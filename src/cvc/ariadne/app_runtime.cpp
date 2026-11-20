@@ -670,9 +670,10 @@ void AppRuntime::ensure_intrinsics() {
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
-        // bound to NAME follow when it is ready), (data-reload NAME), (data-status NAME),
-        // (data-files NAME) and (data-file NAME PATH) (its bytes, or nil).
-        // The store first: it is reset when this runtime dies, and only then is `app` still ours.
+        // bound to NAME follow when it is ready), (data-generate NAME GENERATOR [PARAMS]) points
+        // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-status
+        // NAME), (data-files NAME) and (data-file NAME PATH) (its bytes, or nil). The store first:
+        // it is reset when this runtime dies, and only then is `app` still ours.
         std::shared_ptr<DataStore> store;
         std::string prefix, doc_dir;
         {
@@ -734,6 +735,20 @@ void AppRuntime::ensure_intrinsics() {
                 spec.path = text(a, 3, "data-load");
               spec.base = doc_dir;
               return se::value_t(live("data-load")->bind(prefix, spec));
+            });
+        se::builtins::register_fn(
+            env, "data-generate",
+            [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() < 2 || a.size() > 3)
+                throw se::dsl_error("TypeError",
+                                    "data-generate: expected NAME GENERATOR [PARAMS], got " +
+                                        std::to_string(a.size()) + " args");
+              DataSpec spec;
+              spec.name = name(a, "data-generate");
+              spec.generate = text(a, 1, "data-generate");
+              spec.params = a.size() > 2 ? text(a, 2, "data-generate") : std::string("{}");
+              spec.base = doc_dir;
+              return se::value_t(live("data-generate")->bind(prefix, spec));
             });
         se::builtins::register_fn(
             env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {

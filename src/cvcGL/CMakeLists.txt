@@ -1121,6 +1121,11 @@ add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
 add_executable(cvcgl_imgui_heatmap test/cvcgl_imgui_heatmap.cpp)
 target_link_libraries(cvcgl_imgui_heatmap PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_heatmap COMMAND cvcgl_imgui_heatmap)
+# ImGuiBackend's settings editor: a slider dragged writes its key, a reset puts its default back,
+# and a text field applies on Enter only (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_settings test/cvcgl_imgui_settings.cpp)
+target_link_libraries(cvcgl_imgui_settings PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_settings COMMAND cvcgl_imgui_settings)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)
@@ -1216,6 +1221,15 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_views test/cvcgl_ariadne_views.cpp)
   target_link_libraries(cvcgl_ariadne_views PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
+endif()
+
+# Computed colours (docs/ARIADNE.md §5.26) in ImGui's pixels: grid cells filled from a palette in
+# state, a text red past a threshold, a coloured button and radio. Offscreen; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_imgui_colors test/cvcgl_imgui_colors.cpp)
+  target_link_libraries(cvcgl_imgui_colors PRIVATE cvcGL)
+  add_test(NAME cvcgl_imgui_colors COMMAND cvcgl_imgui_colors)
 endif()
 
 # Click-to-world picking in a viewport: an `input: pick` view's left button picks what it draws,
@@ -1620,4 +1634,5 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record)
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
+                        cvcgl_imgui_colors)

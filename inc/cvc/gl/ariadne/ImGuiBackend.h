@@ -76,6 +76,9 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.26 a widget's colour: ImGuiCol_Text over the leaf between them (a button's, a menu item's).
+  void begin_text_color(const float rgb[3]) override;
+  void end_text_color() override;
   // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
   bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
   // §5.20 a paragraph wrapped to the line's width: bold drawn twice, italic slanted, code on a
@@ -93,6 +96,12 @@ public:
   // hovered cell outlined, and the legend, on the draw list over one item (the tooltip's).
   cvc::ariadne::HeatmapEvent heatmap(const char *label,
                                      const cvc::ariadne::HeatmapSpec &spec) override;
+  // Kind::Settings (settings_imgui.cpp): a collapsing header for each branch under the root and a
+  // tree node for each deeper one, a reset on a header whose keys can be reset; each key a row of
+  // its name, its editor (a checkbox, a slider by ratio over a wide range, a field, a combo, or a
+  // read-out) and a reset while it is not its default, with its tooltip; a search box above.
+  cvc::ariadne::SettingsEdit settings(const char *label, const char *id,
+                                      const cvc::ariadne::SettingsSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
@@ -148,6 +157,10 @@ public:
                                 const std::vector<std::string> &options) override;
   cvc::ariadne::IndexEdit radio(const char *label, int current_index,
                                 const std::vector<std::string> &options, bool row) override;
+  // §5.26 each option's button and text in its own colour.
+  cvc::ariadne::IndexEdit
+  radio_colored(const char *label, int current_index, const std::vector<std::string> &options,
+                bool row, const std::vector<cvc::ariadne::ItemColor> &colors) override;
   // An ImGui tab bar. The selection follows `current` (a write to the tab's key from anywhere
   // selects that tab); a click on another tab is reported as the pick.
   cvc::ariadne::IndexEdit tab_bar(const char *label, const char *id, int current,
@@ -224,6 +237,16 @@ public:
   // own current context, so without this the backend sees none and crashes. With ImGuiOverlay, or
   // a shared imgui, it is not needed and harmless. Pass nullptr before destroying `ctx`.
   static void setImGuiContext(ImGuiContext *ctx);
+
+protected:
+  // settings() calls this after each key's row, with the screen rects (x0, y0, x1, y1) of its
+  // editor and of its reset button (all 0 when it has none): for a test or a tool driving a row.
+  virtual void settings_row_drawn(const cvc::ariadne::SettingsNode &row, const float editor[4],
+                                  const float reset[4]) {
+    (void)row;
+    (void)editor;
+    (void)reset;
+  }
 
 private:
   // §10.8 the file dialog out (pick_files), shared with SDL's callback until it answers.
@@ -372,6 +395,11 @@ private:
   // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
   struct BackdropFrame;
   std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
+  // §5.26 ImGuiCol_Text pushes begin_text_color made that end_text_color pops.
+  int m_textColorPushes = 0;
+  cvc::ariadne::IndexEdit radio_options(const char *label, int current_index,
+                                        const std::vector<std::string> &options, bool row,
+                                        const std::vector<cvc::ariadne::ItemColor> *colors);
   // §4.6 item groups open in this frame, innermost last; the last one closed (its button's
   // ImGuiID) and whether it was clicked.
   struct ItemGroupFrame;
@@ -385,6 +413,9 @@ private:
   // Per-chart legend state (chart_imgui.cpp), keyed by the chart's ImGui ID: the series a click on
   // their legend entry hid, by label ("#<i>" for one without).
   std::unordered_map<unsigned int, std::unordered_set<std::string>> m_chartHidden;
+  // A settings editor's number while its slider is held (settings_imgui.cpp), by key path: the
+  // value the slider shows when `commit: release` keeps it out of state until the release.
+  std::unordered_map<std::string, double> m_settingNumbers;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.

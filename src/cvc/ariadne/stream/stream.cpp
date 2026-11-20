@@ -207,23 +207,32 @@ void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
 
   // The tick runs on the dedicated producer thread. It is self-contained: acquire a slab
   // (non-blocking — drop at source when the pool is full, never stall), have the source fill it,
-  // publish on the channel (which stamps the seq), and post the throttled seq heartbeat. It
-  // captures raw `this`/source pointers, all of which outlive the producer (close()/~stream join it
-  // first). Returns false only when the source reports it is spent.
+  // publish on the channel (which stamps the seq), and post the throttled seq heartbeat; again
+  // while the source has another frame ready (a mic's backlog after a late tick;
+  // frame_source::more), up to kMaxFramesPerTick. It captures raw `this`/source pointers, all of
+  // which outlive the producer (close()/~stream join it first). Returns false only when the source
+  // reports it is spent.
   frame_source *src = source_.get();
   producer_ = std::make_unique<producer_thread>(
       [this, src]() -> bool {
-        auto lease = channel_->pool().acquire();
-        if (!lease.has_value())
-          return true; // pool full: a slow consumer pinned every slab — drop this frame, keep going
-        const produced_frame pf = src->fill(lease->data, lease->cap);
-        if (pf.bytes == 0) {
-          channel_->pool().discard(*lease); // nothing produced this tick (or source spent)
-          return !pf.stop;
+        constexpr int kMaxFramesPerTick = 16;
+        for (int i = 0; i < kMaxFramesPerTick; ++i) {
+          auto lease = channel_->pool().acquire();
+          if (!lease.has_value())
+            return true; // pool full: a slow consumer pinned every slab — drop, keep going
+          const produced_frame pf = src->fill(lease->data, lease->cap);
+          if (pf.bytes == 0) {
+            channel_->pool().discard(*lease); // nothing produced this tick (or source spent)
+            return !pf.stop;
+          }
+          const std::int64_t seq = channel_->publish(*lease, pf.bytes, pf.pts_seconds);
+          post_seq(seq); // throttled heartbeat onto the pump (not every frame)
+          if (pf.stop)
+            return false;
+          if (!src->more())
+            break;
         }
-        const std::int64_t seq = channel_->publish(*lease, pf.bytes, pf.pts_seconds);
-        post_seq(seq); // throttled heartbeat onto the pump (not every frame)
-        return !pf.stop;
+        return true;
       },
       hz);
   producer_->start();

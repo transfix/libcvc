@@ -100,7 +100,7 @@ try:
     x0, y0, h0 = s.x.copy(), s.y.copy(), s.heading.copy()
     for _ in range(20):
         s = cars.step([0.0, 0.0], [1.0, 1.0])
-    t = 20 * C.DT  # 1.2 s at libcvc's 0.06 s tick
+    t = 20 * C.DT  # 1.17 s at libcvc's 7/120 s tick
     check(np.allclose(s.speed, t, atol=1e-4), f"1 m/s^2 for {t:.2f} s: {t:.2f} m/s ({s.speed})")
     check(np.allclose(np.hypot(s.x - x0, s.y - y0), 0.5 * t * t, atol=0.03),
           f"{0.5 * t * t:.2f} m covered")
