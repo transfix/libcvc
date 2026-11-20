@@ -323,8 +323,7 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
     const bool rider = _riders.count(pid) != 0;
     const bool visible = !rider && (!self || _self_visible);
     const auto show = [&](const std::string &node_id) {
-      if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id);
-          g && g->isVisible() != visible)
+      if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id); g && g->isVisible() != visible)
         g->setVisible(visible);
     };
     show(id);

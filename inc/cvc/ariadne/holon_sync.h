@@ -184,9 +184,9 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
 // as in server_pump. While the relay says SELF_PID drives a vehicle (driving, section 18.6), its
 // pose is the vehicle's, which it does not predict: it is played out from the relay's samples as a
-// peer is, and predicted again once it is out. With physics, both pumps (re)load the holon's statics from the room scene
-// whenever its revision changes, and both take each of the room's rules sections (room_rules.h)
-// whenever its stamp moves (holon::set_physics and the rest).
+// peer is, and predicted again once it is out. With physics, both pumps (re)load the holon's
+// statics from the room scene whenever its revision changes, and both take each of the room's rules
+// sections (room_rules.h) whenever its stamp moves (holon::set_physics and the rest).
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt = -1.0);
 

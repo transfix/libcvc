@@ -67,13 +67,14 @@
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib> // std::getenv — the conference relay / room / name come from the environment
 #include <cstring> // std::memcpy — a peer's f32 mic chunk out of its payload
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h> // read_or: the avatar's walk keys, from the state tree
-#include <cvc/ariadne/controls.h> // the control schemes: walk, car, boat (section 18.6)
 #include <cvc/ariadne/conference/relay_session.h> // a document's relay: block and --relay
+#include <cvc/ariadne/controls.h> // the control schemes: walk, car, boat (section 18.6)
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
@@ -89,10 +90,9 @@
 #include <cvc/core/app.h>
 #include <cvc/media/player.h> // cvcMedia's FFmpeg + SDL3 player for video: / audio:
 #include <cvc/net/browser.h>
-#include <cmath>
 #include <random> // std::random_device — the conference node id's per-launch suffix
-#include <sstream> // arigl info: the GL report, line by line
 #include <set>
+#include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
 // ws://|wss:// (WebSocket, what browsers dial; the host page sets wss://<page-origin>/…) or grpc://
@@ -691,9 +691,9 @@ struct ConferenceSession {
   std::uint64_t drive_answered_ = 0; // the relay's answer to our last ask that we have shown
   std::string drive_note_;           // a refusal, shown over us for a moment
   double drive_note_until_s_ = 0.0;
-  static constexpr double kChaseS = 0.6;       // the chase camera's swing behind a moving vehicle
-  static constexpr double kChaseSpeed = 1.0;   // m/s: slower, the camera orbits as you leave it
-  static constexpr double kPromptAbove = 0.8;  // the get-in prompt over a vehicle's roof (m)
+  static constexpr double kChaseS = 0.6;      // the chase camera's swing behind a moving vehicle
+  static constexpr double kChaseSpeed = 1.0;  // m/s: slower, the camera orbits as you leave it
+  static constexpr double kPromptAbove = 0.8; // the get-in prompt over a vehicle's roof (m)
   unsigned last_keys_ = 0;   // the scheme's keys held at the last proposal (a bit each)
   double next_turn_s_ = 0.0; // steady_s() before which a turn alone proposes nothing
   static constexpr double kTurnHz = 20.0;
@@ -1302,7 +1302,8 @@ struct ConferenceSession {
     // scheme's keys as the Controls window has them (their defaults until the document's load
     // seeds them): any of an action's keys held.
     const std::string keys_at = controls_path(*view_, scheme);
-    for (const cvc::ariadne::control_action &a : cvc::ariadne::default_control_scheme(scheme).actions) {
+    for (const cvc::ariadne::control_action &a :
+         cvc::ariadne::default_control_scheme(scheme).actions) {
       const std::string stored =
           cvc::ariadne::read_or<std::string>(*app_, keys_at + a.id, std::string());
       controls_.set_keys(a.id, stored.empty() ? a.binding.keys : cvc::ariadne::split_keys(stored));
@@ -1317,9 +1318,9 @@ struct ConferenceSession {
     }
     if (controls_.pressed("mouse_look"))
       cam_->setMouseLookEnabled(!cam_->mouseLookEnabled());
-    const bool walking = driving == 0 && (controls_.held("forward") || controls_.held("backward") ||
-                                          controls_.held("strafe_left") ||
-                                          controls_.held("strafe_right"));
+    const bool walking =
+        driving == 0 && (controls_.held("forward") || controls_.held("backward") ||
+                         controls_.held("strafe_left") || controls_.held("strafe_right"));
     cvc::ariadne::avatar_intent in;
     if (look) {
       // We face where the camera looks, standing or walking: the mouse aims.
@@ -1474,8 +1475,7 @@ struct ConferenceSession {
         const cvc::physics::quat &q = car.rotation;
         const double heading =
             std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-        const double speed =
-            std::hypot(car.linear_velocity.x, car.linear_velocity.y);
+        const double speed = std::hypot(car.linear_velocity.x, car.linear_velocity.y);
         if (speed > kChaseSpeed) {
           constexpr double kPi = 3.14159265358979323846;
           const double off = std::remainder(heading - gla::heading_yaw(eye, focal), 2.0 * kPi);
@@ -1528,10 +1528,10 @@ struct ConferenceSession {
     if (driving == 0 && target != 0 && entities_->pose(target, at)) {
       const conf::room_entity *e = entities_->find(target);
       const std::string what = e && !e->name.empty() ? e->name : e ? e->archetype : "it";
-      room_view_->set_prompt(key + "  Drive " + what, progress,
-                             cvc::physics::vec3{at.position.x, at.position.y,
-                                                at.position.z + 0.5 * (e ? e->size[2] : 1.0) +
-                                                    kPromptAbove});
+      room_view_->set_prompt(
+          key + "  Drive " + what, progress,
+          cvc::physics::vec3{at.position.x, at.position.y,
+                             at.position.z + 0.5 * (e ? e->size[2] : 1.0) + kPromptAbove});
     } else if (driving != 0 && progress > 0.0 && self) {
       const double roof = ride ? 0.5 * ride->size[2] : 1.0;
       room_view_->set_prompt(key + "  Get out", progress,

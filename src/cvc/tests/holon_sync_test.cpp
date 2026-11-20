@@ -1264,18 +1264,18 @@ TEST(HolonSyncTest, TheDriveTargetIsTheNearestDrivableVehicleInReach) {
     e.size = {4.0, 2.0, 1.5};
     return e;
   };
-  conf::write_room_entities(app, room,
-                            {vehicle(1, true), vehicle(2, true), vehicle(3, false), vehicle(4, true)});
+  conf::write_room_entities(
+      app, room, {vehicle(1, true), vehicle(2, true), vehicle(3, false), vehicle(4, true)});
   cvc::ariadne::entity_playout playout;
   const auto place = [&](std::uint64_t id, double x, double y) {
     body_state s;
     s.position = vec3{x, y, 0.75};
     EXPECT_TRUE(playout.apply(conf::entity_pid(id), s, 10));
   };
-  place(1, 4.0, 0.0);   // ahead of us (+x), its box from 2 m
-  place(2, -3.5, 0.0);  // behind us, its box from 1.5 m: nearer, but behind
-  place(3, 0.0, 1.5);   // right beside us, not drivable
-  place(4, 20.0, 0.0);  // drivable, out of reach
+  place(1, 4.0, 0.0);  // ahead of us (+x), its box from 2 m
+  place(2, -3.5, 0.0); // behind us, its box from 1.5 m: nearer, but behind
+  place(3, 0.0, 1.5);  // right beside us, not drivable
+  place(4, 20.0, 0.0); // drivable, out of reach
   playout.pump(app, room, 1.0 / 60.0);
   double gap = 0.0;
   EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{0.0, 0.0, 0.0}, 0.0, &gap), 1u)
