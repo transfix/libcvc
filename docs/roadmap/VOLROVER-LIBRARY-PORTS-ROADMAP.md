@@ -1133,20 +1133,43 @@ std::unique_ptr<result_job<tile_result>> tile_contours_job(contour_stack in, til
 }
 ```
 
-**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is
-smaller than a pair:
+**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is far
+smaller than a pair. A unit is about a microsecond's work: a contour vertex, a triangle, or a call
+that cannot yield, charged by the vertices it takes (`TILER_UNITS` and its charges in
+`tiler/stepping.h`). A step also ends where the phase changes, so a budget the scheduler sized on
+one phase is not spent on the next.
 - **`"snapping"`:** every contour vertex onto the `int64` grid, a vertex per unit.
+- **`"curating"` and `"augmenting"`:** a contour at a time is checked, cleared of collinear
+  vertices, dilated or eroded; a pair of contours at a time is differenced, or augmented with each
+  other's crossings.
 - **`"tiling"`:** per slice pair and component, the tiler's stages in order: correspondence,
-  tiling regions, branching, untiled regions and intersection removal. Within each, a unit is a
-  contour vertex or a triangle emitted.
-  - Each Clipper2 Boolean or offset, CDT triangulation and Boost.Polygon medial axis is called on
-    one pair's contours. That call is the indivisible piece, and its cost grows with those
-    contours' vertex count.
-  - T7 records the worst pair in the committed `.ser` series. A pair whose contours are too large
-    for a frame is split before the call: Clipper2 and CDT run per connected region, and the
-    medial axis per untiled region.
+  tiling regions, the OTV table, the four tiling passes, untiled regions and intersection removal.
+  Each test is a unit charged by its contours' size. An untiled region's fill yields a point at a
+  time, each point a Delaunay triangulation and a natural-neighbour interpolation.
+  - The indivisible pieces each take one slice's contours, one slice pair's or one untiled
+    region: a Clipper2 Boolean or offset, a sweep, a CDT partition or Delaunay triangulation, a
+    tiling test, a workspace freed. Their cost grows with those contours' vertex count.
+  - Intersection removal between two components' tiles (`remove_intersections`, off by default)
+    is still one unit per pair of components, about 2 ms on T3's touching case.
 - **`"assembling"`:** the per-component surfaces stitched and their normals computed, a triangle
   per unit.
+- **Measured** (2026-11-20, after P4 found the early phases coarse; native MSVC Release,
+  `CVC_SLICED_THREADING=cooperative`, 4 ms slice, three runs each on a shared machine):
+  - P4's demo stack (3 components, 40 slices, 64-vertex contours) in `cvcgl_contour_lab`: the
+    slowest frame of each phase is 4.1 to 4.7 ms. Before, its first frames took 50 to 160 ms: a
+    step ran on across a phase change, and a curating or augmenting unit was a whole slice or slice
+    pair. The slowest frame left there, 14 to 60 ms, is the document's frame that starts the job,
+    outside the stepper.
+  - T7's cases (touching, branch, and P4's stack on 12 slices): the slowest step at the default
+    budget is 2.8 to 7.5 ms and the slowest cooperative frame 4.1 to 5.0 ms, against 41 to 117 ms
+    and 6.1 to 8.7 ms before. Under wasm-mt node (two runs) the slowest step is 4.0 to 7.1 ms and
+    the slowest frame 4.3 to 4.9 ms, but for touching's 9.2 to 9.6 ms (its intersection removal
+    is one unit per pair of components).
+  - The bunny (`tiler_bunny_test`, 50 slices, 9,536 contour vertices, tiled in 2.9 s): the slowest
+    frame is 5.6 to 5.8 ms (up to 9.6 ms under load), and the slowest step at budget 4096 9 to
+    16 ms. Its largest pieces, a tiling test or a freed workspace, take up to 2 to 4 ms.
+  - The blocking call takes as long as before, and stepping at the default budget costs 0 to 10%
+    more than budget 0.
 
 **Surfaces**
 
