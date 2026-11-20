@@ -194,6 +194,9 @@ void write_intent(cvc::app &app, const std::string &room, const std::string &pid
   set_replicated(app, leaf(room, pid, {"intent", "move", "y"}), fmt(intent.move.y));
   set_replicated(app, leaf(room, pid, {"intent", "move", "z"}), fmt(intent.move.z));
   set_replicated(app, leaf(room, pid, {"intent", "yaw"}), fmt(intent.yaw));
+  // The drive axes (a vehicle the participant drives), "nan" when it has none.
+  set_replicated(app, leaf(room, pid, {"intent", "steer"}), fmt(intent.steer));
+  set_replicated(app, leaf(room, pid, {"intent", "accel"}), fmt(intent.accel));
   set_replicated(app, leaf(room, pid, {"intent", "tick"}),
                  std::to_string(static_cast<unsigned long long>(tick)));
 }
@@ -206,6 +209,14 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
               read_double(app, leaf(room, pid, {"intent", "move", "y"})),
               read_double(app, leaf(room, pid, {"intent", "move", "z"}))};
   out.yaw = read_double(app, leaf(room, pid, {"intent", "yaw"}));
+  // The drive axes: absent (an older client) is none.
+  const auto axis = [&](const char *name) {
+    const std::string path = leaf(room, pid, {"intent", name});
+    return node_present(app, path) ? read_double(app, path)
+                                   : std::numeric_limits<double>::quiet_NaN();
+  };
+  out.steer = axis("steer");
+  out.accel = axis("accel");
   if (out_tick) {
     cvc::state *t = app.root().findDescendant(leaf(room, pid, {"intent", "tick"}));
     *out_tick = t ? std::strtoull(t->value().c_str(), nullptr, 10) : 0;

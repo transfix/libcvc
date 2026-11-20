@@ -2211,6 +2211,26 @@ bool WorldVehicles::command(std::uint64_t id, double steer, double accel) {
   return false;
 }
 
+bool WorldVehicles::set_driver(std::uint64_t id, const std::string &pid) {
+  impl &d = *_impl;
+  for (impl::entity &e : d.ents)
+    if (e.id == id) {
+      if (e.spec.driver != pid) {
+        e.spec.driver = pid;
+        ++d.rev;
+      }
+      return true;
+    }
+  return false;
+}
+
+std::string WorldVehicles::driver(std::uint64_t id) const {
+  for (const impl::entity &e : _impl->ents)
+    if (e.id == id)
+      return e.spec.driver;
+  return std::string();
+}
+
 bool WorldVehicles::set_goal(std::uint64_t id, double x, double y) {
   impl &d = *_impl;
   for (impl::entity &e : d.ents)

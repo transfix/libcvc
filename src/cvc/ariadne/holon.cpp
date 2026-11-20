@@ -128,9 +128,158 @@ void holon::remove_participant(const std::string &pid) {
     if (_left.size() > kMaxLeft)
       _left.erase(_left.begin() == _left.find(pid) ? std::next(_left.begin()) : _left.begin());
   }
+  if (it != _participants.end() && it->second.drives != 0)
+    get_out(pid, it->second); // the vehicle goes back to its controller
   _participants.erase(pid);
   if (_world)
     _world->remove_avatar(pid);
+}
+
+namespace {
+cvc::physics::body_state ride_of(const entity_info &e) {
+  cvc::physics::body_state s;
+  s.position = {e.x, e.y, e.z};
+  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
+  s.linear_velocity = {e.vx, e.vy, 0.0};
+  return s;
+}
+bool find_entity(const WorldVehicles &v, std::uint64_t id, entity_info &out) {
+  for (const entity_info &e : v.entities())
+    if (e.id == id) {
+      out = e;
+      return true;
+    }
+  return false;
+}
+} // namespace
+
+bool holon::set_driver(const std::string &pid, std::uint64_t id, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (_role != holon_role::server)
+    return fail("a client asks the server to drive; the server sets the driver");
+  const auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return fail("no participant '" + pid + "'");
+  participant &p = it->second;
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  if (id == 0) {
+    if (p.drives != 0)
+      get_out(pid, p);
+    return true;
+  }
+  if (!v)
+    return fail("no world with vehicles attached (attach_world)");
+  entity_info e;
+  if (!find_entity(*v, id, e) || !e.placed)
+    return fail("no entity " + std::to_string(id) + " in the world");
+  if (!e.spec.driver.empty() && e.spec.driver != pid)
+    return fail("entity " + std::to_string(id) + " is driven by '" + e.spec.driver + "'");
+  if (p.drives == id)
+    return true;
+  if (p.drives != 0)
+    get_out(pid, p);
+  // Into the vehicle: the person leaves the world, its feet and reserve kept.
+  if (_world->has_avatar(pid)) {
+    p.parked_feet = _world->state(pid);
+    p.parked_reserve = _world->energy(pid).reserve;
+    _world->remove_avatar(pid);
+  }
+  v->set_driver(id, pid);
+  p.drives = id;
+  p.ride = ride_of(e);
+  return true;
+}
+
+std::uint64_t holon::drives(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it == _participants.end() ? 0 : it->second.drives;
+}
+
+void holon::get_out(const std::string &pid, participant &p) {
+  const std::uint64_t id = p.drives;
+  p.drives = 0;
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  cvc::physics::body_state feet = p.parked_feet;
+  entity_info e;
+  if (v && find_entity(*v, id, e)) {
+    v->set_driver(id, std::string());
+    v->clear_intent(id); // back to its controller
+    // A clear point beside it: off its left side, past half its width, on the ground under it.
+    double half_w = 1.0;
+    for (const vehicle_archetype &a : v->archetypes())
+      if (a.id == e.spec.archetype) {
+        try {
+          half_w = vehicle_desc_of(a, e.spec.mass, e.spec.max_speed).half_extents.y;
+        } catch (const std::exception &) {
+        }
+        break;
+      }
+    const double out = half_w + 0.5 * _applied.avatar().body.width + 0.5;
+    feet = cvc::physics::body_state{};
+    feet.position = {e.x - std::sin(e.yaw) * out, e.y + std::cos(e.yaw) * out, e.ground_z};
+    feet.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
+  }
+  if (_world && !_world->has_avatar(pid)) {
+    _world->add_avatar(pid, feet, /*dynamic=*/true);
+    _world->set_reserve(pid, p.parked_reserve);
+  }
+  p.last_feet = feet;
+}
+
+void holon::update_rides() {
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  if (!v)
+    return;
+  bool any = false;
+  for (const auto &kv : _participants)
+    any = any || kv.second.drives != 0;
+  if (!any)
+    return;
+  const std::vector<entity_info> all = v->entities();
+  for (auto &kv : _participants) {
+    participant &p = kv.second;
+    if (p.drives == 0)
+      continue;
+    for (const entity_info &e : all)
+      if (e.id == p.drives) {
+        p.ride = ride_of(e);
+        break;
+      }
+  }
+}
+
+std::vector<holon::entity> holon::entities() const {
+  std::vector<entity> out;
+  for (const auto &kv : _participants) {
+    entity e;
+    e.id = "p:" + kv.first;
+    e.kind = "person";
+    e.controller = "walker@1";
+    e.driver = "participant:" + kv.first;
+    e.owner = kv.first;
+    e.in_world = !_world || _world->has_avatar(kv.first);
+    e.state = kv.second.drives != 0 ? kv.second.parked_feet : state(kv.first);
+    out.push_back(std::move(e));
+  }
+  if (const WorldVehicles *v = _scene ? _scene->vehicles() : nullptr)
+    for (const entity_info &info : v->entities()) {
+      entity e;
+      e.id = "e" + std::to_string(info.id);
+      e.kind = info.spec.archetype;
+      e.controller = info.plant;
+      e.driver = info.spec.driver.empty() ? info.spec.controller
+                                          : "participant:" + info.spec.driver;
+      e.owner = info.spec.driver.empty() ? "server" : info.spec.driver;
+      e.policy = info.spec.policy;
+      e.in_world = info.placed;
+      e.state = ride_of(info);
+      out.push_back(std::move(e));
+    }
+  return out;
 }
 
 void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
@@ -155,6 +304,9 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
   if (world && std::fabs(world->world().config().fixed_dt - _clock.fixed_dt()) > 1e-12)
     return fail("the world steps " + std::to_string(world->world().config().fixed_dt) +
                 " s, the holon's quantum is " + std::to_string(_clock.fixed_dt()) + " s");
+  for (auto &kv : _participants) // out of the old world's vehicles first
+    if (kv.second.drives != 0)
+      get_out(kv.first, kv.second);
   // Where everyone stands, and what they carry, before the move.
   std::map<std::string, cvc::physics::body_state> feet;
   std::map<std::string, avatar_energy> energy;
@@ -208,9 +360,21 @@ void holon::scene_step() {
   // last step.
   if (WorldVehicles *v = _scene->vehicles()) {
     std::vector<std::array<double, 2>> movers;
-    for (const auto &kv : _participants)
+    for (auto &kv : _participants) {
+      participant &p = kv.second;
       if (_world->has_avatar(kv.first))
-        movers.push_back({kv.second.last_feet.position.x, kv.second.last_feet.position.y});
+        movers.push_back({p.last_feet.position.x, p.last_feet.position.y});
+      // A driver's drive axes in place of its vehicle's controller (section 18.4): the intent in
+      // force now (a stamped one due by the frame's steps takes over at the next frame).
+      if (p.drives != 0) {
+        entity_intent in;
+        in.command = entity_intent::mode::replace;
+        in.steer = std::isfinite(p.intent.steer) ? p.intent.steer : 0.0;
+        in.accel = std::isfinite(p.intent.accel) ? p.intent.accel : 0.0;
+        if (v->intent(p.drives) != in)
+          v->set_intent(p.drives, in);
+      }
+    }
     v->set_movers(std::move(movers));
   }
   _scene->follow(
@@ -236,6 +400,7 @@ void holon::scene_step() {
           kv.second.last_feet = _world->state(kv.first);
         }
       });
+  update_rides();
 }
 
 void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
@@ -974,6 +1139,8 @@ void holon::advance(double wall_dt) { _driver.advance(wall_dt); }
 
 cvc::physics::body_state holon::state(const std::string &pid) const {
   const participant &p = _participants.at(pid);
+  if (p.drives != 0)
+    return p.ride; // driving: where its vehicle is
   if (_world && (_role == holon_role::server || p.local))
     return _world->state(pid);
   if (_role == holon_role::server)
@@ -985,6 +1152,8 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
 
 cvc::physics::pose holon::display_pose(const std::string &pid) const {
   const participant &p = _participants.at(pid);
+  if (p.drives != 0)
+    return cvc::physics::pose{p.ride.position, p.ride.rotation};
   // The client's own avatar: between its last two quanta, by the frame's alpha.
   if (_role == holon_role::client && p.local && p.have_render_prev)
     return interpolate_peer(p.render_prev, _world ? _world->state(pid) : p.predicted.state(),
