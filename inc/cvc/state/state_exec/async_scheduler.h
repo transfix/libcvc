@@ -169,10 +169,10 @@ public:
   /// The long-step monitor (S2a.7, S2-Q11): a step that takes longer than the threshold (at
   /// slice_steps above 1, a run's 16-step window), one that throws included, is counted
   /// (long_steps()) and reported to the sink with the call-site name of the native it ended in
-  /// ("native" on the higher-order path), at most once per name per minute. The threshold is
-  /// the tree's state_exec.long_step_ms when it is set, else the default set here; 0: off. A pool
-  /// with workers gives the groups it pumps a default of 1 ms. With no sink, caught steps are
-  /// only counted. Pump owner, or before the first pump.
+  /// ("native" on the higher-order path, "(no native)" when it applied none), at most once per name
+  /// per minute. The threshold is the tree's state_exec.long_step_ms when it is set, else the
+  /// default set here; 0: off. A pool with workers gives the groups it pumps a default of 1 ms.
+  /// With no sink, caught steps are only counted. Pump owner, or before the first pump.
   using long_step_sink = std::function<void(const std::string &native, double seconds)>;
   void set_long_step_sink(long_step_sink sink);
   void set_long_step_default(double seconds);

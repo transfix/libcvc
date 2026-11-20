@@ -240,8 +240,8 @@ jobs:
 
   # The continuous pool's group state-word model (tools/locks_model/state_word.py; S2.md S2-Q15,
   # td 8.3's PL-1): its deep suite, every interleaving of the posters, the workers, the timer, the
-  # hosts and the attaching thread at its deep bounds (26 checks, about 8 minutes on the lead's
-  # Windows box, the largest 5.3 million states). The quick suite runs in CTest
+  # hosts and the attaching thread at its deep bounds (41 checks, about 12 minutes on the lead's
+  # Windows box, the largest 4.8 million states, 2.5 GB). The quick suite runs in CTest
   # (state_exec_state_word_model_test). No C++ build; a ref without the model stops at once.
   state-word-model:
     name: locks deep / state-word model

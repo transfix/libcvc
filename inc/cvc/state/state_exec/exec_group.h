@@ -147,8 +147,9 @@ struct pump_budget {
 /// What one pump did: the steps it took, the processes wake_awaiting() woke, and whether a C++
 /// exception escaped it (the pool then fails the group, S1.6). Stage 2 (S2a, S2-Q4): what the
 /// pump left, read under the token from its run loop's end (async_scheduler::run_report), so a
-/// worker's release reads only this and the state word, never the scheduler. Unset when failed,
-/// and while the group's scheduler has no wake notifier installed (nothing reads it then).
+/// worker's release reads only this and the state word, never the scheduler. Unset when failed.
+/// While the group's scheduler has no wake notifier installed the report is not recomputed, so
+/// these fields repeat the last one computed (nothing reads them then).
 struct pump_result {
   std::uint64_t steps = 0;
   int woken = 0;
