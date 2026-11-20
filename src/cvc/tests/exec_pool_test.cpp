@@ -2446,6 +2446,80 @@ TEST(ExecGroupDeathTest, DestroyedInsideItsOwnWithGroupAborts) {
       "destroyed from inside its own with_group");
 }
 
+namespace {
+
+// An attached group pumped by a pool's worker whose process calls (body), a host_proxied native, in
+// a generator, which cannot park: the call runs as a waiting body on this, the attaching thread,
+// in its host loop, under the blocked worker's token. The loop runs until `done()` or 10 s.
+template <class Done>
+void run_a_waiting_body(cvc::exec_pool &pool, exec_group &g, environment_ptr env, Done done) {
+  execute_options eo;
+  eo.env = std::move(env);
+  g.execute(std::string("(begin (set gen (generator (lambda () (yield (body))))) (next gen))"), eo);
+  pool.attach(g);
+  const auto t0 = clock_type::now();
+  while (!done() && clock_type::now() - t0 < std::chrono::seconds(10)) {
+    pool.pump_host(0.01);
+    pool.wait_for_work(0.01);
+  }
+}
+
+} // namespace
+
+// The waiting-body twin (the amended transitions, R2a C-M3): destroying an attached group inside
+// its own waiting body, which its blocked worker waits for, aborts in every build. Skipped where
+// the pool has no worker (the body would run inline), and while host_held_here does not yet cover a
+// waiting body (probed in one first): the teardown would wait for that worker for good.
+TEST(ExecGroupDeathTest, DestroyedInsideItsOwnWaitingBodyAborts) {
+  {
+    cvc::pool_options po;
+    po.threads = 1;
+    cvc::exec_pool pool(po);
+    if (pool.threads() == 0)
+      GTEST_SKIP() << "the pool has no worker";
+    cvc::app app;
+    share_locks(app);
+    exec_group g(opts_for(app, "probe"));
+    environment_ptr env = environment::extend(builtins::make_default_environment());
+    std::atomic<int> held{-1};
+    bool waiting = false; // its worker held the token: a waiting body, not an inline call
+    g.install(
+        env, "body",
+        [&](std::span<const value_t>) -> value_t {
+          waiting = g.sched().pumped_elsewhere();
+          held.store(cvc::detail::host_held_here(g) ? 1 : 0);
+          return value_t(int64_t(1));
+        },
+        provider_affinity::host_proxied);
+    run_a_waiting_body(pool, g, env, [&] { return held.load() >= 0; });
+    pool.detach(g);
+    ASSERT_GE(held.load(), 0) << "the waiting body never ran";
+    ASSERT_TRUE(waiting) << "the body ran inline, not as a waiting body";
+    if (held.load() == 0)
+      GTEST_SKIP() << "host_held_here does not cover a waiting body yet (R2a C-M3)";
+  }
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        cvc::pool_options po;
+        po.threads = 1;
+        cvc::exec_pool pool(po);
+        cvc::app app;
+        share_locks(app);
+        auto *g = new exec_group(opts_for(app, "doomed"));
+        environment_ptr env = environment::extend(builtins::make_default_environment());
+        g->install(
+            env, "body",
+            [g](std::span<const value_t>) -> value_t {
+              delete g;
+              return nil_value();
+            },
+            provider_affinity::host_proxied);
+        run_a_waiting_body(pool, *g, env, [] { return false; });
+      },
+      "destroyed from inside its own with_group");
+}
+
 // --- Stage 2a continuous pool (td 8.3, 8.11) ---
 //
 // S2.md section 4's PL cases for continuous mode (S2a.9): the eventcount, a parked pool, the
