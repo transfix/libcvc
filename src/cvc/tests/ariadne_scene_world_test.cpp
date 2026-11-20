@@ -1855,6 +1855,293 @@ scene:
   EXPECT_EQ(e[3].spec.name, "car 3");
 }
 
+// A fleet is a named start: entry (fleet:): up to 4096 vehicles, with its layout, seed, rally
+// points, colours and keys; an unnamed entry stays at 256 and its fleet keys are ignored.
+TEST(AriadneWorldVehicles, AFleetIsANamedStartEntry) {
+  REQUIRE_YAML();
+  std::vector<std::string> warnings;
+  const auto parse = [&](const std::string &start, world_rules &x) {
+    cvc::app app;
+    register_world_block(app);
+    LoadResult r = load_string(app, "world:\n  vehicles:\n    start: " + start +
+                                        "\n    archetypes:\n      v: { plant: kinematic, "
+                                        "vehicle: humvee }\nscene:\n  nodes: []\n");
+    x = default_world_rules();
+    warnings.clear();
+    const Value *block = find_world_block(r);
+    return block ? parse_world_block(*block, x, &warnings) : std::string("no world: block");
+  };
+  world_rules x;
+  ASSERT_EQ(parse("[{fleet: city, archetype: v, count: 800, spawn: opposed, seed: 7, rally: "
+                  "{count: 16, assign: latitude}, colors: hsv, keys: summary, plant: kinematic}]",
+                  x),
+            "");
+  ASSERT_EQ(x.vehicle_starts.size(), 1u);
+  const vehicle_start &f = x.vehicle_starts[0];
+  EXPECT_EQ(f.fleet, "city");
+  EXPECT_EQ(f.count, 800);
+  EXPECT_EQ(f.layout, "opposed");
+  EXPECT_EQ(f.seed, 7u);
+  EXPECT_EQ(f.rally, 16);
+  EXPECT_EQ(f.assign, "latitude");
+  EXPECT_EQ(f.colors, "hsv");
+  EXPECT_EQ(f.keys, "summary");
+  EXPECT_TRUE(warnings.empty());
+  ASSERT_EQ(parse("[{fleet: c, archetype: v, rally: 3}]", x), ""); // rally: T is rally: {count: T}
+  EXPECT_EQ(x.vehicle_starts[0].rally, 3);
+  ASSERT_EQ(parse("[{archetype: v, count: 2, rally: 4}]", x), "");
+  EXPECT_EQ(x.vehicle_starts[0].rally, 0);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("rally: is a fleet's"), std::string::npos);
+  const auto error = [&](const std::string &start, const std::string &says) {
+    world_rules y;
+    const std::string e = parse(start, y);
+    EXPECT_NE(e.find(says), std::string::npos) << start << ": " << e;
+  };
+  error("[{archetype: v, count: 300}]", "name a fleet: for more");
+  error("[{fleet: c, archetype: v, count: 4097}]", "count: expects a whole number");
+  error("[{fleet: \"two words\", archetype: v}]", "is not a state name");
+  error("[{fleet: c, archetype: v}, {fleet: c, archetype: v}]", "is named twice");
+  error("[{fleet: c, archetype: v, at: [1, 2]}]", "laid out by spawn:, not at:");
+  error("[{fleet: c, archetype: v, spawn: ring}]", "spawn: 'ring' is not one");
+  error("[{fleet: c, archetype: v, rally: 0}]", "rally: expects a count");
+  error("[{fleet: c, archetype: v, rally: {count: 65}}]", "rally: expects a count");
+  error("[{fleet: c, archetype: v, rally: {count: 2, assign: longitude}}]", "assign: 'longitude'");
+  error("[{fleet: c, archetype: v, colors: rainbow}]", "colors: 'rainbow' is not one");
+  error("[{fleet: c, archetype: v, keys: some}]", "keys: 'some' is not one");
+  error("[{fleet: c, archetype: v, seed: -1}]", "seed: expects a whole number");
+}
+
+namespace {
+
+const char *kFleetDoc = R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 } }
+      - { archetype: v, name: solo, controller: none, at: [0, 0] }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [400, 400, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+double fleet_mean_x(const std::vector<entity_info> &es) {
+  double sum = 0.0;
+  int n = 0;
+  for (const entity_info &e : es)
+    if (e.fleet == "city") {
+      sum += e.x;
+      ++n;
+    }
+  return n ? sum / n : 0.0;
+}
+
+} // namespace
+
+// A fleet is laid out as the nav demos' swarms are: starts in the west 30 % of the grid, goals in
+// the east 30 %, teams by the goals' latitude, each team's goal held at its rally point and its
+// colour the team's. The rally points are keys (a write moves the team), a restart puts the fleet
+// back where it started and a reseed lays it out anew; a summary fleet writes no per-entity keys
+// but for the vehicles vehicles.watch names. The layout is its seed's: the same in another runtime.
+TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const fs::path path = write_doc("fleet_rally", kFleetDoc);
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(path.string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  ASSERT_NE(v, nullptr);
+  art.drain();
+  ASSERT_EQ(v->fleets(), std::vector<std::string>{"city"});
+  const std::vector<entity_info> es = v->entities();
+  ASSERT_EQ(es.size(), 65u);
+
+  std::array<std::array<double, 2>, 4> rally{};
+  for (int t = 0; t < 4; ++t) {
+    ASSERT_TRUE(v->rally("city", t, rally[t][0], rally[t][1]));
+    EXPECT_GT(rally[t][0], 200.0 * 0.4 - 4.0) << t; // in the east 30 % of [-200, 200]
+    if (t > 0)
+      EXPECT_GT(rally[t][1], rally[t - 1][1]) << t; // one per latitude band, south to north
+  }
+  EXPECT_FALSE(v->rally("city", 4, rally[0][0], rally[0][1]));
+  std::array<int, 4> per_team{};
+  std::array<std::array<float, 3>, 4> color{};
+  for (int k = 0; k < 64; ++k) {
+    const entity_info &e = es[static_cast<std::size_t>(k)];
+    EXPECT_EQ(e.spec.name, "city " + std::to_string(k + 1));
+    EXPECT_EQ(e.fleet, "city");
+    ASSERT_GE(e.rally, 0);
+    ASSERT_LT(e.rally, 4);
+    EXPECT_EQ(e.spec.team, e.rally);
+    EXPECT_LT(e.x, -200.0 * 0.4 + 4.0) << k; // in the west 30 % (the chassis ahead of its axle)
+    EXPECT_DOUBLE_EQ(e.goal_x, rally[e.rally][0]);
+    EXPECT_DOUBLE_EQ(e.goal_y, rally[e.rally][1]);
+    if (per_team[e.rally]++ == 0)
+      color[e.rally] = e.spec.color;
+    EXPECT_EQ(e.spec.color, color[e.rally]) << k; // the team's colour
+  }
+  for (int t = 0; t < 4; ++t) {
+    EXPECT_GT(per_team[t], 0) << t;
+    if (t > 0)
+      EXPECT_NE(color[t], color[t - 1]);
+  }
+  EXPECT_EQ(es[64].spec.name, "solo");
+  EXPECT_EQ(es[64].fleet, "");
+  EXPECT_EQ(es[64].rally, -1);
+
+  // Its keys, and a summary fleet's entities: only the unnamed entry's have keys.
+  art.step_world(6);
+  art.drain();
+  cvc::state &st = cvc::state::instance(app);
+  EXPECT_EQ(val(app, "vehicles.fleets.names"), "city");
+  EXPECT_EQ(val(app, "vehicles.fleets.city.count"), "64");
+  EXPECT_EQ(val(app, "vehicles.fleets.city.placed"), "64");
+  EXPECT_EQ(val(app, "vehicles.fleets.city.teams"), "4");
+  EXPECT_EQ(val(app, "vehicles.fleets.city.seed"), "7");
+  EXPECT_EQ(val(app, "vehicles.fleets.city.rally.count"), "4");
+  EXPECT_NE(val(app, "vehicles.fleets.city.rally.3.color"), "");
+  EXPECT_NE(val(app, "vehicles.fleets.city.status").find("laid out: 64 v opposed"),
+            std::string::npos);
+  const std::string solo = std::to_string(es[64].id), first = std::to_string(es[0].id);
+  EXPECT_EQ(val(app, "entities.ids"), solo);
+  EXPECT_EQ(val(app, "entities.count"), "65");
+  EXPECT_EQ(st.findDescendant("entities." + first), nullptr);
+  EXPECT_NE(val(app, "entities.summary").find("fleet city  64 v (keys: summary)"),
+            std::string::npos);
+  st("vehicles.watch").value(first); // a camera follows it: it has keys
+  art.step_world(6);
+  art.drain();
+  EXPECT_EQ(val(app, "entities.ids"), first + "," + solo);
+  EXPECT_NE(val(app, "entities." + first + ".x"), "");
+  EXPECT_EQ(val(app, "entities." + first + ".team"), std::to_string(es[0].rally));
+  st("vehicles.watch").value("");
+  art.step_world(6);
+  art.drain();
+  EXPECT_EQ(st.findDescendant("entities." + first), nullptr);
+
+  // A rally point's keys move its team; they drive toward it.
+  const double x0 = fleet_mean_x(v->entities());
+  st("vehicles.fleets.city.rally.0.x").value("150");
+  st("vehicles.fleets.city.rally.0.y").value("-20");
+  art.step_world(6);
+  art.drain();
+  double rx = 0.0, ry = 0.0;
+  ASSERT_TRUE(v->rally("city", 0, rx, ry));
+  EXPECT_DOUBLE_EQ(rx, 150.0);
+  EXPECT_DOUBLE_EQ(ry, -20.0);
+  for (const entity_info &e : v->entities())
+    if (e.fleet == "city" && e.rally == 0) {
+      EXPECT_DOUBLE_EQ(e.goal_x, 150.0);
+      EXPECT_DOUBLE_EQ(e.goal_y, -20.0);
+    } else if (e.fleet == "city") {
+      EXPECT_DOUBLE_EQ(e.goal_x, rally[e.rally][0]);
+    }
+  EXPECT_TRUE(v->move_rally("city", 1, 1e6, 0.0)); // held to the grid
+  ASSERT_TRUE(v->rally("city", 1, rx, ry));
+  EXPECT_LE(rx, 201.0);
+  EXPECT_FALSE(v->move_rally("city", 9, 0.0, 0.0));
+  EXPECT_FALSE(v->move_rally("town", 0, 0.0, 0.0));
+  art.step_world(240);
+  art.drain();
+  EXPECT_GT(fleet_mean_x(v->entities()), x0 + 5.0); // under way, east
+
+  // A restart: every vehicle back at its start, the rally points as laid out.
+  ASSERT_TRUE(v->restart_fleet("city", false));
+  std::vector<entity_info> again = v->entities();
+  ASSERT_EQ(again.size(), 65u);
+  for (std::size_t k = 0; k < 64; ++k) {
+    EXPECT_NEAR(again[k].x, es[k].x, 1e-3) << k;
+    EXPECT_NEAR(again[k].y, es[k].y, 1e-3) << k;
+    EXPECT_EQ(again[k].rally, es[k].rally) << k;
+  }
+  ASSERT_TRUE(v->rally("city", 0, rx, ry));
+  EXPECT_DOUBLE_EQ(rx, rally[0][0]);
+  // A reseed by its key: another layout.
+  st("vehicles.fleets.city.reseed.request").value("1");
+  art.step_world(6);
+  art.drain();
+  EXPECT_EQ(val(app, "vehicles.fleets.city.seed"), "8");
+  again = v->entities();
+  int moved = 0;
+  for (std::size_t k = 0; k < 64; ++k)
+    moved += std::hypot(again[k].x - es[k].x, again[k].y - es[k].y) > 1.0 ? 1 : 0;
+  EXPECT_GT(moved, 48);
+  EXPECT_FALSE(v->restart_fleet("town", false));
+
+  // The same seed in another runtime: the same layout.
+  cvc::app app2;
+  AppRuntime art2(app2, "");
+  art2.load(path.string());
+  ASSERT_NE(art2.scene_world(), nullptr);
+  art2.drain();
+  const std::vector<entity_info> es2 = art2.scene_world()->vehicles()->entities();
+  ASSERT_EQ(es2.size(), es.size());
+  for (std::size_t k = 0; k < es.size(); ++k) {
+    EXPECT_EQ(es2[k].x, es[k].x) << k;
+    EXPECT_EQ(es2[k].y, es[k].y) << k;
+    EXPECT_EQ(es2[k].goal_x, es[k].goal_x) << k;
+  }
+}
+
+// keys: all keeps a fleet's per-entity keys; colors: spawn keeps the spawn's colour; a fleet with
+// no rally points holds each vehicle at its own goal (it does not wander from it).
+TEST(AriadneWorldVehicles, AFleetWithoutRallyPointsHoldsItsOwnGoals) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string doc = kFleetDoc;
+  const std::string entry =
+      "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 } }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: city, archetype: v, count: 12, seed: 3, keys: all, colors: spawn }");
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_own_goals", doc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  const std::vector<entity_info> es = v->entities();
+  ASSERT_EQ(es.size(), 13u);
+  int spread = 0;
+  for (std::size_t k = 0; k < 12; ++k) {
+    EXPECT_EQ(es[k].rally, -1);
+    EXPECT_EQ(es[k].spec.team, 0);
+    EXPECT_EQ(es[k].spec.color, entity_spec{}.color); // the spawn's
+    spread += std::abs(es[k].x) > 80.0 ? 0 : 1;       // scattered: anywhere free
+  }
+  EXPECT_GT(spread, 0);
+  double rx = 0.0, ry = 0.0;
+  EXPECT_FALSE(v->rally("city", 0, rx, ry));
+  art.step_world(6);
+  art.drain();
+  EXPECT_EQ(val(app, "vehicles.fleets.city.teams"), "0");
+  EXPECT_NE(val(app, "entities." + std::to_string(es[0].id) + ".x"), ""); // keys: all
+  int listed = 1;
+  for (char c : val(app, "entities.ids"))
+    listed += c == ',' ? 1 : 0;
+  EXPECT_EQ(listed, 13);
+  // Held: after a long drive every goal is still the one laid out.
+  art.step_world(1200);
+  art.drain();
+  const std::vector<entity_info> later = v->entities();
+  for (std::size_t k = 0; k < 12; ++k) {
+    EXPECT_DOUBLE_EQ(later[k].goal_x, es[k].goal_x) << k;
+    EXPECT_DOUBLE_EQ(later[k].goal_y, es[k].goal_y) << k;
+  }
+}
+
 TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {
   REQUIRE_YAML();
   LoadResult r = load_intents();
@@ -5713,6 +6000,48 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
               tick_ms - phys_tick - pub_ms);
 }
 
+// A fleet declared in the document (start: fleet:) on a paused clock: the load (spawn and layout),
+// six steps, and one publish, with its per-entity keys (keys: all) or its summary alone.
+void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, int ticks) {
+  std::string doc = fleet_bench_doc(bundle);
+  const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
+  doc.insert(doc.find(arch) + arch.size(),
+             "    start:\n      - { fleet: city, archetype: humvee, plant: kinematic, count: " +
+                 std::to_string(n) +
+                 ", spawn: opposed, seed: 7, rally: { count: 16 }, keys: " + keys + " }\n");
+  doc.insert(doc.find("scene:\n") + 7, "  clock: { paused: true }\n");
+  const fs::path path = write_doc("fleet_doc_bench", doc);
+  using clk = std::chrono::steady_clock;
+  cvc::app app;
+  AppRuntime art(app, "");
+  const auto t0 = clk::now();
+  art.load(path.string());
+  art.drain();
+  const double load_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+  if (!art.scene_world() || !art.scene_world()->vehicles()) {
+    std::printf("[fleet doc] no world\n");
+    return;
+  }
+  WorldVehicles &v = *art.scene_world()->vehicles();
+  for (int i = 0; i < 10; ++i) {
+    art.step_world(6);
+    art.drain();
+  }
+  const auto t1 = clk::now();
+  for (int i = 0; i < ticks; ++i) {
+    art.step_world(6);
+    art.drain();
+  }
+  const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
+  const auto t2 = clk::now();
+  v.publish();
+  const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
+  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  6 steps %7.2f ms  publish "
+              "%6.2f ms  (%zu entities, %s)\n",
+              n, keys.c_str(), load_ms, tick_ms, pub_ms, v.size(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str());
+}
+
 } // namespace
 
 TEST(AriadneWorldGym, FleetBench) {
@@ -5728,6 +6057,9 @@ TEST(AriadneWorldGym, FleetBench) {
   if (jolt())
     for (const int n : {60, 120, 240})
       fleet_bench(doc, "jolt", n, "known", 100);
+  for (const int n : {800, 2000})
+    for (const char *keys : {"all", "summary"})
+      fleet_doc_bench(bundle ? bundle : "", n, keys, 50);
 }
 
 TEST(AriadneWorldGym, KinematicBoxesTouchWhenTheyOverlap) {

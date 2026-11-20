@@ -81,6 +81,112 @@ std::string rgb_text(const std::array<float, 3> &c) {
   return num(c[0]) + "," + num(c[1]) + "," + num(c[2]);
 }
 
+// HSV (h in [0, 1)) to RGB: a fleet's team colours, as the nav demos made them.
+std::array<float, 3> hsv_rgb(double h, double s, double v) {
+  const double i = std::floor(h * 6.0);
+  const double f = h * 6.0 - i;
+  const double p = v * (1.0 - s), q = v * (1.0 - f * s), t = v * (1.0 - (1.0 - f) * s);
+  double r = v, g = t, b = p;
+  switch (static_cast<int>(i) % 6) {
+  case 1:
+    r = q, g = v, b = p;
+    break;
+  case 2:
+    r = p, g = v, b = t;
+    break;
+  case 3:
+    r = p, g = q, b = v;
+    break;
+  case 4:
+    r = t, g = p, b = v;
+    break;
+  case 5:
+    r = v, g = p, b = q;
+    break;
+  default:
+    break;
+  }
+  return {static_cast<float>(r), static_cast<float>(g), static_cast<float>(b)};
+}
+
+// splitmix64: a fleet's draws, the same on every platform.
+std::uint64_t mix64(std::uint64_t &z) {
+  std::uint64_t x = (z += 0x9e3779b97f4a7c15ull);
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+  return x ^ (x >> 31);
+}
+
+// `n` free points of grid `on` (`dist` its distance field) at least `clearance` from anything
+// blocked and, when they can be, `sep` from each other, drawn from `seed` among the samples whose
+// column is in [c0, c1) (all of them when that band has none free): a fleet's starts and goals.
+// Empty when nothing is free. Linear in n (the separation is checked in a hash of cells).
+std::vector<std::array<double, 2>> band_points(const cvc::nav::world_grid &on,
+                                               const std::vector<float> &dist, std::uint64_t seed,
+                                               int n, double clearance, double sep, int c0,
+                                               int c1) {
+  std::vector<std::size_t> pool;
+  const auto fill = [&](int a, int b, bool clear) {
+    a = std::max(a, 0);
+    b = std::min(b, on.cols);
+    for (int r = 0; r < on.rows; ++r)
+      for (int c = a; c < b; ++c) {
+        const std::size_t i = static_cast<std::size_t>(r) * on.cols + c;
+        if (i < dist.size() && (clear ? dist[i] >= clearance : dist[i] > 0.0f))
+          pool.push_back(i);
+      }
+  };
+  fill(c0, c1, true);
+  if (pool.empty())
+    fill(c0, c1, false);
+  if (pool.empty())
+    fill(0, on.cols, true);
+  if (pool.empty())
+    fill(0, on.cols, false);
+  std::vector<std::array<double, 2>> pts;
+  if (pool.empty() || n <= 0)
+    return pts;
+  const double h = on.cell();
+  const double cell = std::max(sep, h);
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> cells_of;
+  const auto key = [&](double x, double y) {
+    const auto ix = static_cast<std::int64_t>(std::floor((x - on.min_x) / cell));
+    const auto iy = static_cast<std::int64_t>(std::floor((y - on.min_y) / cell));
+    return (static_cast<std::uint64_t>(ix) << 32) ^ static_cast<std::uint32_t>(iy);
+  };
+  const auto crowded = [&](double x, double y) {
+    if (!(sep > 0.0))
+      return false;
+    const auto ix = static_cast<std::int64_t>(std::floor((x - on.min_x) / cell));
+    const auto iy = static_cast<std::int64_t>(std::floor((y - on.min_y) / cell));
+    for (std::int64_t dx = -1; dx <= 1; ++dx)
+      for (std::int64_t dy = -1; dy <= 1; ++dy) {
+        const auto it = cells_of.find((static_cast<std::uint64_t>(ix + dx) << 32) ^
+                                      static_cast<std::uint32_t>(iy + dy));
+        if (it != cells_of.end())
+          for (std::size_t k : it->second)
+            if (std::hypot(pts[k][0] - x, pts[k][1] - y) < sep)
+              return true;
+      }
+    return false;
+  };
+  std::uint64_t z = seed;
+  pts.reserve(static_cast<std::size_t>(n));
+  for (int k = 0; k < n; ++k) {
+    std::array<double, 2> p{};
+    for (int t = 0; t < 32; ++t) {
+      const std::size_t i = pool[mix64(z) % pool.size()];
+      p = {on.min_x + static_cast<double>(i % on.cols) * h,
+           on.min_y + static_cast<double>(i / on.cols) * h};
+      if (!crowded(p[0], p[1]))
+        break;
+    }
+    cells_of[key(p[0], p[1])].push_back(pts.size());
+    pts.push_back(p);
+  }
+  return pts;
+}
+
 // "r,g,b" in [0, 1]; false (and `out` unchanged) for anything else.
 bool parse_rgb(const std::string &s, std::array<float, 3> &out) {
   std::array<float, 3> c{};
@@ -533,8 +639,27 @@ struct WorldVehicles::impl {
     // The dynamic and kinematic plants' odometer (m), from its position at each navigator tick.
     double distance = 0.0, ox = 0.0, oy = 0.0;
     bool odometer = false;
+    int group = -1;    // its fleet (start: fleet:) in `groups`, -1 none
+    int rally = -1;    // its team's rally point in that fleet, -1 none
+    bool hold = false; // its goal is held (a fleet's): it does not wander from it
   };
   std::vector<entity> ents;
+
+  // The fleets (start: entries with fleet:): their vehicles laid out together from a seed, in
+  // teams at rally points, published as one (vehicles.fleets.<name>.*).
+  struct fleet_group {
+    vehicle_start start;
+    std::uint64_t seed = 0; // the layout's: the start's, one more at each reseed
+    bool laid_out = false;
+    std::vector<std::array<double, 2>> rally; // each team's point (world metres)
+    std::vector<std::array<float, 3>> colors; // each team's colour
+    std::vector<std::string> seen_rally;      // each team's "x|y" as last written or read
+    std::string seen_restart, seen_reseed;
+    std::string status;
+    bool summary() const { return start.keys != "all"; }
+  };
+  std::vector<fleet_group> groups;
+  bool hold_placing = false; // spawn() leaves its entity unplaced (a fleet places it laid out)
   std::uint64_t next_id = 1;
   std::uint64_t rev = 0;
   std::string status;
@@ -1069,6 +1194,9 @@ struct WorldVehicles::impl {
     const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
     if (floats(e) && !ground_of(e).any())
       return "no water deep and open enough for " + e.spec.archetype;
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
+        !groups[static_cast<std::size_t>(e.group)].laid_out)
+      lay_out(static_cast<std::size_t>(e.group));
     if (!e.started) {
       double px = 0.0, py = 0.0, ph = 0.0;
       // A start off its medium (a car's in a lake, a boat's ashore) moves to a free point.
@@ -1096,7 +1224,9 @@ struct WorldVehicles::impl {
       e.sx = p[0];
       e.sy = p[1];
     }
-    if (e.spec.controller == "nav@1") {
+    if (e.hold) {
+      // A fleet's: its goal is where its layout (or its rally point since) put it.
+    } else if (e.spec.controller == "nav@1") {
       const std::array<double, 2> g = draw_point(clearance, &e);
       e.gx = g[0];
       e.gy = g[1];
@@ -1192,6 +1322,272 @@ struct WorldVehicles::impl {
         if (std::string why = place(e); !why.empty() && ready)
           status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
+  }
+
+  // Fleet `gi`'s layout: every vehicle's start and goal from its seed, its teams by their goals'
+  // latitude (each team's goal held at its rally point) and their colours, as the nav demos'
+  // swarms are made (sim_world's scatter_free, SceneSwarm's targets). Its vehicles are not placed
+  // here; place() places each at its start.
+  void lay_out(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    g.laid_out = true;
+    std::vector<entity *> mine;
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi))
+        mine.push_back(&e);
+    if (mine.empty() || !grid)
+      return;
+    const entity &first = *mine.front();
+    const WorldSpawns::start_ground gr = ground_of(first);
+    const cvc::nav::world_grid &on = gr.grid ? *gr.grid : *grid;
+    const std::vector<float> &dist = gr.sdf ? *gr.sdf : sdf;
+    double clearance = std::hypot(first.desc.half_extents.x, first.desc.half_extents.y) + 0.5;
+    if (floats(first))
+      clearance = std::max(clearance, gr.clearance);
+    const int n = static_cast<int>(mine.size());
+    const bool opposed = g.start.layout == "opposed" && on.cols > 1;
+    const int lo = opposed ? static_cast<int>(on.cols * 0.30) : on.cols;
+    const int hi = opposed ? static_cast<int>(on.cols * 0.70) : 0;
+    std::uint64_t z = g.seed;
+    const std::uint64_t start_seed = mix64(z), goal_seed = mix64(z);
+    std::vector<std::array<double, 2>> starts, goals;
+    std::vector<double> headings(static_cast<std::size_t>(n),
+                                 std::numeric_limits<double>::quiet_NaN());
+    if (g.start.layout == "points" && spawns) {
+      for (int k = 0; k < n; ++k) {
+        double px = 0.0, py = 0.0, ph = 0.0;
+        const auto taken = [&](double x, double y, double r) {
+          for (const std::array<double, 2> &s : starts)
+            if (std::hypot(s[0] - x, s[1] - y) < r)
+              return true;
+          return crowded(x, y, r, nullptr);
+        };
+        if (!spawns->choose(mine[static_cast<std::size_t>(k)]->spec.team, first.spec.archetype,
+                            taken, px, py, ph))
+          break;
+        starts.push_back({px, py});
+        headings[static_cast<std::size_t>(k)] = ph;
+      }
+      if (static_cast<int>(starts.size()) < n) { // too few points: the rest drawn
+        const std::vector<std::array<double, 2>> more =
+            band_points(on, dist, start_seed, n - static_cast<int>(starts.size()), clearance,
+                        2.0 * clearance, 0, on.cols);
+        starts.insert(starts.end(), more.begin(), more.end());
+      }
+    } else {
+      starts = band_points(on, dist, start_seed, n, clearance, 2.0 * clearance, 0, lo);
+    }
+    goals = band_points(on, dist, goal_seed, n, clearance, 0.0, hi, on.cols);
+    if (static_cast<int>(starts.size()) < n || static_cast<int>(goals.size()) < n) {
+      g.status = "no free ground for the fleet";
+      return; // each placed as a single vehicle is
+    }
+    // Teams: one rally point per latitude band, on the goal nearest the band's centre.
+    const int T = g.start.rally;
+    std::vector<int> team(static_cast<std::size_t>(n), -1);
+    g.rally.clear();
+    g.colors.clear();
+    if (T > 0) {
+      double ymin = std::numeric_limits<double>::infinity(), ymax = -ymin, xsum = 0.0;
+      for (const std::array<double, 2> &q : goals) {
+        ymin = std::min(ymin, q[1]);
+        ymax = std::max(ymax, q[1]);
+        xsum += q[0];
+      }
+      const double xmean = xsum / n;
+      for (int t = 0; t < T; ++t) {
+        g.colors.push_back(hsv_rgb(static_cast<double>(t) / T, 0.74, 0.98));
+        const double ty = ymin + (t + 0.5) / T * std::max(1e-6, ymax - ymin);
+        std::array<double, 2> best{xmean, ty};
+        double bd = std::numeric_limits<double>::infinity();
+        for (const std::array<double, 2> &q : goals)
+          if (const double d = std::hypot(q[0] - xmean, q[1] - ty); d < bd) {
+            bd = d;
+            best = q;
+          }
+        g.rally.push_back(best);
+      }
+      for (int k = 0; k < n; ++k) {
+        const double f =
+            ymax > ymin ? (goals[static_cast<std::size_t>(k)][1] - ymin) / (ymax - ymin) : 0.0;
+        team[static_cast<std::size_t>(k)] = std::clamp(static_cast<int>(f * T), 0, T - 1);
+      }
+    }
+    const bool hsv = g.start.colors.empty() ? T > 0 : g.start.colors == "hsv";
+    for (int k = 0; k < n; ++k) {
+      entity &e = *mine[static_cast<std::size_t>(k)];
+      const std::size_t ks = static_cast<std::size_t>(k);
+      const int t = team[ks];
+      e.sx = starts[ks][0];
+      e.sy = starts[ks][1];
+      if (!g.start.has_heading && std::isfinite(headings[ks]))
+        e.spec.yaw = headings[ks];
+      e.syaw = e.spec.yaw; // not finite: toward its goal (place())
+      e.started = true;
+      e.hold = true;
+      e.rally = t;
+      if (t >= 0) {
+        e.spec.team = g.start.team + t;
+        e.gx = g.rally[static_cast<std::size_t>(t)][0];
+        e.gy = g.rally[static_cast<std::size_t>(t)][1];
+      } else {
+        e.gx = goals[ks][0];
+        e.gy = goals[ks][1];
+      }
+      if (hsv)
+        e.spec.color = t >= 0 ? g.colors[static_cast<std::size_t>(t)]
+                              : hsv_rgb(static_cast<double>(k) / n, 0.74, 0.98);
+      if (e.spec.controller != "nav@1") { // none or external: it parks where it starts
+        e.gx = e.sx;
+        e.gy = e.sy;
+      }
+    }
+    g.status = "laid out: " + std::to_string(n) + " " + first.spec.archetype +
+               (g.start.layout.empty() ? std::string(" scattered") : " " + g.start.layout) +
+               ", seed " + std::to_string(g.seed) +
+               (T > 0 ? ", " + std::to_string(T) + " rally points" : std::string());
+    publish_rally(g);
+  }
+
+  // Fleet `g`'s rally keys: vehicles.fleets.<name>.rally.count and .<t>.{x,y,color}.
+  void publish_rally(fleet_group &g) {
+    g.seen_rally.assign(g.rally.size(), std::string());
+    if (vkey.empty() || !root())
+      return;
+    const std::string at = vkey + ".fleets." + g.start.fleet + ".rally.";
+    put(at + "count", std::to_string(g.rally.size()));
+    for (std::size_t t = 0; t < g.rally.size(); ++t) {
+      const std::string x = num(g.rally[t][0]), y = num(g.rally[t][1]);
+      put(at + std::to_string(t) + ".x", x);
+      put(at + std::to_string(t) + ".y", y);
+      put(at + std::to_string(t) + ".color", rgb_text(g.colors[t]));
+      g.seen_rally[t] = x + "|" + y;
+    }
+  }
+
+  fleet_group *group_named(const std::string &name) {
+    for (fleet_group &g : groups)
+      if (g.start.fleet == name)
+        return &g;
+    return nullptr;
+  }
+
+  // Fleet `gi`'s rally point `t` to (x, y) (held to the grid): its team's goals move there.
+  bool move_rally(std::size_t gi, int t, double x, double y) {
+    fleet_group &g = groups[gi];
+    if (t < 0 || static_cast<std::size_t>(t) >= g.rally.size() || !std::isfinite(x) ||
+        !std::isfinite(y))
+      return false;
+    if (grid) {
+      x = std::clamp(x, grid->min_x, grid->max_x);
+      y = std::clamp(y, grid->min_y, grid->max_y);
+    }
+    g.rally[static_cast<std::size_t>(t)] = {x, y};
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi) && e.rally == t && e.spec.controller == "nav@1") {
+        e.gx = x;
+        e.gy = y;
+        if (fleet *f = fleet_of(e); f && index(e) >= 0)
+          f->sim->retarget(index(e), nx(x), ny(y));
+      }
+    if (!vkey.empty() && root()) {
+      const std::string at =
+          vkey + ".fleets." + g.start.fleet + ".rally." + std::to_string(t) + ".";
+      const std::string xs = num(x), ys = num(y);
+      put(at + "x", xs);
+      put(at + "y", ys);
+      g.seen_rally[static_cast<std::size_t>(t)] = xs + "|" + ys;
+    }
+    ++rev;
+    return true;
+  }
+
+  // Fleet `gi` laid out again (from its next seed when `reseed`): its vehicles out of the world
+  // and back at their new starts.
+  void restart_group(std::size_t gi, bool reseed) {
+    fleet_group &g = groups[gi];
+    if (reseed)
+      ++g.seed;
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi)) {
+        remove_from_fleet(e);
+        e.started = false;
+        e.hold = false;
+        e.rally = -1;
+        e.spec.team = g.start.team;
+        e.spec.yaw = g.start.has_heading ? g.start.heading * kPi / 180.0
+                                         : std::numeric_limits<double>::quiet_NaN();
+      }
+    g.laid_out = false;
+    if (ready)
+      for (entity &e : ents)
+        if (e.group == static_cast<int>(gi) && !e.agent)
+          if (std::string why = place(e); !why.empty())
+            status = "entity " + std::to_string(e.id) + ": " + why;
+    ++rev;
+  }
+
+  // Each fleet's request and rally keys: a change is a request, a rally point's a move.
+  void poll_groups() {
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+      fleet_group &g = groups[gi];
+      const std::string at = "fleets." + g.start.fleet + ".";
+      if (const std::string r = get(at + "restart.request"); r != g.seen_restart) {
+        g.seen_restart = r;
+        restart_group(gi, false);
+      }
+      if (const std::string r = get(at + "reseed.request"); r != g.seen_reseed) {
+        g.seen_reseed = r;
+        restart_group(gi, true);
+      }
+      for (std::size_t t = 0; t < g.rally.size() && t < g.seen_rally.size(); ++t) {
+        const std::string xs = get(at + "rally." + std::to_string(t) + ".x"),
+                          ys = get(at + "rally." + std::to_string(t) + ".y");
+        if (xs + "|" + ys == g.seen_rally[t])
+          continue;
+        g.seen_rally[t] = xs + "|" + ys;
+        char *end = nullptr;
+        const double x = std::strtod(xs.c_str(), &end);
+        const bool okx = end && end != xs.c_str();
+        const double y = std::strtod(ys.c_str(), &end);
+        if (okx && end && end != ys.c_str())
+          move_rally(gi, static_cast<int>(t), x, y);
+      }
+    }
+  }
+
+  // Each fleet's counts: vehicles.fleets.names, and vehicles.fleets.<name>.{count, placed,
+  // arrived, teams, status, seed}.
+  void publish_groups() {
+    if (vkey.empty() || !root() || groups.empty())
+      return;
+    std::string names;
+    for (std::size_t gi = 0; gi < groups.size(); ++gi) {
+      const fleet_group &g = groups[gi];
+      names += (names.empty() ? "" : ",") + g.start.fleet;
+      int count = 0, placed = 0, arrived = 0;
+      for (const entity &e : ents) {
+        if (e.group != static_cast<int>(gi))
+          continue;
+        ++count;
+        const fleet *f = fleet_of(e);
+        const int i = index(e);
+        if (!f || i < 0)
+          continue;
+        ++placed;
+        const pose p = pose_of(*f, i);
+        if (std::hypot(e.gx - p.position.x, e.gy - p.position.y) < kReach + e.desc.half_extents.x)
+          ++arrived;
+      }
+      const std::string at = vkey + ".fleets." + g.start.fleet + ".";
+      put(at + "count", std::to_string(count));
+      put(at + "placed", std::to_string(placed));
+      put(at + "arrived", std::to_string(arrived));
+      put(at + "teams", std::to_string(g.rally.size()));
+      put(at + "seed", std::to_string(g.seed));
+      put(at + "status", g.status);
+    }
+    put(vkey + ".fleets.names", names);
   }
 
   // Each step of a tick: the dynamic plants' substep, the kinematic boxes a step further along the
@@ -1355,8 +1751,8 @@ struct WorldVehicles::impl {
         e.oy = p.position.y;
         e.odometer = true;
       }
-      // nav@1 wanders: one at its goal draws another.
-      if (e.spec.controller == "nav@1" && wander &&
+      // nav@1 wanders: one at its goal draws another (a fleet's goal is held).
+      if (e.spec.controller == "nav@1" && wander && !e.hold &&
           std::hypot(e.gx - p.position.x, e.gy - p.position.y) < kReach + e.desc.half_extents.x) {
         const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
         const std::array<double, 2> g = draw_point(clearance, &e);
@@ -1378,6 +1774,9 @@ struct WorldVehicles::impl {
     out.goal_x = e.gx;
     out.goal_y = e.gy;
     out.reach = kReach + e.desc.half_extents.x;
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size())
+      out.fleet = groups[static_cast<std::size_t>(e.group)].start.fleet;
+    out.rally = e.rally;
     const fleet *f = fleet_of(e);
     const int i = index(e);
     if (!f || i < 0)
@@ -1739,11 +2138,37 @@ struct WorldVehicles::impl {
   }
 
   void publish_entities() {
+    publish_groups();
     if (ekey.empty() || !root())
       return;
+    // A summary fleet's vehicles have keys only when vehicles.watch names them (a camera's, a
+    // panel's: ids joined by ',') or they have an intent.
+    std::set<std::uint64_t> keyed;
+    bool quiet_fleets = false;
+    for (const fleet_group &g : groups)
+      quiet_fleets = quiet_fleets || g.summary();
+    if (quiet_fleets) {
+      std::stringstream in(get("watch"));
+      for (std::string part; std::getline(in, part, ',');) {
+        char *end = nullptr;
+        const unsigned long long v = std::strtoull(part.c_str(), &end, 10);
+        if (end && end != part.c_str())
+          keyed.insert(v);
+      }
+      std::lock_guard<std::mutex> lock(mu);
+      for (const auto &[id, it] : intents)
+        keyed.insert(id);
+    }
     std::set<std::string> now;
     std::string ids, summary;
+    std::vector<int> quiet(groups.size(), 0);
     for (const entity &e : ents) {
+      if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
+          groups[static_cast<std::size_t>(e.group)].summary() && !keyed.count(e.id) &&
+          e.applied == entity_intent{}) {
+        ++quiet[static_cast<std::size_t>(e.group)];
+        continue;
+      }
       const entity_info in = info(e);
       const std::string id = std::to_string(e.id);
       now.insert(id);
@@ -1783,6 +2208,11 @@ struct WorldVehicles::impl {
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
     }
+    for (std::size_t gi = 0; gi < groups.size(); ++gi)
+      if (quiet[gi])
+        summary += (summary.empty() ? "" : "\n") + std::string("fleet ") + groups[gi].start.fleet +
+                   "  " + std::to_string(quiet[gi]) + " " + groups[gi].start.archetype +
+                   " (keys: summary)";
     cvc::state *r = root();
     for (const std::string &id : published)
       if (!now.count(id))
@@ -1857,6 +2287,8 @@ void WorldVehicles::set_ground(std::shared_ptr<const nav::world_grid> grid,
   d.grid = std::move(grid);
   d.ground = std::move(ground_bodies);
   d.status = d.grid ? "ready" : "waiting for the world's grid";
+  for (impl::fleet_group &g : d.groups) // a new grid: each fleet is laid out on it again
+    g.laid_out = false;
   try {
     d.build_navigator();
     if (d.ready)
@@ -1919,7 +2351,7 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
   }
   d.ents.push_back(std::move(e));
   impl::entity &placed = d.ents.back();
-  if (d.ready) {
+  if (d.ready && !d.hold_placing) {
     if (std::string w = d.place(placed); !w.empty()) {
       d.ents.pop_back();
       return refuse(w);
@@ -1936,9 +2368,56 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
 
 std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts,
                                         std::vector<std::string> *warnings) {
+  impl &d = *_impl;
   std::size_t made = 0;
   for (std::size_t i = 0; i < starts.size(); ++i) {
     const vehicle_start &st = starts[i];
+    if (!st.fleet.empty()) {
+      // A fleet: its vehicles spawned unplaced, then laid out and placed together.
+      if (d.group_named(st.fleet)) {
+        if (warnings)
+          warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
+                              st.fleet + "' is there already");
+        continue;
+      }
+      d.groups.emplace_back();
+      const std::size_t gi = d.groups.size() - 1;
+      d.groups[gi].start = st;
+      d.groups[gi].seed = st.seed;
+      d.groups[gi].seen_restart = d.get("fleets." + st.fleet + ".restart.request");
+      d.groups[gi].seen_reseed = d.get("fleets." + st.fleet + ".reseed.request");
+      d.groups[gi].status = "waiting for the world's grid";
+      d.hold_placing = true;
+      int got = 0;
+      std::string why;
+      for (int k = 0; k < st.count; ++k) {
+        entity_spec s;
+        s.archetype = st.archetype;
+        s.name = (st.name.empty() ? st.fleet : st.name) + " " + std::to_string(k + 1);
+        s.team = st.team;
+        s.controller = st.controller;
+        s.plant = st.plant;
+        s.policy = st.policy;
+        if (st.has_heading)
+          s.yaw = st.heading * kPi / 180.0;
+        if (!spawn(s, &why))
+          break;
+        d.ents.back().group = static_cast<int>(gi);
+        ++got;
+      }
+      d.hold_placing = false;
+      if (got < st.count && warnings)
+        warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
+                            st.fleet + "': " + why);
+      if (d.ready)
+        for (impl::entity &e : d.ents)
+          if (e.group == static_cast<int>(gi) && !e.agent)
+            if (std::string w = d.place(e); !w.empty())
+              d.status = "entity " + std::to_string(e.id) + ": " + w;
+      ++d.rev;
+      made += static_cast<std::size_t>(got);
+      continue;
+    }
     for (int k = 0; k < st.count; ++k) {
       entity_spec s;
       s.archetype = st.archetype;
@@ -1983,6 +2462,7 @@ void WorldVehicles::clear() {
   impl &d = *_impl;
   d.unplace_all(false);
   d.ents.clear();
+  d.groups.clear();
   ++d.rev;
   std::lock_guard<std::mutex> lock(d.mu);
   d.live.clear();
@@ -2032,6 +2512,7 @@ void WorldVehicles::poll() {
   }
   if (const std::string m = d.get("sense"); (m == "known" || m == "fog") && m != d.sense)
     set_sense(m);
+  d.poll_groups();
   if (const std::string a = d.get("avoid"); a == "0" || a == "1")
     if ((a == "1") != d.avoid)
       set_avoid(a == "1");
@@ -2199,6 +2680,41 @@ bool WorldVehicles::command(std::uint64_t id, double steer, double accel) {
         return false;
       e.cmd_steer = steer;
       e.cmd_accel = accel;
+      return true;
+    }
+  return false;
+}
+
+std::vector<std::string> WorldVehicles::fleets() const {
+  std::vector<std::string> out;
+  for (const impl::fleet_group &g : _impl->groups)
+    out.push_back(g.start.fleet);
+  return out;
+}
+
+bool WorldVehicles::rally(const std::string &fleet, int team, double &x, double &y) const {
+  for (const impl::fleet_group &g : _impl->groups)
+    if (g.start.fleet == fleet && team >= 0 && static_cast<std::size_t>(team) < g.rally.size()) {
+      x = g.rally[static_cast<std::size_t>(team)][0];
+      y = g.rally[static_cast<std::size_t>(team)][1];
+      return true;
+    }
+  return false;
+}
+
+bool WorldVehicles::move_rally(const std::string &fleet, int team, double x, double y) {
+  impl &d = *_impl;
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi)
+    if (d.groups[gi].start.fleet == fleet)
+      return d.move_rally(gi, team, x, y);
+  return false;
+}
+
+bool WorldVehicles::restart_fleet(const std::string &fleet, bool reseed) {
+  impl &d = *_impl;
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi)
+    if (d.groups[gi].start.fleet == fleet) {
+      d.restart_group(gi, reseed);
       return true;
     }
   return false;

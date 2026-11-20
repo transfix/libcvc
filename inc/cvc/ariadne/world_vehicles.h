@@ -203,6 +203,8 @@ struct entity_info {
   bool reached = false;              // at its goal (nav@1 then draws another, unless held)
   std::string plant;                 // jolt, dynamic, dynamic4w, kinematic or dynamicboat (as
                                      // spec.plant)
+  std::string fleet;                 // the fleet it was laid out in (start: fleet:), "" none
+  int rally = -1;                    // its team's rally point in its fleet, -1 none
   // Its chassis's contacts over the physics steps since the navigator's last tick (each step's
   // contact events, begun or, when the scene's physics reports them, persisting): with the
   // world's bodies other than the ground (buildings, walls, props), and with another vehicle. A
@@ -452,6 +454,21 @@ public:
   // Empty for an id that is not a placed entity.
   std::vector<entity_wheel> wheels(std::uint64_t id) const;
   std::size_t size() const;
+
+  // Fleets (world: vehicles: start: entries with fleet:, spawn_starts): their names in the
+  // document's order. A fleet is laid out once the world's grid exists; its keys are
+  // `vehicles.fleets.<name>.*` (rally points, restart and reseed requests, its counts).
+  std::vector<std::string> fleets() const;
+  // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
+  // none (no such fleet or team, or not laid out yet).
+  bool rally(const std::string &fleet, int team, double &x, double &y) const;
+  // Moves it (held to the grid): its team's vehicles drive there. As writing
+  // vehicles.fleets.<fleet>.rally.<team>.x and .y.
+  bool move_rally(const std::string &fleet, int team, double x, double y);
+  // Lays fleet `fleet` out again, every vehicle back to a start: from its seed (`reseed` false),
+  // or from the next one. As changing vehicles.fleets.<fleet>.restart.request or
+  // reseed.request.
+  bool restart_fleet(const std::string &fleet, bool reseed);
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;

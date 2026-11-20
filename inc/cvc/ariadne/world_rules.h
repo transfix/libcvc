@@ -196,6 +196,18 @@ bool spawn_scope_known(const std::string &scope);
 //       start:
 //         - { archetype: rover, count: 12, team: 1 }
 //         - { archetype: rover, name: lead, at: [0, 0], heading: 90 }
+//         - { fleet: city, archetype: rover, count: 800, spawn: opposed, rally: { count: 16 } }
+//
+// An entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles laid out together once the
+// world's grid exists, from `seed`. `spawn:` opposed starts them in the grid's west 30 % and gives
+// them goals in its east 30 %, scattered (the default) draws both anywhere free, and points starts
+// them at the world's spawn points with scattered goals. `rally: { count: T, assign: latitude }`
+// makes T teams by their goals' latitude, each team's goal held at its rally point (the goal
+// nearest its band's centre) and its vehicles coloured hsv(t / T, 0.74, 0.98) (`colors: hsv`, the
+// default; `colors: spawn` keeps the spawn's). A fleet's goals are held (they do not wander).
+// `keys: summary` (a fleet's default) publishes the fleet's keys (vehicles.fleets.<fleet>.*), and
+// per-entity keys only for the vehicles vehicles.watch names or with an intent; `keys: all`
+// publishes every vehicle's, as an unnamed entry's are.
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -204,9 +216,19 @@ struct vehicle_start {
   double x = 0.0, y = 0.0;
   bool has_heading = false;
   double heading = 0.0;
+  // A fleet's (all empty or 0 for an entry of single vehicles).
+  std::string fleet;
+  std::string layout; // spawn: opposed | scattered | points ("" scattered)
+  unsigned long long seed = 0;
+  int rally = 0;      // rally: { count: } (0: no teams; each its own goal)
+  std::string assign; // rally: { assign: } latitude ("" latitude)
+  std::string colors; // hsv | spawn ("" hsv with rally points, spawn without)
+  std::string keys;   // summary | all ("" summary)
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;
+constexpr int kMaxFleetCount = 4096;
+constexpr int kMaxFleetRally = 64;
 
 struct world_rules {
   world_physics physics;
