@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
@@ -317,6 +318,7 @@ struct SceneWorld::impl {
   std::string on_sig;      // what the world on was made from at the last rev
   std::string refused;     // a source key's value that names no world, warned about once
   std::string enabled_key; // <stats_key>.enabled, or ""
+  std::string hash_key;    // <stats_key>.hash, or "": "1" publishes the state hash
   std::deque<double> step_history;
   // The vehicles (bind_vehicles), on the grid `ground_grid` of the world on.
   std::unique_ptr<WorldVehicles> vehicles;
@@ -628,6 +630,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
   if (!stats_key.empty()) {
     out->_impl->stats = stats_key + ".stats";
     out->_impl->enabled_key = stats_key + ".enabled";
+    out->_impl->hash_key = stats_key + ".hash";
     cvc::state &enabled = cvc::state::instance(app)(out->_impl->enabled_key);
     if (enabled.value().empty())
       enabled.value("1");
@@ -1047,6 +1050,7 @@ std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &s
     out->bind_boats(scene, bind_prefix, warnings);
     if (out->vehicles()) {
       out->vehicles()->set_intents_key(resolve_bind(bind_prefix, scene.vehicle_intents));
+      out->vehicles()->set_poses_key(resolve_bind(bind_prefix, scene.vehicle_poses));
       out->vehicles()->spawn_starts(scene.vehicle_starts, warnings);
     }
     out->bind_wind(scene, bind_prefix);
@@ -1732,6 +1736,15 @@ void SceneWorld::publish_stats() {
   // A line per vehicle: its speed, power, energy and the wheels' load.
   if (d.vehicles)
     put("vehicles", d.vehicles->stats_lines());
+  // The world's state hash (physics::world::state_hash, 16 hex digits), while <stats_key>.hash is
+  // 1: it saves the whole world, so a test or a check asks for it.
+  if (!d.hash_key.empty())
+    if (cvc::state *h = root.findDescendant(d.hash_key); h && h->value() == "1") {
+      char buf[24];
+      std::snprintf(buf, sizeof(buf), "%016llx",
+                    static_cast<unsigned long long>(d.world->state_hash()));
+      put("hash", buf);
+    }
 }
 
 } // namespace ariadne

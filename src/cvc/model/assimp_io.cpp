@@ -28,6 +28,7 @@
 #include <string>
 
 #ifdef CVC_ENABLE_ASSIMP
+#include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
@@ -40,6 +41,7 @@
 #include <cvc/image/image.h>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <stdexcept>
 
@@ -80,6 +82,9 @@ unsigned int import_flags() {
   return aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace |
          aiProcess_JoinIdenticalVertices | aiProcess_ImproveCacheLocality;
 }
+
+// model_read_options::exact: what the file stores, in its order, nothing joined or generated.
+unsigned int import_flags(const model_read_options &o) { return o.exact ? 0u : import_flags(); }
 
 // Directory containing `p` ("." if none), for resolving relative texture paths.
 std::string dir_of(const std::string &p) {
@@ -291,8 +296,15 @@ geometry build_geometry(const aiMesh *mesh) {
     tris.reserve(mesh->mNumFaces);
     for (unsigned int f = 0; f < mesh->mNumFaces; ++f) {
       const aiFace &face = mesh->mFaces[f];
-      // Post-Triangulate every polygon is a triangle; skip anything else
-      // (points/lines emitted by degenerate faces) defensively.
+      // A line's segment is kept (an exact read: needles, a centreline); anything else that is
+      // not a triangle is skipped.
+      if (face.mNumIndices == 2) {
+        line_t ln;
+        ln[0] = face.mIndices[0];
+        ln[1] = face.mIndices[1];
+        geom.lines().push_back(ln);
+        continue;
+      }
       if (face.mNumIndices != 3)
         continue;
       tri_t tr;
@@ -392,13 +404,148 @@ model read_model_assimp(app &ctx, const std::string &path) {
 
 // The same from bytes in memory, the format by `hint` (an extension without its dot).
 model read_model_assimp_memory(app &ctx, const void *data, std::size_t size,
-                               const std::string &hint) {
+                               const std::string &hint, const model_read_options &options) {
   Assimp::Importer imp;
-  const aiScene *s = imp.ReadFileFromMemory(data, size, import_flags(), hint.c_str());
+  const aiScene *s = imp.ReadFileFromMemory(data, size, import_flags(options), hint.c_str());
   if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
     throw std::runtime_error("cvc::model assimp read of " + std::to_string(size) + " bytes of ." +
                              hint + ": " + imp.GetErrorString());
   return model_of_scene(ctx, s, std::string());
+}
+
+// ── Writing ──────────────────────────────────────────────────────────────────────────────────────
+
+// The assimp export format for an extension (leading dot, lower case) that writes to one file,
+// or empty.
+std::string export_format(const std::string &ext) {
+  if (ext == ".glb")
+    return "glb2";
+  if (ext == ".ply")
+    return "plyb";
+  if (ext == ".stl")
+    return "stlb";
+  return std::string();
+}
+
+std::string lower_extension(const std::string &extension) {
+  std::string ext = extension;
+  if (!ext.empty() && ext[0] != '.')
+    ext = "." + ext;
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return ext;
+}
+
+// One cvc mesh's points, normals, colours and uvs as an aiMesh whose faces are its triangles
+// (`corners` 3) or its lines (2). The aiMesh owns its arrays (the aiScene frees them).
+aiMesh *mesh_to_ai(const geometry &g, const std::string &name, unsigned int material,
+                   unsigned int corners) {
+  auto *am = new aiMesh();
+  am->mName = aiString(name);
+  am->mMaterialIndex = material;
+  am->mPrimitiveTypes = corners == 3 ? aiPrimitiveType_TRIANGLE : aiPrimitiveType_LINE;
+  const unsigned int nv = static_cast<unsigned int>(g.points().size());
+  am->mNumVertices = nv;
+  am->mVertices = new aiVector3D[nv];
+  for (unsigned int v = 0; v < nv; ++v)
+    am->mVertices[v] =
+        aiVector3D(static_cast<ai_real>(g.points()[v][0]), static_cast<ai_real>(g.points()[v][1]),
+                   static_cast<ai_real>(g.points()[v][2]));
+  if (corners == 3 && g.normals().size() == nv) {
+    am->mNormals = new aiVector3D[nv];
+    for (unsigned int v = 0; v < nv; ++v)
+      am->mNormals[v] = aiVector3D(static_cast<ai_real>(g.normals()[v][0]),
+                                   static_cast<ai_real>(g.normals()[v][1]),
+                                   static_cast<ai_real>(g.normals()[v][2]));
+  }
+  if (g.colors().size() == nv) {
+    am->mColors[0] = new aiColor4D[nv];
+    for (unsigned int v = 0; v < nv; ++v)
+      am->mColors[0][v] =
+          aiColor4D(static_cast<ai_real>(g.colors()[v][0]), static_cast<ai_real>(g.colors()[v][1]),
+                    static_cast<ai_real>(g.colors()[v][2]), 1);
+  }
+  if (corners == 3 && g.uvs().size() == nv) {
+    am->mNumUVComponents[0] = 2;
+    am->mTextureCoords[0] = new aiVector3D[nv];
+    for (unsigned int v = 0; v < nv; ++v)
+      am->mTextureCoords[0][v] =
+          aiVector3D(static_cast<ai_real>(g.uvs()[v][0]), static_cast<ai_real>(g.uvs()[v][1]), 0);
+  }
+  const std::size_t nf = corners == 3 ? g.tris().size() : g.lines().size();
+  am->mNumFaces = static_cast<unsigned int>(nf);
+  am->mFaces = new aiFace[nf];
+  for (std::size_t f = 0; f < nf; ++f) {
+    aiFace &face = am->mFaces[f];
+    face.mNumIndices = corners;
+    face.mIndices = new unsigned int[corners];
+    for (unsigned int k = 0; k < corners; ++k)
+      face.mIndices[k] = static_cast<unsigned int>(corners == 3 ? g.tris()[f][k] : g.lines()[f][k]);
+  }
+  return am;
+}
+
+// A cvc model as an aiScene for the exporter: each mesh's triangles one aiMesh and its lines
+// another, all under the root node, and a "default" material for a mesh that has none.
+std::unique_ptr<aiScene> scene_of_model(const model &m) {
+  auto scene = std::make_unique<aiScene>();
+  std::vector<aiMaterial *> mats;
+  for (const material &mat : m.materials) {
+    auto *am = new aiMaterial();
+    const aiString name(mat.name);
+    am->AddProperty(&name, AI_MATKEY_NAME);
+    const aiColor4D base(mat.base_color[0], mat.base_color[1], mat.base_color[2],
+                         mat.base_color[3]);
+    am->AddProperty(&base, 1, AI_MATKEY_BASE_COLOR);
+    am->AddProperty(&base, 1, AI_MATKEY_COLOR_DIFFUSE);
+    mats.push_back(am);
+  }
+  const unsigned int fallback = static_cast<unsigned int>(mats.size());
+  bool need_fallback = false;
+  std::vector<aiMesh *> meshes;
+  for (const model::mesh &mm : m.meshes) {
+    const bool has = mm.material >= 0 && mm.material < static_cast<int>(m.materials.size());
+    const unsigned int mat = has ? static_cast<unsigned int>(mm.material) : fallback;
+    need_fallback = need_fallback || !has;
+    if (!mm.geom.tris().empty())
+      meshes.push_back(mesh_to_ai(mm.geom, mm.name, mat, 3));
+    if (!mm.geom.lines().empty())
+      meshes.push_back(mesh_to_ai(mm.geom, mm.name + ".lines", mat, 2));
+  }
+  if (need_fallback || mats.empty()) {
+    auto *am = new aiMaterial();
+    const aiString name("default");
+    am->AddProperty(&name, AI_MATKEY_NAME);
+    mats.push_back(am);
+  }
+  scene->mNumMaterials = static_cast<unsigned int>(mats.size());
+  scene->mMaterials = new aiMaterial *[mats.size()];
+  std::copy(mats.begin(), mats.end(), scene->mMaterials);
+  scene->mNumMeshes = static_cast<unsigned int>(meshes.size());
+  scene->mMeshes = new aiMesh *[meshes.size()];
+  std::copy(meshes.begin(), meshes.end(), scene->mMeshes);
+  scene->mRootNode = new aiNode("root");
+  scene->mRootNode->mNumMeshes = scene->mNumMeshes;
+  scene->mRootNode->mMeshes = new unsigned int[scene->mNumMeshes];
+  for (unsigned int i = 0; i < scene->mNumMeshes; ++i)
+    scene->mRootNode->mMeshes[i] = i;
+  return scene;
+}
+
+std::string write_model_assimp_memory(const model &m, const std::string &ext) {
+  const std::string format = export_format(ext);
+  if (format.empty())
+    throw unsupported_model_file_type("cvc::model assimp write: cannot write '" + ext + "'");
+  if (m.meshes.empty())
+    throw std::runtime_error("cvc::model assimp write: the model has no meshes");
+  const std::unique_ptr<aiScene> scene = scene_of_model(m);
+  Assimp::Exporter ex;
+  const aiExportDataBlob *blob = ex.ExportToBlob(scene.get(), format.c_str(), 0u);
+  if (!blob)
+    throw std::runtime_error("cvc::model assimp write of " + ext + ": " + ex.GetErrorString());
+  if (blob->next)
+    throw std::runtime_error("cvc::model assimp write of " + ext + ": more than one file");
+  return std::string(static_cast<const char *>(blob->data), blob->size);
 }
 
 // -------------
@@ -416,9 +563,15 @@ public:
     return read_model_assimp(ctx, filename);
   }
 
-  virtual void write(app &, const model & /*m*/, const std::string &filename) const {
-    throw unsupported_model_file_type(
-        std::string("cvc::model assimp write: export not supported: ") + filename);
+  virtual void write(app &, const model &m, const std::string &filename) const {
+    const std::string::size_type dot = filename.find_last_of('.');
+    const std::string ext =
+        lower_extension(dot == std::string::npos ? std::string() : filename.substr(dot));
+    const std::string bytes = write_model_assimp_memory(m, ext);
+    std::ofstream out(filename, std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!out)
+      throw std::runtime_error("cvc::model assimp write: cannot write " + filename);
   }
 
 private:
@@ -478,6 +631,11 @@ bool can_read_model_from_memory(const std::string &extension) {
 
 model read_model_from_memory(app &ctx, const void *data, std::size_t size,
                              const std::string &extension) {
+  return read_model_from_memory(ctx, data, size, extension, model_read_options());
+}
+
+model read_model_from_memory(app &ctx, const void *data, std::size_t size,
+                             const std::string &extension, const model_read_options &options) {
   if (!can_read_model_from_memory(extension))
     throw unsupported_model_file_type("cvc::read_model_from_memory: no reader for '" + extension +
                                       "' from memory");
@@ -485,12 +643,40 @@ model read_model_from_memory(app &ctx, const void *data, std::size_t size,
   std::string hint = extension[0] == '.' ? extension.substr(1) : extension;
   std::transform(hint.begin(), hint.end(), hint.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return read_model_assimp_memory(ctx, data, size, hint);
+  return read_model_assimp_memory(ctx, data, size, hint, options);
 #else
   (void)ctx;
   (void)data;
   (void)size;
+  (void)options;
   return model();
+#endif
+}
+
+bool can_write_model_to_memory(const std::string &extension) {
+#ifdef CVC_ENABLE_ASSIMP
+  std::string ext = extension;
+  if (!ext.empty() && ext[0] != '.')
+    ext = "." + ext;
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !export_format(ext).empty();
+#else
+  (void)extension;
+  return false;
+#endif
+}
+
+std::string write_model_to_memory(app &ctx, const model &m, const std::string &extension) {
+  (void)ctx;
+  if (!can_write_model_to_memory(extension))
+    throw unsupported_model_file_type("cvc::write_model_to_memory: no writer for '" + extension +
+                                      "'");
+#ifdef CVC_ENABLE_ASSIMP
+  return write_model_assimp_memory(m, lower_extension(extension));
+#else
+  (void)m;
+  return std::string();
 #endif
 }
 

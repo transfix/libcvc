@@ -9,6 +9,8 @@
 
 #include "chart_emit.h"     // Kind::Chart (series / marker parse caches, the pick edge)
 #include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
+#include "heatmap_emit.h"   // Kind::Heatmap (the subtree read on a write, the cell events)
+#include "settings_emit.h"  // Kind::Settings (the key walk, its write watch, the edits)
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -213,6 +215,7 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.label, kTok, idx);
   replace_in(out.bind, kTok, idx);
   replace_in(out.on, kTok, idx);
+  replace_in(out.pick, kTok, idx); // a chart's or a heatmap's pick: key
   // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
   // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
   replace_in(out.on_click, kTok, idx);
@@ -231,6 +234,11 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.on_remove, kTok, idx);
   for (std::string &t : out.tab_titles)
     replace_in(t, kTok, idx);
+  // A settings editor's roots and filter (root: vehicles.{i}).
+  for (std::string &r : out.settings_roots)
+    replace_in(r, kTok, idx);
+  for (std::string &f : out.settings_filter)
+    replace_in(f, kTok, idx);
   replace_in(out.visible_when, kTok, idx);
   replace_in(out.enabled_when, kTok, idx);
   replace_in(out.disabled_when, kTok, idx);
@@ -835,6 +843,26 @@ public:
 
   // How many expressions ran (a result reused from the cache is not one), since it was made.
   std::uint64_t evaluations() const { return evaluated_; }
+
+  // The write generation of the newest write at or under the absolute `path`, or at one of its
+  // ancestors (the generation every result is stale from, when the write log overflowed): it
+  // moves when, and only when, something there may have changed since. A Kind::Heatmap reads its
+  // subtree again only then.
+  std::uint64_t written(const std::string &path) {
+    sync_writes();
+    std::uint64_t g = all_gen_;
+    const auto take = [&](const std::unordered_map<std::string, std::uint64_t> &m,
+                          const std::string &key) {
+      const auto it = m.find(key);
+      if (it != m.end())
+        g = std::max(g, it->second);
+    };
+    take(sub_gen_, path);
+    for (std::size_t i = path.rfind('.'); i != std::string::npos && i > 0;
+         i = path.rfind('.', i - 1))
+      take(node_gen_, path.substr(0, i));
+    return g;
+  }
 
   // §12: re-chroot the read-lane to `path` so a mounted fragment's predicates read state
   // relative to its own sub-prefix, exactly as its widget binds resolve there. The evaluator,
@@ -1588,8 +1616,10 @@ struct Runtime::Impl {
     bool has_event = false;
     float ex = 0.0f, ey = 0.0f, edx = 0.0f, edy = 0.0f;
     int ebutton = 0;
-    // Otherwise, an `event` dict of these strings (a message_input's sent text), when any.
+    // Otherwise, an `event` dict of these strings (a message_input's sent text), when any, and
+    // these values (a heatmap cell's row, col and v).
     std::vector<std::pair<std::string, std::string>> event_fields;
+    std::vector<std::pair<std::string, cvc::state_exec::value_t>> event_values;
     // Runtime::run_program: told how the program ended instead of a warning.
     std::function<void(const std::string &)> done;
     // §6.6 the functions of the scope it was started in (a FunctionScope prelude), run first.
@@ -1682,6 +1712,14 @@ struct Runtime::Impl {
   // changes. Swept of the charts no frame drew for a while (`chart_frame` counts render()s).
   std::unordered_map<std::string, ChartCache> chart_caches;
   std::uint64_t chart_frame = 0;
+  // Kind::Heatmap caches, one per heatmap instance (heatmap_emit.h), swept with the charts'.
+  std::unordered_map<std::string, HeatmapCache> heatmap_caches;
+  // Kind::Settings: one cache per editor instance, rebuilt only after a write under its roots,
+  // which `settings_watch` counts from the tree root's childChanged (connected when the first
+  // editor is drawn, on whatever thread writes). Swept with the charts' (`chart_frame`).
+  std::unordered_map<std::string, SettingsCache> settings_caches;
+  std::shared_ptr<SettingsWatch> settings_watch;
+  boost::signals2::scoped_connection settings_watch_conn;
 
   // §5.11 pictures by URI: loaded off the frame by the cache, published to the backend under the
   // cache's names (each once per raster, tracked in `published` against the backend it went to).
@@ -2165,6 +2203,20 @@ struct Runtime::Impl {
       }
     enqueue_fields(event, std::move(fields));
     queued_events.back().coalesce = key;
+  }
+  // Enqueue a heatmap's handler: its program gets the cell as `event` (row, col and v as numbers,
+  // v nil for a cell with no value; text, row_label and col_label; mark 1 or 0).
+  void enqueue_cell(const std::string &event, const HeatmapCellEvent &cell) {
+    if (event.empty())
+      return;
+    namespace se = cvc::state_exec;
+    enqueue_fields(
+        event, {{"text", cell.text}, {"row_label", cell.row_label}, {"col_label", cell.col_label}});
+    std::vector<std::pair<std::string, se::value_t>> &v = queued_events.back().event_values;
+    v.emplace_back("row", se::value_t(static_cast<int64_t>(cell.row)));
+    v.emplace_back("col", se::value_t(static_cast<int64_t>(cell.col)));
+    v.emplace_back("v", cell.has_value ? se::value_t(cell.v) : se::value_t());
+    v.emplace_back("mark", se::value_t(static_cast<int64_t>(cell.mark ? 1 : 0)));
   }
   // Enqueue a handler whose program gets an `event` dict of FIELDS (strings).
   void enqueue_fields(const std::string &event,
@@ -3043,6 +3095,41 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Heatmap: {
+    HeatmapContext ctx{app,
+                       b,
+                       [this](const std::string &bind) { return resolve(bind); },
+                       [this](const std::string &expr) { return eval_text_or_literal(expr); },
+                       [this](const std::string &path) { return ensure_reactive().written(path); },
+                       [this](const std::string &event, const HeatmapCellEvent &cell) {
+                         enqueue_cell(event, cell);
+                       },
+                       [this](const std::string &msg) { warn_once(msg); },
+                       heatmap_caches,
+                       chart_frame};
+    if (emit_heatmap(ctx, w)) // a cell's click is the heatmap's, not a clickable card's around it
+      ++clicks_fired;
+    break;
+  }
+
+  case Kind::Settings: {
+    if (!settings_watch) {
+      settings_watch = std::make_shared<SettingsWatch>();
+      settings_watch_conn = cvc::state::instance(app).childChanged.connect(
+          [watch = settings_watch](const std::string &path) { watch->note(path); });
+    }
+    SettingsContext ctx{app,
+                        b,
+                        [this](const std::string &bind) { return resolve(bind); },
+                        [this](const std::string &event) { enqueue(event); },
+                        [this](const std::string &msg) { warn_once(msg); },
+                        *settings_watch,
+                        settings_caches,
+                        chart_frame};
+    emit_settings(ctx, w);
+    break;
+  }
+
   case Kind::Checkbox: {
     const std::string path = resolve(w.bind);
     const bool cur =
@@ -3451,11 +3538,13 @@ void Runtime::Impl::emit_node(const Widget &w) {
   };
   // A group's click is the innermost taker's: a widget inside it with an on_click of its own (an
   // avatar opening a profile in a card opening a post), or a button, keeps it.
-  if (!w.on_click.empty() && !inner_click && b.item_clicked()) {
+  // A heatmap's on_click, on_hover and tooltip are per cell, its own (emit_heatmap).
+  const bool own_pointer = w.kind == Kind::Heatmap;
+  if (!own_pointer && !w.on_click.empty() && !inner_click && b.item_clicked()) {
     fire_pointer(w.on_click);
     ++clicks_fired;
   }
-  if (!w.on_hover.empty() && b.item_hovered())
+  if (!own_pointer && !w.on_hover.empty() && b.item_hovered())
     fire_pointer(w.on_hover);
   // on_hover_end: kept while the item is hovered, run once the walk after it is not (render()).
   if (!w.on_hover_end.empty() && b.item_hovered())
@@ -3472,7 +3561,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   // mistaken for one. So: try to evaluate an expr-looking tooltip, but if it does NOT evaluate
   // cleanly, fall back to showing it verbatim (no spurious warning). A genuine computed tooltip
   // still works; a literal that happens to start with '(' is shown as-is.
-  if (!w.tooltip.empty()) {
+  if (!own_pointer && !w.tooltip.empty()) {
     std::string tip = w.tooltip;
     if (is_expr(w.tooltip))
       tip = eval_text_or_literal(w.tooltip);
@@ -4539,8 +4628,14 @@ void Runtime::Impl::render() {
     }
   hovered_last.swap(hovered_now);
   hovered_now.clear();
-  if (++chart_frame % 64 == 0 && !chart_caches.empty())
-    sweep_chart_caches(chart_caches, chart_frame);
+  if (++chart_frame % 64 == 0) {
+    if (!chart_caches.empty())
+      sweep_chart_caches(chart_caches, chart_frame);
+    if (!heatmap_caches.empty())
+      sweep_heatmap_caches(heatmap_caches, chart_frame);
+    if (!settings_caches.empty())
+      sweep_settings_caches(settings_caches, chart_frame);
+  }
 }
 
 void Runtime::Impl::plan_windows_menu() {
@@ -6264,10 +6359,12 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
       f.emplace_back("dy", se::value_t(static_cast<double>(action.edy)));
       f.emplace_back("button", se::value_t(static_cast<int64_t>(action.ebutton)));
       ac->env->set("event", se::make_dict(std::move(f)));
-    } else if (!action.event_fields.empty()) {
+    } else if (!action.event_fields.empty() || !action.event_values.empty()) {
       std::vector<std::pair<std::string, se::value_t>> f;
       for (const auto &kv : action.event_fields)
         f.emplace_back(kv.first, se::value_t(kv.second));
+      for (const auto &kv : action.event_values)
+        f.push_back(kv);
       ac->env->set("event", se::make_dict(std::move(f)));
     }
     // A child the action forks shares this context: recorded, so the context stays until it ends.

@@ -133,6 +133,21 @@ windows:
     size: [370, 300]
     closable: true
 
+# The tactical boat's model (the vehicle-tactical-boat package) and the crates' (prop-wooden-crate),
+# pulled from cvcpkg when a node asks for them (load: lazy), not shipped with the document. Each
+# archive is checked against the registry's sha256 and kept in the data cache. Without the network
+# (arigl --net-allow https://cvcpkg.org; the web gallery allows it) a local install is used, else
+# the boat's hull and the crates' boxes.
+data:
+  tactical_boat:
+    uri: cvcpkg://cy-pca/vehicle-tactical-boat
+    path: share/cvc-scenes/shared
+    load: lazy
+  crate:
+    uri: cvcpkg://cy-pca/prop-wooden-crate
+    path: share/cvc-scenes/shared
+    load: lazy
+
 scene:
   chrome: false
   clock: { scale: 1.0, paused: false }
@@ -210,21 +225,25 @@ scene:
       swell_dir: 200       # degrees: the way it travels
       body: {}
     # Three wooden crates dropped on the big lake north of the city (seed 5's world; on another
-    # world they land where they land): they bob on its waves.
+    # world they land where they land): they bob on its waves. Each floats as its box and is drawn
+    # as the crate model fitted to it (model:), the box in its colour until the model has loaded.
     - node: crate_a
       source: { box: { size: [3, 3, 3] } }
       transform: { position: [22, 176, 6] }
       material: { color: [0.62, 0.42, 0.22] }
+      model: { data: crate, file: WoodenCrate.glb }
       body: { density: 450 }
     - node: crate_b
       source: { box: { size: [2, 2, 2] } }
       transform: { position: [32, 186, 8] }
       material: { color: [0.55, 0.36, 0.18] }
+      model: { data: crate, file: WoodenCrate.glb }
       body: { density: 500 }
     - node: crate_c
       source: { box: { size: [2.5, 2.5, 2.5] } }
       transform: { position: [14, 188, 10] }
       material: { color: [0.68, 0.48, 0.26] }
+      model: { data: crate, file: WoodenCrate.glb }
       body: { density: 400 }
     # A patrol boat on the lake beside the crates (the tactical preset: a 7.8 m box hull, its
     # outboards one thrust), afloat on the water node's sea, drawn as the vehicle-tactical-boat
@@ -235,6 +254,7 @@ scene:
       type: boat
       water: water
       preset: tactical
+      model: { data: tactical_boat, file: TacticalBoat.glb }   # its hull until it has loaded
       transform: { position: [0, 170, 0] }
       goal: [40, 150]
     # The clouds: a deck of L-system cumulus scattered over the whole world, drifting and slowly

@@ -86,6 +86,8 @@ jobs:
               --no-fallback-to-source 2>&1 | tail -3 \
               || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
+          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
+          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build + pack pycvc-gl-cp312 (wasm) — compiles the closure + links the host
         # Drives the recipe's build-wasm.sh against the pre-installed deps. It

@@ -23,6 +23,7 @@
 // write (which fans out to observers / replicated peers), not one per frame.
 
 #include <algorithm>            // min (text_view's default)
+#include <cstdint>
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/files.h>  // pick_files: FilePickRequest / FilePickDone (§10.8)
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
@@ -219,6 +220,98 @@ ChartBounds chart_bounds(const ChartSpec &spec, const std::vector<char> &shown =
 // A marker kind's name (best, elbow, plateau, note), and the kind a name says (else Note).
 const char *chart_marker_kind_name(ChartMarkerKind kind);
 ChartMarkerKind chart_marker_kind(const std::string &name);
+
+// What the core hands a backend to draw a heatmap (Kind::Heatmap): `rows` x `cols` cells, row
+// after row, each already coloured from the ramp by the core, so every backend shows the same
+// colours. A cell with no value (`has_value` false) is drawn empty, in the surface's frame colour.
+struct HeatmapCell {
+  bool has_value = false;
+  double v = 0.0;
+  float rgb[3] = {0.0f, 0.0f, 0.0f}; // the ramp's colour at v
+  std::string text;                  // drawn on the cell ("" none)
+  bool mark = false;                 // a corner triangle in HeatmapSpec::mark_rgb
+};
+struct HeatmapSpec {
+  int rows = 0, cols = 0;
+  std::vector<HeatmapCell> cells;            // rows * cols, cell (r, c) at r * cols + c
+  std::vector<std::string> row_labels;       // one per row, or empty: none drawn
+  std::vector<std::string> col_labels;       // one per column, or empty: none drawn
+  std::vector<HeatmapStop> ramp;             // the legend's stops, sorted by `at`
+  HeatmapLegend legend = HeatmapLegend::Off; // the ramp as a bar, its stops labelled
+  float cell_size = 28.0f, gap = 2.0f;       // px, where the backend has pixels
+  float mark_rgb[3] = {1.0f, 1.0f, 1.0f};
+  int sel_row = -1, sel_col = -1; // the picked cell, outlined (-1: none)
+  bool interactive = false; // a pick or an on_click: a click is wanted (a terminal takes focus)
+  // Moves each time the core reads the cells again (only after a write to the subtree), so a
+  // backend can keep what it derives from them until it does.
+  std::uint64_t revision = 0;
+};
+// The cell under the pointer this frame (`hovered`), and the one clicked (`clicked`). The core
+// writes a click to the heatmap's `pick:`, runs its on_click / on_hover with the cell, and shows
+// the hovered cell's tooltip (Backend::set_tooltip, after the call: the heatmap is the last item).
+struct HeatmapEvent {
+  bool hovered = false;
+  int row = -1, col = -1;
+  bool clicked = false;
+  int click_row = -1, click_col = -1;
+};
+// The ramp's colour at `v`: mixed between the two stops about it, the end stop's beyond them (a
+// mid grey with no stops). False (and `rgb` untouched) when `v` is not finite.
+bool heatmap_color(const std::vector<HeatmapStop> &ramp, double v, float rgb[3]);
+// What the core hands a backend to draw a settings editor (Kind::Settings): the keys under its
+// root and the branches that hold them, in the order drawn, each key's editor chosen from its
+// metadata (settings_kind). A node's children follow it, one `depth` deeper.
+enum class SettingKind {
+  Readout, // read-only: the value (and unit) as text
+  Toggle,  // a checkbox; writes 1 / 0
+  Int,     // an integer: a slider over [min, max], else a field
+  Number,  // a number: a slider over [min, max] (by ratio when `log`), else a field
+  Text,    // a text field, applied on Enter
+  Choice   // one of `choices`, in a combo
+};
+struct SettingsNode {
+  bool group = false;  // a branch's header; else a key
+  int depth = 0;       // 0: straight under the root
+  std::string id;      // its path under the root ("vehicle.vmax"): stable, unique in the editor
+  std::string path;    // a key's absolute state path: the backend's key for an edit in progress
+  std::string name;    // what its row shows: a key's last part, a branch's title
+  std::string tooltip; // the path, the description, unit, range, default and when it applies
+  // A group:
+  bool open = false;  // open at first (`groups:` open:, or the widget's open: true)
+  int resettable = 0; // keys under it that a reset would change
+  // A key:
+  SettingKind kind = SettingKind::Text;
+  std::string value;           // in state now
+  std::string unit;            // "" none; "1" a ratio, shown without one
+  std::string fmt;             // a number's printf format, its unit after it ("%.4g m/s")
+  double min = 0.0, max = 0.0; // the recommended range, when has_range
+  bool has_range = false;
+  bool log = false;                 // a slider that moves by ratio
+  std::vector<std::string> choices; // Choice: the values the key may hold
+  std::string def;                  // what a reset writes, when has_default
+  bool has_default = false;
+  bool changed = false; // its value is not its default: a reset is offered
+};
+struct SettingsSpec {
+  std::vector<SettingsNode> nodes;
+  bool search = false; // a search box above the keys, holding `search_text`
+  std::string search_text;
+  bool narrowed = false; // a search or filter is narrowing it: draw every group open
+  std::string empty;     // shown when no key is left ("" none)
+};
+// What the user did with it this frame. `node` >= 0: nodes[node]'s new `value` (text): `changed`
+// while it moves (a slider being dragged), `committed` when it is final (a release, Enter, a
+// click). `reset` >= 0: the reset of nodes[reset] was pressed, a key back to its default or each
+// key under a group to its own. `search_changed`: the search box now holds `search`.
+struct SettingsEdit {
+  int node = -1;
+  std::string value;
+  bool changed = false;
+  bool committed = false;
+  int reset = -1;
+  bool search_changed = false;
+  std::string search;
+};
 
 // §11.4 runtime geometry persistence. The CORE owns the state (tree.<id>.geometry /
 // tree.<id>.tracks per §11.2); the backend only SEEDS a window / split-grid from a persisted
@@ -596,6 +689,17 @@ public:
   // value and its range, a gap for a column with no finite value, then a line for each marker and
   // for the cursor, so every backend has one. Defined in chart_emit.cpp.
   virtual ChartEvent chart(const char *label, const ChartSpec &spec);
+  // A heatmap grid (Kind::Heatmap); see HeatmapSpec. Returns the hovered and clicked cells. By
+  // default text: the label, a line of column labels, then a line for each row, its label and
+  // each cell's text (else its value) with `*` after a marked one, `.` for a cell with no value,
+  // then the legend's stops, so every backend has one. Defined in heatmap_emit.cpp.
+  virtual HeatmapEvent heatmap(const char *label, const HeatmapSpec &spec);
+  // A settings editor (Kind::Settings) titled `label` ("" none), `id` its identity; see
+  // SettingsSpec. By default a flat list from this backend's own widgets, so every backend has
+  // one: the search box, then each group as a "[title]" line (and a reset when it has keys to
+  // reset), each key as its editor labelled with its path under the root, a reset beside a
+  // changed one, and its tooltip. Defined in settings_emit.cpp.
+  virtual SettingsEdit settings(const char *label, const char *id, const SettingsSpec &spec);
   // A read-only progress bar at `fraction` (0..1) with `overlay` drawn over it (empty: the
   // percent). By default a text value, "[########------------] 40%", so every backend has one.
   virtual void progress_bar(const char *label, float fraction, const std::string &overlay) {

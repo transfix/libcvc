@@ -1,0 +1,380 @@
+/*
+  Copyright 2026 The University of Texas at Austin
+
+  This file is part of libcvc.
+
+  libcvc is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License version 2.1 as published by the Free Software Foundation.
+*/
+
+// Version 2 city bundles (cvc/world/city_bundle.h, ARIADNE_WORLDS section 18.8): a world written
+// as a bundle and read back is the same world, a generated world included, and writing what was
+// read gives the same bytes, so its hash is the world's.
+
+#include <cmath>
+#include <cvc/core/app.h>
+#include <cvc/geometry/height_field.h>
+#include <cvc/model/model.h>
+#include <cvc/model/model_file_io.h>
+#include <cvc/physics/world.h>
+#include <cvc/physics/world_geometry.h>
+#include <cvc/world/city_bundle.h>
+#include <cvc/world/generated_world.h>
+#include <cvc/world/surface.h>
+#include <filesystem>
+#include <gtest/gtest.h>
+#include <map>
+#include <string>
+
+using namespace cvc::world;
+
+namespace {
+
+bool have_glb() { return cvc::can_write_model_to_memory(".glb"); }
+bool have_jolt() { return cvc::physics::backend_available(cvc::physics::backend::jolt); }
+
+std::uint16_t sid(const char *name) { return surface_registry::builtin().by_name(name); }
+
+// A 6 x 5 terrain with cell surfaces, two buildings on two surfaces, and a lines item.
+world_geometry small_world_geometry() {
+  world_geometry w;
+  w.set_edge_walls(false);
+  std::vector<float> h;
+  for (int r = 0; r < 5; ++r)
+    for (int c = 0; c < 6; ++c)
+      h.push_back(0.25f * r + 0.125f * c + (r * c % 3) * 0.5f);
+  auto field = std::make_shared<cvc::height_field>(5, 6, -10.0, -8.0, 4.0, 4.0, h);
+  std::vector<cvc::face_material_t> cells;
+  for (int i = 0; i < 4 * 5; ++i)
+    cells.push_back(i % 3 == 0 ? sid("asphalt") : sid("dirt"));
+  field->set_cell_materials(cells);
+  geometry_item t;
+  t.name = "terrain";
+  t.geometry = field;
+  t.surface = sid("dirt");
+  w.add(t);
+
+  auto b = std::make_shared<cvc::geometry>();
+  for (int k = 0; k < 8; ++k) {
+    cvc::point_t p;
+    p[0] = (k & 1) * 3.0 + 0.1;
+    p[1] = ((k >> 1) & 1) * 2.0 - 1.3;
+    p[2] = (k >> 2) * 5.0 + 0.7;
+    b->points().push_back(p);
+    cvc::color_t col;
+    col[0] = 0.1 * k;
+    col[1] = 0.5;
+    col[2] = 1.0 - 0.1 * k;
+    b->colors().push_back(col);
+  }
+  const int tris[4][3] = {{0, 1, 3}, {0, 3, 2}, {4, 5, 7}, {4, 7, 6}};
+  for (const auto &tr : tris) {
+    cvc::tri_t x;
+    x[0] = tr[0];
+    x[1] = tr[1];
+    x[2] = tr[2];
+    b->tris().push_back(x);
+  }
+  b->face_materials() = {sid("building_concrete"), sid("building_concrete"), sid("asphalt"),
+                         sid("asphalt")};
+  geometry_item bi;
+  bi.name = "buildings";
+  bi.geometry = b;
+  bi.surface = sid("building_concrete");
+  bi.position = {1.0, 2.0, 0.5};
+  w.add(bi);
+
+  auto n = std::make_shared<cvc::geometry>();
+  for (int k = 0; k < 4; ++k) {
+    cvc::point_t p;
+    p[0] = k * 1.5;
+    p[1] = 2.0;
+    p[2] = 3.0 + k;
+    n->points().push_back(p);
+  }
+  for (int k = 0; k < 3; ++k) {
+    cvc::line_t l;
+    l[0] = k;
+    l[1] = k + 1;
+    n->lines().push_back(l);
+  }
+  geometry_item ni;
+  ni.name = "needles";
+  ni.geometry = n;
+  ni.roles = role_render;
+  w.add(ni);
+  return w;
+}
+
+generated_world_params small_params() {
+  generated_world_params p;
+  p.seed = 11;
+  p.half_m = 200.0;
+  p.trees = 40;
+  p.rocks = 10;
+  p.buildings = 16;
+  p.tree_gen = 3;
+  p.amp_m = 40.0;
+  return p;
+}
+
+} // namespace
+
+TEST(ModelGlb, WritesAndReadsBackExactly) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  cvc::model m;
+  cvc::material mat;
+  mat.name = "asphalt";
+  mat.base_color = {{0.2, 0.2, 0.25, 1.0}};
+  m.materials.push_back(mat);
+  cvc::model::mesh tri;
+  tri.material = 0;
+  tri.name = "tri";
+  for (int k = 0; k < 4; ++k) {
+    cvc::point_t p;
+    p[0] = k;
+    p[1] = k * k * 0.5;
+    p[2] = -k;
+    tri.geom.points().push_back(p);
+  }
+  tri.geom.tris().push_back({{0, 1, 2}});
+  tri.geom.tris().push_back({{0, 2, 3}});
+  m.meshes.push_back(tri);
+  cvc::model::mesh lines;
+  lines.name = "lines";
+  for (int k = 0; k < 3; ++k) {
+    cvc::point_t p;
+    p[0] = k;
+    p[1] = 1;
+    p[2] = 2;
+    lines.geom.points().push_back(p);
+  }
+  lines.geom.lines().push_back({{0, 1}});
+  lines.geom.lines().push_back({{1, 2}});
+  m.meshes.push_back(lines);
+
+  const std::string bytes = cvc::write_model_to_memory(app, m, ".glb");
+  ASSERT_GT(bytes.size(), 12u);
+  EXPECT_EQ(bytes.substr(0, 4), "glTF");
+  EXPECT_EQ(cvc::write_model_to_memory(app, m, "glb"), bytes) << "the same model, other bytes";
+
+  cvc::model_read_options exact;
+  exact.exact = true;
+  const cvc::model back =
+      cvc::read_model_from_memory(app, bytes.data(), bytes.size(), ".glb", exact);
+  ASSERT_EQ(back.meshes.size(), 2u);
+  EXPECT_EQ(back.meshes[0].geom.const_points().size(), 4u);
+  EXPECT_EQ(back.meshes[0].geom.const_tris().size(), 2u);
+  EXPECT_TRUE(back.meshes[0].geom.const_normals().empty()) << "an exact read made normals";
+  EXPECT_EQ(back.meshes[1].geom.const_lines().size(), 2u);
+  for (std::size_t v = 0; v < 4; ++v)
+    for (int k = 0; k < 3; ++k)
+      EXPECT_DOUBLE_EQ(back.meshes[0].geom.const_points()[v][k],
+                       static_cast<float>(tri.geom.const_points()[v][k]));
+  ASSERT_GE(back.meshes[0].material, 0);
+  EXPECT_EQ(back.materials[back.meshes[0].material].name, "asphalt");
+}
+
+TEST(CityBundleV2, AWorldReadsBackAsItWasWritten) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  const world_geometry w = small_world_geometry();
+  city_bundle_write info;
+  info.water_level = 1.25;
+  info.region = city_bundle_region{-8.0, -6.0, 8.0, 6.0};
+  info.generator.name = "test";
+  info.generator.version = "1";
+  info.generator.seed = 42;
+  info.generator.params = "{\"a\": 1}";
+  info.extra["notes.txt"] = std::make_shared<const std::string>("kept as written");
+  const city_bundle_files files = city_bundle_bytes(app, w, info);
+  for (const char *f : {"world.json", "terrain.json", "terrain.f32", "terrain_surfaces.u16",
+                        "buildings.glb", "needles.glb", "notes.txt"})
+    EXPECT_TRUE(files.count(f)) << f;
+
+  const city_bundle b = load_city_bundle(app, city_bundle_memory_reader(files), "memory");
+  EXPECT_EQ(b.version, 2);
+  EXPECT_EQ(b.hash, city_bundle_hash(files));
+  EXPECT_EQ(b.hash.size(), 64u);
+  ASSERT_TRUE(b.water_level.has_value());
+  EXPECT_DOUBLE_EQ(*b.water_level, 1.25);
+  ASSERT_TRUE(b.region.has_value());
+  EXPECT_DOUBLE_EQ(b.region->max_y, 6.0);
+  EXPECT_EQ(b.generator.name, "test");
+  EXPECT_EQ(b.generator.seed, 42u);
+  EXPECT_FALSE(b.geometry.edge_walls());
+  EXPECT_TRUE(b.buildings_loaded);
+
+  // The terrain: the same heights, cell surfaces and grid, exactly.
+  const auto t0 = w.terrain(), t1 = b.geometry.terrain();
+  ASSERT_TRUE(t1);
+  EXPECT_EQ(t1->rows(), t0->rows());
+  EXPECT_EQ(t1->cols(), t0->cols());
+  EXPECT_EQ(t1->x0(), t0->x0());
+  EXPECT_EQ(t1->dy(), t0->dy());
+  EXPECT_EQ(t1->heights(), t0->heights());
+  EXPECT_EQ(t1->cell_materials(), t0->cell_materials());
+
+  // The meshes: the same items, roles, surfaces, placement and faces.
+  ASSERT_EQ(b.geometry.items().size(), w.items().size());
+  for (const geometry_item &a : w.items()) {
+    const geometry_item *c = b.geometry.find(a.name);
+    ASSERT_NE(c, nullptr) << a.name;
+    EXPECT_EQ(c->roles, a.roles) << a.name;
+    EXPECT_EQ(c->surface, a.surface) << a.name;
+    EXPECT_EQ(c->position, a.position) << a.name;
+    if (a.height_field())
+      continue;
+    EXPECT_EQ(c->geometry->const_tris().size(), a.geometry->const_tris().size()) << a.name;
+    EXPECT_EQ(c->geometry->const_lines().size(), a.geometry->const_lines().size()) << a.name;
+    EXPECT_EQ(c->geometry->const_points().size(), a.geometry->const_points().size()) << a.name;
+  }
+  // Each face keeps its surface (the buildings' two).
+  std::map<int, int> before, after;
+  for (const auto m : w.find("buildings")->geometry->const_face_materials())
+    ++before[m];
+  for (const auto m : b.geometry.find("buildings")->geometry->const_face_materials())
+    ++after[m];
+  EXPECT_EQ(after, before);
+  EXPECT_TRUE(b.geometry.find("needles")->geometry->const_face_materials().empty());
+
+  // Written again from what was read: the same bytes, file by file.
+  city_bundle_write again = info;
+  const city_bundle_files files2 = city_bundle_bytes(app, b.geometry, again);
+  ASSERT_EQ(files2.size(), files.size());
+  for (const auto &[name, bytes] : files)
+    EXPECT_EQ(*files2.at(name), *bytes) << name << " changed on a second write";
+
+  // The hash follows the contents.
+  city_bundle_files changed = files;
+  std::string t = *changed.at("terrain.f32");
+  t[0] ^= 1;
+  changed["terrain.f32"] = std::make_shared<const std::string>(t);
+  EXPECT_NE(city_bundle_hash(changed), city_bundle_hash(files));
+}
+
+TEST(CityBundleV2, ADirectoryReadsAsMemoryDoes) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  const city_bundle_files files = city_bundle_bytes(app, small_world_geometry());
+  const auto dir = std::filesystem::temp_directory_path() / "cvc_city_bundle_v2_dir";
+  std::filesystem::remove_all(dir);
+  write_city_bundle(dir.string(), files);
+  const city_bundle b = load_city_bundle(app, dir.string());
+  EXPECT_EQ(b.version, 2);
+  EXPECT_EQ(b.hash, city_bundle_hash(files));
+  EXPECT_EQ(b.geometry.items().size(), 3u);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(CityBundleV2, BadBundlesSayWhy) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  city_bundle_files files = city_bundle_bytes(app, small_world_geometry());
+  city_bundle_files missing = files;
+  missing.erase("buildings.glb");
+  try {
+    load_city_bundle(app, city_bundle_memory_reader(missing), "memory");
+    FAIL() << "a missing item file loaded";
+  } catch (const std::runtime_error &e) {
+    EXPECT_NE(std::string(e.what()).find("buildings.glb"), std::string::npos) << e.what();
+  }
+  city_bundle_files short_heights = files;
+  short_heights["terrain.f32"] = std::make_shared<const std::string>("1234");
+  EXPECT_THROW(load_city_bundle(app, city_bundle_memory_reader(short_heights), "memory"),
+               std::runtime_error);
+  world_geometry no_terrain;
+  EXPECT_THROW(city_bundle_bytes(app, no_terrain), std::invalid_argument);
+}
+
+TEST(CityBundleV2, AGeneratedWorldIsTheSameWorldReadBack) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  const generated_world gw = generate_world(app, small_params());
+  const city_bundle_files files = generated_world_bundle(app, gw, "test");
+  const city_bundle b = load_city_bundle(app, city_bundle_memory_reader(files), "generated");
+  EXPECT_EQ(b.generator.name, "generated_world");
+  EXPECT_EQ(b.generator.seed, 11u);
+  ASSERT_TRUE(b.water_level.has_value());
+  EXPECT_DOUBLE_EQ(*b.water_level, gw.params.water_level_m);
+  const generated_world_params back = generated_world_params_from_json(b.generator.params);
+  EXPECT_EQ(back.seed, gw.params.seed);
+  EXPECT_DOUBLE_EQ(back.half_m, gw.params.half_m);
+  EXPECT_EQ(back.trees, gw.params.trees);
+  EXPECT_EQ(back.city, gw.params.city);
+  EXPECT_EQ(generated_world_params_json(back), generated_world_params_json(gw.params));
+
+  // The terrain exactly; the meshes face for face.
+  EXPECT_EQ(b.geometry.terrain()->heights(), gw.terrain->heights());
+  EXPECT_EQ(b.geometry.terrain()->cell_materials(), gw.terrain->cell_materials());
+  const world_geometry g = gw.geometry();
+  for (const geometry_item &a : g.items()) {
+    const geometry_item *c = b.geometry.find(a.name);
+    ASSERT_NE(c, nullptr) << a.name;
+    EXPECT_EQ(c->roles, a.roles) << a.name;
+    if (!a.height_field())
+      EXPECT_EQ(c->geometry->const_tris().size(), a.geometry->const_tris().size()) << a.name;
+  }
+  if (!gw.needles.const_points().empty())
+    EXPECT_NE(b.geometry.find("needles"), nullptr);
+
+  // What was read writes the same bytes again: the hash is the world's.
+  city_bundle_write info;
+  info.generator = b.generator;
+  info.water_level = b.water_level;
+  const city_bundle_files again = city_bundle_bytes(app, b.geometry, info);
+  EXPECT_EQ(city_bundle_hash(again), b.hash);
+  // And the same params make the same bundle.
+  EXPECT_EQ(
+      city_bundle_hash(generated_world_bundle(app, generate_world(app, small_params()), "test")),
+      b.hash);
+}
+
+TEST(CityBundleV2, PhysicsRunsTheSameOnEveryLoad) {
+  cvc::app app;
+  if (!have_glb() || !have_jolt())
+    GTEST_SKIP() << "needs glb and Jolt";
+  const generated_world gw = generate_world(app, small_params());
+  const city_bundle_files files = generated_world_bundle(app, gw, "test");
+  auto run = [&](const world_geometry &g) {
+    cvc::physics::world_config c;
+    c.backend = cvc::physics::backend::jolt;
+    cvc::physics::world w(c);
+    cvc::physics::add_world_geometry(w, g);
+    for (int i = 0; i < 5; ++i) {
+      cvc::physics::body_desc d{cvc::physics::box{{0.5, 0.5, 0.5}}};
+      d.position = {-40.0 + 20.0 * i, 10.0, gw.height(-40.0 + 20.0 * i, 10.0) + 6.0};
+      w.add_body(d);
+    }
+    w.step(200);
+    return w.state_hash();
+  };
+  const std::uint64_t a =
+      run(load_city_bundle(app, city_bundle_memory_reader(files), "a").geometry);
+  const std::uint64_t b =
+      run(load_city_bundle(app, city_bundle_memory_reader(files), "b").geometry);
+  EXPECT_EQ(a, b) << "two loads of one bundle simulate differently";
+
+  // The loaded terrain is the generated one to the engine too.
+  cvc::physics::world_config c;
+  c.backend = cvc::physics::backend::jolt;
+  cvc::physics::world w(c);
+  cvc::physics::add_world_geometry(
+      w, load_city_bundle(app, city_bundle_memory_reader(files), "c").geometry);
+  double worst = 0;
+  for (int i = -4; i <= 4; ++i)
+    for (int j = -4; j <= 4; ++j) {
+      const double x = 37.0 * i, y = 31.0 * j;
+      const auto hit = w.raycast({x, y, 500.0}, {x, y, -500.0});
+      if (hit && hit->point.z < gw.height(x, y) + 0.5) // the ground, not a roof or a tree
+        worst = std::max(worst, std::fabs(hit->point.z - gw.height(x, y)));
+    }
+  EXPECT_LT(worst, 0.01);
+}

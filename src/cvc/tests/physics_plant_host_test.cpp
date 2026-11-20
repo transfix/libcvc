@@ -9,18 +9,27 @@
 */
 
 // cvc::physics::plant_host (plant_host.h): the plant a sim_world drives on, chosen by name, in
-// code and in the state tree.
+// code and in the state tree; and cvc::physics::scrub_plant (scrub_plant.h), the checkpoint
+// scrubber's hook onto it, which walls a deployed world's buildings in.
 
 #include <cmath>
 #include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/nav_scrub.h>
+#include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
+#include <cvc/nav/sim_world_trace.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/plant_host.h>
+#include <cvc/physics/scrub_plant.h>
+#include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -195,4 +204,39 @@ TEST(PlantHost, WorkerThreadsCostLessAndChangeNothing) {
               "allows 60000 us)\n",
               n, us0, us3);
   EXPECT_EQ(h0, h3) << "the job system's threads changed the result";
+}
+
+TEST(ScrubPlant, WallsTheBuildingsInAndTheHumveeStaysOutOfThem) {
+  cvc::nav::scrub_scenario s = cvc::nav::default_scenario(2, 0, 300);
+  cvc::nav::policy_library lib;
+  sim_world w = cvc::nav::world_from_trace(s.world, lib);
+  // the blocks' walls: the square's four sides and its nine buildings, one box each
+  EXPECT_EQ(scrub_wall_boxes(w.truth(), w.rows(), w.cols()), 13);
+  EXPECT_EQ(scrub_default_plant(), plant_host::available() ? "humvee" : "kinematic");
+  EXPECT_THROW(scrub_plant({}, 0.0), std::invalid_argument);
+  const cvc::nav::scrub_plant_fn hook = scrub_plant();
+  EXPECT_THROW(hook(w, "no such vehicle"), cvc::physics_error);
+  REQUIRE_JOLT();
+  {
+    const cvc::nav::scrub_plant_attached on = hook(w, "humvee");
+    EXPECT_EQ(on.driving, "humvee");
+    const auto host = std::static_pointer_cast<plant_host>(on.owner);
+    ASSERT_NE(host->physics(), nullptr);
+    sim_world bare_sim = cvc::nav::world_from_trace(s.world, lib);
+    plant_host bare;
+    bare.use(bare_sim, "humvee");
+    EXPECT_EQ(host->physics()->body_count(), bare.physics()->body_count() + 13);
+    w.set_plant(nullptr);
+    bare_sim.set_plant(nullptr);
+  }
+  // deployed on the Humvee: no tick ends with a centre inside a building, and the log says so
+  const std::string blob =
+      (std::filesystem::path(::testing::TempDir()) / "scrub_plant_default.cvcnav").string();
+  cvc::nav::coef_mlp::default_biased().save(blob);
+  s.plant = "humvee";
+  const cvc::nav::run_log l = cvc::nav::deploy_checkpoint(s, blob, "default", lib, "{}", hook);
+  EXPECT_EQ(l.header().plant, "humvee");
+  EXPECT_EQ(l.ticks(), 300);
+  EXPECT_EQ(cvc::nav::metrics_of(l).pen_steps, 0.0);
+  EXPECT_GT(cvc::nav::metrics_of(l).path_m, 1.0);
 }

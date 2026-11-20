@@ -1116,6 +1116,16 @@ add_test(NAME cvcgl_imgui_spinner COMMAND cvcgl_imgui_spinner)
 add_executable(cvcgl_imgui_chart test/cvcgl_imgui_chart.cpp)
 target_link_libraries(cvcgl_imgui_chart PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chart COMMAND cvcgl_imgui_chart)
+# ImGuiBackend's heatmap, by its pixels (its draw data rasterized in the test): the ramp's colours,
+# a mark's corner, the hover tooltip and the picked cell's outline (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_heatmap test/cvcgl_imgui_heatmap.cpp)
+target_link_libraries(cvcgl_imgui_heatmap PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_heatmap COMMAND cvcgl_imgui_heatmap)
+# ImGuiBackend's settings editor: a slider dragged writes its key, a reset puts its default back,
+# and a text field applies on Enter only (a bare ImGui context, no GL).
+add_executable(cvcgl_imgui_settings test/cvcgl_imgui_settings.cpp)
+target_link_libraries(cvcgl_imgui_settings PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_settings COMMAND cvcgl_imgui_settings)
 # The overlay's fonts: DejaVu Sans Mono's symbols under the UI font, and Twemoji's colour emoji
 # where ImGui has 32-bit characters and FreeType (the cvcpkg imgui 1.92.9+cvc.4). No window, no GL.
 add_executable(cvcgl_imgui_fonts test/cvcgl_imgui_fonts.cpp)

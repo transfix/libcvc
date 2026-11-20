@@ -84,11 +84,20 @@ windows:
     size: [350, 760]
     closable: true
 
+# The Humvee's model, the vehicle-humvee package, pulled from cvcpkg when a Humvee is drawn
+# (load: lazy), not shipped with the document; without the network a local install, else its box.
+data:
+  humvee:
+    uri: cvcpkg://cy-pca/vehicle-humvee
+    path: share/cvc-scenes/shared
+    load: lazy
+
 world:
   vehicles:
     archetypes:
       humvee:
         vehicle: humvee
+        look: { data: humvee, file: Humvee.glb }
         ranges: { mass: [2000, 3500], max_speed: [5, 20] }
         controllers: [nav@1, none]
       roboracer:

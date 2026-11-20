@@ -39,6 +39,7 @@
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/se2_train.h>
+#include <cvc/physics/scrub_plant.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
@@ -3010,20 +3011,33 @@ TEST_F(CvcCliTest, NavScrubDeploysEveryCheckpointAndCachesIt) {
   cfg.checkpoint_prefix = path("coef");
   cvc::nav::coef_trainer(cfg, 3).train(cvc::nav::city_scene(32));
   const std::string report = path("scrub.json");
-  auto r = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --report \"" + report +
-               "\"");
+  auto r = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --plant kinematic" +
+               " --report \"" + report + "\"");
   ASSERT_EQ(0, r.exit_code) << r.output;
   EXPECT_NE(std::string::npos, r.output.find("3 checkpoints of")) << r.output;
-  EXPECT_NE(std::string::npos, r.output.find("step 0 (1/3), deployed")) << r.output;
-  EXPECT_NE(std::string::npos, r.output.find("blocks, 2 agents, seed 0, 60 ticks")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("step 0 (1/3) on kinematic, deployed")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("blocks, 2 agents, seed 0, on kinematic, 60 ticks"))
+      << r.output;
   EXPECT_TRUE(fs::is_directory(cfg.history_path + ".scrub"));
   std::ifstream f(report);
   std::stringstream ss;
   ss << f.rdbuf();
   EXPECT_NE(std::string::npos, ss.str().find("\"schema\":\"cvc.nav.scrub/v1\"")) << ss.str();
-  auto again = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60");
+  EXPECT_NE(std::string::npos, ss.str().find("\"plant\":\"kinematic\"")) << ss.str();
+  auto again =
+      cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60 --plant kinematic");
   ASSERT_EQ(0, again.exit_code) << again.output;
-  EXPECT_NE(std::string::npos, again.output.find("step 4 (3/3), cached")) << again.output;
+  EXPECT_NE(std::string::npos, again.output.find("step 4 (3/3) on kinematic, cached"))
+      << again.output;
+  // the default plant: the Humvee with Jolt, deployed apart from the bicycle's runs
+  const std::string plant = cvc::physics::scrub_default_plant();
+  auto hv = cvc("nav scrub \"" + cfg.history_path + "\" --agents 2 --ticks 60");
+  ASSERT_EQ(0, hv.exit_code) << hv.output;
+  EXPECT_NE(std::string::npos, hv.output.find("step 4 (3/3) on " + plant + ", deployed"))
+      << hv.output;
+  auto bad = cvc("nav scrub \"" + cfg.history_path + "\" --plant nope");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("no vehicle preset named 'nope'")) << bad.output;
   auto empty = cvc("nav scrub \"" + path("nothing.jsonl") + "\"");
   EXPECT_NE(0, empty.exit_code);
   { std::ofstream(path("none.jsonl")) << "{\"kind\":\"step\",\"step\":1,\"loss\":1}\n"; }

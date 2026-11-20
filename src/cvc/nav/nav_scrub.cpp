@@ -122,6 +122,11 @@ std::vector<std::uint8_t> blocks(int n, std::mt19937 &rng) {
   return occ;
 }
 
+// A scenario's plant, "" read as kinematic.
+std::string plant_name(const std::string &plant) {
+  return plant.empty() ? std::string(kScrubKinematic) : plant;
+}
+
 } // namespace
 
 // ── training histories ──────────────────────────────────────────────────────────────────────────
@@ -323,7 +328,8 @@ std::string scenario_hash(const scrub_scenario &s) {
   h.build = "{}"; // the recording build is not the scenario
   h.meta = "{}";
   const std::string text = "cvc.nav.scrub/v" + std::to_string(kScrubVersion) + "\n" + h.to_json() +
-                           "\nticks " + std::to_string(s.ticks) + "\nlibcvc " + CVC_VERSION_STRING;
+                           "\nplant " + plant_name(s.plant) + "\nticks " + std::to_string(s.ticks) +
+                           "\nlibcvc " + CVC_VERSION_STRING;
   return sha256_hex(reinterpret_cast<const unsigned char *>(text.data()), text.size())
       .substr(0, 16);
 }
@@ -363,9 +369,18 @@ scrub_metrics metrics_of(const run_log &log, int a) {
 }
 
 run_log deploy_checkpoint(const scrub_scenario &s, const std::string &blob, const std::string &name,
-                          policy_library &lib, const std::string &meta) {
+                          policy_library &lib, const std::string &meta,
+                          const scrub_plant_fn &plant) {
+  const std::string want = plant_name(s.plant);
+  if (want != kScrubKinematic && !plant)
+    throw std::invalid_argument(std::string(kWho) + "the scenario's plant '" + want +
+                                "' needs a scrub_options::plant hook (cvc::physics::scrub_plant)");
   std::vector<std::unique_ptr<sim_world>> worlds;
   worlds.push_back(std::make_unique<sim_world>(world_from_trace(s.world, lib, {{0, blob}})));
+  // declared before the run, so the plant outlives the world the run owns
+  scrub_plant_attached on{kScrubKinematic, nullptr};
+  if (want != kScrubKinematic)
+    on = plant(*worlds.front(), want);
   arm a;
   a.name = name;
   a.uri = blob;
@@ -374,13 +389,15 @@ run_log deploy_checkpoint(const scrub_scenario &s, const std::string &blob, cons
   arms_options o;
   o.seed = static_cast<unsigned>(s.world.seed);
   o.scene = s.name;
-  o.plant = "kinematic";
+  o.plant = on.driving.empty() ? std::string(kScrubKinematic) : on.driving;
   std::string wj = "{\"world_id\":";
   tj::append_string(wj, s.world.world_id);
   wj += ",\"scenario\":";
   tj::append_string(wj, s.name);
   wj += ",\"scenario_hash\":";
   tj::append_string(wj, scenario_hash(s));
+  wj += ",\"plant\":";
+  tj::append_string(wj, want);
   wj += ",\"ticks\":" + std::to_string(s.ticks) + "}";
   o.world = wj;
   arms_run run(std::move(worlds), {a}, o);
@@ -415,7 +432,7 @@ std::vector<scrub_entry> scrub(const training_history &h, const scrub_scenario &
     if (!e.log) {
       const std::string meta = "{\"step\":" + tj::number(e.checkpoint.step) + "}";
       e.log = std::make_shared<const run_log>(deploy_checkpoint(
-          s, e.checkpoint.path, "step " + step_text(e.checkpoint.step), lib, meta));
+          s, e.checkpoint.path, "step " + step_text(e.checkpoint.step), lib, meta, o.plant));
       if (o.use_cache) {
         fs::create_directories(fs::path(e.cache).parent_path(), ec);
         e.log->write(e.cache);
@@ -425,11 +442,11 @@ std::vector<scrub_entry> scrub(const training_history &h, const scrub_scenario &
     if (o.say) {
       char b[256];
       std::snprintf(b, sizeof b,
-                    "scrub: step %s (%zu/%zu), %s: reached %.2f, path %.1f m, %.0f ticks "
+                    "scrub: step %s (%zu/%zu) on %s, %s: reached %.2f, path %.1f m, %.0f ticks "
                     "penetrating, %.1f m to go",
                     step_text(e.checkpoint.step).c_str(), i + 1, h.checkpoints.size(),
-                    e.cached ? "cached" : "deployed", e.metrics.reached, e.metrics.path_m,
-                    e.metrics.pen_steps, e.metrics.goal_m);
+                    plant_name(s.plant).c_str(), e.cached ? "cached" : "deployed",
+                    e.metrics.reached, e.metrics.path_m, e.metrics.pen_steps, e.metrics.goal_m);
       o.say(b);
     }
     out.push_back(std::move(e));
@@ -449,6 +466,8 @@ std::string scrub_report_json(const training_history &h, const scrub_scenario &s
   tj::append_string(out, h.schema);
   out += ",\"run\":" + std::to_string(h.run) + ",\"scenario\":{\"name\":";
   tj::append_string(out, s.name);
+  out += ",\"plant\":";
+  tj::append_string(out, plant_name(s.plant));
   out += ",\"hash\":";
   tj::append_string(out, scenario_hash(s));
   out += ",\"ticks\":" + std::to_string(s.ticks) + ",\"world\":" + s.world.to_json() +
@@ -569,20 +588,52 @@ chart_plot curve_chart(const training_history &h, const std::vector<scrub_entry>
 
 scrub_view::scrub_view(training_history h, std::vector<scrub_entry> entries, int k,
                        std::string scenario)
-    : h_(std::move(h)), entries_(std::move(entries)), scenario_(std::move(scenario)) {
-  if (entries_.empty())
+    : scrub_view(std::move(h), std::vector<scrub_plant_runs>{{"", std::move(entries)}}, k,
+                 std::move(scenario)) {}
+
+scrub_view::scrub_view(training_history h, std::vector<scrub_plant_runs> plants, int k,
+                       std::string scenario)
+    : h_(std::move(h)), plants_(std::move(plants)), scenario_(std::move(scenario)) {
+  if (plants_.empty() || plants_.front().entries.empty())
     throw std::invalid_argument(std::string(kWho) + "no checkpoint to show");
-  for (const scrub_entry &e : entries_)
+  const std::vector<scrub_entry> &first = plants_.front().entries;
+  for (const scrub_plant_runs &p : plants_) {
+    // unnamed: what its runs drove, else kinematic
+    std::string name = p.plant;
+    if (name.empty() && !p.entries.empty() && p.entries.front().log)
+      name = p.entries.front().log->header().plant;
+    name = plant_name(name);
+    if (std::find(plant_labels_.begin(), plant_labels_.end(), name) != plant_labels_.end())
+      throw std::invalid_argument(std::string(kWho) + "the plant '" + name + "' is named twice");
+    bool same = p.entries.size() == first.size();
+    for (std::size_t i = 0; same && i < first.size(); ++i)
+      same = p.entries[i].sha256 == first[i].sha256;
+    if (!same)
+      throw std::invalid_argument(std::string(kWho) + "the plant '" + name +
+                                  "' has other checkpoints than the first plant's");
+    plant_labels_.push_back(name);
+  }
+  for (const scrub_entry &e : first)
     labels_.push_back("step " + step_text(e.checkpoint.step) +
                       (e.checkpoint.selected ? " (pick)" : ""));
-  int pick = static_cast<int>(entries_.size()) - 1;
-  for (int i = 0; i < static_cast<int>(entries_.size()); ++i)
-    if (entries_[i].checkpoint.selected)
+  int pick = static_cast<int>(first.size()) - 1;
+  for (int i = 0; i < static_cast<int>(first.size()); ++i)
+    if (first[i].checkpoint.selected)
       pick = i;
-  k_ = std::clamp(k < 0 ? pick : k, 0, static_cast<int>(entries_.size()) - 1);
+  k_ = std::clamp(k < 0 ? pick : k, 0, static_cast<int>(first.size()) - 1);
 }
 
-void scrub_view::pick(int k) { k_ = std::clamp(k, 0, static_cast<int>(entries_.size()) - 1); }
+void scrub_view::pick(int k) { k_ = std::clamp(k, 0, static_cast<int>(entries().size()) - 1); }
+
+void scrub_view::use_plant(int p) {
+  const int q = std::clamp(p, 0, static_cast<int>(plants_.size()) - 1);
+  if (q == p_)
+    return;
+  p_ = q;
+  shown_ = -1; // the pair's logs, the table and the charts: the new plant's
+  metric_.clear();
+  curve_.clear();
+}
 
 void scrub_view::pick_step(cvc::app &app, const std::string &prefix) {
   const std::string v = panel_get(app, panel_path(prefix, "scrub.pick"));
@@ -592,14 +643,14 @@ void scrub_view::pick_step(cvc::app &app, const std::string &prefix) {
   if (!(in >> s) || !std::isfinite(s))
     return;
   int best = 0;
-  for (int i = 1; i < static_cast<int>(entries_.size()); ++i)
-    if (std::abs(entries_[i].checkpoint.step - s) < std::abs(entries_[best].checkpoint.step - s))
+  for (int i = 1; i < static_cast<int>(entries().size()); ++i)
+    if (std::abs(entries()[i].checkpoint.step - s) < std::abs(entries()[best].checkpoint.step - s))
       best = i;
   pick(best);
 }
 
 void scrub_view::show(cvc::app &app, const std::string &prefix, bool charts) {
-  const scrub_entry &first = entries_.front(), &now = entries_[static_cast<std::size_t>(k_)];
+  const scrub_entry &first = entries().front(), &now = entries()[static_cast<std::size_t>(k_)];
   std::vector<std::string> names = {"step " + step_text(first.checkpoint.step),
                                     "step " + step_text(now.checkpoint.step)};
   if (names[0] == names[1])
@@ -613,30 +664,37 @@ void scrub_view::show(cvc::app &app, const std::string &prefix, bool charts) {
   const std::string flag =
       now.checkpoint.selected ? ", the pick" : (now.checkpoint.best ? ", a best so far" : "");
   panel_set(app, panel_path(prefix, "scrub.now"),
-            "checkpoint " + std::to_string(k_ + 1) + " of " + std::to_string(entries_.size()) +
+            "checkpoint " + std::to_string(k_ + 1) + " of " + std::to_string(entries().size()) +
                 ": step " + step_text(now.checkpoint.step) + flag + "; " +
                 fs::path(now.checkpoint.path).filename().string());
   panel_set(app, panel_path(prefix, "scrub.step"), step_text(now.checkpoint.step));
-  char b[160];
-  std::snprintf(b, sizeof b, "%s (blue) and %s (orange), %.1f s each", names[0].c_str(),
-                names[1].c_str(), both->duration());
+  const std::string &plant = plant_labels_[static_cast<std::size_t>(p_)];
+  char b[200];
+  std::snprintf(b, sizeof b, "%s (blue) and %s (orange) on %s, %.1f s each", names[0].c_str(),
+                names[1].c_str(), plant.c_str(), both->duration());
   panel_set(app, panel_path(prefix, "play.title"), b);
-  write_table(app, prefix, scrub_table(entries_, k_));
+  panel_set(app, panel_path(prefix, "scrub.plant"), plant);
+  write_table(app, prefix, scrub_table(entries(), k_));
   (void)charts;
   shown_ = k_;
 }
 
 scrub_view::frame scrub_view::update(cvc::app &app, const std::string &prefix, double dt,
                                      bool charts) {
-  const int n = static_cast<int>(entries_.size());
+  const int n = static_cast<int>(entries().size());
   if (!wrote_) {
     std::string labels, curves;
     for (std::size_t i = 0; i < labels_.size(); ++i)
       labels += (i ? "\n" : "") + labels_[i];
     for (std::size_t i = 0; i < h_.series.size(); ++i)
       curves += (i ? "\n" : "") + h_.series[i].name;
+    std::string plants;
+    for (std::size_t i = 0; i < plant_labels_.size(); ++i)
+      plants += (i ? "\n" : "") + plant_labels_[i];
     panel_set(app, panel_path(prefix, "scrub.labels"), labels);
     panel_set(app, panel_path(prefix, "scrub.curve_names"), curves);
+    panel_set(app, panel_path(prefix, "scrub.plant_labels"), plants);
+    panel_set(app, panel_path(prefix, "scrub.plant_count"), std::to_string(plant_labels_.size()));
     const std::string have = panel_get(app, panel_path(prefix, "scrub.curve_name"));
     if (!h_.find(have))
       panel_set(app, panel_path(prefix, "scrub.curve_name"),
@@ -645,12 +703,20 @@ scrub_view::frame scrub_view::update(cvc::app &app, const std::string &prefix, d
     char b[256];
     std::snprintf(b, sizeof b, "%s: %d checkpoints, steps %s to %s",
                   fs::path(h_.path).filename().string().c_str(), n,
-                  step_text(entries_.front().checkpoint.step).c_str(),
-                  step_text(entries_.back().checkpoint.step).c_str());
+                  step_text(entries().front().checkpoint.step).c_str(),
+                  step_text(entries().back().checkpoint.step).c_str());
     panel_set(app, panel_path(prefix, "scrub.title"), b);
     if (!scenario_.empty())
       panel_set(app, panel_path(prefix, "scrub.scenario"), scenario_);
   }
+  // the plant: a new choice shows the same checkpoint on it
+  const std::string plant = panel_get(app, panel_path(prefix, "scrub.plant_choice"));
+  if (wrote_ && plant != plant_choice_)
+    for (int i = 0; i < static_cast<int>(plant_labels_.size()); ++i)
+      if (plant_labels_[static_cast<std::size_t>(i)] == plant)
+        use_plant(i);
+  plant_choice_ = plant_labels_[static_cast<std::size_t>(p_)];
+  panel_set(app, panel_path(prefix, "scrub.plant_choice"), plant_choice_);
   // whichever control moved since the last frame picks k; then every control shows it
   std::istringstream in(panel_get(app, panel_path(prefix, "scrub.pos"), "0"));
   in.imbue(std::locale::classic());
@@ -676,7 +742,7 @@ scrub_view::frame scrub_view::update(cvc::app &app, const std::string &prefix, d
   const std::string metric = panel_get(app, panel_path(prefix, "scrub.metric_name"), "path_m");
   if (metric != metric_) {
     std::string text;
-    const chart_plot c = metric_chart(entries_, metric, &text);
+    const chart_plot c = metric_chart(entries(), metric, &text);
     panel_set(app, panel_path(prefix, "scrub.metric_text"), text);
     if (charts)
       write_chart(app, prefix, c);
@@ -686,7 +752,7 @@ scrub_view::frame scrub_view::update(cvc::app &app, const std::string &prefix, d
   if (curve != curve_) {
     bool log_y = false;
     std::string text;
-    const chart_plot c = curve_chart(h_, entries_, curve, &log_y, &text);
+    const chart_plot c = curve_chart(h_, entries(), curve, &log_y, &text);
     panel_set(app, panel_path(prefix, "scrub.curve_text"), text);
     panel_set(app, panel_path(prefix, "scrub.curve_log"), log_y ? "1" : "0");
     if (charts)

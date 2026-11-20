@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/core/app.h>
+#include <cvc/nav/world_planes.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/npy.h>
 #include <cvc/world/road_grade.h>
@@ -1196,51 +1197,119 @@ TEST(WorldGenerated, StreetVergesLineSomeStretches) {
 }
 
 // A terrain cell's water is the mesh's: a cell whose ground (its corners' mean) is more than half
-// a metre under the sea is deep water, hard, which the navigator does not drive into and the
-// physics gives deep water's grip; one just under it is shallow water; a dry one is not water.
+// a metre under the water level is deep water, hard, which the navigator does not drive into and
+// the physics gives deep water's grip; one just under it is shallow water; a dry one is not water.
 // Each cell used to take one raster sample's class, a corner of the cell where the raster and the
 // mesh share samples, so on a steep shore a cell metres deep could be dry ground or drivable
 // shallow water (world_gym.ari's generated world drove a Humvee down one and off the world).
-// Cells the roads graded keep the class they had before (the banks lift them out of the water).
+// The cells the roads graded too: a bank a road lifted out of the water is dry (they kept the deep
+// water they had before the grade, so the navigator took the road's bank for a lake). And the
+// water is at water_level_m, not at the 0 m the relief is laid against: at -4 m the cells between
+// -4 m and -0.5 m were deep water, dry and drawn dry (GRL-SNAM's scrub world, 13 % of it).
 TEST(WorldGenerated, ACellsWaterIsTheMeshsDepth) {
+  for (const double level : {0.0, -4.0}) {
+    SCOPED_TRACE("water_level_m " + std::to_string(level));
+    cvc::app app;
+    generated_world_params p = small_world();
+    p.water_level_m = level;
+    const generated_world w = generate_world(app, p);
+    const cvc::height_field &hf = *w.terrain;
+    const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
+    ASSERT_NE(graded, nullptr);
+    const std::shared_ptr<const terrain_source> base = make_terrain(app, p); // before the grade
+    const surface_registry &reg = w.model->registry();
+    std::uint16_t shallow = 0, deep = 0;
+    ASSERT_TRUE(reg.find("water_shallow", shallow));
+    ASSERT_TRUE(reg.find("water_deep", deep));
+    ASSERT_TRUE(reg[deep].hard);
+    const int N = hf.rows();
+    const std::vector<float> &hs = hf.heights();
+    int deepCells = 0, shallowCells = 0, dryCells = 0, lifted = 0, wrong = 0;
+    std::string first;
+    for (int r = 0; r + 1 < N; ++r)
+      for (int c = 0; c + 1 < N; ++c) {
+        const double x = hf.x0() + c * hf.dx(), y = hf.y0() + r * hf.dy();
+        const std::size_t s = std::size_t(r) * N + c;
+        const double h = 0.25 * (double(hs[s]) + hs[s + 1] + hs[s + N] + hs[s + N + 1]);
+        const std::uint16_t k = hf.cell_material(r, c);
+        bool ok = true;
+        if (h < level - 0.5) {
+          ++deepCells;
+          ok = reg[k].hard;
+        } else if (h < level) {
+          ++shallowCells;
+          ok = k == shallow || reg[k].hard;
+        } else {
+          ++dryCells;
+          ok = k != shallow && k != deep;
+          const double was =
+              0.25 * (base->sample(x, y) + base->sample(x + hf.dx(), y) +
+                      base->sample(x, y + hf.dy()) + base->sample(x + hf.dx(), y + hf.dy()));
+          lifted += was < level - 0.5;
+        }
+        if (!ok && wrong++ == 0)
+          first = "(" + std::to_string(x) + ", " + std::to_string(y) + "), " +
+                  std::to_string(h - level) + " m from the water, is " + reg[k].name;
+      }
+    EXPECT_EQ(wrong, 0) << "cells whose class is not their depth; the first " << first;
+    EXPECT_GT(deepCells, 100);
+    EXPECT_GT(shallowCells, 10);
+    EXPECT_GT(dryCells, 1000);
+    if (level == 0.0)
+      EXPECT_GT(lifted, 0) << "no road lifted a cell out of the water: the grade is not tested";
+    // The raster's water is at the water level too: no sample on dry ground is water.
+    int dryWater = 0;
+    for (std::size_t i = 0; i < w.raster.klass.size(); ++i)
+      dryWater += w.raster.height[i] >= level &&
+                  (w.raster.klass[i] == shallow || w.raster.klass[i] == deep);
+    EXPECT_EQ(dryWater, 0);
+  }
+}
+
+// GRL-SNAM's scrub world (its Pages deploy: seed 7, 1 km, 160 buildings, a 25 m relief under a
+// -4 m water level), as the navigator reads it (nav::rasterize, at pycvc_gl.cars' 2 m). Six
+// checkpoints drove into the basin at (-290, 175), 0.5 to 3.5 m above the water: its cells were
+// deep water, hard, so the scrub counted up to 186 ticks "inside" with a clearance of -25 m and no
+// contact, the physics having nothing there to hit (and deep water's grip to stall on). Of the
+// world's cells with every corner dry, 5871 were water.
+TEST(WorldGenerated, TheScrubWorldsNavigatorHasNoWaterOnDryGround) {
   cvc::app app;
-  const generated_world w = generate_world(app, small_world());
+  generated_world_params p;
+  p.seed = 7;
+  p.half_m = 500.0;
+  p.trees = 200;
+  p.rocks = 40;
+  p.buildings = 160;
+  p.amp_m = 25.0;
+  p.water_level_m = -4.0;
+  const generated_world w = generate_world(app, p);
   const cvc::height_field &hf = *w.terrain;
-  const auto *graded = dynamic_cast<const graded_terrain *>(&w.model->terrain());
-  ASSERT_NE(graded, nullptr);
   const surface_registry &reg = w.model->registry();
-  std::uint16_t shallow = 0, deep = 0;
-  ASSERT_TRUE(reg.find("water_shallow", shallow));
-  ASSERT_TRUE(reg.find("water_deep", deep));
-  ASSERT_TRUE(reg[deep].hard);
-  const double sea = w.params.water_level_m;
+  const std::uint16_t shallow = reg.by_name("water_shallow"), deep = reg.by_name("water_deep");
   const int N = hf.rows();
-  const std::vector<float> &hs = hf.heights();
-  int deepCells = 0, shallowCells = 0, dryCells = 0;
+  int dryWater = 0;
   for (int r = 0; r + 1 < N; ++r)
     for (int c = 0; c + 1 < N; ++c) {
-      const double x = hf.x0() + c * hf.dx(), y = hf.y0() + r * hf.dy();
-      if (graded->graded_at(x, y) || graded->graded_at(x + hf.dx(), y) ||
-          graded->graded_at(x, y + hf.dy()) || graded->graded_at(x + hf.dx(), y + hf.dy()))
-        continue;
-      const std::size_t s = std::size_t(r) * N + c;
-      const double h = 0.25 * (double(hs[s]) + hs[s + 1] + hs[s + N] + hs[s + N + 1]);
       const std::uint16_t k = hf.cell_material(r, c);
-      if (h < sea - 0.5) {
-        ++deepCells;
-        EXPECT_TRUE(reg[k].hard) << "a cell " << sea - h << " m deep at (" << x << ", " << y
-                                 << ") is " << reg[k].name;
-      } else if (h < sea) {
-        ++shallowCells;
-        EXPECT_TRUE(k == shallow || reg[k].hard) << "(" << x << ", " << y << ") " << reg[k].name;
-      } else {
-        ++dryCells;
-        EXPECT_TRUE(k != shallow && k != deep) << "dry (" << x << ", " << y << ") is water";
-      }
+      dryWater += (k == shallow || k == deep) &&
+                  std::min({hf.height_at(r, c), hf.height_at(r, c + 1), hf.height_at(r + 1, c),
+                            hf.height_at(r + 1, c + 1)}) >= p.water_level_m;
     }
-  EXPECT_GT(deepCells, 100);
-  EXPECT_GT(shallowCells, 10);
-  EXPECT_GT(dryCells, 1000);
+  EXPECT_EQ(dryWater, 0);
+
+  const cvc::nav::world_planes planes = cvc::nav::rasterize(w.geometry(), 501, 501);
+  auto at = [&](double x, double y) {
+    return std::size_t(std::lround((y - planes.min_y) / 2.0)) * planes.cols +
+           std::size_t(std::lround((x - planes.min_x) / 2.0));
+  };
+  // The six runs' way in, from (-303.5, 191.3) to (-284.6, 166.6): dry, open ground.
+  for (double t = 0.0; t <= 1.0; t += 0.125) {
+    const double x = -303.5 + t * (-284.6 + 303.5), y = 191.3 + t * (166.6 - 191.3);
+    const std::size_t i = at(x, y);
+    EXPECT_GT(planes.height[i], p.water_level_m) << "(" << x << ", " << y << ")";
+    EXPECT_EQ(planes.occupancy[i], 0)
+        << "(" << x << ", " << y << ") is " << reg[planes.surface[i]].name;
+  }
 }
 
 // The world's edge: walls by default, or a shore: a band at the rim becomes coast (the sea floor

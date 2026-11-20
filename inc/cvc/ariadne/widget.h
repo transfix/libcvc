@@ -37,6 +37,7 @@ enum class Kind {
   Progress,       // a read-only bar: the number at a state path, over [lo, hi]
   Plot,           // a read-only line graph: the comma-separated numbers at a state path
   Chart,          // read-only curves: series with their own x, bands, markers, log y, a cursor
+  Settings,       // an editor for every key under a state subtree, each drawn from its metadata
   Checkbox,       // bound bool state
   SliderInt,      // bound int state, [ilo, ihi]
   SliderFloat,    // bound double state, [lo, hi]
@@ -62,6 +63,8 @@ enum class Kind {
                   // shown under it), or over `options:` alone (a switch)
   List,           // rows of a state array (count at bind, rows at bind.<i>), one selected, with
                   // Add / Remove buttons that edit the array
+  Heatmap,        // a rows x cols grid of cells, each filled from a colour ramp by its value, with
+                  // an optional text, corner mark and tooltip; hover and click report the cell
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -88,6 +91,36 @@ struct ChartSeriesBind {
   std::string bind;
   std::string label;
   std::string style;
+};
+// Kind::Heatmap: one stop of its colour ramp (`ramp: [[at, colour], ...]`): a value and the
+// colour (0..1) a cell holding it is filled with. Between two stops the colour is mixed in
+// proportion; below the first and above the last it is the end stop's.
+struct HeatmapStop {
+  double at = 0.0;
+  float rgb[3] = {0.0f, 0.0f, 0.0f};
+};
+// Kind::Heatmap: where its legend goes (`legend:`; Off for `none`, the default).
+enum class HeatmapLegend { Off, Bottom, Right };
+// Kind::Heatmap's settings from the document. The cells, their count and the row and column
+// labels come from the subtree at the widget's `bind` (docs/ARIADNE.md §4).
+struct HeatmapOptions {
+  std::vector<HeatmapStop> ramp; // sorted by `at`; empty: one grey
+  float cell_size = 28.0f;       // a cell's side in px, where the backend has pixels
+  float gap = 2.0f;              // px between cells
+  bool row_labels = true; // `labels: {rows, cols}`: draw the subtree's labels when it has them
+  bool col_labels = true;
+  HeatmapLegend legend = HeatmapLegend::Off;
+  float mark_rgb[3] = {1.0f, 1.0f, 1.0f}; // `mark_color:` a marked cell's corner triangle
+};
+
+// Kind::Settings: one entry of its `groups:` list, the branch at `key` (a path under the root,
+// "a.b" for a nested one): drawn in the list's order among its siblings, under `title` ("" its
+// name), with `help` as its tooltip ("" the branch's comment), open at first when `open`.
+struct SettingsGroupSpec {
+  std::string key;
+  std::string title;
+  std::string help;
+  bool open = false;
 };
 struct Background {
   std::string src;
@@ -465,6 +498,26 @@ struct Widget {
   std::string cursor;
   std::string pick;
 
+  // Kind::Heatmap: `bind` is the subtree holding rows, cols, cells.<r>.<c>.{v,text,mark,tip} and
+  // the optional row_labels / col_labels; `heatmap` the ramp and the layout. `pick` (shared with
+  // Kind::Chart) is the key a click writes the cell to (<pick>.row, <pick>.col, then <pick> =
+  // "row,col"), and the cell it names is outlined. Its `tooltip`, `on_click` and `on_hover` are the
+  // heatmap's own: per cell, with the cell in their tokens (the tooltip) or `event` (the handlers).
+  HeatmapOptions heatmap;
+  // Kind::Settings: `settings_roots` are the subtrees it edits (`root:`, a state path or a list of
+  // them); `settings_filter` the patterns a key's path under the root must match, one of them
+  // (a substring, or a glob with * ? [..]; one starting with '-' excludes what it matches);
+  // `settings_groups` orders, renames and opens branches; `settings_search` adds a search box
+  // (its text kept at tree.<id>.search); `settings_readouts` false leaves out the read-only keys;
+  // `settings_open` opens every group at first. `on` runs after each committed write and reset;
+  // `commit_on_release` makes its sliders write once, at the release.
+  std::vector<std::string> settings_roots;
+  std::vector<std::string> settings_filter;
+  std::vector<SettingsGroupSpec> settings_groups;
+  bool settings_search = false;
+  bool settings_readouts = true;
+  bool settings_open = false;
+
   // Kind::TextView: its height in px (0: the rest of the window; rows of 16 px in a terminal);
   // `follow` keeps it at the bottom while lines arrive, if it is already there; `wrap` wraps long
   // lines; `on_top` (an event name or a program) runs when the view is scrolled to its top, once
@@ -692,6 +745,28 @@ inline Widget chart(std::string label, std::string bind, std::vector<ChartSeries
   w.bind = std::move(bind);
   w.chart_series = std::move(series);
   w.plot_height = height;
+  return w;
+}
+
+// A heatmap grid (Kind::Heatmap) of the subtree at `bind`, coloured by `ramp`. Set the layout,
+// labels, legend and mark colour on the result's `heatmap`, and `pick` / the handlers on it.
+inline Widget heatmap(std::string label, std::string bind, std::vector<HeatmapStop> ramp = {}) {
+  Widget w;
+  w.kind = Kind::Heatmap;
+  w.label = std::move(label);
+  w.bind = std::move(bind);
+  w.heatmap.ramp = std::move(ramp);
+  return w;
+}
+
+// An editor for every key under the state subtree `root` (Kind::Settings), each drawn from its
+// metadata (cvc/state/state_key_meta.h, cvc/core/param_table.h). Set the filter, groups, search
+// and the rest on the result.
+inline Widget settings(std::string label, std::string root) {
+  Widget w;
+  w.kind = Kind::Settings;
+  w.label = std::move(label);
+  w.settings_roots.push_back(std::move(root));
   return w;
 }
 

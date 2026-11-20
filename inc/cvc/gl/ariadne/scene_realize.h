@@ -257,6 +257,11 @@ struct RealizedScene {
   std::uint64_t vehicles_rev = ~std::uint64_t(0);
   // The vehicle models this scene has read and fitted, read once each (vehicle_view.cpp).
   std::shared_ptr<struct vehicle_model_cache> vehicle_models;
+  // A vehicle drawn as its box while its look's data package loads: the vehicles are drawn again
+  // once none is loading (sync_vehicle_markers).
+  bool vehicle_models_pending = false;
+  // The document's data: entries (Scene::data), which a node's model names (a boat's `model:`).
+  std::vector<cvc::ariadne::SceneData> data;
   // The spawn points as drawn (their node ids), as of the spawn points' revision `spawns_rev`.
   std::vector<std::string> spawn_markers;
   std::uint64_t spawns_rev = ~std::uint64_t(0);

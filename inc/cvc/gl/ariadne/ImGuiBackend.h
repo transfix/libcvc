@@ -89,6 +89,16 @@ public:
   // Kind::Chart (chart_imgui.cpp): axes with log decades, a legend that hides and shows series,
   // a hover readout, bands, gaps, markers, the cursor and the pick, on the draw list.
   cvc::ariadne::ChartEvent chart(const char *label, const cvc::ariadne::ChartSpec &spec) override;
+  // Kind::Heatmap (heatmap_imgui.cpp): the cells, their text, marks and labels, the picked and the
+  // hovered cell outlined, and the legend, on the draw list over one item (the tooltip's).
+  cvc::ariadne::HeatmapEvent heatmap(const char *label,
+                                     const cvc::ariadne::HeatmapSpec &spec) override;
+  // Kind::Settings (settings_imgui.cpp): a collapsing header for each branch under the root and a
+  // tree node for each deeper one, a reset on a header whose keys can be reset; each key a row of
+  // its name, its editor (a checkbox, a slider by ratio over a wide range, a field, a combo, or a
+  // read-out) and a reset while it is not its default, with its tooltip; a search box above.
+  cvc::ariadne::SettingsEdit settings(const char *label, const char *id,
+                                      const cvc::ariadne::SettingsSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
   bool menu_item_action(const char *label) override;
@@ -220,6 +230,16 @@ public:
   // own current context, so without this the backend sees none and crashes. With ImGuiOverlay, or
   // a shared imgui, it is not needed and harmless. Pass nullptr before destroying `ctx`.
   static void setImGuiContext(ImGuiContext *ctx);
+
+protected:
+  // settings() calls this after each key's row, with the screen rects (x0, y0, x1, y1) of its
+  // editor and of its reset button (all 0 when it has none): for a test or a tool driving a row.
+  virtual void settings_row_drawn(const cvc::ariadne::SettingsNode &row, const float editor[4],
+                                  const float reset[4]) {
+    (void)row;
+    (void)editor;
+    (void)reset;
+  }
 
 private:
   // §10.8 the file dialog out (pick_files), shared with SDL's callback until it answers.
@@ -381,6 +401,9 @@ private:
   // Per-chart legend state (chart_imgui.cpp), keyed by the chart's ImGui ID: the series a click on
   // their legend entry hid, by label ("#<i>" for one without).
   std::unordered_map<unsigned int, std::unordered_set<std::string>> m_chartHidden;
+  // A settings editor's number while its slider is held (settings_imgui.cpp), by key path: the
+  // value the slider shows when `commit: release` keeps it out of state until the release.
+  std::unordered_map<std::string, double> m_settingNumbers;
 
   // Per-key in-progress InputText / InputInt text. Follows the value in state while no field is
   // active and holds the edit while one is — the string counterpart of cache_int/cache_float.

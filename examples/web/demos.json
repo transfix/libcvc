@@ -34,7 +34,8 @@
       "desc": "the Ariadne GL runtime: every .ari demo, switched in place from its Demos menu",
       "card": false,
       "boot": {
-        "args": ["run", "--component-path", "/", "/ariadne/documents/{doc}.ari"],
+        "args": ["run", "--component-path", "/", "--net-allow", "https://cvcpkg.org",
+                 "/ariadne/documents/{doc}.ari"],
         "env": {"CVC_ARIGL_GALLERY": "/gallery.json"},
         "files": {"/gallery.json": "../gallery.json"},
         "doc": "fem_gallery"
@@ -143,7 +144,7 @@
     "nav_scrub": {
       "desc": "watch a navigation policy learn, checkpoint by checkpoint",
       "blurb":
-          "cvc::nav's own trainer runs a short training in the page, saving a checkpoint every few steps; every checkpoint is then deployed on a walled square of city blocks it trained on, and you scrub through them: checkpoint k drives beside step 0, with the deployed metric against the training step, the loss curve, and the Stats and Ledger of both runs at the play head (the books against U_nav, the plant ledger). No Python, no libtorch, nothing fetched.",
+          "cvc::nav's own trainer runs a short training in the page, saving a checkpoint every few steps; every checkpoint is then deployed on a walled square of city blocks it trained on, on a Jolt Humvee that stops against the buildings and on nav's kinematic bicycle that drives through them (the Plant combo switches), and you scrub through them: checkpoint k drives beside step 0, with the deployed metric against the training step, the loss curve, and the Stats and Ledger of both runs at the play head (the books against U_nav, the plant ledger). No Python, no libtorch, nothing fetched.",
       "thumb": "img/nav_scrub.jpg"
     },
     "nav_fog_ghost": {

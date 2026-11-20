@@ -3,8 +3,10 @@
 # checkpoint on one scenario (cached beside the history) and draws the scenario's world and the two
 # ghosts; cvc::nav::scrub_view writes every window: checkpoint k beside step 0.
 #
-# - Scrub: the history, the scenario and the checkpoint (a combo, a slider, Previous and Next, or a
-#   click on a chart); the deployed metric against the step with step 0's dashed, and the table.
+# - Scrub: the history, the scenario, the plant (the Jolt Humvee, which stops against a building,
+#   or nav's kinematic bicycle, which drives through one) and the checkpoint (a combo, a slider,
+#   Previous and Next, or a click on a chart); the deployed metric against the step with step 0's
+#   dashed, and the table.
 # - Training: a curve from the history (Curve picks it), the pick marked.
 # - Episode and Simulation: the two runs' time (libcvc's sim transport, a Position slider).
 # - Stats and Ledger: step 0 (blue) and checkpoint k (orange) at the play head.

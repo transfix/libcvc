@@ -46,6 +46,10 @@ struct MouseControls {
   std::string invert_x; // 1: moving the mouse right turns left
   std::string distance; // the camera's distance from what it orbits (the wheel changes it too)
   double distance_lo = 1.5, distance_hi = 40.0;
+  bool distance_log = false; // its slider on a log scale (a range from metres to kilometres)
+  // A read-lane predicate that shows the distance only while it means something ("" = always):
+  // arigl's, while the camera orbits (CameraController's mode 0), not in Fly, Track or Map.
+  std::string distance_when;
   std::string note; // a line under them, what the look does here ("" = none)
 };
 

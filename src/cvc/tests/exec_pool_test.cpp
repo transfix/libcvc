@@ -355,22 +355,32 @@ TEST(ExecPool, APassedDeadlineSkipsGroupsAndTheyGoFirstNextTime) {
     cvc::exec_pool pool(po);
     cvc::app app;
     share_locks(app);
+    std::mutex order_m; // a woken helper would pump beside the caller
     std::vector<std::string> order;
     std::vector<std::unique_ptr<exec_group>> owned;
     std::vector<exec_group *> groups;
     for (int i = 0; i < 3; ++i) {
       exec_group::options o = opts_for(app, "g" + std::to_string(i));
-      o.pump_hook_for_test = [&order](exec_group &g) { order.push_back(g.opts().name); };
+      o.pump_hook_for_test = [&order, &order_m](exec_group &g) {
+        std::lock_guard<std::mutex> lock(order_m);
+        order.push_back(g.opts().name);
+      };
       owned.push_back(std::make_unique<exec_group>(o));
       groups.push_back(owned.back().get());
     }
     pool.pump_all(groups, kSteps, clock_type::now() - std::chrono::seconds(1));
     EXPECT_TRUE(order.empty()) << "nothing starts past the deadline";
     EXPECT_EQ(pool.stats().skipped, 3u);
-    // g1 alone is pumped, then skipped g0 and g2 go before it.
+    // g1 alone is pumped, then skipped g0 and g2 go before it. The order is the caller's: with
+    // the last pumps under inline_below no helper is woken, so the caller pumps every group. (g1's
+    // measured pump can pass 100 us on a loaded runner; a helper then pumped beside the caller,
+    // in no set order, and the unguarded push here lost an entry or corrupted the heap.)
     std::vector<exec_group *> one{owned[1].get()};
     pool.pump_all(one, kSteps, far_deadline());
+    for (exec_group *g : groups)
+      pool.set_last_pump_for_test(*g, 10e-6);
     pool.pump_all(groups, kSteps, far_deadline());
+    EXPECT_EQ(pool.stats().helper_wakes, 0u) << "threads " << threads;
     ASSERT_EQ(order.size(), 4u);
     EXPECT_EQ(order[0], "g1");
     EXPECT_EQ(std::set<std::string>(order.begin() + 1, order.begin() + 3),

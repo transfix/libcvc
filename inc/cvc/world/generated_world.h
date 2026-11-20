@@ -67,6 +67,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/world/building_archetypes.h>
+#include <cvc/world/city_bundle.h>
 #include <cvc/world/grid.h>
 #include <cvc/world/raster.h>
 #include <cvc/world/roads.h>
@@ -284,6 +285,19 @@ struct generated_world {
   // and the props and roads (render only).
   world_geometry geometry() const;
 };
+
+// ── A generated world as a version 2 bundle (city_bundle.h, ARIADNE_WORLDS section 18.8) ──
+
+// The params as a JSON object (every field), and back: what a bundle's generator block holds, so
+// a client can make the same world from them. Fields a text leaves out keep their defaults.
+std::string generated_world_params_json(const generated_world_params &p);
+generated_world_params generated_world_params_from_json(const std::string &text);
+
+// The world as bundle files (city_bundle_bytes): geometry()'s items and the needles (render
+// only), the water level, and the generator ("generated_world", `generator_version`, the seed and
+// params). Throws as city_bundle_bytes does.
+city_bundle_files generated_world_bundle(cvc::app &ctx, const generated_world &w,
+                                         const std::string &generator_version);
 
 // One cell's run of a prop mesh (generated_world::prop_cell) as a mesh of its own: its points,
 // colours and triangles or lines, the indices rebased.
