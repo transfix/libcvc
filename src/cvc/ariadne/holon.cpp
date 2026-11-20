@@ -271,8 +271,8 @@ std::vector<holon::entity> holon::entities() const {
       e.id = "e" + std::to_string(info.id);
       e.kind = info.spec.archetype;
       e.controller = info.plant;
-      e.driver = info.spec.driver.empty() ? info.spec.controller
-                                          : "participant:" + info.spec.driver;
+      e.driver =
+          info.spec.driver.empty() ? info.spec.controller : "participant:" + info.spec.driver;
       e.owner = info.spec.driver.empty() ? "server" : info.spec.driver;
       e.policy = info.spec.policy;
       e.in_world = info.placed;

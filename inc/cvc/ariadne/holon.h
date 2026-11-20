@@ -260,8 +260,8 @@ public:
     // Who supplies the intent: "participant:<pid>", or the entity's own controller as its spec
     // names it (nav@1, external, none); a person no one drives is its participant's.
     std::string driver;
-    std::string owner;  // "server", or the participant's pid
-    std::string policy; // nav@1's policy (a .cvcnav), "" the default
+    std::string owner;    // "server", or the participant's pid
+    std::string policy;   // nav@1's policy (a .cvcnav), "" the default
     bool in_world = true; // a body in the physics world now (a person driving a vehicle: false)
     cvc::physics::body_state state; // a person's feet, an entity's chassis centre
   };

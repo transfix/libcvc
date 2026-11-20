@@ -12,8 +12,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
-#include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/conference/room_entities.h>
+#include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
