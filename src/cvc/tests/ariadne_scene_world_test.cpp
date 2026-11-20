@@ -2487,10 +2487,10 @@ TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
   std::printf("[pose-track] state hash after %llu ticks: %016llx\n",
               static_cast<unsigned long long>(w->world().tick()),
               static_cast<unsigned long long>(hash));
-  EXPECT_EQ(w->world().tick(), 515u);
+  EXPECT_EQ(w->world().tick(), 618u); // 1/120 s steps (cvc::kSimQuantum)
   if (cvc::physics::backend_capabilities(cvc::physics::backend::jolt) &
       cvc::physics::cap_determinism_cross_platform)
-    EXPECT_EQ(hash, 0xffffc2632ce76a65ull) << std::hex << "state hash " << hash;
+    EXPECT_EQ(hash, 0xe6d183c87bbc907eull) << std::hex << "state hash " << hash;
 }
 
 // Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
@@ -2532,27 +2532,28 @@ TEST(AriadneWorldVehicles, TimedPosesAreDrawnBetweenTheLastTwo) {
   ASSERT_TRUE(v.set_pose(id, at(0.0, 0.0, 3.0)));
   step(1);
   EXPECT_EQ(entity(v, id).x, 0.0) << "the first: there at once";
-  // The next, 0.06 s on: over the next 0.06 s of world time it moves there, the heading the
-  // short way round (3 rad to -3 rad is 0.28 rad, not 6).
-  ASSERT_TRUE(v.set_pose(id, at(0.6, 0.06, -3.0)));
+  // The next, six physics steps on (span): over the next six steps of world time it moves there,
+  // the heading the short way round (3 rad to -3 rad is 0.28 rad, not 6).
+  const double span = 6 * dt;
+  ASSERT_TRUE(v.set_pose(id, at(0.6, span, -3.0)));
   const double arc = std::remainder(-3.0 - 3.0, 2.0 * 3.14159265358979323846);
   for (int k = 1; k <= 6; ++k) {
     step(1);
     const entity_info e = entity(v, id);
-    const double s = std::min(1.0, k * dt / 0.06);
+    const double s = std::min(1.0, k * dt / span);
     EXPECT_NEAR(e.x, 0.6 * s, 1e-12) << "step " << k;
     EXPECT_NEAR(std::remainder(e.yaw - (3.0 + s * arc), 2.0 * 3.14159265358979323846), 0.0, 1e-12);
-    EXPECT_NEAR(e.pose.time, 0.06 * s, 1e-12);
+    EXPECT_NEAR(e.pose.time, span * s, 1e-12);
   }
   EXPECT_EQ(entity(v, id).x, 0.6) << "there exactly, at the span's end";
   step(5);
   EXPECT_EQ(entity(v, id).x, 0.6) << "the next is late: it holds";
   // The same time again: the same pose, nothing changes.
-  ASSERT_TRUE(v.set_pose(id, at(5.0, 0.06)));
+  ASSERT_TRUE(v.set_pose(id, at(5.0, span)));
   step(2);
   EXPECT_EQ(entity(v, id).x, 0.6);
   // A jump (farther than pose_jump): at once, its chassis teleported.
-  ASSERT_TRUE(v.set_pose(id, at(50.0, 0.12)));
+  ASSERT_TRUE(v.set_pose(id, at(50.0, 2 * span)));
   step(1);
   EXPECT_EQ(entity(v, id).x, 50.0);
   EXPECT_NEAR(w->world().state(entity(v, id).chassis).position.x, 50.0, 1e-4);
@@ -2777,7 +2778,7 @@ TEST(AriadneWorldVehicles, APoseDocumentsHashIsPinned) {
   std::printf("[pose-document] state hash at tick 60: %s\n", hex);
   if (cvc::physics::backend_capabilities(cvc::physics::backend::jolt) &
       cvc::physics::cap_determinism_cross_platform)
-    EXPECT_EQ(hash, 0x9e21a383280ccbb7ull) << "state hash " << hex;
+    EXPECT_EQ(hash, 0xcbe4b2596cd56330ull) << "state hash " << hex;
 }
 
 // A server document places entities through its published namespace: its program writes the
