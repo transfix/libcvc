@@ -1,0 +1,63 @@
+# skeleton.ari — golden: the skeleton demo (examples/ariadne/documents/skeleton_lab.ari) at a fixed
+# size. A mesh_lab node reads the Stanford bunny decimated to 4000 triangles (data/bunny_4k.off,
+# written once by cvc::simplify, so every platform skeletonizes the same points; the demo decimates
+# the embedded bunny itself) and init: asks for its skeleton. The strands (green, the blue stars of
+# small clusters) and the sheets are drawn inside the see-through surface, and a viewport shows the
+# skeleton alone (show: [skeleton]: the node's own surface is tagged surface, its children
+# skeleton). The harness waits for the run (RealizedScene::settling) before the capture.
+
+meta:
+  name: golden skeleton
+  min_libcvc: 4.0.0
+
+customs:
+  - node: mesh_lab
+    required: true
+
+init: |
+  (state-set "graphics.root.children.bunny.mesh_ops.request" "skeleton")
+
+# The main view from a little further out than the scene's own bounds, on the first tick (after
+# the host framed the realized scene).
+on_tick: |
+  (if (!= (state-get "skel.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-190 -75 -5 75 75 105")
+             (state-set "skel.opened" "1")))
+
+windows:
+  - window: Skeleton
+    id: skeleton
+    pos: [16, 16]
+    size: [540, 462]
+    children:
+      - text: "skeleton"
+        bind: graphics.root.children.bunny.mesh_ops.skeleton.status
+      - text: "strands"
+        bind: graphics.root.children.bunny.mesh_ops.skeleton.info.strands
+      - text: "sheets"
+        bind: graphics.root.children.bunny.mesh_ops.skeleton.info.sheets
+      - progress: progress
+        bind: graphics.root.children.bunny.mesh_ops.skeleton.progress
+        hi: 100
+        overlay: graphics.root.children.bunny.mesh_ops.skeleton.phase
+      - type: viewport
+        view: skeleton
+        show: [skeleton]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        zoom: 0.85
+        width: 500
+        height: 300
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: bunny
+      type: mesh_lab
+      source: { file: data/bunny_4k.off }
+      fit: { height: 100, up: y }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9, opacity: 0.3 }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

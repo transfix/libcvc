@@ -89,6 +89,9 @@ depends:
     - name: assimp
     - name: eigen
     - name: libigl
+    # Shewchuk's exact predicates (header-only): cvc::tet_complex and the skeleton built on it,
+    # which a mesh_lab node's `skeleton` request runs. Without them that request reports an error.
+    - name: shewchuk-predicates
     # cvc's image I/O (ImageMagick), static, plus every codec library the static MagickCore and
     # libtiff link. `cvcpkg install` lays bundles down flat (a bundle's own deps are not pulled
     # in), so the closure is listed here, as in libcvc-examples-web.

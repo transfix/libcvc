@@ -72,6 +72,9 @@ depends:
     # cvc's mesh_ops / fem (header-only), which the FEM gallery's fe_lab / mesh_lab nodes run on.
     - name: eigen
     - name: libigl
+    # Shewchuk's exact predicates (header-only): cvc::tet_complex and the skeleton built on it,
+    # which the skeleton lab's mesh_lab node runs. Without them its request reports an error.
+    - name: shewchuk-predicates
     # The `ari` page's terminal backend; only the single-threaded gallery has that page.
     - name: ftxui
       platforms: [wasm]

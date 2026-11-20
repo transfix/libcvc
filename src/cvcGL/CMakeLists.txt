@@ -1161,6 +1161,17 @@ set_tests_properties(cvcgl_tf_binding PROPERTIES RUN_SERIAL TRUE)
 add_executable(cvcgl_fe_interval test/cvcgl_fe_interval.cpp)
 target_link_libraries(cvcgl_fe_interval PRIVATE cvcGL)
 add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
+# mesh_lab's skeleton request (VOLROVER-LIBRARY-PORTS-ROADMAP.md P2): its keys, children, view
+# tags, data channel, stop, bad values and two apps; headless. The second entry runs it the way
+# single-threaded wasm runs it (cooperative slices on the scheduler thread), where it also bounds
+# the frames the run spans (RUN_SERIAL: parallel ctest jobs preempting the thread would stretch
+# them).
+add_executable(cvcgl_mesh_skeleton test/cvcgl_mesh_skeleton.cpp)
+target_link_libraries(cvcgl_mesh_skeleton PRIVATE cvcGL)
+add_test(NAME cvcgl_mesh_skeleton COMMAND cvcgl_mesh_skeleton)
+add_test(NAME cvcgl_mesh_skeleton_cooperative COMMAND cvcgl_mesh_skeleton)
+set_tests_properties(cvcgl_mesh_skeleton_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative RUN_SERIAL TRUE)
 # ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
 # its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a
 # sized window scrolls both ways. No window, no GL.
@@ -1562,6 +1573,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_tf_editor # a bare ImGui context, no GL
   cvcgl_tf_binding # scene nodes + state only, never renders
   cvcgl_fe_interval # LBIE + cvc::fem + an fe_lab node's state, never renders
+  cvcgl_mesh_skeleton cvcgl_mesh_skeleton_cooperative # a mesh_lab node's state, never renders
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo

@@ -24,8 +24,9 @@
 //   type: mesh_lab -- a triangle mesh read like a `geometry` node (source + fit + material). Its
 //     parameters and commands are node-scoped state keys under
 //     "<node>.mesh_ops.*" (node->stateName("mesh_ops")), seeded from the node's props:
-//       request          smooth | decimate | repair | orient | curvature | reset | load | reload
-//                        (consumed: the tick writes "" back; while a job runs the request waits).
+//       request          smooth | decimate | repair | orient | curvature | reset | load | reload |
+//                        skeleton | stop (consumed: the tick writes "" back; while a job or a
+//                        skeleton runs the request waits, except a stop, which ends a skeleton).
 //                        Several commands separated by spaces run in order ("load smooth").
 //       busy, status, stats.vertices, stats.faces, stats.work_ms       (published)
 //       source.file (a relative path resolves against the document's directory), source.up
@@ -39,6 +40,24 @@
 //       Laplace-Beltrami eigenfunction, >= 1)                         (followed live)
 //       color.min, color.max                                          (published)
 //     and <node>.field_colors (below).
+//     `skeleton` runs cvc::skeletonize (cvc/geometry/skeleton.h) on the shown mesh's vertices as a
+//     sliced task on the app's scheduler. Its keys are under "<node>.mesh_ops.skeleton.*":
+//       <field>          skeleton_params' table (cvc/geometry/skeleton_params.h: robust,
+//                        cocone_phi, medial_ratio, sheet_count, ...), with their properties
+//                        (doc, unit, min, max, default); read when a run starts, seeded from the
+//                        node's `skeleton: { <field>: <value> }` prop, else the defaults. A value
+//                        that does not parse or is out of range is reported in status, and
+//                        nothing runs
+//       busy, stoppable, status, progress, phase, stats.work_ms, pid (published, job_keys.h)
+//       info.points, info.strands (the polylines), info.sheets, info.clusters, info.lines,
+//       info.triangles, warnings (one per line)                        (published; "-" before)
+//       view.strands, view.sheets (1: show that part)                  (followed live)
+//     It draws in two children, "<id>_strands" (lines, green polylines and blue stars) and
+//     "<id>_sheets" (a colour per sheet), and puts the parts on the data channel at
+//     "<node>.skeleton.strands", ".sheets" and ".helix" (cvc::geometry). A new mesh clears them.
+//     View tags: the children are tagged `skeleton` and the node's own surface `surface` (beside
+//     the node's own tags), so a viewport shows the skeleton alone (show: [skeleton]) or the node
+//     without its surface (hide: [surface]).
 //
 //   type: fe_lab -- a volume read like a `volren` node (source: { file } or { sdf }), meshed
 //     with the LBIE mesher (cvc::tetrahedralize, tetrahedralize_interval below, hexahedralize)
@@ -99,7 +118,8 @@
 // heat.steps 1..1e6, modes.index 1..50, source.dim 0..1024, view.slice_axis 0..2.
 //
 // Heavy work runs on one cvc::async_lane per node (deferred, on the render thread, in a wasm build
-// without threads); results are applied by the node's per-frame tick on the render thread.
+// without threads), or as sliced tasks on the app's scheduler (fe_lab's jobs, mesh_lab's
+// skeleton); results are applied by the node's per-frame tick on the render thread.
 
 #ifndef CVC_GL_ARIADNE_MESH_NODES_H
 #define CVC_GL_ARIADNE_MESH_NODES_H

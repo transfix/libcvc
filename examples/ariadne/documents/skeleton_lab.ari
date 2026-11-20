@@ -1,0 +1,103 @@
+# skeleton_lab.ari — the skeleton of a surface, declared in Ariadne: cvc::skeletonize (the
+# VolumeRover Skeletonization port, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §2) on a
+# `mesh_lab` node's vertices.
+#
+# The embedded Stanford bunny is decimated to 4,000 triangles when the document opens and then
+# skeletonized. The strands (green polylines; blue stars for the small planar clusters) and the
+# sheets (a colour per sheet) are drawn inside the see-through surface, in the node's two children
+# `mesh_strands` and `mesh_sheets`. The Skeleton window's view shows the skeleton alone: the
+# children are tagged `skeleton` and the node's own surface `surface`, so `show: [skeleton]` leaves
+# the surface out. The mesh_tools component's Skeleton section sets the parameters and runs it
+# again (a slice at a time on the app's scheduler, so the frame never waits: the bar names the
+# stage and Stop ends it), and shows or hides each part. Its other sections smooth, decimate or
+# load another mesh, which clears the skeleton. No host C++ (docs/ARIADNE.md §5.4).
+#
+# Run from the repository root:
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/skeleton_lab.ari
+
+meta:
+  name: Skeleton lab (Ariadne + cvc::skeletonize)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+# mesh_lab exists only in a libcvc built with CVC_ENABLE_LIBIGL: a build without it refuses the
+# document up front instead of showing an empty scene. (The skeleton itself needs Shewchuk's
+# predicates; without them its status says so.)
+customs:
+  - node: mesh_lab
+    required: true
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/mesh_tools.ari
+
+# Decimate the bunny, then take the skeleton of what is left (the request key runs its commands in
+# order, each after the job before it).
+init: |
+  (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate skeleton")
+
+# The main view opens a little further out than the scene's own bounds, with the bunny in the
+# middle, between the panels: a frame request on the first tick, once.
+on_tick: |
+  (if (!= (state-get "skeleton_lab.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-75 -75 -5 75 75 105")
+             (state-set "skeleton_lab.opened" "1")))
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: mesh_tools
+    pos: [16, 32]
+    size: [380, 760]
+  - window: Skeleton
+    id: skeleton_view
+    pos: [840, 32]
+    size: [550, 420]
+    children:
+      - text: "skeleton"
+        bind: graphics.root.children.mesh.mesh_ops.skeleton.status
+      - text: "warnings"
+        bind: graphics.root.children.mesh.mesh_ops.skeleton.warnings
+      # The skeleton alone: the node's skeleton children, without its surface.
+      - type: viewport
+        view: skeleton
+        show: [skeleton]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        zoom: 0.85
+        width: 530
+        height: 320
+        caption: "drag: orbit   wheel: zoom"
+  - include: stage_lighting
+    pos: [960, 470]
+    size: [420, 160]
+  - include: camera_controls
+    pos: [960, 640]
+    size: [420, 120]
+
+scene:
+  shadows: { enabled: true, resolution: 2048 }   # soft shadows (softness 2), on in every demo
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The mesh: props seed mesh_ops.* (they win over the components' widget defaults), and
+    # `skeleton:` seeds mesh_ops.skeleton.* (cvc::skeleton_params' fields; the rest keep their
+    # defaults).
+    - node: mesh
+      type: mesh_lab
+      source: { file: stanford.bunny }
+      fit: { height: 100, up: y }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9, opacity: 0.3 }
+      target_faces: 4000
+      skeleton: { sheet_count: 2 }
+  lights:
+    - light: studio
+      rig: three_point

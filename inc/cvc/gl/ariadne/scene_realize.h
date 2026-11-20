@@ -166,11 +166,15 @@ struct RealizedScene {
   std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
   // Every realized node, at any depth, with its view tags (`tags:`, §9.5.1): what a viewport
   // widget leaves out when its show: / hide: rule out a node's tags, and what its override:s name
-  // by id or tag. Held weakly, like the tickers.
+  // by id or tag. Held weakly, like the tickers. A node's tags hold for its subtree. A custom node
+  // type may add entries for the parts it makes: a child of its own, or (subtree false) the node's
+  // own props alone, so its children can be in a view its own surface is not (mesh_lab's surface
+  // is tagged `surface`, its skeleton children `skeleton`).
   struct TaggedNode {
     std::string id;
     std::vector<std::string> tags;
     std::weak_ptr<GraphicsNode> node;
+    bool subtree = true; // false: the tags are the node's own props', not its children's
   };
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
@@ -183,6 +187,11 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
+  // Probes a custom node type registers, each true while work the node has started (a request
+  // waiting, a job running, a result not drawn yet) will still change what it draws: a host that
+  // captures a still frame (the golden-image test) steps on until every probe is false. A probe
+  // captures its node weakly, like a tick, and is false once the node is gone.
+  std::vector<std::function<bool()>> settling;
   // The same for a closure that reads the scene's world as this frame left it (the physics stepped
   // and its moving bodies posed: `world`, `physics_binding`) and the frame's clock step. The scene
   // is passed in, not captured, since it moves after realize. Run after the custom_ticks.

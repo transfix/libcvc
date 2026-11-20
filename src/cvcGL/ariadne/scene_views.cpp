@@ -403,8 +403,8 @@ bool has_any(const std::vector<std::string> &tags, const std::vector<std::string
 }
 
 // Whether a node with `tags` is in a view that shows `show` (every tag when empty) and hides
-// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along;
-// an untagged node is in every view.
+// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along
+// (an entry with subtree false only its own props); an untagged node is in every view.
 bool in_view(const std::vector<std::string> &tags, const std::vector<std::string> &show,
              const std::vector<std::string> &hide) {
   if (tags.empty())
@@ -621,7 +621,8 @@ bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
     std::shared_ptr<GraphicsNode> n = t.node.lock();
     if (!n)
       continue;
-    const cvc::bounding_box bb = n->getCombinedWorldBoundingBox();
+    const cvc::bounding_box bb =
+        t.subtree ? n->getCombinedWorldBoundingBox() : n->getWorldBoundingBox();
     if (bb.isNull())
       continue;
     const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
@@ -1055,7 +1056,7 @@ void SceneViews::update(double dt) {
     std::unordered_set<vtkProp *> out;
     for (const RealizedScene::TaggedNode &t : mainSlot.realized->nodes)
       if (!in_view(t.tags, mainSlot.realized->main_show, mainSlot.realized->main_hide))
-        collect(t.node.lock(), out);
+        collect(t.node.lock(), out, t.subtree);
     main_hidden_.assign(out.begin(), out.end());
     if (!main_start_tag_)
       if (vtkRenderer *r = view_->renderer()) {
@@ -1101,7 +1102,7 @@ void SceneViews::update(double dt) {
     if (rs && (!v.show.empty() || !v.hide.empty()))
       for (const RealizedScene::TaggedNode &t : rs->nodes)
         if (!in_view(t.tags, v.show, v.hide))
-          collect(t.node.lock(), v.hidden);
+          collect(t.node.lock(), v.hidden, t.subtree);
     // A slice view leaves out the volume_slice nodes on the other two axes, with their overlays:
     // seen edge-on, each would only draw a line across its own.
     const bool slice_view = v.start.mode == "slice" && v.camera.empty();
@@ -1130,7 +1131,7 @@ void SceneViews::update(double dt) {
             if (vtkSmartPointer<vtkMatrix4x4> w = n->getWorldTransform())
               std::copy(w->GetData(), w->GetData() + 16, frame.begin());
           std::unordered_set<vtkProp *> props;
-          collect(n, props);
+          collect(n, props, t.subtree);
           for (vtkProp *p : props)
             e.props.emplace(p, frame); // an outer named node's frame wins over one inside it
         }

@@ -376,6 +376,16 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /orthoslicer: 32 planes, slice view down y/.test(l)),
   });
+  // mesh_lab's skeleton (P2): the bunny decimated, then skeletonized a slice at a time on the
+  // single-threaded page; its document prints the counts once the skeleton is drawn (or the error,
+  // which fails the case: a page built without Shewchuk's predicates, say).
+  cases.push({
+    name: 'a mesh_lab skeleton runs on the page (the skeleton lab)',
+    url: `${ORIGIN}/apps/app/?src=skeleton.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)),
+  });
 }
 
 // ari's terminal page, when the package has it: the same set in the FTXUI backend.
