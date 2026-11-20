@@ -314,6 +314,14 @@ bool host_held_here(state_exec::exec_group &group) noexcept;
 // call that cannot park): the caller runs it as soon as it services the queue, while the worker
 // is blocked.
 void run_on_host_waiting(exec_pool &pool, state_exec::exec_group &group, std::function<void()> fn);
+// Stage 2 (S2a): a worker blocked over 10 ms on a waiting body of attached `group` (its
+// run_on_host_waiting's rendezvous): counted in long_host_waits and logged, once a group a minute,
+// while it waits (S2-Q5). Nothing for a group not attached.
+void long_host_wait(state_exec::exec_group &group, double seconds) noexcept;
+// Stage 2 (S2a): when `group` is attached and the calling thread neither pumps nor holds it (nor
+// runs its waiting body), run `fn` under that pool's with_group and return true; else return
+// false, running nothing (exec_group::execute from a host, exec_group.h).
+bool with_attached(state_exec::exec_group &group, const std::function<void()> &fn);
 } // namespace detail
 
 } // namespace cvc
