@@ -312,6 +312,57 @@ def test_po01_raw_call_while_another_thread_pumps():
     assert spins > 100, spins
 
 
+# ── run_all's batch wait (S2-Q6) ───────────────────────────────────────
+
+
+def test_bw01_a_post_is_consumed_before_a_sleeper_wakes():
+    # S2a.8 (S2-Q6): between rounds run_all waits once for the whole batch, until the earliest of
+    # its groups' deadlines or a post to any of them. Pooled Exec 0's program sleeps 20 ms; pooled
+    # Exec 1's starts a Python async function, whose kernel waits for a Python thread to let it
+    # finish, and awaits it. The kernel's completion, a post to group 1, ends the batch wait, so
+    # program 1 resumes, yields a frame, and notes "posted" before program 0's sleep ends and it
+    # notes "sleeper" (an order, not a time). A wait that ignored the post would wake at the
+    # sleeper's deadline and pump both, and program 1's frame would put its note second. The batch
+    # did wait (batch_waits), and no wait timed out with a post pending (batch_wait_timeouts).
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=2, size=2, prefix="bw01pool")
+    nap = 0.2 if SANITIZER else 0.02
+    gate = threading.Event()
+    started = threading.Event()
+    seen = []
+
+    def opener():
+        assert started.wait(WAIT), "program 1 never started its call"
+        gate.set()
+
+    try:
+        pool.register_async_fn("bw01gate", lambda: gate.wait(6 * WAIT) and 7)
+        pool.register_fn("bw01started", lambda: started.set() or True)
+        pool.register_fn("bw01note", lambda x: seen.append(x) or x)
+        t, out = _in_thread("bw01-open", opener)
+        try:
+            t0 = time.monotonic()
+            res = pool.run_all([
+                f'(begin (sleep {nap}) (bw01note "sleeper"))',
+                '(begin (set f (bw01gate-async)) (bw01started) (set v (await f)) (await 0) '
+                '(bw01note "posted") v)',
+            ])
+            took = time.monotonic() - t0
+        finally:
+            gate.set()
+            _join(t)
+        assert "error" not in out, out
+        stats = pool.stats()
+        print(f"  run_all took {took:.4f} s (the sleeper {nap} s); notes {seen}; {stats}")
+        assert res == ["sleeper", "7"], res
+        assert seen == ["posted", "sleeper"], seen
+        assert stats["batch_waits"] >= 1, stats
+        assert stats["batch_wait_timeouts"] == 0, stats
+    finally:
+        gate.set()
+        pool.close()
+
+
 # --- Stage 2a continuous pool (td 8.3, 8.11) ---
 
 
