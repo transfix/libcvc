@@ -6,7 +6,8 @@
 Runs state_word.py's quick suite (the CI lane's checks: the amended protocol finds nothing, each
 finding of the frozen protocol is found without its amendment, each mutation is caught), and
 checks the explorer itself: the workers' symmetry reduction finds what the full exploration
-finds, and a trace replays to its violation. Standard library only; about 15 s.
+finds, a trace replays to its violation, and the liveness check's components and cycles.
+Standard library only; about 30 s.
 """
 
 import os
@@ -48,6 +49,22 @@ class Explorer(unittest.TestCase):
         v = r['violations']['lost-wake']
         self.assertIn('VIOLATION lost-wake', v['trace'][-1])
         self.assertTrue(any('stores 0' in line for line in v['trace']))
+
+    def test_sccs(self):
+        graph = {1: [2], 2: [3], 3: [1, 4], 4: [5], 5: [4], 6: [6], 7: []}
+        comps = sorted(sorted(c) for c in sw.sccs(list(graph), graph.__getitem__))
+        self.assertEqual(comps, [[1, 2, 3], [4, 5], [6], [7]])
+
+    def test_a_starved_host_is_shown_by_a_cycle(self):
+        # P's hold handoff alone: a group made idle and woken at once by its timer keeps a
+        # with_group waiting (handoff-idle cures it)
+        actors = dict(posters=0, workers=1, bodies=0, teardown=0)
+        opts = dict(pre=1, repop=1, live=1)
+        r = sw.explore(sw.make_config(actors, opts, sw.BUT('handoff-idle')))
+        v = r['violations']['host-starved']
+        self.assertIn('repeats for ever', v['trace'][-1])
+        self.assertTrue(any('the deadline falls due' in line for line in v['trace']))
+        self.assertEqual(sw.explore(sw.make_config(actors, opts, 'all'))['violations'], {})
 
     def test_the_frozen_host_release_loses_a_submit(self):
         # finding 1 (README.md, host-wake): a with_group that submits to an idle group is never
