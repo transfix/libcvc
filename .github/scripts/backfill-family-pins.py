@@ -15,12 +15,15 @@ whose required_deps name one of them without a version, this pins that edge to t
 upstream version (`==<X.Y.Z>`, any +cvc.N), which is the release it was built with. It uses the
 registry's admin endpoint `POST /v1/admin/packages/{name}/{version}/backfill-deps`, one variant per
 call, with `expect_required_deps` set to what the row records now, so a row anything else changed
-in the meantime is left alone. Rows that already pin are skipped, so a rerun is a no-op.
+in the meantime is left alone (and reported UNCHANGED). Rows that already pin are skipped, so a
+rerun is a no-op.
 
 Without --apply it only reads the public catalog and prints what it would change, and which rows
 would then have no same-release peer on their platform (they stop resolving, rather than resolving
 to a mix). --apply needs an admin token in CVCPKG_TOKEN and changes published rows, so it is run by
-hand, once, by the registry's owner.
+hand, once, by the registry's owner. It was applied to cvcpkg.org on 2026-11-19 (1,116 rows, from
+3.2 through 4.0.1), so it now finds nothing; it is kept for a row published from a recipe without
+pins.
 
 Usage:
   backfill-family-pins.py [--apply] [--server URL] [--org cvc] [--only-major N] [repo-root]
@@ -140,6 +143,11 @@ def main(argv):
     ap.add_argument("--only-major", type=int, default=None,
                     help="limit to rows of one major (e.g. 4)")
     ap.add_argument("--verbose", action="store_true", help="list every row it would change")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="with --apply, write only the first N rows (a canary)")
+    ap.add_argument("--save", default=None,
+                    help="write the planned changes (each row's key, old and new required_deps) "
+                         "to this JSON file, from which they can be reverted")
     ap.add_argument("root", nargs="?", default=str(Path(__file__).resolve().parents[2]))
     args = ap.parse_args(argv)
     server = args.server.rstrip("/")
@@ -164,6 +172,14 @@ def main(argv):
     if len(lost) > 50:
         print(f"  ... and {len(lost) - 50} more")
 
+    if args.save:
+        keys = ("name", "version", "platform", "arch", "build_type", "link")
+        rows = [{**{k: b.get(k) for k in keys}, "org": args.org,
+                 "old_required_deps": b.get("required_deps") or [], "new_required_deps": new}
+                for b, new in changes]
+        Path(args.save).write_text(json.dumps(rows, indent=1) + "\n", encoding="utf-8")
+        print(f"saved {len(rows)} planned change(s) to {args.save}")
+
     if not args.apply:
         print("dry run: nothing written (--apply writes the pins with an admin CVCPKG_TOKEN)")
         return 0
@@ -171,7 +187,10 @@ def main(argv):
     if not token:
         print("--apply needs an admin token in CVCPKG_TOKEN")
         return 1
+    if args.limit is not None:
+        changes = changes[:args.limit]
     done = 0
+    unchanged = 0
     failed = 0
     for b, new in changes:
         try:
@@ -180,11 +199,18 @@ def main(argv):
             print(f"FAILED {label(b)}: {exc}")
             failed += 1
             continue
+        # The server compares the row's stored required_deps with expect_required_deps as text
+        # and writes nothing when they differ (the row changed since the catalog was read, or
+        # it is stored in another form), answering count.required_deps == 0.
+        if (result.get("count") or {}).get("required_deps") != 1:
+            print(f"UNCHANGED {label(b)}: {result}")
+            unchanged += 1
+            continue
         done += 1
         if args.verbose:
             print(f"  {label(b)}: {result}")
-    print(f"pinned {done} row(s), {failed} failed")
-    return 1 if failed else 0
+    print(f"pinned {done} row(s), {unchanged} left as they were, {failed} failed")
+    return 1 if failed or unchanged else 0
 
 
 if __name__ == "__main__":
