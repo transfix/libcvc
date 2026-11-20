@@ -24,25 +24,28 @@
 namespace cvc {
 
 // ----------------
-// The simulation tick (WORLD-CLOCK-SYNC-ROADMAP, "One tick")
+// The simulation tick (WORLD-CLOCK-SYNC-ROADMAP, "One tick"; ARIADNE_WORLDS.md section 18.1)
 // ----------------
-// One tick for every simulation host and trainer: the navigator's step and the control period,
-// one command per agent per tick. It is configurable everywhere (gym_options::tick,
-// WorldVehicles::set_tick, pycvc_gl.cars' tick), and everything uses the same default:
+// One clock for every simulation host and trainer, the holon's: 120 Hz quanta, and physics steps
+// one a quantum. The navigator's step and the control period, one command per agent per tick, is a
+// whole number of them. It is configurable everywhere (gym_options::tick, WorldVehicles::set_tick,
+// pycvc_gl.cars' tick), and everything uses the same default:
 //
-//   kSimTick      0.06 s: the navigator's trained step (veh.dt), which every shipped policy was
-//                 trained at;
-//   kSimQuantum   0.01 s: the suite quantum the simulation hosts' clock runs at, which divides a
-//                 tick (6), a 100 Hz physics step (1) and the 0.05 s and 0.1 s rollouts;
-//   kSimCatchup   0.25 s: the world time a real-time frame may catch up at 1x. A stalled frame's
-//                 time beyond it is dropped and reported (world_clock::step_result::dropped_steps,
-//                 sim.dropped), never run late.
+//   kSimQuantum      1/120 s: the quantum every host's clock runs at (a holon's, a scene's, the
+//                    gym's), and a physics step;
+//   kSimTickQuanta   7: the navigator's tick in quanta;
+//   kSimTick         7/120 s (0.0583 s): the navigator's tick, the nearest whole tick to the 0.06 s
+//                    the shipped policies were trained at (owner, 2026-11-19: "7 quanta");
+//   kSimCatchup      0.25 s: the world time a real-time frame may catch up at 1x. A stalled frame's
+//                    time beyond it is dropped and reported (world_clock::step_result::
+//                    dropped_steps, sim.dropped), never run late.
 //
 // Real time ticks against world time: the host's world_clock advances by wall time x speed in
 // whole quanta (sim_clock_config), and each simulation follows it with a clock_follower, so a
 // frame runs exactly the ticks that world time has passed.
-inline constexpr double kSimTick = 0.06;
-inline constexpr double kSimQuantum = 0.01;
+inline constexpr double kSimQuantum = 1.0 / 120.0;
+inline constexpr int kSimTickQuanta = 7;
+inline constexpr double kSimTick = kSimTickQuanta * kSimQuantum;
 inline constexpr double kSimCatchup = 0.25;
 
 // The whole number of `step`s in `span` (both seconds). Throws std::invalid_argument when `span`
@@ -69,14 +72,13 @@ inline world_clock::config sim_clock_config(double scale = 1.0) {
   return c;
 }
 
-// Put `clock` on sim_clock_config, keeping its speed and mode, unless it already runs at the suite
-// quantum or has ticked (a quantum changes what every tick means, so a running clock is left as
-// it is). True when it is at the suite quantum afterwards.
+// Put `clock` on sim_clock_config (the quantum and the catch-up), keeping its speed, unless it has
+// ticked (a quantum changes what every tick means, so a running clock is left as it is). True when
+// it is at the suite quantum afterwards.
 inline bool adopt_sim_clock(world_clock &clock) {
-  if (std::fabs(clock.fixed_dt() - kSimQuantum) < 1e-12)
-    return true;
+  const bool at_quantum = std::fabs(clock.fixed_dt() - kSimQuantum) < 1e-12;
   if (clock.tick() != 0)
-    return false;
+    return at_quantum;
   clock.configure(sim_clock_config(clock.current_config().scale));
   return true;
 }

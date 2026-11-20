@@ -17,6 +17,7 @@ bindings.
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -81,7 +82,7 @@ check("nav.vehicle.vmax" in head["settings"], "the settings")
 check(pycvc.nav_run_log_ticks(log) == 120, "a tick a frame, headless")
 a = pycvc.nav_run_log_arrays(log)
 legs = pycvc.nav_run_log_legs(log)
-R = round(3.0 / C.DT)  # the retarget's tick: 3 s on the sim tick
+R = math.ceil(3.0 / C.DT - 1e-9)  # the retarget's tick: the first at or past 3 s on the sim tick
 check([g["tick"] for g in legs] == [0, R], f"a leg from 3 s: {[g['tick'] for g in legs]}")
 check(np.all(a["goal_x"][R] == a["goal_x"][R, 0]), "every arm's goals moved on the same tick")
 check(np.array_equal(a["x"][:, 1], a["x"][:, 2]), "the same policy twice: the same run")

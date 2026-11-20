@@ -932,13 +932,21 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
 
 - **One quantum, 1/120 s,** for every host and trainer: holons, scene worlds with or without
   vehicles, the gym, `pycvc_gl.cars` and the trainers. `kSimQuantum` becomes 1/120 s and
-  `SceneWorld::use_vehicle_clock` goes, since every scene is on the same clock.
+  `SceneWorld::use_vehicle_clock` stays only for the real-time catch-up. A host on the clock
+  builds its plant world at the quantum (the cars template, the swarm); `world_config`'s own
+  0.01 s default stays, where the determinism goldens and the trainers' 0.06 s run.
 - **The navigator's tick is 7 quanta, 0.0583 s** (owner, 2026-11-19: "7 quanta"), the one default
   (`kSimTick`), still configurable. 1/120 s divides neither the old 0.06 s tick nor the 0.01 s
   quantum; 7 quanta is the nearest whole tick, 3% shorter than the 0.06 s the GRL-SNAM networks
   were trained at. The tick is held as a count of quanta, so no host ever rounds it.
 - **Trained policies are checked at the new tick** before anything depends on them, and
-  retrained at it if they lose ground.
+  retrained at it if they lose ground. **Checked (OW1):** on Jolt RoboRacers through the city,
+  the same 24 s at 0.06 s and at 7/120 s, 20 seeds of 48 agents, the shipped weights reach
+  0.519 and 0.522 (+0.003, SE 0.014) and the untrained default 0.522 and 0.548 (+0.026, SE
+  0.011); at 0.05 s, 0.515 and 0.501
+  (`NavPlantConvergence.PoliciesHoldTheirReachAtTheSimulationTick`, `CVC_NAV_TICK_AB=1`). No
+  retraining. The trainers' own defaults (`training_scene::dt`, the city story's 0.06 s, which
+  GRL-SNAM's Python stories mirror) move with GRL-SNAM's hosts.
 - **Not changed:** the 50 Hz drift-tooling protocol (`plant_log_scene`, `cvc plant-log`), which
   the plant fits were measured at.
 
@@ -1017,7 +1025,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | Phase | What | Size |
 |---|---|---|
 | OW0 | This section. | S |
-| OW1 | **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it. | M |
+| OW1 | **Built** (2026-11-19). **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it (§18.1: they hold). | M |
 | OW2 | **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |

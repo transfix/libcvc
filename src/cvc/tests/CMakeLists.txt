@@ -2878,6 +2878,8 @@ target_compile_features(nav_yield_test PRIVATE cxx_std_17)
 if(EXISTS "${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
   target_compile_definitions(nav_test PRIVATE
     CVC_NAV_SHIPPED_WEIGHTS="${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
+  target_compile_definitions(nav_plant_test PRIVATE
+    CVC_NAV_SHIPPED_WEIGHTS="${PROJECT_SOURCE_DIR}/share/cvc/nav/coef_mlp.cvcnav")
 endif()
 # Enable the CUDA parity tests (device-resident sim_world + CUDA trainer) when built.
 if(CVC_ENABLE_CUDA)
