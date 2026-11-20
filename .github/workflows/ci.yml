@@ -1046,6 +1046,14 @@ jobs:
             --config release --link shared --no-fallback-to-source
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+          # ari's web build links -sJSPI (JX2), and emsdk's own node (22.16, V8 12.4) has no
+          # WebAssembly.Suspending. Node has JSPI on by default from 24.20; cvcpkg's nodejs26 runs
+          # ari.js below. The two test binaries link no JSPI and stay on emsdk's node.
+          cvcpkg install nodejs26 --prefix "$RUNNER_TEMP/node26" \
+            --config release --link shared --no-fallback-to-source
+          "$RUNNER_TEMP/node26/bin/node" -p 'typeof WebAssembly.Suspending' | grep -qx function \
+            || { echo "::error::cvcpkg's nodejs26 has no JSPI"; exit 1; }
+          echo "JSPI_NODE=$RUNNER_TEMP/node26/bin/node" >> "$GITHUB_ENV"
 
       - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, ImageMagick and its codecs)
         if: steps.paths.outputs.run == 'true'
@@ -1093,7 +1101,7 @@ jobs:
       - name: Render the baked tour under node
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           "$node" build-wasm/bin/ari.js snapshot --width 100 --height 24 /terminal_tour.ari \
             | tee snapshot.txt
           for want in "Controls" "Status" "Layout" "agents: 64" "Belief: < shared >"; do
@@ -1109,7 +1117,7 @@ jobs:
         # output.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/net_probe_server.py > probe-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1134,7 +1142,7 @@ jobs:
         # the credential; and the device code. No token may reach the output.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
 
       - name: Frames go on while a request is out (L4)
@@ -1144,7 +1152,7 @@ jobs:
         # a request that blocked the frame loop would leave that near 0.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/net_probe_server.py > probe-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1168,7 +1176,7 @@ jobs:
         # send its message; a connect or a wait that blocked the frame loop would leave them near 0.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/ws_probe_server.py > ws-port.txt &
           server=$!
           trap 'kill $server' EXIT
