@@ -171,6 +171,20 @@ struct evaluator_state {
   /// A generator's state (builtin_generator): with-lock refuses to run in it (LockError
   /// "generator"; docs/STATE_EXEC_LOCKS.md 5.3). Not serialized.
   bool in_generator = false;
+  /// The call-site name of the native function this state's latest step applied, for the
+  /// long-step monitor (S2a.7, S2-Q11), or null when that step applied none (step() clears it
+  /// first). It is the call's head symbol (`+` in `(+ 1 2)`, `f` in `(f x)`); "native" for a
+  /// function a deep-data job called at the evaluator's level (collections.map's, where no symbol
+  /// is at hand); "with-lock" for a lock wait; "super" for a native method `super` called. It
+  /// points at the symbol's own characters, with no allocation or copy, while something besides
+  /// the call's frame holds its form (the program, a closure's body, an enclosing form), so they
+  /// outlive the step. A form only its frame holds (a macro's expansion, an eval'd list) goes when
+  /// the frame pops, and a step that raised pops frames as it unwinds: then the name is copied to
+  /// native_site_copy and points there. Valid until the state's next step, or until the state is
+  /// copied or moved. Not serialized.
+  const char *native_site = nullptr;
+  /// native_site's copy of a name the step's frames may free (above).
+  std::string native_site_copy;
 };
 
 /// Whether a frame of `st` waits on deep-data work: any work but a heap measurement, which waits
@@ -450,9 +464,10 @@ private:
   // A for loop over a DSL generator: push the call that advances it as a job.
   void advance_generator(evaluator_state &state, eval_frame &frame);
   // Apply native `fn` to `args` as the top frame's call: its value pops the frame, or, if it
-  // left deep-data work (a job, or a DSL function to call), the frame waits for that.
+  // left deep-data work (a job, or a DSL function to call), the frame waits for that. `site` is
+  // the call's name for evaluator_state::native_site (alive for the step).
   void apply_native(evaluator_state &state, eval_frame &frame, const native_fn &fn,
-                    std::span<const value_t> args);
+                    std::span<const value_t> args, const char *site);
   void call_closure(evaluator_state &state, eval_frame &frame, const closure_ptr &cls,
                     const std::vector<value_t> &args);
   // Push the frame that evaluates `cls`'s body in `local` (its parameters already bound).

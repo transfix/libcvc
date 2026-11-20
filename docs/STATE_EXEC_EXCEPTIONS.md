@@ -455,6 +455,14 @@ The cost is that enough slow requests in flight at once can delay other async ke
 thread frees. If that shows up in practice, the fix is a cap on how many blocking kernels run at
 once, in the same pool (a registration option), or a larger pool. A second pool isn't needed.
 
+That holds while every execution group is pumped on its host's thread. Once the app's exec pool
+has workers (`state_exec.threads` above 0), the background pool splits in two (settled question
+4; `docs/STATE_EXEC_THREADED.md` 4.9):
+- `background_cpu`, sized to the cores the exec workers leave (at least 1), runs every kernel
+  but an I/O call's;
+- the background task pool, now `background_io`, keeps its size and runs I/O calls' kernels
+  (`async_options::io`) and `compute_async`'s jobs.
+
 Other places a kernel can run:
 - **A named `async_lane`:** for work that must stay on one thread.
 - **No executor** (the sync scheduler, a bare evaluator, a unit test's inline executor): the
@@ -1008,16 +1016,23 @@ was added on 2026-10-19 (6):
      The two schedulers should agree.
    - C++ that wants an exception can call `evaluate`, which throws `dsl_exception`, or read
      `get_exit_exception`.
-4. **There's no separate I/O pool** (3.5).
-   - Async kernels run on the app's background task pool, which is already separate from the
-     fork-join compute pool frames use, bounded, and prioritized.
-   - A blocking request only takes a background thread out of the rotation; the compute pool
-     never sees it.
-   - If slow requests are found to starve other kernels, a cap on concurrent blocking kernels
-     in that pool comes first.
-   - Superseded from Stage 2 of `docs/STATE_EXEC_THREADED.md` (its Q9, decided 2026-10-26). Once
-     execution groups run on worker threads and compete with kernels for cores, the pool splits
-     into `background_cpu` and `background_io`. Until then this answer stands.
+4. **A separate I/O pool once execution groups have workers** (3.5). The first answer was
+   "there's no separate I/O pool". `docs/STATE_EXEC_THREADED.md` reversed it from its Stage 2 on
+   (its Q9, decided 2026-10-26; built in S2a.6, S2-Q11).
+   - The first answer: async kernels run on the app's background task pool, which is already
+     separate from the fork-join compute pool frames use, bounded, and prioritized. A blocking
+     request only takes a background thread out of the rotation; the compute pool never sees it.
+   - Why it changed: once execution groups run on worker threads (`state_exec.threads` above 0),
+     they compete with kernels for the cores. CPU-bound kernels should fill only the cores the
+     exec workers leave, and blocking kernels shouldn't wait behind them.
+   - What is built (`app::trySubmitKernel`): from the moment the app's exec pool has workers,
+     - `background_cpu`, max(1, cores - exec workers) persistent workers of its own, runs every
+       kernel but an I/O call's (`executor::background` keeps meaning this one);
+     - `background_io` is the background task pool itself, its size and its other tasks
+       unchanged. It runs I/O calls' kernels (`async_options::io`, set by the net and room
+       calls) and `compute_async`'s blocking jobs.
+   - At `state_exec.threads` 0, and before an exec pool with workers exists, there is one pool,
+     as before: the same workers and the same order.
 5. **`await-all` waits for every future, then raises the first failure in list order** (3.3).
    It doesn't cancel the rest or raise at the first failure in time.
    - Why: the error reported is then the same however the timing falls, which keeps programs
