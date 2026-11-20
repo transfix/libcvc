@@ -7197,7 +7197,8 @@ TEST(AriadneOneWorld, GettingInIsAskedForInTheRoomAndRuledOn) {
   w->sync(&warnings);
   const std::uint64_t far_off = spawn_kind(v, "humvee", -40.0, 0.0);
   const std::uint64_t truck = spawn_kind(v, "truck", 4.0, 8.0);
-  const std::uint64_t close = spawn_kind(v, "humvee", 6.5, 0.0); // its rear axle: the box from ~6.1 m
+  const std::uint64_t close =
+      spawn_kind(v, "humvee", 6.5, 0.0); // its rear axle: the box from ~6.1 m
   holon h(holon_role::server, one_world_holon());
   std::string why;
   ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;

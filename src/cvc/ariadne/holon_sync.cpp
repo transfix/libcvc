@@ -270,8 +270,7 @@ void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::st
     const std::string v = ask->value();
     const std::size_t colon = v.find(':');
     char *end = nullptr;
-    const std::uint64_t seq =
-        colon == std::string::npos ? 0 : std::strtoull(v.c_str(), &end, 10);
+    const std::uint64_t seq = colon == std::string::npos ? 0 : std::strtoull(v.c_str(), &end, 10);
     if (seq != 0 && end == v.c_str() + colon && read_drive_status(app, room, pid).seq != seq) {
       const std::uint64_t entity = std::strtoull(v.c_str() + colon + 1, nullptr, 10);
       std::string why;

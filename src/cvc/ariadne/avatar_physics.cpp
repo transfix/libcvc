@@ -272,7 +272,8 @@ void avatar_world::jump(avatar &a, ph::body_state &s, const avatar_intent &in) c
     return;
   const double vz = std::max(0.0, s.linear_velocity.z);
   if (_energy.enabled) {
-    const bool stopped = _energy.empty == avatar_energy_policy::when_empty::stop && a.energy.exhausted;
+    const bool stopped =
+        _energy.empty == avatar_energy_policy::when_empty::stop && a.energy.exhausted;
     const double cost = 0.5 * a.mass * (vj * vj - vz * vz);
     if (stopped || cost > a.energy.reserve)
       return;

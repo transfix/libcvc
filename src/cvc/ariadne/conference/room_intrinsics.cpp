@@ -746,10 +746,10 @@ void register_room_intrinsics(cvc::app &app) {
           const double entity = get_num(&args[1]);
           if (!(entity >= 0.0) || entity != std::floor(entity))
             return err("room-drive: ENTITY must be an entity id, or 0 to get out");
-          const std::uint64_t seq = cvc::ariadne::request_drive(
-              app, rh->room_id, rh->self_pid, static_cast<std::uint64_t>(entity));
-          return se::make_dict({{"ok", se::value_t(true)},
-                                {"seq", se::value_t(static_cast<double>(seq))}});
+          const std::uint64_t seq = cvc::ariadne::request_drive(app, rh->room_id, rh->self_pid,
+                                                                static_cast<std::uint64_t>(entity));
+          return se::make_dict(
+              {{"ok", se::value_t(true)}, {"seq", se::value_t(static_cast<double>(seq))}});
         });
 
     // (room-driving HANDLE) -> { driving N seq N ok #t/#f why "..." }: the entity the caller

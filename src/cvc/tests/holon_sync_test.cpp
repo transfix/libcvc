@@ -19,9 +19,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <set>
-#include <string>
-#include <vector>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_avatar.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
@@ -39,6 +36,9 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
+#include <set>
+#include <string>
+#include <vector>
 
 using cvc::ariadne::avatar_intent;
 using cvc::ariadne::holon;

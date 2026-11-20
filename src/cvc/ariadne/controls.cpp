@@ -118,8 +118,8 @@ void control_resolver::update(const held_fn &held, double dt) {
     const double ramp = a.binding.ramp;
     if (ramp > 0.0) {
       const double step = dt / ramp;
-      l.value = l.value < target ? std::min(target, l.value + step)
-                                 : std::max(target, l.value - step);
+      l.value =
+          l.value < target ? std::min(target, l.value + step) : std::max(target, l.value - step);
     } else {
       l.value = target;
     }

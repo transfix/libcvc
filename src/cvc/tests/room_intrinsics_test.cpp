@@ -337,10 +337,10 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   using op = cvc::state_mutation_op;
 
   // What clients write (room_join, write_intent, room_net, room_publish).
-  for (const char *key : {"presence.joined", "intent.move.x", "intent.yaw", "intent.tick",
-                          "intent.throttle", "intent.jump", "drive", "net.rtt_ms", "net.in_kbps",
-                          "voice.talking", "video.off", "audio.opus", "streams.camera.endpoint",
-                          "streams.camera.token"})
+  for (const char *key :
+       {"presence.joined", "intent.move.x", "intent.yaw", "intent.tick", "intent.throttle",
+        "intent.jump", "drive", "net.rtt_ms", "net.in_kbps", "voice.talking", "video.off",
+        "audio.opus", "streams.camera.endpoint", "streams.camera.token"})
     EXPECT_TRUE(gate.may_write("alice", alice + "." + key, op::set_value)) << key;
   EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::touch));
   EXPECT_TRUE(gate.may_write("alice", alice + ".avatar", op::set_data));

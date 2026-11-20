@@ -455,8 +455,8 @@ void holon::scene_step() {
       // force now (a stamped one due by the frame's steps takes over at the next frame).
       if (p.drives != 0) {
         const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
-        const double speed = p.ride.linear_velocity.x * std::cos(yaw) +
-                             p.ride.linear_velocity.y * std::sin(yaw);
+        const double speed =
+            p.ride.linear_velocity.x * std::cos(yaw) + p.ride.linear_velocity.y * std::sin(yaw);
         const drive_cmd c = drive_command(p.intent, p.envelope, speed, v->tick_seconds());
         entity_intent in;
         in.command = entity_intent::mode::replace;
