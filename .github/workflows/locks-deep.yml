@@ -4,8 +4,10 @@ name: state_exec locks (deep)
 # their regular sizes on every PR. This workflow runs the sizes too slow for that:
 #   - the C++ model check at bounds 4 and 5, and the '+c' variants (coalescing on) at bound 3;
 #   - the `LocksModelStress` and `LocksStress` suites, which ci.yml's STRESS_REGEX keeps off PRs;
-#   - the Linux record of the `lock.cross_thread` bench scenario (information only, no gate).
-# It uses a Release Linux build of the lock test targets (and state_exec_bench) only.
+#   - the Linux record of the `lock.cross_thread` bench scenario (information only, no gate);
+#   - the deep suite of the continuous pool's state-word model (threaded execution's S2a, PL-1).
+# It uses a Release Linux build of the lock test targets (and state_exec_bench) only; the model,
+# Python's standard library only, needs no build.
 #
 # The runs are split into lanes, one job each, so that no job comes near the hosted runner's
 # 6 hours. The times below were measured serially on the locks work's Windows build box; a hosted
@@ -235,3 +237,21 @@ jobs:
           name: lock-cross-thread-linux
           path: lock-cross-thread-linux.jsonl
           if-no-files-found: ignore
+
+  # The continuous pool's group state-word model (tools/locks_model/state_word.py; S2.md S2-Q15,
+  # td 8.3's PL-1): its deep suite, every interleaving of the posters, the workers, the timer, the
+  # hosts and the attaching thread at its deep bounds (41 checks, about 12 minutes on the lead's
+  # Windows box, the largest 4.8 million states, 2.5 GB). The quick suite runs in CTest
+  # (state_exec_state_word_model_test). No C++ build; a ref without the model stops at once.
+  state-word-model:
+    name: locks deep / state-word model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The state-word model's deep suite
+        shell: bash
+        run: |
+          [ -f tools/locks_model/state_word.py ] || { echo "no state-word model on this ref"; exit 0; }
+          python3 -I tools/locks_model/state_word.py --suite deep

@@ -23,6 +23,7 @@
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/task.h>
 #include <cvc/state/state_exec/types.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -126,6 +127,57 @@ public:
   };
   /// Any thread (one relaxed load): whether a thread other than the caller holds the pump owner.
   bool pumped_elsewhere() const noexcept;
+
+  // --- Stage 2: the continuous pool (S2a; docs/STATE_EXEC_THREADED.md 4.4, 4.9) ---
+
+  /// Install `fn(ctx)` as the notifier of this scheduler's wakeup, which its lock home's port
+  /// shares (detail::wakeup::set_notifier, S2-Q2). While one is installed, every post calls it,
+  /// whatever idle_waiting_ says: post_message, post_async_completion and post_control under the
+  /// ingress mutex, a lock post under the port's mu_ (lock_port::post, unchanged); and
+  /// wait_for_work() must not be called (asserted). nullptr clears it. Any thread; returns once no
+  /// call of the old notifier runs. exec_pool::attach installs one and detach clears it;
+  /// ExecPool.run_all installs one per pooled group for its batch (S2-Q6).
+  void set_wake_notifier(detail::wake_notifier fn, void *ctx);
+  /// Whether a notifier is installed (any thread).
+  bool has_wake_notifier() const noexcept;
+
+  /// What the last run loop left (S2-Q4), computed at its end on the pump owner's thread while a
+  /// wake notifier is installed (a pool attached the group, or a host batch waits on it:
+  /// ExecPool.run_all, the bench's fork-join async point), the only readers; otherwise it is left
+  /// as it was, so a scheduler with no notifier runs master's loop exactly (R2b S-m2: the timer
+  /// peek pops stale heap entries). exec_group::pump copies it into pump_result. Pump owner only.
+  struct run_report {
+    /// A process was ready when the run loop ended (its step or time budget ran out first).
+    bool runnable = false;
+    /// The earliest time the scheduler has work of its own that no post announces: its earliest
+    /// timer (a sleeper's wake, a timed receive's deadline, a lock wait's deadline), an async
+    /// call's registration timeout or next charge (the 1 ms beat of a process with a step or time
+    /// limit), its cycle collection falling due, and now + 1 ms while a process waits for the
+    /// next frame (yield_frame, which a pump's wake_awaiting readies); time_point::max(): none.
+    std::chrono::steady_clock::time_point next_deadline =
+        std::chrono::steady_clock::time_point::max();
+    /// next_deadline is a sleeper's or a timed wait's, to be kept precisely (detail::wakeup's
+    /// precise wait, S2-Q3); every other deadline is coarse.
+    bool precise = false;
+    /// process_table::best_runnable() when the run loop ended.
+    std::optional<int> best_runnable;
+    /// A process waits for the next frame (yield_frame) when the run loop ended.
+    bool awaiting_frame = false;
+  };
+  const run_report &last_run_report() const noexcept { return run_report_; }
+
+  /// The long-step monitor (S2a.7, S2-Q11): a step that takes longer than the threshold (at
+  /// slice_steps above 1, a run's 16-step window), one that throws included, is counted
+  /// (long_steps()) and reported to the sink with the call-site name of the native it ended in
+  /// ("native" on the higher-order path, "(no native)" when it applied none), at most once per name
+  /// per minute. The threshold is the tree's state_exec.long_step_ms when it is set, else the
+  /// default set here; 0: off. A pool with workers gives the groups it pumps a default of 1 ms.
+  /// With no sink, caught steps are only counted. Pump owner, or before the first pump.
+  using long_step_sink = std::function<void(const std::string &native, double seconds)>;
+  void set_long_step_sink(long_step_sink sink);
+  void set_long_step_default(double seconds);
+  /// The steps (or windows) the monitor caught since the scheduler was made (any thread).
+  std::uint64_t long_steps() const noexcept { return long_steps_.load(std::memory_order_relaxed); }
 
   // --- Process submission ---
 
@@ -681,6 +733,26 @@ private:
   random_stream *random_ = nullptr;
   std::shared_ptr<std::atomic<int>> pid_source_;
   std::atomic<std::thread::id> pump_owner_{};
+
+  /// Stage 2 (S2a): the last run loop's report (last_run_report), and the long-step monitor's
+  /// sink, default threshold and count.
+  run_report run_report_;
+  long_step_sink long_step_sink_;
+  double long_step_default_ = 0.0;
+  std::atomic<std::uint64_t> long_steps_{0};
+  /// CVC_EXEC_FUZZ's yields at the ingress posts (S2-Q15), read as the scheduler is made; null
+  /// when it is off.
+  std::unique_ptr<detail::lock_fuzz> ingress_fuzz_;
+  /// The long-step monitor (S2a.7): the threshold in force in seconds (0: off), the tree's
+  /// state_exec.long_step_ms in seconds while it is set (else the default applies), when the step
+  /// or the run's window being timed began, and when each native was last reported.
+  double long_step_seconds_ = 0.0;
+  std::optional<double> long_step_tree_;
+  clock::time_point long_window_{};
+  std::unordered_map<std::string, clock::time_point> long_step_reported_;
+  /// The step or window that began at long_window_ ends `now`: counted and reported if it was
+  /// long (async_scheduler.cpp); the next one begins `now`.
+  void time_long_step(const process &proc, clock::time_point now) noexcept;
 };
 
 } // namespace cvc::state_exec

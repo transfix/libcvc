@@ -187,6 +187,14 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
   if (m.opts.slice_seconds)
     m.sched->set_slice_seconds(*m.opts.slice_seconds);
   if (app) {
+    // The long-step monitor's line (S2a.7, S2-Q11), as group 0's (app.cpp): through the app at
+    // level 2, inside the pump, interruption held off. Off unless a threshold is set (the tree's
+    // state_exec.long_step_ms, or the default a pool with workers gives the groups it pumps).
+    m.sched->set_long_step_sink([app, name = m.opts.name](const std::string &native, double s) {
+      char ms[32];
+      std::snprintf(ms, sizeof ms, "%.1f", s * 1e3);
+      note(app, 2, "long step: " + native + " took " + ms + " ms (group '" + name + "')");
+    });
     // Pids no other group or the app scheduler repeats (S1.4).
     m.sched->set_pid_source(app->exec_pid_source());
     // The app's lock manager, in its own mode, as the app scheduler attaches (S1-Q1): with-lock
@@ -221,6 +229,15 @@ exec_group::~exec_group() {
     std::fflush(stderr);
     std::abort();
   }
+  // Nor inside its own with_group, host body or waiting body, on the thread holding it (Stage 2,
+  // the amended transitions in exec_group.h): the caller would go on using it after the teardown
+  // (a waiting body's worker waits for it), and its token would nest. That aborts, in every build.
+  if (cvc::detail::host_held_here(*this)) {
+    std::fputs("exec_group: destroyed from inside its own with_group, host body or waiting body\n",
+               stderr);
+    std::fflush(stderr);
+    std::abort();
+  }
   // Nor while a pump_all holds it (a host body or callback of that call, or another thread): the
   // call would go on using it after the teardown (N3). That aborts, in every build, too.
   if (m.link.call.load(std::memory_order_relaxed) != nullptr) {
@@ -239,7 +256,12 @@ exec_group::~exec_group() {
                what_of(std::current_exception()));
     }
   };
-  // The token, waiting for a pump in progress (no pool holds it outside a pump_all).
+  // An attached group (Stage 2, S2-Q4's order): (1) detaching is set and (2) a pump in progress,
+  // and another thread's with_group or host body, are waited for, servicing this thread's host
+  // queue. A group whose pump failed attached is detaching already. Nothing for one not attached.
+  cvc::detail::detach_begin(*this);
+  // (3) The token: free by now for an attached group; else waiting for a pump in progress (no pool
+  // holds it outside a pump_all).
   std::optional<async_scheduler::pump_owner_scope> token;
   for (;;) {
     try {
@@ -249,12 +271,15 @@ exec_group::~exec_group() {
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
-  // Then, in td 4.2's order: no lock post lands from here on; the test hook (GL-2); the kills,
-  // which settle the processes' calls as cancelled; the host, waiting for its kernels; the
-  // host-call queue's entries, dropped unrun; the reap.
+  // Then, in td 4.2's order: no lock post lands from here on; the test hook (GL-2); (4) the group
+  // leaves its pool (the ready queue, the timer heap, its notifier), so nothing the kills post
+  // reaches the pool; (5) the kills, which settle the processes' calls as cancelled; the host,
+  // waiting for its kernels; the host-call queue's entries (its attaching thread's too), dropped
+  // unrun; the reap.
   step("closing the lock port", [&] { m.sched->close_lock_port(); });
   if (m.opts.teardown_hook_for_test)
     step("the teardown hook", [&] { m.opts.teardown_hook_for_test(*this); });
+  cvc::detail::detach_end(*this);
   step("listing its processes", [&] {
     for (const process_info &p : m.sched->list_processes())
       if (!is_finished(p.status))
@@ -323,6 +348,14 @@ pump_result exec_group::pump(const pump_budget &budget) {
                                               ? std::optional<double>(std::max(0.0, budget.seconds))
                                               : std::nullopt;
     r.steps = s.sync_run_steps(budget.steps, seconds);
+    // What the run loop left (S2-Q4), read here under the token: a worker's release reads this,
+    // never the scheduler.
+    const async_scheduler::run_report &left = s.last_run_report();
+    r.runnable = left.runnable;
+    r.next_deadline = left.next_deadline;
+    r.deadline_precise = left.precise;
+    r.best_runnable = left.best_runnable;
+    r.awaiting_frame = left.awaiting_frame;
   } catch (...) {
     if (m.callback_threw) {
       // An on_complete callback run inline threw: the host's exception, as today.
@@ -348,7 +381,8 @@ bool exec_group::wants_pump() const {
 namespace {
 
 // on_complete for a process of `m`'s group (S1.6, td 4.9): queued for the pump_all's caller when a
-// threaded pump_all pumps the group (on a worker or on its caller), else run inline, as today.
+// threaded pump_all pumps the group (on a worker or on its caller), or for its attaching thread's
+// host queue when a worker pumps it attached (Stage 2, S2-Q5), else run inline, as today.
 std::function<void(value_t)> group_on_complete(exec_group *group, bool *threw,
                                                std::function<void(value_t)> cb) {
   return [group, threw, cb = std::move(cb)](value_t result) {
@@ -365,16 +399,30 @@ std::function<void(value_t)> group_on_complete(exec_group *group, bool *threw,
 
 } // namespace
 
+namespace {
+
+// A submission: under the pool's with_group when the group is attached and the calling thread
+// neither pumps nor holds it (Stage 2: it waits for a pump in progress, and the group is woken
+// after, since a submission posts nothing), else here.
+int submitted(exec_group &g, const std::function<int()> &submit) {
+  int pid = 0;
+  if (!cvc::detail::with_attached(g, [&] { pid = submit(); }))
+    pid = submit();
+  return pid;
+}
+
+} // namespace
+
 int exec_group::execute(const std::string &script, const execute_options &opts) {
   impl &m = *impl_;
   if (!opts.on_complete && (!opts.owner.empty() || m.opts.owner.empty()))
-    return m.sched->execute(script, opts);
+    return submitted(*this, [&] { return m.sched->execute(script, opts); });
   execute_options o = opts;
   if (o.owner.empty())
     o.owner = m.opts.owner; // the group's owner by default (options::owner)
   if (o.on_complete)
     o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
-  return m.sched->execute(script, o);
+  return submitted(*this, [&] { return m.sched->execute(script, o); });
 }
 
 int exec_group::execute(const value_t &expr, const execute_options &opts) {
@@ -385,13 +433,13 @@ int exec_group::execute(const value_t &expr, const execute_options &opts) {
   // is what keeps two groups, and the host's AST, from sharing one.
   const value_t given = copy_lists_and_dicts(expr);
   if (!opts.on_complete && (!opts.owner.empty() || m.opts.owner.empty()))
-    return m.sched->execute(given, opts);
+    return submitted(*this, [&] { return m.sched->execute(given, opts); });
   execute_options o = opts;
   if (o.owner.empty())
     o.owner = m.opts.owner;
   if (o.on_complete)
     o.on_complete = group_on_complete(this, &m.callback_threw, std::move(o.on_complete));
-  return m.sched->execute(given, o);
+  return submitted(*this, [&] { return m.sched->execute(given, o); });
 }
 
 namespace {
@@ -417,9 +465,9 @@ struct proxied_body {
 };
 
 // Where the calling thread is a worker of `pool`: park the calling process (whose call runs in
-// `ctx`) on the body, queued for the pump_all's caller, and resume it with the body's value at the
-// group's next pump; at a point that cannot park (a generator body), block this worker until the
-// caller has run it.
+// `ctx`) on the body, queued for the pump_all's caller (an attached group's attaching thread,
+// Stage 2), and resume it with the body's value at the group's next pump; at a point that cannot
+// park (a generator body), block this worker until that thread has run it.
 value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &group,
                         const std::string &name, proxied_body body) {
   if (can_await(ctx)) {
@@ -452,7 +500,15 @@ value_t proxy_on_worker(exec_context *ctx, cvc::exec_pool &pool, exec_group &gro
     meet->cv.notify_all();
   });
   std::unique_lock<std::mutex> lock(meet->m);
-  meet->cv.wait(lock, [&] { return meet->done; });
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!meet->cv.wait_for(lock, std::chrono::milliseconds(10), [&] { return meet->done; })) {
+    // Over 10 ms: counted and logged while it waits (S2-Q5, an attached group's), then waited out.
+    lock.unlock();
+    cvc::detail::long_host_wait(
+        group, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    lock.lock();
+    meet->cv.wait(lock, [&] { return meet->done; });
+  }
   if (meet->error)
     std::rethrow_exception(meet->error);
   return std::move(meet->value);

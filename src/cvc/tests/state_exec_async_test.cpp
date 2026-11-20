@@ -1683,6 +1683,537 @@ TEST(AsyncScheduler, KO02_AThrowingKillDoesNotStopTheRest) {
   }
 }
 
+// --- Stage 2a: the wake notifier, the pump's report, the long-step monitor (S2a.1, S2a.3, S2a.7)
+// ---
+
+// The includes the cases below add to the file's own.
+#include <algorithm>
+#include <cstdlib>
+#include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/process_table.h> // detail::wakeup
+#include <limits>
+
+namespace {
+
+// A notifier that counts its calls in the std::atomic<int> it was installed with.
+void count_wakes(void *ctx) noexcept {
+  static_cast<std::atomic<int> *>(ctx)->fetch_add(1, std::memory_order_relaxed);
+}
+
+// A notifier whose call blocks until the case releases it.
+struct blocking_notifier {
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+  std::atomic<bool> returned{false};
+  static void call(void *ctx) noexcept {
+    auto &b = *static_cast<blocking_notifier *>(ctx);
+    b.entered.store(true);
+    while (!b.release.load())
+      std::this_thread::yield();
+    b.returned.store(true);
+  }
+};
+
+} // namespace
+
+// S2a.1 (S2-Q2): with a notifier installed, each post calls it once, though no wait_for_work is in
+// progress (idle_waiting_ unset: before, nothing was signalled): post_message,
+// post_async_completion and post_control under the ingress mutex, and a lock post through the
+// home's port, which shares the scheduler's wakeup. Once it is cleared, a post calls it no more.
+TEST(WakeNotifier, EveryPostCallsIt) {
+  async_scheduler sched;
+  std::atomic<int> wakes{0};
+  sched.set_wake_notifier(&count_wakes, &wakes);
+  ASSERT_TRUE(sched.has_wake_notifier());
+  sched.post_message("wn.a", value_t(int64_t{1}));
+  EXPECT_EQ(wakes.load(), 1) << "post_message";
+  sched.post_async_completion(std::make_shared<async_call>("wn", 0));
+  EXPECT_EQ(wakes.load(), 2) << "post_async_completion";
+  EXPECT_TRUE(sched.post_control(9999, control_cmd{}));
+  EXPECT_EQ(wakes.load(), 3) << "post_control";
+  detail::lock_home *home = sched.locks();
+  ASSERT_NE(home, nullptr);
+  EXPECT_TRUE(home->port()->post(detail::lock_post{}));
+  EXPECT_EQ(wakes.load(), 4) << "a lock post through the port";
+  sched.set_wake_notifier(nullptr, nullptr);
+  EXPECT_FALSE(sched.has_wake_notifier());
+  sched.post_message("wn.a", value_t(int64_t{2}));
+  EXPECT_EQ(wakes.load(), 4) << "a post after the notifier was cleared";
+}
+
+// S2a.1: a notify while a notifier is installed signals nothing, so no wait ends on it; once the
+// notifier is cleared, a notify signals again. (A wait whose deadline has passed returns whether a
+// notification was waiting, and consumes it.)
+TEST(WakeNotifier, ItReplacesTheSignal) {
+  using std::chrono::steady_clock;
+  detail::wakeup w;
+  std::atomic<int> wakes{0};
+  w.set_notifier(&count_wakes, &wakes);
+  w.notify();
+  EXPECT_EQ(wakes.load(), 1);
+  EXPECT_FALSE(w.wait_until(steady_clock::now(), false)) << "a notify with a notifier signalled";
+  w.notify();
+  EXPECT_FALSE(w.wait_until(steady_clock::now() + std::chrono::milliseconds(5), false))
+      << "a notify with a notifier ended a wait";
+  EXPECT_EQ(wakes.load(), 2);
+  w.set_notifier(nullptr, nullptr);
+  EXPECT_FALSE(w.has_notifier());
+  w.notify();
+  EXPECT_EQ(wakes.load(), 2);
+  EXPECT_TRUE(w.wait_until(steady_clock::now(), false)) << "cleared, a notify signals";
+}
+
+// S2a.1: set_notifier(nullptr) returns only once a call of the notifier in progress has returned,
+// so the notifier's ctx may be freed then. The call blocks until the case releases it; the
+// clearing thread is still held meanwhile, and finds the call returned once set_notifier is.
+TEST(WakeNotifier, ClearingWaitsForACallInProgress) {
+  using std::chrono::steady_clock;
+  detail::wakeup w;
+  blocking_notifier b;
+  w.set_notifier(&blocking_notifier::call, &b);
+  std::thread poster([&w] { w.notify(); });
+  const steady_clock::time_point t0 = steady_clock::now();
+  while (!b.entered.load() && steady_clock::now() - t0 < std::chrono::seconds(5))
+    std::this_thread::yield();
+  if (!b.entered.load()) {
+    poster.join();
+    FAIL() << "the notify never called the notifier";
+  }
+  std::atomic<bool> cleared{false};
+  bool returned_when_cleared = false;
+  std::thread clearer([&] {
+    w.set_notifier(nullptr, nullptr);
+    returned_when_cleared = b.returned.load();
+    cleared.store(true);
+  });
+  // A pause, which gives a clearer that does not wait the time to return early.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_FALSE(cleared.load()) << "set_notifier returned while the notifier ran";
+  b.release.store(true);
+  clearer.join();
+  poster.join();
+  EXPECT_TRUE(returned_when_cleared);
+  EXPECT_FALSE(w.has_notifier());
+}
+
+// S2a.1 (S2-Q15): CVC_EXEC_FUZZ, read as a scheduler is made, yields at its ingress posts, between
+// the push and the wake. Posts from four threads at once still each call the notifier once, and
+// each lands.
+TEST(WakeNotifier, FuzzedPostsEachCallItOnce) {
+  struct fuzz_env {
+    explicit fuzz_env(const char *v) { set(v); }
+    ~fuzz_env() { set(nullptr); }
+    static void set(const char *v) {
+#ifdef _WIN32
+      _putenv_s("CVC_EXEC_FUZZ", v ? v : "");
+#else
+      if (v)
+        setenv("CVC_EXEC_FUZZ", v, 1);
+      else
+        unsetenv("CVC_EXEC_FUZZ");
+#endif
+    }
+  };
+  std::unique_ptr<async_scheduler> sched;
+  {
+    const fuzz_env fuzzed("7");
+    sched = std::make_unique<async_scheduler>(); // reads the seed now
+  }
+  std::atomic<int> wakes{0};
+  sched->set_wake_notifier(&count_wakes, &wakes);
+  constexpr int kThreads = 4, kPosts = 200;
+  std::vector<std::thread> posters;
+  for (int t = 0; t < kThreads; ++t)
+    posters.emplace_back([&sched] {
+      for (int i = 0; i < kPosts; ++i)
+        sched->post_message("wn.fuzz", value_t(int64_t{i}));
+    });
+  for (std::thread &t : posters)
+    t.join();
+  EXPECT_EQ(wakes.load(), kThreads * kPosts);
+  sched->set_wake_notifier(nullptr, nullptr);
+  sched->drain_ingress();
+  EXPECT_EQ(sched->total_pending_messages(), static_cast<std::size_t>(kThreads * kPosts));
+}
+
+// S2a.3 (S2-Q4): what a pump left, in its pump_result (async_scheduler::run_report). A report
+// case's world: a group on an app (state_exec.policy `policy` when given), the intrinsics on an
+// environment of the world's, and (hold), an async function on the app's pool whose kernel runs
+// until its call is cancelled (the group's teardown shuts its host down, which cancels it).
+// Pumps are steps-only. No case times anything: each deadline is bounded by clock readings taken
+// around the pump, with no slack. The world installs a wake notifier that does nothing on its
+// group, as a pool's attach would: the report is computed only while one is installed (R2b S-m2).
+namespace {
+
+void ignore_wakes(void *) noexcept {}
+
+struct report_world {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+  std::unique_ptr<exec_group> group;
+
+  explicit report_world(const char *policy = nullptr, bool notified = true) {
+    if (policy)
+      tree("state_exec.policy").value(std::string(policy));
+    exec_group::options opts;
+    opts.name = "s2a3";
+    opts.app = &app;
+    group = std::make_unique<exec_group>(std::move(opts));
+    if (notified)
+      group->sched().set_wake_notifier(&ignore_wakes, nullptr);
+    ictx.sched = &group->sched();
+    ictx.root = &tree;
+    ictx.proc = make_process();
+    register_intrinsics(env, &ictx);
+    register_async_fn(env, group->host(), "hold", [](std::span<const value_t>) -> async_kernel {
+      return [](async_call &call) -> value_t {
+        while (!call.cancelled())
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        throw std::runtime_error("hold: cancelled");
+      };
+    });
+  }
+  report_world(const report_world &) = delete;
+  report_world &operator=(const report_world &) = delete;
+  ~report_world() { env.reset(); } // before the group, as a host lets go
+
+  int submit(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    return group->execute(script, opts);
+  }
+  pump_result pump(std::uint64_t steps = 100000) {
+    return group->pump({steps, std::numeric_limits<double>::infinity()});
+  }
+  std::optional<process_status> status(int pid) const {
+    const auto i = group->sched().get_process_info(pid);
+    return i ? std::optional<process_status>(i->status) : std::nullopt;
+  }
+};
+
+using report_clock = std::chrono::steady_clock;
+constexpr auto kOneMs = std::chrono::milliseconds(1);
+constexpr auto kFiveS = std::chrono::seconds(5);
+
+} // namespace
+
+// A sleeper's wake is the deadline, kept precisely.
+TEST(PumpReport, ASleepersWakeIsAPreciseDeadline) {
+  report_world w;
+  const int pid = w.submit("(begin (sleep 5) 1)");
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r.failed);
+  EXPECT_EQ(w.status(pid), process_status::waiting);
+  EXPECT_FALSE(r.runnable);
+  EXPECT_FALSE(r.best_runnable.has_value());
+  EXPECT_FALSE(r.awaiting_frame);
+  EXPECT_TRUE(r.deadline_precise);
+  EXPECT_GE(r.next_deadline, before + kFiveS - kOneMs);
+  EXPECT_LE(r.next_deadline, after + kFiveS);
+}
+
+// A timed receive's deadline ((await f 5) on the future of a call that runs on) is kept precisely
+// too. Its process has no limit, so its call has no charge beat.
+TEST(PumpReport, ATimedReceivesDeadlineIsPrecise) {
+  report_world w;
+  const int pid = w.submit("(begin (await (hold-async) 5) 1)");
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r.failed);
+  EXPECT_EQ(w.status(pid), process_status::waiting);
+  EXPECT_FALSE(r.runnable);
+  EXPECT_TRUE(r.deadline_precise);
+  EXPECT_GE(r.next_deadline, before + kFiveS - kOneMs);
+  EXPECT_LE(r.next_deadline, after + kFiveS);
+}
+
+// A process waiting for the next frame is a coarse timer at the run's end + 1 ms (S2-Q4), pump
+// after pump, until it ends: then nothing is pending.
+TEST(PumpReport, AFrameWaiterIsACoarseMillisecond) {
+  report_world w;
+  const int pid = w.submit("(begin (await 1) (await 2) 3)");
+  for (int frame = 0; frame < 2; ++frame) {
+    const report_clock::time_point before = report_clock::now();
+    const pump_result r = w.pump();
+    const report_clock::time_point after = report_clock::now();
+    ASSERT_FALSE(r.failed);
+    EXPECT_EQ(w.status(pid), process_status::waiting) << "frame " << frame;
+    EXPECT_FALSE(r.runnable);
+    EXPECT_TRUE(r.awaiting_frame) << "frame " << frame;
+    EXPECT_FALSE(r.deadline_precise) << "frame " << frame;
+    EXPECT_GE(r.next_deadline, before + kOneMs) << "frame " << frame;
+    EXPECT_LE(r.next_deadline, after + kOneMs) << "frame " << frame;
+  }
+  const pump_result r = w.pump();
+  EXPECT_EQ(w.status(pid), process_status::terminated);
+  EXPECT_FALSE(r.awaiting_frame);
+  EXPECT_EQ(r.next_deadline, report_clock::time_point::max());
+}
+
+// With no wake notifier installed the report is not computed (R2b S-m2): a scheduler nothing reads
+// it from runs master's loop. A pump of a group that never had one reports nothing of its sleeper;
+// a report computed under a notifier stays as it was once the notifier is cleared, though its frame
+// waiter has ended since.
+TEST(PumpReport, WithoutANotifierTheReportIsLeftAsItWas) {
+  report_world w(nullptr, /*notified=*/false);
+  const int sleeper = w.submit("(begin (sleep 5) 1)");
+  const pump_result r0 = w.pump();
+  ASSERT_FALSE(r0.failed);
+  EXPECT_EQ(w.status(sleeper), process_status::waiting);
+  EXPECT_EQ(r0.next_deadline, report_clock::time_point::max()) << "computed with no notifier";
+  EXPECT_FALSE(r0.deadline_precise);
+  const int waiter = w.submit("(begin (await 1) 2)");
+  w.group->sched().set_wake_notifier(&ignore_wakes, nullptr);
+  const pump_result r1 = w.pump();
+  ASSERT_TRUE(r1.awaiting_frame);
+  EXPECT_NE(r1.next_deadline, report_clock::time_point::max());
+  w.group->sched().set_wake_notifier(nullptr, nullptr);
+  const pump_result r2 = w.pump(); // the waiter ends
+  EXPECT_EQ(w.status(waiter), process_status::terminated);
+  EXPECT_TRUE(r2.awaiting_frame) << "computed with no notifier";
+  EXPECT_EQ(r2.next_deadline, r1.next_deadline);
+  EXPECT_EQ(r2.deadline_precise, r1.deadline_precise);
+}
+
+// A process with max_steps whose call is in flight: the call's 1 ms charge beat, coarse.
+TEST(PumpReport, ALimitedProcesssCallInFlightBeatsCoarsely) {
+  report_world w;
+  execute_options limited;
+  limited.max_steps = 1000000;
+  const int pid = w.submit("(begin (hold) 1)", limited);
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r.failed);
+  EXPECT_EQ(w.status(pid), process_status::waiting);
+  EXPECT_FALSE(r.runnable);
+  EXPECT_FALSE(r.deadline_precise);
+  EXPECT_GE(r.next_deadline, before + kOneMs);
+  EXPECT_LE(r.next_deadline, after + kOneMs);
+}
+
+// A pump whose step budget ran out leaves its process runnable, at the one level of round robin.
+TEST(PumpReport, ABudgetThatRanOutLeavesItRunnable) {
+  report_world w;
+  const int pid = w.submit("(begin (set i 0) (while (< i 100000) (set i (+ i 1))) i)");
+  const pump_result r = w.pump(10);
+  ASSERT_FALSE(r.failed);
+  EXPECT_LE(r.steps, 10u);
+  EXPECT_EQ(w.status(pid), process_status::ready);
+  EXPECT_TRUE(r.runnable);
+  EXPECT_EQ(r.best_runnable, std::optional<int>(0));
+}
+
+// best_runnable: the best (lowest) effective priority among the ready processes under the
+// priority policy (3 and -2: -2), and 0 under round robin, whose one level is 0.
+TEST(PumpReport, BestRunnableIsTheBestReadyLevel) {
+  const std::string loop = "(begin (set i 0) (while (< i 100000) (set i (+ i 1))) i)";
+  for (const char *policy : {"priority", "round_robin"}) {
+    report_world w(policy);
+    execute_options low, high;
+    low.priority = 3;
+    high.priority = -2;
+    const int a = w.submit(loop, low);
+    const int b = w.submit(loop, high);
+    const pump_result r = w.pump(2);
+    ASSERT_FALSE(r.failed) << policy;
+    EXPECT_EQ(w.status(a), process_status::ready) << policy;
+    EXPECT_EQ(w.status(b), process_status::ready) << policy;
+    EXPECT_TRUE(r.runnable) << policy;
+    EXPECT_EQ(r.best_runnable, std::optional<int>(std::string(policy) == "priority" ? -2 : 0))
+        << policy;
+  }
+}
+
+// Nothing pending: no deadline. And the cycle collection's 1 s throttle after an exit: a group
+// whose process ended and left something tracked within a second of its last collection has that
+// collection due a second after it, a coarse deadline (the first program's end collects, since
+// the group never has; the second's, a moment later, is throttled).
+TEST(PumpReport, NothingPendingAndTheCollectionFallingDue) {
+  report_world w;
+  const std::string cycle = "(begin (set d (dict)) (set-attr d \"self\" d) 1)";
+  const int first = w.submit(cycle);
+  const report_clock::time_point before = report_clock::now();
+  const pump_result r1 = w.pump();
+  const report_clock::time_point after = report_clock::now();
+  ASSERT_FALSE(r1.failed);
+  EXPECT_EQ(w.status(first), process_status::terminated);
+  EXPECT_FALSE(r1.runnable);
+  EXPECT_FALSE(r1.best_runnable.has_value());
+  EXPECT_FALSE(r1.deadline_precise);
+  EXPECT_EQ(r1.next_deadline, report_clock::time_point::max()) << "collected at the run's end";
+
+  const int second = w.submit(cycle);
+  const pump_result r2 = w.pump();
+  const report_clock::time_point end = report_clock::now();
+  ASSERT_FALSE(r2.failed);
+  EXPECT_EQ(w.status(second), process_status::terminated);
+  EXPECT_FALSE(r2.runnable);
+  const double gap = std::chrono::duration<double>(end - before).count();
+  std::printf("PumpReport: the two pumps took %.3f s\n", gap);
+  if (gap < 0.9) { // else the throttle had passed, and the second end collected too
+    EXPECT_FALSE(r2.deadline_precise);
+    EXPECT_GE(r2.next_deadline, before + std::chrono::seconds(1));
+    EXPECT_LE(r2.next_deadline, after + std::chrono::seconds(1));
+  }
+}
+
+// S2a.7 (S2-Q11): the long-step monitor. A step longer than the threshold (at slice_steps above 1,
+// a run's window between two of its clock readings) is counted, and reported to the sink with the
+// native it ended in, at most once a minute per name. The natives here take 5 ms or more against
+// a 1 ms threshold, which holds however loaded the machine is; other steps may be caught too on a
+// loaded machine, so counts are lower bounds and reports are checked by name.
+namespace {
+
+struct long_step_world {
+  cvc::app app;
+  cvc::state &tree = cvc::state::instance(app);
+  std::vector<std::string> reports;
+  async_scheduler sched;
+  environment_ptr env = builtins::make_default_environment();
+
+  explicit long_step_world(std::uint64_t slice = 1) {
+    sched.set_watch_root(&tree);
+    sched.set_slice_steps(slice);
+    sched.set_long_step_sink(
+        [this](const std::string &native, double) { reports.push_back(native); });
+    builtins::register_fn(env, "nap", [](std::span<const value_t>) -> value_t {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      return value_t(int64_t{1});
+    });
+    // A native that runs until its step's deadline cuts it (max_step_time): the step throws.
+    builtins::register_fn(env, "spin", [](call_args a) -> value_t {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (std::chrono::steady_clock::now() < until)
+        eval_deadline_check(a.context(), "spin");
+      return value_t();
+    });
+  }
+  long_step_world(const long_step_world &) = delete;
+  long_step_world &operator=(const long_step_world &) = delete;
+
+  int run(const std::string &script, execute_options opts = {}) {
+    opts.env = environment::extend(env);
+    const int pid = sched.execute(script, opts);
+    sched.sync_run();
+    return pid;
+  }
+  int reported(const std::string &name) const {
+    return static_cast<int>(std::count(reports.begin(), reports.end(), name));
+  }
+  std::string all_reports() const {
+    std::string out;
+    for (const std::string &r : reports)
+      out += "[" + r + "]";
+    return out;
+  }
+};
+
+} // namespace
+
+// A group of an app logs a long step through the app, naming its native and the group.
+TEST(LongSteps, AGroupsLongNativeIsCountedAndLogged) {
+  cvc::app app;
+  const std::string log_key("s2a7_log");
+  app.data(log_key, std::string());
+  app.properties("system.log_output", log_key);
+  exec_group::options o;
+  o.name = "s2a7";
+  o.app = &app;
+  o.slice_steps = 1;
+  exec_group g(std::move(o));
+  g.sched().set_long_step_default(0.001);
+  environment_ptr env = environment::extend(builtins::make_default_environment());
+  builtins::register_fn(env, "nap", [](std::span<const value_t>) -> value_t {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return value_t(int64_t{1});
+  });
+  execute_options eo;
+  eo.env = env;
+  const int pid = g.execute(std::string("(nap)"), eo);
+  g.pump({100000, std::numeric_limits<double>::infinity()});
+  const auto info = g.sched().get_process_info(pid);
+  ASSERT_TRUE(info && info->status == process_status::terminated);
+  EXPECT_GE(g.sched().long_steps(), 1u);
+  const std::string log = app.data<std::string>(log_key);
+  EXPECT_NE(log.find("long step: nap took "), std::string::npos) << log;
+  EXPECT_NE(log.find(" ms (group 's2a7')"), std::string::npos) << log;
+}
+
+// The tree's state_exec.long_step_ms, when set, wins over the default: 5000 ms catches no 5 ms
+// step; a value that is not a number leaves it in force; unset, the default's 1 ms catches it; 0
+// turns the monitor off.
+TEST(LongSteps, TheTreesSettingWinsOverTheDefault) {
+  long_step_world w;
+  w.sched.set_long_step_default(0.001);
+  w.tree("state_exec.long_step_ms").value(std::string("5000"));
+  w.run("(nap)");
+  EXPECT_EQ(w.sched.long_steps(), 0u) << "the tree's 5 s lost to the 1 ms default";
+  w.tree("state_exec.long_step_ms").value(std::string("soon"));
+  w.run("(nap)");
+  EXPECT_EQ(w.sched.long_steps(), 0u) << "a value that is not a number replaced the 5 s";
+  w.tree("state_exec.long_step_ms").value(std::string(""));
+  w.run("(nap)");
+  const std::uint64_t caught = w.sched.long_steps();
+  EXPECT_GE(caught, 1u) << "unset, the 1 ms default did not apply";
+  EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
+  w.tree("state_exec.long_step_ms").value(std::string("0"));
+  w.run("(nap)");
+  EXPECT_EQ(w.sched.long_steps(), caught) << "0 did not turn the monitor off";
+}
+
+// A long step that throws (its native cut by the step's deadline) is counted and named.
+TEST(LongSteps, AThrowingLongStepIsCounted) {
+  long_step_world w;
+  w.sched.set_long_step_default(0.001);
+  execute_options capped;
+  capped.max_step_time = 0.01;
+  const int pid = w.run("(spin)", capped);
+  const auto info = w.sched.get_process_info(pid);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->status, process_status::killed);
+  EXPECT_EQ(w.sched.get_exit_error(pid), "time_limit_exceeded");
+  EXPECT_GE(w.sched.long_steps(), 1u);
+  EXPECT_EQ(w.reported("spin"), 1) << w.all_reports();
+}
+
+// At slice_steps 256 the program is one run, read in windows: the long window is counted and named
+// by its last step's native, here the (nap) that ends the program.
+TEST(LongSteps, ALongWindowAtSlice256NamesItsLastNative) {
+  long_step_world w(256);
+  w.sched.set_long_step_default(0.001);
+  const int pid = w.run("(nap (+ 1 2))");
+  const auto info = w.sched.get_process_info(pid);
+  ASSERT_TRUE(info && info->status == process_status::terminated);
+  EXPECT_GT(info->step_count, 1u) << "one step: no window to read";
+  EXPECT_GE(w.sched.long_steps(), 1u);
+  EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
+}
+
+// Two long steps of one native are both counted, and reported once (once a minute per name).
+TEST(LongSteps, ANameIsReportedOnceAMinute) {
+  long_step_world w;
+  w.sched.set_long_step_default(0.001);
+  w.run("(begin (nap) (nap) 1)");
+  EXPECT_GE(w.sched.long_steps(), 2u);
+  EXPECT_EQ(w.reported("nap"), 1) << w.all_reports();
+}
+
+// A long step that applied no native is named "(no native)" (R2b S-m9). At a 1 ns threshold the
+// loop's steps that read the clock a tick apart are long, those that applied no native among them.
+TEST(LongSteps, AStepWithNoNativeIsNamedSo) {
+  long_step_world w;
+  w.sched.set_long_step_default(1e-9);
+  w.run("(begin (set i 0) (while (< i 2000) (set i (+ i 1))) i)");
+  EXPECT_GT(w.sched.long_steps(), 0u);
+  EXPECT_EQ(w.reported("(no native)"), 1) << w.all_reports();
+  EXPECT_EQ(w.reported(""), 0) << w.all_reports();
+}
+
 // --- Stage S: slices (td 4.4, 8.10; S2-Q12; S2 section 4's SL-1..SL-9) ---
 
 // A run is up to slice_steps() consecutive steps of one process, on one step's guards, clock

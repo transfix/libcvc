@@ -4837,8 +4837,8 @@ def register_intrinsics(env, ctx):
 // pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
 // idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
 // exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
-// raises ValueError. run_all, register_fn, register_async_fn and close() are methods; threads is
-// a read-only property.
+// raises ValueError. run_all, register_fn, register_async_fn, stats() (a dict of run_all's batch
+// wait counters, S2a.8) and close() are methods; threads is a read-only property.
 %feature("kwargs") pycvc::ExecPool::ExecPool;
 %feature("kwargs") pycvc::ExecPool::register_async_fn;
 %exception pycvc::ExecPool::ExecPool {
