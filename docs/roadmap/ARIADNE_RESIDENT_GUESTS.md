@@ -1,9 +1,9 @@
 # Ariadne resident guests: clients' code that stays on the server, and the gas that pays for it
 
-> **Status: PLANNED (2026-11-15).** Nothing here is built. It builds on G4's first part,
-> transfix/libcvc#1283 (clients' one-shot WebAssembly guests on `arisrvx`). Parent roadmap:
-> [`ARIADNE_SCRIPTING_HOSTS.md`](ARIADNE_SCRIPTING_HOSTS.md) (§8.7 points here). The decisions in
-> §11 are open.
+> **Status: PLANNED (2026-11-15; RG8 added 2026-11-16).** Nothing here is built. It builds on
+> G4's first part, transfix/libcvc#1283 (clients' one-shot WebAssembly guests on `arisrvx`).
+> Parent roadmap: [`ARIADNE_SCRIPTING_HOSTS.md`](ARIADNE_SCRIPTING_HOSTS.md) (§8.7 points here).
+> The decisions in §11 are open.
 
 ## 0. The ask
 
@@ -21,6 +21,10 @@ The owner's request, server side first:
    refill at a set rate, and an identity can get a starting grant the first time it connects.
 5. **Guests on clients** (from the same discussion), in native clients and in the browser, without
    needing wasm-mt's threads.
+6. **Residents as services** (asked 2026-11-16). One user's resident can offer library calls to
+   other users' guests, when it explicitly allows them. A direct call bills the calling user the
+   gas. Over a stream or a channel, both users are billed as they exchange messages, and the call
+   runs in the resident (§9a).
 
 ## 1. What exists
 
@@ -337,6 +341,243 @@ Worker. The other way is to block on SharedArrayBuffer and `Atomics.wait`, which
 COOP/COEP. So the Worker suits guests that compute and call the host rarely, and it is the hard
 stop beneath RG6's metering.
 
+## 9a. RG8: public exports between residents
+
+One owner's resident can offer calls to other owners' guests, when both sides say so. They use it
+in one of two ways:
+- **A direct call.** The caller calls a public export as one of its own functions. The callee's
+  work runs as the caller's work, so the caller pays for it.
+- **A channel or a stream.** The caller sends messages to one of the resident's public channels.
+  Each side pays for its own work: the sender for its sends, the resident's owner for the firings
+  that handle them, and the sender again for the firings that handle the replies.
+
+This needs RG2: without the ledger there's no account to bill a caller.
+
+### What works today
+
+Checked against master 77056351 (#1305).
+
+- **Within one document**, a guest's `call()` reaches any function in its document's registry.
+  - Any name that doesn't start `state-`, `msg-`, `http-`, `ws-` or `net-` is in the `call`
+    import group (`import_group`, `src/ariadne_wasm/wasm_engine.cpp`).
+  - Exports are host functions of the document, and since #1305 of that document only
+    (`Runtime::add_program_intrinsics`).
+  - The call runs as the calling process's sliced work. SlicedCall makes it as `(apply f a)` in
+    the process's own environment (`src/cvc/ariadne/script_engine.cpp`), so its steps are the
+    caller's.
+  - A call back into the same instance is a RecursionError. A test covers it:
+    `WasmEngineTest.ACallBackIntoTheGuestIsARecursionError` (`src/cvc/tests/ariadne_wasm_test.cpp`).
+    There the guest calls `bounce`, a document function, which calls the guest's own `echo`.
+- **Not from one wasm guest to another.** No test calls one guest from another, because no
+  document can hold two:
+  - A document has one block for each language, and the last one wins
+    (`AppRuntime::run_script_blocks`, `src/cvc/ariadne/app_runtime.cpp`).
+  - A `load:`ed module's blocks don't run yet (`ScriptBlock::module`).
+  - Across documents, #1305 keeps each document's exports its own
+    (`WasmEngineTest.TwoDocumentsOnOneAppEachCallTheirOwnGuest`).
+- **On a relay**, a client's guest reaches only its S3 program's functions. Any other name is a
+  NameError: the `spawn` case of `WasmClientGuestTest.AGuestMayDoOnlyWhatItsClientsProgramMay`.
+  So the server document's functions are out of its reach, and so is every other client's code.
+
+So the path a public call takes exists: an activation run as the caller's sliced work, under the
+callee's lock. What's missing is a link between two clients' instances, and a way to keep the
+callee's authority apart from the caller's.
+
+### Opting in
+
+Both sides opt in, within the operator's ceiling.
+
+```lisp
+;; The publisher: a resident that offers two exports and a channel.
+(define geo
+  (room-guest-start (geo-bytes)
+    (dict "name"   "geo"
+          "hooks"  (dict "msg" (dict "jobs" "on_job"))
+          "public" (dict "to"       (dict "roles" (list "planner"))   ; or "room", or "principals"
+                         "exports"  (dict "route"   (dict "steps" 2000)
+                                          "nearest" (dict "steps" 500 "writes" #t))
+                         "channels" (dict "jobs" (dict "rate" 5 "queue" 16 "prepay" 0))))))
+
+;; A caller, another owner's resident, with geo's gid from (room-guests-public):
+;; (geo.route a b) is now one of its functions.
+(room-guest-start (planner-bytes)
+  (dict "name"  "planner"
+        "links" (dict "geo" (dict "gid" geo-gid "exports" (list "route" "nearest")))
+        "hooks" (dict "on_tick" "tick")))
+
+(room-guests-public)                                     ; the room's public residents
+(room-guest-send geo-gid "jobs" (dict "from" a "to" b))  ; to a public channel
+```
+
+```yaml
+server:
+  residents:
+    public:                                  # absent: no resident publishes anything
+      to: [principals, roles, room]          # the audiences a publisher may name
+      call: { steps: 2000, fee: 1000, rate: 20, wait: 0.02 }   # each public call
+      share: 0.5                             # of a resident's per-step budget, for public calls
+      writes: true                           # whether a publisher may let a public call write
+      channels: { queue: 16, rate: 10, fee: 500, window: 8, prepay_max: 2000000 }
+```
+
+- **The publisher** lists what it offers under `public` in `room-guest-start`'s dict:
+  - `to` says who may call: `"room"` (every authenticated principal in the room), or a dict of
+    `principals` and `roles`, as the `authenticate` hook names them. With no `to`, only its owner
+    may call. The relay keeps the principal ids it's given as hashes, and never writes them to the
+    tree.
+  - `exports` lists the public exports. Each has its own cap per call (`steps`), and `writes`,
+    which says whether a call may write the resident's subtree. `writes` is off by default (D21).
+  - `channels` lists public channels for its `msg` hook. Each has its own `to` (the resident's by
+    default), `rate`, `queue` and `prepay`.
+  - The exports and channels are fixed for the resident's life, as its hooks are. Its owner can
+    change `to` with `room-guest-set`, and the next call is checked against the new list.
+  - `status.public` names the exports and channels, for everyone in the room. It doesn't show `to`.
+- **The caller** links a resident's exports by gid, in its own start dict (in `room-run`'s for a
+  one-shot), under an alias.
+  - Each export then shows up as a namespaced function, `<alias>.<export>`: `(geo.route a b)` in a
+    DSL program, or the name `"geo.route"` through `ari.call` from wasm. It's in the `call` import
+    group.
+  - The relay checks a link when the caller starts, and a link that fails fails the start. It
+    checks again at each call: the resident is still there, the export is public, and the caller's
+    principal is in `to`. A resident that has ended is a NameError.
+  - Any client's program can link: a resident, a G4 one-shot, or an S3 or RG4 program.
+- **The operator** sets the ceiling under `server: residents: public:`. The relay holds a
+  publisher's caps and audiences within it. With no `public:` key, no resident publishes anything.
+- **No authenticator, no public calls.** Without S5's principals there's no caller to allow, and
+  no account to bill (D5). There, `public` and `links` fail the start.
+
+### Direct calls: the caller pays
+
+A public call takes export_activation's sliced path (`run_as_program_work`, `SlicedCall`). The
+callee's activation runs as the **caller's** own sliced work.
+
+- **Billing.**
+  - The callee's slices are charged to the caller's process, so the caller's caps bound them.
+    RG2 debits the caller's owner for them, plus `call.fee` for each call.
+  - A call's cap is the smallest of the export's `steps`, the ceiling's `call.steps`, and what's
+    left of the caller's reservation.
+  - The resident's owner pays nothing for a public call. So a starved or lingering resident still
+    answers public calls.
+- **The lock.** The host takes the callee's lock, `guest:<gid>`, in the caller's process around
+  the call. It takes it by its absolute key, since the caller's own `with-lock` can't name another
+  resident's home. STATE_EXEC_LOCKS then gives what the plan needs:
+  - **Re-entry is a RecursionError.** Say A calls B and B calls A back, all in A's process. The
+    second call is granted A's lock again, since a process's locks are reentrant. Then A's
+    instance refuses the call, as G1's guests do today.
+  - **A cycle is a DeadlockError.** Say A's firing holds `guest:A` and calls B, while B's firing
+    holds `guest:B` and calls A. The wait that closes the cycle raises a DeadlockError at block
+    time, with its `cycle`.
+  - **A wait is short.** A wait for a busy resident lasts at most `call.wait` (20 ms), then raises
+    a TimeoutError (D16).
+- **The authority split (the change this needs).** Today a sliced call's `call()`s run in the
+  calling process's environment: its chroot and its functions (`ScriptSlice`'s `env_`, and
+  `ScriptLane::export_activation`, in `script_engine.h`). Across owners, that is a confused
+  deputy. The callee would write the caller's `participants.<pid>`, read under the caller's scope,
+  and reach the caller's links. So a public call keeps authority and cost apart:
+  - **The callee's authority.** Its `call()`s and `call_now()`s resolve in the resident's own
+    environment:
+    - its home, `conf.rooms.<room>.guests.<gid>`, as its chroot;
+    - its gated writers, only where the export has `writes`;
+    - its `room` link, under D14's rule;
+    - its own imports' narrowing.
+  - **The caller's cost.** The caller's evaluator makes those calls, and their steps are charged
+    to the caller's process.
+  - **In the code.** SlicedCall gets the environment it resolves calls in as a parameter, apart
+    from the process it charges. Its kSlicedAsk closure is made over the callee's environment,
+    while the lock and the steps stay with the caller's process.
+  - The callee never sees the caller's environment, and the caller sees only the call's value.
+  - A public call may call the callee's own links. The next resident checks the callee's owner
+    against its `to`, and the cost still falls on the first caller, under its cap.
+- **No waiting inside a call.** A public call runs to its end within the caller's step, as a pure
+  export does (`export_pure`: `may_wait()` is false). It runs the way `ActivationRunner::run_pure`
+  runs one, so SlicedCall's yield when the frame budget is spent doesn't apply.
+  - A `yield_frame()` goes straight on.
+  - An `await()`, or a call to anything that would wait (a message, an `http-` call), is a
+    RuntimeError.
+  - A linked call made from inside a public call doesn't wait either: a busy resident there is a
+    TimeoutError at once.
+  - So a public call never holds the callee's lock across a frame. A caller can't keep another
+    owner's resident busy while it waits for something else. An export that needs to wait offers
+    a channel instead.
+- **Values** cross as typed CBOR, never JSON.
+  - The caller's CBOR is decoded with the caller's handles, then encoded again for the callee,
+    with handles of the callee's own. The result goes back the same way.
+  - A handle never crosses as a number. Clients' guests hold no host objects today (G4 refuses
+    `make`), so this is a rule for later more than a cost now. Bytes with no handle in them can pass
+    through as they are.
+- **The shared instance.** A public call runs on the resident's one instance, so it sees, and may
+  change, its linear memory and globals. Keeping that safe is the publisher's job: caches and
+  indexes are the point of a resident. An export marked `"fresh" #t` instead runs each call on a
+  new instance of the same compiled module, as G4's one-shots run (D15).
+- **Fairness.** The resident's own firings queue behind callers, under the same lock:
+  - The resident's own firings go first. A firing waiting for the lock is granted it before a
+    public call that waits.
+  - Public calls take at most `share` of the resident's per-step budget (§3, Scheduling). Past
+    that, the step's other calls get a TimeoutError at once.
+  - Each caller principal gets a token bucket of `call.rate` calls a second for each resident it
+    calls.
+  - Each call is short, at most `call.steps`, so it holds the lock no longer than that.
+- **Who called.** Inside a public call, `guest-caller` returns the caller's hashed identity (D19),
+  plus its gid if a resident called. A library can keep limits of its own for each caller.
+- **Failures.**
+  - A trap or an error in a public call fails that call. It raises in the caller with its class (a
+    WasmError for a trap), and the caller can catch it.
+  - Whether it counts toward the resident's restart backoff is D13.
+  - If the caller's cap runs out partway through, the callee's activation is cancelled. Then the
+    instance may hold half-done state, as after a trap.
+
+### Channels and streams: each side pays
+
+RG1's `msg` hook takes messages from its owner only. RG8 adds public channels, each with its own
+`to`.
+
+- **Sending.** Anyone in a channel's `to` may call `(room-guest-send gid channel value)`. The
+  sender pays for its send, which is the steps of the program that sends it, plus `channels.fee` a
+  message, debited at once.
+- **Handling.** The resident's firing that handles the message is billed to the resident's owner,
+  as every firing is (§4). Its event is `{channel, value, from}`. `from` is the sender's hashed
+  identity (D19), plus its gid if a resident sent it.
+- **Replying.** `(guest-reply event value)` answers the sender:
+  - A resident that sent it gets the reply in its `msg` hook, on its `reply` channel, with `from`
+    naming the resident that answered. That firing is billed to the sender's owner.
+  - A connected client's program that sent it gets the reply as a message to that client. Nothing
+    runs on the server.
+- **Streams** work the same way, per chunk.
+  - `(room-guest-open gid channel)` opens one. The sender writes chunks until either side closes
+    it.
+  - The resident's firings get `{channel, stream, seq, value}`, in order.
+  - Each chunk is billed as a message is.
+  - A window (`window`, 8 chunks) holds the sender back until the resident's firings take what's
+    queued. A send into a full window is refused, so no chunk is dropped.
+
+### Draining the publisher's gas
+
+On a channel, the resident's owner pays to handle every message. So a sender could drain that
+owner's balance with messages it doesn't care about. RG8 guards against that three ways:
+
+- **Queues and rates for each sender.** RG1's one queue of 64, which drops the oldest, gives way
+  to a queue for each sender (`queue`, 16) and a token bucket (`rate` messages a second), within
+  the ceiling.
+  - A send past either is refused back to the sender, which has still paid for it.
+  - The resident takes the queues round robin, by sender, so one sender can't crowd out the rest.
+- **The sender's hash in the event,** so the handler can drop a message early. A firing that
+  returns at once costs its owner the firing `fee` and little more. `guest-block` makes the relay
+  refuse a sender's messages before anything fires: for a time, or until the resident ends.
+- **Prepay, held in escrow.** A channel can ask each message to bring `prepay` gas.
+  - The relay holds that much of the sender's balance at the send, and spends it first on the
+    firing that handles the message.
+  - The resident's owner pays only what goes past it, and whatever is left goes back to the
+    sender.
+  - With `prepay` at the firing caps, the sender pays for everything, and a send its balance can't
+    cover is refused (D18).
+
+### What RG8 leaves out
+
+- **Pricing.** No gas moves between accounts. Callers pay the host's cost, not the publisher
+  (D17).
+- **Other rooms.** A link names a resident in the caller's own room (D20).
+- **Modules from peers** on clients stay in RG6.
+
 ## 10. Phases
 
 | Phase | What | Needs | Size |
@@ -348,9 +589,10 @@ stop beneath RG6's metering.
 | RG5 | Hibernation of idle residents, and lingering residents across a relay restart | RG3 | L |
 | RG6 | Guests on clients: sent by the relay's document; native on the pool; in the browser, compiled by Promise, metered in the page and run to their end | G2 | M |
 | RG7 | The Worker backstop in the browser (G4's second part) | RG6 | M |
+| RG8 | Public exports between residents: the two-sided opt-in (`public`, `links`) within the operator's `residents: public:` ceiling; direct calls run as the caller's work in the callee's own environment (the authority split), billed to the caller plus `fee`; public channels and streams, with queues and rates for each sender, a hashed sender in each event, and prepay | RG1, RG2, S5 | L: two parts, direct calls and then channels and streams |
 
 RG1 through RG3 are the owner's ask, in order. RG4 can run beside RG2. RG6 and RG7 don't depend
-on the server phases.
+on the server phases. RG8 (asked 2026-11-16) needs RG2's ledger, and can run beside RG3.
 
 ## 11. Decisions (open)
 
@@ -366,8 +608,17 @@ on the server phases.
 | D8 | The cost of idling | **`rent` 0 by default**, with caps on count and memory per owner. Hibernation (RG5) makes idling cheap later |
 | D9 | Who gets grants | **Authenticated principals only**, plus a server-wide cap on the gas grants create each hour, against identity farming |
 | D10 | Who is an admin | **A role from the `authenticate` hook (`admin_role`)**, plus arisrvx's operator code |
-| D11 | Whether other clients may call a resident's exports (a resident as a service) | **Later.** Until then they interact through state it watches and state it writes |
+| D11 | Whether other clients may call a resident's exports (a resident as a service) | **Yes, as RG8 (§9a), after RG2**, when both sides opt in within the operator's ceiling. Until then they interact through state it watches and state it writes |
 | D12 | Where the ledger is kept | **A file journal in libcvc behind an interface**, which arisrvx can replace with the application's database |
+| D13 | A trap in a public call | **It fails that call only**, as an error the caller can catch. It doesn't count toward the resident's restart backoff: otherwise any allowed caller could end another owner's resident with 8 bad calls in a row. The owner sees the count in `(room-guests)`. A publisher can set `traps`, a number for each caller an hour, past which the relay refuses that caller's calls for the rest of the hour |
+| D14 | What a public call reads | **What both owners may read**: the resident's own subtree, plus the room only where the caller's and the publisher's owners' read scopes (S6) both allow. A publisher can set `"reads" "owner"` to read under its own owner's scope, knowing that callers learn whatever its exports return |
+| D15 | Whether public calls share the resident's instance | **Yes, by default**, since its memory is its state (caches, indexes). `"fresh" #t` on an export runs each call on a new instance of the same compiled module, as G4's one-shots run, for a library that should keep nothing between callers |
+| D16 | A call to a busy resident | **A short wait** (`call.wait`, 20 ms) under STATE_EXEC_LOCKS' rules, then a TimeoutError. None inside a public call. The resident's own firings go first, and public calls take at most `share` of its per-step budget |
+| D17 | Pricing: gas paid to the publisher | **Parked.** Callers pay the host's cost, their work plus `fee`, and no gas moves between accounts. A price paid to the publisher would let grants farmed on many identities (D9) be gathered into one account, so it stays parked unless it's asked for |
+| D18 | Who pays to handle a message | **Each side its own**, as asked: the sender pays its send plus `channels.fee`, and the resident's owner pays the firing that handles it. A publisher can ask for `prepay` with each message, held from the sender and spent first on that firing |
+| D19 | The sender's identity in an event | **A keyed hash for each publishing owner**: HMAC(salt, the publisher's account ‖ the sender's principal). It stays the same for one publisher, so a publisher can drop or block a sender, but two publishers can't match up their callers. Never the principal id |
+| D20 | Links across rooms | **Not in RG8.** A link names a resident in the caller's own room. Read scopes and step budgets are per room, so a call across rooms needs a rule for both first |
+| D21 | Whether a public call may write | **Off by default** (the export's `writes`), and the ceiling can forbid it. A call that may write writes only the resident's own `guests.<gid>`, within its subtree caps. A public call can't send messages or start anything |
 
 ## 12. Risks and checks
 
@@ -388,3 +639,10 @@ on the server phases.
    long-running app has to keep its own state in its subtree, or in its owner's application.
 8. **Privacy.** Balances and principal ids stay out of the replicated tree. Admins see hashed
    accounts, and names only through the `authenticate` hook's dict.
+9. **The confused deputy.** RG8 must not ship on today's sliced path alone, where a callee's
+   imports would run in the caller's environment. Its first part needs a test that a public
+   call's write lands in the callee's `guests.<gid>` and nowhere under the caller's chroot. It
+   also needs one that a callee's read past D14's rule fails.
+10. **A public call holds the drain.** A public call runs to its end inside the caller's step, so
+    `call.steps` is how long one call can stall the room loop. Keep it within the firing caps, and
+    measure it with risk 2's 100 and 1000 residents, each calling.
