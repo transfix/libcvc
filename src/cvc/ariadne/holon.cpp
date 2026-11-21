@@ -308,14 +308,14 @@ bool holon::set_archetype(const std::string &pid, const std::string &archetype, 
     return fail("no participant '" + pid + "'");
   participant &p = it->second;
   const world_rules &r = rules();
-  const avatar_archetype *want =
-      archetype.empty() ? (r.archetypes.empty() ? nullptr : &r.archetypes.front())
-                        : r.find_avatar(archetype);
+  const avatar_archetype *want = archetype.empty()
+                                     ? (r.archetypes.empty() ? nullptr : &r.archetypes.front())
+                                     : r.find_avatar(archetype);
   if (!want && !archetype.empty())
     return fail("no avatar archetype '" + archetype + "'");
   const std::string id = want ? want->id : std::string();
-  const std::string have = p.archetype.empty() && !r.archetypes.empty() ? r.archetypes.front().id
-                                                                         : p.archetype;
+  const std::string have =
+      p.archetype.empty() && !r.archetypes.empty() ? r.archetypes.front().id : p.archetype;
   if (id == have && (want == nullptr || want->vehicle.empty() || p.body != 0))
     return true;
   WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;

@@ -837,13 +837,14 @@ void register_room_intrinsics(cvc::app &app) {
             return err("room-archetype: (room-archetype HANDLE)");
           room_handle *rh = tbl->find(handle_token(args[0]));
           if (!rh)
-            return err("room-archetype: HANDLE must be a room-join handle (needs the caller's pid)");
+            return err(
+                "room-archetype: HANDLE must be a room-join handle (needs the caller's pid)");
           const cvc::ariadne::archetype_status st =
               cvc::ariadne::read_archetype_status(app, rh->room_id, rh->self_pid);
-          std::string id = st.answered && st.ok
-                               ? st.archetype
-                               : cvc::ariadne::read_requested_archetype(app, rh->room_id,
-                                                                        rh->self_pid);
+          std::string id =
+              st.answered && st.ok
+                  ? st.archetype
+                  : cvc::ariadne::read_requested_archetype(app, rh->room_id, rh->self_pid);
           std::vector<avatar_archetype> list;
           read_avatar_archetypes(app, rh->room_id, list);
           if (id.empty() && !list.empty())
