@@ -170,6 +170,7 @@ EM_ASYNC_JS(void, arigl_wait_frame, (), {
 #include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/SdlGamepad.h>
 #include <cvc/gl/SdlInput.h>
 #include <cvc/gl/Settings.h> // UiSettings: the overlay's UI size, for the Controls window
 #include <cvc/gl/StageLighting.h>
@@ -530,6 +531,11 @@ std::string controls_path(const cvc::gl::SceneRenderer &view, const std::string 
   const std::string viewer = view.scene().getStatePrefix() + ".viewers." + view.name();
   return scheme == "walk" ? viewer + ".avatar.keys." : viewer + ".controls." + scheme + ".";
 }
+// A scheme's gamepad bindings, where they differ from its defaults (controls.h):
+// <viewer>.pad.<scheme>.<action>, each one input or more.
+std::string pad_path(const cvc::gl::SceneRenderer &view, const std::string &scheme) {
+  return view.scene().getStatePrefix() + ".viewers." + view.name() + ".pad." + scheme + ".";
+}
 std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
   std::vector<ari::KeyBinding> keys;
   for (const cvc::ariadne::control_scheme &s : cvc::ariadne::default_control_schemes()) {
@@ -540,7 +546,8 @@ std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
     // walk's ids are the ones they always had (avatar_<action>); the vehicles' by scheme.
     const std::string id = s.id == "walk" ? std::string("avatar_") : s.id + "_";
     for (const cvc::ariadne::control_action &a : s.actions)
-      keys.push_back({id + a.id, a.label, group, a.binding.keys, "", at + a.id});
+      keys.push_back({id + a.id, a.label, group, a.binding.keys, "", at + a.id, a.binding.pad,
+                      "/" + pad_path(view, s.id) + a.id});
   }
   return keys;
 }
@@ -688,6 +695,13 @@ struct ConferenceSession {
   // own scheme; its keys as the Controls window has them (controls_path), held only in Orbit.
   cvc::ariadne::control_resolver controls_{cvc::ariadne::default_control_scheme("walk")};
   const cvc::gl::SceneRenderer *view_ = nullptr;
+  // The first gamepad plugged in (OW6b): the same actions, on its sticks, triggers and buttons.
+  // Played with, we face where the camera looks (as under mouse look) and the right stick turns
+  // the camera, kPadLookDegS at a full push.
+  cvc::gl::SdlGamepad *pad_ = nullptr; // the run loop's (gamepad()): none while the Controls
+                                       // window waits for a button, so it moves nothing
+  std::string pad_name_;               // the one logged as connected (log on change)
+  static constexpr double kPadLookDegS = 150.0;
   std::uint64_t drive_answered_ = 0; // the relay's answer to our last ask that we have shown
   std::string drive_note_;           // a refusal, shown over us for a moment
   double drive_note_until_s_ = 0.0;
@@ -1223,6 +1237,9 @@ struct ConferenceSession {
   // participant, each peer named — with third-person controls: W/S walk our avatar forward/back
   // along its facing and A/D strafe, a click on the scene turns it to face the clicked point, and
   // `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
+  // The gamepad the room's controls read this frame (the run loop's; null: none).
+  void gamepad(cvc::gl::SdlGamepad *pad) { pad_ = pad; }
+
   void attach_view(cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
                    cvc::gl::ImGuiOverlay &ui) {
     if (!active || !driver_ || !app_)
@@ -1302,15 +1319,45 @@ struct ConferenceSession {
     // scheme's keys as the Controls window has them (their defaults until the document's load
     // seeds them): any of an action's keys held.
     const std::string keys_at = controls_path(*view_, scheme);
+    const std::string pad_at = pad_path(*view_, scheme);
     for (const cvc::ariadne::control_action &a :
          cvc::ariadne::default_control_scheme(scheme).actions) {
       const std::string stored =
           cvc::ariadne::read_or<std::string>(*app_, keys_at + a.id, std::string());
       controls_.set_keys(a.id, stored.empty() ? a.binding.keys : cvc::ariadne::split_keys(stored));
+      const std::string pad =
+          cvc::ariadne::read_or<std::string>(*app_, pad_at + a.id, std::string());
+      controls_.set_pad(a.id, pad.empty() ? a.binding.pad : cvc::ariadne::split_keys(pad));
     }
     const bool orbit_mode = cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
-    controls_.update([&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); },
-                     f.wall_dt);
+    const bool pad_on = pad_ && pad_->connected();
+    if (pad_ && pad_->name() != pad_name_) {
+      pad_name_ = pad_->name();
+      std::fprintf(stderr, "arigl: room: gamepad %s%s\n", pad_on ? "connected: " : "gone",
+                   pad_name_.c_str());
+    }
+    controls_.update(
+        [&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); }, f.wall_dt,
+        orbit_mode && pad_on ? cvc::ariadne::control_resolver::pad_fn(
+                                   [&](const std::string &n) { return pad_->input(n); })
+                             : cvc::ariadne::control_resolver::pad_fn());
+    // The right stick turns the camera about us (look_*): right turns the view right, up looks up.
+    double look_x = 0.0, look_y = 0.0;
+    controls_.look_axes(look_x, look_y);
+    const bool pad_looking = orbit_mode && (look_x != 0.0 || look_y != 0.0);
+    if (pad_looking) {
+      const double turn = kPadLookDegS * std::max(0.0, f.wall_dt);
+      const auto deg = [&](const char *leaf, double fallback) {
+        return cvc::ariadne::read_or<double>(*app_, cam_->stateName(leaf), fallback);
+      };
+      cvc::state &az = app_->root()(cam_->stateName("orbit.azimuth"));
+      az.value(deg("orbit.azimuth", 0.0) - look_x * turn);
+      cvc::state &el = app_->root()(cam_->stateName("orbit.elevation"));
+      el.value(std::clamp(deg("orbit.elevation", 0.0) - look_y * turn,
+                          deg("orbit.min_elevation", -89.0), deg("orbit.max_elevation", 89.0)));
+    }
+    // Played on the gamepad, we face where the camera looks, as under mouse look.
+    const bool pad_aims = orbit_mode && driving == 0 && controls_.from_pad();
     unsigned keys = 0, bit = 1;
     for (const cvc::ariadne::control_action &a : controls_.scheme().actions) {
       keys |= controls_.held(a.id) ? bit : 0u;
@@ -1318,11 +1365,11 @@ struct ConferenceSession {
     }
     if (controls_.pressed("mouse_look"))
       cam_->setMouseLookEnabled(!cam_->mouseLookEnabled());
-    const bool walking =
-        driving == 0 && (controls_.held("forward") || controls_.held("backward") ||
-                         controls_.held("strafe_left") || controls_.held("strafe_right"));
+    double walk_f = 0.0, walk_r = 0.0;
+    controls_.walk_axes(walk_f, walk_r);
+    const bool walking = driving == 0 && (walk_f != 0.0 || walk_r != 0.0);
     cvc::ariadne::avatar_intent in;
-    if (look) {
+    if (look || pad_aims) {
       // We face where the camera looks, standing or walking: the mouse aims.
       double eye[3], focal[3], up[3];
       cam_->getPose(eye, focal, up);
@@ -1338,9 +1385,9 @@ struct ConferenceSession {
     }
     in.yaw = facing_yaw_;
     if (orbit_mode && driving == 0) {
-      in = gla::intent_from_keys(controls_.held("forward"), controls_.held("backward"),
-                                 controls_.held("strafe_left"), controls_.held("strafe_right"),
-                                 facing_yaw_, holon_->controller().param("walk_speed", kWalkSpeed));
+      // As fast as the stick is pushed; a key is a full push.
+      in = gla::intent_from_axes(walk_f, walk_r, facing_yaw_,
+                                 holon_->controller().param("walk_speed", kWalkSpeed));
       in.jump = controls_.held("jump");
     } else if (driving != 0) {
       controls_.drive_axes(in); // the vehicle's: steer, throttle, brake
@@ -1366,7 +1413,7 @@ struct ConferenceSession {
     // with it: what only turned waits until kTurnHz allows, a key at once.
     const double now = steady_s();
     // Driving, the steering ramps every frame while a key is held: as often as a turn.
-    const bool turning = look || steering || driving != 0;
+    const bool turning = look || pad_aims || pad_looking || steering || driving != 0;
     bool ask = differs(in, last_user_);
     if (ask && turning && keys == last_keys_ && now < next_turn_s_)
       ask = false;
@@ -1470,7 +1517,7 @@ struct ConferenceSession {
       cam_->getPose(eye, focal, up);
       // Driving: the camera swings round behind the vehicle as it moves (a chase camera), unless
       // the mouse or a drag is turning it; parked, it orbits as you leave it.
-      if (driving != 0 && !look && !steering) {
+      if (driving != 0 && !look && !steering && !pad_looking) {
         const cvc::physics::body_state car = holon_->state(pid_);
         const cvc::physics::quat &q = car.rotation;
         const double heading =
@@ -1519,10 +1566,14 @@ struct ConferenceSession {
         std::fprintf(stderr, "arigl: room: %s\n", drive_note_.c_str());
       }
     }
-    // The prompt: the interact's first key, and what it does.
+    // The prompt: the interact's first key (its first gamepad button, played on the gamepad),
+    // and what it does.
     const cvc::ariadne::control_action *interact = controls_.scheme().find("interact");
-    const std::string key =
-        interact && !interact->binding.keys.empty() ? interact->binding.keys.front() : "E";
+    std::string key = "E";
+    if (interact && controls_.from_pad() && !interact->binding.pad.empty())
+      key = interact->binding.pad.front();
+    else if (interact && !interact->binding.keys.empty())
+      key = interact->binding.keys.front();
     const double progress = controls_.progress("interact");
     cvc::physics::pose at;
     if (driving == 0 && target != 0 && entities_->pose(target, at)) {
@@ -2126,6 +2177,7 @@ struct ConferenceSession {
   }
   void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &, cvc::gl::ImGuiOverlay &) {
   }
+  void gamepad(cvc::gl::SdlGamepad *) {}
   void pump() {}
   void stop() {}
 #endif
@@ -2248,6 +2300,8 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
   // relay (WebSocket for ws://|wss://, gRPC for grpc://), so the document (conference_roster.ari)
   // joins a hosted room.
+  cvc::gl::SdlGamepad pad; // the first gamepad plugged in: the room's controls and the Controls
+                           // window read it (declared first: it outlives the session)
   ConferenceSession conf;
   // A conference-setup failure must not take down the runtime — fall back to running the document
   // locally (no relay) and say why, rather than letting the exception abort main.
@@ -2459,6 +2513,13 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
           continue;
         rt.post_input(to_ari(e));
       }
+      // The gamepad: its new presses for the Controls window's gamepad Change, and itself for the
+      // room's controls, unless that Change is waiting for one.
+      pad.update();
+      for (const std::string &input : pad.pressed())
+        rt.app_runtime().runtime().post_pad_press(input);
+      conf.gamepad(pad.connected() && !rt.app_runtime().runtime().key_capture_pending() ? &pad
+                                                                                        : nullptr);
       for (std::string sig = osSignals.take_trapped(); !sig.empty(); sig = osSignals.take_trapped())
         if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
           exit_signal = sig;

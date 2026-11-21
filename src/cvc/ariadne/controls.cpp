@@ -14,6 +14,7 @@
 */
 
 #include <algorithm>
+#include <cmath>
 #include <cvc/ariadne/controls.h>
 
 namespace cvc {
@@ -22,6 +23,8 @@ namespace ariadne {
 namespace {
 constexpr double kInteractHold = 0.4; // s
 constexpr double kSteerRamp = 0.25;   // s from straight to the lock
+constexpr double kStickDead = 0.15;   // of a stick's travel: a resting stick drifts
+constexpr double kTriggerDead = 0.05; // of a trigger's
 
 control_action act(const char *id, const char *label, std::vector<std::string> keys,
                    std::vector<std::string> pad = {}) {
@@ -33,22 +36,40 @@ control_action act(const char *id, const char *label, std::vector<std::string> k
   return a;
 }
 
+control_action dead(control_action a, double deadzone) {
+  a.binding.deadzone = deadzone;
+  return a;
+}
+
+// Looking around: the right stick only (the mouse looks on its own).
+void look_actions(control_scheme &s) {
+  s.actions.push_back(dead(act("look_left", "Look left", {}, {"RightX-"}), kStickDead));
+  s.actions.push_back(dead(act("look_right", "Look right", {}, {"RightX+"}), kStickDead));
+  s.actions.push_back(dead(act("look_up", "Look up", {}, {"RightY-"}), kStickDead));
+  s.actions.push_back(dead(act("look_down", "Look down", {}, {"RightY+"}), kStickDead));
+}
+
 control_scheme drive_scheme(const char *id, bool brakes) {
   control_scheme s;
   s.id = id;
   s.kind = control_kind::drive;
-  s.actions.push_back(act("throttle", "Throttle", {"W", "Up"}));
-  s.actions.push_back(act("reverse", "Reverse", {"S", "Down"}));
+  s.actions.push_back(dead(act("throttle", "Throttle", {"W", "Up"}, {"RT"}), kTriggerDead));
+  // A boat's reverse is the left trigger, where a car's brake is; a car's is LB.
+  s.actions.push_back(
+      dead(act("reverse", "Reverse", {"S", "Down"}, {brakes ? "LB" : "LT"}), kTriggerDead));
   if (brakes)
-    s.actions.push_back(act("brake", "Brake", {"Space"}));
-  control_action left = act("steer_left", "Steer left", {"A", "Left"});
-  control_action right = act("steer_right", "Steer right", {"D", "Right"});
+    s.actions.push_back(dead(act("brake", "Brake", {"Space"}, {"LT"}), kTriggerDead));
+  control_action left =
+      dead(act("steer_left", "Steer left", {"A", "Left"}, {"LeftX-"}), kStickDead);
+  control_action right =
+      dead(act("steer_right", "Steer right", {"D", "Right"}, {"LeftX+"}), kStickDead);
   left.binding.ramp = right.binding.ramp = kSteerRamp;
   s.actions.push_back(left);
   s.actions.push_back(right);
-  control_action out = act("interact", "Get out (hold)", {"E"});
+  control_action out = act("interact", "Get out (hold)", {"E"}, {"X"});
   out.binding.hold = kInteractHold;
   s.actions.push_back(out);
+  look_actions(s);
   return s;
 }
 } // namespace
@@ -64,15 +85,18 @@ std::vector<control_scheme> default_control_schemes() {
   control_scheme walk;
   walk.id = "walk";
   walk.kind = control_kind::walk;
-  walk.actions.push_back(act("forward", "Walk forward", {"W", "Up"}));
-  walk.actions.push_back(act("backward", "Walk back", {"S", "Down"}));
-  walk.actions.push_back(act("strafe_left", "Step left", {"A", "Left"}));
-  walk.actions.push_back(act("strafe_right", "Step right", {"D", "Right"}));
-  walk.actions.push_back(act("jump", "Jump", {"Space"}));
-  walk.actions.push_back(act("mouse_look", "Mouse look on / off", {"V"}));
-  control_action in = act("interact", "Get in (hold)", {"E"});
+  walk.actions.push_back(dead(act("forward", "Walk forward", {"W", "Up"}, {"LeftY-"}), kStickDead));
+  walk.actions.push_back(dead(act("backward", "Walk back", {"S", "Down"}, {"LeftY+"}), kStickDead));
+  walk.actions.push_back(
+      dead(act("strafe_left", "Step left", {"A", "Left"}, {"LeftX-"}), kStickDead));
+  walk.actions.push_back(
+      dead(act("strafe_right", "Step right", {"D", "Right"}, {"LeftX+"}), kStickDead));
+  walk.actions.push_back(act("jump", "Jump", {"Space"}, {"A"}));
+  walk.actions.push_back(act("mouse_look", "Mouse look on / off", {"V"}, {"RightStick"}));
+  control_action in = act("interact", "Get in (hold)", {"E"}, {"X"});
   in.binding.hold = kInteractHold;
   walk.actions.push_back(in);
+  look_actions(walk);
   return {walk, drive_scheme("car", true), drive_scheme("boat", false)};
 }
 
@@ -105,24 +129,62 @@ void control_resolver::set_keys(const std::string &action, std::vector<std::stri
       a.binding.keys = std::move(keys);
 }
 
-void control_resolver::update(const held_fn &held, double dt) {
+void control_resolver::set_pad(const std::string &action, std::vector<std::string> pad) {
+  for (control_action &a : _scheme.actions)
+    if (a.id == action)
+      a.binding.pad = std::move(pad);
+}
+
+double pad_reading(const control_binding &binding, const control_resolver::pad_fn &pad) {
+  if (!pad)
+    return 0.0;
+  double best = 0.0;
+  for (const std::string &name : binding.pad) {
+    if (name.empty())
+      continue;
+    // A stick's half by its sign; anything else as it reads.
+    const char sign = name.back();
+    const bool half = sign == '+' || sign == '-';
+    double r = pad(half ? name.substr(0, name.size() - 1) : name);
+    if (!std::isfinite(r))
+      continue;
+    if (binding.invert)
+      r = -r;
+    if (half)
+      r = sign == '+' ? r : -r;
+    best = std::max(best, std::clamp(r, 0.0, 1.0));
+  }
+  const double dz = std::clamp(binding.deadzone, 0.0, 0.99);
+  if (best <= dz)
+    return 0.0;
+  return std::clamp((best - dz) / (1.0 - dz) * binding.scale, 0.0, 1.0);
+}
+
+void control_resolver::update(const held_fn &held, double dt, const pad_fn &pad) {
   dt = std::max(0.0, dt);
+  bool any_key = false, any_pad = false;
   for (const control_action &a : _scheme.actions) {
     live &l = _live[a.id];
-    bool down = false;
+    bool keyed = false;
     for (const std::string &k : a.binding.keys)
-      down = down || (held && held(k));
+      keyed = keyed || (held && held(k));
+    const double padded = pad_reading(a.binding, pad);
+    any_key = any_key || keyed;
+    any_pad = any_pad || padded > 0.0;
+    const bool down = keyed || padded > 0.5;
     l.was_down = l.down;
     l.down = down;
-    const double target = down ? 1.0 : 0.0;
+    // The keys' value ramps; the gamepad's is as it reads.
+    const double target = keyed ? 1.0 : 0.0;
     const double ramp = a.binding.ramp;
     if (ramp > 0.0) {
       const double step = dt / ramp;
-      l.value =
-          l.value < target ? std::min(target, l.value + step) : std::max(target, l.value - step);
+      l.key_value = l.key_value < target ? std::min(target, l.key_value + step)
+                                         : std::max(target, l.key_value - step);
     } else {
-      l.value = target;
+      l.key_value = target;
     }
+    l.value = std::max(l.key_value, padded);
     l.fired = false;
     if (!down)
       l.spent = false; // let go: it may fire (or toggle) again
@@ -139,6 +201,10 @@ void control_resolver::update(const held_fn &held, double dt) {
       }
     }
   }
+  if (any_key)
+    _from_pad = false;
+  else if (any_pad)
+    _from_pad = true;
 }
 
 double control_resolver::value(const std::string &action) const {
@@ -168,6 +234,16 @@ void control_resolver::drive_axes(avatar_intent &in) const {
   in.steer = value("steer_left") - value("steer_right");
   in.throttle = value("throttle") - value("reverse");
   in.brake = value("brake");
+}
+
+void control_resolver::walk_axes(double &forward, double &right) const {
+  forward = value("forward") - value("backward");
+  right = value("strafe_right") - value("strafe_left");
+}
+
+void control_resolver::look_axes(double &right, double &up) const {
+  right = value("look_right") - value("look_left");
+  up = value("look_up") - value("look_down");
 }
 
 } // namespace ariadne

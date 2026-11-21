@@ -9609,6 +9609,73 @@ TEST(AriadneAppRuntime, KeysWindowListsTheDocumentsAndTheHostsKeys) {
   EXPECT_TRUE(mb.saw("text_line:No keys to change here."));
 }
 
+// A binding the host reads a gamepad for (KeyBinding::pad_path) has a gamepad column beside its
+// keys, seeded with its defaults, and a Change of its own: the next gamepad input pressed
+// (post_pad_press) is its new one. Keys go on waiting, and Escape keeps the old one; a gamepad
+// input pressed with no gamepad Change waiting binds nothing.
+TEST(AriadneAppRuntime, KeysWindowRebindsAGamepadInput) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  cvc::app app;
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.set_host_keys({{"walk_forward",
+                      "Walk forward",
+                      "Avatar",
+                      {"W"},
+                      "",
+                      "/av.keys.forward",
+                      {"LeftY-"},
+                      "/av.pad.forward"},
+                     {"camera_up", "Up", "Camera", {"E"}, "", "/cam.keys.up"}});
+  art.load(write_doc("pad_window.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n"));
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(st("av.pad.forward").value(), "LeftY-") << "seeded with its default";
+  st("ui.docs.d.tree.ariadne_keys.open").value(1);
+  art.drain();
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("text_value:=W"));
+  EXPECT_TRUE(mb.saw("text_value:=LeftY-")) << "the gamepad column";
+  EXPECT_TRUE(mb.saw("push_id:pad"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "button:Change"), 3)
+      << "the keys' Change on each row, the gamepad's on the one row that has one";
+
+  const std::string capture = "ui.docs.d.tree.ariadne_keys.capture";
+  art.runtime().post_pad_press("A");
+  art.drain();
+  EXPECT_EQ(st("av.pad.forward").value(), "LeftY-") << "no gamepad Change waiting: nothing";
+
+  st(capture).value(std::string(kPadCapture) + "walk_forward"); // its gamepad Change
+  art.drain();
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw(std::string("text_value:=") + kPadPrompt));
+  EXPECT_TRUE(mb.saw("text_value:=W")) << "its keys still shown";
+  InputEvent key;
+  key.kind = InputEvent::Kind::KeyDown;
+  key.key = "Up";
+  art.runtime().post_input(key);
+  art.drain();
+  EXPECT_EQ(st("av.keys.forward").value(), "W") << "a key binds nothing to a gamepad Change";
+  EXPECT_EQ(st(capture).value(), std::string(kPadCapture) + "walk_forward") << "still waiting";
+  art.runtime().post_pad_press("RT");
+  art.drain();
+  EXPECT_EQ(st("av.pad.forward").value(), "RT");
+  EXPECT_EQ(st(capture).value(), "");
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("text_value:=RT")) << "and its row shows it";
+
+  st(capture).value(std::string(kPadCapture) + "walk_forward");
+  key.key = "Escape";
+  art.runtime().post_input(key);
+  art.drain();
+  EXPECT_EQ(st("av.pad.forward").value(), "RT") << "Escape keeps the old one";
+  EXPECT_EQ(st(capture).value(), "");
+}
+
 // The Controls window shows the host's mouse settings above the keys (set_host_mouse), bound where
 // its camera reads them: the look (drag to look, or mouse look), whether a drag steers, the
 // sensitivity, the inverted axes, and a note on what the look does there.
