@@ -76,7 +76,7 @@ target_include_directories(tiler_legacy_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/.
 target_compile_definitions(tiler_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 
-# molecule_test reads 1GRL from the source tree (src/cvc/tests/data/mol).
+# molecule_test reads PDB entry 1GRL from the source tree (examples/data/molecules).
 target_compile_definitions(molecule_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 target_compile_definitions(blur_test PRIVATE

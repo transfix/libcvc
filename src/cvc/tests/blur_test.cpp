@@ -40,7 +40,7 @@ namespace mol = cvc::mol;
 namespace {
 
 const std::string kRepo = CVC_REPO_DIR;
-const std::string k1grl = kRepo + "/src/cvc/tests/data/mol/1grl.pdb";
+const std::string k1grl = kRepo + "/examples/data/molecules/1grl.pdb";
 
 mol::molecule atoms(std::initializer_list<std::array<double, 4>> xyzr) {
   mol::molecule m;
