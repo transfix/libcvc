@@ -7,12 +7,18 @@
 //   - picks written to grid.pick.* run the gestures: a click marks and unmarks a point, a drag is
 //     a rubber band, Shift+Ctrl drags the selection, navigate moves the other planes; the overlays
 //     draw the points, the rings, the crosshairs and the band; the pointer fills the probe;
-//   - requests: undo, delete_selected, select_all, step, save / load classes and points, save /
-//     load a session, load another volume, and a bad one reported in status;
+//   - requests: undo, delete_selected, select_all, step, and a bad one reported in status;
 //   - rows edited, added and removed edit the classes; a point_classes written to grid.points from
 //     outside replaces them;
-//   - T6: two grids in one document share nothing (one read plane by plane); a second app without
-//     cvcGL's extensions has no volume_grid type.
+//   - the data on the state tree: the volume is the one the app wrote to grid.source.volume's key
+//     (its voxels shared, grid.volume the very pointer), followed when a new one is written or the
+//     key is edited; a grid waits for a volume not there yet; a grid with source: { node } shows
+//     another's volume; the app saves grid.points and grid.session (data_save) and loads them back
+//     as datasets the grid follows (grid.source.points, grid.source.session); the sdf generator
+//     makes a volume as a dataset;
+//   - T6: two grids in one document share nothing (one a slice_source read plane by plane); a
+//     second app without cvcGL's extensions has no volume_grid type, sdf generator or encoder of
+//     the first's.
 
 #include "streaming_test_util.h"
 
@@ -20,6 +26,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/geometry.h>
@@ -33,6 +41,8 @@
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
+#include <cvc/volume/volume_grid.h>
+#include <cvc/volume/volume_slice.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -114,6 +124,13 @@ std::shared_ptr<const cvc::point_classes> points_of(cvc::app &app, const std::st
   return nullptr;
 }
 
+std::shared_ptr<const cvc::volume> volume_at(cvc::app &app, const std::string &path) {
+  const boost::any d = cvc::state::instance(app)(path).data();
+  if (const auto *p = boost::any_cast<std::shared_ptr<const cvc::volume>>(&d))
+    return *p;
+  return nullptr;
+}
+
 std::size_t lines_in(const std::shared_ptr<cvc::gl::GeometryNode> &g) {
   return g && g->isVisible() && g->getGeometry() ? g->getGeometry()->num_lines() : 0;
 }
@@ -122,19 +139,20 @@ std::size_t tris_in(const std::shared_ptr<cvc::gl::GeometryNode> &g) {
   return g && g->isVisible() && g->getGeometry() ? g->getGeometry()->num_tris() : 0;
 }
 
-std::string doc(const std::string &file, const std::string &file2) {
+// g and h show volumes the app put at /vols.g and /vols.h; w waits for one at /vols.later; s
+// shows g's (source: { node: g }).
+std::string doc() {
   return "meta:\n  name: grid test\n  min_libcvc: 3.7.0\nscene:\n  nodes:\n"
-         "    - node: g\n      type: volume_grid\n      source: { file: \"" +
-         file +
-         "\" }\n"
+         "    - node: g\n      type: volume_grid\n      source: { state: /vols.g }\n"
          "      view: xy\n      slice: { z: 2 }\n"
          "      display: { point_scale: 1 }\n"
          "      classes:\n"
          "        - { name: membrane, color: [1, 0, 0], radius: 1.5 }\n"
          "        - { name: background, color: [0, 0, 1] }\n"
          "      transfer_function: { preset: grayscale }\n"
-         "    - node: h\n      type: volume_grid\n      source: { file: \"" +
-         file2 + "\" }\n      region_reads: true\n";
+         "    - node: h\n      type: volume_grid\n      source: { state: /vols.h }\n"
+         "    - node: w\n      type: volume_grid\n      source: { state: /vols.later }\n"
+         "    - node: s\n      type: volume_grid\n      source: { node: g }\n";
 }
 
 void run(const fs::path &dir) {
@@ -143,20 +161,23 @@ void run(const fs::path &dir) {
   cvc::gl::ariadne::register_cvcgl_extensions(app);
   check(cvc::gl::ariadne::has_scene_node_type(app, "volume_grid"),
         "register_cvcgl_extensions installs volume_grid");
-  const std::string file = (dir / "coded.rawiv").generic_string();
+  // The app holds the volumes: g's in memory, h's a large file a host reads plane by plane.
+  cvc::state &root = cvc::state::instance(app);
   const std::string file2 = (dir / "other.rawiv").generic_string();
-  const std::string file3 = (dir / "cube.rawiv").generic_string();
-  cvc::writeVolumeFile(app, coded(app, 8, 6, 4), file);
   cvc::writeVolumeFile(app, coded(app, 4, 4, 4), file2);
-  cvc::writeVolumeFile(app, coded(app, 5, 5, 5), file3);
+  const auto gvol = std::make_shared<const cvc::volume>(coded(app, 8, 6, 4));
+  root("vols.g").data(boost::any(gvol));
+  root("vols.h").data(boost::any(std::make_shared<cvc::slice_source>(app, file2)));
 
-  realized_doc d(app, "vg", doc(file, file2));
+  realized_doc d(app, "vg", doc());
   for (const std::string &w : d.warnings)
     check(false, "the document realizes without warnings", w);
   auto g = std::dynamic_pointer_cast<cvc::gl::VolumeGridNode>(d.sg.getGraphics("g"));
   auto h = std::dynamic_pointer_cast<cvc::gl::VolumeGridNode>(d.sg.getGraphics("h"));
-  check(g && h, "a volume_grid node is a VolumeGridNode");
-  if (!g || !h)
+  auto w = std::dynamic_pointer_cast<cvc::gl::VolumeGridNode>(d.sg.getGraphics("w"));
+  auto s = std::dynamic_pointer_cast<cvc::gl::VolumeGridNode>(d.sg.getGraphics("s"));
+  check(g && h && w && s, "a volume_grid node is a VolumeGridNode");
+  if (!g || !h || !w || !s)
     return;
   d.tick(2);
   const std::string k = g->stateName() + ".grid";
@@ -201,10 +222,28 @@ void run(const fs::path &dir) {
   check(lines_in(g->linesOverlay(slice_axis::z)) == 2, "crosshairs on the xy plane",
         std::to_string(lines_in(g->linesOverlay(slice_axis::z))));
   check(g->source()->in_memory() && !h->source()->in_memory(),
-        "g is read whole, h (region_reads: true) plane by plane");
-  check(points_of(app, k + ".volume") == nullptr &&
-            !cvc::state::instance(app)(k + ".volume").data().empty(),
-        "grid.volume holds the volume in memory");
+        "g cuts the volume in memory, h the slice_source read plane by plane");
+  check(val(app, k + ".source.volume") == "/vols.g" && val(app, k + ".info.source") == "/vols.g",
+        "source: { state } seeds grid.source.volume; info.source says it");
+  check(volume_at(app, k + ".volume") == gvol,
+        "grid.volume is the very volume the app holds (the pointer it wrote)");
+  check(g->source()->in_memory_volume()->data_ptr() == gvol->data_ptr(),
+        "and the planes cut its voxels, not a copy");
+
+  // ---- a volume not there yet, and one shared with another node ----
+  const std::string wk = w->stateName() + ".grid";
+  check(!w->source() && w->slice(slice_axis::z) &&
+            val(app, wk + ".status") == "waiting for a volume at /vols.later",
+        "a grid whose volume is not there yet has its planes, nothing to cut, and waits",
+        val(app, wk + ".status"));
+  root("vols.later").data(boost::any(std::make_shared<const cvc::volume>(coded(app, 3, 3, 3))));
+  d.tick();
+  check(w->source() && val(app, wk + ".info.dims") == "3 3 3",
+        "and takes the volume when the app writes it", val(app, wk + ".info.dims"));
+  const std::string sk = s->stateName() + ".grid";
+  check(volume_at(app, sk + ".volume") == gvol && val(app, sk + ".info.dims") == "8 6 4",
+        "source: { node: g } shows g's volume: one volume, two grids",
+        val(app, sk + ".source.volume") + " " + val(app, sk + ".status"));
 
   // ---- picks ----
   picker pick{app, d, k + ".pick"};
@@ -329,55 +368,91 @@ void run(const fs::path &dir) {
     check(val(app, k + ".classes") == "3", "undoable too");
   }
 
-  // ---- files ----
+  // ---- the app saves and loads the classes ----
+  const std::string prefix = d.sg.getStatePrefix(); // the document's scope
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
   const std::string vgr = (dir / "classes.vgr").generic_string();
-  set(app, k + ".request", "save_classes " + vgr);
-  d.tick();
-  check(fs::exists(vgr), "save_classes writes the file", val(app, k + ".status"));
-  set(app, k + ".request", "delete_selected");
-  set(app, k + ".request", "select_all");
-  d.tick();
-  set(app, k + ".request", "delete_selected");
-  d.tick();
-  set(app, k + ".request", "load_classes " + vgr);
+  cvc::ariadne::data_save(app, k + ".points", vgr);
+  check(fs::exists(vgr), "the app saves grid.points as a .vgr (data_save, by the payload's type)");
+  const auto delete_all = [&] {
+    set(app, k + ".request", "select_all");
+    d.tick();
+    set(app, k + ".request", "delete_selected");
+    d.tick();
+  };
+  delete_all();
+  check(points_of(app, k + ".points")->point_count() == 0, "(the points deleted)");
+  cvc::ariadne::DataSpec seeds;
+  seeds.name = "seeds";
+  seeds.uri = vgr; // as: point_classes, by its extension
+  store->bind(prefix, seeds);
+  const std::string seeds_at = cvc::ariadne::resolve_bind(prefix, "data.seeds");
+  check(store->wait(seeds_at, 30.0), "the app loads the .vgr as a dataset",
+        cvc::ariadne::data_status(app, seeds_at));
+  set(app, k + ".source.points", "data.seeds.classes");
   d.tick();
   pts = points_of(app, k + ".points");
-  check(pts && pts->point_count() == 3 && pts->classes.size() == 3, "load_classes reads it back",
+  check(pts && pts->point_count() == 3 && pts->classes.size() == 3 &&
+            val(app, k + ".status") == "read 3 points in 3 classes from data.seeds.classes",
+        "grid.source.points pointed at it: its classes replace the grid's",
         val(app, k + ".status"));
-  set(app, k + ".request", "load_points " + vgr);
+  delete_all();
+  store->reload(seeds_at);
+  store->wait(seeds_at, 30.0);
   d.tick();
-  pts = points_of(app, k + ".points");
-  check(pts && pts->point_count() == 3 && pts->classes.size() == 3,
-        "load_points adds a file's points to the classes of those names (nothing new here)");
-  set(app, k + ".request", "load_classes " + (dir / "missing.vgr").generic_string());
-  d.tick();
-  check(val(app, k + ".status").rfind("error: load_classes:", 0) == 0,
-        "a file that can't be read is reported", val(app, k + ".status"));
+  check(points_of(app, k + ".points")->point_count() == 3,
+        "the dataset loaded again (a changed file) is followed");
+  bool refused = false;
+  try {
+    cvc::ariadne::data_save(app, k + ".nothing_here", (dir / "x.vgr").generic_string());
+  } catch (const std::runtime_error &e) {
+    refused = std::string(e.what()).find("holds no data") != std::string::npos;
+  }
+  check(refused, "saving a key with no data raises, saying so");
+  refused = false;
+  try {
+    cvc::ariadne::data_save(app, k + ".points", (dir / "x.vgr").generic_string(), "",
+                            "https://example.org/docs");
+  } catch (const std::runtime_error &e) {
+    refused = std::string(e.what()).find("not a local file") != std::string::npos;
+  }
+  check(refused && !fs::exists(dir / "x.vgr"), "a document that is not a local file saves nothing");
   set(app, k + ".request", "frobnicate");
   d.tick();
   check(val(app, k + ".status") == "error: frobnicate: 'frobnicate' is not a request",
         "a bad request is reported", val(app, k + ".status"));
 
-  // ---- sessions ----
+  // ---- sessions, through the app ----
   const std::string session = (dir / "grid.session.json").generic_string();
   set(app, k + ".view", "zy");
   set(app, k + ".display.point_scale", "2");
   d.tick();
-  set(app, k + ".request", "save_session " + session);
-  d.tick();
-  check(fs::exists(session), "save_session writes the file", val(app, k + ".status"));
+  {
+    const boost::any sd = root(k + ".session").data();
+    const auto *sp = boost::any_cast<std::shared_ptr<const cvc::volume_grid_session>>(&sd);
+    check(sp && *sp && (*sp)->keys.count("grid.view") && (*sp)->keys.at("grid.view") == "zy" &&
+              (*sp)->classes.point_count() == 3 && !(*sp)->keys.count("grid.source.volume"),
+          "grid.session holds the session as it stands (not where the data come from)");
+  }
+  cvc::ariadne::data_save(app, k + ".session", session);
+  check(fs::exists(session), "the app saves grid.session (data_save)");
   set(app, k + ".view", "xy");
   set(app, k + ".display.point_scale", "1");
-  set(app, k + ".request", "select_all");
-  d.tick();
-  set(app, k + ".request", "delete_selected");
-  d.tick();
-  set(app, k + ".request", "load_session " + session);
+  delete_all();
+  cvc::ariadne::DataSpec last;
+  last.name = "last";
+  last.uri = session;
+  last.as = "volume_grid_session";
+  store->bind(prefix, last);
+  check(store->wait(cvc::ariadne::resolve_bind(prefix, "data.last"), 30.0),
+        "the app loads the session as a dataset");
+  set(app, k + ".source.session", "data.last.session");
   d.tick();
   pts = points_of(app, k + ".points");
   check(val(app, k + ".view") == "zy" && val(app, k + ".display.point_scale") == "2" && pts &&
-            pts->point_count() == 3,
-        "load_session puts the keys and the classes back", val(app, k + ".status"));
+            pts->point_count() == 3 && val(app, k + ".source.volume") == "/vols.g",
+        "grid.source.session pointed at it: the keys and the classes come back",
+        val(app, k + ".status"));
 
   // ---- grey ----
   set(app, k + ".display.grey", "1");
@@ -397,7 +472,7 @@ void run(const fs::path &dir) {
   check(val(app, hk + ".info.dims") == "4 4 4" && val(app, hk + ".view") == "xy",
         "and its own volume and keys");
   check(cvc::state::instance(app)(hk + ".volume").data().empty(),
-        "a grid read plane by plane has no volume in memory");
+        "a grid cutting a slice_source read plane by plane has no volume in memory");
   picker hpick{app, d, hk + ".pick"};
   hpick.click(0, 0, 1);
   hpts = points_of(app, hk + ".points");
@@ -406,26 +481,59 @@ void run(const fs::path &dir) {
   pts = points_of(app, k + ".points");
   check(pts && pts->point_count() == 3, "and leaves g alone");
 
-  // ---- load another volume ----
-  set(app, k + ".source.file", file3);
-  set(app, k + ".request", "load");
+  // ---- the volume changes ----
+  const auto bigger = std::make_shared<const cvc::volume>(coded(app, 5, 5, 5));
+  root("vols.g").data(boost::any(bigger)); // a filter's output, say
   d.tick();
   check(val(app, k + ".info.dims") == "5 5 5" && val(app, k + ".slice.x") == "4" &&
-            cvc::state::instance(app)(k + ".slice.x").property("max") == "4",
-        "load reads grid.source.file; the planes are clamped to it",
+            cvc::state::instance(app)(k + ".slice.x").property("max") == "4" &&
+            volume_at(app, k + ".volume") == bigger,
+        "a new volume at the key is followed: the planes are clamped to it, grid.volume is it",
         val(app, k + ".info.dims") + " " + val(app, k + ".slice.x") + " " +
             val(app, k + ".status"));
-  set(app, k + ".source.file", (dir / "nope.rawiv").generic_string());
-  set(app, k + ".request", "load");
   d.tick();
-  check(val(app, k + ".status").rfind("error: load:", 0) == 0 &&
+  check(volume_at(app, sk + ".volume") == bigger && val(app, sk + ".info.dims") == "5 5 5",
+        "and the grid sharing g's volume follows it too");
+  root("vols.g").data(boost::any(std::string("not a volume")));
+  d.tick();
+  check(val(app, k + ".status") == "error: vols.g holds no volume" &&
             val(app, k + ".info.dims") == "5 5 5",
-        "a load that fails is reported and keeps the volume", val(app, k + ".status"));
+        "something that is no volume is reported, and the volume kept", val(app, k + ".status"));
+  root("vols.g2").data(boost::any(gvol));
+  set(app, k + ".source.volume", "/vols.g2");
+  d.tick();
+  check(val(app, k + ".info.dims") == "8 6 4" && volume_at(app, k + ".volume") == gvol,
+        "grid.source.volume edited: the grid follows the new key", val(app, k + ".status"));
+
+  // ---- the sdf generator: a volume made as a dataset ----
+  cvc::ariadne::DataSpec bunny;
+  bunny.name = "bunny";
+  bunny.generate = "sdf";
+  bunny.params = "{\"mesh\": \"stanford.bunny\", \"dim\": 8}";
+  store->bind(prefix, bunny);
+  const std::string bunny_at = cvc::ariadne::resolve_bind(prefix, "data.bunny");
+  const bool made = store->wait(bunny_at, 120.0);
+  const auto sdf =
+      volume_at(app, cvc::state::instance(app).findThroughLinks(bunny_at)->fullName() + ".volume");
+  const std::string error =
+      val(app, cvc::state::instance(app).findThroughLinks(bunny_at)->fullName() + ".error");
+  check((made && sdf && sdf->XDim() == 8 && sdf->ZDim() == 8) ||
+            (!made && error.find("CVC_ENABLE_SDF") != std::string::npos),
+        "generate: sdf makes the mesh's signed distance field as the dataset's volume", error);
 
   // ---- two apps ----
   cvc::app other;
   check(!cvc::gl::ariadne::has_scene_node_type(other, "volume_grid"),
         "an app that has not registered cvcGL's extensions has no volume_grid type");
+  check(cvc::ariadne::has_data_generator(app, "sdf") &&
+            !cvc::ariadne::has_data_generator(other, "sdf"),
+        "nor the sdf generator, which is the first app's");
+  cvc::ariadne::register_data_encoder(
+      other, "x_only", [](const cvc::ariadne::DataEncode &) { return std::string(); });
+  check(cvc::ariadne::has_data_encoder(other, "x_only") &&
+            !cvc::ariadne::has_data_encoder(app, "x_only") &&
+            cvc::ariadne::has_data_encoder(other, "point_classes"),
+        "an encoder registered on one app is that app's; each starts with the built-ins");
 }
 
 // Rendered (offscreen): the plane's overlays draw on top of it, the crosshair lines and a point's
@@ -436,8 +544,9 @@ void rendered(const fs::path &dir) {
   if (!cvcgl_test::renderAvailable(app))
     return;
   cvc::gl::ariadne::register_cvcgl_extensions(app);
-  const std::string file = (dir / "flat.rawiv").generic_string();
-  cvc::writeVolumeFile(app, coded(app, 9, 9, 3), file);
+  (void)dir;
+  cvc::state::instance(app)("vols.flat")
+      .data(boost::any(std::make_shared<const cvc::volume>(coded(app, 9, 9, 3))));
   realized_doc d(app, "vg_draw",
                  R"(meta:
   name: grid draw
@@ -446,8 +555,7 @@ scene:
   nodes:
     - node: g
       type: volume_grid
-      source: { file: ")" +
-                     file + R"(" }
+      source: { state: /vols.flat }
       slice: { x: 2, y: 6, z: 1 }
       classes: [ { name: c, color: [0, 1, 0], radius: 1 } ]
       transfer_function: { color: [[0, 0, 0, 1], [1, 0, 0, 1]] }
