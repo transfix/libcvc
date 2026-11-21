@@ -8,7 +8,7 @@ legacy VolumeRover (`tools/volrover-goldens`). This directory makes those output
    checkout of just the directories the parser and GOABlur need.
 2. It builds `blur_legacy` with this directory's `CMakeLists.txt`. That build is never part of
    libcvc's.
-3. It runs it on PDB entry 1GRL (`src/cvc/tests/data/mol/1grl.pdb`) for each case.
+3. It runs it on PDB entry 1GRL (`examples/data/molecules/1grl.pdb`) for each case.
 4. It writes the goldens to `src/cvc/tests/data/texmol-goldens/blur/`, where `blur_test` reads
    them.
 

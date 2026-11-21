@@ -7,7 +7,7 @@ TexMol original. This script:
   1. fetches transfix/TexMol at the sha in texmol.sha (only the directories the parser and GOABlur
      need), or uses --texmol DIR;
   2. builds blur_legacy with this directory's CMakeLists.txt (never part of libcvc's build);
-  3. runs it on each case below, on src/cvc/tests/data/mol/1grl.pdb;
+  3. runs it on each case below, on examples/data/molecules/1grl.pdb;
   4. writes the goldens to src/cvc/tests/data/texmol-goldens/blur/ (or --out), or, with --check,
      makes them in a scratch directory and compares them with what is committed.
 
@@ -45,7 +45,7 @@ SPARSE = ["inc/PDBParser", "src/PDBParser", "inc/Blurmaps", "src/Blurmaps", "inc
           "src/Utility", "inc/UsefulMath", "src/UsefulMath", "inc/SimpleVolumeData",
           "src/SimpleVolumeData", "inc/DPG", "inc/ByteOrder", "src/ByteOrder", "inc/ColorManager",
           "src/ColorManager", "inc/TexMol"]
-PDB = os.path.join(REPO, "src", "cvc", "tests", "data", "mol", "1grl.pdb")
+PDB = os.path.join(REPO, "examples", "data", "molecules", "1grl.pdb")
 # name: (resolution in Å, blobbiness)
 CASES = {
     "1grl_r1.5": (1.5, -2.3442),  # TexMol's default blobbiness
@@ -183,7 +183,7 @@ def main():
             "library": "TexMol PDBParser + Blurmaps GOABlur (electron density, van der Waals radii)",
             "texmol": sha,
             "case": case,
-            "input": "src/cvc/tests/data/mol/1grl.pdb",
+            "input": "examples/data/molecules/1grl.pdb",
             "input_sha256": sha256(PDB),
             "resolution": resolution,
             "blobbiness": blobbiness,
