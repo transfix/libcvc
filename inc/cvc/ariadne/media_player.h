@@ -68,6 +68,9 @@ public:
   virtual double position() const = 0;   // seconds
   virtual double duration() const = 0;   // seconds; 0 when not known (yet)
   virtual std::string error() const = 0; // why it Failed; never a token
+  // What keeps its picture from showing though it hasn't Failed, in a few words for its box: a
+  // browser waiting for a tap to start it, frames that read back blank. "" when nothing does.
+  virtual std::string notice() const { return std::string(); }
   // The picture to show now (RGBA), when it is a newer one than `gen` (then `gen` moves to it);
   // false when there is none or it has not changed.
   virtual bool frame(cvc::image &out, long &gen) = 0;

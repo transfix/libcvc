@@ -3531,6 +3531,11 @@ has loaded, or when it failed, nothing is drawn behind the content.
   `size: "100%"` and `max_height:` (§5.11) make it as wide as its line, at the video's own shape:
   `size: "100%"` with `max_height: 480` is a feed's video, as wide as the post, a portrait one
   narrower.
+- **With no frame, the box says why**, over the poster or the placeholder: `failed` (with
+  `controls: false`, the error itself: there is no controls line to show it), what the player says
+  keeps the picture away (a browser's `tap to start it`), or, after 3 s loading or playing with no
+  frame, `loading` or `playing`. It isn't shown once a frame has been, where the widget has a
+  `badge:` of its own, in a box narrower than 96 px (an avatar, an emoji), or in a terminal.
 - **`autoplay: true`** starts it once it can, and from then on, until the user presses Play or
   Pause (or the document writes `playing`), it plays while its picture shows: scrolled out of its
   window's view, or its window closed, it pauses, and back in view it plays on. So a feed's
@@ -3561,6 +3566,16 @@ has loaded, or when it failed, nothing is drawn behind the content.
     - Each player is a hidden element. It plays the sound itself, and a video's new frames are
       drawn into a canvas the size of the box and copied into the widget's picture. That is one
       copy per frame shown, and it works the same in both pages, under windows and menus.
+      - The element sits in the viewport's top-left corner, 2 px, under the page and all but
+        transparent: a phone's browser may not start or decode a video far outside the viewport.
+      - A frame is read back with a 2D canvas kept in memory, else WebGL, else a GPU-backed 2D
+        canvas. A frame that reads back empty or all one colour (black, or the green of a zeroed
+        frame) is tried the other ways (twice a second at most), and the first that gives a
+        picture is kept: a phone's hardware decoder can hand out frames one way reads as black.
+        Until a video has shown a picture, blank frames aren't shown, and after 3 s the box says
+        so with the ways it tried (`its frames come out black (2d, gl, gpu)`).
+        A page that sets `Module.cvcMediaPaths` (say `["gl"]`) before a player opens uses that
+        order instead.
     - The policy and credentials are decided in C++ before the element sees anything:
       - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
         requests), once the host allows its origin;
@@ -3572,6 +3587,11 @@ has loaded, or when it failed, nothing is drawn behind the content.
       plays and the error says so.
     - A browser plays sound only after the user has clicked or typed on the page. A muted
       `autoplay` starts by itself.
+      - Where the browser refuses to start one (sound, or a phone that starts no video by
+        itself, as some do on Data Saver), the box says `tap to start it`, and the next tap or key
+        anywhere on the page starts it.
+      - A browser that loads nothing before Play (preload none, as on Data Saver) leaves the
+        player `ready` rather than `loading`, so `autoplay` starts it.
     - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
       (and the media's origin when it is another). Without it the element falls back to
       `default-src`, and Chrome refuses media from another origin with "Media load rejected by
