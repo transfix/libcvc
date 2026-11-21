@@ -1,0 +1,377 @@
+# volume_grid.ari — a REUSABLE Ariadne component: VolumeGridRover for a `type: volume_grid` node
+# (cvc::gl::VolumeGridNode, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4). Slice views down the
+# volume's axes with a 3D view beside them, the tool (navigate / points / probe), and a side panel:
+# the probe and the planes, the point classes, and the transfer function. Every control binds a key
+# the node owns (graphics.root.children.<node>.grid.*, VolumeGridNode.h), and the views write their
+# picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO host C++.
+#
+#   In a slice view, with the Points tool:
+#     click                 mark a point of the current class, or unmark the one under the pointer
+#     drag                  select the points in a rubber band (Shift adds, Ctrl or Alt takes away)
+#     Shift+Ctrl drag       move the selection
+#   With Navigate, a click moves the other two planes to the voxel. The middle or right button pans,
+#   the wheel zooms about the pointer. The probe follows the pointer in every tool.
+#
+# The views come in two layouts (the `layout` arg): `switch` (the default, as VolumeGridRover had
+# it) is one slice view under an XY / XZ / ZY switch bound to grid.view, beside the 3D view; `quad`
+# is the XY, XZ and ZY views and the 3D view in a 2 x 2 grid. Under each slice view a slider moves
+# its plane; the sliders take their ranges from the keys (range: key), which the node keeps at the
+# volume's planes.
+#
+# Units:
+#   volume_grid         the whole tool in one window
+#   volume_grid_views   the views alone (a group: for a document that lays out its own windows)
+#   volume_grid_tools   the tool and the side panel alone (a group); its tabs end in a
+#                       `slot: tabs`, so an include adds tabs of its own (`slots: { tabs: [...] }`)
+#
+# Args (every one has a default, so a bare include works):
+#   node       the volume_grid node's id (default grid)
+#   title      the window's title (default Volume grid)
+#   id         the instance id: view names, window geometry and widget state persist under it
+#              (default volume_grid); give each include its own when a document has several grids
+#   view_size  a slice view's width and height in pixels (default 360; quad: each of the four)
+#   layout     switch | quad (default switch)
+#
+# Use it:
+#     import: cvc://components/volume_grid.ari
+#     windows:
+#       - include: volume_grid
+#     scene:
+#       nodes:
+#         - node: grid
+#           type: volume_grid
+#           source: { file: head.rawiv }
+#           classes: [ { name: membrane, color: [1, 0.2, 0.2], radius: 2 } ]
+#
+# Two grids: give each include its node and id; each view shows its own grid alone (show: [node]).
+# Keyboard: a document binds keys to requests (`keys:`), as examples/ariadne/documents/volume_grid.ari
+# does: PageUp / PageDown write `step 1` / `step -1`, Delete `delete_selected`.
+#
+# (P9 adds a Segmentation tab, P10 a Contours tab and a Tile button.)
+
+import:
+  - cvc://components/transfer_function.ari
+
+units:
+  volume_grid:
+    args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - type: group
+        id: "{id}_body"
+        layout: { kind: horizontal }
+        children:
+          - include: volume_grid_views
+            args: { node: "{node}", id: "{id}", view_size: "{view_size}", layout: "{layout}" }
+          - include: volume_grid_tools
+            args: { node: "{node}", id: "{id}" }
+
+  volume_grid_views:
+    args: { node: grid, id: volume_grid, view_size: 360, layout: switch }
+    type: group
+    id: "{id}_views"
+    children:
+      # switch: one slice view down the axis grid.view names, the 3D view beside it.
+      - type: group
+        id: "{id}_switch"
+        visible_when: (!= "{layout}" "quad")
+        layout: { kind: horizontal }
+        children:
+          - type: group
+            id: "{id}_switch_slice"
+            children:
+              - tabs: View
+                id: "{id}_view_switch"
+                bind: graphics.root.children.{node}.grid.view
+                options: [XY, XZ, ZY]
+                values: [xy, xz, zy]
+              - type: viewport
+                view: "{id}_slice"
+                mode: slice
+                axis:
+                  bind: graphics.root.children.{node}.grid.view
+                show: ["{node}"]
+                hide: [surfaces]
+                input: pick
+                pick: graphics.root.children.{node}.grid.pick
+                pointer: graphics.root.children.{node}.grid.pointer
+                chrome: false
+                clear_color: [0.04, 0.045, 0.06]
+                width: "{view_size}"
+                height: "{view_size}"
+                caption: "click: mark   drag: select   middle: pan   wheel: zoom"
+              - slider_int: Z plane
+                bind: graphics.root.children.{node}.grid.slice.z
+                range: key
+                hi: 1000
+                visible_when: (= (state-get "graphics.root.children.{node}.grid.view") "xy")
+              - slider_int: Y plane
+                bind: graphics.root.children.{node}.grid.slice.y
+                range: key
+                hi: 1000
+                visible_when: (= (state-get "graphics.root.children.{node}.grid.view") "xz")
+              - slider_int: X plane
+                bind: graphics.root.children.{node}.grid.slice.x
+                range: key
+                hi: 1000
+                visible_when: (= (state-get "graphics.root.children.{node}.grid.view") "zy")
+          - type: viewport
+            view: "{id}_3d"
+            show: ["{node}"]
+            chrome: false
+            clear_color: [0.04, 0.045, 0.06]
+            width: "{view_size}"
+            height: "{view_size}"
+            zoom: 0.6
+            caption: "drag: orbit   wheel: zoom"
+      # quad: XY | XZ over ZY | 3D: two rows, each flowing side by side. Not a table: a table
+      # spans the window's width, which would push the tools off it.
+      - type: group
+        id: "{id}_quad"
+        visible_when: (= "{layout}" "quad")
+        children:
+          - type: group
+            id: "{id}_quad_top"
+            layout: { kind: horizontal }
+            children:
+              - type: group
+                id: "{id}_quad_xy"
+                children:
+                  - type: viewport
+                    view: "{id}_xy"
+                    mode: slice
+                    axis: z
+                    show: ["{node}"]
+                    hide: [surfaces]
+                    input: pick
+                    pick: graphics.root.children.{node}.grid.pick
+                    pointer: graphics.root.children.{node}.grid.pointer
+                    chrome: false
+                    clear_color: [0.04, 0.045, 0.06]
+                    width: "{view_size}"
+                    height: "{view_size}"
+                    caption: XY
+                  - slider_int: Z plane
+                    bind: graphics.root.children.{node}.grid.slice.z
+                    range: key
+                    hi: 1000
+              - type: group
+                id: "{id}_quad_xz"
+                children:
+                  - type: viewport
+                    view: "{id}_xz"
+                    mode: slice
+                    axis: y
+                    show: ["{node}"]
+                    hide: [surfaces]
+                    input: pick
+                    pick: graphics.root.children.{node}.grid.pick
+                    pointer: graphics.root.children.{node}.grid.pointer
+                    chrome: false
+                    clear_color: [0.04, 0.045, 0.06]
+                    width: "{view_size}"
+                    height: "{view_size}"
+                    caption: XZ
+                  - slider_int: Y plane
+                    bind: graphics.root.children.{node}.grid.slice.y
+                    range: key
+                    hi: 1000
+          - type: group
+            id: "{id}_quad_bottom"
+            layout: { kind: horizontal }
+            children:
+              - type: group
+                id: "{id}_quad_zy"
+                children:
+                  - type: viewport
+                    view: "{id}_zy"
+                    mode: slice
+                    axis: x
+                    show: ["{node}"]
+                    hide: [surfaces]
+                    input: pick
+                    pick: graphics.root.children.{node}.grid.pick
+                    pointer: graphics.root.children.{node}.grid.pointer
+                    chrome: false
+                    clear_color: [0.04, 0.045, 0.06]
+                    width: "{view_size}"
+                    height: "{view_size}"
+                    caption: ZY
+                  - slider_int: X plane
+                    bind: graphics.root.children.{node}.grid.slice.x
+                    range: key
+                    hi: 1000
+              - type: viewport
+                view: "{id}_quad_3d"
+                show: ["{node}"]
+                chrome: false
+                clear_color: [0.04, 0.045, 0.06]
+                width: "{view_size}"
+                height: "{view_size}"
+                zoom: 0.6
+                caption: 3D
+
+  volume_grid_tools:
+    args: { node: grid, id: volume_grid }
+    type: group
+    id: "{id}_tools"
+    children:
+      - radio_row: Tool
+        bind: graphics.root.children.{node}.grid.tool
+        options: [Navigate, Points, Probe]
+        values: [navigate, points, probe]
+        tooltip: "what a click in a slice view does: move the other planes there, mark and select points, or only read the voxel"
+      - type: tabs
+        id: "{id}_panel"
+        children:
+          - type: group
+            tab: Probe
+            children:
+              - type: group
+                id: "{id}_probe_voxel"
+                layout: { kind: horizontal }
+                children:
+                  - text: i
+                    bind: graphics.root.children.{node}.grid.cursor.i
+                  - text: j
+                    bind: graphics.root.children.{node}.grid.cursor.j
+                  - text: k
+                    bind: graphics.root.children.{node}.grid.cursor.k
+              - text: Value
+                bind: graphics.root.children.{node}.grid.cursor.value
+              - type: group
+                id: "{id}_probe_position"
+                layout: { kind: horizontal }
+                children:
+                  - text: x
+                    bind: graphics.root.children.{node}.grid.cursor.x
+                  - text: y
+                    bind: graphics.root.children.{node}.grid.cursor.y
+                  - text: z
+                    bind: graphics.root.children.{node}.grid.cursor.z
+              - separator
+              - slider_int: X plane
+                bind: graphics.root.children.{node}.grid.slice.x
+                range: key
+                hi: 1000
+              - slider_int: Y plane
+                bind: graphics.root.children.{node}.grid.slice.y
+                range: key
+                hi: 1000
+              - slider_int: Z plane
+                bind: graphics.root.children.{node}.grid.slice.z
+                range: key
+                hi: 1000
+              - checkbox: Crosshairs
+                bind: graphics.root.children.{node}.grid.display.crosshairs
+              - checkbox: Grey
+                bind: graphics.root.children.{node}.grid.display.grey
+                tooltip: "draw the slices in grey, not through the transfer function"
+              - separator
+              - text: Volume
+                bind: graphics.root.children.{node}.grid.info.dims
+              - type: group
+                id: "{id}_range"
+                layout: { kind: horizontal }
+                children:
+                  - text: Min
+                    bind: graphics.root.children.{node}.grid.info.min
+                  - text: Max
+                    bind: graphics.root.children.{node}.grid.info.max
+              - input_text: File
+                bind: graphics.root.children.{node}.grid.source.file
+                tooltip: "a volume file; a relative path is read from the document's directory"
+              - button: Load
+                on: (state-set "graphics.root.children.{node}.grid.request" "load")
+                tooltip: "read the file (its variable and timestep: grid.source.var / time)"
+              - separator
+              - input_text: Session
+                bind: graphics.root.children.{node}.grid.files.session
+                tooltip: "a session file (JSON): the grid's keys, its transfer function and its point classes"
+              - button: Save session
+                on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "save_session" (state-get "graphics.root.children.{node}.grid.files.session")) " "))
+              - button: Load session
+                on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "load_session" (state-get "graphics.root.children.{node}.grid.files.session")) " "))
+          - type: group
+            tab: Point classes
+            children:
+              - list: Classes
+                bind: graphics.root.children.{node}.grid.classes
+                add: true
+                remove: true
+                new_item: { name: "class {n}", radius: "1" }
+                rows: 5
+                tooltip: "the class a click marks; Add and Remove edit the classes (Undo puts them back)"
+              - type: group
+                id: "{id}_class_head"
+                layout: { kind: grid, col_widths: [110, 140, 80, 50] }
+                children:
+                  - text: name
+                  - text: colour
+                  - text: radius
+                  - text: pts
+              - type: group
+                id: "{id}_class_{i}"
+                repeat: (int (state-get "graphics.root.children.{node}.grid.classes"))
+                layout: { kind: grid, col_widths: [110, 140, 80, 50] }
+                children:
+                  - input_text: "##name{i}"
+                    bind: graphics.root.children.{node}.grid.classes.{i}.name
+                  - color: "##colour{i}"
+                    bind: graphics.root.children.{node}.grid.classes.{i}.color
+                  - slider_float: "##radius{i}"
+                    bind: graphics.root.children.{node}.grid.classes.{i}.radius
+                    lo: 0.5
+                    hi: 10.0
+                    fmt: "%.1f"
+                  - text: ""
+                    bind: graphics.root.children.{node}.grid.classes.{i}.points
+              - text: Selected
+                bind: graphics.root.children.{node}.grid.selection.count
+              - type: group
+                id: "{id}_selection"
+                layout: { kind: horizontal }
+                children:
+                  - button: All
+                    on: (state-set "graphics.root.children.{node}.grid.request" "select_all")
+                  - button: None
+                    on: (state-set "graphics.root.children.{node}.grid.request" "select_none")
+                  - button: Delete
+                    on: (state-set "graphics.root.children.{node}.grid.request" "delete_selected")
+                    tooltip: "delete the selected points"
+                  - button: Undo
+                    on: (state-set "graphics.root.children.{node}.grid.request" "undo")
+              - checkbox: Show points
+                bind: graphics.root.children.{node}.grid.display.show_points
+              - slider_float: Point scale
+                bind: graphics.root.children.{node}.grid.display.point_scale
+                range: key
+                lo: 0.1
+                hi: 10.0
+                fmt: "%.1f"
+                tooltip: "every class's radius times this, as its points draw and as a click finds them"
+              - separator
+              - input_text: Classes file
+                bind: graphics.root.children.{node}.grid.files.classes
+                tooltip: "a .vgr file (VolumeGridRover's point classes), or .pts (its point list) to add"
+              - type: group
+                id: "{id}_class_files"
+                layout: { kind: horizontal }
+                children:
+                  - button: Save
+                    on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "save_classes" (state-get "graphics.root.children.{node}.grid.files.classes")) " "))
+                  - button: Load
+                    on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "load_classes" (state-get "graphics.root.children.{node}.grid.files.classes")) " "))
+                    tooltip: "replace the classes with the file's"
+                  - button: Add points
+                    on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "load_points" (state-get "graphics.root.children.{node}.grid.files.classes")) " "))
+                    tooltip: "add the file's points to the classes of their names (.pts or .vgr)"
+          - type: group
+            tab: Transfer function
+            children:
+              - include: transfer_function_editor
+                args: { node: "{node}", id: "{id}_tf", label: Colours }
+          - slot: tabs
+      - text: Status
+        bind: graphics.root.children.{node}.grid.status
