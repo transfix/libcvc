@@ -653,6 +653,15 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# cvc::mol's blur is TexMol's GOABlur to the bit (blur_test's MolBlurLegacy compares it with
+# TexMol's own maps): float grid positions and float sums of double kernels. FMA contraction
+# (Clang's default on aarch64, macOS CI) rounds a grid point's position once instead of twice and
+# moves densities by up to 5e-5 relative (on MSVC, /fp:contract /arch:AVX2 gives the same misses),
+# so it is built without contraction. MSVC's /fp:strict, libcvc's default there, never contracts.
+if(NOT MSVC)
+  set_source_files_properties(mol/blur.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
+
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
 # seam to the material consumer and MUST NOT reference cvc::nav — a change to
 # material_build's blur/EDT/gradients must invalidate no generated bundle.
