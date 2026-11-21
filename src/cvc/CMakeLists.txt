@@ -173,6 +173,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/geometry/contours.h
   ../../inc/cvc/geometry/contour_intrinsics.h
+  ../../inc/cvc/mol/blur.h
   ../../inc/cvc/mol/molecule.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
@@ -341,6 +342,7 @@ set(SOURCE_FILES
   geometry/contour_formats.cpp
   geometry/contour_intrinsics.cpp
   utility/xml_lite.cpp
+  mol/blur.cpp
   mol/molecule.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
@@ -649,6 +651,15 @@ if(NOT MSVC)
 else()
   set_source_files_properties(${_cvc_exact_math_sources}
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
+# cvc::mol's blur is TexMol's GOABlur to the bit (blur_test's MolBlurLegacy compares it with
+# TexMol's own maps): float grid positions and float sums of double kernels. FMA contraction
+# (Clang's default on aarch64, macOS CI) rounds a grid point's position once instead of twice and
+# moves densities by up to 5e-5 relative (on MSVC, /fp:contract /arch:AVX2 gives the same misses),
+# so it is built without contraction. MSVC's /fp:strict, libcvc's default there, never contracts.
+if(NOT MSVC)
+  set_source_files_properties(mol/blur.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
