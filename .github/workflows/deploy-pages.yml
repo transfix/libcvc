@@ -34,6 +34,7 @@ on:
       - 'THIRD_PARTY_NOTICES.md'
       - '!.github/**'
       - '.github/workflows/deploy-pages.yml'
+      - '.github/actions/cvcpkg-cli/**'
       - '!bindings/**'
   schedule:
     - cron: '30 8 * * *' # 08:30 UTC ≈ 03:30 America/Chicago (after cyberpcangel nightly)
@@ -81,10 +82,19 @@ jobs:
         # (see nav-swarm-cinematic/PR #225 and the sister workflow's rationale).
         run: echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
 
+      # The released cvcpkg every CI job runs (pinned in the action), in this job's temp dir. Not the
+      # one in the runner user's ~/.local/bin: other workflows on catx-03 pip install over that one,
+      # and on 2026-11-20 one put back cvcpkg 2.2.1, from before installs merged into the prefix's
+      # lockfile (cy-pca/cvcpkg#252). Each install then rewrote the lockfile with its own packages
+      # only, the pin below found none of its packages, VTK stayed at the republished cvc.6, and
+      # every deploy failed to link on its __wasm_longjmp.
+      - name: Install the cvcpkg CLI
+        uses: ./.github/actions/cvcpkg-cli
+
       - name: Install fresh wasm dep closure + scene bundles
         run: |
-          export PATH="/opt/cvc-wasm/cmake-cvcpkg/bin:$HOME/.local/bin:$PATH"
-          command -v cvcpkg >/dev/null || { echo "cvcpkg not found; skipping"; exit 0; }
+          export PATH="$RUNNER_TEMP/cvcpkg-bin:/opt/cvc-wasm/cmake-cvcpkg/bin:$PATH"
+          echo "cvcpkg: $(command -v cvcpkg), $(cvcpkg --version)"
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick; do
             echo "=== $p ==="
             cvcpkg install "$p" \
@@ -104,7 +114,11 @@ jobs:
           # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
           # clipper2, cdt, shewchuk-predicates: cvc::planar, which the contour tiler demo's
           # contour_lab node tiles on. Without them the tiler is not built in.
-          for p in eigen libigl sdl3 clipper2 cdt shewchuk-predicates; do
+          # joltphysics: cvc::physics' engine (single-threaded here: jolt_backend.cpp runs Jolt's
+          # single-threaded job system without pthreads). Without it CVC_WITH_JOLT goes off, the
+          # gallery has the null backend only, and a document's bodies (terrain_lab's boat and
+          # crates) never move. build-wasm-demo.sh fails the build if the configure missed it.
+          for p in eigen libigl sdl3 clipper2 cdt shewchuk-predicates joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \

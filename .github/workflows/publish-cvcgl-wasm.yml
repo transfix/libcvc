@@ -370,7 +370,7 @@ jobs:
           bash cvcpkg/recipes/arigl-web/build-wasm.sh
           WEB="$INST/share/arigl-web"
           log="$CVC_BUILD_DIR/configure.log"
-          for f in index.html arigl-web.js arigl-web.css arigl.js arigl.wasm \
+          for f in index.html arigl-web.js arigl-web.css arigl.js arigl.wasm cvc-audio-worklet.js \
                    THIRD_PARTY_NOTICES.md LICENSE; do
             test -f "$WEB/$f" || { echo "::error::arigl-web ($PLATFORM) has no $f"; exit 1; }
           done

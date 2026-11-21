@@ -933,6 +933,20 @@ The defaults match the legacy `Parameters` (`Skeletonization.h:42-54`) and the d
     `fe_lab` does today.
   - The previous revision made it a node of its own only to keep GPL code out of cvcGL. That
     reason is gone.
+  - *Built (P2):* as above, with these specifics. The parameters are the table's fields under
+    `mesh_ops.skeleton.*`, seeded from a `skeleton: { ... }` prop and read when a run starts. The
+    counts are `mesh_ops.skeleton.info.{points, strands, sheets, clusters, lines, triangles}`, the
+    warnings `mesh_ops.skeleton.warnings`, and the data channel also holds `<node>.skeleton.helix`.
+    `stop` is a `mesh_ops.request` word, as fe_lab's. The request waits while a mesh job runs,
+    and the other requests wait while it runs, so the mesh it reads stays the one shown; a new mesh
+    clears the skeleton. `view.strands` / `view.sheets` show each part.
+  - *Tags (P2):* a node's tags hold for its subtree, so children alone could not show a skeleton
+    without its parent's surface. The node's own surface is therefore tagged `surface` too, for
+    its props alone (`RealizedScene::TaggedNode::subtree`): `show: [skeleton]` shows an untagged
+    mesh_lab's skeleton alone, and `hide: [surface]` any mesh_lab's skeleton without its surface.
+    A view whose `show:` list names neither now leaves a mesh_lab out, as it would any tagged node.
+  - *Golden (P2):* the harness waits on `RealizedScene::pending_work`, a probe a custom node type
+    registers while its work would still change the frame, before it captures.
 
 **Tests** (§1.7)
 
@@ -1335,6 +1349,29 @@ their units and ranges as properties. Bulk data is on the data channel:
   arigl-web, with a golden image per layout and an interaction test that scripts picks and the
   view switch through state writes.
 
+**What P8 built.**
+- **Core** (`inc/cvc/volume/volume_grid.h`, no GL): the three parameter tables;
+  `cvc::point_class_editor` (mark, toggle, select, rubber band, move, delete, undo, one plane at a
+  time, the shown variable and timestep's classes only); `cvc::point_class_gestures` (picks to
+  edits, with VolumeGridRover's modifiers); the class rows a `list:` binds, reconciled as rows are
+  edited, added and removed; the session JSON. `volume_grid_test` (native and wasm-mt) and pycvc
+  (`pycvc_volume_grid.i`, `test_pycvc_volume_grid.py`).
+- **The node** (`cvc::gl::VolumeGridNode`, `type: volume_grid`): keys as in the table above, less
+  the contour, segmentation and tile ones; the data channel's `points`, `selection` and `volume`;
+  overlays per plane (disks, the selection's rings, crosshairs, the rubber band). `load` reads in
+  one call (or plane by plane, past 64 Mi voxels), as a `volume_slice` node does, so it has no
+  stepper; the job keys are published for P9's segmentation. `cvcgl_volume_grid` (headless, picks
+  through state writes, two grids) and `cvcgl_ariadne_volume_grid` (the component, the mouse).
+- **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
+  and `axis` on a pick; a slider's `range: key`.
+- **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and
+  `quad` layouts, the Probe, Point classes and Transfer function tabs, and `slot: tabs` for more.
+  Goldens `src/cvcGL/test/golden/volume_grid.ari` and `volume_grid_quad.ari`; the arigl-web case
+  `volume_grid.ari` clicks once and waits for the mark.
+- **Left for P9 / P10, shaped to slot in:** a `segment` request and the Segmentation tab; the
+  `contours` tool, the Contours tab and `tile`. Both add tabs to `volume_grid_tools` and draw into
+  the `<id>_surfaces` group, which slice views hide.
+
 ---
 
 ## 5. Seeded segmentation (GenSeg)
@@ -1621,14 +1658,14 @@ not as follow-ups.
 | P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix), Shewchuk's predicates and nanoflann as header-only cvcpkg packages (cy-pca/cvcpkg#597), not vendored. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
 | P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
 | P1 Skeleton core | M | `cvc::tet_complex`, libcvc's own exact incremental Delaunay on Shewchuk's predicates (settled 2026-11-12; Qhull only as the general-position cross-check), with its adapter, and its first PR proving the incremental build against the batch build and CGAL's (§2, transfix/libcvc#1157); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
-| P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
+| P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web. *Built:* the request, its keys, children, view tags and data channel (§2, "Ariadne"), the Skeleton section, `examples/ariadne/documents/skeleton_lab.ari` (in the gallery as `skeleton_lab_ari`; golden `src/cvcGL/test/golden/skeleton.ari` on a committed 4,000-triangle bunny; arigl-web smoke case `skeleton.ari` in the docset); tests `cvcgl_mesh_skeleton` (and its cooperative run), `cvcgl_ariadne_views`' parts case, `SkeletonParams.OnTheStateTree` (ports lane) | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
 | P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); then `cvc tile`, pycvc and `tiler.tile` with `tiler_intrinsics_test` | P3a, P0d |
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web. *Built:* `contour_lab` (`contour_lab_nodes.h`, test `cvcgl_contour_lab`), `contour_tiler.ari`, and `examples/ariadne/documents/contour_tiler.ari` on the Kuwajima 2019 series (CC0, `examples/data/contours/kuwajima2019`; golden `src/cvcGL/test/golden/contour_tiler.ari`, arigl-web smoke case `contour_tiler.ari` in the docset, and the gallery) | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
-| P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6) | P7, P0d |
+| P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6). *Built:* `cvc/volume/volume_grid.h`, `VolumeGridNode` and `type: volume_grid`, `volume_grid.ari` (§4, "What P8 built") | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
 | P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
 | P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |

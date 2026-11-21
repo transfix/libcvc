@@ -425,6 +425,17 @@ struct Capabilities {
   bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
   bool badge = false;           // item_badge shows a picture's label: image.badge
   bool rich_text = false;       // rich_text draws styles and links that can be activated: text.runs
+  bool button_icon = false;     // button_with draws ButtonLook::icon on the button: button.icon
+  bool button_selected = false; // button_with draws a chosen button pressed in: button.selected
+};
+
+// §5.27 how button_with draws a button: `icon`, a published image's name (set_image; empty for
+// none) drawn in place of the label, `icon_h` tall in the document's px (0: a line of text);
+// `selected`, the pressed-in look of the chosen button of a row.
+struct ButtonLook {
+  std::string icon;
+  float icon_h = 0.0f;
+  bool selected = false;
 };
 
 // The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
@@ -536,6 +547,9 @@ public:
     (void)maximized;
     return false;
   }
+  // §5.9 / §5.14 whether the view is a phone's (under 500 logical px on its short side), for a
+  // window's `maximized: phone`. Default: no (a terminal, a test backend).
+  virtual bool view_is_phone() const { return false; }
   // §5.9 `resizable:`, for the NEXT begin_window: false, and the user can't resize the window by
   // its edges or corners (a maximize still fills it). Called before every begin_window. Default:
   // ignored (a backend whose windows the user can't resize).
@@ -734,6 +748,13 @@ public:
   // Whether the surface shows glyphs beyond ASCII (braille, box drawing). Default yes.
   virtual bool unicode_glyphs() const { return true; }
   virtual bool button(const char *label) = 0;           // returns clicked
+  // §5.27 a button with a picture and/or drawn chosen (ButtonLook); returns clicked. Default: the
+  // plain button(label), for a backend that draws neither (Capabilities::button_icon and
+  // button_selected say which one does).
+  virtual bool button_with(const char *label, const ButtonLook &look) {
+    (void)look;
+    return button(label);
+  }
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
   // §4.6 widget-level on_click: did the LAST item drawn get clicked this frame? The walk queries

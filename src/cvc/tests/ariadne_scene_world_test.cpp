@@ -14,7 +14,10 @@
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/conference/room_entities.h>
+#include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
 #include <cvc/ariadne/scene.h>
@@ -2498,6 +2501,172 @@ TEST(AriadneWorldVehicles, AFleetHasPlantsAndAMetric) {
   art.drain();
   EXPECT_EQ(key_of("teams", "plans"), "vehicle");
   EXPECT_NEAR(kinematic_limits("teams").rr, own, 1e-6);
+}
+
+// A fleet's poses are a snapshot (FL1d): poses(fleet) gives its placed vehicles as the last
+// publish left them (ids, chassis centres, headings, speeds, teams, the box they lie in and the
+// tick), the same the fleet's .tick and .bounds keys say. A snapshot held stays as it was while the
+// world steps on, another thread reads them without a lock, and a fleet gone has none.
+TEST(AriadneWorldVehicles, AFleetsPosesAreASnapshot) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_poses", kFleetDoc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  art.step_world(1);
+  art.drain();
+  const std::shared_ptr<const fleet_poses> p = v->poses("city");
+  ASSERT_NE(p, nullptr);
+  ASSERT_EQ(p->size(), 64u);
+  EXPECT_EQ(p->tick, art.scene_world()->world().tick());
+  EXPECT_EQ(v->poses("solo"), nullptr); // an unnamed vehicle is no fleet's
+  EXPECT_EQ(v->poses("town"), nullptr);
+  std::vector<entity_info> city;
+  for (const entity_info &e : v->entities())
+    if (e.fleet == "city")
+      city.push_back(e);
+  ASSERT_EQ(city.size(), 64u);
+  for (std::size_t k = 0; k < 64; ++k) {
+    EXPECT_EQ(p->id[k], city[k].id) << k;
+    EXPECT_NEAR(p->x[k], city[k].x, 1e-3) << k;
+    EXPECT_NEAR(p->y[k], city[k].y, 1e-3) << k;
+    EXPECT_NEAR(p->yaw[k], city[k].yaw, 1e-4) << k;
+    EXPECT_EQ(p->team[k], city[k].rally) << k;
+    EXPECT_GE(p->x[k], p->min_x - 1e-3);
+    EXPECT_LE(p->x[k], p->max_x + 1e-3);
+    EXPECT_GE(p->y[k], p->min_y - 1e-3);
+    EXPECT_LE(p->y[k], p->max_y + 1e-3);
+  }
+  EXPECT_LT(p->max_x, -200.0 * 0.4 + 4.0); // laid out in the west 30 %
+  EXPECT_EQ(val(app, "vehicles.fleets.city.tick"), std::to_string(p->tick));
+  double b[4] = {};
+  ASSERT_EQ(std::sscanf(val(app, "vehicles.fleets.city.bounds").c_str(), "%lf,%lf,%lf,%lf", &b[0],
+                        &b[1], &b[2], &b[3]),
+            4);
+  EXPECT_NEAR(b[0], p->min_x, 1e-3);
+  EXPECT_NEAR(b[3], p->max_y, 1e-3);
+
+  // A reader on another thread while the world steps: every snapshot whole, and newer ones come.
+  const std::uint64_t held_tick = p->tick;
+  const std::vector<float> held_x = p->x;
+  std::atomic<bool> stop{false};
+  std::atomic<int> reads{0}, torn{0};
+  std::atomic<std::uint64_t> latest{0};
+  std::thread reader([&] {
+    while (!stop.load()) {
+      if (const std::shared_ptr<const fleet_poses> q = v->poses("city")) {
+        if (q->size() != 64 || q->x.size() != 64 || q->team.size() != 64)
+          ++torn;
+        latest = q->tick;
+        ++reads;
+      }
+      std::this_thread::yield();
+    }
+  });
+  for (int k = 0; k < 120; ++k) // a batch publishes once, at its end: a step a batch, 120 swaps
+    art.step_world(1);
+  art.drain();
+  const std::shared_ptr<const fleet_poses> later = v->poses("city");
+  const std::uint64_t newest = later ? later->tick : 0;
+  // The reader takes the newest too, in its own time: a loaded runner may not have run it since.
+  for (int k = 0; k < 5000 && latest.load() < newest; ++k)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  stop = true;
+  reader.join();
+  ASSERT_NE(later, nullptr);
+  EXPECT_GT(reads.load(), 0);
+  EXPECT_EQ(torn.load(), 0);
+  EXPECT_EQ(latest.load(), newest);
+  EXPECT_GT(newest, p->tick);
+  EXPECT_EQ(p->tick, held_tick); // the one held is as it was
+  EXPECT_EQ(p->x, held_x);
+  EXPECT_NE(later->x, p->x); // they drove
+
+  // Its vehicles gone, it has none.
+  v->clear();
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(v->poses("city"), nullptr);
+  EXPECT_TRUE(v->starts().empty());
+}
+
+// A gym lays a document's fleet out at each reset (FL1d, gym_options::fleets): its vehicles are
+// the agents (after any of the options' own), laid out from the fleet's seed plus the reset's, so
+// each seed has its layout and the same seed the same one. Their goals are held, and the episode
+// ends with every one of them at its own.
+TEST(AriadneWorldGym, AFleetIsTheGymsAgents) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string doc = kFleetDoc;
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: squad, archetype: v, count: 6, seed: 4, policy: builtin }");
+  const std::string path = write_doc("gym_fleet", doc).string();
+  {
+    gym_options bad;
+    bad.fleets = {"armada"};
+    try {
+      WorldGym refused(path, bad);
+      ADD_FAILURE() << "a fleet the document does not declare";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find("has no fleet 'armada' (its fleets: squad)"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+  gym_options o;
+  o.fleets = {"squad"};
+  o.max_steps = 2000;
+  WorldGym gym(path, o);
+  const gym_observation first = gym.reset(1);
+  ASSERT_EQ(first.n, 6u); // the fleet's alone: the document's solo is not an agent
+  for (std::size_t i = 0; i < first.n; ++i) {
+    EXPECT_EQ(first.plant[i], "kinematic");
+    EXPECT_GT(first.goal_dist[i], 1.0) << i;
+  }
+  EXPECT_EQ(gym.vehicles().fleets(), std::vector<std::string>{"squad"});
+  const std::vector<double> none(6, std::numeric_limits<double>::quiet_NaN());
+  gym.step(none, none);
+  EXPECT_EQ(val(gym.app(), "vehicles.fleets.squad.seed"), "5"); // its 4, plus the reset's 1
+  const gym_observation other = gym.reset(2);
+  ASSERT_EQ(other.n, 6u);
+  EXPECT_NE(other.x, first.x);
+  const gym_observation again = gym.reset(1);
+  ASSERT_EQ(again.n, 6u);
+  for (std::size_t i = 0; i < 6; ++i) {
+    EXPECT_DOUBLE_EQ(again.x[i], first.x[i]) << i;
+    EXPECT_DOUBLE_EQ(again.goal_x[i], first.goal_x[i]) << i;
+  }
+  // The navigator drives them all to their goals, and the episode ends.
+  gym_step s;
+  for (std::uint64_t k = 0; k < o.max_steps; ++k) {
+    s = gym.step(none, none);
+    if (s.terminated || s.truncated)
+      break;
+  }
+  EXPECT_TRUE(s.terminated) << "step " << s.observation.step;
+  for (std::size_t i = 0; i < 6; ++i)
+    EXPECT_EQ(s.observation.reached[i], 1) << i;
+  for (std::size_t i = 0; i < 6; ++i) // held: the goals laid out, not wandered from
+    EXPECT_DOUBLE_EQ(s.observation.goal_x[i], again.goal_x[i]) << i;
+
+  // The options' own agents come first.
+  gym_options both = o;
+  entity_spec lead;
+  lead.archetype = "v";
+  lead.name = "lead";
+  lead.controller = "none";
+  both.agents = {lead};
+  WorldGym mixed(path, both);
+  const gym_observation m = mixed.reset(1);
+  ASSERT_EQ(m.n, 7u);
+  EXPECT_EQ(mixed.vehicles().entities().front().spec.name, "lead");
 }
 
 TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {
@@ -7152,6 +7321,379 @@ TEST(AriadneOneWorld, AttachTakesAServerWorldOnTheHolonsQuantum) {
                        h.state("a").position.y - there.position.y),
             1e-9)
       << "back in its own world where it stood";
+}
+
+namespace {
+// A navigated car driving west past an avatar standing in its lane, the world run by a server
+// holon: the closest the car's centre came to the avatar, where the car ended, and how far the
+// avatar was moved.
+struct mover_pass {
+  double closest = 1e9, car_x = 0.0, avatar_moved = 0.0;
+};
+mover_pass pass_avatar(bool avoid) {
+  LoadResult r = load_vehicles(kAvoid);
+  EXPECT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  mover_pass out;
+  if (!w)
+    return out;
+  WorldVehicles *v = w->vehicles();
+  v->set_avoid(avoid);
+  v->set_wander(false);
+  w->sync(&warnings);
+  entity_spec a;
+  a.archetype = "car";
+  a.placed = true;
+  a.x = 25.0;
+  a.y = 0.5;
+  a.yaw = 3.14159265358979323846;
+  const std::uint64_t id = v->spawn(a);
+  EXPECT_NE(id, 0u);
+  v->set_goal(id, -30.0, 0.5);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  EXPECT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {0.0, 0.5, 0.0};
+  h.add_participant("walker", false, feet);
+  for (int i = 0; i < 900; ++i) {
+    h.advance(1.0 / 60.0);
+    const entity_info e = entity(*v, id);
+    const cvc::physics::body_state s = h.state("walker");
+    if (e.placed) {
+      out.closest = std::min(out.closest, std::hypot(e.x - s.position.x, e.y - s.position.y));
+      out.car_x = e.x;
+    }
+  }
+  const cvc::physics::body_state end = h.state("walker");
+  out.avatar_moved = std::hypot(end.position.x, end.position.y - 0.5);
+  return out;
+}
+} // namespace
+
+// The navigators steer around the avatars (section 18.4): a car on nav@1 swings past a person
+// standing in its lane and drives on to its goal, where without avoiding it drives into them.
+TEST(AriadneOneWorld, ANavigatedCarSteersAroundAnAvatar) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const mover_pass on = pass_avatar(true), off = pass_avatar(false);
+  std::printf("  past an avatar: avoiding, closest %.2f m, the car ends at x %.1f, the avatar "
+              "moved %.2f m; not avoiding, %.2f m, x %.1f, moved %.2f m\n",
+              on.closest, on.car_x, on.avatar_moved, off.closest, off.car_x, off.avatar_moved);
+  EXPECT_LT(on.car_x, -20.0) << "the car got past";
+  EXPECT_GT(on.closest, 2.0) << "with room to spare";
+  EXPECT_LT(on.avatar_moved, 0.1) << "and never touched the avatar";
+  EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "without avoiding, it drove into them";
+}
+
+// Generic entities (section 18.4): a participant gets into a vehicle and drives it with its
+// intent's drive axes; its person leaves the world and it is where the vehicle is; the entity
+// table and the room's entities say who drives what; getting out puts the person beside the
+// vehicle and gives the vehicle back to its controller. Refused: a client, an unknown entity,
+// one someone else drives.
+TEST(AriadneOneWorld, AParticipantGetsIntoAVehicleAndDrivesIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_at(v, "external", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-38.0, 6.0, 0.0};
+  h.add_participant("ann", false, feet);
+  h.add_participant("bob", false, cvc::physics::body_state{});
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  const std::size_t bodies = w->world().body_count();
+  const entity_info parked = entity(v, id);
+
+  holon client(holon_role::client, one_world_holon());
+  EXPECT_FALSE(client.set_driver("ann", id, &why));
+  EXPECT_FALSE(h.set_driver("ann", 99, &why));
+  EXPECT_FALSE(h.set_driver("nobody", id, &why));
+  ASSERT_TRUE(h.set_driver("ann", id, &why)) << why;
+  EXPECT_EQ(h.drives("ann"), id);
+  EXPECT_EQ(v.driver(id), "ann");
+  EXPECT_FALSE(h.set_driver("bob", id, &why)) << "someone else drives it";
+  EXPECT_NE(why.find("ann"), std::string::npos) << why;
+  EXPECT_EQ(w->world().body_count(), bodies - 1) << "ann's person left the world";
+  const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+  ASSERT_EQ(wire.size(), 1u);
+  EXPECT_EQ(wire[0].driver, "ann") << "the room's entities say who drives it";
+
+  // Ann's drive axes drive it: full throttle straight ahead for 3 s.
+  avatar_intent go;
+  go.steer = 0.0;
+  go.throttle = 1.0;
+  h.set_intent("ann", go);
+  for (int i = 0; i < 180; ++i)
+    h.advance(1.0 / 60.0);
+  const entity_info driven = entity(v, id);
+  EXPECT_GT(driven.x - parked.x, 4.0) << "it drove";
+  EXPECT_GT(driven.speed, 2.0);
+  const cvc::physics::body_state ann = h.state("ann");
+  EXPECT_LT(std::hypot(ann.position.x - driven.x, ann.position.y - driven.y), 0.5)
+      << "ann is where the vehicle is";
+
+  bool saw_person = false, saw_vehicle = false;
+  for (const holon::entity &e : h.entities()) {
+    if (e.id == "p:ann") {
+      saw_person = true;
+      EXPECT_EQ(e.kind, "person");
+      EXPECT_FALSE(e.in_world);
+    }
+    if (e.id == "e" + std::to_string(id)) {
+      saw_vehicle = true;
+      EXPECT_EQ(e.kind, "humvee");
+      EXPECT_EQ(e.driver, "participant:ann");
+      EXPECT_EQ(e.owner, "ann");
+    }
+  }
+  EXPECT_TRUE(saw_person && saw_vehicle);
+
+  // Out: beside the vehicle, standing, and the vehicle back to its controller (external: with no
+  // intent it brakes to a stop).
+  ASSERT_TRUE(h.set_driver("ann", 0, &why)) << why;
+  EXPECT_EQ(h.drives("ann"), 0u);
+  EXPECT_EQ(v.driver(id), "");
+  EXPECT_EQ(w->world().body_count(), bodies);
+  for (int i = 0; i < 120; ++i)
+    h.advance(1.0 / 60.0);
+  const entity_info after = entity(v, id);
+  const cvc::physics::body_state out = h.state("ann");
+  const double d = std::hypot(out.position.x - after.x, out.position.y - after.y);
+  std::printf("  drove %.1f m to %.2f m/s; out at %.2f m from the vehicle, which went on to %.1f m "
+              "at %.2f m/s\n",
+              driven.x - parked.x, driven.speed, d, after.x - parked.x, after.speed);
+  EXPECT_GT(d, 1.0) << "beside it, not in it";
+  EXPECT_LT(d, 6.0);
+  EXPECT_NEAR(out.position.z, 0.0, 0.1) << "standing on the square";
+  EXPECT_LT(after.speed, 0.5) << "its controller (external) brought it to rest";
+}
+
+// The drive axes are shares of what the vehicle can do (section 18.6), so one scheme drives any
+// vehicle: steer of its lock; throttle of its acceleration; a brake toward a stop and never past
+// it; reverse, a car braking while it still rolls forward and backing up from there, a boat's
+// propeller astern; a boat has no brake.
+TEST(AriadneOneWorld, TheDriveAxesAreSharesOfTheVehiclesEnvelope) {
+  holon::drive_envelope car;
+  car.max_steer = 0.5;
+  car.max_accel = 3.0;
+  car.max_decel = 7.0;
+  holon::drive_envelope boat = car;
+  boat.floats = true;
+  boat.max_decel = 1.5; // its propeller astern
+  const double dt = 7.0 / 120.0;
+  const auto cmd = [&](const holon::drive_envelope &e, double steer, double throttle, double brake,
+                       double speed) {
+    avatar_intent in;
+    in.steer = steer;
+    in.throttle = throttle;
+    in.brake = brake;
+    return holon::drive_command(in, e, speed, dt);
+  };
+  EXPECT_DOUBLE_EQ(cmd(car, 1.0, 0.0, 0.0, 0.0).steer, 0.5);
+  EXPECT_DOUBLE_EQ(cmd(car, -0.5, 0.0, 0.0, 0.0).steer, -0.25);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 1.0, 0.0, 5.0).accel, 3.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.5, 0.0, 5.0).accel, 1.5);
+  // The brake: its share of max_decel at speed, only what stops it near a stop, nothing at rest.
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.0, 1.0, 10.0).accel, -7.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.0, 0.5, 10.0).accel, -3.5);
+  EXPECT_NEAR(cmd(car, 0.0, 0.0, 1.0, 0.1).accel, -0.1 / dt, 1e-12);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 0.0, 1.0, 0.0).accel, 0.0) << "never past a stop";
+  EXPECT_NEAR(cmd(car, 0.0, 0.0, 1.0, -0.2).accel, 0.2 / dt, 1e-12) << "rolling back, it stops too";
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, 1.0, 1.0, 10.0).accel, -7.0) << "the brake wins";
+  // Reverse: braking while it rolls forward, then backing up.
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, -1.0, 0.0, 5.0).accel, -7.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, -1.0, 0.0, 0.2).accel, -3.0);
+  EXPECT_DOUBLE_EQ(cmd(car, 0.0, -1.0, 0.0, -2.0).accel, -3.0);
+  // A boat: no brake; reverse is the propeller astern, whatever its speed.
+  EXPECT_DOUBLE_EQ(cmd(boat, 0.0, 0.0, 1.0, 5.0).accel, 0.0);
+  EXPECT_DOUBLE_EQ(cmd(boat, 0.0, -1.0, 0.0, 5.0).accel, -1.5);
+  EXPECT_DOUBLE_EQ(cmd(boat, 0.0, -1.0, 0.0, 0.0).accel, -1.5);
+  // None is none: 0.
+  const holon::drive_cmd none = holon::drive_command(avatar_intent{}, car, 3.0, dt);
+  EXPECT_DOUBLE_EQ(none.steer, 0.0);
+  EXPECT_DOUBLE_EQ(none.accel, 0.0);
+}
+
+namespace {
+// kIntents' square, with a drivable humvee (reach 3 m) and a truck no one may drive.
+const char *kDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        controllers: [nav@1, none, external]
+        drivable: true
+      truck:
+        vehicle: humvee
+        controllers: [external]
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+LoadResult load_drivable() {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kDrivable);
+  if (r.ok)
+    if (const Value *world = find_world_block(r)) {
+      world_rules rules = default_world_rules();
+      EXPECT_EQ(parse_world_block(*world, rules), "");
+      r.scene.vehicles = rules.vehicles;
+    }
+  return r;
+}
+
+std::uint64_t spawn_kind(WorldVehicles &v, const std::string &archetype, double x, double y) {
+  entity_spec s;
+  s.archetype = archetype;
+  s.controller = "external";
+  s.placed = true;
+  s.x = x;
+  s.y = y;
+  s.yaw = 0.0;
+  std::string why;
+  const std::uint64_t id = v.spawn(s, &why);
+  EXPECT_NE(id, 0u) << why;
+  return id;
+}
+} // namespace
+
+// A driven car (section 18.6): full throttle, then the brake brings it to a stop and holds it
+// there (the brake never reverses); reverse backs it up.
+TEST(AriadneOneWorld, ACarBrakesToAStopAndOnlyReverseBacksItUp) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_drivable();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const auto drive = [&](double throttle, double brake, double seconds) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = throttle;
+    in.brake = brake;
+    h.set_intent("ann", in);
+    for (int i = 0; i < static_cast<int>(seconds * 60.0); ++i)
+      h.advance(1.0 / 60.0);
+    return entity(v, id);
+  };
+  const entity_info going = drive(1.0, 0.0, 3.0);
+  EXPECT_GT(going.speed, 3.0);
+  const entity_info braked = drive(0.0, 1.0, 3.0);
+  EXPECT_LT(std::fabs(braked.speed), 0.2) << "the brake stopped it";
+  const entity_info held = drive(0.0, 1.0, 2.0);
+  EXPECT_GT(held.x, braked.x - 0.1) << "and held it: the brake never backs up";
+  const entity_info backed = drive(-1.0, 0.0, 3.0);
+  std::printf("  braked from %.2f m/s to %.2f; held %.2f m; reverse: %.2f m/s, %.1f m back\n",
+              going.speed, braked.speed, held.x - braked.x, backed.speed, held.x - backed.x);
+  EXPECT_LT(backed.speed, -0.5) << "reverse backs it up";
+  EXPECT_LT(backed.x, held.x - 1.0);
+}
+
+// Getting in is the world's to rule on (section 18.6): a participant asks in the room tree
+// (request_drive) and the relay's server_pump answers. A vehicle too far away, or one whose
+// archetype is not drivable, is refused with why; a drivable one within reach lets them in, and
+// the room's entities say which may be driven.
+TEST(AriadneOneWorld, GettingInIsAskedForInTheRoomAndRuledOn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_drivable();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t far_off = spawn_kind(v, "humvee", -40.0, 0.0);
+  const std::uint64_t truck = spawn_kind(v, "truck", 4.0, 8.0);
+  const std::uint64_t close =
+      spawn_kind(v, "humvee", 6.5, 0.0); // its rear axle: the box from ~6.1 m
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  const std::string room = "garage";
+  conference::room_join(app, room, "ann"); // the first joiner stands at (4, 0)
+  const auto pump = [&](int frames) {
+    for (int i = 0; i < frames; ++i)
+      server_pump(h, app, room, 1.0 / 60.0);
+  };
+  pump(30);
+  const auto ask = [&](std::uint64_t entity) {
+    const std::uint64_t seq = request_drive(app, room, "ann", entity);
+    pump(1);
+    const drive_status st = read_drive_status(app, room, "ann");
+    EXPECT_EQ(st.seq, seq);
+    return st;
+  };
+  drive_status st = ask(far_off);
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("m away"), std::string::npos) << st.why;
+  st = ask(truck);
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("not drivable"), std::string::npos) << st.why;
+  EXPECT_EQ(read_driving(app, room, "ann"), 0u);
+  st = ask(close);
+  EXPECT_TRUE(st.ok) << st.why;
+  EXPECT_EQ(h.drives("ann"), close);
+  EXPECT_EQ(read_driving(app, room, "ann"), close);
+  st = ask(0);
+  EXPECT_TRUE(st.ok);
+  EXPECT_EQ(read_driving(app, room, "ann"), 0u);
+
+  bool saw_humvee = false, saw_truck = false;
+  for (const conference::room_entity &e : conference::room_entities_of(v)) {
+    if (e.id == close) {
+      saw_humvee = true;
+      EXPECT_TRUE(e.drivable);
+      EXPECT_DOUBLE_EQ(e.reach, 3.0);
+      EXPECT_EQ(e.controls, "car");
+    }
+    if (e.id == truck) {
+      saw_truck = true;
+      EXPECT_FALSE(e.drivable);
+    }
+  }
+  EXPECT_TRUE(saw_humvee && saw_truck);
 }
 
 TEST(AriadneWorldGym, FleetBench) {

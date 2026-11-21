@@ -194,6 +194,13 @@ public:
   // Before a step: drive a dynamic avatar from its intent through its controller, paying from its
   // reserve (see above).
   void drive(const std::string &pid, const avatar_intent &in);
+  // The walker's jump (avatar_intent::jump): the upward speed it leaves the ground with (m/s; 4
+  // clears about 0.8 m under Earth's gravity, 0 no jumping). It jumps while the intent holds jump
+  // and something is under its feet (within 8 cm), and not while already rising; with a budget
+  // (avatar_energy_policy) the reserve pays the jump's kinetic energy, and one it cannot pay for
+  // is no jump.
+  void set_jump_speed(double v) { _jump_speed = v; }
+  double jump_speed() const { return _jump_speed; }
   // The energy policy every avatar spends under. An avatar added later starts with a full reserve;
   // one already here keeps its reserve, cut to the new reserve_max.
   void set_energy_policy(const avatar_energy_policy &p);
@@ -235,6 +242,10 @@ private:
   // The walker controller: ease the horizontal velocity of S toward the intent's within the
   // force limit and what A can pay for, and charge A for it.
   void drive_walker(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
+  // The walker's jump: S (its centre's state) leaves the ground if the intent asks, it stands on
+  // something and A can pay.
+  void jump(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
+  double _jump_speed = 4.0;
   avatar_body _body;
   avatar_energy_policy _energy;
   cvc::physics::vec3 _gravity{0.0, 0.0, -9.80665};

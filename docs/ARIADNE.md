@@ -485,6 +485,10 @@ Each state-bound primitive returns `{changed, committed, value}`
 slider's on every `changed` too, so whatever it drives follows the drag. A slider with
 `commit: release` writes once, when the drag ends, for a key whose change is too costly to
 redo every frame (the forest controls' structural sliders, which regrow the whole forest).
+A slider with `range: key` takes its range from the bound key's `min` and `max` properties (what a
+parameter table writes, [`param_table.h`](../inc/cvc/core/param_table.h), or what a node keeps
+there as its data changes: a `volume_grid`'s slice keys end at the volume's last plane), read every
+frame, each falling back to `lo:` / `hi:` while the key has none.
 
 A `progress:` widget is read-only: a bar showing the number at `bind` placed in [`lo`, `hi`]
 (default 0..1; fe_controls uses `hi: 100` for `fe.progress`), with the text at `overlay` (a
@@ -1024,7 +1028,8 @@ the loader only *captures*. The host wires them:
 
   `AppRuntime` lists every binding, the document's and the host's (`set_host_keys`), in a
   **Controls** window it puts in the document: closed until `tree.ariadne_keys.open` is set
-  (arigl's *Settings > Controls...*), a row per binding with its keys and a **Change** button.
+  (arigl's *Settings > Controls...*, for a document with a scene), a row per binding with its keys
+  and a **Change** button.
   Every key a host acts on is such a binding, in the state tree beside what reads it. arigl's:
 
   | binding | state key (under the scene prefix) | default |
@@ -1189,7 +1194,8 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+`volume_slice` (one axis-aligned plane of a volume, below), `volume_grid` (VolumeGridRover: three
+such planes with point classes, below), `water` (its sea, lakes and ponds as the
 GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
 drawn from data, below), `nav_swarm` and `swarm_layer` (a swarm of navigating vehicles and
 what of it is drawn, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
@@ -2330,8 +2336,13 @@ scene:
       `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
       vehicles start at rest where they are on the new plants. A plant or team that is not one is
       said in `vehicles.status` and changes nothing.
-    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
-      `entity_info::fleet` and `rally`.
+    - A view draws a fleet from `WorldVehicles::poses(fleet)`, not from state: a snapshot of its
+      placed vehicles as the last step left them (ids, chassis centres, headings, speeds, teams,
+      the box they lie in and the tick), made each step and read from any thread without a lock.
+      The keys `.tick` (the physics step they are of) and `.bounds` (`min_x,min_y,max_x,max_y`)
+      say the same in state.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()`, `restart_fleet()`, `poses()`
+      and `starts()`, and `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -2450,13 +2461,19 @@ scene:
     team, controller, x, y, yaw, ...}]` (any of the four plants). Starts come from the
     document's spawn points when it has them. A seed and a list of commands give the same
     episode every time, in any gym.
+  - **Fleets.** `fleets=["city"]` (`gym_options::fleets`) names the document's fleets (its
+    `start:` entries with `fleet:`) that each reset lays out after the agents, from the fleet's
+    `seed:` plus the reset's seed: each seed a layout of its own, the same seed the same one.
+    Their vehicles are agents in the fleets' order, their goals held (a team's at its rally
+    point); with fleets and no `agents`, they are the only agents. A name the document does not
+    declare is refused when the gym is made.
   - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
     from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
     world.
   - **A step** is one navigator tick: `tick=` (`gym_options::tick`), by default libcvc's one
-    simulation tick, 0.06 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a whole
-    number of physics steps: a world with vehicles runs its clock at the 0.01 s simulation quantum,
-    so physics steps at 100 Hz and a tick is 6 of them. An agent takes
+    simulation tick, 7/120 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a
+    whole number of physics steps: a world with vehicles runs its clock at the 1/120 s simulation
+    quantum, so physics steps at 120 Hz and a tick is 7 of them. An agent takes
     its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
     envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
     Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
@@ -2549,7 +2566,7 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload` (§5.5); several separated by spaces run in order, as in `load smooth` | — |
+| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload`, `skeleton`, `stop` (§5.5); several separated by spaces run in order, as in `load smooth` or `decimate skeleton` | — |
 | `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
 | `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source: { file }` |
@@ -2563,6 +2580,10 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 | `geodesic.source` | source vertex for `geodesic` (clamped to #V-1; -1 is the highest vertex) | `geodesic_source` |
 | `modes.index` | the Laplace–Beltrami eigenfunction `modes` shows (`fem::laplacian_eigenmodes` on the surface; 1 is the first non-constant, up to 50) | `mode` |
 | `color.min`, `color.max` | the colour range used: the field colours' explicit domain, else the values' (2-98% percentiles for curvature) | — |
+| `skeleton.<field>` | `cvc::skeleton_params`' table ([`skeleton_params.h`](../inc/cvc/geometry/skeleton_params.h)): `robust`, `big_ball_ratio`, `theta_if`, `theta_ff`, `cocone_phi`, `sharp_phi`, `flat_phi`, `flatness_ratio`, `medial_theta`, `medial_ratio`, `discard_small`, `threshold`, `sheet_count`, `helix_window`; each key carries its `doc`, `unit`, `min`, `max` and `default` properties. Read when a `skeleton` run starts | `skeleton: { <field>: <value>, ... }` (else the defaults) |
+| `skeleton.busy`, `.stoppable`, `.status`, `.progress`, `.phase`, `.stats.work_ms`, `.pid` | published by the run, as fe_lab's job keys | — |
+| `skeleton.info.points`, `.info.strands`, `.info.sheets`, `.info.clusters`, `.info.lines`, `.info.triangles`, `skeleton.warnings` | published: the input's vertices; the strands (polylines), the sheets, the planar clusters found, the strands' segments and the sheets' triangles; the warnings, one per line. `-` before a skeleton | — |
+| `skeleton.view.strands`, `skeleton.view.sheets` | 1 shows that part of the skeleton — followed live | — |
 
 **Field colours (both node types).** The values a node shows are coloured through a transfer
 function at `<node>.field_colors` (a `cvc::tf::model` string, outside `mesh_ops.*` / `fe.*`), so
@@ -2588,6 +2609,25 @@ back-substitutions; so are the eigenpairs (at least ten are computed), so steppi
 when a `source.*` key changed since the last load; otherwise it goes back to the loaded mesh
 (undoing a smooth or a decimate), and keeps those caches when that mesh is still the one
 shown. `reload` always reads it. A failed load says why in `status` and keeps the mesh.
+
+**The skeleton.** `skeleton` runs `cvc::skeletonize` ([`skeleton.h`](../inc/cvc/geometry/skeleton.h),
+the VolumeRover Skeletonization port) on the shown mesh's vertices as a sliced task on the app's
+scheduler: a few milliseconds a frame on single-threaded wasm, pool chunks where there are
+threads, so the frame never waits on it. It reads the `skeleton.*` parameters when it starts; one
+that does not parse or is out of range is reported in `skeleton.status`, and nothing runs, and one
+changed while it runs applies to the next run (its status says so). While it runs `busy` and
+`skeleton.busy` are 1 and the other requests wait in the key, so the mesh it reads stays the one
+shown; `stop` ends it at its next step and keeps the last skeleton. The result is drawn in two
+children of the node, `<id>_strands` (lines: the polylines green, the stars of small planar
+clusters blue) and `<id>_sheets` (a colour per sheet), which hide with the node, and is put on the
+data channel at `<node>.skeleton.strands`, `.sheets` and `.helix` (`cvc::geometry`, which
+`(skeleton.compute ...)` and `state-data-get` read). A new mesh (an operation, a load, a reset)
+clears it. The children are tagged `skeleton` and the node's own surface `surface`, beside the
+node's own tags (below, Tags), so a viewport with `show: [skeleton]` shows the skeleton alone and
+one with `hide: [surface]` shows a mesh_lab without its surface. The skeleton needs Shewchuk's
+predicates (`CVC_WITH_SHEWCHUK`); without them `skeleton.status` reports skeletonize's error.
+[`skeleton_lab.ari`](../examples/ariadne/documents/skeleton_lab.ari) is the demo
+(`cvcgl_mesh_skeleton`, `cvcgl_ariadne_views`, the `skeleton` golden).
 
 **`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
 meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
@@ -2752,6 +2792,62 @@ orthoslicer is one node with a source and two with `volume_of:`.
 `examples/ariadne/documents/orthoslicer.ari` puts them beside a `volren` of the same volume, with
 a slice view down the axis a switch picks (§5.18) and the transfer-function editor on the first
 plane.
+
+**`type: volume_grid`** ([`volume_grid_nodes.h`](../inc/cvc/gl/ariadne/volume_grid_nodes.h),
+`cvc::gl::VolumeGridNode`) is VolumeGridRover rebuilt as a node
+([VOLROVER-LIBRARY-PORTS-ROADMAP.md](roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md) §4): three
+`volume_slice` planes of one volume, one down each axis, with the point classes drawn on them and
+the editing VolumeGridRover's slice canvases did, all driven by state keys. The `volume_grid.ari`
+component (§6.5) lays out its views and panel.
+
+```yaml
+- node: grid
+  type: volume_grid
+  source: { file: head.rawiv }           # or { sdf: { mesh: stanford.bunny, dim: 64 } }; var:, time:
+  view: xy                               # the switch: xy | xz | zy
+  tool: points                           # navigate | points | probe
+  slice: { z: 40 }                       # the planes (-1, the default, the middle one)
+  display: { point_scale: 1, show_points: true, crosshairs: true, grey: false }
+  classes:                               # the classes it starts with
+    - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
+  points: seeds.vgr                      # or classes and points from a file (.vgr, .pts)
+  transfer_function: { preset: grayscale }
+```
+
+Its keys are under `<node>.grid` ([`VolumeGridNode.h`](../inc/cvc/gl/VolumeGridNode.h)); a prop
+seeds its key only while the key is empty:
+
+| key | meaning |
+|---|---|
+| `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
+| `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`) and `cvc::volume_grid_source_params` (`file`, `var`, `time`: what `load` reads) |
+| `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
+| `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
+| `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did, the volume's dims, range and spacing |
+| `request` | one command, consumed: `load`, `save_classes <f>`, `load_classes <f>`, `load_points <f>` (adds a file's points), `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane), `save_session <f>`, `load_session <f>`. A relative file is the document's directory's |
+| `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
+
+The point classes, the selection and the volume are on the data channel at `grid.points`,
+`grid.selection` (`std::shared_ptr<const cvc::point_classes>`) and `grid.volume`
+(`std::shared_ptr<const cvc::volume>`, while the volume is in memory). A `point_classes` written to
+`grid.points` from outside (a program's `state-data-set`, pycvc) replaces the classes.
+`<node>.transfer_function` colours all three planes, with the volume's histogram; `display.grey`
+draws them in grey instead.
+
+In a slice view with the `points` tool, a click marks a point of the current class (or unmarks the
+one under the pointer), a drag selects with a rubber band (Shift adds, Ctrl or Alt takes away),
+and Shift+Ctrl drags the selection; with `navigate`, a click moves the other two planes to the
+voxel. Every edit is one undo step. The planes are the node's children `slice_xy`, `slice_xz` and
+`slice_zy`, realized as `<id>_slice_xy` ... and tagged with the node's id and their names, so a
+view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
+overlays draw its points as disks of their radius in voxels, the selection's rings, the crosshairs
+where the other planes cross it (each in the colour of the axis it runs along) and a rubber band
+being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is an empty group for the surfaces later
+phases draw in the 3D view. The editing itself is core libcvc
+([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
+`cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
+pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
+`test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -2982,6 +3078,8 @@ entry warns. An entry is one of:
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `ui.fullscreen` | `(fullscreen ON)` makes the window cover the screen: a GL window, or the canvas in a browser; never a terminal (§10.7) |
   | `ui.maximize` | a window's title bar has a maximize button that fills it to the screen under the menu bar, and back (`tree.<id>.maximized`, §5.9); ImGui and FTXUI |
+  | `button.icon` | `button:` takes `icon:`, a picture drawn in place of its label (§5.27); ImGui |
+  | `button.selected` | `button:` takes `selected:`, the chosen button of a row drawn pressed in (§5.27); ImGui, FTXUI and tvision |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
@@ -3182,6 +3280,17 @@ that use of the unit.
     window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **How it starts:** a window's `maximized:` is the maximize it has while that key holds nothing:
+  `true` (maximized everywhere), `phone` (maximized where the view is a phone's, under 500 CSS
+  pixels on its short side, §5.14), or `false` (the default). The user's restore, or the
+  document's write, sets the key, and from then on the key decides, across a restart too.
+
+  ```yaml
+  windows:
+    - window: Feed
+      id: main
+      maximized: phone   # fills a phone's screen under the menu bar; a desktop's opens as laid out
+  ```
 - **In front:** a window that becomes maximized, by any of these, comes to the front of the
   others (see *Bringing a window to the front* below).
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
@@ -3508,6 +3617,11 @@ has loaded, or when it failed, nothing is drawn behind the content.
   `size: "100%"` and `max_height:` (§5.11) make it as wide as its line, at the video's own shape:
   `size: "100%"` with `max_height: 480` is a feed's video, as wide as the post, a portrait one
   narrower.
+- **With no frame, the box says why**, over the poster or the placeholder: `failed` (with
+  `controls: false`, the error itself: there is no controls line to show it), what the player says
+  keeps the picture away (a browser's `tap to start it`), or, after 3 s loading or playing with no
+  frame, `loading` or `playing`. It isn't shown once a frame has been, where the widget has a
+  `badge:` of its own, in a box narrower than 96 px (an avatar, an emoji), or in a terminal.
 - **`autoplay: true`** starts it once it can, and from then on, until the user presses Play or
   Pause (or the document writes `playing`), it plays while its picture shows: scrolled out of its
   window's view, or its window closed, it pauses, and back in view it plays on. So a feed's
@@ -3538,6 +3652,16 @@ has loaded, or when it failed, nothing is drawn behind the content.
     - Each player is a hidden element. It plays the sound itself, and a video's new frames are
       drawn into a canvas the size of the box and copied into the widget's picture. That is one
       copy per frame shown, and it works the same in both pages, under windows and menus.
+      - The element sits in the viewport's top-left corner, 2 px, under the page and all but
+        transparent: a phone's browser may not start or decode a video far outside the viewport.
+      - A frame is read back with a 2D canvas kept in memory, else WebGL, else a GPU-backed 2D
+        canvas. A frame that reads back empty or all one colour (black, or the green of a zeroed
+        frame) is tried the other ways (twice a second at most), and the first that gives a
+        picture is kept: a phone's hardware decoder can hand out frames one way reads as black.
+        Until a video has shown a picture, blank frames aren't shown, and after 3 s the box says
+        so with the ways it tried (`its frames come out black (2d, gl, gpu)`).
+        A page that sets `Module.cvcMediaPaths` (say `["gl"]`) before a player opens uses that
+        order instead.
     - The policy and credentials are decided in C++ before the element sees anything:
       - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
         requests), once the host allows its origin;
@@ -3549,6 +3673,11 @@ has loaded, or when it failed, nothing is drawn behind the content.
       plays and the error says so.
     - A browser plays sound only after the user has clicked or typed on the page. A muted
       `autoplay` starts by itself.
+      - Where the browser refuses to start one (sound, or a phone that starts no video by
+        itself, as some do on Data Saver), the box says `tap to start it`, and the next tap or key
+        anywhere on the page starts it.
+      - A browser that loads nothing before Play (preload none, as on Data Saver) leaves the
+        player `ready` rather than `loading`, so `autoplay` starts it.
     - A site serving the pages under a Content-Security-Policy adds `media-src 'self' blob:`
       (and the media's origin when it is another). Without it the element falls back to
       `default-src`, and Chrome refuses media from another origin with "Media load rejected by
@@ -3639,7 +3768,8 @@ this for every one.
   the view, and the panels show a list of titles over the scene. The arrow (or a double tap)
   opens one: it unfolds from its title, as wide as the view and no taller than the room below,
   over the titles after it. Windows that fit where they were put, and those with no `pos:` (the
-  flow, §5.8), open as anywhere else.
+  flow, §5.8), open as anywhere else. A window with `maximized: phone` (§5.9) opens maximized
+  instead, filling the view under the menu bar: an app's one main window, a feed.
 - **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
   widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
 - **Scrolling with a finger.** On a touch screen a finger drags a window's content along, its
@@ -4038,6 +4168,7 @@ windows:
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
@@ -4049,7 +4180,7 @@ under the `pick:` key:
 - `hit`: `1` or `0`;
 - `node`: the id of the node it hit;
 - `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
-  (empty elsewhere);
+  (empty elsewhere), and `axis` (`x`, `y` or `z`), the axis that slice looks down;
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
@@ -4106,7 +4237,14 @@ own that the other views leave out (`hide: [main_only]`). The main view always d
 node hidden with `visible:` is gone from every view, and so is everything under it: its children,
 the ones a `source: { data }` node draws when its dataset arrives included, keep their own flags
 but draw only while every ancestor is visible. A `generated_world` node's meshes and water beside
-it follow it too.
+it follow it too. A custom node type may tag the parts it makes on top of the node's own tags: a
+`mesh_lab` node's skeleton children are tagged `skeleton`, and its own surface `surface`, that
+tag covering the surface alone, not the children under it (§5.4). So `show: [skeleton]` shows an
+untagged mesh_lab's skeleton without its surface, and `hide: [surface]` drops every mesh_lab's
+surface and keeps its skeleton. A view with a `show:` list that names neither leaves a mesh_lab
+out, as it would any tagged node. A view that names tags to show is framed on the nodes it lets
+in, so it waits until one of them has bounds: `show: [skeleton]` is framed on the skeleton once
+the run has made one, not on what else the view held before.
 
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
@@ -4816,6 +4954,46 @@ The terminal snapshots are `ariadne_ftxui_test`'s `ComputedColorsReachTheCells` 
 16 colours) and `ComputedColorsReachTheWindowCells` (tvision's cells). ImGui's pixels are checked
 by `cvcgl_imgui_colors`.
 
+### 5.27 Buttons with a picture, and the chosen button: `icon:` and `selected:`
+
+A bar of buttons that go to places, or a row of choices, wants pictures on its buttons and the
+current one to look pressed:
+
+```yaml
+- type: group
+  layout: {kind: horizontal}
+  children:
+    - button: "👥"                          # the label: drawn where no picture is
+      icon: (state-get "nav.icon.following") # a picture URI, or a published image; "" for none
+      tooltip: Following
+      selected: (= (state-get "feed.mode") "following")
+      on: (state-set "feed.mode" "following")
+    - button: "🌐"
+      tooltip: Everyone
+      selected: (= (state-get "feed.mode") "everyone")
+      on: (state-set "feed.mode" "everyone")
+```
+
+- **`icon:`** is a picture: a URI (§5.11, fetched and cached as an `image:`'s is, with `auth:`
+  for a credential), the name of a picture the host published, or an expression giving either.
+  It is drawn in place of the label, one line of text tall (`icon_size:` N for N px), at its own
+  shape. Until it has loaded, when it fails, when the expression gives `""`, and on a backend that
+  draws no pictures on buttons, the button shows its label. So give it a label that stands on its
+  own: an emoji, or a word.
+- **`selected:`** is `true`, `false`, or an expression. While it holds, the button is drawn
+  pressed in; `false` is a button of such a row that is never the chosen one (a bar's Back). On
+  ImGui sunken (a shadow along its top and left edges, a darker face, its content a step down and
+  to the right), with the row's other buttons raised beside it (a light top and left, a shadow at
+  the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
+  choosing another moves nothing. It is a look only: a click runs `on:` as on any button.
+- In a `repeat:`, `{i}` reaches both.
+- `(has? "button.icon")` and `(has? "button.selected")` say where the backend draws them (§5.7).
+  Elsewhere a button with them is a plain button.
+
+`ariadne_loader_test`'s `ButtonIconAndSelectedParse` checks the keys; `ariadne_ftxui_test`'s
+`SelectedButtonIsMarked` the terminal's look; `cvcgl_imgui_group_click` taps a selected
+button with a picture through ImGui's own input.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -4990,6 +5168,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs` |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
@@ -5389,7 +5568,11 @@ The cvcGL examples
 [`src/arigl/gallery.h`](../src/arigl/gallery.h)), `arigl run`'s menu bar is its own and the same
 for every document: **Demos**, **Document** (the document's own menus, as submenus) and
 **Settings** (the scene's shadows, grid, origin axis, bounding boxes and extent labels, which
-`arigl` without a gallery adds after the document's menus). A demo picked from Demos that is a
+`arigl` without a gallery adds after the document's menus). Settings' *Controls...* and the
+scene's items show only while the loaded document has a scene (`scene:`): `AriRuntime::load`
+writes `ariadne.scene` (`1` or `0`) under the document's prefix, and the items'
+`visible_when:` reads it. A document with no scene (a feed, a form) gets *Show clock* and *Show
+notifications* alone. A demo picked from Demos that is a
 `.ari` document loads in place of the running one, in the same window; any other demo opens on
 its own (its page in the browser, its program natively). That is how the examples' browser gallery runs every `.ari` demo in one app
 (`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree
@@ -7653,7 +7836,13 @@ A capture is made repeatable by:
 - the UI font pinned to `golden/fonts/LiberationSans-Regular.ttf` (OFL; never a system font);
 - UI scale 1, touch mode off, the show/hide button hidden, panels open;
 - ImGui's frame delta pinned (`ImGuiOverlay::setFixedDeltaTime`);
-- at least 4 frames at a fixed dt before the capture.
+- at least 4 frames at a fixed dt before the capture;
+- where a custom node has work in flight (a request waiting, a job or a sliced task running, a
+  result not drawn yet), more frames until it is done, then 4 more with none in flight so the
+  windows show what it published. A node type says so through `RealizedScene::pending_work`, a
+  probe per node (mesh_lab registers one: its skeleton, its colour jobs; contour_lab one: its
+  tile). The skeleton and contour tiler goldens wait for their runs this way;
+- where the scene has `volren` nodes, more frames until each shows a finished raycast.
 
 The test then renders one more frame and requires it to be identical, so a UI that is still
 changing fails as unsettled rather than as a flaky mismatch.

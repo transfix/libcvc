@@ -270,6 +270,7 @@ jobs:
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvcGL/wasm \
                    src/cvcGL/test/webgl_state_shadow_test.js \
+                   src/cvcMedia/web src/cvcMedia/test/cvc_audio_worklet_test.js \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -294,20 +295,27 @@ jobs:
   #
   # physics_replay_test replays src/cvc/tests/data/physics_replay_trace.json, recorded natively,
   # and requires the state_hash after every step: the recipe jobs run it natively (ctest), and
-  # this one builds a minimal wasm-mt libcvc (no cvcGL, no codecs) on the catalog's Jolt and runs
-  # it under the emsdk's node. Only when physics, what it builds on, or this file changed: the
-  # emsdk is a big download.
+  # this one builds a minimal libcvc (no cvcGL, no codecs) on the catalog's Jolt, threaded (wasm-mt)
+  # and single-threaded (wasm), and runs it under the emsdk's node. Only when physics, what it
+  # builds on, or this file changed: the emsdk is a big download.
   physics-wasm:
-    name: physics replay (wasm-mt, node)
+    name: physics replay (${{ matrix.flavor }}, node)
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # wasm-mt runs Jolt's thread-pool job system; wasm its single-threaded one
+        # (jolt_backend.cpp), which is what the gh-pages gallery runs (deploy-pages.yml).
+        flavor: [wasm-mt, wasm]
     concurrency:
-      group: ci-${{ github.ref }}-physics-wasm
+      group: ci-${{ github.ref }}-physics-${{ matrix.flavor }}
       cancel-in-progress: true
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
     env:
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
+      FLAVOR: ${{ matrix.flavor }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -348,22 +356,24 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      - name: Install the wasm-mt deps (boost, pegtl, Jolt, the compression libraries)
+      - name: Install the ${{ matrix.flavor }} deps (boost, pegtl, Jolt, the compression libraries)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
           for p in zlib bzip2 xz zstd boost pegtl joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
-              --platform wasm-mt --arch wasm32 --config release --link static \
+              --platform "$FLAVOR" --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
 
-      - name: Build libcvc (wasm-mt, physics only) and physics_replay_test
+      - name: Build libcvc (${{ matrix.flavor }}, physics only) and physics_replay_test
         if: steps.paths.outputs.run == 'true'
         run: |
           # shellcheck disable=SC1091
           source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          pthreads=OFF
+          [ "$FLAVOR" = wasm-mt ] && pthreads=ON
           emcmake cmake -G Ninja -S . -B build-wasm \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
@@ -372,14 +382,17 @@ jobs:
             -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
             -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
-            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS="$pthreads" \
             | tee configure.log
           grep -q "cvc::physics Jolt backend ENABLED" configure.log \
-            || { echo "::error::the wasm-mt configure did not find Jolt"; exit 1; }
+            || { echo "::error::the $FLAVOR configure did not find Jolt"; exit 1; }
           cmake --build build-wasm --target physics_replay_test -j"$(nproc)"
 
       - name: Replay the native trace under node
         if: steps.paths.outputs.run == 'true'
+        # It takes about a second; a run that waits on a thread a single-threaded build has not got
+        # fails here instead of holding the job for hours.
+        timeout-minutes: 10
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           "$node" --version
@@ -2583,6 +2596,7 @@ jobs:
               state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
               ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
+              net_engine_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
             bench: mt.groups --size t=8 --size groups=8 --size runs=1
@@ -2603,7 +2617,7 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
-        ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
+        net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
         skeleton_test contour_stack_test point_classes_test planar_test tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
@@ -2764,6 +2778,19 @@ jobs:
         state_exec_async_calls_test: OK ] AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher
         stream_test: OK ] Stream.EventsGoToTheSchedulerItWasOpenedWith
         net_ws_client_test: OK ] NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages
+      # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
+      # in every leg: its I/O threads take commands from the test's thread and post events back,
+      # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
+      # run under each sanitizer.
+      SAN_REQUIRED_NET: |
+        net_engine_test: OK ] NetEngineFraming.APausedConnectionSwitchesFramingExactlyAtTheFrame
+        net_engine_test: OK ] NetEngineOutput.SendsAndBroadcastsKeepTheirOrderOnEveryConnection
+        net_engine_test: OK ] NetEngineOutput.AJoinIssuedBeforeABroadcastIncludesTheConnection
+        net_engine_test: OK ] NetEngineGroups.ExcludeLeaveAndCloseLeaveEveryGroup
+        net_engine_test: OK ] NetEngineBackpressure.ASlowReaderClosesPastMaxQueued
+        net_engine_test: OK ] NetEngineClose.AFlushingCloseSendsWhatIsQueuedThenEnds
+        net_engine_test: OK ] NetEngine.StopClosesEveryConnectionAndLaterCommandsDoNothing
+        net_engine_test: OK ] NetEngineFanOut.OneMessageToManyLoopbackReceivers
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
@@ -2868,6 +2895,7 @@ jobs:
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
             ${{ env.SAN_REQUIRED_S1B }}
+            ${{ env.SAN_REQUIRED_NET }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs

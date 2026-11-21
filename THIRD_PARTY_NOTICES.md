@@ -49,7 +49,8 @@ the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-
 [Twemoji Mozilla](#twemoji-mozilla-070).
 
 Example data, in `examples/data` and preloaded into the browser gallery:
-[the Kuwajima 2019 Reconstruct series](#kuwajima-2019-reconstruct-series) (CC0).
+[the Kuwajima 2019 Reconstruct series](#kuwajima-2019-reconstruct-series) (CC0) and
+[PDB entry 1GRL](#pdb-entry-1grl) (CC0).
 
 In the build scripts only: [CMake modules](#cmake-modules-build-scripts-only).
 
@@ -1329,6 +1330,19 @@ PLoS ONE 15(1): e0226797, https://doi.org/10.1371/journal.pone.0226797.
 
 License: CC0 1.0 Universal (public domain dedication),
 https://creativecommons.org/publicdomain/zero/1.0/. The repository asks that the dataset be cited.
+
+## PDB entry 1GRL
+
+- `examples/data/molecules/1grl.pdb` -- the Protein Data Bank entry 1GRL, a subunit of the
+  bacterial chaperonin GroEL (4,186 atoms), as distributed in 1995. cvc::mol's tests read it.
+
+Source: the Protein Data Bank, https://www.rcsb.org/structure/1GRL. Described in Braig K,
+Otwinowski Z, Hegde R, Boisvert DC, Joachimiak A, Horwich AL, Sigler PB (1994), "The crystal
+structure of the bacterial chaperonin GroEL at 2.8 Å", Nature 371: 578-586.
+
+License: the PDB archive's files are free of copyright restrictions, under CC0 1.0 Universal
+(public domain dedication), https://creativecommons.org/publicdomain/zero/1.0/. The wwPDB asks
+that users cite the structure's authors.
 
 ## CMake modules (build scripts only)
 
