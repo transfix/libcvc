@@ -1624,6 +1624,23 @@ set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_contex
 get_property(_cvcgl_tests DIRECTORY PROPERTY TESTS)
 set_property(TEST ${_cvcgl_tests} APPEND PROPERTY ENVIRONMENT __GL_SYNC_TO_VBLANK=0 vblank_mode=0)
 
+# ── wasm: every executable here links -sFETCH ──
+# A scene's vehicles load a fleet's weights through DataStore (ariadne/data.cpp), which can fetch
+# over cvc::net, so an executable that realizes a scene links the Emscripten-fetch backend
+# (net/http_client_fetch.cpp), and without -sFETCH=1 its emscripten_fetch* symbols are undefined.
+# libcvc leaves the fetch flags to the executable (src/cvc/CMakeLists.txt). These never fetch, so
+# -sFETCH alone links them; a blocking send would also need -sASYNCIFY or -pthread. Set on every
+# executable defined above, so a new test cannot miss it.
+if(EMSCRIPTEN)
+  get_property(_cvcgl_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_t IN LISTS _cvcgl_targets)
+    get_target_property(_type ${_t} TYPE)
+    if(_type STREQUAL "EXECUTABLE")
+      target_link_options(${_t} PRIVATE -sFETCH=1)
+    endif()
+  endforeach()
+endif()
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
