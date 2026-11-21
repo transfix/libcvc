@@ -1871,6 +1871,7 @@ struct Runtime::Impl {
     std::uint64_t drawn_walk = 0;
     double last_drawn = 0.0;
     bool hidden_paused = false;
+    double made_at = 0.0; // when its player was made (a video with no frame 3 s on says why)
   };
   std::unordered_map<std::string, PlayerSlot> players;
   std::uint64_t walk_count = 0;
@@ -4274,6 +4275,7 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
       media::PlayerSource src = ps;
       src.base = media_base;
       p.player = media::make_player(app, src);
+      p.made_at = steady_seconds();
       p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
       if (!p.player)
         p.error = "this host's player cannot play it";
@@ -4450,9 +4452,29 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     }
     const float width =
         within_height(static_cast<float>(draw_w), bh > 0 ? 0.0f : aspect, w.img_max_h);
-    if (!b.draw_image(name.c_str(), width))
+    const bool drew = b.draw_image(name.c_str(), width);
+    if (!drew)
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
     in_view = b.item_visible();
+    // No frame yet: the box says why, over the poster or the placeholder: its error once it fails
+    // (with controls, "failed": their line has the error), what the player says keeps the picture
+    // away (a browser waiting for a tap), or, loading or playing 3 s with no frame, that state.
+    // Not where a badge: of its own is, in a box too small for words (an avatar, an emoji), or in
+    // a terminal (a badge there is a line of its own, under the picture).
+    if (drew && pl && !p.have_frame && w.badge.empty() && draw_w >= 96 &&
+        !b.capabilities().terminal) {
+      std::string why;
+      if (p.state == media::PlayerState::Failed)
+        why = decorative && !p.error.empty() ? p.error : std::string("failed");
+      else
+        why = pl->notice();
+      if (why.empty() &&
+          (p.state == media::PlayerState::Loading || p.state == media::PlayerState::Playing) &&
+          now - p.made_at >= 3.0)
+        why = media::player_state_name(p.state);
+      if (!why.empty())
+        b.item_badge(why.c_str());
+    }
     emit_badge(w);
   }
 
