@@ -792,6 +792,7 @@ struct WorldVehicles::impl {
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
   bool wander = true;      // nav@1 draws another goal at each one it reaches
   bool avoid = true;       // vehicles steer around each other (set_avoid)
+  std::vector<std::array<double, 2>> movers; // what else they steer around (set_movers), m
   std::string sense = "known"; // what the navigators know: known or fog (set_sense)
   bool drive_tel = false;  // the navigators capture their drive (set_drive_telemetry)
 
@@ -2646,10 +2647,14 @@ struct WorldVehicles::impl {
           if (fleet_of(e) == f.get())
             if (const int i = index(e); i >= 0)
               f->from[static_cast<std::size_t>(i)] = bicycle_box(*f, i, e.desc);
-      // The other plants' vehicles and the `pose` entities, for this fleet's separation to steer
-      // around.
-      if (avoid && (fleets.size() > 1 || posed_placed())) {
+      // The other plants' vehicles, the `pose` entities and the world's other movers (a
+      // holon's avatars), for this fleet's separation to steer around.
+      if (avoid && (fleets.size() > 1 || posed_placed() || !movers.empty())) {
         std::vector<float> others;
+        for (const std::array<double, 2> &m : movers) {
+          others.push_back(nx(m[0]));
+          others.push_back(ny(m[1]));
+        }
         for (const entity &o : ents) {
           pose q;
           if (fleet_of(o) == f.get() || !where(o, q))
@@ -3674,6 +3679,12 @@ void WorldVehicles::set_avoid(bool avoid) {
 }
 
 bool WorldVehicles::avoid() const { return _impl->avoid; }
+
+void WorldVehicles::set_movers(std::vector<std::array<double, 2>> xy) {
+  _impl->movers = std::move(xy);
+}
+
+const std::vector<std::array<double, 2>> &WorldVehicles::movers() const { return _impl->movers; }
 
 bool WorldVehicles::set_sense(const std::string &mode) {
   impl &d = *_impl;

@@ -500,6 +500,12 @@ public:
   // document's init: may set it before the world is made.
   void set_avoid(bool avoid);
   bool avoid() const;
+  // Other things that move in the world, which the navigators steer around as they do around each
+  // other's vehicles while avoid() is on (ARIADNE_WORLDS.md section 18.4): a holon's avatars
+  // (holon::attach_world sets them before each step), at their positions in the world's metres.
+  // Nothing moves them; kept until set again, empty for none (the default).
+  void set_movers(std::vector<std::array<double, 2>> xy);
+  const std::vector<std::array<double, 2>> &movers() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense
