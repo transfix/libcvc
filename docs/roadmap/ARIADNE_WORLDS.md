@@ -1040,19 +1040,28 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 - **An avatar can be a vehicle** where the world allows it: its avatar archetypes may include
   vehicles, and a participant picks one when it joins (WD4, WD6).
 - **Each thing driven has its own controls** (`cvc/ariadne/controls.h`). A control scheme per
-  kind, each with its own bindings (keys and mouse buttons now; gamepad buttons and axes from
-  OW6b), so a car's keys are not a person's:
+  kind, each with its own bindings (keys and mouse buttons, and a gamepad's buttons, triggers and
+  stick halves), so a car's keys are not a person's:
 
-  | Scheme | Actions (default keys) |
-  |---|---|
-  | walk | forward W/Up, backward S/Down, strafe left A/Left, strafe right D/Right, jump Space, mouse look on/off V, get in E (held 0.4 s) |
-  | car | throttle W/Up, reverse S/Down, brake Space, steer left A/Left, steer right D/Right (each ramps to the lock over 0.25 s), get out E (held) |
-  | boat | the car's, with no brake |
+  | Scheme | Actions (default keys) | Gamepad |
+  |---|---|---|
+  | walk | forward W/Up, backward S/Down, strafe left A/Left, strafe right D/Right, jump Space, mouse look on/off V, get in E (held 0.4 s) | walk on the left stick (as fast as it is pushed), look around on the right, jump A, mouse look on/off the right stick pressed, get in X (held) |
+  | car | throttle W/Up, reverse S/Down, brake Space, steer left A/Left, steer right D/Right (each ramps to the lock over 0.25 s), get out E (held) | steer on the left stick, throttle RT, brake LT, reverse LB, look around on the right stick, get out X (held) |
+  | boat | the car's, with no brake | the car's, with reverse on LT |
 
   Getting in switches a participant to its vehicle's scheme (the archetype's `controls:`, car or
   boat, by its plant when it names none), getting out back to walking. arigl keeps the bindings
   where the Controls window changes them: walking's at `<viewer>.avatar.keys.<action>`, the
-  vehicles' at `<viewer>.controls.<scheme>.<action>`.
+  vehicles' at `<viewer>.controls.<scheme>.<action>`, a gamepad's at `<viewer>.pad.<scheme>.<action>`
+  (where one is set: the Controls window does not list them yet).
+- **As built (OW6b):** a binding's `pad` names a gamepad's inputs (buttons A, B, X, Y by position,
+  LB, RB, the D-pad, the sticks pressed; triggers LT, RT; stick halves `LeftY-`, `LeftX+`, ...);
+  each has a deadzone (0.15 of a stick, 0.05 of a trigger), past which the rest of its travel is
+  0 to 1, and an action is its keys' value or its gamepad's, the larger (a key's steering ramps, a
+  stick's does not). cvcGL's `SdlGamepad` reads the first gamepad SDL finds (one plugged in later
+  within a second). Played on the gamepad, arigl faces where the camera looks, as under mouse
+  look; the right stick turns the camera (150 degrees a second at a full push, the chase camera
+  waiting while it does), and the get-in prompt names the gamepad's button.
 - **The drive axes are shares of the vehicle's envelope,** so one scheme drives any vehicle and
   the server holds each to its own: `steer` in [-1, 1] of its lock (`max_steer`), `throttle` in
   [-1, 1] of its `max_accel` (negative is reverse), `brake` in [0, 1] of its `max_decel`
@@ -1084,7 +1093,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
-| OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads. OW6c: avatars that are vehicles, a first-person walk. | M |
+| OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme). OW6c: avatars that are vehicles, a first-person walk. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 
 **Open:**

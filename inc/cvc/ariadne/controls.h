@@ -34,30 +34,44 @@ namespace ariadne {
 // reverse and steering: neither can strafe). Getting in switches the participant to its
 // vehicle's scheme, getting out back to walking.
 //
-//   walk   forward, backward, strafe_left, strafe_right, jump, mouse_look (toggles it), interact
-//   car    throttle, reverse, brake, steer_left, steer_right, interact
+//   walk   forward, backward, strafe_left, strafe_right, jump, mouse_look (toggles it), interact,
+//          look_left, look_right, look_up, look_down
+//   car    throttle, reverse, brake, steer_left, steer_right, interact, and the look_ four
 //   boat   the car's, with no brake (its reverse is the propeller astern)
 //
 // interact gets in (the nearest drivable vehicle within its reach) and out; it fires once held
 // for its `hold` (0.4 s), and letting go before then cancels it.
 //
 // A binding names keys and mouse buttons as the Controls window stores them (keys.h: SDL's names,
-// "Mouse1".."Mouse5" for the buttons) and, for a gamepad, its SDL standard names (pad: A, B, X, Y,
-// LB, RB, LT, RT, LeftX, ...; read from OW6b on). A host keeps each scheme's bindings in its state
-// so the Controls window can change them (arigl: <viewer>.avatar.keys.<action> for walk, as before,
-// and <viewer>.controls.<scheme>.<action> for the others).
+// "Mouse1".."Mouse5" for the buttons) and a gamepad's inputs by their standard names (OW6b):
+//
+//   buttons  A, B, X, Y (the face buttons by position, Xbox-style: A the bottom one), LB, RB,
+//            Back, Start, Guide, LeftStick, RightStick (the sticks pressed), DPadUp, DPadDown,
+//            DPadLeft, DPadRight: 0 or 1
+//   triggers LT, RT: 0 to 1
+//   sticks   LeftX, LeftY, RightX, RightY: -1 to 1, Y down; a binding takes one half of an axis
+//            by its sign, "LeftY-" the left stick pushed forward, "LeftX+" pushed right
+//
+// By default a gamepad walks on the left stick and looks around on the right, jumps on A and gets
+// in and out on X held; driving, the left stick steers, RT is the throttle, LT the brake (a
+// boat's reverse), LB a car's reverse.
+//
+// A host keeps each scheme's bindings in its state so the Controls window can change them
+// (arigl: <viewer>.avatar.keys.<action> for walk, as before, and <viewer>.controls.<scheme>.<action>
+// for the others; a gamepad's at <viewer>.pad.<scheme>.<action>).
 
 enum class control_kind { walk, drive };
 
 struct control_binding {
   std::vector<std::string> keys; // keys and mouse buttons; any held holds it
-  std::vector<std::string> pad;  // gamepad buttons and axes (OW6b)
-  // An analog input below `deadzone` is none; above it, scaled to [0, 1] and by `scale`, and
-  // turned over by `invert`. A digital one is 0 or 1.
+  std::vector<std::string> pad;  // gamepad buttons, triggers and stick halves; the most pressed
+  // A gamepad input below `deadzone` is none; above it, scaled to [0, 1] and by `scale`. `invert`
+  // turns a stick over (a binding to "LeftY-" reads the stick pulled back). A key is 0 or 1.
   double deadzone = 0.0, scale = 1.0;
   bool invert = false;
-  // Seconds from 0 to full while held, and back to 0 when let go (0: at once): a key steers
-  // smoothly instead of yanking the wheel to its lock.
+  // Seconds from 0 to full while a key is held, and back to 0 when let go (0: at once): a key
+  // steers smoothly instead of yanking the wheel to its lock. A stick or trigger is already
+  // smooth: it is read as it is.
   double ramp = 0.0;
   // Seconds held before it fires (interact); 0 is a plain hold.
   double hold = 0.0;
@@ -89,6 +103,9 @@ class control_resolver {
 public:
   // Which inputs are held: a key's or mouse button's stored name (keys.h) in, held out.
   using held_fn = std::function<bool(const std::string &)>;
+  // A gamepad's reading of one input, by its base name (a stick's axis as a whole: "LeftY", -1
+  // to 1; a trigger 0 to 1; a button 0 or 1). Empty, or 0 for every name: no gamepad.
+  using pad_fn = std::function<double(const std::string &)>;
 
   control_resolver() = default;
   explicit control_resolver(control_scheme scheme) { set_scheme(std::move(scheme)); }
@@ -98,12 +115,14 @@ public:
   // get you straight back out).
   void set_scheme(control_scheme scheme);
   const control_scheme &scheme() const { return _scheme; }
-  // A binding's keys from now on (the Controls window changed them).
+  // A binding's keys, or its gamepad inputs, from now on (the Controls window changed them).
   void set_keys(const std::string &action, std::vector<std::string> keys);
+  void set_pad(const std::string &action, std::vector<std::string> pad);
 
-  void update(const held_fn &held, double dt);
+  void update(const held_fn &held, double dt, const pad_fn &pad = {});
 
-  // An action's value in [0, 1] after its ramp; 0 for an action the scheme has not.
+  // An action's value in [0, 1]: its keys' after their ramp, or its gamepad's, the larger; 0 for
+  // an action the scheme has not.
   double value(const std::string &action) const;
   bool held(const std::string &action) const { return value(action) > 0.5; }
   // A hold action: true on the update its hold elapsed (once per press), and how far along the
@@ -116,17 +135,29 @@ public:
   // A drive scheme's actions as the intent's drive axes (shares, avatar_intent): steer =
   // steer_left - steer_right, throttle = throttle - reverse, brake.
   void drive_axes(avatar_intent &in) const;
+  // The walk's as shares of the walking speed: forward - backward, strafe_right - strafe_left.
+  void walk_axes(double &forward, double &right) const;
+  // And the look's, for the camera: look_right - look_left, look_up - look_down.
+  void look_axes(double &right, double &up) const;
+
+  // Whether the last input this scheme saw was the gamepad's (a prompt names its button then).
+  bool from_pad() const { return _from_pad; }
 
 private:
   struct live {
     bool down = false, was_down = false;
-    double value = 0.0;
+    double value = 0.0, key_value = 0.0; // key_value: the keys' alone, as it ramps
     double held_s = 0.0;
     bool fired = false, spent = false; // spent: fired this press (wait for a let go)
   };
   control_scheme _scheme;
   std::map<std::string, live> _live;
+  bool _from_pad = false;
 };
+
+// One gamepad binding's reading, by the rules above (the most pressed of its inputs, after its
+// deadzone, scale and invert), in [0, 1]; 0 without a gamepad.
+double pad_reading(const control_binding &binding, const control_resolver::pad_fn &pad);
 
 } // namespace ariadne
 } // namespace cvc
