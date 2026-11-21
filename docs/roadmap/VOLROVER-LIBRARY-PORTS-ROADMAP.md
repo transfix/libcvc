@@ -1713,6 +1713,8 @@ not as follow-ups.
   `utility.h`'s XML-RPC helpers, and the `__system.xmlrpc` keys.
 - **Skeletonization's helix-specific strand window and its `#if 0` helix block.** The window
   becomes an off-by-default parameter. The block fits better with a SecondaryStructures port.
+  *(T5 ported SecondaryStructures, which picks helices by the same (2, 3) window on its U2
+  widths: `cvc::find_secondary_structures`, TEXMOL-F2DOCK-ARISRV-ROADMAP.md §2.6.)*
 
 ---
 

@@ -222,7 +222,7 @@ intrinsics, a job kind, and Ariadne components, wasm included.
 | **Docking analysis:** **InterfaceStats**, **MolecularCharacteristics**, and the filters **fast-clash**, **fast-hydro** (pseudo-Gsol), **fast-LJ**, **fast-resCont** | 11.8k | UT LGPL-2.1, plus files with no header; `ElementInformation.h` is UT GPL in TexMol (TexMol#7 relicenses it) | CAPRI criteria; interface area, volume, gap, planarity and circularity; residue contacts; per-molecule statistics; the octree filters and scores | **F2Dock carries its own copies of the same filters.** Port them once, as `cvc::mol` filters that `libf2dock` and the analysis both use (§3.2). pthreads become the app's pool; 39 `exit()`s become exceptions. The element table waits on cyconv's D13 |
 | **F2DockClient's Qt-free core** | about 6.5k | UT LGPL-2.1 | The docking, rerank, F2D-generation and quad-generation parameter structs, the `.inp` writers, and the `.out` result parser (`summaryResults.cpp`), so legacy results and inputs load into arimol | The XML-RPC transport, the Qt dialogs and the "Nagger" polling thread stay behind; the job service replaces them (§5). Fix on the way: `dockControl.cpp:416` checks the wrong pointer; `return NULL` into `std::string` (`f2dockMasterControl.cpp:269-281`) |
 | **PocketTunnel** | 5.0k | UT LGPL-2.1 | Pockets, tunnels and voids by stable manifolds, with surface curation | Needs the VolumeRover plan's `cvc::cocone` core on Qhull (its cocone files are the copies that plan merges). `exit()`s and `debug_output/` writes go |
-| **SecondaryStructures** | 9.0k | **no licence header** (UT to confirm) | Helices and sheets from a volume's isosurface, via the cocone medial axis | On the same cocone core; it is the "SecondaryStructures port" the VolumeRover plan leaves Skeletonization's helix window to. `MainWindow.cpp:2267,2276` keep dangling `c_str()` pointers; its `.rawc` and `.off` writes go |
+| **SecondaryStructures** | 9.0k | UT LGPL-2.1: volrover's copy carries UT's header on all 14 `.cpp` files; TexMol's copy has none (Joe, 2026-11-21: "It is also LGPL-2.1 like the rest") | Helices and sheets from a volume's isosurface, via the cocone medial axis | On the same cocone core; it is the "SecondaryStructures port" the VolumeRover plan leaves Skeletonization's helix window to. `MainWindow.cpp:2267,2276` keep dangling `c_str()` pointers; its `.rawc` and `.off` writes go. *Ported (T5):* `cvc::find_secondary_structures` (§2.6) |
 | **Curvatures**, **ColorSurfaceByFunction** | 1.1k | UT LGPL-2.1 | Analytic curvature of a sum-of-Gaussians surface (not libcvc's mesh fit); Coulomb colouring of surface vertices | Small; they sit beside `mesh_ops` |
 
 ### 2.3 Only if rewritten
@@ -285,6 +285,26 @@ intrinsics, a job kind, and Ariadne components, wasm included.
   Until then `libf2dock` keeps its own copies, and an A/B (T16) checks that the two agree.
 - **Cocone last.** PocketTunnel and SecondaryStructures wait for the VolumeRover plan's P1
   (`cvc::tet_complex` and the cocone core on Qhull).
+  - *SecondaryStructures, built (T5, 2026-11-21):* `cvc::find_secondary_structures`
+    (`inc/cvc/geometry/secondary_structures.h`). It uses P1's core where it is
+    (`src/cvc/geometry/skeleton/`) for the triangulation, Tight Cocone, U1 and U2, unchanged. Its
+    own stages are in `src/cvc/geometry/secondary/`: the inner medial axis peeled from its free
+    boundary, the skeleton graph with its widths, and the helices and sheets chosen from it. The
+    result keeps the graph, so `select_secondary_structures` re-chooses them as the legacy GUI's
+    sliders did. Its stepper is a `result_job`; the parameters are a `param_table`; its geometries
+    belong to the app the call names.
+  - *Its A/B* (`tools/volrover-goldens`, the legacy library built from the pinned volrover sha
+    with its fixes as recorded patches).
+    - On a synthetic surface (three tubes and a slab) it matches exactly: every polygon,
+      edge, component area, width, helix axis (to 1e-9) and sheet polygon.
+    - On 1GRL's blur-map isosurface (blobbiness -0.3, 2 Å, isovalue 12) it matches statistically:
+      99% of the polygon widths, every helix width, and 17 of the 20 helix axes within 3 Å.
+    - There the core's Tight Cocone already differs a little from the legacy (19,166 surface
+      facets against 19,154), and so does P1's own skeleton: 98.5% of the legacy Skeletonization's
+      segments on the same surface.
+  - *Against the PDB file:* 18 of its 20 helix axes on 1GRL lie on HELIX residues, and 15 of the
+    file's 19 helices have an axis through them.
+  - *Still to do:* the CLI, pycvc, DSL intrinsics and a `mesh_lab` request.
 - **Job kinds.** Every port is a job kind (§5): `mol.surface`, `mol.blur`, `mol.hls`,
   `mol.pockets`, `mol.characteristics`, `dock.interface`, `mol.tunnels`, `mol.secondary`. TexMol's
   batch commands map onto them.
@@ -733,7 +753,7 @@ Sizes: S is a PR or two, M a few, L a short series, XL a longer one.
 | T2 SES and pockets | M | HLevelSet; Pocket rebuilt on `cvc::sdf` and `cvc::iso`; `mol.hls` / `mol.pockets` | T1 |
 | T3 Docking analysis | M | InterfaceStats, MolecularCharacteristics, and the `cvc::mol` filters (clash, pseudo-Gsol, LJ, residue contacts) shared with F2Dock, with an A/B against `libf2dock`'s copies | M0, the D13 rulings |
 | T4 Docking inputs and results | S | F2DockClient's Qt-free parameter structs, `.inp` writers and `.out` parser, so legacy jobs load into arimol | M0 |
-| T5 Tunnels and secondary structure | M | PocketTunnel and SecondaryStructures on the cocone core | VolumeRover P1, UT on SecondaryStructures' licence |
+| T5 Tunnels and secondary structure | M | PocketTunnel and SecondaryStructures on the cocone core | VolumeRover P1 (SecondaryStructures' licence settled 2026-11-21: LGPL-2.1) |
 | T6 Small pieces | S | Curvatures, ColorSurfaceByFunction, the DX volume reader | T1 |
 | F0 F2Dock fixes | S–M | §3.2 F0, in transfix/F2Dock | — |
 | F1 `libf2dock` | L | §3.2 F1, with `dock_stepper` sliced within a rotation (T7 natively and under node, single-threaded included) | F0 |

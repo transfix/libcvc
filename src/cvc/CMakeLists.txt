@@ -29,6 +29,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/geometry/skeleton_intrinsics.h
+  ../../inc/cvc/geometry/secondary_structures.h
+  ../../inc/cvc/geometry/secondary_structures_params.h
   ../../inc/cvc/geometry/tiler.h
   ../../inc/cvc/geometry/tiler_params.h
   ../../inc/cvc/geometry/tiler_intrinsics.h
@@ -333,6 +335,9 @@ set(SOURCE_FILES
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
   geometry/skeleton/skeleton_intrinsics.cpp
+  geometry/secondary/secondary_axis.cpp
+  geometry/secondary/secondary_select.cpp
+  geometry/secondary/secondary_structures.cpp
   geometry/tiler/tile_contours.cpp
   geometry/tiler/tiler_intrinsics.cpp
   geometry/sliced_ldlt.cpp

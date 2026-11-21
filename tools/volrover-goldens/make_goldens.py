@@ -26,6 +26,11 @@ SegMed (src/Segmentation/SegMed), the paper's critical points, per case:
                       voxel, x fastest); --check compares it to within 1e-6, not byte for byte
   <case>.json         the case, the volrover sha, the platform, the count and the SHA-256
 
+SecondaryStructures (src/SecondaryStructures), per case:
+  <case>.ss.txt       what secondary_driver.cpp writes: the skeleton's counts and widths, the
+                      candidate runs, the helix axes and the sheets' polygons
+  <case>.json         the case, the volrover sha, the platform, the counts and the SHA-256
+
     python3 tools/volrover-goldens/make_goldens.py            # write the goldens
     python3 tools/volrover-goldens/make_goldens.py --check    # CI: they must not change
 
@@ -51,11 +56,12 @@ SPARSE = {
     "genseg": ["src/Segmentation/GenSeg", "inc/Segmentation/GenSeg", "LICENSE", "COPYING"],
     "segmed": ["src/Segmentation/SegMed", "inc/Segmentation/SegMed", "LICENSE", "COPYING"],
     "skeleton": ["src/Skeletonization", "inc/Skeletonization", "LICENSE", "COPYING"],
+    "secondary": ["src/SecondaryStructures", "inc/SecondaryStructures", "LICENSE", "COPYING"],
     "tiler": ["src/ContourTiler", "inc/ContourTiler", "LICENSE", "COPYING"],
 }
 # The executable each library's legacy build makes (CMakeLists.txt).
 TARGETS = {"genseg": "genseg_legacy", "segmed": "segmed_legacy", "skeleton": "skeleton_legacy",
-           "tiler": "tiler_legacy"}
+           "secondary": "secondary_legacy", "tiler": "tiler_legacy"}
 # The largest difference --check allows between a made and a committed SegMed field: the legacy
 # code's exp() is the platform's expf, which may round a last bit differently.
 FIELD_TOLERANCE = 1e-6
@@ -260,6 +266,36 @@ def skeleton_case(exe, inputs_dir, case, out_dir):
                   "debug_files": debug}
 
 
+def secondary_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy SecondaryStructures on inputs/secondary/<case>.pts; write <case>.ss.txt
+    (what secondary_driver.cpp writes) and return the case's metadata and its counts. It runs in a
+    scratch directory: the legacy code writes debug files to the current one."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    args = ["%s=%s" % (k, v) for k, v in sorted(meta.get("parameters", {}).items())]
+    with tempfile.TemporaryDirectory(prefix="secondary-") as tmp:
+        shutil.copy(os.path.join(inputs_dir, case + ".pts"), os.path.join(tmp, "in.pts"))
+        run([exe, "in.pts", "out.txt"] + args, cwd=tmp, quiet=True)
+        with open(os.path.join(tmp, "out.txt"), "rb") as f:
+            text = f.read().replace(b"\r\n", b"\n")
+        debug = sorted(n for n in os.listdir(tmp) if n not in ("in.pts", "out.txt"))
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, case + ".ss.txt"), "wb") as f:
+        f.write(text)
+    kinds = {}
+    head = []
+    for line in text.decode().splitlines():
+        kinds[line[0]] = kinds.get(line[0], 0) + 1
+        if line[0] == "N":
+            head = [int(x) for x in line.split()[1:]]
+    nv, ne, nf, comps, helices, drawn, sheets, sheet_candidates = head
+    return meta, {"skeleton_points": nv, "skeleton_edges": ne, "polygons": nf,
+                  "components": comps, "runs": kinds.get("R", 0), "helices": helices,
+                  "helices_drawn": drawn, "sheets_drawn": sheets,
+                  "sheet_candidates": sheet_candidates, "sheet_polygons": kinds.get("P", 0),
+                  "debug_files": debug}
+
+
 # How far --check lets a remade tiler golden's coordinates be from the committed one's: the
 # legacy ContourTiler runs on CGAL::Cartesian<double> (inexact predicates and constructions), and
 # its untiled-region fill interpolates, so the platform's floating point can move the last bits.
@@ -347,9 +383,9 @@ def main():
                                                    "volrover-goldens"))
     ap.add_argument("--check", action="store_true",
                     help="make the goldens in a scratch directory and compare them with --out")
-    ap.add_argument("--libs", default="genseg,segmed,skeleton,tiler",
-                    help="the libraries, comma-separated (genseg, segmed, skeleton, tiler; skeleton "
-                         "and tiler need CGAL)")
+    ap.add_argument("--libs", default="genseg,segmed,skeleton,secondary,tiler",
+                    help="the libraries, comma-separated (genseg, segmed, skeleton, secondary, "
+                         "tiler; skeleton, secondary and tiler need CGAL)")
     args = ap.parse_args()
 
     sha = pinned_sha()
@@ -453,6 +489,35 @@ def main():
             print("Skeletonization %s: %d polyline segments, %d stars, %d polygons, %d helix "
                   "strips" % (case, counts["polyline_segments"], counts["stars"],
                               counts["polygons"], counts["helix_strips"]))
+
+    if "secondary" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "secondary")
+        out_dir = os.path.join(target, "secondary")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, counts = secondary_case(exes["secondary"], inputs_dir, case, out_dir)
+            golden = {
+                "library": "SecondaryStructures",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/secondary/%s.pts" % case,
+                "input_sha256": sha256(os.path.join(inputs_dir, case + ".pts")),
+                "points": meta["points"],
+                "made_from": meta["made_from"],
+                "parameters": meta.get("parameters", {}),
+                "counts": counts,
+                "ss_sha256": sha256(os.path.join(out_dir, case + ".ss.txt")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            compared.append(("secondary", case + ".ss.txt"))
+            print("SecondaryStructures %s: %d helices (%d drawn), %d of %d sheet candidates drawn "
+                  "(%d polygons), %d polygons in %d components" %
+                  (case, counts["helices"], counts["helices_drawn"], counts["sheets_drawn"],
+                   counts["sheet_candidates"], counts["sheet_polygons"], counts["polygons"],
+                   counts["components"]))
 
     if "tiler" in libs:
         inputs_dir = os.path.join(HERE, "inputs", "tiler")
