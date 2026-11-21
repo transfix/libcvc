@@ -12,6 +12,7 @@
     "volslice_bunny_ari",
     "orthoslicer_ari",
     "volume_grid_ari",
+    "contour_tiler_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
     "viewer_looks_ari",
@@ -205,6 +206,15 @@
       "blurb":
           "VolumeGridRover rebuilt as an Ariadne component over a volume_grid node: the signed distance field of the embedded Stanford bunny in three slice planes, a slice view under the XY / XZ / ZY switch beside a 3D view of the planes, and a panel with the probe, the point classes and the transfer function. Click in the slice view to mark a point of the current class (or unmark one), drag to select points in a rubber band, Shift+Ctrl drag to move them; Navigate moves the other planes to the voxel clicked, and the probe follows the pointer.",
       "thumb": "img/volume_grid_ari.jpg"
+    },
+    "contour_tiler_ari": {
+      "app": "arigl",
+      "doc": "contour_tiler",
+      "title": "contour tiler",
+      "desc": "surfaces through serial-section contours: axons and mitochondria from a real Reconstruct series",
+      "blurb":
+          "VolumeRover's contour tiler as one Ariadne document: a contour_lab node reads a real Reconstruct series from mouse hippocampus (two axons traced through 72 sections, a third that branches, and two mitochondria inside one of them; Kuwajima 2019, CC0), draws the traced contours and tiles a surface through each object's contours, slice pair by slice pair, as a sliced task, so the page keeps drawing while it works and the progress bar names the pair it is on. Tick the components to tile, change the slice range or the parameters, and tile again; the surfaces are see-through, so the mitochondria show inside their axon.",
+      "thumb": "img/contour_tiler_ari.jpg"
     },
     "arigl_term": {
       "title": "arigl --terminal",

@@ -35,6 +35,8 @@
 //   /apps/app/          the arigl-web files (index.html, arigl-web.js/.css, arigl.js/.wasm)
 //   /apps/app/main.ari  the docset's app/, which imports lib/panel.ari and ../shared/note.ari
 //   /apps/shared/       the docset's shared/
+//   /apps/tiler/        the app again, with a page config that preloads the contour tiler's series
+//                       from /apps/data/, the repository's examples/data
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
 //   /apps/wasm/         ariglx-web's files again, beside the --wasmdocs documents and guests
@@ -55,6 +57,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 const argv = process.argv.slice(2);
 const opt = name => {
@@ -117,11 +120,23 @@ const CONFIG = JSON.stringify({flags: ['--net'], args: ['--instance', '{origin}'
 // /apps/pyprog/: a Python program in place of the document, and the document it loads (a program's
 // own files are not followed, so the page preloads them).
 const PY_CONFIG = JSON.stringify({src: 'program.py', preload: ['program.ari']});
+// /apps/data/: the repository's examples/data. /apps/tiler/ is the app again, with a page config
+// that preloads the contour tiler's series from there (a series is its .ser and the numbered
+// section files beside it, which no reference in the document names): sections 14 to 33, the ones
+// contour_tiler.ari reads.
+const EXAMPLES_DATA = fileURLToPath(new URL('../../../../examples/data/', import.meta.url));
+const SERIES = '../data/contours/kuwajima2019/VYLNH_20181017';
+const TILER_CONFIG = JSON.stringify({
+  preload: [`${SERIES}.ser`, ...Array.from({length: 20}, (_, i) => `${SERIES}.${14 + i}`)],
+});
 function fileFor(urlPath) {
   const p = decodeURIComponent(urlPath);
   if (!p.startsWith('/apps/') || p.includes('..')) return null;
   let rest = p.slice('/apps/'.length);
   if (rest === 'cfg/ariadne.config.json') return {json: CONFIG};
+  if (rest === 'tiler/ariadne.config.json') return {json: TILER_CONFIG};
+  if (rest.startsWith('data/')) return path.join(EXAMPLES_DATA, rest.slice('data/'.length));
+  if (rest.startsWith('tiler/')) rest = 'app/' + rest.slice('tiler/'.length);
   if (PYDOCS && rest === 'pyprog/ariadne.config.json') return {json: PY_CONFIG};
   if (PYDOCS && (rest.startsWith('py/') || rest.startsWith('pyprog/'))) {
     const name = rest.slice(rest.indexOf('/') + 1);
@@ -384,6 +399,16 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     inject: LOGGED,
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /volume_grid: 32 32 32, slice view down y, added \(10, 15, 12\) to seeds/.test(l)),
+  });
+  // The contour tiler (arigl only, as the orthoslicer): a contour_lab node reads a Reconstruct
+  // series the page config preloads and tiles it as a sliced task on the page's scheduler; the
+  // document prints one line once its three surfaces are up.
+  cases.push({
+    name: 'a contour_lab node tiles a Reconstruct series (the contour tiler)',
+    url: `${ORIGIN}/apps/tiler/?src=contour_tiler.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /contour_tiler: 3 surfaces, [1-9][0-9]* triangles/.test(l)),
   });
 }
 

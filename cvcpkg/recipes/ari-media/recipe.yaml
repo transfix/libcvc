@@ -33,12 +33,12 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.2"
     - name: sdl3
     - name: ffmpeg-lgpl
   runtime:
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.2"
     - name: sdl3
     - name: ffmpeg-lgpl
   host_tools:
