@@ -242,6 +242,13 @@ public:
   // between (pose_tracker::capture). Returns the steps run.
   std::uint64_t follow(const cvc::world_clock &clock,
                        const std::function<void()> &after_step = nullptr);
+  // The same, with `before_each` called before each step (after the vehicles, boats and weather
+  // have put their forces in, just before the world steps) and `after_each` after it (after the
+  // vehicles have read theirs), each with the clock tick the step ends on. A holon that runs this
+  // world puts its avatars' drives in the first and reads them in the second (holon::attach_world).
+  using step_hook = std::function<void(std::uint64_t tick)>;
+  std::uint64_t follow(const cvc::world_clock &clock, const std::function<void()> &after_step,
+                       const step_hook &before_each, const step_hook &after_each);
 
   // Rebuild the world as build() made it: the same object, a fresh physics world with the same
   // config and materials, each node's body where the document put it (at rest unless it declared

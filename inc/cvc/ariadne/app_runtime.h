@@ -304,6 +304,11 @@ public:
   SceneWorld *running_world() const {
     return world_ ? world_.get() : scene_ ? scene_->scene_world() : nullptr;
   }
+  // ONE WORLD (ARIADNE_WORLDS.md section 18.2): another clock steps scene_world(), a holon that
+  // runs it (holon::attach_world). This runtime then neither drives the scene's clock nor steps
+  // its world in drain(); it still passes on the world's warnings. False again, it does both.
+  void set_world_external(bool external) { worldExternal_ = external; }
+  bool world_external() const { return worldExternal_; }
 
   // The built-in sim.step and sim.restart (sim_transport.ari's Step and Restart buttons, and any
   // document's bare `on: sim.step` / `on: sim.restart`), which the constructor registers. A host's
@@ -335,6 +340,7 @@ private:
   // With no adapter: the scene's world, and the clock it runs on (scene_world()).
   std::unique_ptr<SceneWorld> world_;
   std::unique_ptr<SceneClockDriver> worldClock_;
+  bool worldExternal_ = false; // set_world_external
   // The scene clock's step key and the restart counter beside it (step_world, restart_world);
   // empty for a document with no scene.
   std::string stepKey_, restartsKey_, pausedKey_;
