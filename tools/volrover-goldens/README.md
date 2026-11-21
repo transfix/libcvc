@@ -200,8 +200,12 @@ from VolumeRover's, which is the same at the pinned commit. It needs CGAL, as Sk
   use.
 - **Inputs:** `inputs/pockettunnel/<case>.pts` (float-exact, as the skeleton's; the legacy entry
   reads its points as floats) and `<case>.json` (`num_pockets` and `num_tunnels`, VolumeRover2's
-  3 and 3). `make_inputs.py --only pockettunnel` wrote them: a ball with chambers cut out of it,
-  each joined to the outside by narrower necks, sampled on the solid's boundary.
+  3 and 3). `make_inputs.py --only pockettunnel` wrote the four balls: each has chambers cut out
+  of it, joined to the outside by narrower necks, sampled on the solid's boundary. `1grl.pts` is a
+  protein's surface, which needs libcvc to make: PDB 1GRL's heavy atoms blurred by
+  `cvc::mol::blur` (blobbiness -0.2, a 3 Å grid) and `cvc::iso` at 10, the points as floats.
+  `pocket_tunnel_test`'s `OnAProtein` makes it again natively, checks the committed copy against
+  it, and writes it with `CVC_POCKETTUNNEL_WRITE_1GRL=<path>`.
 - **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/pockettunnel/`:
   - `<case>.ptv.txt`: every cluster outside the surface (kind, mouths, volume, cells, maxima), the
     geometry `pocket_tunnel_fromsurf()` returned (its points with their colours, its triangles,
@@ -218,6 +222,7 @@ from VolumeRover's, which is the same at the pinned commit. It needs CGAL, as Sk
 | `tunnel` | 2,074 | a chamber with two necks: one tunnel (two mouths) |
 | `three_chambers` | 3,487 | a tunnel and two pockets of different sizes in one ball |
 | `cavity` | 1,873 | a chamber with no neck: Tight Cocone marks it inside, so there is no cluster |
+| `1grl` | 2,609 | PDB 1GRL (a GroEL subunit) at a 3 Å map's resolution: a tunnel (two mouths) and a pocket of over a thousand Å³ each, and 17 pockets of one cell |
 
 **The legacy result depends on the cells' addresses.** CGAL's facet iterator reports a facet from
 the cell at the lower address, and Tight Cocone's peeling (`create_surface`, `grow_boundary`) is
@@ -231,13 +236,15 @@ cells. So the driver runs the legacy entry once a process, and records the marki
 - **exactly after Tight Cocone** (`MatchesTheLegacyLibraryAfterTightCocone`): given the legacy
   marking (`pocket_tunnel_marked.h`), the port's own stages (S_max, the mouths, the output) make
   every cluster with the same kind, mouths, cells and maxima, volumes to 1e-12, every shown
-  triangle with its cluster and class, and every point's colour, on all four cases;
+  triangle with its cluster and class, and every point's colour, on all five cases;
 - **end to end** (`MatchesTheLegacyLibrary`): the port's Tight Cocone walks in tet_complex's
   spatial order. On `pocket`, `three_chambers` and `cavity` it marks the same cells and the whole
   result is the legacy's; on `tunnel` the port's tunnel has 3,085 cells to the legacy's 3,083
   (volume 14.1604 to 14.1590), and the port, like the odd legacy run, finds five pockets of one
-  or two cells.
-  Every cluster of more than a hundred cells is the legacy's to 1% of its cells and volume.
+  or two cells. On `1grl` the large pocket is the legacy's, cell for cell; the tunnel has 317
+  cells to the legacy's 309 (1,195 Å³ to 1,181); and the legacy run finds 17 one-cell pockets,
+  the port 3. Every cluster of more than a hundred cells keeps its kind and mouths, and its cells
+  and volume to 5%.
 
 **Platforms:** the goldens were made on Windows with MSVC 2022 and CGAL 6.0.1, and `--check`
 there makes the same files in a new process each time.

@@ -397,6 +397,11 @@ POCKETTUNNEL_CASES = {
 }
 
 
+# inputs/pockettunnel/1grl.pts, a protein's surface (PDB 1GRL's blur map's isosurface), needs libcvc
+# to make, so this script leaves it alone: src/cvc/tests/pocket_tunnel_test.cpp's OnAProtein makes
+# it again, checks it, and writes it with CVC_POCKETTUNNEL_WRITE_1GRL=<path>.
+
+
 def write_pockettunnel_inputs():
     out_dir = os.path.join(HERE, "inputs", "pockettunnel")
     os.makedirs(out_dir, exist_ok=True)
