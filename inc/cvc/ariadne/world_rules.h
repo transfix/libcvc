@@ -224,6 +224,28 @@ bool spawn_scope_known(const std::string &scope);
 //            a .cvcnav's path, or { uri:, path:, sha256: } (a file, an https URL or a cvcpkg://
 //            package, the .cvcnav inside it and its hash) or { data: <entry> } (the document's
 //            data: entry). Without the weights it drives on the built-in net and says why.
+//   metric:  trained (the trainer's vehicle, as the weights learned) | vehicle (each plant's own
+//            size and limits) | policy (the default: trained when weights drive or are on their
+//            way, vehicle on the built-in net)
+//   plant:   one plant, a list its vehicles cycle over ([jolt, kinematic]), or each team's
+//            ({ 0: jolt, 2: jolt }; a team not named on the archetype's plant). A fleet's plants
+//            all float (dynamicboat) or none do.
+struct fleet_plants {
+  std::vector<std::string> cycle;   // the vehicles' plants in turn (none: the archetype's)
+  std::map<int, std::string> teams; // a team's own (its rally point's index)
+  bool empty() const { return cycle.empty() && teams.empty(); }
+  // Member `member`'s plant on team `team` (-1 none): its team's, else the cycle's, else "".
+  std::string of(int member, int team) const;
+  // As parse_fleet_plants reads it: "jolt", "jolt, kinematic", "0: jolt, 2: jolt",
+  // "kinematic, 0: jolt" (team 0 on jolt, the rest kinematic).
+  std::string text() const;
+  bool operator==(const fleet_plants &) const = default;
+};
+// `text` (fleet_plants::text's form) into `out`: "" or what is wrong. A team must be below
+// `teams` (its fleet's rally points; -1 unchecked), and the plants all float or none do.
+std::string parse_fleet_plants(const std::string &text, fleet_plants &out, int teams = -1);
+bool fleet_metric_known(const std::string &metric); // trained, vehicle or policy
+
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -244,6 +266,9 @@ struct vehicle_start {
   std::string belief; // shared | grouped | private ("" shared)
   // policy: { uri:, path:, sha256: } (`policy` the uri) or { data: } (`policy_data`).
   std::string policy_path, policy_sha256, policy_data;
+  std::string metric; // trained | vehicle | policy ("" policy)
+  // A fleet's plant: as a list or each team's (`plant` is then the list's first, or "").
+  fleet_plants plants;
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;

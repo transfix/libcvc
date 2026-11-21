@@ -23,8 +23,11 @@
 // Needs CVC_ENABLE_SDF (it is built only then) and cvc::planar (the tiler; it skips without it).
 // Nothing here needs libigl: the distances come from the small search below.
 
+#include "resumable_harness.h"
+
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cvc/core/app.h>
@@ -381,7 +384,10 @@ TEST(CVC_TILER_BUNNY_SUITE, TheTiledSlicesOfItsSdfAreTheBunny) {
   // curating them doubles the tiling's time for the same surface.
   cvc::tile_params params;
   params.curation_delta = 0;
+  const auto t0 = std::chrono::steady_clock::now();
   const cvc::tile_result r = cvc::tile_contours(stack, params);
+  const double tile_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   ASSERT_EQ(r.components.count("bunny"), 1u);
   const cvc::geometry &tiled = r.components.at("bunny");
   ASSERT_GT(tiled.num_tris(), 0u);
@@ -394,7 +400,8 @@ TEST(CVC_TILER_BUNNY_SUITE, TheTiledSlicesOfItsSdfAreTheBunny) {
   const double hausdorff = std::max(to_bunny.max, to_tiled.max);
   std::cout << "[ bunny ] " << stack.slices.size() << " slices, " << loops << " contours (at most "
             << max_loops << " in a slice), " << stack.vertex_count() << " contour vertices; "
-            << tiled.num_tris() << " triangles, " << r.warnings.size() << " warnings\n"
+            << tiled.num_tris() << " triangles, " << r.warnings.size() << " warnings, in "
+            << tile_ms << " ms\n"
             << "[ bunny ] in slice spacings (h = " << h << "): tiled to bunny max "
             << to_bunny.max / h << " (above the base band " << to_bunny.max_above / h << "), mean "
             << to_bunny.mean / h << "; bunny to tiled max " << to_tiled.max / h << ", mean "
@@ -414,6 +421,31 @@ TEST(CVC_TILER_BUNNY_SUITE, TheTiledSlicesOfItsSdfAreTheBunny) {
   EXPECT_LT(hausdorff, 5 * h);
   EXPECT_LT(to_bunny.mean, 0.4 * h);
   EXPECT_LT(to_tiled.mean, 0.4 * h);
+
+  // Resumable (§1.9, T7's timing on a real input): the slowest step at the default budget, and the
+  // slowest frame of the tile run as a cooperative sliced task (as single-threaded wasm runs it),
+  // each giving the same surfaces. Recorded, not bounded: Debug and sanitizer builds are slow
+  // everywhere.
+  cvc::test::t7_subject<cvc::tile_stepper, cvc::tile_result> t7;
+  t7.name = "tiler bunny";
+  t7.make = [&] { return std::make_unique<cvc::tile_stepper>(stack, params); };
+  t7.take = [](cvc::tile_stepper &st) { return st.take(); };
+  t7.equal = [](const cvc::tile_result &a, const cvc::tile_result &b) {
+    if (a.warnings != b.warnings || a.components.size() != b.components.size())
+      return false;
+    for (const auto &c : a.components) {
+      auto it = b.components.find(c.first);
+      if (it == b.components.end() || c.second.points() != it->second.points() ||
+          c.second.tris() != it->second.tris() || c.second.normals() != it->second.normals() ||
+          c.second.colors() != it->second.colors())
+        return false;
+    }
+    return true;
+  };
+  cvc::test::t7_report rep;
+  rep.budget0_ms = tile_ms;
+  cvc::test::t7_time_steps(t7, {}, r, rep);
+  cvc::test::t7_frame_run(t7, {}, r, rep);
 }
 
 } // namespace

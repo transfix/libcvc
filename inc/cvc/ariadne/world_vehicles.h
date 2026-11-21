@@ -500,6 +500,12 @@ public:
   // document's init: may set it before the world is made.
   void set_avoid(bool avoid);
   bool avoid() const;
+  // Other things that move in the world, which the navigators steer around as they do around each
+  // other's vehicles while avoid() is on (ARIADNE_WORLDS.md section 18.4): a holon's avatars
+  // (holon::attach_world sets them before each step), at their positions in the world's metres.
+  // Nothing moves them; kept until set again, empty for none (the default).
+  void set_movers(std::vector<std::array<double, 2>> xy);
+  const std::vector<std::array<double, 2>> &movers() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense
@@ -563,6 +569,11 @@ public:
   // "trained (<where>, sha256:...)", "weights (<uri>, sha256:...)", "builtin", "builtin: loading
   // <uri>" while weights are on their way, or "builtin: no trained weights (<why>)", which the
   // host's log also gets once.
+  // `.plant` (fleet_plants::text: "jolt", "jolt, kinematic", "0: jolt, kinematic") switches its
+  // plants, its vehicles at rest where they are on the new ones (a bad one is said in
+  // vehicles.status and changes nothing). `.metric` (trained, vehicle, policy) is what it plans
+  // with (D9), and `.plans` what it does now: "trained" (the trainer's vehicle, while weights drive
+  // or are on their way) or "vehicle" (each plant's own); a change makes its navigators again.
   std::vector<std::string> fleets() const;
   // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
   // none (no such fleet or team, or not laid out yet).

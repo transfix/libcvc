@@ -933,6 +933,20 @@ The defaults match the legacy `Parameters` (`Skeletonization.h:42-54`) and the d
     `fe_lab` does today.
   - The previous revision made it a node of its own only to keep GPL code out of cvcGL. That
     reason is gone.
+  - *Built (P2):* as above, with these specifics. The parameters are the table's fields under
+    `mesh_ops.skeleton.*`, seeded from a `skeleton: { ... }` prop and read when a run starts. The
+    counts are `mesh_ops.skeleton.info.{points, strands, sheets, clusters, lines, triangles}`, the
+    warnings `mesh_ops.skeleton.warnings`, and the data channel also holds `<node>.skeleton.helix`.
+    `stop` is a `mesh_ops.request` word, as fe_lab's. The request waits while a mesh job runs,
+    and the other requests wait while it runs, so the mesh it reads stays the one shown; a new mesh
+    clears the skeleton. `view.strands` / `view.sheets` show each part.
+  - *Tags (P2):* a node's tags hold for its subtree, so children alone could not show a skeleton
+    without its parent's surface. The node's own surface is therefore tagged `surface` too, for
+    its props alone (`RealizedScene::TaggedNode::subtree`): `show: [skeleton]` shows an untagged
+    mesh_lab's skeleton alone, and `hide: [surface]` any mesh_lab's skeleton without its surface.
+    A view whose `show:` list names neither now leaves a mesh_lab out, as it would any tagged node.
+  - *Golden (P2):* the harness waits on `RealizedScene::pending_work`, a probe a custom node type
+    registers while its work would still change the frame, before it captures.
 
 **Tests** (§1.7)
 
@@ -1133,20 +1147,43 @@ std::unique_ptr<result_job<tile_result>> tile_contours_job(contour_stack in, til
 }
 ```
 
-**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is
-smaller than a pair:
+**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is far
+smaller than a pair. A unit is about a microsecond's work: a contour vertex, a triangle, or a call
+that cannot yield, charged by the vertices it takes (`TILER_UNITS` and its charges in
+`tiler/stepping.h`). A step also ends where the phase changes, so a budget the scheduler sized on
+one phase is not spent on the next.
 - **`"snapping"`:** every contour vertex onto the `int64` grid, a vertex per unit.
+- **`"curating"` and `"augmenting"`:** a contour at a time is checked, cleared of collinear
+  vertices, dilated or eroded; a pair of contours at a time is differenced, or augmented with each
+  other's crossings.
 - **`"tiling"`:** per slice pair and component, the tiler's stages in order: correspondence,
-  tiling regions, branching, untiled regions and intersection removal. Within each, a unit is a
-  contour vertex or a triangle emitted.
-  - Each Clipper2 Boolean or offset, CDT triangulation and Boost.Polygon medial axis is called on
-    one pair's contours. That call is the indivisible piece, and its cost grows with those
-    contours' vertex count.
-  - T7 records the worst pair in the committed `.ser` series. A pair whose contours are too large
-    for a frame is split before the call: Clipper2 and CDT run per connected region, and the
-    medial axis per untiled region.
+  tiling regions, the OTV table, the four tiling passes, untiled regions and intersection removal.
+  Each test is a unit charged by its contours' size. An untiled region's fill yields a point at a
+  time, each point a Delaunay triangulation and a natural-neighbour interpolation.
+  - The indivisible pieces each take one slice's contours, one slice pair's or one untiled
+    region: a Clipper2 Boolean or offset, a sweep, a CDT partition or Delaunay triangulation, a
+    tiling test, a workspace freed. Their cost grows with those contours' vertex count.
+  - Intersection removal between two components' tiles (`remove_intersections`, off by default)
+    is still one unit per pair of components, about 2 ms on T3's touching case.
 - **`"assembling"`:** the per-component surfaces stitched and their normals computed, a triangle
   per unit.
+- **Measured** (2026-11-20, after P4 found the early phases coarse; native MSVC Release,
+  `CVC_SLICED_THREADING=cooperative`, 4 ms slice, three runs each on a shared machine):
+  - P4's demo stack (3 components, 40 slices, 64-vertex contours) in `cvcgl_contour_lab`: the
+    slowest frame of each phase is 4.1 to 4.7 ms. Before, its first frames took 50 to 160 ms: a
+    step ran on across a phase change, and a curating or augmenting unit was a whole slice or slice
+    pair. The slowest frame left there, 14 to 60 ms, is the document's frame that starts the job,
+    outside the stepper.
+  - T7's cases (touching, branch, and P4's stack on 12 slices): the slowest step at the default
+    budget is 2.8 to 7.5 ms and the slowest cooperative frame 4.1 to 5.0 ms, against 41 to 117 ms
+    and 6.1 to 8.7 ms before. Under wasm-mt node (two runs) the slowest step is 4.0 to 7.1 ms and
+    the slowest frame 4.3 to 4.9 ms, but for touching's 9.2 to 9.6 ms (its intersection removal
+    is one unit per pair of components).
+  - The bunny (`tiler_bunny_test`, 50 slices, 9,536 contour vertices, tiled in 2.9 s): the slowest
+    frame is 5.6 to 5.8 ms (up to 9.6 ms under load), and the slowest step at budget 4096 9 to
+    16 ms. Its largest pieces, a tiling test or a freed workspace, take up to 2 to 4 ms.
+  - The blocking call takes as long as before, and stepping at the default budget costs 0 to 10%
+    more than budget 0.
 
 **Surfaces**
 
@@ -1171,14 +1208,10 @@ smaller than a pair:
     series, the Kuwajima 2019 one (CC0; `examples/data/contours/kuwajima2019`): two axons
     through 72 sections, a third that branches, and two mitochondria inside one of them, about
     20,000 triangles with no warnings.
-  - **Found in P4: `tile_stepper`'s early phases are coarse.** In cooperative mode
-    (`CVC_SLICED_THREADING=cooperative`, as single-threaded wasm runs), the first frames of a tile
-    of 3 components on 40 slices (64-vertex contours) take 50 to 160 ms each in a native Release
-    build, against §1.9's 4 ms slice. Two causes: `step(budget)` runs on across a phase change, so
-    a budget the scheduler sized on "snapping" units (a vertex each) is spent on "curating" ones;
-    and a "curating" or "augmenting" unit is a whole slice or slice pair (milliseconds each),
-    while the scheduler's smallest call is 16 units. The "tiling" frames stay near the slice. A
-    fix ends the step at a phase change and counts curating and augmenting by vertex.
+  - **Found in P4, fixed in #1411: `tile_stepper`'s phases were coarse.** In cooperative mode the
+    first frames of this demo's tile (3 components on 40 slices, 64-vertex contours) took 50 to
+    160 ms each, against §1.9's 4 ms slice. "Resumable" above describes the fix and records what
+    was measured after it: 4.1 to 4.7 ms per phase on the same stack.
 
 **Tests** (§1.7)
 
@@ -1625,7 +1658,7 @@ not as follow-ups.
 | P0c Permissive libraries | M | Qhull (wasm and wasm-mt) and Clipper2 as cvcpkg packages, in cy-pca/cvcpkg#578, open; CDT (with its `static const` fix), Shewchuk's predicates and nanoflann as header-only cvcpkg packages (cy-pca/cvcpkg#597), not vendored. Each with its notice in `THIRD_PARTY_NOTICES.md`, the singleton scan clean, a smoke test natively and under node, and its first `cgal_ab_test` rows (T16) | — |
 | P0d Shared types | S | `cvc::contour_stack` and `cvc::point_classes`, with readers and writers registered on the app, their parameter tables, intrinsics (`contours.*`, `point-classes.*`, `params.*`), pycvc, and T6, T8, T9, T11 and T14 | P0a, P0b |
 | P1 Skeleton core | M | `cvc::tet_complex`, libcvc's own exact incremental Delaunay on Shewchuk's predicates (settled 2026-11-12; Qhull only as the general-position cross-check), with its adapter, and its first PR proving the incremental build against the batch build and CGAL's (§2, transfix/libcvc#1157); vendor into `src/cvc/geometry/skeleton/` with the shared cocone core and `skeleton_context`; the §2 fixes; `skeleton_stepper` with every phase sliced, `cvc::skeletonize` and its job; `cvc skeleton`; pycvc; `skeleton.compute`; §2's tests | P0a–P0c |
-| P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
+| P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web. *Built:* the request, its keys, children, view tags and data channel (§2, "Ariadne"), the Skeleton section, `examples/ariadne/documents/skeleton_lab.ari` (in the gallery as `skeleton_lab_ari`; golden `src/cvcGL/test/golden/skeleton.ari` on a committed 4,000-triangle bunny; arigl-web smoke case `skeleton.ari` in the docset); tests `cvcgl_mesh_skeleton` (and its cooperative run), `cvcgl_ariadne_views`' parts case, `SkeletonParams.OnTheStateTree` (ports lane) | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
 | P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); then `cvc tile`, pycvc and `tiler.tile` with `tiler_intrinsics_test` | P3a, P0d |
 | P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web. *Built:* `contour_lab` (`contour_lab_nodes.h`, test `cvcgl_contour_lab`), `contour_tiler.ari`, and `examples/ariadne/documents/contour_tiler.ari` on the Kuwajima 2019 series (CC0, `examples/data/contours/kuwajima2019`; golden `src/cvcGL/test/golden/contour_tiler.ari`, arigl-web smoke case `contour_tiler.ari` in the docset, and the gallery) | P3b |

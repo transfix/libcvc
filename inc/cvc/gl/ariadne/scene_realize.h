@@ -166,11 +166,15 @@ struct RealizedScene {
   std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
   // Every realized node, at any depth, with its view tags (`tags:`, §9.5.1): what a viewport
   // widget leaves out when its show: / hide: rule out a node's tags, and what its override:s name
-  // by id or tag. Held weakly, like the tickers.
+  // by id or tag. Held weakly, like the tickers. A node's tags hold for its subtree. A custom node
+  // type may add entries for the parts it makes: a child of its own, or (subtree false) the node's
+  // own props alone, so its children can be in a view its own surface is not (mesh_lab's surface
+  // is tagged `surface`, its skeleton children `skeleton`).
   struct TaggedNode {
     std::string id;
     std::vector<std::string> tags;
     std::weak_ptr<GraphicsNode> node;
+    bool subtree = true; // false: the tags are the node's own props', not its children's
   };
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
@@ -183,9 +187,11 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
-  // Work a CUSTOM node has in flight, one probe per node: true while its job runs or a request
-  // waits (a contour_lab's tile). A host that captures a settled frame (cvcgl_ari_golden) steps
-  // until none is busy. A probe should hold its node weakly and say false once it is gone.
+  // Work a CUSTOM node has in flight, one probe per node: true while what it has started (a
+  // request waiting, a job or sliced task running, a result not drawn yet: a contour_lab's tile, a
+  // mesh_lab's skeleton) will still change what it draws. A host that captures a settled frame
+  // (cvcgl_ari_golden) steps until none is busy. A probe should hold its node weakly, like a tick,
+  // and say false once it is gone.
   std::vector<std::function<bool()>> pending_work;
   // The same for a closure that reads the scene's world as this frame left it (the physics stepped
   // and its moving bodies posed: `world`, `physics_binding`) and the frame's clock step. The scene

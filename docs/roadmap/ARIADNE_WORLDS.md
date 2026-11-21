@@ -963,6 +963,15 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   every side.
 - **Vehicles are in the same world.** `WorldVehicles` already puts every plant in the scene's
   world (L2b); now that world is the holon's, at 120 Hz.
+- **As built (OW2):** `holon::attach_world(SceneWorld *)` on a server holon with physics, for a
+  world on its quantum: the avatars move into the scene's physics world where they stood
+  (`avatar_world` over a shared world it does not own: no stepping, statics, gravity or air of its
+  own; `release`, `move_to` when the owner replaces its world), and the holon steps the world from
+  its own step through `SceneWorld::follow`'s per-step hooks, each avatar driven just before each
+  step. `AppRuntime::set_world_external` stops the document's runtime stepping it, and `arisrv`
+  attaches a server document's world to the room's holon at start-up. A Humvee driven into a
+  standing avatar carries it down the road and ends 0.67 m behind the same run without it
+  (`AriadneOneWorld`). Clients still build their statics from the published scene (OW5).
 - **Local is the same.** A lab, a gym or a demo with no relay runs a server-role holon in its own
   process: the same world, the same entities, the same code path as the relay. `WorldGym`,
   `HostCars` and the GRL-SNAM hosts move onto it.
@@ -997,7 +1006,10 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   becomes the entities' pose stream; a participant pid names its entity.
 - **Navigators avoid everything they don't drive.** `nav@1` takes every other entity as a foreign
   agent (position, velocity, radius), avatars included, and passes on the right
-  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`).
+  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`). **As built (OW4):**
+  `WorldVehicles::set_movers`, which a holon running the world fills with its avatars before
+  each step; a car on `nav@1` swings 3.1 m past a person standing in its lane and drives on,
+  where without avoiding it carries them 34 m down the road (`AriadneOneWorld`).
 
 ### 18.5 Clients: the same world, predicted where it is yours
 
@@ -1026,9 +1038,9 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 |---|---|---|
 | OW0 | This section. | S |
 | OW1 | **Built** (2026-11-19). **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it (§18.1: they hold). | M |
-| OW2 | **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
+| OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
-| OW4 | **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
+| OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Getting in and out of vehicles,** and avatars that are vehicles. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |

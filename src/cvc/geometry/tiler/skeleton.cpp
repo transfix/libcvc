@@ -21,6 +21,8 @@
 // src/ContourTiler at 1cf0fbd7) and ported onto libcvc's tiler kernel and cvc::planar
 // (VOLROVER-LIBRARY-PORTS-ROADMAP.md §3).
 
+#include "skeleton.h"
+
 #include "Vertices.h"
 #include "common.h"
 #include "interp.h"
@@ -317,6 +319,12 @@ string pp(const Triangle &T) {
 template <typename Tile_iterator, typename ID_factory>
 void medial_axis_stable(const Untiled_region &r, Number_type zmid, Tile_iterator tiles,
                         ID_factory &id_factory, Tiler_workspace &tw) {
+  run_to_end(medial_axis_stable_steps(r, zmid, tiles, id_factory, tw));
+}
+
+template <typename Tile_iterator, typename ID_factory>
+step_task medial_axis_stable_steps(const Untiled_region &r, Number_type zmid, Tile_iterator tiles,
+                                   ID_factory &id_factory, Tiler_workspace &tw) {
 
   Logger logger = tw.logger("tiler.medial_axis_stable");
   Untiled_region region(r);
@@ -330,12 +338,12 @@ void medial_axis_stable(const Untiled_region &r, Number_type zmid, Tile_iterator
   // Basic error checking
   if (!P.is_simple()) {
     TILER_WARN(logger, "Polygon being given to the medial axis splitter is not simple: " << pp(P));
-    return;
+    co_return;
   }
 
   if (P.size() == 0) {
     TILER_WARN(logger, "Polygon being given to the medial axis splitter is empty");
-    return;
+    co_return;
   }
 
   bool planar = true;
@@ -346,12 +354,15 @@ void medial_axis_stable(const Untiled_region &r, Number_type zmid, Tile_iterator
   }
   TILER_TRACE(logger, "planar = " << planar);
 
+  bool propagated = true;
   try {
     tw.propagate_z_home(P.vertices_begin(), P.vertices_end());
   } catch (logic_error &e) {
     TILER_ERROR(logger, "Failed to propagate z_home - aborting medial axis tile: " << pp(P));
-    return;
+    propagated = false;
   }
+  if (!propagated)
+    co_return;
 
   Number_type z_home;
   for (auto v_it = P.vertices_begin(); v_it != P.vertices_end(); ++v_it) {
@@ -392,14 +403,18 @@ void medial_axis_stable(const Untiled_region &r, Number_type zmid, Tile_iterator
   // Split the polygon into convex polygons
   list<Polygon_2> polygons;
   list<Segment_2> segments;
+  bool partitioned = true;
   try {
     Number_type max_area = partition(P, std::back_inserter(polygons));
   } catch (logic_error &e) {
     TILER_ERROR(logger, "Failed to partition polygon - aborting medial axis tile: "
                             << e.what() << ": " << pp(P));
     TILER_ERROR(logger, "Original: " << pp(old_P));
-    return;
+    partitioned = false;
   }
+  if (!partitioned)
+    co_return;
+  TILER_UNITS(untiled_units(P.size()));
   for (const auto &p : polygons) {
     segments.insert(segments.end(), p.edges_begin(), p.edges_end());
     TILER_TRACE(logger, "convex polygon area = " << p.area());
@@ -531,7 +546,7 @@ void medial_axis_stable(const Untiled_region &r, Number_type zmid, Tile_iterator
     it->z() = it->z() * 0.99 + anchor_mid * 0.01;
   }
 
-  interpolate(anchors.begin(), anchors.end(), centers.begin(), centers.end(), zmid);
+  SK_RUN(interpolate_steps(anchors.begin(), anchors.end(), centers.begin(), centers.end(), zmid));
 
   for (const auto &c : centers) {
     if (c.z() > anchor_max || c.z() < anchor_min) {
@@ -545,7 +560,7 @@ void medial_axis_stable(const Untiled_region &r, Number_type zmid, Tile_iterator
         TILER_DEBUG(logger, "  Polygon = " << pp(p));
       }
       TILER_DEBUG(logger, "  Original polygon = " << pp(P));
-      return;
+      co_return;
       // TILER_TRACE(logger, "Bad interpolation: failing.  z = " << c.z()
       //   	      << ", min = " << anchor_min << ", max = " << anchor_max << "  Anchors:");
       // for (const auto& a : anchors) {
@@ -676,6 +691,14 @@ template void medial_axis_stable(const Untiled_region &region, Number_type zmid,
 template void medial_axis_stable(const Untiled_region &region, Number_type zmid,
                                  back_insert_iterator<vector<Triangle>> tiles, Vertices &id_factory,
                                  Tiler_workspace &tw);
+
+template step_task medial_axis_stable_steps(const Untiled_region &region, Number_type zmid,
+                                            back_insert_iterator<list<Triangle>> tiles,
+                                            Vertices &id_factory, Tiler_workspace &tw);
+
+template step_task medial_axis_stable_steps(const Untiled_region &region, Number_type zmid,
+                                            back_insert_iterator<vector<Triangle>> tiles,
+                                            Vertices &id_factory, Tiler_workspace &tw);
 
 // void to_simple(const Untiled_region& region)
 // {

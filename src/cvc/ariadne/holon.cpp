@@ -18,6 +18,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_vehicles.h>
+#include <cvc/physics/world.h>
 #include <exception>
 #include <iterator>
 
@@ -132,8 +135,107 @@ void holon::remove_participant(const std::string &pid) {
 
 void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
   _statics = stamp;
-  if (_world)
+  _statics_list = statics;
+  if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
+}
+
+bool holon::attach_world(SceneWorld *world, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (world == _scene)
+    return true;
+  if (world && _role != holon_role::server)
+    return fail("a client holon runs the server's world as its replica, not a scene's");
+  if (!_world)
+    return fail("no avatar physics (holon_config::physics off, or no Jolt in this build)");
+  if (world && std::fabs(world->world().config().fixed_dt - _clock.fixed_dt()) > 1e-12)
+    return fail("the world steps " + std::to_string(world->world().config().fixed_dt) +
+                " s, the holon's quantum is " + std::to_string(_clock.fixed_dt()) + " s");
+  // Where everyone stands, and what they carry, before the move.
+  std::map<std::string, cvc::physics::body_state> feet;
+  std::map<std::string, avatar_energy> energy;
+  for (const auto &kv : _participants)
+    if (_world->has_avatar(kv.first)) {
+      feet[kv.first] = _world->state(kv.first);
+      energy[kv.first] = _world->energy(kv.first);
+    }
+  if (_world->shares_world())
+    _world->release(); // out of the old scene's world
+  std::unique_ptr<avatar_world> next;
+  if (world) {
+    next = std::make_unique<avatar_world>(world->world(), _applied.avatar().body,
+                                          _applied.policy.energy);
+  } else {
+    next = std::make_unique<avatar_world>(_clock.fixed_dt(), _applied.avatar().body,
+                                          _applied.policy.energy);
+    next->set_gravity(_applied.physics.gravity);
+    const world_physics &wp = _applied.physics; // the room's wind (O14)
+    next->set_wind({wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
+                   wp.wind_base);
+    next->set_statics(_statics_list);
+  }
+  for (auto &kv : _participants) {
+    const auto it = feet.find(kv.first);
+    if (it == feet.end())
+      continue;
+    next->add_avatar(kv.first, it->second, /*dynamic=*/true);
+    next->set_reserve(kv.first, energy[kv.first].reserve);
+    kv.second.last_feet = it->second;
+  }
+  if (_scene && _scene != world)
+    if (WorldVehicles *v = _scene->vehicles())
+      v->set_movers({}); // the avatars have left that world
+  _world = std::move(next);
+  _scene = world;
+  _scene_world = world ? static_cast<const void *>(&world->world()) : nullptr;
+  return true;
+}
+
+void holon::scene_step() {
+  // The world's owner replaced its physics world (a restart): the avatars go into the new one.
+  if (static_cast<const void *>(&_scene->world()) != _scene_world) {
+    std::map<std::string, cvc::physics::body_state> feet;
+    for (const auto &kv : _participants)
+      feet[kv.first] = kv.second.last_feet;
+    _world->move_to(_scene->world(), feet);
+    _scene_world = &_scene->world();
+  }
+  // The world's navigators steer around the avatars (section 18.4), where they stood after the
+  // last step.
+  if (WorldVehicles *v = _scene->vehicles()) {
+    std::vector<std::array<double, 2>> movers;
+    for (const auto &kv : _participants)
+      if (_world->has_avatar(kv.first))
+        movers.push_back({kv.second.last_feet.position.x, kv.second.last_feet.position.y});
+    v->set_movers(std::move(movers));
+  }
+  _scene->follow(
+      _clock, nullptr,
+      [this](std::uint64_t tick) {
+        world_rules_for(tick);
+        for (auto &kv : _participants) {
+          participant &p = kv.second;
+          while (!p.queued.empty() && p.queued.front().first <= tick) {
+            p.intent = p.queued.front().second;
+            p.queued.pop_front();
+          }
+          if (_world->has_avatar(kv.first))
+            _world->drive(kv.first, veto(p.intent, _applied.policy));
+        }
+      },
+      [this](std::uint64_t) {
+        for (auto &kv : _participants) {
+          if (!_world->has_avatar(kv.first))
+            continue;
+          if (_world->state(kv.first).position.z < _cfg.respawn_below_z)
+            _world->place(kv.first, kv.second.spawn); // fell off the world
+          kv.second.last_feet = _world->state(kv.first);
+        }
+      });
 }
 
 void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
@@ -778,6 +880,11 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
   const double dt = f.fixed_dt;
   const int steps = f.step.steps;
   if (_world) {
+    // One world: the scene's, on this clock (attach_world).
+    if (_scene) {
+      scene_step();
+      return;
+    }
     // Rigid bodies. Nothing moves until the room's statics exist (there is nothing to stand on).
     if (!_statics.written())
       return;

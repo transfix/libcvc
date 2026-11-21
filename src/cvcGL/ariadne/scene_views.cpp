@@ -407,8 +407,8 @@ bool has_any(const std::vector<std::string> &tags, const std::vector<std::string
 }
 
 // Whether a node with `tags` is in a view that shows `show` (every tag when empty) and hides
-// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along;
-// an untagged node is in every view.
+// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along
+// (an entry with subtree false only its own props); an untagged node is in every view.
 bool in_view(const std::vector<std::string> &tags, const std::vector<std::string> &show,
              const std::vector<std::string> &hide) {
   if (tags.empty())
@@ -615,18 +615,43 @@ bool props_bounds(const std::unordered_set<vtkProp *> &props, double out[6]) {
 }
 
 // The world bounds of the tagged nodes `show` / `hide` let in, with their subtrees (the untagged
-// left out): what a view, or the main view, that names tags to show is framed on. False when
-// none has any.
+// left out): what a view, or the main view, that names tags to show is framed on. A node an entry
+// out of the view takes along is left out as the view leaves it out: an entry's own node, and
+// with subtree every node under it (a mesh_lab tagged lab takes its skeleton children, tagged lab
+// and skeleton, out of show: [skeleton]). False when none has any. `matched`, when given, counts
+// the nodes let in, with bounds or not.
 bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
-                  const std::vector<std::string> &hide, double out[6]) {
+                  const std::vector<std::string> &hide, double out[6], int *matched = nullptr) {
+  std::vector<std::pair<const GraphicsNode *, bool>> outs; // node, subtree
+  for (const RealizedScene::TaggedNode &t : rs.nodes)
+    if (!t.tags.empty() && !in_view(t.tags, show, hide))
+      if (std::shared_ptr<GraphicsNode> n = t.node.lock())
+        outs.emplace_back(n.get(), t.subtree);
+  const auto left_out = [&outs](const GraphicsNode *n, bool subtree) {
+    for (const auto &[o, osub] : outs) {
+      if (o == n) {
+        if (osub || !subtree) // its own props out, and the entry's covered no more than those
+          return true;
+        continue;
+      }
+      if (osub)
+        for (const GraphicsNode *p = n->getParentNode(); p; p = p->getParentNode())
+          if (p == o)
+            return true;
+    }
+    return false;
+  };
   bool any = false;
   for (const RealizedScene::TaggedNode &t : rs.nodes) {
     if (t.tags.empty() || !in_view(t.tags, show, hide))
       continue;
     std::shared_ptr<GraphicsNode> n = t.node.lock();
-    if (!n)
+    if (!n || left_out(n.get(), t.subtree))
       continue;
-    const cvc::bounding_box bb = n->getCombinedWorldBoundingBox();
+    if (matched)
+      ++*matched;
+    const cvc::bounding_box bb =
+        t.subtree ? n->getCombinedWorldBoundingBox() : n->getWorldBoundingBox();
     if (bb.isNull())
       continue;
     const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
@@ -1080,7 +1105,7 @@ void SceneViews::update(double dt) {
     std::unordered_set<vtkProp *> out;
     for (const RealizedScene::TaggedNode &t : mainSlot.realized->nodes)
       if (!in_view(t.tags, mainSlot.realized->main_show, mainSlot.realized->main_hide))
-        collect(t.node.lock(), out);
+        collect(t.node.lock(), out, t.subtree);
     main_hidden_.assign(out.begin(), out.end());
     if (!main_start_tag_)
       if (vtkRenderer *r = view_->renderer()) {
@@ -1126,7 +1151,7 @@ void SceneViews::update(double dt) {
     if (rs && (!v.show.empty() || !v.hide.empty()))
       for (const RealizedScene::TaggedNode &t : rs->nodes)
         if (!in_view(t.tags, v.show, v.hide))
-          collect(t.node.lock(), v.hidden);
+          collect(t.node.lock(), v.hidden, t.subtree);
     // A slice view leaves out the volume_slice nodes on the other two axes, with their overlays:
     // seen edge-on, each would only draw a line across its own.
     const bool slice_view = v.start.mode == "slice" && v.camera.empty();
@@ -1155,7 +1180,7 @@ void SceneViews::update(double dt) {
             if (vtkSmartPointer<vtkMatrix4x4> w = n->getWorldTransform())
               std::copy(w->GetData(), w->GetData() + 16, frame.begin());
           std::unordered_set<vtkProp *> props;
-          collect(n, props);
+          collect(n, props, t.subtree);
           for (vtkProp *p : props)
             e.props.emplace(p, frame); // an outer named node's frame wins over one inside it
         }
@@ -1241,9 +1266,18 @@ void SceneViews::update(double dt) {
             }
             own = true;
           }
-        if (!own && (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b)))
-          r->ComputeVisiblePropBounds(b);
-        if (valid_bounds(b)) {
+        // A view naming tags to show waits while the nodes it lets in have no bounds yet (a
+        // mesh_lab's skeleton before its run ends), rather than framing on what else it holds.
+        bool wait = false;
+        if (!own) {
+          int matched = 0;
+          if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b, &matched)) {
+            wait = matched > 0;
+            if (!wait)
+              r->ComputeVisiblePropBounds(b);
+          }
+        }
+        if (!wait && valid_bounds(b)) {
           frame_camera(cam, b, v.start, sg, v.slice_axis);
           v.framed = true;
         }

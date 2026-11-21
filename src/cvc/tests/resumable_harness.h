@@ -35,6 +35,9 @@
 //      the frames keep coming while it runs, the slowest frame is recorded (and bounded, with a
 //      bound set), and the result is the same.
 //
+// 4 and 5 also run alone (t7_time_steps, t7_frame_run), against a result the test already has, for
+// an input too big to run eight times (tiler_bunny_test).
+//
 // Timing bounds are off by default (0): sanitizer and Debug builds are many times slower, so a
 // port sets its bounds for the builds that measure them. Header-only, for tests.
 
@@ -175,6 +178,81 @@ inline void pump_frame(cvc::app &a) {
 
 } // namespace detail
 
+// 4. The slowest step at opt.default_budget, and all the steps' time (rep.slowest_step_ms,
+// rep.stepped_ms), recorded and printed with the overhead over rep.budget0_ms (if set); the
+// result must equal `ref`.
+template <class S, class R>
+void t7_time_steps(const t7_subject<S, R> &s, const t7_options &opt, const R &ref, t7_report &rep) {
+  {
+    std::unique_ptr<S> st = s.make();
+    bool done = false;
+    while (!done) {
+      const auto t0 = std::chrono::steady_clock::now();
+      done = st->step(opt.default_budget);
+      const double ms = detail::ms_since(t0);
+      rep.stepped_ms += ms;
+      rep.slowest_step_ms = std::max(rep.slowest_step_ms, ms);
+    }
+    R got = s.take(*st);
+    EXPECT_TRUE(s.equal(ref, got)) << s.name << ": the timed run differs";
+  }
+  const double overhead =
+      rep.budget0_ms > 0.0 ? 100.0 * (rep.stepped_ms / rep.budget0_ms - 1.0) : 0.0;
+  ::testing::Test::RecordProperty("t7_slowest_step_ms", std::to_string(rep.slowest_step_ms));
+  ::testing::Test::RecordProperty("t7_overhead_pct", std::to_string(overhead));
+  std::cout << "[ T7 ] " << s.name << ": slowest step at budget " << opt.default_budget << " "
+            << rep.slowest_step_ms << " ms; stepping " << rep.stepped_ms << " ms vs budget 0 "
+            << rep.budget0_ms << " ms (" << overhead << "%)\n";
+  if (opt.max_step_ms > 0.0)
+    EXPECT_LE(rep.slowest_step_ms, opt.max_step_ms) << s.name << ": a step overran its bound";
+}
+
+// 5. The job run as a cooperative sliced task on a fresh app's scheduler, pumped a frame at a time
+// (rep.frames, rep.slowest_frame_ms); the result must equal `ref`.
+template <class S, class R>
+void t7_frame_run(const t7_subject<S, R> &s, const t7_options &opt, const R &ref, t7_report &rep) {
+  cvc::app a;
+  auto take = s.take;
+  std::shared_ptr<result_job<R>> job(
+      make_result_job<R>(s.make(), [take](S &st) { return take(st); }));
+  std::optional<R> got;
+  cvc::sliced_task_options o;
+  o.kind = "t7";
+  o.subject = s.name;
+  o.threading = cvc::sliced_threading::cooperative;
+  o.slice_ms = opt.slice_ms;
+  o.on_done = [&](cvc::sliced_job &j) {
+    got.emplace(static_cast<result_job<R> &>(j).take_result());
+  };
+  std::string why;
+  const int pid = cvc::schedule_sliced_job(a, job, o, &why);
+  EXPECT_GE(pid, 0) << s.name << ": " << why;
+  const auto start = std::chrono::steady_clock::now();
+  while (pid >= 0 && cvc::sliced_job_running(a, pid)) {
+    const auto t0 = std::chrono::steady_clock::now();
+    detail::pump_frame(a);
+    const double ms = detail::ms_since(t0);
+    ++rep.frames;
+    rep.slowest_frame_ms = std::max(rep.slowest_frame_ms, ms);
+    if (detail::ms_since(start) > 1000.0 * opt.frame_run_timeout_s) {
+      ADD_FAILURE() << s.name << ": the cooperative run did not finish";
+      cvc::cancel_sliced_job(a, pid);
+      break;
+    }
+  }
+  ::testing::Test::RecordProperty("t7_frames", std::to_string(rep.frames));
+  ::testing::Test::RecordProperty("t7_slowest_frame_ms", std::to_string(rep.slowest_frame_ms));
+  std::cout << "[ T7 ] " << s.name << ": cooperative run " << rep.frames << " frames, slowest "
+            << rep.slowest_frame_ms << " ms (slice " << opt.slice_ms << " ms)\n";
+  EXPECT_FALSE(job->failed()) << s.name << ": " << job->error();
+  EXPECT_TRUE(got.has_value()) << s.name << ": the cooperative run gave no result";
+  if (got)
+    EXPECT_TRUE(s.equal(ref, *got)) << s.name << ": the cooperative run differs";
+  EXPECT_GE(rep.frames, 2u) << s.name << ": the job and its finish each get a frame";
+  if (opt.max_frame_ms > 0.0)
+    EXPECT_LE(rep.slowest_frame_ms, opt.max_frame_ms) << s.name << ": a frame overran";
+}
+
 template <class S, class R>
 t7_report run_t7(const t7_subject<S, R> &s, const t7_options &opt = {}) {
   t7_report rep;
@@ -216,28 +294,7 @@ t7_report run_t7(const t7_subject<S, R> &s, const t7_options &opt = {}) {
   }
 
   // 4. The slowest step at the default budget, and the overhead over budget 0.
-  {
-    std::unique_ptr<S> st = s.make();
-    bool done = false;
-    while (!done) {
-      const auto t0 = std::chrono::steady_clock::now();
-      done = st->step(opt.default_budget);
-      const double ms = detail::ms_since(t0);
-      rep.stepped_ms += ms;
-      rep.slowest_step_ms = std::max(rep.slowest_step_ms, ms);
-    }
-    R got = s.take(*st);
-    EXPECT_TRUE(s.equal(*ref, got)) << s.name << ": the timed run differs";
-  }
-  const double overhead =
-      rep.budget0_ms > 0.0 ? 100.0 * (rep.stepped_ms / rep.budget0_ms - 1.0) : 0.0;
-  ::testing::Test::RecordProperty("t7_slowest_step_ms", std::to_string(rep.slowest_step_ms));
-  ::testing::Test::RecordProperty("t7_overhead_pct", std::to_string(overhead));
-  std::cout << "[ T7 ] " << s.name << ": slowest step at budget " << opt.default_budget << " "
-            << rep.slowest_step_ms << " ms; stepping " << rep.stepped_ms << " ms vs budget 0 "
-            << rep.budget0_ms << " ms (" << overhead << "%)\n";
-  if (opt.max_step_ms > 0.0)
-    EXPECT_LE(rep.slowest_step_ms, opt.max_step_ms) << s.name << ": a step overran its bound";
+  t7_time_steps(s, opt, *ref, rep);
 
   // 3. A cancel in each phase: no result, and the stepper destroyed at the next step.
   if (opt.cancel_each_phase) {
@@ -277,48 +334,8 @@ t7_report run_t7(const t7_subject<S, R> &s, const t7_options &opt = {}) {
   }
 
   // 5. The cooperative frame-time run.
-  if (opt.frame_run) {
-    cvc::app a;
-    auto take = s.take;
-    std::shared_ptr<result_job<R>> job(
-        make_result_job<R>(s.make(), [take](S &st) { return take(st); }));
-    std::optional<R> got;
-    cvc::sliced_task_options o;
-    o.kind = "t7";
-    o.subject = s.name;
-    o.threading = cvc::sliced_threading::cooperative;
-    o.slice_ms = opt.slice_ms;
-    o.on_done = [&](cvc::sliced_job &j) {
-      got.emplace(static_cast<result_job<R> &>(j).take_result());
-    };
-    std::string why;
-    const int pid = cvc::schedule_sliced_job(a, job, o, &why);
-    EXPECT_GE(pid, 0) << s.name << ": " << why;
-    const auto start = std::chrono::steady_clock::now();
-    while (pid >= 0 && cvc::sliced_job_running(a, pid)) {
-      const auto t0 = std::chrono::steady_clock::now();
-      detail::pump_frame(a);
-      const double ms = detail::ms_since(t0);
-      ++rep.frames;
-      rep.slowest_frame_ms = std::max(rep.slowest_frame_ms, ms);
-      if (detail::ms_since(start) > 1000.0 * opt.frame_run_timeout_s) {
-        ADD_FAILURE() << s.name << ": the cooperative run did not finish";
-        cvc::cancel_sliced_job(a, pid);
-        break;
-      }
-    }
-    ::testing::Test::RecordProperty("t7_frames", std::to_string(rep.frames));
-    ::testing::Test::RecordProperty("t7_slowest_frame_ms", std::to_string(rep.slowest_frame_ms));
-    std::cout << "[ T7 ] " << s.name << ": cooperative run " << rep.frames << " frames, slowest "
-              << rep.slowest_frame_ms << " ms (slice " << opt.slice_ms << " ms)\n";
-    EXPECT_FALSE(job->failed()) << s.name << ": " << job->error();
-    EXPECT_TRUE(got.has_value()) << s.name << ": the cooperative run gave no result";
-    if (got)
-      EXPECT_TRUE(s.equal(*ref, *got)) << s.name << ": the cooperative run differs";
-    EXPECT_GE(rep.frames, 2u) << s.name << ": the job and its finish each get a frame";
-    if (opt.max_frame_ms > 0.0)
-      EXPECT_LE(rep.slowest_frame_ms, opt.max_frame_ms) << s.name << ": a frame overran";
-  }
+  if (opt.frame_run)
+    t7_frame_run(s, opt, *ref, rep);
   return rep;
 }
 
