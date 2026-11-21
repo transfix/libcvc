@@ -9,11 +9,13 @@
 // 1 with touch mode off, the overlay's show/hide button hidden and its panels open (a view of at
 // least 500 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
 // pinned, and several frames at a fixed dt before the capture, so new windows have finished
-// appearing; where the scene has volren nodes, more frames until each shows a finished raycast
-// (they raycast on a worker thread). The test then renders one frame more and requires it to be
-// identical to the capture. When ImGui drew exactly the same UI in both and only the rasterizer
-// moved (the Apple Software Renderer, in a process's first frames), it renders up to
-// kRasterSettleFrames more until two agree.
+// appearing; where a custom node has work in flight (RealizedScene::pending_work: a contour_lab's
+// tile, a mesh_lab skeleton, a colour job), more frames until it is done, then those again for the
+// UI to show what it published; where the scene has volren nodes, more frames until each shows a
+// finished raycast (they raycast on a worker thread). The test then renders one frame more and
+// requires it to be identical to the capture. When ImGui drew exactly the same UI in both and only
+// the rasterizer moved (the Apple Software Renderer, in a process's first frames), it renders up
+// to kRasterSettleFrames more until two agree.
 //
 // Goldens are made under Mesa llvmpipe, the rasterizer of the Linux and Windows CI jobs. Other
 // rasterizers, and other Mesa versions, draw anti-aliased edges and shading a little differently,
@@ -68,6 +70,9 @@ constexpr int kRasterSettleFrames = 10;    // more frames for a rasterizer drawi
 // How long a volren raycast may take to land: a hang ceiling, far above the seconds a Debug build
 // with coverage takes on llvmpipe, never a measure of speed.
 constexpr auto kVolrenCeiling = std::chrono::seconds(120);
+// The same for a custom node's work (RealizedScene::pending_work): a skeleton in a Debug build with
+// coverage on a CI runner takes seconds.
+constexpr auto kSettleCeiling = std::chrono::seconds(180);
 const double kBackground[3] = {0.09, 0.10, 0.12};
 
 // One tolerance for every rasterizer, from these measurements against the goldens (Mesa 25.3.6
@@ -297,8 +302,33 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // than the frames above take, so step on until every volren node shows a finished raycast of
   // the live camera (VolRenNode::converged, three frames running), as the volren tests wait. A
   // slow machine only takes more frames here; a document with no volren node takes none.
-  int volrenFrames = 0;
+  // A custom node's work in flight (a request waiting, a job or a sliced task running, a result
+  // not drawn yet: a contour_lab's tile, a mesh_lab's skeleton) changes the frame when it lands:
+  // step on until no RealizedScene::pending_work probe has said busy for kMinFrames frames after
+  // the one it went idle on, so the windows show the keys it published; a probe busy again (a
+  // request a finished job left) starts the count over. A slow machine only takes more frames
+  // here; a document whose nodes register no probe takes none. The ceiling is a hang guard.
+  int workFrames = 0;
   const cvc::gl::ariadne::RealizedScene *realized = rt.realized();
+  if (realized && !realized->pending_work.empty()) {
+    const auto busy = [&] {
+      for (const auto &probe : realized->pending_work)
+        if (probe && probe())
+          return true;
+      return false;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    int idleFrames = 0; // frames stepped since a probe last said busy
+    while (idleFrames <= kMinFrames && std::chrono::steady_clock::now() - start < kSettleCeiling) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      rt.step(kDt);
+      ++workFrames;
+      idleFrames = busy() ? 0 : idleFrames + 1;
+    }
+    check(idleFrames > kMinFrames, name + ": its nodes' work has finished",
+          std::to_string(workFrames) + " frames more");
+  }
+  int volrenFrames = 0;
   if (realized && !realized->volren_ticks.empty()) {
     const auto raycastsDone = [&] {
       for (const auto &weak : realized->volren_ticks) {
@@ -353,8 +383,8 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
 
   const std::string renderer = glRenderer(view);
   const bool llvmpipe = renderer.find("llvmpipe") != std::string::npos;
-  std::printf("  %d frames at %dx%d on %s\n", frames + volrenFrames + 2 + rasterFrames, kWidth,
-              kHeight, renderer.empty() ? "(unknown renderer)" : renderer.c_str());
+  std::printf("  %d frames at %dx%d on %s\n", frames + workFrames + volrenFrames + 2 + rasterFrames,
+              kWidth, kHeight, renderer.empty() ? "(unknown renderer)" : renderer.c_str());
 
   check(!actual.empty() && actual.w == kWidth && actual.h == kHeight,
         name + ": captured a " + std::to_string(kWidth) + "x" + std::to_string(kHeight) + " frame");

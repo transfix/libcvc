@@ -689,10 +689,14 @@ writes on its keys (`cvc/state/state_key_meta.h`'s `access`, `unit`, `min` and `
     the paths below start with the root as written (`nav.vehicle.vmax`).
 - **`filter:`** patterns match a key's path under the root:
   - a pattern with `*`, `?` or `[...]` is a glob (`*` crosses dots), any other a substring;
-  - a key passes when it matches one of the patterns and none that start with `-`.
+  - a key passes when it matches none of the patterns that start with `-` and, if there are
+    others, one of them.
 - **The search box** narrows the list by words in a key's path or description, in any case; a
-  `-word` leaves out what has it. While a search or a filter narrows the list, every group is
-  drawn open.
+  `-word` leaves out what has it.
+- **While a search narrows the list**, or a filter with a pattern that picks keys (one not
+  starting with `-`), every group is drawn open, so no match hides in a closed one. A filter of
+  `-` patterns only leaves keys out: `open:` and `groups:` decide which groups start open, and
+  each opens and closes by hand.
 - **Reset.** A key whose value is not its default shows a reset, which writes the default back.
   - The default is the key's `default` property, else the value the editor first saw it hold.
   - A group with such keys shows a "reset all", which puts back each key under it.
@@ -2294,8 +2298,45 @@ scene:
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. `keys: all` writes every vehicle's.
-    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
-      `entity_info::fleet` and `rally`.
+    - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
+      `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
+      `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
+      `grouped` (max(2, n / 64) maps, teammates together) or `private` (one each).
+      `vehicles.fleets.<fleet>.sense` and `.belief` make it again, its vehicles at rest where
+      they are, and `.planes` counts its maps.
+    - `policy:` is what drives it.
+      - `trained` (the default) is the published CoefMLP, found in this order:
+        `$CVC_NAV_WEIGHTS`, an installed copy, else downloaded from
+        `cvcpkg://cvc/grl-snam-weights` through the data store (cached by hash).
+      - `builtin` is the built-in net.
+      - A `.cvcnav`'s path, `{ uri:, path:, sha256: }` (a file, an https URL or a cvcpkg://
+        package, the `.cvcnav` inside it, and its hash), or `{ data: <entry> }` (the document's
+        `data:` entry).
+
+      `vehicles.fleets.<fleet>.policy` switches it live, and `.drives` says what drives:
+      `trained (<where>, sha256:...)`, `weights (...)`, `builtin`, `builtin: loading <uri>` while
+      the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
+      weights it drives on the built-in net, and the host's log says why once.
+    - `metric:` is what it plans with. `trained` is the trainer's vehicle (a 3 m disc and 18 m/s,
+      the bicycle the weights learned on; its plants plan with it too). `vehicle` is each plant's
+      own size and limits. `policy` (the default) follows the policy: `trained` while weights
+      drive it or are on their way, `vehicle` on the built-in net, its own or a fallback's.
+      `vehicles.fleets.<fleet>.metric` switches it, and `.plans` says which it plans with now.
+      A change makes its navigators again, its vehicles at rest where they are.
+    - `plant:` is one plant, a list its vehicles cycle over (`[jolt, kinematic]`), or each team's
+      (`{ 0: jolt, 2: jolt }`; a team not named is on the archetype's plant). Each plant is a
+      navigator of the fleet's own, and its plants all float (`dynamicboat`) or none do.
+      `vehicles.fleets.<fleet>.plant` switches them live, written as `jolt`, `jolt, kinematic`,
+      `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
+      vehicles start at rest where they are on the new plants. A plant or team that is not one is
+      said in `vehicles.status` and changes nothing.
+    - A view draws a fleet from `WorldVehicles::poses(fleet)`, not from state: a snapshot of its
+      placed vehicles as the last step left them (ids, chassis centres, headings, speeds, teams,
+      the box they lie in and the tick), made each step and read from any thread without a lock.
+      The keys `.tick` (the physics step they are of) and `.bounds` (`min_x,min_y,max_x,max_y`)
+      say the same in state.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()`, `restart_fleet()`, `poses()`
+      and `starts()`, and `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -2414,13 +2455,19 @@ scene:
     team, controller, x, y, yaw, ...}]` (any of the four plants). Starts come from the
     document's spawn points when it has them. A seed and a list of commands give the same
     episode every time, in any gym.
+  - **Fleets.** `fleets=["city"]` (`gym_options::fleets`) names the document's fleets (its
+    `start:` entries with `fleet:`) that each reset lays out after the agents, from the fleet's
+    `seed:` plus the reset's seed: each seed a layout of its own, the same seed the same one.
+    Their vehicles are agents in the fleets' order, their goals held (a team's at its rally
+    point); with fleets and no `agents`, they are the only agents. A name the document does not
+    declare is refused when the gym is made.
   - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
     from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
     world.
   - **A step** is one navigator tick: `tick=` (`gym_options::tick`), by default libcvc's one
-    simulation tick, 0.06 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a whole
-    number of physics steps: a world with vehicles runs its clock at the 0.01 s simulation quantum,
-    so physics steps at 100 Hz and a tick is 6 of them. An agent takes
+    simulation tick, 7/120 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a
+    whole number of physics steps: a world with vehicles runs its clock at the 1/120 s simulation
+    quantum, so physics steps at 120 Hz and a tick is 7 of them. An agent takes
     its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
     envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
     Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
@@ -2513,7 +2560,7 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 
 | key | meaning | seeded from prop |
 |---|---|---|
-| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload` (§5.5); several separated by spaces run in order, as in `load smooth` | — |
+| `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload`, `skeleton`, `stop` (§5.5); several separated by spaces run in order, as in `load smooth` or `decimate skeleton` | — |
 | `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
 | `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source: { file }` |
@@ -2527,6 +2574,10 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 | `geodesic.source` | source vertex for `geodesic` (clamped to #V-1; -1 is the highest vertex) | `geodesic_source` |
 | `modes.index` | the Laplace–Beltrami eigenfunction `modes` shows (`fem::laplacian_eigenmodes` on the surface; 1 is the first non-constant, up to 50) | `mode` |
 | `color.min`, `color.max` | the colour range used: the field colours' explicit domain, else the values' (2-98% percentiles for curvature) | — |
+| `skeleton.<field>` | `cvc::skeleton_params`' table ([`skeleton_params.h`](../inc/cvc/geometry/skeleton_params.h)): `robust`, `big_ball_ratio`, `theta_if`, `theta_ff`, `cocone_phi`, `sharp_phi`, `flat_phi`, `flatness_ratio`, `medial_theta`, `medial_ratio`, `discard_small`, `threshold`, `sheet_count`, `helix_window`; each key carries its `doc`, `unit`, `min`, `max` and `default` properties. Read when a `skeleton` run starts | `skeleton: { <field>: <value>, ... }` (else the defaults) |
+| `skeleton.busy`, `.stoppable`, `.status`, `.progress`, `.phase`, `.stats.work_ms`, `.pid` | published by the run, as fe_lab's job keys | — |
+| `skeleton.info.points`, `.info.strands`, `.info.sheets`, `.info.clusters`, `.info.lines`, `.info.triangles`, `skeleton.warnings` | published: the input's vertices; the strands (polylines), the sheets, the planar clusters found, the strands' segments and the sheets' triangles; the warnings, one per line. `-` before a skeleton | — |
+| `skeleton.view.strands`, `skeleton.view.sheets` | 1 shows that part of the skeleton — followed live | — |
 
 **Field colours (both node types).** The values a node shows are coloured through a transfer
 function at `<node>.field_colors` (a `cvc::tf::model` string, outside `mesh_ops.*` / `fe.*`), so
@@ -2552,6 +2603,25 @@ back-substitutions; so are the eigenpairs (at least ten are computed), so steppi
 when a `source.*` key changed since the last load; otherwise it goes back to the loaded mesh
 (undoing a smooth or a decimate), and keeps those caches when that mesh is still the one
 shown. `reload` always reads it. A failed load says why in `status` and keeps the mesh.
+
+**The skeleton.** `skeleton` runs `cvc::skeletonize` ([`skeleton.h`](../inc/cvc/geometry/skeleton.h),
+the VolumeRover Skeletonization port) on the shown mesh's vertices as a sliced task on the app's
+scheduler: a few milliseconds a frame on single-threaded wasm, pool chunks where there are
+threads, so the frame never waits on it. It reads the `skeleton.*` parameters when it starts; one
+that does not parse or is out of range is reported in `skeleton.status`, and nothing runs, and one
+changed while it runs applies to the next run (its status says so). While it runs `busy` and
+`skeleton.busy` are 1 and the other requests wait in the key, so the mesh it reads stays the one
+shown; `stop` ends it at its next step and keeps the last skeleton. The result is drawn in two
+children of the node, `<id>_strands` (lines: the polylines green, the stars of small planar
+clusters blue) and `<id>_sheets` (a colour per sheet), which hide with the node, and is put on the
+data channel at `<node>.skeleton.strands`, `.sheets` and `.helix` (`cvc::geometry`, which
+`(skeleton.compute ...)` and `state-data-get` read). A new mesh (an operation, a load, a reset)
+clears it. The children are tagged `skeleton` and the node's own surface `surface`, beside the
+node's own tags (below, Tags), so a viewport with `show: [skeleton]` shows the skeleton alone and
+one with `hide: [surface]` shows a mesh_lab without its surface. The skeleton needs Shewchuk's
+predicates (`CVC_WITH_SHEWCHUK`); without them `skeleton.status` reports skeletonize's error.
+[`skeleton_lab.ari`](../examples/ariadne/documents/skeleton_lab.ari) is the demo
+(`cvcgl_mesh_skeleton`, `cvcgl_ariadne_views`, the `skeleton` golden).
 
 **`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
 meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
@@ -4070,7 +4140,14 @@ own that the other views leave out (`hide: [main_only]`). The main view always d
 node hidden with `visible:` is gone from every view, and so is everything under it: its children,
 the ones a `source: { data }` node draws when its dataset arrives included, keep their own flags
 but draw only while every ancestor is visible. A `generated_world` node's meshes and water beside
-it follow it too.
+it follow it too. A custom node type may tag the parts it makes on top of the node's own tags: a
+`mesh_lab` node's skeleton children are tagged `skeleton`, and its own surface `surface`, that
+tag covering the surface alone, not the children under it (§5.4). So `show: [skeleton]` shows an
+untagged mesh_lab's skeleton without its surface, and `hide: [surface]` drops every mesh_lab's
+surface and keeps its skeleton. A view with a `show:` list that names neither leaves a mesh_lab
+out, as it would any tagged node. A view that names tags to show is framed on the nodes it lets
+in, so it waits until one of them has bounds: `show: [skeleton]` is framed on the skeleton once
+the run has made one, not on what else the view held before.
 
 **Overrides.** `override:` restyles nodes in one view only. Each entry names a node id, a tag, or
 `"*"` (everything), and sets any of `drawstyle` (`surface`, `wireframe`, `points`), `opacity`,
@@ -5665,7 +5742,8 @@ makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
-and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node, and
+`AriApp.world_geometry(node)` that node's world, under a drawn host too through `ari_app_attach`): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++
@@ -7616,7 +7694,13 @@ A capture is made repeatable by:
 - the UI font pinned to `golden/fonts/LiberationSans-Regular.ttf` (OFL; never a system font);
 - UI scale 1, touch mode off, the show/hide button hidden, panels open;
 - ImGui's frame delta pinned (`ImGuiOverlay::setFixedDeltaTime`);
-- at least 4 frames at a fixed dt before the capture.
+- at least 4 frames at a fixed dt before the capture;
+- where a custom node has work in flight (a request waiting, a job or a sliced task running, a
+  result not drawn yet), more frames until it is done, then 4 more with none in flight so the
+  windows show what it published. A node type says so through `RealizedScene::pending_work`, a
+  probe per node (mesh_lab registers one: its skeleton, its colour jobs; contour_lab one: its
+  tile). The skeleton and contour tiler goldens wait for their runs this way;
+- where the scene has `volren` nodes, more frames until each shows a finished raycast.
 
 The test then renders one more frame and requires it to be identical, so a UI that is still
 changing fails as unsettled rather than as a flaky mismatch.

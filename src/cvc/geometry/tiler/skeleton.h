@@ -27,6 +27,7 @@
 #include "Tiler_workspace.h"
 #include "Untiled_region.h"
 #include "common.h"
+#include "stepping.h"
 
 #include <list>
 
@@ -35,6 +36,14 @@ namespace cvc::tiler {
 template <typename Tile_iterator, typename ID_factory>
 void medial_axis_stable(const Untiled_region &region, Number_type zmid, Tile_iterator tiles,
                         ID_factory &id_factory, Tiler_workspace &tw);
+
+// The same, resumable: its units are interpolate_steps' (a point of the fill at a time), and the
+// rest of the fill charged by the region's size (stepping.h). `region`, `id_factory`, `tw` and what
+// `tiles` writes to must outlive the task.
+template <typename Tile_iterator, typename ID_factory>
+step_task medial_axis_stable_steps(const Untiled_region &region, Number_type zmid,
+                                   Tile_iterator tiles, ID_factory &id_factory,
+                                   Tiler_workspace &tw);
 
 void to_simple(const Untiled_region &region);
 

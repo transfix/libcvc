@@ -1,0 +1,72 @@
+# contour_tiler.ari — surfaces through serial-section contours: a real Reconstruct series from
+# mouse hippocampus (two axons traced through 72 sections, a third that branches, and two
+# mitochondria inside one of them; examples/data/contours/kuwajima2019, CC0), read by a
+# `contour_lab` node, drawn as its traced contours, and tiled into one surface per object by the
+# contour tiler (VolumeRover's ContourTiler, ported as cvc::tile_contours). The tile runs as a
+# sliced task: the frame loop keeps drawing while it works, and the progress bar names the slice
+# pair it is on. Tick the components to tile, change the parameters and Tile again; the surfaces
+# are see-through so the mitochondria show inside their axon (docs/ARIADNE.md §5.4).
+#
+#   ariadne_hello examples/ariadne/documents/contour_tiler.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/contour_tiler.ari
+#
+# The series' path is relative to this document: examples/data/contours here, /data/contours in
+# the browser gallery's file system.
+
+meta:
+  name: Contour tiler (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/contour_tiler.ari
+
+# The main view opens low over where ax008 meets ax010 and its mitochondria (the sections are
+# stacked up z, 4 microns of them), on the right of the panel, once the scene is realized; ax006
+# lies further off, to the left.
+on_tick: |
+  (if (!= (state-get "tiler_demo.opened") "1")
+      (begin (state-set "viewers.main.camera.mode" "0")
+             (state-set "viewers.main.camera.orbit.center.x" "13.2")
+             (state-set "viewers.main.camera.orbit.center.y" "11.2")
+             (state-set "viewers.main.camera.orbit.center.z" "2")
+             (state-set "viewers.main.camera.orbit.azimuth" "-35")
+             (state-set "viewers.main.camera.orbit.elevation" "22")
+             (state-set "viewers.main.camera.orbit.distance" "15")
+             (state-set "tiler_demo.opened" "1")))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: contour_tiler
+    args: { node: axons, title: Contour tiler, slices: 72 }
+    pos: [16, 16]
+    size: [470, 700]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: axons
+      type: contour_lab
+      source: { file: ../../data/contours/kuwajima2019/VYLNH_20181017.ser }
+      auto_tile: true
+      opacity: 0.55
+      line_width: 1
+      tiler: { curation_delta: 0.005 }
+      components:
+        ax006: { color: [0.35, 0.80, 0.45] }
+        ax008: { color: [0.95, 0.65, 0.25] }
+        ax010: { color: [0.40, 0.60, 1.00] }
+        ax010mito01: { color: [0.95, 0.30, 0.40] }
+        ax010mito02: { color: [0.95, 0.30, 0.75] }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

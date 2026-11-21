@@ -158,6 +158,14 @@ bool filter_pass(const std::vector<std::string> &filter, const std::string &id) 
   return !any_in || in;
 }
 
+// Whether a filter picks keys: has a pattern that includes, not only ones that leave keys out.
+bool filter_picks(const std::vector<std::string> &filter) {
+  for (const std::string &f : filter)
+    if (!f.empty() && f[0] != '-')
+      return true;
+  return false;
+}
+
 // The search box's verdict: each of its words is in the key's path or its description (any
 // case), and none of its '-' words is.
 bool search_pass(const std::string &search, const std::string &id, const std::string &help) {
@@ -603,7 +611,10 @@ void emit_settings(SettingsContext &ctx, const Widget &w) {
     SettingsSpec spec;
     spec.search = w.settings_search;
     spec.search_text = search;
-    spec.narrowed = !search.empty() || !w.settings_filter.empty();
+    // A search, or a filter that picks keys, narrows the list: every group is drawn open so no
+    // match hides in a closed one. A filter that only leaves keys out keeps the groups as
+    // groups: and open: set them, and they open and close by hand.
+    spec.narrowed = !search.empty() || filter_picks(w.settings_filter);
     Walker walker(ctx, w, cache, search);
     walker.walk(spec.nodes, roots);
     if (walker.truncated())

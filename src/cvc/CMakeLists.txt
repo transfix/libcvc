@@ -112,6 +112,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_router.h
   ../../inc/cvc/media/media_rungs.h
   ../../inc/cvc/media/media_opus.h
+  ../../inc/cvc/media/voice_mixer.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/archive.h
@@ -191,6 +192,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/volume/volume_slice.h
+  ../../inc/cvc/volume/volume_grid.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -451,6 +453,7 @@ set(SOURCE_FILES
   media/media_router.cpp
   media/media_rungs.cpp
   media/media_opus.cpp
+  media/voice_mixer.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
@@ -482,6 +485,7 @@ set(SOURCE_FILES
   volume/contour_spectrum.cpp
   volume/resize_stepper.cpp
   volume/volume_slice.cpp
+  volume/volume_grid.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
@@ -521,6 +525,9 @@ set(SOURCE_FILES
   nav/coph_model.cpp
   nav/coph_allocation.cpp
   nav/coph_learner.cpp
+  nav/coph_packet.cpp
+  nav/coph_exchange.cpp
+  nav/coph_channel.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
@@ -700,10 +707,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp nav/coph_packet.cpp nav/coph_exchange.cpp nav/coph_channel.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp nav/coph_packet.cpp nav/coph_exchange.cpp nav/coph_channel.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1639,6 +1646,11 @@ list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cp
 # (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
 list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
+# The connection engine (cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1): TCP
+# listeners on Boost.Asio I/O threads of its own, framing, groups and one-copy broadcast. Always
+# compiled; a browser build has the stubs (it cannot listen).
+list(APPEND SOURCE_FILES net/net_engine.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/net_engine.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
   ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
@@ -3197,9 +3209,16 @@ function(cvc_setup_physics_replay target)
   target_compile_features(${target} PRIVATE cxx_std_17)
   if(EMSCRIPTEN)
     # node reads the trace from the host's file system, and the process exits with main's
-    # status. main runs on a pthread, so the cvc::app's workers can start while it waits.
+    # status.
     target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1
-      -sALLOW_MEMORY_GROWTH=1 -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb)
+    # Threaded (wasm-mt), main runs on a pthread, so the cvc::app's workers can start while it
+    # waits. Single-threaded (wasm, the gh-pages gallery's flavor) there are no workers, Jolt runs
+    # its single-threaded job system, and Emscripten refuses PROXY_TO_PTHREAD without -pthread.
+    # The -pthread test is the cvc_igl one above: CVC_WASM_PTHREADS, or -pthread in the flags.
+    if(CVC_WASM_PTHREADS OR "${CMAKE_CXX_FLAGS}" MATCHES "(^| )-pthread($| )")
+      target_link_options(${target} PRIVATE -sPROXY_TO_PTHREAD=1)
+    endif()
   endif()
 endfunction()
 

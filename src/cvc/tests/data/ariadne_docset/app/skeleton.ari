@@ -1,0 +1,47 @@
+# The browser smoke test's skeleton (src/arigl/web/test/arigl_web_smoke.mjs): the
+# examples/ariadne/documents/skeleton_lab.ari scene, smaller. A mesh_lab node decimates the
+# embedded bunny to 2,000 triangles and takes the skeleton of what is left, a slice at a time on the
+# page's scheduler (the single-threaded page has no other thread), with a view of the skeleton
+# alone. Once the skeleton is drawn it prints one line the test waits for; a failed run prints why.
+meta: {min_libcvc: 4.0.0}
+customs:
+  - node: mesh_lab
+    required: true
+init: (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate skeleton")
+on_tick: |
+  (if (and (!= (state-get "skel.reported") "1")
+           (= (state-get "graphics.root.children.mesh.mesh_ops.skeleton.busy") "0")
+           (!= (state-get "graphics.root.children.mesh.mesh_ops.skeleton.status") "idle"))
+      (begin
+        (print (str-concat "skeleton: "
+                           (state-get "graphics.root.children.mesh.mesh_ops.skeleton.info.strands")
+                           " strands, "
+                           (state-get "graphics.root.children.mesh.mesh_ops.skeleton.info.sheets")
+                           " sheets ("
+                           (state-get "graphics.root.children.mesh.mesh_ops.skeleton.status") ")"))
+        (state-set "skel.reported" "1")))
+windows:
+  - window: Skeleton
+    id: skeleton
+    pos: [16, 16]
+    size: [340, 300]
+    children:
+      - progress: progress
+        bind: graphics.root.children.mesh.mesh_ops.skeleton.progress
+        hi: 100
+        overlay: graphics.root.children.mesh.mesh_ops.skeleton.phase
+      - type: viewport
+        view: skeleton
+        show: [skeleton]
+        chrome: false
+        width: 320
+        height: 240
+scene:
+  chrome: false
+  nodes:
+    - node: mesh
+      type: mesh_lab
+      source: { file: stanford.bunny }
+      fit: { height: 100, up: y }
+      material: { color: [0.85, 0.82, 0.88], opacity: 0.3 }
+      target_faces: 2000
