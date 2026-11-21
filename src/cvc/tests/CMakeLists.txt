@@ -70,6 +70,7 @@ add_executable(state_identity_test state_identity_test.cpp)
 add_executable(state_device_key_test state_device_key_test.cpp)
 add_executable(media_rungs_test media_rungs_test.cpp)
 add_executable(voice_mixer_test voice_mixer_test.cpp)
+add_executable(voice_monitor_test voice_monitor_test.cpp)
 add_executable(fast_lane_test fast_lane_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
@@ -472,6 +473,7 @@ set(TEST_TARGETS
   state_device_key_test
   media_rungs_test
   voice_mixer_test
+  voice_monitor_test
   fast_lane_test
   state_distributed_metrics_test
   state_delegation_manager_test
@@ -1817,6 +1819,12 @@ target_link_libraries(voice_mixer_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(voice_monitor_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 target_link_libraries(fast_lane_test
   PRIVATE
     cvc
@@ -2927,6 +2935,7 @@ target_compile_features(state_identity_test PRIVATE cxx_std_17)
 target_compile_features(state_device_key_test PRIVATE cxx_std_17)
 target_compile_features(media_rungs_test PRIVATE cxx_std_17)
 target_compile_features(voice_mixer_test PRIVATE cxx_std_17)
+target_compile_features(voice_monitor_test PRIVATE cxx_std_17)
 target_compile_features(fast_lane_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
@@ -3511,6 +3520,7 @@ cvc_discover_tests(state_identity_test)
 cvc_discover_tests(state_device_key_test)
 cvc_discover_tests(media_rungs_test)
 cvc_discover_tests(voice_mixer_test)
+cvc_discover_tests(voice_monitor_test)
 cvc_discover_tests(fast_lane_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)

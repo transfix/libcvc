@@ -591,4 +591,53 @@ TEST(VoiceMixer, DelayFloorRaisesTargets) {
   EXPECT_NEAR(st.target_s, 0.10, 1e-9);
 }
 
+// set_params replaces the tunables, a UI's: the device's floor still holds, and the greatest
+// target caps the rest, known peers' targets included.
+TEST(VoiceMixer, SetParamsKeepsTheFloor) {
+  cvc::voice_mixer mx(kRate, 1);
+  mx.set_delay_floor(0.064, 0.10);
+  const std::vector<float> pkt = constant(960, 0.1f);
+  mx.push("a", pkt.data(), pkt.size(), 0.0); // target 0.10
+  cvc::voice_mixer::params p;
+  p.min_delay_s = 0.02;
+  p.start_delay_s = 0.05;
+  p.max_delay_s = 0.09;
+  mx.set_params(p);
+  const cvc::voice_mixer::params q = mx.parameters();
+  EXPECT_NEAR(q.min_delay_s, 0.064, 1e-9) << "the floor's";
+  EXPECT_NEAR(q.max_delay_s, 0.09, 1e-9);
+  EXPECT_NEAR(q.start_delay_s, 0.09, 1e-9) << "the floor's start, capped at the greatest";
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.09, 1e-9);
+  p.max_delay_s = 0.4;
+  p.start_delay_s = 0.2;
+  mx.set_params(p);
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.09, 1e-9) << "a known peer keeps its target inside the range";
+}
+
+// reset_targets puts every target back to the start; a peer holding much more is trimmed down to
+// it at its next pull, so the delay drops at once.
+TEST(VoiceMixer, ResetTargetsDropsTheDelay) {
+  cvc::voice_mixer::params p;
+  p.start_delay_s = 0.3;
+  cvc::voice_mixer mx(kRate, 1, p);
+  const std::vector<float> pkt = constant(960, 0.5f);
+  std::vector<float> out(480);
+  for (int i = 0; i < 15; ++i) // 300 ms
+    mx.push("a", pkt.data(), pkt.size(), 0.0);
+  mx.pull(out.data(), out.size(), 0.0); // plays, 300 ms behind
+  p.start_delay_s = 0.08;
+  mx.set_params(p);
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.3, 1e-9) << "set_params alone leaves it";
+  mx.reset_targets();
+  mx.pull(out.data(), out.size(), 0.01);
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.08, 1e-9);
+  EXPECT_NEAR(st.buffered_s, 0.07, 1e-9) << "trimmed to the target, then 10 ms played";
+}
+
 } // namespace

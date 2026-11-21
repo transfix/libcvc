@@ -217,6 +217,13 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.bind, kTok, idx);
   replace_in(out.on, kTok, idx);
   replace_in(out.pick, kTok, idx); // a chart's or a heatmap's pick: key
+  // A chart's series, cursor and log axis: a row's own curves (series: [{bind: runs.{i}.y}]).
+  for (ChartSeriesBind &s : out.chart_series) {
+    replace_in(s.bind, kTok, idx);
+    replace_in(s.label, kTok, idx);
+  }
+  replace_in(out.cursor, kTok, idx);
+  replace_in(out.log_y, kTok, idx);
   // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
   // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
   replace_in(out.on_click, kTok, idx);
