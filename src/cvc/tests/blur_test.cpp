@@ -19,8 +19,11 @@
 //     cancel ends it with no result; the result_job;
 //   - T5: parameters that aren't valid, no atoms;
 //   - T6: two apps blurring at once on two threads get the same volume;
-//   - T1: 1GRL's density equals TexMol's, voxel for voxel (tools/texmol-goldens).
+//   - T1: 1GRL's atoms, grid and density are TexMol's (tools/texmol-goldens): the density to 1e-5
+//     relative, most voxels bit for bit.
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cvc/core/app.h>
@@ -132,8 +135,7 @@ TEST(MolBlur, OneAtomIsTheKernel) {
         bool inside = true;
         for (int a = 0; a < 3; ++a)
           inside = inside && ijk[a] >= lo_i[a] && ijk[a] < hi_i[a];
-        const double d[3] = {c[0] - point(v, 0, i), c[1] - point(v, 1, j),
-                             c[2] - point(v, 2, k)};
+        const double d[3] = {c[0] - point(v, 0, i), c[1] - point(v, 1, j), c[2] - point(v, 2, k)};
         const double r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
         const double got = at(v, i, j, k);
         if (inside)
@@ -264,3 +266,108 @@ TEST(MolBlur, TwoAppsAtOnce) {
   tb.join();
   EXPECT_TRUE(same(va, vb));
 }
+
+// ---- T1: TexMol's own blur maps (tools/texmol-goldens) ----
+
+namespace {
+
+struct golden_grid {
+  int dims[3] = {0, 0, 0};
+  float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+};
+
+const std::string kGoldens = kRepo + "/src/cvc/tests/data/texmol-goldens/blur/";
+
+golden_grid read_grid(const std::string &name) {
+  std::ifstream in(kGoldens + name + ".grid.txt");
+  golden_grid g;
+  in >> g.dims[0] >> g.dims[1] >> g.dims[2] >> g.lo[0] >> g.lo[1] >> g.lo[2] >> g.hi[0] >>
+      g.hi[1] >> g.hi[2];
+  EXPECT_TRUE(in) << name << ".grid.txt";
+  return g;
+}
+
+std::vector<float> read_f32(const std::string &name, std::size_t n) {
+  std::vector<float> v(n);
+  std::ifstream in(kGoldens + name + ".f32", std::ios::binary);
+  in.read(reinterpret_cast<char *>(v.data()), static_cast<std::streamsize>(n * sizeof(float)));
+  EXPECT_TRUE(in) << name << ".f32";
+  return v;
+}
+
+// 1GRL as TexMol's parser read it: every atom, and TexMol's radius for one its table lacks, which
+// is the atom's occupancy (addAtom's argument order; 1.00 for every atom in 1GRL).
+mol::molecule texmol_1grl(cvc::app &app) {
+  mol::molecule_read_params p;
+  p.unknown_radius = 1.0;
+  return mol::read_molecule(app, k1grl, p);
+}
+
+void expect_texmols(const std::string &name, double resolution, double blobbiness) {
+  cvc::app app;
+  const mol::molecule m = texmol_1grl(app);
+  mol::blur_params p;
+  p.resolution = resolution;
+  p.blobbiness = blobbiness;
+  const cvc::volume v = mol::blur(app, m, p);
+  const golden_grid g = read_grid(name);
+  ASSERT_EQ(v.XDim(), static_cast<std::uint64_t>(g.dims[0]));
+  ASSERT_EQ(v.YDim(), static_cast<std::uint64_t>(g.dims[1]));
+  ASSERT_EQ(v.ZDim(), static_cast<std::uint64_t>(g.dims[2]));
+  const auto &b = v.boundingBox();
+  EXPECT_FLOAT_EQ(static_cast<float>(b.minx), g.lo[0]);
+  EXPECT_FLOAT_EQ(static_cast<float>(b.miny), g.lo[1]);
+  EXPECT_FLOAT_EQ(static_cast<float>(b.minz), g.lo[2]);
+  EXPECT_FLOAT_EQ(static_cast<float>(b.maxx), g.hi[0]);
+  EXPECT_FLOAT_EQ(static_cast<float>(b.maxy), g.hi[1]);
+  EXPECT_FLOAT_EQ(static_cast<float>(b.maxz), g.hi[2]);
+  const std::size_t n = v.XDim() * v.YDim() * v.ZDim();
+  const std::vector<float> want = read_f32(name, n);
+  std::size_t exact = 0, off = 0;
+  double worst = 0;
+  std::size_t i = 0;
+  for (std::uint64_t z = 0; z < v.ZDim(); ++z)
+    for (std::uint64_t y = 0; y < v.YDim(); ++y)
+      for (std::uint64_t x = 0; x < v.XDim(); ++x, ++i) {
+        const float got = static_cast<float>(at(v, x, y, z));
+        if (got == want[i]) {
+          ++exact;
+          continue;
+        }
+        const double rel = std::abs(got - want[i]) / std::max(1e-30, std::abs(double(want[i])));
+        worst = std::max(worst, rel);
+        off += rel > 1e-5;
+      }
+  // Most voxels are TexMol's bit for bit. The rest are float sums of the same terms in another
+  // order (TexMol's tree order, TheAtomsAreTexMols): a voxel where hundreds of blobs overlap, in a
+  // low-resolution map, can round some 1e-6 apart.
+  std::printf("  %s: %zu of %zu voxels exactly TexMol's, worst relative difference %.3g\n",
+              name.c_str(), exact, n, worst);
+  EXPECT_EQ(off, 0u) << name << ": voxels more than 1e-5 off TexMol's";
+  EXPECT_GT(exact, n * 9 / 10) << name;
+}
+
+} // namespace
+
+// The same atoms with the same radii. TexMol's order differs: its group tree keeps a sheet's
+// strands together (1GRL's residues 48-50 follow 38-40), and flattening walks the tree. Only the
+// densities' float sums can feel that, by a rounding.
+TEST(MolBlurLegacy, TheAtomsAreTexMols) {
+  cvc::app app;
+  const mol::molecule m = texmol_1grl(app);
+  std::vector<std::array<float, 4>> ours, theirs;
+  for (const mol::atom &a : m.atoms)
+    ours.push_back({static_cast<float>(a.x), static_cast<float>(a.y), static_cast<float>(a.z),
+                    static_cast<float>(a.radius)});
+  std::ifstream in(kGoldens + "1grl.atoms.txt");
+  for (float x, y, z, r; in >> x >> y >> z >> r;)
+    theirs.push_back({x, y, z, r});
+  std::sort(ours.begin(), ours.end());
+  std::sort(theirs.begin(), theirs.end());
+  ASSERT_EQ(ours.size(), theirs.size());
+  EXPECT_TRUE(ours == theirs);
+}
+
+TEST(MolBlurLegacy, TexMolsDefaultBlobbiness) { expect_texmols("1grl_r1.5", 1.5, -2.3442); }
+
+TEST(MolBlurLegacy, ALowResolutionMap) { expect_texmols("1grl_coarse", 2.0, -0.5); }

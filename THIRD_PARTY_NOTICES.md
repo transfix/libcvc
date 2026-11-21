@@ -1335,6 +1335,8 @@ https://creativecommons.org/publicdomain/zero/1.0/. The repository asks that the
 
 - `src/cvc/tests/data/mol/1grl.pdb` -- the Protein Data Bank entry 1GRL, a subunit of the
   bacterial chaperonin GroEL (4,186 atoms), as distributed in 1995. cvc::mol's tests read it.
+- `src/cvc/tests/data/texmol-goldens/blur/` -- TexMol's blur maps of it and the atoms TexMol's
+  parser read from it (`tools/texmol-goldens`), for the blur's parity test.
 
 Source: the Protein Data Bank, https://www.rcsb.org/structure/1GRL. Described in Braig K,
 Otwinowski Z, Hegde R, Boisvert DC, Joachimiak A, Horwich AL, Sigler PB (1994), "The crystal

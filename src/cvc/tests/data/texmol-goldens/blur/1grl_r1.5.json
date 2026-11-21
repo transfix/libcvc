@@ -1,0 +1,14 @@
+{
+  "library": "TexMol PDBParser + Blurmaps GOABlur (electron density, van der Waals radii)",
+  "texmol": "ed20eae784283a6c1f2730d0d249dc801d0c38f8",
+  "case": "1grl_r1.5",
+  "input": "src/cvc/tests/data/mol/1grl.pdb",
+  "input_sha256": "73e5b13d9a7a5875e855254c7e4098e983bf4cf37d4a48222ec7a1ec0a0ffc0e",
+  "resolution": 1.5,
+  "blobbiness": -2.3442,
+  "density_sha256": "230bd7a877ce974547941616f81f6de217614140d6b84e232f5ea5dd1f068124",
+  "grid_sha256": "4ee96173f282dce80ec5aaa58d8957f9394571fe76cfe99c24bbd219c80830f5",
+  "atoms_sha256": "e4961e3ef79d2d37b97501d8c05a93b5a9733394cb73aec297ac240821281b9d",
+  "made_by": "tools/texmol-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-10, Python 3.11.13"
+}

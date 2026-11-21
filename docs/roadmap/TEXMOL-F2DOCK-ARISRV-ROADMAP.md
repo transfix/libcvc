@@ -12,10 +12,17 @@ scheduler in slices with progress for the UI, interactive on one thread (§1 ite
   ports lane, on fixtures and on PDB entry 1GRL. Not yet in it: the group tree, torsions, the
   writers, CLI, pycvc and intrinsics (M0 part 2), and the A/B against TexMol's parser, which comes
   with T1's (`tools/texmol-goldens/`).
+- **T1 part 1** (2026-11-21): `cvc::mol::blur` (`inc/cvc/mol/blur.h`), GOABlur's electron density
+  (exp(B (r^2/R^2 - 1)) per atom, the box padded by four of the largest radius, extent / resolution
+  + 3 grid points, centres snapped to the grid) as a resumable stepper, in GOABlur's arithmetic.
+  Its A/B: `tools/texmol-goldens` builds TexMol's PDBParser and GOABlur at a pinned sha and runs
+  them on 1GRL (CI's `texmol goldens` job checks they come out again); `blur_test` finds TexMol's
+  atoms and radii, its grid, and its densities to 1e-5 (most voxels bit for bit: TexMol sums a
+  sheet's strands together). Not in it: the hydrophobicity and electrostatic densities, colour,
+  the multilevel blur, the surfaces (T1 part 2).
 - **Next, for the skeleton demo** (Joe, 2026-11-21: skeletonization was meant for molecular data
-  too): T1 part 1, GOABlur's electron-density map as a resumable stepper with its A/B against
-  TexMol; then a mesh_lab that builds its surface from a PDB (the density's isosurface) and a
-  skeleton demo on 1GRL, whose strands and sheets should follow its 19 helices and 11 strands.
+  too): a mesh_lab that builds its surface from a PDB (the blur's isosurface) and a skeleton demo
+  on 1GRL, whose strands and sheets should follow its 19 helices and 11 strands.
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital

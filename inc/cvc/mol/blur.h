@@ -19,15 +19,16 @@
 //   // smooths it toward a low-resolution map, where helices read as rods
 //
 // Each atom of radius R at c adds exp(B (|x - c|^2 / R^2 - 1)) to every grid point x within its
-// reach, R sqrt(1 + ln(cutoff) / B), where it has fallen to `cutoff`. B is the blobbiness, negative;
-// at |x - c| = R an atom adds exactly 1. The grid's box is the atoms' centres padded by `padding`
-// times the largest radius, and its spacing comes from `resolution` (the grid then has
+// reach, R sqrt(1 + ln(cutoff) / B), where it has fallen to `cutoff`. B is the blobbiness,
+// negative; at |x - c| = R an atom adds exactly 1. The grid's box is the atoms' centres padded by
+// `padding` times the largest radius, and its spacing comes from `resolution` (the grid then has
 // extent / resolution + 3 points along each axis) or from `dims`.
 //
 // It computes what GOABlur computed, in the same arithmetic: float positions, box and spacing,
 // double kernels, float sums, atoms in order and each atom's points z, y, x. So with the defaults
-// (a centre moved to its nearest grid point first, as GOABlur did) the volume is TexMol's, voxel
-// for voxel (tools/texmol-goldens). snap_centres off keeps each centre where it is.
+// (a centre moved to its nearest grid point first, as GOABlur did) the volume is TexMol's to a
+// float rounding: most voxels bit for bit, the rest within 1e-5 where TexMol summed the same atoms
+// in its group tree's order (tools/texmol-goldens). snap_centres off keeps each centre where it is.
 //
 // blur_stepper does it a slice at a time (VOLROVER plan §1.9): phases "checking" (the parameters
 // and the box, a unit per atom) and "splatting" (a unit per grid point an atom reaches). Each unit
@@ -55,10 +56,10 @@ namespace mol {
 struct blur_params {
   // B in exp(B (r^2 / R^2 - 1)); negative. TexMol's default, -2.3442, is Grant and Pickup's.
   double blobbiness = -2.3442;
-  double resolution = 1.0; // Å between grid points, unless `dims` gives the grid
-  std::vector<int> dims;   // the grid's points along x, y, z, instead of `resolution`
-  double padding = 4.0;    // the box: the atoms' centres, padded by this many largest radii
-  double cutoff = 1e-3;    // an atom reaches the grid points where it has fallen to this
+  double resolution = 1.0;  // Å between grid points, unless `dims` gives the grid
+  std::vector<int> dims;    // the grid's points along x, y, z, instead of `resolution`
+  double padding = 4.0;     // the box: the atoms' centres, padded by this many largest radii
+  double cutoff = 1e-3;     // an atom reaches the grid points where it has fallen to this
   bool snap_centres = true; // move each atom's centre to its nearest grid point (GOABlur's way)
 };
 
