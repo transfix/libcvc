@@ -193,9 +193,11 @@ const char *const kAriSchema = R"ARISCHEMA({
           "uri": {"type": "string"},
           "path": {"type": "string"},
           "as": {"type": "string"},
+          "generate": {"type": "string"},
+          "params": {"type": "object"},
           "load": {"enum": ["eager", "lazy"]}
         },
-        "required": ["uri"]
+        "anyOf": [{"required": ["uri"]}, {"required": ["generate"]}]
       }
     },
     "args": {
@@ -653,6 +655,18 @@ bool commit_on_release(Ctx &ctx, const YAML::Node &n, const std::string &label) 
   if (c != "live" && c != "release")
     ctx.warn("ari: slider '" + label + "' has commit: '" + c + "' (live or release) — live");
   return c == "release";
+}
+
+// A slider's `range:` -- key (the bound key's "min" and "max" properties, lo: / hi: until it has
+// them) or absent.
+bool range_from_key(Ctx &ctx, const YAML::Node &n, const char *type, const std::string &label) {
+  if (!has(n, "range"))
+    return false;
+  const std::string r = str(n, "range");
+  if (r != "key")
+    ctx.warn("ari: " + std::string(type) + " '" + label + "' has range: '" + r +
+             "' (only key, the bound key's min and max) -- lo: and hi:");
+  return r == "key";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -1144,6 +1158,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
     Widget w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+    w.range_from_key = range_from_key(ctx, n, "slider_int", label);
     w.commit_on_release = commit_on_release(ctx, n, label);
     w.on = action(n); // fired on the commit edge (drag end / key step), not every drag frame
     return w;
@@ -1155,6 +1170,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
     Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    w.range_from_key = range_from_key(ctx, n, "slider_float", label);
     w.log_scale = flag(n, "log", false);
     if (w.log_scale && !(lo > 0.0))
       ctx.warn("ari: slider_float '" + label + "' has log: true and lo <= 0; drawn linear");

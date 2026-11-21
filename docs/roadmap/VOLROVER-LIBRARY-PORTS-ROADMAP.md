@@ -1349,6 +1349,51 @@ their units and ranges as properties. Bulk data is on the data channel:
   arigl-web, with a golden image per layout and an interaction test that scripts picks and the
   view switch through state writes.
 
+**What P8 built.**
+- **Core** (`inc/cvc/volume/volume_grid.h`, no GL): the three parameter tables;
+  `cvc::point_class_editor` (mark, toggle, select, rubber band, move, delete, undo, one plane at a
+  time, the shown variable and timestep's classes only); `cvc::point_class_gestures` (picks to
+  edits, with VolumeGridRover's modifiers); the class rows a `list:` binds, reconciled as rows are
+  edited, added and removed; the session JSON. `volume_grid_test` (native and wasm-mt) and pycvc
+  (`pycvc_volume_grid.i`, `test_pycvc_volume_grid.py`).
+- **The node** (`cvc::gl::VolumeGridNode`, `type: volume_grid`): keys as in the table above, less
+  the contour, segmentation and tile ones; the data channel's `points`, `selection`, `session` and
+  `volume`; overlays per plane (disks, the selection's rings, crosshairs, the rubber band); the job
+  keys, published for P9's segmentation. `cvcgl_volume_grid` (headless, picks through state
+  writes, the data on the tree, four grids) and `cvcgl_ariadne_volume_grid` (the component, the
+  mouse, two grids on one dataset).
+- **Its data on the state tree** (part 3, after Joe on 2026-11-20: a component loads no file; the
+  outer app does, the main scene and the grid show one volume, and both update when it changes).
+  The node reads and writes no file. `source: { data: <name> }` (a `data:` entry the app loads),
+  `{ state: <key> }` or `{ node: <id> }` names the volume; the planes cut the app's volume itself
+  (its voxels shared; `grid.volume` the very pointer), followed as it changes. `points:` and
+  `session:` name point classes and sessions the same way. Saving is the app's: Ariadne's data
+  layer gained encoders (`register_data_encoder`; volume, point classes, sessions, bytes) and
+  `(data-save PATH FILE [AS])`, beside the document or downloaded in a browser, and the
+  `point_classes` and `volume_grid_session` decoders; the component's Save and Load go through
+  them. cvcGL's `sdf` data generator makes a mesh's distance field as a dataset (the demo's bunny).
+  A large file read plane by plane is now a host's choice (a `slice_source` on the volume's key).
+  A view naming tags frames on what its nodes draw (`shown_bounds`): a hidden node waits, a
+  plane's flat box counts, and a hidden overlay or an empty group adds nothing. Before, a flat box
+  counted as none, so the grid's 3D view framed one plane (the one whose empty overlay added the
+  origin) and an empty group's default box, and which plane that was turned on whether the points
+  or the volume loaded first. The grid's overlays now join the renderer in a fixed order, so where
+  a plane's disks and lines cross the lines win however the data arrive. Left for the wider move
+  of every node type to the same rule:
+  `volume_slice`, `volren` and the other nodes that still read `source: { file }`; a `data:`
+  decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
+  Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane
+  (which disk shows depends on draw order); the slice views show them all.
+- **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
+  and `axis` on a pick; a slider's `range: key`.
+- **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and
+  `quad` layouts, the Probe, Point classes and Transfer function tabs, and `slot: tabs` for more.
+  Goldens `src/cvcGL/test/golden/volume_grid.ari` and `volume_grid_quad.ari`; the arigl-web case
+  `volume_grid.ari` clicks once and waits for the mark.
+- **Left for P9 / P10, shaped to slot in:** a `segment` request and the Segmentation tab; the
+  `contours` tool, the Contours tab and `tile`. Both add tabs to `volume_grid_tools` and draw into
+  the `<id>_surfaces` group, which slice views hide.
+
 ---
 
 ## 5. Seeded segmentation (GenSeg)
@@ -1642,7 +1687,7 @@ not as follow-ups.
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
-| P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6) | P7, P0d |
+| P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6). *Built:* `cvc/volume/volume_grid.h`, `VolumeGridNode` and `type: volume_grid`, `volume_grid.ari` (§4, "What P8 built") | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
 | P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
 | P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |

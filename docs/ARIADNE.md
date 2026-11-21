@@ -485,6 +485,10 @@ Each state-bound primitive returns `{changed, committed, value}`
 slider's on every `changed` too, so whatever it drives follows the drag. A slider with
 `commit: release` writes once, when the drag ends, for a key whose change is too costly to
 redo every frame (the forest controls' structural sliders, which regrow the whole forest).
+A slider with `range: key` takes its range from the bound key's `min` and `max` properties (what a
+parameter table writes, [`param_table.h`](../inc/cvc/core/param_table.h), or what a node keeps
+there as its data changes: a `volume_grid`'s slice keys end at the volume's last plane), read every
+frame, each falling back to `lo:` / `hi:` while the key has none.
 
 A `progress:` widget is read-only: a bar showing the number at `bind` placed in [`lo`, `hi`]
 (default 0..1; fe_controls uses `hi: 100` for `fe.progress`), with the text at `overlay` (a
@@ -1189,7 +1193,8 @@ types behind one call, `register_cvcgl_extensions`
 ([`extensions.h`](../inc/cvc/gl/ariadne/extensions.h)), which both `ariadne_hello` and
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
-`volume_slice` (one axis-aligned plane of a volume, below), `water` (its sea, lakes and ponds as the
+`volume_slice` (one axis-aligned plane of a volume, below), `volume_grid` (VolumeGridRover: three
+such planes with point classes, below), `water` (its sea, lakes and ponds as the
 GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
 drawn from data, below), `nav_swarm` and `swarm_layer` (a swarm of navigating vehicles and
 what of it is drawn, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
@@ -2776,6 +2781,86 @@ orthoslicer is one node with a source and two with `volume_of:`.
 a slice view down the axis a switch picks (§5.18) and the transfer-function editor on the first
 plane.
 
+**`type: volume_grid`** ([`volume_grid_nodes.h`](../inc/cvc/gl/ariadne/volume_grid_nodes.h),
+`cvc::gl::VolumeGridNode`) is VolumeGridRover rebuilt as a node
+([VOLROVER-LIBRARY-PORTS-ROADMAP.md](roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md) §4): three
+`volume_slice` planes of one volume, one down each axis, with the point classes drawn on them and
+the editing VolumeGridRover's slice canvases did, all driven by state keys. The `volume_grid.ari`
+component (§6.5) lays out its views and panel.
+
+The node reads no file. It shows data the app holds on the state tree (§5.17) and follows them as
+they change: the volume it cuts is the dataset's own, its voxels shared, so a grid and anything
+else showing that dataset show one volume, and when the dataset loads again (or a program writes a
+new volume to the key) the planes redraw on it.
+
+```yaml
+data:                                    # the app loads the data
+  head: head.rawiv                       # a volume (as: volume, by the extension)
+  seeds: seeds.vgr                       # point classes (as: point_classes)
+```
+
+```yaml
+- node: grid
+  type: volume_grid
+  source: { data: head }                 # or { state: <key> } (a program's, a filter's), or
+                                         # { node: <id>, key: <key> } (another grid's grid.volume)
+  var: 0                                 # the variable and timestep the volume holds
+  time: 0
+  view: xy                               # the switch: xy | xz | zy
+  tool: points                           # navigate | points | probe
+  slice: { z: 40 }                       # the planes (-1, the default, the middle one)
+  display: { point_scale: 1, show_points: true, crosshairs: true, grey: false }
+  classes:                               # the classes it starts with
+    - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
+  points: { data: seeds }                # point classes (item: classes), or { state: <key> }
+  session: { data: last }                # a session to apply (item: session), or { state: <key> }
+  transfer_function: { preset: grayscale }
+```
+
+A `source: { file }` or `{ sdf }` is not read: the node warns, naming the `data:` entry to write
+instead (`generate: sdf` for a mesh's distance field).
+
+Its keys are under `<node>.grid` ([`VolumeGridNode.h`](../inc/cvc/gl/VolumeGridNode.h)); a prop
+seeds its key only while the key is empty:
+
+| key | meaning |
+|---|---|
+| `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
+| `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
+| `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
+| `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
+| `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
+| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane) |
+| `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
+
+The point classes, the selection, the session and the volume are on the data channel at
+`grid.points`, `grid.selection` (`std::shared_ptr<const cvc::point_classes>`), `grid.session`
+(`std::shared_ptr<const cvc::volume_grid_session>`, kept current) and `grid.volume` (the very
+`std::shared_ptr<const cvc::volume>` its source holds, while the volume is in memory). A
+`point_classes` written to `grid.points` from outside (a program's `state-data-set`, pycvc)
+replaces the classes. The app saves them: `(data-save "graphics.root.children.grid.grid.points"
+"seeds.vgr")`, and `grid.session` the same way. The component's Save and Load buttons do this, and
+load with `(data-load ...)`, pointing `source.points` or `source.session` at what they loaded.
+`<node>.transfer_function` colours all three planes, with the volume's histogram; `display.grey`
+draws them in grey instead.
+
+In a slice view with the `points` tool, a click marks a point of the current class (or unmarks the
+one under the pointer), a drag selects with a rubber band (Shift adds, Ctrl or Alt takes away),
+and Shift+Ctrl drags the selection; with `navigate`, a click moves the other two planes to the
+voxel. Every edit is one undo step. The planes are the node's children `slice_xy`, `slice_xz` and
+`slice_zy`, realized as `<id>_slice_xy` ... and tagged with the node's id and their names, so a
+view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
+overlays draw its points as disks of their radius in voxels, the selection's rings, the crosshairs
+where the other planes cross it (each in the colour of the axis it runs along) and a rubber band
+being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is an empty group for the surfaces later
+phases draw in the 3D view. Until the first volume arrives the planes and that group are hidden,
+so a view frames once there is something to show, and the scene has work pending while a dataset
+the node follows is loading. The editing itself is core libcvc
+([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
+`cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
+pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
+`test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
+
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
 Two custom types draw lines whose points come from data
@@ -3961,8 +4046,33 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `volume` | `volume`: a `cvc::volume` |
 | `heightfield` | `terrain` (a `cvc::height_field`) and `bounds.*`, from a `terrain.json` |
 | `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value); for a version 2 bundle also `version`, `hash` (its content hash), `water_level`, `region` (`min_x` ... `max_y`, when it is cut to one) and `generator` (its name; `version`, `seed`, `params`) |
+| `point_classes` | `classes`: a `cvc::point_classes` from a `.vgr` (VolumeGridRover's point classes; the default for `.vgr`), its point count as the value |
+| `volume_grid_session` | `session`: a `cvc::volume_grid_session` from a session's JSON (`as:` names it: `.json` alone is `json`) |
 
 A host adds its own with `register_data_decoder`.
+
+**Generators.** `generate: NAME` with `params:` makes a dataset instead of fetching it:
+`generated_world` (core: a world, as a version 2 city bundle) and, in cvcGL hosts, `sdf` (a mesh's
+signed distance field, as `volume`: `params: { mesh: stanford.bunny, dim: 64, algorithm: v2,
+fit: { height: 100, up: y } }`, `mesh` a mesh URI or a file beside the document). A generator that
+writes its outputs itself and makes no files runs no decoder. A host adds its own with
+`register_data_generator`.
+
+**Saving.** The app saves data as it loads them: `(data-save PATH FILE [AS])` (below), or a host's
+`data_save`, encodes what the state key PATH holds on its data channel and writes it as FILE.
+`AS` names the encoder; without it the payload's type picks one:
+
+| encoder | Writes |
+|---|---|
+| `bytes` | the bytes (a `DataBytes` or a string) as they are |
+| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...) |
+| `point_classes` | `cvc::point_classes` as a `.vgr` |
+| `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
+
+A relative FILE is the document's directory's. A document whose directory is a URL (an `https://`
+one) writes no file. In a browser the file downloads under its name instead. A host adds encoders
+with `register_data_encoder`. So a node that edits data in memory reads and writes no file itself:
+a `volume_grid` shows the volume the app loaded, and the app saves the points the grid publishes.
 
 **Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
 ready, the scene draws into it the first of the dataset's `world`, `geometry`, `terrain` or
@@ -3992,6 +4102,10 @@ or host can write as well.
 - `(data-status NAME)` returns its status.
 - `(data-files NAME)` lists its file paths.
 - `(data-file NAME PATH)` returns one file's bytes, or nil.
+- `(data-save PATH FILE [AS])` saves what the state key PATH (relative to the document, a leading
+  `/` the root's) holds on its data channel as FILE, through the encoder AS (else the payload's
+  type picks one), and returns `#t`; it raises, saying why, when PATH holds nothing, no encoder
+  takes it, or the file can't be written.
 
 **Hosts.** In C++, use `AppRuntime::data_store()`. In Python:
 - `pycvc.data_load` and `data_wait` start and wait for a load;
@@ -4061,6 +4175,7 @@ windows:
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
@@ -4072,7 +4187,7 @@ under the `pick:` key:
 - `hit`: `1` or `0`;
 - `node`: the id of the node it hit;
 - `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
-  (empty elsewhere);
+  (empty elsewhere), and `axis` (`x`, `y` or `z`), the axis that slice looks down;
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
@@ -5020,6 +5135,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs` |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
