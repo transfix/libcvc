@@ -3203,9 +3203,16 @@ function(cvc_setup_physics_replay target)
   target_compile_features(${target} PRIVATE cxx_std_17)
   if(EMSCRIPTEN)
     # node reads the trace from the host's file system, and the process exits with main's
-    # status. main runs on a pthread, so the cvc::app's workers can start while it waits.
+    # status.
     target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1
-      -sALLOW_MEMORY_GROWTH=1 -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb)
+    # Threaded (wasm-mt), main runs on a pthread, so the cvc::app's workers can start while it
+    # waits. Single-threaded (wasm, the gh-pages gallery's flavor) there are no workers, Jolt runs
+    # its single-threaded job system, and Emscripten refuses PROXY_TO_PTHREAD without -pthread.
+    # The -pthread test is the cvc_igl one above: CVC_WASM_PTHREADS, or -pthread in the flags.
+    if(CVC_WASM_PTHREADS OR "${CMAKE_CXX_FLAGS}" MATCHES "(^| )-pthread($| )")
+      target_link_options(${target} PRIVATE -sPROXY_TO_PTHREAD=1)
+    endif()
   endif()
 endfunction()
 
