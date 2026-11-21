@@ -5981,6 +5981,29 @@ TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
 }
 
+// A data: entry names a uri or a generator: the schema takes `generate:` (and its params) in place
+// of `uri:`, as the loader does, and still flags an entry that names neither.
+TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
+  if (!have_yaml() || !have_jsonschema())
+    GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
+  const std::string doc = "data:\n"
+                          "  made: { generate: generated_world, params: { seed: 7 } }\n"
+                          "  fetched: { uri: a.bin, as: bytes }\n"
+                          "  neither: { as: bytes }\n"
+                          "windows: []\n";
+  const LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  bool flagged = false;
+  for (const std::string &w : r.warnings) {
+    if (w.find("schema:") == std::string::npos)
+      continue;
+    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
+    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
+    flagged = flagged || w.find("'neither'") != std::string::npos;
+  }
+  EXPECT_TRUE(flagged);
+}
+
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
 
 namespace {
