@@ -927,13 +927,20 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
 
 void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
                                    std::vector<std::string> *warnings) {
-  // The simulation clock (cvc::kSimQuantum, the scenes' own 1/120 s, with a real-time catch-up of
-  // cvc::kSimCatchup), of which the vehicles' tick (cvc::kSimTick) is whole quanta. A clock that
-  // has ticked keeps its quantum, and the tick is then held to whole physics steps of it.
-  if (!scene.vehicles.empty() && !cvc::adopt_sim_clock(app.world_clock()))
-    warn(warnings, "ari: world: vehicles: the clock has already run at " +
+  // The simulation clock (the scene's rate, clock: { hz }, else cvc::kSimQuantum, the scenes' own
+  // 1/120 s; with a real-time catch-up of cvc::kSimCatchup), of which the vehicles' tick
+  // (cvc::sim_tick) is whole quanta. A clock that has ticked keeps its quantum, and the tick is
+  // then held to whole physics steps of it.
+  const bool rated = scene.clock.hz > 0.0;
+  if (!rated && scene.vehicles.empty())
+    return;
+  const double quantum = rated ? cvc::sim_quantum(scene.clock.hz) : cvc::kSimQuantum;
+  if (!cvc::adopt_sim_clock(app.world_clock(), quantum))
+    warn(warnings, std::string(rated ? "ari: scene: clock: hz" : "ari: world: vehicles") +
+                       ": the clock has already run at " +
                        std::to_string(app.world_clock().fixed_dt()) +
-                       " s quanta; the vehicles' tick is held to whole physics steps of it");
+                       " s quanta; the world keeps them, and the vehicles' tick is held to whole "
+                       "physics steps of it");
 }
 
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,

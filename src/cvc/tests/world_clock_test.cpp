@@ -773,6 +773,41 @@ TEST(SimTickTest, TheTickIsWholeQuantaAndRealTimeCatchesUpAQuarterSecond) {
   EXPECT_EQ(ticks.take(clock), 2u) << "a frame runs the ticks world time has passed";
 }
 
+// A world's rate (ARIADNE_WORLDS.md section 18.9): a whole number of ticks a second from 10 to 240,
+// its quantum 1/hz, and the navigator's tick the whole quanta nearest the policies' 0.06 s: 7 at
+// 120 Hz (kSimTick exactly), 4 at 60, 2 at 30, one at 10. The catch-up stays a quarter second.
+TEST(SimTickTest, AWorldsRateSetsItsQuantumAndTheNavigatorsTick) {
+  for (double hz : {10.0, 20.0, 30.0, 60.0, 90.0, 120.0, 240.0})
+    EXPECT_TRUE(cvc::sim_rate_valid(hz)) << hz;
+  for (double hz : {0.0, 9.0, 241.0, 59.5, -60.0, std::nan("")})
+    EXPECT_FALSE(cvc::sim_rate_valid(hz)) << hz;
+
+  EXPECT_EQ(cvc::sim_quantum(120.0), cvc::kSimQuantum);
+  EXPECT_EQ(cvc::sim_quantum(60.0), 1.0 / 60.0);
+  EXPECT_EQ(cvc::sim_tick_quanta(cvc::kSimQuantum), cvc::kSimTickQuanta);
+  EXPECT_EQ(cvc::sim_tick(cvc::kSimQuantum), cvc::kSimTick) << "the default, bit for bit";
+  EXPECT_EQ(cvc::sim_tick_quanta(1.0 / 60.0), 4);
+  EXPECT_EQ(cvc::sim_tick_quanta(1.0 / 30.0), 2);
+  EXPECT_EQ(cvc::sim_tick_quanta(1.0 / 100.0), 6);
+  EXPECT_EQ(cvc::sim_tick_quanta(1.0 / 10.0), 1);
+  EXPECT_NEAR(cvc::sim_tick(1.0 / 60.0), 4.0 / 60.0, 1e-15);
+  EXPECT_EQ(cvc::whole_steps(cvc::sim_tick(1.0 / 60.0), 1.0 / 60.0), 4);
+
+  const cvc::world_clock::config c = cvc::sim_clock_config(1.0, 1.0 / 60.0);
+  EXPECT_EQ(c.fixed_dt, 1.0 / 60.0);
+  EXPECT_EQ(c.max_steps_per_advance, 15) << "a quarter second at 60 Hz";
+  EXPECT_EQ(cvc::sim_clock_config(1.0, 1.0 / 10.0).max_steps_per_advance, 3) << "2.5, rounded";
+
+  cvc::world_clock fresh;
+  EXPECT_TRUE(cvc::adopt_sim_clock(fresh, 1.0 / 60.0));
+  EXPECT_EQ(fresh.fixed_dt(), 1.0 / 60.0);
+  fresh.advance(0.1);
+  ASSERT_GT(fresh.tick(), 0u);
+  EXPECT_FALSE(cvc::adopt_sim_clock(fresh)) << "a running clock keeps its 60 Hz";
+  EXPECT_EQ(fresh.fixed_dt(), 1.0 / 60.0);
+  EXPECT_TRUE(cvc::adopt_sim_clock(fresh, 1.0 / 60.0)) << "it is at that quantum";
+}
+
 // A clock goes onto the simulation clock (its quantum and catch-up) only before it has ticked,
 // keeping its speed.
 TEST(SimTickTest, AdoptingTheSimulationClockKeepsTheSpeedAndSparesARunningClock) {

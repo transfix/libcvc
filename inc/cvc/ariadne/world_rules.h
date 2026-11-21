@@ -365,9 +365,9 @@ void register_world_block(cvc::app &app);
 const Value *find_world_block(const LoadResult &lr);
 
 // A world document's rules: the defaults, its scene's physics: gravity, then its world: block
-// (WORLD, null for none). A physics: fixed_dt other than the room's quantum (1/120 s), a backend
-// or materials are warnings: the room's quantum is fixed, and bodies other than the avatars' wait
-// for WD3. "" or what is wrong.
+// (WORLD, null for none). A physics: fixed_dt other than the room's quantum (1/120 s, or 1/hz for
+// a scene: clock: hz), a backend or materials are warnings: the avatars step one quantum at a
+// time, and bodies other than the avatars' wait for WD3. "" or what is wrong.
 std::string world_rules_from(const Scene &scene, const Value *world, world_rules &out,
                              std::vector<std::string> *warnings = nullptr);
 
