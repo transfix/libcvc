@@ -2364,6 +2364,30 @@ TEST(AriadneWorldVehicles, AFleetHasANavigatorAndAPolicyOfItsOwn) {
   EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
       << key_of("scouts", "drives");
   EXPECT_EQ(key_of("scouts", "plans"), "vehicle"); // the fallback's built-in net
+  // trained without $CVC_NAV_WEIGHTS: a copy installed, else the download (D8). The test's network
+  // is off and its registry isn't there (for the package below too), so the download's why is said.
+  cvc::state::instance(app)("sys.data.cvcpkg.registry").value(std::string("http://127.0.0.1:9"));
+  {
+    EnvFor no_override("CVC_NAV_WEIGHTS", "");
+    const std::string installed = cvc::nav::coef_mlp::default_weights_path();
+    cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("trained"));
+    art.step_world(1);
+    art.drain();
+    if (fs::is_regular_file(installed)) {
+      EXPECT_EQ(key_of("scouts", "drives").rfind("trained (" + installed, 0), 0u)
+          << key_of("scouts", "drives");
+    } else {
+      for (int k = 0; k < 400 && key_of("scouts", "drives").rfind("builtin: no trained", 0) != 0;
+           ++k) {
+        art.step_world(1);
+        art.drain();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      EXPECT_NE(key_of("scouts", "drives").find("grl-snam-weights"), std::string::npos)
+          << "the download, not " << key_of("scouts", "drives");
+      EXPECT_EQ(key_of("scouts", "plans"), "vehicle");
+    }
+  }
   cvc::state::instance(app)("vehicles.fleets.scouts.policy")
       .value(std::string("cvcpkg://cvc/no-such-weights-for-a-test"));
   art.step_world(1);
