@@ -119,6 +119,12 @@ if [[ "$FULL" == "ON" ]] \
   echo "arigl-web: the configure found no ImageMagick in $CVC_DEPS_PREFIX" >&2
   exit 1
 fi
+# Nor, in the full package (mesh_lab is in it), without Shewchuk's predicates: mesh_lab's skeleton
+# request would only report that the build has none.
+if [[ "$FULL" == "ON" ]] && ! grep -qF "exact predicates ENABLED" "$CVC_BUILD_DIR/configure.log"; then
+  echo "arigl-web: the configure found no Shewchuk's predicates in $CVC_DEPS_PREFIX" >&2
+  exit 1
+fi
 
 TARGETS=(arigl)
 ARI_PAGES=()

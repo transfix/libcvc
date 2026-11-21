@@ -74,7 +74,8 @@ depends:
     - name: eigen
     - name: libigl
     # cvc::planar (Clipper2, CDT and Shewchuk's predicates), which the contour tiler demo's
-    # contour_lab node tiles on (roadmap P4).
+    # contour_lab node tiles on (roadmap P4). Shewchuk's predicates also carry cvc::tet_complex
+    # and the skeleton built on it, which the skeleton lab's mesh_lab node runs (P2).
     - name: clipper2
     - name: cdt
     - name: shewchuk-predicates

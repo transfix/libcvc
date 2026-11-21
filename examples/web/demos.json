@@ -11,6 +11,7 @@
     "volslice_bunny",
     "volslice_bunny_ari",
     "orthoslicer_ari",
+    "skeleton_lab_ari",
     "contour_tiler_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
@@ -196,6 +197,15 @@
       "blurb":
           "The classic orthoslicer beside a raycast volume, as one Ariadne document: the signed distance field of the embedded Stanford bunny, raycast with a see-through surface and cut by three axis-aligned volume_slice planes that share one volume and one transfer function. A slice view looks straight down whichever axis the XY / XZ / ZY switch picks: drag to pan, the wheel zooms about the pointer, a click reads out the voxel under it. The sliders move the planes, and the transfer-function editor recolours all three.",
       "thumb": "img/orthoslicer_ari.jpg"
+    },
+    "skeleton_lab_ari": {
+      "app": "arigl",
+      "doc": "skeleton_lab",
+      "title": "skeleton lab",
+      "desc": "the skeleton of the bunny's surface: strands and sheets inside it",
+      "blurb":
+          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node: the embedded Stanford bunny is decimated to 4,000 triangles and its vertices skeletonized (Tight Cocone, the medial axis, then the unstable manifolds of its saddles) a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) and the sheets are drawn inside the see-through surface, and a second view shows the skeleton alone. The Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
+      "thumb": "img/skeleton_lab_ari.jpg"
     },
     "contour_tiler_ari": {
       "app": "arigl",
