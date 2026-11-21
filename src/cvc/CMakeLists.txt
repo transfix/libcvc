@@ -1646,6 +1646,11 @@ list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cp
 # (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
 list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
+# The connection engine (cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1): TCP
+# listeners on Boost.Asio I/O threads of its own, framing, groups and one-copy broadcast. Always
+# compiled; a browser build has the stubs (it cannot listen).
+list(APPEND SOURCE_FILES net/net_engine.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/net_engine.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
   ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
