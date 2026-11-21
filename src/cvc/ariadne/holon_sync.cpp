@@ -596,18 +596,28 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
       have = false;
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
-    // Driving, our pose is the vehicle's, played out as a peer's; out, predicted again.
-    if (p.pid == self_pid && h.has_participant(p.pid)) {
-      const bool riding = read_driving(app, room, p.pid) != 0;
-      if (riding == h.is_local(p.pid)) {
+    // Driving, our pose is the vehicle's: predicted when the room's entities say how it runs (the
+    // kinematic plant, section 18.5, OW5b), else played out as a peer's; out, the walker again.
+    const conference::room_entity *ride = nullptr;
+    bool local = p.pid == self_pid;
+    if (p.pid == self_pid) {
+      const std::uint64_t driving = read_driving(app, room, p.pid);
+      ride = driving != 0 && entities ? entities->find(driving) : nullptr;
+      if (ride && !ride->drive.valid())
+        ride = nullptr;
+      local = driving == 0 || ride;
+      if (h.has_participant(p.pid) &&
+          (local != h.is_local(p.pid) || (local && (ride != nullptr) != h.predicts_vehicle(p.pid)))) {
         const cvc::physics::body_state now = h.state(p.pid);
         h.remove_participant(p.pid);
-        h.add_participant(p.pid, /*local=*/!riding, now, /*pose_known=*/true);
+        h.add_participant(p.pid, local, now, /*pose_known=*/true);
       }
     }
     if (!h.has_participant(p.pid))
-      h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{},
+      h.add_participant(p.pid, local, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);
+    if (ride)
+      h.predict_vehicle(p.pid, ride->drive); // a no-op while its numbers stay the same
     if (p.pid == self_pid) {
       // The server's reserve before the pose: a reconcile trims the log the reserve is checked
       // against.
@@ -718,8 +728,13 @@ bool entity_playout::pose(std::uint64_t id, cvc::physics::pose &out) const {
   const std::string pid = conference::entity_pid(id);
   if (!_holon->has_participant(pid))
     return false;
-  out = _holon->display_pose(pid);
+  out = id != 0 && id == _predicted ? _predicted_at : _holon->display_pose(pid);
   return true;
+}
+
+void entity_playout::show_predicted(std::uint64_t id, const cvc::physics::pose &at) {
+  _predicted = id;
+  _predicted_at = at;
 }
 
 bool entity_playout::state(std::uint64_t id, cvc::physics::body_state &out) const {

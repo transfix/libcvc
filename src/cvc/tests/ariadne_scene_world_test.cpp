@@ -7421,3 +7421,138 @@ TEST(AriadneWorldGym, KinematicBoxesTouchWhenTheyOverlap) {
   EXPECT_TRUE(es[3].vehicle_contact); // 1.7 m apart, side by side: a Humvee is 2.2 m wide
   EXPECT_TRUE(es[4].vehicle_contact);
 }
+
+namespace {
+// kDrivable's square with the humvee on the kinematic plant, as traffic.ari's trucks are.
+const char *kKinematicDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: kinematic
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The command the relay sets after a step for a driver's next navigator tick (holon's drive).
+void command_after(cvc::ariadne::kinematic_vehicle &m, const cvc::ariadne::kinematic_drive &k,
+                   const avatar_intent &in, double dt) {
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double speed = m.vx * std::cos(m.box[3]) + m.vy * std::sin(m.box[3]);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  m.steer_cmd = c.steer;
+  m.accel_cmd = c.accel;
+}
+} // namespace
+
+// The vehicle a client drives, run as the relay's world runs it (ARIADNE_WORLDS.md section 18.5,
+// OW5b): on the kinematic plant, the room's entities carry its numbers and the clock ticks its
+// navigator ticks on (WorldVehicles::kinematics), and a model stepped on the same drive axes at
+// the same ticks (kinematic_vehicle_step, the command after each step) stays on the relay's
+// vehicle through throttle, a turn, the brake and reverse.
+TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kKinematicDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i) // the driver's command set, the navigator ticked on a clock tick
+    h.advance(dt);
+
+  cvc::ariadne::kinematic_drive k;
+  ASSERT_TRUE(v.kinematics(id, k));
+  EXPECT_TRUE(k.valid());
+  EXPECT_EQ(k.tick_steps, v.steps_per_tick());
+  bool carried = false;
+  for (const conference::room_entity &e : conference::room_entities_of(v))
+    if (e.id == id) {
+      carried = true;
+      EXPECT_EQ(e.drive, k) << "the room's entities carry it";
+    }
+  EXPECT_TRUE(carried);
+
+  // From where the relay has it (at rest: exact), on the same drive axes at each tick.
+  cvc::ariadne::kinematic_vehicle m = cvc::ariadne::kinematic_vehicle_at(k, h.state("ann"),
+                                                                         h.tick(), dt);
+  const auto axes = [](int step) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = 0.0;
+    in.brake = 0.0;
+    if (step < 240) {
+      in.throttle = 1.0;
+    } else if (step < 480) {
+      in.throttle = 1.0;
+      in.steer = 0.5;
+    } else if (step < 600) {
+      in.throttle = 0.5;
+      in.steer = -1.0;
+    } else if (step < 840) {
+      in.brake = 1.0;
+    } else {
+      in.throttle = -1.0;
+    }
+    return in;
+  };
+  double worst = 0.0, top = 0.0;
+  const cvc::physics::vec3 start = h.state("ann").position;
+  for (int step = 0; step < 1080; ++step) {
+    const avatar_intent in = axes(step);
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      cvc::ariadne::kinematic_vehicle_step(m, k, t, dt);
+      command_after(m, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    worst = std::max(worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
+    top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
+  }
+  const cvc::physics::body_state end = h.state("ann");
+  std::printf("  the model on the relay's vehicle: %.6f m at worst over 9 s (top %.2f m/s, "
+              "%.1f m from the start, speed at the end %.2f m/s)\n",
+              worst, top, std::hypot(end.position.x - start.x, end.position.y - start.y), m.speed);
+  EXPECT_GT(top, 5.0) << "it drove";
+  EXPECT_LT(m.speed, -0.5) << "and backed up at the end";
+  EXPECT_LT(worst, 0.01) << "step for step";
+}

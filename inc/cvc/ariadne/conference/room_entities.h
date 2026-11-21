@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cvc/ariadne/pose_stream.h> // pose_subject
 #include <cvc/ariadne/section.h>
+#include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h> // vehicle_look
 #include <string>
 #include <vector>
@@ -73,6 +74,10 @@ struct room_entity {
   // The participant whose body it is (an avatar archetype that is a vehicle, holon::set_archetype;
   // "" none): no one else gets in it.
   std::string avatar;
+  // On the kinematic plant: what a client needs to run it as the relay's world does, so the one
+  // it drives is predicted (ARIADNE_WORLDS.md section 18.5, OW5b; WorldVehicles::kinematics). Not
+  // valid() on another plant.
+  kinematic_drive drive;
   bool operator==(const room_entity &) const = default;
 };
 

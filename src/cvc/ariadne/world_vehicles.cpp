@@ -787,6 +787,12 @@ struct WorldVehicles::impl {
   bool posing = false;     // and moved the `pose` entities in it
   int every = 1;           // physics steps per nav tick
   std::uint64_t steps = 0; // physics steps since the navigator was built
+  // The clock tick the step being taken ends on (before_step(clock_tick)), and the clock ticks the
+  // navigator ticks on (tick % every), once it has ticked on one.
+  bool have_clock = false;
+  std::uint64_t clock_tick = 0;
+  bool have_phase = false;
+  std::uint64_t phase = 0;
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
   bool wander = true;      // nav@1 draws another goal at each one it reaches
   bool avoid = true;       // vehicles steer around each other (set_avoid)
@@ -3371,10 +3377,25 @@ void WorldVehicles::before_step() {
   }
   if (!d.ready)
     return;
-  if (d.steps++ % static_cast<std::uint64_t>(d.every) == 0)
+  if (d.steps++ % static_cast<std::uint64_t>(d.every) == 0) {
     d.navigator_tick();
+    if (d.have_clock) {
+      const std::uint64_t phase = d.clock_tick % static_cast<std::uint64_t>(d.every);
+      if (!d.have_phase || phase != d.phase) {
+        d.phase = phase;
+        d.have_phase = true;
+        ++d.rev; // the room's entities carry it (kinematics)
+      }
+    }
+  }
   d.before_world_step();
   d.stepping = true;
+}
+
+void WorldVehicles::before_step(std::uint64_t clock_tick) {
+  _impl->have_clock = true;
+  _impl->clock_tick = clock_tick;
+  before_step();
 }
 
 void WorldVehicles::after_step() {
@@ -3500,6 +3521,36 @@ double WorldVehicles::tick_seconds() const {
 }
 
 int WorldVehicles::steps_per_tick() const { return _impl->ready ? _impl->every : 0; }
+
+bool WorldVehicles::kinematics(std::uint64_t id, kinematic_drive &out) const {
+  const impl &d = *_impl;
+  if (!d.ready || !d.have_phase)
+    return false;
+  for (const impl::entity &e : d.ents) {
+    if (e.id != id)
+      continue;
+    const impl::fleet *f = d.fleet_of(e);
+    if (!f || f->plant != "kinematic" || d.index(e) < 0)
+      return false;
+    // As kinematics() and the navigator's config give them to nav (in metres here).
+    kinematic_drive k;
+    k.wheelbase = e.desc.wheelbase();
+    k.lock = d.cfg.veh.delta_max;
+    k.vmax = e.desc.max_speed > 0.0 ? e.desc.max_speed : 30.0;
+    k.a_max = 0.8 * e.desc.max_accel;
+    k.allow_reverse = d.cfg.veh.allow_reverse;
+    k.rear_x = impl::rear_axle_x(e.desc);
+    k.tick_steps = d.every;
+    k.nsub = std::max(1, d.cfg.veh.nsub);
+    k.phase = d.phase;
+    k.max_steer = e.desc.max_steer;
+    k.max_accel = e.desc.max_accel;
+    k.max_decel = e.desc.max_decel;
+    out = k;
+    return true;
+  }
+  return false;
+}
 
 void WorldVehicles::set_tick(double seconds) {
   if (!(seconds > 0.0) || !std::isfinite(seconds))
