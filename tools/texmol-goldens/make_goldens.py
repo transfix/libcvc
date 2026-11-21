@@ -112,10 +112,12 @@ def build(texmol, work):
     raise SystemExit("blur_legacy was not built in " + bdir)
 
 
-def sha256(path):
+def sha256(path, text=False):
+    """The file's SHA-256; a text file's with CRLF read as LF, as git checks it out on Windows."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        h.update(f.read())
+        data = f.read()
+    h.update(data.replace(b"\r\n", b"\n") if text else data)
     return h.hexdigest()
 
 
@@ -184,12 +186,12 @@ def main():
             "texmol": sha,
             "case": case,
             "input": "examples/data/molecules/1grl.pdb",
-            "input_sha256": sha256(PDB),
+            "input_sha256": sha256(PDB, text=True),
             "resolution": resolution,
             "blobbiness": blobbiness,
             "density_sha256": sha256(prefix + ".f32"),
-            "grid_sha256": sha256(prefix + ".grid.txt"),
-            "atoms_sha256": sha256(os.path.join(out, "1grl.atoms.txt")),
+            "grid_sha256": sha256(prefix + ".grid.txt", text=True),
+            "atoms_sha256": sha256(os.path.join(out, "1grl.atoms.txt"), text=True),
             "made_by": "tools/texmol-goldens/make_goldens.py",
             "platform": describe_platform(),
         }
@@ -203,7 +205,7 @@ def main():
     problems = []
     for name in ["1grl.atoms.txt"] + [c + ".grid.txt" for c in sorted(CASES)]:
         with open(os.path.join(out, name), "rb") as f, open(os.path.join(args.out, name), "rb") as g:
-            if f.read() != g.read():
+            if f.read().replace(b"\r\n", b"\n") != g.read().replace(b"\r\n", b"\n"):
                 problems.append(name + " differs")
     for case in sorted(CASES):
         why = densities_differ(os.path.join(out, case + ".f32"), os.path.join(args.out, case + ".f32"))
