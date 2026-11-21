@@ -1180,6 +1180,14 @@ void holon::world_step_client(const std::string &self, const avatar_intent &in,
   for (const auto &kv : _participants)
     if (!kv.second.local && _world->has_avatar(kv.first))
       _world->move_kinematic(kv.first, display_pose(kv.first));
+  // So are the entities held (hold_entity): each on from where it was shown, along its velocity.
+  for (const auto &kv : _held) {
+    const held &e = kv.second;
+    const double t = static_cast<double>(e.steps) * _clock.fixed_dt();
+    _world->hold_obstacle(
+        kv.first, e.half_extents,
+        cvc::physics::pose{e.at.position + e.at.linear_velocity * t, e.at.rotation});
+  }
   _world->drive(self, veto(in, _applied.policy));
   _world->set_time(double(tick) * _clock.fixed_dt()); // the wind's gusts at the tick's time
   _world->step();
@@ -1280,6 +1288,8 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           continue;
         self->second.render_prev = _world->state(self->first);
         self->second.have_render_prev = true;
+        for (auto &kv : _held)
+          ++kv.second.steps;
         participant::logged e;
         e.reserve_before = _world->energy(self->first).reserve;
         world_step_client(self->first, self->second.intent, tick);
@@ -1322,6 +1332,40 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
     }
     // Peers integrate nothing: they are driven by apply_authoritative samples.
   }
+}
+
+bool holon::hold_entity(std::uint64_t id, const std::array<double, 3> &size,
+                        const cvc::physics::body_state &at) {
+  if (_role != holon_role::client || !_world)
+    return false;
+  for (double d : size)
+    if (!std::isfinite(d) || d <= 0.0)
+      return false;
+  held &e = _held[id];
+  e.half_extents = cvc::physics::vec3{0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
+  e.at = at;
+  e.steps = 0;
+  _world->hold_obstacle(id, e.half_extents, cvc::physics::pose{at.position, at.rotation});
+  return true;
+}
+
+void holon::release_entity(std::uint64_t id) {
+  if (_held.erase(id) && _world)
+    _world->remove_obstacle(id);
+}
+
+std::vector<std::uint64_t> holon::held_entities() const {
+  std::vector<std::uint64_t> ids;
+  for (const auto &kv : _held)
+    ids.push_back(kv.first);
+  return ids;
+}
+
+bool holon::held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const {
+  if (!_held.count(id) || !_world || !_world->has_obstacle(id))
+    return false;
+  out = _world->obstacle_state(id);
+  return true;
 }
 
 void holon::on_present(const cvc::clock_driver::clock_frame &f) {

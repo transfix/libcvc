@@ -1461,9 +1461,11 @@ struct ConferenceSession {
       cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap, entities_.get());
     for (const auto &[tick, samples] : lane_samples) // decoded (and acked) on the pose lane
       cvc::ariadne::apply_pose_samples(*holon_, samples, tick, entities_.get());
-    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    // The entities first: client_pump holds each where it is shown this frame, so the walk we
+    // predict meets the vehicles we see (ARIADNE_WORLDS.md section 18.5).
     if (entities_)
       entities_->pump(*app_, room_, f.wall_dt);
+    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get());
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())
       avatar_panel_.publish(*app_, prefix_);

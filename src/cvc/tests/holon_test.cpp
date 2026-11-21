@@ -1530,3 +1530,86 @@ TEST(HolonPhysicsTest, TheWindPushesADynamicAvatar) {
   EXPECT_LT(std::fabs(breeze), 0.05) << "the walker holds against a breeze";
   EXPECT_GT(gale, 1.0) << "a gale pushes it past what the walker holds";
 }
+
+// The same world on a client (ARIADNE_WORLDS.md section 18.5, OW5): a vehicle the client shows,
+// held in its world as a kinematic box (holon::hold_entity), stops the walk it predicts at the
+// box, as the relay's world stops it at the car; a client that does not hold it walks through.
+// Only a client with physics holds one, and only a box with a size.
+TEST(HolonPhysicsTest, AHeldEntityStopsTheWalkWePredict) {
+  holon client(holon_role::client, physics_config());
+  holon without(holon_role::client, physics_config());
+  if (!client.physics() || !without.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  const std::array<double, 3> humvee{4.5, 2.0, 1.5};
+  body_state car;
+  car.position = vec3{0.0, 5.0, 0.75}; // across the walk, 5 m off the cube
+  holon server(holon_role::server, physics_config());
+  EXPECT_FALSE(server.hold_entity(7, humvee, car)) << "the server's vehicles are its world's";
+  holon kinematic(holon_role::client);
+  EXPECT_FALSE(kinematic.hold_entity(7, humvee, car)) << "no world to hold it in";
+  EXPECT_FALSE(client.hold_entity(7, {4.5, 0.0, 1.5}, car)) << "no size";
+
+  for (holon *h : {&client, &without}) {
+    h->set_statics(room_statics(), 1);
+    h->add_participant("A", true, at(-6.0, 5.0));
+  }
+  avatar_intent walk;
+  walk.move = vec3{2.0, 0.0, 0.0};
+  client.set_intent("A", walk);
+  without.set_intent("A", walk);
+  for (int f = 0; f < 720; ++f) { // 6 s at 2 m/s: 12 m, through where the car stands
+    ASSERT_TRUE(client.hold_entity(7, humvee, car)); // the host holds it every frame
+    run(client, 1);
+    run(without, 1);
+  }
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{7});
+  const double face = -0.5 * humvee[0] - 0.5 * client.body().width;
+  std::printf("  walked into a held car: stopped at x %.2f (its face at %.2f); unheld, at %.2f\n",
+              client.state("A").position.x, face, without.state("A").position.x);
+  EXPECT_LT(client.state("A").position.x, face + 0.05) << "stopped at the car";
+  EXPECT_GT(client.state("A").position.x, face - 0.5) << "against it";
+  EXPECT_GT(without.state("A").position.x, 4.0) << "a client that does not hold it walks through";
+  body_state box;
+  ASSERT_TRUE(client.held_entity_state(7, box));
+  EXPECT_NEAR(box.position.x, 0.0, 1e-6) << "the car is where it was held, not pushed";
+
+  client.release_entity(7);
+  EXPECT_TRUE(client.held_entities().empty());
+  EXPECT_FALSE(client.held_entity_state(7, box));
+  run(client, 720);
+  EXPECT_GT(client.state("A").position.x, 4.0) << "released, nothing in the way";
+}
+
+// A held vehicle on the move carries on along its velocity through the frame's steps and pushes
+// the avatar we predict out of its way, as the relay's car shoves the avatar.
+TEST(HolonPhysicsTest, AHeldEntityOnTheMovePushesTheAvatar) {
+  holon client(holon_role::client, physics_config());
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  std::vector<cvc::ariadne::avatar_static> floor = room_statics();
+  floor.resize(1); // the floor alone, and wider: nothing to pin the avatar against, no edge
+  floor[0].half_extents = vec3{50.0, 50.0, 0.1};
+  client.set_statics(floor, 1);
+  client.add_participant("A", true, at(0.0, 5.0));
+  run(client, 30);
+  const std::array<double, 3> humvee{4.5, 2.0, 1.5};
+  body_state car;
+  car.position = vec3{-6.0, 5.0, 0.75};
+  car.linear_velocity = vec3{3.0, 0.0, 0.0};
+  const double dt = client.clock().fixed_dt();
+  // The host holds it each frame where its playout shows it; frames of 2 steps (60 Hz), so the
+  // steps between holds carry it on along its velocity.
+  for (int f = 0; f < 360; ++f) { // 6 s at 3 m/s: 18 m
+    body_state shown = car;
+    shown.position = car.position + car.linear_velocity * (2.0 * dt * f);
+    ASSERT_TRUE(client.hold_entity(3, humvee, shown));
+    client.advance(2.0 * dt);
+  }
+  body_state box;
+  ASSERT_TRUE(client.held_entity_state(3, box));
+  std::printf("  a held car at 3 m/s: at x %.2f, the avatar pushed to x %.2f\n", box.position.x,
+              client.state("A").position.x);
+  EXPECT_GT(box.position.x, 10.0) << "it drove on";
+  EXPECT_GT(client.state("A").position.x, 5.0) << "and pushed the avatar along";
+  EXPECT_NEAR(client.state("A").position.z, 0.0, 0.1) << "on its feet";
+}

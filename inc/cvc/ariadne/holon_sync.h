@@ -211,8 +211,13 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // peer is, and predicted again once it is out. With physics, both pumps (re)load the holon's
 // statics from the room scene whenever its revision changes, and both take each of the room's rules
 // sections (room_rules.h) whenever its stamp moves (holon::set_physics and the rest).
+//
+// With ENTITIES (the room's entities, pumped this frame first) and physics, every entity it shows
+// that SELF_PID neither drives nor is (section 18.5, OW5) is held in the holon's world as a
+// kinematic box where it is shown (holon::hold_entity), so the avatar we predict bumps into the
+// room's vehicles and is pushed by them as on the relay; one no longer shown is released.
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                 double wall_dt = -1.0);
+                 double wall_dt = -1.0, const entity_playout *entities = nullptr);
 
 // A pose snapshot from the relay (room_pose_relay; transports' set_on_pose_snapshot): decode it
 // with this connection's DECODER and give each participant the holon already has its sample, as
@@ -259,6 +264,8 @@ public:
   std::vector<std::uint64_t> shown() const;
   // Where entity `id` is shown this frame; false before its first sample.
   bool pose(std::uint64_t id, cvc::physics::pose &out) const;
+  // ... and its velocity, its newest sample's.
+  bool state(std::uint64_t id, cvc::physics::body_state &out) const;
   // Bumps whenever the section's entities or the ones shown change (a view rebuilds on it).
   std::uint64_t revision() const { return _rev; }
   holon &playout() { return *_holon; }
