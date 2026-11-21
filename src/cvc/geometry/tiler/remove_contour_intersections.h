@@ -24,9 +24,12 @@
 #ifndef __REMOVE_CONTOUR_INTERSECTIONS_H__
 #define __REMOVE_CONTOUR_INTERSECTIONS_H__
 
+#include "Contour.h"
 #include "common.h"
+#include "stepping.h"
 
 #include <list>
+#include <vector>
 
 namespace cvc::tiler {
 
@@ -35,6 +38,13 @@ namespace cvc::tiler {
 template <typename Contour_iter, typename Out_iter>
 void remove_contour_intersections(Contour_iter begin, Contour_iter end, Number_type delta,
                                   Out_iter out, tiler_context &ctx);
+
+// The same, resumable: a contour dilated or eroded, or a pair of contours differenced, at a time,
+// each charged by its vertices (stepping.h). The new contours are appended to `out`, in the order
+// remove_contour_intersections gives them. `contours` and `out` must outlive the task.
+step_task remove_contour_intersections_steps(const std::vector<Contour_handle> &contours,
+                                             Number_type delta, std::list<Contour_handle> &out,
+                                             tiler_context &ctx);
 
 // template <typename Contour_iter, typename Out_iter, typename Failure_iter>
 // void remove_contour_intersections2(Contour_iter begin, Contour_iter end,

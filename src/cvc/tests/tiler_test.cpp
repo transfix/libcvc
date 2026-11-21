@@ -758,6 +758,36 @@ TEST(Tiler, TheCapsAndBranchesStepToo) {
   cvc::test::run_t7(t);
 }
 
+// The stack P4's cooperative demo tiles (cvcgl_contour_lab's cooperative(): three 64-vertex
+// circles a slice, curated at the default delta), on 12 slices. Its curating and augmenting once
+// stepped a whole slice, or pair of slices, per unit: frames of 50 to 160 ms in place of §1.9's
+// 4. Charged by their vertices (tiler/stepping.h), every phase's steps stay near the budget.
+TEST(Tiler, ManyContourVerticesStepByVertex) {
+  SKIP_WITHOUT_PLANAR();
+  cvc::contour_stack s;
+  s.z_spacing = 0.5;
+  for (int k = 0; k < 12; ++k)
+    for (int c = 0; c < 3; ++c) {
+      std::vector<double> xy;
+      const double cx = 8.0 * c + 0.05 * k, cy = 0.03 * k, r = 2.0 + 0.25 * std::sin(0.3 * k + c);
+      for (int i = 0; i < 64; ++i) {
+        const double t = 0.2 * k + 2.0 * pi * i / 64;
+        xy.push_back(cx + r * std::cos(t));
+        xy.push_back(cy + r * std::sin(t));
+      }
+      s.add(k, "c" + std::to_string(c), xy);
+    }
+  cvc::test::t7_subject<cvc::tile_stepper, cvc::tile_result> t;
+  t.name = "tiler 3 x 12 x 64";
+  t.make = [&] { return std::make_unique<cvc::tile_stepper>(s); };
+  t.take = [](cvc::tile_stepper &st) { return st.take(); };
+  t.equal = [](const cvc::tile_result &a, const cvc::tile_result &b) { return same(a, b); };
+  t.blocking = [&] { return cvc::tile_contours(s); };
+  const cvc::test::t7_report r = cvc::test::run_t7(t);
+  for (const char *phase : {"snapping", "curating", "augmenting", "tiling", "assembling"})
+    EXPECT_NE(std::find(r.phases.begin(), r.phases.end(), phase), r.phases.end()) << phase;
+}
+
 TEST(Tiler, TheLabelNamesTheSlicesBeingTiled) {
   SKIP_WITHOUT_PLANAR();
   cvc::tile_stepper st(cylinder(4));
