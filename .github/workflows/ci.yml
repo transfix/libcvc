@@ -133,12 +133,15 @@ jobs:
           fi
           "$py" .github/scripts/recipe-deps-parity.py
 
-      # A package built here (ari*, arisrv*, pycvc*, cvcgl*, cvc-cli*, ...) loads only the libcvc
-      # major it was built against (libcvc.so.4), but an unversioned dependency lets
-      # `cvcpkg install` pick any: arisrvx 3.7.13 took libcvc-cuda 4.0.0 and did not load. Every
-      # dependency on one of these recipes, or a name one provides, pins "^<major>.0" from
-      # CMakeLists.txt, so a major bump moves the pins with upstream_version. A step of this job.
-      - name: Dependencies on libcvc's own packages pin its major version
+      # A package built here (ari*, arisrv*, pycvc*, cvcgl*, cvc-cli*, ...) links the libcvc,
+      # cvcgl and pycvc of its own release, and their ABI changes between patch releases. A wider
+      # range lets `cvcpkg install` mix releases: arisrvx 3.7.13 took libcvc-cuda 4.0.0, and while
+      # 4.0.1 was half-published GRL-SNAM's CI got pycvc-gl 4.0.1 with cvcgl 4.0.0 (undefined
+      # symbol) and pycvc 4.0.0 with libcvc 4.0.1 (segfaults). Every dependency on one of these
+      # recipes, or a name one provides, pins "==<VERSION>" from CMakeLists.txt (any +cvc.N), so
+      # cvcpkg's resolver falls back to the last release that is all on the catalog.
+      # bump-version.py moves the pins with upstream_version. A step of this job.
+      - name: Dependencies on libcvc's own packages pin its release
         shell: bash
         run: |
           set -euo pipefail
@@ -2610,6 +2613,7 @@ jobs:
         skeleton_test contour_stack_test point_classes_test planar_test tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
+        volume_grid_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

@@ -28,8 +28,8 @@ Checked against master a17ca3f0 (libcvc 3.7.9).
 | Wire frame | `cvc::media_frame`: origin pid, `stream_id`, codec, w/h, seq, pts, rate/channels, one whole frame of payload. The same struct on WS and gRPC. | `inc/cvc/media/media_frame.h` |
 | Stream names | `stream_id` is a literal **`"camera"` or `"mic"`**. | same, and every consumer below |
 | Publisher | The client forwards exactly two streams, `cam_token` (latest frame) and `mic_token` (every chunk), and re-stamps each frame with one host clock reading per pump. | `src/arigl/main.cpp` (`pubs_`, `forward_frame`) |
-| Receiver | `peers_` is keyed by pid alone: one video proxy and one audio queue per peer. Video waits for that peer's mic clock (A/V sync). | `src/arigl/main.cpp` (`drain_inbox`, `sync_and_show`) |
-| Mixer | One output for all peers: **mono**, 48 kHz, 1024-frame chunks. Opus packets are re-chunked to fit. | `src/arigl/main.cpp` (`mix_audio`) |
+| Receiver | `peers_` is keyed by pid alone: one video proxy and one jitter buffer per peer. Video waits for that peer's mic clock (A/V sync). | `src/arigl/main.cpp` (`drain_inbox`, `sync_and_show`) |
+| Mixer | One output for all peers: **mono**, 48 kHz, a jitter buffer per peer keyed by pid, pulled by the device. | `inc/cvc/media/voice_mixer.h`; `src/arigl/main.cpp` (`open_voice_output`) |
 | Video codec | **MJPEG only.** Every frame stands alone, so the relay can drop any frame and re-encode smaller rungs. | `inc/cvc/media/media_rungs.h` |
 | Relay policy | The AOI tiers and the rungs match the literal `"camera"` + `mjpeg`. | `room_aoi.cpp:278`, `media_rungs.cpp:39` |
 | Camera off | A flag (`participants.<pid>.video.off`), not frames. | `room_net.h` |

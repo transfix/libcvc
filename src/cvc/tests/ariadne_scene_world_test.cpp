@@ -2150,7 +2150,8 @@ TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
   EXPECT_LE(rx, 201.0);
   EXPECT_FALSE(v->move_rally("city", 9, 0.0, 0.0));
   EXPECT_FALSE(v->move_rally("town", 0, 0.0, 0.0));
-  art.step_world(240);
+  // 3 s, whatever the clock's quantum: from rest they are ~9 m east by then (4.4 m at 2 s).
+  art.step_world(static_cast<int>(std::lround(3.0 / cvc::kSimQuantum)));
   art.drain();
   EXPECT_GT(fleet_mean_x(v->entities()), x0 + 5.0); // under way, east
 
