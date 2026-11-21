@@ -2641,6 +2641,46 @@ TEST(AriadneRuntime, SliderWritesWhileDraggedUnlessCommitOnRelease) {
   EXPECT_EQ(cvc::state::instance(app)("demo.held").value(), "40");
 }
 
+// range: key: a slider's range is its key's "min" and "max" properties (a parameter table's, or
+// what a node keeps there), read each frame, each falling back to lo: / hi: while the key has none.
+TEST(AriadneRuntime, SliderRangeFromTheKeysProperties) {
+  struct RangeBackend : MockBackend {
+    std::map<std::string, std::pair<double, double>> range;
+    IntEdit slider_int(const char *l, const char *k, int cur, int lo, int hi) override {
+      range[l] = {lo, hi};
+      return MockBackend::slider_int(l, k, cur, lo, hi);
+    }
+    DoubleEdit slider_double(const char *l, const char *k, double cur, double lo, double hi,
+                             const char *fmt) override {
+      range[l] = {lo, hi};
+      return MockBackend::slider_double(l, k, cur, lo, hi, fmt);
+    }
+  };
+  cvc::app app;
+  Runtime rt(app, "");
+  RangeBackend mb;
+  rt.set_backend(&mb);
+  Widget plane = slider_int("Plane", "grid.slice.z", 0, 100, 0);
+  plane.range_from_key = true;
+  Widget scale = slider_float("Scale", "grid.scale", 0.0, 1.0, 0.5);
+  scale.range_from_key = true;
+  rt.set_root(group({plane, scale, slider_int("Fixed", "grid.fixed", 0, 100, 0)}));
+  rt.render();
+  EXPECT_EQ(mb.range["Plane"], std::make_pair(0.0, 100.0)) << "no properties yet: lo: and hi:";
+  cvc::state &z = cvc::state::instance(app)("grid.slice.z");
+  z.property("min", "0");
+  z.property("max", "63");
+  cvc::state::instance(app)("grid.scale").property("max", "10");
+  cvc::state::instance(app)("grid.fixed").property("max", "7");
+  rt.render();
+  EXPECT_EQ(mb.range["Plane"], std::make_pair(0.0, 63.0));
+  EXPECT_EQ(mb.range["Scale"], std::make_pair(0.0, 10.0)) << "max from the key, min from lo:";
+  EXPECT_EQ(mb.range["Fixed"], std::make_pair(0.0, 100.0)) << "without range: key, lo: and hi:";
+  z.property("max", "127"); // the node loaded a bigger volume
+  rt.render();
+  EXPECT_EQ(mb.range["Plane"], std::make_pair(0.0, 127.0));
+}
+
 // Key names compare across spellings: SDL's ("Left Shift", "Space", "PageDown") and VTK's
 // ("Shift_L", "space", "Next"); letters fold to lower case.
 TEST(AriadneKeys, CanonicalNamesMatchAcrossSpellings) {

@@ -83,50 +83,6 @@ void to_json(const ari::Value &v, std::string &out) {
   }
 }
 
-// The node's transfer_function: prop as a model: `preset:` (grayscale when absent), then each of
-// the model's own keys it gives replacing the preset's.
-cvc::tf::model model_of(const ari::SceneNode &n, std::vector<std::string> *warnings) {
-  const ari::Value *t = n.props.find("transfer_function");
-  cvc::tf::model m = cvc::tf::model::preset("grayscale");
-  if (!t)
-    return m;
-  if (!t->is_map()) {
-    warn(warnings, "ari: scene node '" + n.id + "': transfer_function: must be a map -- ignored");
-    return m;
-  }
-  if (t->has("preset"))
-    m = cvc::tf::model::preset(t->str("preset"));
-  ari::Value rest;
-  rest.kind = ari::Value::Kind::Map;
-  for (const auto &e : t->entries)
-    if (e.first != "preset")
-      rest.entries.push_back(e);
-  if (rest.entries.empty())
-    return m;
-  std::string json;
-  to_json(rest, json);
-  cvc::tf::model given;
-  std::string err;
-  if (!cvc::tf::from_string(json, given, &err)) {
-    warn(warnings, "ari: scene node '" + n.id + "': transfer_function: " + err);
-    return m;
-  }
-  if (rest.has("color"))
-    m.color = given.color;
-  if (rest.has("alpha"))
-    m.alpha = given.alpha;
-  if (rest.has("isocontours"))
-    m.isocontours = given.isocontours;
-  if (rest.has("domain"))
-    m.domain = given.domain;
-  if (rest.has("opacity_cubed"))
-    m.opacity_cubed = given.opacity_cubed;
-  if (rest.has("resolution"))
-    m.resolution = given.resolution;
-  m.normalize();
-  return m;
-}
-
 // The props that seed <node>.slice.*: axis (by any name parse_slice_axis takes), index, filter,
 // opaque, overlay_offset.
 void seed_keys(VolumeSliceNode &vn, const ari::SceneNode &n, std::vector<std::string> *warnings) {
@@ -266,7 +222,7 @@ std::shared_ptr<GraphicsNode> realize_volume_slice(SceneGraph &sg, const ari::Sc
     bound.max(src->max());
   }
   tf_binding_options opt;
-  opt.seed = model_of(n, warnings);
+  opt.seed = transfer_function_prop(n, warnings);
   attach_transfer_function(out, vn, tf_target::volume_slice, bound, opt, warnings);
 
   vn->setSource(src); // cuts and colours the first plane now
@@ -279,6 +235,48 @@ std::shared_ptr<GraphicsNode> realize_volume_slice(SceneGraph &sg, const ari::Sc
 }
 
 } // namespace
+
+cvc::tf::model transfer_function_prop(const ari::SceneNode &n, std::vector<std::string> *warnings) {
+  const ari::Value *t = n.props.find("transfer_function");
+  cvc::tf::model m = cvc::tf::model::preset("grayscale");
+  if (!t)
+    return m;
+  if (!t->is_map()) {
+    warn(warnings, "ari: scene node '" + n.id + "': transfer_function: must be a map -- ignored");
+    return m;
+  }
+  if (t->has("preset"))
+    m = cvc::tf::model::preset(t->str("preset"));
+  ari::Value rest;
+  rest.kind = ari::Value::Kind::Map;
+  for (const auto &e : t->entries)
+    if (e.first != "preset")
+      rest.entries.push_back(e);
+  if (rest.entries.empty())
+    return m;
+  std::string json;
+  to_json(rest, json);
+  cvc::tf::model given;
+  std::string err;
+  if (!cvc::tf::from_string(json, given, &err)) {
+    warn(warnings, "ari: scene node '" + n.id + "': transfer_function: " + err);
+    return m;
+  }
+  if (rest.has("color"))
+    m.color = given.color;
+  if (rest.has("alpha"))
+    m.alpha = given.alpha;
+  if (rest.has("isocontours"))
+    m.isocontours = given.isocontours;
+  if (rest.has("domain"))
+    m.domain = given.domain;
+  if (rest.has("opacity_cubed"))
+    m.opacity_cubed = given.opacity_cubed;
+  if (rest.has("resolution"))
+    m.resolution = given.resolution;
+  m.normalize();
+  return m;
+}
 
 void register_volume_slice_node_type(cvc::app &app) {
   register_scene_node_type(app, "volume_slice", realize_volume_slice);

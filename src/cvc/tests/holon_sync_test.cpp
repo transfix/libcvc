@@ -21,9 +21,11 @@
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_avatar.h>
+#include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_rules.h>
 #include <cvc/ariadne/conference/room_scene.h>
+#include <cvc/ariadne/controls.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/section.h>     // section_epoch
@@ -35,6 +37,9 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
+#include <set>
+#include <string>
+#include <vector>
 
 using cvc::ariadne::avatar_intent;
 using cvc::ariadne::holon;
@@ -1078,4 +1083,205 @@ TEST(HolonSyncTest, RoomStaticsComeFromTheRoomScene) {
   EXPECT_DOUBLE_EQ(cube.half_extents.z, 0.5);
   EXPECT_DOUBLE_EQ(cube.center.z, 0.5);
   EXPECT_TRUE(cvc::ariadne::room_holon_config().physics);
+}
+
+// The drive axes and the jump on the wire (section 18.6): a participant's intent carries them,
+// shares for the drive axes ("nan" for none), and the jump held or not.
+TEST(HolonSyncTest, TheDriveAxesAndTheJumpRideTheIntent) {
+  cvc::app app;
+  const std::string room = "garage";
+  avatar_intent in;
+  in.steer = -0.25;
+  in.throttle = -1.0;
+  in.brake = 0.5;
+  in.jump = true;
+  cvc::ariadne::write_intent(app, room, "ann", in, 42);
+  avatar_intent out;
+  std::uint64_t tick = 0;
+  ASSERT_TRUE(cvc::ariadne::read_intent(app, room, "ann", out, &tick));
+  EXPECT_EQ(tick, 42u);
+  EXPECT_DOUBLE_EQ(out.steer, -0.25);
+  EXPECT_DOUBLE_EQ(out.throttle, -1.0);
+  EXPECT_DOUBLE_EQ(out.brake, 0.5);
+  EXPECT_TRUE(out.jump);
+  cvc::ariadne::write_intent(app, room, "ann", avatar_intent{}, 43);
+  ASSERT_TRUE(cvc::ariadne::read_intent(app, room, "ann", out, &tick));
+  EXPECT_TRUE(std::isnan(out.steer) && std::isnan(out.throttle) && std::isnan(out.brake))
+      << "a walker's intent has none";
+  EXPECT_FALSE(out.jump);
+
+  // The holon's veto holds the shares to their ranges.
+  holon h(holon_role::server);
+  avatar_intent wild;
+  wild.steer = 3.0;
+  wild.throttle = -2.0;
+  wild.brake = -1.0;
+  const avatar_intent held = h.sanitize_intent(wild);
+  EXPECT_DOUBLE_EQ(held.steer, 1.0);
+  EXPECT_DOUBLE_EQ(held.throttle, -1.0);
+  EXPECT_DOUBLE_EQ(held.brake, 0.0);
+}
+
+// Asking to get in (section 18.6): each ask has the next seq, the server answers each once in
+// drive_status, and asking again after a refusal is a new ask. With no world attached the server
+// refuses, and says why.
+TEST(HolonSyncTest, AnAskToDriveIsAnsweredOnce) {
+  cvc::app app;
+  const std::string room = "garage";
+  cvc::ariadne::conference::room_join(app, room, "ann");
+  holon server(holon_role::server, cvc::ariadne::room_holon_config());
+  cvc::ariadne::server_pump(server, app, room, 1.0 / 60.0);
+  EXPECT_EQ(cvc::ariadne::read_drive_status(app, room, "ann").seq, 0u) << "no ask, no answer";
+  EXPECT_EQ(cvc::ariadne::request_drive(app, room, "ann", 7), 1u);
+  cvc::ariadne::server_pump(server, app, room, 1.0 / 60.0);
+  cvc::ariadne::drive_status st = cvc::ariadne::read_drive_status(app, room, "ann");
+  EXPECT_EQ(st.seq, 1u);
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("no world"), std::string::npos) << st.why;
+  EXPECT_EQ(cvc::ariadne::read_driving(app, room, "ann"), 0u);
+  // Answered once: the status stays as it is while the ask does.
+  cvc::state &status =
+      app.root()(cvc::ariadne::conference::room_participant_path(room, "ann") + ".drive_status");
+  status.value(std::string("1 refused: kept"));
+  cvc::ariadne::server_pump(server, app, room, 1.0 / 60.0);
+  EXPECT_EQ(cvc::ariadne::read_drive_status(app, room, "ann").why, "kept");
+  // A new ask, and getting out, which needs nothing.
+  EXPECT_EQ(cvc::ariadne::request_drive(app, room, "ann", 0), 2u);
+  cvc::ariadne::server_pump(server, app, room, 1.0 / 60.0);
+  st = cvc::ariadne::read_drive_status(app, room, "ann");
+  EXPECT_EQ(st.seq, 2u);
+  EXPECT_TRUE(st.ok);
+}
+
+// The control schemes (section 18.6): walk, car and boat, each with its own bindings; a car brakes
+// and reverses on keys of their own, a boat has no brake. The resolver ramps the steering, fires
+// a hold once per press, and does not let the E that got you in get you straight back out.
+TEST(ControlSchemes, EachSchemeHasItsOwnBindings) {
+  using cvc::ariadne::control_resolver;
+  using cvc::ariadne::control_scheme;
+  const control_scheme walk = cvc::ariadne::default_control_scheme("walk");
+  const control_scheme car = cvc::ariadne::default_control_scheme("car");
+  const control_scheme boat = cvc::ariadne::default_control_scheme("boat");
+  ASSERT_EQ(walk.id, "walk");
+  ASSERT_NE(walk.find("jump"), nullptr);
+  EXPECT_EQ(walk.find("jump")->binding.keys, (std::vector<std::string>{"Space"}));
+  EXPECT_EQ(walk.find("strafe_left")->binding.keys, (std::vector<std::string>{"A", "Left"}));
+  EXPECT_EQ(car.find("throttle")->binding.keys, (std::vector<std::string>{"W", "Up"}));
+  EXPECT_EQ(car.find("reverse")->binding.keys, (std::vector<std::string>{"S", "Down"}));
+  EXPECT_EQ(car.find("brake")->binding.keys, (std::vector<std::string>{"Space"}));
+  EXPECT_EQ(car.find("strafe_left"), nullptr) << "a car can't strafe";
+  EXPECT_EQ(boat.find("brake"), nullptr) << "a boat has no brake";
+  EXPECT_NE(boat.find("reverse"), nullptr);
+  EXPECT_DOUBLE_EQ(car.find("interact")->binding.hold, 0.4);
+  EXPECT_TRUE(cvc::ariadne::default_control_scheme("hovercraft").id.empty());
+
+  std::set<std::string> down;
+  const control_resolver::held_fn held = [&](const std::string &k) { return down.count(k) != 0; };
+  control_resolver r(walk);
+  // E held: nothing until 0.4 s, then once.
+  down = {"E"};
+  r.update(held, 0.2);
+  EXPECT_FALSE(r.fired("interact"));
+  EXPECT_NEAR(r.progress("interact"), 0.5, 1e-9);
+  r.update(held, 0.25);
+  EXPECT_TRUE(r.fired("interact"));
+  r.update(held, 1.0);
+  EXPECT_FALSE(r.fired("interact")) << "once per press";
+  // In the car now, E still held: let go first.
+  r.set_scheme(car);
+  r.update(held, 1.0);
+  EXPECT_FALSE(r.fired("interact"));
+  EXPECT_DOUBLE_EQ(r.progress("interact"), 0.0);
+  down.clear();
+  r.update(held, 0.1);
+  down = {"E"};
+  r.update(held, 0.3);
+  EXPECT_FALSE(r.fired("interact")) << "let go before the hold: nothing";
+  down.clear();
+  r.update(held, 0.1);
+  EXPECT_DOUBLE_EQ(r.progress("interact"), 0.0) << "and the hold starts over";
+  // The steering ramps to the lock over 0.25 s; the throttle is at once.
+  down = {"A", "W"};
+  r.update(held, 0.1);
+  avatar_intent in;
+  r.drive_axes(in);
+  EXPECT_NEAR(in.steer, 0.4, 1e-9);
+  EXPECT_DOUBLE_EQ(in.throttle, 1.0);
+  EXPECT_DOUBLE_EQ(in.brake, 0.0);
+  r.update(held, 0.5);
+  r.drive_axes(in);
+  EXPECT_DOUBLE_EQ(in.steer, 1.0);
+  down = {"S", "Space"};
+  r.update(held, 0.1);
+  r.drive_axes(in);
+  EXPECT_NEAR(in.steer, 0.6, 1e-9) << "back toward straight as it ramped out";
+  EXPECT_DOUBLE_EQ(in.throttle, -1.0) << "reverse";
+  EXPECT_DOUBLE_EQ(in.brake, 1.0) << "and the brake, a key of its own";
+  // A rebinding takes effect at once.
+  r.set_keys("brake", {"B"});
+  r.update(held, 0.1);
+  r.drive_axes(in);
+  EXPECT_DOUBLE_EQ(in.brake, 0.0);
+}
+
+// While the relay says we drive (section 18.6), our pose is the vehicle's, which we do not
+// predict: client_pump plays it out from the relay's samples as a peer's, and predicts it again
+// once we are out.
+TEST(HolonSyncTest, OurOwnPoseIsPlayedOutWhileWeDrive) {
+  cvc::app app;
+  const std::string room = "garage";
+  cvc::ariadne::conference::room_join(app, room, "ann");
+  body_state at;
+  at.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", at, 100);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  ASSERT_TRUE(client.has_participant("ann"));
+  EXPECT_TRUE(client.is_local("ann")) << "walking: predicted";
+  cvc::state &driving =
+      app.root()(cvc::ariadne::conference::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("5"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_TRUE(client.has_participant("ann"));
+  EXPECT_FALSE(client.is_local("ann")) << "driving: played out";
+  driving.value(std::string("0"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_TRUE(client.is_local("ann")) << "out: predicted again";
+}
+
+// The vehicle the prompt names (section 18.6): the nearest drivable one within its reach of us,
+// one ahead of us before one behind; never one that is not drivable, nor one out of reach.
+TEST(HolonSyncTest, TheDriveTargetIsTheNearestDrivableVehicleInReach) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  const auto vehicle = [](std::uint64_t id, bool drivable) {
+    conf::room_entity e;
+    e.id = id;
+    e.archetype = "humvee";
+    e.drivable = drivable;
+    e.reach = 3.0;
+    e.size = {4.0, 2.0, 1.5};
+    return e;
+  };
+  conf::write_room_entities(
+      app, room, {vehicle(1, true), vehicle(2, true), vehicle(3, false), vehicle(4, true)});
+  cvc::ariadne::entity_playout playout;
+  const auto place = [&](std::uint64_t id, double x, double y) {
+    body_state s;
+    s.position = vec3{x, y, 0.75};
+    EXPECT_TRUE(playout.apply(conf::entity_pid(id), s, 10));
+  };
+  place(1, 4.0, 0.0);  // ahead of us (+x), its box from 2 m
+  place(2, -3.5, 0.0); // behind us, its box from 1.5 m: nearer, but behind
+  place(3, 0.0, 1.5);  // right beside us, not drivable
+  place(4, 20.0, 0.0); // drivable, out of reach
+  playout.pump(app, room, 1.0 / 60.0);
+  double gap = 0.0;
+  EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{0.0, 0.0, 0.0}, 0.0, &gap), 1u)
+      << "the one ahead";
+  EXPECT_NEAR(gap, 2.0, 0.05);
+  EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{0.0, 0.0, 0.0}, 3.14159265, &gap), 2u)
+      << "turned round, the other";
+  EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{40.0, 40.0, 0.0}, 0.0), 0u) << "none in reach";
 }

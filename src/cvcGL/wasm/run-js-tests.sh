@@ -3,6 +3,7 @@
 #   - the WebGL state shim's node test   (test/webgl_state_shadow_test.js)
 #   - the glsync census's node test       (wasm/devtools/tests/test_glsync.js)
 #   - serve.py's flag/injection tests     (wasm/devtools/tests/test_serve.py, python3)
+#   - cvcMedia's AudioWorklets' node test (src/cvcMedia/test/cvc_audio_worklet_test.js)
 #
 # node comes from the Emscripten SDK (the cvcpkg emsdk bundle ships it), never a system one:
 #   CVC_EMSDK_DIR=<emsdk prefix> src/cvcGL/wasm/run-js-tests.sh
@@ -37,6 +38,8 @@ run() {
 run webgl_state_shadow "$NODE" "$CVCGL/test/webgl_state_shadow_test.js" "$HERE/webgl_state_shadow.js"
 run glsync "$NODE" "$HERE/devtools/tests/test_glsync.js"
 run serve.py "$PYTHON" "$HERE/devtools/tests/test_serve.py"
+MEDIA="$(dirname "$CVCGL")/cvcMedia" # src/cvcMedia
+run cvc_audio_worklet "$NODE" "$MEDIA/test/cvc_audio_worklet_test.js" "$MEDIA/web/cvc-audio-worklet.js"
 
 if [[ "$fail" -ne 0 ]]; then
     echo "run-js-tests: FAILED" >&2

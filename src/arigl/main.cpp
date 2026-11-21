@@ -67,12 +67,14 @@
 #include <algorithm>
 #include <cctype> // std::isalnum / std::isdigit — sanitize the conference node id
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib> // std::getenv — the conference relay / room / name come from the environment
 #include <cstring> // std::memcpy — a peer's f32 mic chunk out of its payload
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h> // read_or: the avatar's walk keys, from the state tree
 #include <cvc/ariadne/conference/relay_session.h> // a document's relay: block and --relay
+#include <cvc/ariadne/controls.h> // the control schemes: walk, car, boat (section 18.6)
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
@@ -89,6 +91,7 @@
 #include <cvc/media/player.h> // cvcMedia's FFmpeg + SDL3 player for video: / audio:
 #include <cvc/net/browser.h>
 #include <random> // std::random_device — the conference node id's per-launch suffix
+#include <set>
 #include <sstream> // arigl info: the GL report, line by line
 #if CVC_ENABLE_WS || CVC_ENABLE_GRPC
 // Conference mode: a state transport joins a hosted room, chosen by the relay URL scheme —
@@ -117,6 +120,7 @@
 #include <cvc/media/media_frame.h>        // cvc::media_frame — the canonical media frame
 #include <cvc/media/media_opus.h>         // our mic in Opus, and peers' Opus mics decoded
 #include <cvc/media/voice_mixer.h>        // peers' voices: a jitter buffer each, one mix
+#include <cvc/media/web_audio.h>          // a browser's audio clock: mic and mix off frames
 #include <cvc/net/fast_lane_rtc.h>        // fast_lane_rtc_available
 #include <cvc/state/state.h>              // cvc::state::instance — conference media state keys
 #include <cvc/state/state_cluster_shard.h>
@@ -134,6 +138,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <iterator> // std::make_move_iterator — requeue the frames the audio tick leaves
 #include <map>
 #include <mutex>
 #include <optional>
@@ -521,28 +526,27 @@ std::vector<ari::KeyBinding> camera_keys(const cvc::gl::CameraController &cam) {
   return keys;
 }
 
-// Our avatar's walk keys (conference mode, in Orbit): each action, what the Controls window calls
-// it, and its default keys. They live beside the camera's, under the viewer that walks the avatar
-// (<viewer>.avatar.keys.<action>, avatar_keys_path), each one key or more.
-struct WalkKey {
-  const char *action, *label;
-  const char *keys[2];
-  std::vector<std::string> default_keys() const { return {std::begin(keys), std::end(keys)}; }
-};
-constexpr WalkKey kWalkKeys[] = {{"forward", "Walk forward", {"W", "Up"}},
-                                 {"backward", "Walk back", {"S", "Down"}},
-                                 {"strafe_left", "Step left", {"A", "Left"}},
-                                 {"strafe_right", "Step right", {"D", "Right"}}};
-std::string avatar_keys_path(const cvc::gl::SceneRenderer &view) {
-  return view.scene().getStatePrefix() + ".viewers." + view.name() + ".avatar.keys.";
+// What we control in a room has a scheme of its own (cvc/ariadne/controls.h; ARIADNE_WORLDS.md
+// section 18.6): walking, a car, a boat, each with its own keys. They live beside the camera's,
+// under the viewer that walks the avatar, each action one key or more: walking's at
+// <viewer>.avatar.keys.<action> (where they always were), the vehicles' at
+// <viewer>.controls.<scheme>.<action>.
+std::string controls_path(const cvc::gl::SceneRenderer &view, const std::string &scheme) {
+  const std::string viewer = view.scene().getStatePrefix() + ".viewers." + view.name();
+  return scheme == "walk" ? viewer + ".avatar.keys." : viewer + ".controls." + scheme + ".";
 }
 std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
-  const std::string at = "/" + avatar_keys_path(view);
   std::vector<ari::KeyBinding> keys;
-  for (const WalkKey &k : kWalkKeys)
-    keys.push_back({std::string("avatar_") + k.action, k.label,
-                    "Avatar (mouse look: walk where you aim)", k.default_keys(), "",
-                    at + k.action});
+  for (const cvc::ariadne::control_scheme &s : cvc::ariadne::default_control_schemes()) {
+    const std::string at = "/" + controls_path(view, s.id);
+    const std::string group = s.id == "walk"  ? "Avatar (mouse look: walk where you aim)"
+                              : s.id == "car" ? "Driving a car"
+                                              : "Driving a boat";
+    // walk's ids are the ones they always had (avatar_<action>); the vehicles' by scheme.
+    const std::string id = s.id == "walk" ? std::string("avatar_") : s.id + "_";
+    for (const cvc::ariadne::control_action &a : s.actions)
+      keys.push_back({id + a.id, a.label, group, a.binding.keys, "", at + a.id});
+  }
   return keys;
 }
 
@@ -685,8 +689,17 @@ struct ConferenceSession {
   // face where it does and walk that way. Turning proposes at most kTurnHz intents a second (a
   // key still proposes at once; our own avatar turns every frame), and the camera looks past our
   // right shoulder at a point ahead of us.
-  std::string walk_keys_;    // where our walk keys are bound (avatar_keys_path)
-  unsigned last_keys_ = 0;   // the movement keys held at the last proposal (a bit each)
+  // What we control (section 18.6): walking, or the vehicle the relay says we drive, each by its
+  // own scheme; its keys as the Controls window has them (controls_path), held only in Orbit.
+  cvc::ariadne::control_resolver controls_{cvc::ariadne::default_control_scheme("walk")};
+  const cvc::gl::SceneRenderer *view_ = nullptr;
+  std::uint64_t drive_answered_ = 0; // the relay's answer to our last ask that we have shown
+  std::string drive_note_;           // a refusal, shown over us for a moment
+  double drive_note_until_s_ = 0.0;
+  static constexpr double kChaseS = 0.6;      // the chase camera's swing behind a moving vehicle
+  static constexpr double kChaseSpeed = 1.0;  // m/s: slower, the camera orbits as you leave it
+  static constexpr double kPromptAbove = 0.8; // the get-in prompt over a vehicle's roof (m)
+  unsigned last_keys_ = 0;   // the scheme's keys held at the last proposal (a bit each)
   double next_turn_s_ = 0.0; // steady_s() before which a turn alone proposes nothing
   static constexpr double kTurnHz = 20.0;
   static constexpr double kShoulder = 0.45; // the pivot's offset to the right (m)
@@ -797,6 +810,12 @@ struct ConferenceSession {
   std::atomic<double> self_talk_until_{0.0}; // wall time until which WE count as "talking"
   bool voice_talking_ = false; // our voice.talking leaf's value (absent = not talking)
   double now_wall_ = 0.0;      // wall-clock seconds, refreshed once per pump
+  bool in_pump_ = false;       // pump() is running (the audio tick leaves the frame its own work)
+#ifdef __EMSCRIPTEN__
+  // In a browser, the worklets' clock (cvc/media/web_audio.h): audio_tick() runs on each 20 ms
+  // block, between frames, and at full rate in a hidden tab, which draws no frames.
+  std::unique_ptr<cvc::media::web_audio::audio_clock> audio_clock_;
+#endif
   std::vector<std::string> cam_devices_, mic_devices_; // cached device names (index = device index)
   bool devices_enumerated_ = false;                    // devices listed yet (deferred past startup)
 
@@ -1148,6 +1167,12 @@ struct ConferenceSession {
       mic_run_ = true;
       mic_sender_ = std::thread([this] { mic_send_loop(); });
     }
+#ifdef __EMSCRIPTEN__
+    // Load the AudioWorklets now (asynchronous), so they are in by the time the document opens
+    // the mic and the first peer is heard; until then, and where they cannot load, SDL plays.
+    cvc::media::web_audio::prepare();
+    audio_clock_ = std::make_unique<cvc::media::web_audio::audio_clock>([this] { audio_tick(); });
+#endif
     active = true;
     return true;
   }
@@ -1298,9 +1323,9 @@ struct ConferenceSession {
     }
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
-    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (kWalkKeys)
+    cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (controls_)
     cam.setMouseLookOrbits(true);   // mouse look is third person: the camera turns about us
-    walk_keys_ = avatar_keys_path(view);
+    view_ = &view;
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
     ui.setSceneDrawCallback([this] {
@@ -1341,23 +1366,40 @@ struct ConferenceSession {
     steer_held_ = steering;
     steer_x_ = cx;
     steer_y_ = cy;
+    // What we control (section 18.6): walking, or the vehicle the relay says we drive, by its
+    // scheme (a car's or a boat's); getting in or out switches it.
+    const std::uint64_t driving = cvc::ariadne::read_driving(*app_, room_, pid_);
+    const cvc::ariadne::conference::room_entity *ride =
+        driving != 0 && entities_ ? entities_->find(driving) : nullptr;
+    const std::string scheme =
+        driving == 0 ? "walk" : (ride && !ride->controls.empty() ? ride->controls : "car");
+    if (scheme != controls_.scheme().id)
+      controls_.set_scheme(cvc::ariadne::default_control_scheme(scheme));
     // Keys -> intent, only in Orbit: in Fly the same keys move the camera instead. The camera's
-    // held set is dropped while the UI has the keyboard, so typing a name never walks.
-    cvc::ariadne::avatar_intent in;
-    // Our walk keys as the Controls window has them (kWalkKeys; their defaults until the
-    // document's load seeds them): any of an action's keys held.
-    unsigned keys = 0, bit = 1;
-    for (const WalkKey &k : kWalkKeys) {
+    // held set is dropped while the UI has the keyboard, so typing a name never walks. The
+    // scheme's keys as the Controls window has them (their defaults until the document's load
+    // seeds them): any of an action's keys held.
+    const std::string keys_at = controls_path(*view_, scheme);
+    for (const cvc::ariadne::control_action &a :
+         cvc::ariadne::default_control_scheme(scheme).actions) {
       const std::string stored =
-          cvc::ariadne::read_or<std::string>(*app_, walk_keys_ + k.action, std::string());
-      bool down = false;
-      for (const std::string &key :
-           stored.empty() ? k.default_keys() : cvc::ariadne::split_keys(stored))
-        down = down || cam_->keyHeld(key);
-      keys |= down ? bit : 0u;
+          cvc::ariadne::read_or<std::string>(*app_, keys_at + a.id, std::string());
+      controls_.set_keys(a.id, stored.empty() ? a.binding.keys : cvc::ariadne::split_keys(stored));
+    }
+    const bool orbit_mode = cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
+    controls_.update([&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); },
+                     f.wall_dt);
+    unsigned keys = 0, bit = 1;
+    for (const cvc::ariadne::control_action &a : controls_.scheme().actions) {
+      keys |= controls_.held(a.id) ? bit : 0u;
       bit <<= 1;
     }
-    const bool walking = keys != 0;
+    if (controls_.pressed("mouse_look"))
+      cam_->setMouseLookEnabled(!cam_->mouseLookEnabled());
+    const bool walking =
+        driving == 0 && (controls_.held("forward") || controls_.held("backward") ||
+                         controls_.held("strafe_left") || controls_.held("strafe_right"));
+    cvc::ariadne::avatar_intent in;
     if (look) {
       // We face where the camera looks, standing or walking: the mouse aims.
       double eye[3], focal[3], up[3];
@@ -1373,11 +1415,15 @@ struct ConferenceSession {
       last_user_.yaw = facing_yaw_;
     }
     in.yaw = facing_yaw_;
-    if (cam_->mode() == cvc::gl::CameraController::Mode::Orbit) {
-      in = gla::intent_from_keys((keys & 1u) != 0, (keys & 2u) != 0, (keys & 4u) != 0,
-                                 (keys & 8u) != 0, facing_yaw_,
-                                 holon_->controller().param("walk_speed", kWalkSpeed));
+    if (orbit_mode && driving == 0) {
+      in = gla::intent_from_keys(controls_.held("forward"), controls_.held("backward"),
+                                 controls_.held("strafe_left"), controls_.held("strafe_right"),
+                                 facing_yaw_, holon_->controller().param("walk_speed", kWalkSpeed));
+      in.jump = controls_.held("jump");
+    } else if (driving != 0) {
+      controls_.drive_axes(in); // the vehicle's: steer, throttle, brake
     }
+    step_drive(driving, ride, placed ? self : nullptr);
     // Propose when the USER changed what they ask for (a key, a click to face) -- a replicated
     // write, so only on change. Otherwise run on whatever intent the tree holds for us: the
     // document may drive the avatar itself with (room-set-intent ...), and our prediction must
@@ -1385,14 +1431,20 @@ struct ConferenceSession {
     // fresh per launch and the relay zeroes a departed participant's intent.)
     const auto differs = [](const cvc::ariadne::avatar_intent &a,
                             const cvc::ariadne::avatar_intent &b) {
-      return a.move.x != b.move.x || a.move.y != b.move.y || a.move.z != b.move.z || a.yaw != b.yaw;
+      const auto ne = [](double x, double y) { // none (NaN) is none
+        return std::isnan(x) != std::isnan(y) || (!std::isnan(x) && x != y);
+      };
+      return a.move.x != b.move.x || a.move.y != b.move.y || a.move.z != b.move.z ||
+             a.yaw != b.yaw || ne(a.steer, b.steer) || ne(a.throttle, b.throttle) ||
+             ne(a.brake, b.brake) || a.jump != b.jump;
     };
     // An intent in the tree stamped before our last proposal is an echo of an earlier one (the
     // relay's re-broadcast can carry it back after the newer write left): not ours any more.
     // Under mouse look, or while a drag steers, the facing moves every frame, the walk's direction
     // with it: what only turned waits until kTurnHz allows, a key at once.
     const double now = steady_s();
-    const bool turning = look || steering;
+    // Driving, the steering ramps every frame while a key is held: as often as a turn.
+    const bool turning = look || steering || driving != 0;
     bool ask = differs(in, last_user_);
     if (ask && turning && keys == last_keys_ && now < next_turn_s_)
       ask = false;
@@ -1494,9 +1546,86 @@ struct ConferenceSession {
       // it then, rather than show its inside.
       double eye[3], focal[3], up[3];
       cam_->getPose(eye, focal, up);
+      // Driving: the camera swings round behind the vehicle as it moves (a chase camera), unless
+      // the mouse or a drag is turning it; parked, it orbits as you leave it.
+      if (driving != 0 && !look && !steering) {
+        const cvc::physics::body_state car = holon_->state(pid_);
+        const cvc::physics::quat &q = car.rotation;
+        const double heading =
+            std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        const double speed = std::hypot(car.linear_velocity.x, car.linear_velocity.y);
+        if (speed > kChaseSpeed) {
+          constexpr double kPi = 3.14159265358979323846;
+          const double off = std::remainder(heading - gla::heading_yaw(eye, focal), 2.0 * kPi);
+          const double k = 1.0 - std::exp(-std::max(0.0, f.wall_dt) / kChaseS);
+          cvc::state &az = app_->root()(cam_->stateName("orbit.azimuth"));
+          az.value(std::strtod(az.value().c_str(), nullptr) + off * k * 180.0 / kPi);
+        }
+      }
       room_view_->set_self_visible(std::hypot(eye[0] - p[0], eye[1] - p[1]) >= kInsideRadius ||
                                    eye[2] >= p[2] + kInsideTop);
     }
+  }
+
+  // Getting in and out (section 18.6), once a frame from step_room: the scheme's interact held
+  // for its hold asks the relay to put us in the drivable vehicle nearest us (the one ahead of us
+  // first), or, driving, to let us out; the prompt over that vehicle fills as it is held; a
+  // refusal shows over us for a moment. And whoever drives anything is hidden: they are in it.
+  // DRIVING is the entity we drive (0: none), RIDE its identity, SELF where we stand (null before
+  // our first pose).
+  void step_drive(std::uint64_t driving, const cvc::ariadne::conference::room_entity *ride,
+                  const double *self) {
+    namespace conf = cvc::ariadne::conference;
+    std::uint64_t target = 0;
+    if (driving == 0 && self && entities_)
+      target = cvc::ariadne::drive_target(*entities_, cvc::physics::vec3{self[0], self[1], self[2]},
+                                          facing_yaw_);
+    if (controls_.fired("interact")) {
+      if (driving != 0)
+        cvc::ariadne::request_drive(*app_, room_, pid_, 0);
+      else if (target != 0)
+        cvc::ariadne::request_drive(*app_, room_, pid_, target);
+    }
+    // The relay's answer: a refusal is said over us, for kDriveNoteS.
+    constexpr double kDriveNoteS = 2.5;
+    const cvc::ariadne::drive_status st = cvc::ariadne::read_drive_status(*app_, room_, pid_);
+    if (st.seq != drive_answered_) {
+      drive_answered_ = st.seq;
+      if (!st.ok && !st.why.empty()) {
+        drive_note_ = "Can't drive: " + st.why;
+        drive_note_until_s_ = steady_s() + kDriveNoteS;
+        std::fprintf(stderr, "arigl: room: %s\n", drive_note_.c_str());
+      }
+    }
+    // The prompt: the interact's first key, and what it does.
+    const cvc::ariadne::control_action *interact = controls_.scheme().find("interact");
+    const std::string key =
+        interact && !interact->binding.keys.empty() ? interact->binding.keys.front() : "E";
+    const double progress = controls_.progress("interact");
+    cvc::physics::pose at;
+    if (driving == 0 && target != 0 && entities_->pose(target, at)) {
+      const conf::room_entity *e = entities_->find(target);
+      const std::string what = e && !e->name.empty() ? e->name : e ? e->archetype : "it";
+      room_view_->set_prompt(
+          key + "  Drive " + what, progress,
+          cvc::physics::vec3{at.position.x, at.position.y,
+                             at.position.z + 0.5 * (e ? e->size[2] : 1.0) + kPromptAbove});
+    } else if (driving != 0 && progress > 0.0 && self) {
+      const double roof = ride ? 0.5 * ride->size[2] : 1.0;
+      room_view_->set_prompt(key + "  Get out", progress,
+                             cvc::physics::vec3{self[0], self[1], self[2] + roof + kPromptAbove});
+    } else if (self && steady_s() < drive_note_until_s_) {
+      room_view_->set_prompt(drive_note_, 0.0,
+                             cvc::physics::vec3{self[0], self[1], self[2] + 2.0 + kPromptAbove});
+    } else {
+      room_view_->set_prompt(std::string(), 0.0, cvc::physics::vec3{0.0, 0.0, 0.0});
+    }
+    // Whoever drives is in their vehicle: no marker of their own.
+    std::set<std::string> riders;
+    for (const conf::room_participant &p : conf::room_roster(*app_, room_))
+      if (cvc::ariadne::read_driving(*app_, room_, p.pid) != 0)
+        riders.insert(p.pid);
+    room_view_->set_riders(std::move(riders));
   }
 
   // The room's LOD at work, for a scene that has mesh objects (the default room has none, so this
@@ -1528,7 +1657,37 @@ struct ConferenceSession {
   void pump() {
     if (!tp_ || !driver_)
       return;
+    in_pump_ = true;
+    struct pumping { // in_pump_ goes false however advance() returns
+      bool &on;
+      ~pumping() { on = false; }
+    } guard{in_pump_};
     driver_->advance(); // measured wall delta; fires kOrderPumpAll .. kOrderActivity in order
+  }
+
+  // A browser's audio step, on the worklets' clock (audio_clock_): send what the mic has, and
+  // hand peers' audio that has come to their jitter buffers, so neither waits for a frame. The
+  // frame loop does the same each frame (forward_streams, drain_inbox), and whichever runs first
+  // takes a chunk. A mic chunk is stamped as the native sender stamps it (mic_send_loop): the last
+  // frame's world-clock time moved on by the steady clock since, never stepping back.
+  void audio_tick() {
+    if (!active || in_pump_ || !app_ || !tp_ || !send_media_)
+      return;
+    now_wall_ =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    bool stamped = false;
+    double stamp = 0.0;
+    {
+      std::lock_guard<std::mutex> lk(mic_mu_);
+      if (clock_wall_ >= 0.0) { // a frame has stamped: the mic's stamps go on from it
+        stamp = std::max(mic_stamp_, clock_t_ + (now_wall_ - clock_wall_));
+        mic_stamp_ = stamp;
+        stamped = true;
+      }
+    }
+    if (stamped)
+      forward_streams(stamp, /*audio_only=*/true);
+    drain_inbox(/*audio_only=*/true);
   }
 
   // Register the per-frame steps as ordered observers on the driver, once, in setup(). They fire
@@ -1543,15 +1702,14 @@ struct ConferenceSession {
     driver_->add_frame_observer(kOrderNet, [this](const cf &) { net_step(); });
     // Wall-clock seconds for the talk-hold — deliberately wall time, not world time, so the hold is
     // frame-rate independent and does not freeze when the sim clock is paused or scaled.
-    // The mic's sender reads the world clock from here too: this frame's t, at now_wall_.
+    // The mic's sender (or a browser's audio tick) reads the world clock from here too: this
+    // frame's t, at now_wall_.
     driver_->add_frame_observer(kOrderWall, [this](const cf &f) {
       now_wall_ = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                       .count();
-      if (audio_threads_) {
-        std::lock_guard<std::mutex> lk(mic_mu_);
-        clock_t_ = f.t;
-        clock_wall_ = now_wall_;
-      }
+      std::lock_guard<std::mutex> lk(mic_mu_); // the native sender, or a browser's audio tick
+      clock_t_ = f.t;
+      clock_wall_ = now_wall_;
     });
     // Pull the user-list window's per-peer volume/mute (local only, never sent).
     driver_->add_frame_observer(kOrderControls, [this](const cf &) { read_peer_controls(); });
@@ -1720,6 +1878,9 @@ struct ConferenceSession {
   }
 
   void stop() {
+#ifdef __EMSCRIPTEN__
+    audio_clock_.reset(); // no audio tick into what goes below
+#endif
     room_view_.reset(); // remove the room's nodes while the SceneGraph is still alive
     peers_.clear();     // close decode proxies before the transport/shard go away
     stop_mic_sender();  // it sends through the lane and the transport: joined before either goes
@@ -1849,12 +2010,14 @@ struct ConferenceSession {
   // Forward our local streams (camera: freshest frame; mic: every chunk in order) to the relay,
   // which fans them to the peers. EVERY outgoing frame is stamped with the common world-clock time
   // so a receiver can A/V-sync them — the sources' own pts (SDL camera vs SDL audio vs synthetic)
-  // are not comparable across streams.
-  void forward_streams(double stamp) {
+  // are not comparable across streams. AUDIO_ONLY: the mic alone (the audio tick).
+  void forward_streams(double stamp, bool audio_only = false) {
     if (!app_)
       return;
     auto &reg = cvc::ariadne::stream::stream_registry::for_app(*app_);
     for (publisher &p : pubs_) {
+      if (audio_only && !p.ring)
+        continue;
       const std::string token = cvc::state::instance(*app_)(prefix_ + "." + p.key).value();
       if (token.empty())
         continue;
@@ -2112,14 +2275,20 @@ struct ConferenceSession {
 
   // Route each queued peer frame: camera -> a pts-ordered buffer + a lazily-opened decode proxy
   // the tile renders; mic (where the audio is on the frame) -> receive_voice. Then take in what
-  // each peer's audio did (take_voice).
-  void drain_inbox() {
+  // each peer's audio did (take_voice). AUDIO_ONLY (a browser's audio tick): the mic frames; the
+  // rest stay queued, in order, for the frame.
+  void drain_inbox(bool audio_only = false) {
     std::vector<cvc::media_frame> batch;
     {
       std::lock_guard<std::mutex> lk(media_mu_);
       batch.swap(inbox_);
     }
+    std::vector<cvc::media_frame> later; // not the audio tick's
     for (cvc::media_frame &m : batch) {
+      if (audio_only && m.stream_id != "mic") {
+        later.push_back(std::move(m));
+        continue;
+      }
       if (m.origin_node_id.empty() || m.origin_node_id == pid_)
         continue; // never play/show ourselves as a peer
       if (m.stream_id == "mic") {
@@ -2150,6 +2319,11 @@ struct ConferenceSession {
           pm.vbuf.pop_front();
       }
     }
+    if (!later.empty()) { // ahead of what has come since
+      std::lock_guard<std::mutex> lk(media_mu_);
+      inbox_.insert(inbox_.begin(), std::make_move_iterator(later.begin()),
+                    std::make_move_iterator(later.end()));
+    }
     take_voice();
   }
 
@@ -2160,6 +2334,10 @@ struct ConferenceSession {
   // the target is +inf, so the freshest frame shows immediately (no added delay) instead of waiting
   // on an audio clock that has stopped.
   void sync_and_show() {
+    double out_s = out_period_s_;
+    if (mix_out_ && voice_ && voice_->rate() > 0 && voice_->channels() > 0)
+      out_s += static_cast<double>(mix_out_->queued_bytes()) /
+               (static_cast<double>(voice_->rate()) * voice_->channels() * sizeof(float));
     for (auto &kv : peers_) {
       peer_media &pm = kv.second;
       if (!pm.video_proxy)
@@ -2168,12 +2346,13 @@ struct ConferenceSession {
         pm.vbuf.clear();
         continue;
       }
-      // This peer's audio latency = what its jitter buffer holds + the output device's buffer.
-      // Show the video frame whose pts the audio has reached: last_audio_pts minus that. (With no
-      // output open nothing drains the buffers, and they say nothing of what is heard.)
+      // This peer's audio latency = what its jitter buffer holds + the output's (its device
+      // buffer, and what it holds queued: a browser's worklet ring). Show the video frame whose pts
+      // the audio has reached: last_audio_pts minus that. (With no output open nothing drains the
+      // buffers, and they say nothing of what is heard.)
       double target = 1e18;
       if (audio_fresh(pm) && mix_out_)
-        target = pm.last_audio_pts - out_period_s_ - voice_->buffered_s(kv.first);
+        target = pm.last_audio_pts - out_s - voice_->buffered_s(kv.first);
       std::shared_ptr<std::vector<std::uint8_t>> show;
       double show_pts = pm.shown_pts;
       while (!pm.vbuf.empty() &&
