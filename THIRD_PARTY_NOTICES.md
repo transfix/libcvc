@@ -48,6 +48,9 @@ Installed with cvcGL (`share/libcvc/fonts`) and embedded in the browser hosts (a
 the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-237) and
 [Twemoji Mozilla](#twemoji-mozilla-070).
 
+Example data, in `examples/data` and preloaded into the browser gallery:
+[the Kuwajima 2019 Reconstruct series](#kuwajima-2019-reconstruct-series) (CC0).
+
 In the build scripts only: [CMake modules](#cmake-modules-build-scripts-only).
 
 ## stb_image 2.30 and stb_image_write 1.16
@@ -1312,6 +1315,20 @@ or where your use is permitted by an applicable exception or limitation. No warr
 The license may not give you all of the permissions necessary for your intended use.
 For example, other rights such as publicity, privacy, or moral rights may limit how you use the material.
 ```
+
+## Kuwajima 2019 Reconstruct series
+
+- `examples/data/contours/kuwajima2019/` -- a subset of the trace files (five objects, sections 1
+  to 72) of a Reconstruct series from mouse hippocampus area CA1, which the contour tiler demo
+  (`examples/ariadne/documents/contour_tiler.ari`) tiles. Its README says what was kept.
+
+Source: Kuwajima, Masaaki (2019), "3DEM dataset from a mouse hippocampus injected with rAAV to
+express ChR2-GFP and mAPEX2", Texas Data Repository, V1, https://doi.org/10.18738/T8/QP43LB.
+Described in Kuwajima M, Ostrovskaya OI, Cao G, Weisberg SA, Harris KM, Zemelman BV (2020),
+PLoS ONE 15(1): e0226797, https://doi.org/10.1371/journal.pone.0226797.
+
+License: CC0 1.0 Universal (public domain dedication),
+https://creativecommons.org/publicdomain/zero/1.0/. The repository asks that the dataset be cited.
 
 ## CMake modules (build scripts only)
 

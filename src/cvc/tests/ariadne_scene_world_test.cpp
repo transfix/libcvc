@@ -34,6 +34,8 @@
 #include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/policy_library.h>
 #include <cvc/nav/world_grid.h>
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
@@ -1978,6 +1980,26 @@ TEST(AriadneWorldVehicles, AFleetIsANamedStartEntry) {
   error("[{fleet: c, archetype: v}, {fleet: c, archetype: v}]", "is named twice");
   error("[{fleet: c, archetype: v, at: [1, 2]}]", "laid out by spawn:, not at:");
   error("[{fleet: c, archetype: v, controller: pose}]", "controller: pose places one");
+  error("[{fleet: c, archetype: v, sense: sonar}]", "sense: 'sonar' is not one");
+  error("[{fleet: c, archetype: v, belief: hive}]", "belief: 'hive' is not one");
+  error("[{fleet: c, archetype: v, policy: {path: a.cvcnav}}]",
+        "policy: expects a uri: or a data:");
+  error("[{fleet: c, archetype: v, policy: {uri: a, data: b}}]", "not both");
+  {
+    world_rules y;
+    ASSERT_EQ(parse("[{fleet: c, archetype: v, sense: fog, belief: private, policy: {uri: "
+                    "'cvcpkg://o/w', path: share/w/a.cvcnav, sha256: ab}}, {fleet: d, archetype: "
+                    "v, policy: {data: weights}}]",
+                    y),
+              "");
+    ASSERT_EQ(y.vehicle_starts.size(), 2u);
+    EXPECT_EQ(y.vehicle_starts[0].sense, "fog");
+    EXPECT_EQ(y.vehicle_starts[0].belief, "private");
+    EXPECT_EQ(y.vehicle_starts[0].policy, "cvcpkg://o/w");
+    EXPECT_EQ(y.vehicle_starts[0].policy_path, "share/w/a.cvcnav");
+    EXPECT_EQ(y.vehicle_starts[0].policy_sha256, "ab");
+    EXPECT_EQ(y.vehicle_starts[1].policy_data, "weights");
+  }
   error("[{fleet: c, archetype: v, spawn: ring}]", "spawn: 'ring' is not one");
   error("[{fleet: c, archetype: v, rally: 0}]", "rally: expects a count");
   error("[{fleet: c, archetype: v, rally: {count: 65}}]", "rally: expects a count");
@@ -1995,7 +2017,8 @@ world:
     archetypes:
       v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
     start:
-      - { fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 } }
+      - { fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 },
+          policy: builtin }
       - { archetype: v, name: solo, controller: none, at: [0, 0] }
 scene:
   clock: { paused: true }
@@ -2128,7 +2151,8 @@ TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
   EXPECT_LE(rx, 201.0);
   EXPECT_FALSE(v->move_rally("city", 9, 0.0, 0.0));
   EXPECT_FALSE(v->move_rally("town", 0, 0.0, 0.0));
-  art.step_world(static_cast<int>(std::lround(2.4 / cvc::kSimQuantum))); // 2.4 s
+  // 3 s, whatever the clock's quantum: from rest they are ~9 m east by then (4.4 m at 2 s).
+  art.step_world(static_cast<int>(std::lround(3.0 / cvc::kSimQuantum)));
   art.drain();
   EXPECT_GT(fleet_mean_x(v->entities()), x0 + 5.0); // under way, east
 
@@ -2177,10 +2201,11 @@ TEST(AriadneWorldVehicles, AFleetWithoutRallyPointsHoldsItsOwnGoals) {
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
   std::string doc = kFleetDoc;
-  const std::string entry =
-      "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 } }";
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
   doc.replace(doc.find(entry), entry.size(),
-              "{ fleet: city, archetype: v, count: 12, seed: 3, keys: all, colors: spawn }");
+              "{ fleet: city, archetype: v, count: 12, seed: 3, keys: all, colors: spawn, "
+              "policy: builtin }");
   cvc::app app;
   AppRuntime art(app, "");
   art.load(write_doc("fleet_own_goals", doc).string());
@@ -2215,6 +2240,97 @@ TEST(AriadneWorldVehicles, AFleetWithoutRallyPointsHoldsItsOwnGoals) {
     EXPECT_DOUBLE_EQ(later[k].goal_x, es[k].goal_x) << k;
     EXPECT_DOUBLE_EQ(later[k].goal_y, es[k].goal_y) << k;
   }
+}
+
+// A fleet's navigator is its own (FL1b): made with its sense: and belief: (grouped: max(2, n / 64)
+// planes, teammates together; private: one a vehicle), and made again when its keys change them.
+// Its policy: is the built-in net, a .cvcnav checked against its sha256, or trained (here
+// $CVC_NAV_WEIGHTS), each said in .drives, and .policy switches it live. Weights that can't be had
+// fall back to the built-in net, and .drives says why.
+TEST(AriadneWorldVehicles, AFleetHasANavigatorAndAPolicyOfItsOwn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string weights =
+      (fs::path(::testing::TempDir()) / "fleet_policy.cvcnav").generic_string();
+  cvc::nav::coef_mlp::default_biased().save(weights, "a fleet test's weights");
+  const std::string key = cvc::nav::policy_library().get({weights, ""}).key; // sha256:<hex>
+  std::string doc = kFleetDoc;
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: city, archetype: v, count: 130, spawn: opposed, seed: 7, rally: { count: "
+              "4 }, belief: grouped, policy: builtin }\n      - { fleet: scouts, archetype: v, "
+              "count: 6, seed: 2, sense: fog, belief: private, policy: { uri: '" +
+                  weights + "', sha256: " + key.substr(7) + " } }");
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_navigators", doc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  ASSERT_EQ(v->fleets(), (std::vector<std::string>{"city", "scouts"}));
+  ASSERT_EQ(v->entities().size(), 137u);
+  art.step_world(1);
+  art.drain();
+  const auto key_of = [&](const std::string &fleet, const std::string &leaf) {
+    return val(app, "vehicles.fleets." + fleet + "." + leaf);
+  };
+  EXPECT_EQ(key_of("city", "sense"), "known"); // the world's
+  EXPECT_EQ(key_of("city", "belief"), "grouped");
+  EXPECT_EQ(key_of("city", "planes"), "2");
+  EXPECT_EQ(key_of("city", "drives"), "builtin");
+  EXPECT_EQ(key_of("scouts", "sense"), "fog");
+  EXPECT_EQ(key_of("scouts", "belief"), "private");
+  EXPECT_EQ(key_of("scouts", "planes"), "6");
+  EXPECT_EQ(key_of("scouts", "drives"), "weights (" + weights + ", " + key + ")");
+  // Each fleet's navigator, beside the plant's for the unnamed vehicle.
+  std::vector<std::uint8_t> occ;
+  int rows = 0, cols = 0;
+  EXPECT_TRUE(v->belief("kinematic/city", occ, rows, cols));
+  EXPECT_TRUE(v->belief("kinematic/scouts", occ, rows, cols));
+  EXPECT_TRUE(v->belief("kinematic", occ, rows, cols));
+
+  // The keys switch them: a shared belief, then what drives, live.
+  cvc::state::instance(app)("vehicles.fleets.scouts.belief").value(std::string("shared"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "planes"), "1");
+  int placed = 0;
+  for (const entity_info &e : v->entities())
+    placed += e.fleet == "scouts" && e.placed ? 1 : 0;
+  EXPECT_EQ(placed, 6);
+  cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("builtin"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "drives"), "builtin");
+  {
+    EnvFor env("CVC_NAV_WEIGHTS", weights);
+    cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("trained"));
+    art.step_world(1);
+    art.drain();
+    EXPECT_EQ(key_of("scouts", "drives"), "trained (" + weights + ", " + key + ")");
+  }
+  // Weights that can't be had: the built-in net drives, and says why.
+  cvc::state::instance(app)("vehicles.fleets.scouts.policy")
+      .value(std::string("C:/no/such/weights.cvcnav"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
+      << key_of("scouts", "drives");
+  cvc::state::instance(app)("vehicles.fleets.scouts.policy")
+      .value(std::string("cvcpkg://cvc/no-such-weights-for-a-test"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: ", 0), 0u) << key_of("scouts", "drives");
+  for (int k = 0; k < 400 && key_of("scouts", "drives").rfind("builtin: no trained", 0) != 0; ++k) {
+    art.step_world(1);
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
+      << key_of("scouts", "drives");
+  EXPECT_EQ(key_of("scouts", "drives").find("no/such"), std::string::npos); // this one's why
 }
 
 TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {

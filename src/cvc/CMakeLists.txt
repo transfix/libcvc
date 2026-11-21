@@ -112,6 +112,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_router.h
   ../../inc/cvc/media/media_rungs.h
   ../../inc/cvc/media/media_opus.h
+  ../../inc/cvc/media/voice_mixer.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/archive.h
@@ -191,6 +192,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/volume/volume_slice.h
+  ../../inc/cvc/volume/volume_grid.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -451,6 +453,7 @@ set(SOURCE_FILES
   media/media_router.cpp
   media/media_rungs.cpp
   media/media_opus.cpp
+  media/voice_mixer.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
@@ -482,6 +485,7 @@ set(SOURCE_FILES
   volume/contour_spectrum.cpp
   volume/resize_stepper.cpp
   volume/volume_slice.cpp
+  volume/volume_grid.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp

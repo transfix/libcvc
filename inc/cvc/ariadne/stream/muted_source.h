@@ -61,6 +61,8 @@ public:
   // a self-describing-codec wrapper (jpeg_encode_source) through this decorator.
   int cur_width() const override { return inner_ ? inner_->cur_width() : 0; }
   int cur_height() const override { return inner_ ? inner_->cur_height() : 0; }
+  // And whether it has another frame ready (a mic's backlog drains through the mute too).
+  bool more() const override { return inner_ && inner_->more(); }
 
 private:
   std::unique_ptr<frame_source> inner_;

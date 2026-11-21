@@ -41,13 +41,16 @@ class sdl_audio_capture_source : public st::frame_source {
 public:
   sdl_audio_capture_source(SDL_AudioStream *stream, int sample_rate, int channels, int frames)
       : stream_(stream), sr_(sample_rate), ch_(channels), frames_(frames) {
-    // Latency ceiling for drop-at-source (see fill()): keep at most ~80 ms of audio queued in SDL's
-    // capture FIFO, but never below two chunks, so ordinary per-tick jitter never triggers a drop —
-    // only a real consumer stall does.
+    // Latency ceiling for drop-at-source (see fill()): keep at most ~250 ms of audio queued in
+    // SDL's capture FIFO, and never below four chunks. A tick drains every whole chunk queued
+    // (more()), so the FIFO holds more than a device block or two only after a real stall: a
+    // browser delivers its mic in 43 ms blocks on the main thread, and two of them back to back
+    // after a busy frame are routine there. Audio from a stall that short goes out late rather
+    // than not at all, and the listener's jitter buffer (voice_mixer) trims what it cannot use.
     const std::size_t chunk = f32_chunk_bytes(frames_, ch_);
-    const std::size_t eighty_ms =
-        static_cast<std::size_t>(sr_) * static_cast<std::size_t>(ch_) * sizeof(float) / 12u;
-    max_queued_bytes_ = (chunk * 2u > eighty_ms) ? chunk * 2u : eighty_ms;
+    const std::size_t quarter_s =
+        static_cast<std::size_t>(sr_) * static_cast<std::size_t>(ch_) * sizeof(float) / 4u;
+    max_queued_bytes_ = (chunk * 4u > quarter_s) ? chunk * 4u : quarter_s;
   }
   ~sdl_audio_capture_source() override {
     if (stream_)
@@ -56,6 +59,16 @@ public:
   }
 
   std::size_t frame_bytes() const override { return f32_chunk_bytes(frames_, ch_); }
+
+  // Another whole chunk is already captured: the producer reads it in the same tick, so a tick
+  // that came late (or a block of several chunks at once) leaves nothing behind.
+  bool more() const override {
+    const std::size_t need = frame_bytes();
+    if (!stream_ || need == 0)
+      return false;
+    const int avail = SDL_GetAudioStreamAvailable(stream_);
+    return avail > 0 && static_cast<std::size_t>(avail) >= need;
+  }
 
   st::produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
     st::produced_frame out; // bytes = 0 by default: "no chunk ready this tick" (producer runs on)
