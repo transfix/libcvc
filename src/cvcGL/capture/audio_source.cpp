@@ -8,8 +8,10 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cstdio>
 #include <cvc/ariadne/stream/frame_source.h>
 #include <cvc/gl/capture/audio_source.h>
+#include <cvc/media/web_audio.h> // a browser: the mic on an AudioWorklet, SDL the fallback
 
 #if CVC_ENABLE_SDL
 #include <SDL3/SDL_audio.h>
@@ -134,9 +136,28 @@ private:
 
 audio_capture_open open_audio_capture(const audio_capture_spec &spec) {
   audio_capture_open result;
-#if CVC_ENABLE_SDL
   if (spec.sample_rate <= 0 || spec.channels <= 0 || spec.frames_per_chunk <= 0)
     return result; // a misconfigured request produces no source rather than a dead stream
+  // In a browser the mic comes from an AudioWorklet, whose blocks reach the stream between frames
+  // and at full rate in a hidden tab (cvc/media/web_audio.h). A browser offers one mic, so the
+  // device index is the default's. SDL's Web Audio backend, read on a main-thread timer, is the
+  // fallback (no AudioWorklet, another rate, CVC_WEB_AUDIO=sdl).
+  if (spec.device_index <= 0 && cvc::media::web_audio::prepare()) {
+    result.source =
+        cvc::media::web_audio::open_capture(spec.sample_rate, spec.channels, spec.frames_per_chunk);
+    if (result.source) {
+      result.sample_rate = spec.sample_rate;
+      result.channels = spec.channels;
+      result.frames_per_chunk = spec.frames_per_chunk;
+      result.name = "browser microphone (AudioWorklet)";
+      std::fprintf(stderr, "web audio: the mic on an AudioWorklet, %d Hz x %d\n", spec.sample_rate,
+                   spec.channels);
+      return result;
+    }
+    std::fprintf(stderr, "web audio: the mic on SDL (worklets %s)\n",
+                 cvc::media::web_audio::status().c_str());
+  }
+#if CVC_ENABLE_SDL
   if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
     return result; // refcounted; the source's dtor (or the cleanup below) quits it
   bool handed_off = false;
