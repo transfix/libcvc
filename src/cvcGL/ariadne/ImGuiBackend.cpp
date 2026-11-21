@@ -196,6 +196,8 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.maximize = true;
   c.badge = true;
   c.rich_text = true;
+  c.button_icon = true;
+  c.button_selected = true;
   return c;
 }
 
@@ -1636,6 +1638,77 @@ void ImGuiBackend::spinner(const char *label, double seconds, bool ascii) {
 #endif
 }
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }
+
+bool ImGuiBackend::view_is_phone() const {
+#ifdef CVC_ENABLE_IMGUI
+  return ImGui::GetCurrentContext() != nullptr && phone_view();
+#else
+  return false;
+#endif
+}
+
+// §5.27 drawn by hand over an InvisibleButton (ImGui's own Button has no pressed-in state), at the
+// size ImGui::Button would give the same content: the frame padding around the label's text, or
+// around the picture.
+bool ImGuiBackend::button_with(const char *label, const cvc::ariadne::ButtonLook &look) {
+#ifdef CVC_ENABLE_IMGUI
+  int W = 0, H = 0;
+  const unsigned int tex = look.icon.empty() ? 0 : image_texture(look.icon.c_str(), W, H);
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const char *end = ImGui::FindRenderedTextEnd(label); // the label without its ##id
+  ImVec2 content = ImGui::CalcTextSize(label, end);
+  if (tex != 0) {
+    const float h = look.icon_h > 0.0f ? ui_px(look.icon_h) : ImGui::GetFontSize();
+    content = ImVec2(h * static_cast<float>(W) / static_cast<float>(H), h);
+  }
+  const ImVec2 size(content.x + st.FramePadding.x * 2.0f, content.y + st.FramePadding.y * 2.0f);
+  const bool clicked = ImGui::InvisibleButton(label, size);
+  const ImRect r(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+  const bool held = ImGui::IsItemActive();
+  const bool hovered = ImGui::IsItemHovered();
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  // One step of the bevel: a device pixel's worth of the UI's scale, at least one.
+  const float e = std::max(1.0f, std::floor(ui_px(1.0f)));
+  const float round = st.FrameRounding;
+  const auto shade = [](ImVec4 c, float k) {
+    return ImGui::GetColorU32(ImVec4(c.x * k, c.y * k, c.z * k, c.w));
+  };
+  const ImVec4 base = st.Colors[held      ? ImGuiCol_ButtonActive
+                                : hovered ? ImGuiCol_ButtonHovered
+                                          : ImGuiCol_Button];
+  const ImU32 light = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
+  const ImU32 dark = ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.60f));
+  ImVec2 nudge(0.0f, 0.0f);
+  if (look.selected) {
+    // Pressed in: the shadow along the top and left, the light along the bottom and right, a
+    // darker face (the active colour, opaque), and the content a step down and to the right.
+    const ImVec4 a = st.Colors[ImGuiCol_ButtonActive];
+    dl->AddRectFilled(r.Min, r.Max, light, round);
+    dl->AddRectFilled(r.Min, r.Max - ImVec2(e, e), dark, round);
+    dl->AddRectFilled(r.Min + ImVec2(2.0f * e, 2.0f * e), r.Max - ImVec2(e, e),
+                      shade(ImVec4(a.x, a.y, a.z, 1.0f), hovered ? 0.75f : 0.6f), round);
+    nudge = ImVec2(e, e);
+  } else {
+    // Raised: the light along the top and left, the shadow along the bottom and right.
+    dl->AddRectFilled(r.Min, r.Max, dark, round);
+    dl->AddRectFilled(r.Min, r.Max - ImVec2(e, e), light, round);
+    dl->AddRectFilled(r.Min + ImVec2(e, e), r.Max - ImVec2(e, e), ImGui::GetColorU32(base), round);
+    if (held)
+      nudge = ImVec2(e, e);
+  }
+  ImGui::RenderNavCursor(r, ImGui::GetItemID());
+  const ImVec2 at = r.Min + st.FramePadding + nudge;
+  if (tex != 0)
+    dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), at, at + content);
+  else
+    ImGui::RenderTextClipped(at, r.Max + nudge - st.FramePadding, label, end, &content,
+                             ImVec2(0.5f, 0.5f), &r);
+  return clicked;
+#else
+  (void)look;
+  return button(label);
+#endif
+}
 bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClicked(label); }
 // §4.6 widget on_click: was the last-submitted item clicked (left button, released over it)? Works
 // for any item ImGui submitted this frame — the walk queries it right after drawing the widget.

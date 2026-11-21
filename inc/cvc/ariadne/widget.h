@@ -413,6 +413,10 @@ struct Widget {
   // Window `maximizable:` (default true): a square button in its title bar fills it to the screen
   // under the main menu bar, and back; its state is tree.<id>.maximized (§5.9).
   bool maximizable = true;
+  // Window `maximized:` (§5.9) the maximize it starts with, while tree.<id>.maximized holds
+  // nothing: "true", or "phone" (only where the view is a phone's, Backend::view_is_phone); "":
+  // not maximized. The user's restore writes the key, and that holds from then on.
+  std::string start_maximized;
   // Window `resizable:` (default true): the user may resize it by an edge or a corner. A window
   // that fits its content (no `size:`) follows its content either way (§5.8, §5.9).
   bool resizable = true;
@@ -432,6 +436,16 @@ struct Widget {
   // text_color. `option_colors`: a radio's list written in the document (`color: [c0, c1]`).
   std::string color_src;
   std::vector<ItemColor> option_colors;
+  // §5.27 Kind::Button `icon:`: a picture drawn on the button in place of its label: a URI (§5.11,
+  // fetched as an image:'s is, with `auth:` in media_auth), a host-published image's name, or an
+  // expression giving either. Empty, not loaded yet, failed, or on a backend that can't draw one:
+  // the label. `icon_size` is its height in the document's px; 0, one line of text tall.
+  std::string button_icon;
+  float icon_size = 0.0f;
+  // §5.27 Kind::Button `selected:`: "true", "false", or an expression; while it holds the button
+  // is drawn pressed in, beside the raised buttons of its row (a choice of views, a bar's current
+  // place). "false": a button of such a row that is never the chosen one. Empty: a plain button.
+  std::string selected;
   // §5.11 Kind::Text `emoji:`: a state path holding a map of shortcode names to picture URIs. A
   // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
   // backend can put a picture in a line. Empty: plain text.
