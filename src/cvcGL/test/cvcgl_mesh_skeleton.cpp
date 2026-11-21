@@ -16,9 +16,9 @@
 //     `skeleton:` prop (else the defaults), with their properties; view.* on, info.* "-", status
 //     idle; the children <id>_strands / <id>_sheets hidden; the view tags (the surface's own entry
 //     `surface`, the children's `skeleton`) (T8);
-//   - a run: skeleton.busy, mesh_ops.busy and the RealizedScene::settling probe hold while it runs
-//     and its progress never falls; then the children hold exactly cvc::skeletonize's parts of the
-//     mesh's vertices, shown, info.* and status count them, and the data channel
+//   - a run: skeleton.busy, mesh_ops.busy and the RealizedScene::pending_work probe hold while it
+//     runs and its progress never falls; then the children hold exactly cvc::skeletonize's parts
+//     of the mesh's vertices, shown, info.* and status count them, and the data channel
 //     <node>.skeleton.{strands, sheets} holds them (T8: the result at the documented keys);
 //   - the view keys hide each part;
 //   - a stop before its first step ends it "stopped" and keeps the last skeleton; with nothing
@@ -207,7 +207,7 @@ struct Lab {
     cvc::pump_exec_frame(app.exec_scheduler()); // the skeleton is a sliced task on it
   }
   bool settling() const {
-    for (const auto &p : r.settling)
+    for (const auto &p : r.pending_work)
       if (p && p())
         return true;
     return false;

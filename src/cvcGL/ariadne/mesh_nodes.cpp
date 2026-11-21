@@ -1479,8 +1479,8 @@ void tick_mesh_lab(MeshLabRT &rt) {
   rt.work.settle(a, !rt.job && !rt.skel, rt.k.work_ms);
 }
 
-// Whether the node still has work that will change what it draws: a request waiting, a job or a
-// skeleton running, a colour not made for the mesh and mode shown yet (RealizedScene::settling).
+// Whether the node still has work that will change what it draws (RealizedScene::pending_work): a
+// request waiting, a job or a skeleton running, a colour not made for the mesh and mode shown yet.
 bool mesh_lab_settling(MeshLabRT &rt) {
   return rt.job || rt.skel || !ari::read_or<std::string>(*rt.app, rt.k.request, "").empty() ||
          mesh_color_signature(rt) != rt.field_sig;
@@ -1666,7 +1666,7 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
 
   out.custom_ticks.push_back([rt](vtkRenderer *) { tick_mesh_lab(*rt); });
   const std::weak_ptr<MeshLabRT> wrt = rt;
-  out.settling.push_back([wrt]() {
+  out.pending_work.push_back([wrt]() {
     const std::shared_ptr<MeshLabRT> r = wrt.lock();
     return r && mesh_lab_settling(*r);
   });

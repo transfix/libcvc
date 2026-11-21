@@ -7,7 +7,8 @@ recipe:
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF
   # because the demo link could not resolve MagickCore's static codec libraries).
   # Reset to 1 for the 4.0.2 upstream version: a version bump restarts cvc_revision.
-  cvc_revision: 1
+  # Bumped 1 -> 2: the contour tiler demo (cvc::planar's clipper2, cdt and shewchuk-predicates).
+  cvc_revision: 2
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
@@ -72,8 +73,11 @@ depends:
     # cvc's mesh_ops / fem (header-only), which the FEM gallery's fe_lab / mesh_lab nodes run on.
     - name: eigen
     - name: libigl
-    # Shewchuk's exact predicates (header-only): cvc::tet_complex and the skeleton built on it,
-    # which the skeleton lab's mesh_lab node runs. Without them its request reports an error.
+    # cvc::planar (Clipper2, CDT and Shewchuk's predicates), which the contour tiler demo's
+    # contour_lab node tiles on (roadmap P4). Shewchuk's predicates also carry cvc::tet_complex
+    # and the skeleton built on it, which the skeleton lab's mesh_lab node runs (P2).
+    - name: clipper2
+    - name: cdt
     - name: shewchuk-predicates
     # The `ari` page's terminal backend; only the single-threaded gallery has that page.
     - name: ftxui

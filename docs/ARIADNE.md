@@ -7668,9 +7668,10 @@ A capture is made repeatable by:
 - ImGui's frame delta pinned (`ImGuiOverlay::setFixedDeltaTime`);
 - at least 4 frames at a fixed dt before the capture;
 - where a custom node has work in flight (a request waiting, a job or a sliced task running, a
-  result not drawn yet), more frames until it is done, then 4 more so the windows show what it
-  published. A node type says so through `RealizedScene::settling`, a probe per node (mesh_lab
-  registers one: its skeleton, its colour jobs). The skeleton golden waits for its run this way;
+  result not drawn yet), more frames until it is done, then 4 more with none in flight so the
+  windows show what it published. A node type says so through `RealizedScene::pending_work`, a
+  probe per node (mesh_lab registers one: its skeleton, its colour jobs; contour_lab one: its
+  tile). The skeleton and contour tiler goldens wait for their runs this way;
 - where the scene has `volren` nodes, more frames until each shows a finished raycast.
 
 The test then renders one more frame and requires it to be identical, so a UI that is still

@@ -4,7 +4,7 @@
 # the embedded bunny itself) and init: asks for its skeleton. The strands (green, the blue stars of
 # small clusters) and the sheets are drawn inside the see-through surface, and a viewport shows the
 # skeleton alone (show: [skeleton]: the node's own surface is tagged surface, its children
-# skeleton). The harness waits for the run (RealizedScene::settling) before the capture.
+# skeleton). The harness waits for the run (RealizedScene::pending_work) before the capture.
 
 meta:
   name: golden skeleton

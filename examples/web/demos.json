@@ -12,6 +12,7 @@
     "volslice_bunny_ari",
     "orthoslicer_ari",
     "skeleton_lab_ari",
+    "contour_tiler_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
     "viewer_looks_ari",
@@ -205,6 +206,15 @@
       "blurb":
           "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node: the embedded Stanford bunny is decimated to 4,000 triangles and its vertices skeletonized (Tight Cocone, the medial axis, then the unstable manifolds of its saddles) a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) and the sheets are drawn inside the see-through surface, and a second view shows the skeleton alone. The Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
       "thumb": "img/skeleton_lab_ari.jpg"
+    },
+    "contour_tiler_ari": {
+      "app": "arigl",
+      "doc": "contour_tiler",
+      "title": "contour tiler",
+      "desc": "surfaces through serial-section contours: axons and mitochondria from a real Reconstruct series",
+      "blurb":
+          "VolumeRover's contour tiler as one Ariadne document: a contour_lab node reads a real Reconstruct series from mouse hippocampus (two axons traced through 72 sections, a third that branches, and two mitochondria inside one of them; Kuwajima 2019, CC0), draws the traced contours and tiles a surface through each object's contours, slice pair by slice pair, as a sliced task, so the page keeps drawing while it works and the progress bar names the pair it is on. Tick the components to tile, change the slice range or the parameters, and tile again; the surfaces are see-through, so the mitochondria show inside their axon.",
+      "thumb": "img/contour_tiler_ari.jpg"
     },
     "arigl_term": {
       "title": "arigl --terminal",

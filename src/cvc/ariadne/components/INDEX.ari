@@ -199,6 +199,13 @@ catalog:
     for: "a `type: fe_lab` node (load an SDF or a volume; LBIE tet / hex mesh of a solid, or a tet mesh of the interval between two isovalues; P1 Poisson / heat / eigenmode solve; the field on the boundary and a cut, or the elements cut away)"
     args: { node: domain, title: Finite elements, id: fe_controls }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build (and CVC_ENABLE_MESHER to tet-mesh); commands go through fe.request"
+  - component: contour_tiler
+    file: contour_tiler.ari
+    unit: contour_tiler
+    binds: "<prefix>.graphics.root.children.{node}.tiler.*"    # the cvcGL contour_lab realizer
+    for: "a `type: contour_lab` node (planar contours from a file or another node: the component picker, the slice range, the tiler's parameters, Tile / Stop / Load and a progress bar naming the slice pair)"
+    args: { node: contours, title: Contour tiler, id: contour_tiler, slices: 200 }   # defaults
+    note: "the tile runs as a sliced task (tiler.request); a libcvc built without cvc::planar has no tiler, and its status says so"
   - component: transfer_function
     file: transfer_function.ari
     unit: transfer_function

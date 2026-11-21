@@ -1257,6 +1257,13 @@ add_executable(cvcgl_volume_slice test/cvcgl_volume_slice.cpp)
 target_link_libraries(cvcgl_volume_slice PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
 
+# The contour_lab node (contour_lab_nodes.h, roadmap P4): a contour stack from a file, another
+# node or a state key, its rows and keys, and the tiler run as a sliced task (tile, untick, stop),
+# its surfaces on the data channel; two apps. Headless.
+add_executable(cvcgl_contour_lab test/cvcgl_contour_lab.cpp)
+target_link_libraries(cvcgl_contour_lab PRIVATE cvcGL)
+add_test(NAME cvcgl_contour_lab COMMAND cvcgl_contour_lab)
+
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
 # the AriRuntime part skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
@@ -1635,4 +1642,4 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
-                        cvcgl_imgui_colors)
+                        cvcgl_imgui_colors cvcgl_contour_lab)
