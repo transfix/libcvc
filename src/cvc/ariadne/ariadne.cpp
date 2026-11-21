@@ -94,6 +94,24 @@ std::string read_string(cvc::app &ctx, const std::string &path) {
   }
 }
 
+// A slider's `range: key`: the bound key's "min" and "max" properties over `lo` / `hi`, each kept
+// where the key has none (or one that is not a number). Follows a transparent link as reads do.
+void key_range(cvc::app &ctx, const std::string &path, double &lo, double &hi) {
+  try {
+    cvc::state *n = read_node(ctx, path);
+    if (!n)
+      return;
+    for (auto [prop, out] : {std::pair<const char *, double *>{"min", &lo}, {"max", &hi}}) {
+      const std::string t = n->property(prop);
+      char *end = nullptr;
+      const double d = std::strtod(t.c_str(), &end);
+      if (!t.empty() && end && *end == '\0' && std::isfinite(d))
+        *out = d;
+    }
+  } catch (const std::exception &) {
+  }
+}
+
 // §4 read-lane: is this bind an s-EXPRESSION (a computed value) rather than a state path?
 // State paths are dotted identifiers and never begin with '('; an s-expr always does. So the
 // first non-space character decides — no ambiguity, and no new field/key needed.
@@ -217,6 +235,13 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.bind, kTok, idx);
   replace_in(out.on, kTok, idx);
   replace_in(out.pick, kTok, idx); // a chart's or a heatmap's pick: key
+  // A chart's series, cursor and log axis: a row's own curves (series: [{bind: runs.{i}.y}]).
+  for (ChartSeriesBind &s : out.chart_series) {
+    replace_in(s.bind, kTok, idx);
+    replace_in(s.label, kTok, idx);
+  }
+  replace_in(out.cursor, kTok, idx);
+  replace_in(out.log_y, kTok, idx);
   // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
   // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
   replace_in(out.on_click, kTok, idx);
@@ -255,6 +280,8 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.color_src, kTok, idx);            // §5.26 a row's colour (palette.{i})
   replace_in(out.poster, kTok, idx); // §5.13
   replace_in(out.emoji, kTok, idx);  // §5.11 a post's own shortcodes
+  replace_in(out.button_icon, kTok, idx); // §5.27 a row's button: its picture, whether it's chosen
+  replace_in(out.selected, kTok, idx);
   // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
   replace_in(out.runs_src, kTok, idx);
   replace_in(out.on_link, kTok, idx);
@@ -1871,6 +1898,7 @@ struct Runtime::Impl {
     std::uint64_t drawn_walk = 0;
     double last_drawn = 0.0;
     bool hidden_paused = false;
+    double made_at = 0.0; // when its player was made (a video with no frame 3 s on says why)
   };
   std::unordered_map<std::string, PlayerSlot> players;
   std::uint64_t walk_count = 0;
@@ -3077,7 +3105,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // button in its title bar where the backend has one (`maximizable: false`: none). While it is
     // maximized its geometry is not persisted, so tree.<id>.geometry keeps where it goes back to.
     const std::string max_path = resolve("tree." + id + ".maximized");
-    bool maximized = w.maximizable && read_bool_or(app, max_path, 0) != 0;
+    // `maximized: true | phone` is how it starts, until the user (or the document) writes the key.
+    const bool start_max =
+        w.start_maximized == "true" || (w.start_maximized == "phone" && b.view_is_phone());
+    bool maximized = w.maximizable && read_bool_or(app, max_path, start_max ? 1 : 0) != 0;
     const bool can_maximize = w.maximizable && b.next_window_maximize(&maximized);
     if (!can_maximize)
       maximized = false;
@@ -3298,7 +3329,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::SliderInt: {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
-    const IntEdit e = b.slider_int(label, path.c_str(), cur, w.ilo, w.ihi);
+    int lo = w.ilo, hi = w.ihi;
+    if (w.range_from_key) {
+      double klo = lo, khi = hi;
+      key_range(app, path, klo, khi);
+      lo = static_cast<int>(std::lround(klo));
+      hi = std::max(lo, static_cast<int>(std::lround(khi)));
+    }
+    const IntEdit e = b.slider_int(label, path.c_str(), cur, lo, hi);
     if (e.committed || (e.changed && !w.commit_on_release)) // live while dragged, by default
       write<int>(app, path, e.value);
     if (e.committed && !w.on.empty()) // on: fires once per commit (drag end / key step), not
@@ -3309,9 +3347,12 @@ void Runtime::Impl::emit_node(const Widget &w) {
   case Kind::SliderFloat: {
     const std::string path = resolve(w.bind);
     const double cur = read_or_seed<double>(app, path, w.def);
-    const DoubleEdit e =
-        w.log_scale ? b.slider_double_log(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str())
-                    : b.slider_double(label, path.c_str(), cur, w.lo, w.hi, w.fmt.c_str());
+    double lo = w.lo, hi = w.hi;
+    if (w.range_from_key)
+      key_range(app, path, lo, hi);
+    const DoubleEdit e = w.log_scale
+                             ? b.slider_double_log(label, path.c_str(), cur, lo, hi, w.fmt.c_str())
+                             : b.slider_double(label, path.c_str(), cur, lo, hi, w.fmt.c_str());
     if (e.committed || (e.changed && !w.commit_on_release))
       write<double>(app, path, e.value);
     if (e.committed && !w.on.empty())
@@ -3636,12 +3677,40 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Button:
-    if (tinted([&] { return b.button(label); })) {
+  case Kind::Button: {
+    // §5.27 a picture in place of the label, and the chosen one of a row drawn pressed in. A plain
+    // button goes the way it always has.
+    bool hit = false;
+    if (w.button_icon.empty() && w.selected.empty()) {
+      hit = tinted([&] { return b.button(label); });
+    } else {
+      ButtonLook look;
+      look.icon_h = w.icon_size;
+      look.selected = w.selected == "true" || (is_expr(w.selected) && predicate(w.selected, false));
+      const std::string icon = is_expr(w.button_icon) ? eval_text(w.button_icon) : w.button_icon;
+      if (media::is_uri(icon) && !media::is_video_uri(icon)) {
+        // Fetched and kept as an image:'s picture is, at its own shape: the label shows until it is
+        // ready, and if it fails. Three times the height it's drawn (a line, about 16 px, unless
+        // icon_size: says), so a phone's dense screen gets a sharp one.
+        media::ImageRequest rq;
+        rq.uri = icon;
+        rq.auth = w.media_auth;
+        rq.w = 3 * std::max(16, static_cast<int>(std::lround(w.icon_size)));
+        media::ImageView v;
+        const std::string name = media_picture(rq, v);
+        if (v.status == media::Status::Ready)
+          look.icon = name;
+      } else if (!icon.empty() && !media::is_uri(icon)) {
+        look.icon = icon; // a host-published picture
+      }
+      hit = tinted([&] { return b.button_with(label, look); });
+    }
+    if (hit) {
       enqueue(w.on);
       ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
     }
     break;
+  }
 
   case Kind::TfEditor: {
     TfEditorContext ctx{app,
@@ -4275,6 +4344,7 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
       media::PlayerSource src = ps;
       src.base = media_base;
       p.player = media::make_player(app, src);
+      p.made_at = steady_seconds();
       p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
       if (!p.player)
         p.error = "this host's player cannot play it";
@@ -4451,9 +4521,29 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     }
     const float width =
         within_height(static_cast<float>(draw_w), bh > 0 ? 0.0f : aspect, w.img_max_h);
-    if (!b.draw_image(name.c_str(), width))
+    const bool drew = b.draw_image(name.c_str(), width);
+    if (!drew)
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
     in_view = b.item_visible();
+    // No frame yet: the box says why, over the poster or the placeholder: its error once it fails
+    // (with controls, "failed": their line has the error), what the player says keeps the picture
+    // away (a browser waiting for a tap), or, loading or playing 3 s with no frame, that state.
+    // Not where a badge: of its own is, in a box too small for words (an avatar, an emoji), or in
+    // a terminal (a badge there is a line of its own, under the picture).
+    if (drew && pl && !p.have_frame && w.badge.empty() && draw_w >= 96 &&
+        !b.capabilities().terminal) {
+      std::string why;
+      if (p.state == media::PlayerState::Failed)
+        why = decorative && !p.error.empty() ? p.error : std::string("failed");
+      else
+        why = pl->notice();
+      if (why.empty() &&
+          (p.state == media::PlayerState::Loading || p.state == media::PlayerState::Playing) &&
+          now - p.made_at >= 3.0)
+        why = media::player_state_name(p.state);
+      if (!why.empty())
+        b.item_badge(why.c_str());
+    }
     emit_badge(w);
   }
 

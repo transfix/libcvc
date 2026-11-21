@@ -11,6 +11,7 @@
     "volslice_bunny",
     "volslice_bunny_ari",
     "orthoslicer_ari",
+    "volume_grid_ari",
     "skeleton_lab_ari",
     "contour_tiler_ari",
     "fem_gallery_ari",
@@ -197,6 +198,15 @@
       "blurb":
           "The classic orthoslicer beside a raycast volume, as one Ariadne document: the signed distance field of the embedded Stanford bunny, raycast with a see-through surface and cut by three axis-aligned volume_slice planes that share one volume and one transfer function. A slice view looks straight down whichever axis the XY / XZ / ZY switch picks: drag to pan, the wheel zooms about the pointer, a click reads out the voxel under it. The sliders move the planes, and the transfer-function editor recolours all three.",
       "thumb": "img/orthoslicer_ari.jpg"
+    },
+    "volume_grid_ari": {
+      "app": "arigl",
+      "doc": "volume_grid",
+      "title": "volume grid",
+      "desc": "VolumeGridRover in Ariadne: slice views, a probe and point classes on a volume",
+      "blurb":
+          "VolumeGridRover rebuilt as an Ariadne component over a volume_grid node: the signed distance field of the embedded Stanford bunny in three slice planes, a slice view under the XY / XZ / ZY switch beside a 3D view of the planes, and a panel with the probe, the point classes and the transfer function. Click in the slice view to mark a point of the current class (or unmark one), drag to select points in a rubber band, Shift+Ctrl drag to move them; Navigate moves the other planes to the voxel clicked, and the probe follows the pointer.",
+      "thumb": "img/volume_grid_ari.jpg"
     },
     "skeleton_lab_ari": {
       "app": "arigl",

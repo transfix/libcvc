@@ -1,0 +1,14 @@
+<!DOCTYPE pointclassdoc>
+<pointclassdoc>
+ <pointclass name="inside" color="#ff7333" variable="0" timestep="0" radius="1.5">
+  <point>10 12 15</point>
+  <point>14 18 15</point>
+  <point>20 16 15</point>
+  <point>8 15 8</point>
+ </pointclass>
+ <pointclass name="outside" color="#4d99ff" variable="0" timestep="0" radius="1.5">
+  <point>4 26 15</point>
+  <point>27 5 15</point>
+  <point>22 15 20</point>
+ </pointclass>
+</pointclassdoc>

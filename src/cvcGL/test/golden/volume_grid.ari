@@ -1,0 +1,45 @@
+# volume_grid.ari — golden: the volume_grid component (src/cvc/ariadne/components/volume_grid.ari)
+# in its switch layout, VolumeGridRover's: a slice view looking down z under the XY / XZ / ZY
+# switch, the 3D view of the three planes beside it, and the Point classes tab, over the signed
+# distance field of the embedded bunny (32^3 here, to keep the run short) with the point classes of
+# volume_grid.vgr on the planes. The Transfer function tab is not the one shown: its histogram
+# arrives from a task, on no fixed frame.
+
+meta:
+  name: golden volume_grid
+  min_libcvc: 4.0.0
+
+import:
+  - cvc://components/volume_grid.ari
+
+init: |
+  (state-set "tree.vg_panel.tab" "Point classes")
+
+on_tick: |
+  (if (!= (state-get "vg.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-140 -140 -60 140 140 160")
+             (state-set "vg.opened" "1")))
+
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vg, title: Volume grid, view_size: 270 }
+    pos: [8, 8]
+    size: [944, 520]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+      fit: { height: 100, up: y }
+      view: xy
+      points: volume_grid.vgr
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.58, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
