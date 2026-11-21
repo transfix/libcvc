@@ -23,6 +23,10 @@
 #if !defined(_WIN32)
 #include <sys/resource.h>
 #endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/syslimits.h>
+#endif
 
 #if defined(__SANITIZE_THREAD__)
 #define CVC_NET_TEST_TSAN 1
@@ -767,6 +771,16 @@ std::size_t fit_descriptors(std::size_t n) {
       }
       getrlimit(RLIMIT_NOFILE, &r);
     }
+#if defined(__APPLE__)
+    // macOS takes a larger limit and still refuses descriptors past OPEN_MAX and
+    // kern.maxfilesperproc (a macos-latest run failed its 5115th connect at 10240).
+    rlim_t ceiling = OPEN_MAX;
+    int per_proc = 0;
+    std::size_t len = sizeof per_proc;
+    if (sysctlbyname("kern.maxfilesperproc", &per_proc, &len, nullptr, 0) == 0 && per_proc > 0)
+      ceiling = std::min<rlim_t>(ceiling, static_cast<rlim_t>(per_proc));
+    r.rlim_cur = std::min(r.rlim_cur, ceiling);
+#endif
     if (r.rlim_cur < want)
       n = r.rlim_cur > 512 ? static_cast<std::size_t>((r.rlim_cur - 256) / 2) : 128;
   }
