@@ -48,6 +48,8 @@
 #include <cvc/geometry/fem.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
+#include <cvc/mol/blur.h>
+#include <cvc/mol/molecule.h>
 #include <cvc/geometry/mesh_ops.h>
 #include <cvc/geometry/simplify.h>
 #include <cvc/geometry/skeleton.h>        // mesh_lab's skeleton request
@@ -676,9 +678,18 @@ struct SourceSpec {
   bool flip = false;     // then turned upside down
   double height = 0.0;   // > 0: stood on z = 0, centred, its largest extent scaled to this
   std::string base_dir;  // where a relative file resolves
+  // mesh_lab, a molecule file (.pdb, .ent, .pqr): its surface is the isosurface at `isovalue` of
+  // its blur map (cvc::mol::blur, TexMol's GOABlur) with this blobbiness and grid spacing, of its
+  // heavy atoms unless `hydrogens`. The defaults are TexMol's: near the van der Waals surface.
+  double blobbiness = -2.3442;
+  double resolution = 1.0;
+  double isovalue = 1.0;
+  bool hydrogens = false;
   std::string sig() const {
     return type + "|" + file + "|" + std::to_string(dim) + "|" + algorithm + "|" + up + "|" +
-           (flip ? "1" : "0") + "|" + std::to_string(height) + "|" + base_dir;
+           (flip ? "1" : "0") + "|" + std::to_string(height) + "|" + base_dir + "|" +
+           std::to_string(blobbiness) + "|" + std::to_string(resolution) + "|" +
+           std::to_string(isovalue) + "|" + (hydrogens ? "1" : "0");
   }
 };
 
@@ -706,15 +717,55 @@ ari::ResolvedFile resolve_source_path(cvc::app &app, const std::string &uri,
   return rf;
 }
 
-// A source's mesh, read with app's geometry handlers and placed: turned to z-up (and flipped), then
-// fitted when height > 0.
+// Whether `path` is a molecule file the app reads (cvc::mol: .pdb, .ent, .pqr, .xyzr).
+bool is_molecule_file(cvc::app &app, const std::string &path) {
+  std::string ext = std::filesystem::path(path).extension().string();
+  for (char &c : ext)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  const std::vector<std::string> exts = cvc::mol::molecule_read_extensions(app);
+  return !ext.empty() && std::find(exts.begin(), exts.end(), ext) != exts.end();
+}
+
+// A molecule's surface: the isosurface of its blur map (SourceSpec says which).
+cvc::geometry molecule_surface(cvc::app &app, const std::string &path, const SourceSpec &s) {
+#ifdef CVC_ENABLE_MESHER
+  cvc::mol::molecule_read_params rp;
+  rp.hydrogens = s.hydrogens;
+  const cvc::mol::molecule m = cvc::mol::read_molecule(app, path, rp);
+  cvc::mol::blur_params bp;
+  bp.blobbiness = s.blobbiness;
+  bp.resolution = s.resolution;
+  const cvc::volume v = cvc::mol::blur(app, m, bp);
+  cvc::geometry g = cvc::iso(v, s.isovalue);
+  if (g.const_tris().empty()) {
+    double peak = 0.0;
+    for (std::uint64_t z = 0; z < v.ZDim(); ++z)
+      for (std::uint64_t y = 0; y < v.YDim(); ++y)
+        for (std::uint64_t x = 0; x < v.XDim(); ++x)
+          peak = std::max(peak, v(x, y, z));
+    throw std::runtime_error("the molecule's surface at isovalue " + std::to_string(s.isovalue) +
+                             " is empty: its density peaks at " + std::to_string(peak));
+  }
+  return g;
+#else
+  (void)app;
+  (void)path;
+  (void)s;
+  throw std::runtime_error("this build has no isosurfacing (CVC_ENABLE_MESHER), so it can't make "
+                           "a molecule's surface");
+#endif
+}
+
+// A source's mesh, read with app's geometry handlers (or, for a molecule file, its blur map's
+// isosurface) and placed: turned to z-up (and flipped), then fitted when height > 0.
 cvc::geometry load_source_mesh(cvc::app &app, const SourceSpec &s) {
   if (s.file.empty())
     throw std::runtime_error("source.file is empty");
   const ari::ResolvedFile f = resolve_source_path(app, s.file, s.base_dir);
   if (!f.ok)
     throw std::runtime_error(f.error);
-  cvc::geometry g = cvc::read_geometry(app, f.path);
+  cvc::geometry g = is_molecule_file(app, f.path) ? molecule_surface(app, f.path, s)
+                                                  : cvc::read_geometry(app, f.path);
   g = s.height > 0.0 ? fit_to_ground(g, s.up, s.flip, static_cast<float>(s.height))
                      : turn_up(g, s.up, s.flip);
   if (g.const_normals().size() != g.const_points().size())
@@ -902,6 +953,7 @@ struct MeshKeys {
   std::string target_faces, weld, remove_degenerate, remove_unreferenced, orient;
   std::string color_mode, colormap, color_min, color_max, geodesic_source, mode_index;
   std::string source_file, source_up, source_flip, source_height, work_ms;
+  std::string source_blobbiness, source_resolution, source_isovalue, source_hydrogens;
 };
 
 struct MeshLabRT {
@@ -953,6 +1005,10 @@ SourceSpec mesh_source_from_keys(const MeshLabRT &rt) {
   const double h = ari::read_or<double>(a, rt.k.source_height, 0.0);
   s.height = std::isfinite(h) && h > 0.0 ? h : 0.0;
   s.base_dir = rt.base_dir;
+  s.blobbiness = ari::read_or<double>(a, rt.k.source_blobbiness, s.blobbiness);
+  s.resolution = ari::read_or<double>(a, rt.k.source_resolution, s.resolution);
+  s.isovalue = ari::read_or<double>(a, rt.k.source_isovalue, s.isovalue);
+  s.hydrogens = ari::read_bool_or(a, rt.k.source_hydrogens, 0) != 0;
   return s;
 }
 
@@ -1504,6 +1560,10 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   spec.flip = n.fit_flip;
   spec.height = n.has_fit ? n.fit_height : 0.0;
   spec.base_dir = n.base_dir;
+  spec.blobbiness = n.props.num("blobbiness", spec.blobbiness);
+  spec.resolution = n.props.num("resolution", spec.resolution);
+  spec.isovalue = n.props.num("isovalue", spec.isovalue);
+  spec.hydrogens = n.props.flag("hydrogens", spec.hydrogens);
   cvc::geometry geom;
   if (from_file) {
     try {
@@ -1549,6 +1609,10 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   k.source_up = seed_str(a, base, "source.up", std::string(1, spec.up));
   k.source_flip = seed_bool(a, base, "source.flip", spec.flip);
   k.source_height = seed_num(a, base, "source.height", spec.height);
+  k.source_blobbiness = seed_num(a, base, "source.blobbiness", spec.blobbiness);
+  k.source_resolution = seed_num(a, base, "source.resolution", spec.resolution);
+  k.source_isovalue = seed_num(a, base, "source.isovalue", spec.isovalue);
+  k.source_hydrogens = seed_bool(a, base, "source.hydrogens", spec.hydrogens);
   k.smooth_method = seed_str(a, base, "smooth.method", prop_str(pr, "smooth_method", "cotan"));
   k.smooth_iterations = seed_num(a, base, "smooth.iterations", pr.num("smooth_iterations", 3));
   k.smooth_lambda = seed_num(a, base, "smooth.lambda", pr.num("smooth_lambda", 1e-3));
