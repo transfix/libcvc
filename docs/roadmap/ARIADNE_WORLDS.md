@@ -1052,6 +1052,10 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   so a client offers no one else that vehicle and shows its owner no get-out prompt. A person's
   body is still the first person archetype's for everyone: bodies that differ by archetype are
   still to come. `traffic.ari` offers a rover body.
+- **Mouse look is first person** (OW6c): walking under mouse look, arigl's camera sits at the
+  walker's eyes (0.92 of its body's height) and its own avatar is hidden; W walks where you look.
+  The Controls window's "Mouse look in first person" (the camera's `settings.first_person`, on by
+  default) turns it off for the view over your shoulder. Driving keeps the chase camera.
 - **Each thing driven has its own controls** (`cvc/ariadne/controls.h`). A control scheme per
   kind, each with its own bindings (keys and mouse buttons, and a gamepad's buttons, triggers and
   stick halves), so a car's keys are not a person's:
