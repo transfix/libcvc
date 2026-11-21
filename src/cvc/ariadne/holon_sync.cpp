@@ -194,6 +194,12 @@ void write_intent(cvc::app &app, const std::string &room, const std::string &pid
   set_replicated(app, leaf(room, pid, {"intent", "move", "y"}), fmt(intent.move.y));
   set_replicated(app, leaf(room, pid, {"intent", "move", "z"}), fmt(intent.move.z));
   set_replicated(app, leaf(room, pid, {"intent", "yaw"}), fmt(intent.yaw));
+  // The drive axes (a vehicle the participant drives; shares, avatar_intent), "nan" when it has
+  // none, and the walker's jump.
+  set_replicated(app, leaf(room, pid, {"intent", "steer"}), fmt(intent.steer));
+  set_replicated(app, leaf(room, pid, {"intent", "throttle"}), fmt(intent.throttle));
+  set_replicated(app, leaf(room, pid, {"intent", "brake"}), fmt(intent.brake));
+  set_replicated(app, leaf(room, pid, {"intent", "jump"}), intent.jump ? "1" : "0");
   set_replicated(app, leaf(room, pid, {"intent", "tick"}),
                  std::to_string(static_cast<unsigned long long>(tick)));
 }
@@ -206,11 +212,113 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
               read_double(app, leaf(room, pid, {"intent", "move", "y"})),
               read_double(app, leaf(room, pid, {"intent", "move", "z"}))};
   out.yaw = read_double(app, leaf(room, pid, {"intent", "yaw"}));
+  // The drive axes: absent (an older client) is none.
+  const auto axis = [&](const char *name) {
+    const std::string path = leaf(room, pid, {"intent", name});
+    return node_present(app, path) ? read_double(app, path)
+                                   : std::numeric_limits<double>::quiet_NaN();
+  };
+  out.steer = axis("steer");
+  out.throttle = axis("throttle");
+  out.brake = axis("brake");
+  const double jump = axis("jump");
+  out.jump = std::isfinite(jump) && jump != 0.0;
   if (out_tick) {
     cvc::state *t = app.root().findDescendant(leaf(room, pid, {"intent", "tick"}));
     *out_tick = t ? std::strtoull(t->value().c_str(), nullptr, 10) : 0;
   }
   return true;
+}
+
+std::uint64_t request_drive(cvc::app &app, const std::string &room, const std::string &pid,
+                            std::uint64_t entity) {
+  const std::string path = leaf(room, pid, {"drive"});
+  std::uint64_t seq = read_drive_status(app, room, pid).seq;
+  if (cvc::state *n = app.root().findDescendant(path))
+    seq = std::max<std::uint64_t>(seq, std::strtoull(n->value().c_str(), nullptr, 10));
+  ++seq;
+  set_replicated(app, path,
+                 std::to_string(static_cast<unsigned long long>(seq)) + ":" +
+                     std::to_string(static_cast<unsigned long long>(entity)));
+  return seq;
+}
+
+std::uint64_t read_driving(cvc::app &app, const std::string &room, const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(leaf(room, pid, {"driving"}));
+  return n ? std::strtoull(n->value().c_str(), nullptr, 10) : 0;
+}
+
+drive_status read_drive_status(cvc::app &app, const std::string &room, const std::string &pid) {
+  drive_status out;
+  cvc::state *n = app.root().findDescendant(leaf(room, pid, {"drive_status"}));
+  if (!n)
+    return out;
+  const std::string v = n->value();
+  char *end = nullptr;
+  out.seq = std::strtoull(v.c_str(), &end, 10);
+  const std::string rest = end ? std::string(end) : std::string();
+  out.ok = rest == " ok";
+  const std::string refused = " refused: ";
+  if (rest.compare(0, refused.size(), refused) == 0)
+    out.why = rest.substr(refused.size());
+  return out;
+}
+
+void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::string &pid) {
+  // A new ask: "<seq>:<entity>", answered once (its seq in drive_status).
+  if (cvc::state *ask = app.root().findDescendant(leaf(room, pid, {"drive"}))) {
+    const std::string v = ask->value();
+    const std::size_t colon = v.find(':');
+    char *end = nullptr;
+    const std::uint64_t seq = colon == std::string::npos ? 0 : std::strtoull(v.c_str(), &end, 10);
+    if (seq != 0 && end == v.c_str() + colon && read_drive_status(app, room, pid).seq != seq) {
+      const std::uint64_t entity = std::strtoull(v.c_str() + colon + 1, nullptr, 10);
+      std::string why;
+      const bool ok = h.get_in(pid, entity, &why);
+      set_replicated(app, leaf(room, pid, {"drive_status"}),
+                     std::to_string(static_cast<unsigned long long>(seq)) +
+                         (ok ? std::string(" ok") : " refused: " + why));
+    }
+  }
+  // What it drives, when that changed (a get-in, a get-out, the vehicle gone); nothing written for
+  // one that never drove.
+  const std::uint64_t now = h.drives(pid);
+  const std::string driving = leaf(room, pid, {"driving"});
+  if (node_present(app, driving) ? read_driving(app, room, pid) != now : now != 0)
+    set_replicated(app, driving, std::to_string(static_cast<unsigned long long>(now)));
+}
+
+std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
+                           double facing, double *out_gap) {
+  std::uint64_t best = 0;
+  double best_score = 1e300, best_gap = 0.0;
+  for (const conference::room_entity &e : entities.entities()) {
+    cvc::physics::pose at;
+    if (!e.drivable || !entities.pose(e.id, at))
+      continue;
+    // Its feet to the chassis box, in the vehicle's frame, in plan (holon::get_in's rule).
+    const cvc::physics::quat &q = at.rotation;
+    const double yaw =
+        std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    const double dx = feet.x - at.position.x, dy = feet.y - at.position.y;
+    const double c = std::cos(yaw), s = std::sin(yaw);
+    const double lx = c * dx + s * dy, ly = -s * dx + c * dy;
+    const double gap = std::hypot(std::max(0.0, std::fabs(lx) - 0.5 * e.size[0]),
+                                  std::max(0.0, std::fabs(ly) - 0.5 * e.size[1]));
+    if (gap > e.reach)
+      continue;
+    // Ahead of it first: one behind it scores as if a reach further away.
+    const bool ahead = -dx * std::cos(facing) - dy * std::sin(facing) >= 0.0;
+    const double score = gap + (ahead ? 0.0 : e.reach);
+    if (score < best_score) {
+      best = e.id;
+      best_score = score;
+      best_gap = gap;
+    }
+  }
+  if (out_gap)
+    *out_gap = best_gap;
+  return best;
 }
 
 bool read_current_intent(cvc::app &app, const std::string &room, const std::string &pid,
@@ -372,6 +480,9 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   for (const std::string &pid : h.participants())
     if (!present.count(pid))
       h.remove_participant(pid);
+  // Getting in and out of the world's vehicles (section 18.6).
+  for (const conference::room_participant &p : roster)
+    serve_drive(h, app, room, p.pid);
   // One authoritative frame.
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the
@@ -414,6 +525,15 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
       have = false;
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
+    // Driving, our pose is the vehicle's, played out as a peer's; out, predicted again.
+    if (p.pid == self_pid && h.has_participant(p.pid)) {
+      const bool riding = read_driving(app, room, p.pid) != 0;
+      if (riding == h.is_local(p.pid)) {
+        const cvc::physics::body_state now = h.state(p.pid);
+        h.remove_participant(p.pid);
+        h.add_participant(p.pid, /*local=*/!riding, now, /*pose_known=*/true);
+      }
+    }
     if (!h.has_participant(p.pid))
       h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);

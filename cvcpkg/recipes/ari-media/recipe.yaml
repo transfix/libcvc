@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ari-media
-  upstream_version: "4.0.2"
+  upstream_version: "4.0.3"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -33,12 +33,12 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.2"
+      version: "==4.0.3"
     - name: sdl3
     - name: ffmpeg-lgpl
   runtime:
     - name: libcvc
-      version: "==4.0.2"
+      version: "==4.0.3"
     - name: sdl3
     - name: ffmpeg-lgpl
   host_tools:

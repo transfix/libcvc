@@ -145,6 +145,9 @@ BIN="$CVC_BUILD_DIR/bin"
 WEB="$CVC_INSTALL_DIR/share/arigl-web"
 install -d "$WEB"
 install -m 644 "$BIN/arigl.js" "$BIN/arigl.wasm" "$BIN/arigl-web.js" "$BIN/arigl-web.css" "$WEB/"
+# The mic and speaker's AudioWorklets (cvc/media/web_audio.h): a page without the file loads the
+# copy compiled in, unless its Content-Security-Policy forbids a blob: script.
+install -m 644 "$BIN/cvc-audio-worklet.js" "$WEB/"
 install -m 644 "$BIN/arigl-web.html" "$WEB/index.html"
 for p in ${ARI_PAGES[@]+"${ARI_PAGES[@]}"}; do
   install -m 644 "$BIN/$p.html" "$BIN/$p.js" "$BIN/$p.wasm" "$WEB/"

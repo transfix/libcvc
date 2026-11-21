@@ -2335,8 +2335,13 @@ scene:
       `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
       vehicles start at rest where they are on the new plants. A plant or team that is not one is
       said in `vehicles.status` and changes nothing.
-    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
-      `entity_info::fleet` and `rally`.
+    - A view draws a fleet from `WorldVehicles::poses(fleet)`, not from state: a snapshot of its
+      placed vehicles as the last step left them (ids, chassis centres, headings, speeds, teams,
+      the box they lie in and the tick), made each step and read from any thread without a lock.
+      The keys `.tick` (the physics step they are of) and `.bounds` (`min_x,min_y,max_x,max_y`)
+      say the same in state.
+    - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()`, `restart_fleet()`, `poses()`
+      and `starts()`, and `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
     `color`, `color2` as `r,g,b`, `metadata` as `key=value, ...`, `controller`, `policy`,
     `policy_sha256`, `mass` or `mass_t` (a fraction of the range), `max_speed` or `max_speed_t`,
@@ -2455,13 +2460,19 @@ scene:
     team, controller, x, y, yaw, ...}]` (any of the four plants). Starts come from the
     document's spawn points when it has them. A seed and a list of commands give the same
     episode every time, in any gym.
+  - **Fleets.** `fleets=["city"]` (`gym_options::fleets`) names the document's fleets (its
+    `start:` entries with `fleet:`) that each reset lays out after the agents, from the fleet's
+    `seed:` plus the reset's seed: each seed a layout of its own, the same seed the same one.
+    Their vehicles are agents in the fleets' order, their goals held (a team's at its rally
+    point); with fleets and no `agents`, they are the only agents. A name the document does not
+    declare is refused when the gym is made.
   - **A world per episode.** With `regenerate=True` each reset makes a generated world on again
     from its seed (the node's `world.seed`): another seed, another world; the same seed, the same
     world.
   - **A step** is one navigator tick: `tick=` (`gym_options::tick`), by default libcvc's one
-    simulation tick, 0.06 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a whole
-    number of physics steps: a world with vehicles runs its clock at the 0.01 s simulation quantum,
-    so physics steps at 100 Hz and a tick is 6 of them. An agent takes
+    simulation tick, 7/120 s (`cvc::kSimTick`, `pycvc.SIM_TICK`; cvc/core/sim_tick.h). It is a
+    whole number of physics steps: a world with vehicles runs its clock at the 1/120 s simulation
+    quantum, so physics steps at 120 Hz and a tick is 7 of them. An agent takes
     its command for that tick in place of its controller's (`WorldVehicles::command`, held to its
     envelope); a NaN leaves it to its controller, so NaN everywhere is the navigator's baseline.
     Goals are held for the episode (`wander=False`); `set_goal(id, x, y)` moves one.
