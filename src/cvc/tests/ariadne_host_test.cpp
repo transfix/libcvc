@@ -19,6 +19,7 @@
 #include <cvc/state/state_exec/async_scheduler.h> // policy (--exec-policy)
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
 #include <cvc/state/state_exec/types.h>
+#include <cvc/volume/point_classes.h> // data-save's point_classes
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -852,6 +853,38 @@ template <class Pred> bool drain_until(AppRuntime &art, Pred pred) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return pred();
+}
+
+// (data-save PATH FILE [AS]): a program saves what a key's data channel holds, through the app's
+// encoder, beside the document (PATH and FILE relative to the document); nothing there raises,
+// saying so. A document reads and writes no file but through the app.
+TEST(AriadneHostVerbs, DataSaveWritesAKeysDataBesideTheDocument) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("data_save");
+  const fs::path doc = write(dir, "s.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ds");
+  art.set_backend(be);
+  art.load(doc.string());
+  cvc::point_classes pc;
+  pc.add("seeds", 1, 2, 3);
+  pc.add("seeds", 4, 5, 6);
+  cvc::state::instance(app)("ui.docs.ds.work.points")
+      .data(boost::any(std::make_shared<const cvc::point_classes>(pc)));
+  std::string how = "running";
+  art.run_program(R"((state-set "ok" (if (data-save "work.points" "seeds.vgr") "1" "0")))",
+                  [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(val(app, "ui.docs.ds.ok"), "1");
+  ASSERT_TRUE(fs::exists(dir / "seeds.vgr"));
+  EXPECT_EQ(cvc::read_point_classes(app, (dir / "seeds.vgr").string()), pc);
+  how = "running";
+  art.run_program(R"((data-save "work.nothing" "x.vgr"))", [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_NE(how.find("holds no data"), std::string::npos) << how;
+  EXPECT_FALSE(fs::exists(dir / "x.vgr"));
 }
 
 // ── (quit [code]), run_program and tests: (ari test) ───────────────────────────────────────────

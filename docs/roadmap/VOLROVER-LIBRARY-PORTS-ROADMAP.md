@@ -1324,11 +1324,28 @@ their units and ranges as properties. Bulk data is on the data channel:
   edited, added and removed; the session JSON. `volume_grid_test` (native and wasm-mt) and pycvc
   (`pycvc_volume_grid.i`, `test_pycvc_volume_grid.py`).
 - **The node** (`cvc::gl::VolumeGridNode`, `type: volume_grid`): keys as in the table above, less
-  the contour, segmentation and tile ones; the data channel's `points`, `selection` and `volume`;
-  overlays per plane (disks, the selection's rings, crosshairs, the rubber band). `load` reads in
-  one call (or plane by plane, past 64 Mi voxels), as a `volume_slice` node does, so it has no
-  stepper; the job keys are published for P9's segmentation. `cvcgl_volume_grid` (headless, picks
-  through state writes, two grids) and `cvcgl_ariadne_volume_grid` (the component, the mouse).
+  the contour, segmentation and tile ones; the data channel's `points`, `selection`, `session` and
+  `volume`; overlays per plane (disks, the selection's rings, crosshairs, the rubber band); the job
+  keys, published for P9's segmentation. `cvcgl_volume_grid` (headless, picks through state
+  writes, the data on the tree, four grids) and `cvcgl_ariadne_volume_grid` (the component, the
+  mouse, two grids on one dataset).
+- **Its data on the state tree** (part 3, after Joe on 2026-11-20: a component loads no file; the
+  outer app does, the main scene and the grid show one volume, and both update when it changes).
+  The node reads and writes no file. `source: { data: <name> }` (a `data:` entry the app loads),
+  `{ state: <key> }` or `{ node: <id> }` names the volume; the planes cut the app's volume itself
+  (its voxels shared; `grid.volume` the very pointer), followed as it changes. `points:` and
+  `session:` name point classes and sessions the same way. Saving is the app's: Ariadne's data
+  layer gained encoders (`register_data_encoder`; volume, point classes, sessions, bytes) and
+  `(data-save PATH FILE [AS])`, beside the document or downloaded in a browser, and the
+  `point_classes` and `volume_grid_session` decoders; the component's Save and Load go through
+  them. cvcGL's `sdf` data generator makes a mesh's distance field as a dataset (the demo's bunny).
+  A large file read plane by plane is now a host's choice (a `slice_source` on the volume's key).
+  Views frame on shown nodes only (`shown_bounds` skips hidden ones), so a view whose nodes wait
+  for data frames once they show. Left for the wider move of every node type to the same rule:
+  `volume_slice`, `volren` and the other nodes that still read `source: { file }`; a `data:`
+  decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
+  Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane
+  (which disk shows depends on draw order); the slice views show them all.
 - **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
   and `axis` on a pick; a slider's `range: key`.
 - **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and

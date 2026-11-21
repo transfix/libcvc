@@ -12,6 +12,14 @@ meta:
 import:
   - cvc://components/volume_grid.ari
 
+# The app holds the data: the bunny's 32^3 signed distance field (cvcGL's sdf generator) and the
+# point classes of volume_grid.vgr. The grid reads no file; it shows those.
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
+  seeds: volume_grid.vgr
+
 init: |
   (state-set "tree.vg_panel.tab" "Point classes")
 
@@ -32,10 +40,9 @@ scene:
   nodes:
     - node: grid
       type: volume_grid
-      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
-      fit: { height: 100, up: y }
+      source: { data: bunny }
       view: xy
-      points: volume_grid.vgr
+      points: { data: seeds }
       transfer_function:
         domain: [-20, 20]
         color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],

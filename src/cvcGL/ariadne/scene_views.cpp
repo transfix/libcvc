@@ -615,7 +615,9 @@ bool props_bounds(const std::unordered_set<vtkProp *> &props, double out[6]) {
 }
 
 // The world bounds of the tagged nodes `show` / `hide` let in, with their subtrees (the untagged
-// left out): what a view, or the main view, that names tags to show is framed on. False when
+// left out): what a view, or the main view, that names tags to show is framed on. A node hidden
+// (or under a hidden one) is not shown, so it is left out: a view whose nodes wait for their data
+// (a volume_grid's planes, before the app's volume is there) frames once they show. False when
 // none has any.
 bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
                   const std::vector<std::string> &hide, double out[6]) {
@@ -624,7 +626,7 @@ bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
     if (t.tags.empty() || !in_view(t.tags, show, hide))
       continue;
     std::shared_ptr<GraphicsNode> n = t.node.lock();
-    if (!n)
+    if (!n || !n->isVisibleInHierarchy())
       continue;
     const cvc::bounding_box bb = n->getCombinedWorldBoundingBox();
     if (bb.isNull())

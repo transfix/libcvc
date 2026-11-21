@@ -672,8 +672,10 @@ void AppRuntime::ensure_intrinsics() {
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
         // bound to NAME follow when it is ready), (data-generate NAME GENERATOR [PARAMS]) points
         // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-status
-        // NAME), (data-files NAME) and (data-file NAME PATH) (its bytes, or nil). The store first:
-        // it is reset when this runtime dies, and only then is `app` still ours.
+        // NAME), (data-files NAME), (data-file NAME PATH) (its bytes, or nil) and (data-save PATH
+        // FILE [AS]) (what a state key's data channel holds, written beside the document or, in a
+        // browser, downloaded: data_save). The store first: it is reset when this runtime dies,
+        // and only then is `app` still ours.
         std::shared_ptr<DataStore> store;
         std::string prefix, doc_dir;
         {
@@ -753,6 +755,23 @@ void AppRuntime::ensure_intrinsics() {
         se::builtins::register_fn(
             env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
               return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+            });
+        se::builtins::register_fn(
+            env, "data-save",
+            [app, text, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() < 2 || a.size() > 3)
+                throw se::dsl_error("TypeError", "data-save: expected PATH FILE [AS], got " +
+                                                     std::to_string(a.size()) + " args");
+              const std::string path = text(a, 0, "data-save");
+              try {
+                data_save(*app, resolve_bind(prefix, path), text(a, 1, "data-save"),
+                          a.size() > 2 ? text(a, 2, "data-save") : std::string(), doc_dir);
+              } catch (const se::dsl_error &) {
+                throw;
+              } catch (const std::exception &e) {
+                throw se::dsl_error("RuntimeError", std::string("data-save: ") + e.what());
+              }
+              return se::value_t(true);
             });
         se::builtins::register_fn(
             env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {

@@ -6631,7 +6631,8 @@ windows:
     for (const char *want :
          {"view", "tool", "slice.x", "slice.y", "slice.z", "classes", "classes.{i}.name",
           "classes.{i}.color", "classes.{i}.radius", "selection.count", "display.point_scale",
-          "display.grey", "cursor.value", "source.file", "files.classes", "status"})
+          "display.grey", "cursor.value", "info.source", "files.classes", "files.session",
+          "status"})
       EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end()) << g + want;
     for (const std::string &k : keys)
       if (k.find("{i}") == std::string::npos)
@@ -6686,10 +6687,15 @@ TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
     GTEST_SKIP() << "component sources not found";
   LoadResult r = load_file(app, doc.string());
   ASSERT_TRUE(r.ok) << r.error;
-  for (const std::string &w : r.warnings) // cvcGL registers the viewport widget, not this test
-    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  // cvcGL registers the viewport widget and the sdf generator (the volume, data.bunny), not this
+  // test.
+  for (const std::string &w : r.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
   ASSERT_EQ(r.scene.nodes.size(), 1u);
   EXPECT_EQ(r.scene.nodes[0].type, "volume_grid");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 

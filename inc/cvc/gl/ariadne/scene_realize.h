@@ -434,6 +434,19 @@ cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int
 cvc::volume sdf_volume_of_mesh(cvc::app &app, const cvc::geometry &mesh, int dim,
                                cvc::sdf_algorithm algorithm = cvc::SDF_V2);
 
+// The data generator `sdf` on `app` (cvc/ariadne/data.h): a mesh's signed distance field made as
+// a dataset, so the app holds the volume and every node that shows it shares it (a volume_grid's
+// source: { data: <name> }). Its params, a JSON object as a data: entry writes them:
+//   data:
+//     bunny:
+//       generate: sdf
+//       params: { mesh: stanford.bunny, dim: 64, algorithm: v2, fit: { height: 100, up: y } }
+// mesh (a mesh URI, or a file relative to the document), dim (default 64), algorithm (v1 | v2 |
+// igl; igl falls back to v2 without CVC_ENABLE_LIBIGL) and fit (height, up x | y | z, flip), as
+// a node's source: { sdf } and fit: take them. The volume is the dataset's `volume`. Needs a
+// CVC_ENABLE_SDF build (the load fails saying so without one). register_cvcgl_extensions calls it.
+void register_sdf_data_generator(cvc::app &app);
+
 // The volume a node's `source:` declares: `{ file }`, or `{ sdf: { mesh, dim, algorithm } }`
 // (algorithm v1 | v2 | igl; igl falls back to v2 with a warning when cvc::mesh_ops_available() is
 // false). Throws on failure.
