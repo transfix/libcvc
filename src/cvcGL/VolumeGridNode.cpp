@@ -90,6 +90,17 @@ bool volume_of(const boost::any &d, std::shared_ptr<cvc::slice_source> &src,
   return true;
 }
 
+// Whether a key's data is a volume the planes can cut (what volume_of takes), without making one.
+bool holds_volume(const boost::any &d) {
+  if (const auto *s = boost::any_cast<std::shared_ptr<cvc::slice_source>>(&d))
+    return static_cast<bool>(*s);
+  if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::volume>>(&d))
+    return static_cast<bool>(*c);
+  if (const auto *m = boost::any_cast<std::shared_ptr<cvc::volume>>(&d))
+    return static_cast<bool>(*m);
+  return boost::any_cast<cvc::volume>(&d) != nullptr;
+}
+
 template <class T> bool pointee(const boost::any &d, const void *&id) {
   if (const auto *p = boost::any_cast<std::shared_ptr<T>>(&d)) {
     id = p->get();
@@ -351,6 +362,52 @@ void VolumeGridNode::followSources() {
     else if (!d.empty())
       status("error: " + m_followSession.path + " holds no volume grid session");
   }
+}
+
+// grid.volumes, what the panel's Source combo offers. The document's data: entries are the links
+// under <scope>.data (with no scope that is the store's own node, whose other children are the
+// requests the links point at, so only the links count), and an entry's outputs are the children
+// of the node it points at. Made again only when grid.source.volume, an entry, where it points or
+// its rev changes.
+void VolumeGridNode::publishVolumes() {
+  const std::string current = getState("grid.source.volume").value();
+  cvc::state &root = app().root();
+  cvc::state *data =
+      current.empty()
+          ? nullptr
+          : root.findThroughLinks(m_scope.empty() ? std::string("data")
+                                                  : m_scope + cvc::state::SEPARATOR + "data");
+  std::vector<std::pair<std::string, cvc::state *>> entries;
+  std::string signature = current;
+  if (data)
+    for (const std::string &name : data->childNames()) {
+      cvc::state &link = (*data)(name);
+      if (!link.isLink())
+        continue;
+      const std::string target = link.linkTarget();
+      cvc::state *node = root.findThroughLinks(target);
+      if (!node)
+        continue;
+      cvc::state *rev = root.findThroughLinks(target + cvc::state::SEPARATOR + "rev");
+      signature += '\n' + name + '=' + target + '@' + (rev ? rev->value() : std::string());
+      entries.emplace_back(name, node);
+    }
+  if (signature == m_volumesSignature)
+    return;
+  m_volumesSignature = signature;
+  std::string list;
+  bool listed = current.empty();
+  for (const auto &[name, node] : entries)
+    for (const std::string &out : node->childNames())
+      if (holds_volume((*node)(out).data())) {
+        const std::string path =
+            std::string("data") + cvc::state::SEPARATOR + name + cvc::state::SEPARATOR + out;
+        listed = listed || path == current;
+        list += (list.empty() ? "" : "\n") + path;
+      }
+  if (!listed)
+    list += (list.empty() ? "" : "\n") + current;
+  put(getState("grid.volumes"), list);
 }
 
 void VolumeGridNode::adoptPoints(const boost::any &d, const std::string &from) {
@@ -713,6 +770,7 @@ bool VolumeGridNode::tick() {
       put(grid("classes"), "0");
   }
   followSources(); // the app's volume, points and session, as they change
+  publishVolumes(); // what the Source combo offers, while waiting for a volume too
   if (!m_source) {
     publishSession();
     return false;

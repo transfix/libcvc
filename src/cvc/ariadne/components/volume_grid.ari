@@ -6,7 +6,9 @@
 # picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO host C++.
 #
 # The grid reads no file: it shows the volume the app holds (the node's source: { data: <name> },
-# a data: entry the document loads), and follows it as it changes. The panel's Save and Load go
+# a data: entry the document loads), and follows it as it changes. With more than one volume
+# loaded, the Probe tab's Source combo picks which: it lists the document's data: entries that
+# hold a volume (the node's grid.volumes) and writes grid.source.volume. The panel's Save and Load go
 # through the app too: Save writes what the node publishes (grid.points, grid.session) with
 # (data-save ...), beside the document or, in a browser, as a download; Load loads the file as
 # the dataset <node>_points or <node>_session with (data-load ...) and points the node's
@@ -288,8 +290,14 @@ units:
                     bind: graphics.root.children.{node}.grid.info.min
                   - text: Max
                     bind: graphics.root.children.{node}.grid.info.max
+              - combo: Source
+                bind: graphics.root.children.{node}.grid.source.volume
+                options: (string.split (state-get "graphics.root.children.{node}.grid.volumes") "\n")
+                visible_when: (!= (or (state-get "graphics.root.children.{node}.grid.volumes") "") "")
+                tooltip: "the state key the volume is at: the app holds it (a data: entry, a program, a filter) and the grid follows it. Pick another of the document's volumes to show it"
               - text: Source
                 bind: graphics.root.children.{node}.grid.info.source
+                visible_when: (= (or (state-get "graphics.root.children.{node}.grid.volumes") "") "")
                 tooltip: "the state key the volume is at: the app holds it (a data: entry, a program, a filter) and the grid follows it"
               - separator
               - input_text: Session
