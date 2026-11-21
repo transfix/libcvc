@@ -49,8 +49,8 @@ the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-
 [Twemoji Mozilla](#twemoji-mozilla-070).
 
 Example data, in `examples/data` and preloaded into the browser gallery:
-[the Kuwajima 2019 Reconstruct series](#kuwajima-2019-reconstruct-series) (CC0). Test data,
-in `src/cvc/tests/data`: [PDB entry 1GRL](#pdb-entry-1grl) (CC0).
+[the Kuwajima 2019 Reconstruct series](#kuwajima-2019-reconstruct-series) (CC0) and
+[PDB entry 1GRL](#pdb-entry-1grl) (CC0).
 
 In the build scripts only: [CMake modules](#cmake-modules-build-scripts-only).
 
@@ -1333,7 +1333,7 @@ https://creativecommons.org/publicdomain/zero/1.0/. The repository asks that the
 
 ## PDB entry 1GRL
 
-- `src/cvc/tests/data/mol/1grl.pdb` -- the Protein Data Bank entry 1GRL, a subunit of the
+- `examples/data/molecules/1grl.pdb` -- the Protein Data Bank entry 1GRL, a subunit of the
   bacterial chaperonin GroEL (4,186 atoms), as distributed in 1995. cvc::mol's tests read it.
 
 Source: the Protein Data Bank, https://www.rcsb.org/structure/1GRL. Described in Braig K,

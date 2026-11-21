@@ -34,7 +34,7 @@ namespace fs = std::filesystem;
 namespace {
 
 const std::string kRepo = CVC_REPO_DIR;
-const std::string k1grl = kRepo + "/src/cvc/tests/data/mol/1grl.pdb";
+const std::string k1grl = kRepo + "/examples/data/molecules/1grl.pdb";
 
 // A small PDB with everything read_pdb handles, in v3.3 columns.
 const char *const kPdb =
