@@ -230,6 +230,15 @@ jobs:
               --prefix "$WASM_DEPS" --no-fallback-to-source 2>&1 | tail -2 \
               || { echo "::error::failed to install data package $p"; exit 1; }
           done
+          # cvc::planar's libraries, which the contour tiler demo's contour_lab node tiles on: for
+          # the gallery's own build only, after the SDK above (which does not take them yet).
+          for p in clipper2 cdt shewchuk-predicates; do
+            echo "=== install gallery dep: $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -2 \
+              || { echo "::error::failed to install wasm dep $p"; exit 1; }
+          done
           # The trained weights + Austin scene are ESSENTIAL: without them
           # build-wasm.sh silently falls back to a synthetic city + default net.
           # Fail loudly on a preload miss rather than shipping a gutted gallery.

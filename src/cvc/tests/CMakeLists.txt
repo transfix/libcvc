@@ -69,6 +69,7 @@ add_executable(state_write_policy_test state_write_policy_test.cpp)
 add_executable(state_identity_test state_identity_test.cpp)
 add_executable(state_device_key_test state_device_key_test.cpp)
 add_executable(media_rungs_test media_rungs_test.cpp)
+add_executable(voice_mixer_test voice_mixer_test.cpp)
 add_executable(fast_lane_test fast_lane_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
@@ -330,6 +331,7 @@ add_executable(nav_belief_material_controller_test nav_belief_material_controlle
 add_executable(nav_coph_test nav_coph_test.cpp)
 add_executable(nav_coph_model_test nav_coph_model_test.cpp)
 add_executable(nav_coph_learner_test nav_coph_learner_test.cpp)
+add_executable(nav_coph_exchange_test nav_coph_exchange_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -469,6 +471,7 @@ set(TEST_TARGETS
   state_identity_test
   state_device_key_test
   media_rungs_test
+  voice_mixer_test
   fast_lane_test
   state_distributed_metrics_test
   state_delegation_manager_test
@@ -606,6 +609,7 @@ set(TEST_TARGETS
   nav_coph_test
   nav_coph_model_test
   nav_coph_learner_test
+  nav_coph_exchange_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -1498,6 +1502,13 @@ target_link_libraries(nav_coph_learner_test
     GTest::gtest_main
 )
 
+target_link_libraries(nav_coph_exchange_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(nav_material_deploy_test
   PRIVATE
     cvc
@@ -1795,6 +1806,12 @@ target_link_libraries(state_device_key_test
     GTest::gtest_main
 )
 target_link_libraries(media_rungs_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(voice_mixer_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2909,6 +2926,7 @@ target_compile_features(state_write_policy_test PRIVATE cxx_std_17)
 target_compile_features(state_identity_test PRIVATE cxx_std_17)
 target_compile_features(state_device_key_test PRIVATE cxx_std_17)
 target_compile_features(media_rungs_test PRIVATE cxx_std_17)
+target_compile_features(voice_mixer_test PRIVATE cxx_std_17)
 target_compile_features(fast_lane_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
@@ -3291,6 +3309,7 @@ cvc_discover_tests(nav_belief_material_controller_test)
 cvc_discover_tests(nav_coph_test)
 cvc_discover_tests(nav_coph_model_test)
 cvc_discover_tests(nav_coph_learner_test)
+cvc_discover_tests(nav_coph_exchange_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3491,6 +3510,7 @@ cvc_discover_tests(state_write_policy_test)
 cvc_discover_tests(state_identity_test)
 cvc_discover_tests(state_device_key_test)
 cvc_discover_tests(media_rungs_test)
+cvc_discover_tests(voice_mixer_test)
 cvc_discover_tests(fast_lane_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)
