@@ -19,6 +19,8 @@
 get_filename_component(_cvc_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
+include("${_cvc_root}/CMake/CvcVtkWasmExceptions.cmake")
+cvc_vtk_wasm_exceptions()
 find_package(Boost REQUIRED COMPONENTS program_options)
 
 # cvc_demos_menu -- the "Demos" menu each C++ demo puts first in its main menu bar, so any demo

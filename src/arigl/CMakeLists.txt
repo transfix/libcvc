@@ -26,6 +26,8 @@ else()
 endif()
 # What the host itself draws with, beyond what cvcGL links: VTK's window/interactor and image IO.
 find_package(VTK REQUIRED COMPONENTS RenderingUI IOImage)
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcVtkWasmExceptions.cmake")
+cvc_vtk_wasm_exceptions()
 
 add_executable(arigl main.cpp gallery.cpp)
 target_link_libraries(arigl PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
