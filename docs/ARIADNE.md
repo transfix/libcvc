@@ -689,10 +689,14 @@ writes on its keys (`cvc/state/state_key_meta.h`'s `access`, `unit`, `min` and `
     the paths below start with the root as written (`nav.vehicle.vmax`).
 - **`filter:`** patterns match a key's path under the root:
   - a pattern with `*`, `?` or `[...]` is a glob (`*` crosses dots), any other a substring;
-  - a key passes when it matches one of the patterns and none that start with `-`.
+  - a key passes when it matches none of the patterns that start with `-` and, if there are
+    others, one of them.
 - **The search box** narrows the list by words in a key's path or description, in any case; a
-  `-word` leaves out what has it. While a search or a filter narrows the list, every group is
-  drawn open.
+  `-word` leaves out what has it.
+- **While a search narrows the list**, or a filter with a pattern that picks keys (one not
+  starting with `-`), every group is drawn open, so no match hides in a closed one. A filter of
+  `-` patterns only leaves keys out: `open:` and `groups:` decide which groups start open, and
+  each opens and closes by hand.
 - **Reset.** A key whose value is not its default shows a reset, which writes the default back.
   - The default is the key's `default` property, else the value the editor first saw it hold.
   - A group with such keys shows a "reset all", which puts back each key under it.
@@ -2294,6 +2298,38 @@ scene:
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. `keys: all` writes every vehicle's.
+    - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
+      `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
+      `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
+      `grouped` (max(2, n / 64) maps, teammates together) or `private` (one each).
+      `vehicles.fleets.<fleet>.sense` and `.belief` make it again, its vehicles at rest where
+      they are, and `.planes` counts its maps.
+    - `policy:` is what drives it.
+      - `trained` (the default) is the published CoefMLP, found in this order:
+        `$CVC_NAV_WEIGHTS`, an installed copy, else downloaded from
+        `cvcpkg://cvc/grl-snam-weights` through the data store (cached by hash).
+      - `builtin` is the built-in net.
+      - A `.cvcnav`'s path, `{ uri:, path:, sha256: }` (a file, an https URL or a cvcpkg://
+        package, the `.cvcnav` inside it, and its hash), or `{ data: <entry> }` (the document's
+        `data:` entry).
+
+      `vehicles.fleets.<fleet>.policy` switches it live, and `.drives` says what drives:
+      `trained (<where>, sha256:...)`, `weights (...)`, `builtin`, `builtin: loading <uri>` while
+      the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
+      weights it drives on the built-in net, and the host's log says why once.
+    - `metric:` is what it plans with. `trained` is the trainer's vehicle (a 3 m disc and 18 m/s,
+      the bicycle the weights learned on; its plants plan with it too). `vehicle` is each plant's
+      own size and limits. `policy` (the default) follows the policy: `trained` while weights
+      drive it or are on their way, `vehicle` on the built-in net, its own or a fallback's.
+      `vehicles.fleets.<fleet>.metric` switches it, and `.plans` says which it plans with now.
+      A change makes its navigators again, its vehicles at rest where they are.
+    - `plant:` is one plant, a list its vehicles cycle over (`[jolt, kinematic]`), or each team's
+      (`{ 0: jolt, 2: jolt }`; a team not named is on the archetype's plant). Each plant is a
+      navigator of the fleet's own, and its plants all float (`dynamicboat`) or none do.
+      `vehicles.fleets.<fleet>.plant` switches them live, written as `jolt`, `jolt, kinematic`,
+      `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
+      vehicles start at rest where they are on the new plants. A plant or team that is not one is
+      said in `vehicles.status` and changes nothing.
     - In C++: `WorldVehicles::fleets()`, `rally()`, `move_rally()` and `restart_fleet()`, and
       `entity_info::fleet` and `rally`.
   - **Spawning from keys.** Set `vehicles.selected` and `vehicles.spawn.*` (`name`, `team`,
@@ -5665,7 +5701,8 @@ makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
-and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node): the
+and free points; `AriApp.grid(node, cell)` gives it for a scene's generated or data node, and
+`AriApp.world_geometry(node)` that node's world, under a drawn host too through `ari_app_attach`): the
 navigator gets the grade (`nav_sim_world_set_terrain` with the Humvee's
 `nav_plant.terrain_config_of`), and the routes keep off the slopes `nav_terrain_build` marks
 infeasible for it. The Jolt plant drives on flat ground with the buildings as boxes, as the C++

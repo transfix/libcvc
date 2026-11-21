@@ -103,7 +103,9 @@ jobs:
           # eigen + libigl (header-only): cvc's mesh_ops / fem, which the FEM gallery's fe_lab and
           # mesh_lab nodes run on. Without them CVC_ENABLE_LIBIGL goes off and those nodes don't exist.
           # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
-          for p in eigen libigl sdl3; do
+          # clipper2, cdt, shewchuk-predicates: cvc::planar, which the contour tiler demo's
+          # contour_lab node tiles on. Without them the tiler is not built in.
+          for p in eigen libigl sdl3 clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \

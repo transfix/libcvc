@@ -1133,20 +1133,43 @@ std::unique_ptr<result_job<tile_result>> tile_contours_job(contour_stack in, til
 }
 ```
 
-**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is
-smaller than a pair:
+**Resumable** (§1.9). Progress counts slice pairs of components, so it is real, but a step is far
+smaller than a pair. A unit is about a microsecond's work: a contour vertex, a triangle, or a call
+that cannot yield, charged by the vertices it takes (`TILER_UNITS` and its charges in
+`tiler/stepping.h`). A step also ends where the phase changes, so a budget the scheduler sized on
+one phase is not spent on the next.
 - **`"snapping"`:** every contour vertex onto the `int64` grid, a vertex per unit.
+- **`"curating"` and `"augmenting"`:** a contour at a time is checked, cleared of collinear
+  vertices, dilated or eroded; a pair of contours at a time is differenced, or augmented with each
+  other's crossings.
 - **`"tiling"`:** per slice pair and component, the tiler's stages in order: correspondence,
-  tiling regions, branching, untiled regions and intersection removal. Within each, a unit is a
-  contour vertex or a triangle emitted.
-  - Each Clipper2 Boolean or offset, CDT triangulation and Boost.Polygon medial axis is called on
-    one pair's contours. That call is the indivisible piece, and its cost grows with those
-    contours' vertex count.
-  - T7 records the worst pair in the committed `.ser` series. A pair whose contours are too large
-    for a frame is split before the call: Clipper2 and CDT run per connected region, and the
-    medial axis per untiled region.
+  tiling regions, the OTV table, the four tiling passes, untiled regions and intersection removal.
+  Each test is a unit charged by its contours' size. An untiled region's fill yields a point at a
+  time, each point a Delaunay triangulation and a natural-neighbour interpolation.
+  - The indivisible pieces each take one slice's contours, one slice pair's or one untiled
+    region: a Clipper2 Boolean or offset, a sweep, a CDT partition or Delaunay triangulation, a
+    tiling test, a workspace freed. Their cost grows with those contours' vertex count.
+  - Intersection removal between two components' tiles (`remove_intersections`, off by default)
+    is still one unit per pair of components, about 2 ms on T3's touching case.
 - **`"assembling"`:** the per-component surfaces stitched and their normals computed, a triangle
   per unit.
+- **Measured** (2026-11-20, after P4 found the early phases coarse; native MSVC Release,
+  `CVC_SLICED_THREADING=cooperative`, 4 ms slice, three runs each on a shared machine):
+  - P4's demo stack (3 components, 40 slices, 64-vertex contours) in `cvcgl_contour_lab`: the
+    slowest frame of each phase is 4.1 to 4.7 ms. Before, its first frames took 50 to 160 ms: a
+    step ran on across a phase change, and a curating or augmenting unit was a whole slice or slice
+    pair. The slowest frame left there, 14 to 60 ms, is the document's frame that starts the job,
+    outside the stepper.
+  - T7's cases (touching, branch, and P4's stack on 12 slices): the slowest step at the default
+    budget is 2.8 to 7.5 ms and the slowest cooperative frame 4.1 to 5.0 ms, against 41 to 117 ms
+    and 6.1 to 8.7 ms before. Under wasm-mt node (two runs) the slowest step is 4.0 to 7.1 ms and
+    the slowest frame 4.3 to 4.9 ms, but for touching's 9.2 to 9.6 ms (its intersection removal
+    is one unit per pair of components).
+  - The bunny (`tiler_bunny_test`, 50 slices, 9,536 contour vertices, tiled in 2.9 s): the slowest
+    frame is 5.6 to 5.8 ms (up to 9.6 ms under load), and the slowest step at budget 4096 9 to
+    16 ms. Its largest pieces, a tiling test or a freed workspace, take up to 2 to 4 ms.
+  - The blocking call takes as long as before, and stepping at the default budget costs 0 to 10%
+    more than budget 0.
 
 **Surfaces**
 
@@ -1163,6 +1186,18 @@ smaller than a pair:
   - Its keys live under `<node>.tiler.*`, and its surfaces on the data channel.
   - The `contour_tiler.ari` component has a component picker, the slice range, the parameters,
     Tile and Stop, and a progress bar labelled with the slice pair being tiled.
+  - *Built in P4 (2026-11-20).* `contour_lab` (`inc/cvc/gl/ariadne/contour_lab_nodes.h`) also
+    reads `source: { state: <key> }`, a stack a program put on a key's data channel, and follows
+    a node or state source when its data changes. Each component's row (`components.<i>`) has a
+    `tile` tick as well, which the component picker shows: an unticked component is left out of
+    the next tile. A file is read whole at realize and at each `load`. The demo tiles a real
+    series, the Kuwajima 2019 one (CC0; `examples/data/contours/kuwajima2019`): two axons
+    through 72 sections, a third that branches, and two mitochondria inside one of them, about
+    20,000 triangles with no warnings.
+  - **Found in P4, fixed in #1411: `tile_stepper`'s phases were coarse.** In cooperative mode the
+    first frames of this demo's tile (3 components on 40 slices, 64-vertex contours) took 50 to
+    160 ms each, against §1.9's 4 ms slice. "Resumable" above describes the fix and records what
+    was measured after it: 4.1 to 4.7 ms per phase on the same stack.
 
 **Tests** (§1.7)
 
@@ -1589,7 +1624,7 @@ not as follow-ups.
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
 | P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); then `cvc tile`, pycvc and `tiler.tile` with `tiler_intrinsics_test` | P3a, P0d |
-| P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
+| P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web. *Built:* `contour_lab` (`contour_lab_nodes.h`, test `cvcgl_contour_lab`), `contour_tiler.ari`, and `examples/ariadne/documents/contour_tiler.ari` on the Kuwajima 2019 series (CC0, `examples/data/contours/kuwajima2019`; golden `src/cvcGL/test/golden/contour_tiler.ari`, arigl-web smoke case `contour_tiler.ari` in the docset, and the gallery) | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |

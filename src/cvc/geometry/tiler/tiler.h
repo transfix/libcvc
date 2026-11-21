@@ -26,9 +26,10 @@
 // (tiler_output.h), and logged through process-wide loggers. Here it runs on slices tile_contours()
 // built (a copy), returns its triangles in a tile_output, logs to the call's tiler_context, and is
 // a coroutine (the skeleton port's step_task, VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.9): it yields
-// a unit per slice curated, per slice pair augmented, per component tiled in each pair, per
-// intersecting component pair whose intersections it removes, and per triangle decomposed. The
-// order of the work is the legacy order.
+// per contour (or pair of contours) curated or augmented, and per piece of each component's tiling
+// in each pair, each charged by the vertices it takes (stepping.h); per intersecting component pair
+// whose intersections it removes; and per triangle decomposed. The order of the work is the legacy
+// order.
 
 #ifndef __TILER_H__
 #define __TILER_H__

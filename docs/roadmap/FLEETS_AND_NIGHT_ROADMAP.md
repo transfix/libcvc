@@ -91,7 +91,8 @@ world:
                                     # a list cycles over the vehicles; per team: { 0: jolt, ... }
         controller: nav@1
         policy: trained             # trained | builtin | { uri, path, sha256 } | { data: <entry> }
-        metric: trained             # trained (the trainer's vehicle) | vehicle (each plant's own)
+        metric: policy              # trained (the trainer's vehicle) | vehicle (each plant's own)
+                                    # | policy (follows the policy, the default)
         sense: fog                  # known | fog
         belief: grouped             # shared | grouped (max(2, n/64)) | private
         spawn: opposed              # opposed | scattered | points (world: spawns:)
@@ -157,8 +158,10 @@ world:
     trained weights live (`set_policy`) once they arrive.
 - **The metric** (settled, D9). `trained` plans with the trainer's vehicle, at the metric the
   weights learned in, as the demos do. `vehicle` plans with each plant's own size and limits
-  (`nav_plant_options::plan_with_vehicle`), as world vehicles do today. The default follows the
-  policy: `trained` with trained weights, `vehicle` with the built-in net. `metric:` overrides it.
+  (`nav_plant_options::plan_with_vehicle`), as world vehicles do today. The default (`policy`)
+  follows the policy: `trained` with trained weights (and while they are on their way, so their
+  arrival does not make the navigator again), `vehicle` with the built-in net. `metric:` overrides
+  it (FL1c).
 - **The navigator per fleet.** A fleet's entities share one `sim_world`, built with the fleet's
   belief mode (`sim_world::belief_mode`, which #1358's `SceneSwarm` already drives). Fog coverage
   and sensed walls come from the existing `WorldVehicles::belief`, extended per plane.
@@ -288,6 +291,8 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 |---|---|---|---|
 | **FL0** | **Done** (2026-11-19; §3.1). `AriadneWorldGym.FleetBench` (`CVC_FLEET_BENCH=1`) times kinematic fleets of 100, 400 and 800 (map known and fog) and Jolt fleets of 60, 120 and 240, headless. Two fixes from it: `WorldVehicles::entities()` found kinematic overlaps pair by pair (quadratic; now a grid, linear), and the navigators get the app's pool. D3 decided by the numbers: yes. | — | S |
 | **FL1a** | **Done** (2026-11-19). Fleets as named `start:` entries: `fleet:`, up to 4096 vehicles, `spawn:` (opposed, scattered, points), `seed:`, `rally: { count, assign: latitude }` (teams, hsv colours, goals held), `colors:`, `keys:` (summary, all). Laid out once the grid exists (linear: a hashed separation check); rally keys move a team; `restart.request` and `reseed.request`; `vehicles.watch`; `WorldVehicles::fleets`, `rally`, `move_rally`, `restart_fleet`; `entity_info::fleet` and `rally`. Tests: `AFleetIsANamedStartEntry`, `AFleetIsLaidOutInTeamsAtRallyPoints`, `AFleetWithoutRallyPointsHoldsItsOwnGoals`; the bench's `[fleet doc]` rows (§3.1). Left for FL1: sense, belief and policy per fleet, plant lists, the metric, `poses(fleet)`, the gym's fleet. | FL0 | M |
+| **FL1b** | **Done** (2026-11-20). A navigator per fleet (one per plant, `<plant>/<fleet>`): `sense:` (known, fog; the world's by default) and `belief:` (shared; grouped, max(2, n / 64) planes by team; private, one per vehicle), both switched by their keys, which make the navigator again with its vehicles at rest where they are; `.planes`. `policy:` `trained` (`$CVC_NAV_WEIGHTS`, an installed copy, else `cvcpkg://cvc/grl-snam-weights` through the data store), `builtin`, a `.cvcnav`, `{ uri, path, sha256 }` or `{ data: <entry> }`; `.policy` switches it live (`set_policy` / `reset_policy`), `.drives` says what drives, and the visible fallback (the built-in net, its reason in `.drives` and once in the host's log). `policy_library::get_bytes`. A fleet refuses `controller: pose`. Test: `AFleetHasANavigatorAndAPolicyOfItsOwn`. Left for FL1: plant lists and per-team plants, the metric (D9), `poses(fleet)` and the gym's fleet; D3 goes with ARIADNE_WORLDS §18 (below). | FL1a | M |
+| **FL1c** | **Done** (2026-11-20). A fleet's `plant:` is one plant, a list its vehicles cycle over, or each team's (`{ 0: jolt }`; a team not named on the archetype's), all floating or none, each plant a navigator of the fleet's own; `.plant` switches them live (`fleet_plants::text`: `jolt, kinematic`, `kinematic, 0: jolt`), its vehicles at rest where they are, and a bad one is said in `vehicles.status`. The metric (D9): `metric:` `trained` (the trainer's vehicle, `training_scene`'s rr, d_hat and vmax at the hosts' tick, and the plants' `plan_with_vehicle` off), `vehicle`, or `policy` (the default: trained while weights drive or are on their way, so their arrival does not make the navigator again; vehicle on the built-in net, a fallback's included); `.metric` switches it, `.plans` says which, and a change makes the navigators again. `plants()` reports each fleet's own bicycle. Tests: `AFleetHasPlantsAndAMetric`, `AFleetIsANamedStartEntry`'s plants and metric. Left for FL1: `poses(fleet)`, the summary's tick and bounds, and the gym's fleet. | FL1b | M |
 | **FL1** | **Fleets in `WorldVehicles`.** Named `world: vehicles: start:` entries (`fleet:`; count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
 | **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
@@ -358,7 +363,15 @@ part.
   identity entry per entity.
 - **D3. Decided by FL0 (§3.1):** a drawn host steps its scene world (physics and navigators) on a
   worker, with the frame reading poses lock-free; headless hosts, the gym and the relay stay
-  synchronous.
+  synchronous. **With ARIADNE_WORLDS §18 (one world, the holon is the world; OW1-OW7, 2026-11-19)**
+  the worker is the local server-role holon's: a drawn host runs its world in a holon of its own
+  (§18.2, "Local is the same"), and the frame reads that holon's poses. So D3 is built with OW7's
+  local holon, not as a second stepping thread, and `poses(fleet)` feeds the holon's entity
+  playout (OW5). Fleets need nothing else from §18: they live in `WorldVehicles`, which OW2 puts in
+  the holon's world at 120 Hz (OW1's 7-quanta tick is `steps_per_tick` here), OW4's movers reach
+  each fleet's navigator as foreign agents, and once OW3 lands a vehicle a participant drives is
+  to count as keyed in summary publishing. FleetBench's numbers are re-measured at 120 Hz once
+  OW1 lands.
 - **D4. A fleet's per-entity keys by default:** `summary` or `all`.
 - **D5. Where Austin's lamps come from:** the bundle (does it carry street lights?), generated along
   roads, or OSM later.
