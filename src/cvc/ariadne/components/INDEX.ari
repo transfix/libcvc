@@ -262,6 +262,13 @@ catalog:
     binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
     for: "the same console without a window, to embed in a document's own window"
     args: { id: py_console }
+  - component: audio_buffers
+    file: audio_buffers.ari
+    unit: audio_buffers
+    binds: "<prefix>.{rows}.{count,<i>.pid,<i>.name}, media.<pid>.jb.* (host), audio.{device_ms,ahead_ms,window_s} (host), audio.jb.* and audio.reset (the tuning, local)"
+    for: "a conference's Audio window: each person's jitter buffer as a graph (what it holds and its target over the last 30 s) with how often it ran dry, and the buffers' tuning in a settings editor"
+    args: { id: audio, title: Audio, rows: peer }
+    note: "the rows are room_users' (room-users-step); the host's cvc::ariadne::conference::voice_monitor writes media.<pid>.jb.* and applies audio.jb.*"
   - component: room_users
     file: room_users.ari
     unit: room_users
