@@ -159,6 +159,9 @@ struct entity_spec {
   // is its chassis's centre, ahead of it along the heading.
   bool placed = false;
   double x = 0.0, y = 0.0, yaw = std::numeric_limits<double>::quiet_NaN();
+  // The participant driving it (its pid; ARIADNE_WORLDS.md section 18.4), or "" for its controller.
+  // Set by WorldVehicles::set_driver (a holon's set_driver), not at spawn.
+  std::string driver;
 };
 
 // What an entity is told from outside: a command, a force, or both, kept until changed.
@@ -440,6 +443,12 @@ public:
   // intent that is not finite or a weight outside [0, 1]. intent() is the one that will be used
   // (off for none).
   bool set_intent(std::uint64_t id, const entity_intent &intent);
+  // Who drives entity `id`: a participant's pid, or "" for its controller (section 18.4). The
+  // holon that runs the world sets it (holon::set_driver) and feeds the participant's drive axes
+  // in as the entity's intent. A change is a new revision (room_entities sends it). False for an
+  // unknown id.
+  bool set_driver(std::uint64_t id, const std::string &pid);
+  std::string driver(std::uint64_t id) const;
   bool clear_intent(std::uint64_t id);
   entity_intent intent(std::uint64_t id) const;
   // A second table of intents beside the entities' own keys (world: vehicles: intents:): an

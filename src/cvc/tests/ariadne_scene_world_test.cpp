@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
@@ -7384,6 +7385,100 @@ TEST(AriadneOneWorld, ANavigatedCarSteersAroundAnAvatar) {
   EXPECT_GT(on.closest, 2.0) << "with room to spare";
   EXPECT_LT(on.avatar_moved, 0.1) << "and never touched the avatar";
   EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "without avoiding, it drove into them";
+}
+
+// Generic entities (section 18.4): a participant gets into a vehicle and drives it with its
+// intent's drive axes; its person leaves the world and it is where the vehicle is; the entity
+// table and the room's entities say who drives what; getting out puts the person beside the
+// vehicle and gives the vehicle back to its controller. Refused: a client, an unknown entity,
+// one someone else drives.
+TEST(AriadneOneWorld, AParticipantGetsIntoAVehicleAndDrivesIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_at(v, "external", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-38.0, 6.0, 0.0};
+  h.add_participant("ann", false, feet);
+  h.add_participant("bob", false, cvc::physics::body_state{});
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  const std::size_t bodies = w->world().body_count();
+  const entity_info parked = entity(v, id);
+
+  holon client(holon_role::client, one_world_holon());
+  EXPECT_FALSE(client.set_driver("ann", id, &why));
+  EXPECT_FALSE(h.set_driver("ann", 99, &why));
+  EXPECT_FALSE(h.set_driver("nobody", id, &why));
+  ASSERT_TRUE(h.set_driver("ann", id, &why)) << why;
+  EXPECT_EQ(h.drives("ann"), id);
+  EXPECT_EQ(v.driver(id), "ann");
+  EXPECT_FALSE(h.set_driver("bob", id, &why)) << "someone else drives it";
+  EXPECT_NE(why.find("ann"), std::string::npos) << why;
+  EXPECT_EQ(w->world().body_count(), bodies - 1) << "ann's person left the world";
+  const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+  ASSERT_EQ(wire.size(), 1u);
+  EXPECT_EQ(wire[0].driver, "ann") << "the room's entities say who drives it";
+
+  // Ann's drive axes drive it: 2 m/s^2 straight ahead for 3 s.
+  avatar_intent go;
+  go.steer = 0.0;
+  go.accel = 2.0;
+  h.set_intent("ann", go);
+  for (int i = 0; i < 180; ++i)
+    h.advance(1.0 / 60.0);
+  const entity_info driven = entity(v, id);
+  EXPECT_GT(driven.x - parked.x, 4.0) << "it drove";
+  EXPECT_GT(driven.speed, 2.0);
+  const cvc::physics::body_state ann = h.state("ann");
+  EXPECT_LT(std::hypot(ann.position.x - driven.x, ann.position.y - driven.y), 0.5)
+      << "ann is where the vehicle is";
+
+  bool saw_person = false, saw_vehicle = false;
+  for (const holon::entity &e : h.entities()) {
+    if (e.id == "p:ann") {
+      saw_person = true;
+      EXPECT_EQ(e.kind, "person");
+      EXPECT_FALSE(e.in_world);
+    }
+    if (e.id == "e" + std::to_string(id)) {
+      saw_vehicle = true;
+      EXPECT_EQ(e.kind, "humvee");
+      EXPECT_EQ(e.driver, "participant:ann");
+      EXPECT_EQ(e.owner, "ann");
+    }
+  }
+  EXPECT_TRUE(saw_person && saw_vehicle);
+
+  // Out: beside the vehicle, standing, and the vehicle back to its controller (external: with no
+  // intent it brakes to a stop).
+  ASSERT_TRUE(h.set_driver("ann", 0, &why)) << why;
+  EXPECT_EQ(h.drives("ann"), 0u);
+  EXPECT_EQ(v.driver(id), "");
+  EXPECT_EQ(w->world().body_count(), bodies);
+  for (int i = 0; i < 120; ++i)
+    h.advance(1.0 / 60.0);
+  const entity_info after = entity(v, id);
+  const cvc::physics::body_state out = h.state("ann");
+  const double d = std::hypot(out.position.x - after.x, out.position.y - after.y);
+  std::printf("  drove %.1f m to %.2f m/s; out at %.2f m from the vehicle, which went on to %.1f m "
+              "at %.2f m/s\n",
+              driven.x - parked.x, driven.speed, d, after.x - parked.x, after.speed);
+  EXPECT_GT(d, 1.0) << "beside it, not in it";
+  EXPECT_LT(d, 6.0);
+  EXPECT_NEAR(out.position.z, 0.0, 0.1) << "standing on the square";
+  EXPECT_LT(after.speed, 0.5) << "its controller (external) brought it to rest";
 }
 
 TEST(AriadneWorldGym, FleetBench) {

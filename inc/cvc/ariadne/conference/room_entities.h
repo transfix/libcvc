@@ -47,6 +47,8 @@ namespace conference {
 struct room_entity {
   std::uint64_t id = 0;
   std::string name, archetype, plant, controller;
+  // The participant driving it (its pid), or "" for its controller (section 18.4).
+  std::string driver;
   int team = 0;
   std::array<float, 3> color{0.85f, 0.70f, 0.20f};
   std::array<float, 3> color2{0.12f, 0.12f, 0.14f};

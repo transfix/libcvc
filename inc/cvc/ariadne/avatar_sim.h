@@ -22,6 +22,7 @@
 #include <cvc/physics/pose_tracker.h> // cvc::physics::pose / interpolate
 #include <cvc/physics/types.h>        // cvc::physics::vec3
 #include <deque>
+#include <limits>
 
 namespace cvc {
 namespace ariadne {
@@ -49,6 +50,12 @@ namespace ariadne {
 struct avatar_intent {
   cvc::physics::vec3 move; // desired linear velocity, world metres/second
   double yaw = 0.0;        // facing: radians about +Z from +X (Z-up), chosen by the user
+  // The drive axes, for the vehicle the participant drives (holon::set_driver; ARIADNE_WORLDS.md
+  // section 18.4): the steering's bicycle angle (rad, + left) and the acceleration along its
+  // heading (m/s^2), held to the vehicle's lock and speeds. Not finite: none (0 while driving).
+  // A walker ignores them.
+  double steer = std::numeric_limits<double>::quiet_NaN();
+  double accel = std::numeric_limits<double>::quiet_NaN();
 };
 
 // A deterministic, headless kinematic avatar: integrate an avatar_intent over

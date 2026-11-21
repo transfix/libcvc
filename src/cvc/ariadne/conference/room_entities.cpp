@@ -121,6 +121,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set({k, "archetype"}, e.archetype);
     w.set({k, "plant"}, e.plant);
     w.set({k, "controller"}, e.controller);
+    w.set({k, "driver"}, e.driver);
     w.set({k, "team"}, std::to_string(e.team));
     w.set({k, "color"}, triple(e.color));
     w.set({k, "color2"}, triple(e.color2));
@@ -158,6 +159,7 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     e.archetype = r.text({k, "archetype"});
     e.plant = r.text({k, "plant"});
     e.controller = r.text({k, "controller"});
+    e.driver = r.text({k, "driver"});
     e.team = static_cast<int>(r.number({k, "team"}, 0.0));
     read_triple(r.text({k, "color"}), e.color);
     read_triple(r.text({k, "color2"}), e.color2);
@@ -191,6 +193,7 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
     e.archetype = info.spec.archetype;
     e.plant = info.plant;
     e.controller = info.spec.controller;
+    e.driver = info.spec.driver;
     e.team = info.spec.team;
     e.color = info.spec.color;
     e.color2 = info.spec.color2;

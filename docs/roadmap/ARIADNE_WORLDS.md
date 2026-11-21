@@ -1004,6 +1004,14 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   (§5).
 - **A participant's avatar is the entity it owns and drives.** The participants' pose stream
   becomes the entities' pose stream; a participant pid names its entity.
+- **As built so far (OW3, server side):** `holon::entities()` lists every mover (each participant's
+  person, the world's entities) with its kind, controller, driver, owner and policy.
+  `holon::set_driver(pid, entity)` puts a participant in a world vehicle: its person leaves the
+  world (feet and reserve kept), its intent's drive axes (`avatar_intent::steer`, `accel`, on the
+  wire as `intent.steer` / `intent.accel`) replace the vehicle's command, and it is where the
+  vehicle is; out, the person stands beside it and the vehicle goes back to its controller. The
+  room's entities carry `driver`. Not yet: a client's verb to ask (OW6), avatars that are
+  vehicles, a person driven by a navigator.
 - **Navigators avoid everything they don't drive.** `nav@1` takes every other entity as a foreign
   agent (position, velocity, radius), avatars included, and passes on the right
   (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`). **As built (OW4):**
@@ -1039,7 +1047,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW0 | This section. | S |
 | OW1 | **Built** (2026-11-19). **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it (§18.1: they hold). | M |
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
-| OW3 | **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
+| OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Getting in and out of vehicles,** and avatars that are vehicles. | M |

@@ -251,6 +251,34 @@ public:
   bool attach_world(SceneWorld *world, std::string *why = nullptr);
   SceneWorld *attached_world() const noexcept { return _scene; }
 
+  // GENERIC ENTITIES (ARIADNE_WORLDS.md section 18.4). Every thing that moves in the holon's world,
+  // one table: each participant's person, and the attached world's entities (its vehicles, boats).
+  struct entity {
+    std::string id;         // "p:<pid>" for a participant's person, "e<id>" for a world entity
+    std::string kind;       // "person", or the entity's archetype
+    std::string controller; // what turns an intent into forces: "walker@1", or its plant
+    // Who supplies the intent: "participant:<pid>", or the entity's own controller as its spec
+    // names it (nav@1, external, none); a person no one drives is its participant's.
+    std::string driver;
+    std::string owner;    // "server", or the participant's pid
+    std::string policy;   // nav@1's policy (a .cvcnav), "" the default
+    bool in_world = true; // a body in the physics world now (a person driving a vehicle: false)
+    cvc::physics::body_state state; // a person's feet, an entity's chassis centre
+  };
+  std::vector<entity> entities() const;
+
+  // SERVER with a world attached: participant PID drives world entity ENTITY (its id in the
+  // world's WorldVehicles), or nothing with 0. Driving, the participant's intent's drive axes
+  // (avatar_intent::steer, accel) replace the entity's controller's command each step, its person
+  // leaves the world (its feet and reserve kept), and its state() and display_pose() are the
+  // vehicle's. Getting out, the person comes back at a clear point beside the vehicle, and the
+  // vehicle goes back to its controller. False (with WHY) on a client, with no world or no such
+  // pid or entity, or for an entity someone else drives; nothing changes then. A participant
+  // removed while driving gets out first.
+  bool set_driver(const std::string &pid, std::uint64_t entity, std::string *why = nullptr);
+  // The world entity PID drives, 0 for none (or an unknown pid).
+  std::uint64_t drives(const std::string &pid) const;
+
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
   // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
   // set_statics with a written stamp (there is nothing to stand on).
@@ -388,6 +416,12 @@ public:
 private:
   struct participant {
     bool local = false;
+    // SERVER with a world attached: the world entity it drives (0: none), its person's feet and
+    // reserve while it is out of the world, and the vehicle's state as of the last step.
+    std::uint64_t drives = 0;
+    cvc::physics::body_state parked_feet;
+    double parked_reserve = 0.0;
+    cvc::physics::body_state ride;
     // SERVER with a world attached: its feet after the last step, where it goes back in if the
     // world is replaced.
     cvc::physics::body_state last_feet;
@@ -533,6 +567,8 @@ private:
   SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
   const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
   void scene_step();                        // SERVER with a world attached: the due steps
+  void update_rides();                      // ... each driver's ride, from its vehicle
+  void get_out(const std::string &pid, participant &p); // ... its person back beside it
 };
 
 } // namespace ariadne
