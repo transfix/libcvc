@@ -90,6 +90,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <typeindex>
+#include <typeinfo>
 #include <vector>
 
 namespace cvc {
@@ -164,6 +166,10 @@ private:
   struct followed {
     std::string path, node;
     boost::posix_time::ptime mod;
+    // What the key held: a write within the clock's resolution leaves mod as it was (Windows'
+    // clock ticks in milliseconds), so the payload's type and the object a pointer holds tell too.
+    std::type_index type = typeid(void);
+    const void *id = nullptr;
   };
   void adopt(std::shared_ptr<cvc::slice_source> src, std::shared_ptr<const cvc::volume> vol,
              const std::string &label, int var, int time);

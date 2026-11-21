@@ -90,6 +90,25 @@ bool volume_of(const boost::any &d, std::shared_ptr<cvc::slice_source> &src,
   return true;
 }
 
+template <class T> bool pointee(const boost::any &d, const void *&id) {
+  if (const auto *p = boost::any_cast<std::shared_ptr<T>>(&d)) {
+    id = p->get();
+    return true;
+  }
+  return false;
+}
+
+// The object a followed key's payload points at, for the payloads the grid reads as pointers (the
+// data channel's convention); null for anything else, which its type and the key's mod tell apart.
+const void *payload_id(const boost::any &d) {
+  const void *id = nullptr;
+  (void)(pointee<cvc::slice_source>(d, id) || pointee<const cvc::volume>(d, id) ||
+         pointee<cvc::volume>(d, id) || pointee<const cvc::point_classes>(d, id) ||
+         pointee<cvc::point_classes>(d, id) || pointee<const cvc::volume_grid_session>(d, id) ||
+         pointee<cvc::volume_grid_session>(d, id));
+  return id;
+}
+
 // The point in object space at plane coordinates (r, u) on the plane `plane` along axis `a`.
 cvc::geometry::point_t at(cvc::slice_axis a, double plane, double r, double u) {
   const std::pair<int, int> ru = cvc::grid_plane_axes(a);
@@ -275,12 +294,17 @@ bool VolumeGridNode::follow(const char *which, followed &f, boost::any &payload)
   }
   const std::string node = s->fullName();
   const boost::posix_time::ptime mod = s->lastMod();
-  if (path == f.path && node == f.node && mod == f.mod)
+  boost::any d = s->data();
+  const std::type_index type(d.type());
+  const void *id = payload_id(d);
+  if (path == f.path && node == f.node && mod == f.mod && type == f.type && id == f.id)
     return false;
   f.path = path;
   f.node = node;
   f.mod = mod;
-  payload = s->data();
+  f.type = type;
+  f.id = id;
+  payload = std::move(d);
   return true;
 }
 
