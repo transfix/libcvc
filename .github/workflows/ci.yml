@@ -388,6 +388,9 @@ jobs:
 
       - name: Replay the native trace under node
         if: steps.paths.outputs.run == 'true'
+        # It takes about a second; a run that waits on a thread a single-threaded build has not got
+        # fails here instead of holding the job for hours.
+        timeout-minutes: 10
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           "$node" --version
