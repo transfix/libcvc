@@ -42,8 +42,7 @@ kinematic_vehicle kinematic_vehicle_at(const kinematic_drive &k,
                                        double fixed_dt) {
   kinematic_vehicle v;
   const cvc::physics::quat &q = chassis.rotation;
-  const double yaw =
-      std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
   v.z = chassis.position.z;
   v.vx = chassis.linear_velocity.x;
   v.vy = chassis.linear_velocity.y;

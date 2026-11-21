@@ -606,8 +606,8 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
       if (ride && !ride->drive.valid())
         ride = nullptr;
       local = driving == 0 || ride;
-      if (h.has_participant(p.pid) &&
-          (local != h.is_local(p.pid) || (local && (ride != nullptr) != h.predicts_vehicle(p.pid)))) {
+      if (h.has_participant(p.pid) && (local != h.is_local(p.pid) ||
+                                       (local && (ride != nullptr) != h.predicts_vehicle(p.pid)))) {
         const cvc::physics::body_state now = h.state(p.pid);
         h.remove_participant(p.pid);
         h.add_participant(p.pid, local, now, /*pose_known=*/true);

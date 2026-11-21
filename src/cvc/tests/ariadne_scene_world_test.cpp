@@ -7511,8 +7511,8 @@ TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
   EXPECT_TRUE(carried);
 
   // From where the relay has it (at rest: exact), on the same drive axes at each tick.
-  cvc::ariadne::kinematic_vehicle m = cvc::ariadne::kinematic_vehicle_at(k, h.state("ann"),
-                                                                         h.tick(), dt);
+  cvc::ariadne::kinematic_vehicle m =
+      cvc::ariadne::kinematic_vehicle_at(k, h.state("ann"), h.tick(), dt);
   const auto axes = [](int step) {
     avatar_intent in;
     in.steer = 0.0;

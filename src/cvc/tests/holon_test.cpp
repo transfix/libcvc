@@ -1693,8 +1693,7 @@ TEST(HolonVehicleTest, TheVehicleWeDriveIsPredictedAndReconciled) {
     for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
       relay_step(relay, k, in, t, dt);
     if (client.tick() % 4 == 0) // the relay's samples, every 4 ticks
-      client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay),
-                                 client.tick());
+      client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), client.tick());
     const vec3 c = client.take_correction("A");
     corrected += std::sqrt(cvc::physics::dot(c, c));
     const body_state s = client.state("A");
@@ -1721,8 +1720,7 @@ TEST(HolonVehicleTest, TheVehicleWeDriveIsPredictedAndReconciled) {
     for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
       relay_step(relay, k, in, t, dt);
     if (client.tick() % 4 == 0)
-      client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay),
-                                 client.tick());
+      client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), client.tick());
     const vec3 c = client.take_correction("A");
     after += std::sqrt(cvc::physics::dot(c, c));
     if (step >= 60) {
