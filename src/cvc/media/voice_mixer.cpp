@@ -18,9 +18,14 @@ voice_mixer::voice_mixer(int rate, int channels) : voice_mixer(rate, channels, p
 
 voice_mixer::voice_mixer(int rate, int channels, const params &p)
     : _rate(rate > 0 ? rate : 48000), _channels(channels > 0 ? channels : 1), _p(p) {
-  _p.min_delay_s = std::max(0.0, _p.min_delay_s);
+  normalize();
+}
+
+void voice_mixer::normalize() {
+  _p.min_delay_s = std::max({0.0, _p.min_delay_s, _floor_min});
   _p.max_delay_s = std::max(_p.max_delay_s, _p.min_delay_s);
-  _p.start_delay_s = std::min(std::max(_p.start_delay_s, _p.min_delay_s), _p.max_delay_s);
+  _p.start_delay_s =
+      std::min(std::max({_p.start_delay_s, _p.min_delay_s, _floor_start}), _p.max_delay_s);
 }
 
 voice_mixer::params voice_mixer::parameters() const {
@@ -30,12 +35,28 @@ voice_mixer::params voice_mixer::parameters() const {
 
 void voice_mixer::set_delay_floor(double min_s, double start_s) {
   std::lock_guard<std::mutex> lk(_mu);
-  _p.min_delay_s = std::max(_p.min_delay_s, min_s);
-  _p.max_delay_s = std::max(_p.max_delay_s, _p.min_delay_s);
-  _p.start_delay_s =
-      std::min(std::max({_p.start_delay_s, start_s, _p.min_delay_s}), _p.max_delay_s);
+  _floor_min = std::max(_floor_min, min_s);
+  _floor_start = std::max(_floor_start, start_s);
+  normalize();
   for (auto &kv : _peers)
     kv.second.target_s = std::max(kv.second.target_s, _p.min_delay_s);
+}
+
+void voice_mixer::set_params(const params &p) {
+  std::lock_guard<std::mutex> lk(_mu);
+  _p = p;
+  normalize();
+  for (auto &kv : _peers)
+    kv.second.target_s = std::min(std::max(kv.second.target_s, _p.min_delay_s), _p.max_delay_s);
+}
+
+void voice_mixer::reset_targets() {
+  std::lock_guard<std::mutex> lk(_mu);
+  for (auto &kv : _peers) {
+    kv.second.target_s = _p.start_delay_s;
+    kv.second.restart_s = -1.0;
+    kv.second.clean_s = 0.0;
+  }
 }
 
 double voice_mixer::seconds(std::size_t n) const {
