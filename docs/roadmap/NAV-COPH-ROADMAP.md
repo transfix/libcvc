@@ -383,6 +383,40 @@ G5 within 0.0069, and G6–G8 within 7e-5.
 
 ### 4.4 Packets and the channel (C4)
 
+**Landed:** `inc/cvc/nav/coph_packet.h`, `coph_exchange.h` and `coph_channel.h`, tested by
+`nav_coph_exchange_test`. G9 and G10 come from GRL-SNAM's `grl_snam.tools.coph_golden_packets`,
+on G5–G8's scripted run (CVC-Lab/GRL-SNAM#201). On Windows:
+- every decision and byte count matches;
+- the values come within 0.074 of the tier's allowance (G9 within 0.074, G10 within 0.034);
+- the repr cases and export 0's JSON text match character for character.
+
+Where the code differs from the bullets below:
+- **The demos' packet is a `MazePacket`.** Its export and assimilation run three layers:
+  - **`CooperativeLearner`** fits the bootstrap and anchors at candidates around the agent, then
+    checks provenance, age, order and payload and stages the packet under the cap.
+  - **`TerrainLearner`** re-anchors at the riskiest supported readings with a second bootstrap.
+    It also keeps route evidence: a packet whose anchors lie in no kept stage is still accepted,
+    as `remote_route_only`.
+  - **`MazeLearner`** sends and checks the geometry reports.
+
+  `coph_export` and `coph_assimilate` follow all three, and G10 reaches every reason they give.
+- **Bytes are BIT on the wire form.** A raw export's covariance entries change their shortest
+  repr, and so the JSON length, with their last bits, on every platform the Python runs on too.
+  G9 counts the bytes of each export rounded to 2^-24, and production byte counts are as
+  platform-dependent as the Python's.
+- **The Gauss–Newton whitening** uses the packet's covariance plus (0.01 + 0.005 × age) I. The
+  covariance floor is added at export. The step is clamped to ±0.5 per weight, and it replaces
+  G5's weights in `coph_update`.
+- **H and V_task use the navigation target.** That is the router's last waypoint in a live run,
+  else the goal, so `coph_learner_state` gains it, with the agent id, the clock and the exchange
+  state.
+- **The channel carries the packet.** `send(from, to, packet, bytes, at_s)` takes the packet with
+  its byte count, and `poll` returns deliveries by arrival time. Draws (the bootstrap's and
+  `coph_ideal_channel`'s) come from a seeded `std::mt19937` through `detail::pick_below`, the same
+  on every standard library.
+- **Left for C5:** observe's packet-side bookkeeping (the local geometry reports, expiring route
+  evidence), the rate decision and the sending.
+
 - **`coph_packet`.** The Python fields, in the same order.
 - **Byte count.** `bytes()` is the length of the compact, key-sorted JSON. Floats are written with
   Python's `repr` rule: the shortest round-trip digits from `std::to_chars`, scientific when the

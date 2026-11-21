@@ -28,6 +28,7 @@
 #include <cvc/gl/ariadne/stream_node.h>            // register_stream_node_type: type: stream
 #include <cvc/gl/ariadne/stream_texture_binding.h> // StreamTextureBinding (gl-bind-stream sink)
 #include <cvc/gl/ariadne/stream_verbs.h>     // StreamBindingSink / register_gl_stream_intrinsics
+#include <cvc/state/state.h>                 // cvc::state::instance: <prefix>.ariadne.scene
 #include <cvc/state/state_exec/intrinsics.h> // document_scope::slot
 #include <memory>
 #include <stdexcept>
@@ -521,7 +522,11 @@ std::vector<std::string> AriRuntime::load(const std::string &path) {
   std::vector<std::string> warnings = app_rt_.load(path);
   // §5.14 on a phone the panels start hidden so a scene isn't buried; a document with no scene
   // (a feed, a form) is nothing but its panels, so it starts with them shown.
-  overlay_->setPhoneHidesPanels(realized() != nullptr);
+  const bool scene = realized() != nullptr;
+  overlay_->setPhoneHidesPanels(scene);
+  // §5.4 whether the document draws a scene, under its own prefix: a host's scene-only menu items
+  // (arigl's Settings: Controls..., the scene's display settings) show only then.
+  cvc::state::instance(app_)(prefix() + ".ariadne.scene").value(std::string(scene ? "1" : "0"));
   return warnings;
 }
 

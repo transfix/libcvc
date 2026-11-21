@@ -198,6 +198,7 @@ public:
   void separator() override;
   bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
+  bool button_with(const char *label, const ButtonLook &look) override; // §5.27 [>chosen<]
   bool menu_item_action(const char *label) override;
 
   bool item_clicked() override;

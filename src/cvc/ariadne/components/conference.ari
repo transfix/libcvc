@@ -3,8 +3,8 @@
 # is a document that includes these, and any other app can take the same pieces, all or some, and
 # add its own windows and branding around them (ARIADNE_CONFERENCE_ROADMAP.md).
 #
-# Import the file for its units and functions (it imports room_users.ari and chat.ari, the Users
-# and Chat windows, itself):
+# Import the file for its units and functions (it imports room_users.ari, chat.ari and
+# audio_buffers.ari, the Users, Chat and Audio windows, itself):
 #   conference          My Camera: your name, your camera, the camera and mic pickers and their on/off
 #       args: id (mycam), title (My Camera)
 #   conference_avatar   how everyone sees you (Colour, Wear), your body (a person or a vehicle,
@@ -27,7 +27,7 @@
 # A document using them:
 #     requires: [stream_view, stream-open, stream-capture-camera, stream-capture-audio,
 #                stream-set-muted, room-join, room-roster, room-set-avatar, room-set-archetype,
-#                plot, chat-post, text_view, message_input]
+#                plot, chart, settings, chat-post, text_view, message_input]
 #     import: cvc://components/conference.ari
 #     windows:
 #       - include: conference
@@ -36,6 +36,8 @@
 #         args: { id: users, rows: peer, chat: chat, self: conf.self }
 #       - include: chat
 #         args: { id: chat, room: room.token }
+#       - include: audio_buffers
+#         args: { id: audio, title: Audio, rows: peer }
 #       - include: conference_peers
 #     on_tick: (conference-step)
 #
@@ -49,7 +51,9 @@
 #   cam.cur_device, mic.cur_device                  what is captured
 #   avatar.*                                        the pickers' options, picks and what was sent
 #   tree.cam_<i>.geometry                           the peers' windows' first places
-import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+#   tree.audio.open                                 the Audio window, closed until the View menu
+import: [cvc://components/room_users.ari, cvc://components/chat.ari,
+         cvc://components/audio_buffers.ari]
 
 units:
   conference:
@@ -333,6 +337,7 @@ functions: |
       (begin
         (state-set "joined" "1")
         (state-set "name_error" "") ; no name conflict yet (the web client's launch name is random)
+        (state-set "tree.audio.open" "0") ; the Audio window waits for the View menu
         ; the avatar pickers start blank; conference-avatar-step fills them once the relay's
         ; catalog is here (an unset key reads as nil, which compares unequal to "")
         (state-set "avatar.color" "")

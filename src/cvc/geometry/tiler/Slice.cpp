@@ -32,32 +32,32 @@
 
 namespace cvc::tiler {
 
-void Slice::remove_collinear(Number_type epsilon) {
+void Slice::remove_collinear(Number_type epsilon) { run_to_end(remove_collinear_steps(epsilon)); }
+
+step_task Slice::remove_collinear_steps(Number_type epsilon) {
   for (Map::iterator it = _map.begin(); it != _map.end(); ++it) {
     Contour_container &comp_contours = it->second;
     for (Contour_iterator c_it = comp_contours.begin(); c_it != comp_contours.end(); ++c_it) {
       Contour_handle c = *c_it;
+      const std::size_t n = c->polygon().size();
       c->polygon() = cvc::tiler::remove_collinear(c->polygon(), epsilon);
+      TILER_UNITS(simple_test_units(n) + scan_units(n));
     }
   }
 }
 
 void Slice::remove_intersections(Number_type delta, tiler_context &ctx) {
+  run_to_end(remove_intersections_steps(delta, ctx));
+}
+
+step_task Slice::remove_intersections_steps(Number_type delta, tiler_context &ctx) {
   Logger logger = ctx.logger("tiler.Slice.remove_intersections");
 
   // Put all polygons in the slice into polys, regardless of component.
   vector<Contour_handle> contours;
   list<Contour_handle> nested;
 
-  // Add all contours to a hierarchy
-  list<Contour_handle> all_contours;
-  for (Map::iterator it = _map.begin(); it != _map.end(); ++it) {
-    Contour_container &comp_contours = it->second;
-    for (Contour_iterator c_it = comp_contours.begin(); c_it != comp_contours.end(); ++c_it) {
-      Contour_handle c = *c_it;
-      all_contours.push_back(c);
-    }
-  }
+  // (The legacy gathered every contour here for a hierarchy it no longer built.)
   // Hierarchy h(all_contours.begin(), all_contours.end(), Hierarchy_policy::FORCE_CCW);
 
   for (Map::iterator it = _map.begin(); it != _map.end(); ++it) {
@@ -67,6 +67,7 @@ void Slice::remove_intersections(Number_type delta, tiler_context &ctx) {
       if (!c->polygon().is_simple()) {
         throw logic_error("Contour is not simple before intersection removal...");
       }
+      TILER_UNITS(simple_test_units(c->polygon().size()));
       // TILER_TRACE(logger, "Contour is at level " << h.level(c));
       // if (!c->is_counterclockwise_oriented())
       // if (h.parent(c)) {
@@ -84,14 +85,14 @@ void Slice::remove_intersections(Number_type delta, tiler_context &ctx) {
   // Remove all contour intersections by dilating, removing
   // intersections, then eroding.
   list<Contour_handle> new_contours;
-  remove_contour_intersections(contours.begin(), contours.end(), delta, back_inserter(new_contours),
-                               ctx);
+  SK_RUN(remove_contour_intersections_steps(contours, delta, new_contours, ctx));
 
   _map.clear();
   // insert(new_contours.begin(), new_contours.end());
   for (list<Contour_handle>::const_iterator it = new_contours.begin(); it != new_contours.end();
        ++it) {
     Contour_handle ch = *it;
+    TILER_UNITS(simple_test_units(ch->polygon().size()));
     if (ch->polygon().size() < 3) {
       TILER_WARN(logger, "Contour " << ch->info().name()
                                     << " is not simple after intersection removal: "
@@ -112,8 +113,9 @@ void Slice::remove_intersections(Number_type delta, tiler_context &ctx) {
   insert(nested.begin(), nested.end());
 }
 
-void Slice::validate() {
+void Slice::validate() { run_to_end(validate_steps()); }
 
+step_task Slice::validate_steps() {
   for (Map::iterator it = _map.begin(); it != _map.end(); ++it) {
     Contour_container &comp_contours = it->second;
     for (Contour_iterator c_it = comp_contours.begin(); c_it != comp_contours.end(); ++c_it) {
@@ -122,6 +124,7 @@ void Slice::validate() {
         throw logic_error("Contour is not simple: component " + c->info().object_name() + ": " +
                           pp(c->polygon()));
       }
+      TILER_UNITS(simple_test_units(c->polygon().size()));
     }
   }
 }

@@ -18,6 +18,8 @@ set(CVC_PORT_TESTS
   skeleton_intrinsics_test
   contour_stack_test
   point_classes_test
+  molecule_test
+  blur_test
   planar_test
   tiler_test
   tiler_legacy_test
@@ -29,6 +31,7 @@ set(CVC_PORT_TESTS
   seed_generators_test
   volume_slice_test
   tabs_list_test
+  volume_grid_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
@@ -71,4 +74,10 @@ target_compile_definitions(critical_points_test PRIVATE
 target_include_directories(tiler_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
 target_include_directories(tiler_legacy_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
 target_compile_definitions(tiler_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# molecule_test reads PDB entry 1GRL from the source tree (examples/data/molecules).
+target_compile_definitions(molecule_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_compile_definitions(blur_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

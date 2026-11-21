@@ -25,6 +25,7 @@
 #define __SLICE_H__
 
 #include "Contour.h"
+#include "stepping.h"
 
 #include <boost/unordered_map.hpp>
 #include <list>
@@ -106,6 +107,12 @@ public:
   void remove_intersections(Number_type delta, tiler_context &ctx);
 
   void validate();
+
+  // The three above a contour (or a pair of contours) at a time, each call charged by its
+  // contours' size (stepping.h); the functions above run them to the end.
+  step_task remove_collinear_steps(Number_type epsilon);
+  step_task remove_intersections_steps(Number_type delta, tiler_context &ctx);
+  step_task validate_steps();
 
   bool empty() const { return _map.empty(); }
 

@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arix
-  upstream_version: "4.0.2"
+  upstream_version: "4.0.3"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -56,18 +56,18 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.3"
     # libpython3.12 and its headers, the interpreter arix embeds.
     - name: python312
     # wasmtime's C API, which runs a document's wasm: guests.
     - name: wasmtime
   runtime:
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.3"
     - name: python312
     - name: wasmtime
     - name: pycvc-cp312
-      version: "^4.0"
+      version: "==4.0.3"
     - name: numpy-cp312
   host_tools:
     - cmake

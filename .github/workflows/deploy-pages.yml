@@ -35,6 +35,7 @@ on:
       - '!.github/**'
       - '.github/workflows/deploy-pages.yml'
       - '.github/scripts/pin-wasm-pre-jx1.sh'
+      - '.github/actions/cvcpkg-cli/**'
       - '!bindings/**'
   schedule:
     - cron: '30 8 * * *' # 08:30 UTC ≈ 03:30 America/Chicago (after cyberpcangel nightly)
@@ -82,10 +83,19 @@ jobs:
         # (see nav-swarm-cinematic/PR #225 and the sister workflow's rationale).
         run: echo "/opt/cvc-wasm/cmake-cvcpkg/bin" >> "$GITHUB_PATH"
 
+      # The released cvcpkg every CI job runs (pinned in the action), in this job's temp dir. Not the
+      # one in the runner user's ~/.local/bin: other workflows on catx-03 pip install over that one,
+      # and on 2026-11-20 one put back cvcpkg 2.2.1, from before installs merged into the prefix's
+      # lockfile (cy-pca/cvcpkg#252). Each install then rewrote the lockfile with its own packages
+      # only, the pin below found none of its packages, VTK stayed at the republished cvc.6, and
+      # every deploy failed to link on its __wasm_longjmp.
+      - name: Install the cvcpkg CLI
+        uses: ./.github/actions/cvcpkg-cli
+
       - name: Install fresh wasm dep closure + scene bundles
         run: |
-          export PATH="/opt/cvc-wasm/cmake-cvcpkg/bin:$HOME/.local/bin:$PATH"
-          command -v cvcpkg >/dev/null || { echo "cvcpkg not found; skipping"; exit 0; }
+          export PATH="$RUNNER_TEMP/cvcpkg-bin:/opt/cvc-wasm/cmake-cvcpkg/bin:$PATH"
+          echo "cvcpkg: $(command -v cvcpkg), $(cvcpkg --version)"
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick; do
             echo "=== $p ==="
             cvcpkg install "$p" \
@@ -103,7 +113,13 @@ jobs:
           # eigen + libigl (header-only): cvc's mesh_ops / fem, which the FEM gallery's fe_lab and
           # mesh_lab nodes run on. Without them CVC_ENABLE_LIBIGL goes off and those nodes don't exist.
           # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
-          for p in eigen libigl sdl3; do
+          # clipper2, cdt, shewchuk-predicates: cvc::planar, which the contour tiler demo's
+          # contour_lab node tiles on. Without them the tiler is not built in.
+          # joltphysics: cvc::physics' engine (single-threaded here: jolt_backend.cpp runs Jolt's
+          # single-threaded job system without pthreads). Without it CVC_WITH_JOLT goes off, the
+          # gallery has the null backend only, and a document's bodies (terrain_lab's boat and
+          # crates) never move. build-wasm-demo.sh fails the build if the configure missed it.
+          for p in eigen libigl sdl3 clipper2 cdt shewchuk-predicates joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
@@ -150,6 +166,10 @@ jobs:
           # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
           # Last, after every wasm install above, so none of them moves a pinned package again.
           # Without it the link fails on freetype's __wasm_longjmp.
+          # The pin reads what the prefix holds from its lockfile, so check that the lockfile
+          # still lists VTK, installed above: it does not when a cvcpkg replaces the lockfile on
+          # each install, and the pin then quietly skips everything.
+          grep -qx -- "- name: vtk" "$CVC_WASM_DEPS/share/libcvc-deps/lockfile.yaml"             || { echo "::error::the prefix's lockfile does not list vtk; the pin cannot see it"; exit 1; }
           bash .github/scripts/pin-wasm-pre-jx1.sh "$CVC_WASM_DEPS" wasm
 
       - name: Build the gallery (libcvc-examples-web, single-threaded)

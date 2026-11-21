@@ -14,6 +14,9 @@
 #   • Chat       (id chat)    — the room's chat and your direct messages (components/chat.ari): pick
 #                               the room or a conversation, scroll up for older messages, Enter sends
 #                               and Shift+Enter adds a line.
+#   • Audio      (id audio)   — how full each person's jitter buffer is, a graph over the last 30 s,
+#                               and the buffers' tuning (components/audio_buffers.ari). LOCAL, like
+#                               the Users controls. Closed at first; open it from the View menu.
 #   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
 #                               camera. Repeated over peer.count; opened automatically, closable, and
 #                               listed by name at the end of the View menu to open again (or click
@@ -44,13 +47,15 @@ requires:
   - room-set-avatar                # the Avatar window
   - room-set-archetype             # its Body picker (a world whose avatars may be vehicles)
   - plot                           # its history graphs
+  - chart                          # the Audio window's buffer graphs (audio_buffers.ari)
+  - settings                       # and its tuning
   - chat-post                      # the Chat window (chat.ari; the relay keeps the history)
   - text_view
   - message_input
 
 # Every window and the tick are the shipped conference library's (components/conference.ari; it
-# imports room_users.ari and chat.ari): this document places them and adds the menus. An app built
-# on the conference does the same, with its own windows and branding beside them.
+# imports room_users.ari, chat.ari and audio_buffers.ari): this document places them and adds the
+# menus. An app built on the conference does the same, with its own windows and branding beside them.
 import: cvc://components/conference.ari
 
 # No scene: block. The room and its LOOK are the world's (ARIADNE_WORLDS.md WD1, Q1): the relay
@@ -77,6 +82,9 @@ menubar:
         bind: tree.chat.open
       - menu_item: Avatar
         bind: tree.myavatar.open
+      - menu_item: Audio
+        bind: tree.audio.open
+
 windows:
   # ── My Camera: your name, self-view, device pickers + on/off toggles ──
   - include: conference
@@ -103,6 +111,14 @@ windows:
     args: { id: chat, title: Chat, room: room.token }
     pos: [390, 310]
     size: [570, 320]
+
+  # ── Audio: each person's jitter buffer, and its tuning (components/audio_buffers.ari) ──
+  # The host publishes the graphs (media.<pid>.jb.*) and applies audio.jb.* to its mixer
+  # (cvc/ariadne/conference/voice_monitor.h). Closed until the View menu opens it.
+  - include: audio_buffers
+    args: { id: audio, title: Audio, rows: peer }
+    pos: [970, 300]
+    size: [560, 580]
 
   # ── One camera window per OTHER participant, titled by their name ──
   - include: conference_peers

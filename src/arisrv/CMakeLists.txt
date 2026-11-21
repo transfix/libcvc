@@ -541,8 +541,17 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                      "--relay-arg=${_srv_tests}/rcon_password.txt" --client-only
                      --client-arg=--relay-room --client-arg=ctest
                      "--client-arg=${_srv_tests}/rcon_client.ari")
+    # Each client's limits (ID4): an admin's server.limits for a client refuses it programs, or
+    # lowers their steps, from its next program on (the relay's document caps them at 5000).
+    add_test(NAME arisrv_client_limits
+             COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                     --scheme grpc ${_id_relay} --relay-arg=--rcon-password-file
+                     "--relay-arg=${_srv_tests}/rcon_password.txt" --relay-arg=--doc
+                     "--relay-arg=${_srv_tests}/client_programs_server.ari" --client-only
+                     --client-arg=--relay-room --client-arg=ctest
+                     "--client-arg=${_srv_tests}/client_limits.ari")
     set_tests_properties(arisrv_guest_password arisrv_guest_password_refuses arisrv_rcon
-                         PROPERTIES ENVIRONMENT "PYTHONIOENCODING=utf-8"
+                         arisrv_client_limits PROPERTIES ENVIRONMENT "PYTHONIOENCODING=utf-8"
                          SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 120)
     # rcon's role in arisrvx (ID3): a connection rcon made an admin has the role admin in
     # ctx.principal, so tests/rcon_service.py's @export(roles=["admin"]) answers it; before rcon,
