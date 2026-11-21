@@ -88,10 +88,39 @@ bool SdlGamepad::update() {
       SDL_free(ids);
     }
   }
+  read_pressed();
   return pad_ != nullptr;
 #else
   return false;
 #endif
+}
+
+void SdlGamepad::read_pressed() {
+  std::vector<std::string> down;
+#ifdef CVC_ENABLE_SDL
+  if (pad_) {
+    for (const auto &b : kButtons)
+      if (input(std::string(b.first)) > 0.5)
+        down.emplace_back(b.first);
+    for (const auto &a : kAxes) {
+      const std::string n(a.first);
+      const double v = input(n);
+      if (n == "LT" || n == "RT") {
+        if (v > 0.5)
+          down.push_back(n);
+      } else if (v > 0.5) {
+        down.push_back(n + "+");
+      } else if (v < -0.5) {
+        down.push_back(n + "-");
+      }
+    }
+  }
+#endif
+  pressed_.clear();
+  for (const std::string &n : down)
+    if (std::find(down_.begin(), down_.end(), n) == down_.end())
+      pressed_.push_back(n);
+  down_ = std::move(down);
 }
 
 std::string SdlGamepad::name() const {

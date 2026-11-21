@@ -1052,8 +1052,10 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   Getting in switches a participant to its vehicle's scheme (the archetype's `controls:`, car or
   boat, by its plant when it names none), getting out back to walking. arigl keeps the bindings
   where the Controls window changes them: walking's at `<viewer>.avatar.keys.<action>`, the
-  vehicles' at `<viewer>.controls.<scheme>.<action>`, a gamepad's at `<viewer>.pad.<scheme>.<action>`
-  (where one is set: the Controls window does not list them yet).
+  vehicles' at `<viewer>.controls.<scheme>.<action>`, a gamepad's at `<viewer>.pad.<scheme>.<action>`.
+  The Controls window lists each action's gamepad input beside its keys, with a Change of its own:
+  press the new button, pull the trigger or push the stick (`KeyBinding::pad_path`,
+  `Runtime::post_pad_press`; Escape keeps the old one).
 - **As built (OW6b):** a binding's `pad` names a gamepad's inputs (buttons A, B, X, Y by position,
   LB, RB, the D-pad, the sticks pressed; triggers LT, RT; stick halves `LeftY-`, `LeftX+`, ...);
   each has a deadzone (0.15 of a stick, 0.05 of a trigger), past which the rest of its travel is

@@ -12,6 +12,7 @@
 #define CVC_GL_SDL_GAMEPAD_H
 
 #include <string>
+#include <vector>
 
 namespace cvc {
 namespace gl {
@@ -34,11 +35,18 @@ public:
   // An input's reading by its name (above), as of the last update(); 0 for a name it does not
   // know, or with no gamepad.
   double input(const std::string &name) const;
+  // The inputs pressed at the last update() that were not before, by name: a button gone down, a
+  // trigger or a stick's half ("LeftY-") past half way. What the Controls window binds
+  // (cvc::ariadne::Runtime::post_pad_press).
+  const std::vector<std::string> &pressed() const { return pressed_; }
 
 private:
   bool inited_ = false, failed_ = false; // SDL's gamepad subsystem: held, or would not start
   void *pad_ = nullptr;                  // the open SDL_Gamepad
   int scan_ = 0;                         // updates until the next look for a gamepad
+  std::vector<std::string> down_;        // the inputs past half way at the last update()
+  std::vector<std::string> pressed_;     // ... and not at the one before
+  void read_pressed();
 };
 
 } // namespace gl

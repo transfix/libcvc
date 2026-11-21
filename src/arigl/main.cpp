@@ -546,7 +546,8 @@ std::vector<ari::KeyBinding> avatar_keys(const cvc::gl::SceneRenderer &view) {
     // walk's ids are the ones they always had (avatar_<action>); the vehicles' by scheme.
     const std::string id = s.id == "walk" ? std::string("avatar_") : s.id + "_";
     for (const cvc::ariadne::control_action &a : s.actions)
-      keys.push_back({id + a.id, a.label, group, a.binding.keys, "", at + a.id});
+      keys.push_back({id + a.id, a.label, group, a.binding.keys, "", at + a.id, a.binding.pad,
+                      "/" + pad_path(view, s.id) + a.id});
   }
   return keys;
 }
@@ -697,8 +698,9 @@ struct ConferenceSession {
   // The first gamepad plugged in (OW6b): the same actions, on its sticks, triggers and buttons.
   // Played with, we face where the camera looks (as under mouse look) and the right stick turns
   // the camera, kPadLookDegS at a full push.
-  cvc::gl::SdlGamepad pad_;
-  std::string pad_name_; // the one logged as connected (log on change)
+  cvc::gl::SdlGamepad *pad_ = nullptr; // the run loop's (gamepad()): none while the Controls
+                                       // window waits for a button, so it moves nothing
+  std::string pad_name_;               // the one logged as connected (log on change)
   static constexpr double kPadLookDegS = 150.0;
   std::uint64_t drive_answered_ = 0; // the relay's answer to our last ask that we have shown
   std::string drive_note_;           // a refusal, shown over us for a moment
@@ -1235,6 +1237,9 @@ struct ConferenceSession {
   // participant, each peer named — with third-person controls: W/S walk our avatar forward/back
   // along its facing and A/D strafe, a click on the scene turns it to face the clicked point, and
   // `cam` (Orbit) keeps orbiting it. A no-op for a document with no relay.
+  // The gamepad the room's controls read this frame (the run loop's; null: none).
+  void gamepad(cvc::gl::SdlGamepad *pad) { pad_ = pad; }
+
   void attach_view(cvc::gl::SceneRenderer &view, cvc::gl::CameraController &cam,
                    cvc::gl::ImGuiOverlay &ui) {
     if (!active || !driver_ || !app_)
@@ -1325,16 +1330,16 @@ struct ConferenceSession {
       controls_.set_pad(a.id, pad.empty() ? a.binding.pad : cvc::ariadne::split_keys(pad));
     }
     const bool orbit_mode = cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
-    const bool pad_on = pad_.update();
-    if (pad_.name() != pad_name_) {
-      pad_name_ = pad_.name();
+    const bool pad_on = pad_ && pad_->connected();
+    if (pad_ && pad_->name() != pad_name_) {
+      pad_name_ = pad_->name();
       std::fprintf(stderr, "arigl: room: gamepad %s%s\n", pad_on ? "connected: " : "gone",
                    pad_name_.c_str());
     }
     controls_.update([&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); },
                      f.wall_dt,
                      orbit_mode && pad_on ? cvc::ariadne::control_resolver::pad_fn(
-                                                [&](const std::string &n) { return pad_.input(n); })
+                                                [&](const std::string &n) { return pad_->input(n); })
                                           : cvc::ariadne::control_resolver::pad_fn());
     // The right stick turns the camera about us (look_*): right turns the view right, up looks up.
     double look_x = 0.0, look_y = 0.0;
@@ -2172,6 +2177,7 @@ struct ConferenceSession {
   }
   void attach_view(cvc::gl::SceneRenderer &, cvc::gl::CameraController &, cvc::gl::ImGuiOverlay &) {
   }
+  void gamepad(cvc::gl::SdlGamepad *) {}
   void pump() {}
   void stop() {}
 #endif
@@ -2294,6 +2300,8 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
   // Conference mode (no-op unless CVC_ARIADNE_RELAY is set): register the room verbs and dial the
   // relay (WebSocket for ws://|wss://, gRPC for grpc://), so the document (conference_roster.ari)
   // joins a hosted room.
+  cvc::gl::SdlGamepad pad; // the first gamepad plugged in: the room's controls and the Controls
+                           // window read it (declared first: it outlives the session)
   ConferenceSession conf;
   // A conference-setup failure must not take down the runtime — fall back to running the document
   // locally (no relay) and say why, rather than letting the exception abort main.
@@ -2505,6 +2513,13 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
           continue;
         rt.post_input(to_ari(e));
       }
+      // The gamepad: its new presses for the Controls window's gamepad Change, and itself for the
+      // room's controls, unless that Change is waiting for one.
+      pad.update();
+      for (const std::string &input : pad.pressed())
+        rt.app_runtime().runtime().post_pad_press(input);
+      conf.gamepad(pad.connected() && !rt.app_runtime().runtime().key_capture_pending() ? &pad
+                                                                                      : nullptr);
       for (std::string sig = osSignals.take_trapped(); !sig.empty(); sig = osSignals.take_trapped())
         if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
           exit_signal = sig;

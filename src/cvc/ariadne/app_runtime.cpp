@@ -310,9 +310,13 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       kids.push_back(text(mouse.note));
     kids.push_back(separator());
   }
-  kids.push_back(text(bindings.empty()
-                          ? "No keys to change here."
-                          : "Change, then press the new key. Escape keeps the old one."));
+  bool any_pad = false;
+  for (const KeyBinding &b : bindings)
+    any_pad = any_pad || !b.pad_path.empty();
+  kids.push_back(text(bindings.empty() ? "No keys to change here."
+                      : any_pad ? "Change, then press the new key or gamepad button (a stick: "
+                                  "push it). Escape keeps the old one."
+                                : "Change, then press the new key. Escape keeps the old one."));
   const std::string capture = kKeyCapture;
   bool first = true;
   std::string heading;
@@ -325,11 +329,27 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
     }
     // Its keys, or the prompt while its Change waits: kept by the runtime (key_shown_path), so the
     // window evaluates nothing per frame.
-    Widget row = group({text(b.label.empty() ? b.id : b.label), text_bound("", key_shown_path(b)),
-                        button("Change", "(state-set \"" + capture + "\" \"" + b.id + "\")")});
+    std::vector<Widget> cells = {
+        text(b.label.empty() ? b.id : b.label), text_bound("", key_shown_path(b)),
+        button("Change", "(state-set \"" + capture + "\" \"" + b.id + "\")")};
+    // Its gamepad's beside, where the host reads one for it: a group of its own (its id scopes
+    // its Change, apart from the keys').
+    if (!b.pad_path.empty()) {
+      Widget pad = group({text_bound("", pad_shown_path(b)),
+                          button("Change", "(state-set \"" + capture + "\" \"" + kPadCapture +
+                                               b.id + "\")")});
+      pad.id = "pad";
+      pad.layout.kind = LayoutKind::Grid;
+      pad.layout.col_widths = {Track{Unit::Px, 90.0f}, Track{}};
+      cells.push_back(std::move(pad));
+    }
+    Widget row = group(std::move(cells));
     row.id = "key_" + b.id; // each row's Change button its own
     row.layout.kind = LayoutKind::Grid;
     row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 130.0f}, Track{}};
+    if (!b.pad_path.empty())
+      row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 110.0f},
+                               Track{Unit::Px, 70.0f}, Track{}};
     kids.push_back(std::move(row));
   }
   Widget w = window("Controls", std::move(kids));
@@ -348,18 +368,25 @@ void AppRuntime::seed_keys(const std::vector<KeyBinding> &own, bool new_document
     else if (!b.keys.empty())
       read_or_seed<std::string>(app_, path, join_keys(b.keys));
   }
-  for (const KeyBinding &b : hostKeys_)
+  for (const KeyBinding &b : hostKeys_) {
     if (!b.keys.empty()) // one with no default of its own is seeded by its reader (the camera)
       read_or_seed<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)),
                                 join_keys(b.keys));
+    if (!b.pad_path.empty() && !b.pad.empty())
+      read_or_seed<std::string>(app_, resolve_bind(prefix_, b.pad_path), join_keys(b.pad));
+  }
 }
 
 void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
   keys.insert(keys.end(), hostKeys_.begin(), hostKeys_.end());
   write<std::string>(app_, resolve_bind(prefix_, kKeyCapture), ""); // no Change waiting
-  for (const KeyBinding &b : keys) // shown from the first frame; the runtime keeps it after
+  for (const KeyBinding &b : keys) { // shown from the first frame; the runtime keeps it after
     write<std::string>(app_, resolve_bind(prefix_, key_shown_path(b)),
                        read_or<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)), ""));
+    if (!b.pad_path.empty())
+      write<std::string>(app_, resolve_bind(prefix_, pad_shown_path(b)),
+                         read_or<std::string>(app_, resolve_bind(prefix_, b.pad_path), ""));
+  }
   if (keysWindow_ || !keys.empty()) {
     read_or_seed<int>(app_, resolve_bind(prefix_, kKeysWindowOpen), 0); // closed until asked for
     root.children.push_back(keys_window(keys, hostMouse_));
