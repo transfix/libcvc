@@ -85,10 +85,27 @@ policy_library::entry policy_library::get(const policy_ref &ref) {
     throw std::runtime_error(std::string(kWho) + "can't read '" + path + "'");
   const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)),
                                          std::istreambuf_iterator<char>());
+  return load(bytes, want, "'" + path + "'");
+}
+
+policy_library::entry policy_library::get_bytes(const std::string &bytes, const std::string &sha256,
+                                                const std::string &what) {
+  std::string want;
+  if (!sha256.empty()) {
+    if (!is_sha256(sha256))
+      throw std::invalid_argument(std::string(kWho) + "sha256 '" + sha256 +
+                                  "' is not 64 hex digits");
+    want = "sha256:" + lower(sha256);
+  }
+  return load(std::vector<unsigned char>(bytes.begin(), bytes.end()), want, what);
+}
+
+policy_library::entry policy_library::load(const std::vector<unsigned char> &bytes,
+                                           const std::string &want, const std::string &what) {
   const std::string key = "sha256:" + lower(sha256_hex(bytes));
   if (!want.empty() && key != want)
-    throw std::runtime_error(std::string(kWho) + "'" + path + "' hashes to " + key.substr(7) +
-                             ", not " + want.substr(7));
+    throw std::runtime_error(std::string(kWho) + what + " hashes to " + key.substr(7) + ", not " +
+                             want.substr(7));
   {
     std::lock_guard<std::mutex> lock(mu_);
     const auto it = by_key_.find(key);

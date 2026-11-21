@@ -8,7 +8,9 @@
 //   running a document's programs with no window and no GL (tests, CI, a server). Its init:,
 //   residents, actions, host functions and state behave as under arigl; nothing is drawn, so a
 //   computed bind: or text: is never evaluated, and a document that requires gl.scene does not
-//   load. pycvc.ari.Host(mode="headless") drives it.
+//   load. pycvc.ari.Host(mode="headless") drives it. grid(node, cell, half) and world_geometry(node)
+//   read the scene's world (SceneWorld) wherever it runs: this runtime's, or, attached to a drawn
+//   host's runtime (ari_app_attach), its renderer's.
 // - pycvc.ari_app_attach(app, runtime): an AriApp over a scripting host's own AppRuntime (arix,
 //   ariglx lend it as a "cvc.ariadne.AppRuntime" capsule, _arihost.runtime()), which it does not
 //   own: the host's python: blocks register their functions through it, and
@@ -26,6 +28,7 @@
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/nav/world_grid.h>
+#include <cvc/world/world_geometry.h>
 #include <cmath>
 #include <cstring>
 #include <cvc/core/app.h>
@@ -511,15 +514,27 @@ public:
   // (AppRuntime::step_world / restart_world).
   void step_world(unsigned long long n = 1) { rt_->step_world(n); }
   bool restart_world() { return rt_->restart_world(); }
-  // The navigator's grid of the world scene node `node` makes (a generated world, a dataset):
-  // SceneWorld::grid on the scene's world this runtime runs. None when it runs none (a renderer's
-  // adapter does), or the node has no world yet.
+  // The navigator's grid of the world scene node `node` makes (a generated world, a dataset, a
+  // terrain, a flat ground): SceneWorld::grid on the scene's world wherever it runs, this runtime
+  // or its renderer's adapter (AppRuntime::running_world), so an AriApp attached to a drawn host
+  // reads it too. None when the document runs no world, or the node has no world yet.
   world_grid *grid(const std::string &node, double cell, double half = 0.0) {
-    cvc::ariadne::SceneWorld *w = rt_->scene_world();
+    cvc::ariadne::SceneWorld *w = rt_->running_world();
     if (!w)
       return nullptr;
     std::shared_ptr<const cvc::nav::world_grid> g = w->grid(node, cell, half);
     return g ? new world_grid(*g) : nullptr;
+  }
+  // The world scene node `node` makes at run time (a generated world's colliders, a dataset's
+  // world): SceneWorld::world_geometry on the scene's world wherever it runs, a copy sharing its
+  // arrays (as pycvc.data_world's). What a host's own physics collides with when it is not in that
+  // world. None when the document runs no world, or the node has none (yet).
+  cvc::world::world_geometry *world_geometry(const std::string &node) {
+    cvc::ariadne::SceneWorld *w = rt_->running_world();
+    if (!w)
+      return nullptr;
+    std::shared_ptr<const cvc::world::world_geometry> g = w->world_geometry(node);
+    return g ? new cvc::world::world_geometry(*g) : nullptr;
   }
   std::string prefix() const { return prefix_; }
   // The running world's entities (pycvc.WorldEntities), over this runtime.
@@ -613,6 +628,7 @@ host_function make_host_function(const std::string &name, PyObject *fn, bool is_
 
 %newobject pycvc::AriApp::grid;
 %feature("kwargs") pycvc::AriApp::grid;
+%newobject pycvc::AriApp::world_geometry;
 %newobject pycvc::AriApp::entities;
 %newobject pycvc::world_entities;
 %feature("kwargs") WorldEntities::spawn;
@@ -670,6 +686,7 @@ public:
   void step_world(unsigned long long n = 1);
   bool restart_world();
   world_grid *grid(const std::string &node, double cell, double half = 0.0);
+  cvc::world::world_geometry *world_geometry(const std::string &node);
   std::string prefix() const;
   WorldEntities *entities();
   bool has_function(const std::string &name);
