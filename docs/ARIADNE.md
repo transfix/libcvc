@@ -1028,7 +1028,8 @@ the loader only *captures*. The host wires them:
 
   `AppRuntime` lists every binding, the document's and the host's (`set_host_keys`), in a
   **Controls** window it puts in the document: closed until `tree.ariadne_keys.open` is set
-  (arigl's *Settings > Controls...*), a row per binding with its keys and a **Change** button.
+  (arigl's *Settings > Controls...*, for a document with a scene), a row per binding with its keys
+  and a **Change** button.
   Every key a host acts on is such a binding, in the state tree beside what reads it. arigl's:
 
   | binding | state key (under the scene prefix) | default |
@@ -3077,6 +3078,8 @@ entry warns. An entry is one of:
   | `ui.windows`, `ui.menubar`, `ui.color` | movable windows; a menu bar; coloured styling |
   | `ui.fullscreen` | `(fullscreen ON)` makes the window cover the screen: a GL window, or the canvas in a browser; never a terminal (§10.7) |
   | `ui.maximize` | a window's title bar has a maximize button that fills it to the screen under the menu bar, and back (`tree.<id>.maximized`, §5.9); ImGui and FTXUI |
+  | `button.icon` | `button:` takes `icon:`, a picture drawn in place of its label (§5.27); ImGui |
+  | `button.selected` | `button:` takes `selected:`, the chosen button of a row drawn pressed in (§5.27); ImGui, FTXUI and tvision |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
@@ -3277,6 +3280,17 @@ that use of the unit.
     window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
+- **How it starts:** a window's `maximized:` is the maximize it has while that key holds nothing:
+  `true` (maximized everywhere), `phone` (maximized where the view is a phone's, under 500 CSS
+  pixels on its short side, §5.14), or `false` (the default). The user's restore, or the
+  document's write, sets the key, and from then on the key decides, across a restart too.
+
+  ```yaml
+  windows:
+    - window: Feed
+      id: main
+      maximized: phone   # fills a phone's screen under the menu bar; a desktop's opens as laid out
+  ```
 - **In front:** a window that becomes maximized, by any of these, comes to the front of the
   others (see *Bringing a window to the front* below).
 - **Geometry:** while a window is maximized its `tree.<id>.geometry` isn't written, so it keeps
@@ -3734,7 +3748,8 @@ this for every one.
   the view, and the panels show a list of titles over the scene. The arrow (or a double tap)
   opens one: it unfolds from its title, as wide as the view and no taller than the room below,
   over the titles after it. Windows that fit where they were put, and those with no `pos:` (the
-  flow, §5.8), open as anywhere else.
+  flow, §5.8), open as anywhere else. A window with `maximized: phone` (§5.9) opens maximized
+  instead, filling the view under the menu bar: an app's one main window, a feed.
 - **Labels.** A slider's, combo's or field's label stays in view: in a window that fits its
   widgets, a widget that would push its label past the view's edge is narrowed to leave it room.
 - **Scrolling with a finger.** On a touch screen a finger drags a window's content along, its
@@ -4919,6 +4934,46 @@ The terminal snapshots are `ariadne_ftxui_test`'s `ComputedColorsReachTheCells` 
 16 colours) and `ComputedColorsReachTheWindowCells` (tvision's cells). ImGui's pixels are checked
 by `cvcgl_imgui_colors`.
 
+### 5.27 Buttons with a picture, and the chosen button: `icon:` and `selected:`
+
+A bar of buttons that go to places, or a row of choices, wants pictures on its buttons and the
+current one to look pressed:
+
+```yaml
+- type: group
+  layout: {kind: horizontal}
+  children:
+    - button: "👥"                          # the label: drawn where no picture is
+      icon: (state-get "nav.icon.following") # a picture URI, or a published image; "" for none
+      tooltip: Following
+      selected: (= (state-get "feed.mode") "following")
+      on: (state-set "feed.mode" "following")
+    - button: "🌐"
+      tooltip: Everyone
+      selected: (= (state-get "feed.mode") "everyone")
+      on: (state-set "feed.mode" "everyone")
+```
+
+- **`icon:`** is a picture: a URI (§5.11, fetched and cached as an `image:`'s is, with `auth:`
+  for a credential), the name of a picture the host published, or an expression giving either.
+  It is drawn in place of the label, one line of text tall (`icon_size:` N for N px), at its own
+  shape. Until it has loaded, when it fails, when the expression gives `""`, and on a backend that
+  draws no pictures on buttons, the button shows its label. So give it a label that stands on its
+  own: an emoji, or a word.
+- **`selected:`** is `true`, `false`, or an expression. While it holds, the button is drawn
+  pressed in; `false` is a button of such a row that is never the chosen one (a bar's Back). On
+  ImGui sunken (a shadow along its top and left edges, a darker face, its content a step down and
+  to the right), with the row's other buttons raised beside it (a light top and left, a shadow at
+  the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
+  choosing another moves nothing. It is a look only: a click runs `on:` as on any button.
+- In a `repeat:`, `{i}` reaches both.
+- `(has? "button.icon")` and `(has? "button.selected")` say where the backend draws them (§5.7).
+  Elsewhere a button with them is a plain button.
+
+`ariadne_loader_test`'s `ButtonIconAndSelectedParse` checks the keys; `ariadne_ftxui_test`'s
+`SelectedButtonIsMarked` the terminal's look; `cvcgl_imgui_group_click` taps a selected
+button with a picture through ImGui's own input.
+
 ## 6. Composition: include / import / load
 
 Three mechanisms compose documents. They differ in **isolation**, not in how they
@@ -5493,7 +5548,11 @@ The cvcGL examples
 [`src/arigl/gallery.h`](../src/arigl/gallery.h)), `arigl run`'s menu bar is its own and the same
 for every document: **Demos**, **Document** (the document's own menus, as submenus) and
 **Settings** (the scene's shadows, grid, origin axis, bounding boxes and extent labels, which
-`arigl` without a gallery adds after the document's menus). A demo picked from Demos that is a
+`arigl` without a gallery adds after the document's menus). Settings' *Controls...* and the
+scene's items show only while the loaded document has a scene (`scene:`): `AriRuntime::load`
+writes `ariadne.scene` (`1` or `0`) under the document's prefix, and the items'
+`visible_when:` reads it. A document with no scene (a feed, a form) gets *Show clock* and *Show
+notifications* alone. A demo picked from Demos that is a
 `.ari` document loads in place of the running one, in the same window; any other demo opens on
 its own (its page in the browser, its program natively). That is how the examples' browser gallery runs every `.ari` demo in one app
 (`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree

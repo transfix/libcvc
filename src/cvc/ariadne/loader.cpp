@@ -247,6 +247,9 @@ const char *const kAriSchema = R"ARISCHEMA({
                  "items": {"type": ["number", "string"]}},
         "max_height": {"type": "number"},
         "emoji": {"type": "string"},
+        "icon": {"type": "string"},
+        "icon_size": {"type": "number"},
+        "selected": {"type": ["boolean", "string"]},
         "runs": {"type": ["array", "string"]},
         "on_link": {"type": "string"},
         "src": {"type": "string"},
@@ -513,6 +516,7 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
 Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
+std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label); // §5.9
 
 // Widget keys the loader consumes directly; everything else on a custom widget flows
 // into Widget::props for a registered emit fn to read.
@@ -958,6 +962,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
     w.closable = flag(n, "closable", true);          // §5.9 a close (X) button + tree.<id>.open
     w.maximizable = flag(n, "maximizable", true);    // §5.9 a maximize button + .maximized
+    w.start_maximized = start_maximized(ctx, n, label); // §5.9 maximized: true | phone
     w.resizable = flag(n, "resizable", true);        // §5.9 the user resizes it by an edge
     return w;
   }
@@ -1436,7 +1441,29 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const std::string on = action(n);
     if (on.empty())
       ctx.warn("ari: button '" + label + "' has no on: action");
-    return button(label, on);
+    Widget b = button(label, on);
+    // §5.27 a picture in place of the label, and the pressed-in look of the chosen one
+    b.button_icon = str(n, "icon");
+    b.media_auth = str(n, "auth");
+    b.icon_size = static_cast<float>(std::max(0.0, num(n, "icon_size", 0.0)));
+    if (has(n, "selected")) {
+      const YAML::Node s = n["selected"];
+      const std::string v = s.IsScalar() ? s.Scalar() : std::string();
+      if (v == "true" || v == "yes" || v == "on")
+        b.selected = "true";
+      else if (v == "false" || v == "no" || v == "off")
+        b.selected = "false"; // one of a row, never the chosen one: drawn raised with the others
+      else if (v.empty())
+        b.selected.clear();
+      else if (v.front() == '(') // an expression, read each frame
+        b.selected = v;
+      else
+        ctx.warn("ari: button '" + label + "': selected: '" + v +
+                 "' is not true, false or an expression");
+    }
+    if (!b.button_icon.empty() && label.empty())
+      ctx.warn("ari: button with icon: has no label: it shows nothing where the picture can't");
+    return b;
   }
 
   if (!type.empty() && type != "group" && type != "panel") {
@@ -1628,6 +1655,19 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
   bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
   if (!bg.any())
     ctx.warn("ari: background: has no src:, bind: or color: — nothing to draw");
+}
+
+// §5.9 a window's `maximized:`, the maximize it starts with until the user picks: true, false, or
+// phone (maximized only where the view is a phone's).
+std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+  const std::string v = str(n, "maximized");
+  if (v == "true" || v == "yes" || v == "on")
+    return "true";
+  if (v == "phone")
+    return "phone";
+  if (!v.empty() && v != "false" && v != "no" && v != "off")
+    ctx.warn("ari: window '" + label + "': maximized: '" + v + "' is not true, false or phone");
+  return std::string();
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
@@ -2109,6 +2149,8 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
       w.closable = flag(n, "closable", true);
     if (n["maximizable"])
       w.maximizable = flag(n, "maximizable", true);
+    if (n["maximized"])
+      w.start_maximized = start_maximized(ctx, n, w.label);
     if (n["resizable"])
       w.resizable = flag(n, "resizable", true);
   }

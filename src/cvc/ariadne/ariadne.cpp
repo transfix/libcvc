@@ -273,6 +273,8 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.color_src, kTok, idx);            // §5.26 a row's colour (palette.{i})
   replace_in(out.poster, kTok, idx); // §5.13
   replace_in(out.emoji, kTok, idx);  // §5.11 a post's own shortcodes
+  replace_in(out.button_icon, kTok, idx); // §5.27 a row's button: its picture, whether it's chosen
+  replace_in(out.selected, kTok, idx);
   // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
   replace_in(out.runs_src, kTok, idx);
   replace_in(out.on_link, kTok, idx);
@@ -3094,7 +3096,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // button in its title bar where the backend has one (`maximizable: false`: none). While it is
     // maximized its geometry is not persisted, so tree.<id>.geometry keeps where it goes back to.
     const std::string max_path = resolve("tree." + id + ".maximized");
-    bool maximized = w.maximizable && read_bool_or(app, max_path, 0) != 0;
+    // `maximized: true | phone` is how it starts, until the user (or the document) writes the key.
+    const bool start_max =
+        w.start_maximized == "true" || (w.start_maximized == "phone" && b.view_is_phone());
+    bool maximized = w.maximizable && read_bool_or(app, max_path, start_max ? 1 : 0) != 0;
     const bool can_maximize = w.maximizable && b.next_window_maximize(&maximized);
     if (!can_maximize)
       maximized = false;
@@ -3663,12 +3668,40 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Button:
-    if (tinted([&] { return b.button(label); })) {
+  case Kind::Button: {
+    // §5.27 a picture in place of the label, and the chosen one of a row drawn pressed in. A plain
+    // button goes the way it always has.
+    bool hit = false;
+    if (w.button_icon.empty() && w.selected.empty()) {
+      hit = tinted([&] { return b.button(label); });
+    } else {
+      ButtonLook look;
+      look.icon_h = w.icon_size;
+      look.selected = w.selected == "true" || (is_expr(w.selected) && predicate(w.selected, false));
+      const std::string icon = is_expr(w.button_icon) ? eval_text(w.button_icon) : w.button_icon;
+      if (media::is_uri(icon) && !media::is_video_uri(icon)) {
+        // Fetched and kept as an image:'s picture is, at its own shape: the label shows until it is
+        // ready, and if it fails. Three times the height it's drawn (a line, about 16 px, unless
+        // icon_size: says), so a phone's dense screen gets a sharp one.
+        media::ImageRequest rq;
+        rq.uri = icon;
+        rq.auth = w.media_auth;
+        rq.w = 3 * std::max(16, static_cast<int>(std::lround(w.icon_size)));
+        media::ImageView v;
+        const std::string name = media_picture(rq, v);
+        if (v.status == media::Status::Ready)
+          look.icon = name;
+      } else if (!icon.empty() && !media::is_uri(icon)) {
+        look.icon = icon; // a host-published picture
+      }
+      hit = tinted([&] { return b.button_with(label, look); });
+    }
+    if (hit) {
       enqueue(w.on);
       ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
     }
     break;
+  }
 
   case Kind::TfEditor: {
     TfEditorContext ctx{app,

@@ -1069,6 +1069,100 @@ windows:
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
 }
 
+// §5.9 `maximized:` how a window starts while tree.<id>.maximized holds nothing: true, phone
+// (only on a phone's view), false; anything else warns and is false. An include may set it.
+TEST(AriadneLoader, WindowMaximizedParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  feed:
+    window: Feed
+    children: [ { text: hi } ]
+windows:
+  - window: Always
+    maximized: true
+    children: [ { text: hi } ]
+  - window: Phone
+    maximized: phone
+    children: [ { text: hi } ]
+  - window: Plain
+    children: [ { text: hi } ]
+  - window: Odd
+    maximized: sometimes
+    children: [ { text: hi } ]
+  - include: feed
+    maximized: phone
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const auto start = [&](const char *title) {
+    const Widget *w = find(r.root, Kind::Window, title);
+    EXPECT_NE(w, nullptr) << title;
+    return w ? w->start_maximized : std::string("?");
+  };
+  EXPECT_EQ(start("Always"), "true");
+  EXPECT_EQ(start("Phone"), "phone");
+  EXPECT_EQ(start("Plain"), "");
+  EXPECT_EQ(start("Odd"), "");
+  EXPECT_EQ(start("Feed"), "phone");
+  bool warned = false;
+  for (const std::string &w : r.warnings)
+    warned = warned || w.find("maximized: 'sometimes'") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+// §5.27 a button's `icon:` (a picture in place of its label, with auth: and icon_size:) and
+// `selected:` (true, or an expression; false and no are none; anything else warns).
+TEST(AriadneLoader, ButtonIconAndSelectedParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - button: Home
+        on: home
+        icon: https://media.example/e/home.png
+        auth: site
+        icon_size: 24
+        selected: true
+      - button: Tags
+        on: tags
+        icon: (state-get "nav.icon.tags")
+        selected: (= (state-get "view") "tags")
+      - button: Plain
+        on: plain
+        selected: false
+      - button: Odd
+        on: odd
+        selected: maybe
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *home = find(r.root, Kind::Button, "Home");
+  const Widget *tags = find(r.root, Kind::Button, "Tags");
+  const Widget *plain = find(r.root, Kind::Button, "Plain");
+  const Widget *odd = find(r.root, Kind::Button, "Odd");
+  ASSERT_NE(home, nullptr);
+  ASSERT_NE(tags, nullptr);
+  ASSERT_NE(plain, nullptr);
+  ASSERT_NE(odd, nullptr);
+  EXPECT_EQ(home->button_icon, "https://media.example/e/home.png");
+  EXPECT_EQ(home->media_auth, "site");
+  EXPECT_FLOAT_EQ(home->icon_size, 24.0f);
+  EXPECT_EQ(home->selected, "true");
+  EXPECT_EQ(tags->button_icon, "(state-get \"nav.icon.tags\")");
+  EXPECT_EQ(tags->selected, "(= (state-get \"view\") \"tags\")");
+  EXPECT_TRUE(plain->button_icon.empty());
+  EXPECT_EQ(plain->selected, "false") << "one of the row, drawn raised, never chosen";
+  EXPECT_TRUE(odd->selected.empty());
+  bool warned = false;
+  for (const std::string &w : r.warnings) {
+    warned = warned || w.find("selected: 'maybe'") != std::string::npos;
+    EXPECT_EQ(w.find("'icon'"), std::string::npos) << w; // a known key, not an unknown one
+  }
+  EXPECT_TRUE(warned);
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {

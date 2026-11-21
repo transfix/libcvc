@@ -2548,8 +2548,16 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     if (!gallery.empty())
       menus.push_back(gallery.menu(doc));
     menus.push_back(ari::AppRuntime::document_menus(gallery.empty() ? "" : "Document"));
-    menus.push_back(ari::menu("Settings", {keys_menu_item(), clock_menu_item(), bell_menu_item(),
-                                           ari::separator(), ari::custom("scene_settings")}));
+    // Controls... (the camera's keys and mouse) and the scene's display settings mean nothing to a
+    // document with no scene (a feed, a form): they show only while the loaded one has a scene
+    // (AriRuntime::load writes ariadne.scene), so they come and go with a gallery's documents.
+    const auto scene_only = [](ari::Widget w) {
+      w.visible_when = "(= (state-get \"ariadne.scene\") \"1\")";
+      return w;
+    };
+    menus.push_back(ari::menu("Settings", {scene_only(keys_menu_item()), clock_menu_item(),
+                                           bell_menu_item(), scene_only(ari::separator()),
+                                           scene_only(ari::custom("scene_settings"))}));
     return menus;
   };
   // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
