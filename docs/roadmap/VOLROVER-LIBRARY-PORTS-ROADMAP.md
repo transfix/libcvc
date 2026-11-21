@@ -1194,14 +1194,10 @@ one phase is not spent on the next.
     series, the Kuwajima 2019 one (CC0; `examples/data/contours/kuwajima2019`): two axons
     through 72 sections, a third that branches, and two mitochondria inside one of them, about
     20,000 triangles with no warnings.
-  - **Found in P4: `tile_stepper`'s early phases are coarse.** In cooperative mode
-    (`CVC_SLICED_THREADING=cooperative`, as single-threaded wasm runs), the first frames of a tile
-    of 3 components on 40 slices (64-vertex contours) take 50 to 160 ms each in a native Release
-    build, against §1.9's 4 ms slice. Two causes: `step(budget)` runs on across a phase change, so
-    a budget the scheduler sized on "snapping" units (a vertex each) is spent on "curating" ones;
-    and a "curating" or "augmenting" unit is a whole slice or slice pair (milliseconds each),
-    while the scheduler's smallest call is 16 units. The "tiling" frames stay near the slice. A
-    fix ends the step at a phase change and counts curating and augmenting by vertex.
+  - **Found in P4, fixed in #1411: `tile_stepper`'s phases were coarse.** In cooperative mode the
+    first frames of this demo's tile (3 components on 40 slices, 64-vertex contours) took 50 to
+    160 ms each, against §1.9's 4 ms slice. "Resumable" above describes the fix and records what
+    was measured after it: 4.1 to 4.7 ms per phase on the same stack.
 
 **Tests** (§1.7)
 
