@@ -1163,6 +1163,22 @@ smaller than a pair:
   - Its keys live under `<node>.tiler.*`, and its surfaces on the data channel.
   - The `contour_tiler.ari` component has a component picker, the slice range, the parameters,
     Tile and Stop, and a progress bar labelled with the slice pair being tiled.
+  - *Built in P4 (2026-11-20).* `contour_lab` (`inc/cvc/gl/ariadne/contour_lab_nodes.h`) also
+    reads `source: { state: <key> }`, a stack a program put on a key's data channel, and follows
+    a node or state source when its data changes. Each component's row (`components.<i>`) has a
+    `tile` tick as well, which the component picker shows: an unticked component is left out of
+    the next tile. A file is read whole at realize and at each `load`. The demo tiles a real
+    series, the Kuwajima 2019 one (CC0; `examples/data/contours/kuwajima2019`): two axons
+    through 72 sections, a third that branches, and two mitochondria inside one of them, about
+    20,000 triangles with no warnings.
+  - **Found in P4: `tile_stepper`'s early phases are coarse.** In cooperative mode
+    (`CVC_SLICED_THREADING=cooperative`, as single-threaded wasm runs), the first frames of a tile
+    of 3 components on 40 slices (64-vertex contours) take 50 to 160 ms each in a native Release
+    build, against §1.9's 4 ms slice. Two causes: `step(budget)` runs on across a phase change, so
+    a budget the scheduler sized on "snapping" units (a vertex each) is spent on "curating" ones;
+    and a "curating" or "augmenting" unit is a whole slice or slice pair (milliseconds each),
+    while the scheduler's smallest call is 16 units. The "tiling" frames stay near the slice. A
+    fix ends the step at a phase change and counts curating and augmenting by vertex.
 
 **Tests** (§1.7)
 
@@ -1589,7 +1605,7 @@ not as follow-ups.
 | P2 Skeleton in Ariadne | S | The `mesh_lab` `skeleton` request, children and `mesh_tools` section; a demo document with a golden image, native and in arigl-web | P1 |
 | P3a Planar module | M | `cvc::planar`: the snapping grid, predicates, polygons, Clipper2 Booleans and offsets, CDT, the Boost.Polygon medial axis, Sibson interpolation; T2 against brute force | P0c |
 | P3b Tiler core | L | Vendor ContourTiler into `src/cvc/geometry/tiler/` on `cvc::planar`, with the context-held logger; in-memory output, const input; `tile_stepper` slicing within a slice pair (§3); its 12 tests as gtest; `cvc tile`; pycvc; `tiler.tile`; §3's tests. *Built:* the core, `tiler_test` and `tiler_legacy_test`, and the legacy goldens (§3, "What P3b built"); then `cvc tile`, pycvc and `tiler.tile` with `tiler_intrinsics_test` | P3a, P0d |
-| P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web | P3b |
+| P4 Tiler in Ariadne | S | `contour_lab`, reading a file or another node's contours, and `contour_tiler.ari`, with a demo on a small redistributable Reconstruct series (find one), native and in arigl-web. *Built:* `contour_lab` (`contour_lab_nodes.h`, test `cvcgl_contour_lab`), `contour_tiler.ari`, and `examples/ariadne/documents/contour_tiler.ari` on the Kuwajima 2019 series (CC0, `examples/data/contours/kuwajima2019`; golden `src/cvcGL/test/golden/contour_tiler.ari`, arigl-web smoke case `contour_tiler.ari` in the docset, and the gallery) | P3b |
 | P5 Segmentation core | M | §5 steps 1–2: GenSeg vendored into `src/cvc/volume/segmentation/` with `genseg_context` and in-memory input and output; `segment_stepper` with every phase sliced (§5); voxel-for-voxel parity, then the clean-up; `cvc segment`; pycvc; `segment.seeded`; §5's tests | P0a, P0b, P0d |
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
