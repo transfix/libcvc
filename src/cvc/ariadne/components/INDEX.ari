@@ -189,7 +189,7 @@ catalog:
     file: mesh_tools.ari
     unit: mesh_tools
     binds: "<prefix>.graphics.root.children.{node}.mesh_ops.*"   # the cvcGL mesh_lab realizer
-    for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction)"
+    for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction; the skeleton of its vertices, with a progress bar and Stop)"
     args: { node: mesh, title: Mesh tools, id: mesh_tools }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build; commands are written to mesh_ops.request and run off the render thread"
   - component: fe_controls

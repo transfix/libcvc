@@ -8,7 +8,9 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cstdio>
 #include <cvc/media/playback/audio_output.h>
+#include <cvc/media/web_audio.h> // a browser: the speaker on an AudioWorklet, SDL the fallback
 
 #if CVC_MEDIA_SDL
 #include <SDL3/SDL_audio.h>
@@ -198,6 +200,21 @@ audio_output_open open_audio_output(const audio_output_spec &spec) {
 audio_output_open open_audio_output_pull(const audio_output_spec &spec, audio_pull_fn fill) {
   if (!fill)
     return {};
+  // In a browser the default device plays from an AudioWorklet, which keeps playing through a busy
+  // main thread or a hidden tab (cvc/media/web_audio.h); SDL's Web Audio backend, whose callback
+  // runs on the main thread, is the fallback (no AudioWorklet, another rate, CVC_WEB_AUDIO=sdl).
+  if (spec.device_index < 0 && web_audio::prepare()) {
+    if (auto sink = web_audio::open_output_pull(spec.sample_rate, spec.channels, fill)) {
+      audio_output_open result;
+      result.sink = std::move(sink);
+      result.sample_rate = spec.sample_rate;
+      result.channels = spec.channels;
+      result.name = "AudioWorklet";
+      return result;
+    }
+    std::fprintf(stderr, "web audio: the speaker on SDL (worklets %s)\n",
+                 web_audio::status().c_str());
+  }
   return open_output(spec, std::move(fill));
 }
 

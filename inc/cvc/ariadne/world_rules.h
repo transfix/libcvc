@@ -124,6 +124,10 @@ struct vehicle_look {
 //                intent alone: WorldVehicles::set_intent, the entity's intent keys) or pose (an
 //                outside simulation places it, and no plant integrates it: WorldVehicles::set_pose,
 //                the entity's pose keys); the first is a spawn's default
+//   drivable     whether a participant may get in and drive it (ARIADNE_WORLDS.md section 18.6;
+//                holon::set_driver), from within `reach` metres of its chassis box (3 m)
+//   controls     the control scheme a driver drives it with (controls.h): car or boat; "" by its
+//                plant (a dynamicboat's boat, every other car)
 struct vehicle_archetype {
   std::string id;
   std::string plant = "jolt";
@@ -132,8 +136,13 @@ struct vehicle_archetype {
   vehicle_look look;
   std::map<std::string, std::pair<double, double>> ranges;
   std::vector<std::string> controllers{"nav@1", "none"};
+  bool drivable = false;
+  double reach = 3.0;
+  std::string controls;
   bool operator==(const vehicle_archetype &) const = default;
 };
+// The control scheme a driver drives A with: its controls, or by its plant (boat or car).
+std::string vehicle_controls(const vehicle_archetype &a);
 
 // The vehicle presets a `vehicle:` may name, and the controllers and plants a vehicle may have.
 // A dynamicboat's presets are the boats' (boat_presets()), every other plant's the vehicles'.
@@ -224,6 +233,28 @@ bool spawn_scope_known(const std::string &scope);
 //            a .cvcnav's path, or { uri:, path:, sha256: } (a file, an https URL or a cvcpkg://
 //            package, the .cvcnav inside it and its hash) or { data: <entry> } (the document's
 //            data: entry). Without the weights it drives on the built-in net and says why.
+//   metric:  trained (the trainer's vehicle, as the weights learned) | vehicle (each plant's own
+//            size and limits) | policy (the default: trained when weights drive or are on their
+//            way, vehicle on the built-in net)
+//   plant:   one plant, a list its vehicles cycle over ([jolt, kinematic]), or each team's
+//            ({ 0: jolt, 2: jolt }; a team not named on the archetype's plant). A fleet's plants
+//            all float (dynamicboat) or none do.
+struct fleet_plants {
+  std::vector<std::string> cycle;   // the vehicles' plants in turn (none: the archetype's)
+  std::map<int, std::string> teams; // a team's own (its rally point's index)
+  bool empty() const { return cycle.empty() && teams.empty(); }
+  // Member `member`'s plant on team `team` (-1 none): its team's, else the cycle's, else "".
+  std::string of(int member, int team) const;
+  // As parse_fleet_plants reads it: "jolt", "jolt, kinematic", "0: jolt, 2: jolt",
+  // "kinematic, 0: jolt" (team 0 on jolt, the rest kinematic).
+  std::string text() const;
+  bool operator==(const fleet_plants &) const = default;
+};
+// `text` (fleet_plants::text's form) into `out`: "" or what is wrong. A team must be below
+// `teams` (its fleet's rally points; -1 unchecked), and the plants all float or none do.
+std::string parse_fleet_plants(const std::string &text, fleet_plants &out, int teams = -1);
+bool fleet_metric_known(const std::string &metric); // trained, vehicle or policy
+
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -244,6 +275,9 @@ struct vehicle_start {
   std::string belief; // shared | grouped | private ("" shared)
   // policy: { uri:, path:, sha256: } (`policy` the uri) or { data: } (`policy_data`).
   std::string policy_path, policy_sha256, policy_data;
+  std::string metric; // trained | vehicle | policy ("" policy)
+  // A fleet's plant: as a list or each team's (`plant` is then the list's first, or "").
+  fleet_plants plants;
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;

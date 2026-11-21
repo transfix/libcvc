@@ -765,6 +765,56 @@ TEST(HolonPhysicsTest, AnAvatarStandsOnTheFloorAndFallsOntoIt) {
   EXPECT_NEAR(server.state("A").position.x, 4.0, 1e-3) << "and it stayed where it landed";
 }
 
+// The walker's jump (section 18.6): held, an avatar standing on the floor leaves it at its
+// controller's jump_speed (4 m/s: about 0.8 m up), comes down, and jumps again while it is held;
+// never again in the air, so held the whole time it never climbs higher than one jump. The reserve
+// pays the jump's kinetic energy. Let go, it stays on the floor; a controller's jump_speed: 0 is no
+// jumping.
+TEST(HolonPhysicsTest, AnAvatarJumpsFromTheFloorAndNotInTheAir) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  server.set_statics(room_statics(), 1);
+  server.add_participant("A", false, at(4.0, 0.0));
+  run(server, 60);
+  cvc::ariadne::avatar_energy before;
+  ASSERT_TRUE(server.energy("A", before));
+  avatar_intent jump;
+  jump.jump = true;
+  server.set_intent("A", jump);
+  double peak = 0.0;
+  int landings = 0;
+  bool up = false;
+  for (int i = 0; i < 360; ++i) { // 3 s held
+    run(server, 1);
+    const double z = server.state("A").position.z;
+    peak = std::max(peak, z);
+    if (z > 0.1)
+      up = true;
+    else if (up && z < 0.05) {
+      up = false;
+      ++landings;
+    }
+  }
+  std::printf("  jump: peak %.3f m, %d landings in 3 s\n", peak, landings);
+  EXPECT_NEAR(peak, 4.0 * 4.0 / (2.0 * 9.80665), 0.1) << "one jump's height, never two";
+  EXPECT_GE(landings, 2) << "held, it jumps again once down";
+  cvc::ariadne::avatar_energy after;
+  ASSERT_TRUE(server.energy("A", after));
+  EXPECT_GT(after.ledger.work - before.ledger.work, 2.0 * 0.5 * 70.0 * 16.0 * 0.9)
+      << "each jump paid its kinetic energy";
+
+  server.set_intent("A", avatar_intent{});
+  run(server, 120);
+  EXPECT_NEAR(server.state("A").position.z, 0.0, 0.02) << "let go, it stays down";
+  std::vector<cvc::ariadne::avatar_controller> none{cvc::ariadne::avatar_controller{}};
+  none[0].params["jump_speed"] = 0.0;
+  server.set_controllers(none);
+  server.set_intent("A", jump);
+  run(server, 60);
+  EXPECT_NEAR(server.state("A").position.z, 0.0, 0.02) << "jump_speed: 0 is no jumping";
+}
+
 TEST(HolonPhysicsTest, AnAvatarAcceleratesWithInertia) {
   holon server(holon_role::server, physics_config());
   if (!server.physics())
