@@ -1099,7 +1099,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme). OW6c: avatars that are vehicles, a first-person walk. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
-| OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). Not yet: a change while the relay runs, the policies checked at 4/60 s. | S |
+| OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**
 
@@ -1236,11 +1236,18 @@ compute are an issue." So a world's rate is a knob: the relay picks it, and its 
   viewer's round trip (room_pose_relay) and the room steps at 60 Hz whatever the rate; a near
   entity's pose is capped at 30 Hz at any rate. Video has its own knobs (`--video-max`,
   `--viewer-kbps-max`, `--aoi`, `--aoi-video-max`).
+- **The policies hold at 4/60 s** (2026-11-21), which is the tick at 60 Hz and at 30 Hz. That tick
+  is 11% longer than the 0.06 s they were trained at; 7/120 s was 3% shorter. The run is the
+  same as OW1's (§18.1): Jolt RoboRacers through the city for 24 s, 20 seeds of 48 agents
+  (`NavPlantConvergence.PoliciesHoldTheirReachAtTheSimulationTick`, `CVC_NAV_TICK_AB=1`, which now
+  has the 4/60 s arm). Reach at 0.06 s, then at 4/60 s:
+  - the shipped weights: 0.519, then 0.512;
+  - the untrained default: 0.522, then 0.517.
+
+  Both are within the seeds' noise. No retraining.
 - **Not yet:**
   - A rate change while a relay runs. It is a restart: the clients follow the new run's section.
     In place it would be a world restart under a new epoch (§6, #1076) that every holon rebuilds
     on.
-  - The policies checked at 4/60 s, as OW1 checked them at 7/120 s (§18.1). 0.0667 s is 11% longer
-    than the 0.06 s they were trained at, where 7/120 s was 3% shorter.
   - The scene swarm (`scene_swarm`) runs its own plant host and tick at 1/120 s and needs the
     120 Hz clock: a scene with a swarm and a rate of its own is not supported yet.
