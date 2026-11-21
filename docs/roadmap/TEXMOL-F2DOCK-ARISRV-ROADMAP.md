@@ -1,9 +1,21 @@
 # TexMol Libraries, libf2dock, and arisrv as a Many-Room Compute and Scene Server — Roadmap (sketch)
 
-**Status:** sketch, 2026-11-09, merged as transfix/libcvc#1090. Nothing has landed. §9 lists the
-decisions that need Joe. Revised the same day for Joe's "make them resumable like we have for the
+**Status:** sketch, 2026-11-09, merged as transfix/libcvc#1090. §9 lists the decisions that need
+Joe. Revised the same day for Joe's "make them resumable like we have for the
 FEM routines": every long routine here, docking included, is a resumable stepper that runs on the
 scheduler in slices with progress for the UI, interactive on one thread (§1 item 2, §2.6, §3.2).
+**Progress:**
+- **M0 part 1** (2026-11-21): `cvc::mol` (`inc/cvc/mol/molecule.h`). A flat molecule model (atoms
+  with residue, chain, model, radius and charge; HELIX, SHEET and TURN ranges); PDB, PQR and XYZR
+  readers as each app's own file handlers; and PDBParser's residue-atom table, row for row, for
+  the radii and charges a PDB file lacks. Tests: `molecule_test`, natively and in the wasm-mt
+  ports lane, on fixtures and on PDB entry 1GRL. Not yet in it: the group tree, torsions, the
+  writers, CLI, pycvc and intrinsics (M0 part 2), and the A/B against TexMol's parser, which comes
+  with T1's (`tools/texmol-goldens/`).
+- **Next, for the skeleton demo** (Joe, 2026-11-21: skeletonization was meant for molecular data
+  too): T1 part 1, GOABlur's electron-density map as a resumable stepper with its A/B against
+  TexMol; then a mesh_lab that builds its surface from a PDB (the density's isosurface) and a
+  skeleton demo on 1GRL, whose strands and sheets should follow its 19 helices and 11 strands.
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital
