@@ -1,7 +1,7 @@
 {
   "library": "SecondaryStructures",
   "points": 9581,
-  "made_from": "PDB entry 1GRL (examples/data/molecules/1grl.pdb, a GroEL subunit): the vertices of the isosurface at 12 of its heavy atoms' blur map (cvc::mol::blur, blobbiness -0.3, a 2 Å grid; cvc::iso, DUALLIB), each coordinate rounded to a multiple of 1/64 Å (so its decimal is exact). Made with libcvc at 84e790ea and transfix/libcvc#1428's blur (950bf8bd); make_inputs.py leaves this case as it is.",
+  "made_from": "PDB entry 1GRL (examples/data/molecules/1grl.pdb, a GroEL subunit): the vertices of the isosurface at 12 of its heavy atoms' blur map (cvc::mol::blur, blobbiness -0.3, a 2 \u00c5 grid; cvc::iso, DUALLIB), each coordinate rounded to a multiple of 1/64 \u00c5 (so its decimal is exact). secondary_structures_test's The1GRLInputIsItsBlurMapsIsosurface makes it again (libcvc master d04c070d, transfix/libcvc#1428's blur); make_inputs.py leaves this case as it is.",
   "parameters": {},
   "made_by": "libcvc (cvc::mol::blur, cvc::iso), committed"
 }

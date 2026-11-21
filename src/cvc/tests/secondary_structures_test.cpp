@@ -25,6 +25,7 @@
 #include <cvc/geometry/secondary_structures.h>
 #include <cvc/geometry/secondary_structures_params.h>
 #include <cvc/geometry/tet_complex.h>
+#include <cvc/mol/blur.h>
 #include <cvc/mol/molecule.h>
 #include <cvc/state/state.h>
 #include <fstream>
@@ -38,6 +39,9 @@
 #include <thread>
 #include <tuple>
 #include <vector>
+#ifdef CVC_ENABLE_MESHER
+#include <cvc/utility/algorithm.h>
+#endif
 
 namespace {
 
@@ -479,6 +483,50 @@ TEST_F(SecondaryStructures, FindsTheHelicesOf1GRL) {
   // Measured: 18 of 20 axes, 15 of 19 helices.
   EXPECT_GE(on_helices, int(0.8 * double(s.helices.size())));
   EXPECT_GE(found, 12);
+}
+
+// The committed 1GRL surface is what 1grl.json says it is: the isosurface at 12 of the heavy atoms'
+// blur map (cvc::mol::blur, blobbiness -0.3, a 2 Å grid; cvc::iso), rounded to 1/64 Å. Native
+// builds only: the wasm ports lane has no isosurfacing.
+TEST_F(SecondaryStructures, The1GRLInputIsItsBlurMapsIsosurface) {
+#ifndef CVC_ENABLE_MESHER
+  GTEST_SKIP() << "libcvc was built without CVC_ENABLE_MESHER (cvc::iso)";
+#else
+  const std::string base = std::string(CVC_REPO_DIR);
+  cvc::app a;
+  cvc::mol::molecule_read_params rp;
+  rp.hydrogens = false;
+  const cvc::mol::molecule m =
+      cvc::mol::read_molecule(a, base + "/examples/data/molecules/1grl.pdb", rp);
+  cvc::mol::blur_params bp;
+  bp.blobbiness = -0.3;
+  bp.resolution = 2.0;
+  const cvc::geometry g = cvc::iso(cvc::mol::blur(a, m, bp), 12.0);
+  pts_t made;
+  for (const auto &p : g.const_points())
+    made.push_back(
+        {std::round(p[0] * 64) / 64, std::round(p[1] * 64) / 64, std::round(p[2] * 64) / 64});
+  pts_t kept = read_points(base + "/tools/volrover-goldens/inputs/secondary/1grl.pts");
+  std::sort(made.begin(), made.end());
+  std::sort(kept.begin(), kept.end());
+  std::size_t same_points = 0;
+  for (std::size_t i = 0, j = 0; i < kept.size() && j < made.size();) {
+    if (kept[i] == made[j]) {
+      ++same_points;
+      ++i;
+      ++j;
+    } else if (kept[i] < made[j]) {
+      ++i;
+    } else {
+      ++j;
+    }
+  }
+  std::cout << "1GRL surface: " << made.size() << " points made, " << kept.size() << " committed, "
+            << same_points << " the same\n";
+  // The same mesh; another compiler's last bits may move a vertex across a 1/64 Å step.
+  EXPECT_EQ(made.size(), kept.size());
+  EXPECT_GE(double(same_points), 0.99 * double(kept.size()));
+#endif
 }
 
 // ---- T3: known shapes ----------------------------------------------------------------------
