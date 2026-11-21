@@ -68,6 +68,7 @@ public:
   gain_source(std::unique_ptr<frame_source> input, int channels, int frames_per_chunk, float gain);
   std::size_t frame_bytes() const override;
   produced_frame fill(std::uint8_t *buf, std::size_t cap) override;
+  bool more() const override { return in_ && in_->more(); } // a device input's backlog
 
 private:
   std::unique_ptr<frame_source> in_;

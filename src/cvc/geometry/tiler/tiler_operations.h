@@ -49,9 +49,13 @@ void augment(Polygon_2 &P, Polygon_2 &Q);
 
 /// Outputs augmented contours
 /// ContourIterator - iterator over contours
+//
+// A pair of contours augmented at a time, charged by their vertices (stepping.h); `augmented` is
+// the legacy return value once it ends. The iterators' contours must outlive the task.
 template <typename ContourIterator, typename OutputIterator>
-bool augment(ContourIterator bottom_start, ContourIterator bottom_end, ContourIterator top_start,
-             ContourIterator top_end, OutputIterator bottom_aug, OutputIterator top_aug) {
+step_task augment_steps(ContourIterator bottom_start, ContourIterator bottom_end,
+                        ContourIterator top_start, ContourIterator top_end,
+                        OutputIterator bottom_aug, OutputIterator top_aug, bool &augmented) {
   using namespace std;
 
   typedef list<Contour_handle> Container;
@@ -81,10 +85,20 @@ bool augment(ContourIterator bottom_start, ContourIterator bottom_end, ContourIt
       Polygon_2 oldq = Q;
       augment(P, Q);
       ret = ret || (oldp.size() < P.size() || oldq.size() < Q.size());
+      TILER_UNITS(sweep_units(oldp.size() + oldq.size()));
     }
   }
 
-  return ret;
+  augmented = ret;
+}
+
+template <typename ContourIterator, typename OutputIterator>
+bool augment(ContourIterator bottom_start, ContourIterator bottom_end, ContourIterator top_start,
+             ContourIterator top_end, OutputIterator bottom_aug, OutputIterator top_aug) {
+  bool augmented = false;
+  run_to_end(
+      augment_steps(bottom_start, bottom_end, top_start, top_end, bottom_aug, top_aug, augmented));
+  return augmented;
 }
 
 /// Returns true if a tile can exist between two contours
@@ -97,7 +111,7 @@ bool can_tile(Contour_handle c1, Contour_handle c2, const Hierarchy &h1, const H
 /// Yes, I know the return value looks scary, but it is simply a map of contour handles to a
 /// list of contour handles:
 //
-// A unit per pair of contours tested.
+// A pair of contours tested at a time, charged by their vertices (stepping.h).
 template <typename ContourIterator>
 step_task find_correspondences_steps(ContourIterator start1, ContourIterator end1,
                                      const Hierarchy &h1, ContourIterator start2,
@@ -111,7 +125,7 @@ step_task find_correspondences_steps(ContourIterator start1, ContourIterator end
         correspondences.add(*it1, *it2);
         ++count;
       }
-      SK_UNIT;
+      TILER_UNITS(overlap_test_units((*it1)->polygon().size() + (*it2)->polygon().size()));
     }
   TILER_TRACE(logger, "Number of correspondences: " << count);
 }
@@ -136,7 +150,7 @@ Vertex_map<HTiling_region>
 find_tiling_regions(ContourIterator start1, ContourIterator end1, const Hierarchy &h1,
                     ContourIterator start2, ContourIterator end2, const Hierarchy &h2,
                     Number_type z1, Number_type z2, const Vertices &vertices);
-/// The same, a unit per contour vertex.
+/// The same, a contour vertex at a time, charged by the other slice's vertices it is located among.
 template <typename ContourIterator>
 step_task find_tiling_regions_steps(ContourIterator start1, ContourIterator end1,
                                     const Hierarchy &h1, ContourIterator start2,
@@ -204,7 +218,8 @@ OTV_table build_OTV_table(ContourIterator contours_begin, ContourIterator contou
                           const Vertices &vertices, const Correspondences &correspondences,
                           const Vertex_map<HTiling_region> &tiling_regions, const Hierarchies &h,
                           Banned &banned);
-/// The same, a unit per contour vertex.
+/// The same, a contour vertex at a time (its candidates sorted) and a candidate tested at a time,
+/// each charged by its size (stepping.h).
 template <typename ContourIterator>
 step_task build_OTV_table_steps(ContourIterator contours_begin, ContourIterator contours_end,
                                 ContourIterator c1_begin, ContourIterator c1_end,
@@ -272,8 +287,9 @@ int optimality(const Point_3 &u2, const Point_3 &u3, const Point_3 &v2, const Po
 void find_banned(Tiler_workspace &w);
 
 //
-// Units: one per hierarchy, then those of find_correspondences_steps, find_tiling_regions_steps
-// and build_OTV_table_steps. The workspace is `w` once it returns.
+// Units: the hierarchies, the vertices and the workspace, each charged by the contours' vertices
+// (stepping.h), and those of find_correspondences_steps, find_tiling_regions_steps and
+// build_OTV_table_steps. The workspace is `w` once it returns.
 template <typename ContourIterator>
 step_task pre_tile_steps(ContourIterator bottom_start, ContourIterator bottom_end,
                          ContourIterator top_start, ContourIterator top_end, bool do_augment,
@@ -285,8 +301,11 @@ step_task pre_tile_steps(ContourIterator bottom_start, ContourIterator bottom_en
   Hierarchies hierarchies;
   Correspondences correspondences;
   Vertices vertices;
+  // (Each Vertex_map holds 10000 entries, whatever the contours.)
   Vertex_map<HTiling_region> tiling_regions;
+  TILER_UNITS(vertex_map_units());
   OTV_table otv_table;
+  TILER_UNITS(vertex_map_units());
 
   Number_type bottomz;
   if (bottom_start != bottom_end) {
@@ -316,14 +335,20 @@ step_task pre_tile_steps(ContourIterator bottom_start, ContourIterator bottom_en
 
   all.insert(all.end(), bottom.begin(), bottom.end());
   all.insert(all.end(), top.begin(), top.end());
+  std::size_t bottom_n = 0, top_n = 0;
+  for (const Contour_handle &c : bottom)
+    bottom_n += c->polygon().size();
+  for (const Contour_handle &c : top)
+    top_n += c->polygon().size();
+  SK_UNIT;
 
   TILER_TRACE(logger, "Creating hierarchies...");
   TILER_TRACE(logger, "Creating bottom augmented hierarchy...");
   bottom_h = Hierarchy(bottom.begin(), bottom.end(), Hierarchy_policy::FORCE_CCW);
-  SK_UNIT;
+  TILER_UNITS(hierarchy_units(bottom_n));
   TILER_TRACE(logger, "Creating top augmented hierarchy...");
   top_h = Hierarchy(top.begin(), top.end(), Hierarchy_policy::FORCE_CCW);
-  SK_UNIT;
+  TILER_UNITS(hierarchy_units(top_n));
 
   //   hierarchies[bottom[0]->slice()] = bottom_h;
   //   hierarchies[top[0]->slice()] = top_h;
@@ -332,6 +357,7 @@ step_task pre_tile_steps(ContourIterator bottom_start, ContourIterator bottom_en
 
   TILER_TRACE(logger, "Creating vertices...");
   vertices = Vertices::create(all.begin(), all.end());
+  TILER_UNITS(table_units(bottom_n + top_n));
 
   // Get correspondences
   TILER_TRACE(logger, "Finding correspondences...");
@@ -353,6 +379,7 @@ step_task pre_tile_steps(ContourIterator bottom_start, ContourIterator bottom_en
 
   w = Tiler_workspace::create(all, bottom, top, correspondences, vertices, tiling_regions,
                               otv_table, hierarchies, midz);
+  TILER_UNITS(table_units(bottom_n + top_n));
 
   // Finding banned vertices
   TILER_TRACE(logger, "Finding banned vertices...");
@@ -371,11 +398,13 @@ pre_tile(ContourIterator bottom_start, ContourIterator bottom_end, ContourIterat
 void build_tiling_table(Tiler_workspace &workspace);
 
 void build_tiling_table_phase1(Tiler_workspace &workspace);
-/// A unit per OTV pair, and per chord step in passes 2-4.
+/// An OTV pair at a time, and a chord step at a time in passes 2-4, each charged by the
+/// workspace's vertices (stepping.h).
 step_task build_tiling_table_phase1_steps(Tiler_workspace &workspace);
 
 void build_tiling_table_phase2(Tiler_workspace &workspace);
-/// A unit per untiled region (each filled in one piece: its partition and interpolation).
+/// An untiled region at a time (its partition charged by its size), and within one, a point of its
+/// fill at a time (medial_axis_stable_steps).
 step_task build_tiling_table_phase2_steps(Tiler_workspace &workspace);
 
 } // namespace cvc::tiler

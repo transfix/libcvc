@@ -22,6 +22,7 @@
 
 // extensions.cpp — the cvcGL → Ariadne extension bundle (see extensions.h).
 
+#include <cvc/gl/ariadne/contour_lab_nodes.h>
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/mesh_nodes.h>
@@ -47,6 +48,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_vehicle_preview_node(app);   // "vehicle_preview"
   register_ribbon_node_types(app);      // "ribbon", "draped_link"
   register_volume_slice_node_type(app); // "volume_slice"
+  register_contour_lab_node_type(app);  // "contour_lab"
   register_swarm_node_types(app);       // "nav_swarm", "swarm_layer"
 }
 

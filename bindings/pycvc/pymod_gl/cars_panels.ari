@@ -12,7 +12,8 @@
 # The keys they bind, which pycvc_gl.cars's functions read and write:
 #   cars_world_choice   run.world (data | generated | flat), run.uri, run.data_path; the button sends
 #                       load_world (make_world / load_data_world); data.city.status
-#   cars_settings       nav.vehicle.*, nav.reach_tol (sim_world::pull) and nav_plant.* (plant_host)
+#   cars_settings       a settings: editor over nav.reach_tol, nav.vehicle (sim_world::pull) and
+#                       nav_plant (plant_host): every knob there, from the keys' descriptions
 #   cars_world          world.* (generate, and the scene's generated_world node); the button sends
 #                       regenerate_world; world.status. Shown while run.world is generated.
 #   cars_coefficients   plot.coef0..3 and their names plot.coef0_name..3 (plot_coefficients)
@@ -42,6 +43,11 @@ units:
         bind: data.city.status
         visible_when: (= (state-get "run.world") "data")
 
+  # A settings: editor over libcvc's descriptions of these keys (sim_world_binding.cpp's
+  # kVehicleKeys and reach_tol, nav_plant.cpp's kPlantKeys): each key's slider, unit, range,
+  # tooltip and reset come from its metadata. Every knob under the roots is listed; read-outs, the
+  # plant's build settings (settings.*, available) and nav_plant.vehicle (Run's Vehicle combo) are
+  # left out. The plant's knobs are there only once a plant other than nav's bicycle has run.
   cars_settings:
     args: { title: Settings, id: settings }
     window: "{title}"
@@ -49,70 +55,15 @@ units:
     size: [360, 330]
     children:
       - text: "navigator and vehicles: applied on the next tick"
-      - slider_float: Top speed (m/s)
-        bind: nav.vehicle.vmax
-        lo: 0.5
-        hi: 40
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.vmax: the top speed; on a vehicle, the lower of this and its own"
-      - slider_float: Acceleration (m/s^2)
-        bind: nav.vehicle.a_max
-        lo: 0.5
-        hi: 15
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.a_max: the acceleration and braking the navigator commands"
-      - slider_float: Cornering (m/s^2)
-        bind: nav.vehicle.a_lat_max
-        lo: 0.5
-        hi: 15
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.a_lat_max: the sideways acceleration the corner speed limit allows"
-      - slider_float: Barrier range d_hat (m)
-        bind: nav.vehicle.d_hat
-        lo: 0.5
-        hi: 30
-        fmt: "%.1f"
-        tooltip: "nav.vehicle.d_hat: how far from a wall the barrier that pushes the vehicle away reaches"
-      - slider_float: Footprint radius (m)
-        bind: nav.vehicle.rr
-        lo: 0.1
-        hi: 5
-        fmt: "%.2f"
-        tooltip: "nav.vehicle.rr: the footprint disc the navigator keeps clear of walls"
-      - slider_float: Wall steering k_steer (rad)
-        bind: nav.vehicle.k_steer
-        lo: 0
-        hi: 2
-        fmt: "%.2f"
-      - slider_float: Bicycle wheelbase (m)
-        bind: nav.vehicle.wheelbase
-        lo: 0.2
-        hi: 8
-        fmt: "%.2f"
-        tooltip: "nav.vehicle.wheelbase: nav's bicycle (the kinematic plant); a vehicle has its own"
-      - slider_float: Steering lock (rad)
-        bind: nav.vehicle.delta_max
-        lo: 0.1
-        hi: 1
-        fmt: "%.3f"
-      - checkbox: Risk governor
-        bind: nav.vehicle.risk_governor
-      - slider_float: Arrival radius (m)
-        bind: nav.reach_tol
-        lo: 0.5
-        hi: 20
-        fmt: "%.1f"
-      - slider_float: Plant latency (s)
-        bind: nav_plant.latency
-        lo: 0
-        hi: 0.5
-        fmt: "%.2f"
-        tooltip: "nav_plant.latency: the response time the navigator's stopping limit allows for"
-      - slider_float: Brake margin
-        bind: nav_plant.brake_margin
-        lo: 0.3
-        hi: 1
-        fmt: "%.2f"
+      - type: settings
+        id: "{id}_keys"
+        root: [nav.reach_tol, nav.vehicle, nav_plant]
+        filter: ["-nav_plant.vehicle", "-nav_plant.settings.", "-nav_plant.available"]
+        readouts: false
+        search: true
+        groups:
+          - nav.vehicle: {title: Vehicle, help: "nav.vehicle: the vehicle the navigator plans with and nav's bicycle drives", open: true}
+          - nav_plant: {title: Plant, help: "nav_plant: the plant's planning margins and drive modulation (plant_host)", open: true}
 
   cars_world:
     args: { title: World, id: world }
