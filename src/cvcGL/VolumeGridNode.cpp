@@ -156,7 +156,7 @@ void VolumeGridNode::ensureChildren() {
         g->setRenderMode(GeometryRenderMode::LINES); // and again after each setGeometry
         g->setLineWidth(2.0);
       }
-      g->setVisible(false); // until it has something to draw
+      g->setVisible(false); // until the first build (rebuildOverlays), with its plane's volume
       (k ? m_lines : m_points)[ax] = g;
     }
   }
@@ -844,17 +844,17 @@ void VolumeGridNode::rebuildOverlays() {
       segment(at(a, plane, b0r, b1u), at(a, plane, b0r, b0u), band);
     }
 
+    // Set even when empty, and shown from the first build on: an overlay shown later joins the
+    // renderer after the other and draws over it, so whether a plane's disks or its lines win
+    // where they cross would follow whether the points came before the volume or after.
     for (auto [node, geom] : {std::pair<GeometryNode *, cvc::geometry *>{m_points[ax].get(), &pts},
                               {m_lines[ax].get(), &lines}}) {
-      const bool any = geom->num_points() > 0;
-      if (any) {
-        node->setGeometry(*geom);
-        // setGeometry picks a mode from what the geometry holds, a surface for a lines-only one,
-        // which draws no lines: the lines overlay asks for its own every time.
-        if (geom == &lines)
-          node->setRenderMode(GeometryRenderMode::LINES);
-      }
-      node->setVisible(any);
+      node->setGeometry(*geom);
+      // setGeometry picks a mode from what the geometry holds, a surface for a lines-only one,
+      // which draws no lines: the lines overlay asks for its own every time.
+      if (geom == &lines)
+        node->setRenderMode(GeometryRenderMode::LINES);
+      node->setVisible(true);
     }
   }
 }

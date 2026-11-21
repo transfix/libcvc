@@ -1373,8 +1373,13 @@ their units and ranges as properties. Bulk data is on the data channel:
   `point_classes` and `volume_grid_session` decoders; the component's Save and Load go through
   them. cvcGL's `sdf` data generator makes a mesh's distance field as a dataset (the demo's bunny).
   A large file read plane by plane is now a host's choice (a `slice_source` on the volume's key).
-  Views frame on shown nodes only (`shown_bounds` skips hidden ones), so a view whose nodes wait
-  for data frames once they show. Left for the wider move of every node type to the same rule:
+  A view naming tags frames on what its nodes draw (`shown_bounds`): a hidden node waits, a
+  plane's flat box counts, and a hidden overlay or an empty group adds nothing. Before, a flat box
+  counted as none, so the grid's 3D view framed one plane (the one whose empty overlay added the
+  origin) and an empty group's default box, and which plane that was turned on whether the points
+  or the volume loaded first. The grid's overlays now join the renderer in a fixed order, so where
+  a plane's disks and lines cross the lines win however the data arrive. Left for the wider move
+  of every node type to the same rule:
   `volume_slice`, `volren` and the other nodes that still read `source: { file }`; a `data:`
   decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
   Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane

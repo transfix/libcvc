@@ -17,6 +17,7 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/TouchScroll.h>
@@ -614,14 +615,42 @@ bool props_bounds(const std::unordered_set<vtkProp *> &props, double out[6]) {
   return any;
 }
 
+// Adds the world box `bb` to `out`. A box with no extent at all is none (an empty geometry's box
+// is the point at its origin), nor is an inverted one; a flat box (a plane) is.
+void add_box(const cvc::bounding_box &bb, double out[6], bool &any) {
+  const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+  if (!valid_bounds(b) || !(b[1] - b[0] + b[3] - b[2] + b[5] - b[4] > 0.0))
+    return;
+  for (int i = 0; i < 3; ++i) {
+    out[2 * i] = any ? std::min(out[2 * i], b[2 * i]) : b[2 * i];
+    out[2 * i + 1] = any ? std::max(out[2 * i + 1], b[2 * i + 1]) : b[2 * i + 1];
+  }
+  any = true;
+}
+
+// What the shown node `n` draws, in world space: its own box and, with `subtree`, its shown
+// descendants'. A hidden node is left out with what is under it (an overlay with nothing to draw),
+// and a group's own box counts only when it says so (a NullGraphicNode's default box is no
+// geometry). So an empty overlay or group does not stretch the box to the origin.
+void add_shown(const GraphicsNode &n, bool subtree, double out[6], bool &any) {
+  const auto *group = dynamic_cast<const NullGraphicNode *>(&n);
+  if (!group || group->getIncludeOwnBounds())
+    add_box(n.getWorldBoundingBox(), out, any);
+  if (subtree)
+    for (const std::shared_ptr<GraphicsNode> &c : n.getGraphicsChildren())
+      if (c && c->isVisible())
+        add_shown(*c, true, out, any);
+}
+
 // The world bounds of the tagged nodes `show` / `hide` let in, with their subtrees (the untagged
 // left out): what a view, or the main view, that names tags to show is framed on. A node an entry
 // out of the view takes along is left out as the view leaves it out: an entry's own node, and
 // with subtree every node under it (a mesh_lab tagged lab takes its skeleton children, tagged lab
-// and skeleton, out of show: [skeleton]). A node hidden (or under a hidden one) is let in but
-// gives no bounds: a view whose nodes wait for their data (a volume_grid's planes, before the
-// app's volume is there) frames once they show. False when none has any. `matched`, when given,
-// counts the nodes let in, with bounds or not.
+// and skeleton, out of show: [skeleton]). Each gives what it draws (add_shown): a plane's flat
+// box counts, a hidden child's or an empty group's does not. A node hidden (or under a hidden
+// one) is let in but gives no bounds: a view whose nodes wait for their data (a volume_grid's
+// planes, before the app's volume is there) frames once they show. False when none has any.
+// `matched`, when given, counts the nodes let in, with bounds or not.
 bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
                   const std::vector<std::string> &hide, double out[6], int *matched = nullptr) {
   std::vector<std::pair<const GraphicsNode *, bool>> outs; // node, subtree
@@ -652,18 +681,8 @@ bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
       continue;
     if (matched)
       ++*matched;
-    if (!n->isVisibleInHierarchy())
-      continue;
-    const cvc::bounding_box bb =
-        t.subtree ? n->getCombinedWorldBoundingBox() : n->getWorldBoundingBox();
-    if (bb.isNull())
-      continue;
-    const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
-    for (int i = 0; i < 3; ++i) {
-      out[2 * i] = any ? std::min(out[2 * i], b[2 * i]) : b[2 * i];
-      out[2 * i + 1] = any ? std::max(out[2 * i + 1], b[2 * i + 1]) : b[2 * i + 1];
-    }
-    any = true;
+    if (n->isVisibleInHierarchy())
+      add_shown(*n, t.subtree, out, any);
   }
   return any;
 }
