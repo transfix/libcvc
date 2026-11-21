@@ -179,6 +179,9 @@ public:
   // CLIENT: the newest server tick seen from `pid` is remembered when it is removed (left_tick).
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
+  // Whether `pid` is this client's own, predicted avatar (added with local); false for a peer, an
+  // unknown pid, and on a server.
+  bool is_local(const std::string &pid) const;
   // CLIENT: the newest server tick seen from `pid` before it was last removed, until a sample of
   // it is applied again; 0 otherwise. The pose subtree a departed peer leaves behind in the room
   // tree carries a tick no newer, so the host (client_pump) can tell it from a pose for its rejoin.
@@ -278,6 +281,31 @@ public:
   bool set_driver(const std::string &pid, std::uint64_t entity, std::string *why = nullptr);
   // The world entity PID drives, 0 for none (or an unknown pid).
   std::uint64_t drives(const std::string &pid) const;
+  // SERVER: a participant's own ask to get in (section 18.6; the room's drive request): set_driver
+  // under the world's rules. ENTITY's archetype must be drivable, and PID's person within its
+  // reach (metres from its feet to the vehicle's chassis box, in plan). 0 gets out, always.
+  bool get_in(const std::string &pid, std::uint64_t entity, std::string *why = nullptr);
+
+  // What a driven vehicle can do, which a driver's drive axes are shares of (avatar_intent): its
+  // steering lock (rad), its acceleration and braking (m/s^2; a boat's max_decel is its
+  // propeller astern), and whether it floats (a boat: no brakes).
+  struct drive_envelope {
+    double max_steer = 0.6, max_accel = 3.0, max_decel = 7.0;
+    bool floats = false;
+  };
+  // Faster than this forward (m/s), a car's reverse brakes first.
+  static constexpr double kRollingForward = 0.5;
+  // A driver's drive axes as the vehicle's command, for a vehicle at SPEED (m/s along its heading)
+  // commanded every DT s: steer times the lock; a brake toward a stop within DT and no further, at
+  // most its share of max_decel (a boat: none); throttle forward its share of max_accel; reverse,
+  // a boat's propeller astern (its share of max_decel), a car braking while it rolls forward faster
+  // than kRollingForward and backing up from there (its share of max_accel). None is 0. The
+  // command is entity_intent's: steer in rad (+ left), accel in m/s^2 along the heading.
+  struct drive_cmd {
+    double steer = 0.0, accel = 0.0;
+  };
+  static drive_cmd drive_command(const avatar_intent &in, const drive_envelope &env, double speed,
+                                 double dt);
 
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
   // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
@@ -419,6 +447,7 @@ private:
     // SERVER with a world attached: the world entity it drives (0: none), its person's feet and
     // reserve while it is out of the world, and the vehicle's state as of the last step.
     std::uint64_t drives = 0;
+    drive_envelope envelope; // the vehicle's, while it drives one
     cvc::physics::body_state parked_feet;
     double parked_reserve = 0.0;
     cvc::physics::body_state ride;

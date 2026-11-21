@@ -135,6 +135,9 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set_double({k, "look", "yaw"}, e.look.yaw);
     w.set_double({k, "look", "z"}, e.look.z);
     w.set_flag({k, "look", "fit"}, e.look.fit);
+    w.set_flag({k, "drivable"}, e.drivable);
+    w.set_double({k, "reach"}, e.reach);
+    w.set({k, "controls"}, e.controls);
     w.set_flag({k, "present"}, true); // last: a reader that sees it present sees its fields
     written.insert(e.id);
   }
@@ -173,6 +176,9 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     e.look.yaw = r.number({k, "look", "yaw"}, 0.0);
     e.look.z = r.number({k, "look", "z"}, 0.0);
     e.look.fit = r.flag({k, "look", "fit"}, false);
+    e.drivable = r.flag({k, "drivable"}, false);
+    e.reach = r.number({k, "reach"}, 3.0);
+    e.controls = r.text({k, "controls"});
     out.push_back(std::move(e));
   }
   return out;
@@ -202,6 +208,9 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
       if (a.id != info.spec.archetype)
         continue;
       e.look = a.look;
+      e.drivable = a.drivable;
+      e.reach = a.reach;
+      e.controls = vehicle_controls(a);
       if (e.look.kind == "file" || e.look.kind == "asset")
         e.look.path = std::filesystem::path(e.look.path).filename().string();
       try {
