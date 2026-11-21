@@ -57,8 +57,9 @@ namespace ariadne {
 // boat's reverse), LB a car's reverse.
 //
 // A host keeps each scheme's bindings in its state so the Controls window can change them
-// (arigl: <viewer>.avatar.keys.<action> for walk, as before, and <viewer>.controls.<scheme>.<action>
-// for the others; a gamepad's at <viewer>.pad.<scheme>.<action>).
+// (arigl: <viewer>.avatar.keys.<action> for walk, as before, and
+// <viewer>.controls.<scheme>.<action> for the others; a gamepad's at
+// <viewer>.pad.<scheme>.<action>).
 
 enum class control_kind { walk, drive };
 

@@ -17,7 +17,6 @@
 // and that it rides the existing conf.rooms.* replication.
 
 #include <cmath>
-#include <map>
 #include <cstdint>
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
@@ -38,6 +37,7 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>

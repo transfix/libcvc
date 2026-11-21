@@ -1331,11 +1331,11 @@ struct ConferenceSession {
       std::fprintf(stderr, "arigl: room: gamepad %s%s\n", pad_on ? "connected: " : "gone",
                    pad_name_.c_str());
     }
-    controls_.update(
-        [&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); }, f.wall_dt,
-        orbit_mode && pad_on ? cvc::ariadne::control_resolver::pad_fn(
-                                   [&](const std::string &n) { return pad_.input(n); })
-                             : cvc::ariadne::control_resolver::pad_fn());
+    controls_.update([&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); },
+                     f.wall_dt,
+                     orbit_mode && pad_on ? cvc::ariadne::control_resolver::pad_fn(
+                                                [&](const std::string &n) { return pad_.input(n); })
+                                          : cvc::ariadne::control_resolver::pad_fn());
     // The right stick turns the camera about us (look_*): right turns the view right, up looks up.
     double look_x = 0.0, look_y = 0.0;
     controls_.look_axes(look_x, look_y);
@@ -1564,11 +1564,11 @@ struct ConferenceSession {
     // The prompt: the interact's first key (its first gamepad button, played on the gamepad),
     // and what it does.
     const cvc::ariadne::control_action *interact = controls_.scheme().find("interact");
-    const std::vector<std::string> *names =
-        !interact                                                ? nullptr
-        : controls_.from_pad() && !interact->binding.pad.empty() ? &interact->binding.pad
-                                                                 : &interact->binding.keys;
-    const std::string key = names && !names->empty() ? names->front() : "E";
+    std::string key = "E";
+    if (interact && controls_.from_pad() && !interact->binding.pad.empty())
+      key = interact->binding.pad.front();
+    else if (interact && !interact->binding.keys.empty())
+      key = interact->binding.keys.front();
     const double progress = controls_.progress("interact");
     cvc::physics::pose at;
     if (driving == 0 && target != 0 && entities_->pose(target, at)) {

@@ -38,9 +38,9 @@ constexpr std::pair<std::string_view, SDL_GamepadButton> kButtons[] = {
 };
 
 constexpr std::pair<std::string_view, SDL_GamepadAxis> kAxes[] = {
-    {"LeftX", SDL_GAMEPAD_AXIS_LEFTX},         {"LeftY", SDL_GAMEPAD_AXIS_LEFTY},
-    {"RightX", SDL_GAMEPAD_AXIS_RIGHTX},       {"RightY", SDL_GAMEPAD_AXIS_RIGHTY},
-    {"LT", SDL_GAMEPAD_AXIS_LEFT_TRIGGER},     {"RT", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER},
+    {"LeftX", SDL_GAMEPAD_AXIS_LEFTX},     {"LeftY", SDL_GAMEPAD_AXIS_LEFTY},
+    {"RightX", SDL_GAMEPAD_AXIS_RIGHTX},   {"RightY", SDL_GAMEPAD_AXIS_RIGHTY},
+    {"LT", SDL_GAMEPAD_AXIS_LEFT_TRIGGER}, {"RT", SDL_GAMEPAD_AXIS_RIGHT_TRIGGER},
 };
 
 SDL_Gamepad *as_pad(void *p) { return static_cast<SDL_Gamepad *>(p); }

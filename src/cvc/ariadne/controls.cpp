@@ -59,7 +59,8 @@ control_scheme drive_scheme(const char *id, bool brakes) {
       dead(act("reverse", "Reverse", {"S", "Down"}, {brakes ? "LB" : "LT"}), kTriggerDead));
   if (brakes)
     s.actions.push_back(dead(act("brake", "Brake", {"Space"}, {"LT"}), kTriggerDead));
-  control_action left = dead(act("steer_left", "Steer left", {"A", "Left"}, {"LeftX-"}), kStickDead);
+  control_action left =
+      dead(act("steer_left", "Steer left", {"A", "Left"}, {"LeftX-"}), kStickDead);
   control_action right =
       dead(act("steer_right", "Steer right", {"D", "Right"}, {"LeftX+"}), kStickDead);
   left.binding.ramp = right.binding.ramp = kSteerRamp;
