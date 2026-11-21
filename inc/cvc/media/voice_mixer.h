@@ -31,13 +31,25 @@ namespace cvc {
 // of it are buffered, and the device pulls from the buffers at its own pace (pull()).
 //
 // When a playing peer's buffer runs dry, the voice fades out and that peer waits for TARGET
-// again. If its audio comes back soon (within late_window_s), the buffer was too small for the
-// jitter on that link, and TARGET grows a step; after relax_after_s of playing without running
-// dry it shrinks a step, back toward min_delay_s. A peer that stops sending (the sender sends
-// nothing through a silence) runs dry too, but sends nothing soon after, so its target stands. A
-// burst after a stall (more than twice TARGET buffered, and at least TARGET plus trim_slack_s)
-// drops its oldest audio down to TARGET, cross-fading across the cut; that keeps the delay from
-// growing.
+// again. A peer that stops sending runs dry too: a conference sender sends nothing through a
+// silence once its mic has been quiet 0.8 s, so its voice runs dry on quiet audio. One that runs
+// dry on audio louder than quiet_rms, with its audio back soon (within late_window_s), was late:
+// the buffer was too small for the jitter on that link. TARGET then grows by how late the audio
+// was to the device: the audio it asked for from running dry to the audio's return and did not
+// get, at least a step and rounded up to whole steps. That is the time since, for a device that
+// pulls at its own pace; a receiver whose own main thread stalled pulls a stall's worth at once
+// after it (more than the time since), or nothing during it (less). So a stall grows it once, by
+// the stall, rather than a step per stall, and a pause in speech does not grow it at all. It
+// plays again once what it waited for before is buffered, not the grown TARGET: the audio that
+// comes back brings the delay the stall needed with it, and waiting for the rest would be a gap of
+// its own; the grown TARGET keeps that audio from being trimmed away, and the next talk spurt
+// starts at it. After
+// relax_after_s of playing without running dry it shrinks a step, back toward
+// min_delay_s: slowly, so a stall that comes back (a slow frame, a GC) still finds the buffer big
+// enough; the cost is that the delay a one-off stall added lingers (160 ms of it, 80 s at the
+// defaults). A burst after a stall (more than twice TARGET buffered, and at least TARGET plus
+// trim_slack_s) drops its oldest audio down to TARGET, cross-fading across the cut; that keeps the
+// delay from growing.
 //
 // THREADING: push(), set_gain() and the readers run on the app's thread; pull() runs on the audio
 // device's (SDL's audio thread natively; the page's audio callback in a single-threaded browser
@@ -49,9 +61,12 @@ public:
     double start_delay_s = 0.08; // a new peer's target
     double min_delay_s = 0.04;   // the least target
     double max_delay_s = 0.40;   // the greatest target
-    double step_s = 0.02;        // the target grows by this after a late underrun
-    double relax_after_s = 10.0; // and shrinks by it after this long playing without one
+    double step_s = 0.02;        // a late underrun grows the target by whole steps (0: never)
+    double relax_after_s = 10.0; // and it shrinks a step after this long playing without one
     double late_window_s = 0.30; // audio back this soon after an underrun: the underrun was late
+    double quiet_rms = 0.008;    // unless the voice ran dry on audio below this RMS (its last
+                                 // 20 ms): the end of a talk spurt (the sender's send threshold,
+                                 // 0.004, and some for the codec)
     double trim_slack_s = 0.12;  // more than target + max(this, target): drop down to the target
     double max_buffer_s = 2.0;   // a peer never holds more than this
     double fade_s = 0.0025;      // the ramp on a voice's start and on its running dry
@@ -118,6 +133,10 @@ private:
     bool playing = false;
     bool fade_in = false;      // the next samples pulled start the voice: ramp them up
     double underrun_at = -1.0; // when it last ran dry while playing (-1: not since its audio came)
+    std::size_t short_by = 0;  // samples the device asked for and did not get since then
+    bool dry_quiet = false;    // it ran dry on quiet audio
+    double restart_s = -1.0;   // after a late underrun, what the next start waits for (-1: target)
+    float level2 = 0.0f;       // the mean square of what it played, over about the last 20 ms
     double last_push = -1.0;   // when its audio last arrived
     double clean_s = 0.0;      // seconds played since its target last changed or it ran dry
     peer_stats st;
