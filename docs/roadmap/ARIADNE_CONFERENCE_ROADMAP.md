@@ -1131,10 +1131,13 @@ Each viewer's rung adapts to its link.
     There the worklets keep the tone 97.9-99.3% of the time. SDL keeps it 89.9% busy, 0% with the
     sender hidden, and 18.7% with the receiver hidden, with hundreds of clicks. SDL's capture and
     playback nodes all but stop in a hidden tab: a hidden sender sends nothing, and a hidden
-    receiver's jitter buffer fills to a second and is trimmed. What the worklets still lose comes in
-    the first seconds, while the ring and the jitter buffers grow to the stalls. A jitter buffer
-    grows 20 ms per late underrun, and against a sender whose main thread stalls 100 ms or more
-    that took 9 late underruns. Growing it by how late the audio was would take one or two.
+    receiver's jitter buffer fills to a second and is trimmed. What the worklets still lost came
+    while the ring and the jitter buffers grew to the stalls: a jitter buffer grew 20 ms per late
+    underrun, 9-13 of them against main threads that stall 150 ms. It now grows by how late the
+    audio was to the device (Jitter buffers, above; #1416). Against #1412's head, 3 trials a case
+    (2026-11-20, load 3-15), busy under SwiftShader went from 95.3-97.0% heard (0.9-1.4 s of gaps)
+    to 98.2-99.9% (30-550 ms), and late underruns from 10-13 to 4-7. The GPU and the other cases
+    were within noise (98.7-100% before, 99.1-100% after).
 
 ### 5k. Avatars: look, body, controller, energy (the frame for bring-your-own)
 
