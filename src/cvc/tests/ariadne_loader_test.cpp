@@ -4447,9 +4447,10 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
 }
 
 // The baseline conference app (examples/ariadne/documents/conference_roster.ari) is the shipped
-// conference library's windows (components/conference.ari, with room_users.ari and chat.ari) placed
-// in a document, and its tick is the library's conference-step: an app built on the conference
-// takes the same pieces. The windows keep the ids the app's View menu opens them by.
+// conference library's windows (components/conference.ari, with room_users.ari, chat.ari and
+// audio_buffers.ari) placed in a document, and its tick is the library's conference-step: an app
+// built on the conference takes the same pieces. The windows keep the ids the app's View menu opens
+// them by.
 TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
   SKIP_WITHOUT_YAML();
   cvc::app app;
@@ -4475,7 +4476,7 @@ TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
   for (const Widget &w : r.root.children)
     if (w.kind == Kind::Window)
       ids.push_back(w.id);
-  for (const char *id : {"mycam", "myavatar", "users", "chat", "cam_{i}"})
+  for (const char *id : {"mycam", "myavatar", "users", "chat", "audio", "cam_{i}"})
     EXPECT_NE(std::find(ids.begin(), ids.end(), id), ids.end()) << "no window " << id;
   const Widget *peers = nullptr;
   for (const Widget &w : r.root.children)
@@ -4493,6 +4494,11 @@ TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
         "conference-devices-step", "conference-avatar-step", "room-users-step", "chat-ui-step"})
     EXPECT_NE(std::find(fns.begin(), fns.end(), f), fns.end()) << "no function " << f;
   EXPECT_NE(r.on_tick_script.find("(conference-step)"), std::string::npos) << r.on_tick_script;
+  bool audio_closed = false; // the Audio window waits for the View menu
+  for (const FunctionDef &f : r.functions)
+    if (f.name == "conference-join")
+      audio_closed = f.source.find("(state-set \"tree.audio.open\" \"0\")") != std::string::npos;
+  EXPECT_TRUE(audio_closed) << "conference-join seeds the Audio window closed";
 }
 
 // scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
