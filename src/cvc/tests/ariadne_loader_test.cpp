@@ -6592,6 +6592,138 @@ windows:
   }
 }
 
+// volume_grid.ari (VolumeGridRover): every control drives its node's grid.* keys; the switch layout
+// binds its slice view's axis to grid.view, the quad layout gives each axis a view of its own; the
+// views write the node's picks and pointer and show its grid alone; the planes' sliders take their
+// ranges from the keys; and the tool panel's tabs end in a slot a document fills.
+TEST(AriadneComponents, VolumeGridDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+  - include: volume_grid
+    args: { node: skull, id: skull_grid, title: Skull, layout: quad }
+  - window: Own
+    children:
+      - include: volume_grid_tools
+        args: { node: skull, id: own }
+        slots:
+          tabs: [ { type: group, tab: Extra, children: [ { text: extra } ] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings) // cvcGL registers the viewport widget, not this test
+    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 3u);
+  EXPECT_EQ(windows[0]->label, "Volume grid");
+  EXPECT_EQ(windows[1]->id, "skull_grid");
+  for (int i = 0; i < 2; ++i) {
+    const std::string g =
+        i == 0 ? "graphics.root.children.grid.grid." : "graphics.root.children.skull.grid.";
+    std::vector<std::string> keys;
+    collect_key_strings(*windows[i], keys);
+    for (const char *want :
+         {"view", "tool", "slice.x", "slice.y", "slice.z", "classes", "classes.{i}.name",
+          "classes.{i}.color", "classes.{i}.radius", "selection.count", "display.point_scale",
+          "display.grey", "cursor.value", "source.file", "files.classes", "status"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end()) << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  // The views: their names, axes, picks, pointer and the grid they show.
+  std::vector<const Widget *> custom;
+  collect(r.root, Kind::Custom, custom);
+  std::map<std::string, const Widget *> views;
+  for (const Widget *w : custom)
+    if (w->props.has("view"))
+      views[w->props.str("view")] = w;
+  for (const char *v : {"volume_grid_slice", "volume_grid_3d", "skull_grid_xy", "skull_grid_xz",
+                        "skull_grid_zy", "skull_grid_quad_3d"})
+    EXPECT_TRUE(views.count(v)) << v;
+  ASSERT_TRUE(views.count("volume_grid_slice") && views.count("skull_grid_xz"));
+  const Widget &slice = *views["volume_grid_slice"];
+  EXPECT_EQ(slice.props.str("mode"), "slice");
+  ASSERT_NE(slice.props.find("axis"), nullptr);
+  EXPECT_EQ(slice.props.find("axis")->str("bind"), "graphics.root.children.grid.grid.view");
+  EXPECT_EQ(slice.props.str("pick"), "graphics.root.children.grid.grid.pick");
+  EXPECT_EQ(slice.props.str("pointer"), "graphics.root.children.grid.grid.pointer");
+  const Widget &xz = *views["skull_grid_xz"];
+  EXPECT_EQ(xz.props.str("axis"), "y");
+  EXPECT_EQ(xz.props.str("pick"), "graphics.root.children.skull.grid.pick");
+  ASSERT_NE(xz.props.find("show"), nullptr);
+  ASSERT_TRUE(xz.props.find("show")->is_seq());
+  EXPECT_EQ(xz.props.find("show")->items.front().scalar, "skull");
+  // The planes' sliders: range: key.
+  std::vector<const Widget *> sliders;
+  collect(*windows[0], Kind::SliderInt, sliders);
+  ASSERT_FALSE(sliders.empty());
+  for (const Widget *s : sliders)
+    if (s->bind.find(".slice.") != std::string::npos)
+      EXPECT_TRUE(s->range_from_key) << s->label;
+  // The slot: a tab of the document's own after the component's.
+  const Widget *tabs = find(*windows[2], Kind::Tabs);
+  ASSERT_NE(tabs, nullptr);
+  ASSERT_GE(tabs->children.size(), 4u);
+  EXPECT_EQ(tabs->tab_titles.back(), "Extra");
+}
+
+TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings) // cvcGL registers the viewport widget, not this test
+    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_grid");
+  EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.
+TEST(AriadneLoader, SliderRangeFromKey) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - slider_int: Plane
+        bind: grid.slice.z
+        range: key
+      - slider_float: Scale
+        bind: grid.scale
+        range: key
+      - slider_int: Odd
+        bind: grid.odd
+        range: data
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
+  const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
+  const Widget *odd = find(r.root, Kind::SliderInt, "Odd");
+  ASSERT_TRUE(plane && scale && odd);
+  EXPECT_TRUE(plane->range_from_key);
+  EXPECT_TRUE(scale->range_from_key);
+  EXPECT_FALSE(odd->range_from_key);
+}
+
 TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {
   SKIP_WITHOUT_YAML();
   namespace fs = std::filesystem;

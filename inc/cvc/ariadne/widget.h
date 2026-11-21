@@ -368,6 +368,10 @@ struct Widget {
   // SliderFloat `log: true`: the handle moves by ratio, not difference, so a range of 1 to 5000
   // is as easy to set at its low end as at its high (a backend without one draws it linear).
   bool log_scale = false;
+  // Slider `range: key`: the range is the bound key's "min" and "max" properties (as a parameter
+  // table writes them, cvc/core/param_table.h; a node may write them as its data changes), read
+  // each frame, each falling back to lo: / hi: while the key has none.
+  bool range_from_key = false;
   // A slider writes its key on every change while it is dragged, so what it drives follows the
   // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
   // too costly to redo every frame.
