@@ -2564,16 +2564,21 @@ TEST(AriadneWorldVehicles, AFleetsPosesAreASnapshot) {
       std::this_thread::yield();
     }
   });
-  art.step_world(120);
+  for (int k = 0; k < 120; ++k) // a batch publishes once, at its end: a step a batch, 120 swaps
+    art.step_world(1);
   art.drain();
+  const std::shared_ptr<const fleet_poses> later = v->poses("city");
+  const std::uint64_t newest = later ? later->tick : 0;
+  // The reader takes the newest too, in its own time: a loaded runner may not have run it since.
+  for (int k = 0; k < 5000 && latest.load() < newest; ++k)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   stop = true;
   reader.join();
+  ASSERT_NE(later, nullptr);
   EXPECT_GT(reads.load(), 0);
   EXPECT_EQ(torn.load(), 0);
-  EXPECT_GT(latest.load(), p->tick);
-  const std::shared_ptr<const fleet_poses> later = v->poses("city");
-  ASSERT_NE(later, nullptr);
-  EXPECT_GT(later->tick, p->tick);
+  EXPECT_EQ(latest.load(), newest);
+  EXPECT_GT(newest, p->tick);
   EXPECT_EQ(p->tick, held_tick); // the one held is as it was
   EXPECT_EQ(p->x, held_x);
   EXPECT_NE(later->x, p->x); // they drove
