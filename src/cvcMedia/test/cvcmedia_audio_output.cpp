@@ -3,11 +3,14 @@
 // flushes, and the process has loaded no GL, VTK or ImGui. CTest runs it on SDL's dummy drivers, so
 // it needs no sound card; a build without SDL3 checks only that the output is reported absent.
 #undef NDEBUG
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cvc/media/playback/audio_output.h>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 #if CVC_MEDIA_TEST_SDL
 #include <SDL3/SDL_init.h>
@@ -36,7 +39,27 @@ int main() {
   assert(out.sink->play(tone.data(), tone.size() * sizeof(float)));
   assert(!out.sink->play(tone.data(), 3) && "a partial frame is refused");
   out.sink->flush();
+  assert(out.sink->device_period_s() > 0.0 && "the device reports its buffer");
   out.sink.reset();
+
+  // Pull mode: the device asks for its audio, in whole frames, without the app pushing any.
+  std::atomic<std::size_t> pulled{0};
+  std::atomic<bool> whole{true};
+  pb::audio_output_open pull =
+      pb::open_audio_output_pull({48000, 1}, [&](float *buf, std::size_t frames) {
+        for (std::size_t i = 0; i < frames; ++i)
+          buf[i] = 0.1f;
+        if (frames == 0)
+          whole = false;
+        pulled += frames;
+      });
+  assert(pull.sink && pull.channels == 1);
+  for (int i = 0; i < 200 && pulled.load() < 4800; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(pulled.load() >= 4800 && "the device pulled 0.1 s by itself");
+  assert(whole.load());
+  pull.sink.reset(); // stops the callbacks before `pulled` goes
+  assert(!pb::open_audio_output_pull({48000, 1}, nullptr).sink && "a pull needs a fill");
 #if defined(__linux__)
   // Nothing GL-shaped came in with it.
   std::ifstream maps("/proc/self/maps");
