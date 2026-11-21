@@ -991,11 +991,34 @@ Each viewer's rung adapts to its link.
   (`open_audio_output_pull`, SDL's get-callback), not the frame loop's.
   - A peer starts playing once its target is buffered: 80 ms to start, at least the device's
     block plus 20 ms (a browser's Web Audio block is 43 ms, so 63 ms there).
-  - When a playing peer runs dry and its audio is back within 300 ms, the audio was late, and its
-    target grows 20 ms (to 400 ms at most). After 10 s without running dry it shrinks a step.
-  - A peer that stops sending through a silence runs dry too, but nothing comes back soon, so its
-    target stands. A burst after a stall, past twice the target (and at least 120 ms past it),
-    loses its oldest audio down to the target, cross-faded across the cut.
+  - When a playing peer runs dry and its audio is back within 300 ms, the audio was late. Its
+    target grows by how late it was to the device, up to 400 ms: the audio the device asked for
+    from running dry to the audio's return and did not get, rounded up to 20 ms steps and at
+    least one. For a device that pulls at its own pace (SDL's audio thread) that is the time
+    since. A browser's main thread pulls for its AudioWorklet ring, so a stall of its own makes it
+    ask for the stall's worth at once after it, or nothing during it: under SwiftShader, late
+    underruns were 3 ms by the clock and 56 ms short, and 90 ms by the clock and 1 ms short. A
+    late underrun used to grow the target 20 ms, so against a sender whose main thread stalls
+    150 ms it took one gap per step (9 in headless Chrome, 80 to 260 ms).
+  - After a late underrun the voice plays again once what it waited for before is buffered, not
+    the grown target. The audio that comes back brings the delay the stall needed with it, and
+    waiting for the rest was a gap of its own (up to 580 ms in one, in headless Chrome). The grown
+    target keeps that audio from being trimmed away, and the next talk spurt starts at it.
+  - A peer that stops sending runs dry too. A sender sends nothing through a silence once its mic
+    has been below 0.004 RMS for 0.8 s, so the voice runs dry on quiet audio, and a peer that runs
+    dry on audio below 0.008 RMS (over about its last 20 ms) is not late, however soon it comes
+    back. Without that, every pause of 0.8 to 1.1 s came back within 300 ms and counted: 20 ms a
+    pause before, and the whole pause with the growth above. In a simulation of 5 minutes of
+    speech on a clean link the targets averaged 109 ms with a step a pause, 320 ms growing by the
+    pause, and 45 ms with the quiet check.
+  - After 10 s without running dry the target shrinks 20 ms. Shrinking faster after a big jump
+    gives the delay back sooner after a one-off stall, but a stall that comes back finds the buffer
+    small again: simulated with stalls that recur (every 0.4, 15 or 40 s), undoing the last jump
+    after 10 s ran dry 1.6-3.0 times as often as shrinking a step at a time, nearly as often as
+    the old 20 ms growth did. So it stays a step. The cost is the delay a one-off stall added:
+    after one of 250 ms the target goes from 80 to 240 ms, and is back to 80 ms about 85 s later.
+  - A burst after a stall, past twice the target (and at least 120 ms past it), loses its oldest
+    audio down to the target, cross-faded across the cut.
   - Every 10 s the client logs each heard peer's target, what it holds, how often it ran dry
     (and how often that was late audio), and what was trimmed.
   - Before this, the client played audio the moment it landed, into a 100 ms output it filled
@@ -1015,6 +1038,20 @@ Each viewer's rung adapts to its link.
     (`opus.lib`, cvcpkg libopus cvc.8, or `libopus.dll.a`), never the MinGW `libopus.a`. The wasm
     bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
   - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
+- **A native client's audio is off the frame loop.** A long frame (a loaded machine, software
+  GL) used to hold audio up both ways. A peer's mic was decoded and pushed to its jitter buffer
+  once a frame, so a stall let the device drain the buffer. Our own mic went out once a frame from
+  a ring of 8 chunks (170 ms), so a stall delayed it, and one past 170 ms dropped it.
+  - A peer's mic is decoded and pushed to `voice_mixer` on the thread it arrives on: the
+    transport's reader, or the lane's. The decoders, one per peer, are under their own mutex, since
+    the connection and the lane can both deliver one peer's packets. The frame takes each peer's
+    talk highlight and A/V clock from there.
+  - The mixer is made when the client joins, at 48 kHz mono, so the reader can feed it from the
+    first chunk. The output still opens on the frame's thread, once there is audio to play.
+  - Our mic goes out on a sender thread as the producer delivers each chunk. It is stamped with the
+    last frame's world-clock time, moved on by the steady clock since.
+  - `CVC_ARIGL_AUDIO_THREADS=0` puts both back on the frame. A browser build always has them
+    there: its transport, its audio callbacks and its frames share the page's one thread.
 
 ### 5k. Avatars: look, body, controller, energy (the frame for bring-your-own)
 

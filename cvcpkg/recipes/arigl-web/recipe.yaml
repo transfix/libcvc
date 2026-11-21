@@ -92,7 +92,9 @@ depends:
     - name: libigl
     # cvc::planar (Clipper2, CDT and Shewchuk's predicates), which the contour tiler runs on: a
     # document's contour_lab node tiles its contours (roadmap P4). Without them the tiler is not
-    # built in, and a tile says so.
+    # built in, and a tile says so. Shewchuk's predicates also carry cvc::tet_complex and the
+    # skeleton built on it, which a mesh_lab node's `skeleton` request runs (P2); without them that
+    # request reports an error.
     - name: clipper2
     - name: cdt
     - name: shewchuk-predicates

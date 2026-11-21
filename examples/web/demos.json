@@ -12,6 +12,7 @@
     "volslice_bunny_ari",
     "orthoslicer_ari",
     "volume_grid_ari",
+    "skeleton_lab_ari",
     "contour_tiler_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
@@ -206,6 +207,15 @@
       "blurb":
           "VolumeGridRover rebuilt as an Ariadne component over a volume_grid node: the signed distance field of the embedded Stanford bunny in three slice planes, a slice view under the XY / XZ / ZY switch beside a 3D view of the planes, and a panel with the probe, the point classes and the transfer function. Click in the slice view to mark a point of the current class (or unmark one), drag to select points in a rubber band, Shift+Ctrl drag to move them; Navigate moves the other planes to the voxel clicked, and the probe follows the pointer.",
       "thumb": "img/volume_grid_ari.jpg"
+    },
+    "skeleton_lab_ari": {
+      "app": "arigl",
+      "doc": "skeleton_lab",
+      "title": "skeleton lab",
+      "desc": "the skeleton of the bunny's surface: strands and sheets inside it",
+      "blurb":
+          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node: the embedded Stanford bunny is decimated to 4,000 triangles and its vertices skeletonized (Tight Cocone, the medial axis, then the unstable manifolds of its saddles) a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) and the sheets are drawn inside the see-through surface, and a second view shows the skeleton alone. The Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
+      "thumb": "img/skeleton_lab_ari.jpg"
     },
     "contour_tiler_ari": {
       "app": "arigl",

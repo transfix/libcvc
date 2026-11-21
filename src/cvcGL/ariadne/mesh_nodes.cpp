@@ -50,6 +50,8 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/mesh_ops.h>
 #include <cvc/geometry/simplify.h>
+#include <cvc/geometry/skeleton.h>        // mesh_lab's skeleton request
+#include <cvc/geometry/skeleton_params.h> // ... its parameters as keys
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
@@ -860,6 +862,40 @@ struct MeshJob {
   std::string status;
 };
 
+// --- mesh_lab: the skeleton ----------------------------------------------------------------------
+//
+// `skeleton` (VOLROVER-LIBRARY-PORTS-ROADMAP.md §2) runs cvc::skeletonize_job on the shown mesh's
+// vertices as a sliced task on the app's scheduler (cvc/core/sliced_task.h): about slice_ms of
+// work a frame where there are no threads, pool chunks where there are, so a frame never waits on
+// it. Its parameters are skeleton_params' table (cvc/geometry/skeleton_params.h) under
+// <node>.mesh_ops.skeleton, read when it starts: a missing key is seeded from the node's
+// `skeleton:` prop, else the default, and a value that does not parse or is out of range is
+// reported in skeleton.status, and nothing runs. The run publishes job_keys' busy, stoppable,
+// status, progress, phase and stats.work_ms under the same base. Its hooks (on the scheduler
+// thread) hand the result to the tick through a SkeletonRun; the tick draws it in the node's two
+// children, publishes info.* and warnings, and puts the parts on the data channel at
+// <node>.skeleton.{strands, sheets, helix}. A skeleton is a command like smooth: while it runs the
+// other requests wait in the key (`stop` ends it and keeps the last skeleton), so the mesh it reads
+// stays the one shown. A new mesh (an operation, a load, a reset) clears the skeleton.
+struct SkeletonRun {
+  std::shared_ptr<cvc::result_job<cvc::skeleton>> job;
+  int pid = -1;           // its sliced task
+  std::size_t points = 0; // the vertices it reads
+  std::string params;     // the parameters it started with (skeleton_signature)
+  // Written by the hooks before `done`, read by the tick after it.
+  std::atomic<bool> done{false};
+  bool ok = false; // a skeleton in `result`; else `status` says why there is none
+  cvc::skeleton result;
+  std::string status;
+};
+
+struct SkeletonKeys {
+  std::string base; // <node>.mesh_ops.skeleton: parameters and job keys
+  std::string data; // <node>.skeleton: the data channel
+  std::string show_strands, show_sheets;
+  std::string points, strands, sheets, clusters, lines, triangles, warnings; // info.*, published
+};
+
 struct MeshKeys {
   std::string request, busy, status, nv, nf;
   std::string smooth_method, smooth_iterations, smooth_lambda, smooth_fix_boundary;
@@ -889,11 +925,21 @@ struct MeshLabRT {
   std::uint64_t eigen_version = 0;
   std::shared_ptr<MeshJob> job;
   WorkTimer work;
+  // The skeleton: its children (<id>_strands, <id>_sheets), keys, the parameters the node's
+  // `skeleton:` prop seeds, the run in flight, and whether the children show one.
+  std::weak_ptr<GeometryNode> strands, sheets;
+  SkeletonKeys sk;
+  std::unique_ptr<cvc::job_keys> sk_keys;
+  cvc::skeleton_params sk_seed;
+  std::shared_ptr<SkeletonRun> skel;
+  bool have_skeleton = false;
   std::unique_ptr<cvc::async_lane> lane; // last: destroyed (drained, joined) before the rest
 
   ~MeshLabRT() {
     if (job)
       job->cancel = true;
+    if (skel && skel->pid >= 0 && app)
+      cvc::cancel_sliced_job(*app, skel->pid);
   }
 };
 
@@ -1057,6 +1103,208 @@ void launch_mesh_job(MeshLabRT &rt, const std::string &op) {
   }
 }
 
+// mesh_ops.busy: 1 while a lane job or a skeleton runs (the components grey their commands out).
+void publish_mesh_busy(MeshLabRT &rt) {
+  ari::write<int>(*rt.app, rt.k.busy, rt.job || rt.skel ? 1 : 0);
+}
+
+// The parameters as one line ("robust=0 big_ball_ratio=0.0625 ..."): what a run started with, so
+// its end can tell whether the keys changed while it ran.
+std::string skeleton_signature(const cvc::skeleton_params &p) {
+  std::string sig, v;
+  for (const std::string &name : cvc::param_names<cvc::skeleton_params>())
+    if (cvc::param_get_text(p, name, v))
+      sig += name + "=" + v + " ";
+  return sig;
+}
+
+// The parameters under skeleton's base (a missing key seeded from the props, else the default;
+// the keys' properties written), with what is wrong with them.
+cvc::param_result<cvc::skeleton_params> read_skeleton_params(MeshLabRT &rt) {
+  try {
+    return cvc::params_from_state<cvc::skeleton_params>(ari::write_node(*rt.app, rt.sk.base),
+                                                        rt.sk_seed);
+  } catch (const std::exception &e) {
+    cvc::param_result<cvc::skeleton_params> r;
+    r.value = rt.sk_seed;
+    r.errors.push_back(e.what());
+    return r;
+  }
+}
+
+void publish_skeleton_info(MeshLabRT &rt, const cvc::skeleton *s, std::size_t points) {
+  cvc::app &a = *rt.app;
+  const auto count = [&](const std::string &key, std::size_t n) {
+    if (s)
+      ari::write<double>(a, key, static_cast<double>(n));
+    else
+      ari::write<std::string>(a, key, "-");
+  };
+  count(rt.sk.points, points);
+  count(rt.sk.strands, s ? static_cast<std::size_t>(s->polylines) : 0);
+  count(rt.sk.sheets, s ? static_cast<std::size_t>(s->sheet_clusters) : 0);
+  count(rt.sk.clusters, s ? static_cast<std::size_t>(s->clusters) : 0);
+  count(rt.sk.lines, s ? s->strands.const_lines().size() : 0);
+  count(rt.sk.triangles, s ? s->sheets.const_tris().size() : 0);
+  std::string w;
+  if (s)
+    for (const std::string &line : s->warnings)
+      w += (w.empty() ? "" : "\n") + line;
+  ari::write<std::string>(a, rt.sk.warnings, w);
+}
+
+// The data channel: the skeleton's parts as cvc::geometry (copies share their data), or nothing.
+void publish_skeleton_data(MeshLabRT &rt, const cvc::skeleton *s) {
+  const std::pair<const char *, const cvc::geometry *> parts[] = {
+      {"strands", s ? &s->strands : nullptr},
+      {"sheets", s ? &s->sheets : nullptr},
+      {"helix", s ? &s->helix : nullptr}};
+  for (const auto &p : parts) {
+    try {
+      ari::write_node(*rt.app, rt.sk.data + "." + p.first)
+          .data(p.second ? boost::any(*p.second) : boost::any());
+    } catch (const std::exception &) {
+    }
+  }
+}
+
+// Show the children while there is a skeleton, each as its view key says.
+void follow_skeleton_view(MeshLabRT &rt) {
+  cvc::app &a = *rt.app;
+  show_child(a, rt.strands.lock().get(),
+             rt.have_skeleton && ari::read_bool_or(a, rt.sk.show_strands, 1) != 0);
+  show_child(a, rt.sheets.lock().get(),
+             rt.have_skeleton && ari::read_bool_or(a, rt.sk.show_sheets, 1) != 0);
+}
+
+// The mesh changed under a skeleton: it is not this mesh's any more.
+void clear_skeleton(MeshLabRT &rt) {
+  if (!rt.have_skeleton)
+    return;
+  rt.have_skeleton = false;
+  for (const std::weak_ptr<GeometryNode> &w : {rt.strands, rt.sheets})
+    if (std::shared_ptr<GeometryNode> c = w.lock())
+      swap_geometry(*c, cvc::geometry());
+  follow_skeleton_view(rt);
+  publish_skeleton_info(rt, nullptr, 0);
+  publish_skeleton_data(rt, nullptr);
+  ari::write<std::string>(*rt.app, rt.sk_keys->path("status"),
+                          "cleared: the mesh changed (run it again)");
+}
+
+// `skeleton`: start a run on the shown mesh. False when it did not start (skeleton.status says
+// why).
+bool launch_skeleton(MeshLabRT &rt) {
+  cvc::app &a = *rt.app;
+  const cvc::param_result<cvc::skeleton_params> p = read_skeleton_params(rt);
+  if (!p.ok()) {
+    rt.sk_keys->finished("error: " + p.message());
+    return false;
+  }
+  auto run = std::make_shared<SkeletonRun>();
+  run->points = rt.current->const_points().size();
+  run->params = skeleton_signature(p.value);
+  try {
+    run->job = cvc::skeletonize_job(*rt.current, p.value); // stores the points; no work yet
+  } catch (const std::exception &e) {
+    rt.sk_keys->finished(std::string("error: ") + e.what());
+    return false;
+  }
+  rt.skel = run;
+  rt.sk_keys->started("skeleton of " + std::to_string(run->points) + " points...");
+  publish_mesh_busy(rt);
+  cvc::sliced_task_options o;
+  o.kind = "mesh_lab";
+  o.subject = "skeleton " + rt.sk.base;
+  o.owner = "mesh_lab:" + rt.sk.base;
+  // The hooks run on the scheduler thread and touch only the run (never the node or state).
+  o.on_done = [run](cvc::sliced_job &) {
+    cvc::result_job<cvc::skeleton> &j = *run->job;
+    if (j.failed()) {
+      run->status = "error: " + j.error();
+    } else {
+      try {
+        run->result = j.take_result();
+        run->ok = true;
+      } catch (const std::exception &e) {
+        run->status = std::string("error: ") + e.what();
+      }
+    }
+    run->done.store(true, std::memory_order_release);
+  };
+  o.on_cancelled = [run](cvc::sliced_job &) {
+    run->status = "stopped";
+    run->done.store(true, std::memory_order_release);
+  };
+  std::string why;
+  run->pid = cvc::schedule_sliced_job(a, run->job, o, &why);
+  if (run->pid < 0) {
+    run->status = "error: the job could not start: " + why;
+    run->done.store(true, std::memory_order_release);
+  } else {
+    rt.sk_keys->pid(run->pid);
+  }
+  return true;
+}
+
+// Draw a finished run, or say why there is nothing to draw: the children, info.*, warnings, the
+// data channel, and the job keys' last status.
+void apply_skeleton(MeshLabRT &rt, SkeletonRun &run) {
+  if (!run.ok) {
+    rt.sk_keys->finished(run.status.empty() ? std::string("stopped") : run.status);
+    return;
+  }
+  const cvc::skeleton &s = run.result;
+  if (std::shared_ptr<GeometryNode> c = rt.strands.lock())
+    swap_geometry(*c, s.strands);
+  if (std::shared_ptr<GeometryNode> c = rt.sheets.lock())
+    swap_geometry(*c, s.sheets);
+  rt.have_skeleton = true;
+  follow_skeleton_view(rt);
+  publish_skeleton_info(rt, &s, run.points);
+  publish_skeleton_data(rt, &s);
+  std::string status = "done: " + std::to_string(s.polylines) + " strands, " +
+                       std::to_string(s.sheet_clusters) + " sheets (" + std::to_string(s.clusters) +
+                       " clusters) from " + std::to_string(run.points) + " points";
+  if (!s.warnings.empty())
+    status +=
+        ", " + std::to_string(s.warnings.size()) + " warning" + (s.warnings.size() == 1 ? "" : "s");
+  // A parameter changed while it ran applies to the next run (§1.5): say so.
+  if (skeleton_signature(read_skeleton_params(rt).value) != run.params)
+    status += "; the parameters changed while it ran: run it again to use them";
+  rt.sk_keys->finished(status);
+}
+
+// The run in flight: a `stop` at the head of the request key ends it, its progress is published,
+// and once its hooks have handed the result over it is drawn. True while it runs.
+bool follow_skeleton(MeshLabRT &rt) {
+  if (!rt.skel)
+    return false;
+  cvc::app &a = *rt.app;
+  SkeletonRun &run = *rt.skel;
+  if (!run.done.load(std::memory_order_acquire)) {
+    std::string rest;
+    if (first_word(ari::read_or<std::string>(a, rt.k.request, ""), &rest) == "stop") {
+      ari::write<std::string>(a, rt.k.request, rest); // what follows the stop waits for the end
+      run.job->cancel(); // thread-safe: the step running (or the next) ends it, then on_cancelled
+      rt.sk_keys->stopping();
+    }
+    // A task ended with no hook (cancel_sliced_job, kill_owner, the scheduler's teardown).
+    if (!cvc::sliced_job_running(a, run.pid) && !run.done.load(std::memory_order_acquire)) {
+      run.status = "stopped";
+      run.done.store(true, std::memory_order_release);
+    }
+  }
+  if (!run.done.load(std::memory_order_acquire)) {
+    rt.sk_keys->progress(*run.job); // its progress and phase are safe to read while a step runs
+    return true;
+  }
+  const std::shared_ptr<SkeletonRun> done = std::move(rt.skel);
+  apply_skeleton(rt, *done);
+  publish_mesh_busy(rt);
+  return false;
+}
+
 void publish_mesh_stats(MeshLabRT &rt) {
   ari::write<double>(*rt.app, rt.k.nv, static_cast<double>(rt.current->const_points().size()));
   ari::write<double>(*rt.app, rt.k.nf, static_cast<double>(tri_count(*rt.current)));
@@ -1078,6 +1326,7 @@ void set_mesh(MeshLabRT &rt, GeometryNode &node, std::shared_ptr<const cvc::geom
   adopt_mesh(rt, std::move(g));
   hide_field(node, rt.single_color); // the colour follower recomputes it for the new mesh
   swap_geometry(node, *rt.current);
+  clear_skeleton(rt);
 }
 
 void apply_mesh_job(MeshLabRT &rt, GeometryNode &node, MeshJob &j) {
@@ -1111,12 +1360,11 @@ void apply_mesh_job(MeshLabRT &rt, GeometryNode &node, MeshJob &j) {
     set_mesh(rt, node, j.geom);
   }
   ari::write<std::string>(a, rt.k.status, j.status);
-  ari::write<int>(a, rt.k.busy, 0);
+  publish_mesh_busy(rt); // the job is off rt.job by now
 }
 
-// Follow color.mode / color.colormap / geodesic.source / modes.index: a changed signature
-// recomputes the scalar off-thread; a colormap change alone recolours in place.
-void follow_mesh_color(MeshLabRT &rt, GeometryNode &node) {
+// What the colour shown must have been made for: "<version>|<mode>[|<source or index>]".
+std::string mesh_color_signature(MeshLabRT &rt) {
   cvc::app &a = *rt.app;
   const std::string mode = ari::read_or<std::string>(a, rt.k.color_mode, "none");
   std::string sig = std::to_string(rt.version) + "|" + mode;
@@ -1124,6 +1372,15 @@ void follow_mesh_color(MeshLabRT &rt, GeometryNode &node) {
     sig += "|" + std::to_string(geodesic_source(rt));
   else if (mode == "modes")
     sig += "|" + std::to_string(mode_index(a, rt.k.mode_index));
+  return sig;
+}
+
+// Follow color.mode / color.colormap / geodesic.source / modes.index: a changed signature
+// recomputes the scalar off-thread; a colormap change alone recolours in place.
+void follow_mesh_color(MeshLabRT &rt, GeometryNode &node) {
+  cvc::app &a = *rt.app;
+  const std::string mode = ari::read_or<std::string>(a, rt.k.color_mode, "none");
+  const std::string sig = mesh_color_signature(rt);
   if (sig != rt.field_sig) {
     rt.field_sig = sig;
     if (is_color_job_mode(mode)) {
@@ -1183,6 +1440,10 @@ bool run_mesh_request(MeshLabRT &rt, GeometryNode &node, const std::string &req)
       rt.field_sig.clear();
     else
       ari::write<std::string>(a, rt.k.color_mode, "mean");
+  } else if (req == "skeleton") {
+    return launch_skeleton(rt);
+  } else if (req == "stop") {
+    ari::write<std::string>(a, rt.k.status, "nothing to stop");
   } else {
     ari::write<std::string>(a, rt.k.status, "unknown request '" + req + "'");
   }
@@ -1195,14 +1456,18 @@ void tick_mesh_lab(MeshLabRT &rt) {
     return;
   cvc::app &a = *rt.app;
   pump(*rt.lane);
+  // The skeleton first, so its stop and progress go through while a colour job runs too.
+  follow_skeleton(rt);
+  follow_skeleton_view(rt);
   if (rt.job) {
     if (!rt.job->done.load(std::memory_order_acquire))
       return; // one job at a time; a request waits in its key
     std::shared_ptr<MeshJob> j = std::move(rt.job);
     apply_mesh_job(rt, *node, *j);
   }
-  // Instant commands run back to back; one that starts a job leaves the rest waiting.
-  for (int i = 0; i < 16; ++i) {
+  // Instant commands run back to back; one that starts a job leaves the rest waiting, and so does
+  // a skeleton running (it reads the mesh shown).
+  for (int i = 0; i < 16 && !rt.skel; ++i) {
     const std::string req = take_request(a, rt.k.request);
     if (req.empty())
       break;
@@ -1211,7 +1476,14 @@ void tick_mesh_lab(MeshLabRT &rt) {
       return;
   }
   follow_mesh_color(rt, *node);
-  rt.work.settle(a, !rt.job, rt.k.work_ms);
+  rt.work.settle(a, !rt.job && !rt.skel, rt.k.work_ms);
+}
+
+// Whether the node still has work that will change what it draws (RealizedScene::pending_work): a
+// request waiting, a job or a skeleton running, a colour not made for the mesh and mode shown yet.
+bool mesh_lab_settling(MeshLabRT &rt) {
+  return rt.job || rt.skel || !ari::read_or<std::string>(*rt.app, rt.k.request, "").empty() ||
+         mesh_color_signature(rt) != rt.field_sig;
 }
 
 // type: mesh_lab
@@ -1295,6 +1567,61 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   k.geodesic_source = seed_num(a, base, "geodesic.source", pr.num("geodesic_source", 0));
   k.mode_index = seed_num(a, base, "modes.index", pr.num("mode", 1));
 
+  // The skeleton: `skeleton: { <field>: <value>, ... }` seeds its parameter keys (the table's
+  // names), and its view keys and info.* sit beside them.
+  SkeletonKeys &sk = rt->sk;
+  sk.base = ari::resolve_bind(base, "skeleton");
+  sk.data = g->stateName("skeleton");
+  if (const ari::Value *sp = pr.find("skeleton")) {
+    std::vector<std::pair<std::string, std::string>> given;
+    if (sp->is_map())
+      for (const ari::Value::Entry &e : sp->entries)
+        given.emplace_back(e.first, e.second.is_scalar() ? e.second.scalar : std::string("?"));
+    const cvc::param_result<cvc::skeleton_params> r = cvc::params_from_strings(given, rt->sk_seed);
+    if (!sp->is_map())
+      warn("skeleton: wants a map of its parameters; ignored");
+    else if (!r.ok())
+      warn("skeleton: " + r.message() + " (the defaults stand for those)");
+    else
+      rt->sk_seed = r.value;
+  }
+  rt->sk_keys = std::make_unique<cvc::job_keys>(cvc::state::instance(a), sk.base);
+  sk.show_strands = seed_bool(a, sk.base, "view.strands", true);
+  sk.show_sheets = seed_bool(a, sk.base, "view.sheets", true);
+  for (std::pair<std::string *, const char *> info :
+       {std::pair<std::string *, const char *>{&sk.points, "info.points"},
+        {&sk.strands, "info.strands"},
+        {&sk.sheets, "info.sheets"},
+        {&sk.clusters, "info.clusters"},
+        {&sk.lines, "info.lines"},
+        {&sk.triangles, "info.triangles"},
+        {&sk.warnings, "warnings"}})
+    *info.first = ari::resolve_bind(sk.base, info.second);
+  // The children: the strands as lines in their own colours (green polylines, blue stars), the
+  // sheets as patches in theirs, unlit enough to read their colours inside a see-through surface.
+  // Hidden until a skeleton is drawn; they hide with the node.
+  std::shared_ptr<GeometryNode> strands =
+      g->createChild<GeometryNode>(n.id + "_strands", cvc::geometry());
+  if (strands) {
+    // setGeometry takes a lines-only geometry for triangles; this mode stays (swap_geometry).
+    strands->setRenderMode(GeometryRenderMode::LINES);
+    strands->setUseSingleColor(false);
+    strands->setLineWidth(2.0);
+    strands->setAmbient(1.0);
+    strands->setDiffuse(0.0);
+    strands->setVisible(false);
+  }
+  std::shared_ptr<GeometryNode> sheets =
+      g->createChild<GeometryNode>(n.id + "_sheets", cvc::geometry());
+  if (sheets) {
+    sheets->setUseSingleColor(false);
+    sheets->setAmbient(0.45);
+    sheets->setDiffuse(0.7);
+    sheets->setVisible(false);
+  }
+  rt->strands = strands;
+  rt->sheets = sheets;
+
   auto snapshot = std::make_shared<cvc::geometry>();
   snapshot->copy(geom, true);
   rt->source = snapshot;
@@ -1307,11 +1634,42 @@ std::shared_ptr<GraphicsNode> realize_mesh_lab(SceneGraph &sg, const ari::SceneN
   rt->colormap = ari::read_or<std::string>(a, k.colormap, "viridis");
   init_field_colors(a, rt->fc, g->stateName("field_colors"), k.colormap);
   g->setColorTable(rt->fc.table, rt->fc.alpha);
-  // Keys written before the scene was realized (an init: program) name another source: read it.
-  if (from_file && mesh_source_from_keys(*rt).sig() != rt->source_sig)
-    ari::write<std::string>(a, k.request, "load");
+  rt->sk_keys->idle();
+  ari::write<std::string>(a, rt->sk_keys->path("status"), "idle");
+  publish_skeleton_info(*rt, nullptr, 0);
+  // The parameter keys now, with their properties (a component labels and bounds its widgets by
+  // them), not at the first run. A value that does not parse is reported then.
+  read_skeleton_params(*rt);
+  // Keys written before the scene was realized (an init: program) name another source: read it
+  // first; a request waiting (an init:'s "skeleton") runs after it.
+  if (from_file && mesh_source_from_keys(*rt).sig() != rt->source_sig) {
+    const std::string waiting = ari::read_or<std::string>(a, k.request, "");
+    std::string rest;
+    const std::string first = first_word(waiting, &rest);
+    if (first != "load" && first != "reload")
+      ari::write<std::string>(a, k.request, waiting.empty() ? "load" : "load " + waiting);
+  }
+
+  // The view tags of the node's parts (RealizedScene::TaggedNode): the node's own tags hold for
+  // the whole subtree as usual (realize_node adds that entry), and on top of them the node's own
+  // surface is tagged `surface` and the skeleton children `skeleton`, so a view shows the
+  // skeleton alone (show: [skeleton], the node untagged) or the node without its surface
+  // (hide: [surface]). The surface's entry goes first: a repeat: copy finds its node there.
+  std::vector<std::string> surface_tags = n.tags, skeleton_tags = n.tags;
+  surface_tags.push_back("surface");
+  skeleton_tags.push_back("skeleton");
+  out.nodes.push_back({n.id, surface_tags, g, /*subtree=*/false});
+  if (strands)
+    out.nodes.push_back({n.id + "_strands", skeleton_tags, strands});
+  if (sheets)
+    out.nodes.push_back({n.id + "_sheets", skeleton_tags, sheets});
 
   out.custom_ticks.push_back([rt](vtkRenderer *) { tick_mesh_lab(*rt); });
+  const std::weak_ptr<MeshLabRT> wrt = rt;
+  out.pending_work.push_back([wrt]() {
+    const std::shared_ptr<MeshLabRT> r = wrt.lock();
+    return r && mesh_lab_settling(*r);
+  });
   return g;
 }
 

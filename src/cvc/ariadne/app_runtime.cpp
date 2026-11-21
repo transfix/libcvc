@@ -1275,11 +1275,12 @@ void AppRuntime::drain_end() {
   }
   // No adapter: the scene's clock and world run here, on real time (a paused clock with step
   // requests, or lockstep, makes it deterministic).
-  if (worldClock_)
+  if (worldClock_ && !worldExternal_)
     worldClock_->drive(-1.0);
   if (world_) {
     try {
-      world_->follow(app_.world_clock());
+      if (!worldExternal_) // a holon steps it on its own clock (set_world_external)
+        world_->follow(app_.world_clock());
       for (std::string &w : world_->take_warnings()) { // a regenerated world's, a dataset's bodies
         post_warning(w);
         pendingWarnings_.push_back(std::move(w));

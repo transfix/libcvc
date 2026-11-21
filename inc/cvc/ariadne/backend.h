@@ -296,7 +296,7 @@ struct SettingsSpec {
   std::vector<SettingsNode> nodes;
   bool search = false; // a search box above the keys, holding `search_text`
   std::string search_text;
-  bool narrowed = false; // a search or filter is narrowing it: draw every group open
+  bool narrowed = false; // a search or a filter that picks keys: draw every group open
   std::string empty;     // shown when no key is left ("" none)
 };
 // What the user did with it this frame. `node` >= 0: nodes[node]'s new `value` (text): `changed`
