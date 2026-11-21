@@ -37,6 +37,7 @@
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -1222,6 +1223,108 @@ TEST(ControlSchemes, EachSchemeHasItsOwnBindings) {
   r.update(held, 0.1);
   r.drive_axes(in);
   EXPECT_DOUBLE_EQ(in.brake, 0.0);
+}
+
+// A gamepad plays the same actions (OW6b): walking on the left stick, looking on the right,
+// jumping on A, getting in and out on X held; driving, the left stick steers, RT is the throttle
+// and LT the brake (a boat's reverse), LB a car's reverse.
+TEST(ControlSchemes, AGamepadPlaysTheSameActions) {
+  using cvc::ariadne::control_resolver;
+  using cvc::ariadne::control_scheme;
+  const control_scheme walk = cvc::ariadne::default_control_scheme("walk");
+  const control_scheme car = cvc::ariadne::default_control_scheme("car");
+  const control_scheme boat = cvc::ariadne::default_control_scheme("boat");
+  EXPECT_EQ(walk.find("forward")->binding.pad, (std::vector<std::string>{"LeftY-"}));
+  EXPECT_EQ(walk.find("look_right")->binding.pad, (std::vector<std::string>{"RightX+"}));
+  EXPECT_EQ(walk.find("jump")->binding.pad, (std::vector<std::string>{"A"}));
+  EXPECT_EQ(walk.find("interact")->binding.pad, (std::vector<std::string>{"X"}));
+  EXPECT_TRUE(walk.find("look_up")->binding.keys.empty()) << "the mouse looks on its own";
+  EXPECT_EQ(car.find("steer_left")->binding.pad, (std::vector<std::string>{"LeftX-"}));
+  EXPECT_EQ(car.find("throttle")->binding.pad, (std::vector<std::string>{"RT"}));
+  EXPECT_EQ(car.find("brake")->binding.pad, (std::vector<std::string>{"LT"}));
+  EXPECT_EQ(car.find("reverse")->binding.pad, (std::vector<std::string>{"LB"}));
+  EXPECT_EQ(boat.find("reverse")->binding.pad, (std::vector<std::string>{"LT"}));
+  EXPECT_NE(car.find("look_left"), nullptr) << "and looks around while it drives";
+
+  std::map<std::string, double> pad;
+  const control_resolver::pad_fn read = [&](const std::string &n) {
+    const auto it = pad.find(n);
+    return it == pad.end() ? 0.0 : it->second;
+  };
+  const control_resolver::held_fn none = [](const std::string &) { return false; };
+  control_resolver r(walk);
+  // A resting stick's drift is nothing; past the deadzone, the rest of its travel.
+  pad = {{"LeftY", -0.1}, {"LeftX", 0.1}};
+  r.update(none, 1.0 / 60.0, read);
+  double f = 1.0, right = 1.0;
+  r.walk_axes(f, right);
+  EXPECT_DOUBLE_EQ(f, 0.0);
+  EXPECT_DOUBLE_EQ(right, 0.0);
+  EXPECT_FALSE(r.from_pad()) << "nothing pressed yet";
+  pad = {{"LeftY", -1.0}, {"LeftX", -0.575}};
+  r.update(none, 1.0 / 60.0, read);
+  r.walk_axes(f, right);
+  EXPECT_DOUBLE_EQ(f, 1.0) << "pushed forward (Y is down)";
+  EXPECT_NEAR(right, -0.5, 1e-9) << "and half way left, past the deadzone";
+  EXPECT_TRUE(r.from_pad());
+  // The right stick looks; A jumps.
+  pad = {{"RightX", 1.0}, {"RightY", -0.575}, {"A", 1.0}};
+  r.update(none, 1.0 / 60.0, read);
+  double lx = 0.0, ly = 0.0;
+  r.look_axes(lx, ly);
+  EXPECT_DOUBLE_EQ(lx, 1.0);
+  EXPECT_NEAR(ly, 0.5, 1e-9) << "pushed up looks up";
+  EXPECT_TRUE(r.held("jump"));
+  // X held gets in, as E does.
+  pad = {{"X", 1.0}};
+  r.update(none, 0.2, read);
+  EXPECT_NEAR(r.progress("interact"), 0.5, 1e-9);
+  r.update(none, 0.25, read);
+  EXPECT_TRUE(r.fired("interact"));
+  // In the car, X still held: let go first, as with E.
+  r.set_scheme(car);
+  r.update(none, 1.0, read);
+  EXPECT_FALSE(r.fired("interact"));
+  // The stick steers as it is pushed, with no ramp; the triggers are the throttle and the brake.
+  pad = {{"LeftX", 1.0}, {"RT", 0.62}, {"LT", 0.24}};
+  r.update(none, 1.0 / 60.0, read);
+  avatar_intent in;
+  r.drive_axes(in);
+  EXPECT_DOUBLE_EQ(in.steer, -1.0) << "right at once";
+  EXPECT_NEAR(in.throttle, (0.62 - 0.05) / 0.95, 1e-9);
+  EXPECT_NEAR(in.brake, (0.24 - 0.05) / 0.95, 1e-9);
+  pad = {{"LB", 1.0}};
+  r.update(none, 1.0 / 60.0, read);
+  r.drive_axes(in);
+  EXPECT_DOUBLE_EQ(in.throttle, -1.0) << "LB is a car's reverse";
+  EXPECT_DOUBLE_EQ(in.brake, 0.0);
+  // A key and the pad together: the larger; a key held makes the keys the input in use.
+  std::set<std::string> down = {"D"};
+  const control_resolver::held_fn held = [&](const std::string &k) { return down.count(k) != 0; };
+  pad = {{"LeftX", -0.575}};
+  r.update(held, 0.1, read);
+  r.drive_axes(in);
+  EXPECT_NEAR(in.steer, 0.5 - 0.4, 1e-9) << "the stick's half left against D's ramp";
+  EXPECT_FALSE(r.from_pad());
+  // The boat: LT is its reverse.
+  r.set_scheme(boat);
+  pad = {{"LT", 1.0}};
+  r.update(none, 1.0 / 60.0, read);
+  r.drive_axes(in);
+  EXPECT_DOUBLE_EQ(in.throttle, -1.0);
+  EXPECT_DOUBLE_EQ(in.brake, 0.0);
+  // Rebound: an inverted stick, read the other way.
+  r.set_pad("throttle", {"RightY-"});
+  pad = {{"RightY", -1.0}};
+  r.update(none, 1.0 / 60.0, read);
+  EXPECT_DOUBLE_EQ(r.value("throttle"), 1.0);
+  cvc::ariadne::control_binding b;
+  b.pad = {"RightY-"};
+  b.invert = true;
+  EXPECT_DOUBLE_EQ(cvc::ariadne::pad_reading(b, read), 0.0) << "inverted: pulled back reads it";
+  pad = {{"RightY", 1.0}};
+  EXPECT_DOUBLE_EQ(cvc::ariadne::pad_reading(b, read), 1.0);
+  EXPECT_DOUBLE_EQ(cvc::ariadne::pad_reading(b, {}), 0.0) << "no gamepad";
 }
 
 // While the relay says we drive (section 18.6), our pose is the vehicle's, which we do not

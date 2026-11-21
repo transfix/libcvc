@@ -47,6 +47,19 @@ struct RecordingBackend : cvc::gl::ImGuiBackend {
     note(label);
     return hit;
   }
+  bool button_with(const char *label, const ari::ButtonLook &look) override {
+    const bool hit = ImGuiBackend::button_with(label, look);
+    note(label);
+    selected[label] = look.selected;
+    return hit;
+  }
+  std::map<std::string, bool> selected; // §5.27 each button_with's look.selected, last drawn
+  bool maximized = false;               // §5.9 the last window's maximize, as the core read it
+  bool next_window_maximize(bool *m) override {
+    const bool can = ImGuiBackend::next_window_maximize(m);
+    maximized = *m;
+    return can;
+  }
   void end_item_group() override {
     ImGuiBackend::end_item_group();
     note("group");
@@ -58,10 +71,11 @@ struct Session {
   cvc::app app;
   ari::Runtime rt{app, "ui"};
   RecordingBackend be;
-  explicit Session(ari::Widget root) {
+  explicit Session(ari::Widget root, ImVec2 display = ImVec2(1000.0f, 700.0f)) {
+    ImGui::SetCurrentContext(ctx); // CreateContext keeps another session's current
     cvc::gl::ImGuiBackend::setImGuiContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(1000.0f, 700.0f);
+    io.DisplaySize = display;
     io.IniFilename = nullptr;
     unsigned char *px = nullptr;
     int w = 0, h = 0;
@@ -104,6 +118,7 @@ struct Session {
 } // namespace
 
 int main() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0); // each check shows, even before an abort
 #ifndef CVC_ENABLE_IMGUI
   std::printf("skip: cvcGL built without ImGui\n");
   return 0;
@@ -185,6 +200,54 @@ int main() {
       "a press that went down elsewhere is not its click (" + s.val("viewed") + ")");
 
   chk(s.be.capabilities().item_groups, "ImGuiBackend reports item groups (ui.group_click)");
+
+  // §5.27 a row of choices: the chosen one drawn pressed in (button_with), a tap runs its on: as on
+  // any button, and choosing another moves no button.
+  {
+    ari::Widget following = ari::button("Following", "(state-set \"mode\" \"following\")");
+    following.selected = "(= (state-get \"mode\") \"following\")";
+    ari::Widget everyone = ari::button("Everyone", "(state-set \"mode\" \"everyone\")");
+    everyone.selected = "(= (state-get \"mode\") \"everyone\")";
+    ari::Widget row = ari::group({following, everyone});
+    row.layout.kind = ari::LayoutKind::Horizontal;
+    ari::Widget bar = ari::window("Bar", {row});
+    bar.has_pos = true;
+    bar.pos_x = bar.pos_y = 20.0f;
+    Session c(bar);
+    c.set("mode", "following");
+    c.frame(ImVec2(990.0f, 690.0f), false);
+    chk(c.be.selected["Following"] && !c.be.selected["Everyone"],
+        "the chosen button is drawn selected, the other not");
+    const RecordingBackend::Rect before = c.be.at["Everyone"];
+    const ImVec2 every = before.centre();
+    c.tap(every, every);
+    chk(c.val("mode") == "everyone", "a tap on the other runs its on: (" + c.val("mode") + ")");
+    chk(c.be.selected["Everyone"] && !c.be.selected["Following"], "and it is drawn selected now");
+    chk(c.be.at["Everyone"].min.x == before.min.x && c.be.at["Everyone"].max.x == before.max.x,
+        "choosing it moved no button");
+    chk(c.be.capabilities().button_selected && c.be.capabilities().button_icon,
+        "ImGuiBackend reports button.selected and button.icon");
+    chk(!c.be.view_is_phone(), "a 1000 x 700 view is not a phone's");
+  }
+
+  // §5.9 `maximized: phone`: a window starts maximized on a phone's view (under 500 px on its short
+  // side), and as laid out on a wider one; the user's restore writes the key, which then holds.
+  {
+    ari::Widget feed = ari::window("Main", {ari::text("a feed")});
+    feed.id = "main";
+    feed.start_maximized = "phone";
+    Session phone(feed, ImVec2(390.0f, 760.0f));
+    chk(phone.be.view_is_phone(), "a 390 x 760 view is a phone's");
+    chk(phone.be.maximized, "maximized: phone starts maximized on a phone");
+    phone.set("tree.main.maximized", "0");
+    phone.frame(ImVec2(380.0f, 750.0f), false);
+    chk(!phone.be.maximized, "a restore (the key written 0) holds");
+    Session wide(feed);
+    chk(!wide.be.maximized, "maximized: phone opens as laid out on a wide view");
+    feed.start_maximized = "true";
+    Session always(feed);
+    chk(always.be.maximized, "maximized: true starts maximized anywhere");
+  }
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 #endif

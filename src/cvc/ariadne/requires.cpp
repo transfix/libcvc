@@ -101,6 +101,12 @@ std::span<const TokenRule> rules() {
                        "drawn over the picture with it dimmed, a media grid's \"+3\" (a terminal "
                        "puts it on the line under the picture)"},
        [](const HostFacts &f) { return f.caps.badge; }},
+      {{"button.icon", "button: takes icon: (a picture URI or a published image), drawn on the "
+                       "button in place of its label"},
+       [](const HostFacts &f) { return f.caps.button_icon; }},
+      {{"button.selected", "button: takes selected: (true, or an expression): the chosen button "
+                           "of a row is drawn pressed in"},
+       [](const HostFacts &f) { return f.caps.button_selected; }},
       {{"text.emoji", "text: takes emoji: (a map of :shortcode: names to picture URIs), drawn "
                       "in the line where the backend can put a picture there"},
        [](const HostFacts &) { return true; }},

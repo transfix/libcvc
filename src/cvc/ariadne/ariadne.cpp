@@ -235,6 +235,13 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.bind, kTok, idx);
   replace_in(out.on, kTok, idx);
   replace_in(out.pick, kTok, idx); // a chart's or a heatmap's pick: key
+  // A chart's series, cursor and log axis: a row's own curves (series: [{bind: runs.{i}.y}]).
+  for (ChartSeriesBind &s : out.chart_series) {
+    replace_in(s.bind, kTok, idx);
+    replace_in(s.label, kTok, idx);
+  }
+  replace_in(out.cursor, kTok, idx);
+  replace_in(out.log_y, kTok, idx);
   // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
   // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
   replace_in(out.on_click, kTok, idx);
@@ -273,6 +280,8 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   replace_in(out.color_src, kTok, idx);            // §5.26 a row's colour (palette.{i})
   replace_in(out.poster, kTok, idx); // §5.13
   replace_in(out.emoji, kTok, idx);  // §5.11 a post's own shortcodes
+  replace_in(out.button_icon, kTok, idx); // §5.27 a row's button: its picture, whether it's chosen
+  replace_in(out.selected, kTok, idx);
   // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
   replace_in(out.runs_src, kTok, idx);
   replace_in(out.on_link, kTok, idx);
@@ -1889,6 +1898,7 @@ struct Runtime::Impl {
     std::uint64_t drawn_walk = 0;
     double last_drawn = 0.0;
     bool hidden_paused = false;
+    double made_at = 0.0; // when its player was made (a video with no frame 3 s on says why)
   };
   std::unordered_map<std::string, PlayerSlot> players;
   std::uint64_t walk_count = 0;
@@ -2137,6 +2147,7 @@ struct Runtime::Impl {
   std::atomic<bool> have_key_bindings_{false};
   std::mutex pressed_mutex_;
   std::vector<std::string> pressed_keys_;
+  std::vector<std::string> pressed_pads_; // post_pad_press, for a gamepad Change
   // The Keys window waits for a key: a Change button named a binding, and the window is open (a
   // capture left over in a closed window is cleared by the next drain).
   bool key_capture_pending() const {
@@ -3094,7 +3105,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // button in its title bar where the backend has one (`maximizable: false`: none). While it is
     // maximized its geometry is not persisted, so tree.<id>.geometry keeps where it goes back to.
     const std::string max_path = resolve("tree." + id + ".maximized");
-    bool maximized = w.maximizable && read_bool_or(app, max_path, 0) != 0;
+    // `maximized: true | phone` is how it starts, until the user (or the document) writes the key.
+    const bool start_max =
+        w.start_maximized == "true" || (w.start_maximized == "phone" && b.view_is_phone());
+    bool maximized = w.maximizable && read_bool_or(app, max_path, start_max ? 1 : 0) != 0;
     const bool can_maximize = w.maximizable && b.next_window_maximize(&maximized);
     if (!can_maximize)
       maximized = false;
@@ -3663,12 +3677,40 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
-  case Kind::Button:
-    if (tinted([&] { return b.button(label); })) {
+  case Kind::Button: {
+    // §5.27 a picture in place of the label, and the chosen one of a row drawn pressed in. A plain
+    // button goes the way it always has.
+    bool hit = false;
+    if (w.button_icon.empty() && w.selected.empty()) {
+      hit = tinted([&] { return b.button(label); });
+    } else {
+      ButtonLook look;
+      look.icon_h = w.icon_size;
+      look.selected = w.selected == "true" || (is_expr(w.selected) && predicate(w.selected, false));
+      const std::string icon = is_expr(w.button_icon) ? eval_text(w.button_icon) : w.button_icon;
+      if (media::is_uri(icon) && !media::is_video_uri(icon)) {
+        // Fetched and kept as an image:'s picture is, at its own shape: the label shows until it is
+        // ready, and if it fails. Three times the height it's drawn (a line, about 16 px, unless
+        // icon_size: says), so a phone's dense screen gets a sharp one.
+        media::ImageRequest rq;
+        rq.uri = icon;
+        rq.auth = w.media_auth;
+        rq.w = 3 * std::max(16, static_cast<int>(std::lround(w.icon_size)));
+        media::ImageView v;
+        const std::string name = media_picture(rq, v);
+        if (v.status == media::Status::Ready)
+          look.icon = name;
+      } else if (!icon.empty() && !media::is_uri(icon)) {
+        look.icon = icon; // a host-published picture
+      }
+      hit = tinted([&] { return b.button_with(label, look); });
+    }
+    if (hit) {
       enqueue(w.on);
       ++clicks_fired; // the click is the button's, not a group's around it (§4.6)
     }
     break;
+  }
 
   case Kind::TfEditor: {
     TfEditorContext ctx{app,
@@ -4302,6 +4344,7 @@ Runtime::Impl::PlayerSlot &Runtime::Impl::player_slot(const std::string &key,
       media::PlayerSource src = ps;
       src.base = media_base;
       p.player = media::make_player(app, src);
+      p.made_at = steady_seconds();
       p.state = p.player ? media::PlayerState::Loading : media::PlayerState::Unsupported;
       if (!p.player)
         p.error = "this host's player cannot play it";
@@ -4478,9 +4521,29 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     }
     const float width =
         within_height(static_cast<float>(draw_w), bh > 0 ? 0.0f : aspect, w.img_max_h);
-    if (!b.draw_image(name.c_str(), width))
+    const bool drew = b.draw_image(name.c_str(), width);
+    if (!drew)
       b.text_value(caption.c_str(), "(" + std::string(media::player_state_name(p.state)) + ")");
     in_view = b.item_visible();
+    // No frame yet: the box says why, over the poster or the placeholder: its error once it fails
+    // (with controls, "failed": their line has the error), what the player says keeps the picture
+    // away (a browser waiting for a tap), or, loading or playing 3 s with no frame, that state.
+    // Not where a badge: of its own is, in a box too small for words (an avatar, an emoji), or in
+    // a terminal (a badge there is a line of its own, under the picture).
+    if (drew && pl && !p.have_frame && w.badge.empty() && draw_w >= 96 &&
+        !b.capabilities().terminal) {
+      std::string why;
+      if (p.state == media::PlayerState::Failed)
+        why = decorative && !p.error.empty() ? p.error : std::string("failed");
+      else
+        why = pl->notice();
+      if (why.empty() &&
+          (p.state == media::PlayerState::Loading || p.state == media::PlayerState::Playing) &&
+          now - p.made_at >= 3.0)
+        why = media::player_state_name(p.state);
+      if (!why.empty())
+        b.item_badge(why.c_str());
+    }
     emit_badge(w);
   }
 
@@ -7175,6 +7238,13 @@ void Runtime::post_input(const InputEvent &ev) {
 
 bool Runtime::key_capture_pending() const { return m_->key_capture_pending(); }
 
+void Runtime::post_pad_press(const std::string &input) {
+  if (input.empty() || !m_->have_key_bindings_.load())
+    return;
+  std::lock_guard<std::mutex> lock(m_->pressed_mutex_);
+  m_->pressed_pads_.push_back(input);
+}
+
 void Runtime::forget_layout() { m_->forget_layout_pending = true; }
 
 void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
@@ -7184,20 +7254,35 @@ void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
 }
 
 void Runtime::Impl::run_key_bindings() {
-  std::vector<std::string> keys;
+  std::vector<std::string> keys, pads;
   {
     std::lock_guard<std::mutex> lock(pressed_mutex_);
     keys.swap(pressed_keys_);
+    pads.swap(pressed_pads_);
   }
   const std::string capture_path = resolve_bind(prefix, kKeyCapture);
   if (!key_capture_pending() && !read_or<std::string>(app, capture_path, "").empty())
     write<std::string>(app, capture_path, ""); // the Keys window closed while it waited
+  const std::string pad_capture = kPadCapture;
+  const auto waiting_pad = [&](std::string *id) {
+    const std::string capture = read_or<std::string>(app, capture_path, "");
+    if (!key_capture_pending() || capture.compare(0, pad_capture.size(), pad_capture) != 0)
+      return false;
+    *id = capture.substr(pad_capture.size());
+    return true;
+  };
   for (const std::string &key : keys) {
     if (key_capture_pending()) {
       const std::string capture = read_or<std::string>(app, capture_path, "");
       const std::string stored = stored_key_name(key);
       if (stored.empty())
         continue; // a key with no name can't be bound: still waiting
+      std::string pad_id;
+      if (waiting_pad(&pad_id)) {
+        if (canonical_key(key) == "escape") // a gamepad Change takes no key, but Escape
+          write<std::string>(app, capture_path, "");
+        continue;
+      }
       if (canonical_key(key) != "escape")
         for (const KeyBinding &b : key_bindings_)
           if (b.id == capture)
@@ -7213,17 +7298,34 @@ void Runtime::Impl::run_key_bindings() {
         queued_events.back().functions = doc_functions;
       }
   }
+  // A gamepad input for the binding whose gamepad Change waits; one pressed otherwise is the
+  // host's.
+  for (const std::string &input : pads) {
+    std::string pad_id;
+    if (!waiting_pad(&pad_id))
+      continue;
+    for (const KeyBinding &b : key_bindings_)
+      if (b.id == pad_id && !b.pad_path.empty())
+        write<std::string>(app, resolve_bind(prefix, b.pad_path), input);
+    write<std::string>(app, capture_path, "");
+  }
   // What the Keys window shows for each binding, written only when it changes.
   const std::string waiting =
       key_capture_pending() ? read_or<std::string>(app, capture_path, "") : std::string();
-  for (const KeyBinding &b : key_bindings_) {
-    const std::string shown =
-        !waiting.empty() && b.id == waiting
-            ? std::string(kKeyPrompt)
-            : read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), "");
-    const std::string path = resolve_bind(prefix, key_shown_path(b));
+  const auto show = [&](const std::string &path, const std::string &shown) {
     if (read_or<std::string>(app, path, std::string(1, '\x01')) != shown) // \x01: not there yet
       write<std::string>(app, path, shown);
+  };
+  for (const KeyBinding &b : key_bindings_) {
+    show(resolve_bind(prefix, key_shown_path(b)),
+         !waiting.empty() && b.id == waiting
+             ? std::string(kKeyPrompt)
+             : read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""));
+    if (!b.pad_path.empty())
+      show(resolve_bind(prefix, pad_shown_path(b)),
+           !waiting.empty() && waiting == pad_capture + b.id
+               ? std::string(kPadPrompt)
+               : read_or<std::string>(app, resolve_bind(prefix, b.pad_path), ""));
   }
 }
 
