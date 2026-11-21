@@ -1549,7 +1549,9 @@ struct ConferenceSession {
     if (driving == 0 && self && entities_)
       target = cvc::ariadne::drive_target(*entities_, cvc::physics::vec3{self[0], self[1], self[2]},
                                           facing_yaw_);
-    if (controls_.fired("interact")) {
+    // A vehicle that is our body (our archetype's, section 18.6): there is no getting out of it.
+    const bool embodied = ride && ride->avatar == pid_;
+    if (controls_.fired("interact") && !embodied) {
       if (driving != 0)
         cvc::ariadne::request_drive(*app_, room_, pid_, 0);
       else if (target != 0)
@@ -1583,7 +1585,7 @@ struct ConferenceSession {
           key + "  Drive " + what, progress,
           cvc::physics::vec3{at.position.x, at.position.y,
                              at.position.z + 0.5 * (e ? e->size[2] : 1.0) + kPromptAbove});
-    } else if (driving != 0 && progress > 0.0 && self) {
+    } else if (driving != 0 && !embodied && progress > 0.0 && self) {
       const double roof = ride ? 0.5 * ride->size[2] : 1.0;
       room_view_->set_prompt(key + "  Get out", progress,
                              cvc::physics::vec3{self[0], self[1], self[2] + roof + kPromptAbove});

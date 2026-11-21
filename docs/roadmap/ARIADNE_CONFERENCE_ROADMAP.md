@@ -1046,7 +1046,10 @@ chosen so each part can later come from the user without changing who decides.
 1. Server looks (§5g).
 2. The energy budget, server policy, and the walker as the first controller (this step).
 3. Server-supplied bodies and controllers a participant picks from the catalog (sizes within the
-   policy; a Jolt vehicle among them).
+   policy; a Jolt vehicle among them). **Vehicles built (2026-11-21, ARIADNE_WORLDS.md §18.6
+   OW6c):** the world's avatar archetypes may be vehicles; a participant picks one beside its look
+   (`participants.<pid>.avatar.archetype`, the Avatar window's Body combo), and the relay spawns it
+   and seats the participant in it. Person bodies that differ by archetype are still to come.
 4. User looks, then user bodies.
 5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
    controller of their choosing.

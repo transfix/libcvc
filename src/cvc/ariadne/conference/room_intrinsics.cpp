@@ -777,6 +777,89 @@ void register_room_intrinsics(cvc::app &app) {
           });
         });
 
+    // (room-archetypes ROOM) -> list of ids: the avatar archetypes the room's world offers
+    // (avatars.archetypes), in its order, the default first; empty until they have arrived. One
+    // may be a vehicle (ARIADNE_WORLDS.md section 18.6). ROOM is a room-join handle or a room-id.
+    se::builtins::register_fn(
+        env, "room-archetypes", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-archetypes: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-archetypes: internal: room-table slot unavailable");
+          if (args.empty())
+            return err("room-archetypes: (room-archetypes ROOM)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          const std::string room_id = rh ? rh->room_id : handle_token(args[0]);
+          std::vector<avatar_archetype> list;
+          read_avatar_archetypes(app, room_id, list);
+          std::vector<se::value_t> ids;
+          for (const avatar_archetype &a : list)
+            ids.push_back(se::value_t(a.id));
+          return se::make_list(std::move(ids));
+        });
+
+    // (room-set-archetype HANDLE ID) -> { ok #t }: the caller asks for avatar archetype ID ("" the
+    // first). The relay rules on it (room-archetype reads its answer); one that is a vehicle is
+    // the caller's body from then on, which it drives.
+    se::builtins::register_fn(
+        env, "room-set-archetype", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-set-archetype: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-set-archetype: internal: room-table slot unavailable");
+          if (args.size() < 2)
+            return err("room-set-archetype: (room-set-archetype HANDLE ID)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err(
+                "room-set-archetype: HANDLE must be a room-join handle (needs the caller's pid)");
+          const std::string id = get_str(&args[1]);
+          if (!id.empty() && !cvc::state::isValidStateName(id))
+            return err("room-set-archetype: ID must be an archetype's id");
+          cvc::ariadne::request_archetype(app, rh->room_id, rh->self_pid, id);
+          return se::make_dict({{"ok", se::value_t(true)}});
+        });
+
+    // (room-archetype HANDLE) -> { archetype "..." vehicle "..." ok #t/#f why "..." }: the
+    // caller's archetype as the relay last ruled (the one asked for until it has; "" before
+    // either: the first), the vehicle archetype it is when it is one ("" a person), and the
+    // relay's answer to the last ask (ok #t until it refuses one).
+    se::builtins::register_fn(
+        env, "room-archetype", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
+          if (!doc)
+            return err("room-archetype: no document scope");
+          room_table *tbl = doc_rooms(doc);
+          if (!tbl)
+            return err("room-archetype: internal: room-table slot unavailable");
+          if (args.empty())
+            return err("room-archetype: (room-archetype HANDLE)");
+          room_handle *rh = tbl->find(handle_token(args[0]));
+          if (!rh)
+            return err("room-archetype: HANDLE must be a room-join handle (needs the caller's pid)");
+          const cvc::ariadne::archetype_status st =
+              cvc::ariadne::read_archetype_status(app, rh->room_id, rh->self_pid);
+          std::string id = st.answered && st.ok
+                               ? st.archetype
+                               : cvc::ariadne::read_requested_archetype(app, rh->room_id,
+                                                                        rh->self_pid);
+          std::vector<avatar_archetype> list;
+          read_avatar_archetypes(app, rh->room_id, list);
+          if (id.empty() && !list.empty())
+            id = list.front().id;
+          std::string vehicle;
+          for (const avatar_archetype &a : list)
+            if (a.id == id)
+              vehicle = a.vehicle;
+          return se::make_dict({
+              {"archetype", se::value_t(id)},
+              {"vehicle", se::value_t(vehicle)},
+              {"ok", se::value_t(!st.answered || st.ok)},
+              {"why", se::value_t(st.why)},
+          });
+        });
+
     // (room-avatar-options ROOM KIND) -> list of labels. KIND is "color" or "accessory"; the
     // labels of what the room's catalog offers (room_avatar.h), in its order, the default first.
     // Empty until the relay's catalog has arrived. ROOM is a room-join handle or a room-id.

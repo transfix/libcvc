@@ -63,6 +63,11 @@ struct avatar_archetype {
   std::string id = "person";
   avatar_body body;
   std::vector<std::string> controllers{"walker@1"}; // controller ids; the first is the avatar's
+  // An avatar that is a vehicle (ARIADNE_WORLDS.md section 18.6, OW6c): the id of one of the
+  // world's vehicle archetypes (world: vehicles: archetypes:). A participant with this archetype
+  // has no body of its own: the server spawns that vehicle for it and it drives it for good. ""
+  // is a person, with `body` and `controllers`.
+  std::string vehicle;
   bool operator==(const avatar_archetype &) const = default;
 };
 
@@ -271,8 +276,12 @@ struct world_rules {
   bool operator==(const world_rules &) const = default;
   const vehicle_archetype *find_vehicle(const std::string &id) const;
 
-  // The archetype every avatar has: the first (the default person when there is none).
+  // The person every avatar's body is: the first archetype that is not a vehicle (the default
+  // person when there is none). A participant whose archetype is a vehicle drives that instead
+  // (holon::set_archetype), and is this person when it gets out of it.
   const avatar_archetype &avatar() const;
+  // An archetype by id; null for none.
+  const avatar_archetype *find_avatar(const std::string &id) const;
   // The avatar's controller: the first its archetype allows, as `controllers` defines it (the
   // default walker@1 when that is missing).
   const avatar_controller &controller() const;
