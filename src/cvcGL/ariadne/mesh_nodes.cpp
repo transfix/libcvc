@@ -48,8 +48,6 @@
 #include <cvc/geometry/fem.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
-#include <cvc/mol/blur.h>
-#include <cvc/mol/molecule.h>
 #include <cvc/geometry/mesh_ops.h>
 #include <cvc/geometry/simplify.h>
 #include <cvc/geometry/skeleton.h>        // mesh_lab's skeleton request
@@ -60,6 +58,8 @@
 #include <cvc/gl/ariadne/mesh_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h> // the isovalue as an editable transfer-function isocontour
+#include <cvc/mol/blur.h>
+#include <cvc/mol/molecule.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h>            // field colours: a transfer function's colour ramp
 #include <cvc/tf/overlay_tasks.h>    // ... the spectrum / tree an editor asks for, on the scheduler
@@ -743,8 +743,13 @@ cvc::geometry molecule_surface(cvc::app &app, const std::string &path, const Sou
       for (std::uint64_t y = 0; y < v.YDim(); ++y)
         for (std::uint64_t x = 0; x < v.XDim(); ++x)
           peak = std::max(peak, v(x, y, z));
-    throw std::runtime_error("the molecule's surface at isovalue " + std::to_string(s.isovalue) +
-                             " is empty: its density peaks at " + std::to_string(peak));
+    const auto text = [](double x) {
+      char b[32];
+      std::snprintf(b, sizeof b, "%.6g", x);
+      return std::string(b);
+    };
+    throw std::runtime_error("the molecule's surface at isovalue " + text(s.isovalue) +
+                             " is empty: its density peaks at " + text(peak));
   }
   return g;
 #else

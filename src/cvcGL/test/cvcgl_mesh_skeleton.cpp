@@ -51,10 +51,10 @@
 #include <cvc/geometry/skeleton.h>
 #include <cvc/geometry/tet_complex.h> // tet_complex_available
 #include <cvc/gl/GeometryNode.h>
-#include <cvc/mol/molecule.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/mol/molecule.h>
 #include <cvc/state/state.h>
 #include <filesystem>
 #include <memory>
@@ -513,17 +513,20 @@ int main() {
 
   // ---- a molecule: PDB entry 1GRL (a GroEL subunit) as a surface, then its skeleton ----
   // A .pdb source is the isosurface of its heavy atoms' blur map (cvc::mol::blur). At the skeleton
-  // lab's settings, a low-resolution map (blobbiness -0.2, 2 Å, isovalue 10), the skeleton's strands
-  // run along the helices: a helix's C-alpha lies near a strand far more often than a coil's.
+  // lab's settings, a low-resolution map (blobbiness -0.2, 2 Å, isovalue 10), the skeleton's
+  // strands run along the helices: a helix's C-alpha lies near a strand far more often than a
+  // coil's.
   {
     cvc::app ma;
     cvc::gl::ariadne::register_cvcgl_extensions(ma);
-    const fs::path molDir = fs::path(CVC_REPO_DIR) / "src" / "cvc" / "tests" / "data" / "mol";
+    const fs::path molDir = fs::path(CVC_REPO_DIR) / "examples" / "data" / "molecules";
     Value mp;
     mp.kind = Value::Kind::Map;
-    for (const auto &kv : std::vector<std::pair<std::string, std::string>>{
-             {"blobbiness", "-0.2"}, {"resolution", "2"}, {"isovalue", "10"},
-             {"target_faces", "4000"}})
+    for (const auto &kv :
+         std::vector<std::pair<std::string, std::string>>{{"blobbiness", "-0.2"},
+                                                          {"resolution", "2"},
+                                                          {"isovalue", "10"},
+                                                          {"target_faces", "4000"}})
       mp.entries.emplace_back(kv.first, scalar(kv.second));
     Lab lab(ma, "mol", molDir, "1grl.pdb", mp);
     const std::size_t surface_tris =
@@ -537,7 +540,8 @@ int main() {
           "source.blobbiness / resolution / isovalue / hydrogens are seeded from the props");
       lab.set(ops + ".request", "decimate skeleton");
       chk(lab.settle(), "the decimate and the skeleton settle");
-      chk(starts(lab.get(sk + ".status"), "done: "), "the skeleton ran: " + lab.get(sk + ".status"));
+      chk(starts(lab.get(sk + ".status"), "done: "),
+          "the skeleton ran: " + lab.get(sk + ".status"));
       const auto strands = lab.part("strands");
       std::size_t helix = 0, helix_near = 0, coil = 0, coil_near = 0;
       if (strands && !strands->const_lines().empty()) {
