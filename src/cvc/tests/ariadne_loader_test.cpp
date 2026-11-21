@@ -4361,9 +4361,10 @@ TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
   cvc::app app;
   namespace fs = std::filesystem;
   const fs::path src = fs::path(__FILE__).parent_path().parent_path();
-  const fs::path doc =
-      src.parent_path().parent_path() / "examples" / "ariadne" / "documents" / "conference_roster.ari";
-  if (!fs::is_regular_file(doc) || !fs::is_regular_file(src / "ariadne" / "components" / "conference.ari"))
+  const fs::path doc = src.parent_path().parent_path() / "examples" / "ariadne" / "documents" /
+                       "conference_roster.ari";
+  if (!fs::is_regular_file(doc) ||
+      !fs::is_regular_file(src / "ariadne" / "components" / "conference.ari"))
     GTEST_SKIP() << "the conference sources are not here";
   {
     ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
@@ -4393,9 +4394,9 @@ TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
   std::vector<std::string> fns;
   for (const FunctionDef &f : r.functions)
     fns.push_back(f.name);
-  for (const char *f : {"conference-step", "conference-join", "conference-media-open",
-                        "conference-name-step", "conference-devices-step",
-                        "conference-avatar-step", "room-users-step", "chat-ui-step"})
+  for (const char *f :
+       {"conference-step", "conference-join", "conference-media-open", "conference-name-step",
+        "conference-devices-step", "conference-avatar-step", "room-users-step", "chat-ui-step"})
     EXPECT_NE(std::find(fns.begin(), fns.end(), f), fns.end()) << "no function " << f;
   EXPECT_NE(r.on_tick_script.find("(conference-step)"), std::string::npos) << r.on_tick_script;
 }

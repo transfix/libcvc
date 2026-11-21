@@ -14,8 +14,6 @@
 // an inproc transport).
 
 #include <algorithm>
-#include <filesystem>
-#include <fstream>
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: the conference library's steps
 #include <cvc/ariadne/ariadne.h>     // Runtime: the avatar verbs' test
 #include <cvc/ariadne/conference/avatar_panel.h>
@@ -23,13 +21,15 @@
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_rules.h> // the policy section
 #include <cvc/ariadne/conference/room_write_gate.h>
-#include <cvc/ariadne/loader.h> // have_yaml
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h> // archetype_status: the body verbs' test
+#include <cvc/ariadne/loader.h>     // have_yaml
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
