@@ -65,6 +65,11 @@ struct room_entity {
   // Its archetype's look; a file's or an asset's path is its file name alone (the relay's own path
   // means nothing to a client, which finds the file its own way).
   vehicle_look look;
+  // Whether a participant may get in (its archetype's drivable:), from within `reach` metres of its
+  // chassis box, and the control scheme it is driven with (car, boat; vehicle_controls).
+  bool drivable = false;
+  double reach = 3.0;
+  std::string controls;
   bool operator==(const room_entity &) const = default;
 };
 

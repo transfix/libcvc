@@ -250,10 +250,41 @@ void avatar_world::drive(const std::string &pid, const avatar_intent &in) {
     return;
   ph::body_state s = _world->state(bid(a.id));
   drive_walker(a, s, in); // the only controller so far (§5k)
+  jump(a, s, in);
   // Upright, facing the intent: a pushed box must not tip over.
   s.rotation = yaw_quat(in.yaw);
   s.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
   _world->set_state(bid(a.id), s);
+}
+
+void avatar_world::jump(avatar &a, ph::body_state &s, const avatar_intent &in) const {
+  const double vj = _jump_speed;
+  // Not while rising, nor while still falling onto the floor (it lands first).
+  if (!in.jump || !(vj > 0.0) || s.linear_velocity.z > 0.5 * vj || s.linear_velocity.z < -1.0)
+    return;
+  // Something under its feet: a ray from a hair below the box (so it misses the avatar's own body)
+  // to kJumpReach under it, enough for the solver's resting gap.
+  constexpr double kJumpReach = 0.08;
+  const double feet = s.position.z - 0.5 * _body.height;
+  const ph::vec3 from{s.position.x, s.position.y, feet - 0.002};
+  const ph::vec3 to{s.position.x, s.position.y, feet - kJumpReach};
+  if (!_world->raycast(from, to))
+    return;
+  const double vz = std::max(0.0, s.linear_velocity.z);
+  if (_energy.enabled) {
+    const bool stopped =
+        _energy.empty == avatar_energy_policy::when_empty::stop && a.energy.exhausted;
+    const double cost = 0.5 * a.mass * (vj * vj - vz * vz);
+    if (stopped || cost > a.energy.reserve)
+      return;
+    a.energy.reserve -= cost;
+    a.energy.ledger.work += cost;
+    a.energy.power += cost / _dt;
+    a.energy.ledger.peak_power = std::max(a.energy.ledger.peak_power, a.energy.power);
+    if (a.energy.reserve <= 0.0)
+      a.energy.exhausted = true;
+  }
+  s.linear_velocity.z = vj;
 }
 
 void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_intent &in) const {

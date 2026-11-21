@@ -53,6 +53,10 @@ class holon;
 //   <participant>.intent.move.{x,y,z}       proposed, CLIENT-written
 //   <participant>.intent.yaw                facing (radians about +Z), CLIENT-written
 //   <participant>.intent.tick               the client tick it applies from (0 = at once)
+//   <participant>.intent.{steer,throttle,brake,jump}  the drive axes and the walker's jump
+//   <participant>.drive                     "<seq>:<entity>", a get-in (0: get out), CLIENT-written
+//   <participant>.driving                   the entity it drives (0: none), SERVER-written
+//   <participant>.drive_status              "<seq> ok" or "<seq> refused: <why>", SERVER-written
 //
 // Scalar leaves (not a typed body_state data() object) are used on purpose: they
 // already journal and replicate through the existing "conf" interest filter with
@@ -111,6 +115,33 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
 bool read_current_intent(cvc::app &app, const std::string &room, const std::string &pid,
                          std::uint64_t proposed_tick, avatar_intent &out);
 
+// GETTING IN AND OUT (ARIADNE_WORLDS.md section 18.6). CLIENT: ask to drive world entity ENTITY
+// (0: get out) as our own PID. Each ask has the next seq (one more than the last in the tree), so
+// asking again after a refusal is a new ask; returns it. The server answers in drive_status and,
+// when it lets us in or out, in driving.
+std::uint64_t request_drive(cvc::app &app, const std::string &room, const std::string &pid,
+                            std::uint64_t entity);
+// The entity PID drives as the server says (0: none).
+std::uint64_t read_driving(cvc::app &app, const std::string &room, const std::string &pid);
+// The server's answer to PID's last ask: its seq (0: none yet), whether it was let in or out, and
+// why not.
+struct drive_status {
+  std::uint64_t seq = 0;
+  bool ok = false;
+  std::string why;
+};
+drive_status read_drive_status(cvc::app &app, const std::string &room, const std::string &pid);
+// SERVER: answer PID's ask, if it has a new one (holon::get_in), and publish what it drives.
+// server_pump does this for every participant.
+void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::string &pid);
+
+// CLIENT: the vehicle a participant standing at FEET, facing FACING (rad from +x), would get into:
+// the nearest drivable entity the playout shows whose chassis box is within its reach, one ahead
+// of it before one behind. 0 for none; OUT_GAP gets its distance (m, feet to box, in plan).
+class entity_playout;
+std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
+                           double facing, double *out_gap = nullptr);
+
 // The holon configuration every conference room uses, on the relay and in every client (they must
 // agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world, under
 // the room's rules -- the body, controller, veto, energy budget and gravity the relay publishes as
@@ -151,9 +182,11 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // nothing to draw) -- drop the ones that left, apply each replicated authoritative .pose (the
 // holon ignores a sample it has already seen, so re-reading an unchanged pose every frame is
 // harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
-// as in server_pump. With physics, both pumps (re)load the holon's statics from the room scene
-// whenever its revision changes, and both take each of the room's rules sections (room_rules.h)
-// whenever its stamp moves (holon::set_physics and the rest).
+// as in server_pump. While the relay says SELF_PID drives a vehicle (driving, section 18.6), its
+// pose is the vehicle's, which it does not predict: it is played out from the relay's samples as a
+// peer is, and predicted again once it is out. With physics, both pumps (re)load the holon's
+// statics from the room scene whenever its revision changes, and both take each of the room's rules
+// sections (room_rules.h) whenever its stamp moves (holon::set_physics and the rest).
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                  double wall_dt = -1.0);
 
