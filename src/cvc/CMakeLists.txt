@@ -173,6 +173,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/geometry/contours.h
   ../../inc/cvc/geometry/contour_intrinsics.h
+  ../../inc/cvc/mol/blur.h
   ../../inc/cvc/mol/molecule.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
@@ -341,6 +342,7 @@ set(SOURCE_FILES
   geometry/contour_formats.cpp
   geometry/contour_intrinsics.cpp
   utility/xml_lite.cpp
+  mol/blur.cpp
   mol/molecule.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
