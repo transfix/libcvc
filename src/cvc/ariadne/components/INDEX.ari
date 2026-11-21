@@ -255,6 +255,29 @@ catalog:
     binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
     for: "the same console without a window, to embed in a document's own window"
     args: { id: py_console }
+  - component: conference
+    file: conference.ari
+    unit: conference
+    binds: "<prefix>.conf.self, cam_token, cam.sel, mic.sel, cam_on, mic_on, name_error, self.video_in, <prefix>.tree.{id}.*"
+    for: "the conference app's My Camera window: your name (refused when taken), your camera, the camera and mic pickers and their on/off"
+    args: { id: mycam, title: My Camera }
+    verbs: [room-join, room-roster, stream-open, stream-capture-camera, stream-capture-audio, stream-set-muted]
+    note: "imports room_users.ari and chat.ari; call (conference-step) from on_tick for the whole app, or its pieces (conference-join, conference-media-open, conference-name-step, conference-devices-step, conference-avatar-step) for some of it"
+  - component: conference_avatar
+    file: conference.ari
+    unit: conference_avatar
+    binds: "<prefix>.avatar.* (the pickers), self.avatar.* (the host's avatar_panel)"
+    for: "the conference app's Avatar window: Colour and Wear from the relay's catalog, the Body (a person, or a vehicle you drive as your body, where the world offers one), your energy budget, ledger and history"
+    args: { id: myavatar, title: Avatar }
+    verbs: [room-set-avatar, room-set-archetype, plot]
+    note: "call (conference-avatar-step) from on_tick, after (conference-join)"
+  - component: conference_peers
+    file: conference.ari
+    unit: conference_peers
+    binds: "<prefix>.{rows}.{i}.{name,cam,video_off} (room_users' rows), <prefix>.tree.cam_<i>.*"
+    for: "a camera window per other participant, titled by their name, repeated over {rows}.count"
+    args: { rows: peer, title: Peer }
+    note: "room_users' (room-users-step ROWS ROOM CHAT) fills the rows it shows"
   - component: room_users
     file: room_users.ari
     unit: room_users
