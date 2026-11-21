@@ -70,6 +70,10 @@ struct vehicle_model_cache; // vehicle_view.h: the models it fits
 // intent carries `yaw`, so the avatar keeps facing it while it walks or strafes.
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
                                              double yaw, double speed);
+// The same from a stick (control_resolver::walk_axes): FORWARD and RIGHT shares in [-1, 1], the
+// walk as fast as the stick is pushed (a full push, or a key, at `speed`; never faster).
+cvc::ariadne::avatar_intent intent_from_axes(double forward, double right, double yaw,
+                                             double speed);
 
 // The camera's heading on a Z-up ground as a yaw (radians about +Z from +X): the view direction
 // (eye -> focal) flattened onto the ground. A camera looking straight down has none: +Y (pi/2).

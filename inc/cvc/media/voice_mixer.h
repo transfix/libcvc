@@ -98,6 +98,16 @@ public:
   // MIN_S.
   void set_delay_floor(double min_s, double start_s);
 
+  // Replace the tunables (a UI's), all of P but for the floor: the least and starting targets stay
+  // at least what set_delay_floor raised them to, and the greatest at least the least. Peers
+  // already known keep their targets, brought within the new least and greatest.
+  void set_params(const params &p);
+
+  // Every peer's target back to start_delay_s, as if it had just joined. A peer holding more than
+  // that and the slack is trimmed down to it at its next pull, cross-faded: the delay drops at
+  // once (a UI's "reset").
+  void reset_targets();
+
   // Append N interleaved samples of PEER's audio, decoded, arriving at NOW. A trailing partial
   // frame is dropped.
   void push(const std::string &peer, const float *samples, std::size_t n, double now);
@@ -147,8 +157,11 @@ private:
   std::size_t samples(double seconds) const;
   void trim(peer &p, std::size_t keep); // _mu held
 
+  void normalize(); // _p's targets in order, over the floor; _mu held (or not yet shared)
+
   int _rate, _channels;
   params _p;
+  double _floor_min = 0.0, _floor_start = 0.0; // set_delay_floor's
   mutable std::mutex _mu;
   std::map<std::string, peer> _peers;
 };
