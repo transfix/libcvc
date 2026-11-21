@@ -42,6 +42,7 @@ requires:
   - room-join                      # the room (arigl registers these when CVC_ARIADNE_RELAY is set)
   - room-roster
   - room-set-avatar                # the Avatar window
+  - room-set-archetype             # its Body picker (a world whose avatars may be vehicles)
   - plot                           # its history graphs
   - chat-post                      # the Chat window (chat.ari; the relay keeps the history)
   - text_view
@@ -173,6 +174,15 @@ windows:
         bind: avatar.accessory
         options: (string.split (state-get "avatar.accessories") "\n")
         visible_when: (not (= (state-get "avatar.accessories") ""))
+      # What you are, where the world offers more than one archetype: a person, or a vehicle you
+      # drive as your body (ARIADNE_WORLDS.md section 18.6).
+      - type: combo
+        label: "Body"
+        bind: avatar.archetype
+        options: (string.split (state-get "avatar.archetypes") "\n")
+        visible_when: (string.contains (state-get "avatar.archetypes") "\n")
+      - text: (state-get "avatar.archetype_note")
+        visible_when: (not (= (state-get "avatar.archetype_note") ""))
       - type: group
         layout: { kind: grid, col_widths: [104, 300] }
         children:
@@ -496,7 +506,23 @@ on_tick: |
                                (state-get "avatar.color") (state-get "avatar.accessory"))
               (state-set "avatar.sent.color" (state-get "avatar.color"))
               (state-set "avatar.sent.accessory" (state-get "avatar.accessory")))
-            #f)))
+            #f))
+        ; the Body picker: the world's archetypes, the one we have shown until we pick another;
+        ; the relay rules on a pick (a vehicle is spawned where we stand) and says why not
+        (set kinds (string.join (room-archetypes (state-get "conf.room")) "\n"))
+        (if (= kinds (state-get "avatar.archetypes")) #f (state-set "avatar.archetypes" kinds))
+        (set body (room-archetype (state-get "room.token")))
+        (if (= (state-get "avatar.sent.archetype") "")
+          (if (= (get-attr body "archetype") "") #f
+            (begin
+              (state-set "avatar.archetype" (get-attr body "archetype"))
+              (state-set "avatar.sent.archetype" (get-attr body "archetype"))))
+          (if (= (state-get "avatar.archetype") (state-get "avatar.sent.archetype")) #f
+            (begin
+              (room-set-archetype (state-get "room.token") (state-get "avatar.archetype"))
+              (state-set "avatar.sent.archetype" (state-get "avatar.archetype")))))
+        (set note (if (get-attr body "ok") "" (str-concat "Not that body: " (get-attr body "why"))))
+        (if (= note (state-get "avatar.archetype_note")) #f (state-set "avatar.archetype_note" note)))
       #f)
     ; ── the Users rows (components/room_users.ari) and the Chat window (components/chat.ari) ──
     (room-users-step "peer" (state-get "conf.room") "chat")

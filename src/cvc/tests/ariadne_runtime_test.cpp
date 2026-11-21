@@ -9694,6 +9694,7 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   m.invert_y = "/cam.settings.invert_pitch";
   m.invert_x = "/cam.settings.invert_yaw";
   m.distance = "/cam.orbit.distance";
+  m.first_person = "/cam.settings.first_person";
   m.note = "Click the scene to start.";
   art.set_host_mouse(m);
   auto &st = cvc::state::instance(app);
@@ -9708,6 +9709,7 @@ TEST(AriadneAppRuntime, ControlsWindowShowsTheHostsMouseSettings) {
   ASSERT_TRUE(mb.saw("begin_window:Controls(closable)")) << "set_host_mouse alone gives the window";
   EXPECT_TRUE(mb.saw("combo:Look=0")) << "drag to look, as the camera has it";
   EXPECT_TRUE(mb.saw("checkbox:Drag the floor to face it")) << "in the host's words";
+  EXPECT_TRUE(mb.saw("checkbox:Mouse look in first person"));
   EXPECT_TRUE(mb.saw("slider_double:Sensitivity"));
   EXPECT_TRUE(mb.saw("checkbox:Invert up/down"));
   EXPECT_TRUE(mb.saw("checkbox:Invert left/right"));
