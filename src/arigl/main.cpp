@@ -1336,11 +1336,11 @@ struct ConferenceSession {
       std::fprintf(stderr, "arigl: room: gamepad %s%s\n", pad_on ? "connected: " : "gone",
                    pad_name_.c_str());
     }
-    controls_.update([&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); },
-                     f.wall_dt,
-                     orbit_mode && pad_on ? cvc::ariadne::control_resolver::pad_fn(
-                                                [&](const std::string &n) { return pad_->input(n); })
-                                          : cvc::ariadne::control_resolver::pad_fn());
+    controls_.update(
+        [&](const std::string &k) { return orbit_mode && cam_->keyHeld(k); }, f.wall_dt,
+        orbit_mode && pad_on ? cvc::ariadne::control_resolver::pad_fn(
+                                   [&](const std::string &n) { return pad_->input(n); })
+                             : cvc::ariadne::control_resolver::pad_fn());
     // The right stick turns the camera about us (look_*): right turns the view right, up looks up.
     double look_x = 0.0, look_y = 0.0;
     controls_.look_axes(look_x, look_y);
@@ -2519,7 +2519,7 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
       for (const std::string &input : pad.pressed())
         rt.app_runtime().runtime().post_pad_press(input);
       conf.gamepad(pad.connected() && !rt.app_runtime().runtime().key_capture_pending() ? &pad
-                                                                                      : nullptr);
+                                                                                        : nullptr);
       for (std::string sig = osSignals.take_trapped(); !sig.empty(); sig = osSignals.take_trapped())
         if (!rt.post_signal(sig, "os")) { // no on_signal: the host's default is to stop
           exit_signal = sig;

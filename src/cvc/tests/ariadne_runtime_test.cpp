@@ -9620,8 +9620,14 @@ TEST(AriadneAppRuntime, KeysWindowRebindsAGamepadInput) {
   MockBackend mb;
   AppRuntime art(app, "ui.docs.d");
   art.set_backend(mb);
-  art.set_host_keys({{"walk_forward", "Walk forward", "Avatar", {"W"}, "", "/av.keys.forward",
-                      {"LeftY-"}, "/av.pad.forward"},
+  art.set_host_keys({{"walk_forward",
+                      "Walk forward",
+                      "Avatar",
+                      {"W"},
+                      "",
+                      "/av.keys.forward",
+                      {"LeftY-"},
+                      "/av.pad.forward"},
                      {"camera_up", "Up", "Camera", {"E"}, "", "/cam.keys.up"}});
   art.load(write_doc("pad_window.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n"));
   auto &st = cvc::state::instance(app);

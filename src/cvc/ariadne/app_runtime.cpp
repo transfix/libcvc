@@ -335,9 +335,9 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
     // Its gamepad's beside, where the host reads one for it: a group of its own (its id scopes
     // its Change, apart from the keys').
     if (!b.pad_path.empty()) {
-      Widget pad = group({text_bound("", pad_shown_path(b)),
-                          button("Change", "(state-set \"" + capture + "\" \"" + kPadCapture +
-                                               b.id + "\")")});
+      Widget pad = group(
+          {text_bound("", pad_shown_path(b)),
+           button("Change", "(state-set \"" + capture + "\" \"" + kPadCapture + b.id + "\")")});
       pad.id = "pad";
       pad.layout.kind = LayoutKind::Grid;
       pad.layout.col_widths = {Track{Unit::Px, 90.0f}, Track{}};
