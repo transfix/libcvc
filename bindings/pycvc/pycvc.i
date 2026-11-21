@@ -4867,6 +4867,10 @@ def register_intrinsics(env, ctx):
 // pycvc.WorldGym: a world document driven by reset, step and observe, headless (L4).
 %include "pycvc_gym.i"
 
+// pycvc.net_engine and the rest of cvc::net: the connection engine, with its callbacks on an
+// asyncio loop (docs/roadmap/ARIADNE_NET_ENGINE.md §2.7). pycvc.ariadne.net is the same names.
+%include "pycvc_net.i"
+
 // pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
 // needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,
 // installed beside this module as _pycvc_ari.py; pycvc_gl.ariadne is the same module.
