@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 // frame_source — a PULL source of frame payloads that a stream's producer thread drives, one frame
 // per tick (roadmap STATE_BINARY_STREAMING.md §"Phase 3 — producers"). It is the abstraction every
@@ -75,6 +76,15 @@ public:
   // the source dropped it. A generator (a tone, a test pattern) makes a frame per tick and keeps
   // the default, false.
   virtual bool more() const { return false; }
+
+  // A source fed from outside its producer's ticks (a browser's AudioWorklet mic, whose blocks
+  // arrive as main-thread messages; cvc/media/web_audio.h) calls READY whenever it may have a
+  // frame, so the producer fills now instead of at its next tick: in a single-threaded browser
+  // build the ticks are a timer, which a hidden tab slows to about one a second. The stream that
+  // runs the source sets READY when it starts the producer and clears it (empty) before it stops
+  // it. READY runs on the caller's thread. The default ignores it, as a source that makes its own
+  // frames per tick can.
+  virtual void set_ready_callback(std::function<void()> ready) { (void)ready; }
 };
 
 // The size a SRC_W x SRC_H frame takes within a BUDGET_W x BUDGET_H budget: its aspect ratio kept,

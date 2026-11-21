@@ -270,6 +270,7 @@ jobs:
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvcGL/wasm \
                    src/cvcGL/test/webgl_state_shadow_test.js \
+                   src/cvcMedia/web src/cvcMedia/test/cvc_audio_worklet_test.js \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -2652,6 +2653,7 @@ jobs:
               state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
               ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
+              net_engine_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
             bench: mt.groups --size t=8 --size groups=8 --size runs=1
@@ -2672,7 +2674,7 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
-        ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
+        net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
         skeleton_test contour_stack_test point_classes_test planar_test tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
@@ -2833,6 +2835,19 @@ jobs:
         state_exec_async_calls_test: OK ] AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher
         stream_test: OK ] Stream.EventsGoToTheSchedulerItWasOpenedWith
         net_ws_client_test: OK ] NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages
+      # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
+      # in every leg: its I/O threads take commands from the test's thread and post events back,
+      # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
+      # run under each sanitizer.
+      SAN_REQUIRED_NET: |
+        net_engine_test: OK ] NetEngineFraming.APausedConnectionSwitchesFramingExactlyAtTheFrame
+        net_engine_test: OK ] NetEngineOutput.SendsAndBroadcastsKeepTheirOrderOnEveryConnection
+        net_engine_test: OK ] NetEngineOutput.AJoinIssuedBeforeABroadcastIncludesTheConnection
+        net_engine_test: OK ] NetEngineGroups.ExcludeLeaveAndCloseLeaveEveryGroup
+        net_engine_test: OK ] NetEngineBackpressure.ASlowReaderClosesPastMaxQueued
+        net_engine_test: OK ] NetEngineClose.AFlushingCloseSendsWhatIsQueuedThenEnds
+        net_engine_test: OK ] NetEngine.StopClosesEveryConnectionAndLaterCommandsDoNothing
+        net_engine_test: OK ] NetEngineFanOut.OneMessageToManyLoopbackReceivers
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
@@ -2937,6 +2952,7 @@ jobs:
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
             ${{ env.SAN_REQUIRED_S1B }}
+            ${{ env.SAN_REQUIRED_NET }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs

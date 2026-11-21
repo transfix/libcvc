@@ -199,7 +199,10 @@ void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
   if (need == 0 || need > channel_->pool().slab_bytes())
     return;
   // Replace any existing producer: stop()+join the old one before dropping its source, so its tick
-  // (which captured the old source) can never run against a freed source.
+  // (which captured the old source) can never run against a freed source. The old source wakes
+  // the old producer no more first (set_ready_callback).
+  if (source_)
+    source_->set_ready_callback({});
   if (producer_)
     producer_->stop();
   producer_.reset();
@@ -235,12 +238,17 @@ void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
         return true;
       },
       hz);
+  // A source fed from outside (a browser's worklet mic) fills as its frames come, not only at the
+  // ticks (frame_source::set_ready_callback; producer_thread::run_now).
+  producer_thread *prod = producer_.get();
+  source_->set_ready_callback([prod] { prod->run_now(); });
   producer_->start();
   // Defensive against a close() that raced in on another thread (the API is owner-thread, so this
   // should never trigger; it keeps a mis-threaded caller from leaving a producer publishing onto an
   // already-closed channel). If close() completed while producer_ was still null it stopped
   // nothing, so stop the one we just started.
   if (closed_.load(std::memory_order_seq_cst)) {
+    source_->set_ready_callback({});
     producer_->stop();
     producer_.reset();
   }
@@ -249,6 +257,8 @@ void stream::start_producer(std::unique_ptr<frame_source> source, double hz) {
 void stream::close() {
   if (closed_.exchange(true))
     return;
+  if (source_)
+    source_->set_ready_callback({}); // it wakes the producer no more
   if (producer_)
     producer_->stop(); // JOIN the producer before the channel/pool it publishes into are torn down
   if (channel_)
