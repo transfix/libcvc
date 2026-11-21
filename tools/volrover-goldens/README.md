@@ -13,7 +13,7 @@ those outputs reproducibly:
    tests read them.
 
 GPL code may be built here, and only here. The libraries that need CGAL (Skeletonization,
-ContourTiler) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
+ContourTiler, PocketTunnel) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
 libcvc, cvcGL or pycvc, and nothing here is installed or packaged.
 
 ```bash
@@ -177,6 +177,70 @@ box, but not the same bytes: the last digits differ, and so does the order of ti
 Its dumbbell differs more, because the cells' memory order is the allocator's: 361 segments, one
 of them not in Linux's 362, and two of Linux's missing. The port contains both platforms'
 dumbbell segments, and its test compares coordinates to 1e-9, so it passes against either set.
+
+## PocketTunnel
+
+PocketTunnel is `src/PocketTunnel`, the pockets, tunnels and voids of a molecular surface
+(docs/roadmap/TEXMOL-F2DOCK-ARISRV-ROADMAP.md §2.2, T5). TexMol carries a copy; the goldens are made
+from VolumeRover's, which is the same at the pinned commit. It needs CGAL, as Skeletonization does
+(`--libs pockettunnel` builds it alone).
+
+- **What is built:** every legacy source but `main.cpp.unused`, two of them from patched copies in
+  the build tree (a patch that does not apply fails the configure):
+  - **`tcocone.cpp`** is Skeletonization's, with the same two `CGAL_assertion()`s whose
+    `has_vertex()` calls fill the indices the code then uses: plain calls, as the port makes them;
+  - **`pocket_tunnel.cpp`** calls the driver's `pocket_tunnel_driver_report()` after
+    `detect_handle()`. `pocket_tunnel_fromsurf()` keeps its triangulation and clusters in locals;
+    the hook reads them, and changes nothing.
+
+  The legacy build's `-DHUGE=1000000` is left out: no source uses it, and it breaks MSVC's own
+  `HUGE`.
+- **What is shimmed:** `shim/cvcraw_geometry/cvcgeom.h`, the points, colours and triangles of the
+  legacy `cvcgeom_t`; and `shim/PEDetection/Timer.h`, which `datastruct.h` includes and does not
+  use.
+- **Inputs:** `inputs/pockettunnel/<case>.pts` (float-exact, as the skeleton's; the legacy entry
+  reads its points as floats) and `<case>.json` (`num_pockets` and `num_tunnels`, VolumeRover2's
+  3 and 3). `make_inputs.py --only pockettunnel` wrote them: a ball with chambers cut out of it,
+  each joined to the outside by narrower necks, sampled on the solid's boundary.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/pockettunnel/`:
+  - `<case>.ptv.txt`: every cluster outside the surface (kind, mouths, volume, cells, maxima), the
+    geometry `pocket_tunnel_fromsurf()` returned (its points with their colours, its triangles,
+    each with the cluster it bounds and its class), and Tight Cocone's marking (the cells it marked
+    outside, the facets it left on the surface); `pockettunnel_driver.cpp` gives the format;
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256.
+
+  `--check` compares a remade `.ptv.txt` by content: each point's colour by its coordinates, the
+  triangles as a set, volumes to within 1e-9.
+
+| Case | Points | What it covers |
+|---|---|---|
+| `pocket` | 1,923 | a chamber with one neck: one pocket |
+| `tunnel` | 2,074 | a chamber with two necks: one tunnel (two mouths) |
+| `three_chambers` | 3,487 | a tunnel and two pockets of different sizes in one ball |
+| `cavity` | 1,873 | a chamber with no neck: Tight Cocone marks it inside, so there is no cluster |
+
+**The legacy result depends on the cells' addresses.** CGAL's facet iterator reports a facet from
+the cell at the lower address, and Tight Cocone's peeling (`create_surface`, `grow_boundary`) is
+greedy: it starts from the first infinite cell it meets and walks in that order. Where its choices
+are close, the cells it marks outside differ with the order. Within one process a second
+triangulation of the same points, placed elsewhere in the heap, can be marked differently: on
+`tunnel`, one run in five marked 33 more cells outside, which made five pockets of one or two
+cells. So the driver runs the legacy entry once a process, and records the marking with the result.
+
+`pocket_tunnel_test` compares the port with these goldens at two levels:
+- **exactly after Tight Cocone** (`MatchesTheLegacyLibraryAfterTightCocone`): given the legacy
+  marking (`pocket_tunnel_marked.h`), the port's own stages (S_max, the mouths, the output) make
+  every cluster with the same kind, mouths, cells and maxima, volumes to 1e-12, every shown
+  triangle with its cluster and class, and every point's colour, on all four cases;
+- **end to end** (`MatchesTheLegacyLibrary`): the port's Tight Cocone walks in tet_complex's
+  spatial order. On `pocket`, `three_chambers` and `cavity` it marks the same cells and the whole
+  result is the legacy's; on `tunnel` the port's tunnel has 3,085 cells to the legacy's 3,083
+  (volume 14.1604 to 14.1590), and the port, like the odd legacy run, finds five pockets of one
+  or two cells.
+  Every cluster of more than a hundred cells is the legacy's to 1% of its cells and volume.
+
+**Platforms:** the goldens were made on Windows with MSVC 2022 and CGAL 6.0.1, and `--check`
+there makes the same files in a new process each time.
 
 ## ContourTiler
 

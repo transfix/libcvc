@@ -29,6 +29,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/geometry/skeleton_intrinsics.h
+  ../../inc/cvc/geometry/pocket_tunnel.h
+  ../../inc/cvc/geometry/pocket_tunnel_params.h
   ../../inc/cvc/geometry/tiler.h
   ../../inc/cvc/geometry/tiler_params.h
   ../../inc/cvc/geometry/tiler_intrinsics.h
@@ -323,16 +325,17 @@ set(SOURCE_FILES
   geometry/fem.cpp
   geometry/tet_complex.cpp
   geometry/exact_predicates.cpp
-  geometry/skeleton/datastruct.cpp
-  geometry/skeleton/init.cpp
-  geometry/skeleton/util.cpp
-  geometry/skeleton/tcocone.cpp
-  geometry/skeleton/rcocone.cpp
+  geometry/cocone/datastruct.cpp
+  geometry/cocone/init.cpp
+  geometry/cocone/util.cpp
+  geometry/cocone/tcocone.cpp
+  geometry/cocone/rcocone.cpp
   geometry/skeleton/medax.cpp
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
   geometry/skeleton/skeleton_intrinsics.cpp
+  geometry/pocket_tunnel/pocket_tunnel.cpp
   geometry/tiler/tile_contours.cpp
   geometry/tiler/tiler_intrinsics.cpp
   geometry/sliced_ldlt.cpp

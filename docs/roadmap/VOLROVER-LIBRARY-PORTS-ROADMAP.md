@@ -886,7 +886,11 @@ outside the unit count, and the slowest 4,096-unit step was 0.4–0.8 ms at 20k�
 and `init.cpp` differ from the copies in TightCocone, PocketTunnel and Curation by 10–25 lines
 each. Port them once, as an internal `cvc::cocone` module on `tet_complex`. A later TightCocone
 port (surface reconstruction from points) and PocketTunnel then reuse it, rather than vendoring a
-fifth copy.
+fifth copy. *Built:* the core is `src/cvc/geometry/cocone/` (`cocone.h`, `datastruct.*`,
+`stepping.h`, `init`, `util`, `tcocone`, `rcocone`), lifted out of `skeleton/` when PocketTunnel came
+to use it (TexMol T5). The skeleton's own stages are in `skeleton/` (`skeleton_stages.h`),
+PocketTunnel's in `pocket_tunnel/`. PocketTunnel's copies of `init.cpp` and `tcocone.cpp` were this
+code; its `util.cpp` added only `cell_volume`, now in the core.
 
 **API sketch** (`inc/cvc/geometry/skeleton.h`)
 
