@@ -563,6 +563,11 @@ public:
   // "trained (<where>, sha256:...)", "weights (<uri>, sha256:...)", "builtin", "builtin: loading
   // <uri>" while weights are on their way, or "builtin: no trained weights (<why>)", which the
   // host's log also gets once.
+  // `.plant` (fleet_plants::text: "jolt", "jolt, kinematic", "0: jolt, kinematic") switches its
+  // plants, its vehicles at rest where they are on the new ones (a bad one is said in
+  // vehicles.status and changes nothing). `.metric` (trained, vehicle, policy) is what it plans
+  // with (D9), and `.plans` what it does now: "trained" (the trainer's vehicle, while weights drive
+  // or are on their way) or "vehicle" (each plant's own); a change makes its navigators again.
   std::vector<std::string> fleets() const;
   // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
   // none (no such fleet or team, or not laid out yet).
