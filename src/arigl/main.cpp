@@ -104,6 +104,7 @@
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
 #include <cvc/ariadne/conference/room_lane.h>       // the fast lane (CVC_ARIADNE_LANE=1)
 #include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
+#include <cvc/ariadne/conference/voice_monitor.h>   // the Audio window: jitter buffers
 #include <cvc/ariadne/holon.h>                 // the client replica of the room holon (avatars, H1)
 #include <cvc/ariadne/holon_sync.h>            // client_pump / propose_intent over the room tree
 #include <cvc/ariadne/stream/frame.h>          // frame_ptr — forward the local camera/mic streams
@@ -829,6 +830,9 @@ struct ConferenceSession {
   // declared before mix_out_, so the output, whose callback reads voice_, goes first.
   static constexpr int kVoiceRate = 48000, kVoiceChannels = 1;
   std::unique_ptr<cvc::voice_mixer> voice_;
+  // The Audio window's data and tuning (cvc://components/audio_buffers.ari): made at setup, so
+  // its settings are there before the first audio; mix_audio steps it.
+  std::unique_ptr<cvc::ariadne::conference::voice_monitor> voice_mon_;
   std::unique_ptr<cvc::gl::playback::audio_output> mix_out_;
   double out_period_s_ = 0.0;     // the output device's buffer (s): audio's latency past voice_
   double next_voice_log_s_ = 0.0; // now_wall_ at or after which the jitter buffers are logged
@@ -971,6 +975,8 @@ struct ConferenceSession {
     pid_ = nodeId;
     prefix_ = prefix;
     room_ = room;
+    voice_mon_ = std::make_unique<cvc::ariadne::conference::voice_monitor>(app, prefix);
+    voice_mon_->describe();
     // Drive the world clock from wall time via the clock driver: live mode so advance() banks wall
     // time. The driver owns the single advance of this app's clock and fires the conference's
     // per-frame steps in order (install_observers); nothing else advances it.
@@ -1898,6 +1904,7 @@ struct ConferenceSession {
       stop_(); // joins the transport reader thread (idempotent: _running.exchange(false))
     // After the readers, which push to it.
     voice_.reset();
+    voice_mon_.reset();
   }
 
   // Stop and join the mic's sender (idempotent): a pop() it is parked in returns once its
@@ -1940,14 +1947,21 @@ struct ConferenceSession {
 
   // The mix's step each frame: hand voice_ each peer's gain, its local volume (the user's slider)
   // times its distance gain in the room (muted: 0, consumed unheard). The output's callback does
-  // the mixing. Every kVoiceLogS, a line per peer heard since the last on how its jitter buffer is
-  // doing.
+  // the mixing. The Audio window's data is sampled (voice_mon_), and its tuning applied. Every
+  // kVoiceLogS, a line per peer heard since the last on how its jitter buffer is doing.
   void mix_audio() {
     if (!voice_)
       return;
     for (const auto &kv : peers_)
       voice_->set_gain(kv.first,
                        kv.second.audio_muted ? 0.0f : kv.second.volume * room_gain(kv.first));
+    if (voice_mon_) { // the Audio window: each voice's buffer sampled, and its tuning applied
+      double ahead_s = 0.0;
+      if (mix_out_ && voice_->rate() > 0 && voice_->channels() > 0)
+        ahead_s = static_cast<double>(mix_out_->queued_bytes()) /
+                  (static_cast<double>(voice_->rate()) * voice_->channels() * sizeof(float));
+      voice_mon_->step(*voice_, steady_s(), out_period_s_, ahead_s);
+    }
     if (now_wall_ < next_voice_log_s_)
       return;
     next_voice_log_s_ = now_wall_ + kVoiceLogS;

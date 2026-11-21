@@ -12682,3 +12682,59 @@ TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
   ASSERT_EQ(mb.runs.size(), 1u);
   EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
 }
+
+// The conference's Audio window (components/audio_buffers.ari): a name, a graph and a line per
+// person in room_users' rows, each reading that person's own media.<pid>.jb.* keys (the host's
+// voice_monitor). The graphs are repeated charts, so their series take the row's index.
+TEST(AriadneComponents, AudioBuffersDrawsARowPerPerson) {
+  struct ChartLog : MockBackend {
+    std::vector<ChartSpec> charts;
+    ChartEvent chart(const char *, const ChartSpec &spec) override {
+      charts.push_back(spec);
+      return {};
+    }
+  };
+  namespace fs = std::filesystem;
+  const fs::path file = fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "components" /
+                        "audio_buffers.ari";
+  if (!fs::exists(file))
+    GTEST_SKIP() << "component sources not found at " << file.string();
+  cvc::app app;
+  Runtime rt(app, "doc");
+  ChartLog be;
+  rt.set_backend(&be);
+  auto &st = cvc::state::instance(app);
+  st("doc.peer.count").value("2");
+  st("doc.peer.0.pid").value("pa");
+  st("doc.peer.0.name").value("Ann");
+  st("doc.peer.1.pid").value("pb");
+  st("doc.peer.1.name").value("Bo");
+  st("doc.media.pa.jb.buffered").value("60,70");
+  st("doc.media.pa.jb.target").value("80,80");
+  st("doc.media.pa.jb.now").value("Ann's line");
+  st("doc.media.pb.jb.buffered").value("100,0,40");
+  st("doc.media.pb.jb.target").value("120,140,140");
+  st("doc.media.pb.jb.now").value("Bo's line");
+  st("doc.audio.window_s").value("30");
+  st("doc.audio.device_ms").value("20");
+  st("doc.audio.ahead_ms").value("60");
+  LoadResult r = load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: " + file.string() +
+                                      "\nwindows:\n  - include: audio_buffers\n"
+                                      "    args: { rows: peer }\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  rt.set_root(std::move(r.root));
+  rt.render();
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  EXPECT_TRUE(be.saw("text_value:=Ann"));
+  EXPECT_TRUE(be.saw("text_value:=Bo"));
+  EXPECT_TRUE(be.saw("text_value:=Ann's line"));
+  EXPECT_TRUE(be.saw("text_value:=Bo's line"));
+  EXPECT_FALSE(be.saw("text_line:No one else is here."));
+  ASSERT_EQ(be.charts.size(), 2u);
+  ASSERT_EQ(be.charts[0].series.size(), 2u);
+  EXPECT_EQ(be.charts[0].series[0].y, (std::vector<double>{60, 70}));
+  EXPECT_EQ(be.charts[0].series[1].y, (std::vector<double>{80, 80}));
+  ASSERT_EQ(be.charts[1].series.size(), 2u);
+  EXPECT_EQ(be.charts[1].series[0].y, (std::vector<double>{100, 0, 40}));
+  EXPECT_EQ(be.charts[1].series[1].line, ChartLine::Dashed);
+}
