@@ -906,6 +906,11 @@ struct WorldVehicles::impl {
     std::string key(const std::string &plant) const { return plant + "/" + start.fleet; }
   };
   std::vector<fleet_group> groups;
+  std::vector<vehicle_start> starts; // every entry spawn_starts was given, in order (starts())
+  // Each fleet's poses as the last publish left them, swapped in whole (std::atomic_store), so
+  // poses() reads them from any thread without a lock, as sim_thread's snapshot is read.
+  using pose_book = std::map<std::string, std::shared_ptr<const fleet_poses>>;
+  std::shared_ptr<const pose_book> book;
   bool hold_placing = false; // spawn() leaves its entity unplaced (a fleet places it laid out)
   std::uint64_t next_id = 1;
   std::uint64_t rev = 0;
@@ -2483,15 +2488,23 @@ struct WorldVehicles::impl {
     }
   }
 
-  // Each fleet's counts: vehicles.fleets.names, and vehicles.fleets.<name>.{count, placed,
-  // arrived, teams, status, seed}.
+  // Each fleet's poses (poses()) and its counts: vehicles.fleets.names, and
+  // vehicles.fleets.<name>.{count, placed, arrived, teams, status, seed, tick, bounds, ...}.
   void publish_groups() {
-    if (vkey.empty() || !root() || groups.empty())
+    if (groups.empty()) {
+      if (std::atomic_load(&book))
+        std::atomic_store(&book, std::shared_ptr<const pose_book>());
       return;
+    }
+    const bool keys = !vkey.empty() && root();
+    auto next = std::make_shared<pose_book>();
+    const std::uint64_t tick = world->tick();
     std::string names;
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
       const fleet_group &g = groups[gi];
       names += (names.empty() ? "" : ",") + g.start.fleet;
+      auto fp = std::make_shared<fleet_poses>();
+      fp->tick = tick;
       int count = 0, placed = 0, arrived = 0;
       for (const entity &e : ents) {
         if (e.group != static_cast<int>(gi))
@@ -2501,12 +2514,34 @@ struct WorldVehicles::impl {
         const int i = index(e);
         if (!f || i < 0)
           continue;
-        ++placed;
         const pose p = pose_of(*f, i);
         if (std::hypot(e.gx - p.position.x, e.gy - p.position.y) < kReach + e.desc.half_extents.x)
           ++arrived;
+        if (placed++ == 0) {
+          fp->min_x = fp->max_x = p.position.x;
+          fp->min_y = fp->max_y = p.position.y;
+        }
+        fp->min_x = std::min(fp->min_x, p.position.x);
+        fp->max_x = std::max(fp->max_x, p.position.x);
+        fp->min_y = std::min(fp->min_y, p.position.y);
+        fp->max_y = std::max(fp->max_y, p.position.y);
+        fp->id.push_back(e.id);
+        fp->x.push_back(static_cast<float>(p.position.x));
+        fp->y.push_back(static_cast<float>(p.position.y));
+        fp->z.push_back(static_cast<float>(p.position.z));
+        fp->yaw.push_back(static_cast<float>(p.yaw));
+        fp->speed.push_back(static_cast<float>(p.speed));
+        fp->team.push_back(static_cast<std::int16_t>(e.rally));
       }
+      const fleet_poses &now = *fp;
+      (*next)[g.start.fleet] = std::move(fp);
+      if (!keys)
+        continue;
       const std::string at = vkey + ".fleets." + g.start.fleet + ".";
+      put(at + "tick", std::to_string(tick));
+      put(at + "bounds", placed ? num(now.min_x) + "," + num(now.min_y) + "," + num(now.max_x) +
+                                      "," + num(now.max_y)
+                                : std::string());
       put(at + "count", std::to_string(count));
       put(at + "placed", std::to_string(placed));
       put(at + "arrived", std::to_string(arrived));
@@ -2521,7 +2556,9 @@ struct WorldVehicles::impl {
       put(at + "planes", std::to_string(planes));
       put(at + "plans", trained_metric(static_cast<int>(gi)) ? "trained" : "vehicle");
     }
-    put(vkey + ".fleets.names", names);
+    if (keys)
+      put(vkey + ".fleets.names", names);
+    std::atomic_store(&book, std::shared_ptr<const pose_book>(std::move(next)));
   }
 
   // Each step of a tick: the dynamic plants' substep, the kinematic boxes a step further along the
@@ -3374,6 +3411,7 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
 std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts,
                                         std::vector<std::string> *warnings) {
   impl &d = *_impl;
+  d.starts.insert(d.starts.end(), starts.begin(), starts.end());
   std::size_t made = 0;
   for (std::size_t i = 0; i < starts.size(); ++i) {
     const vehicle_start &st = starts[i];
@@ -3510,6 +3548,7 @@ void WorldVehicles::clear() {
   for (std::size_t gi = 0; gi < d.groups.size(); ++gi) // the fleets' own navigators go with them
     d.drop_navigators(gi);
   d.groups.clear();
+  d.starts.clear();
   d.posed_count = 0;
   ++d.rev;
   std::lock_guard<std::mutex> lock(d.mu);
@@ -3805,6 +3844,16 @@ std::vector<std::string> WorldVehicles::fleets() const {
     out.push_back(g.start.fleet);
   return out;
 }
+
+std::shared_ptr<const fleet_poses> WorldVehicles::poses(const std::string &fleet) const {
+  const std::shared_ptr<const impl::pose_book> book = std::atomic_load(&_impl->book);
+  if (!book)
+    return nullptr;
+  const auto it = book->find(fleet);
+  return it == book->end() ? nullptr : it->second;
+}
+
+const std::vector<vehicle_start> &WorldVehicles::starts() const { return _impl->starts; }
 
 bool WorldVehicles::rally(const std::string &fleet, int team, double &x, double &y) const {
   for (const impl::fleet_group &g : _impl->groups)

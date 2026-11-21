@@ -377,6 +377,19 @@ struct navigator_params {
   bool stop_at_goal = false, park_hold = false;
 };
 
+// A fleet's vehicles at one world tick (WorldVehicles::poses, FL1): each one's entity id, its
+// chassis's centre (world metres) and heading (rad, 0 along +x, counter-clockwise), its speed
+// along that heading (m/s, negative backing up) and its team (its rally point, -1 none), in the
+// fleet's order, as flat arrays of the same length; and the box they all lie in.
+struct fleet_poses {
+  std::uint64_t tick = 0; // the physics world's step these are of
+  std::vector<std::uint64_t> id;
+  std::vector<float> x, y, z, yaw, speed;
+  std::vector<std::int16_t> team;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0; // all 0 with none placed
+  std::size_t size() const { return id.size(); }
+};
+
 class WorldVehicles {
 public:
   // The vehicles of `world`, under `vehicles_key` (the catalog, the spawn keys), `entities_key`
@@ -574,6 +587,8 @@ public:
   // vehicles.status and changes nothing). `.metric` (trained, vehicle, policy) is what it plans
   // with (D9), and `.plans` what it does now: "trained" (the trainer's vehicle, while weights drive
   // or are on their way) or "vehicle" (each plant's own); a change makes its navigators again.
+  // `.tick` is the physics world's step its keys are of, and `.bounds` the box its placed
+  // vehicles lie in ("min_x,min_y,max_x,max_y", world metres; "" with none placed).
   std::vector<std::string> fleets() const;
   // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
   // none (no such fleet or team, or not laid out yet).
@@ -585,6 +600,15 @@ public:
   // or from the next one. As changing vehicles.fleets.<fleet>.restart.request or
   // reseed.request.
   bool restart_fleet(const std::string &fleet, bool reseed);
+  // Fleet `fleet`'s vehicles as the last publish() left them (fleet_poses), for a view that draws
+  // hundreds without reading state: lock-free, from any thread, the snapshot the caller holds
+  // unchanged while later steps make new ones. Null for a name that is not a fleet's, and before
+  // its first publish.
+  std::shared_ptr<const fleet_poses> poses(const std::string &fleet) const;
+  // The start: entries spawn_starts has been given since the last clear(), in order: after a load,
+  // the document's (a gym keeps them to lay its fleets out again at each reset,
+  // gym_options::fleets).
+  const std::vector<vehicle_start> &starts() const;
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;
