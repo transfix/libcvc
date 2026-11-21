@@ -2147,6 +2147,7 @@ struct Runtime::Impl {
   std::atomic<bool> have_key_bindings_{false};
   std::mutex pressed_mutex_;
   std::vector<std::string> pressed_keys_;
+  std::vector<std::string> pressed_pads_; // post_pad_press, for a gamepad Change
   // The Keys window waits for a key: a Change button named a binding, and the window is open (a
   // capture left over in a closed window is cleared by the next drain).
   bool key_capture_pending() const {
@@ -7237,6 +7238,13 @@ void Runtime::post_input(const InputEvent &ev) {
 
 bool Runtime::key_capture_pending() const { return m_->key_capture_pending(); }
 
+void Runtime::post_pad_press(const std::string &input) {
+  if (input.empty() || !m_->have_key_bindings_.load())
+    return;
+  std::lock_guard<std::mutex> lock(m_->pressed_mutex_);
+  m_->pressed_pads_.push_back(input);
+}
+
 void Runtime::forget_layout() { m_->forget_layout_pending = true; }
 
 void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
@@ -7246,20 +7254,35 @@ void Runtime::set_key_bindings(std::vector<KeyBinding> bindings) {
 }
 
 void Runtime::Impl::run_key_bindings() {
-  std::vector<std::string> keys;
+  std::vector<std::string> keys, pads;
   {
     std::lock_guard<std::mutex> lock(pressed_mutex_);
     keys.swap(pressed_keys_);
+    pads.swap(pressed_pads_);
   }
   const std::string capture_path = resolve_bind(prefix, kKeyCapture);
   if (!key_capture_pending() && !read_or<std::string>(app, capture_path, "").empty())
     write<std::string>(app, capture_path, ""); // the Keys window closed while it waited
+  const std::string pad_capture = kPadCapture;
+  const auto waiting_pad = [&](std::string *id) {
+    const std::string capture = read_or<std::string>(app, capture_path, "");
+    if (!key_capture_pending() || capture.compare(0, pad_capture.size(), pad_capture) != 0)
+      return false;
+    *id = capture.substr(pad_capture.size());
+    return true;
+  };
   for (const std::string &key : keys) {
     if (key_capture_pending()) {
       const std::string capture = read_or<std::string>(app, capture_path, "");
       const std::string stored = stored_key_name(key);
       if (stored.empty())
         continue; // a key with no name can't be bound: still waiting
+      std::string pad_id;
+      if (waiting_pad(&pad_id)) {
+        if (canonical_key(key) == "escape") // a gamepad Change takes no key, but Escape
+          write<std::string>(app, capture_path, "");
+        continue;
+      }
       if (canonical_key(key) != "escape")
         for (const KeyBinding &b : key_bindings_)
           if (b.id == capture)
@@ -7275,17 +7298,34 @@ void Runtime::Impl::run_key_bindings() {
         queued_events.back().functions = doc_functions;
       }
   }
+  // A gamepad input for the binding whose gamepad Change waits; one pressed otherwise is the
+  // host's.
+  for (const std::string &input : pads) {
+    std::string pad_id;
+    if (!waiting_pad(&pad_id))
+      continue;
+    for (const KeyBinding &b : key_bindings_)
+      if (b.id == pad_id && !b.pad_path.empty())
+        write<std::string>(app, resolve_bind(prefix, b.pad_path), input);
+    write<std::string>(app, capture_path, "");
+  }
   // What the Keys window shows for each binding, written only when it changes.
   const std::string waiting =
       key_capture_pending() ? read_or<std::string>(app, capture_path, "") : std::string();
-  for (const KeyBinding &b : key_bindings_) {
-    const std::string shown =
-        !waiting.empty() && b.id == waiting
-            ? std::string(kKeyPrompt)
-            : read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), "");
-    const std::string path = resolve_bind(prefix, key_shown_path(b));
+  const auto show = [&](const std::string &path, const std::string &shown) {
     if (read_or<std::string>(app, path, std::string(1, '\x01')) != shown) // \x01: not there yet
       write<std::string>(app, path, shown);
+  };
+  for (const KeyBinding &b : key_bindings_) {
+    show(resolve_bind(prefix, key_shown_path(b)),
+         !waiting.empty() && b.id == waiting
+             ? std::string(kKeyPrompt)
+             : read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""));
+    if (!b.pad_path.empty())
+      show(resolve_bind(prefix, pad_shown_path(b)),
+           !waiting.empty() && waiting == pad_capture + b.id
+               ? std::string(kPadPrompt)
+               : read_or<std::string>(app, resolve_bind(prefix, b.pad_path), ""));
   }
 }
 

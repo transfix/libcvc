@@ -179,6 +179,10 @@ public:
   // The Keys window is waiting for a key: a host that would use keys itself first (a terminal's
   // focus keys) hands them to post_input instead.
   bool key_capture_pending() const;
+  // A gamepad input newly pressed, by its name (controls.h: "A", "RT", "LeftY-", ...): the new
+  // one for the binding whose gamepad Change waits (KeyBinding::pad_path), and nothing otherwise
+  // (a host reads its gamepad for itself). Taken at the next drain(), as a key is.
+  void post_pad_press(const std::string &input);
 
   // The next tree is a different document (AppRuntime::load): each window's first frame from the
   // next render() on ignores the geometry persisted at tree.<id>.geometry -- the last document's,

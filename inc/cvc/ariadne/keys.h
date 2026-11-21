@@ -27,6 +27,11 @@ struct KeyBinding {
   std::string on;   // what a press does: a program or a host event ("" = something else reads the
                     // keys, as the camera reads its own)
   std::string path; // the state key holding its keys ("" = keys.<id>; a leading '/' is absolute)
+  // Its gamepad inputs too, where the host reads a gamepad for it (controls.h names them: "A",
+  // "RT", "LeftY-", ...): their defaults, and the state key holding them, as `path` is ("" = no
+  // gamepad column in the Controls window).
+  std::vector<std::string> pad;
+  std::string pad_path;
 };
 
 // The pointer and camera settings a host's camera reads, for the Controls window to change beside
@@ -73,6 +78,15 @@ inline std::string key_shown_path(const KeyBinding &b) {
   return std::string("tree.") + kKeysWindow + ".shown." + b.id;
 }
 inline constexpr const char *kKeyPrompt = "press a key...";
+
+// A binding's gamepad column the same way: shown at pad_shown_path, and its Change names the
+// binding in kKeyCapture as kPadCapture + its id ("pad:camera_forward"), the next gamepad input
+// pressed (Runtime::post_pad_press) its new one. Escape keeps the old one here too.
+inline constexpr const char *kPadCapture = "pad:";
+inline std::string pad_shown_path(const KeyBinding &b) {
+  return std::string("tree.") + kKeysWindow + ".pad_shown." + b.id;
+}
+inline constexpr const char *kPadPrompt = "press a button...";
 
 // A binding's keys as stored ("Right, PageDown"), and back. The comma key is stored as "Comma"
 // (stored_key_name), so a comma always separates.
