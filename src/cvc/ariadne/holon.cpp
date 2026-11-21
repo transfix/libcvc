@@ -1184,9 +1184,9 @@ void holon::world_step_client(const std::string &self, const avatar_intent &in,
   for (const auto &kv : _held) {
     const held &e = kv.second;
     const double t = static_cast<double>(e.steps) * _clock.fixed_dt();
-    _world->hold_obstacle(kv.first, e.half_extents,
-                          cvc::physics::pose{e.at.position + e.at.linear_velocity * t,
-                                             e.at.rotation});
+    _world->hold_obstacle(
+        kv.first, e.half_extents,
+        cvc::physics::pose{e.at.position + e.at.linear_velocity * t, e.at.rotation});
   }
   _world->drive(self, veto(in, _applied.policy));
   _world->set_time(double(tick) * _clock.fixed_dt()); // the wind's gusts at the tick's time
