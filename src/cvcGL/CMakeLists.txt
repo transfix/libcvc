@@ -1173,6 +1173,8 @@ add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
 # them).
 add_executable(cvcgl_mesh_skeleton test/cvcgl_mesh_skeleton.cpp)
 target_link_libraries(cvcgl_mesh_skeleton PRIVATE cvcGL)
+# Its molecule case reads PDB entry 1GRL from the source tree.
+target_compile_definitions(cvcgl_mesh_skeleton PRIVATE CVC_REPO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../..")
 add_test(NAME cvcgl_mesh_skeleton COMMAND cvcgl_mesh_skeleton)
 add_test(NAME cvcgl_mesh_skeleton_cooperative COMMAND cvcgl_mesh_skeleton)
 set_tests_properties(cvcgl_mesh_skeleton_cooperative PROPERTIES
