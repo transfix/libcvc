@@ -391,6 +391,15 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /orthoslicer: 32 planes, slice view down y/.test(l)),
   });
+  // The volume_grid component (VolumeGridRover) over a volume_grid node: its document clicks once,
+  // as a slice view writes a pick, and prints a line once the node has marked the voxel.
+  cases.push({
+    name: 'a volume_grid node and its component run and mark a point (VolumeGridRover)',
+    url: `${ORIGIN}/apps/app/?src=volume_grid.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /volume_grid: 32 32 32, slice view down y, added \(10, 15, 12\) to seeds/.test(l)),
+  });
   // mesh_lab's skeleton (P2): the bunny decimated, then skeletonized a slice at a time on the
   // single-threaded page; its document prints the counts once the skeleton is drawn (or the error,
   // which fails the case: a page built without Shewchuk's predicates, say).
