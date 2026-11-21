@@ -38,6 +38,8 @@
 namespace cvc {
 namespace ariadne {
 
+class SceneWorld;
+
 // ----------------
 // cvc::ariadne::holon (H1 slice 3)
 // ----------------
@@ -233,6 +235,22 @@ public:
   // has the backend).
   bool physics() const noexcept { return _world != nullptr; }
 
+  // ONE WORLD (ARIADNE_WORLDS.md section 18.2). SERVER with physics: run WORLD -- a server
+  // document's SceneWorld, its statics, vehicles and other bodies -- as this holon's one physics
+  // world. The avatars move into it, where they stood, and leave the holon's own world; from then
+  // on WORLD steps on this holon's clock (SceneWorld::follow from the holon's step), with each
+  // avatar driven just before each of its steps, so a car shoves an avatar and an avatar stops what
+  // it is heavy enough to stop. The room's statics (set_statics) are kept but not used: the
+  // scene's bodies are the statics. Its host stops stepping WORLD itself
+  // (AppRuntime::set_world_external). WORLD's step must be the holon's quantum. If its owner
+  // replaces its physics world (a restart), the avatars follow, from where they were last.
+  //
+  // Null detaches: the avatars go back to a world of the holon's own, with the room's statics.
+  // False (with WHY) on a client, without physics, or for a world on another step; the holon is
+  // then as it was. WORLD must outlive the holon, or be detached first.
+  bool attach_world(SceneWorld *world, std::string *why = nullptr);
+  SceneWorld *attached_world() const noexcept { return _scene; }
+
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
   // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
   // set_statics with a written stamp (there is nothing to stand on).
@@ -370,6 +388,9 @@ public:
 private:
   struct participant {
     bool local = false;
+    // SERVER with a world attached: its feet after the last step, where it goes back in if the
+    // world is replaced.
+    cvc::physics::body_state last_feet;
     // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
     bool pose_known = true;
     avatar_sim sim;       // server authoritative integrator
@@ -508,6 +529,10 @@ private:
   bool _have_reading = false;           // CLIENT: _newest_reading holds a tick
   std::uint64_t _newest_reading = 0;    // CLIENT: the newest tick taken as a clock reading
   section_stamp _statics;               // the room scene the statics came from
+  std::vector<avatar_static> _statics_list; // ... and the statics themselves (for a detach)
+  SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
+  const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
+  void scene_step();                        // SERVER with a world attached: the due steps
 };
 
 } // namespace ariadne

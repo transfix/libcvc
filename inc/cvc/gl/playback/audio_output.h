@@ -24,8 +24,10 @@ namespace playback {
 using cvc::media::playback::audio_output;
 using cvc::media::playback::audio_output_open;
 using cvc::media::playback::audio_output_spec;
+using cvc::media::playback::audio_pull_fn;
 using cvc::media::playback::list_audio_playback_devices;
 using cvc::media::playback::open_audio_output;
+using cvc::media::playback::open_audio_output_pull;
 
 } // namespace playback
 } // namespace gl

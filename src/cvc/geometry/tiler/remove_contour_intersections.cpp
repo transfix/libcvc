@@ -123,18 +123,22 @@ void diffed_contours(const list<Polygon_with_holes_2> &polygons, const Contour::
 
 // Takes two lists of contours.  Each contour in one list will be differenced with
 // each contour in the other list.  The changing map will be updated accordingly.
-template <typename InputIterator>
-void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
-                        boost::unordered_map<Contour_handle, list<Contour_handle>> &changing,
-                        Logger &logger) {
+//
+// A pair a unit, a difference charged by its two contours' vertices. `initial`, `changing` and
+// `logger` must outlive the task.
+step_task
+remove_differences_steps(const list<pair<Contour_handle, Contour_handle>> &initial,
+                         boost::unordered_map<Contour_handle, list<Contour_handle>> &changing,
+                         Logger &logger) {
 
   typedef pair<Contour_handle, Contour_handle> Pair;
-  deque<Pair> pairs(pairs_begin, pairs_end);
+  deque<Pair> pairs(initial.begin(), initial.end());
   while (!pairs.empty()) {
     Pair cpair = pairs.front();
     pairs.pop_front();
     Contour_handle p = cpair.first;
     Contour_handle q = cpair.second;
+    TILER_UNITS(1);
 
     if (!p || !q)
       continue;
@@ -184,6 +188,7 @@ void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
 
       diffed_contours(pdiff, p->info(), logger, back_inserter(changing[p]));
       diffed_contours(qdiff, q->info(), logger, back_inserter(changing[q]));
+      TILER_UNITS(boolean_units(p->polygon().size() + q->polygon().size()));
     }
   }
 }
@@ -191,13 +196,22 @@ void remove_differences(InputIterator pairs_begin, InputIterator pairs_end,
 template <typename Contour_iter, typename Out_iter>
 void remove_contour_intersections(Contour_iter begin, Contour_iter end, Number_type delta,
                                   Out_iter out, tiler_context &ctx) {
+  const vector<Contour_handle> in(begin, end);
+  list<Contour_handle> result;
+  run_to_end(remove_contour_intersections_steps(in, delta, result, ctx));
+  for (const Contour_handle &c : result)
+    *out++ = c;
+}
+
+step_task remove_contour_intersections_steps(const vector<Contour_handle> &in, Number_type delta,
+                                             list<Contour_handle> &out, tiler_context &ctx) {
   Logger logger = ctx.logger("tiler.remove_contour_intersections");
 
   Number_type delta2 = delta / 2.0;
 
   // This must be a list because we'll be inserting and deleting a lot
   list<Contour_handle> contours;
-  for (Contour_iter it = begin; it != end; ++it) {
+  for (vector<Contour_handle>::const_iterator it = in.begin(); it != in.end(); ++it) {
     if (!(*it)->is_counterclockwise_oriented()) {
       throw logic_error("Polygon is not counter clockwise!");
     }
@@ -215,6 +229,7 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end, Number_t
       throw logic_error("Component = " + c->info().object_name() + "  " + e.what());
     }
     contours.push_back(c);
+    TILER_UNITS(offset_units((*it)->polygon().size()));
   }
 
   typedef list<Contour_handle>::iterator Iter;
@@ -226,12 +241,19 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end, Number_t
   boost::unordered_map<Contour_handle, list<Contour_handle>> changing;
 
   list<pair<Contour_handle, Contour_handle>> pairs;
-  get_intersecting_pairs(contours.begin(), contours.end(), back_inserter(pairs));
-  remove_differences(pairs.begin(), pairs.end(), changing, logger);
+  {
+    std::size_t vertices = 0;
+    for (const auto &c : contours)
+      vertices += c->polygon().size();
+    get_intersecting_pairs(contours.begin(), contours.end(), back_inserter(pairs));
+    TILER_UNITS(sweep_units(vertices));
+  }
+  SK_RUN(remove_differences_steps(pairs, changing, logger));
 
   list<Contour_handle> temp;
   for (const auto &c : contours) {
     get_current_contours(changing, c, back_inserter(temp));
+    TILER_UNITS(1);
 
     // debug
     if (c->info().name() == "a100") {
@@ -282,11 +304,12 @@ void remove_contour_intersections(Contour_iter begin, Contour_iter end, Number_t
                                   << "  Polygon = " << pp(p));
           // throw logic_error("Polygon is not simple!");
         } else {
-          *out++ = Contour::create(p, c->info());
+          out.push_back(Contour::create(p, c->info()));
           // *out++ = c;
         }
       }
     }
+    TILER_UNITS(offset_units(c->polygon().size()));
   }
 }
 

@@ -40,6 +40,7 @@
 //   }
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -79,6 +80,11 @@ public:
   // to one device-buffer period, tens of ms) that SDL has already pulled into the hardware mixing
   // buffer may still play out — SDL exposes no stronger synchronous stop for a device-bound stream.
   virtual void flush() = 0;
+
+  // How much audio the device takes at a time, in seconds: its buffer, about 43 ms in a browser
+  // (SDL's Web Audio backend) and around 10 ms natively. 0 when unknown. A jitter buffer feeding
+  // the device holds at least this much, or it runs dry on every take.
+  virtual double device_period_s() const { return 0.0; }
 };
 
 // The outcome of open_audio_output(): the sink plus the format it plays (equal to the requested
@@ -98,6 +104,19 @@ struct audio_output_open {
 // call them on the SDL MAIN thread. play(), queued_bytes(), and flush() use SDL stream calls
 // documented safe from any thread, so the app may pump them from its render/consumer loop.
 audio_output_open open_audio_output(const audio_output_spec &spec = {});
+
+// The device asking a pull-mode output (open_audio_output_pull) for audio: write FRAMES frames of
+// interleaved f32 (the opened channels) into OUT, silence included.
+using audio_pull_fn = std::function<void(float *out, std::size_t frames)>;
+
+// Open a playback device per `spec` that PULLS its audio: SDL calls FILL each time the device needs
+// more, with just what it needs, so a mixer behind it runs at the device's pace rather than the
+// app's frame rate (a voice mixer's jitter buffers then run dry only when the audio really is
+// late). FILL runs on SDL's audio thread natively, and in the page's audio callback on the main
+// thread (between frames) in a single-threaded browser build. It must not block for long, and
+// whatever it uses must outlive the sink: destroying the sink stops the callbacks first. play()
+// still works and queues ahead of FILL. Empty result as for open_audio_output.
+audio_output_open open_audio_output_pull(const audio_output_spec &spec, audio_pull_fn fill);
 
 // Human-readable names of the available playback devices (index aligns with
 // audio_output_spec::device_index). Empty when SDL is unavailable or none is present. Call on the
