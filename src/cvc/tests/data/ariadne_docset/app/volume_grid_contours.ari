@@ -13,18 +13,26 @@ data:
     params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
 import:
   - cvc://components/volume_grid.ari
-init: |
-  (begin (state-set "graphics.root.children.grid.grid.request" "trace 0 3 27 2")
-         (state-set "vgc.step" "0"))
-# The clicks name voxels (i, j on plane 16), as a slice view's pick inside the volume does; the
-# fourth lands on the first point and closes the curve. They start once the tile is done (bunny's
-# row counts its triangles), each object's curves then drawn into `drawn` (object 1).
+init: (state-set "vgc.step" "-1")
+# Step -1 asks for the trace once the grid has the volume (not in init:, which may run before the
+# node is up). The clicks name voxels (i, j on plane 16), as a slice view's pick inside the volume
+# does; the fourth lands on the first point and closes the curve. They start once the tile is done
+# (bunny's row counts its triangles), each object's curves then drawn into `drawn` (object 1). A
+# `vgc:` line follows the step, the tile and the node's status, so a stuck run shows where.
 on_tick: |
   (let ((g "graphics.root.children.grid.grid.")
         (step (int (state-get "vgc.step")))
-        (tris (state-get "graphics.root.children.grid.grid.objects.0.triangles")))
-    (if (and (< step 8) (!= tris "") (!= tris "-")
-             (= (state-get (str-concat g "info.dims")) "32 32 32"))
+        (tris (state-get "graphics.root.children.grid.grid.objects.0.triangles"))
+        (dims (state-get "graphics.root.children.grid.grid.info.dims")))
+    (let ((now (str-concat (str step) " | " dims " | " (state-get (str-concat g "tile.status"))
+                           " | " tris " | " (state-get (str-concat g "status")))))
+      (if (!= now (state-get "vgc.seen"))
+          (begin (print (str-concat "vgc: " now)) (state-set "vgc.seen" now))))
+    (if (and (= step -1) (= dims "32 32 32"))
+        (begin
+          (state-set (str-concat g "request") "trace 0 3 27 2")
+          (state-set "vgc.step" "0")))
+    (if (and (>= step 0) (< step 8) (!= tris "") (!= tris "-") (= dims "32 32 32"))
         (let ((p (nth (list (list 8 8) (list 24 8) (list 16 24) (list 8 8)) (int (/ step 2)))))
           (state-set (str-concat g "objects.current") "1")
           (state-set (str-concat g "pick.phase") (if (= (% step 2) 0) "down" "up"))
