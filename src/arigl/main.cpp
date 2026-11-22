@@ -1338,8 +1338,9 @@ struct ConferenceSession {
     if (!active || !driver_ || !app_)
       return;
     holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client,
-                                                   cvc::ariadne::room_holon_config());
-    entities_ = std::make_unique<cvc::ariadne::entity_playout>(cvc::ariadne::room_holon_config());
+                                                   cvc::ariadne::room_holon_config(*app_, room_));
+    entities_ = std::make_unique<cvc::ariadne::entity_playout>(
+        cvc::ariadne::room_holon_config(*app_, room_));
     set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
@@ -1370,9 +1371,30 @@ struct ConferenceSession {
                                 [this](const cvc::clock_driver::clock_frame &f) { step_room(f); });
   }
 
+  // Our holon at the room's rate (ARIADNE_WORLDS.md section 18.9). The relay publishes the rate
+  // its world runs at (conf.rooms.<room>.clock), and a holon cannot change its quantum in place
+  // (every tick would mean another time), so ours is built again at it: when the room's tree
+  // first brings a rate other than the 120 Hz it was built at, or a relay restarts at another.
+  // The roster puts everyone back in it at the next pump, and the stream's next entries their
+  // poses; our lead is kept in seconds.
+  void follow_room_clock() {
+    if (cvc::ariadne::on_room_clock(*holon_, *app_, room_))
+      return;
+    const double lead_s = static_cast<double>(holon_->lead_ticks()) * holon_->clock().fixed_dt();
+    const cvc::ariadne::holon_config cfg = cvc::ariadne::room_holon_config(*app_, room_);
+    holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client, cfg);
+    entities_ = std::make_unique<cvc::ariadne::entity_playout>(cfg);
+    holon_->set_lead_ticks(static_cast<std::uint64_t>(std::ceil(lead_s / cfg.clock.fixed_dt)));
+    proposed_tick_ = 0; // a stamp on the old clock
+    logged_realigns_ = 0;
+    std::fprintf(stderr, "arigl: room: the relay runs the world at %.0f Hz; our holon follows\n",
+                 1.0 / cfg.clock.fixed_dt);
+  }
+
   void step_room(const cvc::clock_driver::clock_frame &f) {
     if (!holon_ || !room_view_ || !cam_)
       return;
+    follow_room_clock();
     const bool look =
         cam_->mouseLookEnabled() && cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
     // A click on the scene (not one the UI took) turns us to face the ground point under it, and
@@ -1545,9 +1567,20 @@ struct ConferenceSession {
       cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap, entities_.get());
     for (const auto &[tick, samples] : lane_samples) // decoded (and acked) on the pose lane
       cvc::ariadne::apply_pose_samples(*holon_, samples, tick, entities_.get());
-    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    // The entities first: client_pump holds each where it is shown this frame, so the walk we
+    // predict meets the vehicles we see (ARIADNE_WORLDS.md section 18.5).
     if (entities_)
       entities_->pump(*app_, room_, f.wall_dt);
+    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get());
+    // The vehicle we drive is drawn where we predict it (section 18.5, OW5b), not a round trip
+    // behind our keys where its samples put it.
+    if (entities_) {
+      const std::uint64_t driving = cvc::ariadne::read_driving(*app_, room_, pid_);
+      if (driving != 0 && holon_->predicts_vehicle(pid_))
+        entities_->show_predicted(driving, holon_->display_pose(pid_));
+      else
+        entities_->show_predicted(0, cvc::physics::pose{});
+    }
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())
       avatar_panel_.publish(*app_, prefix_);

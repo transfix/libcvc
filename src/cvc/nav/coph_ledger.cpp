@@ -129,6 +129,15 @@ void coph_ledger::refresh_obstacles() {
   }
 }
 
+void coph_ledger::commit(const std::vector<std::vector<double>> &weights, std::int64_t version) {
+  if (weights.size() != stages_.size())
+    throw std::invalid_argument("coph_ledger::commit: one weight list per kept stage");
+  for (std::size_t k = 0; k < stages_.size(); ++k) {
+    stages_[k].weights = weights[k];
+    stages_[k].version = version;
+  }
+}
+
 bool coph_ledger::advance(const coph_state &x, std::int64_t version) {
   const coph_stage &s = stages_.back();
   const coph_vec2 size{cfg_.stage_width, cfg_.stage_height};

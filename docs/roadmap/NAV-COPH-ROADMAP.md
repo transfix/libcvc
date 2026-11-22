@@ -437,6 +437,28 @@ Where the code differs from the bullets below:
 
 ### 4.5 The fleet driver (C5)
 
+**Landed in part 1:** `inc/cvc/nav/coph_agent.h` and `coph_fleet.h`, tested against G12 by
+`nav_coph_fleet_test`. G12 comes from GRL-SNAM's `grl_snam.tools.coph_golden_episode`: the
+demos' runner with two `CrossingLearner` agents for 60 ticks of the crossing, communication on
+(CVC-Lab/GRL-SNAM#202).
+- **Results on Windows.** Every decision matches: samples, the routed controls with their
+  waypoints and route changes, the updates and their attempts, the events and the geometry
+  events. Positions and forces agree within 2.8e-16, against an allowance of 1e-6.
+- **`coph_agent`** is the demos' whole learner, over C1–C4:
+  - observe follows `navigation.observe_geometry`'s store, MazeLearner's geometry reports and
+    TerrainLearner's expiries;
+  - advance follows MazeLearner;
+  - the action is the routed control in the live navigation context;
+  - the update follows CooperativeLearner's diagnostic controls and TerrainLearner's own anchors.
+- **`coph_fleet`** is the runner's boundary schedule over a `coph_channel`. `coph_crossing_world`
+  is the crossing demo's world, and `run()` drives a fleet through it.
+- **Without the Python, past G12.** Run to the end of the crossing (at most 2,000 ticks, with
+  the fleet's own draws), both agents reach their goals with no hit. Agent 0 takes 92.0 s, the
+  demo's reciprocal finish time. Each energy account's residual stays at 7e-15 against 7.9 J of
+  work.
+- **Next, part 2:** the vehicle driver below and the `plant_ledger` items (D11), with the
+  byte-unchanged runs without a fleet.
+
 `coph_fleet` lives outside `sim_world`, as `route_follower` does (D10). Before each `step()`, it:
 - reads each attached agent's pose, heading and speed;
 - scales them (§3.3.1);

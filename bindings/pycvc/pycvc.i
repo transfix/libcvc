@@ -1441,6 +1441,7 @@ struct pycvc_py_conversion {
 %include "pycvc_segmentation.i"
 %include "pycvc_tiler.i"
 %include "pycvc_volume_slice.i"
+%include "pycvc_volume_grid_contours.i" // before volume_grid.i: its session holds contours
 %include "pycvc_volume_grid.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────

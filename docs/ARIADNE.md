@@ -2166,7 +2166,8 @@ scene:
     `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
     power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named.
+    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named
+    (a summary fleet's one line for the vehicles that have no keys, as in `entities.summary`).
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
@@ -2303,7 +2304,8 @@ scene:
     - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
-      `entities.count` counts them all. `keys: all` writes every vehicle's.
+      `entities.count` counts them all. The others share a line in `entities.summary` and in
+      `physics.stats.vehicles`. `keys: all` writes every vehicle's.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
@@ -2569,7 +2571,8 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 | `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload`, `skeleton`, `stop` (§5.5); several separated by spaces run in order, as in `load smooth` or `decimate skeleton` | — |
 | `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
-| `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source: { file }` |
+| `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in). A molecule file (`.pdb`, `.ent`, `.pqr`, `.xyzr`; `cvc::mol`) is read as atoms, and its surface is the isosurface of its blur map, as the next row says | `source: { file }` |
+| `source.blobbiness`, `source.resolution`, `source.isovalue`, `source.hydrogens` | a molecule file's surface: its atoms blurred (`cvc::mol::blur`, TexMol's GOABlur: each atom adds exp(B (r²/R² − 1)), B the blobbiness, negative) on a grid of this spacing in Å, then the isosurface at `isovalue`; hydrogens left out unless `source.hydrogens`. The defaults (−2.3442, 1, 1) are TexMol's, a surface near the atoms' van der Waals spheres; a blobbiness nearer 0 and a higher isovalue give a low-resolution map's surface, where a helix reads as a rod (the skeleton lab uses −0.2, 2 Å, 10) | `blobbiness`, `resolution`, `isovalue`, `hydrogens` |
 | `source.up`, `source.flip`, `source.height` | the `fit:` `load` applies: up axis `x`/`y`/`z`, upside down, height (0 = no fit) | `fit:` |
 | `smooth.method` | `cotan` (implicit) / `uniform` / `taubin` | `smooth_method` |
 | `smooth.iterations`, `smooth.lambda`, `smooth.fix_boundary` | `cvc::smooth_params` | `smooth_iterations`, `smooth_lambda`, `fix_boundary` |
@@ -2626,8 +2629,11 @@ clears it. The children are tagged `skeleton` and the node's own surface `surfac
 node's own tags (below, Tags), so a viewport with `show: [skeleton]` shows the skeleton alone and
 one with `hide: [surface]` shows a mesh_lab without its surface. The skeleton needs Shewchuk's
 predicates (`CVC_WITH_SHEWCHUK`); without them `skeleton.status` reports skeletonize's error.
-[`skeleton_lab.ari`](../examples/ariadne/documents/skeleton_lab.ari) is the demo
-(`cvcgl_mesh_skeleton`, `cvcgl_ariadne_views`, the `skeleton` golden).
+[`skeleton_lab.ari`](../examples/ariadne/documents/skeleton_lab.ari) is the demo: the skeleton
+of a protein's surface, PDB entry 1GRL (a GroEL subunit) read and blurred into a low-resolution
+map (`source.blobbiness` -0.2, 2 Å, isovalue 10), whose strands run along its helices
+(`cvcgl_mesh_skeleton`, `cvcgl_ariadne_views`, the `skeleton` golden on a bunny and the
+`molecule_skeleton` golden on 1GRL).
 
 **`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
 meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
@@ -2822,13 +2828,18 @@ data:                                    # the app loads the data
   var: 0                                 # the variable and timestep the volume holds
   time: 0
   view: xy                               # the switch: xy | xz | zy
-  tool: points                           # navigate | points | probe
+  tool: points                           # navigate | points | probe | contours
   slice: { z: 40 }                       # the planes (-1, the default, the middle one)
   display: { point_scale: 1, show_points: true, crosshairs: true, grey: false }
   classes:                               # the classes it starts with
     - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
   points: { data: seeds }                # point classes (item: classes), or { state: <key> }
   session: { data: last }                # a session to apply (item: session), or { state: <key> }
+  objects:                               # the contour objects it starts with
+    - { name: axon, color: [0.2, 0.8, 0.3], interpolation: spline, samples: 5 }
+  contours: { data: traced }             # contours the app holds (item: contours), or { state }
+  contour: { point_size: 0.6, auto_tile: true }   # how they draw and edit: grid.contour.*
+  tile: { curation_delta: 0.01 }         # the tiler's parameters: grid.tile.*
   transfer_function: { preset: grayscale }
 ```
 
@@ -2846,7 +2857,10 @@ seeds its key only while the key is empty:
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
-| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane) |
+| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane); the contours': `tile`, `stop_tile` (and `stop` while a tile runs), `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `objects`, `objects.<i>.{name,color,interpolation,samples,visible,curves,points,triangles}`, `objects.current` | the contour objects as rows a `list:` binds (`interpolation` is `linear` or `spline`, `samples` a spline's points per span; `curves`, `points` and `triangles` are written); `current` is the object a click draws |
+| `contour.*`, `contour.{selected,info,active}` | `cvc::volume_grid_contour_params`: `show`, `control_points`, `point_size` (voxels), `line_width`, `snap`, `show_3d`, `show_surfaces`, `surface_opacity`, `auto_tile` and `source` (a key whose data channel holds a `contour_stack` or a `grid_contours`, followed); published: how many control points are selected, a summary, the curve being drawn |
+| `tile.*` | `cvc::tile_params` (lengths in object units) and the tile job's keys (`busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms`, `pid`, `label`, `warnings`): under `tile`, so a tile runs beside the segmentation's job |
 | `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
 
 The point classes, the selection, the session and the volume are on the data channel at
@@ -2868,14 +2882,42 @@ voxel. Every edit is one undo step. The planes are the node's children `slice_xy
 view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
 overlays draw its points as disks of their radius in voxels, the selection's rings, the crosshairs
 where the other planes cross it (each in the colour of the axis it runs along) and a rubber band
-being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is an empty group for the surfaces later
-phases draw in the 3D view. Until the first volume arrives the planes and that group are hidden,
+being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is the group for what the 3D view alone
+shows: the contours' curves and tiled surfaces, and later phases'. Until the first volume arrives
+the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
 `cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
 pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
 `test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
+
+**Contours** ([`VolumeGridContours.h`](../inc/cvc/gl/VolumeGridContours.h), P10). With the
+`contours` tool a click adds a point to the current object's curve on that plane: at the end being
+drawn, else at the nearer end of its open curve there, else as a new curve (Shift+click always
+starts one). A click on the first point of the curve being drawn closes it; a drag from a control
+point moves it (the selection, when the point is in it); a drag elsewhere selects control points
+with a rubber band. Every edit is one undo step. Each object draws its curves straight or as a
+spline through the points (a centripetal Catmull-Rom, `samples` points per span). The curves are
+on the data channel at `grid.curves` (`std::shared_ptr<const cvc::grid_contours>`, every curve as
+drawn; a write from outside replaces them), and the closed ones as contour stacks at
+`grid.contours` (the z planes', splines drawn: what `contour_lab`'s `source: { node: <grid> }`,
+`tiler.tile` and the contour formats take), `grid.contours.xz` and `grid.contours.zy`. `trace`
+adds the curves where the shown view's planes cross an isovalue (VolumeGridRover's isocontouring:
+marching squares, simplified to half a voxel). `tile` runs the contour tiler on every object's
+closed curves as a sliced task (each plane orientation a stack, in voxel units so its tolerances
+hold for any volume) and puts a surface per object in the 3D view in the object's colour, at
+`grid.surfaces.<object>` on the data channel; `contour.auto_tile` tiles whenever the contours are
+replaced or traced. Each plane's overlays draw its curves (`contours`) and their control points
+(`contour_points`, the selection's rings, the drawn end's amber ring); the `surfaces` group holds
+every plane's curves (`contours`) and the surfaces (`tiles`). The session keeps the contours. The
+editing is core libcvc ([`volume_grid_contours.h`](../inc/cvc/volume/volume_grid_contours.h):
+`cvc::grid_contour_editor`, `cvc::grid_contour_gestures`, `cvc::trace_slice`,
+`cvc::tile_grid_contours` and its stepper), in the DSL as `grid-contours.*`
+([`volume_grid_contour_intrinsics.h`](../inc/cvc/volume/volume_grid_contour_intrinsics.h)) and in
+pycvc (`volume_grid_contours_test`, `volume_grid_contour_intrinsics_test`,
+`cvcgl_volume_grid_contours`, `test_pycvc_volume_grid_contours.py`).
+`examples/ariadne/documents/volume_grid_contours.ari` is the demo.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -4098,6 +4140,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `city_bundle` | `world` (a `world_geometry`), `terrain`, `buildings` (a `cvc::geometry`), `buildings_error`, `bounds.min_x` ... `max_y`, `satellite` (`satellite.png` decoded: the image on `data()`, its file path as the value); for a version 2 bundle also `version`, `hash` (its content hash), `water_level`, `region` (`min_x` ... `max_y`, when it is cut to one) and `generator` (its name; `version`, `seed`, `params`) |
 | `point_classes` | `classes`: a `cvc::point_classes` from a `.vgr` (VolumeGridRover's point classes; the default for `.vgr`), its point count as the value |
 | `volume_grid_session` | `session`: a `cvc::volume_grid_session` from a session's JSON (`as:` names it: `.json` alone is `json`) |
+| `contours` | `contours`: a `cvc::contour_stack` from any contour format the app reads (the default for `.ser`, `.contour` and `.cvcc`), its polygon count as the value; a Reconstruct series' section files come from its archive or the page's preload |
 
 A host adds its own with `register_data_decoder`.
 
@@ -4118,6 +4161,7 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 | `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...) |
 | `point_classes` | `cvc::point_classes` as a `.vgr` |
 | `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
+| `contours` | a `cvc::contour_stack` in a one-file format, by FILE's extension: `.cvcc`, `.contour` or `.pcd` (a `.ser` or `.config` writes files beside it, and is refused) |
 
 A relative FILE is the document's directory's. A document whose directory is a URL (an `https://`
 one) writes no file. In a browser the file downloads under its name instead. A host adds encoders
@@ -5244,9 +5288,10 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs` |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+| `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its

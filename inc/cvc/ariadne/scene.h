@@ -506,6 +506,13 @@ struct SceneClock {
   std::string paused_key = "sim.paused"; // read each frame → paused vs live mode
   std::string time_key = "sim.time";     // published each frame: world seconds (world_clock::t())
   std::string tick_key;                  // optional: published tick count (empty ⇒ not published)
+  // The world's rate (ARIADNE_WORLDS.md section 18.9): ticks a second, a whole number from
+  // cvc::kSimRateMin to cvc::kSimRateMax (cvc/core/sim_tick.h); 0, the default, is 120 Hz. The
+  // clock's quantum, a physics step and the navigator's tick follow it (SceneWorld::
+  // use_vehicle_clock), and a relay running the document runs its room at it, which its clients
+  // follow (room_clock). A clock that has already ticked at another quantum keeps it, with a
+  // warning.
+  double hz = 0.0;
 };
 
 // Where the shadow maps are spent (cvc::gl::SceneGraph::setShadowFocus). Unfocused, each light's

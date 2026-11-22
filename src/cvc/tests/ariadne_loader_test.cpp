@@ -2443,6 +2443,30 @@ scene:
   EXPECT_EQ(r.scene.clock.paused_key, "demo.hold");
   EXPECT_TRUE(r.scene.clock.time_key.empty()); // explicit "" disables the publish lane
   EXPECT_EQ(r.scene.clock.tick_key, "demo.tick");
+  EXPECT_EQ(r.scene.clock.hz, 0.0) << "no hz: the default 120 Hz";
+}
+
+// The world's rate (ARIADNE_WORLDS.md section 18.9): clock: { hz } takes a whole number of ticks a
+// second from 10 to 240; anything else is a warning, and the world runs at 120 Hz.
+TEST(AriadneScene, ClockBlockTakesAWorldsRate) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: { hz: 60 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.clock.hz, 60.0);
+  for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
+    LoadResult b = fresh_load(
+        std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
+    ASSERT_TRUE(b.ok) << b.error;
+    EXPECT_EQ(b.scene.clock.hz, 0.0) << bad;
+    bool warned = false;
+    for (const std::string &w : b.warnings)
+      warned = warned || w.find("clock: hz") != std::string::npos;
+    EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+  }
 }
 
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
@@ -4444,6 +4468,61 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   EXPECT_GE(checked, 15); // the 14 components shipped with transfer_function, and card
   std::error_code ec;
   fs::remove_all(decoy, ec);
+}
+
+// The baseline conference app (examples/ariadne/documents/conference_roster.ari) is the shipped
+// conference library's windows (components/conference.ari, with room_users.ari, chat.ari and
+// audio_buffers.ari) placed in a document, and its tick is the library's conference-step: an app
+// built on the conference takes the same pieces. The windows keep the ids the app's View menu opens
+// them by.
+TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  namespace fs = std::filesystem;
+  const fs::path src = fs::path(__FILE__).parent_path().parent_path();
+  const fs::path doc = src.parent_path().parent_path() / "examples" / "ariadne" / "documents" /
+                       "conference_roster.ari";
+  if (!fs::is_regular_file(doc) ||
+      !fs::is_regular_file(src / "ariadne" / "components" / "conference.ari"))
+    GTEST_SKIP() << "the conference sources are not here";
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler(app, {(src / "ariadne").string()});
+  }
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings) {
+    EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+    EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+    EXPECT_EQ(w.find("parse error"), std::string::npos) << w;
+  }
+  std::vector<std::string> ids;
+  for (const Widget &w : r.root.children)
+    if (w.kind == Kind::Window)
+      ids.push_back(w.id);
+  for (const char *id : {"mycam", "myavatar", "users", "chat", "audio", "cam_{i}"})
+    EXPECT_NE(std::find(ids.begin(), ids.end(), id), ids.end()) << "no window " << id;
+  const Widget *peers = nullptr;
+  for (const Widget &w : r.root.children)
+    if (w.id == "cam_{i}")
+      peers = &w;
+  ASSERT_NE(peers, nullptr);
+  EXPECT_EQ(peers->repeat, "(state-get \"peer.count\")") << "one per row of the Users window";
+  const Widget *body = find(r.root, Kind::Combo, "Body");
+  EXPECT_NE(body, nullptr) << "the Avatar window's Body picker";
+  std::vector<std::string> fns;
+  for (const FunctionDef &f : r.functions)
+    fns.push_back(f.name);
+  for (const char *f :
+       {"conference-step", "conference-join", "conference-media-open", "conference-name-step",
+        "conference-devices-step", "conference-avatar-step", "room-users-step", "chat-ui-step"})
+    EXPECT_NE(std::find(fns.begin(), fns.end(), f), fns.end()) << "no function " << f;
+  EXPECT_NE(r.on_tick_script.find("(conference-step)"), std::string::npos) << r.on_tick_script;
+  bool audio_closed = false; // the Audio window waits for the View menu
+  for (const FunctionDef &f : r.functions)
+    if (f.name == "conference-join")
+      audio_closed = f.source.find("(state-set \"tree.audio.open\" \"0\")") != std::string::npos;
+  EXPECT_TRUE(audio_closed) << "conference-join seeds the Audio window closed";
 }
 
 // scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
@@ -6825,6 +6904,96 @@ TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
   EXPECT_EQ(r.scene.nodes[0].type, "volume_grid");
   EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// volume_grid.ari's Contours tab (P10): a tab titled Contours in the tools' panel, every control
+// on its node's grid.objects / grid.contour.* / grid.tile.* keys, the tool's radio with Contours,
+// and the tab alone as a unit; the contours demo loads clean.
+TEST(AriadneComponents, VolumeGridContoursTabDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+    args: { node: skull, id: skull_grid }
+  - window: Own
+    children:
+      - include: volume_grid_contours_tab
+        args: { node: skull, id: own }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  std::vector<const Widget *> all_tabs;
+  collect(*windows[0], Kind::Tabs, all_tabs);
+  bool titled = false; // the panel's (the view switch is a tabs: too)
+  for (const Widget *t : all_tabs)
+    titled = titled || std::find(t->tab_titles.begin(), t->tab_titles.end(), "Contours") !=
+                           t->tab_titles.end();
+  EXPECT_TRUE(titled) << "the panel has a tab titled Contours";
+  for (const Widget *w : windows) {
+    std::vector<std::string> keys;
+    collect_key_strings(*w, keys);
+    const std::string g = "graphics.root.children.skull.grid.";
+    for (const char *want : {"objects",
+                             "objects.{i}.name",
+                             "objects.{i}.color",
+                             "objects.{i}.interpolation",
+                             "objects.{i}.samples",
+                             "objects.{i}.visible",
+                             "objects.{i}.curves",
+                             "contour.active",
+                             "contour.info",
+                             "contour.selected",
+                             "contour.show",
+                             "contour.control_points",
+                             "contour.show_3d",
+                             "contour.snap",
+                             "contour.point_size",
+                             "contour.auto_tile",
+                             "contour.show_surfaces",
+                             "contour.surface_opacity",
+                             "tile.progress",
+                             "tile.phase",
+                             "tile.status",
+                             "tile.curation_delta",
+                             "tile.cap_ends",
+                             "files.contours"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end())
+          << w->label << ": " << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  std::vector<const Widget *> radios;
+  collect(*windows[0], Kind::Radio, radios);
+  bool contours = false;
+  for (const Widget *w : radios)
+    if (w->bind == "graphics.root.children.skull.grid.tool")
+      contours = std::find(w->values.begin(), w->values.end(), "contours") != w->values.end();
+  EXPECT_TRUE(contours) << "the tool radio offers contours";
+
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid_contours.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app demo_app;
+  ASSERT_TRUE(register_source_components(demo_app));
+  LoadResult d = load_file(demo_app, doc.string());
+  ASSERT_TRUE(d.ok) << d.error;
+  for (const std::string &w : d.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(d.scene.nodes.size(), 1u);
+  EXPECT_EQ(d.scene.nodes[0].type, "volume_grid");
+  EXPECT_NE(d.scene.nodes[0].props.find("objects"), nullptr);
 }
 
 // The shared-volume demo (docs/roadmap/DATA_FROM_STATE_TREE.md, D1): a volren and a volume_grid
