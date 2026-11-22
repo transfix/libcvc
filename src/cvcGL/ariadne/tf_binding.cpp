@@ -1086,6 +1086,10 @@ void tf_binding::tick() {
     return;
   }
   const bool range_moved = d.refresh_range(*node);
+  if (d.seed_pending) { // no volume yet to make the seed on: the key waits for it
+    d.service_overlays();
+    return;
+  }
   d.read_model();
   const bool fe_lab = d.target == tf_target::fe_lab;
   const bool rescaled = range_moved && d.model_ok && d.model.domain.automatic;

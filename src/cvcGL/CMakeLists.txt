@@ -1264,6 +1264,14 @@ add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
 target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
 
+# One volume on the state tree shown by a volren, a volume_grid and volume_slices (node_data.h,
+# docs/roadmap/DATA_FROM_STATE_TREE.md D1), headless: one pointer, followed when a new volume is
+# written or the dataset reloads; the volren's transfer function seeded on its first volume; two
+# apps sharing nothing.
+add_executable(cvcgl_shared_volume test/cvcgl_shared_volume.cpp)
+target_link_libraries(cvcgl_shared_volume PRIVATE cvcGL)
+add_test(NAME cvcgl_shared_volume COMMAND cvcgl_shared_volume)
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
