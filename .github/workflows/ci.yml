@@ -366,8 +366,6 @@ jobs:
               --platform "$FLAVOR" --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" "$FLAVOR"
 
       - name: Build libcvc (${{ matrix.flavor }}, physics only) and physics_replay_test
         if: steps.paths.outputs.run == 'true'
@@ -483,8 +481,6 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt) and the port tests
         if: steps.paths.outputs.run == 'true'
@@ -598,8 +594,6 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build libcvc (wasm, single-threaded) and ariadne_wasm_browser_test
         if: steps.paths.outputs.run == 'true'
@@ -698,8 +692,6 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt) and permissive_libs_test
         if: steps.paths.outputs.run == 'true'
@@ -776,7 +768,8 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
                    src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
                    src/cvc/geometry/tet_complex.cpp inc/cvc/geometry/tet_complex.h \
-                   src/cvc/geometry/skeleton inc/cvc/geometry/skeleton.h \
+                   src/cvc/geometry/cocone src/cvc/geometry/skeleton \
+                   inc/cvc/geometry/skeleton.h \
                    src/cvc/geometry/planar inc/cvc/geometry/planar.h \
                    src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    .github/workflows/ci.yml | grep -q .; then
@@ -1121,6 +1114,14 @@ jobs:
             --config release --link shared --no-fallback-to-source
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+          # ari's web build links -sJSPI (JX2), and emsdk's own node (22.16, V8 12.4) has no
+          # WebAssembly.Suspending. Node has JSPI on by default from 24.20; cvcpkg's nodejs26 runs
+          # ari.js below. The two test binaries link no JSPI and stay on emsdk's node.
+          cvcpkg install nodejs26 --prefix "$RUNNER_TEMP/node26" \
+            --config release --link shared --no-fallback-to-source
+          "$RUNNER_TEMP/node26/bin/node" -p 'typeof WebAssembly.Suspending' | grep -qx function \
+            || { echo "::error::cvcpkg's nodejs26 has no JSPI"; exit 1; }
+          echo "JSPI_NODE=$RUNNER_TEMP/node26/bin/node" >> "$GITHUB_ENV"
 
       - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, ImageMagick and its codecs)
         if: steps.paths.outputs.run == 'true'
@@ -1135,8 +1136,6 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build the ari web target (wasm, single-threaded)
         if: steps.paths.outputs.run == 'true'
@@ -1170,7 +1169,7 @@ jobs:
       - name: Render the baked tour under node
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           "$node" build-wasm/bin/ari.js snapshot --width 100 --height 24 /terminal_tour.ari \
             | tee snapshot.txt
           for want in "Controls" "Status" "Layout" "agents: 64" "Belief: < shared >"; do
@@ -1186,7 +1185,7 @@ jobs:
         # output.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/net_probe_server.py > probe-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1211,7 +1210,7 @@ jobs:
         # the credential; and the device code. No token may reach the output.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
 
       - name: Frames go on while a request is out (L4)
@@ -1221,7 +1220,7 @@ jobs:
         # a request that blocked the frame loop would leave that near 0.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/net_probe_server.py > probe-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1245,7 +1244,7 @@ jobs:
         # send its message; a connect or a wait that blocked the frame loop would leave them near 0.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/ws_probe_server.py > ws-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1374,8 +1373,6 @@ jobs:
         run: |
           cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
           cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
             --platform any --config release --link shared --no-fallback-to-source
@@ -1496,8 +1493,6 @@ jobs:
           cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
             --platform ${{ matrix.platform }} --arch wasm32 --config release --link static \
             --no-fallback-to-source
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" ${{ matrix.platform }}
           grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
 
       - name: Build ariglx-web (${{ matrix.platform }}, the lean tier) with the recipe's script
@@ -2675,10 +2670,11 @@ jobs:
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
         net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
-        skeleton_test contour_stack_test point_classes_test planar_test tiler_test
+        skeleton_test pocket_tunnel_test contour_stack_test point_classes_test planar_test
+        tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
-        volume_grid_test
+        volume_grid_test volume_grid_contours_test volume_grid_contour_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

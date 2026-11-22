@@ -5,7 +5,7 @@ recipe:
   # (<name>-cp311/-cp312/-cp313). Same sources as pycvc-cp311, built against
   # python312 + numpy-cp312. New catalog name — revision starts at 1.
   name: pycvc-cp312
-  upstream_version: "4.0.3"
+  upstream_version: "4.0.5"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts revisions OF
   # an upstream version, so a version bump restarts it. Supersedes the 3.2.4
   # +cvc.2 rebuild that shipped the new cvc::nav material bindings in
@@ -62,13 +62,13 @@ depends:
   build:
     # libcvc SDK (find_package(cvc CONFIG)); Python dev interpreter + numpy C API.
     - name: libcvc
-      version: "==4.0.3"
+      version: "==4.0.5"
     - name: python312
     - name: numpy-cp312
   runtime:
     # pycvc imports against this interpreter + numpy and loads libcvc at runtime.
     - name: libcvc
-      version: "==4.0.3"
+      version: "==4.0.5"
     - name: python312
     - name: numpy-cp312
   host_tools:

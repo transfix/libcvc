@@ -15,6 +15,7 @@
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
@@ -22,6 +23,9 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <cvc/utility/archive.h>
+#include <cvc/volume/point_classes.h>
+#include <cvc/volume/volume.h>
+#include <cvc/volume/volume_grid.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
 #include <fstream>
@@ -359,6 +363,156 @@ TEST(AriadneData, AMeshDecodesFromItsBytesInMemory) {
   EXPECT_EQ(cvc::read_model_from_memory(app, obj.data(), obj.size(), "obj").merged().num_points(),
             3u);
   EXPECT_THROW(cvc::read_model_from_memory(app, "x", 1, ".nope"), std::exception);
+}
+
+// A node that edits data reads and writes no file: the app loads its data (the point_classes and
+// volume_grid_session decoders) and saves them (data_save, through an encoder), and a load of what
+// was saved is what was saved.
+TEST(AriadneData, PointClassesAndSessionsLoadAndSaveThroughTheApp) {
+  cvc::app app;
+  TempDir t;
+  auto store = DataStore::of(app);
+  cvc::state &root = cvc::state::instance(app);
+  cvc::point_classes pc;
+  pc.add("membrane", 1, 2, 3);
+  pc.add("membrane", 2, 2, 3);
+  pc.add("background", 7, 7, 1);
+  root("work.points").data(boost::any(std::make_shared<const cvc::point_classes>(pc)));
+  EXPECT_EQ(cvc::ariadne::default_data_encoder(root("work.points").data()), "point_classes");
+  const std::string vgr = (t.dir / "seeds.vgr").generic_string();
+  cvc::ariadne::data_save(app, "work.points", "seeds.vgr", "", t.dir.generic_string());
+  ASSERT_TRUE(fs::exists(vgr));
+  DataSpec spec;
+  spec.uri = vgr; // as: point_classes, by its extension
+  const std::string node = store->load(spec);
+  ASSERT_TRUE(store->wait(node, 30)) << root(node + ".error").value();
+  EXPECT_EQ(root(node + ".as").value(), "point_classes");
+  auto back =
+      boost::any_cast<std::shared_ptr<const cvc::point_classes>>(root(node + ".classes").data());
+  ASSERT_TRUE(back);
+  EXPECT_EQ(*back, pc);
+  EXPECT_EQ(root(node + ".classes").value(), "3");
+
+  cvc::volume_grid_session s;
+  s.keys = {{"grid.view", "zy"}, {"grid.slice.z", "4"}};
+  s.transfer_function = "{\"color\":[[0,0,0,0],[1,1,1,1]]}";
+  s.classes = pc;
+  root("work.session").data(boost::any(std::make_shared<const cvc::volume_grid_session>(s)));
+  const std::string json = (t.dir / "grid.session.json").generic_string();
+  cvc::ariadne::data_save(app, "work.session", json); // an absolute file
+  DataSpec sspec;
+  sspec.uri = json;
+  sspec.as = "volume_grid_session"; // .json alone is json
+  const std::string snode = store->load(sspec);
+  ASSERT_TRUE(store->wait(snode, 30)) << root(snode + ".error").value();
+  auto sback = boost::any_cast<std::shared_ptr<const cvc::volume_grid_session>>(
+      root(snode + ".session").data());
+  ASSERT_TRUE(sback);
+  EXPECT_EQ(sback->keys, s.keys);
+  EXPECT_EQ(sback->transfer_function, s.transfer_function);
+  EXPECT_EQ(sback->classes, pc);
+
+  // A volume, in a format by its extension; bytes; and the errors.
+  cvc::volume v(app, cvc::dimension(4, 3, 2), cvc::Float);
+  v(1, 2, 1, 7.5);
+  root("work.volume").data(boost::any(std::make_shared<const cvc::volume>(v)));
+  const std::string rawiv = (t.dir / "v.rawiv").generic_string();
+  cvc::ariadne::data_save(app, "work.volume", rawiv);
+  cvc::volume vback(app, rawiv);
+  EXPECT_EQ(vback.XDim(), 4u);
+  EXPECT_EQ(vback.ZDim(), 2u);
+  EXPECT_DOUBLE_EQ(vback(1, 2, 1), 7.5);
+  root("work.text").data(boost::any(std::string("hello")));
+  cvc::ariadne::data_save(app, "work.text", (t.dir / "t.txt").generic_string());
+  std::ifstream tin(t.dir / "t.txt");
+  std::string text;
+  std::getline(tin, text);
+  EXPECT_EQ(text, "hello");
+  const auto says = [&](const std::string &path, const std::string &file, const std::string &as,
+                        const std::string &base, const std::string &want) {
+    try {
+      cvc::ariadne::data_save(app, path, file, as, base);
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find(want), std::string::npos) << e.what();
+      return;
+    }
+    ADD_FAILURE() << "no error for " << path << " (" << want << ")";
+  };
+  says("work.none", "x.vgr", "", t.dir.generic_string(), "holds no data");
+  root("work.odd").data(boost::any(42));
+  says("work.odd", "x.bin", "", t.dir.generic_string(), "no built-in encoder takes");
+  says("work.points", "x.vgr", "nope", t.dir.generic_string(), "no encoder as: nope");
+  says("work.points", "x.vgr", "", "https://example.org/docs", "not a local file");
+  EXPECT_FALSE(fs::exists(t.dir / "x.vgr"));
+
+  // Encoders are per app, each starting with the built-ins.
+  cvc::app other;
+  cvc::ariadne::register_data_encoder(
+      other, "mine", [](const cvc::ariadne::DataEncode &) { return std::string("m"); });
+  EXPECT_TRUE(cvc::ariadne::has_data_encoder(other, "mine"));
+  EXPECT_FALSE(cvc::ariadne::has_data_encoder(app, "mine"));
+  for (const char *b : {"bytes", "volume", "point_classes", "volume_grid_session"})
+    EXPECT_TRUE(cvc::ariadne::has_data_encoder(app, b) && cvc::ariadne::has_data_encoder(other, b))
+        << b;
+  cvc::ariadne::register_data_encoder(other, "point_classes", nullptr); // removed from one app
+  EXPECT_FALSE(cvc::ariadne::has_data_encoder(other, "point_classes"));
+  EXPECT_TRUE(cvc::ariadne::has_data_encoder(app, "point_classes"));
+}
+
+// A contour stack (a volume_grid's grid.contours, or contour_lab's) saved through the app in a
+// one-file format and loaded back by its extension; a format that writes files beside it is
+// refused, saying which to use.
+TEST(AriadneData, ContoursLoadAndSaveThroughTheApp) {
+  cvc::app app;
+  TempDir t;
+  auto store = DataStore::of(app);
+  cvc::state &root = cvc::state::instance(app);
+  cvc::contour_stack s;
+  s.z_spacing = 0.5;
+  s.add(3, "axon", {0, 0, 1, 0, 1, 1, 0, 1});
+  s.add(4, "axon", {0, 0, 2, 0, 1, 1});
+  root("work.contours").data(boost::any(std::make_shared<const cvc::contour_stack>(s)));
+  EXPECT_EQ(cvc::ariadne::default_data_encoder(root("work.contours").data()), "contours");
+  for (const char *name : {"c.cvcc", "c.contour"}) {
+    cvc::ariadne::data_save(app, "work.contours", name, "", t.dir.generic_string());
+    ASSERT_TRUE(fs::exists(t.dir / name)) << name;
+    DataSpec spec;
+    spec.uri = (t.dir / name).generic_string(); // as: contours, by its extension
+    const std::string node = store->load(spec);
+    ASSERT_TRUE(store->wait(node, 30)) << root(node + ".error").value();
+    EXPECT_EQ(root(node + ".as").value(), "contours");
+    auto back =
+        boost::any_cast<std::shared_ptr<const cvc::contour_stack>>(root(node + ".contours").data());
+    ASSERT_TRUE(back) << name;
+    EXPECT_EQ(back->polygon_count(), 2u) << name;
+    EXPECT_EQ(root(node + ".contours").value(), "2");
+    if (std::string(name) == "c.cvcc")
+      EXPECT_EQ(*back, s) << "libcvc's own format keeps everything";
+  }
+  try {
+    cvc::ariadne::data_save(app, "work.contours", "c.ser", "", t.dir.generic_string());
+    ADD_FAILURE() << "a .ser saved as one file";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("save as .cvcc"), std::string::npos) << e.what();
+  }
+}
+
+// A generator that makes no files and names no as: has written its outputs: no decoder runs.
+TEST(AriadneData, AGeneratorThatWritesItsOutputsNeedsNoDecoder) {
+  cvc::app app;
+  cvc::ariadne::register_data_generator(app, "made", [](cvc::ariadne::DataDecode &d) {
+    d.out("answer").value(std::string("42"));
+    return std::vector<cvc::archive::file>();
+  });
+  auto store = DataStore::of(app);
+  DataSpec spec;
+  spec.name = "m";
+  spec.generate = "made";
+  store->bind("", spec);
+  ASSERT_TRUE(store->wait("data.m", 30)) << cvc::state::instance(app)("data.m.error").value();
+  cvc::state *answer = cvc::state::instance(app).findThroughLinks("data.m.answer");
+  ASSERT_NE(answer, nullptr);
+  EXPECT_EQ(answer->value(), "42");
 }
 
 TEST(AriadneData, AFailedLoadSaysWhy) {

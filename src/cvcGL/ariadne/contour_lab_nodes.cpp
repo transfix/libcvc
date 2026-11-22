@@ -220,6 +220,22 @@ std::shared_ptr<const cvc::contour_stack> stack_of(const boost::any &a) {
   return nullptr;
 }
 
+// What a followed key's stack is held by (its shared pointer, or the data object it came in), so
+// two writes closer together than the clock's resolution, which share a lastMod, still tell apart.
+// The node keeps it, so its address isn't reused. Null for a stack held by value.
+std::shared_ptr<const void> stack_holder(const boost::any &a) {
+  if (const auto *p = boost::any_cast<std::shared_ptr<const cvc::contour_stack>>(&a))
+    return *p;
+  if (const auto *p = boost::any_cast<std::shared_ptr<cvc::contour_stack>>(&a))
+    return *p;
+  if (const auto *v = boost::any_cast<se::value_t>(&a))
+    if (const auto *d = std::get_if<se::data_object_ptr>(&v->v))
+      return *d;
+  if (const auto *d = boost::any_cast<se::data_object_ptr>(&a))
+    return *d;
+  return nullptr;
+}
+
 // --- the job -------------------------------------------------------------------------------------
 
 // The slice pair being tiled, which tile_stepper::label() names on the stepping thread: copied out
@@ -278,9 +294,10 @@ struct ContourLabRT {
   std::vector<Component> comps;
   std::set<std::string> surface_keys; // surfaces.<key> written by the last tile
 
-  // A node or state source: the data key followed, and when it last changed.
+  // A node or state source: the data key followed, when it last changed, and what held its stack.
   std::string follow_path;
   boost::posix_time::ptime follow_seen;
+  std::shared_ptr<const void> follow_held;
 
   std::unique_ptr<cvc::job_keys> keys;
   std::shared_ptr<cvc::result_job<cvc::tile_result>> job;
@@ -489,6 +506,7 @@ bool load_source(ContourLabRT &rt) {
   std::string error;
   const std::string data_path = file.empty() ? source_data_path(rt, &error) : std::string();
   rt.follow_path = data_path;
+  rt.follow_held.reset();
   if (!error.empty()) {
     rt.status("error: " + error);
     return false;
@@ -526,6 +544,7 @@ bool load_source(ContourLabRT &rt) {
     if (s)
       rt.follow_seen = s->lastMod();
     const boost::any d = s ? s->data() : boost::any();
+    rt.follow_held = stack_holder(d);
     if (d.empty()) {
       rt.status("waiting for contours at " + data_path);
       return false;
@@ -755,7 +774,10 @@ void tick_contour_lab(ContourLabRT &rt) {
     } else if (!rt.follow_path.empty()) {
       // A node or state source: new contours there load (and tile, with auto) again.
       cvc::state *s = ari::read_node(a, rt.follow_path);
-      if (s && s->lastMod() != rt.follow_seen && !s->data().empty()) {
+      const boost::any d = s ? s->data() : boost::any();
+      const std::shared_ptr<const void> held = stack_holder(d);
+      if (s && !d.empty() &&
+          (s->lastMod() != rt.follow_seen || (held && held.get() != rt.follow_held.get()))) {
         if (load_source(rt) && read_bool(a, rt.k("auto"), false))
           launch_tile(rt);
       }

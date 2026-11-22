@@ -4,6 +4,12 @@
 # planes beside it, and a panel with the probe, the point classes and the transfer function
 # (docs/ARIADNE.md §5.4, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4).
 #
+# The app holds the volume: the document's data: block makes the bunny's signed distance field
+# (cvcGL's sdf generator), and the grid shows that volume, not a copy, and follows it: Data >
+# Coarser and Finer make it again at another size, and the planes redraw on the new one. The
+# panel's Save and Load write and read point classes and sessions through the app (data-save,
+# data-load), beside this document.
+#
 # In the slice view, with the Points tool: click to mark a point of the current class (or unmark the
 # one under the pointer), drag to select points in a rubber band (Shift adds, Ctrl or Alt takes
 # away), Shift+Ctrl drag to move the selection. Navigate moves the other planes to the voxel
@@ -52,6 +58,26 @@ menubar:
     items:
       - menu_item: Quit
         on: quit
+  # The app makes the volume again at another size (data-generate re-points data.bunny); the grid
+  # follows it.
+  - menu: Data
+    items:
+      - menu_item: Coarser (32^3)
+        on: |
+          (data-generate "bunny" "sdf"
+            (json-encode (dict "mesh" "stanford.bunny" "dim" 32
+                               "fit" (dict "height" 100 "up" "y"))))
+      - menu_item: Finer (64^3)
+        on: |
+          (data-generate "bunny" "sdf"
+            (json-encode (dict "mesh" "stanford.bunny" "dim" 64
+                               "fit" (dict "height" 100 "up" "y"))))
+
+# The data the grid shows: the bunny's signed distance field, made and held by the app.
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 64, fit: { height: 100, up: y } }
 
 windows:
   - include: volume_grid
@@ -67,8 +93,7 @@ scene:
     # the surface. Two classes to mark, inside and outside, as GenSeg's seeds would be.
     - node: grid
       type: volume_grid
-      source: { sdf: { mesh: stanford.bunny, dim: 64 } }
-      fit: { height: 100, up: y }
+      source: { data: bunny }       # the app's volume (data: above)
       view: xy
       slice: { z: 24 }                # a plane through the bunny's body
       classes:

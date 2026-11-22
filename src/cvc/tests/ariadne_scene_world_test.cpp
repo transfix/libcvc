@@ -2158,11 +2158,19 @@ TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
   EXPECT_EQ(st.findDescendant("entities." + first), nullptr);
   EXPECT_NE(val(app, "entities.summary").find("fleet city  64 v (keys: summary)"),
             std::string::npos);
+  // The physics stats likewise: the fleet's one line, the unnamed entry's own.
+  const std::string stats = val(app, "physics.stats.vehicles");
+  EXPECT_NE(stats.find("fleet city  64 v (keys: summary)"), std::string::npos) << stats;
+  EXPECT_NE(stats.find(solo + "  solo  "), std::string::npos) << stats;
+  EXPECT_EQ(stats.find(first + "  city 1  "), std::string::npos) << stats;
   st("vehicles.watch").value(first); // a camera follows it: it has keys
   art.step_world(6);
   art.drain();
   EXPECT_EQ(val(app, "entities.ids"), first + "," + solo);
   EXPECT_NE(val(app, "entities." + first + ".x"), "");
+  EXPECT_NE(val(app, "physics.stats.vehicles").find(first + "  city 1  "), std::string::npos);
+  EXPECT_NE(val(app, "physics.stats.vehicles").find("fleet city  63 v (keys: summary)"),
+            std::string::npos);
   EXPECT_EQ(val(app, "entities." + first + ".team"), std::to_string(es[0].rally));
   st("vehicles.watch").value("");
   art.step_world(6);
@@ -2364,6 +2372,30 @@ TEST(AriadneWorldVehicles, AFleetHasANavigatorAndAPolicyOfItsOwn) {
   EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
       << key_of("scouts", "drives");
   EXPECT_EQ(key_of("scouts", "plans"), "vehicle"); // the fallback's built-in net
+  // trained without $CVC_NAV_WEIGHTS: a copy installed, else the download (D8). The test's network
+  // is off and its registry isn't there (for the package below too), so the download's why is said.
+  cvc::state::instance(app)("sys.data.cvcpkg.registry").value(std::string("http://127.0.0.1:9"));
+  {
+    EnvFor no_override("CVC_NAV_WEIGHTS", "");
+    const std::string installed = cvc::nav::coef_mlp::default_weights_path();
+    cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("trained"));
+    art.step_world(1);
+    art.drain();
+    if (fs::is_regular_file(installed)) {
+      EXPECT_EQ(key_of("scouts", "drives").rfind("trained (" + installed, 0), 0u)
+          << key_of("scouts", "drives");
+    } else {
+      for (int k = 0; k < 400 && key_of("scouts", "drives").rfind("builtin: no trained", 0) != 0;
+           ++k) {
+        art.step_world(1);
+        art.drain();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      EXPECT_NE(key_of("scouts", "drives").find("grl-snam-weights"), std::string::npos)
+          << "the download, not " << key_of("scouts", "drives");
+      EXPECT_EQ(key_of("scouts", "plans"), "vehicle");
+    }
+  }
   cvc::state::instance(app)("vehicles.fleets.scouts.policy")
       .value(std::string("cvcpkg://cvc/no-such-weights-for-a-test"));
   art.step_world(1);
@@ -3239,6 +3271,57 @@ TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
 
 // Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
 // a jump, a time gone back or the first one taken at once; the same time again changes nothing.
+// A `pose` entity's model, as a relay sends it to its clients (conference::room_entities_of): its
+// base hangs the vehicle's stand height below its chassis (stand_height, where its chassis stands
+// when a pose gives no z), however high over the grid's ground its poses put it.
+TEST(AriadneWorldVehicles, APoseEntitysModelHangsItsStandHeightBelowIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_posed(v);
+  const auto step = [&](int n) {
+    for (int i = 0; i < n; ++i) {
+      v.before_step();
+      w->world().step();
+      v.after_step();
+    }
+  };
+  ASSERT_EQ(r.scene.vehicles.size(), 2u);
+  const double stand = stand_height(vehicle_desc_of(r.scene.vehicles[0]));
+  EXPECT_DOUBLE_EQ(stand, 0.45 + 0.47) << "the Humvee's: half its 0.9 m box, its 0.47 m wheels";
+  for (const double z : {6.0, 2.5}) {
+    entity_pose p;
+    p.x = 10.0;
+    p.y = 2.0;
+    p.z = z;
+    ASSERT_TRUE(v.set_pose(id, p));
+    step(2);
+    const entity_info e = entity(v, id);
+    ASSERT_TRUE(e.posed);
+    EXPECT_DOUBLE_EQ(e.z, z);
+    EXPECT_NEAR(e.ground_z, 0.0, 1e-9) << "the square's top";
+    const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+    ASSERT_EQ(wire.size(), 1u);
+    EXPECT_DOUBLE_EQ(wire[0].base_z, -stand) << "at z " << z << ", not the ground's depth under it";
+  }
+  // Without a z, it stands on the ground: its model's base is the ground.
+  entity_pose p;
+  p.x = 12.0;
+  p.y = 2.0;
+  ASSERT_TRUE(v.set_pose(id, p));
+  step(2);
+  const entity_info e = entity(v, id);
+  EXPECT_NEAR(e.z + conference::room_entities_of(v)[0].base_z, e.ground_z, 1e-9);
+}
+
 TEST(AriadneWorldVehicles, TimedPosesAreDrawnBetweenTheLastTwo) {
   REQUIRE_YAML();
   if (!jolt())
@@ -7179,8 +7262,8 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
   for (int i = 0; i < ticks; ++i)
     gym.step(none, none);
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
-  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, six a tick), and
-  // one publish of the entities' keys (timed here alone).
+  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, a tick's
+  // cvc::kSimTickQuanta of them), and one publish of the entities' keys (timed here alone).
   double phys = 0.0;
   int nphys = 0;
   {
@@ -7193,28 +7276,31 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
         ++nphys;
       }
   }
-  const double phys_tick = nphys ? 6.0 * phys / nphys : 0.0;
+  const double phys_tick = nphys ? cvc::kSimTickQuanta * phys / nphys : 0.0;
   const auto t2 = clk::now();
   gym.vehicles().publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
-  // A tick is 0.06 s of world time: at 1x a tick under 60 ms keeps up, at the demos' 3.6x under
-  // 16.7 ms.
+  // A tick is cvc::kSimTick of world time (7/120 s): at 1x a tick under 58.3 ms keeps up, at the
+  // demos' 3.6x under 16.2 ms.
   std::printf("[fleet] %-9s n=%4d sense=%-5s avoid=%d spawn %7.1f ms  tick %7.2f ms (%5.1fx)  "
               "physics %6.2f  publish %6.2f  rest %6.2f ms\n",
               plant.c_str(), n, sense.c_str(), avoid ? 1 : 0, spawn_ms, tick_ms,
-              tick_ms > 0.0 ? 60.0 / tick_ms : 0.0, phys_tick, pub_ms,
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, phys_tick, pub_ms,
               tick_ms - phys_tick - pub_ms);
 }
 
 // A fleet declared in the document (start: fleet:) on a paused clock: the load (spawn and layout),
-// six steps, and one publish, with its per-entity keys (keys: all) or its summary alone.
+// a tick's steps (cvc::kSimTickQuanta), one publish, with its per-entity keys (keys: all) or its
+// summary alone, and a reseed (its vehicles out and laid out again) with the tick after it. On the
+// built-in net, so it runs the same offline as with the weights.
 void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, int ticks) {
   std::string doc = fleet_bench_doc(bundle);
   const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
   doc.insert(doc.find(arch) + arch.size(),
              "    start:\n      - { fleet: city, archetype: humvee, plant: kinematic, count: " +
                  std::to_string(n) +
-                 ", spawn: opposed, seed: 7, rally: { count: 16 }, keys: " + keys + " }\n");
+                 ", spawn: opposed, seed: 7, rally: { count: 16 }, policy: builtin, keys: " + keys +
+                 " }\n");
   doc.insert(doc.find("scene:\n") + 7, "  clock: { paused: true }\n");
   const fs::path path = write_doc("fleet_doc_bench", doc);
   using clk = std::chrono::steady_clock;
@@ -7230,22 +7316,31 @@ void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, 
   }
   WorldVehicles &v = *art.scene_world()->vehicles();
   for (int i = 0; i < 10; ++i) {
-    art.step_world(6);
+    art.step_world(cvc::kSimTickQuanta);
     art.drain();
   }
   const auto t1 = clk::now();
   for (int i = 0; i < ticks; ++i) {
-    art.step_world(6);
+    art.step_world(cvc::kSimTickQuanta);
     art.drain();
   }
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
   const auto t2 = clk::now();
   v.publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
-  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  6 steps %7.2f ms  publish "
-              "%6.2f ms  (%zu entities, %s)\n",
-              n, keys.c_str(), load_ms, tick_ms, pub_ms, v.size(),
-              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str());
+  const auto t3 = clk::now();
+  const bool reseeded = v.restart_fleet("city", true);
+  art.step_world(cvc::kSimTickQuanta);
+  art.drain();
+  const double reseed_ms = std::chrono::duration<double, std::milli>(clk::now() - t3).count();
+  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  tick %7.2f ms (%5.1fx)  "
+              "publish %6.2f ms  reseed %7.1f ms  (%zu entities, %s; drives %s, plans %s)\n",
+              n, keys.c_str(), load_ms, tick_ms,
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, pub_ms,
+              reseeded ? reseed_ms : -1.0, v.size(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.drives", "").c_str(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.plans", "").c_str());
 }
 
 } // namespace
@@ -7321,6 +7416,65 @@ TEST(AriadneOneWorld, AttachTakesAServerWorldOnTheHolonsQuantum) {
                        h.state("a").position.y - there.position.y),
             1e-9)
       << "back in its own world where it stood";
+}
+
+// A world at 60 Hz (ARIADNE_WORLDS.md section 18.9): a scene: clock: hz of 60 (as arisrv's --sim-hz
+// sets it) puts the app's clock, the physics world's step and the vehicles' tick on 1/60 s quanta,
+// the navigator every 4 of them (the whole quanta nearest the policies' 0.06 s). A server holon at
+// the same rate runs it with the avatars in it; one at 120 Hz is refused.
+TEST(AriadneOneWorld, AWorldAt60HzRunsOnAHolonAt60Hz) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.clock.hz = 60.0;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(app.world_clock().fixed_dt(), 1.0 / 60.0);
+  EXPECT_EQ(app.world_clock().current_config().max_steps_per_advance, 15);
+  EXPECT_NEAR(w->world().config().fixed_dt, 1.0 / 60.0, 1e-15);
+  w->sync(&warnings);
+  ASSERT_NE(w->vehicles(), nullptr);
+  WorldVehicles &v = *w->vehicles();
+  spawn_at(v, "external", -40.0, 0.0);
+  EXPECT_EQ(v.steps_per_tick(), 4);
+  EXPECT_NEAR(v.tick_seconds(), 4.0 / 60.0, 1e-12);
+  EXPECT_NEAR(v.tick(), 4.0 / 60.0, 1e-12);
+  for (const std::string &m : warnings)
+    EXPECT_EQ(m.find("whole number"), std::string::npos) << m;
+
+  std::string why;
+  holon fast(holon_role::server, one_world_holon());
+  EXPECT_FALSE(fast.attach_world(w.get(), &why)) << "a 120 Hz holon";
+  EXPECT_NE(why.find("quantum"), std::string::npos) << why;
+  holon h(holon_role::server, holon_config_at(one_world_holon(), 60.0));
+  cvc::physics::body_state feet;
+  feet.position = {3.0, 4.0, 0.0};
+  h.add_participant("a", false, feet);
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  for (int i = 0; i < 60; ++i)
+    h.advance(1.0 / 60.0);
+  EXPECT_EQ(h.tick(), 60u) << "one quantum a frame";
+  EXPECT_NEAR(h.state("a").position.z, 0.0, 0.05) << "standing on the scene's square";
+
+  // The rate is the scene's only while the clock has not run: a ticked clock keeps its own.
+  LoadResult again = load_intents();
+  again.scene.clock.hz = 30.0;
+  cvc::app running;
+  running.world_clock().advance(0.1);
+  ASSERT_GT(running.world_clock().tick(), 0u);
+  std::vector<std::string> late;
+  std::unique_ptr<SceneWorld> w2 =
+      SceneWorld::from_scene(running, again.scene, "", "physics", &late);
+  ASSERT_NE(w2, nullptr);
+  EXPECT_NEAR(w2->world().config().fixed_dt, 1.0 / 120.0, 1e-15);
+  bool said = false;
+  for (const std::string &m : late)
+    said = said || m.find("clock: hz") != std::string::npos;
+  EXPECT_TRUE(said) << "a rate it could not take is said";
 }
 
 namespace {
@@ -7696,6 +7850,133 @@ TEST(AriadneOneWorld, GettingInIsAskedForInTheRoomAndRuledOn) {
   EXPECT_TRUE(saw_humvee && saw_truck);
 }
 
+// An avatar that is a vehicle (section 18.6, OW6c): a participant asks for an archetype that is
+// one, and the server spawns that vehicle where its person stands and seats it there for good; it
+// drives it, can't get out or into another, and asking for a person puts it back on its feet
+// beside it while the vehicle goes. Where the first archetype is a vehicle, a newcomer is one
+// without asking, and its vehicle goes when it leaves.
+TEST(AriadneOneWorld, AnAvatarCanBeAVehicle) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_drivable();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t other = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  avatar_archetype person, racer;
+  person.id = "person";
+  racer.id = "racer";
+  racer.vehicle = "humvee";
+  h.set_archetypes({person, racer});
+  const std::string room = "garage";
+  conference::room_join(app, room, "ann"); // the first joiner stands at (4, 0)
+  const auto pump = [&](int frames) {
+    for (int i = 0; i < frames; ++i)
+      server_pump(h, app, room, 1.0 / 60.0);
+  };
+  const auto entity = [&](std::uint64_t id, entity_info &out) {
+    for (const entity_info &e : v.entities())
+      if (e.id == id) {
+        out = e;
+        return true;
+      }
+    return false;
+  };
+  pump(30);
+  EXPECT_EQ(h.embodies("ann"), 0u) << "a person until it asks";
+  EXPECT_FALSE(read_archetype_status(app, room, "ann").answered) << "and nothing is said";
+  const cvc::physics::vec3 stood = h.state("ann").position;
+
+  request_archetype(app, room, "ann", "racer");
+  pump(1);
+  archetype_status st = read_archetype_status(app, room, "ann");
+  EXPECT_TRUE(st.answered && st.ok) << st.why;
+  EXPECT_EQ(st.archetype, "racer");
+  const std::uint64_t body = h.embodies("ann");
+  ASSERT_NE(body, 0u);
+  EXPECT_EQ(h.drives("ann"), body);
+  EXPECT_EQ(read_driving(app, room, "ann"), body);
+  EXPECT_EQ(h.archetype_of("ann"), "racer");
+  entity_info e;
+  ASSERT_TRUE(entity(body, e));
+  EXPECT_EQ(e.spec.archetype, "humvee");
+  EXPECT_LT(std::hypot(e.x - stood.x, e.y - stood.y), 3.0) << "spawned where it stood";
+  bool tagged = false;
+  for (const conference::room_entity &re : conference::room_entities_of(v))
+    tagged = tagged || (re.id == body && re.avatar == "ann");
+  EXPECT_TRUE(tagged) << "the room's entities say whose body it is";
+
+  // It drives it.
+  avatar_intent go;
+  go.throttle = 1.0;
+  write_intent(app, room, "ann", go);
+  pump(90);
+  ASSERT_TRUE(entity(body, e));
+  EXPECT_GT(std::hypot(e.x - stood.x, e.y - stood.y), 2.0) << "under way";
+  go.throttle = 0.0;
+  go.brake = 1.0;
+  write_intent(app, room, "ann", go);
+
+  // No getting out, or into another.
+  std::uint64_t seq = request_drive(app, room, "ann", 0);
+  pump(1);
+  drive_status ds = read_drive_status(app, room, "ann");
+  EXPECT_EQ(ds.seq, seq);
+  EXPECT_FALSE(ds.ok);
+  EXPECT_NE(ds.why.find("you are your vehicle"), std::string::npos) << ds.why;
+  seq = request_drive(app, room, "ann", other);
+  pump(1);
+  ds = read_drive_status(app, room, "ann");
+  EXPECT_FALSE(ds.ok);
+  EXPECT_EQ(h.drives("ann"), body);
+
+  // An archetype the world has not: refused, and it stays as it is.
+  request_archetype(app, room, "ann", "dragon");
+  pump(1);
+  st = read_archetype_status(app, room, "ann");
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("no avatar archetype 'dragon'"), std::string::npos) << st.why;
+  EXPECT_EQ(h.embodies("ann"), body);
+
+  // A person again: on its feet beside the vehicle, which goes.
+  ASSERT_TRUE(entity(body, e));
+  request_archetype(app, room, "ann", "person");
+  pump(1);
+  st = read_archetype_status(app, room, "ann");
+  EXPECT_TRUE(st.ok) << st.why;
+  EXPECT_EQ(h.embodies("ann"), 0u);
+  EXPECT_EQ(h.drives("ann"), 0u);
+  EXPECT_EQ(read_driving(app, room, "ann"), 0u);
+  EXPECT_FALSE(entity(body, e)) << "its vehicle went";
+  const cvc::physics::vec3 feet = h.state("ann").position;
+  EXPECT_LT(std::hypot(feet.x - e.x, feet.y - e.y), 4.0) << "beside where it was";
+
+  // A world whose first archetype is a vehicle: a newcomer is one without asking.
+  h.set_archetypes({racer, person});
+  conference::room_join(app, room, "bob");
+  pump(2);
+  const std::uint64_t bobs = h.embodies("bob");
+  ASSERT_NE(bobs, 0u);
+  EXPECT_EQ(read_driving(app, room, "bob"), bobs);
+  st = read_archetype_status(app, room, "bob");
+  EXPECT_TRUE(st.answered && st.ok) << st.why;
+  EXPECT_EQ(h.embodies("ann"), 0u) << "ann asked to be a person";
+  seq = request_drive(app, room, "ann", bobs);
+  pump(1);
+  EXPECT_FALSE(read_drive_status(app, room, "ann").ok) << "no one gets into bob";
+  conference::room_leave(app, room, "bob");
+  pump(2);
+  EXPECT_FALSE(entity(bobs, e)) << "bob's vehicle goes with bob";
+}
+
 TEST(AriadneWorldGym, FleetBench) {
   REQUIRE_YAML();
   if (!std::getenv("CVC_FLEET_BENCH"))
@@ -7742,4 +8023,139 @@ TEST(AriadneWorldGym, KinematicBoxesTouchWhenTheyOverlap) {
   EXPECT_FALSE(es[2].vehicle_contact);
   EXPECT_TRUE(es[3].vehicle_contact); // 1.7 m apart, side by side: a Humvee is 2.2 m wide
   EXPECT_TRUE(es[4].vehicle_contact);
+}
+
+namespace {
+// kDrivable's square with the humvee on the kinematic plant, as traffic.ari's trucks are.
+const char *kKinematicDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: kinematic
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The command the relay sets after a step for a driver's next navigator tick (holon's drive).
+void command_after(cvc::ariadne::kinematic_vehicle &m, const cvc::ariadne::kinematic_drive &k,
+                   const avatar_intent &in, double dt) {
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double speed = m.vx * std::cos(m.box[3]) + m.vy * std::sin(m.box[3]);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  m.steer_cmd = c.steer;
+  m.accel_cmd = c.accel;
+}
+} // namespace
+
+// The vehicle a client drives, run as the relay's world runs it (ARIADNE_WORLDS.md section 18.5,
+// OW5b): on the kinematic plant, the room's entities carry its numbers and the clock ticks its
+// navigator ticks on (WorldVehicles::kinematics), and a model stepped on the same drive axes at
+// the same ticks (kinematic_vehicle_step, the command after each step) stays on the relay's
+// vehicle through throttle, a turn, the brake and reverse.
+TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kKinematicDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i) // the driver's command set, the navigator ticked on a clock tick
+    h.advance(dt);
+
+  cvc::ariadne::kinematic_drive k;
+  ASSERT_TRUE(v.kinematics(id, k));
+  EXPECT_TRUE(k.valid());
+  EXPECT_EQ(k.tick_steps, v.steps_per_tick());
+  bool carried = false;
+  for (const conference::room_entity &e : conference::room_entities_of(v))
+    if (e.id == id) {
+      carried = true;
+      EXPECT_EQ(e.drive, k) << "the room's entities carry it";
+    }
+  EXPECT_TRUE(carried);
+
+  // From where the relay has it (at rest: exact), on the same drive axes at each tick.
+  cvc::ariadne::kinematic_vehicle m =
+      cvc::ariadne::kinematic_vehicle_at(k, h.state("ann"), h.tick(), dt);
+  const auto axes = [](int step) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = 0.0;
+    in.brake = 0.0;
+    if (step < 240) {
+      in.throttle = 1.0;
+    } else if (step < 480) {
+      in.throttle = 1.0;
+      in.steer = 0.5;
+    } else if (step < 600) {
+      in.throttle = 0.5;
+      in.steer = -1.0;
+    } else if (step < 840) {
+      in.brake = 1.0;
+    } else {
+      in.throttle = -1.0;
+    }
+    return in;
+  };
+  double worst = 0.0, top = 0.0;
+  const cvc::physics::vec3 start = h.state("ann").position;
+  for (int step = 0; step < 1080; ++step) {
+    const avatar_intent in = axes(step);
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      cvc::ariadne::kinematic_vehicle_step(m, k, t, dt);
+      command_after(m, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    worst = std::max(worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
+    top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
+  }
+  const cvc::physics::body_state end = h.state("ann");
+  std::printf("  the model on the relay's vehicle: %.6f m at worst over 9 s (top %.2f m/s, "
+              "%.1f m from the start, speed at the end %.2f m/s)\n",
+              worst, top, std::hypot(end.position.x - start.x, end.position.y - start.y), m.speed);
+  EXPECT_GT(top, 5.0) << "it drove";
+  EXPECT_LT(m.speed, -0.5) << "and backed up at the end";
+  EXPECT_LT(worst, 0.01) << "step for step";
 }

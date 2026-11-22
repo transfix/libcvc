@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: cvcgl-cuda
-  upstream_version: "4.0.3"
+  upstream_version: "4.0.5"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
   # Bumped 1 -> 3 (2 is #522's): ships share/cvcGL/ (the wasm state shim), as cvcgl 3.4.0+cvc.18.
@@ -74,7 +74,7 @@ depends:
     # The GPU libcvc SDK (find_package(cvc CONFIG) resolves libcvc-cuda, whose
     # cvc::cvc interface carries CVC_USING_CUDA) + VTK (the scene backend).
     - name: libcvc-cuda
-      version: "==4.0.3"
+      version: "==4.0.5"
     - name: vtk
     # Dear ImGui, cvcGL's overlay (cvc::gl::ImGuiOverlay), as in cvcgl.
     - name: imgui-w32
@@ -86,7 +86,7 @@ depends:
       platforms: [linux, macos, windows]
   runtime:
     - name: libcvc-cuda
-      version: "==4.0.3"
+      version: "==4.0.5"
     - name: vtk
     # cvcGL's export links imgui-w32 and SDL3 (cvcGLConfig.cmake re-finds them),
     # so a consumer of cvc::cvcGL needs both in its prefix.

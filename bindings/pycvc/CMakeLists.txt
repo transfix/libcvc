@@ -341,6 +341,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_tiler:test_pycvc_tiler.py
              pycvc_volume_slice:test_pycvc_volume_slice.py
              pycvc_volume_grid:test_pycvc_volume_grid.py
+             pycvc_volume_grid_contours:test_pycvc_volume_grid_contours.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
              pycvc_state:test_pycvc_state.py
@@ -354,6 +355,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_gym:test_pycvc_gym.py
              pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
              pycvc_ariadne_bridge:test_pycvc_ariadne_bridge.py
+             pycvc_net:test_pycvc_net.py
              pycvc_world_entities:test_pycvc_world_entities.py
              pycvc_world_poses:test_pycvc_world_poses.py
              pycvc_state_exec:test_pycvc_state_exec.py
@@ -480,6 +482,8 @@ if(CVC_BUILD_PYCVC_GL)
   target_include_directories(pycvc_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(pycvc_gl PRIVATE ${_PYCVC_CVCGL_TARGET} ${_PYCVC_CVC_TARGET} Python3::Module Python3::NumPy)
   find_package(VTK REQUIRED COMPONENTS RenderingCore RenderingOpenGL2 IOImage InteractionStyle)
+  include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcVtkWasmExceptions.cmake")
+  cvc_vtk_wasm_exceptions()
   target_link_libraries(pycvc_gl PRIVATE ${VTK_LIBRARIES})
   vtk_module_autoinit(TARGETS pycvc_gl MODULES ${VTK_LIBRARIES})
   if(CVC_PYCVCGL_VTK_BRIDGE)

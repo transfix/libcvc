@@ -17,6 +17,11 @@
 // bytes that hold whole frames are copied once into a refcounted buffer the frames point into, so
 // an idle connection holds no read buffer. Writes go straight to the socket and wait for
 // readiness only when it is full.
+//
+// On Windows the read wait is already IOCP's: Asio waits for a stream socket's input with a
+// zero-byte overlapped WSARecv. Its wait for room to write goes through a select() thread beside
+// IOCP, though, which is slow with thousands of sockets, so there a full socket gets the rest of
+// its output as an overlapped write (async_write_some) instead.
 
 #include <algorithm>
 #include <atomic>
@@ -100,6 +105,16 @@ net_stats net_engine::stats() const { return {}; }
 void net_engine::stop() {}
 
 #else
+
+// Writes that find the socket full go on as overlapped writes on Windows (see the top).
+// -DCVC_NET_ASYNC_WRITES=1 takes that path elsewhere too, to test it.
+#if !defined(CVC_NET_ASYNC_WRITES)
+#if defined(_WIN32)
+#define CVC_NET_ASYNC_WRITES 1
+#else
+#define CVC_NET_ASYNC_WRITES 0
+#endif
+#endif
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
@@ -320,6 +335,10 @@ struct connection : std::enable_shared_from_this<connection> {
   std::deque<net_engine::payload> out;
   std::size_t front_off = 0; // bytes of out.front() already written
   std::size_t queued = 0;
+#if CVC_NET_ASYNC_WRITES
+  // The overlapped write's payloads, kept until its handler runs (a close clears `out` first).
+  std::vector<net_engine::payload> in_flight;
+#endif
 
   asio::steady_timer timer; // the first frame's deadline, or a flushing close's
   unsigned timer_gen = 0;
@@ -373,6 +392,8 @@ struct connection : std::enable_shared_from_this<connection> {
   }
 
   // ── input ─────────────────────────────────────────────────────────────────────────────────────
+  // Wait for input. On Windows Asio waits with a zero-byte overlapped WSARecv, which goes through
+  // IOCP and holds no buffer.
   void start_read() {
     if (reading || state == phase::closed || peer_eof || (state == phase::open && paused))
       return;
@@ -611,20 +632,26 @@ struct connection : std::enable_shared_from_this<connection> {
     }
   }
 
+  // The front of the queue as one gathered write, in w.gather; its size in bytes.
+  std::size_t gather_out() {
+    w.gather.clear();
+    std::size_t bytes = 0;
+    std::size_t skip = front_off;
+    for (const auto &p : out) {
+      if (w.gather.size() == kGatherBuffers || bytes >= kGatherBytes)
+        break;
+      w.gather.emplace_back(p->data() + skip, p->size() - skip);
+      bytes += p->size() - skip;
+      skip = 0;
+    }
+    return bytes;
+  }
+
   // Write what is queued until the socket is full; then wait for room.
   void write_now() {
     is_dirty = false;
     while (state != phase::closed && !writing && !out.empty()) {
-      w.gather.clear();
-      std::size_t bytes = 0;
-      std::size_t skip = front_off;
-      for (const auto &p : out) {
-        if (w.gather.size() == kGatherBuffers || bytes >= kGatherBytes)
-          break;
-        w.gather.emplace_back(p->data() + skip, p->size() - skip);
-        bytes += p->size() - skip;
-        skip = 0;
-      }
+      const std::size_t bytes = gather_out();
       boost::system::error_code ec;
       const std::size_t n = sock.write_some(w.gather, ec);
       if (ec == asio::error::would_block || ec == asio::error::try_again) {
@@ -672,6 +699,29 @@ struct connection : std::enable_shared_from_this<connection> {
     ev.listener = listener->id;
   }
 
+#if CVC_NET_ASYNC_WRITES
+  // The rest as an overlapped write: Asio copies the buffer list, and `in_flight` keeps the bytes.
+  void wait_writable() {
+    writing = true;
+    gather_out();
+    for (std::size_t i = 0; i < w.gather.size(); ++i)
+      in_flight.push_back(out[i]);
+    sock.async_write_some(
+        w.gather, [self = shared_from_this()](const boost::system::error_code &ec, std::size_t n) {
+          turn t(self->w);
+          self->writing = false;
+          self->in_flight.clear();
+          if (self->state == phase::closed)
+            return;
+          if (ec) {
+            self->fail(close_reason::error, ec.message());
+            return;
+          }
+          self->wrote(n);
+          self->write_now();
+        });
+  }
+#else
   void wait_writable() {
     writing = true;
     sock.async_wait(tcp::socket::wait_write,
@@ -687,6 +737,7 @@ struct connection : std::enable_shared_from_this<connection> {
                       self->write_now();
                     });
   }
+#endif
 
   // ── closing ───────────────────────────────────────────────────────────────────────────────────
   void close(bool flush, std::chrono::milliseconds flush_timeout) {
@@ -792,6 +843,7 @@ void worker::apply(command &c) {
       if (conn->id == c.conn || conn->state != connection::phase::open)
         continue;
       conn->enqueue(c.data);
+      bump(conn->lst.broadcast_receivers);
       ++reached;
     }
     bump(counters.broadcast_receivers, reached);

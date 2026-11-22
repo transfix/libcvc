@@ -12,7 +12,7 @@ endif()
 
 # First declare project with C and CXX to initialize CMake properly
 project(libcvc
-  VERSION 4.0.3
+  VERSION 4.0.5
   DESCRIPTION "Computational Visualization Center library from VolumeRover package"
   LANGUAGES C CXX
 )
@@ -99,10 +99,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Emscripten disables C++ exception catching by default; cvc throws and catches
-# as part of its normal API surface, so JS-based EH must stay on everywhere.
+# as part of its normal API surface, so exceptions stay on everywhere. They are
+# wasm's own (-fwasm-exceptions, which also makes setjmp/longjmp wasm's), as every
+# cvcpkg wasm package is built (cy-pca/cvcpkg#624). Emscripten's JS exceptions put a
+# JS invoke_* frame under every call past a destructor, which JSPI can't suspend
+# through, and the two kinds of object don't link together
+# (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX2).
 if(EMSCRIPTEN)
-  add_compile_options(-fexceptions)
-  add_link_options(-fexceptions)
+  add_compile_options(-fwasm-exceptions)
+  add_link_options(-fwasm-exceptions)
   # Boost's config only detects threading under -pthread, but a single-threaded
   # wasm build must not use -pthread (SharedArrayBuffer + COOP/COEP). Emscripten
   # ships the pthread API as single-threaded stubs, so force Boost onto it —

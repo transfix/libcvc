@@ -75,14 +75,15 @@ std::vector<std::string> canonical_segments(const std::string &path) {
 // Whether REST (the path below a participant) names a key the relay writes there: the server
 // holon's `pose` (holon_sync.h) and `energy` reserve (room_avatar.h), the relay's link sample
 // `net.relay` and the participant's `device` tag (room_net.h), what it drives and the answer to
-// its ask to (`driving`, `drive_status`; holon_sync.h), its username `profile.name`
+// its ask to (`driving`, `drive_status`; holon_sync.h), the archetype it was given
+// (`archetype_status`), its username `profile.name`
 // (client_registry.h: a client asks for one with server.set), and in SFU mode each stream's
 // `streams.<kind>.ready` (room_relay_tick).
 bool relay_owned(const std::vector<std::string> &rest) {
   if (rest.empty())
     return false;
   if (rest[0] == "pose" || rest[0] == "device" || rest[0] == "energy" || rest[0] == "driving" ||
-      rest[0] == "drive_status")
+      rest[0] == "drive_status" || rest[0] == "archetype_status")
     return true;
   if (rest[0] == "profile" && rest.size() >= 2 && rest[1] == "name")
     return true;

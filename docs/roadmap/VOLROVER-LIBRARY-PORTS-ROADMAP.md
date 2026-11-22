@@ -574,13 +574,14 @@ from a document carries the document's owner tag, so closing the document stops 
 | `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict of `surfaces` (component name to geometry) and `warnings` |
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
+| `(volume.filter vol [params])` | VolumeRover's bilateral filter on a volume, a new volume (cvc/volume/volume_filter_intrinsics.h; docs/roadmap/DATA_FROM_STATE_TREE.md). `(data-put NAME "volume" result)` puts it back where the scene's nodes follow it |
 | `(contours.info stack)` | A `contour_stack`'s slices, counts and components. No intrinsic reads or writes files: the DSL deals with data on the state tree, and files are the rest of libcvc's (Joe, 2026-11-12) |
 | `(point-classes.add pc class i j k)`, `(point-classes.points pc class)`, `(point-classes.info pc)` | Point-class edits and queries on the state tree (no file reads or writes, as for contours). These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |
 | `(job.cancel pid)` | Cancels a task started by any `-start` form, at its next step |
 
-`skeleton.compute`, `tiler.tile`, `segment.seeded` and `segment.critical-points` each also come
-as `-async` and `-start`, as above.
+`skeleton.compute`, `tiler.tile`, `segment.seeded`, `segment.critical-points` and `volume.filter`
+each also come as `-async` and `-start`, as above.
 
 **Arguments and results**
 - An input is a data object (from `state-data-get`) or a state path string such as
@@ -886,7 +887,11 @@ outside the unit count, and the slowest 4,096-unit step was 0.4–0.8 ms at 20k�
 and `init.cpp` differ from the copies in TightCocone, PocketTunnel and Curation by 10–25 lines
 each. Port them once, as an internal `cvc::cocone` module on `tet_complex`. A later TightCocone
 port (surface reconstruction from points) and PocketTunnel then reuse it, rather than vendoring a
-fifth copy.
+fifth copy. *Built:* the core is `src/cvc/geometry/cocone/` (`cocone.h`, `datastruct.*`,
+`stepping.h`, `init`, `util`, `tcocone`, `rcocone`), lifted out of `skeleton/` when PocketTunnel came
+to use it (TexMol T5). The skeleton's own stages are in `skeleton/` (`skeleton_stages.h`),
+PocketTunnel's in `pocket_tunnel/`. PocketTunnel's copies of `init.cpp` and `tcocone.cpp` were this
+code; its `util.cpp` added only `cell_volume`, now in the core.
 
 **API sketch** (`inc/cvc/geometry/skeleton.h`)
 
@@ -1357,11 +1362,33 @@ their units and ranges as properties. Bulk data is on the data channel:
   edited, added and removed; the session JSON. `volume_grid_test` (native and wasm-mt) and pycvc
   (`pycvc_volume_grid.i`, `test_pycvc_volume_grid.py`).
 - **The node** (`cvc::gl::VolumeGridNode`, `type: volume_grid`): keys as in the table above, less
-  the contour, segmentation and tile ones; the data channel's `points`, `selection` and `volume`;
-  overlays per plane (disks, the selection's rings, crosshairs, the rubber band). `load` reads in
-  one call (or plane by plane, past 64 Mi voxels), as a `volume_slice` node does, so it has no
-  stepper; the job keys are published for P9's segmentation. `cvcgl_volume_grid` (headless, picks
-  through state writes, two grids) and `cvcgl_ariadne_volume_grid` (the component, the mouse).
+  the contour, segmentation and tile ones; the data channel's `points`, `selection`, `session` and
+  `volume`; overlays per plane (disks, the selection's rings, crosshairs, the rubber band); the job
+  keys, published for P9's segmentation. `cvcgl_volume_grid` (headless, picks through state
+  writes, the data on the tree, four grids) and `cvcgl_ariadne_volume_grid` (the component, the
+  mouse, two grids on one dataset).
+- **Its data on the state tree** (part 3, after Joe on 2026-11-20: a component loads no file; the
+  outer app does, the main scene and the grid show one volume, and both update when it changes).
+  The node reads and writes no file. `source: { data: <name> }` (a `data:` entry the app loads),
+  `{ state: <key> }` or `{ node: <id> }` names the volume; the planes cut the app's volume itself
+  (its voxels shared; `grid.volume` the very pointer), followed as it changes. `points:` and
+  `session:` name point classes and sessions the same way. Saving is the app's: Ariadne's data
+  layer gained encoders (`register_data_encoder`; volume, point classes, sessions, bytes) and
+  `(data-save PATH FILE [AS])`, beside the document or downloaded in a browser, and the
+  `point_classes` and `volume_grid_session` decoders; the component's Save and Load go through
+  them. cvcGL's `sdf` data generator makes a mesh's distance field as a dataset (the demo's bunny).
+  A large file read plane by plane is now a host's choice (a `slice_source` on the volume's key).
+  A view naming tags frames on what its nodes draw (`shown_bounds`): a hidden node waits, a
+  plane's flat box counts, and a hidden overlay or an empty group adds nothing. Before, a flat box
+  counted as none, so the grid's 3D view framed one plane (the one whose empty overlay added the
+  origin) and an empty group's default box, and which plane that was turned on whether the points
+  or the volume loaded first. The grid's overlays now join the renderer in a fixed order, so where
+  a plane's disks and lines cross the lines win however the data arrive. Left for the wider move
+  of every node type to the same rule:
+  `volume_slice`, `volren` and the other nodes that still read `source: { file }`; a `data:`
+  decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
+  Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane
+  (which disk shows depends on draw order); the slice views show them all.
 - **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
   and `axis` on a pick; a slider's `range: key`.
 - **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and
@@ -1371,6 +1398,58 @@ their units and ranges as properties. Bulk data is on the data channel:
 - **Left for P9 / P10, shaped to slot in:** a `segment` request and the Segmentation tab; the
   `contours` tool, the Contours tab and `tile`. Both add tabs to `volume_grid_tools` and draw into
   the `<id>_surfaces` group, which slice views hide.
+
+**What P10 built** (2026-11-22).
+- **Core** (`inc/cvc/volume/volume_grid_contours.h`, no GL): `cvc::grid_contours`, the legacy
+  SurfRecon model (objects of a name, colour, `linear` or `spline` and `samples`, holding curves,
+  each on one plane: axis, slice index, control points in the plane's object coordinates, open or
+  closed) on a `grid_frame` (the grid's dims, origin and spacing, so the curves stand alone);
+  `sample_grid_curve` (a centripetal Catmull-Rom, periodic on a closed curve: no GSL);
+  `cvc::grid_contour_editor` (points added at the active end or the nearer end, close, open,
+  move, select, rubber band, delete, undo) and `cvc::grid_contour_gestures` (VolumeGridRover's
+  contour marking on picks: a click on the curve's other end closes it); the object rows a
+  `list:` binds; `grid_contours_stack` and `grid_contours_from_stack` (a `contour_stack` per plane
+  orientation, both ways); `trace_slice`, VolumeGridRover's isocontouring (marching squares,
+  Douglas-Peucker to half a voxel); JSON, and the session's optional `contours`;
+  `tile_grid_contours`, `grid_tile_stepper` and the job: each orientation's closed curves tiled as a
+  stack by `tile_stepper`, in units of the frame's smallest spacing from its origin (the tiler's
+  absolute tolerances hold for any volume; the parameters' lengths are scaled with them), mapped
+  back with the XZ and ZY planes' winding turned (a reflection), so every surface faces out.
+  `volume_grid_contours_test` (33 tests, native and wasm-mt under node: T2-T9, T7 bit for bit at
+  budgets 1, 64, random and 0, T6 threads; a tube is closed, two-manifold and genus 0, and the same
+  curves on another orientation or frame give the same surface placed there).
+- **DSL** (`volume_grid_contour_intrinsics.h`): `grid-contours.tile` with `-async` and `-start`,
+  `grid-contours.info`, `.stack`, `.from-stack`, `.add-curve`, the tables for `params.defaults`;
+  installed for documents by `register_cvcgl_extensions`. `volume_grid_contour_intrinsics_test`
+  (7, cooperative and threaded, a cancel, an Ariadne action's `-start` under the default limits).
+- **pycvc** (`pycvc_volume_grid_contours.i`, `test_pycvc_volume_grid_contours.py`): the model,
+  editor, gestures, rows, stacks, JSON, `trace_slice`, `tile_grid_contours` (keywords, the GIL
+  released) and `tile_grid_contours_job`.
+- **The node** (`cvc::gl::VolumeGridContours`, owned by `VolumeGridNode`): the `contours` tool;
+  keys `grid.objects`, `grid.contour.*` (`volume_grid_contour_params`, `source` followed) and
+  `grid.tile.*` (`tile_params` and the tile job's keys, under `tile` so a tile and P9's
+  segmentation each have their own progress); requests `tile`, `stop_tile`, `close_curve`,
+  `new_curve`, `delete_curve`, `clear_object`, `trace`, and the edits under the contours tool;
+  data `grid.curves`, `grid.contours` (+ `.xz`, `.zy`), `grid.surfaces.<object>`; overlays per
+  plane (curves, control points, rings), the 3D view's every-plane curves and tiled surfaces in
+  the `surfaces` group. The props `objects:`, `contours:`, `contour:` and `tile:`. Ariadne's data
+  layer gained the `contours` decoder and encoder. `cvcgl_volume_grid_contours` (58 checks).
+- **The component:** the Contours tab (`volume_grid_contours_tab`, in `volume_grid_tools` before
+  its slot); demo `examples/ariadne/documents/volume_grid_contours.ari` (traces the 64^3 bunny on
+  every third plane and tiles it); golden `src/cvcGL/test/golden/volume_grid_contours.ari` (its PNG
+  from CI's llvmpipe render); arigl-web case `volume_grid_contours.ari` (traces, tiles, then draws
+  and closes a curve with scripted picks).
+- **Found:**
+  - the tiler's untiled-region fill gives up on a regular polygon stacked on its own copy
+    (`medial_axis_stable: Failed to propagate z_home`, the surface left open there): a P3b
+    follow-up, not fixed here;
+  - `cvcgl_ariadne_volume_grid` loads documents without the 8 MB host stack the other such tests
+    have (`CvcHostStack.cmake`); the Contours tab's one more level overflowed Windows' 1 MB, so it
+    joins the list;
+  - in the grid's 3D viewport the surfaces lit by the main view's lights read black from behind,
+    so the tiles carry some ambient light;
+  - a tab's title is read where the tab is listed, so an included tab needs `tab:` on its
+    `include:` line.
 
 ---
 
@@ -1667,7 +1746,7 @@ not as follow-ups.
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
 | P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6). *Built:* `cvc/volume/volume_grid.h`, `VolumeGridNode` and `type: volume_grid`, `volume_grid.ari` (§4, "What P8 built") | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
-| P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
+| P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view. *Built:* `cvc/volume/volume_grid_contours.h`, `grid-contours.*`, `VolumeGridContours`, the Contours tab (§4, "What P10 built") | P8, P3b |
 | P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |
 
 **Parallel tracks.**

@@ -24,7 +24,7 @@
 // chosen by the angle and ratio conditions), and U1, the unstable manifolds of the index-1
 // saddles grown from the medial-axis facets that contain one.
 
-#include "cocone.h"
+#include "skeleton_stages.h"
 
 namespace cvc::cocone {
 

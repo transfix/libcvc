@@ -23,8 +23,9 @@
 // SecondaryStructures' own stages on the cocone core (cvc/geometry/secondary_structures.h),
 // internal to libcvc: its medial axis (medax.cpp), its skeleton graph (skel.cpp's add_u1_to_skel,
 // add_u2_to_skel and do_star) and its selection of helices and sheets (helix.cpp, skel.cpp's
-// filter and build*Geometry). The triangulation, Tight Cocone, U1 and U2 are the core's
-// (../skeleton/cocone.h), which the legacy files duplicated.
+// filter and build*Geometry). The triangulation and Tight Cocone are the shared cocone core's
+// (../cocone/cocone.h), and U1 and U2 the skeleton's (../skeleton/skeleton_stages.h): the
+// legacy files duplicated both.
 //
 // The legacy cell base's extra fields (e_tag, skel_id) live here, in arrays indexed by the cell's
 // id, so the core's data structures stay as they are.
@@ -32,7 +33,7 @@
 #ifndef CVC_GEOMETRY_SECONDARY_SECONDARY_H
 #define CVC_GEOMETRY_SECONDARY_SECONDARY_H
 
-#include "../skeleton/cocone.h"
+#include "../skeleton/skeleton_stages.h"
 
 #include <array>
 #include <cstdint>

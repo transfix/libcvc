@@ -24,6 +24,7 @@
 #include <cvc/ariadne/uri.h>      // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/app.h>         // app.slot: the app's block parsers
 #include <cvc/core/config.h>      // CVC_VERSION_STRING (generated from project(VERSION))
+#include <cvc/core/sim_tick.h>    // sim_rate_valid: scene: clock: hz
 // §12 channel lint: parse a script (parser.h) and walk its value_t / symbol / list_ptr AST
 // (types.h) for the static msg-* channel references.
 #include <cvc/state/state_exec/parser.h>
@@ -193,9 +194,11 @@ const char *const kAriSchema = R"ARISCHEMA({
           "uri": {"type": "string"},
           "path": {"type": "string"},
           "as": {"type": "string"},
+          "generate": {"type": "string"},
+          "params": {"type": "object"},
           "load": {"enum": ["eager", "lazy"]}
         },
-        "required": ["uri"]
+        "anyOf": [{"required": ["uri"]}, {"required": ["generate"]}]
       }
     },
     "args": {
@@ -3584,10 +3587,10 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
     }
   }
   if (const YAML::Node ck = s["clock"]; ck && ck.IsMap()) {
-    // clock: { scale, paused, speed_key, paused_key, time_key, tick_key } — the scene's simulation
-    // clock (SceneClock). All fields optional: a bare `clock: {}` wires to sim_transport.ari with
-    // the defaults. An explicit empty string for a *_key disables that lane (no steer / no
-    // publish).
+    // clock: { scale, paused, speed_key, paused_key, time_key, tick_key, hz } — the scene's
+    // simulation clock (SceneClock). All fields optional: a bare `clock: {}` wires to
+    // sim_transport.ari with the defaults. An explicit empty string for a *_key disables that lane
+    // (no steer / no publish).
     sc.clock.present = true;
     sc.clock.scale = num(ck, "scale", sc.clock.scale);
     sc.clock.paused = flag(ck, "paused", sc.clock.paused);
@@ -3599,6 +3602,16 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       sc.clock.time_key = str(ck, "time_key");
     if (ck["tick_key"])
       sc.clock.tick_key = str(ck, "tick_key");
+    if (ck["hz"]) { // the world's rate (ARIADNE_WORLDS.md section 18.9)
+      const double hz = num(ck, "hz", 0.0);
+      if (cvc::sim_rate_valid(hz))
+        sc.clock.hz = hz;
+      else
+        ctx.warn("ari: scene: clock: hz must be a whole number from " +
+                 std::to_string(static_cast<int>(cvc::kSimRateMin)) + " to " +
+                 std::to_string(static_cast<int>(cvc::kSimRateMax)) + "; the world runs at " +
+                 std::to_string(static_cast<int>(cvc::kSimRateDefault)) + " Hz");
+    }
   }
   sc.physics = parse_scene_physics(s["physics"]);
   sc.world = parse_scene_world(s["world"]);

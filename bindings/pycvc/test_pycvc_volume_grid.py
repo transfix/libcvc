@@ -269,7 +269,7 @@ def test_params_tables():
     assert grid.child("view").value() == "zy"
     assert grid.child("slice.x").value() == "3" and grid.child("slice.y").value() == "-1"
     assert grid.child("slice.z").property("unit") == "voxel"
-    assert grid.child("tool").property("choices") == "navigate,points,probe"
+    assert grid.child("tool").property("choices") == "navigate,points,probe,contours"
     back = pycvc.volume_grid_params.from_state(grid)
     assert back.view == pycvc.grid_view_zy and back.tool == pycvc.grid_tool_navigate
     assert back.slice_z == 40 and back.to_dict() == p.to_dict()
@@ -284,8 +284,9 @@ def test_params_tables():
     raises(ValueError, pycvc.volume_grid_display_params.from_state, display,
            contains="point_scale = 40 is above its maximum 10")
 
-    s = pycvc.volume_grid_source_params.from_dict({"file": "head.rawiv", "var": 1})
-    assert s.to_dict() == {"file": "head.rawiv", "var": 1, "time": 0}
+    s = pycvc.volume_grid_source_params.from_dict({"volume": "data.head.volume", "var": 1})
+    assert s.to_dict() == {"volume": "data.head.volume", "points": "", "session": "", "var": 1,
+                           "time": 0}
     source = grid.child("source")
     s.to_state(source)
     source.child("var").value("-1")
@@ -294,7 +295,8 @@ def test_params_tables():
     try:
         pycvc.volume_grid_source_params(files="x")
     except TypeError as e:
-        assert "unknown keyword 'files'" in str(e) and "valid: file, var, time" in str(e), str(e)
+        assert ("unknown keyword 'files'" in str(e) and
+                "valid: volume, points, session, var, time" in str(e)), str(e)
     else:
         raise AssertionError("an unknown keyword must raise TypeError")
     print("  ok: the three tables' keywords, validate, from_dict and state round trip")
@@ -354,7 +356,7 @@ def a_session():
     return pycvc.volume_grid_session(
         keys={"grid.view": "xz", "grid.tool": "navigate", "grid.slice.z": "7",
               "grid.display.point_scale": "2",
-              "grid.source.file": 'dir with spaces/head "1".rawiv',
+              "grid.source.var": "1",
               "grid.classes.current": "1"},
         transfer_function='{"color":[[0,0,0,0],[1,1,1,1]]}',
         classes=pc)

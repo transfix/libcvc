@@ -22,6 +22,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // the generated_world generator
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/image/image.h>
@@ -32,7 +33,10 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <cvc/state/state_exec/types.h> // format_number_shortest
+#include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_io.h>
+#include <cvc/volume/volume_grid.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
@@ -45,6 +49,28 @@
 
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 #define CVC_DATA_INLINE 1 // no threads: a load runs where it is asked for
+#endif
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+
+// A saved file, in a browser: the page downloads it under its name (data_save).
+// clang-format off
+EM_JS(int, cvc_data_download, (const char *name, const char *bytes, int size), {
+  if (typeof document === 'undefined')
+    return 0;
+  const url = URL.createObjectURL(
+      new Blob([HEAPU8.slice(bytes, bytes + size)], {type : 'application/octet-stream'}));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = UTF8ToString(name);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return 1;
+});
+// clang-format on
 #endif
 
 namespace cvc {
@@ -247,6 +273,50 @@ void decode_volume(DataDecode &d) {
   d.out("volume").value(std::string("volume"));
 }
 
+// A .vgr's point classes (VolumeGridRover's), at `classes`. A .pts read with as: point_classes
+// has its coordinates rounded to voxel indices: the decoder doesn't know the volume's frame.
+void decode_point_classes(DataDecode &d) {
+  const auto &f = only_file(d);
+  temp_dir tmp;
+  auto pc = std::make_shared<const cvc::point_classes>(
+      cvc::read_point_classes(d.app, tmp.put(basename(f.path), *f.bytes)));
+  d.out("classes").value(std::to_string(pc->point_count()));
+  d.out("classes").data(boost::any(std::shared_ptr<const cvc::point_classes>(std::move(pc))));
+}
+
+// A contour stack (cvc/geometry/contours.h: any format the app reads, by extension), at `contours`.
+// A Reconstruct series is its .ser and the section files beside it: an archive's, or the files a
+// page preloads with it; the .ser (else the one contour file) is what is read.
+void decode_contours(DataDecode &d) {
+  if (d.files.empty())
+    fail("as: contours: " + d.spec.uri + " has no file");
+  temp_dir tmp;
+  std::string main;
+  const std::vector<std::string> readable = cvc::contour_read_extensions(d.app);
+  for (const auto &f : d.files) {
+    const std::string at = tmp.put(basename(f.path), *f.bytes);
+    const std::string ext = extension(f.path);
+    if (ext == ".ser" ||
+        (main.empty() && std::find(readable.begin(), readable.end(), ext) != readable.end() &&
+         extension(main) != ".ser"))
+      main = at;
+  }
+  if (main.empty())
+    main = tmp.path() + "/" + basename(d.files.front().path);
+  auto stack = std::make_shared<const cvc::contour_stack>(cvc::read_contours(d.app, main));
+  d.out("contours").value(std::to_string(stack->polygon_count()));
+  d.out("contours").data(boost::any(std::shared_ptr<const cvc::contour_stack>(std::move(stack))));
+}
+
+// A volume grid session (cvc/volume/volume_grid.h's JSON), at `session`.
+void decode_volume_grid_session(DataDecode &d) {
+  const auto &f = only_file(d);
+  auto s = std::make_shared<const cvc::volume_grid_session>(
+      cvc::volume_grid_session_from_json(*f.bytes, f.path));
+  d.out("session").value(std::string("volume_grid_session"));
+  d.out("session").data(boost::any(std::shared_ptr<const cvc::volume_grid_session>(std::move(s))));
+}
+
 void publish_bounds(DataDecode &d, const cvc::world::city_bundle &city) {
   d.out("bounds.min_x").value(city.min_x);
   d.out("bounds.min_y").value(city.min_y);
@@ -359,6 +429,9 @@ struct decoder_table {
       {"volume", decode_volume},
       {"heightfield", decode_heightfield},
       {"city_bundle", decode_city_bundle},
+      {"point_classes", decode_point_classes},
+      {"volume_grid_session", decode_volume_grid_session},
+      {"contours", decode_contours},
   };
 };
 
@@ -412,7 +485,127 @@ std::string default_decoder(bool many, const std::string &name) {
   for (const char *e : {".rawiv", ".rawv", ".mrc", ".map", ".vtk"})
     if (ext == e)
       return "volume";
+  if (ext == ".vgr")
+    return "point_classes";
+  if (ext == ".ser" || ext == ".contour" || ext == ".cvcc")
+    return "contours";
   return "bytes";
+}
+
+// -- encoders -------------------------------------------------------------------------------------
+
+// The payload as a T, whichever way it is held: std::shared_ptr<const T>, std::shared_ptr<T> or T.
+template <class T> std::shared_ptr<const T> held(const boost::any &a) {
+  if (const auto *c = boost::any_cast<std::shared_ptr<const T>>(&a))
+    return *c;
+  if (const auto *m = boost::any_cast<std::shared_ptr<T>>(&a))
+    return *m;
+  if (const auto *v = boost::any_cast<T>(&a))
+    return std::make_shared<const T>(*v);
+  return nullptr;
+}
+
+std::string read_whole(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  if (!in)
+    fail("cannot read back " + path);
+  return ss.str();
+}
+
+std::string encode_bytes(const DataEncode &e) {
+  if (const auto *b = boost::any_cast<DataBytes>(&e.payload))
+    return *b ? **b : std::string();
+  if (const auto *s = boost::any_cast<std::string>(&e.payload))
+    return *s;
+  fail("bytes: the data are not bytes");
+}
+
+std::string encode_volume(const DataEncode &e) {
+  const std::shared_ptr<const cvc::volume> v = held<cvc::volume>(e.payload);
+  if (!v)
+    fail("volume: the data are not a volume");
+  temp_dir tmp;
+  const std::string p = tmp.path() + "/" + basename(e.file);
+  cvc::writeVolumeFile(e.app, std::vector<cvc::volume>{*v}, p);
+  return read_whole(p);
+}
+
+std::string encode_point_classes(const DataEncode &e) {
+  const std::shared_ptr<const cvc::point_classes> pc = held<cvc::point_classes>(e.payload);
+  if (!pc)
+    fail("point_classes: the data are not point classes");
+  temp_dir tmp;
+  const std::string p = tmp.path() + "/" + basename(e.file);
+  cvc::write_point_classes(e.app, *pc, p);
+  return read_whole(p);
+}
+
+// A contour stack in a one-file format, by the file's extension (.cvcc, .contour, .pcd): a format
+// that writes files beside it (Reconstruct's .ser, Tiling's .config) can't go out as one download.
+std::string encode_contours(const DataEncode &e) {
+  const std::shared_ptr<const cvc::contour_stack> c = held<cvc::contour_stack>(e.payload);
+  if (!c)
+    fail("contours: the data are not a contour stack");
+  temp_dir tmp;
+  const std::string p = tmp.path() + "/" + basename(e.file);
+  cvc::write_contours(e.app, *c, p);
+  std::size_t files = 0;
+  for (const auto &entry : fs::directory_iterator(tmp.path()))
+    files += entry.is_regular_file() ? 1 : 0;
+  if (files != 1)
+    fail("contours: " + extension(e.file) +
+         " writes files beside it; save as .cvcc, .contour or .pcd");
+  return read_whole(p);
+}
+
+std::string encode_volume_grid_session(const DataEncode &e) {
+  const std::shared_ptr<const cvc::volume_grid_session> s =
+      held<cvc::volume_grid_session>(e.payload);
+  if (!s)
+    fail("volume_grid_session: the data are not a volume grid session");
+  return cvc::volume_grid_session_json(*s);
+}
+
+// An app's encoders: the built-ins, then what its host registered.
+struct encoder_table {
+  static constexpr const char *app_slot = "cvc.ariadne.data-encoders";
+  std::mutex m;
+  std::map<std::string, DataEncoder> encoders = {
+      {"bytes", encode_bytes},
+      {"volume", encode_volume},
+      {"point_classes", encode_point_classes},
+      {"volume_grid_session", encode_volume_grid_session},
+      {"contours", encode_contours},
+  };
+};
+
+DataEncoder find_encoder(cvc::app &app, const std::string &as) {
+  encoder_table &t = app.slot<encoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  const auto it = t.encoders.find(as);
+  return it == t.encoders.end() ? DataEncoder() : it->second;
+}
+
+// Write a saved file's bytes: beside the document (a local one), or in a browser as a download.
+void write_saved(const std::string &bytes, const std::string &file, const std::string &base) {
+#if defined(__EMSCRIPTEN__)
+  (void)base;
+  if (!cvc_data_download(basename(file).c_str(), bytes.data(), static_cast<int>(bytes.size())))
+    fail("cannot save " + file + ": this page has no document to download it from");
+#else
+  if (base.find("://") != std::string::npos)
+    fail("cannot save " + file + ": the document is not a local file (" + base + ")");
+  fs::path p(file);
+  if (p.is_relative() && !base.empty())
+    p = fs::path(base) / p;
+  std::ofstream out(p, std::ios::binary | std::ios::trunc);
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  out.close();
+  if (!out)
+    fail("cannot write " + p.string());
+#endif
 }
 
 // ── sources ──────────────────────────────────────────────────────────────────────────────────────
@@ -779,6 +972,63 @@ std::vector<std::string> data_generators(cvc::app &app) {
   return out;
 }
 
+void register_data_encoder(cvc::app &app, const std::string &as, DataEncoder encoder) {
+  encoder_table &t = app.slot<encoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  if (encoder)
+    t.encoders[as] = std::move(encoder);
+  else
+    t.encoders.erase(as);
+}
+
+bool has_data_encoder(cvc::app &app, const std::string &as) {
+  return static_cast<bool>(find_encoder(app, as));
+}
+
+std::vector<std::string> data_encoders(cvc::app &app) {
+  encoder_table &t = app.slot<encoder_table>();
+  std::lock_guard<std::mutex> lock(t.m);
+  std::vector<std::string> out;
+  for (const auto &kv : t.encoders)
+    out.push_back(kv.first);
+  return out;
+}
+
+std::string default_data_encoder(const boost::any &payload) {
+  if (held<cvc::volume>(payload))
+    return "volume";
+  if (held<cvc::point_classes>(payload))
+    return "point_classes";
+  if (held<cvc::volume_grid_session>(payload))
+    return "volume_grid_session";
+  if (held<cvc::contour_stack>(payload))
+    return "contours";
+  if (boost::any_cast<DataBytes>(&payload) || boost::any_cast<std::string>(&payload))
+    return "bytes";
+  return std::string();
+}
+
+void data_save(cvc::app &app, const std::string &path, const std::string &file,
+               const std::string &as, const std::string &base) {
+  if (file.empty())
+    fail("no file to save " + path + " as");
+  cvc::state *n = cvc::state::instance(app).findThroughLinks(path);
+  const boost::any payload = n ? n->data() : boost::any();
+  if (payload.empty())
+    fail(path + " holds no data to save");
+  const std::string name = as.empty() ? default_data_encoder(payload) : as;
+  if (name.empty())
+    fail(path + " holds data no built-in encoder takes: name one (as)");
+  const DataEncoder encoder = find_encoder(app, name);
+  if (!encoder) {
+    std::string known;
+    for (const std::string &k : data_encoders(app))
+      known += (known.empty() ? "" : ", ") + k;
+    fail("no encoder as: " + name + " (known: " + known + ")");
+  }
+  write_saved(encoder(DataEncode{app, payload, file}), file, base);
+}
+
 std::string data_key(const DataSpec &spec) {
   return slug(spec.generate.empty() ? spec.uri : spec.generate) + "_" +
          sha256_of(canonical_request(spec)).substr(0, 8);
@@ -915,8 +1165,8 @@ DataDecoder need_decoder(cvc::app &app, const std::string &as) {
   DataDecoder decoder = find_decoder(app, as);
   if (!decoder)
     fail("no decoder as: " + as +
-         " (known: files, bytes, text, json, mesh, heightfield, "
-         "volume, city_bundle, and any a host registered)");
+         " (known: files, bytes, text, json, mesh, heightfield, volume, city_bundle, "
+         "point_classes, volume_grid_session, contours, and any a host registered)");
   return decoder;
 }
 
@@ -979,13 +1229,15 @@ void run_load(std::shared_ptr<DataStoreLife> life, DataSpec spec, std::string no
       files = files_of(f, root, lim, &many);
     }
     DataSpec decoded = spec;
-    decoded.as = decoder_name(spec, many, files);
+    // A generator that made no files, with no as:, wrote its outputs itself: nothing to decode.
+    const bool made_outputs = !spec.generate.empty() && files.empty() && spec.as.empty();
+    decoded.as = made_outputs ? std::string() : decoder_name(spec, many, files);
     with_app(life, [&](cvc::app &a) {
       publish_files(a, node, files);
       set_status(a, node, "decoding", 0.8);
     });
     with_app(life, [&](cvc::app &a) {
-      const DataDecoder decoder = need_decoder(a, decoded.as);
+      const DataDecoder decoder = made_outputs ? DataDecoder() : need_decoder(a, decoded.as);
       finish_decode(a, decoded, node, files, nullptr, decoder, canonical, sha256, size);
     });
   } catch (const stopped_error &) {
@@ -1142,6 +1394,34 @@ std::string DataStore::resolve(const std::string &path) const {
                  full.find(cvc::state::SEPARATOR, store.size()) == std::string::npos
              ? full
              : "";
+}
+
+std::string DataStore::set_output(const std::string &path, const std::string &item,
+                                  const boost::any &payload) {
+  const char *const own[] = {"status",    "error", "progress", "bytes", "sha256", "uri",
+                             "canonical", "as",    "size",     "rev",   "files"};
+  if (item.empty() || item.find(cvc::state::SEPARATOR) != std::string::npos)
+    throw std::invalid_argument("data-put: '" + item + "' is not an output name (one word)");
+  for (const char *k : own)
+    if (item == k)
+      throw std::invalid_argument("data-put: '" + item + "' is the store's own key, not an output");
+  if (payload.empty())
+    throw std::invalid_argument("data-put: nothing to put as " + item);
+  const std::string node = resolve(path);
+  if (node.empty())
+    throw std::invalid_argument("data-put: '" + path + "' names no dataset");
+  Impl &im = *impl_;
+  std::lock_guard<std::mutex> lock(im.life->mu); // as a load's decode holds it
+  if (!im.life->app)
+    return node;
+  cvc::app &a = *im.life->app;
+  cvc::state &out = cvc::state::instance(a)(join(node, item));
+  if (out.value().empty())
+    out.value(item);
+  out.data(payload);
+  const int rev = read_or<int>(a, join(node, "rev"), 0);
+  cvc::state::instance(a)(join(node, "rev")).value(rev + 1);
+  return node;
 }
 
 void DataStore::touch(const std::string &path) {

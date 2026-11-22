@@ -87,6 +87,9 @@ void avatar_world::release() {
   for (const auto &kv : _avatars)
     _world->remove_body(bid(kv.second.id));
   _avatars.clear();
+  for (const auto &kv : _obstacles)
+    _world->remove_body(bid(kv.second.id));
+  _obstacles.clear();
 }
 
 void avatar_world::move_to(ph::world &shared, const std::map<std::string, ph::body_state> &feet) {
@@ -101,6 +104,9 @@ void avatar_world::move_to(ph::world &shared, const std::map<std::string, ph::bo
     kv.second.id = create_avatar(it != feet.end() ? it->second : ph::body_state{},
                                  kv.second.dynamic, kv.second.mass);
   }
+  // The old world's bodies may be gone: an obstacle comes back at the origin until held again.
+  for (auto &kv : _obstacles)
+    kv.second.id = create_obstacle(kv.second.half_extents, ph::body_state{});
 }
 
 std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynamic, double mass) {
@@ -128,6 +134,11 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
     kept[kv.first] = state(kv.first);
     _world->remove_body(bid(kv.second.id));
   }
+  std::map<std::uint64_t, ph::body_state> held;
+  for (const auto &kv : _obstacles) {
+    held[kv.first] = _world->state(bid(kv.second.id));
+    _world->remove_body(bid(kv.second.id));
+  }
   for (std::uint32_t id : _statics)
     _world->remove_body(bid(id));
   _statics.clear();
@@ -144,6 +155,8 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
   }
   for (auto &kv : _avatars)
     kv.second.id = create_avatar(kept[kv.first], kv.second.dynamic, kv.second.mass);
+  for (auto &kv : _obstacles)
+    kv.second.id = create_obstacle(kv.second.half_extents, held[kv.first]);
 }
 
 void avatar_world::recreate_avatars(const std::map<std::string, ph::body_state> &feet) {
@@ -426,6 +439,51 @@ void avatar_world::step() {
   if (!_own)
     throw std::logic_error("avatar_world::step: a shared world is stepped by its owner");
   _world->step();
+}
+
+std::uint32_t avatar_world::create_obstacle(const ph::vec3 &half_extents,
+                                            const ph::body_state &centre) {
+  ph::body_desc d;
+  d.shape = ph::box{half_extents};
+  d.motion = ph::motion_type::kinematic;
+  d.position = centre.position;
+  d.rotation = centre.rotation;
+  d.linear_velocity = centre.linear_velocity;
+  d.allow_sleeping = false; // a held obstacle moves every frame
+  return _world->add_body(d).value;
+}
+
+void avatar_world::hold_obstacle(std::uint64_t key, const ph::vec3 &half_extents,
+                                 const ph::pose &centre) {
+  auto it = _obstacles.find(key);
+  if (it != _obstacles.end() && it->second.half_extents.x == half_extents.x &&
+      it->second.half_extents.y == half_extents.y && it->second.half_extents.z == half_extents.z) {
+    _world->move_kinematic(bid(it->second.id), centre.position, centre.rotation);
+    return;
+  }
+  if (it != _obstacles.end())
+    _world->remove_body(bid(it->second.id));
+  ph::body_state at;
+  at.position = centre.position;
+  at.rotation = centre.rotation;
+  obstacle o;
+  o.half_extents = half_extents;
+  o.id = create_obstacle(half_extents, at);
+  _obstacles[key] = o;
+}
+
+void avatar_world::remove_obstacle(std::uint64_t key) {
+  auto it = _obstacles.find(key);
+  if (it == _obstacles.end())
+    return;
+  _world->remove_body(bid(it->second.id));
+  _obstacles.erase(it);
+}
+
+bool avatar_world::has_obstacle(std::uint64_t key) const { return _obstacles.count(key) != 0; }
+
+ph::body_state avatar_world::obstacle_state(std::uint64_t key) const {
+  return _world->state(bid(_obstacles.at(key).id));
 }
 
 ph::body_state avatar_world::state(const std::string &pid) const {

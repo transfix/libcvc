@@ -21,7 +21,8 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h>
-#include <cvc/state/state.h> // isValidStateName, SEPARATOR
+#include <cvc/core/sim_tick.h> // the room's rate (scene: clock: hz)
+#include <cvc/state/state.h>   // isValidStateName, SEPARATOR
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -35,8 +36,6 @@ namespace cvc {
 namespace ariadne {
 
 namespace {
-
-constexpr double kRoomQuantum = 1.0 / 120.0; // the holon's fixed_dt (world_clock's default)
 
 bool finite_positive(double v) { return std::isfinite(v) && v > 0.0; }
 bool finite_nonnegative(double v) { return std::isfinite(v) && v >= 0.0; }
@@ -143,7 +142,7 @@ std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
     arch.id = id;
     const std::string at = where + " " + id + ":";
     if (!a.is_map())
-      return at + " expects a map (body:, controllers:)";
+      return at + " expects a map (body:, controllers:, or vehicle:)";
     for (const auto &[key, val] : a.entries) {
       if (key == "body") {
         if (std::string e = parse_body(val, at + " body:", arch.body, warnings); !e.empty())
@@ -151,6 +150,10 @@ std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
       } else if (key == "controllers") {
         if (!names(val, at + " controllers:", arch.controllers, why))
           return why;
+      } else if (key == "vehicle") {
+        if (!val.is_scalar() || val.scalar.empty())
+          return at + " vehicle: expects a vehicle archetype's id";
+        arch.vehicle = val.scalar;
       } else {
         warn(warnings, at + " unknown key '" + key + "', ignored");
       }
@@ -709,7 +712,17 @@ double avatar_controller::param(const std::string &name, double def) const {
   return it == params.end() ? def : it->second;
 }
 
+const avatar_archetype *world_rules::find_avatar(const std::string &id) const {
+  for (const avatar_archetype &a : archetypes)
+    if (a.id == id)
+      return &a;
+  return nullptr;
+}
+
 const avatar_archetype &world_rules::avatar() const {
+  for (const avatar_archetype &a : archetypes) // the first person: a vehicle has no body here
+    if (a.vehicle.empty())
+      return a;
   return archetypes.empty() ? fallback_avatar : archetypes.front();
 }
 
@@ -871,6 +884,14 @@ std::string check_world_rules(const world_rules &r) {
       return at + ": an id must be a name (letters, digits and _)";
     if (!archetypes.insert(a.id).second)
       return at + " is defined twice";
+    if (!a.vehicle.empty()) { // its body is the vehicle's: checked against vehicles: below
+      bool offered = false;
+      for (const vehicle_archetype &v : r.vehicles)
+        offered = offered || v.id == a.vehicle;
+      if (!offered)
+        return at + " is vehicle '" + a.vehicle + "', which vehicles: archetypes: does not define";
+      continue;
+    }
     if (!finite_positive(a.body.mass) || !finite_positive(a.body.width) ||
         !finite_positive(a.body.height))
       return at + ": body mass, width and height must be positive";
@@ -1028,9 +1049,12 @@ std::string world_rules_from(const Scene &scene, const Value *world, world_rules
   }
   if (ph.present) {
     r.physics.gravity = cvc::physics::vec3{ph.gravity[0], ph.gravity[1], ph.gravity[2]};
-    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - kRoomQuantum) > 1e-9)
+    // The room's quantum: its rate's (scene: clock: hz, ARIADNE_WORLDS.md section 18.9).
+    const double hz = scene.clock.hz > 0.0 ? scene.clock.hz : cvc::kSimRateDefault;
+    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - cvc::sim_quantum(hz)) > 1e-9)
       warn(warnings, "scene: physics: fixed_dt " + num_text(ph.fixed_dt) +
-                         " is ignored: a room steps its avatars every 1/120 s");
+                         " is ignored: a room steps its avatars every 1/" + num_text(hz) +
+                         " s (its rate is scene: clock: hz)");
     if (ph.backend != "auto" && ph.backend != "jolt")
       warn(warnings, "scene: physics: backend " + ph.backend +
                          " is ignored: a room's avatars are Jolt bodies when the build has Jolt");

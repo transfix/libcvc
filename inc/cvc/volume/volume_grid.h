@@ -13,7 +13,8 @@
 // here and runs the same natively and in wasm:
 //
 //   - the node's parameters, declared once as tables (§1.5): volume_grid_params (the view switch,
-//     the tool, the slice indices), volume_grid_display_params and volume_grid_source_params;
+//     the tool, the slice indices), volume_grid_display_params and volume_grid_source_params (the
+//     state keys the node takes its volume, points and sessions from);
 //   - point_class_editor: point classes marked, selected, moved and deleted on the planes of a
 //     volume, with undo;
 //   - point_class_gestures: the picks a slice view writes (down, drag, up, with Shift / Ctrl /
@@ -48,6 +49,7 @@
 #include <cstdint>
 #include <cvc/core/param_table.h>
 #include <cvc/volume/point_classes.h>
+#include <cvc/volume/volume_grid_contours.h>
 #include <cvc/volume/volume_slice.h>
 #include <deque>
 #include <limits>
@@ -73,10 +75,11 @@ slice_axis grid_view_axis(grid_view v);
 grid_view grid_view_of(slice_axis a);
 
 // What a click in a slice view does: navigate moves the other two planes to the voxel clicked;
-// points marks, selects and moves point classes (point_class_gestures); probe only reads the voxel.
-// (P10 adds contours.)
-enum class grid_tool { navigate, points, probe };
-BOOST_DESCRIBE_ENUM(grid_tool, navigate, points, probe)
+// points marks, selects and moves point classes (point_class_gestures); probe only reads the voxel;
+// contours draws and edits the current object's curves (grid_contour_gestures,
+// cvc/volume/volume_grid_contours.h).
+enum class grid_tool { navigate, points, probe, contours };
+BOOST_DESCRIBE_ENUM(grid_tool, navigate, points, probe, contours)
 
 // The keys under <node>.grid: the switch, the tool and where the three planes are.
 struct volume_grid_params {
@@ -95,11 +98,16 @@ struct volume_grid_display_params {
   bool grey = false;      // the slices in grey, not through the transfer function
 };
 
-// What `request: load` reads: the keys under <node>.grid.source.
+// Where the grid's data are: the keys under <node>.grid.source. Each path is a state key whose
+// data channel holds the data, relative to the document's scope (a leading '/' is the root's): the
+// app put it there (a document's data: entry, a program, a filter, another node), and the node
+// follows it as it changes. The node reads no file.
 struct volume_grid_source_params {
-  std::string file; // a volume file (a relative path resolves against the document's directory)
-  int var = 0;
-  int time = 0;
+  std::string volume;  // a cvc::volume (or a slice_source): what the planes cut
+  std::string points;  // point classes: they replace the grid's each time they change
+  std::string session; // a volume_grid_session: applied each time it changes
+  int var = 0;         // the variable and timestep the volume holds: the classes of others are
+  int time = 0;        // kept, not shown
 };
 
 #ifndef SWIG
@@ -111,7 +119,8 @@ template <> struct param_table<volume_grid_params> : param_fields<volume_grid_pa
             doc("the slice the view switch shows: xy (down z), xz (down y) or zy (down x)")),
       field("tool", &P::tool,
             doc("what a click in a slice view does: navigate moves the other planes there, "
-                "points marks and selects point classes, probe only reads the voxel")),
+                "points marks and selects point classes, probe only reads the voxel, contours "
+                "draws the current object's curves")),
       field("slice.x", &P::slice_x, unit("voxel"), range(-1.0, none),
             doc("the plane looking down x (the ZY view), from 0; -1 is the middle one")),
       field("slice.y", &P::slice_y, unit("voxel"), range(-1.0, none),
@@ -138,10 +147,19 @@ struct param_table<volume_grid_source_params> : param_fields<volume_grid_source_
   using P = volume_grid_source_params;
   static constexpr double none = std::numeric_limits<double>::quiet_NaN();
   static constexpr auto fields = std::tuple{
-      field("file", &P::file,
-            doc("the volume file `load` reads (relative to the document's directory)")),
-      field("var", &P::var, range(0, none), doc("the variable `load` reads")),
-      field("time", &P::time, range(0, none), doc("the timestep `load` reads")),
+      field("volume", &P::volume,
+            doc("the state key whose data channel holds the volume the planes cut (relative to "
+                "the document; a leading / is the root's), followed as it changes")),
+      field("points", &P::points,
+            doc("the state key whose data channel holds point classes: they replace the grid's "
+                "each time they change")),
+      field("session", &P::session,
+            doc("the state key whose data channel holds a session: applied each time it "
+                "changes")),
+      field("var", &P::var, range(0, none),
+            doc("the variable the volume holds (the classes of others are kept, not shown)")),
+      field("time", &P::time, range(0, none),
+            doc("the timestep the volume holds (the classes of others are kept, not shown)")),
   };
 };
 #endif // SWIG
@@ -343,25 +361,31 @@ point_classes reconcile_point_class_rows(const point_classes &old,
 // ---- sessions ---------------------------------------------------------------------------------
 
 // A node's session (§1.5, "Sessions"): its keys (paths relative to the node, values as text), the
-// transfer function it colours through (a cvc::tf::model's string) and its point classes.
+// transfer function it colours through (a cvc::tf::model's string), its point classes and its
+// contours.
 struct volume_grid_session {
   std::map<std::string, std::string> keys;
   std::string transfer_function;
   point_classes classes;
+  grid_contours contours;
 };
 
 // The keys a session keeps: the parameter tables' (grid.view, grid.tool, grid.slice.*,
-// grid.display.*, grid.source.*) and grid.classes.current. Transient keys (the cursor, picks,
-// published info and job keys, requests) never go in one.
+// grid.display.*, grid.source.var and grid.source.time, grid.contour.* but its source, and the
+// tiler's grid.tile.*), grid.classes.current and grid.objects.current. Where the data come from
+// (grid.source.volume, points and session, grid.contour.source) is the document's, and transient
+// keys (the cursor, picks, published info and job keys, requests) never go in one.
 bool volume_grid_session_key(const std::string &path);
 
 // Write `s` as JSON:
 //   { "format": "cvc.volume_grid.session", "version": 1, "keys": { "grid.view": "xy", ... },
 //     "transfer_function": "...",
 //     "classes": [ { "name": ..., "color": [r, g, b], "radius": ..., "variable": ...,
-//                    "timestep": ..., "points": [i, j, k, ...] }, ... ] }
-// Throws std::invalid_argument when point_class_problems finds anything, and std::runtime_error
-// naming the file when it can't be written.
+//                    "timestep": ..., "points": [i, j, k, ...] }, ... ],
+//     "contours": { grid_contours_json's object } }
+// ("contours" only when there are contour objects.) Throws std::invalid_argument when
+// point_class_problems or grid_contours_problems finds anything, and std::runtime_error naming the
+// file when it can't be written.
 void write_volume_grid_session(const volume_grid_session &s, const std::string &filename);
 std::string volume_grid_session_json(const volume_grid_session &s);
 // Read one. Throws std::runtime_error naming the file and what is wrong: missing, not JSON, not

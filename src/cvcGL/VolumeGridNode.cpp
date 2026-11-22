@@ -18,14 +18,14 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
+#include <cvc/state/followed_key.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
-#include <cvc/volume/volume_file_io.h>
-#include <filesystem>
 #include <sstream>
 
 namespace cvc {
@@ -65,6 +65,16 @@ cvc::geometry::color_t axis_color(int a) {
 constexpr int kDiskSides = 16;
 constexpr double kPi = 3.14159265358979323846;
 
+// The object a followed key's payload points at, for the payloads the grid reads as pointers (a
+// volume's, the points' and the session's): a new one written within the clock's resolution is
+// still a change (cvc::followed_key).
+const void *payload_pointee(const boost::any &d) {
+  if (const void *v = cvc::volume_payload_pointee(d)) // a program's data object's too
+    return v;
+  return cvc::any_pointee<const cvc::point_classes, cvc::point_classes,
+                          const cvc::volume_grid_session, cvc::volume_grid_session>(d);
+}
+
 // The point in object space at plane coordinates (r, u) on the plane `plane` along axis `a`.
 cvc::geometry::point_t at(cvc::slice_axis a, double plane, double r, double u) {
   const std::pair<int, int> ru = cvc::grid_plane_axes(a);
@@ -82,6 +92,7 @@ VolumeGridNode::VolumeGridNode(cvc::app &ctx, const std::string &statePath, cons
   cvc::params_describe_state<cvc::volume_grid_params>(getState("grid"));
   cvc::params_describe_state<cvc::volume_grid_display_params>(getState("grid.display"));
   cvc::params_describe_state<cvc::volume_grid_source_params>(getState("grid.source"));
+  m_contours = std::make_unique<VolumeGridContours>(*this);
 }
 
 VolumeGridNode::~VolumeGridNode() = default;
@@ -119,6 +130,7 @@ void VolumeGridNode::ensureChildren() {
     std::shared_ptr<VolumeSliceNode> s = addGraphicsChild<VolumeSliceNode>(sliceName(a));
     s->getState("slice.axis").value(std::string(cvc::slice_axis_name(a)));
     s->setModelKey(tf);
+    s->setVisible(false); // until there is a volume to cut: no view frames on an empty plane
     m_slices[ax] = s;
     for (int k = 0; k < 2; ++k) {
       std::shared_ptr<GeometryNode> g = s->addGraphicsChild<GeometryNode>(k ? "lines" : "points");
@@ -130,11 +142,13 @@ void VolumeGridNode::ensureChildren() {
         g->setRenderMode(GeometryRenderMode::LINES); // and again after each setGeometry
         g->setLineWidth(2.0);
       }
-      g->setVisible(false); // until it has something to draw
+      g->setVisible(false); // until the first build (rebuildOverlays), with its plane's volume
       (k ? m_lines : m_points)[ax] = g;
     }
   }
   m_surfaces = addGraphicsChild<NullGraphicNode>("surfaces");
+  m_surfaces->setVisible(false); // with the planes: an empty group's box frames no view
+  m_contours->ensureChildren();  // after the planes' own overlays, so it draws over them
   // The grey display's model: the planes colour through it instead of the transfer function.
   getState("grey_transfer_function").value(cvc::tf::to_string(cvc::tf::model::preset("grayscale")));
   cvc::job_keys(app().root(), getState("grid").fullName()).idle();
@@ -145,15 +159,27 @@ void VolumeGridNode::ensureChildren() {
   put(getState("grid.selection.count"), "0");
 }
 
-void VolumeGridNode::setSource(std::shared_ptr<cvc::slice_source> src, const std::string &file,
+void VolumeGridNode::setSource(std::shared_ptr<cvc::slice_source> src, const std::string &label,
                                int var, int time) {
   if (!src)
     return;
+  std::shared_ptr<const cvc::volume> vol;
+  if (const cvc::volume *v = src->in_memory_volume())
+    vol = std::shared_ptr<const cvc::volume>(src, v); // kept by the source
+  adopt(std::move(src), std::move(vol), label, var, time);
+}
+
+void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
+                           std::shared_ptr<const cvc::volume> vol, const std::string &label,
+                           int var, int time) {
   ensureChildren();
   m_source = std::move(src);
-  m_file = file;
+  m_label = label;
+  m_waitingFor.clear();
   m_var = var;
   m_time = time;
+  put(getState("grid.source.var"), std::to_string(var)); // what readKeys reads back
+  put(getState("grid.source.time"), std::to_string(time));
   const cvc::slice_grid &g = m_source->grid();
   m_editor.set_dims(
       {static_cast<int>(g.dim.xdim), static_cast<int>(g.dim.ydim), static_cast<int>(g.dim.zdim)});
@@ -161,10 +187,11 @@ void VolumeGridNode::setSource(std::shared_ptr<cvc::slice_source> src, const std
   m_editor.clear_selection();
   m_gestures.reset();
   m_band = cvc::grid_pick_outcome{};
+  m_contours->setFrame(cvc::grid_frame_of(g));
 
-  // The volume the transfer function's histogram is taken over.
-  if (const cvc::volume *v = m_source->in_memory_volume()) {
-    m_histogramVolume = std::shared_ptr<const cvc::volume>(m_source, v); // kept by the source
+  // The volume the transfer function's histogram is taken over: the app's own, published as is.
+  if (vol) {
+    m_histogramVolume = std::move(vol);
     getState("grid.volume").data(boost::any(m_histogramVolume));
   } else {
     auto stand_in = std::make_shared<cvc::volume>(app());
@@ -183,8 +210,11 @@ void VolumeGridNode::setSource(std::shared_ptr<cvc::slice_source> src, const std
     m_histogramVolume = stand_in;
     getState("grid.volume").data(boost::any());
   }
-  for (const auto &s : m_slices)
+  for (const auto &s : m_slices) {
     s->setSource(m_source);
+    s->setVisible(true);
+  }
+  m_surfaces->setVisible(true);
   publishInfo();
   // Points the new volume doesn't hold are kept, and said.
   const std::vector<int> dims{static_cast<int>(g.dim.xdim), static_cast<int>(g.dim.ydim),
@@ -204,7 +234,137 @@ void VolumeGridNode::publishInfo() {
   put(getState("grid.info.max"), num(m_source->max()));
   put(getState("grid.info.span"),
       num(g.spacing(0)) + " " + num(g.spacing(1)) + " " + num(g.spacing(2)));
-  put(getState("grid.info.file"), m_file);
+  put(getState("grid.info.source"), m_label);
+}
+
+std::string VolumeGridNode::sourcePath(const std::string &which) {
+  const std::string key = getState("grid.source")(which).value();
+  if (key.empty())
+    return std::string();
+  if (key[0] == '/')
+    return key.substr(1);
+  return m_scope.empty() ? key : m_scope + cvc::state::SEPARATOR + key;
+}
+
+// Whether the key grid.source.<which> names data that changed since `f` last saw them
+// (cvc::followed_key): another node than before (the key edited, or a link moved: a dataset
+// loaded again under its name), or the same node's data written since. `payload` is then what
+// it holds (empty when nothing).
+bool VolumeGridNode::follow(const char *which, cvc::followed_key &f, boost::any &payload) {
+  return f.changed(app().root(), sourcePath(which), payload, payload_pointee);
+}
+
+void VolumeGridNode::followSources() {
+  boost::any d;
+  if (follow("volume", m_followVolume, d)) {
+    std::shared_ptr<cvc::slice_source> src;
+    std::shared_ptr<const cvc::volume> vol;
+    if (m_followVolume.node() == getState("grid.volume").fullName()) {
+      status("error: grid.source.volume names this grid's own grid.volume");
+    } else if (cvc::volume_payload(d, src, vol)) {
+      // The same volume written again (or a link moved to it) changes nothing.
+      if (!(vol && vol == m_histogramVolume) && !(!vol && src == m_source)) {
+        const cvc::volume_grid_source_params sp =
+            cvc::params_from_state<cvc::volume_grid_source_params>(getState("grid.source")).value;
+        adopt(src, vol, getState("grid.source.volume").value(), sp.var, sp.time);
+      }
+    } else if (!d.empty()) {
+      status("error: " + m_followVolume.path() + " holds no volume");
+    }
+  }
+  // Not there yet (a dataset still loading, a program that has not written it): said once.
+  if (!m_source) {
+    const std::string key = getState("grid.source.volume").value();
+    const std::string say =
+        key.empty() ? "no volume: grid.source.volume names none" : "waiting for a volume at " + key;
+    if (say != m_waitingFor) {
+      m_waitingFor = say;
+      status(say);
+    }
+  }
+  if (follow("points", m_followPoints, d))
+    adoptPoints(d, getState("grid.source.points").value());
+  if (follow("session", m_followSession, d)) {
+    std::shared_ptr<const cvc::volume_grid_session> s;
+    if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::volume_grid_session>>(&d))
+      s = *c;
+    else if (const auto *m = boost::any_cast<std::shared_ptr<cvc::volume_grid_session>>(&d))
+      s = *m;
+    else if (const auto *v = boost::any_cast<cvc::volume_grid_session>(&d))
+      s = std::make_shared<const cvc::volume_grid_session>(*v);
+    if (s)
+      applySession(*s, getState("grid.source.session").value());
+    else if (!d.empty())
+      status("error: " + m_followSession.path() + " holds no volume grid session");
+  }
+}
+
+void VolumeGridNode::adoptPoints(const boost::any &d, const std::string &from) {
+  std::shared_ptr<const cvc::point_classes> p;
+  if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::point_classes>>(&d))
+    p = *c;
+  else if (const auto *m = boost::any_cast<std::shared_ptr<cvc::point_classes>>(&d))
+    p = *m;
+  else if (const auto *v = boost::any_cast<cvc::point_classes>(&d))
+    p = std::make_shared<const cvc::point_classes>(*v);
+  if (!p) {
+    if (!d.empty())
+      status("error: " + from + " holds no point classes");
+    return;
+  }
+  m_editor.set_classes(*p); // an undo step
+  publishPoints(true);
+  std::vector<std::string> problems;
+  if (m_source) {
+    const cvc::slice_grid &g = m_source->grid();
+    problems = cvc::point_class_problems(
+        m_editor.classes(),
+        {static_cast<int>(g.dim.xdim), static_cast<int>(g.dim.ydim), static_cast<int>(g.dim.zdim)});
+  }
+  status(problems.empty()
+             ? "read " + std::to_string(m_editor.classes().point_count()) + " points in " +
+                   std::to_string(m_editor.classes().classes.size()) + " classes from " + from
+             : "note: " + problems.front());
+}
+
+cvc::volume_grid_session VolumeGridNode::session() {
+  cvc::volume_grid_session s;
+  for (const std::string &full : getState("grid").children()) {
+    const std::string rel = full.substr(getState().fullName().size() + 1);
+    if (!cvc::volume_grid_session_key(rel))
+      continue;
+    const std::string v = getState(rel).value();
+    if (!v.empty())
+      s.keys[rel] = v;
+  }
+  s.transfer_function = getState("transfer_function").value();
+  s.classes = m_editor.classes();
+  s.contours = m_contours->contours();
+  return s;
+}
+
+void VolumeGridNode::applySession(const cvc::volume_grid_session &s, const std::string &from) {
+  for (const auto &kv : s.keys)
+    getState(kv.first).value(kv.second);
+  if (!s.transfer_function.empty())
+    getState("transfer_function").value(s.transfer_function);
+  m_editor.set_classes(s.classes);
+  publishPoints(true);
+  m_contours->setContours(s.contours, from);
+  ++m_keysVersion;
+  status("applied the session from " + from);
+}
+
+// grid.session, rebuilt when what it holds changed: the keys, the classes, the transfer function.
+void VolumeGridNode::publishSession() {
+  const std::string sig =
+      std::to_string(m_editor.version()) + '|' + std::to_string(m_contours->editor().version()) +
+      '|' + std::to_string(m_keysVersion.load()) + '|' + getState("transfer_function").value();
+  if (sig == m_sessionSignature)
+    return;
+  m_sessionSignature = sig;
+  getState("grid.session")
+      .data(boost::any(std::make_shared<const cvc::volume_grid_session>(session())));
 }
 
 void VolumeGridNode::status(const std::string &s) { put(getState("grid.status"), s); }
@@ -225,7 +385,7 @@ void VolumeGridNode::handleStateChanged(const std::string &child) {
     else if (k == "view" || k == "tool" || k == "classes.current" || starts_with(k, "slice.") ||
              starts_with(k, "display.") || starts_with(k, "source."))
       ++m_keysVersion;
-    else
+    else if (!m_contours || !m_contours->stateChanged(k)) // null while constructing
       read = false;
     if (read)
       if (SceneGraph *sg = getSceneGraph())
@@ -244,14 +404,6 @@ bool VolumeGridNode::voxelOf(const double world[3], std::array<std::int64_t, 3> 
   return inside;
 }
 
-std::string VolumeGridNode::resolvePath(const std::string &file) const {
-  namespace fs = std::filesystem;
-  fs::path p(file);
-  if (p.is_relative() && !m_baseDir.empty())
-    p = fs::path(m_baseDir) / p;
-  return p.string();
-}
-
 void VolumeGridNode::readKeys() {
   cvc::state &grid = getState("grid");
   const cvc::param_result<cvc::volume_grid_params> p =
@@ -267,7 +419,17 @@ void VolumeGridNode::readKeys() {
     problems += (problems.empty() ? "" : "; ") + d.message();
   else
     m_display = d.value;
-  cvc::params_from_state<cvc::volume_grid_source_params>(grid("source")); // seeded, read by load
+  // The variable and timestep the volume holds: the editor shows those classes.
+  const cvc::param_result<cvc::volume_grid_source_params> sp =
+      cvc::params_from_state<cvc::volume_grid_source_params>(grid("source"));
+  if (!sp.ok()) {
+    problems += (problems.empty() ? "" : "; ") + sp.message();
+  } else if (sp.value.var != m_var || sp.value.time != m_time) {
+    m_var = sp.value.var;
+    m_time = sp.value.time;
+    m_editor.set_shown(m_var, m_time);
+    m_overlaySignature.clear();
+  }
   if (!problems.empty())
     status("error: " + problems);
   // The grey display: every plane colours through the grey model, else the transfer function.
@@ -432,6 +594,34 @@ void VolumeGridNode::consumePick() {
   p.ijk[static_cast<int>(p.axis)] = m_index[static_cast<int>(p.axis)]; // on the plane shown
   cvc::parse_grid_pick_mods(field("mods"), p);
   cursorFrom("grid.pick");
+  if (m_params.tool == cvc::grid_tool::contours) {
+    // Contours take where the pick met the plane, not a voxel: the plane coordinates of the point
+    // (the voxel's centre for a pick that named only its voxel).
+    double w[3], local[3];
+    const char *coords[3] = {"x", "y", "z"};
+    bool at = true;
+    for (int c = 0; c < 3; ++c)
+      at = at && cvc::param_detail::parse_double(field(coords[c]), w[c]);
+    if (at) {
+      worldToLocal(w, local);
+    } else {
+      const std::int64_t v[3] = {p.ijk[0], p.ijk[1], p.ijk[2]};
+      m_source->grid().voxel_center(v, local);
+    }
+    const std::pair<int, int> ru = cvc::grid_plane_axes(p.axis);
+    cvc::contour_pick cp;
+    cp.phase = static_cast<cvc::contour_pick::phase_t>(p.phase);
+    cp.axis = p.axis;
+    cp.index = m_index[static_cast<int>(p.axis)];
+    cp.r = local[ru.first];
+    cp.u = local[ru.second];
+    cp.inside = p.inside;
+    cp.shift = p.shift;
+    cp.ctrl = p.ctrl;
+    cp.alt = p.alt;
+    m_contours->pick(cp);
+    return;
+  }
 
   long long current = -1;
   cvc::param_detail::parse_integer(getState("grid.classes.current").value(), current);
@@ -457,70 +647,11 @@ void VolumeGridNode::runRequest(const std::string &request) {
   const std::size_t sp = line.find_first_of(" \t");
   const std::string cmd = line.substr(0, sp);
   const std::string arg = sp == std::string::npos ? std::string() : trim(line.substr(sp));
-  const auto need_file = [&]() {
-    if (arg.empty())
-      throw std::invalid_argument(cmd + " needs a file");
-    return resolvePath(arg);
-  };
   const cvc::slice_grid &g = m_source->grid();
-  const std::vector<int> dims{static_cast<int>(g.dim.xdim), static_cast<int>(g.dim.ydim),
-                              static_cast<int>(g.dim.zdim)};
-  const auto read_params = [&]() {
-    cvc::point_class_read_params rp;
-    rp.dims = dims;
-    rp.bbox = {g.box.minx, g.box.miny, g.box.minz, g.box.maxx, g.box.maxy, g.box.maxz};
-    rp.variable = m_var;
-    rp.timestep = m_time;
-    return rp;
-  };
   try {
-    if (cmd == "load") {
-      const cvc::param_result<cvc::volume_grid_source_params> sp =
-          cvc::params_from_state<cvc::volume_grid_source_params>(getState("grid.source"));
-      if (!sp.ok())
-        throw std::invalid_argument(sp.message());
-      if (sp.value.file.empty())
-        throw std::invalid_argument("source.file is empty: nothing to load");
-      std::string error;
-      std::shared_ptr<cvc::slice_source> src;
-      if (m_loader) {
-        src = m_loader(sp.value, error);
-      } else {
-        cvc::volume vol(app());
-        cvc::readVolumeFile(app(), vol, resolvePath(sp.value.file),
-                            static_cast<unsigned>(sp.value.var),
-                            static_cast<unsigned>(sp.value.time));
-        src = std::make_shared<cvc::slice_source>(vol);
-      }
-      if (!src)
-        throw std::runtime_error(error.empty() ? "could not read " + sp.value.file : error);
-      setSource(src, sp.value.file, sp.value.var, sp.value.time);
-      status("loaded " + sp.value.file);
-    } else if (cmd == "save_classes") {
-      const std::string f = need_file();
-      cvc::write_point_classes(app(), m_editor.classes(), f);
-      status("saved " + std::to_string(m_editor.classes().classes.size()) + " classes to " + arg);
-    } else if (cmd == "load_classes" || cmd == "load_points") {
-      const std::string f = need_file();
-      cvc::point_classes read = cvc::read_point_classes(app(), f, read_params());
-      if (cmd == "load_points") { // add the file's to the classes of those names
-        cvc::point_classes merged = m_editor.classes();
-        for (const cvc::point_class &c : read.classes) {
-          if (merged.class_index(c.name, c.variable, c.timestep) < 0) {
-            merged.set_class(c); // a new class, with its colour and radius
-            continue;
-          }
-          for (std::size_t p = 0; p < c.size(); ++p)
-            merged.add(c.name, c.points[3 * p], c.points[3 * p + 1], c.points[3 * p + 2],
-                       c.variable, c.timestep);
-        }
-        read = std::move(merged);
-      }
-      m_editor.set_classes(std::move(read));
-      publishPoints(true);
-      status("read " + std::to_string(m_editor.classes().point_count()) + " points in " +
-             std::to_string(m_editor.classes().classes.size()) + " classes from " + arg);
-    } else if (cmd == "delete_selected") {
+    if (m_contours->request(cmd, arg, m_params.tool == cvc::grid_tool::contours))
+      return;
+    if (cmd == "delete_selected") {
       const std::size_t n = m_editor.delete_selected();
       status("deleted " + std::to_string(n) + " point" + (n == 1 ? "" : "s"));
     } else if (cmd == "select_all") {
@@ -539,39 +670,6 @@ void VolumeGridNode::runRequest(const std::string &request) {
       const std::int64_t last = static_cast<std::int64_t>(g.count(a)) - 1;
       const std::int64_t to = std::clamp<std::int64_t>(m_index[a] + n, 0, last);
       put(getState("grid")(std::string("slice.") + "xyz"[a]), std::to_string(to));
-    } else if (cmd == "save_session") {
-      const std::string f = need_file();
-      cvc::volume_grid_session s;
-      for (const std::string &full : getState("grid").children()) {
-        const std::string rel = full.substr(getState().fullName().size() + 1);
-        if (!cvc::volume_grid_session_key(rel))
-          continue;
-        const std::string v = getState(rel).value();
-        if (!v.empty())
-          s.keys[rel] = v;
-      }
-      s.transfer_function = getState("transfer_function").value();
-      s.classes = m_editor.classes();
-      cvc::write_volume_grid_session(s, f);
-      status("saved the session to " + arg);
-    } else if (cmd == "load_session") {
-      const std::string f = need_file();
-      const cvc::volume_grid_session s = cvc::read_volume_grid_session(f);
-      const cvc::volume_grid_source_params before =
-          cvc::params_from_state<cvc::volume_grid_source_params>(getState("grid.source")).value;
-      for (const auto &kv : s.keys)
-        getState(kv.first).value(kv.second);
-      if (!s.transfer_function.empty())
-        getState("transfer_function").value(s.transfer_function);
-      const cvc::volume_grid_source_params after =
-          cvc::params_from_state<cvc::volume_grid_source_params>(getState("grid.source")).value;
-      if (!after.file.empty() && (after.file != before.file || after.var != m_var ||
-                                  after.time != m_time || after.file != m_file))
-        runRequest("load");
-      m_editor.set_classes(s.classes);
-      publishPoints(true);
-      ++m_keysVersion;
-      status("read the session from " + arg);
     } else if (!cmd.empty()) {
       throw std::invalid_argument("'" + cmd + "' is not a request");
     }
@@ -581,8 +679,23 @@ void VolumeGridNode::runRequest(const std::string &request) {
 }
 
 bool VolumeGridNode::tick() {
-  if (!m_source)
+  if (!m_seeded) {
+    // Every parameter key has its default from the first tick (a document's props seeded theirs
+    // before it), so what binds them reads a value while the volume is still on its way.
+    m_seeded = true;
+    cvc::state &grid = getState("grid");
+    cvc::params_from_state<cvc::volume_grid_params>(grid);
+    cvc::params_from_state<cvc::volume_grid_display_params>(grid("display"));
+    cvc::params_from_state<cvc::volume_grid_source_params>(grid("source"));
+    if (grid("classes").value().empty())
+      put(grid("classes"), "0");
+  }
+  followSources(); // the app's volume, points and session, as they change
+  if (!m_source) {
+    m_contours->tick(m_index); // its keys and its source: the curves wait for the planes
+    publishSession();
     return false;
+  }
   if (m_keysVersion != m_keysSeen) {
     m_keysSeen = m_keysVersion;
     readKeys();
@@ -618,6 +731,7 @@ bool VolumeGridNode::tick() {
     publishPoints(true);
   if (m_editor.selection_version() != m_selectionVersionShown)
     publishSelection();
+  publishSession();
 
   bool changed = false;
   std::ostringstream sig;
@@ -632,6 +746,7 @@ bool VolumeGridNode::tick() {
     rebuildOverlays();
     changed = true;
   }
+  changed = m_contours->tick(m_index) || changed;
   for (const auto &s : m_slices)
     changed = s->tick() || changed;
   return changed;
@@ -733,17 +848,17 @@ void VolumeGridNode::rebuildOverlays() {
       segment(at(a, plane, b0r, b1u), at(a, plane, b0r, b0u), band);
     }
 
+    // Set even when empty, and shown from the first build on: an overlay shown later joins the
+    // renderer after the other and draws over it, so whether a plane's disks or its lines win
+    // where they cross would follow whether the points came before the volume or after.
     for (auto [node, geom] : {std::pair<GeometryNode *, cvc::geometry *>{m_points[ax].get(), &pts},
                               {m_lines[ax].get(), &lines}}) {
-      const bool any = geom->num_points() > 0;
-      if (any) {
-        node->setGeometry(*geom);
-        // setGeometry picks a mode from what the geometry holds, a surface for a lines-only one,
-        // which draws no lines: the lines overlay asks for its own every time.
-        if (geom == &lines)
-          node->setRenderMode(GeometryRenderMode::LINES);
-      }
-      node->setVisible(any);
+      node->setGeometry(*geom);
+      // setGeometry picks a mode from what the geometry holds, a surface for a lines-only one,
+      // which draws no lines: the lines overlay asks for its own every time.
+      if (geom == &lines)
+        node->setRenderMode(GeometryRenderMode::LINES);
+      node->setVisible(true);
     }
   }
 }

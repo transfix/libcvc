@@ -18,7 +18,8 @@
 
 #include <array>
 #include <cstdint>
-#include <cvc/ariadne/world_rules.h> // vehicle_archetype
+#include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
+#include <cvc/ariadne/world_rules.h>        // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
 #include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
@@ -97,6 +98,11 @@ namespace ariadne {
 // std::invalid_argument for a preset that is not one.
 physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                       double max_speed = 0.0);
+// How high a vehicle's chassis's centre stands over the ground under it (m): half its box's height
+// plus its front wheels' radius (0.4 m with no axles). Where a kinematic box and a `pose` entity
+// whose pose gives no z stand, and how far below a `pose` entity's chassis its drawn model's base
+// hangs.
+double stand_height(const physics::vehicle_desc &d);
 // A boat archetype's boat (dynamicboat): its preset (launch, jonboat) with the archetype's mass and
 // max_speed overrides, then a spawn's, held to its ranges. Throws std::invalid_argument for a
 // preset that is not a boat's.
@@ -503,6 +509,10 @@ public:
   // the step's contacts did. The `pose` entities need no grid: they are placed at their first
   // pose, on the world's ground when it has one.
   void before_step();
+  // The same, for a step ending on CLOCK_TICK of the clock the world steps on (SceneWorld::follow
+  // passes it): the navigator's tick then also notes the clock tick it ran on, so kinematics()
+  // can say which clock ticks it runs on.
+  void before_step(std::uint64_t clock_tick);
   // After it, too: the step's contacts, counted on the vehicles they touch.
   void after_step();
   // The entities' keys and the selection's, now.
@@ -552,10 +562,17 @@ public:
   // grid.
   double tick_seconds() const;
   int steps_per_tick() const;
-  // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
-  // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a
-  // restart: WorldGym::reset), held to the nearest whole number of physics steps (the status says
-  // when it is not one). Throws std::invalid_argument for a tick that is not finite and > 0.
+  // Entity `id` on the kinematic plant as a client runs it (ARIADNE_WORLDS.md section 18.5, OW5b;
+  // vehicle_kinematics.h): its bicycle's numbers, its envelope and the clock ticks the navigator
+  // ticks on. False for one on another plant, not in the world, or before the navigator has
+  // ticked on a step with a clock tick (before_step(clock_tick)). The phase it reports changes
+  // only when the navigator is built again; revision() moves when it does.
+  bool kinematics(std::uint64_t id, kinematic_drive &out) const;
+  // The navigator's tick to use (s). By default the world's: cvc::sim_tick of its physics step
+  // (cvc/core/sim_tick.h), kSimTick (7/120 s) at the default 120 Hz, 4/60 s at 60 Hz. It takes
+  // effect when the navigator is next built (a new grid, a restart: WorldGym::reset), held to the
+  // nearest whole number of physics steps (the status says when it is not one). Throws
+  // std::invalid_argument for a tick that is not finite and > 0.
   void set_tick(double seconds);
   double tick() const;
   // The navigator's grid of the world on (null without one).

@@ -10,23 +10,26 @@
 
 // The `volume_grid` scene node type. See inc/cvc/gl/ariadne/volume_grid_nodes.h.
 
+#include "volume_grid_contour_props.h"
+
 #include <algorithm>
+#include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
-#include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
+#include <cvc/gl/ariadne/node_data.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>
 #include <cvc/gl/ariadne/volume_grid_nodes.h>
-#include <cvc/gl/ariadne/volume_slice_nodes.h>
+#include <cvc/gl/ariadne/volume_slice_nodes.h> // transfer_function_prop
 #include <cvc/state/state.h>
-#include <cvc/volume/volume_file_info.h>
-#include <cvc/volume/volume_file_io.h>
+#include <cvc/volume/volume.h>
 #include <cvc/volume/volume_grid.h>
 #include <cvc/volume/volume_slice.h>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,10 +41,6 @@ namespace ariadne {
 namespace ari = cvc::ariadne;
 
 namespace {
-
-// A file larger than this many voxels is read one plane at a time under region_reads: auto, as a
-// volume_slice node's is.
-constexpr double kRegionVoxels = 67108864.0; // 64 Mi
 
 void warn(std::vector<std::string> *w, const std::string &m) {
   if (w)
@@ -64,44 +63,31 @@ std::string color_text(const ari::Value &v) {
   return out;
 }
 
-// A file read for the grid: whole, or (region_reads: true, or auto past kRegionVoxels) plane by
-// plane. A relative path resolves against `base_dir`, then the working directory.
-ari::ResolvedFile resolve(cvc::app &app, const std::string &file, const std::string &base_dir) {
-  ari::ResolvedFile f = ari::resolve_to_file(app, file, base_dir);
-  if (f.ok && !base_dir.empty()) {
-    std::error_code ec;
-    if (!std::filesystem::exists(f.path, ec)) {
-      ari::ResolvedFile cwd = ari::resolve_to_file(app, file, std::string());
-      if (cwd.ok && std::filesystem::exists(cwd.path, ec))
-        return cwd;
-    }
+// The volume: source: { data: <name>, item }, { state: <key> } or { node: <id>, key: <key> }
+// (node_data.h). Says what to write when the source: names none of them.
+NodeDataSource grid_volume_source(SceneGraph &sg, const RealizedScene &out, const ari::SceneNode &n,
+                                  std::vector<std::string> *warnings) {
+  if (NodeDataSource s = volume_data_source(sg, out, n))
+    return s;
+  if (!n.source_file.empty() || !n.source_sdf_mesh.empty()) {
+    const std::string entry =
+        !n.source_file.empty() ? n.source_file
+                               : "{ generate: sdf, params: { mesh: " + n.source_sdf_mesh + " } }";
+    warn(warnings, "ari: scene node '" + n.id +
+                       "' (volume_grid) reads no file: load it as app data (data: { " + n.id +
+                       ": " + entry + " }) and give source: { data: " + n.id + " }");
+  } else {
+    warn(warnings, "ari: scene node '" + n.id +
+                       "' (volume_grid) has no source: give source: { data: <name> }, "
+                       "{ state: <key> } or { node: <id> }");
   }
-  return f;
-}
-
-std::shared_ptr<cvc::slice_source> read_source(cvc::app &app, const std::string &file,
-                                               const std::string &base_dir, int var, int time,
-                                               const std::string &region) {
-  const ari::ResolvedFile f = resolve(app, file, base_dir);
-  if (!f.ok)
-    throw std::runtime_error(f.error);
-  bool by_plane = region == "true";
-  if (region == "auto") {
-    const cvc::volume_file_info info(app, f.path);
-    by_plane = static_cast<double>(info.XDim()) * static_cast<double>(info.YDim()) *
-                   static_cast<double>(info.ZDim()) >
-               kRegionVoxels;
-  }
-  if (by_plane)
-    return std::make_shared<cvc::slice_source>(app, f.path, static_cast<unsigned>(var),
-                                               static_cast<unsigned>(time));
-  cvc::volume vol(app);
-  cvc::readVolumeFile(app, vol, f.path, static_cast<unsigned>(var), static_cast<unsigned>(time));
-  return std::make_shared<cvc::slice_source>(vol);
+  return {};
 }
 
 // The props that seed <node>.grid.*.
-void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, std::vector<std::string> *warnings) {
+void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, const NodeDataSource &volume,
+               const NodeDataSource &points, const NodeDataSource &session,
+               std::vector<std::string> *warnings) {
   cvc::state &grid = g.getState("grid");
   for (const char *k : {"view", "tool"})
     if (n.props.has(k))
@@ -129,7 +115,9 @@ void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, std::vector<std::stri
       warn(warnings, "ari: scene node '" + n.id + "': display: must be a map");
     }
   }
-  seed(grid("source.file"), n.source_file);
+  seed(grid("source.volume"), volume.path);
+  seed(grid("source.points"), points.path);
+  seed(grid("source.session"), session.path);
   for (const char *k : {"var", "time"})
     if (n.props.has(k))
       seed(grid(std::string("source.") + k), n.props.str(k));
@@ -156,35 +144,20 @@ void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, std::vector<std::stri
       rows.value(std::to_string(c->items.size()));
     }
   }
-  if (n.props.has("points"))
-    g.getState("grid.request").value("load_classes " + n.props.str("points"));
 }
 
 std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::SceneNode &n,
                                                   GraphicsNode *parent, RealizedScene &out,
                                                   std::vector<std::string> *warnings) {
-  if (n.source_file.empty() && n.source_sdf_mesh.empty()) {
-    warn(warnings, "ari: scene node '" + n.id + "' (volume_grid) has no source (file or sdf)");
-    return nullptr;
-  }
   cvc::app &app = sg.appContext();
-  const std::string region = n.props.str("region_reads", "auto");
-  if (region != "auto" && region != "true" && region != "false")
-    warn(warnings, "ari: scene node '" + n.id + "': region_reads '" + region +
-                       "' is not auto, true or false -- using auto");
-  const std::string reads = region == "true" || region == "false" ? region : "auto";
-  const int var = std::max(0, static_cast<int>(n.props.num("var", 0)));
-  const int time = std::max(0, static_cast<int>(n.props.num("time", 0)));
-  std::shared_ptr<cvc::slice_source> src;
-  try {
-    if (!n.source_file.empty())
-      src = read_source(app, n.source_file, n.base_dir, var, time, reads);
-    else
-      src = std::make_shared<cvc::slice_source>(load_node_volume(sg, n, warnings));
-  } catch (const std::exception &e) {
-    warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
-    return nullptr;
-  }
+  const std::string prefix = out.bind_prefix;
+  const NodeDataSource volume = grid_volume_source(sg, out, n, warnings);
+  const NodeDataSource points = prop_data_source(app, prefix, n, "points", "classes", warnings);
+  const NodeDataSource session = prop_data_source(app, prefix, n, "session", "session", warnings);
+  if (n.props.has("region_reads"))
+    warn(warnings, "ari: scene node '" + n.id +
+                       "': region_reads: the node reads no file (a host gives a large one read "
+                       "plane by plane as a slice_source on the volume's key) -- ignored");
 
   GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
   if (!parent && sg.hasGraphics(n.id)) // last-wins parity with sg.addGraphics (see volren)
@@ -194,20 +167,10 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
     return nullptr;
   if (!parent)
     sg.registerGraphics(n.id, g);
-  g->setBaseDir(n.base_dir);
-  seed_keys(*g, n, warnings);
-  // `request: load` reads grid.source.* the way the document's source was read.
-  cvc::app *ap = &app;
-  const std::string base_dir = n.base_dir;
-  g->setLoader([ap, base_dir, reads](const cvc::volume_grid_source_params &p, std::string &error) {
-    try {
-      return read_source(*ap, p.file, base_dir, p.var, p.time, reads);
-    } catch (const std::exception &e) {
-      error = e.what();
-      return std::shared_ptr<cvc::slice_source>();
-    }
-  });
-  g->setSource(src, n.source_file, var, time);
+  g->setScope(prefix);
+  g->ensureChildren();
+  seed_keys(*g, n, volume, points, session, warnings);
+  const std::string contour_data = seed_volume_grid_contour_props(app, prefix, *g, n, warnings);
 
   // The views find the planes by their tags: the grid's id (a view showing this grid alone) and
   // their own name (slice_xy ...).
@@ -222,8 +185,10 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
   tags.push_back("surfaces");
   out.nodes.push_back({n.id + "_surfaces", tags, g->surfaces()});
 
-  // The transfer function, over the volume (or the stand-in plane of a file read plane by plane);
-  // it follows a load.
+  g->tick(); // a volume already on the tree is taken now, so the scene frames on it
+
+  // The transfer function, over the volume (or the stand-in plane of a slice_source read plane by
+  // plane); it follows the volume as it changes, and has none until the first arrives.
   tf_binding_options opt;
   opt.seed = transfer_function_prop(n, warnings);
   std::weak_ptr<VolumeGridNode> weak = g;
@@ -231,20 +196,41 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
     const std::shared_ptr<VolumeGridNode> node = weak.lock();
     return node ? node->histogramVolume() : nullptr;
   };
-  attach_transfer_function(out, g, tf_target::volume_slice, *g->histogramVolume(), opt, warnings);
+  const std::shared_ptr<const cvc::volume> now = g->histogramVolume();
+  attach_transfer_function(out, g, tf_target::volume_slice, now ? *now : cvc::volume(app), opt,
+                           warnings);
 
   out.custom_ticks.push_back([weak](vtkRenderer *) {
     if (std::shared_ptr<VolumeGridNode> node = weak.lock())
       node->tick();
   });
-  g->tick(); // the planes and the keys exist at once, so the scene frames on them
+  // The contours' tile (running, asked for, or due once the contours load) is work in flight too.
+  {
+    cvc::app *ap = &app;
+    out.pending_work.push_back([weak, ap, contour_data]() {
+      const std::shared_ptr<VolumeGridNode> node = weak.lock();
+      if (!node)
+        return false;
+      if (!contour_data.empty()) {
+        const std::string st = ari::data_status(*ap, contour_data);
+        if (st == "fetching" || st == "unpacking" || st == "generating" || st == "decoding")
+          return true;
+      }
+      // A request waits for the volume: a document's trace or tile is work to come.
+      return node->contours().busy() || !node->getState("grid.request").value().empty();
+    });
+  }
+  // While a dataset the node follows is loading, the scene has work in flight.
+  wait_for_datasets(out, app, g, {volume, points, session});
   return g;
 }
 
 } // namespace
 
 void register_volume_grid_node_type(cvc::app &app) {
-  register_scene_node_type(app, "volume_grid", realize_volume_grid);
+  NodeTypeOptions options;
+  options.reads_data = true; // source: { data } is the volume the node follows
+  register_scene_node_type(app, "volume_grid", realize_volume_grid, options);
 }
 
 } // namespace ariadne

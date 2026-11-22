@@ -1,9 +1,9 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "4.0.3"
+  upstream_version: "4.0.5"
   # Bumped 1 -> 2: the contour tiler (cvc::planar's clipper2, cdt and shewchuk-predicates).
-  # Reset to 1 for the 4.0.3 upstream version: a version bump restarts cvc_revision.
+  # Reset to 1 for the 4.0.5 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"

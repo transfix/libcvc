@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arisrv
-  upstream_version: "4.0.3"
+  upstream_version: "4.0.5"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -46,10 +46,10 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.3"
+      version: "==4.0.5"
   runtime:
     - name: libcvc
-      version: "==4.0.3"
+      version: "==4.0.5"
   host_tools:
     - cmake
     - ninja

@@ -71,6 +71,11 @@ struct coph_bootstrap {
   std::vector<std::vector<double>> ensemble;
 };
 
+// cooperative.field_vector: (value, gx, gy) of G3's risk (softplus(phi . w) / 4) and its
+// gradient at each point, flattened, on the stage's RBF centres with the given weights.
+std::vector<double> coph_field_vector(const coph_stage &stage, const std::vector<double> &weights,
+                                      const coph_config &cfg, const std::vector<coph_vec2> &points);
+
 // How many blocks the newest stage's export readings make (0 when it has none).
 int coph_bootstrap_blocks(const coph_learner_state &s);
 

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/data.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
 #include <cvc/ariadne/host_cli.h>
@@ -19,6 +20,9 @@
 #include <cvc/state/state_exec/async_scheduler.h> // policy (--exec-policy)
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
 #include <cvc/state/state_exec/types.h>
+#include <cvc/volume/point_classes.h> // data-save's point_classes
+#include <cvc/volume/volume.h>        // data-put's volume
+#include <cvc/volume/volume_file_io.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -852,6 +856,87 @@ template <class Pred> bool drain_until(AppRuntime &art, Pred pred) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return pred();
+}
+
+// (data-save PATH FILE [AS]): a program saves what a key's data channel holds, through the app's
+// encoder, beside the document (PATH and FILE relative to the document); nothing there raises,
+// saying so. A document reads and writes no file but through the app.
+TEST(AriadneHostVerbs, DataSaveWritesAKeysDataBesideTheDocument) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("data_save");
+  const fs::path doc = write(dir, "s.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hi\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.ds");
+  art.set_backend(be);
+  art.load(doc.string());
+  cvc::point_classes pc;
+  pc.add("seeds", 1, 2, 3);
+  pc.add("seeds", 4, 5, 6);
+  cvc::state::instance(app)("ui.docs.ds.work.points")
+      .data(boost::any(std::make_shared<const cvc::point_classes>(pc)));
+  std::string how = "running";
+  art.run_program(R"((state-set "ok" (if (data-save "work.points" "seeds.vgr") "1" "0")))",
+                  [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(val(app, "ui.docs.ds.ok"), "1");
+  ASSERT_TRUE(fs::exists(dir / "seeds.vgr"));
+  EXPECT_EQ(cvc::read_point_classes(app, (dir / "seeds.vgr").string()), pc);
+  how = "running";
+  art.run_program(R"((data-save "work.nothing" "x.vgr"))", [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_NE(how.find("holds no data"), std::string::npos) << how;
+  EXPECT_FALSE(fs::exists(dir / "x.vgr"));
+}
+
+// (data-put NAME ITEM VALUE): a program puts a data object (a volume.filter's result) as an output
+// of the document's dataset: it lands in the store node, not under the document's link, and the
+// rev goes up, so every node viewing the dataset follows it. A store key, or a name that is no
+// dataset, raises, saying so.
+TEST(AriadneHostVerbs, DataPutPutsADataObjectAsADatasetsOutput) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("data_put");
+  cvc::app app;
+  cvc::volume ones(app, cvc::dimension(3, 3, 3), cvc::Float);
+  ones.fill(1.0);
+  cvc::writeVolumeFile(app, ones, (dir / "v.rawiv").string());
+  const fs::path doc = write(
+      dir, "p.ari", "meta: {min_libcvc: 3.4.0}\ndata:\n  vol: v.rawiv\nroot:\n  - text: hi\n");
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.dp");
+  art.set_backend(be);
+  art.load(doc.string());
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
+  ASSERT_TRUE(store->wait("ui.docs.dp.data.vol", 30.0))
+      << cvc::ariadne::data_status(app, "ui.docs.dp.data.vol");
+  const std::string node = store->resolve("ui.docs.dp.data.vol");
+  ASSERT_FALSE(node.empty());
+  const int rev = std::stoi(val(app, node + ".rev"));
+  cvc::volume filtered_v(app, cvc::dimension(3, 3, 3), cvc::Float);
+  filtered_v.fill(2.0);
+  const auto filtered = std::make_shared<const cvc::volume>(filtered_v);
+  cvc::state::instance(app)("ui.docs.dp.work.result").data(boost::any(filtered));
+  std::string how = "running";
+  art.run_program(R"((state-set "where" (data-put "vol" "volume" (state-data-get "work.result"))))",
+                  [&](const std::string &h) { how = h; });
+  EXPECT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(val(app, "ui.docs.dp.where"), node);
+  const boost::any put = cvc::state::instance(app)(node + ".volume").data();
+  const auto *got = boost::any_cast<std::shared_ptr<const cvc::volume>>(&put);
+  ASSERT_NE(got, nullptr) << "the store node's volume holds the payload, as a decoder's output";
+  EXPECT_EQ(got->get(), filtered.get());
+  EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev + 1));
+  for (const char *bad : {R"((data-put "vol" "rev" (state-data-get "work.result")))",
+                          R"((data-put "nope" "volume" (state-data-get "work.result")))",
+                          R"((data-put "vol" "volume" "text"))"}) {
+    how = "running";
+    art.run_program(bad, [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(drain_until(art, [&] { return how != "running"; }));
+    EXPECT_NE(how, "") << bad;
+  }
+  EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev + 1));
 }
 
 // ── (quit [code]), run_program and tests: (ari test) ───────────────────────────────────────────
