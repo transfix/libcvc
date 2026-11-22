@@ -25,11 +25,11 @@
 //
 // The node reads no file. source: names the state key whose data channel holds the volume: a
 // data: entry's output (item: volume by default), a key a program or a filter writes, or another
-// node's published volume ({ node: <id> } follows its `volume`, or its `grid.volume` while that
-// is the one holding data; key: names another). It is resolved into <node>.source.volume
-// (relative to the document's scope; a leading '/' is the root's), and editing that key follows
-// the new one. The volume is followed as it changes and drawn as it is held: the renderers share
-// its voxels.
+// node's published volume ({ node: <id> } follows a volume_grid's `grid.volume` when that grid
+// was realized before this node, else that node's `volume`; key: names another). It is resolved
+// into <node>.source.volume (relative to the document's scope; a leading '/' is the root's) and
+// followed by node_data.h's VolumeFollower, as volren and volume_slice follow theirs; editing that
+// key follows the new one. The renderers draw the volume as it is held, sharing its voxels.
 //
 // Keys under the node: renderer (seeded from renderer:), status (what draws, or what the node
 // waits for), source.volume, source.status (a key that holds no volume); on the data channel,

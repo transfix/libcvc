@@ -149,10 +149,10 @@ void VolumeRenderNode::hand() {
   if (auto *v = dynamic_cast<VolumeNode *>(m_renderer.get())) {
     v->setVolume(vol);
   } else if (auto *r = dynamic_cast<VolRenNode *>(m_renderer.get())) {
-    const cvc::volren::volume_settings vs =
-        r->volumeCount() ? r->volumeConfig(0) : cvc::volren::volume_settings();
-    r->clearVolumes();
-    r->addVolume(vol, vs);
+    if (r->volumeCount())
+      r->setVolume(0, vol); // the voxels replaced, the volume's settings kept
+    else
+      r->addVolume(vol);
   } else if (auto *s = dynamic_cast<VolSliceNode *>(m_renderer.get())) {
     s->setVolume(vol);
   }
