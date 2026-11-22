@@ -87,16 +87,14 @@
 #include <array>
 #include <atomic>
 #include <boost/any.hpp>
-#include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <cstdint>
 #include <cvc/gl/NullGraphicNode.h>
+#include <cvc/state/followed_key.h>
 #include <cvc/volume/volume_grid.h>
 #include <cvc/volume/volume_slice.h>
 #include <functional>
 #include <memory>
 #include <string>
-#include <typeindex>
-#include <typeinfo>
 #include <vector>
 
 namespace cvc {
@@ -172,18 +170,9 @@ protected:
   void handleStateChanged(const std::string &childState) override;
 
 private:
-  // One followed source: the key's path as last resolved, and the node and its data's time.
-  struct followed {
-    std::string path, node;
-    boost::posix_time::ptime mod;
-    // What the key held: a write within the clock's resolution leaves mod as it was (Windows'
-    // clock ticks in milliseconds), so the payload's type and the object a pointer holds tell too.
-    std::type_index type = typeid(void);
-    const void *id = nullptr;
-  };
   void adopt(std::shared_ptr<cvc::slice_source> src, std::shared_ptr<const cvc::volume> vol,
              const std::string &label, int var, int time);
-  bool follow(const char *which, followed &f, boost::any &payload);
+  bool follow(const char *which, cvc::followed_key &f, boost::any &payload);
   void followSources();
   void adoptPoints(const boost::any &payload, const std::string &from);
   void applySession(const cvc::volume_grid_session &s, const std::string &from);
@@ -209,7 +198,7 @@ private:
   std::string m_label;
   int m_var = 0, m_time = 0; // what the source holds (the editor shows these classes)
   std::string m_scope;
-  followed m_followVolume, m_followPoints, m_followSession;
+  cvc::followed_key m_followVolume, m_followPoints, m_followSession;
   std::string m_waitingFor; // the status last said the node is waiting for a volume here
   bool m_seeded = false;    // the parameter keys have their defaults
   std::string m_sessionSignature;

@@ -32,6 +32,7 @@ set(CVC_PORT_TESTS
   volume_slice_test
   tabs_list_test
   volume_grid_test
+  volume_filter_test
   volume_grid_contours_test
   volume_grid_contour_intrinsics_test
 )

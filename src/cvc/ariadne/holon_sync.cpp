@@ -288,14 +288,60 @@ void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::st
     set_replicated(app, driving, std::to_string(static_cast<unsigned long long>(now)));
 }
 
+void request_archetype(cvc::app &app, const std::string &room, const std::string &pid,
+                       const std::string &archetype) {
+  set_replicated(app, leaf(room, pid, {"avatar", "archetype"}), archetype);
+}
+
+std::string read_requested_archetype(cvc::app &app, const std::string &room,
+                                     const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(leaf(room, pid, {"avatar", "archetype"}));
+  return n ? n->value() : std::string();
+}
+
+archetype_status read_archetype_status(cvc::app &app, const std::string &room,
+                                       const std::string &pid) {
+  // "<archetype>:ok" or "<archetype>:refused: <why>"
+  archetype_status out;
+  cvc::state *n = app.root().findDescendant(leaf(room, pid, {"archetype_status"}));
+  if (!n || n->value().empty())
+    return out;
+  const std::string v = n->value();
+  const std::size_t colon = v.find(':');
+  if (colon == std::string::npos)
+    return out;
+  out.answered = true;
+  out.archetype = v.substr(0, colon);
+  const std::string rest = v.substr(colon + 1);
+  out.ok = rest == "ok";
+  const std::string refused = "refused: ";
+  if (rest.compare(0, refused.size(), refused) == 0)
+    out.why = rest.substr(refused.size());
+  return out;
+}
+
+void serve_archetype(holon &h, cvc::app &app, const std::string &room, const std::string &pid) {
+  const std::string want = read_requested_archetype(app, room, pid);
+  const archetype_status st = read_archetype_status(app, room, pid);
+  if (st.answered && st.archetype == want)
+    return; // ruled on already (a refusal waits for a new ask)
+  std::string why;
+  const bool ok = h.set_archetype(pid, want, &why);
+  // Said when it was asked for, refused, or made a vehicle: a person who never asked writes
+  // nothing.
+  if (!want.empty() || !ok || h.embodies(pid) != 0)
+    set_replicated(app, leaf(room, pid, {"archetype_status"}),
+                   want + (ok ? std::string(":ok") : ":refused: " + why));
+}
+
 std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
                            double facing, double *out_gap) {
   std::uint64_t best = 0;
   double best_score = 1e300, best_gap = 0.0;
   for (const conference::room_entity &e : entities.entities()) {
     cvc::physics::pose at;
-    if (!e.drivable || !entities.pose(e.id, at))
-      continue;
+    if (!e.drivable || !e.avatar.empty() || !entities.pose(e.id, at))
+      continue; // someone's body is not a ride
     // Its feet to the chassis box, in the vehicle's frame, in plan (holon::get_in's rule).
     const cvc::physics::quat &q = at.rotation;
     const double yaw =
@@ -480,9 +526,12 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   for (const std::string &pid : h.participants())
     if (!present.count(pid))
       h.remove_participant(pid);
-  // Getting in and out of the world's vehicles (section 18.6).
-  for (const conference::room_participant &p : roster)
+  // Each one's archetype (a vehicle is its body), then getting in and out of the world's vehicles
+  // (section 18.6).
+  for (const conference::room_participant &p : roster) {
+    serve_archetype(h, app, room, p.pid);
     serve_drive(h, app, room, p.pid);
+  }
   // One authoritative frame.
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the

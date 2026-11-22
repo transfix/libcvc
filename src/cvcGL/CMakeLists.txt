@@ -1274,6 +1274,24 @@ add_executable(cvcgl_volume_grid_contours test/cvcgl_volume_grid_contours.cpp)
 target_link_libraries(cvcgl_volume_grid_contours PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid_contours COMMAND cvcgl_volume_grid_contours)
 
+# One volume on the state tree shown by a volren, a volume_grid and volume_slices (node_data.h,
+# docs/roadmap/DATA_FROM_STATE_TREE.md D1), headless: one pointer, followed when a new volume is
+# written or the dataset reloads; the volren's transfer function seeded on its first volume; two
+# apps sharing nothing.
+add_executable(cvcgl_shared_volume test/cvcgl_shared_volume.cpp)
+target_link_libraries(cvcgl_shared_volume PRIVATE cvcGL)
+add_test(NAME cvcgl_shared_volume COMMAND cvcgl_shared_volume)
+
+# The shared-volume demo (examples/ariadne/documents/volume_shared.ari) through AriRuntime: the main
+# scene's volren and a volume_grid show one volume; Filter > Smooth (volume.filter-start, then
+# data-put) and Original (data-reload) are followed by both. Offscreen; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_shared_volume test/cvcgl_ariadne_shared_volume.cpp)
+  target_link_libraries(cvcgl_ariadne_shared_volume PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_shared_volume COMMAND cvcgl_ariadne_shared_volume)
+endif()
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
@@ -1651,6 +1669,23 @@ set_tests_properties(${_cvcgl_gl_tests} PROPERTIES RESOURCE_LOCK cvcgl_gl_contex
 get_property(_cvcgl_tests DIRECTORY PROPERTY TESTS)
 set_property(TEST ${_cvcgl_tests} APPEND PROPERTY ENVIRONMENT __GL_SYNC_TO_VBLANK=0 vblank_mode=0)
 
+# ── wasm: every executable here links -sFETCH ──
+# A scene's vehicles load a fleet's weights through DataStore (ariadne/data.cpp), which can fetch
+# over cvc::net, so an executable that realizes a scene links the Emscripten-fetch backend
+# (net/http_client_fetch.cpp), and without -sFETCH=1 its emscripten_fetch* symbols are undefined.
+# libcvc leaves the fetch flags to the executable (src/cvc/CMakeLists.txt). These never fetch, so
+# -sFETCH alone links them; a blocking send would also need -sASYNCIFY or -pthread. Set on every
+# executable defined above, so a new test cannot miss it.
+if(EMSCRIPTEN)
+  get_property(_cvcgl_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_t IN LISTS _cvcgl_targets)
+    get_target_property(_type ${_t} TYPE)
+    if(_type STREQUAL "EXECUTABLE")
+      target_link_options(${_t} PRIVATE -sFETCH=1)
+    endif()
+  endforeach()
+endif()
+
 # ── examples (opt-in, OFF by default) ──
 # Standalone C++ programs that drive cvcGL directly — SceneGraph + SceneRenderer
 # (the onscreen "basic window") + CameraController (orbit / Quake-fly / cinematic
@@ -1670,4 +1705,4 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
-                        cvcgl_volume_grid cvcgl_volume_grid_contours)
+                        cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)

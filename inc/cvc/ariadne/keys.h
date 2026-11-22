@@ -45,6 +45,9 @@ struct MouseControls {
   std::string steer; // 1: in drag to look, a drag on the scene steers (what the host walks faces
                      // the point under the pointer) and the right button turns the view instead
   std::string steer_label = "Drag to steer"; // its checkbox, in the host's words
+  // 1: mouse look is first person (the camera at the eyes of what the host walks, which it hides);
+  // 0: third person, over its shoulder. "" leaves the row out.
+  std::string first_person;
   std::string sensitivity; // degrees of turn per pixel of motion
   double sensitivity_lo = 0.02, sensitivity_hi = 1.0;
   std::string invert_y; // 1: moving the mouse up looks down

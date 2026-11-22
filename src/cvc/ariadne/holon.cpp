@@ -135,6 +135,9 @@ void holon::remove_participant(const std::string &pid) {
   }
   if (it != _participants.end() && it->second.drives != 0)
     get_out(pid, it->second); // the vehicle goes back to its controller
+  if (it != _participants.end() && it->second.body != 0)
+    if (WorldVehicles *v = _scene ? _scene->vehicles() : nullptr)
+      v->despawn(it->second.body); // its body goes with it
   _participants.erase(pid);
   if (_world)
     _world->remove_avatar(pid);
@@ -243,6 +246,14 @@ bool holon::get_in(const std::string &pid, std::uint64_t id, std::string *why) {
       *why = m;
     return false;
   };
+  if (_role == holon_role::server && _participants.count(pid)) {
+    const participant &p = _participants.at(pid);
+    if (p.body != 0 && id != p.body) // its body is a vehicle: it is in it for good
+      return fail(id == 0 ? "you are your vehicle: pick a person to get out"
+                          : "you are a vehicle: pick a person to get in another");
+    if (p.body != 0)
+      return true;
+  }
   if (id == 0 || _role != holon_role::server || !_participants.count(pid))
     return set_driver(pid, id, why);
   WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
@@ -282,6 +293,90 @@ bool holon::get_in(const std::string &pid, std::uint64_t id, std::string *why) {
 std::uint64_t holon::drives(const std::string &pid) const {
   const auto it = _participants.find(pid);
   return it == _participants.end() ? 0 : it->second.drives;
+}
+
+bool holon::set_archetype(const std::string &pid, const std::string &archetype, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (_role != holon_role::server)
+    return fail("a client asks the server for an archetype; the server sets it");
+  const auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return fail("no participant '" + pid + "'");
+  participant &p = it->second;
+  const world_rules &r = rules();
+  const avatar_archetype *want = archetype.empty()
+                                     ? (r.archetypes.empty() ? nullptr : &r.archetypes.front())
+                                     : r.find_avatar(archetype);
+  if (!want && !archetype.empty())
+    return fail("no avatar archetype '" + archetype + "'");
+  const std::string id = want ? want->id : std::string();
+  const std::string have =
+      p.archetype.empty() && !r.archetypes.empty() ? r.archetypes.front().id : p.archetype;
+  if (id == have && (want == nullptr || want->vehicle.empty() || p.body != 0))
+    return true;
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  if (want && !want->vehicle.empty() && !v)
+    return fail("archetype '" + id + "' is a vehicle, and there is no world to spawn it in");
+  // Out of the vehicle it is now, if it is one: it stands beside it, and the vehicle goes.
+  if (p.body != 0) {
+    const std::uint64_t old = p.body;
+    p.body = 0;
+    if (p.drives != 0)
+      get_out(pid, p);
+    if (v)
+      v->despawn(old);
+  }
+  if (want && !want->vehicle.empty()) {
+    // Where its person stands, facing its way: out of the world first, so the two never overlap.
+    cvc::physics::body_state feet = state(pid);
+    if (p.drives != 0) { // in someone else's vehicle: out of that one first
+      get_out(pid, p);
+      feet = state(pid);
+    }
+    if (_world->has_avatar(pid)) {
+      p.parked_feet = _world->state(pid);
+      p.parked_reserve = _world->energy(pid).reserve;
+      _world->remove_avatar(pid);
+    }
+    const cvc::physics::quat &q = feet.rotation;
+    entity_spec spec;
+    spec.archetype = want->vehicle;
+    spec.name = pid;
+    spec.metadata["avatar"] = pid;
+    for (const vehicle_archetype &a : v->archetypes())
+      if (a.id == want->vehicle &&
+          std::find(a.controllers.begin(), a.controllers.end(), "external") != a.controllers.end())
+        spec.controller = "external"; // its driver's intent alone; the archetype's first else
+    spec.placed = true;
+    spec.x = feet.position.x;
+    spec.y = feet.position.y;
+    spec.yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    std::string refused;
+    const std::uint64_t body = v->spawn(spec, &refused);
+    if (body == 0) { // back on its feet, as it was
+      _world->add_avatar(pid, p.parked_feet, /*dynamic=*/true);
+      _world->set_reserve(pid, p.parked_reserve);
+      return fail("the world will not spawn vehicle '" + want->vehicle + "': " + refused);
+    }
+    p.body = body;
+    set_driver(pid, body); // not placed yet (no grid): scene_step seats it once it is
+  }
+  p.archetype = id;
+  return true;
+}
+
+std::string holon::archetype_of(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it == _participants.end() ? std::string() : it->second.archetype;
+}
+
+std::uint64_t holon::embodies(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it == _participants.end() ? 0 : it->second.body;
 }
 
 void holon::get_out(const std::string &pid, participant &p) {
@@ -443,6 +538,10 @@ void holon::scene_step() {
     _world->move_to(_scene->world(), feet);
     _scene_world = &_scene->world();
   }
+  // A body spawned before the world could place it (set_archetype): seated once it is placed.
+  for (auto &kv : _participants)
+    if (kv.second.body != 0 && kv.second.drives == 0)
+      set_driver(kv.first, kv.second.body);
   // The world's navigators steer around the avatars (section 18.4), where they stood after the
   // last step.
   if (WorldVehicles *v = _scene->vehicles()) {

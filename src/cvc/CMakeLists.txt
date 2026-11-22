@@ -184,6 +184,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/seed_generators.h
   ../../inc/cvc/volume/seed_generators_params.h
   ../../inc/cvc/volume/segmentation_intrinsics.h
+  ../../inc/cvc/volume/volume_filter.h
+  ../../inc/cvc/volume/volume_filter_intrinsics.h
   ../../inc/cvc/model/model.h
   ../../inc/cvc/model/model_file_io.h
   ../../inc/cvc/volume/volume_ops.h
@@ -354,6 +356,8 @@ set(SOURCE_FILES
   volume/segmentation/segmentation.cpp
   volume/gradient_vector_diffusion.cpp
   volume/segmentation/segmentation_intrinsics.cpp
+  volume/volume_filter.cpp
+  volume/volume_filter_intrinsics.cpp
   image/image.cpp
   image/image_decode.cpp
   image/magick_io.cpp
