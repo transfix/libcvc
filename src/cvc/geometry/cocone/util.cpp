@@ -42,6 +42,14 @@ bool is_obtuse(const Point &p0, const Point &p1, const Point &p2) {
   return (cg::to_double(v0 * v1) < 0);
 }
 
+// The volume of a finite cell, unsigned (PocketTunnel's util.cpp; EPICK's determinant in
+// doubles, as Tetrahedron::volume()).
+double cell_volume(const Cell_handle &c) {
+  const Tetrahedron t(c->vertex(0)->point(), c->vertex(1)->point(), c->vertex(2)->point(),
+                      c->vertex(3)->point());
+  return std::fabs(t.volume());
+}
+
 double length_of_seg(const Segment &s) {
   return std::sqrt(cg::to_double((s.point(0) - s.point(1)) * (s.point(0) - s.point(1))));
 }
