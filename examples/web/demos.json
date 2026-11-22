@@ -13,6 +13,7 @@
     "orthoslicer_ari",
     "volume_grid_ari",
     "volume_grid_segment_ari",
+    "volume_grid_contours_ari",
     "skeleton_lab_ari",
     "contour_tiler_ari",
     "fem_gallery_ari",
@@ -218,13 +219,22 @@
           "VolumeGridRover's Segmentation tab in Ariadne, on VolRover's own Visible Human CT of a torso: a seed on the spine and one in each arm seed GenSeg's fast marching (Bajaj, Yu and Auer 2003, ported to libcvc), which fills each bone above the threshold as a sliced task on the page's scheduler, the labels drawing on the slices as the fronts advance; then each class's surface is made, and the Bones view shows them alone. Move the thresholds or gamma and press Segment again, or mark more seeds with the Points tool; each class's colour and Show recolour or hide its labels and surface.",
       "thumb": "img/volume_grid_segment_ari.jpg"
     },
+    "volume_grid_contours_ari": {
+      "app": "arigl",
+      "doc": "volume_grid_contours",
+      "title": "volume grid contours",
+      "desc": "VolumeGridRover's contours: trace, draw and tile objects into surfaces",
+      "blurb":
+          "The volume_grid component's Contours tab over the bunny's signed distance field: the document traces the field's zero level on every third plane into the object bunny and the contour tiler tiles those curves into a surface in the 3D view, a slice at a time while the views stay live. Pick the object drawn and click in the slice view to draw its curve on any plane, click the first point to close it, Shift+click to start another, drag a point to move it; each object draws linear or as a spline. Tile tiles every object's closed curves; Save writes them as .cvcc, .contour or .pcd.",
+      "thumb": "img/volume_grid_contours_ari.jpg"
+    },
     "skeleton_lab_ari": {
       "app": "arigl",
       "doc": "skeleton_lab",
       "title": "skeleton lab",
-      "desc": "the skeleton of the bunny's surface: strands and sheets inside it",
+      "desc": "the skeleton of a protein's surface: strands along its helices, from a PDB file",
       "blurb":
-          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node: the embedded Stanford bunny is decimated to 4,000 triangles and its vertices skeletonized (Tight Cocone, the medial axis, then the unstable manifolds of its saddles) a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) and the sheets are drawn inside the see-through surface, and a second view shows the skeleton alone. The Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
+          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node and a real protein: PDB entry 1GRL, a subunit of the chaperonin GroEL. Its heavy atoms are blurred into a density (TexMol's blur maps, ported too) like a low-resolution map, where a helix reads as a rod, and the density's isosurface is decimated to 4,000 triangles and skeletonized a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) run along the helices, and the sheets are drawn inside the see-through surface; a second view shows the skeleton alone. The Molecule window changes the blur and makes the surface again; the Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
       "thumb": "img/skeleton_lab_ari.jpg"
     },
     "contour_tiler_ari": {

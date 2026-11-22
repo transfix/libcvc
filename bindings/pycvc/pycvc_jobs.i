@@ -286,3 +286,26 @@ def volume_grid_segment_job(vol, seeds, params=None, mesh=None, surfaces=True, *
         m = mesh
     return _volume_grid_segment_job(vol, seeds, p, m, bool(surfaces))
 %}
+// A volume grid's contours tiled (cvc/volume/volume_grid_contours.h; pycvc_volume_grid_contours.i
+// wraps the result): pycvc.tile_grid_contours_job(contours, curation_delta=0.01, ...).
+PYCVC_RESULT_JOB(result_job_grid_tile_result, cvc::grid_tile_result)
+%exception _tile_grid_contours_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::grid_tile_result>>
+_tile_grid_contours_job(const cvc::grid_contours &c, const cvc::tile_params &p) {
+  return cvc::tile_grid_contours_job(c, p);
+}
+%}
+%pythoncode %{
+def tile_grid_contours_job(contours, params=None, **keywords):
+    """tile_grid_contours as a resumable job: step(budget), progress(), phase(), cancel(),
+    result()."""
+    return _tile_grid_contours_job(contours,
+                                   _tile_params(params, keywords, "tile_grid_contours_job"))
+%}

@@ -15,6 +15,7 @@
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
@@ -479,6 +480,44 @@ TEST(AriadneData, PointClassesAndSessionsLoadAndSaveThroughTheApp) {
   cvc::ariadne::register_data_encoder(other, "point_classes", nullptr); // removed from one app
   EXPECT_FALSE(cvc::ariadne::has_data_encoder(other, "point_classes"));
   EXPECT_TRUE(cvc::ariadne::has_data_encoder(app, "point_classes"));
+}
+
+// A contour stack (a volume_grid's grid.contours, or contour_lab's) saved through the app in a
+// one-file format and loaded back by its extension; a format that writes files beside it is
+// refused, saying which to use.
+TEST(AriadneData, ContoursLoadAndSaveThroughTheApp) {
+  cvc::app app;
+  TempDir t;
+  auto store = DataStore::of(app);
+  cvc::state &root = cvc::state::instance(app);
+  cvc::contour_stack s;
+  s.z_spacing = 0.5;
+  s.add(3, "axon", {0, 0, 1, 0, 1, 1, 0, 1});
+  s.add(4, "axon", {0, 0, 2, 0, 1, 1});
+  root("work.contours").data(boost::any(std::make_shared<const cvc::contour_stack>(s)));
+  EXPECT_EQ(cvc::ariadne::default_data_encoder(root("work.contours").data()), "contours");
+  for (const char *name : {"c.cvcc", "c.contour"}) {
+    cvc::ariadne::data_save(app, "work.contours", name, "", t.dir.generic_string());
+    ASSERT_TRUE(fs::exists(t.dir / name)) << name;
+    DataSpec spec;
+    spec.uri = (t.dir / name).generic_string(); // as: contours, by its extension
+    const std::string node = store->load(spec);
+    ASSERT_TRUE(store->wait(node, 30)) << root(node + ".error").value();
+    EXPECT_EQ(root(node + ".as").value(), "contours");
+    auto back =
+        boost::any_cast<std::shared_ptr<const cvc::contour_stack>>(root(node + ".contours").data());
+    ASSERT_TRUE(back) << name;
+    EXPECT_EQ(back->polygon_count(), 2u) << name;
+    EXPECT_EQ(root(node + ".contours").value(), "2");
+    if (std::string(name) == "c.cvcc")
+      EXPECT_EQ(*back, s) << "libcvc's own format keeps everything";
+  }
+  try {
+    cvc::ariadne::data_save(app, "work.contours", "c.ser", "", t.dir.generic_string());
+    ADD_FAILURE() << "a .ser saved as one file";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("save as .cvcc"), std::string::npos) << e.what();
+  }
 }
 
 // A generator that makes no files and names no as: has written its outputs: no decoder runs.

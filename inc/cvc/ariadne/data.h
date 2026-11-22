@@ -109,8 +109,11 @@ using DataDecoder = std::function<void(DataDecode &)>;
 
 // Register (or replace) `app`'s decoder named `as` (an empty decoder removes it). Every app
 // starts with the built-ins: files, bytes, text, json, mesh, heightfield, volume, city_bundle,
-// point_classes (a .vgr's classes, cvc/volume/point_classes.h, at `classes`) and
-// volume_grid_session (a volume grid session's JSON, cvc/volume/volume_grid.h, at `session`).
+// point_classes (a .vgr's classes, cvc/volume/point_classes.h, at `classes`),
+// volume_grid_session (a volume grid session's JSON, cvc/volume/volume_grid.h, at `session`) and
+// contours (a cvc::contour_stack, cvc/geometry/contours.h, at `contours`: .ser, .contour, .cvcc and
+// the other formats the app reads; a .ser's section files come from its archive or the page's
+// preload).
 // Thread-safe; a decoder runs on a load's worker thread and throws std::exception to fail the
 // load. Another app's documents don't see it.
 void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder decoder);
@@ -143,8 +146,9 @@ using DataEncoder = std::function<std::string(const DataEncode &)>;
 // Register (or replace) `app`'s encoder named `as` (an empty encoder removes it). Every app starts
 // with: bytes (DataBytes or a std::string), volume (a cvc::volume, in any format libcvc writes, by
 // the file's extension; or a std::vector<cvc::volume> as one file's variables, in a format that
-// holds several, such as .rawv), point_classes (cvc::point_classes as .vgr) and volume_grid_session
-// (its JSON). Each takes the payload as a std::shared_ptr<const T>, a std::shared_ptr<T> or a T.
+// holds several, such as .rawv), point_classes (cvc::point_classes as .vgr), volume_grid_session
+// (its JSON) and contours (a cvc::contour_stack in a one-file format: .cvcc, .contour or .pcd).
+// Each takes the payload as a std::shared_ptr<const T>, a std::shared_ptr<T> or a T.
 // Thread-safe and per app, as the decoders are.
 void register_data_encoder(cvc::app &app, const std::string &as, DataEncoder encoder);
 bool has_data_encoder(cvc::app &app, const std::string &as);

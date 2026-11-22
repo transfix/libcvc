@@ -132,7 +132,15 @@ struct coph_exchange_state {
     std::vector<std::string> sources;
   };
   std::vector<cell> remote_cells;
-  // TerrainLearner.local_model_anchors: the learner's own terrain anchors, from its last update.
+  // TerrainLearner.local_cells: the learner's own anchors after each update, by 0.2 m cell (the
+  // newest anchor in a cell stays in its place), at most 256 (the oldest time goes);
+  // local_model_anchors are their anchors, in order.
+  struct local_cell {
+    long long ix = 0, iy = 0;
+    double time = 0;
+    coph_anchor anchor;
+  };
+  std::vector<local_cell> local_cells;
   std::vector<coph_anchor> local_model_anchors;
   // MazeLearner.local_geometry_reports: the shapes this learner sensed, one report per shape.
   std::vector<coph_geometry_report> local_geometry;

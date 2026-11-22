@@ -30,6 +30,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeGridSegmentation.h>
 #include <cvc/gl/VolumeSliceNode.h>
@@ -39,6 +40,7 @@
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_grid.h>
+#include <cvc/volume/volume_grid_contours.h>
 #include <functional>
 #include <memory>
 #include <string>
@@ -396,6 +398,40 @@ void run() {
   check(data_at<cvc::volume>(app, k + ".segment.labels") == labels &&
             val(app, k + ".segment.rows") == "2" && zl && zl->isVisible(),
         "and keeps the last result");
+
+  // ---- stop ends a tile and a segmentation at once ----
+  // The contours' tile (VolumeGridContours) runs beside a segmentation, each with its own job keys
+  // (the tile's under grid.tile); one stop ends both. A ring on every z plane, densely sampled, so
+  // a threaded tile is still running when stop comes.
+  {
+    const double pi = 3.14159265358979323846;
+    cvc::grid_contours rings;
+    cvc::grid_contour_object o;
+    o.name = "rings";
+    for (int z = 0; z < N; ++z) {
+      cvc::grid_curve cv;
+      cv.index = z;
+      for (int i = 0; i < 400; ++i)
+        cv.ru.insert(cv.ru.end(),
+                     {N / 2.0 + 8 * std::cos(2 * pi * i / 400) * (1 + 0.1 * std::sin(7 * i + z)),
+                      N / 2.0 + 7 * std::sin(2 * pi * i / 400)});
+      cv.closed = true;
+      o.curves.push_back(cv);
+    }
+    rings.objects.push_back(o);
+    g->contours().setContours(rings, "the test");
+    set(app, k + ".request", "tile");
+    d.tick_nodes();
+    set(app, k + ".request", "segment");
+    d.tick_nodes();
+    set(app, k + ".request", "stop");
+    d.tick_nodes();
+    d.settle();
+    check(val(app, k + ".tile.status") == "cancelled", "stop ends a tile",
+          val(app, k + ".tile.status"));
+    check(!seg.running() && data_at<cvc::volume>(app, k + ".segment.labels") == labels,
+          "and the segmentation beside it, keeping its last result", val(app, k + ".status"));
+  }
 
   // ---- a new volume clears it ----
   root("vols.b").data(boost::any(std::make_shared<const cvc::volume>(blobs(app))));

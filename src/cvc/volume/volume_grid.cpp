@@ -15,6 +15,7 @@
 #include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cvc/geometry/tiler_params.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume_grid.h>
 #include <cvc/volume/volume_grid_segment.h>
@@ -706,8 +707,10 @@ point_classes reconcile_point_class_rows(const point_classes &old,
 // ---- sessions -----------------------------------------------------------------------------------
 
 bool volume_grid_session_key(const std::string &path) {
-  if (path == "grid.classes.current")
+  if (path == "grid.classes.current" || path == "grid.objects.current")
     return true;
+  if (path == "grid.contour.source")
+    return false; // where the contours come from: the document's
   const auto in = [&path](const std::string &base, const std::vector<std::string> &names) {
     for (const std::string &n : names)
       if (path == base + n)
@@ -716,6 +719,8 @@ bool volume_grid_session_key(const std::string &path) {
   };
   return in("grid.", param_names<volume_grid_params>()) ||
          in("grid.display.", param_names<volume_grid_display_params>()) ||
+         in("grid.contour.", param_names<volume_grid_contour_params>()) ||
+         in("grid.tile.", param_names<tile_params>()) ||
          in("grid.source.", {"var", "time"}) || // not where the data come from: the document's
          volume_grid_segment_session_key(path); // the Segmentation tab's parameters
 }
@@ -807,12 +812,21 @@ std::string volume_grid_session_json(const volume_grid_session &s) {
       out += (k ? ", " : "") + std::to_string(c.points[k]);
     out += "]}";
   }
-  out += s.classes.classes.empty() ? "]\n}\n" : "\n  ]\n}\n";
+  out += s.classes.classes.empty() ? "]" : "\n  ]";
+  if (!s.contours.empty()) {
+    std::string c = grid_contours_json(s.contours);
+    while (!c.empty() && (c.back() == '\n' || c.back() == ' '))
+      c.pop_back();
+    out += ",\n  \"contours\": " + c;
+  }
+  out += "\n}\n";
   return out;
 }
 
 void write_volume_grid_session(const volume_grid_session &s, const std::string &filename) {
-  const std::vector<std::string> problems = point_class_problems(s.classes);
+  std::vector<std::string> problems = point_class_problems(s.classes);
+  if (problems.empty())
+    problems = grid_contours_problems(s.contours);
   if (!problems.empty())
     throw std::invalid_argument("volume_grid session " + filename + ": " + problems.front());
   for (const auto &kv : s.keys)
@@ -875,6 +889,13 @@ volume_grid_session volume_grid_session_from_json(const std::string &json,
           pc.points.push_back(int_of(v.second.data(), w + ".points"));
       s.classes.classes.push_back(std::move(pc));
     }
+  }
+  if (const auto contours = root.get_child_optional("contours")) {
+    // Back to text and through grid_contours_from_json: the tree keeps every value's text, so the
+    // contours read back bit for bit.
+    std::ostringstream text;
+    pt::write_json(text, *contours, false);
+    s.contours = grid_contours_from_json(text.str(), what + ": contours");
   }
   const std::vector<std::string> problems = point_class_problems(s.classes);
   if (!problems.empty())
