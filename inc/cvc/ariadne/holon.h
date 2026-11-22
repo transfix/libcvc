@@ -462,6 +462,21 @@ public:
   // holon itself stays exact. Zero for a peer, on a server, or for an unknown pid.
   cvc::physics::vec3 take_correction(const std::string &pid);
 
+  // THE SAME WORLD ON A CLIENT (ARIADNE_WORLDS.md section 18.5, OW5). CLIENT with physics: hold
+  // world entity ID -- one of the room's entities (its vehicles) this client does not drive -- as
+  // a kinematic box of SIZE (full extents in metres: x forward, y left, z up) where the client
+  // shows it, AT (its chassis centre, heading and velocity), so the local avatar's prediction bumps
+  // into it and is pushed by it as the server's will be. Through the frame's steps it carries on
+  // from AT along AT's velocity; a replay holds it where it is. The host holds each again every
+  // frame (holon_sync's client_pump with an entity_playout does) and releases one it no longer
+  // shows. False on a server, without physics, or for a size that is not finite and positive.
+  bool hold_entity(std::uint64_t id, const std::array<double, 3> &size,
+                   const cvc::physics::body_state &at);
+  void release_entity(std::uint64_t id);
+  // The entities held, in id order; and where entity ID's box is now (false for one not held).
+  std::vector<std::uint64_t> held_entities() const;
+  bool held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const;
+
 private:
   struct participant {
     bool local = false;
@@ -549,6 +564,14 @@ private:
   // physics: one quantum of the world at TICK, under the rules in force then (the drive, the
   // peers' kinematic poses, the step).
   void world_step_client(const std::string &self, const avatar_intent &in, std::uint64_t tick);
+  // CLIENT physics: the entities held (hold_entity), where the host last held each, and the live
+  // steps since (each carries it on along its velocity; a replay's steps do not).
+  struct held {
+    cvc::physics::vec3 half_extents;
+    cvc::physics::body_state at;
+    int steps = 0;
+  };
+  std::map<std::uint64_t, held> _held;
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
   // CLIENT physics: re-run the logged steps of the local avatar from FIRST on (the one before it,

@@ -1523,3 +1523,54 @@ TEST(HolonSyncTest, TheDriveTargetIsTheNearestDrivableVehicleInReach) {
       << "turned round, the other";
   EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{40.0, 40.0, 0.0}, 0.0), 0u) << "none in reach";
 }
+
+// The same world on a client (section 18.5, OW5): with the room's entities, client_pump holds each
+// vehicle it shows in the holon's world where it is shown -- not one we drive, nor the one that is
+// our body -- and lets go of one the room no longer lists.
+TEST(HolonSyncTest, TheClientPumpHoldsTheVehiclesWeShow) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::seed_default_scene(app, room);
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{-6.0, 5.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  const auto vehicle = [](std::uint64_t id) {
+    conf::room_entity e;
+    e.id = id;
+    e.archetype = "humvee";
+    e.size = {4.5, 2.0, 1.5};
+    return e;
+  };
+  conf::room_entity driven = vehicle(2), body = vehicle(3);
+  driven.driver = "ann";
+  body.avatar = "ann";
+  conf::write_room_entities(app, room, {vehicle(1), driven, body});
+  cvc::ariadne::entity_playout playout;
+  for (std::uint64_t id : {1, 2, 3}) {
+    body_state s;
+    s.position = vec3{4.0 * static_cast<double>(id), 0.0, 0.75};
+    s.linear_velocity = vec3{1.0, 0.0, 0.0};
+    ASSERT_TRUE(playout.apply(conf::entity_pid(id), s, 100));
+  }
+  holon client(holon_role::client, cvc::ariadne::room_holon_config());
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{1})
+      << "not the one ann drives, nor the one that is ann";
+  body_state box;
+  ASSERT_TRUE(client.held_entity_state(1, box));
+  EXPECT_NEAR(box.position.x, 4.0, 0.2) << "where the playout shows it";
+
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_TRUE(client.held_entities().empty()) << "no entities given: none held";
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{1});
+  conf::write_room_entities(app, room, {driven, body}); // the room's vehicle 1 is gone
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.held_entities().empty()) << "gone from the room, let go";
+}

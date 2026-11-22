@@ -566,8 +566,30 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
     write_reserve(h, app, room, p.pid, 5 * heartbeat);
 }
 
+namespace {
+// client_pump's ENTITIES: each one shown that SELF_PID does not drive or embody, held where it is
+// shown; the rest released.
+void hold_entities(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
+                   const entity_playout *entities) {
+  std::set<std::uint64_t> keep;
+  if (entities && h.physics()) {
+    const std::uint64_t driving = read_driving(app, room, self_pid);
+    for (const conference::room_entity &e : entities->entities()) {
+      if (e.id == driving || e.driver == self_pid || e.avatar == self_pid)
+        continue;
+      cvc::physics::body_state at;
+      if (entities->state(e.id, at) && h.hold_entity(e.id, e.size, at))
+        keep.insert(e.id);
+    }
+  }
+  for (std::uint64_t id : h.held_entities())
+    if (!keep.count(id))
+      h.release_entity(id);
+}
+} // namespace
+
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                 double wall_dt) {
+                 double wall_dt, const entity_playout *entities) {
   sync_statics(h, app, room);
   sync_rules(h, app, room);
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
@@ -615,6 +637,7 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
   for (const std::string &pid : h.participants())
     if (!present.count(pid))
       h.remove_participant(pid);
+  hold_entities(h, app, room, self_pid, entities);
   h.advance(wall_dt);
 }
 
@@ -711,6 +734,16 @@ bool entity_playout::pose(std::uint64_t id, cvc::physics::pose &out) const {
   if (!_holon->has_participant(pid))
     return false;
   out = _holon->display_pose(pid);
+  return true;
+}
+
+bool entity_playout::state(std::uint64_t id, cvc::physics::body_state &out) const {
+  cvc::physics::pose shown;
+  if (!pose(id, shown))
+    return false;
+  out = _holon->state(conference::entity_pid(id));
+  out.position = shown.position;
+  out.rotation = shown.rotation;
   return true;
 }
 

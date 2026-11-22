@@ -1031,6 +1031,19 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 - **The entity it drives is predicted** with its controller (the walker, or the vehicle's plant)
   and reconciled to the server's poses, as the avatar is today. A client without the kernel
   interpolates its own entity (§5).
+- **As built (OW5a):** the room's vehicles are in the client's world. `holon::hold_entity(id,
+  size, at)` holds one as a kinematic box of its chassis's size where the client shows it (its
+  playout's pose, carried on along its velocity through the frame's steps; a replay holds it
+  still), on `avatar_world`'s obstacles; `client_pump(..., entities)` holds every entity the
+  `entity_playout` shows except the one the participant drives or is, and releases one the room no
+  longer lists. arigl pumps the entities before the holon, so the walk it predicts meets the cars
+  it draws: walking into a parked Humvee stops at its side, and a car at 3 m/s pushes the avatar
+  along (`HolonPhysicsTest`), where before the prediction walked through and the relay's pose
+  snapped it back.
+- **Still to come:** OW5b, the vehicle a participant drives (or is) predicted with its plant and
+  reconciled, as the walker is (today it is played out from the relay's samples, a round trip
+  behind the keys); OW5c, the client's statics from the document's bodies (meshes, terrain, a
+  generated world's buildings), not only the plane, boxes and spheres the room scene carries.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1113,7 +1126,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
