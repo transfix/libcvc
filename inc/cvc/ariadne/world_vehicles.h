@@ -97,6 +97,11 @@ namespace ariadne {
 // std::invalid_argument for a preset that is not one.
 physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                       double max_speed = 0.0);
+// How high a vehicle's chassis's centre stands over the ground under it (m): half its box's height
+// plus its front wheels' radius (0.4 m with no axles). Where a kinematic box and a `pose` entity
+// whose pose gives no z stand, and how far below a `pose` entity's chassis its drawn model's base
+// hangs.
+double stand_height(const physics::vehicle_desc &d);
 // A boat archetype's boat (dynamicboat): its preset (launch, jonboat) with the archetype's mass and
 // max_speed overrides, then a spawn's, held to its ranges. Throws std::invalid_argument for a
 // preset that is not a boat's.

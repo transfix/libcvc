@@ -6827,6 +6827,33 @@ TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
+// The shared-volume demo (docs/roadmap/DATA_FROM_STATE_TREE.md, D1): a volren and a volume_grid
+// over one data: entry, and a Filter window.
+TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_shared.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volren");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  EXPECT_EQ(r.scene.nodes[1].type, "volume_grid");
+  EXPECT_EQ(r.scene.nodes[1].source_data, "bunny");
+  EXPECT_NE(find(r.root, Kind::Window, "Filter"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
 // A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.
 TEST(AriadneLoader, SliderRangeFromKey) {
   SKIP_WITHOUT_YAML();
