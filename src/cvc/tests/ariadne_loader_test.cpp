@@ -2443,6 +2443,30 @@ scene:
   EXPECT_EQ(r.scene.clock.paused_key, "demo.hold");
   EXPECT_TRUE(r.scene.clock.time_key.empty()); // explicit "" disables the publish lane
   EXPECT_EQ(r.scene.clock.tick_key, "demo.tick");
+  EXPECT_EQ(r.scene.clock.hz, 0.0) << "no hz: the default 120 Hz";
+}
+
+// The world's rate (ARIADNE_WORLDS.md section 18.9): clock: { hz } takes a whole number of ticks a
+// second from 10 to 240; anything else is a warning, and the world runs at 120 Hz.
+TEST(AriadneScene, ClockBlockTakesAWorldsRate) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: { hz: 60 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.clock.hz, 60.0);
+  for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
+    LoadResult b = fresh_load(
+        std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
+    ASSERT_TRUE(b.ok) << b.error;
+    EXPECT_EQ(b.scene.clock.hz, 0.0) << bad;
+    bool warned = false;
+    for (const std::string &w : b.warnings)
+      warned = warned || w.find("clock: hz") != std::string::npos;
+    EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+  }
 }
 
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the

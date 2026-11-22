@@ -787,7 +787,7 @@ struct WorldVehicles::impl {
   // Every fleet's navigator config: the largest and fastest vehicle any archetype may be (each
   // vehicle on a plant plans with its own envelope and size, nav_plant's plan_with_vehicle).
   cvc::nav::sim_world::config cfg;
-  double tick = cvc::kSimTick; // the navigator's tick asked for (s; set_tick)
+  double tick = 0.0; // the navigator's tick asked for (s; set_tick); 0: the world's (cvc::sim_tick)
   bool ready = false;      // cfg is the grid's
   bool stepping = false;   // before_step() began a step that after_step() ends
   bool posing = false;     // and moved the `pose` entities in it
@@ -1485,13 +1485,16 @@ struct WorldVehicles::impl {
     if (!grid)
       return;
     sdf = cvc::nav::signed_distance(*grid);
-    // The tick in whole physics steps: exactly, on the simulation clock's quantum (sim_tick.h);
-    // the nearest whole number of a step that does not divide it, with a note in the status.
+    // The tick in whole physics steps: by default the world's (cvc::sim_tick of its step, the
+    // whole number of steps nearest the policies' 0.06 s: 7 at 120 Hz, 4 at 60); one asked for
+    // (set_tick) exactly on the simulation clock's quantum (sim_tick.h), else the nearest whole
+    // number of a step that does not divide it, with a note in the status.
     const double fixed_dt = world->config().fixed_dt;
-    every = std::max(1, static_cast<int>(std::lround(tick / fixed_dt)));
+    const double want = tick > 0.0 ? tick : cvc::sim_tick(fixed_dt);
+    every = std::max(1, static_cast<int>(std::lround(want / fixed_dt)));
     const double dt = every * fixed_dt;
-    if (std::fabs(dt - tick) > 1e-9)
-      status = "the tick " + std::to_string(tick) + " s is not a whole number of the physics " +
+    if (std::fabs(dt - want) > 1e-9)
+      status = "the tick " + std::to_string(want) + " s is not a whole number of the physics " +
                "world's " + std::to_string(fixed_dt) + " s steps; it is " + std::to_string(dt) +
                " s";
     // The largest and fastest vehicle any archetype may be (each vehicle on a plant plans with
@@ -3941,7 +3944,11 @@ void WorldVehicles::set_tick(double seconds) {
     throw std::invalid_argument("WorldVehicles::set_tick: the tick must be finite and > 0");
   _impl->tick = seconds;
 }
-double WorldVehicles::tick() const { return _impl->tick; }
+double WorldVehicles::tick() const {
+  if (_impl->tick > 0.0)
+    return _impl->tick;
+  return _impl->world ? cvc::sim_tick(_impl->world->config().fixed_dt) : cvc::kSimTick;
+}
 
 std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
 

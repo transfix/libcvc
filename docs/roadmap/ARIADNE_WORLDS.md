@@ -949,6 +949,8 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   GRL-SNAM's Python stories mirror) move with GRL-SNAM's hosts.
 - **Not changed:** the 50 Hz drift-tooling protocol (`plant_log_scene`, `cvc plant-log`), which
   the plant fits were measured at.
+- **120 Hz is the default, not a law:** a world may run at a rate of its own, and the relay's
+  clients follow it (§18.9).
 
 ### 18.2 The world: the holon runs the document's scene
 
@@ -1114,13 +1116,15 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**
 
 - The dynamic plants are libcvc's own C++, not Jolt, so their cross-platform determinism is not
   pinned; a client's prediction of a vehicle may drift and be corrected. A gate per kernel (§5)
   says how much.
-- The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow.
+- The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow. A
+  world that does not need 120 Hz can run at 60 or less (§18.9).
 - An area of interest for entities: today every client gets every one.
 
 ### 18.8 World contents: a generated world is a bundle
@@ -1213,3 +1217,54 @@ a mesh (`terrain.glb`) and a 16-bit height map PNG.
 | GB3 | **One renderer** for any world dataset. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
 | GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
+
+### 18.9 A world's rate: the server chooses, the clients follow
+
+The owner, 2026-11-21: "some worlds might not need 120hz and can do 60hz or lower if bandwidth and
+compute are an issue." So a world's rate is a knob: the relay picks it, and its clients follow.
+
+- **The knob.** A scene's `clock: { hz: <n> }`, a whole number of ticks a second from 10 to 240
+  (`cvc::sim_rate_valid`; 0 or absent is 120). `arisrv --sim-hz <n>` overrides the document's.
+  Everything that ticks takes it from there:
+  - **the quantum,** 1/hz: the app's world clock (`SceneWorld::use_vehicle_clock` puts it there
+    before the physics world is made), a physics step, the holon's clock;
+  - **the navigator's tick,** the whole quanta nearest the 0.06 s the policies were trained at
+    (`cvc::sim_tick_quanta`): 7 at 120 Hz (`kSimTick`, as before), 6 at 100, 4 at 60 (0.0667 s), 2
+    at 30, one at 20 and below. A tick asked for (`WorldVehicles::set_tick`) still wins;
+  - **the holon's windows,** which are counted in ticks and were sized for 120 Hz: the skew, the
+    lead slack, the peers' playout spans, the intent lead, the catch-up. `holon_config_at` keeps
+    each one's time at the new rate (at 60 Hz each is half the ticks), at least one tick.
+- **The relay.** `arisrv` takes `--sim-hz`, else the document's (or the stock world's) `clock: hz`,
+  else 120. It builds its holon at that rate and the server document's world on it (a load hook
+  sets the scene's `hz`, so `attach_world` finds the world on the holon's quantum), logs
+  `[arisrv] clock: 60 Hz (...)`, and publishes the rate.
+- **The wire.** `conf.rooms.<room>.clock.hz`, a revisioned section (§3) the relay writes once at
+  start-up with its epoch (`room_rules.h`: `write_room_clock`, `read_room_clock`). A value that is
+  no rate reads as none, and a room with none (a relay from before this) runs at 120 Hz. A client
+  never writes it (`room_write_gate`).
+- **The clients.** A host builds its holon from `room_holon_config(app, room)`, at the room's rate.
+  A holon cannot change its quantum in place (every tick it counts would mean another time), so a
+  host whose holon is off the room's clock (`on_room_clock`: it was built before the section came,
+  or the relay restarted at another rate) builds it again; the roster puts everyone back at the
+  next pump and the stream's next entries bring their poses. `arigl` does this each frame
+  (`follow_room_clock`), keeping its lead in seconds.
+- **What it saves.** The relay's CPU, mostly: physics, the navigators and the holon's integration
+  run per tick. Bandwidth much less, since poses already go out at 60, 30 or 20 Hz by each
+  viewer's round trip (room_pose_relay) and the room steps at 60 Hz whatever the rate; a near
+  entity's pose is capped at 30 Hz at any rate. Video has its own knobs (`--video-max`,
+  `--viewer-kbps-max`, `--aoi`, `--aoi-video-max`).
+- **The policies hold at 4/60 s** (2026-11-21), which is the tick at 60 Hz and at 30 Hz. That tick
+  is 11% longer than the 0.06 s they were trained at; 7/120 s was 3% shorter. The run is the
+  same as OW1's (§18.1): Jolt RoboRacers through the city for 24 s, 20 seeds of 48 agents
+  (`NavPlantConvergence.PoliciesHoldTheirReachAtTheSimulationTick`, `CVC_NAV_TICK_AB=1`, which now
+  has the 4/60 s arm). Reach at 0.06 s, then at 4/60 s:
+  - the shipped weights: 0.519, then 0.512;
+  - the untrained default: 0.522, then 0.517.
+
+  Both are within the seeds' noise. No retraining.
+- **Not yet:**
+  - A rate change while a relay runs. It is a restart: the clients follow the new run's section.
+    In place it would be a world restart under a new epoch (§6, #1076) that every holon rebuilds
+    on.
+  - The scene swarm (`scene_swarm`) runs its own plant host and tick at 1/120 s and needs the
+    120 Hz clock: a scene with a swarm and a rate of its own is not supported yet.

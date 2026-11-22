@@ -17,7 +17,8 @@
 #include <cvc/ariadne/conference/room_avatar.h> // room_avatars_path
 #include <cvc/ariadne/conference/room_rules.h>
 #include <cvc/core/app.h>
-#include <cvc/state/state.h> // SEPARATOR
+#include <cvc/core/sim_tick.h> // sim_rate_valid: the room's clock
+#include <cvc/state/state.h>   // SEPARATOR
 #include <string>
 #include <vector>
 
@@ -255,6 +256,30 @@ void write_room_rules(cvc::app &app, const std::string &room_id, const world_rul
   write_room_controllers(app, room_id, r.controllers, at, epoch);
   write_avatar_archetypes(app, room_id, r.archetypes, at, epoch);
   write_avatar_policy(app, room_id, r.policy, at, epoch);
+}
+
+// ---- the world's rate
+
+std::string room_clock_path(const std::string &room_id) {
+  return under(room_path(room_id), "clock");
+}
+
+section_stamp write_room_clock(cvc::app &app, const std::string &room_id, double hz,
+                               std::uint64_t epoch) {
+  section_writer w(app, room_clock_path(room_id));
+  w.set_double({"hz"}, hz);
+  return w.commit(0, epoch);
+}
+
+section_stamp room_clock_stamp(cvc::app &app, const std::string &room_id) {
+  return read_section_stamp(app, room_clock_path(room_id));
+}
+
+double read_room_clock(cvc::app &app, const std::string &room_id) {
+  if (!room_clock_stamp(app, room_id).written())
+    return 0.0;
+  const double hz = section_reader(app, room_clock_path(room_id)).number({"hz"}, 0.0);
+  return cvc::sim_rate_valid(hz) ? hz : 0.0;
 }
 
 world_rules read_room_rules(cvc::app &app, const std::string &room_id) {

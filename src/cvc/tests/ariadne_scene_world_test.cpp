@@ -7403,6 +7403,65 @@ TEST(AriadneOneWorld, AttachTakesAServerWorldOnTheHolonsQuantum) {
       << "back in its own world where it stood";
 }
 
+// A world at 60 Hz (ARIADNE_WORLDS.md section 18.9): a scene: clock: hz of 60 (as arisrv's --sim-hz
+// sets it) puts the app's clock, the physics world's step and the vehicles' tick on 1/60 s quanta,
+// the navigator every 4 of them (the whole quanta nearest the policies' 0.06 s). A server holon at
+// the same rate runs it with the avatars in it; one at 120 Hz is refused.
+TEST(AriadneOneWorld, AWorldAt60HzRunsOnAHolonAt60Hz) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_intents();
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.clock.hz = 60.0;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(app.world_clock().fixed_dt(), 1.0 / 60.0);
+  EXPECT_EQ(app.world_clock().current_config().max_steps_per_advance, 15);
+  EXPECT_NEAR(w->world().config().fixed_dt, 1.0 / 60.0, 1e-15);
+  w->sync(&warnings);
+  ASSERT_NE(w->vehicles(), nullptr);
+  WorldVehicles &v = *w->vehicles();
+  spawn_at(v, "external", -40.0, 0.0);
+  EXPECT_EQ(v.steps_per_tick(), 4);
+  EXPECT_NEAR(v.tick_seconds(), 4.0 / 60.0, 1e-12);
+  EXPECT_NEAR(v.tick(), 4.0 / 60.0, 1e-12);
+  for (const std::string &m : warnings)
+    EXPECT_EQ(m.find("whole number"), std::string::npos) << m;
+
+  std::string why;
+  holon fast(holon_role::server, one_world_holon());
+  EXPECT_FALSE(fast.attach_world(w.get(), &why)) << "a 120 Hz holon";
+  EXPECT_NE(why.find("quantum"), std::string::npos) << why;
+  holon h(holon_role::server, holon_config_at(one_world_holon(), 60.0));
+  cvc::physics::body_state feet;
+  feet.position = {3.0, 4.0, 0.0};
+  h.add_participant("a", false, feet);
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  for (int i = 0; i < 60; ++i)
+    h.advance(1.0 / 60.0);
+  EXPECT_EQ(h.tick(), 60u) << "one quantum a frame";
+  EXPECT_NEAR(h.state("a").position.z, 0.0, 0.05) << "standing on the scene's square";
+
+  // The rate is the scene's only while the clock has not run: a ticked clock keeps its own.
+  LoadResult again = load_intents();
+  again.scene.clock.hz = 30.0;
+  cvc::app running;
+  running.world_clock().advance(0.1);
+  ASSERT_GT(running.world_clock().tick(), 0u);
+  std::vector<std::string> late;
+  std::unique_ptr<SceneWorld> w2 =
+      SceneWorld::from_scene(running, again.scene, "", "physics", &late);
+  ASSERT_NE(w2, nullptr);
+  EXPECT_NEAR(w2->world().config().fixed_dt, 1.0 / 120.0, 1e-15);
+  bool said = false;
+  for (const std::string &m : late)
+    said = said || m.find("clock: hz") != std::string::npos;
+  EXPECT_TRUE(said) << "a rate it could not take is said";
+}
+
 namespace {
 // A navigated car driving west past an avatar standing in its lane, the world run by a server
 // holon: the closest the car's centre came to the avatar, where the car ended, and how far the

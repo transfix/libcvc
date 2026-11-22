@@ -21,7 +21,8 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h>
-#include <cvc/state/state.h> // isValidStateName, SEPARATOR
+#include <cvc/core/sim_tick.h> // the room's rate (scene: clock: hz)
+#include <cvc/state/state.h>   // isValidStateName, SEPARATOR
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -35,8 +36,6 @@ namespace cvc {
 namespace ariadne {
 
 namespace {
-
-constexpr double kRoomQuantum = 1.0 / 120.0; // the holon's fixed_dt (world_clock's default)
 
 bool finite_positive(double v) { return std::isfinite(v) && v > 0.0; }
 bool finite_nonnegative(double v) { return std::isfinite(v) && v >= 0.0; }
@@ -1050,9 +1049,12 @@ std::string world_rules_from(const Scene &scene, const Value *world, world_rules
   }
   if (ph.present) {
     r.physics.gravity = cvc::physics::vec3{ph.gravity[0], ph.gravity[1], ph.gravity[2]};
-    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - kRoomQuantum) > 1e-9)
+    // The room's quantum: its rate's (scene: clock: hz, ARIADNE_WORLDS.md section 18.9).
+    const double hz = scene.clock.hz > 0.0 ? scene.clock.hz : cvc::kSimRateDefault;
+    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - cvc::sim_quantum(hz)) > 1e-9)
       warn(warnings, "scene: physics: fixed_dt " + num_text(ph.fixed_dt) +
-                         " is ignored: a room steps its avatars every 1/120 s");
+                         " is ignored: a room steps its avatars every 1/" + num_text(hz) +
+                         " s (its rate is scene: clock: hz)");
     if (ph.backend != "auto" && ph.backend != "jolt")
       warn(warnings, "scene: physics: backend " + ph.backend +
                          " is ignored: a room's avatars are Jolt bodies when the build has Jolt");
