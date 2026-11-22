@@ -165,7 +165,7 @@ private:
   cvc::volume_grid_contour_params m_params;
   bool m_haveFrame = false;
   bool m_seeded = false;
-  bool m_newCurve = false; // new_curve: the next click starts a curve
+  bool m_newCurve = false;    // new_curve: the next click starts a curve
   cvc::followed_key m_follow; // grid.contour.source
   boost::any m_pending; // a stack that came before the frame: converted once the frame is known
   std::string m_pendingFrom;
