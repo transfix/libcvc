@@ -5,6 +5,13 @@
 # the node owns (graphics.root.children.<node>.grid.*, VolumeGridNode.h), and the views write their
 # picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO host C++.
 #
+# The grid reads no file: it shows the volume the app holds (the node's source: { data: <name> },
+# a data: entry the document loads), and follows it as it changes. The panel's Save and Load go
+# through the app too: Save writes what the node publishes (grid.points, grid.session) with
+# (data-save ...), beside the document or, in a browser, as a download; Load loads the file as
+# the dataset <node>_points or <node>_session with (data-load ...) and points the node's
+# grid.source.points or grid.source.session at it.
+#
 #   In a slice view, with the Points tool:
 #     click                 mark a point of the current class, or unmark the one under the pointer
 #     drag                  select the points in a rubber band (Shift adds, Ctrl or Alt takes away)
@@ -34,13 +41,15 @@
 #
 # Use it:
 #     import: cvc://components/volume_grid.ari
+#     data:
+#       head: head.rawiv                  # the app loads the volume
 #     windows:
 #       - include: volume_grid
 #     scene:
 #       nodes:
 #         - node: grid
 #           type: volume_grid
-#           source: { file: head.rawiv }
+#           source: { data: head }        # and the grid shows it
 #           classes: [ { name: membrane, color: [1, 0.2, 0.2], radius: 2 } ]
 #
 # Two grids: give each include its node and id; each view shows its own grid alone (show: [node]).
@@ -279,20 +288,19 @@ units:
                     bind: graphics.root.children.{node}.grid.info.min
                   - text: Max
                     bind: graphics.root.children.{node}.grid.info.max
-              - input_text: File
-                bind: graphics.root.children.{node}.grid.source.file
-                tooltip: "a volume file; a relative path is read from the document's directory"
-              - button: Load
-                on: (state-set "graphics.root.children.{node}.grid.request" "load")
-                tooltip: "read the file (its variable and timestep: grid.source.var / time)"
+              - text: Source
+                bind: graphics.root.children.{node}.grid.info.source
+                tooltip: "the state key the volume is at: the app holds it (a data: entry, a program, a filter) and the grid follows it"
               - separator
               - input_text: Session
                 bind: graphics.root.children.{node}.grid.files.session
                 tooltip: "a session file (JSON): the grid's keys, its transfer function and its point classes"
               - button: Save session
-                on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "save_session" (state-get "graphics.root.children.{node}.grid.files.session")) " "))
+                on: (data-save "graphics.root.children.{node}.grid.session" (state-get "graphics.root.children.{node}.grid.files.session") "volume_grid_session")
+                tooltip: "the app writes the session (grid.session): beside the document, or in a browser as a download"
               - button: Load session
-                on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "load_session" (state-get "graphics.root.children.{node}.grid.files.session")) " "))
+                on: (begin (data-load "{node}_session" (state-get "graphics.root.children.{node}.grid.files.session") "volume_grid_session") (data-reload "{node}_session") (state-set "graphics.root.children.{node}.grid.source.session" "data.{node}_session.session"))
+                tooltip: "the app loads the file as data.{node}_session, and the grid applies it"
           - type: group
             tab: Point classes
             children:
@@ -354,19 +362,17 @@ units:
               - separator
               - input_text: Classes file
                 bind: graphics.root.children.{node}.grid.files.classes
-                tooltip: "a .vgr file (VolumeGridRover's point classes), or .pts (its point list) to add"
+                tooltip: "a .vgr file (VolumeGridRover's point classes)"
               - type: group
                 id: "{id}_class_files"
                 layout: { kind: horizontal }
                 children:
                   - button: Save
-                    on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "save_classes" (state-get "graphics.root.children.{node}.grid.files.classes")) " "))
+                    on: (data-save "graphics.root.children.{node}.grid.points" (state-get "graphics.root.children.{node}.grid.files.classes") "point_classes")
+                    tooltip: "the app writes the classes (grid.points) as a .vgr: beside the document, or in a browser as a download"
                   - button: Load
-                    on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "load_classes" (state-get "graphics.root.children.{node}.grid.files.classes")) " "))
-                    tooltip: "replace the classes with the file's"
-                  - button: Add points
-                    on: (state-set "graphics.root.children.{node}.grid.request" (string.join (list "load_points" (state-get "graphics.root.children.{node}.grid.files.classes")) " "))
-                    tooltip: "add the file's points to the classes of their names (.pts or .vgr)"
+                    on: (begin (data-load "{node}_points" (state-get "graphics.root.children.{node}.grid.files.classes") "point_classes") (data-reload "{node}_points") (state-set "graphics.root.children.{node}.grid.source.points" "data.{node}_points.classes"))
+                    tooltip: "the app loads the file as data.{node}_points, and its classes replace the grid's"
           - type: group
             tab: Transfer function
             children:
