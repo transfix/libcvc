@@ -82,8 +82,10 @@
 #endif
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/ariadne/host_warnings.h>
+#include <cvc/ariadne/loader.h> // ari validate, ari schema
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
+#include <cvc/ariadne/uri.h>          // ari validate: the cvc:// component library
 #include <cvc/ariadne/web_document.h> // the browser page's document, named by URL
 #ifdef CVC_ARIADNE_PYTHON
 #include "python_engine.h" // arix: the embedded Python (src/ariadne_python)
@@ -100,7 +102,9 @@
 #include <cvc/net/browser.h>
 #include <cvc/state/state.h> // ari test: the run's action time backstop
 #include <exception>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -187,6 +191,8 @@ int usage(int code) {
                "usage: ari run|snapshot|check [flags] doc.ari [document args...]\n"
                "       ari test [flags] [--tap] [--timeout S] [--frames N] [--action-time S]\n"
                "                doc.ari...\n"
+               "       ari validate [--structural-only] [--strict] [--json] doc.ari|-...\n"
+               "       ari schema\n"
                "       ari info [--json] [--functions] [--backend B] [--graphics MODE]\n"
                "\n"
                "flags (before the document):\n"
@@ -208,6 +214,16 @@ int usage(int code) {
                "A program may run as long as the timeout (a running app allows 0.1 s), or\n"
                "--action-time S.\n"
                "run, snapshot and check exit with the code a document passed to (quit code).\n"
+               "\n"
+               "validate checks each document against the .ari schema (ari schema prints it):\n"
+               "every key known and every value of its type, in the document, its units:, and,\n"
+               "as a load reaches them, its import:ed libraries, load: fragments and include:\n"
+               "expansions. It then loads the document without running it and lists what the\n"
+               "loader warns about. --structural-only checks the document and its units: alone\n"
+               "(nothing is resolved); --strict fails on a loader warning too; --json prints\n"
+               "the findings as JSON. It runs nothing: no init:, no network. Exits 0 when every\n"
+               "document is valid, 1 for a schema problem, 2 when a load fails (or warns, with\n"
+               "--strict), 3 when the YAML does not parse, 4 when this build cannot validate.\n"
                "\n"
                "Warnings while a document runs (a program that failed, an on_tick: or on_key:\n"
                "program that stopped, was restarted or given up) show at once: on run's bottom\n"
@@ -537,6 +553,163 @@ int run_tests(const cvc::ariadne::HostOptions &o, const Scripting &scripting) {
   return failed ? 1 : 0;
 }
 
+// ---- ari validate (docs/ARIADNE.md §14) --------------------------------------------------------
+
+// `ari validate`'s exit codes, worst last: what one document earns, and the run the worst of them.
+enum ValidateExit { kValid = 0, kSchemaProblem = 1, kLoadProblem = 2, kBadYaml = 3, kCannot = 4 };
+
+// What validate found in one document.
+struct Validated {
+  std::string path;
+  std::string yaml_error, load_error;
+  std::vector<cvc::ariadne::SchemaIssue> issues;
+  std::vector<std::string> warnings; // the loader's own (not the schema's)
+  int exit = kValid;
+};
+
+std::string json_text(const std::string &s) {
+  std::string o = "\"";
+  for (const char c : s) {
+    if (c == '"' || c == '\\') {
+      o += '\\';
+      o += c;
+    } else if (static_cast<unsigned char>(c) < 0x20) {
+      char buf[8];
+      std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(c));
+      o += buf;
+    } else {
+      o += c;
+    }
+  }
+  return o + "\"";
+}
+
+// Check one document (`path`, or "-" for stdin): its structure (validate_*), then, unless
+// structural_only, a load (load_*: its libraries, fragments and include: expansions against the
+// schema, and the loader's own warnings). Loading runs nothing: no init:, no frame.
+Validated validate_document(cvc::app &app, const std::string &path, bool structural_only,
+                            bool strict) {
+  namespace ari = cvc::ariadne;
+  Validated v;
+  v.path = path;
+  std::string text;
+  if (path == "-") {
+    text.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
+    v.path = "<stdin>";
+  }
+  const ari::ValidationResult s =
+      path == "-" ? ari::validate_string(app, text) : ari::validate_file(app, path);
+  if (!s.error.empty()) {
+    v.yaml_error = s.error;
+    v.exit = kBadYaml;
+    return v;
+  }
+  v.issues = s.issues;
+  if (path == "-")
+    for (ari::SchemaIssue &i : v.issues)
+      i.source = v.path;
+  if (!structural_only) {
+    const ari::LoadResult r = path == "-" ? ari::load_string(app, text) : ari::load_file(app, path);
+    // The load names the document by its canonical path; this run, as it was given.
+    std::error_code ec;
+    for (ari::SchemaIssue i : r.schema_issues) {
+      if (path == "-" ? i.source.empty()
+                      : (!i.source.empty() && std::filesystem::equivalent(i.source, path, ec)))
+        i.source = v.path;
+      const bool seen = std::any_of(v.issues.begin(), v.issues.end(),
+                                    [&](const auto &o) { return o.text() == i.text(); });
+      if (!seen)
+        v.issues.push_back(std::move(i));
+    }
+    for (const std::string &w : r.warnings)
+      if (w.rfind("ari: schema: ", 0) != 0)
+        v.warnings.push_back(w);
+    v.load_error = r.error;
+  }
+  if (!v.load_error.empty() || (strict && !v.warnings.empty()))
+    v.exit = kLoadProblem;
+  else if (!v.issues.empty())
+    v.exit = kSchemaProblem;
+  return v;
+}
+
+int run_validate(const cvc::ariadne::HostOptions &o) {
+  namespace ari = cvc::ariadne;
+  if (!ari::have_yaml() || !ari::have_jsonschema()) {
+    std::fprintf(stderr,
+                 "ari: validate: this ari was built without %s, so it cannot check a document\n",
+                 ari::have_yaml() ? "json-schema-validator" : "yaml-cpp");
+    return kCannot;
+  }
+  std::vector<std::string> docs{o.doc};
+  docs.insert(docs.end(), o.doc_args.begin(), o.doc_args.end());
+  for (const std::string &d : docs)
+    if (d.size() > 1 && d[0] == '-') {
+      std::fprintf(stderr, "ari: validate: '%s' comes after a document; flags go before them\n",
+                   d.c_str());
+      return 2;
+    }
+  const bool structural_only = has_flag(o, "--structural-only");
+  const bool strict = has_flag(o, "--strict");
+  const bool json = has_flag(o, "--json");
+  // The host a document is checked against: ari's own registrations (its blocks, the cvc://
+  // component library), as `ari run` makes them. A load does not run the document.
+  cvc::app app;
+  ari::AppRuntime rt(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix);
+  ari::register_cvc_uri_handler(app, o.component_paths);
+  ari::conference::register_relay_block(app);
+
+  int worst = kValid;
+  std::size_t invalid = 0;
+  std::string out = json ? "{\"documents\": [" : "";
+  for (std::size_t n = 0; n < docs.size(); ++n) {
+    const Validated v = validate_document(app, docs[n], structural_only, strict);
+    worst = std::max(worst, v.exit);
+    invalid += v.exit != kValid;
+    if (json) {
+      out += std::string(n ? "," : "") + "\n  {\"path\": " + json_text(v.path) +
+             ", \"valid\": " + (v.exit == kValid ? "true" : "false") +
+             ", \"exit\": " + std::to_string(v.exit);
+      if (!v.yaml_error.empty())
+        out += ", \"yaml_error\": " + json_text(v.yaml_error);
+      if (!v.load_error.empty())
+        out += ", \"load_error\": " + json_text(v.load_error);
+      out += ", \"schema\": [";
+      for (std::size_t i = 0; i < v.issues.size(); ++i) {
+        const ari::SchemaIssue &s = v.issues[i];
+        out += std::string(i ? "," : "") + "\n    {\"source\": " + json_text(s.source) +
+               ", \"line\": " + std::to_string(s.line) +
+               ", \"column\": " + std::to_string(s.column) +
+               ", \"context\": " + json_text(s.context) + ", \"pointer\": " + json_text(s.pointer) +
+               ", \"message\": " + json_text(s.message) + "}";
+      }
+      out += "], \"warnings\": [";
+      for (std::size_t i = 0; i < v.warnings.size(); ++i)
+        out += std::string(i ? ", " : "") + json_text(v.warnings[i]);
+      out += "]}";
+      continue;
+    }
+    // Text: each problem on a line of its own, file:line:col first, as a compiler writes them.
+    if (!v.yaml_error.empty())
+      std::printf("%s: error: %s\n", v.path.c_str(), v.yaml_error.c_str());
+    for (const ari::SchemaIssue &s : v.issues)
+      std::printf("%s\n", s.text().c_str());
+    if (!v.load_error.empty())
+      std::printf("%s: error: %s\n", v.path.c_str(), v.load_error.c_str());
+    for (const std::string &w : v.warnings)
+      std::printf("%s: warning: %s\n", v.path.c_str(), w.c_str());
+    if (v.exit == kValid)
+      std::printf("%s: valid\n", v.path.c_str());
+  }
+  if (json) {
+    out += "\n], \"exit\": " + std::to_string(worst) + "}\n";
+    std::fputs(out.c_str(), stdout);
+  } else if (docs.size() > 1) {
+    std::printf("ari validate: %zu documents, %zu invalid\n", docs.size(), invalid);
+  }
+  return worst;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -556,7 +729,8 @@ int main(int argc, char **argv) {
     return ari::python::Engine::python_main({kRuntimeName, {}},
                                             std::vector<std::string>(argv + 2, argv + argc));
 #endif
-  ari::HostOptions o = ari::parse_host_args(argc, argv, {"--json", "--functions", "--tap"});
+  ari::HostOptions o = ari::parse_host_args(
+      argc, argv, {"--json", "--functions", "--tap", "--structural-only", "--strict"});
 #ifdef CVC_ARI_WASM_BACKEND // ari_tvision: its documents run on the tvision desktop
   if (o.backend.empty())
     o.backend = CVC_ARI_WASM_BACKEND;
@@ -571,7 +745,8 @@ int main(int argc, char **argv) {
     return usage(2);
   }
   const std::string &cmd = o.command;
-  if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test") {
+  if (cmd != "run" && cmd != "snapshot" && cmd != "check" && cmd != "info" && cmd != "test" &&
+      cmd != "validate" && cmd != "schema") {
     std::fprintf(stderr, "ari: unknown command '%s'\n", cmd.c_str());
     return usage(2);
   }
@@ -579,11 +754,17 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "ari: --backend is ftxui or tvision, not '%s'\n", o.backend.c_str());
     return 2;
   }
-  for (const std::string &f : o.extra_flags)
-    if ((f == "--tap") != (cmd == "test")) {
-      std::fprintf(stderr, "ari: %s is for ari %s\n", f.c_str(), f == "--tap" ? "test" : "info");
+  for (const std::string &f : o.extra_flags) {
+    // The command a flag is for: --tap test's, --structural-only and --strict validate's, the
+    // rest info's (and --json validate's too).
+    const char *for_cmd = f == "--tap"                                    ? "test"
+                          : (f == "--structural-only" || f == "--strict") ? "validate"
+                                                                          : "info";
+    if (cmd != for_cmd && !(f == "--json" && cmd == "validate")) {
+      std::fprintf(stderr, "ari: %s is for ari %s\n", f.c_str(), for_cmd);
       return usage(2);
     }
+  }
   if (o.timeout > 0 && cmd != "test") {
     std::fprintf(stderr, "ari: --timeout is for ari test\n");
     return usage(2);
@@ -611,6 +792,12 @@ int main(int argc, char **argv) {
 #endif
   if (cmd == "info")
     return print_info(o);
+  if (cmd == "schema") { // the .ari schema, for an editor or another tool
+    std::fputs(ari::ari_schema_json().c_str(), stdout);
+    return 0;
+  }
+  if (cmd == "validate")
+    return run_validate(o);
   if (!o.png.empty()) {
     std::fprintf(stderr, "ari: --png needs a renderer; arigl can write one\n");
     return 2;

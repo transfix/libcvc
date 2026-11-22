@@ -28,6 +28,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
 12. [Golden-image tests](#12-golden-image-tests)
 13. [Testing a document: `quit`, `assert` and `ari test`](#13-testing-a-document-quit-assert-and-ari-test)
+14. [Validating a document: the `.ari` schema and `ari validate`](#14-validating-a-document-the-ari-schema-and-ari-validate)
 
 ---
 
@@ -945,6 +946,11 @@ An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `loa
 `cvc::state` and never runs the DSL. The host runs the scripts (§9). This separation is
 why the same `LoadResult` can be driven by different hosts.
 
+The structure a document may have, every key and the values it takes, is the `.ari` schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)).
+The loader stays lenient, loading what it understands, but a build with the validator checks
+every document against the schema as it loads and warns about each place that breaks it (§14).
+
 ### 5.1 Top-level keys
 
 The built-in top-level keys (`is_builtin_block`,
@@ -962,9 +968,11 @@ the tray's bell or not (§5.24). `assets:` and
 `scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
-`register_ari_block`, or — if none is registered — **silently ignored**. This is
-deliberate forward-compatibility: a document authored for a newer build still loads the
-parts an older build understands.
+`register_ari_block`, or, if none is registered, ignored: a document authored for a newer build
+still loads the parts an older build understands. It is not silent, though: the schema check
+(§14) warns about a key that is neither the schema's nor a registered block, unless the
+document declares the block in `customs:` (`- block: <name>`). The blocks the scripting hosts
+and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in the schema.
 
 ### 5.2 `meta:` and the `min_libcvc` gate
 
@@ -8168,3 +8176,115 @@ Interactive behaviour, keys and both terminal backends are tested by driving `ar
 as `src/ari/tests/run_in_tmux_test.sh` (transfix/libcvc#883) does. Scripted input for `snapshot` and `test`, and file
 descriptors as state channels, are on the agenda (transfix/libcvc#894).
 
+---
+
+## 14. Validating a document: the `.ari` schema and `ari validate`
+
+### 14.1 The schema
+
+The `.ari` schema is a JSON Schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)):
+every top-level block, every built-in widget type and scene node, and the keys and values each
+takes, each described. It is the definition of a document's structure; where this guide and the
+schema disagree, the schema (with the loader beside it) is right. The library carries it
+compiled in (`cvc::ariadne::ari_schema_json()`; `ari schema` prints it), and an install puts it
+at `share/libcvc/ariadne/schema/ari.v1.schema.json`, so an editor can check a document as it is
+written. With the YAML language server (VS Code's YAML extension), a modeline does it:
+
+```yaml
+# yaml-language-server: $schema=../../src/cvc/ariadne/schema/ari.v1.schema.json
+```
+
+What the schema holds a document to:
+
+- **Every map is closed.** A key it does not list is an error: a misspelt key (`bnd:`), a
+  misspelt widget type (`slider_itn:`), a key on the wrong widget (a `commit:` on a button), a
+  misspelt block (`widnows:`). Three things stay open: a key that starts with `x-`, anywhere,
+  which is the author's or a tool's own; a custom widget's keys (`type: gauge`) and a custom
+  scene node's (`type: forest_trees`), which are their handler's; and a top-level block an app
+  registered (`register_ari_block`) or the document declares in `customs:`.
+- **Every value has its type**: a number where the loader reads one, one of the values an enum
+  key takes (`commit: live | release`), a colour in one of the forms §5.26 lists, `[x, y, z]`
+  for a position.
+- **A widget's type is its first type key**, in the loader's order
+  (`builtin_widget_types()`): a `progress:` with an `overlay:` caption is a progress. Two type
+  keys that are not such a pair are an error: in `{button: Go, text: x}` the text wins, and the
+  `button:` is an unknown key.
+- **What it cannot see**: inside a program (`on:`, `init:`, `visible_when:`, ...) it checks
+  only that it is text, and a `bind:` the same; a custom type's own keys not at all. The loader
+  and the runtime check the rest (a program that does not parse, a state key no one writes).
+
+Flags take every spelling the loader reads (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+A value written in YAML as `1.5` is a number, and `"1.5"` too: the schema types scalars as the
+loader reads them, not by their quotes.
+
+### 14.2 When a document is checked
+
+A build with the validator (json-schema-validator over nlohmann-json; `have_jsonschema()`,
+`ari info`'s *json_schema*) checks every document it loads:
+
+- the document itself, before anything else reads it;
+- each library it `import:`s, and each fragment it `load:`s (after the mount's `args:`);
+- each `include:` expansion, as a widget, after its args are substituted and its slots filled.
+  A problem there is reported in the unit's own file and line, with the context
+  `include <unit>`.
+
+Each problem is a warning, `ari: schema: <file>:<line>:<column>: <context>: <pointer>:
+<message>`, and a `SchemaIssue` in `LoadResult::schema_issues`. The load goes on: the loader is
+lenient, and a host decides how strict to be. `ari test` fails a document that warns, so a
+tested document is a valid one.
+
+`validate_string(app, yaml)` and `validate_file(app, path)` check a document without loading
+it: its structure, and each of its own `units:` instantiated with the args it declares (a
+`{name}` token only an include site fills is not checked). They resolve nothing.
+
+A build without the validator checks nothing: `validate_*` say so (`checked` is false) and
+loads report no schema issues. CI's libcvc lanes fail when their configure did not find it.
+
+### 14.3 `ari validate`
+
+```
+ari validate [--structural-only] [--strict] [--json] doc.ari...
+ari validate -              # a document on stdin
+ari schema                  # print the schema
+```
+
+`ari validate` checks each document: its structure and units (`validate_file`), then a load
+without running anything (no `init:`, no frame, no network), which checks what the load reaches
+and lists the loader's own warnings. Each problem is a line of its own, file first, as a
+compiler writes them:
+
+```
+doc.ari:11:5: /windows/0: unknown key 'closeable'
+doc.ari:14:9: /windows/0/children/0: unknown key 'bnd'
+doc.ari:16:13: /windows/0/children/0/hi: 'fast' is the wrong type here
+doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or write state
+```
+
+- `--structural-only`: the document and its units alone, nothing resolved (no imports, no
+  fragments): what an editor or a pre-commit hook wants.
+- `--strict`: a loader warning fails the document too.
+- `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
+  column, context, pointer, message), its load error and its warnings.
+
+The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
+the `cvc://` component library, `--component-path`). A document for arigl may name widget types
+`ari` does not have (`viewport`); the load warns about them, and the document is still valid.
+The exit code is 0 when every document is valid, 1 for a schema problem, 2 when a load fails
+(or warns, with `--strict`) or on a usage error, 3 when the YAML does not parse, and 4 when this
+`ari` was built without the validator.
+
+### 14.4 Changing the schema
+
+A key the loader reads goes in the schema in the same change: the test that every shipped
+document is valid (`ariadne_schema_test`'s `EveryShippedDocumentIsValid`) fails until it does.
+The schema keeps to what json-schema-validator implements (draft 7's keywords: no
+`unevaluatedProperties`, no `prefixItems`, no assertion beside a `$ref`), which
+`KeepsToWhatTheValidatorImplements` checks. A map whose every value has a schema (`keys:`,
+`data:`, ...) says so with `patternProperties: {"^.*$": ...}`, never a schema-valued
+`additionalProperties`: the validator reports an error in such a value as one message at the
+map, with no pointer into the value. `additionalProperties` is only ever `false`, closing a map.
+A widget type's schema, `w_<type>`, lists its own
+keys and takes the shared ones by the one pattern every type carries
+(`EveryWidgetTakesTheSharedKeys`); a new widget type also needs its link in `short_widget`, in
+the loader's order, and its entry in `typed_widget` (`EveryBuiltinWidgetTypeHasItsSchema`).

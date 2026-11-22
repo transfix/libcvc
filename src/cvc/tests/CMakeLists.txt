@@ -9,6 +9,7 @@ add_executable(thread_pool_test thread_pool_test.cpp)
 add_executable(thread_class_test thread_class_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
+add_executable(ariadne_schema_test ariadne_schema_test.cpp)
 add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
@@ -428,6 +429,7 @@ set(TEST_TARGETS
   thread_class_test
   text_test
   ariadne_loader_test
+  ariadne_schema_test
   ariadne_doc_fetch_test
   ariadne_scene_tf_test
   ariadne_runtime_test
@@ -849,6 +851,23 @@ target_link_libraries(ariadne_loader_test
     GTest::gtest
     GTest::gtest_main
 )
+
+# The .ari schema's tests (docs/ARIADNE.md §14) read the source tree's documents and schema file.
+# Those that look inside the schema itself need a JSON parser: nlohmann_json, which a build with
+# the validator has (its config finds it).
+target_link_libraries(ariadne_schema_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_definitions(ariadne_schema_test
+  PRIVATE CVC_SCHEMA_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+find_package(nlohmann_json CONFIG QUIET)
+if(TARGET nlohmann_json::nlohmann_json)
+  target_link_libraries(ariadne_schema_test PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_definitions(ariadne_schema_test PRIVATE CVC_SCHEMA_TEST_HAVE_JSON)
+endif()
 
 target_link_libraries(ariadne_doc_fetch_test
   PRIVATE
@@ -3251,6 +3270,7 @@ cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
+cvc_discover_tests(ariadne_schema_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
