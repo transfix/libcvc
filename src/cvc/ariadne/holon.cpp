@@ -20,9 +20,12 @@
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
+#include <cvc/core/sim_tick.h> // holon_config_at: a world's rate
 #include <cvc/physics/world.h>
 #include <exception>
 #include <iterator>
+#include <stdexcept>
+#include <string>
 
 namespace cvc {
 namespace ariadne {
@@ -76,6 +79,31 @@ quat unit(quat q) {
 // names none.
 double jump_speed_of(const world_rules &r) { return r.controller().param("jump_speed", 4.0); }
 } // namespace
+
+holon_config holon_config_at(holon_config cfg, double hz) {
+  if (!cvc::sim_rate_valid(hz))
+    throw std::invalid_argument("holon_config_at: " + std::to_string(hz) +
+                                " Hz is not a world's rate (a whole number from 10 to 240)");
+  const double from = cfg.clock.fixed_dt;
+  const double to = cvc::sim_quantum(hz);
+  const auto span = [&](std::uint64_t &ticks) {
+    ticks = std::max<std::uint64_t>(
+        1, static_cast<std::uint64_t>(std::llround(static_cast<double>(ticks) * from / to)));
+  };
+  span(cfg.max_skew_ticks);
+  span(cfg.stale_reading_ticks);
+  span(cfg.lead_slack_behind_ticks);
+  span(cfg.lead_slack_ahead_ticks);
+  span(cfg.max_peer_span_ticks);
+  span(cfg.peer_max_delay_ticks);
+  span(cfg.peer_interval_ticks);
+  span(cfg.peer_max_extrapolate_ticks);
+  span(cfg.max_intent_lead_ticks);
+  cfg.clock.max_steps_per_advance =
+      std::max(1, static_cast<int>(std::lround(cfg.clock.max_steps_per_advance * from / to)));
+  cfg.clock.fixed_dt = to;
+  return cfg;
+}
 
 holon::holon(holon_role role, holon_config cfg)
     : _role(role), _cfg(cfg), _clock(cfg.clock), _driver(_clock) {

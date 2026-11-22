@@ -54,6 +54,8 @@ step_task tile_one_component(Contour_iter bottom_begin, Contour_iter bottom_end,
   SK_RUN(pre_tile_steps(bottom_begin, bottom_end, top_begin, top_end, false,
                         options.correspondence_overlap(), workspace));
   Tiler_workspace &w = *workspace;
+  // (pre_tile's tables, freed as it returned.)
+  TILER_UNITS(table_units(w.vertices.size()));
   w.set_log(&ctx.log);
 
   // Perform tiling phase 1
@@ -146,11 +148,14 @@ void get_intersections(TW_iter tw_begin, TW_iter tw_end, Out_iter pairs) {
 /// Augments the contours of two consecutive slices in place: one step of the
 /// legacy augment_slices(), which ran this over every pair in order.
 //------------------------------------------------------------------------------
-bool augment_slice_pair(Slice &bottom, Slice &top) {
-  bool augmented_some_point = false;
+//
+// A contour validated, or a pair of contours augmented, at a time (stepping.h);
+// `augmented_some_point` is the legacy return value once it ends.
+step_task augment_slice_pair_steps(Slice &bottom, Slice &top, bool &augmented_some_point) {
+  augmented_some_point = false;
 
-  bottom.validate();
-  top.validate();
+  SK_RUN(bottom.validate_steps());
+  SK_RUN(top.validate_steps());
 
   // Get all components in the two slices
   vector<string> components;
@@ -173,17 +178,17 @@ bool augment_slice_pair(Slice &bottom, Slice &top) {
 
     // Augment the contours, putting the results in bac and tac.
     list<Contour_handle> bac, tac;
-    bool b =
-        augment(bc.begin(), bc.end(), tc.begin(), tc.end(), back_inserter(bac), back_inserter(tac));
+    bool b = false;
+    SK_RUN(augment_steps(bc.begin(), bc.end(), tc.begin(), tc.end(), back_inserter(bac),
+                         back_inserter(tac), b));
     augmented_some_point = augmented_some_point || b;
 
     // Update the slices with the augmented contours.
     bottom.replace(component, bac.begin(), bac.end());
     top.replace(component, tac.begin(), tac.end());
   }
-  bottom.validate();
-  top.validate();
-  return augmented_some_point;
+  SK_RUN(bottom.validate_steps());
+  SK_RUN(top.validate_steps());
 }
 
 namespace {
@@ -231,24 +236,28 @@ step_task tile(vector<Slice> &slices, const Tiler_options &options, tiler_contex
   for (vector<Slice>::iterator it = slices.begin(); it != slices.end(); ++it) {
     Slice &s = *it;
     done_vertices += vertex_count(s);
-    s.validate();
-    s.remove_collinear(options.collinear_epsilon());
-    s.validate();
+    SK_RUN(s.validate_steps());
+    SK_RUN(s.remove_collinear_steps(options.collinear_epsilon()));
+    SK_RUN(s.validate_steps());
 
     if (options.contour_curation_delta() > 0) {
-      s.remove_intersections(options.contour_curation_delta(), ctx);
-      s.validate();
+      SK_RUN(s.remove_intersections_steps(options.contour_curation_delta(), ctx));
+      SK_RUN(s.validate_steps());
     }
     ctx.advance(double(done_vertices) / double(total_vertices));
     SK_UNIT;
   }
 
-  // Augment every pair of consecutive slices, in order, until a pass adds no point.
+  // Augment every pair of consecutive slices, in order, until a pass adds no point. Progress
+  // counts the first pass's pairs; a pass after it (rare) adds none.
   ctx.stage("augmenting", curate_end, augment_end);
   for (bool augmented = true; augmented;) {
     augmented = false;
     for (std::size_t i = 0; i + 1 < slices.size(); ++i) {
-      augmented = augment_slice_pair(slices[i], slices[i + 1]) || augmented;
+      bool b = false;
+      SK_RUN(augment_slice_pair_steps(slices[i], slices[i + 1], b));
+      augmented = b || augmented;
+      ctx.advance(double(i + 1) / double(slices.size() - 1));
       SK_UNIT;
     }
   }
@@ -298,6 +307,7 @@ step_task tile(vector<Slice> &slices, const Tiler_options &options, tiler_contex
       slice_workspaces.push_back(w);
       list<Triangle_handle> t(w->tiles_begin(), w->tiles_end());
       tiles.push_back(t);
+      TILER_UNITS(copy_units(2 * t.size()));
     }
 
     // After tiling is complete, remove any intersections between slices
@@ -359,6 +369,15 @@ step_task tile(vector<Slice> &slices, const Tiler_options &options, tiler_contex
       const string &component = components[j];
       for (list<Triangle_handle>::const_iterator th_it = t.begin(); th_it != t.end(); ++th_it)
         triangles_by_component[component].push_back(**th_it);
+      TILER_UNITS(copy_units(t.size()));
+    }
+
+    // The pair's workspaces, freed one at a time.
+    for (std::size_t j = 0; j < slice_workspaces.size(); ++j) {
+      const std::size_t n = slice_workspaces[j]->vertices.size(), m = tiles[j].size();
+      tiles[j].clear();
+      slice_workspaces[j].reset();
+      TILER_UNITS(table_units(n) + m);
     }
 
     ctx.advance(double(i + 1) / double(slices.size() - 1));
@@ -376,7 +395,9 @@ step_task tile(vector<Slice> &slices, const Tiler_options &options, tiler_contex
     const string &component = entry.first;
     list<Triangle> &triangles = entry.second;
     list<Triangle> &result = out.triangles[component];
-    for (list<Triangle>::iterator it = triangles.begin(); it != triangles.end(); ++it) {
+    // Each triangle is erased once done, so none is left for one unit to free at the end.
+    for (list<Triangle>::iterator it = triangles.begin(); it != triangles.end();
+         it = triangles.erase(it)) {
       const Triangle &tri = *it;
 
       // Augment and decompose triangles as necessary.  New triangles

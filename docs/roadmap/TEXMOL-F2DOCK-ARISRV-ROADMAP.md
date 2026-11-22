@@ -1,9 +1,33 @@
 # TexMol Libraries, libf2dock, and arisrv as a Many-Room Compute and Scene Server — Roadmap (sketch)
 
-**Status:** sketch, 2026-11-09, merged as transfix/libcvc#1090. Nothing has landed. §9 lists the
-decisions that need Joe. Revised the same day for Joe's "make them resumable like we have for the
+**Status:** sketch, 2026-11-09, merged as transfix/libcvc#1090. §9 lists the decisions that need
+Joe. Revised the same day for Joe's "make them resumable like we have for the
 FEM routines": every long routine here, docking included, is a resumable stepper that runs on the
 scheduler in slices with progress for the UI, interactive on one thread (§1 item 2, §2.6, §3.2).
+**Progress:**
+- **M0 part 1** (2026-11-21): `cvc::mol` (`inc/cvc/mol/molecule.h`). A flat molecule model (atoms
+  with residue, chain, model, radius and charge; HELIX, SHEET and TURN ranges); PDB, PQR and XYZR
+  readers as each app's own file handlers; and PDBParser's residue-atom table, row for row, for
+  the radii and charges a PDB file lacks. Tests: `molecule_test`, natively and in the wasm-mt
+  ports lane, on fixtures and on PDB entry 1GRL. Not yet in it: the group tree, torsions, the
+  writers, CLI, pycvc and intrinsics (M0 part 2), and the A/B against TexMol's parser, which comes
+  with T1's (`tools/texmol-goldens/`).
+- **T1 part 1** (2026-11-21): `cvc::mol::blur` (`inc/cvc/mol/blur.h`), GOABlur's electron density
+  (exp(B (r^2/R^2 - 1)) per atom, the box padded by four of the largest radius, extent / resolution
+  + 3 grid points, centres snapped to the grid) as a resumable stepper, in GOABlur's arithmetic.
+  Its A/B: `tools/texmol-goldens` builds TexMol's PDBParser and GOABlur at a pinned sha and runs
+  them on 1GRL (CI's `texmol goldens` job checks they come out again); `blur_test` finds TexMol's
+  atoms and radii, its grid, and its densities to 1e-5 (most voxels bit for bit: TexMol sums a
+  sheet's strands together). Not in it: the hydrophobicity and electrostatic densities, colour,
+  the multilevel blur, the surfaces (T1 part 2).
+- **The skeleton demo on a molecule** (2026-11-21; Joe: skeletonization was meant for molecular
+  data too): mesh_lab reads a molecule file (`.pdb`, `.ent`, `.pqr`, `.xyzr`) as its heavy atoms'
+  blur map's isosurface (`source.blobbiness`, `source.resolution`, `source.isovalue`,
+  `source.hydrogens`), and the skeleton lab shows 1GRL. At blobbiness -0.2 on a 2 Å grid,
+  isovalue 10, decimated to 4,000 triangles, the skeleton's strands run along the helices: 81 of
+  243 helix C-alphas lie within 3 Å of a strand, 22 of 232 coil ones (`cvcgl_mesh_skeleton`
+  checks the ratio stays above 2). At TexMol's default blobbiness the surface is the atoms' own
+  and the skeleton finds no strands; sheets follow the beta strands only weakly.
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital

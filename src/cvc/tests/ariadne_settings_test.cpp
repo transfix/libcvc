@@ -304,6 +304,34 @@ TEST(AriadneSettings, FilterAndSearchNarrowTheKeys) {
   EXPECT_EQ(d.be.specs.back().empty, "no setting matches the search");
 }
 
+// A filter of '-' patterns only leaves keys out, so it does not open the groups: groups: and
+// open: still decide, and a user can close one. A search, or a pattern that picks keys, does.
+TEST(AriadneSettings, AFilterThatOnlyLeavesKeysOutKeepsTheGroupsClosable) {
+  Widget w = settings("S", "cfg");
+  w.settings_filter = {"-nav.plant.*", "-world.half"};
+  w.settings_search = true;
+  w.id = "tune";
+  Doc d(w);
+  put(d.app, "doc.cfg.nav.vmax", "2");
+  put(d.app, "doc.cfg.nav.plant.lag", "3");
+  put(d.app, "doc.cfg.world.seed", "4");
+  put(d.app, "doc.cfg.world.half", "4");
+  EXPECT_FALSE(d.frame().narrowed) << "only '-' patterns: the groups keep their own state";
+  EXPECT_EQ(d.ids(), (std::vector<std::string>{"+nav", " nav.vmax", "+world", " world.seed"}));
+  EXPECT_FALSE(d.node("nav")->open) << "open: false";
+
+  put(d.app, "doc.tree.tune.search", "seed");
+  EXPECT_TRUE(d.frame().narrowed) << "a search narrows it";
+  put(d.app, "doc.tree.tune.search", "");
+  EXPECT_FALSE(d.frame().narrowed);
+
+  Widget picks = settings("S", "cfg");
+  picks.settings_filter = {"-world.half", "world.*"};
+  Doc p(picks);
+  put(p.app, "doc.cfg.world.seed", "4");
+  EXPECT_TRUE(p.frame().narrowed) << "a pattern that picks keys narrows it";
+}
+
 // An edit is written through the committed-write path, as each bound widget's: live while a
 // slider moves, `on:` after the commit; a state watch on the key sees each write. A value the key's
 // kind does not take is refused with a warning.

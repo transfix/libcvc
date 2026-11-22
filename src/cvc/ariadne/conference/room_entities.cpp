@@ -271,6 +271,8 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
         const physics::vehicle_desc d = vehicle_desc_of(a, info.spec.mass, info.spec.max_speed);
         e.size = {2.0 * d.half_extents.x, 2.0 * d.half_extents.y, 2.0 * d.half_extents.z};
         e.wheels = {d.wheelbase(), d.track(), d.axles.empty() ? 0.0 : d.axles.front().wheel_radius};
+        if (info.posed) // placed by an outside simulation: its model hangs its stand height below
+          e.base_z = -stand_height(d);
         if (vehicle_plant_floats(info.plant)) { // a boat's model spans its overall length
           const physics::dyn_boat_desc b = boat_desc_of(a, info.spec.mass, info.spec.max_speed);
           if (b.length_overall > 0.0)

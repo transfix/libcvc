@@ -27,8 +27,19 @@ endif()
 get_filename_component(_CVCMEDIA_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../inc" ABSOLUTE)
 
 add_library(cvcMedia playback/audio_output.cpp playback/audio_stream_player.cpp
-                     player/ffmpeg_player.cpp record/video_writer.cpp)
+                     player/ffmpeg_player.cpp record/video_writer.cpp web_audio.cpp)
 add_library(cvc::cvcMedia ALIAS cvcMedia)
+# A browser's mic and speaker through AudioWorklets (cvc/media/web_audio.h). The worklets are
+# web/cvc-audio-worklet.js, which a page serves beside itself; web_audio.cpp also carries a copy,
+# for a page that does not.
+if(EMSCRIPTEN)
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/web/cvc-audio-worklet.js" CVC_AUDIO_WORKLET_JS)
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/web/cvc_audio_worklet_js.h.in"
+                 "${CMAKE_CURRENT_BINARY_DIR}/generated/cvc_audio_worklet_js.h" @ONLY)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+               "${CMAKE_CURRENT_SOURCE_DIR}/web/cvc-audio-worklet.js")
+  target_include_directories(cvcMedia PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+endif()
 set_target_properties(cvcMedia PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(cvcMedia PUBLIC $<BUILD_INTERFACE:${_CVCMEDIA_INC}>
                                            $<INSTALL_INTERFACE:include>)
@@ -118,6 +129,7 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT CVC_MEDIA_NO_I
   install(DIRECTORY "${_CVCMEDIA_INC}/cvc/media/playback" DESTINATION include/cvc/media
           FILES_MATCHING PATTERN "*.h")
   install(FILES "${_CVCMEDIA_INC}/cvc/media/player.h" "${_CVCMEDIA_INC}/cvc/media/video_writer.h"
+                "${_CVCMEDIA_INC}/cvc/media/web_audio.h"
           DESTINATION include/cvc/media)
   install(EXPORT cvcMediaTargets NAMESPACE cvc:: FILE cvcMediaTargets.cmake
           DESTINATION lib/cmake/cvcMedia)

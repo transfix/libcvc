@@ -120,10 +120,13 @@ struct tile_result {
 // without cvc::planar. A contour that is not simple is skipped with a warning.
 tile_result tile_contours(const contour_stack &stack, const tile_params &params = {});
 
-// tile_contours, a slice at a time (§1.9). Phases: "snapping" (a unit per contour vertex),
-// "curating" (a unit per slice), "augmenting" (per pair of slices, until a pass adds no
-// vertex), "tiling" (per component of each pair of slices, and per pair of components whose
-// intersections are removed), "assembling" (per triangle). label() names the slices being tiled.
+// tile_contours, a little at a time (§1.9). Phases, in order: "snapping", "curating",
+// "augmenting" (each pair of slices, until a pass adds no vertex), "tiling" (each component of
+// each pair of slices, and each pair of components whose intersections are removed) and
+// "assembling". A unit is about a microsecond's work: a contour vertex or a triangle, or a call
+// that cannot be divided (a Clipper2 offset or Boolean, a sweep over contour edges, a Delaunay
+// triangulation), counted by the vertices it takes. A step ends where the phase changes, so a
+// budget sized on one phase is not spent on the next. label() names the slices being tiled.
 // A failure is a tiler_error thrown from step() (and rethrown by later steps and take()).
 // cancel() is the one thread-safe member: the step running (or the next) ends the stepper with no
 // result; a result_job around it ends "cancelled". Not thread-safe otherwise, but it may move

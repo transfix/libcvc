@@ -188,6 +188,10 @@ public:
   // from the geometry store again. Returns whether it advanced.
   bool advance(const coph_state &x, std::int64_t version);
 
+  // Learner.update's commit: every kept stage takes its weights (one list per stage, oldest
+  // first) and the learner's new version. Throws std::invalid_argument on a count mismatch.
+  void commit(const std::vector<std::vector<double>> &weights, std::int64_t version);
+
 private:
   void refresh_obstacles();
 

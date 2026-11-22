@@ -10,11 +10,11 @@
 #   1. The activated Emscripten SDK bundle:
 #        cvcpkg install emsdk --platform linux --prefix <emsdk-dir>
 #      and export CVC_EMSDK_DIR=<emsdk-dir>.
-#   2. A wasm deps prefix holding boost/zstd/zlib/pegtl plus a VTK built WITH the
+#   2. A wasm deps prefix holding boost/zstd/zlib/pegtl/joltphysics plus a VTK built WITH the
 #      rendering modules (recipes/vtk/build-wasm.sh on the feat/vtk-wasm-rendering
 #      branch of libcvc-deps — the published compute-only vtk-wasm bundle will
 #      NOT link this demo):
-#        cvcpkg install boost zstd pegtl --platform wasm --arch wasm32 --link static \
+#        cvcpkg install boost zstd pegtl joltphysics --platform wasm --arch wasm32 --link static \
 #            --prefix <deps>
 #        CVC_EMSDK_DIR=<emsdk-dir> cvcpkg build vtk --platform wasm --local \
 #            --prefix <deps>          # from the libcvc-deps checkout root
@@ -27,6 +27,7 @@
 #   CVC_WASM_BUILD_DIR    the CMake build dir (default build-wasm[-mt]/ at the repo root)
 #   CVC_WASM_GALLERY_DIR  where the gallery goes (default <build dir>/gallery)
 #   CVC_WASM_IMAGEMAGICK  ON (default) or OFF: cvc's ImageMagick image I/O
+#   CVC_WASM_JOLT         ON (default) or OFF: cvc::physics' Jolt backend
 # (Default build is single-threaded — no COOP/COEP headers required.)
 #
 # --pthread builds the threaded variant into build-wasm-mt/ instead. It needs
@@ -125,6 +126,7 @@ PY
     cmake --build "${_yc_work}/build" --target install
 fi
 
+mkdir -p "${BUILD_DIR}"
 emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_FIND_ROOT_PATH="${CVC_WASM_DEPS}" \
@@ -143,9 +145,11 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
     ${CVC_WASM_NAV_WEIGHTS:+-DCVC_WASM_NAV_WEIGHTS="${CVC_WASM_NAV_WEIGHTS}"} \
     -DCVC_ENABLE_MESHER=ON \
     -DCVC_ENABLE_SDF=ON \
+    -DCVC_WITH_JOLT="${CVC_WASM_JOLT:-ON}" \
     -DCVC_BUILD_CVCGL=ON \
     -DCVC_BUILD_EXAMPLES=ON \
-    -DCVC_WASM_PTHREADS=${PTHREAD}
+    -DCVC_WASM_PTHREADS=${PTHREAD} \
+    | tee "${BUILD_DIR}/configure.log"
 
 # A configure that misses ImageMagick turns it off and carries on, so a gallery asked to
 # have it would ship without it. Fail here instead (imagemagick and its codec libraries
@@ -153,6 +157,15 @@ emcmake cmake -G Ninja -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
 if [[ "${CVC_WASM_IMAGEMAGICK:-ON}" == "ON" ]] \
    && ! grep -q '^CVC_IMAGEMAGICK_ENABLED:INTERNAL=ON' "${BUILD_DIR}/CMakeCache.txt"; then
     echo "build-wasm-demo: CVC_WASM_IMAGEMAGICK=ON but the configure found no ImageMagick in ${CVC_WASM_DEPS}" >&2
+    exit 1
+fi
+
+# Jolt the same way: without it cvc::physics has the null backend only, and the documents'
+# bodies (terrain_lab's boat and crates) never move. joltphysics belongs in CVC_WASM_DEPS:
+#   cvcpkg install joltphysics --platform wasm --arch wasm32 --link static (wasm-mt for --pthread)
+if [[ "${CVC_WASM_JOLT:-ON}" == "ON" ]] \
+   && ! grep -qF "cvc::physics Jolt backend ENABLED" "${BUILD_DIR}/configure.log"; then
+    echo "build-wasm-demo: CVC_WASM_JOLT=ON but the configure found no Jolt in ${CVC_WASM_DEPS}" >&2
     exit 1
 fi
 

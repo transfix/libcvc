@@ -700,9 +700,12 @@ void AppRuntime::ensure_intrinsics() {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
         // bound to NAME follow when it is ready), (data-generate NAME GENERATOR [PARAMS]) points
-        // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-status
-        // NAME), (data-files NAME) and (data-file NAME PATH) (its bytes, or nil). The store first:
-        // it is reset when this runtime dies, and only then is `app` still ours.
+        // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-put NAME
+        // ITEM VALUE) (a data object as the dataset's output ITEM, its rev up), (data-status NAME),
+        // (data-files NAME), (data-file NAME PATH) (its bytes, or nil) and (data-save PATH FILE
+        // [AS]) (what a state key's data channel holds, written beside the document or, in a
+        // browser, downloaded: data_save). The store first: it is reset when this runtime dies,
+        // and only then is `app` still ours.
         std::shared_ptr<DataStore> store;
         std::string prefix, doc_dir;
         {
@@ -782,6 +785,44 @@ void AppRuntime::ensure_intrinsics() {
         se::builtins::register_fn(
             env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
               return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+            });
+        // (data-put NAME ITEM VALUE): VALUE, a data object (a volume.filter's result), becomes the
+        // dataset NAME's output ITEM and its rev goes up (DataStore::set_output), so every node
+        // viewing NAME follows it. Returns the store path.
+        se::builtins::register_fn(
+            env, "data-put",
+            [live, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() != 3)
+                throw se::dsl_error("TypeError", "data-put: expected NAME ITEM VALUE, got " +
+                                                     std::to_string(a.size()) + " args");
+              const se::data_object_ptr *obj = std::get_if<se::data_object_ptr>(&a[2].v);
+              if (!obj || !*obj)
+                throw se::dsl_error("TypeError",
+                                    "data-put: VALUE is a data object, not " + a[2].type_name());
+              try {
+                return se::value_t(live("data-put")
+                                       ->set_output(entry(name(a, "data-put")),
+                                                    text(a, 1, "data-put"), (*obj)->payload));
+              } catch (const std::invalid_argument &e) {
+                throw se::dsl_error("ValueError", e.what());
+              }
+            });
+        se::builtins::register_fn(
+            env, "data-save",
+            [app, text, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() < 2 || a.size() > 3)
+                throw se::dsl_error("TypeError", "data-save: expected PATH FILE [AS], got " +
+                                                     std::to_string(a.size()) + " args");
+              const std::string path = text(a, 0, "data-save");
+              try {
+                data_save(*app, resolve_bind(prefix, path), text(a, 1, "data-save"),
+                          a.size() > 2 ? text(a, 2, "data-save") : std::string(), doc_dir);
+              } catch (const se::dsl_error &) {
+                throw;
+              } catch (const std::exception &e) {
+                throw se::dsl_error("RuntimeError", std::string("data-save: ") + e.what());
+              }
+              return se::value_t(true);
             });
         se::builtins::register_fn(
             env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {

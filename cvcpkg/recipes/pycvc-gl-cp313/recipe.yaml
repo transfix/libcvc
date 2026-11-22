@@ -6,7 +6,7 @@ recipe:
   # numpy-cp313 + vtk-python-cp313. New catalog name — revision starts at 1.
   # NO cp313t column: SWIG-generated modules are not free-threaded-safe.
   name: pycvc-gl-cp313
-  upstream_version: "4.0.2"
+  upstream_version: "4.0.5"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
@@ -55,11 +55,11 @@ depends:
   build:
     # libcvc (find_package(cvc CONFIG)); resolves to libcvc-cuda on a CUDA host.
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.5"
     # cvcGL is now the separate `cvcgl` package (find_package(cvcGL CONFIG) +
     # link cvc::cvcGL) instead of being compiled inline here.
     - name: cvcgl
-      version: "^4.0"
+      version: "==4.0.5"
     - name: python313
     - name: numpy-cp313
     - name: vtk
@@ -70,12 +70,12 @@ depends:
     # pycvc-cp313 supplies the core `import pycvc` module this scene module
     # bridges to (same interpreter column).
     - name: pycvc-cp313
-      version: "^4.0"
+      version: "==4.0.5"
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.5"
     # the installed cvcGL this module links against.
     - name: cvcgl
-      version: "^4.0"
+      version: "==4.0.5"
     - name: python313
     - name: numpy-cp313
     - name: vtk

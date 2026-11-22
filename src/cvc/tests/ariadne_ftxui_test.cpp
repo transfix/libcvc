@@ -203,6 +203,35 @@ TEST(AriadneFtxui, ButtonActionRunsOnDrain) {
   EXPECT_EQ(fired, 2);
 }
 
+// §5.27 the chosen button of a row is [>label<] in bold, as wide as [ label ]; choosing another
+// moves the mark and nothing else, and a click on it still runs its on:. Its icon: isn't drawn.
+TEST(AriadneFtxui, SelectedButtonIsMarked) {
+  REQUIRE_FTXUI();
+  Widget a = button("Following", "pick_following");
+  a.selected = "(= (state-get \"mode\") \"following\")";
+  a.button_icon = "https://media.example/e/people.png";
+  Widget b = button("Everyone", "pick_everyone");
+  b.selected = "(= (state-get \"mode\") \"everyone\")";
+  Term t(group({a, b}));
+  cvc::state::instance(t.app)("mode").value("following");
+  t.draw();
+  EXPECT_TRUE(t.shows("[>Following<]")) << t.screen;
+  EXPECT_TRUE(t.shows("[ Everyone ]")) << t.screen;
+  const std::size_t at = t.screen.find("Everyone");
+  cvc::state::instance(t.app)("mode").value("everyone");
+  t.draw();
+  EXPECT_TRUE(t.shows("[ Following ]")) << t.screen;
+  EXPECT_TRUE(t.shows("[>Everyone<]")) << t.screen;
+  EXPECT_EQ(t.screen.find("Everyone"), at) << "the row keeps its place";
+  int fired = 0;
+  t.rt.on("pick_following", [&] { ++fired; });
+  ASSERT_TRUE(t.click("[ Following ]"));
+  t.rt.drain();
+  EXPECT_EQ(fired, 1);
+  EXPECT_TRUE(t.be.capabilities().button_selected);
+  EXPECT_FALSE(t.be.capabilities().button_icon);
+}
+
 // §3 repeat: `{i}` reaches a row's pointer handlers and a message field's hint, so a click or a
 // hover acts on the row it lands on.
 TEST(AriadneFtxui, RepeatedRowsHandlersSeeTheirOwnIndex) {

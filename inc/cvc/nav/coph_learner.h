@@ -13,17 +13,16 @@
 // terrain_warning.TerrainLearner on cooperative.CooperativeLearner on learner.Learner, in
 // GRL-SNAM's grl_snam.coph), in the demos' profile:
 //
-//   coph_field_fit        Learner._field_fit: the ridge fit of each kept stage's field (G5).
-//   coph_fit_damping      Learner._fit_damping: Newton steps on the plant loss, on hyper-duals
-//   (G6). coph_maze_route       maze_learning.maze_route: the route on the surveyed corridor
-//   network. coph_control          navigation.guarded_control: the routed command, its CBF
-//   projection and
-//                         the guard, with maze_graph's corridor checks.
-//   coph_prepare          replay_budget.prepare: each stage's replay horizon and the budget.
-//   coph_replay           stage_prediction.retained_replay: the replay cost, and on duals its
-//                         gradient in the policy (G7).
-//   coph_update           Learner.update: the fits, the policy step and its halvings, validation,
-//                         and the commit or rollback (G8).
+// - coph_field_fit: Learner._field_fit, the ridge fit of each kept stage's field (G5).
+// - coph_fit_damping: Learner._fit_damping, Newton steps on the plant loss, on hyper-duals (G6).
+// - coph_maze_route: maze_learning.maze_route, the route on the surveyed corridor network.
+// - coph_control: navigation.guarded_control, the routed command, its CBF projection and the
+//   guard, with maze_graph's corridor checks.
+// - coph_prepare: replay_budget.prepare, each stage's replay horizon and the budget.
+// - coph_replay: stage_prediction.retained_replay, the replay cost, and on duals its gradient in
+//   the policy (G7).
+// - coph_update: Learner.update, the fits (with the received packets' Gauss-Newton step, C4),
+//   the policy step and its halvings, validation, and the commit or rollback (G8, G10).
 //
 // The learner's state is plain data (coph_learner_state): the kept stages as C1's ledger holds
 // them, the geometry store, the navigation context the maze router reads (the network, the
@@ -32,7 +31,7 @@
 //
 // The demos' profile only (D7): routed control with progress shaping, the mission objective, the
 // retained replay domain, supported_boundary horizons with an update cap, the 'spatial' stage
-// mode, no receiver fit (C4 adds packets) and no local residual.
+// mode, the legacy receiver fit (coph_exchange.h, C4) and no local residual.
 //
 // GRL-SNAM's golden (grl_snam.tools.coph_golden, committed as src/cvc/tests/data/coph_golden.json)
 // pins G5-G8 at three update snapshots of a scripted crossing run; its learner_rules text states
@@ -48,9 +47,11 @@
 #include <cvc/nav/coph_dual.h>
 #include <cvc/nav/coph_ledger.h>
 #include <cvc/nav/coph_model.h>
+#include <cvc/nav/coph_packet.h>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -68,11 +69,13 @@ struct coph_network {
 // 12, joined by rows at y = 0, 4 and 7.5.
 coph_network coph_crossing_network();
 
-// A terrain anchor (terrain_warning): a first-order risk estimate value + g . (p - (x, y)),
-// supported within 0.65 of (x, y).
-struct coph_anchor {
-  double x = 0, y = 0, value = 0, gx = 0, gy = 0;
-};
+// maze_geometry.corridor_clear: points every 0.04 m along a-b all lie within the corridor's
+// radius less margin (the routed controller uses 0.17, the crossing world's hits 0.12).
+bool coph_corridor_clear(const coph_vec2 &a, const coph_vec2 &b, const coph_network &network,
+                         double margin);
+
+// shapes.slab_sweep: the distance from the motion a-b to a slab's surface (negative through it).
+double coph_slab_sweep(const coph_vec2 &a, const coph_vec2 &b, const coph_shape &slab);
 
 // What the maze router reads of a navigation context, and the route it leaves there.
 struct coph_route_context {
@@ -99,6 +102,15 @@ struct coph_learner_state {
   coph_vec2 policy{1.0, 2.0};
   std::int64_t version = 0;
   std::int64_t counterfactual_steps = 0; // replay and pilot steps, guard steps included
+
+  // C4 (coph_exchange.h): CooperativeLearner's identity and clock, and the packets it holds.
+  std::string agent_id = "0";
+  coph_communication_config communication; // CommunicationConfig(); the demos run the profile's
+  double now = 0;                          // the last observation's time
+  // The navigation context's target, which the routed controller sets when it plans (the last
+  // waypoint); control_target falls back to the goal. A packet's H and V_task use it.
+  std::optional<coph_vec2> navigation_target;
+  coph_exchange_state exchange;
 };
 
 // A reading whose uid ends in a multiple of 5 is held out for validation.
@@ -206,6 +218,9 @@ struct coph_route {
   std::string reason; // maze_graph, maze_no_route or unsafe_connector
   std::vector<int> nodes;
   std::vector<int> blocked;
+  // maze_route's route_changed: the nodes or the blocked edges differ from the context's last
+  // route; always true without a route.
+  bool changed = false;
 };
 coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph_network &network,
                            coph_route_context &ctx, int step);
@@ -220,6 +235,8 @@ struct coph_control_meta {
   coph_vec2 waypoint{};
   coph_vec2 applied{};
   bool infeasible = false;
+  coph_vec2 proposed{}; // the raw command, before the force limit (guarded_control's nominal)
+  bool route_changed = false;
 };
 template <class T> struct coph_control_of {
   coph_vec2_of<T> applied;
@@ -309,8 +326,27 @@ struct coph_update_attempt {
   bool accepted = false;
 };
 
+// One stage's Gauss-Newton step from the received packets (CooperativeLearner._field_fit, the
+// legacy receiver). For each received packet, in order, its anchors inside the stage's box give
+// the residual z - f(w), f(w) the field's (value, gx, gy) there, and its Jacobian J = df/dw
+// (analytic); C = the packet's covariance on those anchors + (0.01 + 0.005 (now - timestamp)) I,
+// L = chol(C), and the rows L^-1 J and targets L^-1 (z - f(w)) are stacked. delta = (covariance^-1
+// + A^T A)^-1 A^T y, with G5's weights w and covariance, and weights = w + clamp(delta, -0.5,
+// 0.5). A stage no anchor falls in keeps G5's weights.
+struct coph_message_fit {
+  std::vector<std::pair<std::string, std::vector<int>>> messages; // [sender, anchor indices]
+  int rows = 0;                                                   // the residual's length
+  std::vector<double> gram;  // A^T A, m x m row-major; empty with no rows
+  std::vector<double> rhs;   // A^T y
+  std::vector<double> delta; // before the clamp
+  std::vector<double> weights;
+};
+
 struct coph_update_report {
   std::vector<coph_stage_fit> fit;
+  // With packets received (C4): each stage's Gauss-Newton step, whose weights the update takes
+  // in place of G5's (coph_exchange.h's coph_fit_messages). Empty with nothing received.
+  std::vector<coph_message_fit> message_fit;
   coph_damping_fit damping_fit;
   double damping_proposal = 0;
   coph_replay_plan plan;
@@ -326,13 +362,16 @@ struct coph_update_report {
   std::int64_t version_after = 0;
   coph_vec2 policy_after{};
   double damping_after = 0;
-  double shaping_jump = 0; // V(x) after - V(x) before on the newest stage
+  double shaping_jump = 0;           // V(x) after - V(x) before on the newest stage
+  std::vector<std::string> messages; // the received packets' identities, after the update
 };
 
-// Learner.update at the state x, as the demos' learner runs it: the fits, the plan with the
-// routed controller's reserve of 12 steps, the baseline and gradient replays, the projected policy
-// step and up to solver_steps halvings, validation and feasibility, then the commit (every stage
-// takes its fitted weights and the new version) or nothing.
+// Learner.update at the state x, as the demos' learner runs it: CooperativeLearner's expiry of
+// the received packets (coph_expire), the fits (with their Gauss-Newton step when packets are
+// held), the plan with the routed controller's reserve of 12 steps, the baseline and gradient
+// replays, the projected policy step and up to solver_steps halvings, validation and
+// feasibility, then the commit (every stage takes its fitted weights and the new version) or
+// nothing.
 coph_update_report coph_update(coph_learner_state &s, const coph_state &x);
 
 extern template coph_control_of<double> coph_control<double>(const coph_atlas &,

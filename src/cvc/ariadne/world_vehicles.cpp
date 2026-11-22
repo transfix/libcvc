@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/data.h> // DataStore: a fleet's weights
 #include <cvc/ariadne/scene.h> // SceneAsset
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -24,6 +25,7 @@
 #include <cvc/core/sim_tick.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h> // training_scene: the trainer's vehicle (a fleet's metric)
 #include <cvc/nav/dyn_4w.h> // dyn4_params_of
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
@@ -43,6 +45,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -584,6 +587,10 @@ static ph::vehicle_desc boat_stand_in(const ph::dyn_boat_desc &b) {
   return d;
 }
 
+double stand_height(const ph::vehicle_desc &d) {
+  return d.half_extents.z + (d.axles.empty() ? 0.4 : d.axles.front().wheel_radius);
+}
+
 ph::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
   if (vehicle_plant_floats(a.plant))
     return boat_stand_in(boat_desc_of(a, mass, max_speed));
@@ -781,7 +788,7 @@ struct WorldVehicles::impl {
   // Every fleet's navigator config: the largest and fastest vehicle any archetype may be (each
   // vehicle on a plant plans with its own envelope and size, nav_plant's plan_with_vehicle).
   cvc::nav::sim_world::config cfg;
-  double tick = cvc::kSimTick; // the navigator's tick asked for (s; set_tick)
+  double tick = 0.0; // the navigator's tick asked for (s; set_tick); 0: the world's (cvc::sim_tick)
   bool ready = false;      // cfg is the grid's
   bool stepping = false;   // before_step() began a step that after_step() ends
   bool posing = false;     // and moved the `pose` entities in it
@@ -805,6 +812,12 @@ struct WorldVehicles::impl {
   // the world's bodies, and it steps them on its clock.
   struct fleet {
     std::string plant; // jolt, dynamic, dynamic4w or kinematic
+    int group = -1;    // the fleet (start: fleet:) it navigates alone, -1 the plant's unnamed ones
+    std::string sense; // known or fog: what it was made knowing
+    // It plans with the trainer's vehicle (a fleet's metric: trained), else each plant's own; and
+    // its vehicle radius, which its separation is sized by.
+    bool trained = false;
+    float rr = 0.0f;
     std::unique_ptr<cvc::nav::sim_world> sim;
     std::unique_ptr<ph::nav_plant> jolt;
     std::unique_ptr<ph::dyn_bike_plant> bike;
@@ -821,8 +834,40 @@ struct WorldVehicles::impl {
     // A tick has run since its navigator began capturing its drive (drive_tel): plants() reads
     // the drive's telemetry.
     bool tel_fresh = false;
+    // kinematic: vehicles came or went since kinematics() last ran. It runs once, before the
+    // navigator next steps (only its step reads them), not at each: placing n is then linear.
+    bool kin_stale = false;
   };
-  std::map<std::string, std::unique_ptr<fleet>> fleets; // by plant, made as entities need them
+  // A navigator's key, "<plant>" or a named fleet's "<plant>/<fleet>" (fleet_group::key), as its
+  // parts: fleets is searched by it without building the string. fleet_of() runs for each vehicle
+  // many times a tick.
+  struct nav_ref {
+    std::string_view plant, fleet;
+    bool named = false; // a named fleet's: "<plant>/<fleet>"
+  };
+  // Key `k` against `r`'s string, ordered as std::string orders them.
+  static int compare_key(std::string_view k, const nav_ref &r) {
+    const std::string_view parts[3] = {r.plant,
+                                       r.named ? std::string_view("/") : std::string_view(),
+                                       r.named ? r.fleet : std::string_view()};
+    for (const std::string_view p : parts) {
+      const std::size_t n = std::min(k.size(), p.size());
+      if (const int c = k.compare(0, n, p, 0, n); c != 0)
+        return c;
+      if (n < p.size())
+        return -1; // `k` is a prefix of `r`'s string
+      k.remove_prefix(n);
+    }
+    return k.empty() ? 0 : 1;
+  }
+  struct nav_less {
+    using is_transparent = void;
+    bool operator()(const std::string &a, const std::string &b) const { return a < b; }
+    bool operator()(const std::string &a, const nav_ref &b) const { return compare_key(a, b) < 0; }
+    bool operator()(const nav_ref &a, const std::string &b) const { return compare_key(b, a) > 0; }
+  };
+  // By plant, made as entities need them; a named fleet's own by "<plant>/<fleet>".
+  std::map<std::string, std::unique_ptr<fleet>, nav_less> fleets;
 
   struct entity {
     std::uint64_t id = 0;
@@ -847,6 +892,7 @@ struct WorldVehicles::impl {
     double distance = 0.0, ox = 0.0, oy = 0.0;
     bool odometer = false;
     int group = -1;    // its fleet (start: fleet:) in `groups`, -1 none
+    int member = -1;   // its index in that fleet (0 first)
     int rally = -1;    // its team's rally point in that fleet, -1 none
     bool hold = false; // its goal is held (a fleet's): it does not wander from it
     // A `pose` entity (its controller pose): no fleet, a kinematic box moved to its poses.
@@ -884,9 +930,29 @@ struct WorldVehicles::impl {
     std::vector<std::string> seen_rally;      // each team's "x|y" as last written or read
     std::string seen_restart, seen_reseed;
     std::string status;
+    // Its navigator (FL1b): what it knows and how its vehicles share it (the keys switch them).
+    std::string sense, belief, seen_sense, seen_belief;
+    // Its policy: what is asked (trained, builtin, data:<entry> or a uri; the key switches it),
+    // what drives (`model`, null: the built-in net) and that, said (`drives`). `loading` is the
+    // data store's node of weights still on their way, `file` the .cvcnav in it.
+    std::string policy, seen_policy, drives, loading, file, sha256;
+    cvc::nav::policy_library::entry model;
+    bool warned = false; // the fallback has been logged
+    // Its plants (FL1c): its vehicles' in turn, or each team's (the key switches them), and the
+    // archetype's for a team or vehicle they leave out. Its metric: trained, vehicle or policy
+    // (follows the policy; the key switches it).
+    fleet_plants plants;
+    std::string base_plant, seen_plant;
+    std::string metric = "policy", seen_metric;
     bool summary() const { return start.keys != "all"; }
+    std::string key(const std::string &plant) const { return plant + "/" + start.fleet; } // nav_ref
   };
   std::vector<fleet_group> groups;
+  std::vector<vehicle_start> starts; // every entry spawn_starts was given, in order (starts())
+  // Each fleet's poses as the last publish left them, swapped in whole (std::atomic_store), so
+  // poses() reads them from any thread without a lock, as sim_thread's snapshot is read.
+  using pose_book = std::map<std::string, std::shared_ptr<const fleet_poses>>;
+  std::shared_ptr<const pose_book> book;
   bool hold_placing = false; // spawn() leaves its entity unplaced (a fleet places it laid out)
   std::uint64_t next_id = 1;
   std::uint64_t rev = 0;
@@ -928,10 +994,16 @@ struct WorldVehicles::impl {
     }
   }
 
+  // The navigator key of an entity's: its plant's, or its fleet's own.
+  nav_ref nav_key(const entity &e) const {
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size())
+      return {e.plant, groups[static_cast<std::size_t>(e.group)].start.fleet, true};
+    return {e.plant, {}, false};
+  }
   fleet *fleet_of(const entity &e) const {
     if (e.posed) // a `pose` entity is no plant's
       return nullptr;
-    const auto it = fleets.find(e.plant);
+    const auto it = fleets.find(nav_key(e));
     return it == fleets.end() ? nullptr : it->second.get();
   }
   int index(const entity &e) const {
@@ -1034,8 +1106,7 @@ struct WorldVehicles::impl {
                  ry = o[2 * i + 1] / kScale + grid->center_y();
     const double rear = rear_axle_x(d);
     const double cx = rx - rear * std::cos(h), cy = ry - rear * std::sin(h);
-    const double wheel = d.axles.empty() ? 0.4 : d.axles.front().wheel_radius;
-    return {cx, cy, ground_height(cx, cy) + d.half_extents.z + wheel, h};
+    return {cx, cy, ground_height(cx, cy) + stand_height(d), h};
   }
   static double rear_axle_x(const ph::vehicle_desc &d) {
     double rear = 0.0;
@@ -1051,8 +1122,11 @@ struct WorldVehicles::impl {
     return {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
   }
 
-  // The kinematic fleet's per-agent kinematics, from its vehicles' (after an agent comes or goes).
+  // The kinematic fleet's per-agent kinematics, from its vehicles' (after an agent comes or goes);
+  // on the trained metric, the trainer's vehicle's (cfg.veh) for all.
   void kinematics(fleet &f) {
+    if (f.trained)
+      return;
     const int n = f.sim->size();
     std::vector<float> vmax(static_cast<std::size_t>(n)), amax(vmax.size()), L(vmax.size());
     for (const entity &e : ents)
@@ -1068,21 +1142,84 @@ struct WorldVehicles::impl {
       f.sim->set_vehicle_kinematics(vmax.data(), amax.data(), L.data(), n);
   }
 
-  // The fleet on `plant`, made the first time an entity needs it.
-  fleet &fleet_for(const std::string &plant) {
-    std::unique_ptr<fleet> &slot = fleets[plant];
+  // What fleet `group`'s navigator knows (its sense:, else the world's), and how many belief
+  // planes it shares (1; grouped: max(2, n / 64); private: none made, each vehicle its own).
+  const std::string &sense_of(int group) const {
+    return group >= 0 && !groups[static_cast<std::size_t>(group)].sense.empty()
+               ? groups[static_cast<std::size_t>(group)].sense
+               : sense;
+  }
+  int members(int group) const {
+    int n = 0;
+    for (const entity &e : ents)
+      n += e.group == group ? 1 : 0;
+    return n;
+  }
+  int planes_of(int group) const {
+    if (group < 0 || groups[static_cast<std::size_t>(group)].belief != "grouped")
+      return 1;
+    return std::max(2, members(group) / 64);
+  }
+  // Whether fleet `group` plans with the trainer's vehicle (D9): its metric:, else (policy) while
+  // weights drive it or are on their way, so their arrival does not make it again. On the built-in
+  // net, its own or a fallback's, each plant plans with its own. Unnamed vehicles: their own.
+  bool trained_metric(int group) const {
+    if (group < 0)
+      return false;
+    const fleet_group &g = groups[static_cast<std::size_t>(group)];
+    if (g.metric == "trained" || g.metric == "vehicle")
+      return g.metric == "trained";
+    return static_cast<bool>(g.model.model) || !g.loading.empty();
+  }
+  // Fleet member `e`'s plant: its team's, its turn in the fleet's list, else the archetype's.
+  std::string plant_of(const entity &e) const {
+    const fleet_group &g = groups[static_cast<std::size_t>(e.group)];
+    const std::string p = g.plants.of(e.member, e.rally);
+    return p.empty() ? g.base_plant : p;
+  }
+
+  // The navigator on `plant` (a named fleet's own, `group`), made the first time an entity needs
+  // it.
+  fleet &fleet_for(const std::string &plant, int group = -1) {
+    std::unique_ptr<fleet> &slot =
+        fleets[group >= 0 ? groups[static_cast<std::size_t>(group)].key(plant) : plant];
     if (slot)
       return *slot;
     auto f = std::make_unique<fleet>();
     f->plant = plant;
+    f->group = group;
+    f->sense = sense_of(group);
     // A boat's navigator plans on the water deep enough for the deepest boat, land blocked.
     const std::shared_ptr<const cvc::nav::world_grid> plan =
         vehicle_plant_floats(plant) ? boat_grid() : grid;
     // Under fog the navigator starts knowing nothing (an empty prior) and senses the grid.
-    const std::vector<std::uint8_t> unknown(sense == "fog" ? plan->occupancy.size() : 0, 0);
+    const bool fog = f->sense == "fog";
+    const std::vector<std::uint8_t> unknown(fog ? plan->occupancy.size() : 0, 0);
+    cvc::nav::sim_world::config c = cfg;
+    c.freeze_sense = !fog; // known: the world's grid; fog: sensed
+    // Its metric (D9): the trainer's vehicle, at the metric its weights learned in, as the demos
+    // plan (SceneSwarm), and its plants plan with it too; else each plant's own size and limits.
+    f->trained = trained_metric(group);
+    if (f->trained) {
+      const cvc::nav::training_scene ts;
+      cvc::nav::veh_params v;
+      v.rr = ts.rr;
+      v.d_hat = ts.d_hat;
+      v.vmax = ts.vmax;
+      v.dt = c.veh.dt; // the hosts' tick, not the trainer's 0.06 s
+      c.veh = v;
+      if (avoid) {
+        c.sep_radius = kAvoidRadius * v.rr;
+        c.sep_gain = kAvoidGain * v.rr;
+        c.sep_side_radius = kAvoidSideRadius * v.rr;
+      }
+    }
+    f->rr = c.veh.rr;
     f->sim = std::make_unique<cvc::nav::sim_world>(
-        cfg, plan->occupancy.data(), sense == "fog" ? unknown.data() : plan->occupancy.data(),
+        c, plan->occupancy.data(), fog ? unknown.data() : plan->occupancy.data(),
         cvc::nav::coef_mlp::default_biased(), nullptr, nullptr, nullptr, 0);
+    for (int p = planes_of(group); p > 1; --p)
+      f->sim->add_plane();
     f->sim->set_capture_drive_telemetry(drive_tel);
     // Its kernels on the app's pool: without one each fans out by spawning and joining threads
     // per call, most of a tick for hundreds of vehicles (FLEETS_AND_NIGHT_ROADMAP.md FL0).
@@ -1090,6 +1227,7 @@ struct WorldVehicles::impl {
       f->sim->set_thread_pool(&app->computePool());
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
+    o.plan_with_vehicle = !f->trained;
     o.ground_bodies = ground;
     std::shared_ptr<const cvc::nav::world_grid> g = grid;
     std::shared_ptr<const cvc::height_field> t = terrain;
@@ -1245,7 +1383,7 @@ struct WorldVehicles::impl {
     f->sim->remove_agent(e.agent);
     e.agent = 0;
     if (f->plant == "kinematic")
-      kinematics(*f);
+      f->kin_stale = true;
   }
 
   // Each entity's intent keys: a change (from what they read last) is a new intent.
@@ -1385,13 +1523,16 @@ struct WorldVehicles::impl {
     if (!grid)
       return;
     sdf = cvc::nav::signed_distance(*grid);
-    // The tick in whole physics steps: exactly, on the simulation clock's quantum (sim_tick.h);
-    // the nearest whole number of a step that does not divide it, with a note in the status.
+    // The tick in whole physics steps: by default the world's (cvc::sim_tick of its step, the
+    // whole number of steps nearest the policies' 0.06 s: 7 at 120 Hz, 4 at 60); one asked for
+    // (set_tick) exactly on the simulation clock's quantum (sim_tick.h), else the nearest whole
+    // number of a step that does not divide it, with a note in the status.
     const double fixed_dt = world->config().fixed_dt;
-    every = std::max(1, static_cast<int>(std::lround(tick / fixed_dt)));
+    const double want = tick > 0.0 ? tick : cvc::sim_tick(fixed_dt);
+    every = std::max(1, static_cast<int>(std::lround(want / fixed_dt)));
     const double dt = every * fixed_dt;
-    if (std::fabs(dt - tick) > 1e-9)
-      status = "the tick " + std::to_string(tick) + " s is not a whole number of the physics " +
+    if (std::fabs(dt - want) > 1e-9)
+      status = "the tick " + std::to_string(want) + " s is not a whole number of the physics " +
                "world's " + std::to_string(fixed_dt) + " s steps; it is " + std::to_string(dt) +
                " s";
     // The largest and fastest vehicle any archetype may be (each vehicle on a plant plans with
@@ -1473,9 +1614,11 @@ struct WorldVehicles::impl {
     const double clearance = std::hypot(e.desc.half_extents.x, e.desc.half_extents.y) + 0.5;
     if (floats(e) && !ground_of(e).any())
       return "no water deep and open enough for " + e.spec.archetype;
-    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
-        !groups[static_cast<std::size_t>(e.group)].laid_out)
-      lay_out(static_cast<std::size_t>(e.group));
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size()) {
+      if (!groups[static_cast<std::size_t>(e.group)].laid_out)
+        lay_out(static_cast<std::size_t>(e.group));
+      e.plant = plant_of(e); // its team's, now that the layout has given it one
+    }
     if (!e.started) {
       double px = 0.0, py = 0.0, ph = 0.0;
       // A start off its medium (a car's in a lake, a boat's ashore) moves to a free point.
@@ -1529,7 +1672,7 @@ struct WorldVehicles::impl {
     a.name = e.spec.name;
     fleet *made = nullptr;
     try {
-      fleet &f = fleet_for(e.plant);
+      fleet &f = fleet_for(e.plant, e.group);
       made = &f;
       if (f.jolt)
         a.vehicle = f.jolt->add_desc(e.desc);
@@ -1545,6 +1688,17 @@ struct WorldVehicles::impl {
             policies.get(cvc::nav::policy_ref{e.spec.policy, e.spec.policy_sha256});
         a.policy = p.model;
         a.policy_key = p.key;
+      } else if (e.spec.controller == "nav@1" && e.group >= 0) { // its fleet's
+        const fleet_group &g = groups[static_cast<std::size_t>(e.group)];
+        a.policy = g.model.model;
+        a.policy_key = g.model.model ? g.model.key : std::string();
+      }
+      if (e.group >= 0) { // its fleet's belief: its own, its team's group, or the one
+        const fleet_group &g = groups[static_cast<std::size_t>(e.group)];
+        if (g.belief == "private")
+          a.own_plane = true;
+        else if (const int n = f.sim->planes(); n > 1)
+          a.plane = (e.rally >= 0 ? e.rally : std::max(0, e.member)) % n;
       }
       e.agent = f.sim->add_agent(a);
       const int i = f.sim->index_of(e.agent);
@@ -1562,7 +1716,7 @@ struct WorldVehicles::impl {
         f.boxes.insert(f.boxes.begin() + i, world->add_body(b));
         f.from.insert(f.from.begin() + i, at);
         f.to.insert(f.to.begin() + i, at);
-        kinematics(f);
+        f.kin_stale = true;
       }
     } catch (const std::exception &ex) {
       if (made && e.agent)
@@ -1578,8 +1732,7 @@ struct WorldVehicles::impl {
 
   // Where a chassis's centre stands at (x, y) on the ground, as a kinematic box does.
   double stand_z(const entity &e, double x, double y) const {
-    const double wheel = e.desc.axles.empty() ? 0.4 : e.desc.axles.front().wheel_radius;
-    return ground_height(x, y) + e.desc.half_extents.z + wheel;
+    return ground_height(x, y) + stand_height(e.desc);
   }
 
   // A pose given to `e`, from now: where it moves to over the steps from `now` (the world tick
@@ -2117,6 +2270,7 @@ struct WorldVehicles::impl {
         e.spec.yaw = g.start.has_heading ? g.start.heading * kPi / 180.0
                                          : std::numeric_limits<double>::quiet_NaN();
       }
+    drop_navigators(gi);
     g.laid_out = false;
     if (ready)
       for (entity &e : ents)
@@ -2124,6 +2278,195 @@ struct WorldVehicles::impl {
           if (std::string why = place(e); !why.empty())
             status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
+  }
+
+  // Fleet `gi`'s own navigators, once its vehicles have left them: made again as they are placed
+  // (what they know, and their belief planes, from the start).
+  void drop_navigators(std::size_t gi) {
+    for (auto it = fleets.begin(); it != fleets.end();)
+      it = it->second && it->second->group == static_cast<int>(gi) ? fleets.erase(it) : ++it;
+  }
+
+  // Fleet `gi` made again with what it knows now (sense, belief): its vehicles leave its
+  // navigators and are placed again where they are, at rest, on new ones.
+  void rebuild_navigators(std::size_t gi) {
+    for (entity &e : ents)
+      if (e.group == static_cast<int>(gi) && e.agent) {
+        if (const fleet *f = fleet_of(e); f && index(e) >= 0) {
+          const pose p = pose_of(*f, index(e));
+          e.sx = p.position.x;
+          e.sy = p.position.y;
+          e.syaw = p.yaw;
+        }
+        remove_from_fleet(e);
+      }
+    drop_navigators(gi);
+    if (ready)
+      for (entity &e : ents)
+        if (e.group == static_cast<int>(gi) && !e.agent)
+          if (std::string why = place(e); !why.empty())
+            status = "entity " + std::to_string(e.id) + ": " + why;
+    ++rev;
+  }
+  // Fleet `gi`'s navigators made again when the metric they plan with is no longer its own (its
+  // metric: or policy changed, or the weights fell back), its vehicles at rest where they are.
+  void sync_metric(std::size_t gi) {
+    const bool want = trained_metric(static_cast<int>(gi));
+    for (const auto &[k, nav] : fleets)
+      if (nav && nav->group == static_cast<int>(gi) && nav->trained != want) {
+        rebuild_navigators(gi);
+        return;
+      }
+  }
+
+  // The policy fleet `gi` asks for (FL1b): trained, builtin, data:<entry> or a uri. Resolved now
+  // where it can be (the built-in net, a file, an installed copy); a download or a data: entry
+  // starts loading, the fleet driving on the built-in net until it arrives (poll_policy). Either
+  // way `drives` says what drives, and a fallback says why, once in the host's log.
+  static constexpr const char *kTrainedUri = "cvcpkg://cvc/grl-snam-weights";
+  static constexpr const char *kTrainedPath = "share/grl-snam-weights/coef_sdf.cvcnav";
+  void fall_back(fleet_group &g, const std::string &why) {
+    g.model = {};
+    g.loading.clear();
+    g.drives = "builtin: no trained weights (" + why + ")";
+    if (!g.warned) {
+      g.warned = true;
+      std::fprintf(stderr, "ari: world: vehicles: fleet '%s': %s\n", g.start.fleet.c_str(),
+                   g.drives.c_str());
+    }
+  }
+  void load_from_store(fleet_group &g, const std::string &uri, const std::string &path,
+                       const std::string &sha256) {
+    if (!app)
+      throw std::runtime_error("no data store to fetch " + uri + " with");
+    DataSpec spec;
+    spec.uri = uri;
+    const std::size_t slash = path.find_last_of('/');
+    spec.path = slash == std::string::npos ? std::string() : path.substr(0, slash);
+    g.file = slash == std::string::npos ? path : path.substr(slash + 1);
+    g.sha256 = sha256;
+    g.loading = DataStore::of(*app)->load(spec);
+    g.drives = "builtin: loading " + uri;
+  }
+  void resolve_policy(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    g.model = {};
+    g.loading.clear();
+    const std::string ask = g.policy.empty() ? "trained" : g.policy;
+    try {
+      if (ask == "builtin") {
+        g.drives = "builtin";
+      } else if (ask == "trained") {
+        // $CVC_NAV_WEIGHTS, an installed copy, else the published package (settled, D8).
+        // default_weights_path() names the baked path when nothing is there (so a load says
+        // where it looked): only a file that is there is an installed copy.
+        const char *env = std::getenv("CVC_NAV_WEIGHTS");
+        std::string installed;
+        if (env && *env) {
+          installed = env;
+        } else {
+          const std::string found = cvc::nav::coef_mlp::default_weights_path();
+          std::error_code ec;
+          if (std::filesystem::is_regular_file(found, ec))
+            installed = found;
+        }
+        if (!installed.empty()) {
+          g.model = policies.get(cvc::nav::policy_ref{installed, ""});
+          g.drives = "trained (" + installed + ", " + g.model.key + ")";
+        } else {
+          load_from_store(g, kTrainedUri, kTrainedPath, "");
+        }
+      } else if (ask.rfind("data:", 0) == 0) { // the document's data: entry
+        const std::string entry = ask.substr(5);
+        if (!app || vkey.size() <= 9)
+          throw std::runtime_error("no document data: entry '" + entry + "'");
+        const std::string doc = vkey.substr(0, vkey.size() - 9); // <prefix>.vehicles
+        const std::string node = DataStore::of(*app)->resolve(doc + ".data." + entry);
+        if (node.empty())
+          throw std::runtime_error("no data: entry '" + entry + "'");
+        DataStore::of(*app)->touch(node);
+        g.loading = node;
+        g.file = g.start.policy_path;
+        g.sha256 = g.start.policy_sha256;
+        g.drives = "builtin: loading data: " + entry;
+      } else {
+        const bool own = ask == g.start.policy; // the document's: its path: and sha256: hold
+        const std::string path = own ? g.start.policy_path : std::string();
+        const std::string sha = own ? g.start.policy_sha256 : std::string();
+        if (ask.find("://") == std::string::npos || ask.rfind("file://", 0) == 0) {
+          g.model = policies.get(cvc::nav::policy_ref{ask, sha});
+          g.drives = "weights (" + ask + ", " + g.model.key + ")";
+        } else {
+          load_from_store(g, ask, path, sha);
+        }
+      }
+    } catch (const std::exception &ex) {
+      fall_back(g, ex.what());
+    }
+    apply_policy(gi);
+    sync_metric(gi);
+  }
+  // Weights on their way: taken once the store has them, else the fallback says why.
+  void poll_policy(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    if (g.loading.empty() || !app)
+      return;
+    const std::string s = data_status(*app, g.loading);
+    if (s != "ready" && s != "error" && !s.empty())
+      return;
+    const std::string node = g.loading;
+    const std::string uri = g.policy.empty() || g.policy == "trained" ? kTrainedUri : g.policy;
+    try {
+      if (s != "ready") {
+        cvc::state *err = cvc::state::instance(*app).findThroughLinks(node + ".error");
+        throw std::runtime_error(err && !err->value().empty() ? err->value()
+                                                              : "could not fetch " + uri);
+      }
+      std::string file = g.file;
+      if (file.empty())
+        for (const std::string &p : data_files(*app, node))
+          if (p.size() > 7 && p.compare(p.size() - 7, 7, ".cvcnav") == 0) {
+            file = p;
+            break;
+          }
+      const DataBytes bytes = file.empty() ? nullptr : data_file(*app, node, file);
+      if (!bytes)
+        throw std::runtime_error(uri + " has no " + (file.empty() ? ".cvcnav" : file));
+      g.model = policies.get_bytes(*bytes, g.sha256, uri);
+      g.loading.clear();
+      g.drives = std::string(g.policy.empty() || g.policy == "trained" ? "trained" : "weights") +
+                 " (" + uri + ", " + g.model.key + ")";
+    } catch (const std::exception &ex) {
+      fall_back(g, ex.what());
+    }
+    apply_policy(gi);
+    sync_metric(gi);
+  }
+  // Fleet `gi`'s vehicles on nav@1 drive with its policy now (a vehicle naming its own keeps it);
+  // without a model, on the built-in net (policy 0). Weights the world can't run (a feature it
+  // doesn't provide) fall back, said.
+  void apply_policy(std::size_t gi) {
+    fleet_group &g = groups[gi];
+    try {
+      for (const entity &e : ents) {
+        if (e.group != static_cast<int>(gi) || e.spec.controller != "nav@1" ||
+            !e.spec.policy.empty())
+          continue;
+        fleet *f = fleet_of(e);
+        const int i = index(e);
+        if (!f || i < 0)
+          continue;
+        if (g.model.model)
+          f->sim->set_policy(i, g.model.model, g.model.key);
+        else
+          f->sim->reset_policy(i);
+      }
+    } catch (const std::exception &ex) {
+      if (!g.model.model)
+        throw;
+      fall_back(g, ex.what());
+      apply_policy(gi);
+    }
   }
 
   // Each fleet's request and rally keys: a change is a request, a rally point's a move.
@@ -2138,6 +2481,48 @@ struct WorldVehicles::impl {
       if (const std::string r = get(at + "reseed.request"); r != g.seen_reseed) {
         g.seen_reseed = r;
         restart_group(gi, true);
+      }
+      if (const std::string p = get(at + "policy"); p != g.seen_policy) {
+        g.seen_policy = p;
+        if (p != g.policy) {
+          g.policy = p;
+          g.warned = false;
+          resolve_policy(gi);
+        }
+      }
+      poll_policy(gi);
+      const std::string s = get(at + "sense"), b = get(at + "belief");
+      if (s != g.seen_sense || b != g.seen_belief) {
+        g.seen_sense = s;
+        g.seen_belief = b;
+        const bool sense_ok = s == "known" || s == "fog";
+        const bool belief_ok = b == "shared" || b == "grouped" || b == "private";
+        if ((sense_ok && s != g.sense) || (belief_ok && b != g.belief)) {
+          if (sense_ok)
+            g.sense = s;
+          if (belief_ok)
+            g.belief = b;
+          rebuild_navigators(gi);
+        }
+      }
+      // Its plants: its vehicles leave their navigators and start at rest on the new ones.
+      if (const std::string p = get(at + "plant"); p != g.seen_plant) {
+        g.seen_plant = p;
+        fleet_plants want;
+        const int teams = g.laid_out ? static_cast<int>(g.rally.size()) : g.start.rally;
+        if (std::string why = parse_fleet_plants(p, want, teams); !why.empty()) {
+          status = "fleet '" + g.start.fleet + "': plant: " + why;
+        } else if (want != g.plants) {
+          g.plants = std::move(want);
+          rebuild_navigators(gi);
+        }
+      }
+      if (const std::string m = get(at + "metric"); m != g.seen_metric) {
+        g.seen_metric = m;
+        if (fleet_metric_known(m) && m != g.metric) {
+          g.metric = m;
+          sync_metric(gi);
+        }
       }
       for (std::size_t t = 0; t < g.rally.size() && t < g.seen_rally.size(); ++t) {
         const std::string xs = get(at + "rally." + std::to_string(t) + ".x"),
@@ -2155,15 +2540,23 @@ struct WorldVehicles::impl {
     }
   }
 
-  // Each fleet's counts: vehicles.fleets.names, and vehicles.fleets.<name>.{count, placed,
-  // arrived, teams, status, seed}.
+  // Each fleet's poses (poses()) and its counts: vehicles.fleets.names, and
+  // vehicles.fleets.<name>.{count, placed, arrived, teams, status, seed, tick, bounds, ...}.
   void publish_groups() {
-    if (vkey.empty() || !root() || groups.empty())
+    if (groups.empty()) {
+      if (std::atomic_load(&book))
+        std::atomic_store(&book, std::shared_ptr<const pose_book>());
       return;
+    }
+    const bool keys = !vkey.empty() && root();
+    auto next = std::make_shared<pose_book>();
+    const std::uint64_t tick = world->tick();
     std::string names;
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
       const fleet_group &g = groups[gi];
       names += (names.empty() ? "" : ",") + g.start.fleet;
+      auto fp = std::make_shared<fleet_poses>();
+      fp->tick = tick;
       int count = 0, placed = 0, arrived = 0;
       for (const entity &e : ents) {
         if (e.group != static_cast<int>(gi))
@@ -2173,20 +2566,51 @@ struct WorldVehicles::impl {
         const int i = index(e);
         if (!f || i < 0)
           continue;
-        ++placed;
         const pose p = pose_of(*f, i);
         if (std::hypot(e.gx - p.position.x, e.gy - p.position.y) < kReach + e.desc.half_extents.x)
           ++arrived;
+        if (placed++ == 0) {
+          fp->min_x = fp->max_x = p.position.x;
+          fp->min_y = fp->max_y = p.position.y;
+        }
+        fp->min_x = std::min(fp->min_x, p.position.x);
+        fp->max_x = std::max(fp->max_x, p.position.x);
+        fp->min_y = std::min(fp->min_y, p.position.y);
+        fp->max_y = std::max(fp->max_y, p.position.y);
+        fp->id.push_back(e.id);
+        fp->x.push_back(static_cast<float>(p.position.x));
+        fp->y.push_back(static_cast<float>(p.position.y));
+        fp->z.push_back(static_cast<float>(p.position.z));
+        fp->yaw.push_back(static_cast<float>(p.yaw));
+        fp->speed.push_back(static_cast<float>(p.speed));
+        fp->team.push_back(static_cast<std::int16_t>(e.rally));
       }
+      const fleet_poses &now = *fp;
+      (*next)[g.start.fleet] = std::move(fp);
+      if (!keys)
+        continue;
       const std::string at = vkey + ".fleets." + g.start.fleet + ".";
+      put(at + "tick", std::to_string(tick));
+      put(at + "bounds", placed ? num(now.min_x) + "," + num(now.min_y) + "," + num(now.max_x) +
+                                      "," + num(now.max_y)
+                                : std::string());
       put(at + "count", std::to_string(count));
       put(at + "placed", std::to_string(placed));
       put(at + "arrived", std::to_string(arrived));
       put(at + "teams", std::to_string(g.rally.size()));
       put(at + "seed", std::to_string(g.seed));
       put(at + "status", g.status);
+      put(at + "drives", g.drives);
+      int planes = 0;
+      for (const auto &[k, nav] : fleets)
+        if (nav && nav->group == static_cast<int>(gi))
+          planes += nav->sim->planes() - (g.belief == "private" ? 1 : 0); // plane 0 unused
+      put(at + "planes", std::to_string(planes));
+      put(at + "plans", trained_metric(static_cast<int>(gi)) ? "trained" : "vehicle");
     }
-    put(vkey + ".fleets.names", names);
+    if (keys)
+      put(vkey + ".fleets.names", names);
+    std::atomic_store(&book, std::shared_ptr<const pose_book>(std::move(next)));
   }
 
   // Each step of a tick: the dynamic plants' substep, the kinematic boxes a step further along the
@@ -2235,6 +2659,13 @@ struct WorldVehicles::impl {
   // obstacles are its footprint on the grid, and another kinematic box an overlap; info() and
   // entities() see to those.)
   void count_contacts() {
+    // The events first: a step with none that counts (a kinematic fleet's steps, its boxes
+    // meeting none) looks no vehicle up.
+    const std::vector<ph::contact_event> events = world->contacts();
+    if (std::all_of(events.begin(), events.end(), [](const ph::contact_event &ev) {
+          return ev.type == ph::contact_event::kind::removed;
+        }))
+      return;
     std::map<std::uint64_t, entity *> by_chassis;
     for (entity &e : ents)
       if (pose p; where(e, p) && p.chassis.valid())
@@ -2245,7 +2676,7 @@ struct WorldVehicles::impl {
       const auto it = by_chassis.find(b.value);
       return it == by_chassis.end() ? nullptr : it->second;
     };
-    for (const ph::contact_event &ev : world->contacts()) {
+    for (const ph::contact_event &ev : events) {
       if (ev.type == ph::contact_event::kind::removed)
         continue;
       entity *a = of(ev.body_a), *b = of(ev.body_b);
@@ -2295,6 +2726,10 @@ struct WorldVehicles::impl {
     for (auto &[name, f] : fleets) {
       if (f->sim->size() == 0)
         continue;
+      if (f->kin_stale) { // the vehicles that came or went since its last step
+        kinematics(*f);
+        f->kin_stale = false;
+      }
       apply_intents(*f, now);
       // A command a gym gave for this tick, in place of the intent's or the controller's (once).
       for (entity &e : ents) {
@@ -2784,36 +3219,55 @@ struct WorldVehicles::impl {
             ", wheelbase " + fixed(st.wheelbase, 2) + " m, " + a->plant);
   }
 
-  void publish_entities() {
-    publish_groups();
-    if (ekey.empty() || !root())
-      return;
-    // A summary fleet's vehicles have keys only when vehicles.watch names them (a camera's, a
-    // panel's: ids joined by ',') or they have an intent.
+  // A summary fleet's vehicles have keys and a stats line of their own only when vehicles.watch
+  // names them (a camera's, a panel's: ids joined by ',') or they have an intent: those ids.
+  std::set<std::uint64_t> keyed_ids() const {
     std::set<std::uint64_t> keyed;
     bool quiet_fleets = false;
     for (const fleet_group &g : groups)
       quiet_fleets = quiet_fleets || g.summary();
-    if (quiet_fleets) {
-      std::stringstream in(get("watch"));
-      for (std::string part; std::getline(in, part, ',');) {
-        char *end = nullptr;
-        const unsigned long long v = std::strtoull(part.c_str(), &end, 10);
-        if (end && end != part.c_str())
-          keyed.insert(v);
-      }
-      std::lock_guard<std::mutex> lock(mu);
-      for (const auto &[id, it] : intents)
-        keyed.insert(id);
+    if (!quiet_fleets)
+      return keyed;
+    std::stringstream in(get("watch"));
+    for (std::string part; std::getline(in, part, ',');) {
+      char *end = nullptr;
+      const unsigned long long v = std::strtoull(part.c_str(), &end, 10);
+      if (end && end != part.c_str())
+        keyed.insert(v);
     }
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto &[id, it] : intents)
+      keyed.insert(id);
+    return keyed;
+  }
+  // A summary fleet's vehicle that nothing names (keyed_ids) and no intent steers: its fleet's
+  // count stands for it.
+  bool quiet(const entity &e, const std::set<std::uint64_t> &keyed) const {
+    return e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
+           groups[static_cast<std::size_t>(e.group)].summary() && !keyed.count(e.id) &&
+           e.applied == entity_intent{};
+  }
+  // The line each summary fleet's quiet vehicles share, after the others' (`quiet` counts them).
+  std::string quiet_lines(const std::vector<int> &quiet) const {
+    std::string out;
+    for (std::size_t gi = 0; gi < groups.size(); ++gi)
+      if (quiet[gi])
+        out += (out.empty() ? "" : "\n") + std::string("fleet ") + groups[gi].start.fleet + "  " +
+               std::to_string(quiet[gi]) + " " + groups[gi].start.archetype + " (keys: summary)";
+    return out;
+  }
+
+  void publish_entities() {
+    publish_groups();
+    if (ekey.empty() || !root())
+      return;
+    const std::set<std::uint64_t> keyed = keyed_ids();
     std::set<std::string> now;
     std::string ids, summary;
-    std::vector<int> quiet(groups.size(), 0);
+    std::vector<int> quiet_count(groups.size(), 0);
     for (const entity &e : ents) {
-      if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
-          groups[static_cast<std::size_t>(e.group)].summary() && !keyed.count(e.id) &&
-          e.applied == entity_intent{}) {
-        ++quiet[static_cast<std::size_t>(e.group)];
+      if (quiet(e, keyed)) {
+        ++quiet_count[static_cast<std::size_t>(e.group)];
         continue;
       }
       const entity_info in = info(e);
@@ -2855,11 +3309,8 @@ struct WorldVehicles::impl {
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
     }
-    for (std::size_t gi = 0; gi < groups.size(); ++gi)
-      if (quiet[gi])
-        summary += (summary.empty() ? "" : "\n") + std::string("fleet ") + groups[gi].start.fleet +
-                   "  " + std::to_string(quiet[gi]) + " " + groups[gi].start.archetype +
-                   " (keys: summary)";
+    if (const std::string q = quiet_lines(quiet_count); !q.empty())
+      summary += (summary.empty() ? "" : "\n") + q;
     cvc::state *r = root();
     for (const std::string &id : published)
       if (!now.count(id))
@@ -3039,6 +3490,7 @@ std::uint64_t WorldVehicles::spawn(const entity_spec &spec, std::string *why) {
 std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts,
                                         std::vector<std::string> *warnings) {
   impl &d = *_impl;
+  d.starts.insert(d.starts.end(), starts.begin(), starts.end());
   std::size_t made = 0;
   for (std::size_t i = 0; i < starts.size(); ++i) {
     const vehicle_start &st = starts[i];
@@ -3066,6 +3518,31 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       d.groups[gi].seen_restart = d.get("fleets." + st.fleet + ".restart.request");
       d.groups[gi].seen_reseed = d.get("fleets." + st.fleet + ".reseed.request");
       d.groups[gi].status = "waiting for the world's grid";
+      // Its navigator's keys, as the start asks (writing one switches it live, poll_groups).
+      impl::fleet_group &g = d.groups[gi];
+      g.sense = st.sense;
+      g.belief = st.belief.empty() ? "shared" : st.belief;
+      g.policy = !st.policy_data.empty() ? "data:" + st.policy_data
+                 : st.policy.empty()     ? "trained"
+                                         : st.policy;
+      g.metric = st.metric.empty() ? "policy" : st.metric;
+      g.base_plant = fa ? fa->plant : std::string();
+      g.plants = st.plants;
+      if (g.plants.empty() && !st.plant.empty())
+        g.plants.cycle.push_back(st.plant);
+      const std::string at = d.vkey + ".fleets." + st.fleet + ".";
+      if (!d.vkey.empty()) {
+        d.put(at + "sense", d.sense_of(static_cast<int>(gi)));
+        d.put(at + "belief", g.belief);
+        d.put(at + "policy", g.policy);
+        d.put(at + "metric", g.metric);
+        d.put(at + "plant", g.plants.empty() ? g.base_plant : g.plants.text());
+      }
+      g.seen_sense = d.get("fleets." + st.fleet + ".sense");
+      g.seen_belief = d.get("fleets." + st.fleet + ".belief");
+      g.seen_policy = d.get("fleets." + st.fleet + ".policy");
+      g.seen_metric = d.get("fleets." + st.fleet + ".metric");
+      g.seen_plant = d.get("fleets." + st.fleet + ".plant");
       d.hold_placing = true;
       int got = 0;
       std::string why;
@@ -3075,16 +3552,17 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         s.name = (st.name.empty() ? st.fleet : st.name) + " " + std::to_string(k + 1);
         s.team = st.team;
         s.controller = st.controller;
-        s.plant = st.plant;
-        s.policy = st.policy;
+        s.plant = g.plants.of(k, -1); // its turn in the list; its team's once it has one (place)
         if (st.has_heading)
           s.yaw = st.heading * kPi / 180.0;
         if (!spawn(s, &why))
           break;
         d.ents.back().group = static_cast<int>(gi);
+        d.ents.back().member = k;
         ++got;
       }
       d.hold_placing = false;
+      d.resolve_policy(gi); // before they are placed: they start on it
       if (got < st.count && warnings)
         warnings->push_back("ari: world: vehicles: start: [" + std::to_string(i) + "]: fleet '" +
                             st.fleet + "': " + why);
@@ -3146,7 +3624,10 @@ void WorldVehicles::clear() {
   impl &d = *_impl;
   d.unplace_all(false);
   d.ents.clear();
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi) // the fleets' own navigators go with them
+    d.drop_navigators(gi);
   d.groups.clear();
+  d.starts.clear();
   d.posed_count = 0;
   ++d.rev;
   std::lock_guard<std::mutex> lock(d.mu);
@@ -3308,9 +3789,10 @@ void WorldVehicles::set_avoid(bool avoid) {
   d.cfg.sep_side = avoid ? kAvoidSide : 0.0f;
   d.cfg.sep_side_radius = avoid ? kAvoidSideRadius * d.cfg.veh.rr : 0.0f;
   for (auto &[name, f] : d.fleets)
-    if (f->sim) {
-      f->sim->set_separation(d.cfg.sep_radius, d.cfg.sep_gain);
-      f->sim->set_separation_side(d.cfg.sep_side, d.cfg.sep_side_radius);
+    if (f->sim) { // sized by its own vehicle (a fleet on the trained metric has the trainer's)
+      f->sim->set_separation(avoid ? kAvoidRadius * f->rr : 0.0f,
+                             avoid ? kAvoidGain * f->rr : 0.0f);
+      f->sim->set_separation_side(d.cfg.sep_side, avoid ? kAvoidSideRadius * f->rr : 0.0f);
     }
 }
 
@@ -3331,6 +3813,11 @@ bool WorldVehicles::set_sense(const std::string &mode) {
   d.sense = mode;
   if (!d.vkey.empty())
     d.put(d.vkey + ".sense", mode);
+  for (impl::fleet_group &g : d.groups)
+    if (g.sense.empty() && !d.vkey.empty()) {
+      d.put(d.vkey + ".fleets." + g.start.fleet + ".sense", mode);
+      g.seen_sense = mode;
+    }
   // What a navigator knows is its config and its prior: they are made again, on the grid they
   // have, and every vehicle goes back to its start.
   if (d.grid) {
@@ -3472,6 +3959,16 @@ std::vector<std::string> WorldVehicles::fleets() const {
   return out;
 }
 
+std::shared_ptr<const fleet_poses> WorldVehicles::poses(const std::string &fleet) const {
+  const std::shared_ptr<const impl::pose_book> book = std::atomic_load(&_impl->book);
+  if (!book)
+    return nullptr;
+  const auto it = book->find(fleet);
+  return it == book->end() ? nullptr : it->second;
+}
+
+const std::vector<vehicle_start> &WorldVehicles::starts() const { return _impl->starts; }
+
 bool WorldVehicles::rally(const std::string &fleet, int team, double &x, double &y) const {
   for (const impl::fleet_group &g : _impl->groups)
     if (g.start.fleet == fleet && team >= 0 && static_cast<std::size_t>(team) < g.rally.size()) {
@@ -3593,7 +4090,11 @@ void WorldVehicles::set_tick(double seconds) {
     throw std::invalid_argument("WorldVehicles::set_tick: the tick must be finite and > 0");
   _impl->tick = seconds;
 }
-double WorldVehicles::tick() const { return _impl->tick; }
+double WorldVehicles::tick() const {
+  if (_impl->tick > 0.0)
+    return _impl->tick;
+  return _impl->world ? cvc::sim_tick(_impl->world->config().fixed_dt) : cvc::kSimTick;
+}
 
 std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
 
@@ -3704,7 +4205,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
       p.bike_state.y = pos[2 * static_cast<std::size_t>(i) + 1];
       p.bike_state.psi = head[i];
       p.bike_state.vx = speed[i];
-      const nav::veh_params &vp = d.cfg.veh;
+      const nav::veh_params &vp = g->sim->current_config().veh; // its fleet's (its metric's)
       p.limits.rr = static_cast<float>(vp.rr / kScale);
       p.limits.d_hat = static_cast<float>(vp.d_hat / kScale);
       p.limits.vmax = static_cast<float>(vp.vmax / kScale);
@@ -3833,9 +4334,17 @@ std::uint64_t WorldVehicles::revision() const { return _impl->rev; }
 const std::string &WorldVehicles::status() const { return _impl->status; }
 
 std::string WorldVehicles::stats_lines() const {
+  const impl &d = *_impl;
+  // A summary fleet's quiet vehicles share its line, as in entities.summary.
+  const std::set<std::uint64_t> keyed = d.keyed_ids();
+  std::vector<int> quiet(d.groups.size(), 0);
   std::string out;
-  for (const impl::entity &e : _impl->ents) {
-    const entity_info in = _impl->info(e);
+  for (const impl::entity &e : d.ents) {
+    if (d.quiet(e, keyed)) {
+      ++quiet[static_cast<std::size_t>(e.group)];
+      continue;
+    }
+    const entity_info in = d.info(e);
     out +=
         (out.empty() ? "" : "\n") + std::to_string(e.id) + "  " + e.spec.name + "  " + e.plant +
         "  " +
@@ -3843,6 +4352,8 @@ std::string WorldVehicles::stats_lines() const {
                          fixed(in.energy_wh, 1) + " Wh  " + fixed(in.wheel_load / 1000.0, 1) + " kN"
                    : std::string("waiting"));
   }
+  if (const std::string q = d.quiet_lines(quiet); !q.empty())
+    out += (out.empty() ? "" : "\n") + q;
   return out;
 }
 

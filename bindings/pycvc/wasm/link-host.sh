@@ -34,7 +34,7 @@
 #     their expat and HACL SHA-2 objects (cy-pca/cvcpkg#565). With the VTK bridge, cvc.25 or
 #     later: cvc.23 and cvc.24 clash with VTK's expat on two unrenamed internals
 #     (cy-pca/cvcpkg#581).
-#   * cvc, cvcGL and the wrappers compile with -fexceptions (the top-level CMakeLists.txt),
+#   * cvc, cvcGL and the wrappers compile with -fwasm-exceptions (the top-level CMakeLists.txt),
 #     so this link must say it too. Without it emscripten links with exception catching
 #     off and every throw aborts ("Aborted(undefined)" in ___cxa_throw), even one a catch
 #     would take: cvc::state::instance() on a new app catches its first lookup's bad_any_cast.
@@ -150,7 +150,7 @@ DEP_LIBS=("$DEPS"/lib/*.a)
 # -sASYNCIFY_IGNORE_INDIRECT do not apply until it does.
 
 "$EMCC" "$SRC/bindings/pycvc/wasm/pycvc_host.cpp" "$GEN" \
-    -std=c++17 -O1 -fexceptions -DPYCVC_EMBED_PYEXT ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
+    -std=c++17 -O1 -fwasm-exceptions -DPYCVC_EMBED_PYEXT ${VTK_DEF[@]+"${VTK_DEF[@]}"} -I "$PYINC" \
     -Wl,--whole-archive "$PXA" "$GLA" -Wl,--no-whole-archive \
     ${VTK_WHOLE[@]+"${VTK_WHOLE[@]}"} \
     ${PYEXT_OBJS[@]+"${PYEXT_OBJS[@]}"} \
