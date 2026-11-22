@@ -1021,6 +1021,19 @@ Each viewer's rung adapts to its link.
     audio down to the target, cross-faded across the cut.
   - Every 10 s the client logs each heard peer's target, what it holds, how often it ran dry
     (and how often that was late audio), and what was trimmed.
+  - **The Audio window** (`cvc://components/audio_buffers.ari`) shows the same per person, live: a
+    graph of what each voice's buffer holds and its target over the last 30 s (sampled every
+    0.2 s), how often it ran dry, and the speaker's block and what it holds past the buffers. A
+    line that drops to 0 is a gap the user heard; a high target is delay. The host's
+    `cvc::ariadne::conference::voice_monitor` publishes `media.<pid>.jb.*` from the mixer's stats.
+  - The same window tunes the buffers, LOCALLY (what this client hears; never sent): a
+    `settings:` editor over `audio.jb.*`, which the monitor describes and applies with
+    `voice_mixer::set_params`. Adaptive (the least, starting and greatest targets, and how long a
+    voice plays clean before its target shrinks a step) or fixed (one target for every voice), and
+    a reset that puts every target back to its start (`voice_mixer::reset_targets`; a voice holding
+    much more is trimmed down at once). The device's floor still holds. The rest of the mixer's
+    parameters (the late window, the quiet level, the step) stay internal: they are easy to set
+    wrong and say little to a user.
   - Before this, the client played audio the moment it landed, into a 100 ms output it filled
     once a frame. Over a WebSocket the audio lands in bursts, and a burst that was late left the
     speaker with nothing to play, so the voice broke up.

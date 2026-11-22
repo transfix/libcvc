@@ -86,16 +86,24 @@ void pose_matrix(const cvc::physics::quat &q, double tx, double ty, double tz, d
 
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
                                              double yaw, double speed) {
+  return intent_from_axes((forward ? 1.0 : 0.0) - (back ? 1.0 : 0.0),
+                          (right ? 1.0 : 0.0) - (left ? 1.0 : 0.0), yaw, speed);
+}
+
+cvc::ariadne::avatar_intent intent_from_axes(double forward, double right, double yaw,
+                                             double speed) {
   const double fx = std::cos(yaw), fy = std::sin(yaw);
   const double rx = fy, ry = -fx; // forward x up(0,0,1)
-  const double f = (forward ? 1.0 : 0.0) - (back ? 1.0 : 0.0);
-  const double r = (right ? 1.0 : 0.0) - (left ? 1.0 : 0.0);
+  const double f = std::isfinite(forward) ? std::clamp(forward, -1.0, 1.0) : 0.0;
+  const double r = std::isfinite(right) ? std::clamp(right, -1.0, 1.0) : 0.0;
   double mx = f * fx + r * rx, my = f * fy + r * ry;
   const double ml = std::hypot(mx, my);
   cvc::ariadne::avatar_intent in;
   in.yaw = yaw;
   if (ml > 1e-9) {
-    mx *= speed / ml, my *= speed / ml;
+    // As fast as pushed, never past `speed` (a diagonal of two keys is a full push).
+    const double share = std::min(1.0, ml);
+    mx *= speed * share / ml, my *= speed * share / ml;
     in.move = cvc::physics::vec3{mx, my, 0.0};
   }
   return in;

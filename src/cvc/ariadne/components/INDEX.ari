@@ -262,6 +262,13 @@ catalog:
     binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
     for: "the same console without a window, to embed in a document's own window"
     args: { id: py_console }
+  - component: audio_buffers
+    file: audio_buffers.ari
+    unit: audio_buffers
+    binds: "<prefix>.{rows}.{count,<i>.pid,<i>.name}, media.<pid>.jb.* (host), audio.{device_ms,ahead_ms,window_s} (host), audio.jb.* and audio.reset (the tuning, local)"
+    for: "a conference's Audio window: each person's jitter buffer as a graph (what it holds and its target over the last 30 s) with how often it ran dry, and the buffers' tuning in a settings editor"
+    args: { id: audio, title: Audio, rows: peer }
+    note: "the rows are room_users' (room-users-step); the host's cvc::ariadne::conference::voice_monitor writes media.<pid>.jb.* and applies audio.jb.*"
   - component: room_users
     file: room_users.ari
     unit: room_users
@@ -289,6 +296,6 @@ catalog:
     file: volume_grid.ari
     unit: volume_grid
     binds: "<prefix>.graphics.root.children.{node}.grid.* (view, tool, slice.*, display.*, source.*, classes.*, pick.*, pointer.*, cursor.*, request, status) and .transfer_function; <prefix>.viewers.{id}_*.camera"
-    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), sessions and the transfer function"
+    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), sessions and the transfer function, over a volume the app holds"
     args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }   # defaults
-    note: "volume_grid_views (the views) and volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"
+    note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views) and volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"

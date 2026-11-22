@@ -1,0 +1,72 @@
+# audio_buffers.ari — a REUSABLE Audio window for a conference: how full each person's jitter
+# buffer is, as a graph over the last half minute, and the buffers' tuning. What you hear of each
+# person waits in a buffer (cvc::voice_mixer) that grows when their audio comes late and shrinks
+# back slowly, so the graph shows why a voice breaks up (it ran dry: its line hits 0) or lags (its
+# target is high). The tuning is LOCAL: what YOU hear; it is never sent.
+#
+# Import it beside room_users.ari, whose rows it reads:
+#     import: [cvc://components/room_users.ari, cvc://components/audio_buffers.ari]
+#     windows:
+#       - include: audio_buffers
+#         args: { id: audio, rows: peer }
+#
+#   audio_buffers   the window: a graph and a line per person, the output, and the tuning
+#       args: id (audio), title (Audio), rows (peer: room_users' rows, ROWS.<i>.{pid,name})
+#
+# What it reads (the conference host writes them: cvc/ariadne/conference/voice_monitor.h):
+#   ROWS.count, ROWS.<i>.{pid,name}    the people (room-users-step)
+#   media.<pid>.jb.buffered, .target   ms, oldest first, sampled every 0.2 s
+#   media.<pid>.jb.now                 its target, what it holds, how often it ran dry (and how
+#                                      often that was late audio) and how much was trimmed
+#   audio.device_ms, audio.ahead_ms    the speaker's block, and what it holds past the buffers
+#   audio.window_s                     how long the graphs cover
+# What it writes: audio.jb.mode, audio.jb.adaptive.{min,start,max,relax} and audio.jb.fixed.delay
+# (a settings: editor over them, with the host's descriptions) and audio.reset (1: every target
+# back to start).
+
+units:
+  audio_buffers:
+    args: { id: audio, title: Audio, rows: peer }
+    window: "{title}"
+    id: "{id}"
+    closable: true
+    children:
+      - type: text
+        runs: ["Each voice waits in a buffer that grows when its audio comes late. A line that drops to 0 is a gap you heard."]
+      - text: ""
+        bind: (string.join (list "Holding (solid) and target (dashed), ms, over the last " (state-get "audio.window_s") " s.") "")
+      - separator
+      - type: group
+        repeat: (state-get "{rows}.count")
+        children:
+          - text: ""
+            bind: "{rows}.{i}.name"
+          - type: chart
+            label: "##{id}_jb_{i}"
+            height: 80
+            legend: none
+            x_label: samples 0.2 s apart, the newest on the right
+            series:
+              - bind: (state-get (string.join (list "media." (state-get "{rows}.{i}.pid") ".jb.buffered") ""))
+                label: holding
+                style: solid
+              - bind: (state-get (string.join (list "media." (state-get "{rows}.{i}.pid") ".jb.target") ""))
+                label: target
+                style: dashed
+          - text: ""
+            bind: (state-get (string.join (list "media." (state-get "{rows}.{i}.pid") ".jb.now") ""))
+      - text: "No one else is here."
+        visible_when: (or (is-null (state-get "{rows}.count")) (= (state-get "{rows}.count") "0"))
+      - separator
+      - text: ""
+        bind: (string.join (list "The speaker plays in " (state-get "audio.device_ms") " ms blocks, and holds " (state-get "audio.ahead_ms") " ms past the buffers.") "")
+      - type: settings
+        label: "Buffers"
+        root: audio.jb
+        groups:
+          - adaptive: {title: Adaptive, open: true}
+          - fixed: {title: Fixed, open: true}
+      - type: button
+        label: "Reset buffers"
+        tooltip: "Every target back to where it starts: less delay now, maybe a gap or two while they grow again"
+        on: (state-set "audio.reset" "1")
