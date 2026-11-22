@@ -1268,6 +1268,14 @@ add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
 target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
 
+# The volume_grid node's contours (VolumeGridContours.h, roadmap P10), headless: picks under the
+# contours tool draw, close, move and select curves; requests; object rows; the contours on the
+# data channel (followed by a contour_lab); tile as a sliced task into a surface per object, stop
+# and auto_tile; the session; two grids sharing nothing (T6, T13).
+add_executable(cvcgl_volume_grid_contours test/cvcgl_volume_grid_contours.cpp)
+target_link_libraries(cvcgl_volume_grid_contours PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid_contours COMMAND cvcgl_volume_grid_contours)
+
 # One volume on the state tree shown by a volren, a volume_grid and volume_slices (node_data.h,
 # docs/roadmap/DATA_FROM_STATE_TREE.md D1), headless: one pointer, followed when a new volume is
 # written or the dataset reloads; the volren's transfer function seeded on its first volume; two
@@ -1698,4 +1706,5 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
-                        cvcgl_imgui_colors cvcgl_contour_lab)
+                        cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
+                        cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)

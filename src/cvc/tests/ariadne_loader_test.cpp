@@ -6895,6 +6895,96 @@ TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
+// volume_grid.ari's Contours tab (P10): a tab titled Contours in the tools' panel, every control
+// on its node's grid.objects / grid.contour.* / grid.tile.* keys, the tool's radio with Contours,
+// and the tab alone as a unit; the contours demo loads clean.
+TEST(AriadneComponents, VolumeGridContoursTabDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+    args: { node: skull, id: skull_grid }
+  - window: Own
+    children:
+      - include: volume_grid_contours_tab
+        args: { node: skull, id: own }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  std::vector<const Widget *> all_tabs;
+  collect(*windows[0], Kind::Tabs, all_tabs);
+  bool titled = false; // the panel's (the view switch is a tabs: too)
+  for (const Widget *t : all_tabs)
+    titled = titled || std::find(t->tab_titles.begin(), t->tab_titles.end(), "Contours") !=
+                           t->tab_titles.end();
+  EXPECT_TRUE(titled) << "the panel has a tab titled Contours";
+  for (const Widget *w : windows) {
+    std::vector<std::string> keys;
+    collect_key_strings(*w, keys);
+    const std::string g = "graphics.root.children.skull.grid.";
+    for (const char *want : {"objects",
+                             "objects.{i}.name",
+                             "objects.{i}.color",
+                             "objects.{i}.interpolation",
+                             "objects.{i}.samples",
+                             "objects.{i}.visible",
+                             "objects.{i}.curves",
+                             "contour.active",
+                             "contour.info",
+                             "contour.selected",
+                             "contour.show",
+                             "contour.control_points",
+                             "contour.show_3d",
+                             "contour.snap",
+                             "contour.point_size",
+                             "contour.auto_tile",
+                             "contour.show_surfaces",
+                             "contour.surface_opacity",
+                             "tile.progress",
+                             "tile.phase",
+                             "tile.status",
+                             "tile.curation_delta",
+                             "tile.cap_ends",
+                             "files.contours"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end())
+          << w->label << ": " << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  std::vector<const Widget *> radios;
+  collect(*windows[0], Kind::Radio, radios);
+  bool contours = false;
+  for (const Widget *w : radios)
+    if (w->bind == "graphics.root.children.skull.grid.tool")
+      contours = std::find(w->values.begin(), w->values.end(), "contours") != w->values.end();
+  EXPECT_TRUE(contours) << "the tool radio offers contours";
+
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid_contours.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app demo_app;
+  ASSERT_TRUE(register_source_components(demo_app));
+  LoadResult d = load_file(demo_app, doc.string());
+  ASSERT_TRUE(d.ok) << d.error;
+  for (const std::string &w : d.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(d.scene.nodes.size(), 1u);
+  EXPECT_EQ(d.scene.nodes[0].type, "volume_grid");
+  EXPECT_NE(d.scene.nodes[0].props.find("objects"), nullptr);
+}
+
 // The shared-volume demo (docs/roadmap/DATA_FROM_STATE_TREE.md, D1): a volren and a volume_grid
 // over one data: entry, and a Filter window.
 TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {

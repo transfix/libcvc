@@ -22,6 +22,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // the generated_world generator
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
+#include <cvc/geometry/contours.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/image/image.h>
@@ -283,6 +284,30 @@ void decode_point_classes(DataDecode &d) {
   d.out("classes").data(boost::any(std::shared_ptr<const cvc::point_classes>(std::move(pc))));
 }
 
+// A contour stack (cvc/geometry/contours.h: any format the app reads, by extension), at `contours`.
+// A Reconstruct series is its .ser and the section files beside it: an archive's, or the files a
+// page preloads with it; the .ser (else the one contour file) is what is read.
+void decode_contours(DataDecode &d) {
+  if (d.files.empty())
+    fail("as: contours: " + d.spec.uri + " has no file");
+  temp_dir tmp;
+  std::string main;
+  const std::vector<std::string> readable = cvc::contour_read_extensions(d.app);
+  for (const auto &f : d.files) {
+    const std::string at = tmp.put(basename(f.path), *f.bytes);
+    const std::string ext = extension(f.path);
+    if (ext == ".ser" ||
+        (main.empty() && std::find(readable.begin(), readable.end(), ext) != readable.end() &&
+         extension(main) != ".ser"))
+      main = at;
+  }
+  if (main.empty())
+    main = tmp.path() + "/" + basename(d.files.front().path);
+  auto stack = std::make_shared<const cvc::contour_stack>(cvc::read_contours(d.app, main));
+  d.out("contours").value(std::to_string(stack->polygon_count()));
+  d.out("contours").data(boost::any(std::shared_ptr<const cvc::contour_stack>(std::move(stack))));
+}
+
 // A volume grid session (cvc/volume/volume_grid.h's JSON), at `session`.
 void decode_volume_grid_session(DataDecode &d) {
   const auto &f = only_file(d);
@@ -406,6 +431,7 @@ struct decoder_table {
       {"city_bundle", decode_city_bundle},
       {"point_classes", decode_point_classes},
       {"volume_grid_session", decode_volume_grid_session},
+      {"contours", decode_contours},
   };
 };
 
@@ -461,6 +487,8 @@ std::string default_decoder(bool many, const std::string &name) {
       return "volume";
   if (ext == ".vgr")
     return "point_classes";
+  if (ext == ".ser" || ext == ".contour" || ext == ".cvcc")
+    return "contours";
   return "bytes";
 }
 
@@ -514,6 +542,24 @@ std::string encode_point_classes(const DataEncode &e) {
   return read_whole(p);
 }
 
+// A contour stack in a one-file format, by the file's extension (.cvcc, .contour, .pcd): a format
+// that writes files beside it (Reconstruct's .ser, Tiling's .config) can't go out as one download.
+std::string encode_contours(const DataEncode &e) {
+  const std::shared_ptr<const cvc::contour_stack> c = held<cvc::contour_stack>(e.payload);
+  if (!c)
+    fail("contours: the data are not a contour stack");
+  temp_dir tmp;
+  const std::string p = tmp.path() + "/" + basename(e.file);
+  cvc::write_contours(e.app, *c, p);
+  std::size_t files = 0;
+  for (const auto &entry : fs::directory_iterator(tmp.path()))
+    files += entry.is_regular_file() ? 1 : 0;
+  if (files != 1)
+    fail("contours: " + extension(e.file) +
+         " writes files beside it; save as .cvcc, .contour or .pcd");
+  return read_whole(p);
+}
+
 std::string encode_volume_grid_session(const DataEncode &e) {
   const std::shared_ptr<const cvc::volume_grid_session> s =
       held<cvc::volume_grid_session>(e.payload);
@@ -531,6 +577,7 @@ struct encoder_table {
       {"volume", encode_volume},
       {"point_classes", encode_point_classes},
       {"volume_grid_session", encode_volume_grid_session},
+      {"contours", encode_contours},
   };
 };
 
@@ -954,6 +1001,8 @@ std::string default_data_encoder(const boost::any &payload) {
     return "point_classes";
   if (held<cvc::volume_grid_session>(payload))
     return "volume_grid_session";
+  if (held<cvc::contour_stack>(payload))
+    return "contours";
   if (boost::any_cast<DataBytes>(&payload) || boost::any_cast<std::string>(&payload))
     return "bytes";
   return std::string();
@@ -1117,7 +1166,7 @@ DataDecoder need_decoder(cvc::app &app, const std::string &as) {
   if (!decoder)
     fail("no decoder as: " + as +
          " (known: files, bytes, text, json, mesh, heightfield, volume, city_bundle, "
-         "point_classes, volume_grid_session, and any a host registered)");
+         "point_classes, volume_grid_session, contours, and any a host registered)");
   return decoder;
 }
 

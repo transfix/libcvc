@@ -406,6 +406,23 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /volume_grid: 32 32 32, slice view down y, added \(10, 15, 12\) to seeds/.test(l)),
   });
+  // The volume_grid's contours (P10): its document traces the bunny's field on every other plane,
+  // the tiler tiles the curves as a sliced task on the page, then three clicks draw a curve and a
+  // fourth closes it; it prints one line once the tile is done and the curve closed. Its `vgc:`
+  // lines (step | dims | tile | bunny's triangles | status) say where a failing run stopped.
+  const contoursDone = v => v.state === 'running' && v.warnings.length === 0 &&
+      v.out.some(l => /volume_grid_contours: 32 32 32, tiled 1 object: [1-9][0-9]* triangles, closed a curve of drawn on z = 16/.test(l));
+  cases.push({
+    name: 'a volume_grid traces, tiles and draws contours (VolumeGridRover)',
+    url: `${ORIGIN}/apps/app/?src=volume_grid_contours.ari`,
+    inject: LOGGED,
+    check: contoursDone,
+    report: v => contoursDone(v) ? [] : [
+      ...v.warnings.map(w => 'warning: ' + w),
+      ...(v.warning ? ['page warning: ' + v.warning] : []),
+      ...v.out.slice(-12).map(l => 'out: ' + l),
+    ],
+  });
   // mesh_lab's skeleton (P2): the bunny decimated, then skeletonized a slice at a time on the
   // single-threaded page; its document prints the counts once the skeleton is drawn (or the error,
   // which fails the case: a page built without Shewchuk's predicates, say).
