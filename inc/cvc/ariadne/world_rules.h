@@ -228,6 +228,38 @@ bool spawn_scope_known(const std::string &scope);
 // `keys: summary` (a fleet's default) publishes the fleet's keys (vehicles.fleets.<fleet>.*), and
 // per-entity keys only for the vehicles vehicles.watch names or with an intent; `keys: all`
 // publishes every vehicle's, as an unnamed entry's are.
+//
+// A fleet has a navigator of its own (FLEETS_AND_NIGHT_ROADMAP.md FL1b):
+//   sense:   known | fog: what it knows of the world ("" the world's vehicles.sense)
+//   belief:  shared (one map) | grouped (max(2, n / 64) maps, teammates together) | private
+//            (one each): how its vehicles share what they sense
+//   policy:  trained (the default: the published CoefMLP, $CVC_NAV_WEIGHTS, else an installed
+//            copy, else downloaded from cvcpkg://cvc/grl-snam-weights), builtin (the built-in net),
+//            a .cvcnav's path, or { uri:, path:, sha256: } (a file, an https URL or a cvcpkg://
+//            package, the .cvcnav inside it and its hash) or { data: <entry> } (the document's
+//            data: entry). Without the weights it drives on the built-in net and says why.
+//   metric:  trained (the trainer's vehicle, as the weights learned) | vehicle (each plant's own
+//            size and limits) | policy (the default: trained when weights drive or are on their
+//            way, vehicle on the built-in net)
+//   plant:   one plant, a list its vehicles cycle over ([jolt, kinematic]), or each team's
+//            ({ 0: jolt, 2: jolt }; a team not named on the archetype's plant). A fleet's plants
+//            all float (dynamicboat) or none do.
+struct fleet_plants {
+  std::vector<std::string> cycle;   // the vehicles' plants in turn (none: the archetype's)
+  std::map<int, std::string> teams; // a team's own (its rally point's index)
+  bool empty() const { return cycle.empty() && teams.empty(); }
+  // Member `member`'s plant on team `team` (-1 none): its team's, else the cycle's, else "".
+  std::string of(int member, int team) const;
+  // As parse_fleet_plants reads it: "jolt", "jolt, kinematic", "0: jolt, 2: jolt",
+  // "kinematic, 0: jolt" (team 0 on jolt, the rest kinematic).
+  std::string text() const;
+  bool operator==(const fleet_plants &) const = default;
+};
+// `text` (fleet_plants::text's form) into `out`: "" or what is wrong. A team must be below
+// `teams` (its fleet's rally points; -1 unchecked), and the plants all float or none do.
+std::string parse_fleet_plants(const std::string &text, fleet_plants &out, int teams = -1);
+bool fleet_metric_known(const std::string &metric); // trained, vehicle or policy
+
 struct vehicle_start {
   std::string archetype, name, controller, plant, policy;
   int team = 0;
@@ -244,6 +276,13 @@ struct vehicle_start {
   std::string assign; // rally: { assign: } latitude ("" latitude)
   std::string colors; // hsv | spawn ("" hsv with rally points, spawn without)
   std::string keys;   // summary | all ("" summary)
+  std::string sense;  // known | fog ("" the world's)
+  std::string belief; // shared | grouped | private ("" shared)
+  // policy: { uri:, path:, sha256: } (`policy` the uri) or { data: } (`policy_data`).
+  std::string policy_path, policy_sha256, policy_data;
+  std::string metric; // trained | vehicle | policy ("" policy)
+  // A fleet's plant: as a list or each team's (`plant` is then the list's first, or "").
+  fleet_plants plants;
   bool operator==(const vehicle_start &) const = default;
 };
 constexpr int kMaxVehicleStartCount = 256;
@@ -335,9 +374,9 @@ void register_world_block(cvc::app &app);
 const Value *find_world_block(const LoadResult &lr);
 
 // A world document's rules: the defaults, its scene's physics: gravity, then its world: block
-// (WORLD, null for none). A physics: fixed_dt other than the room's quantum (1/120 s), a backend
-// or materials are warnings: the room's quantum is fixed, and bodies other than the avatars' wait
-// for WD3. "" or what is wrong.
+// (WORLD, null for none). A physics: fixed_dt other than the room's quantum (1/120 s, or 1/hz for
+// a scene: clock: hz), a backend or materials are warnings: the avatars step one quantum at a
+// time, and bodies other than the avatars' wait for WD3. "" or what is wrong.
 std::string world_rules_from(const Scene &scene, const Value *world, world_rules &out,
                              std::vector<std::string> *warnings = nullptr);
 

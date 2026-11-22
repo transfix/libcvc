@@ -395,7 +395,7 @@ public:
   WorldGym(const std::string &document, const std::string &prefix, int count,
            const std::string &world, PyObject *agents, PyObject *set, bool wander,
            unsigned long long max_steps, int rays, double range_m, double ready_timeout,
-           bool regenerate, double tick, bool drive_telemetry) {
+           bool regenerate, double tick, bool drive_telemetry, PyObject *fleets) {
     cvc::ariadne::gym_options o;
     o.regenerate = regenerate;
     o.tick = tick;
@@ -421,6 +421,27 @@ public:
           Py_DECREF(seq);
           throw;
         }
+      }
+      Py_DECREF(seq);
+    }
+    if (fleets != nullptr && fleets != Py_None) { // the document's fleets, by name
+      if (PyUnicode_Check(fleets)) // a str is a sequence too: of its letters
+        throw std::invalid_argument("pycvc.WorldGym: fleets is a list of names (fleets=[\"" +
+                                    std::string(PyUnicode_AsUTF8(fleets)) + "\"])");
+      PyObject *seq = PySequence_Fast(fleets, "fleets is a list of names");
+      if (seq == nullptr) {
+        PyErr_Clear();
+        throw std::invalid_argument("pycvc.WorldGym: fleets is a list of the document's fleet names");
+      }
+      for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i) {
+        PyObject *name = PySequence_Fast_GET_ITEM(seq, i);
+        const char *text = PyUnicode_Check(name) ? PyUnicode_AsUTF8(name) : nullptr;
+        if (text == nullptr) {
+          PyErr_Clear();
+          Py_DECREF(seq);
+          throw std::invalid_argument("pycvc.WorldGym: each fleet is a name (a str)");
+        }
+        o.fleets.push_back(text);
       }
       Py_DECREF(seq);
     }
@@ -690,7 +711,7 @@ public:
            const std::string &world = "", PyObject *agents = nullptr, PyObject *set = nullptr,
            bool wander = false, unsigned long long max_steps = 1000, int rays = 16,
            double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false,
-           double tick = 0.0, bool drive_telemetry = true);
+           double tick = 0.0, bool drive_telemetry = true, PyObject *fleets = nullptr);
   ~WorldGym();
   PyObject *reset(unsigned long long seed = 0);
   PyObject *step(PyObject *steer, PyObject *accel);

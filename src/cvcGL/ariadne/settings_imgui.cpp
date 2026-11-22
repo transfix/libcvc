@@ -24,7 +24,8 @@
 // reset's place at the right, and a "reset" while it is not its default. Hovering a name, an editor
 // or a header shows its tooltip. A slider's value is held here while it is dragged (so `commit:
 // release` shows the drag before the write); a text field holds its text until Enter. The groups
-// open and close by ImGui's own state, every one open while a search or a filter narrows the list.
+// open and close by ImGui's own state, every one open while a search or a filter that picks keys
+// narrows the list.
 // The core owns every cvc::state read and write.
 
 #include <algorithm>

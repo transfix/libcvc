@@ -37,19 +37,27 @@ producer_thread::~producer_thread() { stop(); }
 // delivery — no locking is needed and no frame-loop pump plumbing. A tick returning false (source
 // spent) cancels the timer.
 void producer_thread::em_tick_trampoline(void *self) {
-  auto *p = static_cast<producer_thread *>(self);
-  if (!p->run_.load())
+  static_cast<producer_thread *>(self)->em_tick();
+}
+
+void producer_thread::em_tick() {
+  if (!run_.load() || in_tick_)
     return;
-  if (p->tick_ && !p->tick_()) {
-    p->run_.store(false);
-    if (p->interval_id_ >= 0) {
-      emscripten_clear_interval(p->interval_id_);
-      p->interval_id_ = -1;
+  in_tick_ = true;
+  const bool keep = !tick_ || tick_();
+  in_tick_ = false;
+  if (!keep) {
+    run_.store(false);
+    if (interval_id_ >= 0) {
+      emscripten_clear_interval(interval_id_);
+      interval_id_ = -1;
     }
     return;
   }
-  p->ticks_.fetch_add(1, std::memory_order_relaxed);
+  ticks_.fetch_add(1, std::memory_order_relaxed);
 }
+
+void producer_thread::run_now() { em_tick(); }
 
 void producer_thread::start() {
   if (interval_id_ >= 0)
@@ -81,6 +89,10 @@ void producer_thread::run() {} // unused in the timer-driven build
 #else // native / pthread-wasm: the dedicated worker thread.
 
 void producer_thread::em_tick_trampoline(void *) {} // unused off the single-threaded wasm target
+void producer_thread::em_tick() {}
+
+// The worker polls its source at its rate; a frame that came between ticks waits at most a period.
+void producer_thread::run_now() {}
 
 void producer_thread::start() {
   if (thr_.joinable())

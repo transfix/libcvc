@@ -34,7 +34,7 @@ on:
       - 'THIRD_PARTY_NOTICES.md'
       - '!.github/**'
       - '.github/workflows/deploy-pages.yml'
-      - '.github/scripts/pin-wasm-pre-jx1.sh'
+      - '.github/actions/cvcpkg-cli/**'
       - '!bindings/**'
   schedule:
     - cron: '30 8 * * *' # 08:30 UTC ≈ 03:30 America/Chicago (after cyberpcangel nightly)
@@ -77,6 +77,18 @@ jobs:
         with:
           ref: master
 
+      # The released cvcpkg every CI job runs (pinned in the action), in this job's temp dir. Not the
+      # one in the runner user's ~/.local/bin: other workflows on catx-03 pip install over that one,
+      # and on 2026-11-20 one put back cvcpkg 2.2.1, from before installs merged into the prefix's
+      # lockfile (cy-pca/cvcpkg#252). Each install then rewrote the lockfile with its own packages
+      # only, the pin below found none of its packages, VTK stayed at the republished cvc.6, and
+      # every deploy failed to link on its __wasm_longjmp.
+      # Before the CMake step below: the action downloads with curl, and the curl in
+      # /opt/cvc-wasm/cmake-cvcpkg/bin does not run (its RUNPATH lost its $ORIGIN, so it loads the
+      # system libcurl 7.81 and stops on an undefined curl_easy_header; "Verify live" says the same).
+      - name: Install the cvcpkg CLI
+        uses: ./.github/actions/cvcpkg-cli
+
       - name: Use the cvcpkg CMake on this runner
         # System cmake is 3.22; libcvc's Boost 1.86 config lookup needs 3.24+
         # (see nav-swarm-cinematic/PR #225 and the sister workflow's rationale).
@@ -84,18 +96,28 @@ jobs:
 
       - name: Install fresh wasm dep closure + scene bundles
         run: |
-          export PATH="/opt/cvc-wasm/cmake-cvcpkg/bin:$HOME/.local/bin:$PATH"
-          command -v cvcpkg >/dev/null || { echo "cvcpkg not found; skipping"; exit 0; }
+          export PATH="$RUNNER_TEMP/cvcpkg-bin:/opt/cvc-wasm/cmake-cvcpkg/bin:$PATH"
+          echo "cvcpkg: $(command -v cvcpkg), $(cvcpkg --version)"
+          # wasm32: what cvcpkg's wasm bundles are tagged now. Under x86_64 the catalog has only old
+          # ones (imagemagick 7.1.1+cvc.22, assimp cvc.6) that need a wasm cmake, so every install
+          # here failed without a word, and the gallery linked whatever this runner's prefix held.
+          # Until JX2 the pin script put imagemagick there; after it, the prefix still held the
+          # pin's JS-exceptions cvc.23, and the first JX2 deploy (d6b0bb83) failed to link
+          # MagickCore's __resumeException. A package that fails now says so.
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick; do
             echo "=== $p ==="
-            cvcpkg install "$p" \
-              --prefix "$CVC_WASM_DEPS" \
-              --platform wasm --arch x86_64 --config release --link static \
-              --no-fallback-to-source 2>&1 | tail -3 || echo "  (skipped: $p)"
+            if ! out=$(cvcpkg install "$p" \
+                         --prefix "$CVC_WASM_DEPS" \
+                         --platform wasm --arch wasm32 --config release --link static \
+                         --no-fallback-to-source 2>&1); then
+              printf '%s\n' "$out" | tail -5
+              echo "::warning::cvcpkg could not install $p for wasm; the build gets whatever copy this prefix already holds, if any"
+              continue
+            fi
+            printf '%s\n' "$out" | tail -3
           done
           # pegtl (header-only) is cvc's build-only state_exec grammar engine, and
-          # cvc's configure REQUIRES it, so it may not be skipped. Its wasm bundle
-          # is tagged wasm32, not x86_64 like the older bundles above.
+          # cvc's configure REQUIRES it, so it may not be skipped.
           echo "=== pegtl ==="
           cvcpkg install pegtl --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
@@ -103,7 +125,13 @@ jobs:
           # eigen + libigl (header-only): cvc's mesh_ops / fem, which the FEM gallery's fe_lab and
           # mesh_lab nodes run on. Without them CVC_ENABLE_LIBIGL goes off and those nodes don't exist.
           # sdl3: keyboard and mouse for the documents' on_key / on_pointer (cvcGL's SdlInput).
-          for p in eigen libigl sdl3; do
+          # clipper2, cdt, shewchuk-predicates: cvc::planar, which the contour tiler demo's
+          # contour_lab node tiles on. Without them the tiler is not built in.
+          # joltphysics: cvc::physics' engine (single-threaded here: jolt_backend.cpp runs Jolt's
+          # single-threaded job system without pthreads). Without it CVC_WITH_JOLT goes off, the
+          # gallery has the null backend only, and a document's bodies (terrain_lab's boat and
+          # crates) never move. build-wasm-demo.sh fails the build if the configure missed it.
+          for p in eigen libigl sdl3 clipper2 cdt shewchuk-predicates joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$CVC_WASM_DEPS" \
               --platform wasm --arch wasm32 --config release --link static \
@@ -147,10 +175,6 @@ jobs:
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (xterm-js packages absent — the configure downloads xterm.js)"
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          # Last, after every wasm install above, so none of them moves a pinned package again.
-          # Without it the link fails on freetype's __wasm_longjmp.
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$CVC_WASM_DEPS" wasm
 
       - name: Build the gallery (libcvc-examples-web, single-threaded)
         # Non-pthread: matches the single-threaded wasm dep bundles + does not

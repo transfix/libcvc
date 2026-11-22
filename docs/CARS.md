@@ -174,7 +174,8 @@ libcvc's own keys: `sim_world::pull` reads `nav.*` and `nav.vehicle.*`, and `pla
 places:
 - in the document's `init:`, with `(state-set "nav.vehicle.vmax" "12")`, so a `.ari` file carries
   a whole configuration;
-- on a slider or combo bound to the key (the Settings window binds the common ones);
+- in the Settings window, which edits `nav.reach_tol` and the `nav.vehicle` and `nav_plant` knobs
+  (`nav_plant.vehicle` is Run's Vehicle combo);
 - from the command line, with `--set nav.vehicle.d_hat=5` (repeatable) or `--params run.json`
   (`{"nav.vehicle.vmax": 12, ...}`);
 - from Python, with `host.set(...)`.
@@ -293,7 +294,10 @@ a window of your own in its place in your copy of `cars.ari`.
   or libcvc's navigator as a baseline), ticks per frame, a new goal on arrival, pause, the camera
   and the chosen car. New goals and Reset are document buttons that call back into Python
   (`host.on`).
-- **Settings**: the common navigator, vehicle and plant knobs, with their keys in the tooltips.
+- **Settings**: a `settings:` editor ([ARIADNE.md](ARIADNE.md) §4) over `nav.reach_tol`,
+  `nav.vehicle` and `nav_plant`. Every knob there gets the slider, unit, range, tooltip and reset
+  its key's description gives; a search box narrows the list. The Plant group appears once a
+  plant other than nav's bicycle has run, since only a plant describes those keys.
 - **Controller**: your parameters (`ctl.*`) and how far ahead to predict.
 - **World**: the generator's parameters and Regenerate (with World: Generated).
 - **Cars**: the run's numbers, two plots (the chosen car's speed, the closest gap between two
@@ -414,7 +418,7 @@ its own simulator) uses the template's pieces rather than copying them. GRL-SNAM
 are built this way.
 
 - **Panels.** `cars_panels.ari` holds the template's panels as units:
-  - `cars_settings` (window): the navigator, vehicle and plant knobs;
+  - `cars_settings` (window): the navigator, vehicle and plant knobs (a `settings:` editor);
   - `cars_world` (window): the generator's parameters, shown with World: Generated;
   - `cars_world_choice` (group): the World combo, the city's URI and Load;
   - `cars_coefficients` (group): four coefficient plots;

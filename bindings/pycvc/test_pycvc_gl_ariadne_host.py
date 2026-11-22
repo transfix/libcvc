@@ -13,7 +13,8 @@ Headless (no GL; runs in this process):
 Offscreen (GL; in a child process, skipped without a GL context unless CVC_REQUIRE_RENDER=1):
   * a published picture and a live stream show up in the rendered frame (frame_rgb);
   * snapshot() writes a PNG; host.lab adds a mesh to the document's scene;
-  * the four examples in examples/ariadne/python run offscreen and do what they say.
+  * the four examples in examples/ariadne/python run offscreen and do what they say;
+  * an AriApp attached to the drawn host reads the scene's world (grid, world_geometry).
 """
 
 import importlib.util
@@ -352,6 +353,59 @@ def vehicles(tmp):
     check(abs(car.size[0] - 4.72) < 1e-6 and car.size[2] < car.size[1], "size: length, width, height")
 
 
+WORLD_DOC = """meta: { name: drawn world, min_libcvc: 4.0.0 }
+scene:
+  physics: {}
+  world: { source: generated, cell: 5 }
+  nodes:
+    - { node: land, type: generated_world, world: generated, seed: 5, half: 150, trees: 4,
+        rocks: 2, buildings: 4, body: {} }
+    - { node: square, world: flat, source: { box: { size: [100, 100, 1] } }, body: static }
+"""
+
+
+def drawn_world(tmp):
+    """A drawn host's world, read from Python: an AriApp attached to the host's runtime finds the
+    scene's world where the renderer runs it (AppRuntime::running_world), so its grid and its
+    generated world's colliders are SceneWorld's, the same a headless AriApp gets."""
+    import numpy as np
+    import pycvc
+
+    from pycvc_gl.ariadne import Host
+
+    doc = os.path.join(tmp, "drawn_world.ari")
+    with open(doc, "w", encoding="utf-8") as f:
+        f.write(WORLD_DOC)
+    host = Host(mode="offscreen", name="dw", width=320, height=240)
+    try:
+        host.load(doc)
+        for _ in range(600):  # the drawn node makes its world a few milliseconds a frame
+            host.step()
+            if host.get("scene.world.ready") == "1":
+                break
+        check(host.get("scene.world.ready") == "1", "the drawn generated world is made")
+        rt = pycvc.ari_app_attach(host.app, host.runtime.app_runtime_capsule())
+        g = rt.grid("land", 5.0)
+        w = rt.world_geometry("land")
+        check(g is not None, "AriApp.grid finds the world a renderer runs")
+        check(w is not None, "AriApp.world_geometry finds its colliders")
+        headless = pycvc.AriApp(pycvc.make_app(), "hw")
+        headless.load(doc)
+        h = headless.grid("land", 5.0)
+        check(h is not None and (g.rows(), g.cols()) == (h.rows(), h.cols())
+              and np.array_equal(g.occupancy(), h.occupancy()), "the same grid as headless")
+        m = pycvc.nav_world_grid(w, 5.0)
+        check(np.array_equal(m.occupancy(), g.occupancy()), "and made from those colliders")
+        host.set("scene.world.source", "flat")
+        for _ in range(30):
+            host.step()
+        f = rt.grid("square", 5.0)
+        check(f is not None and f.occupied_count() == 4 * (f.cols() - 1), "the flat world's grid")
+        del headless
+    finally:
+        host.close()
+
+
 def gl_child(tmp):
     """Runs in the child: everything that needs a GL context."""
     import numpy as np
@@ -385,6 +439,7 @@ def gl_child(tmp):
         host.lab.add_mesh("tri", [0, 0, 0, 1, 0, 0, 0, 1, 0], [0, 1, 2], color=(1, 0, 0))
         check(host.scene.hasGraphics("tri"), "host.lab adds to the document's scene")
         host.close()
+        drawn_world(tmp)
 
         # The examples, offscreen, as a user runs them (nav on its block city: no bundle here).
         for name, frames, extra, expect in (

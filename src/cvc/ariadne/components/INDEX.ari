@@ -189,7 +189,7 @@ catalog:
     file: mesh_tools.ari
     unit: mesh_tools
     binds: "<prefix>.graphics.root.children.{node}.mesh_ops.*"   # the cvcGL mesh_lab realizer
-    for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction)"
+    for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction; the skeleton of its vertices, with a progress bar and Stop)"
     args: { node: mesh, title: Mesh tools, id: mesh_tools }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build; commands are written to mesh_ops.request and run off the render thread"
   - component: fe_controls
@@ -199,6 +199,13 @@ catalog:
     for: "a `type: fe_lab` node (load an SDF or a volume; LBIE tet / hex mesh of a solid, or a tet mesh of the interval between two isovalues; P1 Poisson / heat / eigenmode solve; the field on the boundary and a cut, or the elements cut away)"
     args: { node: domain, title: Finite elements, id: fe_controls }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build (and CVC_ENABLE_MESHER to tet-mesh); commands go through fe.request"
+  - component: contour_tiler
+    file: contour_tiler.ari
+    unit: contour_tiler
+    binds: "<prefix>.graphics.root.children.{node}.tiler.*"    # the cvcGL contour_lab realizer
+    for: "a `type: contour_lab` node (planar contours from a file or another node: the component picker, the slice range, the tiler's parameters, Tile / Stop / Load and a progress bar naming the slice pair)"
+    args: { node: contours, title: Contour tiler, id: contour_tiler, slices: 200 }   # defaults
+    note: "the tile runs as a sliced task (tiler.request); a libcvc built without cvc::planar has no tiler, and its status says so"
   - component: transfer_function
     file: transfer_function.ari
     unit: transfer_function
@@ -255,6 +262,36 @@ catalog:
     binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
     for: "the same console without a window, to embed in a document's own window"
     args: { id: py_console }
+  - component: conference
+    file: conference.ari
+    unit: conference
+    binds: "<prefix>.conf.self, cam_token, cam.sel, mic.sel, cam_on, mic_on, name_error, self.video_in, <prefix>.tree.{id}.*"
+    for: "the conference app's My Camera window: your name (refused when taken), your camera, the camera and mic pickers and their on/off"
+    args: { id: mycam, title: My Camera }
+    verbs: [room-join, room-roster, stream-open, stream-capture-camera, stream-capture-audio, stream-set-muted]
+    note: "imports room_users.ari, chat.ari and audio_buffers.ari; call (conference-step) from on_tick for the whole app, or its pieces (conference-join, conference-media-open, conference-name-step, conference-devices-step, conference-avatar-step) for some of it"
+  - component: conference_avatar
+    file: conference.ari
+    unit: conference_avatar
+    binds: "<prefix>.avatar.* (the pickers), self.avatar.* (the host's avatar_panel)"
+    for: "the conference app's Avatar window: Colour and Wear from the relay's catalog, the Body (a person, or a vehicle you drive as your body, where the world offers one), your energy budget, ledger and history"
+    args: { id: myavatar, title: Avatar }
+    verbs: [room-set-avatar, room-set-archetype, plot]
+    note: "call (conference-avatar-step) from on_tick, after (conference-join)"
+  - component: conference_peers
+    file: conference.ari
+    unit: conference_peers
+    binds: "<prefix>.{rows}.{i}.{name,cam,video_off} (room_users' rows), <prefix>.tree.cam_<i>.*"
+    for: "a camera window per other participant, titled by their name, repeated over {rows}.count"
+    args: { rows: peer, title: Peer }
+    note: "room_users' (room-users-step ROWS ROOM CHAT) fills the rows it shows"
+  - component: audio_buffers
+    file: audio_buffers.ari
+    unit: audio_buffers
+    binds: "<prefix>.{rows}.{count,<i>.pid,<i>.name}, media.<pid>.jb.* (host), audio.{device_ms,ahead_ms,window_s} (host), audio.jb.* and audio.reset (the tuning, local)"
+    for: "a conference's Audio window: each person's jitter buffer as a graph (what it holds and its target over the last 30 s) with how often it ran dry, and the buffers' tuning in a settings editor"
+    args: { id: audio, title: Audio, rows: peer }
+    note: "the rows are room_users' (room-users-step); the host's cvc::ariadne::conference::voice_monitor writes media.<pid>.jb.* and applies audio.jb.*"
   - component: room_users
     file: room_users.ari
     unit: room_users
@@ -278,3 +315,10 @@ catalog:
     for: "a `type: nav_swarm` swarm's minimap: a map view of the nodes tagged {tag}; drag a rally point to move it, click to follow a vehicle"
     args: { swarm: swarm, view: minimap, title: minimap, id: swarm_minimap, size: "300", tag: minimap, hide: belief, hz: "5", grab: "0.05" }
     note: "tag the swarm's dots and targets layers {tag}, and hide them from the main view with scene: main_view: { hide: [{tag}] }"
+  - component: volume_grid
+    file: volume_grid.ari
+    unit: volume_grid
+    binds: "<prefix>.graphics.root.children.{node}.grid.* (view, tool, slice.*, display.*, source.*, classes.*, pick.*, pointer.*, cursor.*, request, status) and .transfer_function; <prefix>.viewers.{id}_*.camera"
+    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), sessions and the transfer function, over a volume the app holds"
+    args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }   # defaults
+    note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views) and volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"

@@ -141,6 +141,12 @@ struct holon_config {
   double respawn_below_z = -10.0;
 };
 
+// CFG on a clock of HZ ticks a second (a world's rate, cvc::sim_rate_valid: a room's, room_clock):
+// its quantum 1/HZ, and every span it counts in ticks -- the catch-up, the windows above, all sized
+// for the default 120 Hz -- the same time at HZ as at CFG's own quantum, at least one tick each.
+// At 60 Hz max_skew_ticks 60 (0.5 s) becomes 30. Throws std::invalid_argument for another HZ.
+holon_config holon_config_at(holon_config cfg, double hz);
+
 // The world's four rules sections, as a holon takes them (holon::set_physics and the rest).
 enum class rules_section : int { physics = 0, archetypes, policy, controllers };
 

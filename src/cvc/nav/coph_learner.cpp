@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cvc/algo/det_math.h>
+#include <cvc/nav/coph_exchange.h>
 #include <cvc/nav/coph_learner.h>
+#include <cvc/nav/detail/coph_math.h>
 #include <limits>
 #include <map>
 #include <queue>
@@ -27,6 +29,11 @@ namespace cvc {
 namespace nav {
 
 namespace {
+
+using detail::coph_cholesky;
+using detail::coph_cholesky_solve;
+using detail::coph_features;
+using detail::coph_slab_distance;
 
 constexpr double kAgentRadius = 0.12;
 constexpr double kSupportRadius = 0.65;
@@ -86,15 +93,6 @@ bool crosses(const coph_vec2 &a, const coph_vec2 &b, const coph_vec2 &p, const c
     return (x[0] - o[0]) * (y[1] - o[1]) - (x[1] - o[1]) * (y[0] - o[0]);
   };
   return side(p, s, a) * side(p, s, b) < 0 && side(a, b, p) * side(a, b, s) < 0;
-}
-
-// shapes.slab_distance: the distance from q to the slab's surface (negative inside).
-double slab_distance(const coph_vec2 &q, const coph_shape &o) {
-  const segment_ends e = ends(o);
-  const double d0 = e.s[0] - e.p[0], d1 = e.s[1] - e.p[1];
-  const double t =
-      clip(((q[0] - e.p[0]) * d0 + (q[1] - e.p[1]) * d1) / ((d0 * d0 + d1 * d1) + 1e-20), 0.0, 1.0);
-  return norm2(q[0] - (e.p[0] + t * d0), q[1] - (e.p[1] + t * d1)) - o.r;
 }
 
 // shapes.slab_sweep: the distance from the motion a-b to the slab's surface.
@@ -403,7 +401,7 @@ bool guard(const coph_state &x, const coph_vec2 &u, double damping, const coph_a
     for (const coph_shape &o : atlas.geometry) {
       if (o.slab) {
         valid = slab_sweep(a, b, o) >= clear - 1e-9 && valid;
-        valid = slab_distance(b, o) >= (clear + stopping) - 1e-9 && valid;
+        valid = coph_slab_distance(b, o) >= (clear + stopping) - 1e-9 && valid;
         continue;
       }
       valid = disk_sweep(a, b, o) >= (o.r + kAgentRadius + cfg.safety_margin) - 1e-9 && valid;
@@ -548,50 +546,6 @@ coph_replay_result replay_on(coph_learner_state &s, const coph_atlas &atlas,
   return out;
 }
 
-// Cholesky of a symmetric positive definite m x m matrix (row-major), in place: the lower factor.
-void cholesky(std::vector<double> &a, int m) {
-  for (int j = 0; j < m; ++j) {
-    double d = a[j * m + j];
-    for (int k = 0; k < j; ++k)
-      d -= a[j * m + k] * a[j * m + k];
-    if (!(d > 0))
-      throw std::runtime_error("coph_field_fit: the normal matrix is not positive definite");
-    d = std::sqrt(d);
-    a[j * m + j] = d;
-    for (int i = j + 1; i < m; ++i) {
-      double s = a[i * m + j];
-      for (int k = 0; k < j; ++k)
-        s -= a[i * m + k] * a[j * m + k];
-      a[i * m + j] = s / d;
-    }
-  }
-}
-
-std::vector<double> cholesky_solve(const std::vector<double> &l, int m, std::vector<double> b) {
-  for (int i = 0; i < m; ++i) {
-    for (int k = 0; k < i; ++k)
-      b[i] -= l[i * m + k] * b[k];
-    b[i] /= l[i * m + i];
-  }
-  for (int i = m - 1; i >= 0; --i) {
-    for (int k = i + 1; k < m; ++k)
-      b[i] -= l[k * m + i] * b[k];
-    b[i] /= l[i * m + i];
-  }
-  return b;
-}
-
-std::vector<double> features(const coph_vec2 &q, const std::vector<coph_vec2> &centers,
-                             double width) {
-  std::vector<double> phi;
-  phi.reserve(centers.size());
-  for (const coph_vec2 &c : centers) {
-    const double dx = (q[0] - c[0]) / width, dy = (q[1] - c[1]) / width;
-    phi.push_back(algo::det::exp(-0.5 * (dx * dx + dy * dy)));
-  }
-  return phi;
-}
-
 // The kept stages' transitions, oldest stage first, held out (uid % 5 == 0) or not.
 std::vector<const coph_transition *> transitions(const coph_learner_state &s, bool validation) {
   std::vector<const coph_transition *> out;
@@ -636,6 +590,15 @@ coph_network coph_crossing_network() {
   return n;
 }
 
+bool coph_corridor_clear(const coph_vec2 &a, const coph_vec2 &b, const coph_network &network,
+                         double margin) {
+  return corridor_clear(a, b, network, margin);
+}
+
+double coph_slab_sweep(const coph_vec2 &a, const coph_vec2 &b, const coph_shape &slab) {
+  return slab_sweep(a, b, slab);
+}
+
 bool coph_is_validation(const std::string &uid) {
   const std::size_t colon = uid.rfind(':');
   const std::string last = colon == std::string::npos ? uid : uid.substr(colon + 1);
@@ -657,7 +620,7 @@ std::vector<coph_stage_fit> coph_field_fit(const coph_learner_state &s) {
     for (const coph_reading &r : st.readings) {
       if (coph_is_validation(r.uid))
         continue;
-      const std::vector<double> phi = features(r.q, st.centers, cfg.rbf_width);
+      const std::vector<double> phi = coph_features(r.q, st.centers, cfg.rbf_width);
       const double y = algo::det::log(algo::det::expm1(4 * std::max(r.value, 0.001)));
       f.targets.push_back(y);
       for (int i = 0; i < m; ++i) {
@@ -672,13 +635,13 @@ std::vector<coph_stage_fit> coph_field_fit(const coph_learner_state &s) {
       f.rhs[i] += cfg.fit_ridge * st.weights[i];
     }
     std::vector<double> l = f.normal;
-    cholesky(l, m);
-    f.weights = cholesky_solve(l, m, f.rhs);
+    coph_cholesky(l, m, "coph_field_fit: the normal matrix is not positive definite");
+    f.weights = coph_cholesky_solve(l, m, f.rhs);
     f.covariance.assign(static_cast<std::size_t>(m) * m, 0.0);
     for (int j = 0; j < m; ++j) {
       std::vector<double> e(m, 0.0);
       e[j] = 1.0;
-      const std::vector<double> col = cholesky_solve(l, m, e);
+      const std::vector<double> col = coph_cholesky_solve(l, m, e);
       for (int i = 0; i < m; ++i)
         f.covariance[i * m + j] = col[i];
     }
@@ -883,6 +846,7 @@ coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph
     ctx.blocked_edges = out.blocked;
     out.target = q;
     out.no_route = true;
+    out.changed = true;
     out.reason = "maze_no_route";
     return out;
   }
@@ -914,9 +878,11 @@ coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph
   if (!corridor_clear(q, target, net) || !obstacle_clear(q, target, obstacles)) {
     out.target = q;
     out.no_route = true;
+    out.changed = true;
     out.reason = "unsafe_connector";
     return out;
   }
+  out.changed = ids != ctx.route_nodes || out.blocked != ctx.blocked_edges;
   ctx.target = target;
   ctx.route_nodes = ids;
   ctx.blocked_edges = out.blocked;
@@ -937,6 +903,7 @@ coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> 
   out.meta.route_reason = route.reason;
   out.meta.route_nodes = route.nodes;
   out.meta.waypoint = route.target;
+  out.meta.route_changed = route.changed;
   coph_field_view f;
   f.centers = s.centers;
   f.weights = s.weights;
@@ -946,6 +913,7 @@ coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> 
       coph_command<T>(x, route.target, policy, f, coph_shaping_for(f, cfg), cfg.force_limit);
   const coph_vec2_of<T> &nominal = cmd.applied;
   out.applied = nominal;
+  out.meta.proposed = values<T>(cmd.proposed);
   out.meta.reason = "nominal";
   projection<T> candidate;
   if (!atlas.overflow && !route.no_route)
@@ -1114,10 +1082,14 @@ coph_replay_result coph_replay(coph_learner_state &s, const coph_atlas &atlas,
 coph_update_report coph_update(coph_learner_state &s, const coph_state &x) {
   const coph_config &cfg = s.cfg;
   coph_update_report rep;
+  coph_expire(s); // CooperativeLearner.update
   rep.fit = coph_field_fit(s);
+  // CooperativeLearner._field_fit: with packets held, each stage takes its Gauss-Newton step.
+  if (!s.exchange.received.empty())
+    rep.message_fit = coph_fit_messages(s, rep.fit);
   std::vector<std::vector<double>> weights, committed;
   for (std::size_t k = 0; k < s.stages.size(); ++k) {
-    weights.push_back(rep.fit[k].weights);
+    weights.push_back(rep.message_fit.empty() ? rep.fit[k].weights : rep.message_fit[k].weights);
     committed.push_back(s.stages[k].weights);
   }
   rep.damping_fit = coph_fit_damping(s);
@@ -1228,6 +1200,8 @@ coph_update_report coph_update(coph_learner_state &s, const coph_state &x) {
   rep.version_after = s.version;
   rep.policy_after = s.policy;
   rep.damping_after = s.damping;
+  for (const auto &r : s.exchange.received)
+    rep.messages.push_back(r.second.identity);
   return rep;
 }
 
