@@ -99,6 +99,9 @@ public:
 
 private:
   void sync_stages();
+  // A car's learner (no network): CooperativeLearner on Learner, routing with the profile's
+  // own planner.
+  bool car() const { return s_.network.nodes.empty(); }
   void refresh_geometry();
   coph_vec2 routed_control(const coph_state &x);
 

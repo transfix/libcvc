@@ -56,7 +56,8 @@ coph_crossing_world::step_result coph_crossing_world::step(const coph_state &x,
         1.0);
     r.hit = r.hit || distance({a[0] + t * s0, a[1] + t * s1}, {o.x, o.y}) <= o.r + 0.12;
   }
-  r.hit = r.hit || !coph_corridor_clear(a, b, cfg_.network, 0.12);
+  if (!cfg_.network.nodes.empty())
+    r.hit = r.hit || !coph_corridor_clear(a, b, cfg_.network, 0.12);
   return r;
 }
 
@@ -77,8 +78,12 @@ coph_crossing_world::sensed coph_crossing_world::sense(int agent, const coph_sta
         continue;
       const coph_vec2 q{x[0] + a * cfg_.cfg.sensor_radius, x[1] + b * cfg_.cfg.sensor_radius};
       const double n = cfg_.noise ? cfg_.noise(agent, tick, j) : 0.0;
-      o.readings.push_back(
-          {prefix + std::to_string(j), now, q, std::max(0.001, cfg_.base_risk + n)});
+      double risk = cfg_.base_risk;
+      for (const auto &[px, py, sx, sy, amplitude] : cfg_.patches) {
+        const double zx = (q[0] - px) / sx, zy = (q[1] - py) / sy;
+        risk = risk + amplitude * std::exp(-0.5 * (zx * zx + zy * zy));
+      }
+      o.readings.push_back({prefix + std::to_string(j), now, q, std::max(0.001, risk + n)});
       ++j;
     }
   for (const coph_shape &sh : cfg_.obstacles) {
@@ -164,6 +169,9 @@ std::vector<std::optional<coph_vec2>> coph_fleet::boundary(long long tick, doubl
           continue;
         coph_agent &a = agents_[i];
         const std::string to = std::to_string(j);
+        // A draw source is asked only for an export that makes a packet.
+        if (draws_ && !coph_can_export(a.state(), x_[i]))
+          continue;
         const std::optional<coph_packet> p =
             draws_ ? a.export_to(x_[i], to, draws_(a, x_[i])) : a.export_to(x_[i], to, rng_);
         if (!p)

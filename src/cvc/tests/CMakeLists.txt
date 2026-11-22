@@ -338,6 +338,7 @@ add_executable(nav_coph_model_test nav_coph_model_test.cpp)
 add_executable(nav_coph_learner_test nav_coph_learner_test.cpp)
 add_executable(nav_coph_exchange_test nav_coph_exchange_test.cpp)
 add_executable(nav_coph_fleet_test nav_coph_fleet_test.cpp)
+add_executable(nav_coph_cars_test nav_coph_cars_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -618,6 +619,7 @@ set(TEST_TARGETS
   nav_coph_learner_test
   nav_coph_exchange_test
   nav_coph_fleet_test
+  nav_coph_cars_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -1530,6 +1532,12 @@ target_link_libraries(nav_coph_exchange_test
 )
 
 target_link_libraries(nav_coph_fleet_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_coph_cars_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3350,6 +3358,7 @@ cvc_discover_tests(nav_coph_model_test)
 cvc_discover_tests(nav_coph_learner_test)
 cvc_discover_tests(nav_coph_exchange_test)
 cvc_discover_tests(nav_coph_fleet_test)
+cvc_discover_tests(nav_coph_cars_test)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
