@@ -308,19 +308,20 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 ### 3.1 FL0's numbers
 
 Headless, an open 400 m square, `nav@1` driving every vehicle, on the reference laptop.
-Re-measured at OW1's 120 Hz clock (2026-11-21, the median of three runs). A tick is now 7/120 s of
-world time, seven physics steps, so at the demos' 3.6x a tick must take under 16.2 ms. The last
-column is FL0's first measurement, at 100 Hz: a 0.06 s tick of six steps.
+Re-measured at OW1's 120 Hz clock (2026-11-22, the median of three runs, after the tick fixes
+below). A tick is now 7/120 s of world time, seven physics steps, so at the demos' 3.6x a tick must
+take under 16.2 ms. The last column is FL0's first measurement, at 100 Hz: a 0.06 s tick of six
+steps.
 
 | Fleet | Tick | Physics | Publishing keys | The rest | Speed it keeps | At 100 Hz |
 |---|---|---|---|---|---|---|
-| 100 kinematic | 4.2 ms | 0.4 | 1.8 | 2.0 | 14x | 3.7 ms, 16x |
-| 400 kinematic | 17.0 ms | 1.9 | 7.9 | 7.3 | 3.4x | 15.8 ms, 3.8x |
-| 800 kinematic | 35.8 ms | 3.7 | 15.5 | 17.0 | 1.6x | 32.2 ms, 1.9x |
-| 800 kinematic, fog | 42.1 ms | 3.7 | 14.9 | 23.7 | 1.4x | 39.2 ms, 1.5x |
-| 60 Jolt | 11.8 ms | 8.5 | 1.0 | 2.1 | 4.9x | 9.4 ms, 6.4x |
-| 120 Jolt | 26.4 ms | 21.5 | 2.0 | 2.9 | 2.2x | 20.6 ms, 2.9x |
-| 240 Jolt | 58.2 ms | 46.2 | 4.0 | 7.7 | 1.0x | 47.8 ms, 1.3x |
+| 100 kinematic | 3.4 ms | 0.4 | 1.4 | 1.7 | 17x | 3.7 ms, 16x |
+| 400 kinematic | 14.6 ms | 1.6 | 6.2 | 6.8 | 4.0x | 15.8 ms, 3.8x |
+| 800 kinematic | 30.3 ms | 3.3 | 12.7 | 14.3 | 1.9x | 32.2 ms, 1.9x |
+| 800 kinematic, fog | 37.1 ms | 3.4 | 12.8 | 20.1 | 1.6x | 39.2 ms, 1.5x |
+| 60 Jolt | 10.3 ms | 7.6 | 0.9 | 1.6 | 5.6x | 9.4 ms, 6.4x |
+| 120 Jolt | 23.0 ms | 19.1 | 2.5 | 1.7 | 2.5x | 20.6 ms, 2.9x |
+| 240 Jolt | 50.4 ms | 42.0 | 4.0 | 4.2 | 1.2x | 47.8 ms, 1.3x |
 
 The rest is the navigator, the per-step vehicle hooks and the gym's own observation. Before the
 overlap fix, 800 kinematic vehicles took 42 ms a tick and the rest was 26 ms. #1358's swarm held 800
@@ -328,21 +329,24 @@ under fog at 3.6x.
 
 What 120 Hz changed:
 - **A tick has seven physics steps, not six, and a step costs about what it did.** Jolt's step is
-  1.2, 3.1 and 6.6 ms at 60, 120 and 240 vehicles, against 1.1, 2.6 and 7.1 at 100 Hz. So a tick
+  1.1, 2.7 and 6.0 ms at 60, 120 and 240 vehicles, against 1.1, 2.6 and 7.1 at 100 Hz. So a tick
   costs more, mostly in physics, and a fleet keeps a little less speed. The tick is also 3 %
   shorter in world time (58.3 ms, not 60).
-- **The comparison isn't only the clock.** These runs are a day later and after FL1b to FL1d, and
-  the rest is 1 to 3 ms higher. That isn't separated here.
-- **400 kinematic vehicles no longer keep 3.6x** (17.0 ms against 16.2). 60 Jolt still do, easily.
+- **The comparison isn't only the clock.** These runs are two days later, after FL1b to FL1d and
+  the tick fixes (below), and the machine's load varies from day to day: Jolt, which the fixes
+  don't touch, measured 12 to 13 % faster here than on 2026-11-21. Only runs alternated with each
+  other compare code with code (below).
+- **400 kinematic vehicles keep 3.6x again** (14.6 ms against 16.2; 17.0 on 2026-11-21, before the
+  fixes). 60 Jolt do, easily.
 
 What follows:
-- **Publishing is the largest cost of a kinematic fleet:** about 19 µs per vehicle per tick for its
+- **Publishing is the largest cost of a kinematic fleet:** about 16 µs per vehicle per tick for its
   25 keys. FL1's summary publishing removes it (below).
-- **Jolt costs about 0.14 to 0.19 ms per vehicle per tick** (0.11 to 0.18 at 100 Hz), in the
+- **Jolt costs about 0.13 to 0.18 ms per vehicle per tick** (0.11 to 0.18 at 100 Hz), in the
   physics step itself. About 60 keep up at 3.6x, as the C++ drive's default assumed. More need a
   slower world, or fewer on Jolt in a mixed fleet.
 - **D3: an asynchronous fleet is needed in drawn hosts.** At 3.6x a fleet ticks 62 times a wall
-  second, so even 60 Jolt vehicles (11.8 ms a tick) take nearly three quarters of a core, and 800
+  second, so even 60 Jolt vehicles (10.3 ms a tick) take nearly two thirds of a core, and 800
   kinematic ones all of it. On the frame's thread that is the frame rate. A drawn host steps its
   scene world (its physics and its navigators) off the frame's thread, the frame reading its poses
   lock-free (`poses(fleet)`), as #1358's swarm did with `sim_thread`. Headless hosts, the gym and
@@ -354,17 +358,41 @@ points, an opposed layout, on the built-in net, a tick's seven steps through the
 (`step_world`), same machine. Re-measured at 120 Hz with FleetBench above; FL1a's own, at 100 Hz
 with six steps a tick, are in brackets.
 
-| Fleet | Load and layout | Tick, `keys: all` | Tick, `keys: summary` | One publish, all / summary |
-|---|---|---|---|---|
-| 800 kinematic | 88 ms (48) | 33.1 ms, 1.8x (31.4, 1.9x) | 13.5 ms, 4.3x (11.4, 5.3x) | 14.5 / 0.23 ms (14.6 / 0.12) |
-| 2000 kinematic | 500 ms (250) | 94.6 ms, 0.6x (83.5) | 43.9 ms, 1.3x (35.6, 1.7x) | 38.2 / 0.8 ms (36.4 / 0.35) |
+| Fleet | Load and layout | Tick, `keys: all` | Tick, `keys: summary` | One publish, all / summary | Reseed and a tick, all / summary |
+|---|---|---|---|---|---|
+| 800 kinematic | 13 ms (48) | 29.4 ms, 2.0x (31.4, 1.9x) | 9.5 ms, 6.1x (11.4, 5.3x) | 14.7 / 0.23 ms (14.6 / 0.12) | 39 / 19 ms |
+| 2000 kinematic | 26 ms (250) | 83.0 ms, 0.7x (83.5) | 32.7 ms, 1.8x (35.6, 1.7x) | 36.4 / 0.64 ms (36.4 / 0.35) | 122 / 73 ms |
 
-- **Summary publishing still takes 800 kinematic vehicles past the demos' 3.6x** on the stepping
-  thread (13.5 ms against 16.2). It also makes each tick faster beyond the publish itself, since
-  the state tree stays small.
-- **Loading a fleet takes about twice as long as at FL1a.** The load steps nothing, so this isn't
-  the clock: it came with FL1b to FL1d or master since, and isn't traced yet. 2000 vehicles a tick
-  also grew more (23 % with summary keys) than the seventh step's physics accounts for.
+- **Summary publishing takes 800 kinematic vehicles well past the demos' 3.6x** on the stepping
+  thread (9.5 ms against 16.2), and 2000 keep 1.8x. It also makes each tick faster beyond the
+  publish itself, since the state tree stays small, and the physics stats with it (below).
+- **Loading a fleet is linear now, and faster than at FL1a** (fixed 2026-11-21).
+  - Placing each kinematic vehicle recomputed its fleet's per-vehicle kinematics over every
+    entity, which is quadratic (since #1235). FL1b made each of those lookups build the fleet's
+    key string, which doubled the load to 88 ms at 800 and 500 at 2000. Removing vehicles did the
+    same, so a reseed took about twice the load.
+  - Now the kinematics are made once, before the fleet's navigator next steps (only its step reads
+    them), and the fleets are searched without building strings.
+  - Alternating with the code before the fix, on a busier day, a load took 105 to 117 ms at 800
+    and 640 to 755 at 2000 before it, 20 and 40 after; a reseed with summary keys 228 ms and
+    1.6 s before, 28 and 118 after.
+- **A tick is faster than FL1a's again, the seventh step included** (fixed 2026-11-22). At 2000
+  vehicles with summary keys it had measured 43.9 ms against FL1a's 35.6, 23 %, more than the
+  seventh step's physics accounts for.
+  - Each phase timed, with FL1a's code (six steps a tick) and this one run alternately: 35.5 and
+    40.5 ms, so 14 %. The rest was the busier day.
+  - A step is more than its physics: it also counts the step's contacts and moves the kinematic
+    boxes, at 2000 vehicles about half the physics again. At FL1a's costs a step, the seventh is
+    2.3 ms of the 5.0.
+  - Counting a step's contacts looked up every vehicle (a map of their chassis) before it read the
+    contacts, and the lookups cost more since FL1b: 0.52 ms a step at FL1a, 0.69 after. A
+    kinematic fleet's boxes meet nothing, so there were none to count. The navigator's tick took
+    0.9 ms more (the same lookups in its loops), and FL1d's pose snapshot 0.25.
+  - Now a step with no contacts that count looks nothing up, and `physics.stats.vehicles` gives a
+    summary fleet's quiet vehicles one line, as `entities.summary` does, not a line each, built
+    every tick (3.3 ms at 2000).
+  - Alternating with the code before: 31.8 ms at 2000 (40.5 before) and 9.5 at 800 (12.4).
+    FL1a's were 35.5 and 10.9.
 
 **Order.** FL0, FL1, FL2, then FL3, which completes #1358's rework. NL1 and NL2 can run beside
 FL1 and FL2. NL3 and NL4 come after FL2, and NL5 any time after NL1. FL4 goes with WD3's next

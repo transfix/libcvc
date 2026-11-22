@@ -2159,11 +2159,19 @@ TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
   EXPECT_EQ(st.findDescendant("entities." + first), nullptr);
   EXPECT_NE(val(app, "entities.summary").find("fleet city  64 v (keys: summary)"),
             std::string::npos);
+  // The physics stats likewise: the fleet's one line, the unnamed entry's own.
+  const std::string stats = val(app, "physics.stats.vehicles");
+  EXPECT_NE(stats.find("fleet city  64 v (keys: summary)"), std::string::npos) << stats;
+  EXPECT_NE(stats.find(solo + "  solo  "), std::string::npos) << stats;
+  EXPECT_EQ(stats.find(first + "  city 1  "), std::string::npos) << stats;
   st("vehicles.watch").value(first); // a camera follows it: it has keys
   art.step_world(6);
   art.drain();
   EXPECT_EQ(val(app, "entities.ids"), first + "," + solo);
   EXPECT_NE(val(app, "entities." + first + ".x"), "");
+  EXPECT_NE(val(app, "physics.stats.vehicles").find(first + "  city 1  "), std::string::npos);
+  EXPECT_NE(val(app, "physics.stats.vehicles").find("fleet city  63 v (keys: summary)"),
+            std::string::npos);
   EXPECT_EQ(val(app, "entities." + first + ".team"), std::to_string(es[0].rally));
   st("vehicles.watch").value("");
   art.step_world(6);
@@ -7283,8 +7291,9 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
 }
 
 // A fleet declared in the document (start: fleet:) on a paused clock: the load (spawn and layout),
-// a tick's steps (cvc::kSimTickQuanta), and one publish, with its per-entity keys (keys: all) or
-// its summary alone. On the built-in net, so it runs the same offline as with the weights.
+// a tick's steps (cvc::kSimTickQuanta), one publish, with its per-entity keys (keys: all) or its
+// summary alone, and a reseed (its vehicles out and laid out again) with the tick after it. On the
+// built-in net, so it runs the same offline as with the weights.
 void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, int ticks) {
   std::string doc = fleet_bench_doc(bundle);
   const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
@@ -7320,10 +7329,16 @@ void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, 
   const auto t2 = clk::now();
   v.publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
+  const auto t3 = clk::now();
+  const bool reseeded = v.restart_fleet("city", true);
+  art.step_world(cvc::kSimTickQuanta);
+  art.drain();
+  const double reseed_ms = std::chrono::duration<double, std::milli>(clk::now() - t3).count();
   std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  tick %7.2f ms (%5.1fx)  "
-              "publish %6.2f ms  (%zu entities, %s; drives %s, plans %s)\n",
+              "publish %6.2f ms  reseed %7.1f ms  (%zu entities, %s; drives %s, plans %s)\n",
               n, keys.c_str(), load_ms, tick_ms,
-              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, pub_ms, v.size(),
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, pub_ms,
+              reseeded ? reseed_ms : -1.0, v.size(),
               cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str(),
               cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.drives", "").c_str(),
               cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.plans", "").c_str());
