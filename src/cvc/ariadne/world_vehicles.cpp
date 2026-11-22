@@ -586,6 +586,10 @@ static ph::vehicle_desc boat_stand_in(const ph::dyn_boat_desc &b) {
   return d;
 }
 
+double stand_height(const ph::vehicle_desc &d) {
+  return d.half_extents.z + (d.axles.empty() ? 0.4 : d.axles.front().wheel_radius);
+}
+
 ph::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
   if (vehicle_plant_floats(a.plant))
     return boat_stand_in(boat_desc_of(a, mass, max_speed));
@@ -1064,8 +1068,7 @@ struct WorldVehicles::impl {
                  ry = o[2 * i + 1] / kScale + grid->center_y();
     const double rear = rear_axle_x(d);
     const double cx = rx - rear * std::cos(h), cy = ry - rear * std::sin(h);
-    const double wheel = d.axles.empty() ? 0.4 : d.axles.front().wheel_radius;
-    return {cx, cy, ground_height(cx, cy) + d.half_extents.z + wheel, h};
+    return {cx, cy, ground_height(cx, cy) + stand_height(d), h};
   }
   static double rear_axle_x(const ph::vehicle_desc &d) {
     double rear = 0.0;
@@ -1688,8 +1691,7 @@ struct WorldVehicles::impl {
 
   // Where a chassis's centre stands at (x, y) on the ground, as a kinematic box does.
   double stand_z(const entity &e, double x, double y) const {
-    const double wheel = e.desc.axles.empty() ? 0.4 : e.desc.axles.front().wheel_radius;
-    return ground_height(x, y) + e.desc.half_extents.z + wheel;
+    return ground_height(x, y) + stand_height(e.desc);
   }
 
   // A pose given to `e`, from now: where it moves to over the steps from `now` (the world tick
@@ -2315,9 +2317,18 @@ struct WorldVehicles::impl {
         g.drives = "builtin";
       } else if (ask == "trained") {
         // $CVC_NAV_WEIGHTS, an installed copy, else the published package (settled, D8).
+        // default_weights_path() names the baked path when nothing is there (so a load says
+        // where it looked): only a file that is there is an installed copy.
         const char *env = std::getenv("CVC_NAV_WEIGHTS");
-        const std::string installed =
-            env && *env ? std::string(env) : cvc::nav::coef_mlp::default_weights_path();
+        std::string installed;
+        if (env && *env) {
+          installed = env;
+        } else {
+          const std::string found = cvc::nav::coef_mlp::default_weights_path();
+          std::error_code ec;
+          if (std::filesystem::is_regular_file(found, ec))
+            installed = found;
+        }
         if (!installed.empty()) {
           g.model = policies.get(cvc::nav::policy_ref{installed, ""});
           g.drives = "trained (" + installed + ", " + g.model.key + ")";

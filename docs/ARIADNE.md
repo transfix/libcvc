@@ -2202,7 +2202,7 @@ scene:
     | Key, under `entities.<id>.pose` | What it is |
     |---|---|
     | `x`, `y` | world metres: its chassis's centre (as `entities.<id>.x`), or with `ref: rear` its rear axle (as a spawn's `at:`). Both are needed |
-    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands |
+    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands (`stand_height`: half its box's height plus its wheel radius). Its model is drawn that stand height below its chassis wherever its `z` puts it, so an outside simulation's poses keep its wheels on that simulation's terrain, whatever the grid's ground |
     | `heading`, `pitch`, `roll` | rad: its rotation is Rz(heading) Ry(pitch) Rx(roll); pitch + nose down, roll + right side down |
     | `matrix` | 16 numbers, row-major (as a node's `matrix` key): its translation and rotation, in place of the six above |
     | `speed` | m/s along its heading: listed as its speed, and its wheels roll at it |
