@@ -3234,9 +3234,10 @@ How each backend does it:
   `borders` and `resizable` need that table, so a row using them needs `col_widths` as well;
   without it the table has one column.
 - **Nothing runs past a narrow window (ImGui).** The line's room is the window's (a table cell's),
-  or, in a window whose width fits its content, the view's right edge, as a rich text paragraph
-  measures it (§5.20). A plain `text:` wider than it wraps at a word there; one that fits draws as
-  always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
+  or, in a window whose width fits its content, the widest that window can be: the view's width,
+  wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
+  `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
+  draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
   smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
   bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,

@@ -1392,9 +1392,14 @@ float ImGuiBackend::line_room() const {
   const bool fitting =
       (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 || win->AutoFitFramesX > 0;
   if (fitting && !ImGui::GetCurrentTable()) {
+    // Such a window is as wide as its widest line, so its own width says nothing. Its room is
+    // the widest it can be, the view less ImGui's safe-area padding each side, wherever it
+    // opened: one opened near the view's right edge is moved in, not wrapped there
+    // (cvcgl_imgui_view_shrink).
     const ImGuiViewport *vp = ImGui::GetMainViewport();
     const ImGuiStyle &style = ImGui::GetStyle();
-    room = vp->WorkPos.x + vp->WorkSize.x - ImGui::GetCursorScreenPos().x - style.WindowPadding.x -
+    room = vp->WorkSize.x - 2.0f * style.DisplaySafeAreaPadding.x -
+           (ImGui::GetCursorScreenPos().x - win->Pos.x) - style.WindowPadding.x -
            style.ScrollbarSize;
   }
   return room;
@@ -1408,9 +1413,12 @@ void ImGuiBackend::fitted_text(const char *text, const float *rgb) {
   if (rgb)
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
   // A line that fits draws as it always did; a wider one wraps at a word where the line ends
-  // (a phone's narrow window), as a rich text paragraph does.
+  // (a phone's narrow window), as a rich text paragraph does. A single word draws as it always
+  // did too: ImGui would break it between its letters ("pts" in a narrow table column, as
+  // "pt" over "s").
   const float room = line_room();
-  if (room > ImGui::GetFontSize() && ImGui::CalcTextSize(text).x > room) {
+  if (room > ImGui::GetFontSize() && std::strchr(text, ' ') != nullptr &&
+      ImGui::CalcTextSize(text).x > room) {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + room);
     ImGui::TextUnformatted(text);
     ImGui::PopTextWrapPos();
