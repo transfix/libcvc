@@ -768,7 +768,8 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
                    src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
                    src/cvc/geometry/tet_complex.cpp inc/cvc/geometry/tet_complex.h \
-                   src/cvc/geometry/skeleton inc/cvc/geometry/skeleton.h \
+                   src/cvc/geometry/cocone src/cvc/geometry/skeleton \
+                   inc/cvc/geometry/skeleton.h \
                    src/cvc/geometry/planar inc/cvc/geometry/planar.h \
                    src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    .github/workflows/ci.yml | grep -q .; then
@@ -2669,7 +2670,8 @@ jobs:
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
         net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
-        skeleton_test contour_stack_test point_classes_test planar_test tiler_test
+        skeleton_test pocket_tunnel_test contour_stack_test point_classes_test planar_test
+        tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
         volume_grid_test volume_grid_contours_test volume_grid_contour_intrinsics_test

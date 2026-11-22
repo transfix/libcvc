@@ -1,0 +1,9 @@
+{
+  "library": "PocketTunnel",
+  "points": 2609,
+  "parameters": {
+    "num_pockets": 3,
+    "num_tunnels": 3
+  },
+  "made_by": "src/cvc/tests/pocket_tunnel_test.cpp (OnAProtein, with CVC_POCKETTUNNEL_WRITE_1GRL): PDB 1GRL's heavy atoms blurred by cvc::mol::blur (blobbiness -0.2, 3 A grid), cvc::iso at 10, the points as floats"
+}

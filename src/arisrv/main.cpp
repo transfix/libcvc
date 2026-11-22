@@ -85,6 +85,8 @@
 #ifdef CVC_ARIADNE_PYTHON
 #include "python_engine.h" // arisrvx: the embedded Python (src/ariadne_python)
 #include "server_link.h"   // its writes and the relay's events, between the two threads
+
+#include <cvc/net/net_engine.h> // host.net: the program's connection engine
 #endif
 #ifdef CVC_ARIADNE_WASM
 #include "wasm_engine.h" // arisrvx: clients' WebAssembly guests (src/ariadne_wasm)
@@ -373,6 +375,9 @@ int main(int argc, char **argv) {
   //                              limit); past it a call is answered rate_limited
   //   --call-rate N              the calls one principal may make a second (default 0 = no
   //                              limit); past it a call is answered rate_limited
+  //   --net-threads N            the I/O threads of the host's connection engine, host.net
+  //                              (docs/roadmap/ARIADNE_NET_ENGINE.md; default 2, at most the core
+  //                              count). The engine starts when the program first asks for it
   // With an authenticate hook, the hook decides who joins instead of the room token: each
   // connection's bearer (gRPC's authorization header, WS's cvc-token.<t>) is handed to it, and its
   // principal keys the connection's bound writes, its calls' ctx.principal and their limits.
@@ -406,6 +411,7 @@ int main(int argc, char **argv) {
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
   std::string slowMsArg = "50", authTimeoutArg = "5", callConcurrencyArg = "8", callRateArg = "0";
+  std::string netThreadsArg = "2";
   std::string tlsCert, tlsKey, callResultMaxArg = "1048576";
   std::string clientsMaxArg = "4096", clientLogMaxArg = "32";
   std::string guestPasswordFile, rconPasswordFile;
@@ -529,6 +535,9 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(a, "--call-rate")) {
       pythonFlags.push_back(a);
       callRateArg = next("");
+    } else if (!std::strcmp(a, "--net-threads")) {
+      pythonFlags.push_back(a);
+      netThreadsArg = next("");
     } else if (!std::strcmp(a, "--tls-cert")) {
       tlsCertFlag = true;
       tlsCert = next("");
@@ -593,13 +602,14 @@ int main(int argc, char **argv) {
   }
 #ifdef CVC_ARIADNE_PYTHON
   double shutdownTimeout = 10.0, authTimeout = 5.0, callRate = 0.0;
-  long writeBudget = 65536, slowMs = 50, callConcurrency = 8;
+  long writeBudget = 65536, slowMs = 50, callConcurrency = 8, netThreads = 2;
   if (!check_seconds("--shutdown-timeout", shutdownTimeoutArg, shutdownTimeout) ||
       !check_count("--script-write-budget", writeBudgetArg, writeBudget) ||
       !check_count("--script-slow-ms", slowMsArg, slowMs) ||
       !check_seconds("--auth-timeout", authTimeoutArg, authTimeout) ||
       !check_count("--call-concurrency", callConcurrencyArg, callConcurrency) ||
       !check_rate("--call-rate", callRateArg, callRate) ||
+      !check_count("--net-threads", netThreadsArg, netThreads) ||
       (!httpListen.empty() && !check_address("--http-listen", httpListen)))
     return 2;
   const bool pythonGiven =
@@ -1017,7 +1027,23 @@ int main(int argc, char **argv) {
   // document's Python functions) reach its loop through the link too, so this thread never takes
   // the GIL. It starts now, before anything listens.
   cvc::ariadne::python::ServerLink scriptLink;
+  // The host's connection engine (host.net; ARIADNE_NET_ENGINE.md §2.7), made when the program
+  // first asks for it. Declared before the loan, so it outlives what Python holds of it.
+  std::mutex netMu;
+  std::unique_ptr<cvc::net::net_engine> netEngine;
   cvc::ariadne::python::HostHandles scriptHandles;
+  scriptHandles.net = [&]() {
+    std::lock_guard<std::mutex> lock(netMu);
+    if (!netEngine) {
+      cvc::net::engine_options o;
+      o.io_threads = static_cast<unsigned>(std::max(1L, netThreads));
+      netEngine = std::make_unique<cvc::net::net_engine>(o);
+      std::printf("[arisrvx] net: the connection engine runs %u I/O thread(s)\n",
+                  netEngine->io_threads());
+      std::fflush(stdout);
+    }
+    return netEngine.get();
+  };
   scriptHandles.app = &app;
   scriptHandles.runtime = serverDoc ? &serverDoc->runtime() : nullptr;
   scriptHandles.mode = "server";

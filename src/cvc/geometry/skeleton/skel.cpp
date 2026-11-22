@@ -23,7 +23,7 @@
 // skel.cpp of VolumeRover's Skeletonization: the planar clusters of U1 (the sheets), their stars
 // and areas, and the polylines of U2's graph (the strands).
 
-#include "cocone.h"
+#include "skeleton_stages.h"
 
 namespace cvc::cocone {
 

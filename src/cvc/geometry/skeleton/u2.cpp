@@ -26,7 +26,7 @@
 // The legacy debug files (<prefix>.no_target_VE.degen and friends, written to the current
 // directory) are counted in the diagnostics instead.
 
-#include "cocone.h"
+#include "skeleton_stages.h"
 
 namespace cvc::cocone {
 
