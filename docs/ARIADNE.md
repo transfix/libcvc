@@ -2904,12 +2904,12 @@ own settings stay under `<node>.children.<kind>` (where `volren_controls` and `v
 bind) and a renderer switched back to finds them as it left them. `<node>.transfer_function` is
 one model bound to whichever renderer draws (`tf_binding_options::model_key`), so an edit carries
 over a switch; with `none` the model keeps its range and overlays. The node reads no file:
-`source:` resolves into `<node>.source.volume` as `volume_grid`'s does (`{ node: <id> }` follows
-that node's `volume`, or its `grid.volume` while that is the one holding data), the renderers draw
+`source:` resolves into `<node>.source.volume` as `volren`'s does (node_data.h: `{ node: <id> }`
+follows a `volume_grid` realized before it by its `grid.volume`, else that node's `volume`), the renderers draw
 the volume as it is held (its voxels shared), and a new volume at the key is drawn by the renderer
 drawing then. Keys: `renderer`, `status` (what draws, or what the node waits for),
 `source.volume`, `source.status`; data channel `volume`. Test: `cvcgl_volume_render`. The built-in
-`volume`, `volren` and `volslice` types keep their fixed renderer and `source: { file }`.
+`volume`, `volren` and `volslice` types each keep their one renderer.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
