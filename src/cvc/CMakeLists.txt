@@ -195,6 +195,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/volume/volume_slice.h
   ../../inc/cvc/volume/volume_grid.h
+  ../../inc/cvc/volume/volume_grid_segment.h
+  ../../inc/cvc/volume/class_surfaces.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -490,6 +492,8 @@ set(SOURCE_FILES
   volume/resize_stepper.cpp
   volume/volume_slice.cpp
   volume/volume_grid.cpp
+  volume/volume_grid_segment.cpp
+  volume/class_surfaces.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
