@@ -20,9 +20,14 @@ scheduler in slices with progress for the UI, interactive on one thread (§1 ite
   atoms and radii, its grid, and its densities to 1e-5 (most voxels bit for bit: TexMol sums a
   sheet's strands together). Not in it: the hydrophobicity and electrostatic densities, colour,
   the multilevel blur, the surfaces (T1 part 2).
-- **Next, for the skeleton demo** (Joe, 2026-11-21: skeletonization was meant for molecular data
-  too): a mesh_lab that builds its surface from a PDB (the blur's isosurface) and a skeleton demo
-  on 1GRL, whose strands and sheets should follow its 19 helices and 11 strands.
+- **The skeleton demo on a molecule** (2026-11-21; Joe: skeletonization was meant for molecular
+  data too): mesh_lab reads a molecule file (`.pdb`, `.ent`, `.pqr`, `.xyzr`) as its heavy atoms'
+  blur map's isosurface (`source.blobbiness`, `source.resolution`, `source.isovalue`,
+  `source.hydrogens`), and the skeleton lab shows 1GRL. At blobbiness -0.2 on a 2 Å grid,
+  isovalue 10, decimated to 4,000 triangles, the skeleton's strands run along the helices: 81 of
+  243 helix C-alphas lie within 3 Å of a strand, 22 of 232 coil ones (`cvcgl_mesh_skeleton`
+  checks the ratio stays above 2). At TexMol's default blobbiness the surface is the atoms' own
+  and the skeleton finds no strands; sheets follow the beta strands only weakly.
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital
