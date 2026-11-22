@@ -3263,6 +3263,57 @@ TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
 
 // Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
 // a jump, a time gone back or the first one taken at once; the same time again changes nothing.
+// A `pose` entity's model, as a relay sends it to its clients (conference::room_entities_of): its
+// base hangs the vehicle's stand height below its chassis (stand_height, where its chassis stands
+// when a pose gives no z), however high over the grid's ground its poses put it.
+TEST(AriadneWorldVehicles, APoseEntitysModelHangsItsStandHeightBelowIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_posed(v);
+  const auto step = [&](int n) {
+    for (int i = 0; i < n; ++i) {
+      v.before_step();
+      w->world().step();
+      v.after_step();
+    }
+  };
+  ASSERT_EQ(r.scene.vehicles.size(), 2u);
+  const double stand = stand_height(vehicle_desc_of(r.scene.vehicles[0]));
+  EXPECT_DOUBLE_EQ(stand, 0.45 + 0.47) << "the Humvee's: half its 0.9 m box, its 0.47 m wheels";
+  for (const double z : {6.0, 2.5}) {
+    entity_pose p;
+    p.x = 10.0;
+    p.y = 2.0;
+    p.z = z;
+    ASSERT_TRUE(v.set_pose(id, p));
+    step(2);
+    const entity_info e = entity(v, id);
+    ASSERT_TRUE(e.posed);
+    EXPECT_DOUBLE_EQ(e.z, z);
+    EXPECT_NEAR(e.ground_z, 0.0, 1e-9) << "the square's top";
+    const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+    ASSERT_EQ(wire.size(), 1u);
+    EXPECT_DOUBLE_EQ(wire[0].base_z, -stand) << "at z " << z << ", not the ground's depth under it";
+  }
+  // Without a z, it stands on the ground: its model's base is the ground.
+  entity_pose p;
+  p.x = 12.0;
+  p.y = 2.0;
+  ASSERT_TRUE(v.set_pose(id, p));
+  step(2);
+  const entity_info e = entity(v, id);
+  EXPECT_NEAR(e.z + conference::room_entities_of(v)[0].base_z, e.ground_z, 1e-9);
+}
+
 TEST(AriadneWorldVehicles, TimedPosesAreDrawnBetweenTheLastTwo) {
   REQUIRE_YAML();
   if (!jolt())
@@ -7723,6 +7774,133 @@ TEST(AriadneOneWorld, GettingInIsAskedForInTheRoomAndRuledOn) {
     }
   }
   EXPECT_TRUE(saw_humvee && saw_truck);
+}
+
+// An avatar that is a vehicle (section 18.6, OW6c): a participant asks for an archetype that is
+// one, and the server spawns that vehicle where its person stands and seats it there for good; it
+// drives it, can't get out or into another, and asking for a person puts it back on its feet
+// beside it while the vehicle goes. Where the first archetype is a vehicle, a newcomer is one
+// without asking, and its vehicle goes when it leaves.
+TEST(AriadneOneWorld, AnAvatarCanBeAVehicle) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_drivable();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t other = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  avatar_archetype person, racer;
+  person.id = "person";
+  racer.id = "racer";
+  racer.vehicle = "humvee";
+  h.set_archetypes({person, racer});
+  const std::string room = "garage";
+  conference::room_join(app, room, "ann"); // the first joiner stands at (4, 0)
+  const auto pump = [&](int frames) {
+    for (int i = 0; i < frames; ++i)
+      server_pump(h, app, room, 1.0 / 60.0);
+  };
+  const auto entity = [&](std::uint64_t id, entity_info &out) {
+    for (const entity_info &e : v.entities())
+      if (e.id == id) {
+        out = e;
+        return true;
+      }
+    return false;
+  };
+  pump(30);
+  EXPECT_EQ(h.embodies("ann"), 0u) << "a person until it asks";
+  EXPECT_FALSE(read_archetype_status(app, room, "ann").answered) << "and nothing is said";
+  const cvc::physics::vec3 stood = h.state("ann").position;
+
+  request_archetype(app, room, "ann", "racer");
+  pump(1);
+  archetype_status st = read_archetype_status(app, room, "ann");
+  EXPECT_TRUE(st.answered && st.ok) << st.why;
+  EXPECT_EQ(st.archetype, "racer");
+  const std::uint64_t body = h.embodies("ann");
+  ASSERT_NE(body, 0u);
+  EXPECT_EQ(h.drives("ann"), body);
+  EXPECT_EQ(read_driving(app, room, "ann"), body);
+  EXPECT_EQ(h.archetype_of("ann"), "racer");
+  entity_info e;
+  ASSERT_TRUE(entity(body, e));
+  EXPECT_EQ(e.spec.archetype, "humvee");
+  EXPECT_LT(std::hypot(e.x - stood.x, e.y - stood.y), 3.0) << "spawned where it stood";
+  bool tagged = false;
+  for (const conference::room_entity &re : conference::room_entities_of(v))
+    tagged = tagged || (re.id == body && re.avatar == "ann");
+  EXPECT_TRUE(tagged) << "the room's entities say whose body it is";
+
+  // It drives it.
+  avatar_intent go;
+  go.throttle = 1.0;
+  write_intent(app, room, "ann", go);
+  pump(90);
+  ASSERT_TRUE(entity(body, e));
+  EXPECT_GT(std::hypot(e.x - stood.x, e.y - stood.y), 2.0) << "under way";
+  go.throttle = 0.0;
+  go.brake = 1.0;
+  write_intent(app, room, "ann", go);
+
+  // No getting out, or into another.
+  std::uint64_t seq = request_drive(app, room, "ann", 0);
+  pump(1);
+  drive_status ds = read_drive_status(app, room, "ann");
+  EXPECT_EQ(ds.seq, seq);
+  EXPECT_FALSE(ds.ok);
+  EXPECT_NE(ds.why.find("you are your vehicle"), std::string::npos) << ds.why;
+  seq = request_drive(app, room, "ann", other);
+  pump(1);
+  ds = read_drive_status(app, room, "ann");
+  EXPECT_FALSE(ds.ok);
+  EXPECT_EQ(h.drives("ann"), body);
+
+  // An archetype the world has not: refused, and it stays as it is.
+  request_archetype(app, room, "ann", "dragon");
+  pump(1);
+  st = read_archetype_status(app, room, "ann");
+  EXPECT_FALSE(st.ok);
+  EXPECT_NE(st.why.find("no avatar archetype 'dragon'"), std::string::npos) << st.why;
+  EXPECT_EQ(h.embodies("ann"), body);
+
+  // A person again: on its feet beside the vehicle, which goes.
+  ASSERT_TRUE(entity(body, e));
+  request_archetype(app, room, "ann", "person");
+  pump(1);
+  st = read_archetype_status(app, room, "ann");
+  EXPECT_TRUE(st.ok) << st.why;
+  EXPECT_EQ(h.embodies("ann"), 0u);
+  EXPECT_EQ(h.drives("ann"), 0u);
+  EXPECT_EQ(read_driving(app, room, "ann"), 0u);
+  EXPECT_FALSE(entity(body, e)) << "its vehicle went";
+  const cvc::physics::vec3 feet = h.state("ann").position;
+  EXPECT_LT(std::hypot(feet.x - e.x, feet.y - e.y), 4.0) << "beside where it was";
+
+  // A world whose first archetype is a vehicle: a newcomer is one without asking.
+  h.set_archetypes({racer, person});
+  conference::room_join(app, room, "bob");
+  pump(2);
+  const std::uint64_t bobs = h.embodies("bob");
+  ASSERT_NE(bobs, 0u);
+  EXPECT_EQ(read_driving(app, room, "bob"), bobs);
+  st = read_archetype_status(app, room, "bob");
+  EXPECT_TRUE(st.answered && st.ok) << st.why;
+  EXPECT_EQ(h.embodies("ann"), 0u) << "ann asked to be a person";
+  seq = request_drive(app, room, "ann", bobs);
+  pump(1);
+  EXPECT_FALSE(read_drive_status(app, room, "ann").ok) << "no one gets into bob";
+  conference::room_leave(app, room, "bob");
+  pump(2);
+  EXPECT_FALSE(entity(bobs, e)) << "bob's vehicle goes with bob";
 }
 
 TEST(AriadneWorldGym, FleetBench) {

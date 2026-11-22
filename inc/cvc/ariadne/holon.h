@@ -286,6 +286,21 @@ public:
   // reach (metres from its feet to the vehicle's chassis box, in plan). 0 gets out, always.
   bool get_in(const std::string &pid, std::uint64_t entity, std::string *why = nullptr);
 
+  // SERVER: participant PID's avatar archetype (the world's avatars: archetypes:, by id; "" the
+  // first). One that is a vehicle (avatar_archetype::vehicle) is PID's body (section 18.6, OW6c):
+  // the server spawns that vehicle where PID's person stands, facing its way, and seats PID in it
+  // for good -- its person leaves the world as when it gets in, get_in refuses it any other
+  // vehicle and getting out, and the vehicle goes when PID leaves the room. Back to a person, it
+  // stands beside its vehicle, which goes. False (with WHY) on a client, for an unknown pid or
+  // archetype, a vehicle with no world to spawn it in, or one the world will not spawn; nothing
+  // changes then.
+  bool set_archetype(const std::string &pid, const std::string &archetype,
+                     std::string *why = nullptr);
+  // PID's archetype as set_archetype last took it ("" until then: the first).
+  std::string archetype_of(const std::string &pid) const;
+  // The world entity that is PID's body (0: PID is a person).
+  std::uint64_t embodies(const std::string &pid) const;
+
   // What a driven vehicle can do, which a driver's drive axes are shares of (avatar_intent): its
   // steering lock (rad), its acceleration and braking (m/s^2; a boat's max_decel is its
   // propeller astern), and whether it floats (a boat: no brakes).
@@ -448,6 +463,10 @@ private:
     // reserve while it is out of the world, and the vehicle's state as of the last step.
     std::uint64_t drives = 0;
     drive_envelope envelope; // the vehicle's, while it drives one
+    // Its archetype (set_archetype; "" the first), and the entity that is its body when that is
+    // a vehicle (0: a person).
+    std::string archetype;
+    std::uint64_t body = 0;
     cvc::physics::body_state parked_feet;
     double parked_reserve = 0.0;
     cvc::physics::body_state ride;

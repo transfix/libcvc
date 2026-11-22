@@ -35,8 +35,9 @@
 // (ribbon / draped_link, ribbon_nodes.h), the axis-aligned slice (volume_slice,
 // volume_slice_nodes.h), VolumeGridRover's grid (volume_grid, volume_grid_nodes.h) with the
 // segmentation intrinsics its documents use (segment.seeded, segment.critical-points and
-// segment.surfaces, cvc/volume/segmentation_intrinsics.h) and the
-// contour tiler (contour_lab, contour_lab_nodes.h), all on the app it is given: a
+// segment.surfaces, cvc/volume/segmentation_intrinsics.h), the contour tiler (contour_lab,
+// contour_lab_nodes.h), the sdf data generator and the volume.filter intrinsics
+// (cvc/volume/volume_filter_intrinsics.h), all on the app it is given: a
 // second app has none of them until it is set up too. ariadne_hello and AriRuntime (so pycvc
 // hosts) both call it.
 

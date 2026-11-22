@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cvc/state/followed_key.h>
+#include <cvc/state/state_exec/types.h> // a data object a program stored
 #include <cvc/tf/model.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
@@ -203,6 +205,50 @@ std::vector<std::uint8_t> color_slice(const volume_slice_data &s, const tf::mode
     }
   }
   return px;
+}
+
+namespace {
+
+// What a program stored with state-data-set is the DSL value holding a data object: its payload is
+// the volume. Anything else is itself.
+const boost::any &unwrapped(const boost::any &d) {
+  if (const auto *v = boost::any_cast<state_exec::value_t>(&d))
+    if (const auto *o = std::get_if<state_exec::data_object_ptr>(&v->v))
+      if (*o)
+        return (*o)->payload;
+  return d;
+}
+
+} // namespace
+
+bool volume_payload(const boost::any &held, std::shared_ptr<slice_source> &src,
+                    std::shared_ptr<const volume> &vol) {
+  const boost::any &d = unwrapped(held);
+  if (const auto *s = boost::any_cast<std::shared_ptr<slice_source>>(&d)) {
+    if (!*s)
+      return false;
+    src = *s;
+    vol = nullptr;
+    if (const volume *v = src->in_memory_volume())
+      vol = std::shared_ptr<const volume>(src, v); // kept by the source
+    return true;
+  }
+  std::shared_ptr<const volume> v;
+  if (const auto *c = boost::any_cast<std::shared_ptr<const volume>>(&d))
+    v = *c;
+  else if (const auto *m = boost::any_cast<std::shared_ptr<volume>>(&d))
+    v = *m;
+  else if (const auto *plain = boost::any_cast<volume>(&d))
+    v = std::make_shared<const volume>(*plain); // a handle on the same voxels
+  if (!v)
+    return false;
+  vol = std::move(v);
+  src = std::make_shared<slice_source>(*vol);
+  return true;
+}
+
+const void *volume_payload_pointee(const boost::any &d) {
+  return any_pointee<slice_source, const volume, volume>(unwrapped(d));
 }
 
 slice_source::slice_source(const volume &vol, std::size_t cache)

@@ -34,6 +34,7 @@ set(CVC_PORT_TESTS
   volume_grid_test
   class_surfaces_test
   volume_grid_segment_test
+  volume_filter_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as

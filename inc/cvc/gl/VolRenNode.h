@@ -101,6 +101,10 @@ public:
   std::size_t addVolume(const cvc::volume &vol,
                         cvc::volren::volume_settings vs = cvc::volren::volume_settings());
   void clearVolumes();
+  // Volume `index` becomes `vol` (a shallow copy, as addVolume's), its settings kept: a node that
+  // follows its volume on the state tree takes each new one this way. Throws cvc::volren_error for
+  // an index past the last.
+  void setVolume(std::size_t index, const cvc::volume &vol);
   std::size_t volumeCount() const;
   cvc::volren::volume_settings volumeConfig(std::size_t index) const;
   void setVolumeConfig(std::size_t index, const cvc::volren::volume_settings &vs);

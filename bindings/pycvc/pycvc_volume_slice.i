@@ -30,6 +30,8 @@
 %ignore cvc::volume_slice_data::voxel;
 %ignore cvc::color_slice;
 %ignore cvc::slice_source;
+%ignore cvc::volume_payload;         // C++ nodes following a state key (node_data.h)
+%ignore cvc::volume_payload_pointee;
 %ignore cvc::param_table<cvc::volume_slice_params>;
 
 %exception cvc::extract_slice {

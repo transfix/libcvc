@@ -202,6 +202,17 @@ public:
   // path is neither.
   std::string resolve(const std::string &path) const;
 
+  // Put `payload` as the output `item` of the dataset `path` names (a store path or a document's
+  // link to one), as a decoder writes its outputs, and raise its rev, so every node viewing the
+  // dataset follows it: a filter's volume put back where the scene shows it. A write to
+  // <prefix>.data.<name>.<item> through the document's link makes a node under the link instead;
+  // this reaches the store node. `item` is one word, and not one of the store's own keys (status,
+  // error, progress, bytes, sha256, uri, canonical, as, size, rev, files). Reloading the dataset
+  // makes its outputs again from its source. Returns the store path; throws std::invalid_argument
+  // naming the problem (no dataset there, a bad item, an empty payload).
+  std::string set_output(const std::string &path, const std::string &item,
+                         const boost::any &payload);
+
   // Load `path`'s request if it was bound lazily and is not loaded yet.
   void touch(const std::string &path);
 
