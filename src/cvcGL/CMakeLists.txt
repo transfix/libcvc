@@ -1343,6 +1343,14 @@ add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
+# Between bakes (an update interval over 1) a caster that moved is shaded as it stood at the last
+# bake: lowered or tilted, its sunlit top is as bright as under fresh maps, and the props that did
+# not move draw the same. Before, it shadowed itself where it had moved behind its baked surface,
+# and a bobbing body flashed at the bake cadence. Renders; skips without GL.
+add_executable(cvcgl_shadow_bake_pose test/cvcgl_shadow_bake_pose.cpp)
+target_link_libraries(cvcgl_shadow_bake_pose PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_bake_pose COMMAND cvcgl_shadow_bake_pose)
+
 # Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
 # at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while
 # a caster moves (two a caster a frame without), and frames identical to pass programs off --

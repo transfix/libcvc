@@ -1943,6 +1943,12 @@ A camera focus spends the maps on a sphere `lead` radii ahead of the focal point
 `ground` node's heightfield; `tick_scene` re-aims it every frame, and the maps re-bake once it has
 moved a fiftieth of its radius. Past it the scene is lit unshadowed.
 
+Between bakes (`update_interval` over 1) the maps hold every caster where it stood at the last bake.
+A caster that has moved since, such as a body on the water or a vehicle, is shaded as it stood
+then. So it never shadows itself where it has moved behind its baked surface; before, a bobbing
+crate flashed at the bake cadence. The shadows it throws, and the shade it receives, catch up at
+the next bake.
+
 **Physics.** A scene-level `physics:` block declares a rigid-body world
 (`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
 
