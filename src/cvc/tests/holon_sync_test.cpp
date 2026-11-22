@@ -28,7 +28,8 @@
 #include <cvc/ariadne/controls.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
-#include <cvc/ariadne/section.h>     // section_epoch
+#include <cvc/ariadne/section.h> // section_epoch
+#include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/app.h>
 #include <cvc/physics/body.h>
@@ -1512,5 +1513,65 @@ TEST(HolonSyncTest, TheClientPumpPredictsTheVehicleWeDrive) {
   driving.value(std::string("0"));
   cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
   EXPECT_TRUE(client.is_local("ann"));
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "out: the walker again";
+}
+
+// The same for a vehicle on the dynamic plant (OW5d): its room entity carries the model's numbers
+// (room_entity::dynamics), which round-trip, and client_pump keeps us local and predicts it.
+TEST(HolonSyncTest, TheClientPumpPredictsTheDynamicVehicleWeDrive) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  conf::room_entity dynamic;
+  dynamic.id = 7;
+  dynamic.plant = "dynamic";
+  const cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::humvee();
+  dynamic.dynamics.preset = "humvee";
+  dynamic.dynamics.mass = d.mass;
+  dynamic.dynamics.max_speed = d.max_speed;
+  dynamic.dynamics.max_accel = d.max_accel;
+  dynamic.dynamics.max_decel = d.max_decel;
+  dynamic.dynamics.max_steer = d.max_steer;
+  dynamic.dynamics.lock = 0.5;
+  dynamic.dynamics.vmax = 12.0;
+  dynamic.dynamics.a_hold = 6.0;
+  dynamic.dynamics.tick_steps = 12;
+  dynamic.dynamics.phase = 5;
+  conf::write_room_entities(app, room, {dynamic});
+  {
+    const std::vector<conf::room_entity> back = conf::read_room_entities(app, room);
+    ASSERT_EQ(back.size(), 1u);
+    EXPECT_EQ(back[0].dynamics, dynamic.dynamics) << "the numbers round-trip";
+    EXPECT_FALSE(back[0].drive.valid()) << "not the kinematic plant's";
+  }
+  cvc::ariadne::entity_playout playout;
+  playout.pump(app, room, 1.0 / 60.0);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "walking";
+
+  cvc::state &driving = app.root()(conf::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("7"));
+  body_state car;
+  car.position = vec3{4.0, 2.0, 1.2};
+  car.linear_velocity = vec3{3.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", car, 200);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann")) << "driving a vehicle we can run: still ours";
+  EXPECT_TRUE(client.predicts_vehicle("ann"));
+  cvc::ariadne::dynamic_vehicle now;
+  EXPECT_TRUE(client.predicted_vehicle("ann", now)) << "on its model";
+  EXPECT_NEAR(client.state("ann").position.x, 4.0, 0.2) << "placed by the vehicle's pose";
+  const double x0 = client.state("ann").position.x;
+  for (int i = 0; i < 30; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_GT(client.state("ann").position.x, x0 + 0.5) << "and run on from there";
+
+  driving.value(std::string("0"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
   EXPECT_FALSE(client.predicts_vehicle("ann")) << "out: the walker again";
 }

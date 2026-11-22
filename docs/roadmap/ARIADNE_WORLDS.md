@@ -1073,9 +1073,25 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   passes one and logs what it did. A client on a 1 m dome of terrain stands on it (z 0.99) where
   the room scene's statics put it on the slab below (z 0); on a generated world it stands at
   z 1.23 where the relay's ground is at 1.22 (`AriadneOneWorld`).
-- **Still to come:** the other plants predicted (`dynamic` and `dynamic4w` are deterministic models
-  too; `jolt` needs the vehicle in the client's world; a boat needs the water), played out until
-  then. For the statics: a document the client does not ship with fetched as a world pack
+- **As built (OW5d, the dynamic plant):** the vehicle a participant drives (or is) on the `dynamic`
+  plant is predicted too. That plant is dyn_bike_plant, the dynamic single-track model (tires,
+  load transfer, actuator lag, the driver that turns nav's acceleration into a drive force), one
+  model substep around each world step; its vehicle is its archetype's preset with five numbers
+  (`vehicle_desc_of`), so the room's entities carry those, the navigator's hold on a command (the
+  fleet's steering lock, the top speed and the braking a tick's acceleration is held to:
+  `sim_world::plant_plan_of`) and the ticks it ticks on (`vehicle_drive.h`'s `dynamic_drive`,
+  `WorldVehicles::dynamics`, `room_entity::dynamics`). A client builds the same plant with that
+  vehicle alone and no world, one substep a physics step (`vehicle_dynamics.h`'s
+  `dynamic_vehicle_model`), and steps it as the relay's world does, the box put where each substep
+  starts and carried a step along at the model's velocity; `dyn_bike_plant::save` and `restore`
+  keep and put back its state (the model's, the wheels', the driver's, the command), so the holon
+  logs it by tick and replays from a sample as for the kinematic plant. The pose stream carries no
+  yaw rate, steering angle or driver; a sample takes them from what was predicted for its tick
+  (`dynamic_vehicle_model::at`). The client's model stays within 0.007 mm and 0.002 mrad of the relay's Humvee over 9 s of throttle, a turn, the brake and reverse (`AriadneOneWorld`); the holon predicts it with nothing to correct while it turns at up to 0.68 rad/s, and a 1.5 m push is corrected at the next sample, after which it agrees exactly (`HolonVehicleTest`).
+- **Still to come:** the other plants predicted (`dynamic4w` is a deterministic model too; `jolt`
+  needs the vehicle in the client's world; a boat needs the water), played out until then. The
+  dynamic plant's prediction runs on flat ground (a client's model has no ground under it, so a
+  slope's grade and a wall are the relay's corrections). For the statics: a document the client does not ship with fetched as a world pack
   (section 12); the world switch followed (a relay that turns on another of its scene's worlds
   publishes nothing yet, so a client keeps the one the document starts with); a static body's
   physics material (a client's statics take the default friction).
@@ -1161,7 +1177,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 

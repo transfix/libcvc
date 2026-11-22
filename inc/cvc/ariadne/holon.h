@@ -21,6 +21,7 @@
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/section.h>     // section_stamp
+#include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/clock_driver.h>
@@ -488,9 +489,16 @@ public:
   // peer or an unknown pid, or for a DRIVE that is not valid(). A host stops it by registering the
   // participant again (client_pump does when the relay lets it out).
   bool predict_vehicle(const std::string &pid, const kinematic_drive &drive);
-  // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now.
+  // The same for a vehicle on the dynamic plant (OW5d, room_entity::dynamics): each quantum one
+  // step of its model (dynamic_vehicle_model, the relay's dyn_bike_plant without a world), and a
+  // sample it is not within reconcile_tol of starts it again from the sample, with the yaw rate,
+  // steering and driver it had predicted for that tick (dynamic_vehicle_model::at).
+  bool predict_vehicle(const std::string &pid, const dynamic_drive &drive);
+  // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now (false for the
+  // other plant's).
   bool predicts_vehicle(const std::string &pid) const;
   bool predicted_vehicle(const std::string &pid, kinematic_vehicle &out) const;
+  bool predicted_vehicle(const std::string &pid, dynamic_vehicle &out) const;
 
 private:
   struct participant {
@@ -578,10 +586,15 @@ private:
     bool vehicle_placed = false;
     kinematic_drive vdrive;
     kinematic_vehicle vnow, vprev;
+    // On the dynamic plant: its model (null: the kinematic plant's numbers above), and the model's
+    // vehicle now and before the last quantum.
+    std::shared_ptr<dynamic_vehicle_model> vdyn;
+    dynamic_vehicle dnow, dprev;
     struct vlogged {
       std::uint64_t tick = 0;
       avatar_intent in;
       kinematic_vehicle after;
+      dynamic_vehicle dafter;
     };
     std::deque<vlogged> vlog;
     bool acked = false;
@@ -607,6 +620,10 @@ private:
   void vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick);
   void vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
                          std::uint64_t server_tick);
+  void dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
+                         std::uint64_t server_tick);
+  // CLIENT: the predicted vehicle's chassis now, and before the last quantum.
+  static cvc::physics::body_state vehicle_body(const participant &p, bool before = false);
   // CLIENT physics: re-run the logged steps of the local avatar from FIRST on (the one before it,
   // if any, is where they start) under the rules in force at each; the jump is a correction.
   void replay_log(const std::string &pid, participant &p, std::size_t first);

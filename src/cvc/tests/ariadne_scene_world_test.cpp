@@ -30,6 +30,7 @@
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
+#include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_gym.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_spawns.h>
@@ -7720,4 +7721,147 @@ scene:
   EXPECT_NEAR(client.state("ann").position.z, ground, 0.15) << "on the relay's ground";
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+namespace {
+// kKinematicDrivable's square, its Humvee on the dynamic plant.
+const char *kDynamicDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: dynamic
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The command the relay sets after a step for a driver's next navigator tick (holon's drive).
+void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic_drive &k,
+                   const avatar_intent &in, double dt) {
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double speed = m.vx * std::cos(m.box[3]) + m.vy * std::sin(m.box[3]);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  m.steer_cmd = c.steer;
+  m.accel_cmd = c.accel;
+}
+} // namespace
+
+// The same on the dynamic plant (ARIADNE_WORLDS.md section 18.5, OW5d): the room's entities carry
+// the vehicle (its preset and numbers), the navigator's hold and its ticks
+// (WorldVehicles::dynamics), and the client's model of it (dynamic_vehicle_model: the relay's
+// dyn_bike_plant alone, without a world) stepped on the same drive axes stays on the relay's
+// vehicle, tires, actuator lag and driver and all, through throttle, a turn, the brake and reverse.
+TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kDynamicDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i) // the driver's command set, the navigator ticked on a clock tick
+    h.advance(dt);
+
+  cvc::ariadne::kinematic_drive not_kinematic;
+  EXPECT_FALSE(v.kinematics(id, not_kinematic)) << "not the kinematic plant";
+  cvc::ariadne::dynamic_drive k;
+  ASSERT_TRUE(v.dynamics(id, k));
+  EXPECT_TRUE(k.valid());
+  EXPECT_EQ(k.preset, "humvee");
+  EXPECT_EQ(k.tick_steps, v.steps_per_tick());
+  bool carried = false;
+  for (const conference::room_entity &e : conference::room_entities_of(v))
+    if (e.id == id) {
+      carried = true;
+      EXPECT_EQ(e.dynamics, k) << "the room's entities carry it";
+      EXPECT_FALSE(e.drive.valid());
+    }
+  EXPECT_TRUE(carried);
+
+  // From where the relay has it, at rest, on the same drive axes at each tick.
+  cvc::ariadne::dynamic_vehicle_model model(k, dt);
+  cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
+  const auto axes = [](int step) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = 0.0;
+    in.brake = 0.0;
+    if (step < 240) {
+      in.throttle = 1.0;
+    } else if (step < 480) {
+      in.throttle = 1.0;
+      in.steer = 0.5;
+    } else if (step < 600) {
+      in.throttle = 0.5;
+      in.steer = -1.0;
+    } else if (step < 840) {
+      in.brake = 1.0;
+    } else {
+      in.throttle = -1.0;
+    }
+    return in;
+  };
+  double worst = 0.0, top = 0.0, worst_yaw = 0.0;
+  const cvc::physics::vec3 start = h.state("ann").position;
+  for (int step = 0; step < 1080; ++step) {
+    const avatar_intent in = axes(step);
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      model.step(m, t);
+      command_after(m, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    worst = std::max(worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
+    const double yaw = 2.0 * std::atan2(relay.rotation.z, relay.rotation.w);
+    worst_yaw = std::max(worst_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
+    top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
+  }
+  const cvc::physics::body_state end = h.state("ann");
+  std::printf("  the dynamic model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s "
+              "(top %.2f m/s, %.1f m from the start, speed at the end %.2f m/s)\n",
+              worst, worst_yaw, top, std::hypot(end.position.x - start.x, end.position.y - start.y),
+              cvc::ariadne::dynamic_vehicle_model::speed(m));
+  EXPECT_GT(top, 5.0) << "it drove";
+  EXPECT_LT(cvc::ariadne::dynamic_vehicle_model::speed(m), -0.5) << "and backed up at the end";
+  EXPECT_LT(worst, 0.01) << "step for step";
+  EXPECT_LT(worst_yaw, 0.002);
 }

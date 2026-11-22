@@ -24,6 +24,7 @@
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/section.h>     // section_stamp: the rules tests
+#include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules: the rules tests
 #include <cvc/physics/body.h>
@@ -1721,6 +1722,132 @@ TEST(HolonVehicleTest, TheVehicleWeDriveIsPredictedAndReconciled) {
       relay_step(relay, k, in, t, dt);
     if (client.tick() % 4 == 0)
       client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), client.tick());
+    const vec3 c = client.take_correction("A");
+    after += std::sqrt(cvc::physics::dot(c, c));
+    if (step >= 60) {
+      const body_state s = client.state("A");
+      worst = std::hypot(s.position.x - relay.box[0], s.position.y - relay.box[1]);
+    }
+  }
+  std::printf("  pushed 1.5 m: corrected %.3f m; then %.4f m from the relay's\n", after, worst);
+  EXPECT_NEAR(after, 1.5, 0.3) << "the sample corrected it";
+  EXPECT_LT(worst, 0.05) << "and it agrees again";
+}
+
+namespace {
+// A Humvee on the dynamic plant as the relay's world gives a client its numbers.
+cvc::ariadne::dynamic_drive humvee_dynamics() {
+  const cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::humvee();
+  cvc::ariadne::dynamic_drive k;
+  k.preset = "humvee";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_accel = d.max_accel;
+  k.max_decel = d.max_decel;
+  k.max_steer = d.max_steer;
+  k.lock = d.max_steer;
+  k.vmax = d.max_speed;
+  k.a_hold = d.max_decel;
+  k.tick_steps = 12;
+  k.phase = 3;
+  return k;
+}
+
+// The relay's vehicle one step at TICK on IN: its step, then the command the relay's drive sets.
+void relay_step(cvc::ariadne::dynamic_vehicle &v, cvc::ariadne::dynamic_vehicle_model &m,
+                const avatar_intent &in, std::uint64_t tick) {
+  m.step(v, tick);
+  holon::drive_envelope env;
+  env.max_steer = m.drive().max_steer;
+  env.max_accel = m.drive().max_accel;
+  env.max_decel = m.drive().max_decel;
+  const double speed = v.vx * std::cos(v.box[3]) + v.vy * std::sin(v.box[3]);
+  const holon::drive_cmd c = holon::drive_command(
+      in, env, speed, static_cast<double>(m.drive().tick_steps) * m.fixed_dt());
+  v.steer_cmd = c.steer;
+  v.accel_cmd = c.accel;
+}
+} // namespace
+
+// The vehicle the client drives on the dynamic plant, predicted (section 18.5, OW5d): with its
+// numbers the client runs the relay's model on its own drive axes, so the relay's samples agree
+// with it and nothing is corrected, the yaw rate and steering the samples do not carry included.
+// A push it cannot know is corrected at the next sample, and it agrees again from there.
+TEST(HolonVehicleTest, TheDynamicVehicleWeDriveIsPredictedAndReconciled) {
+  const cvc::ariadne::dynamic_drive k = humvee_dynamics();
+  holon server(holon_role::server);
+  server.add_participant("A");
+  EXPECT_FALSE(server.predict_vehicle("A", k)) << "the server runs the world's vehicle";
+  holon client(holon_role::client);
+  client.add_participant("A", true);
+  EXPECT_FALSE(client.predict_vehicle("A", cvc::ariadne::dynamic_drive{})) << "no numbers";
+  cvc::ariadne::dynamic_drive unknown = k;
+  unknown.preset = "zeppelin";
+  EXPECT_FALSE(client.predict_vehicle("A", unknown)) << "a preset this build does not know";
+  ASSERT_TRUE(client.predict_vehicle("A", k));
+  EXPECT_TRUE(client.predicts_vehicle("A"));
+  EXPECT_TRUE(client.predict_vehicle("A", k)) << "again: a no-op";
+  cvc::ariadne::kinematic_vehicle not_kinematic;
+  EXPECT_FALSE(client.predicted_vehicle("A", not_kinematic));
+
+  const double dt = client.clock().fixed_dt();
+  cvc::ariadne::dynamic_vehicle_model truth(k, dt);
+  body_state start;
+  start.position = vec3{-40.0, 0.0, 1.2};
+  cvc::ariadne::dynamic_vehicle relay = truth.at(start, 1000);
+  client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(relay), 1000);
+  ASSERT_EQ(client.tick(), 1000u) << "the first sample sets the clock";
+  client.take_correction("A");
+
+  const auto axes = [](int step) {
+    avatar_intent in;
+    in.steer = step >= 200 && step < 400 ? 0.7 : 0.0;
+    in.throttle = step < 500 ? 1.0 : 0.0;
+    in.brake = step >= 500 ? 0.6 : 0.0;
+    return in;
+  };
+  double corrected = 0.0, worst = 0.0, spin = 0.0;
+  for (int step = 0; step < 600; ++step) {
+    const avatar_intent in = axes(step);
+    client.set_intent("A", in);
+    const std::uint64_t before = client.tick();
+    client.advance(dt);
+    for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
+      relay_step(relay, truth, in, t);
+    spin = std::max(spin, std::fabs(relay.wz));
+    if (client.tick() % 4 == 0) // the relay's samples, every 4 ticks, with no yaw rate
+      client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(relay), client.tick());
+    const vec3 c = client.take_correction("A");
+    corrected += std::sqrt(cvc::physics::dot(c, c));
+    const body_state s = client.state("A");
+    worst = std::max(worst, std::hypot(s.position.x - relay.box[0], s.position.y - relay.box[1]));
+  }
+  cvc::ariadne::dynamic_vehicle now;
+  ASSERT_TRUE(client.predicted_vehicle("A", now));
+  std::printf("  predicted: %.6f m from the relay's at worst, %.6f m corrected in all (yaw rate "
+              "up to %.2f rad/s)\n",
+              worst, corrected, spin);
+  EXPECT_LT(worst, 1e-9) << "the same steps";
+  EXPECT_EQ(corrected, 0.0) << "nothing to correct";
+  EXPECT_GT(spin, 0.1) << "it turned";
+  EXPECT_GT(std::hypot(relay.box[0] + 40.0, relay.box[1]), 20.0) << "it drove";
+
+  // A push the client cannot know: the relay's vehicle 1.5 m to its left.
+  relay.model.body.y += 1.5;
+  relay.box[1] += 1.5;
+  double after = 0.0;
+  for (int step = 0; step < 120; ++step) {
+    avatar_intent in;
+    in.steer = 0.3;
+    in.throttle = 0.5;
+    in.brake = 0.0;
+    client.set_intent("A", in);
+    const std::uint64_t before = client.tick();
+    client.advance(dt);
+    for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
+      relay_step(relay, truth, in, t);
+    if (client.tick() % 4 == 0)
+      client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(relay), client.tick());
     const vec3 c = client.take_correction("A");
     after += std::sqrt(cvc::physics::dot(c, c));
     if (step >= 60) {

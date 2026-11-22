@@ -1405,7 +1405,7 @@ bool holon::predict_vehicle(const std::string &pid, const kinematic_drive &drive
   if (it == _participants.end() || !it->second.local)
     return false;
   participant &p = it->second;
-  if (p.vehicle && p.vdrive == drive)
+  if (p.vehicle && !p.vdyn && p.vdrive == drive)
     return true;
   // Other numbers (a navigator built again): on from where it is. New: where it stands until its
   // first sample places it.
@@ -1413,9 +1413,38 @@ bool holon::predict_vehicle(const std::string &pid, const kinematic_drive &drive
   p.vprev = p.vnow;
   p.vehicle = true;
   p.vdrive = drive;
+  p.vdyn.reset();
   p.vlog.clear();
   if (_world && _world->has_avatar(pid))
     _world->remove_avatar(pid); // its person is out of the world while it drives
+  return true;
+}
+
+bool holon::predict_vehicle(const std::string &pid, const dynamic_drive &drive) {
+  if (_role != holon_role::client || !drive.valid())
+    return false;
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.local)
+    return false;
+  participant &p = it->second;
+  if (p.vehicle && p.vdyn && p.vdyn->drive() == drive)
+    return true;
+  std::shared_ptr<dynamic_vehicle_model> model;
+  try {
+    model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt());
+  } catch (const std::exception &) {
+    return false; // a preset this build does not know
+  }
+  // As the kinematic plant's: on from where it is, or where it stands until a sample places it.
+  const cvc::physics::body_state now = state(pid);
+  const bool was = p.vehicle && p.vdyn;
+  p.dnow = model->at(now, _clock.tick(), was ? &p.dnow : nullptr);
+  p.dprev = p.dnow;
+  p.vehicle = true;
+  p.vdyn = std::move(model);
+  p.vlog.clear();
+  if (_world && _world->has_avatar(pid))
+    _world->remove_avatar(pid);
   return true;
 }
 
@@ -1426,10 +1455,24 @@ bool holon::predicts_vehicle(const std::string &pid) const {
 
 bool holon::predicted_vehicle(const std::string &pid, kinematic_vehicle &out) const {
   const auto it = _participants.find(pid);
-  if (it == _participants.end() || !it->second.vehicle)
+  if (it == _participants.end() || !it->second.vehicle || it->second.vdyn)
     return false;
   out = it->second.vnow;
   return true;
+}
+
+bool holon::predicted_vehicle(const std::string &pid, dynamic_vehicle &out) const {
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.vehicle || !it->second.vdyn)
+    return false;
+  out = it->second.dnow;
+  return true;
+}
+
+cvc::physics::body_state holon::vehicle_body(const participant &p, bool before) {
+  if (p.vdyn)
+    return dynamic_vehicle_state(before ? p.dprev : p.dnow);
+  return kinematic_vehicle_state(before ? p.vprev : p.vnow);
 }
 
 namespace {
@@ -1449,17 +1492,45 @@ void step_vehicle(kinematic_vehicle &v, const kinematic_drive &k, const avatar_i
   v.steer_cmd = c.steer;
   v.accel_cmd = c.accel;
 }
+
+// The command a driver's drive axes give the dynamic plant's vehicle V for the navigator's next
+// tick, as holon::scene_step's drive gives it on the relay: from its box's speed along its yaw.
+void command_vehicle(dynamic_vehicle &v, const dynamic_drive &k, const avatar_intent &in,
+                     double dt) {
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double speed = v.vx * std::cos(v.box[3]) + v.vy * std::sin(v.box[3]);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  v.steer_cmd = c.steer;
+  v.accel_cmd = c.accel;
+}
+
+// The dynamic plant's vehicle one step at TICK on IN: its model's step, then the next command.
+void step_vehicle(dynamic_vehicle &v, dynamic_vehicle_model &m, const avatar_intent &in,
+                  std::uint64_t tick) {
+  m.step(v, tick);
+  command_vehicle(v, m.drive(), in, m.fixed_dt());
+}
 } // namespace
 
 void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick) {
   if (!p.vehicle_placed)
     return; // nothing to run until a sample places it
-  p.vprev = p.vnow;
-  step_vehicle(p.vnow, p.vdrive, in, tick, _clock.fixed_dt());
   participant::vlogged e;
+  if (p.vdyn) {
+    p.dprev = p.dnow;
+    step_vehicle(p.dnow, *p.vdyn, in, tick);
+    e.dafter = p.dnow;
+  } else {
+    p.vprev = p.vnow;
+    step_vehicle(p.vnow, p.vdrive, in, tick, _clock.fixed_dt());
+    e.after = p.vnow;
+  }
   e.tick = tick;
   e.in = in;
-  e.after = p.vnow;
   p.vlog.push_back(e);
   if (p.vlog.size() > predicted_avatar::kMaxLog)
     p.vlog.pop_front();
@@ -1471,6 +1542,10 @@ void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &au
     return;
   p.acked = true;
   p.last_acked = server_tick;
+  if (p.vdyn) {
+    dynamic_reconcile(p, auth, server_tick);
+    return;
+  }
   const double dt = _clock.fixed_dt();
   const double tol2 = _cfg.reconcile_tol * _cfg.reconcile_tol;
   // The input in force at the sample's tick: its command is the one the next navigator tick takes.
@@ -1524,6 +1599,54 @@ void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &au
   p.correction = p.correction + d;
 }
 
+void holon::dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
+                              std::uint64_t server_tick) {
+  const double tol2 = _cfg.reconcile_tol * _cfg.reconcile_tol;
+  dynamic_vehicle_model &m = *p.vdyn;
+  // The input in force at the sample's tick, and the model as predicted for it: what the pose
+  // stream does not carry (the yaw rate, the steering, the driver) comes from there.
+  avatar_intent at = p.intent;
+  const dynamic_vehicle *like = p.vehicle_placed ? &p.dnow : nullptr;
+  for (const participant::vlogged &e : p.vlog)
+    if (e.tick == server_tick) {
+      const double dx = e.dafter.box[0] - auth.position.x, dy = e.dafter.box[1] - auth.position.y;
+      if (dx * dx + dy * dy <= tol2) {
+        while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
+          p.vlog.pop_front();
+        return;
+      }
+      at = e.in;
+      like = &e.dafter;
+      break;
+    }
+  const cvc::physics::vec3 before = dynamic_vehicle_state(p.dnow).position;
+  // From the sample, with the command it left for the next tick...
+  dynamic_vehicle v = m.at(auth, server_tick, like);
+  command_vehicle(v, m.drive(), at, m.fixed_dt());
+  while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
+    p.vlog.pop_front();
+  if (!p.vehicle_placed) {
+    // ...placed for the first time: on to now on the input in force, logged.
+    p.vehicle_placed = true;
+    p.vlog.clear();
+    p.dnow = p.dprev = v;
+    for (std::uint64_t t = server_tick + 1; t <= _clock.tick(); ++t)
+      vehicle_step(p, p.intent, t);
+    return;
+  }
+  // ...then the inputs since, again.
+  dynamic_vehicle prev = v;
+  for (participant::vlogged &e : p.vlog) {
+    prev = v;
+    step_vehicle(v, m, e.in, e.tick);
+    e.dafter = v;
+  }
+  p.dnow = v;
+  p.dprev = prev;
+  const cvc::physics::vec3 d = dynamic_vehicle_state(p.dnow).position - before;
+  p.correction = p.correction + d;
+}
+
 void holon::on_present(const cvc::clock_driver::clock_frame &f) {
   _alpha = f.alpha;
   if (_role != holon_role::client)
@@ -1545,7 +1668,7 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
   if (p.drives != 0)
     return p.ride; // driving: where its vehicle is
   if (p.vehicle)
-    return kinematic_vehicle_state(p.vnow); // driving, predicted
+    return vehicle_body(p); // driving, predicted
   if (_world && (_role == holon_role::server || p.local))
     return _world->state(pid);
   if (_role == holon_role::server)
@@ -1560,8 +1683,7 @@ cvc::physics::pose holon::display_pose(const std::string &pid) const {
   if (p.drives != 0)
     return cvc::physics::pose{p.ride.position, p.ride.rotation};
   if (p.vehicle) // driving, predicted: between its last two quanta
-    return interpolate_peer(kinematic_vehicle_state(p.vprev), kinematic_vehicle_state(p.vnow),
-                            _alpha);
+    return interpolate_peer(vehicle_body(p, true), vehicle_body(p), _alpha);
   // The client's own avatar: between its last two quanta, by the frame's alpha.
   if (_role == holon_role::client && p.local && p.have_render_prev)
     return interpolate_peer(p.render_prev, _world ? _world->state(pid) : p.predicted.state(),

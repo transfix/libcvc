@@ -611,13 +611,14 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
     // Driving, our pose is the vehicle's: predicted when the room's entities say how it runs (the
-    // kinematic plant, section 18.5, OW5b), else played out as a peer's; out, the walker again.
+    // kinematic plant, section 18.5, OW5b; the dynamic plant, OW5d), else played out as a peer's;
+    // out, the walker again.
     const conference::room_entity *ride = nullptr;
     bool local = p.pid == self_pid;
     if (p.pid == self_pid) {
       const std::uint64_t driving = read_driving(app, room, p.pid);
       ride = driving != 0 && entities ? entities->find(driving) : nullptr;
-      if (ride && !ride->drive.valid())
+      if (ride && !ride->drive.valid() && !ride->dynamics.valid())
         ride = nullptr;
       local = driving == 0 || ride;
       if (h.has_participant(p.pid) && (local != h.is_local(p.pid) ||
@@ -630,8 +631,10 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     if (!h.has_participant(p.pid))
       h.add_participant(p.pid, local, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);
-    if (ride)
+    if (ride && ride->drive.valid())
       h.predict_vehicle(p.pid, ride->drive); // a no-op while its numbers stay the same
+    else if (ride)
+      h.predict_vehicle(p.pid, ride->dynamics); // the dynamic plant's (OW5d)
     if (p.pid == self_pid) {
       // The server's reserve before the pose: a reconcile trims the log the reserve is checked
       // against.

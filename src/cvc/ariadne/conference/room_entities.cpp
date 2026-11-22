@@ -152,6 +152,18 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set_double({k, "drive", "max_steer"}, kd.max_steer);
     w.set_double({k, "drive", "max_accel"}, kd.max_accel);
     w.set_double({k, "drive", "max_decel"}, kd.max_decel);
+    const dynamic_drive &dd = e.dynamics;
+    w.set({k, "dynamics", "preset"}, dd.preset);
+    w.set_double({k, "dynamics", "mass"}, dd.mass);
+    w.set_double({k, "dynamics", "max_speed"}, dd.max_speed);
+    w.set_double({k, "dynamics", "max_accel"}, dd.max_accel);
+    w.set_double({k, "dynamics", "max_decel"}, dd.max_decel);
+    w.set_double({k, "dynamics", "max_steer"}, dd.max_steer);
+    w.set_double({k, "dynamics", "lock"}, dd.lock);
+    w.set_double({k, "dynamics", "vmax"}, dd.vmax);
+    w.set_double({k, "dynamics", "a_hold"}, dd.a_hold);
+    w.set({k, "dynamics", "tick_steps"}, std::to_string(dd.tick_steps));
+    w.set({k, "dynamics", "phase"}, std::to_string(static_cast<unsigned long long>(dd.phase)));
     w.set_flag({k, "present"}, true); // last: a reader that sees it present sees its fields
     written.insert(e.id);
   }
@@ -207,6 +219,18 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     kd.max_steer = r.number({k, "drive", "max_steer"}, 0.6);
     kd.max_accel = r.number({k, "drive", "max_accel"}, 3.0);
     kd.max_decel = r.number({k, "drive", "max_decel"}, 7.0);
+    dynamic_drive &dd = e.dynamics;
+    dd.preset = r.text({k, "dynamics", "preset"});
+    dd.mass = r.number({k, "dynamics", "mass"}, 0.0);
+    dd.max_speed = r.number({k, "dynamics", "max_speed"}, 0.0);
+    dd.max_accel = r.number({k, "dynamics", "max_accel"}, 0.0);
+    dd.max_decel = r.number({k, "dynamics", "max_decel"}, 0.0);
+    dd.max_steer = r.number({k, "dynamics", "max_steer"}, 0.0);
+    dd.lock = r.number({k, "dynamics", "lock"}, 0.0);
+    dd.vmax = r.number({k, "dynamics", "vmax"}, 0.0);
+    dd.a_hold = r.number({k, "dynamics", "a_hold"}, 0.0);
+    dd.tick_steps = static_cast<int>(r.number({k, "dynamics", "tick_steps"}, 0.0));
+    dd.phase = std::strtoull(r.text({k, "dynamics", "phase"}).c_str(), nullptr, 10);
     out.push_back(std::move(e));
   }
   return out;
@@ -256,7 +280,8 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
       }
       break;
     }
-    vehicles.kinematics(info.id, e.drive); // the kinematic plant's, for a client to run
+    vehicles.kinematics(info.id, e.drive);  // the kinematic plant's, for a client to run
+    vehicles.dynamics(info.id, e.dynamics); // the dynamic plant's
     out.push_back(std::move(e));
   }
   std::sort(out.begin(), out.end(),
