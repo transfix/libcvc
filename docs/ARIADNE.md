@@ -2569,7 +2569,8 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 | `request` | `smooth`, `decimate`, `repair`, `orient`, `curvature`, `reset`, `load`, `reload`, `skeleton`, `stop` (§5.5); several separated by spaces run in order, as in `load smooth` or `decimate skeleton` | — |
 | `busy`, `status`, `stats.vertices`, `stats.faces` | published | — |
 | `stats.work_ms` | published: the wall time of the last run of commands, from the first to idle | — |
-| `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in) | `source: { file }` |
+| `source.file` | the mesh `load` reads: a path or URI, a relative path resolved against the document's directory (`stanford.bunny` is built in). A molecule file (`.pdb`, `.ent`, `.pqr`, `.xyzr`; `cvc::mol`) is read as atoms, and its surface is the isosurface of its blur map, as the next row says | `source: { file }` |
+| `source.blobbiness`, `source.resolution`, `source.isovalue`, `source.hydrogens` | a molecule file's surface: its atoms blurred (`cvc::mol::blur`, TexMol's GOABlur: each atom adds exp(B (r²/R² − 1)), B the blobbiness, negative) on a grid of this spacing in Å, then the isosurface at `isovalue`; hydrogens left out unless `source.hydrogens`. The defaults (−2.3442, 1, 1) are TexMol's, a surface near the atoms' van der Waals spheres; a blobbiness nearer 0 and a higher isovalue give a low-resolution map's surface, where a helix reads as a rod (the skeleton lab uses −0.2, 2 Å, 10) | `blobbiness`, `resolution`, `isovalue`, `hydrogens` |
 | `source.up`, `source.flip`, `source.height` | the `fit:` `load` applies: up axis `x`/`y`/`z`, upside down, height (0 = no fit) | `fit:` |
 | `smooth.method` | `cotan` (implicit) / `uniform` / `taubin` | `smooth_method` |
 | `smooth.iterations`, `smooth.lambda`, `smooth.fix_boundary` | `cvc::smooth_params` | `smooth_iterations`, `smooth_lambda`, `fix_boundary` |
@@ -2626,8 +2627,11 @@ clears it. The children are tagged `skeleton` and the node's own surface `surfac
 node's own tags (below, Tags), so a viewport with `show: [skeleton]` shows the skeleton alone and
 one with `hide: [surface]` shows a mesh_lab without its surface. The skeleton needs Shewchuk's
 predicates (`CVC_WITH_SHEWCHUK`); without them `skeleton.status` reports skeletonize's error.
-[`skeleton_lab.ari`](../examples/ariadne/documents/skeleton_lab.ari) is the demo
-(`cvcgl_mesh_skeleton`, `cvcgl_ariadne_views`, the `skeleton` golden).
+[`skeleton_lab.ari`](../examples/ariadne/documents/skeleton_lab.ari) is the demo: the skeleton
+of a protein's surface, PDB entry 1GRL (a GroEL subunit) read and blurred into a low-resolution
+map (`source.blobbiness` -0.2, 2 Å, isovalue 10), whose strands run along its helices
+(`cvcgl_mesh_skeleton`, `cvcgl_ariadne_views`, the `skeleton` golden on a bunny and the
+`molecule_skeleton` golden on 1GRL).
 
 **`type: fe_lab`** reads a volume like a `volren` node (`source: { file }` or `{ sdf }`) and
 meshes it with the in-tree LBIE mesher (`CVC_ENABLE_MESHER`): tetrahedra
@@ -5246,6 +5250,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs` |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
+| `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its

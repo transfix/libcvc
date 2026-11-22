@@ -108,6 +108,22 @@ inline double coph_slab_distance(const coph_vec2 &q, const coph_shape &o) {
   return std::sqrt(ex * ex + ey * ey) - o.r;
 }
 
+// A Python tuple's order on shapes: (x, y, r) for a disk, (x, y, r, hx, hy) for a slab, element
+// by element, a disk before a slab it is a prefix of.
+inline bool coph_shape_less(const coph_shape &a, const coph_shape &b) {
+  if (a.x != b.x)
+    return a.x < b.x;
+  if (a.y != b.y)
+    return a.y < b.y;
+  if (a.r != b.r)
+    return a.r < b.r;
+  if (!a.slab || !b.slab)
+    return !a.slab && b.slab;
+  if (a.hx != b.hx)
+    return a.hx < b.hx;
+  return a.hy < b.hy;
+}
+
 } // namespace detail
 } // namespace nav
 } // namespace cvc

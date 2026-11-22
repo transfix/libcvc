@@ -568,10 +568,11 @@ public:
   // ticked on a step with a clock tick (before_step(clock_tick)). The phase it reports changes
   // only when the navigator is built again; revision() moves when it does.
   bool kinematics(std::uint64_t id, kinematic_drive &out) const;
-  // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
-  // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a
-  // restart: WorldGym::reset), held to the nearest whole number of physics steps (the status says
-  // when it is not one). Throws std::invalid_argument for a tick that is not finite and > 0.
+  // The navigator's tick to use (s). By default the world's: cvc::sim_tick of its physics step
+  // (cvc/core/sim_tick.h), kSimTick (7/120 s) at the default 120 Hz, 4/60 s at 60 Hz. It takes
+  // effect when the navigator is next built (a new grid, a restart: WorldGym::reset), held to the
+  // nearest whole number of physics steps (the status says when it is not one). Throws
+  // std::invalid_argument for a tick that is not finite and > 0.
   void set_tick(double seconds);
   double tick() const;
   // The navigator's grid of the world on (null without one).

@@ -89,6 +89,21 @@ void write_room_rules(cvc::app &app, const std::string &room_id, const world_rul
 // What the four say, with the default for any never written.
 world_rules read_room_rules(cvc::app &app, const std::string &room_id);
 
+// The world's rate (ARIADNE_WORLDS.md section 18.9), a section of its own:
+//   conf.rooms.<room>.clock.hz   ticks a second (cvc::sim_rate_valid), the quantum 1/hz
+// The relay writes it once at start-up, with its epoch, and runs its holon and the document's
+// world at it. Every client's holon runs at it too: a host builds its holon from
+// room_holon_config(app, room) and builds it again when the room's rate is not its holon's
+// (holon_sync's on_room_clock: a relay restarted at another rate). A rate changes what every tick
+// means, so it has no activation tick: it is the room's from the start of a relay's run. A relay
+// from before the section writes none, and its room runs at 120 Hz.
+std::string room_clock_path(const std::string &room_id);
+section_stamp write_room_clock(cvc::app &app, const std::string &room_id, double hz,
+                               std::uint64_t epoch = 0);
+section_stamp room_clock_stamp(cvc::app &app, const std::string &room_id);
+// The room's rate (Hz), or 0 when it was never written or is not a world's rate.
+double read_room_clock(cvc::app &app, const std::string &room_id);
+
 // The activation tick for a change the relay makes while the room runs at world tick NOW: half a
 // second ahead (60 ticks of the 120 Hz holon), more than a client's lead plus the relay's 200 ms
 // pass, so a client that is not far behind switches on the same tick as the relay, and a later

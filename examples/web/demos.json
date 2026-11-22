@@ -212,9 +212,9 @@
       "app": "arigl",
       "doc": "skeleton_lab",
       "title": "skeleton lab",
-      "desc": "the skeleton of the bunny's surface: strands and sheets inside it",
+      "desc": "the skeleton of a protein's surface: strands along its helices, from a PDB file",
       "blurb":
-          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node: the embedded Stanford bunny is decimated to 4,000 triangles and its vertices skeletonized (Tight Cocone, the medial axis, then the unstable manifolds of its saddles) a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) and the sheets are drawn inside the see-through surface, and a second view shows the skeleton alone. The Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
+          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node and a real protein: PDB entry 1GRL, a subunit of the chaperonin GroEL. Its heavy atoms are blurred into a density (TexMol's blur maps, ported too) like a low-resolution map, where a helix reads as a rod, and the density's isosurface is decimated to 4,000 triangles and skeletonized a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) run along the helices, and the sheets are drawn inside the see-through surface; a second view shows the skeleton alone. The Molecule window changes the blur and makes the surface again; the Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
       "thumb": "img/skeleton_lab_ari.jpg"
     },
     "contour_tiler_ari": {
