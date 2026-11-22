@@ -1058,10 +1058,27 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   show_predicted`). The model stays within 0.05 mm of the relay's Humvee over 9 s of throttle, a
   turn, the brake and reverse (`AriadneOneWorld`); the holon predicts it with nothing to correct,
   and a 1.5 m push the client cannot know is corrected at the next sample (`HolonVehicleTest`).
+- **As built (OW5c, the statics from the document):** the room names the document the relay runs
+  (`room_world_source`: `conf.rooms.<room>.world_source.{uri, sha256}`, the URI it was named by and
+  the SHA-256 of its bytes; arisrv writes it beside the room scene, none for a C++ twin). A client
+  that resolves the same URI to a file with the same hash (a stock world it ships with, the first
+  place section 12 looks) builds that document's world as the relay does (`world_replica`:
+  `SceneWorld::from_scene`, its vehicles left to the room's entities, its keys under a prefix of its
+  own), and its holon's statics are that world's: each static body as the world made it (a mesh's
+  triangles, a terrain's field; `avatar_static::kind::body`) and the colliders a node makes at run
+  time, as each becomes ready (a generated world's terrain, buildings and edge walls;
+  `kind::geometry`, through `add_world_geometry`). Only what is in the world now counts (a scene's
+  worlds are on one at a time). `client_pump(..., world)` takes them once the replica is ready,
+  and the room scene's plane, boxes and spheres until then or when the document is another; arigl
+  passes one and logs what it did. A client on a 1 m dome of terrain stands on it (z 0.99) where
+  the room scene's statics put it on the slab below (z 0); on a generated world it stands at
+  z 1.23 where the relay's ground is at 1.22 (`AriadneOneWorld`).
 - **Still to come:** the other plants predicted (`dynamic` and `dynamic4w` are deterministic models
   too; `jolt` needs the vehicle in the client's world; a boat needs the water), played out until
-  then; OW5c, the client's statics from the document's bodies (meshes, terrain, a generated
-  world's buildings), not only the plane, boxes and spheres the room scene carries.
+  then. For the statics: a document the client does not ship with fetched as a world pack
+  (section 12); the world switch followed (a relay that turns on another of its scene's worlds
+  publishes nothing yet, so a client keeps the one the document starts with); a static body's
+  physics material (a client's statics take the default friction).
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1144,7 +1161,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 

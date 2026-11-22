@@ -390,6 +390,7 @@ int main(int argc, char **argv) {
   std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
   bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
   std::string docPath;
+  std::string docUri; // --doc as given (a cvc:// URI before it resolves to a file)
   bool docFlag = false;                                       // --doc was given (even with no path)
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
@@ -825,6 +826,7 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "arisrv: --doc expects a path\n");
       return 2;
     }
+    docUri = docPath;
     // A stock server world by its URI (cvc://worlds/traffic.ari): the file libcvc installs.
     if (docPath.rfind("cvc://", 0) == 0) {
       cvc::ariadne::register_cvc_uri_handler(app);
@@ -907,6 +909,9 @@ int main(int argc, char **argv) {
   namespace rconf = cvc::ariadne::conference;
   rconf::room_world world;
   std::string worldFrom;
+  // The document the world came from, for a client that holds it to build the same world
+  // (room_world_source, ARIADNE_WORLDS.md section 18.5, OW5c): none for a C++ twin.
+  rconf::room_world_source worldSource;
   std::vector<std::string> worldWarnings;
   cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
   std::string rulesFrom;
@@ -931,6 +936,7 @@ int main(int argc, char **argv) {
     }
     world = rconf::room_world_from_scene(serverDoc->scene(), &worldWarnings);
     worldFrom = docPath;
+    worldSource = {docUri, rconf::file_sha256(docPath)};
   } else {
     worldFrom = "cvc://worlds/" + scene + ".ari";
     const cvc::ariadne::UriResult found = cvc::ariadne::resolve(app, worldFrom);
@@ -939,6 +945,7 @@ int main(int argc, char **argv) {
       lr = cvc::ariadne::load_file(app, found.canonical);
     if (found.ok && lr.ok) {
       world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
+      worldSource = {worldFrom, rconf::file_sha256(found.canonical)};
       for (const std::string &w : lr.warnings)
         worldWarnings.push_back(w);
       if (rulesFrom.empty()) {
@@ -1591,6 +1598,7 @@ int main(int argc, char **argv) {
   // mutations, so the first pass of the loop below fans them to the clients, and late joiners get
   // them in the snapshot.
   rconf::write_room_world(app, room, world);
+  rconf::write_room_world_source(app, room, worldSource);
   {
     const std::size_t lights = world.env.lights.size();
     std::printf(

@@ -26,6 +26,7 @@
 #include <cvc/core/namespace.h>
 #include <cvc/physics/body.h>
 #include <cvc/state/pose_snapshot.h>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,6 +38,8 @@ class app;
 namespace ariadne {
 
 class holon;
+class SceneWorld;
+class world_replica;
 
 // ----------------
 // cvc::ariadne — holon <-> state-tree sync over SCALAR keys (H1 slice 4)
@@ -218,8 +221,14 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // that SELF_PID neither drives nor is (section 18.5, OW5) is held in the holon's world as a
 // kinematic box where it is shown (holon::hold_entity), so the avatar we predict bumps into the
 // room's vehicles and is pushed by them as on the relay; one no longer shown is released.
+//
+// With WORLD (OW5c), the statics are the world document's, as the relay's world has them, once
+// WORLD holds that document (world_replica::ready): its meshes, terrain and a generated world's
+// buildings, not only the room scene's plane, boxes and spheres. Until then, and without it, they
+// are the room scene's (room_statics). client_pump pumps WORLD itself.
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                 double wall_dt = -1.0, const entity_playout *entities = nullptr);
+                 double wall_dt = -1.0, const entity_playout *entities = nullptr,
+                 world_replica *world = nullptr);
 
 // A pose snapshot from the relay (room_pose_relay; transports' set_on_pose_snapshot): decode it
 // with this connection's DECODER and give each participant the holon already has its sample, as
@@ -284,6 +293,48 @@ private:
   std::uint64_t _rev = 0;
   std::uint64_t _predicted = 0; // show_predicted's entity (0: none), and where
   cvc::physics::pose _predicted_at;
+};
+
+// CLIENT: the relay's world, built from the same document (ARIADNE_WORLDS.md section 18.5, OW5c).
+// The room names the document the relay runs (room_world_source: its URI and the SHA-256 of its
+// bytes). When this client resolves the same URI to a file with the same hash -- a stock world it
+// ships with, or a pack it was pointed at (section 12) -- it loads it and builds its scene's world
+// as the relay does (SceneWorld::from_scene), and the holon's statics are that world's static
+// bodies (a mesh's and a terrain's shapes) and the colliders its nodes make at run time (a
+// generated world's terrain and buildings, as each becomes ready). Its vehicles and moving bodies
+// are the relay's to run: the room's entities, not statics. A document it cannot resolve, or one
+// whose hash differs, leaves it not ready, and the statics stay the room scene's.
+class world_replica {
+public:
+  world_replica();
+  ~world_replica();
+  world_replica(const world_replica &) = delete;
+  world_replica &operator=(const world_replica &) = delete;
+
+  // One frame: the room's world source (when its stamp moved: resolve, check, load and build),
+  // then the world's sync (a generated world's colliders as they become ready), and the statics
+  // again when any node's colliders changed.
+  void pump(cvc::app &app, const std::string &room);
+  // Whether it holds the relay's document; its statics, and their stamp (its own epoch, a
+  // revision more each time they change: holon::set_statics takes it).
+  bool ready() const { return _ready; }
+  const std::vector<avatar_static> &statics() const { return _statics; }
+  const section_stamp &stamp() const { return _stamp; }
+  // What it did with the source last: what it built, or why not.
+  const std::string &status() const { return _status; }
+  // The world it built (null when not ready).
+  const SceneWorld *world() const { return _world.get(); }
+
+private:
+  void build_statics();
+  section_stamp _source_stamp;
+  std::unique_ptr<SceneWorld> _world;
+  std::vector<std::string> _nodes; // the document's node ids (a node's colliders by id)
+  bool _ready = false;
+  std::map<std::string, std::uint64_t> _taken; // node -> the colliders' revision taken
+  std::vector<avatar_static> _statics;
+  section_stamp _stamp;
+  std::string _status;
 };
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next

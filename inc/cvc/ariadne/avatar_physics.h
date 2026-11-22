@@ -20,11 +20,18 @@
 #include <cvc/algo/wind_field.h>
 #include <cvc/ariadne/avatar_sim.h> // avatar_intent
 #include <cvc/physics/body.h>
+#include <cvc/physics/field.h> // field_id
 #include <cvc/physics/types.h>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace cvc {
+namespace world {
+class world_geometry;
+}
+} // namespace cvc
 
 namespace cvc {
 namespace physics {
@@ -130,14 +137,20 @@ struct avatar_energy {
   avatar_ledger ledger;
 };
 
-// A static object avatars collide with (the room scene's ground, boxes, spheres).
+// A static object avatars collide with: the room scene's ground, boxes and spheres; or, from the
+// world document itself (world_replica, ARIADNE_WORLDS.md section 18.5, OW5c), a static body as
+// the document's world made it (`body`: its shape and pose, a mesh's or a terrain's included) or
+// the colliders a node makes at run time (`geometry`: a generated world's terrain and buildings).
 struct avatar_static {
-  enum class kind { box, sphere };
+  enum class kind { box, sphere, body, geometry };
   kind type = kind::box;
   cvc::physics::vec3 center;
   cvc::physics::quat rotation;
-  cvc::physics::vec3 half_extents{0.5, 0.5, 0.5}; // box
-  double radius = 0.5;                            // sphere
+  cvc::physics::vec3 half_extents{0.5, 0.5, 0.5};             // box
+  double radius = 0.5;                                        // sphere
+  std::shared_ptr<const cvc::physics::body_desc> body;        // body: made static, its material
+                                                              // the world's default
+  std::shared_ptr<const cvc::world::world_geometry> geometry; // geometry: its collide items
 };
 
 class avatar_world {
@@ -166,7 +179,8 @@ public:
                const std::map<std::string, cvc::physics::body_state> &feet);
   cvc::physics::world &world() { return *_world; }
 
-  // Replace the static objects. Avatars are re-created after them (same pids, same states), so the
+  // Replace the static objects (a body or a geometry without one is skipped). Avatars are re-created
+  // after them (same pids, same states), so the
   // world's creation order stays statics-then-avatars. Not in a shared world (its owner's bodies
   // are the statics): std::logic_error.
   void set_statics(const std::vector<avatar_static> &statics);
@@ -267,6 +281,7 @@ private:
   cvc::physics::world *_world = nullptr;     // the world the avatars are in (_own's or shared)
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
+  std::vector<cvc::physics::field_id> _static_fields; // a static geometry's volumes
   std::map<std::string, avatar> _avatars;
   struct obstacle {
     std::uint32_t id = 0; // cvc::physics::body_id value

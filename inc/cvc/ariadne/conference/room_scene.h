@@ -194,6 +194,28 @@ section_stamp write_room_world(cvc::app &app, const std::string &room_id, const 
 room_world room_world_from_scene(const cvc::ariadne::Scene &scene,
                                  std::vector<std::string> *warnings = nullptr);
 
+// The world document the relay runs (ARIADNE_WORLDS.md section 18.5, OW5c): the URI it was named
+// by (a stock world's cvc://worlds/<name>.ari, a --doc as given) and the SHA-256 of its bytes, in
+// lowercase hex. The room scene carries only what every client can draw; a client that holds the
+// same document (its own bundle, section 12) builds the same world from it instead
+// (world_replica), meshes, terrain and a generated world's buildings included. A world from a
+// C++ twin has none.
+//
+//   conf.rooms.<room>.world_source.{uri, sha256}, stamped {epoch, at, rev} (section.h)
+struct room_world_source {
+  std::string uri, sha256;
+  bool operator==(const room_world_source &) const = default;
+};
+std::string room_world_source_path(const std::string &room_id);
+// Write it in one revision (EPOCH as section_writer::commit takes it). Returns the stamp.
+section_stamp write_room_world_source(cvc::app &app, const std::string &room_id,
+                                      const room_world_source &source, std::uint64_t epoch = 0);
+// Read it; false (OUT untouched) if it was never written.
+bool read_room_world_source(cvc::app &app, const std::string &room_id, room_world_source &out);
+section_stamp room_world_source_stamp(cvc::app &app, const std::string &room_id);
+// The SHA-256 of the file at PATH, in lowercase hex; "" when it cannot be read.
+std::string file_sha256(const std::string &path);
+
 // The rig the stock worlds are lit by, as conference_roster.ari declared it before WD1: a
 // three_point rig staged over the 20 m floor whose key spot casts the shadows, with fill, back,
 // warmth and environment.

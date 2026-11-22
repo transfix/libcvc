@@ -17,6 +17,7 @@
 #include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/conference/room_scene.h> // room_world_source
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>
@@ -7555,4 +7556,168 @@ TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
   EXPECT_GT(top, 5.0) << "it drove";
   EXPECT_LT(m.speed, -0.5) << "and backed up at the end";
   EXPECT_LT(worst, 0.01) << "step for step";
+}
+
+namespace {
+// A world whose ground the room scene cannot carry: a 1 m dome of terrain (a heightfield) over a
+// flat slab, which it can.
+const char *kDomeWorld = R"(meta: { name: dome, min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: slab
+      source: { box: { size: [40, 40, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: dome
+      source:
+        heightfield:
+          size: 20
+          resolution: 41
+          layers:
+            - { kind: dome, amplitude: 1.0, radius: 6 }
+      body: static
+)";
+
+// Where a client standing at the dome's top settles after 3 s, with a world_replica or without.
+struct dome_stand {
+  bool ready = false;
+  std::string status;
+  double z = 0.0;
+};
+dome_stand stand_on_dome(const std::string &doc, const conference::room_world_source &source,
+                         bool replica) {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc);
+  EXPECT_TRUE(r.ok) << r.error;
+  const std::string room = "dome";
+  conference::write_room_world(app, room, conference::room_world_from_scene(r.scene));
+  conference::write_room_world_source(app, room, source);
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {0.0, 0.0, 2.5};
+  write_pose(app, room, "ann", feet, 100);
+  holon client(holon_role::client, room_holon_config());
+  world_replica world;
+  for (int i = 0; i < 180; ++i)
+    client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, replica ? &world : nullptr);
+  dome_stand out;
+  out.ready = world.ready();
+  out.status = world.status();
+  out.z = client.state("ann").position.z;
+  return out;
+}
+} // namespace
+
+// The same world on a client (ARIADNE_WORLDS.md section 18.5, OW5c): the room names the document
+// the relay runs (room_world_source), and a client holding the same document (the same SHA-256)
+// builds its statics from it (world_replica): it stands on the terrain the room scene could not
+// carry, as the relay's avatar does. Without it, or with another document under that name, the
+// statics are the room scene's, and the walk stands on the slab under it.
+TEST(AriadneOneWorld, AClientBuildsTheWorldFromTheRelaysDocument) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5c_world_replica";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "dome.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << kDomeWorld;
+  }
+  const conference::room_world_source source{doc.string(), conference::file_sha256(doc.string())};
+  ASSERT_EQ(source.sha256.size(), 64u);
+  {
+    cvc::app app;
+    conference::write_room_world_source(app, "dome", source);
+    conference::room_world_source back;
+    ASSERT_TRUE(conference::read_room_world_source(app, "dome", back));
+    EXPECT_EQ(back, source) << "round-trips";
+  }
+
+  const dome_stand built = stand_on_dome(doc.string(), source, true);
+  const dome_stand scene = stand_on_dome(doc.string(), source, false);
+  conference::room_world_source other = source;
+  other.sha256[0] = other.sha256[0] == '0' ? '1' : '0';
+  const dome_stand differs = stand_on_dome(doc.string(), other, true);
+  std::printf("  on the dome's top: from the document z %.2f (%s); from the room scene z %.2f; "
+              "another document z %.2f (%s)\n",
+              built.z, built.status.c_str(), scene.z, differs.z, differs.status.c_str());
+  EXPECT_TRUE(built.ready);
+  EXPECT_NEAR(built.z, 1.0, 0.1) << "on the terrain, as the relay's avatar stands";
+  EXPECT_NEAR(scene.z, 0.0, 0.1) << "the room scene has the slab alone";
+  EXPECT_FALSE(differs.ready);
+  EXPECT_NE(differs.status.find("SHA-256"), std::string::npos) << differs.status;
+  EXPECT_NEAR(differs.z, 0.0, 0.1) << "not the relay's document: the room scene's statics";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A generated world's ground and buildings (OW5c): the colliders its node makes at run time come
+// to the client's statics through the replica (avatar_static::geometry), so a client standing on
+// it stands where the relay's world has its ground, not in the air or under it.
+TEST(AriadneOneWorld, AClientStandsOnTheRelaysGeneratedWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5c_generated";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "land.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << R"(meta: { name: land, min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+      body: {}
+)";
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  const std::string room = "land";
+  conference::write_room_world(app, room, conference::room_world_from_scene(r.scene));
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  // The relay's world, as a server builds it: its ground under the spawn point.
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> relay = SceneWorld::from_scene(app, r.scene, "relay", "", &warnings);
+  ASSERT_NE(relay, nullptr);
+  relay->sync(&warnings);
+  const std::optional<cvc::physics::ray_hit> hit =
+      relay->world().raycast({3.0, -4.0, 200.0}, {3.0, -4.0, -200.0});
+  ASSERT_TRUE(hit.has_value());
+  const double ground = hit->point.z;
+
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {3.0, -4.0, ground + 1.5};
+  write_pose(app, room, "ann", feet, 100);
+  holon client(holon_role::client, room_holon_config());
+  world_replica world;
+  for (int i = 0; i < 180; ++i)
+    client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  std::size_t geometries = 0;
+  for (const cvc::ariadne::avatar_static &s : world.statics())
+    geometries += s.type == cvc::ariadne::avatar_static::kind::geometry;
+  std::printf("  on the generated world: the relay's ground at z %.2f, the client stands at "
+              "z %.2f (%zu statics, %zu of them a node's colliders; %s)\n",
+              ground, client.state("ann").position.z, world.statics().size(), geometries,
+              world.status().c_str());
+  EXPECT_TRUE(world.ready());
+  EXPECT_EQ(geometries, 1u) << "the land's colliders";
+  EXPECT_NEAR(client.state("ann").position.z, ground, 0.15) << "on the relay's ground";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }

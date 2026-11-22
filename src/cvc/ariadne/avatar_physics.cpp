@@ -18,6 +18,7 @@
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/world.h>
+#include <cvc/physics/world_geometry.h> // add_world_geometry
 #include <stdexcept>
 
 namespace cvc {
@@ -142,15 +143,36 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
   for (std::uint32_t id : _statics)
     _world->remove_body(bid(id));
   _statics.clear();
+  for (const ph::field_id f : _static_fields)
+    _world->remove_field(f);
+  _static_fields.clear();
   for (const avatar_static &s : statics) {
+    if (s.type == avatar_static::kind::geometry) {
+      if (!s.geometry)
+        continue;
+      const ph::world_bodies made = ph::add_world_geometry(*_world, *s.geometry);
+      for (const auto &b : made.bodies)
+        _statics.push_back(b.second.value);
+      for (const auto &f : made.fields)
+        _static_fields.push_back(f.second);
+      continue;
+    }
     ph::body_desc d;
-    if (s.type == avatar_static::kind::sphere)
-      d.shape = ph::sphere{s.radius};
-    else
-      d.shape = ph::box{s.half_extents};
+    if (s.type == avatar_static::kind::body) {
+      if (!s.body)
+        continue;
+      d = *s.body; // its shape and pose; its material is another world's id
+      d.material = ph::body_desc{}.material;
+      d.linear_velocity = d.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
+    } else {
+      if (s.type == avatar_static::kind::sphere)
+        d.shape = ph::sphere{s.radius};
+      else
+        d.shape = ph::box{s.half_extents};
+      d.position = s.center;
+      d.rotation = s.rotation;
+    }
     d.motion = ph::motion_type::static_;
-    d.position = s.center;
-    d.rotation = s.rotation;
     _statics.push_back(_world->add_body(d).value);
   }
   for (auto &kv : _avatars)

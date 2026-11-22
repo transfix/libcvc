@@ -20,6 +20,9 @@
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h> // cvc::state, SEPARATOR, findDescendant, children
+#include <cvc/state/state_blob_store.h> // sha256_hex
+#include <fstream>
+#include <iterator>
 #include <initializer_list>
 #include <set>
 #include <stdexcept>
@@ -255,6 +258,41 @@ cvc::ariadne::SceneLight read_light(cvc::app &app, const std::string &base, cons
 
 std::string room_scene_path(const std::string &room_id) {
   return sub("conf", {"rooms", room_id.c_str(), "scene"});
+}
+
+std::string room_world_source_path(const std::string &room_id) {
+  return sub("conf", {"rooms", room_id.c_str(), "world_source"});
+}
+
+section_stamp write_room_world_source(cvc::app &app, const std::string &room_id,
+                                      const room_world_source &source, std::uint64_t epoch) {
+  section_writer w(app, room_world_source_path(room_id));
+  w.set({"uri"}, source.uri);
+  w.set({"sha256"}, source.sha256);
+  return w.commit(0, epoch);
+}
+
+bool read_room_world_source(cvc::app &app, const std::string &room_id, room_world_source &out) {
+  const std::string base = room_world_source_path(room_id);
+  if (!read_section_stamp(app, base).written())
+    return false;
+  const section_reader r(app, base);
+  out.uri = r.text({"uri"});
+  out.sha256 = r.text({"sha256"});
+  return true;
+}
+
+section_stamp room_world_source_stamp(cvc::app &app, const std::string &room_id) {
+  return read_section_stamp(app, room_world_source_path(room_id));
+}
+
+std::string file_sha256(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    return {};
+  const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)),
+                                         std::istreambuf_iterator<char>());
+  return cvc::sha256_hex(bytes);
 }
 
 namespace {
