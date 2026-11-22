@@ -354,17 +354,27 @@ points, an opposed layout, on the built-in net, a tick's seven steps through the
 (`step_world`), same machine. Re-measured at 120 Hz with FleetBench above; FL1a's own, at 100 Hz
 with six steps a tick, are in brackets.
 
-| Fleet | Load and layout | Tick, `keys: all` | Tick, `keys: summary` | One publish, all / summary |
-|---|---|---|---|---|
-| 800 kinematic | 88 ms (48) | 33.1 ms, 1.8x (31.4, 1.9x) | 13.5 ms, 4.3x (11.4, 5.3x) | 14.5 / 0.23 ms (14.6 / 0.12) |
-| 2000 kinematic | 500 ms (250) | 94.6 ms, 0.6x (83.5) | 43.9 ms, 1.3x (35.6, 1.7x) | 38.2 / 0.8 ms (36.4 / 0.35) |
+| Fleet | Load and layout | Tick, `keys: all` | Tick, `keys: summary` | One publish, all / summary | Reseed and a tick, all / summary |
+|---|---|---|---|---|---|
+| 800 kinematic | 20 ms (48) | 33.1 ms, 1.8x (31.4, 1.9x) | 13.5 ms, 4.3x (11.4, 5.3x) | 14.5 / 0.23 ms (14.6 / 0.12) | 66 / 28 ms |
+| 2000 kinematic | 40 ms (250) | 94.6 ms, 0.6x (83.5) | 43.9 ms, 1.3x (35.6, 1.7x) | 38.2 / 0.8 ms (36.4 / 0.35) | 186 / 118 ms |
 
 - **Summary publishing still takes 800 kinematic vehicles past the demos' 3.6x** on the stepping
   thread (13.5 ms against 16.2). It also makes each tick faster beyond the publish itself, since
   the state tree stays small.
-- **Loading a fleet takes about twice as long as at FL1a.** The load steps nothing, so this isn't
-  the clock: it came with FL1b to FL1d or master since, and isn't traced yet. 2000 vehicles a tick
-  also grew more (23 % with summary keys) than the seventh step's physics accounts for.
+- **Loading a fleet is linear now, and faster than at FL1a** (fixed 2026-11-21).
+  - Placing each kinematic vehicle recomputed its fleet's per-vehicle kinematics over every
+    entity, which is quadratic (since #1235). FL1b made each of those lookups build the fleet's
+    key string, which doubled the load to 88 ms at 800 and 500 at 2000. Removing vehicles did the
+    same, so a reseed took about twice the load.
+  - Now the kinematics are made once, before the fleet's navigator next steps (only its step reads
+    them), and the fleets are searched without building strings.
+  - The load and reseed columns are medians of three runs, alternating with the code before the
+    fix, on a busier machine. Before it: a load of 105 to 117 ms at 800 and 640 to 755 at 2000;
+    a reseed of 228 ms at 800 and 1.6 s at 2000, with summary keys. Ticks didn't change beyond the
+    noise.
+- **2000 vehicles a tick grew more than the seventh step's physics accounts for** (23 % with
+  summary keys). That isn't traced.
 
 **Order.** FL0, FL1, FL2, then FL3, which completes #1358's rework. NL1 and NL2 can run beside
 FL1 and FL2. NL3 and NL4 come after FL2, and NL5 any time after NL1. FL4 goes with WD3's next
