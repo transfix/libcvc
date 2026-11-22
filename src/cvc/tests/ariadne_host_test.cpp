@@ -21,7 +21,7 @@
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
 #include <cvc/state/state_exec/types.h>
 #include <cvc/volume/point_classes.h> // data-save's point_classes
-#include <cvc/volume/volume.h>              // data-put's volume
+#include <cvc/volume/volume.h>        // data-put's volume
 #include <cvc/volume/volume_file_io.h>
 #include <filesystem>
 #include <fstream>
@@ -901,8 +901,8 @@ TEST(AriadneHostVerbs, DataPutPutsADataObjectAsADatasetsOutput) {
   cvc::volume ones(app, cvc::dimension(3, 3, 3), cvc::Float);
   ones.fill(1.0);
   cvc::writeVolumeFile(app, ones, (dir / "v.rawiv").string());
-  const fs::path doc =
-      write(dir, "p.ari", "meta: {min_libcvc: 3.4.0}\ndata:\n  vol: v.rawiv\nroot:\n  - text: hi\n");
+  const fs::path doc = write(
+      dir, "p.ari", "meta: {min_libcvc: 3.4.0}\ndata:\n  vol: v.rawiv\nroot:\n  - text: hi\n");
   FtxuiBackend be;
   AppRuntime art(app, "ui.docs.dp");
   art.set_backend(be);

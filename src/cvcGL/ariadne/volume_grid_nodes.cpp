@@ -62,8 +62,8 @@ std::string color_text(const ari::Value &v) {
 
 // The volume: source: { data: <name>, item }, { state: <key> } or { node: <id>, key: <key> }
 // (node_data.h). Says what to write when the source: names none of them.
-NodeDataSource grid_volume_source(SceneGraph &sg, const RealizedScene &out,
-                                  const ari::SceneNode &n, std::vector<std::string> *warnings) {
+NodeDataSource grid_volume_source(SceneGraph &sg, const RealizedScene &out, const ari::SceneNode &n,
+                                  std::vector<std::string> *warnings) {
   if (NodeDataSource s = volume_data_source(sg, out, n))
     return s;
   if (!n.source_file.empty() || !n.source_sdf_mesh.empty()) {
@@ -150,8 +150,7 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
   const std::string prefix = out.bind_prefix;
   const NodeDataSource volume = grid_volume_source(sg, out, n, warnings);
   const NodeDataSource points = prop_data_source(app, prefix, n, "points", "classes", warnings);
-  const NodeDataSource session =
-      prop_data_source(app, prefix, n, "session", "session", warnings);
+  const NodeDataSource session = prop_data_source(app, prefix, n, "session", "session", warnings);
   if (n.props.has("region_reads"))
     warn(warnings, "ari: scene node '" + n.id +
                        "': region_reads: the node reads no file (a host gives a large one read "

@@ -584,7 +584,8 @@ tf_binding_options volslice_tf_options(const cvc::ariadne::SceneVolSlice &v,
 // added with the document's settings; each later one replaces its voxels, the settings (the
 // transfer function's lowering included) kept. The transfer function's seed is made on the first
 // volume's range, since the document's isosurfaces are values.
-std::shared_ptr<VolRenNode> realize_followed_volren(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+std::shared_ptr<VolRenNode> realize_followed_volren(SceneGraph &sg,
+                                                    const cvc::ariadne::SceneNode &n,
                                                     GraphicsNode *parent, RealizedScene &out,
                                                     const NodeDataSource &src,
                                                     std::vector<std::string> *warnings) {

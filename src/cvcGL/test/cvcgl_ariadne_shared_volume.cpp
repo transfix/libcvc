@@ -63,8 +63,8 @@ int main() {
   return require ? 1 : 0;
 #else
   const fs::path src = fs::path(__FILE__).parent_path().parent_path().parent_path();
-  const fs::path doc = src.parent_path() / "examples" / "ariadne" / "documents" /
-                       "volume_shared.ari";
+  const fs::path doc =
+      src.parent_path() / "examples" / "ariadne" / "documents" / "volume_shared.ari";
   cvc::app app;
   app.properties("system.log_verbosity", "0");
   cvc::gl::SceneGraph sg(app, "vs");
@@ -102,10 +102,12 @@ int main() {
   };
 
   // The app makes the bunny's distance field off the frame thread.
-  step_until([&] {
-    const std::string st = cvc::ariadne::data_status(app, bunny);
-    return st == "ready" || st == "error";
-  }, 300.0);
+  step_until(
+      [&] {
+        const std::string st = cvc::ariadne::data_status(app, bunny);
+        return st == "ready" || st == "error";
+      },
+      300.0);
   if (cvc::ariadne::data_status(app, bunny) != "ready") {
     const std::string error = val(app, cvc::ariadne::DataStore::of(app)->resolve(bunny) + ".error");
     std::printf("SKIP: the distance field was not made (%s)\n", error.c_str());
@@ -123,7 +125,9 @@ int main() {
   // Filter > Smooth: the job runs beside the frame, and on_tick puts its result back.
   // The dataset's rev, read at its store node (a read of <prefix>.data.bunny.rev with state(path)
   // would make a node under the document's link).
-  const auto rev_now = [&] { return val(app, cvc::ariadne::DataStore::of(app)->resolve(bunny) + ".rev"); };
+  const auto rev_now = [&] {
+    return val(app, cvc::ariadne::DataStore::of(app)->resolve(bunny) + ".rev");
+  };
   const std::string rev = rev_now();
   rt.run_program("(volume.filter-start \"data.bunny.volume\" (dict \"filter\" \"bilateral\" "
                  "\"radius\" 3 \"spatial_sigma\" 2.0 \"radiometric_sigma\" 1000.0) "
@@ -148,10 +152,12 @@ int main() {
 
   // Original: the app makes the bunny again.
   rt.run_program("(data-reload \"bunny\")");
-  step_until([&] {
-    const auto now = volume_at(app, bunny + ".volume");
-    return now && now != smoothed && cvc::ariadne::data_status(app, bunny) == "ready";
-  }, 300.0);
+  step_until(
+      [&] {
+        const auto now = volume_at(app, bunny + ".volume");
+        return now && now != smoothed && cvc::ariadne::data_status(app, bunny) == "ready";
+      },
+      300.0);
   step_until([&] { return volume_at(app, render + ".volume") != smoothed; }, 10.0);
   const std::shared_ptr<const cvc::volume> again = volume_at(app, bunny + ".volume");
   check(again && again != smoothed && volume_at(app, render + ".volume") == again &&

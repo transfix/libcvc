@@ -1349,8 +1349,8 @@ std::string DataStore::resolve(const std::string &path) const {
 
 std::string DataStore::set_output(const std::string &path, const std::string &item,
                                   const boost::any &payload) {
-  const char *const own[] = {"status", "error", "progress", "bytes", "sha256", "uri",
-                                        "canonical", "as", "size", "rev", "files"};
+  const char *const own[] = {"status",    "error", "progress", "bytes", "sha256", "uri",
+                             "canonical", "as",    "size",     "rev",   "files"};
   if (item.empty() || item.find(cvc::state::SEPARATOR) != std::string::npos)
     throw std::invalid_argument("data-put: '" + item + "' is not an output name (one word)");
   for (const char *k : own)

@@ -65,9 +65,8 @@ struct volume_filter_stepper::impl {
     for (int k = -r; k <= r; ++k)
       for (int j = -r; j <= r; ++j)
         for (int i = -r; i <= r; ++i)
-          spatial.push_back(
-              std::exp(static_cast<double>(k * k + j * j + i * i) /
-                       (-p.spatial_sigma * p.spatial_sigma * 2.0)));
+          spatial.push_back(std::exp(static_cast<double>(k * k + j * j + i * i) /
+                                     (-p.spatial_sigma * p.spatial_sigma * 2.0)));
   }
 
   // One row of the bilateral filter: voxels::bilateralFilter's loop for (j, k).
@@ -107,7 +106,8 @@ volume_filter_stepper::volume_filter_stepper(std::shared_ptr<const volume> in,
     : _impl(std::make_unique<impl>(std::move(in), p)) {}
 volume_filter_stepper::~volume_filter_stepper() = default;
 volume_filter_stepper::volume_filter_stepper(volume_filter_stepper &&) noexcept = default;
-volume_filter_stepper &volume_filter_stepper::operator=(volume_filter_stepper &&) noexcept = default;
+volume_filter_stepper &
+volume_filter_stepper::operator=(volume_filter_stepper &&) noexcept = default;
 
 bool volume_filter_stepper::step(std::size_t budget) {
   impl &d = *_impl;

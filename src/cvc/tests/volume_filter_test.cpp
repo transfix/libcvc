@@ -122,9 +122,9 @@ TEST(VolumeFilter, BadInputsThrow) {
                std::invalid_argument);
   cvc::volume_filter_params p;
   p.radius = 17;
-  EXPECT_THROW(cvc::volume_filter_stepper(std::make_shared<const cvc::volume>(edged(app, 4, 4, 4)),
-                                          p),
-               std::invalid_argument);
+  EXPECT_THROW(
+      cvc::volume_filter_stepper(std::make_shared<const cvc::volume>(edged(app, 4, 4, 4)), p),
+      std::invalid_argument);
 }
 
 // ---- volume.filter in the DSL -------------------------------------------------------------------

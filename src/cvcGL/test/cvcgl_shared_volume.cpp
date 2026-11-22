@@ -200,15 +200,13 @@ void run(const fs::path &dir) {
   const auto v2 = std::make_shared<const cvc::volume>(coded(app, 8, 6, 4, 1000.0));
   store->set_output(d.head, "volume", boost::any(v2));
   check(d.dataset() == v2 &&
-            val(app, d.dataset_key().substr(0, d.dataset_key().rfind('.')) + ".rev") !=
-                rev,
+            val(app, d.dataset_key().substr(0, d.dataset_key().rfind('.')) + ".rev") != rev,
         "set_output puts the volume in the dataset's store node, its rev up");
   d.tick(2);
   check(d.of("render") == v2 && d.of("grid", "grid.volume") == v2,
         "a new volume at the key: the volren and the grid both follow it, still one pointer");
   check(d.of("cut") == v2 && d.of("plane") == v2 && cut_x->source() == cut->source() &&
-            cut->source()->in_memory_volume() &&
-            cut->source()->in_memory_volume()->min() == 1000.0,
+            cut->source()->in_memory_volume() && cut->source()->in_memory_volume()->min() == 1000.0,
         "and so do the planes, volume_of: included");
   check(render->volumeCount() == 1, "the volren replaced its volume, not added one");
   check(grid->histogramVolume() == v2, "the grid's transfer function follows it too");
@@ -258,8 +256,7 @@ void run(const fs::path &dir) {
   cvc::state::instance(app)("work.text").data(boost::any(std::string("not a volume")));
   cvc::state::instance(app)(w + ".source.volume").value(std::string("/work.text"));
   d.tick();
-  check(val(app, w + ".source.status") == "error: /work.text holds no volume" &&
-            d.of("work") == v5,
+  check(val(app, w + ".source.status") == "error: /work.text holds no volume" && d.of("work") == v5,
         "a key that holds no volume is said, and the volume shown is kept",
         val(app, w + ".source.status"));
 
