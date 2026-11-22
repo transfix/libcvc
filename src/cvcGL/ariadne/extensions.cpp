@@ -33,7 +33,7 @@
 #include <cvc/gl/ariadne/volume_grid_nodes.h>
 #include <cvc/gl/ariadne/volume_slice_nodes.h>
 #include <cvc/gl/ariadne/world_nodes.h>
-#include <cvc/volume/segmentation_intrinsics.h>  // install_segmentation_intrinsics
+#include <cvc/volume/segmentation_intrinsics.h> // install_segmentation_intrinsics
 #include <cvc/volume/volume_filter_intrinsics.h> // install_volume_filter_intrinsics
 #include <cvc/volume/volume_grid_contour_intrinsics.h>
 
