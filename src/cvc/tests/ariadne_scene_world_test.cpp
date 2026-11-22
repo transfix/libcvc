@@ -7745,6 +7745,27 @@ scene:
       body: static
 )";
 
+// The same on the dynamic4w plant.
+const char *kDynamic4wDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: dynamic4w
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
 // The command the relay sets after a step for a driver's next navigator tick (holon's drive).
 void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic_drive &k,
                    const avatar_intent &in, double dt) {
@@ -7758,20 +7779,24 @@ void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic
   m.steer_cmd = c.steer;
   m.accel_cmd = c.accel;
 }
-} // namespace
 
-// The same on the dynamic plant (ARIADNE_WORLDS.md section 18.5, OW5d): the room's entities carry
+// On the dynamic plant (ARIADNE_WORLDS.md section 18.5, OW5d): the room's entities carry
 // the vehicle (its preset and numbers), the navigator's hold and its ticks
 // (WorldVehicles::dynamics), and the client's model of it (dynamic_vehicle_model: the relay's
 // dyn_bike_plant alone, without a world) stepped on the same drive axes stays on the relay's
 // vehicle, tires, actuator lag and driver and all, through throttle, a turn, the brake and reverse.
-TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
-  REQUIRE_YAML();
-  if (!jolt())
-    GTEST_SKIP() << "no Jolt in this build";
+// What drive_as_the_world_does found, for a plant's own checks.
+struct client_run {
+  double worst_z = 0.0, worst_tilt = 0.0;
+  cvc::ariadne::dynamic_drive drive;
+};
+
+// A drivable Humvee on PLANT in DOC's square, driven through throttle, a turn, the brake and
+// reverse, against the client's model of it on the same drive axes.
+void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result) {
   cvc::app app;
   register_world_block(app);
-  LoadResult r = load_string(app, kDynamicDrivable);
+  LoadResult r = load_string(app, doc);
   ASSERT_TRUE(r.ok) << r.error;
   {
     const Value *world = find_world_block(r);
@@ -7805,6 +7830,7 @@ TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
   ASSERT_TRUE(v.dynamics(id, k));
   EXPECT_TRUE(k.valid());
   EXPECT_EQ(k.preset, "humvee");
+  EXPECT_EQ(k.plant, plant);
   EXPECT_EQ(k.tick_steps, v.steps_per_tick());
   bool carried = false;
   for (const conference::room_entity &e : conference::room_entities_of(v))
@@ -7838,7 +7864,7 @@ TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
     }
     return in;
   };
-  double worst = 0.0, top = 0.0, worst_yaw = 0.0;
+  double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
   for (int step = 0; step < 1080; ++step) {
     const avatar_intent in = axes(step);
@@ -7854,14 +7880,54 @@ TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
     const double yaw = 2.0 * std::atan2(relay.rotation.z, relay.rotation.w);
     worst_yaw = std::max(worst_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
     top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
+    // The box's height and attitude, which on dynamic4w are the suspension's. The driver's pose
+    // carries the heading alone (holon's ride), so the attitude is the chassis body's.
+    const cvc::physics::body_state mine = cvc::ariadne::dynamic_vehicle_state(m);
+    worst_z = std::max(worst_z, std::fabs(mine.position.z - relay.position.z));
+    cvc::physics::quat body = relay.rotation;
+    for (const entity_info &e : v.entities())
+      if (e.id == id && e.chassis.valid())
+        body = w->world().state(e.chassis).rotation;
+    const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
+                               mine.rotation.y * body.y + mine.rotation.z * body.z);
+    worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
   }
   const cvc::physics::body_state end = h.state("ann");
-  std::printf("  the dynamic model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s "
-              "(top %.2f m/s, %.1f m from the start, speed at the end %.2f m/s)\n",
-              worst, worst_yaw, top, std::hypot(end.position.x - start.x, end.position.y - start.y),
+  std::printf("  the %s model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s; "
+              "height %.6f m, attitude %.6f rad (top %.2f m/s, %.1f m from the start, speed at "
+              "the end %.2f m/s)\n",
+              plant.c_str(), worst, worst_yaw, worst_z, worst_tilt, top,
+              std::hypot(end.position.x - start.x, end.position.y - start.y),
               cvc::ariadne::dynamic_vehicle_model::speed(m));
   EXPECT_GT(top, 5.0) << "it drove";
   EXPECT_LT(cvc::ariadne::dynamic_vehicle_model::speed(m), -0.5) << "and backed up at the end";
   EXPECT_LT(worst, 0.01) << "step for step";
   EXPECT_LT(worst_yaw, 0.002);
+  result.worst_z = worst_z;
+  result.worst_tilt = worst_tilt;
+  result.drive = k;
+}
+} // namespace
+
+TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kDynamicDrivable, "dynamic", run);
+  EXPECT_EQ(run.drive.ground, 0.0) << "the box sits on the ground under it";
+}
+
+// The same on the dynamic4w plant (OW5e): the client's model is the relay's dyn_4w_plant alone,
+// four wheels on their suspension, its flat ground at the plant's reference height, so the box's
+// height and attitude follow the relay's too.
+TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kDynamic4wDrivable, "dynamic4w", run);
+  EXPECT_NEAR(run.drive.ground, 0.0, 1e-6) << "the square's top";
+  EXPECT_LT(run.worst_z, 0.01) << "the ride height";
+  EXPECT_LT(run.worst_tilt, 0.01) << "the body's pitch and roll";
 }

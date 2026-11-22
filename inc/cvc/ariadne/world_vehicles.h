@@ -551,10 +551,11 @@ public:
   // ticked on a step with a clock tick (before_step(clock_tick)). The phase it reports changes
   // only when the navigator is built again; revision() moves when it does.
   bool kinematics(std::uint64_t id, kinematic_drive &out) const;
-  // Entity `id` on the dynamic plant as a client runs it (OW5d; vehicle_dynamics.h): its vehicle
-  // (its archetype's preset and the numbers the world gave it), the navigator's hold on a command
-  // (sim_world::plant_plan_of, in SI) and the clock ticks the navigator ticks on. False as
-  // kinematics() is, for one not on the `dynamic` plant.
+  // Entity `id` on a dynamic plant as a client runs it (OW5d, OW5e; vehicle_dynamics.h): the
+  // plant, its vehicle (its archetype's preset and the numbers the world gave it), the navigator's
+  // hold on a command (sim_world::plant_plan_of, in SI), the clock ticks the navigator ticks on,
+  // and on dynamic4w the height its vehicles ride from. False as kinematics() is, for one on
+  // neither the `dynamic` nor the `dynamic4w` plant.
   bool dynamics(std::uint64_t id, dynamic_drive &out) const;
   // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
   // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a

@@ -1769,12 +1769,12 @@ void relay_step(cvc::ariadne::dynamic_vehicle &v, cvc::ariadne::dynamic_vehicle_
 }
 } // namespace
 
-// The vehicle the client drives on the dynamic plant, predicted (section 18.5, OW5d): with its
+// The vehicle the client drives on a dynamic plant, predicted (section 18.5, OW5d): with its
 // numbers the client runs the relay's model on its own drive axes, so the relay's samples agree
 // with it and nothing is corrected, the yaw rate and steering the samples do not carry included.
 // A push it cannot know is corrected at the next sample, and it agrees again from there.
-TEST(HolonVehicleTest, TheDynamicVehicleWeDriveIsPredictedAndReconciled) {
-  const cvc::ariadne::dynamic_drive k = humvee_dynamics();
+namespace {
+void predicted_and_reconciled(const cvc::ariadne::dynamic_drive &k) {
   holon server(holon_role::server);
   server.add_participant("A");
   EXPECT_FALSE(server.predict_vehicle("A", k)) << "the server runs the world's vehicle";
@@ -1824,16 +1824,16 @@ TEST(HolonVehicleTest, TheDynamicVehicleWeDriveIsPredictedAndReconciled) {
   }
   cvc::ariadne::dynamic_vehicle now;
   ASSERT_TRUE(client.predicted_vehicle("A", now));
-  std::printf("  predicted: %.6f m from the relay's at worst, %.6f m corrected in all (yaw rate "
+  std::printf("  %s predicted: %.6f m from the relay's at worst, %.6f m corrected in all (yaw rate "
               "up to %.2f rad/s)\n",
-              worst, corrected, spin);
+              k.plant.c_str(), worst, corrected, spin);
   EXPECT_LT(worst, 1e-9) << "the same steps";
   EXPECT_EQ(corrected, 0.0) << "nothing to correct";
   EXPECT_GT(spin, 0.1) << "it turned";
   EXPECT_GT(std::hypot(relay.box[0] + 40.0, relay.box[1]), 20.0) << "it drove";
 
   // A push the client cannot know: the relay's vehicle 1.5 m to its left.
-  relay.model.body.y += 1.5;
+  std::visit([](auto &m) { m.body.y += 1.5; }, relay.model);
   relay.box[1] += 1.5;
   double after = 0.0;
   for (int step = 0; step < 120; ++step) {
@@ -1855,7 +1855,36 @@ TEST(HolonVehicleTest, TheDynamicVehicleWeDriveIsPredictedAndReconciled) {
       worst = std::hypot(s.position.x - relay.box[0], s.position.y - relay.box[1]);
     }
   }
-  std::printf("  pushed 1.5 m: corrected %.3f m; then %.4f m from the relay's\n", after, worst);
+  std::printf("  %s pushed 1.5 m: corrected %.3f m; then %.4f m from the relay's\n",
+              k.plant.c_str(), after, worst);
   EXPECT_NEAR(after, 1.5, 0.3) << "the sample corrected it";
   EXPECT_LT(worst, 0.05) << "and it agrees again";
+}
+} // namespace
+
+TEST(HolonVehicleTest, TheDynamicVehicleWeDriveIsPredictedAndReconciled) {
+  predicted_and_reconciled(humvee_dynamics());
+}
+
+// The same on the dynamic4w plant (OW5e): its model carries the suspension (heave, roll, pitch)
+// the samples do not, from what was predicted for the sample's tick.
+TEST(HolonVehicleTest, TheFourWheelVehicleWeDriveIsPredictedAndReconciled) {
+  cvc::ariadne::dynamic_drive k = humvee_dynamics();
+  k.plant = "dynamic4w";
+  k.ground = 0.0;
+  {
+    cvc::ariadne::dynamic_vehicle_model m(k, 1.0 / 120.0);
+    ASSERT_NE(m.four(), nullptr);
+    EXPECT_EQ(m.bike(), nullptr);
+    body_state start;
+    start.position = vec3{0.0, 0.0, 1.2};
+    cvc::ariadne::dynamic_vehicle v = m.at(start, 0);
+    EXPECT_TRUE(std::holds_alternative<cvc::physics::dyn_4w_saved>(v.model));
+    cvc::ariadne::dynamic_vehicle_model bike(humvee_dynamics(), 1.0 / 120.0);
+    EXPECT_THROW(bike.step(v, 1), std::invalid_argument) << "a vehicle of the other plant";
+  }
+  cvc::ariadne::dynamic_drive other = k;
+  other.plant = "jolt";
+  EXPECT_FALSE(other.valid()) << "not a plant a client runs";
+  predicted_and_reconciled(k);
 }

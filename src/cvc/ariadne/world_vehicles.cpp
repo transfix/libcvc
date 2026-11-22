@@ -3562,12 +3562,16 @@ bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
     const impl::fleet *f = d.fleet_of(e);
     const int i = d.index(e);
     cvc::nav::sim_world::plant_plan plan;
-    if (!f || f->plant != "dynamic" || !f->bike || i < 0 || !f->sim->plant_plan_of(i, plan))
+    if (!f || i < 0 ||
+        !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four)))
+      return false;
+    if (!f->sim->plant_plan_of(i, plan))
       return false;
     const vehicle_archetype *a = d.find(e.spec.archetype);
     if (!a)
       return false;
     dynamic_drive k;
+    k.plant = f->plant;
     k.preset = a->preset;
     k.mass = e.desc.mass;
     k.max_speed = e.desc.max_speed;
@@ -3582,6 +3586,8 @@ bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
     k.a_hold = (plan.a_brake > 0.0f ? plan.a_brake : plan.a_max) / kScale;
     k.tick_steps = d.every;
     k.phase = d.phase;
+    if (f->four)
+      k.ground = f->four->ground_reference();
     out = k;
     return true;
   }

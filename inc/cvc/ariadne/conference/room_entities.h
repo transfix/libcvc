@@ -79,8 +79,8 @@ struct room_entity {
   // it drives is predicted (ARIADNE_WORLDS.md section 18.5, OW5b; WorldVehicles::kinematics). Not
   // valid() on another plant.
   kinematic_drive drive;
-  // On the dynamic plant: the same, for its model (OW5d; WorldVehicles::dynamics). Not valid() on
-  // another plant.
+  // On the dynamic or dynamic4w plant: the same, for its model (OW5d, OW5e;
+  // WorldVehicles::dynamics). Not valid() on another plant.
   dynamic_drive dynamics;
   bool operator==(const room_entity &) const = default;
 };

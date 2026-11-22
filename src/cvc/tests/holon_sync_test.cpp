@@ -1575,3 +1575,58 @@ TEST(HolonSyncTest, TheClientPumpPredictsTheDynamicVehicleWeDrive) {
   cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
   EXPECT_FALSE(client.predicts_vehicle("ann")) << "out: the walker again";
 }
+
+// And on the dynamic4w plant (OW5e): the plant and the height it rides from round-trip, and the
+// vehicle is predicted on the four-wheel model.
+TEST(HolonSyncTest, TheClientPumpPredictsTheFourWheelVehicleWeDrive) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{1.0, 2.0, 0.25};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  conf::room_entity four;
+  four.id = 9;
+  four.plant = "dynamic4w";
+  const cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::humvee();
+  cvc::ariadne::dynamic_drive &k = four.dynamics;
+  k.plant = "dynamic4w";
+  k.preset = "humvee";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_accel = d.max_accel;
+  k.max_decel = d.max_decel;
+  k.max_steer = d.max_steer;
+  k.lock = 0.5;
+  k.vmax = 12.0;
+  k.a_hold = 6.0;
+  k.tick_steps = 12;
+  k.phase = 5;
+  k.ground = 0.25;
+  conf::write_room_entities(app, room, {four});
+  {
+    const std::vector<conf::room_entity> back = conf::read_room_entities(app, room);
+    ASSERT_EQ(back.size(), 1u);
+    EXPECT_EQ(back[0].dynamics, k) << "the plant and the height round-trip";
+  }
+  cvc::ariadne::entity_playout playout;
+  playout.pump(app, room, 1.0 / 60.0);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  cvc::state &driving = app.root()(conf::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("9"));
+  body_state car;
+  car.position = vec3{4.0, 2.0, 1.4};
+  car.linear_velocity = vec3{3.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", car, 200);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann"));
+  cvc::ariadne::dynamic_vehicle now;
+  ASSERT_TRUE(client.predicted_vehicle("ann", now)) << "on its model";
+  EXPECT_TRUE(std::holds_alternative<cvc::physics::dyn_4w_saved>(now.model)) << "the four wheels'";
+  const double x0 = client.state("ann").position.x;
+  for (int i = 0; i < 30; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_GT(client.state("ann").position.x, x0 + 0.5) << "and run on from there";
+}

@@ -489,8 +489,9 @@ public:
   // peer or an unknown pid, or for a DRIVE that is not valid(). A host stops it by registering the
   // participant again (client_pump does when the relay lets it out).
   bool predict_vehicle(const std::string &pid, const kinematic_drive &drive);
-  // The same for a vehicle on the dynamic plant (OW5d, room_entity::dynamics): each quantum one
-  // step of its model (dynamic_vehicle_model, the relay's dyn_bike_plant without a world), and a
+  // The same for a vehicle on the dynamic or dynamic4w plant (OW5d, OW5e, room_entity::dynamics):
+  // each quantum one step of its model (dynamic_vehicle_model, the relay's dyn_bike_plant or
+  // dyn_4w_plant without a world), and a
   // sample it is not within reconcile_tol of starts it again from the sample, with the yaw rate,
   // steering and driver it had predicted for that tick (dynamic_vehicle_model::at).
   bool predict_vehicle(const std::string &pid, const dynamic_drive &drive);
@@ -586,7 +587,7 @@ private:
     bool vehicle_placed = false;
     kinematic_drive vdrive;
     kinematic_vehicle vnow, vprev;
-    // On the dynamic plant: its model (null: the kinematic plant's numbers above), and the model's
+    // On a dynamic plant: its model (null: the kinematic plant's numbers above), and the model's
     // vehicle now and before the last quantum.
     std::shared_ptr<dynamic_vehicle_model> vdyn;
     dynamic_vehicle dnow, dprev;

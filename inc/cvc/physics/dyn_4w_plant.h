@@ -93,6 +93,15 @@ struct dyn_4w_plant_options {
   bool step_world = true;
 };
 
+// One agent's state as the plant steps it, to keep and put back (dyn_4w_plant::save, restore):
+// the model's (the rear axle, the heading, the twist, heave, roll and pitch and their rates, the
+// actuators), what its driver has learnt, and the command it holds (SI: rad, m/s^2).
+struct dyn_4w_saved {
+  cvc::nav::diff::dyn4_state<double> body{};
+  dyn_driver driver;
+  double steer_cmd = 0.0, accel_cmd = 0.0;
+};
+
 // One agent's energy, in J: over the last tick, or since attach().
 struct dyn_4w_books {
   double stored = 0.0;     // H at the end
@@ -168,6 +177,16 @@ public:
   const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
   // The ground (m) under a world point, as the model sees it.
   double ground_height(double x, double y) const;
+  // Agent i's rear axle on its body's x axis (m from the chassis box's centre, - behind it): the
+  // model's reference point, where its chassis box is drawn from.
+  double rear_axle(int i) const { return _agents.at(i).rear_x; }
+  // Agent i's chassis box at its state now (its centre and attitude, world metres), where a world
+  // step puts it.
+  void box_pose(int i, vec3 &position, quat &rotation) const;
+  // Agent i's state to put back later (restore), as dyn_bike_plant's: a twin of the plant replays
+  // from it. restore() with a world puts its box at the restored pose, at rest. Between ticks.
+  dyn_4w_saved save(int i) const;
+  void restore(int i, const dyn_4w_saved &s);
 
   // ── the books ──
   const dyn_4w_books &books(int i) const { return _agents.at(i).total; }

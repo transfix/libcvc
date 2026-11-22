@@ -153,6 +153,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set_double({k, "drive", "max_accel"}, kd.max_accel);
     w.set_double({k, "drive", "max_decel"}, kd.max_decel);
     const dynamic_drive &dd = e.dynamics;
+    w.set({k, "dynamics", "plant"}, dd.plant);
     w.set({k, "dynamics", "preset"}, dd.preset);
     w.set_double({k, "dynamics", "mass"}, dd.mass);
     w.set_double({k, "dynamics", "max_speed"}, dd.max_speed);
@@ -164,6 +165,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set_double({k, "dynamics", "a_hold"}, dd.a_hold);
     w.set({k, "dynamics", "tick_steps"}, std::to_string(dd.tick_steps));
     w.set({k, "dynamics", "phase"}, std::to_string(static_cast<unsigned long long>(dd.phase)));
+    w.set_double({k, "dynamics", "ground"}, dd.ground);
     w.set_flag({k, "present"}, true); // last: a reader that sees it present sees its fields
     written.insert(e.id);
   }
@@ -220,6 +222,9 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     kd.max_accel = r.number({k, "drive", "max_accel"}, 3.0);
     kd.max_decel = r.number({k, "drive", "max_decel"}, 7.0);
     dynamic_drive &dd = e.dynamics;
+    dd.plant = r.text({k, "dynamics", "plant"});
+    if (dd.plant.empty())
+      dd.plant = "dynamic";
     dd.preset = r.text({k, "dynamics", "preset"});
     dd.mass = r.number({k, "dynamics", "mass"}, 0.0);
     dd.max_speed = r.number({k, "dynamics", "max_speed"}, 0.0);
@@ -231,6 +236,7 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     dd.a_hold = r.number({k, "dynamics", "a_hold"}, 0.0);
     dd.tick_steps = static_cast<int>(r.number({k, "dynamics", "tick_steps"}, 0.0));
     dd.phase = std::strtoull(r.text({k, "dynamics", "phase"}).c_str(), nullptr, 10);
+    dd.ground = r.number({k, "dynamics", "ground"}, 0.0);
     out.push_back(std::move(e));
   }
   return out;

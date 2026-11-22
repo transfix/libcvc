@@ -211,6 +211,35 @@ void dyn_4w_plant::chassis_pose(const agent &a, const diff::dyn4_state<double> &
   position = cg - dyn::rotate(rotation, {a.rear_x + a.p.lr, 0.0, a.desc.center_of_mass.z});
 }
 
+void dyn_4w_plant::box_pose(int i, vec3 &position, quat &rotation) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  chassis_pose(a, a.s, position, rotation);
+}
+
+dyn_4w_saved dyn_4w_plant::save(int i) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  dyn_4w_saved s;
+  s.body = a.s;
+  s.driver = a.driver;
+  s.steer_cmd = a.steer_cmd;
+  s.accel_cmd = a.accel_cmd;
+  return s;
+}
+
+void dyn_4w_plant::restore(int i, const dyn_4w_saved &s) {
+  agent &a = _agents.at(static_cast<std::size_t>(i));
+  a.s = s.body;
+  a.driver = s.driver;
+  a.steer_cmd = s.steer_cmd;
+  a.accel_cmd = s.accel_cmd;
+  if (_chassis->on()) {
+    vec3 pos;
+    quat rot;
+    chassis_pose(a, a.s, pos, rot);
+    _chassis->put(i, pos, rot, {}, {});
+  }
+}
+
 cvc::nav::plant_state dyn_4w_plant::state(int i) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
   cvc::nav::plant_state s;

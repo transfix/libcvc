@@ -22,10 +22,13 @@
 namespace cvc {
 namespace ariadne {
 
-// A vehicle on the dynamic plant, as a client runs it (ARIADNE_WORLDS.md section 18.5, OW5d;
-// vehicle_dynamics.h runs it): what the client needs. room_entity::dynamics carries it, and
+// A vehicle on a dynamic plant, as a client runs it (ARIADNE_WORLDS.md section 18.5, OW5d and
+// OW5e; vehicle_dynamics.h runs it): what the client needs. room_entity::dynamics carries it, and
 // WorldVehicles::dynamics fills it.
 struct dynamic_drive {
+  // The plant: `dynamic` (dyn_bike_plant, the single-track model) or `dynamic4w` (dyn_4w_plant,
+  // four wheels on their suspension).
+  std::string plant = "dynamic";
   // The vehicle: its archetype's preset (humvee, roboracer) with its mass (kg), top speed (m/s),
   // acceleration and braking (m/s^2) and steering lock (rad) as the world gave them
   // (vehicle_desc_of with those as overrides makes the same vehicle_desc).
@@ -39,10 +42,16 @@ struct dynamic_drive {
   // on tick T runs it when T % tick_steps == phase.
   int tick_steps = 0;
   std::uint64_t phase = 0;
+  // dynamic4w: the height (m) the plant measures its vehicles' heights from (the ground under its
+  // first vehicle's start, dyn_4w_plant::ground_reference), where its chassis boxes ride. 0 on
+  // the dynamic plant, whose box sits on the ground under it.
+  double ground = 0.0;
 
-  // Whether it is one to run: a tick, a preset, a vehicle with a mass and a top speed.
+  // Whether it is one to run: one of the two plants, a tick, a preset, a vehicle with a mass and
+  // a top speed.
   bool valid() const {
-    return tick_steps > 0 && !preset.empty() && mass > 0.0 && vmax > 0.0 && max_steer > 0.0;
+    return (plant == "dynamic" || plant == "dynamic4w") && tick_steps > 0 && !preset.empty() &&
+           mass > 0.0 && vmax > 0.0 && max_steer > 0.0;
   }
   bool operator==(const dynamic_drive &) const = default;
 };
