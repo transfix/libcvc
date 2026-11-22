@@ -174,6 +174,18 @@ std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::v
 // the room's rules -- the body, controller, veto, energy budget and gravity the relay publishes as
 // sections (room_rules.h), which both pumps take into the holon from their activation ticks.
 holon_config room_holon_config();
+// ... at HZ ticks a second (a world's rate, holon_config_at; 0: the default 120 Hz). The relay
+// builds its holon at the rate its world runs at.
+holon_config room_holon_config(double hz);
+// ... at ROOM's rate: the relay's clock section (room_rules.h's read_room_clock), the default
+// 120 Hz while there is none. A client builds its holon from this.
+holon_config room_holon_config(cvc::app &app, const std::string &room);
+
+// Whether H runs at ROOM's rate (120 Hz while the room has no clock section). A host whose holon
+// does not -- built before the room's tree arrived, or the relay restarted at another rate --
+// builds it again from room_holon_config(app, room): a rate changes what every tick means, so a
+// holon cannot switch to it in place.
+bool on_room_clock(const holon &h, cvc::app &app, const std::string &room);
 
 // The room scene's objects as physics statics (holon::set_statics): the ground plane as a thin
 // slab under z = its height, boxes as boxes, spheres as spheres, each at its transform (Euler

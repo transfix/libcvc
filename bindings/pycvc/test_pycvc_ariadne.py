@@ -213,9 +213,10 @@ rt.step_world(12)
 rt.step(1.0 / 60.0)
 check(pycvc.state_get(app, "w.physics.stats.tick") == ticks, "a restarted world steps as before")
 check(rt.grid("crate", 1.0) is None, "a node with a body of its own makes no world to grid")
+check(rt.world_geometry("crate") is None, "nor a world of its own (its body is a mesh)")
 del rt
 
-# ── AriApp.grid: the navigator's grid of a generated world the headless runtime runs ────────────
+# ── AriApp.grid / world_geometry: a generated world the headless runtime runs ─────────────────
 gen_doc = os.path.join(tmp, "generated.ari")
 with open(gen_doc, "w", encoding="utf-8") as f:
     f.write("scene:\n  physics: {}\n  nodes:\n    - node: land\n      type: generated_world\n"
@@ -231,7 +232,15 @@ if g is not None:
     check(rt.grid("land", 5.0, half=50.0).rows() == 21, "half crops round the terrain's centre")
     pts = g.free_points(3, 2, 4.0, 10.0)
     check(not any(g.occupied(x, y) for x, y in pts), "free points on open ground")
+# AriApp.world_geometry: the colliders the node made, the world its grid is made from.
+w = rt.world_geometry("land")
+check(w is not None, "AriApp.world_geometry: the generated world's colliders")
+if w is not None and g is not None:
+    m = pycvc.nav_world_grid(w, 5.0)
+    check((m.rows(), m.cols()) == (g.rows(), g.cols()) and (m.occupancy() == g.occupancy()).all(),
+          "the grid made from them is SceneWorld's")
 check(rt.grid("nosuch", 5.0) is None, "no such node: None")
+check(rt.world_geometry("nosuch") is None, "no such node: no world either")
 del rt
 
 # ── host_function's own checks ──────────────────────────────────────────────────────────────────

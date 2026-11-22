@@ -1,0 +1,142 @@
+# skeleton_lab.ari — the skeleton of a protein's surface, declared in Ariadne: cvc::skeletonize (the
+# VolumeRover Skeletonization port, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §2) on a
+# `mesh_lab` node's vertices, the surface made from a PDB file (the TexMol ports,
+# docs/roadmap/TEXMOL-F2DOCK-ARISRV-ROADMAP.md).
+#
+# The molecule is PDB entry 1GRL, a subunit of the chaperonin GroEL (examples/data/molecules, CC0).
+# mesh_lab reads its heavy atoms and blurs them into a density (cvc::mol::blur, TexMol's GOABlur),
+# blurry enough to look like a low-resolution map, where a helix reads as a rod and a sheet as a
+# plate; its surface is that density's isosurface. When the document opens the surface is decimated
+# to 4,000 triangles and skeletonized. The strands (green polylines; blue stars for the small planar
+# clusters) and the sheets (a colour per sheet) are drawn inside the see-through surface, in the
+# node's two children `mesh_strands` and `mesh_sheets`: the strands run along 1GRL's helices (a
+# helix's C-alpha lies near one some three times as often as a coil's), which is what the skeleton
+# was made for. The Skeleton window's view shows the skeleton alone: the children are tagged
+# `skeleton` and the node's own surface `surface`, so `show: [skeleton]` leaves the surface out.
+# The mesh_tools component's Skeleton section sets the parameters and runs it again (a slice at a
+# time on the app's scheduler, so the frame never waits: the bar names the stage and Stop ends it),
+# and shows or hides each part. The Molecule window changes the blur; Load makes the surface again,
+# which clears the skeleton. No host C++ (docs/ARIADNE.md §5.4).
+#
+# Run from the repository root:
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/skeleton_lab.ari
+
+meta:
+  name: Skeleton lab (Ariadne + cvc::skeletonize)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+# mesh_lab exists only in a libcvc built with CVC_ENABLE_LIBIGL: a build without it refuses the
+# document up front instead of showing an empty scene. (The skeleton itself needs Shewchuk's
+# predicates; without them its status says so.)
+customs:
+  - node: mesh_lab
+    required: true
+
+import:
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+  - cvc://components/mesh_tools.ari
+
+# Decimate the surface, then take the skeleton of what is left (the request key runs its commands
+# in order, each after the job before it).
+init: |
+  (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate skeleton")
+
+# The main view opens a little further out than the scene's own bounds, with the molecule in the
+# middle, between the panels: a frame request on the first tick, once.
+on_tick: |
+  (if (!= (state-get "skeleton_lab.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-75 -75 -5 75 75 105")
+             (state-set "skeleton_lab.opened" "1")))
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: mesh_tools
+    pos: [16, 32]
+    size: [380, 760]
+  - window: Skeleton
+    id: skeleton_view
+    pos: [840, 32]
+    size: [550, 420]
+    children:
+      - text: "skeleton"
+        bind: graphics.root.children.mesh.mesh_ops.skeleton.status
+      - text: "warnings"
+        bind: graphics.root.children.mesh.mesh_ops.skeleton.warnings
+      # The skeleton alone: the node's skeleton children, without its surface.
+      - type: viewport
+        view: skeleton
+        show: [skeleton]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        zoom: 0.6
+        width: 530
+        height: 320
+        caption: "drag: orbit   wheel: zoom"
+  # The blur that makes the surface from the PDB file (mesh_lab's source.* keys; docs/ARIADNE.md
+  # §5.4): Load reads the file again with them.
+  - window: Molecule
+    id: molecule
+    pos: [410, 600]
+    size: [420, 190]
+    children:
+      - text: "PDB 1GRL: GroEL, one subunit (547 residues, 19 helices)"
+      - slider_float: Blobbiness
+        bind: graphics.root.children.mesh.mesh_ops.source.blobbiness
+        lo: -2.5
+        hi: -0.05
+        fmt: "%.2f"
+        tooltip: "B in each atom's exp(B (r^2/R^2 - 1)): nearer 0 blurs more, like a lower-resolution map"
+      - slider_float: Grid (Å)
+        bind: graphics.root.children.mesh.mesh_ops.source.resolution
+        lo: 0.75
+        hi: 4.0
+        fmt: "%.2f"
+      - slider_float: Isovalue
+        bind: graphics.root.children.mesh.mesh_ops.source.isovalue
+        lo: 0.5
+        hi: 30.0
+        fmt: "%.1f"
+        tooltip: "the surface's density level; blurrier maps need a higher one"
+      - button: Load
+        on: (state-set "graphics.root.children.mesh.mesh_ops.request" "load decimate skeleton")
+        disabled_when: (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
+        tooltip: "make the surface again with these settings, decimate it and take its skeleton"
+  - include: stage_lighting
+    pos: [960, 470]
+    size: [420, 160]
+  - include: camera_controls
+    pos: [960, 640]
+    size: [420, 120]
+
+scene:
+  shadows: { enabled: true, resolution: 2048 }   # soft shadows (softness 2), on in every demo
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The molecule: props seed mesh_ops.* (they win over the components' widget defaults), and
+    # `skeleton:` seeds mesh_ops.skeleton.* (cvc::skeleton_params' fields; the rest keep their
+    # defaults). blobbiness, resolution and isovalue are the blur's (TexMol's defaults, -2.3442,
+    # 1 Å and 1, give a surface near the atoms' van der Waals spheres, too bumpy for a skeleton).
+    - node: mesh
+      type: mesh_lab
+      source: { file: ../../data/molecules/1grl.pdb }
+      blobbiness: -0.2
+      resolution: 2.0
+      isovalue: 10
+      fit: { height: 100 }
+      material: { color: [0.80, 0.86, 0.92], ambient: 0.22, diffuse: 0.9, opacity: 0.3 }
+      target_faces: 4000
+      skeleton: { sheet_count: 2 }
+  lights:
+    - light: studio
+      rig: three_point

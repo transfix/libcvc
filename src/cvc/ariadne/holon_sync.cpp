@@ -28,6 +28,7 @@
 #include <cvc/ariadne/scene_world.h> // world_replica's world
 #include <cvc/ariadne/uri.h>         // resolve
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h> // the room's rate (on_room_clock)
 #include <cvc/physics/types.h> // vec3, quat
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
@@ -387,6 +388,20 @@ holon_config room_holon_config() {
   holon_config cfg;
   cfg.physics = true; // the rest is the room's: its rules sections (sync_rules)
   return cfg;
+}
+
+holon_config room_holon_config(double hz) {
+  return hz > 0.0 ? holon_config_at(room_holon_config(), hz) : room_holon_config();
+}
+
+holon_config room_holon_config(cvc::app &app, const std::string &room) {
+  return room_holon_config(conference::read_room_clock(app, room));
+}
+
+bool on_room_clock(const holon &h, cvc::app &app, const std::string &room) {
+  const double hz = conference::read_room_clock(app, room);
+  const double quantum = cvc::sim_quantum(hz > 0.0 ? hz : cvc::kSimRateDefault);
+  return std::fabs(h.clock().fixed_dt() - quantum) < 1e-12;
 }
 
 std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) {

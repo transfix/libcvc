@@ -19,6 +19,8 @@
 // Skips (rc 0) where nothing rasterises, unless CVC_REQUIRE_RENDER=1.
 #include "streaming_test_util.h"
 
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +34,7 @@
 #include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
+#include <cvc/gl/ariadne/scene_realize.h> // has_scene_node_type
 #include <cvc/gl/ariadne/scene_views.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
@@ -39,6 +42,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkActor.h>
 #include <vtkCamera.h>
@@ -209,6 +213,39 @@ scene:
       volren:
         ambient: 0.5
         isosurfaces: [ { value: 0.5, color: [1, 1, 1], opacity: 1.0 } ]
+)";
+
+// The parts of a mesh_lab node (a CVC_ENABLE_LIBIGL build): its own surface is tagged surface
+// (its props alone) and its skeleton children skeleton, on top of the node's own tags, which hold
+// for its subtree. `plain` is untagged, `lab` is tagged lab. Each takes the skeleton of its
+// decimated bunny at once, so its children have something to draw.
+const char *kPartsDoc = R"(meta:
+  name: parts test
+  min_libcvc: 4.0.0
+customs:
+  - node: mesh_lab
+    required: true
+init: |
+  (begin
+    (state-set "graphics.root.children.plain.mesh_ops.request" "decimate skeleton")
+    (state-set "graphics.root.children.lab.mesh_ops.request" "decimate skeleton"))
+windows:
+  - window: Parts
+    id: parts
+    pos: [20, 20]
+    size: [920, 300]
+    children:
+      - type: group
+        layout: { kind: grid, col_widths: [auto, auto, auto] }
+        children:
+          - { type: viewport, view: skeleton_only, show: [skeleton], shadows: false, width: 280, height: 210 }
+          - { type: viewport, view: no_surface, hide: [surface], shadows: false, width: 280, height: 210 }
+          - { type: viewport, view: lab_only, show: [lab], shadows: false, width: 280, height: 210 }
+scene:
+  chrome: false
+  nodes:
+    - { node: plain, type: mesh_lab, source: { file: stanford.bunny }, fit: { height: 2 }, target_faces: 1000, transform: { position: [-2, 0, 0] } }
+    - { node: lab, type: mesh_lab, tags: [lab], source: { file: stanford.bunny }, fit: { height: 2 }, target_faces: 1000, transform: { position: [2, 0, 0] } }
 )";
 
 bool has_prop(vtkRenderer *r, vtkProp *p) {
@@ -679,6 +716,97 @@ int main() {
       check(has_prop(same_eye, slicesA) && !has_prop(same_eye, raycastA),
             "camera: main: the volslice node drawn as the main view draws it; the volren node "
             "(composited into the main view's pixels) in no view");
+    }
+    rt.load(doc.string()); // back to the main document for the teardown below
+    for (int f = 0; f < 3; ++f)
+      rt.step(kDt);
+  }
+
+  // ── a mesh_lab node's parts: its surface tagged surface, its skeleton children skeleton ───────
+  if (cvc::gl::ariadne::has_scene_node_type(app, "mesh_lab")) {
+    const fs::path parts = dir / "parts.ari";
+    std::ofstream(parts) << kPartsDoc;
+    for (const std::string &w : rt.load(parts.string()))
+      check(false, "the parts document loads without warnings", w);
+    // Until both skeletons are drawn (bounded; the run is a sliced task on the app's scheduler).
+    const auto drawn = [&](const std::string &id) {
+      std::shared_ptr<cvc::gl::GraphicsNode> n = sg.getGraphics(id);
+      if (!n)
+        return true; // reported below
+      const std::string sk = n->stateName("mesh_ops") + ".skeleton";
+      return st(sk + ".busy").value() == "0" && st(sk + ".status").value() != "idle";
+    };
+    for (int f = 0; f < 6000 && !(f > 4 && drawn("plain") && drawn("lab")); ++f) {
+      rt.step(kDt);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    for (int f = 0; f < 3; ++f)
+      rt.step(kDt);
+    const bool made = vm.hasViewport("skeleton_only") && vm.hasViewport("no_surface") &&
+                      vm.hasViewport("lab_only");
+    check(made, "the parts document's views exist");
+    if (made) {
+      vtkRenderer *skel = vm.viewport("skeleton_only").renderer(),
+                  *nosurf = vm.viewport("no_surface").renderer(),
+                  *lab = vm.viewport("lab_only").renderer();
+      // The node's surface and its two children, as props.
+      auto parts_of = [&](const std::string &id) {
+        std::array<vtkProp *, 3> p{nullptr, nullptr, nullptr};
+        if (std::shared_ptr<cvc::gl::GraphicsNode> n = sg.getGraphics(id)) {
+          p[0] = n->prop();
+          if (auto c = n->findChildByName(id + "_strands"))
+            p[1] = c->prop();
+          if (auto c = n->findChildByName(id + "_sheets"))
+            p[2] = c->prop();
+        }
+        return p;
+      };
+      const std::array<vtkProp *, 3> P = parts_of("plain"), L = parts_of("lab");
+      check(P[0] && P[1] && P[2] && L[0] && L[1] && L[2],
+            "each mesh_lab has its surface and its two skeleton children");
+      const auto in = [&](vtkRenderer *r, const std::array<vtkProp *, 3> &p, bool surface,
+                          bool children) {
+        return has_prop(r, p[0]) == surface && has_prop(r, p[1]) == children &&
+               has_prop(r, p[2]) == children;
+      };
+      check(in(skel, P, false, true), "show [skeleton]: an untagged mesh_lab's skeleton alone");
+      check(in(skel, L, false, false),
+            "show [skeleton]: a mesh_lab tagged lab is out, children and all (its tags hold for "
+            "its subtree)");
+      check(in(nosurf, P, false, true) && in(nosurf, L, false, true),
+            "hide [surface]: every mesh_lab's skeleton without its surface, tagged or not");
+      check(in(lab, P, false, false), "show [lab]: the untagged mesh_lab's parts are out");
+      check(in(lab, L, true, true), "show [lab]: the mesh_lab tagged lab is in, surface and all");
+      // show [skeleton] is framed on the skeleton, which has bounds only once its run is done:
+      // the view waits for them rather than framing on whatever else it holds first.
+      double lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+      bool any = false;
+      if (std::shared_ptr<cvc::gl::GraphicsNode> n = sg.getGraphics("plain"))
+        for (const char *part : {"_strands", "_sheets"})
+          if (auto c = n->findChildByName(std::string("plain") + part)) {
+            const cvc::bounding_box bb = c->getWorldBoundingBox();
+            if (bb.isNull())
+              continue;
+            const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+            for (int i = 0; i < 3; ++i) {
+              lo[i] = any ? std::min(lo[i], b[2 * i]) : b[2 * i];
+              hi[i] = any ? std::max(hi[i], b[2 * i + 1]) : b[2 * i + 1];
+            }
+            any = true;
+          }
+      double eye[3], focal[3], up[3];
+      vm.viewport("skeleton_only").camera().getPose(eye, focal, up);
+      double off = 0.0, size = 0.0;
+      for (int i = 0; i < 3; ++i) {
+        off = std::max(off, std::fabs(focal[i] - 0.5 * (lo[i] + hi[i])));
+        size = std::max(size, hi[i] - lo[i]);
+      }
+      check(any && off <= 0.01 * size, "show [skeleton] is framed on the skeleton, once it has one",
+            "focal (" + std::to_string(focal[0]) + ", " + std::to_string(focal[1]) + ", " +
+                std::to_string(focal[2]) + "), skeleton centre (" +
+                std::to_string(0.5 * (lo[0] + hi[0])) + ", " +
+                std::to_string(0.5 * (lo[1] + hi[1])) + ", " +
+                std::to_string(0.5 * (lo[2] + hi[2])) + ")");
     }
     rt.load(doc.string()); // back to the main document for the teardown below
     for (int f = 0; f < 3; ++f)

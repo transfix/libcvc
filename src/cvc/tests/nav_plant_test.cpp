@@ -2804,8 +2804,9 @@ TEST(NavPlantConvergence, BasinGridOnJoltReach) {
 // The policies at the simulation tick (ARIADNE_WORLDS.md section 18.1): the shipped weights and
 // the untrained default were trained and tuned at 0.06 s, and every host now ticks at 7/120 s
 // (cvc::kSimTick). Each drives Jolt RoboRacers through the city over the same 24 s of world time
-// at 0.06 s, at the simulation tick and at 0.05 s, 20 seeds of 48 agents. The simulation tick
-// must keep the reach of 0.06 s, within the seeds' noise. A heavy run: CVC_NAV_TICK_AB=1.
+// at 0.06 s, at the simulation tick, at 0.05 s and at a 60 Hz world's tick (4/60 s, section 18.9;
+// a 30 Hz world's too), 20 seeds of 48 agents. The simulation tick and the 60 Hz tick must keep
+// the reach of 0.06 s, within the seeds' noise. A heavy run: CVC_NAV_TICK_AB=1.
 TEST(NavPlantConvergence, PoliciesHoldTheirReachAtTheSimulationTick) {
   REQUIRE_JOLT();
   if (!std::getenv("CVC_NAV_TICK_AB") || std::string(std::getenv("CVC_NAV_TICK_AB")) != "1")
@@ -2817,7 +2818,7 @@ TEST(NavPlantConvergence, PoliciesHoldTheirReachAtTheSimulationTick) {
 #endif
   policies.emplace_back("default_biased", cvc::nav::coef_mlp::default_biased());
   const double span = 24.0; // s of world time each arm drives
-  const std::vector<double> ticks = {0.06, cvc::kSimTick, 0.05};
+  const std::vector<double> ticks = {0.06, cvc::kSimTick, 0.05, cvc::sim_tick(1.0 / 60.0)};
   for (const auto &pol : policies) {
     std::vector<double> reach(ticks.size());
     std::vector<std::vector<double>> seeds(ticks.size());
@@ -2850,5 +2851,7 @@ TEST(NavPlantConvergence, PoliciesHoldTheirReachAtTheSimulationTick) {
                 pol.first.c_str(), mean, se, n);
     EXPECT_GE(reach[1], reach[0] - 0.05)
         << pol.first << " loses reach at the simulation tick: retrain it at cvc::kSimTick";
+    EXPECT_GE(reach[3], reach[0] - 0.05)
+        << pol.first << " loses reach at a 60 Hz world's tick (4/60 s)";
   }
 }
