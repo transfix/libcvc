@@ -229,7 +229,7 @@ builds it alone).
 | Case | Points | What it covers |
 |---|---|---|
 | `helices_and_sheet` | 2,920 | three tubes of radius 2.5 at three angles and a slab 2.5 thick (`make_inputs.py`): 3 helices, 1 sheet |
-| `1grl` | 9,581 | PDB 1GRL's surface: the isosurface at 12 of its heavy atoms' blur map (blobbiness -0.3, 2 Å grid), from `cvc::mol::blur` and `cvc::iso`, rounded to 1/64 Å. `make_inputs.py` leaves it as committed. 21 helices, 2 of 10 sheet candidates |
+| `1grl` | 9,581 | PDB 1GRL's surface: the isosurface at 12 of its heavy atoms' blur map (blobbiness -0.3, 2 Å grid), from `cvc::mol::blur` and `cvc::iso`, rounded to 1/64 Å. `make_inputs.py` leaves it as committed. 22 helices (20 drawn), 2 of 10 sheet candidates |
 
 `secondary_structures_test` (`MatchesTheLegacyLibrary`) compares the port with these goldens.
 
@@ -242,7 +242,8 @@ builds it alone).
   of the port holds two points more than the legacy's run, each within 1e-7 of one it already has.
 - **By shares on `1grl`:**
   - the measured values: 99% of the polygon widths, every helix width, 65 of the 69 component
-    areas, 17 of the 20 helix axes within 3 Å at both ends, and every sheet polygon;
+    areas, 15 of the 20 helix axes within 1 Å at both ends and 17 within 3 Å, and every sheet
+    polygon;
   - the bounds the test sets are lower, to leave room for another platform's legacy output.
 
   The core's Tight Cocone and U2 keep the legacy's results only up to the cells' order and the
@@ -251,7 +252,14 @@ builds it alone).
   - P1's skeleton port matches 98.5% of the legacy Skeletonization's segments on the same
     surface.
 
-**Platforms:** the goldens were made on Windows with MSVC 2022 and CGAL 6.0.1.
+**Platforms:** the goldens are the ones CI's check made on ubuntu-24.04 with GCC and cvcpkg's
+CGAL, so `--check` passes there and only there. A Windows build (MSVC 2022, CGAL 6.0.1) makes
+the same counts but not the same bytes:
+- on `helices_and_sheet`, the same values to 4e-13, some of them in another order;
+- on `1grl`, 21 candidate runs to Linux's 22. Both draw 20, and the port's axes are as close to
+  either set: 13 (Windows) or 15 (Linux) of the 20 within 1 Å at both ends, 17 within 3 Å.
+
+The test passes against either set.
 
 ## ContourTiler
 

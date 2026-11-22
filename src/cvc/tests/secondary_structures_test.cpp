@@ -383,8 +383,9 @@ void compare_with_legacy(const std::string &name, bool exact) {
     EXPECT_EQ(got.size(), g.polygons.size());
   } else {
     // What 1GRL measured: 99% of the polygon widths, every helix width, 65 of the 69 component
-    // areas, 13 of the 20 helix axes within 1 at both ends and 17 within 3, every sheet polygon.
-    // The bounds leave room for another platform's legacy output (the goldens CI's check made).
+    // areas, 15 of the 20 helix axes within 1 at both ends and 17 within 3, every sheet polygon.
+    // The goldens are Linux's; a Windows build's legacy output gives 13 and 17. The bounds leave
+    // room for another platform's.
     EXPECT_GE(share(sw, g.sheet_widths.size()), 0.95);
     EXPECT_GE(share(hw, g.helix_widths.size()), 0.95);
     EXPECT_GE(share(am, g.areas.size()), 0.85);
