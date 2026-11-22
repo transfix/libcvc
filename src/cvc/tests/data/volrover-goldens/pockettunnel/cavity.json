@@ -17,7 +17,7 @@
     "triangles": 0,
     "debug_files": []
   },
-  "ptv_sha256": "8ac68619211dc31f4fcff0008f5ae8b20e12404a8446a29593eb639993416eb3",
+  "ptv_sha256": "6abcf00471502afc1490ea89729bbb07fb4053294b81760306b618335ef3f064",
   "made_by": "tools/volrover-goldens/make_goldens.py",
-  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+  "platform": "Linux x86_64, Linux-7.0.0-1014-aws-x86_64-with-glibc2.39, Python 3.12.3"
 }

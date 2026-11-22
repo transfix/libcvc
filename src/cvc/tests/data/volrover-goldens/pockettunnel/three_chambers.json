@@ -14,10 +14,10 @@
     "tunnels": 1,
     "voids": 0,
     "points": 3487,
-    "triangles": 3094,
+    "triangles": 3088,
     "debug_files": []
   },
-  "ptv_sha256": "9d1b7ac08ee467144d20ec4d7ea2a45bcf0ae3f0ed315f57569847fbc54b46f0",
+  "ptv_sha256": "bcb6a6f789b4ecae9867d28249bc0518f4c63a7e21664143f99825d090ac0edf",
   "made_by": "tools/volrover-goldens/make_goldens.py",
-  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+  "platform": "Linux x86_64, Linux-7.0.0-1014-aws-x86_64-with-glibc2.39, Python 3.12.3"
 }

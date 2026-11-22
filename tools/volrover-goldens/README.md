@@ -222,15 +222,16 @@ from VolumeRover's, which is the same at the pinned commit. It needs CGAL, as Sk
 | `tunnel` | 2,074 | a chamber with two necks: one tunnel (two mouths) |
 | `three_chambers` | 3,487 | a tunnel and two pockets of different sizes in one ball |
 | `cavity` | 1,873 | a chamber with no neck: Tight Cocone marks it inside, so there is no cluster |
-| `1grl` | 2,609 | PDB 1GRL (a GroEL subunit) at a 3 Å map's resolution: a tunnel (two mouths) and a pocket of over a thousand Å³ each, and 17 pockets of one cell |
+| `1grl` | 2,609 | PDB 1GRL (a GroEL subunit) at a 3 Å map's resolution: a tunnel (two mouths) and a pocket of over a thousand Å³ each, and three pockets of one cell |
 
 **The legacy result depends on the cells' addresses.** CGAL's facet iterator reports a facet from
 the cell at the lower address, and Tight Cocone's peeling (`create_surface`, `grow_boundary`) is
 greedy: it starts from the first infinite cell it meets and walks in that order. Where its choices
 are close, the cells it marks outside differ with the order. Within one process a second
 triangulation of the same points, placed elsewhere in the heap, can be marked differently: on
-`tunnel`, one run in five marked 33 more cells outside, which made five pockets of one or two
-cells. So the driver runs the legacy entry once a process, and records the marking with the result.
+`tunnel`, one Windows run in five marked 33 more cells outside, which made five pockets of one or
+two cells. So the driver runs the legacy entry once a process, and records the marking with the
+result.
 
 `pocket_tunnel_test` compares the port with these goldens at two levels:
 - **exactly after Tight Cocone** (`MatchesTheLegacyLibraryAfterTightCocone`): given the legacy
@@ -238,16 +239,22 @@ cells. So the driver runs the legacy entry once a process, and records the marki
   every cluster with the same kind, mouths, cells and maxima, volumes to 1e-12, every shown
   triangle with its cluster and class, and every point's colour, on all five cases;
 - **end to end** (`MatchesTheLegacyLibrary`): the port's Tight Cocone walks in tet_complex's
-  spatial order. On `pocket`, `three_chambers` and `cavity` it marks the same cells and the whole
-  result is the legacy's; on `tunnel` the port's tunnel has 3,085 cells to the legacy's 3,083
-  (volume 14.1604 to 14.1590), and the port, like the odd legacy run, finds five pockets of one
-  or two cells. On `1grl` the large pocket is the legacy's, cell for cell; the tunnel has 317
-  cells to the legacy's 309 (1,195 Å³ to 1,181); and the legacy run finds 17 one-cell pockets,
-  the port 3. Every cluster of more than a hundred cells keeps its kind and mouths, and its cells
+  spatial order. On `pocket`, `tunnel` and `cavity` it marks the same cells and the whole result
+  is the legacy's: on `tunnel`, a tunnel of 3,085 cells and five pockets of one or two. On
+  `three_chambers` each cluster has 3 to 6 more cells than the legacy's (the tunnel 3,105 to
+  3,099, volume 10.619 to 10.614). On `1grl` the large pocket is the legacy's, cell for cell, and
+  the tunnel has 317 cells to the legacy's 307 (1,195 Å³ to 1,180); both find three one-cell
+  pockets. Every cluster of more than a hundred cells keeps its kind and mouths, and its cells
   and volume to 5%.
 
-**Platforms:** the goldens were made on Windows with MSVC 2022 and CGAL 6.0.1, and `--check`
-there makes the same files in a new process each time.
+**Platforms:** as with Skeletonization, the goldens are the ones CI's check made on ubuntu-24.04
+with GCC and cvcpkg's CGAL, so `--check` passes there and only there. A Windows build (MSVC 2022,
+CGAL 6.0.1) makes the same files in a new process each time, but its heap orders the cells
+differently, and on three cases it marks other cells outside:
+- `tunnel`: 33 fewer, and a single tunnel of 3,083 cells;
+- `three_chambers`: 41 more, the clusters the port's to the cell;
+- `1grl`: 67 more, a tunnel of 309 cells and 17 one-cell pockets.
+Given either platform's marking, the port's stages make that platform's result exactly.
 
 ## ContourTiler
 

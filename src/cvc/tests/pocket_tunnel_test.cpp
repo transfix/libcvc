@@ -832,13 +832,14 @@ TEST_F(PocketTunnel, MatchesTheLegacyLibrary) {
   // legacy library's is their addresses, the port's tet_complex's spatial order
   // (pocket_tunnel_marked.h). Where the two orders mark a few cells by the surface differently,
   // the clusters of a cell or two those cells make differ, and a large cluster gains or loses a
-  // few cells. On the pocket, the three chambers and the cavity the marking is the same, and so is
-  // the whole result. On the tunnel the port's tunnel has 2 more of its 3,083 cells, and the port
-  // finds 5 pockets of one or two cells the legacy run did not (one legacy run in five, its cells
-  // elsewhere in the heap, finds five such pockets too). On 1GRL's surface the large pocket is the
-  // legacy's, cell for cell, and the tunnel has 317 cells to its 309 (1,195 Å^3 to 1,181); the
-  // legacy run finds 17 pockets of one cell, the port 3. Every cluster of more than a hundred
-  // cells keeps its kind and mouths, and its cells and volume to 5%.
+  // few cells. The goldens are the legacy library's on Linux (CI's volrover goldens job). The
+  // legacy library run on Windows marks three of the five cases differently, because its heap
+  // lays the cells out in a different order. On the pocket, the tunnel and the cavity the marking
+  // is the same, and so is the whole result: the tunnel's six clusters, a tunnel of 3,085 cells
+  // and five pockets of one or two. On the three chambers each cluster has 3 to 6 more cells than
+  // the legacy run's (the tunnel 3,105 to 3,099). On 1GRL's surface the large pocket is the
+  // legacy's, cell for cell, and the tunnel has 317 cells to its 307 (1,195 Å^3 to 1,180). Every
+  // cluster of more than a hundred cells keeps its kind and mouths, and its cells and volume to 5%.
   for (const char *name : {"pocket", "tunnel", "three_chambers", "cavity", "1grl"}) {
     SCOPED_TRACE(name);
     const pts_t in = read_case(name);
@@ -847,7 +848,7 @@ TEST_F(PocketTunnel, MatchesTheLegacyLibrary) {
     const std::vector<int> idx = input_index(g, in);
     const cvc::pocket_tunnels r = cvc::pocket_tunnel(in);
     const std::string n = name;
-    if (n == "pocket" || n == "three_chambers" || n == "cavity") {
+    if (n == "pocket" || n == "tunnel" || n == "cavity") {
       ASSERT_EQ(r.features.size(), g.features.size());
       for (std::size_t k = 0; k < g.features.size(); ++k) {
         EXPECT_EQ(long(r.features[k].cells), g.features[k].cells) << k;
