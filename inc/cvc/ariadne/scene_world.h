@@ -95,6 +95,7 @@ struct world_grid;
 }
 namespace world {
 struct generated_world;
+struct generated_world_params;
 class world_geometry;
 }
 
@@ -272,11 +273,26 @@ public:
   // has no world of that name. The key follows.
   const std::string &world_on() const;
   bool set_world(const std::string &name, std::vector<std::string> *warnings = nullptr);
+  // The nodes of world `name`, in the scene's order (empty: no such world).
+  std::vector<std::string> world_nodes(const std::string &name) const;
+  // The generated_world nodes this world runs (from_scene), in the scene's order.
+  std::vector<std::string> generated_nodes() const;
   // The world on made again with `seed`, when it is a generated world this world runs (from_scene)
   // and that is not its seed now: each of its generated_world nodes' seed key is set and its
   // request key asks for a new world, which the next sync() makes. False when there is nothing to
   // make (no such node, or the seed is already its).
   bool regenerate_world(double seed);
+  // A generated_world node this world runs (from_scene): the params its world was made from, its
+  // terrain_file as its key names it (the made world's is the path it resolved to). False for any
+  // other node, or before it has a world.
+  bool generated_params(const std::string &node, cvc::world::generated_world_params &out) const;
+  // Make that node's world from `params` (ARIADNE_WORLDS.md section 18.5, OW5f: a client following
+  // the relay's): when they are not the params of the world it has, its keys take them (a new
+  // preset first, so it does not quick-set the counts over them) and ask for a new world, which
+  // the next sync() makes. True when it asked. The params no key holds (the cell, the terrain's
+  // and the raster's caps, the waterline slivers) stay the document's.
+  bool follow_generated(const std::string &node, const cvc::world::generated_world_params &params,
+                        std::vector<std::string> *warnings = nullptr);
 
   // Take on the scene's vehicles (Scene::vehicles, the document's world: vehicles:): a
   // WorldVehicles under `vehicles_key` and `entities_key` (absolute state paths, <prefix>.vehicles

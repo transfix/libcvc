@@ -1105,9 +1105,20 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   boat needs the water), played out until then. The dynamic plants' prediction runs on flat
   ground (a client's model has no ground under it, so a slope's grade and a wall are the relay's
   corrections). For the statics: a document the client does not ship with fetched as a world pack
-  (section 12); the world switch followed (a relay that turns on another of its scene's worlds
-  publishes nothing yet, so a client keeps the one the document starts with); a static body's
-  physics material (a client's statics take the default friction).
+  (section 12); a static body's physics material (a client's statics take the default friction).
+- **As built (OW5f, the relay's world followed):** the relay publishes what its document has on
+  (`room_world_on`: `conf.rooms.<room>.world_on`, `publish_world_on`, written when it changes):
+  the scene's world that is on, and the params each generated_world node of it (of the scene,
+  without worlds) made its world from, its DEM file as its key names it. A client's replica of the
+  document follows it: it turns on the same world (`SceneWorld::set_world`) and makes the same
+  generated worlds (`SceneWorld::follow_generated`: the node's keys take the params, a new preset
+  first so it does not quick-set the counts over them, and a new world is asked for), and builds
+  its statics again from the world on. A client on the relay's slab stands on the dome once the
+  relay switches to it (z 0.99), and after a Regenerate with another seed and preset its ground is
+  the relay's new ground (z -3.963 where it was 8.803; `AriadneOneWorld`). The params no key holds
+  (the cell, the terrain's and the raster's caps) stay the document's, which are the relay's;
+  a DEM file the client cannot resolve makes its world from the default generators, as the relay
+  would.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1190,7 +1201,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 

@@ -286,6 +286,106 @@ section_stamp room_world_source_stamp(cvc::app &app, const std::string &room_id)
   return read_section_stamp(app, room_world_source_path(room_id));
 }
 
+namespace {
+bool same_params(const cvc::world::generated_world_params &a,
+                 const cvc::world::generated_world_params &b) {
+  return a.seed == b.seed && a.half_m == b.half_m && a.trees == b.trees && a.rocks == b.rocks &&
+         a.buildings == b.buildings && a.tree_gen == b.tree_gen && a.amp_m == b.amp_m &&
+         a.water_level_m == b.water_level_m && a.preset == b.preset && a.ontology == b.ontology &&
+         a.cell_m == b.cell_m && a.max_terrain_n == b.max_terrain_n && a.raster_n == b.raster_n &&
+         a.waterline_sliver_m == b.waterline_sliver_m && a.terrain == b.terrain &&
+         a.city == b.city && a.terrain_file == b.terrain_file && a.edge == b.edge;
+}
+} // namespace
+
+bool room_world_on::operator==(const room_world_on &o) const {
+  if (world != o.world || generated.size() != o.generated.size())
+    return false;
+  for (std::size_t i = 0; i < generated.size(); ++i)
+    if (generated[i].node != o.generated[i].node ||
+        !same_params(generated[i].params, o.generated[i].params))
+      return false;
+  return true;
+}
+
+std::string room_world_on_path(const std::string &room_id) {
+  return sub("conf", {"rooms", room_id.c_str(), "world_on"});
+}
+
+section_stamp write_room_world_on(cvc::app &app, const std::string &room_id,
+                                  const room_world_on &on, std::uint64_t epoch) {
+  section_writer w(app, room_world_on_path(room_id));
+  w.set({"world"}, on.world);
+  w.set({"generated"}, std::to_string(on.generated.size()));
+  for (std::size_t i = 0; i < on.generated.size(); ++i) {
+    const std::string g = "g" + std::to_string(i);
+    const cvc::world::generated_world_params &p = on.generated[i].params;
+    w.set({g, "node"}, on.generated[i].node);
+    w.set({g, "seed"}, std::to_string(static_cast<unsigned long long>(p.seed)));
+    w.set_double({g, "half"}, p.half_m);
+    w.set({g, "trees"}, std::to_string(p.trees));
+    w.set({g, "rocks"}, std::to_string(p.rocks));
+    w.set({g, "buildings"}, std::to_string(p.buildings));
+    w.set({g, "tree_gen"}, std::to_string(p.tree_gen));
+    w.set_double({g, "amp"}, p.amp_m);
+    w.set_double({g, "water_level"}, p.water_level_m);
+    w.set({g, "preset"}, std::to_string(p.preset));
+    w.set({g, "ontology"}, std::to_string(p.ontology));
+    w.set_double({g, "cell"}, p.cell_m);
+    w.set({g, "max_terrain_n"}, std::to_string(p.max_terrain_n));
+    w.set({g, "raster_n"}, std::to_string(p.raster_n));
+    w.set_double({g, "sliver"}, p.waterline_sliver_m);
+    w.set({g, "terrain"}, p.terrain);
+    w.set({g, "city"}, p.city);
+    w.set({g, "terrain_file"}, p.terrain_file);
+    w.set({g, "edge"}, std::to_string(p.edge));
+  }
+  return w.commit(0, epoch);
+}
+
+bool read_room_world_on(cvc::app &app, const std::string &room_id, room_world_on &out) {
+  const std::string base = room_world_on_path(room_id);
+  if (!read_section_stamp(app, base).written())
+    return false;
+  const section_reader r(app, base);
+  room_world_on on;
+  on.world = r.text({"world"});
+  const int n = static_cast<int>(r.number({"generated"}, 0.0));
+  for (int i = 0; i < n; ++i) {
+    const std::string g = "g" + std::to_string(i);
+    room_generated_world x;
+    cvc::world::generated_world_params &p = x.params;
+    const cvc::world::generated_world_params d;
+    x.node = r.text({g, "node"});
+    p.seed = std::strtoull(r.text({g, "seed"}, std::to_string(d.seed)).c_str(), nullptr, 10);
+    p.half_m = r.number({g, "half"}, d.half_m);
+    p.trees = static_cast<int>(r.number({g, "trees"}, d.trees));
+    p.rocks = static_cast<int>(r.number({g, "rocks"}, d.rocks));
+    p.buildings = static_cast<int>(r.number({g, "buildings"}, d.buildings));
+    p.tree_gen = static_cast<int>(r.number({g, "tree_gen"}, d.tree_gen));
+    p.amp_m = r.number({g, "amp"}, d.amp_m);
+    p.water_level_m = r.number({g, "water_level"}, d.water_level_m);
+    p.preset = static_cast<int>(r.number({g, "preset"}, d.preset));
+    p.ontology = static_cast<int>(r.number({g, "ontology"}, d.ontology));
+    p.cell_m = r.number({g, "cell"}, d.cell_m);
+    p.max_terrain_n = static_cast<int>(r.number({g, "max_terrain_n"}, d.max_terrain_n));
+    p.raster_n = static_cast<int>(r.number({g, "raster_n"}, d.raster_n));
+    p.waterline_sliver_m = r.number({g, "sliver"}, d.waterline_sliver_m);
+    p.terrain = r.text({g, "terrain"}, d.terrain);
+    p.city = r.text({g, "city"}, d.city);
+    p.terrain_file = r.text({g, "terrain_file"});
+    p.edge = static_cast<int>(r.number({g, "edge"}, d.edge));
+    if (!x.node.empty())
+      on.generated.push_back(std::move(x));
+  }
+  out = std::move(on);
+  return true;
+}
+
+section_stamp room_world_on_stamp(cvc::app &app, const std::string &room_id) {
+  return read_section_stamp(app, room_world_on_path(room_id));
+}
+
 std::string file_sha256(const std::string &path) {
   std::ifstream in(path, std::ios::binary);
   if (!in)

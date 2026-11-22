@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/section.h> // section_stamp
+#include <cvc/world/generated_world.h> // generated_world_params
 #include <string>
 #include <vector>
 
@@ -215,6 +216,35 @@ bool read_room_world_source(cvc::app &app, const std::string &room_id, room_worl
 section_stamp room_world_source_stamp(cvc::app &app, const std::string &room_id);
 // The SHA-256 of the file at PATH, in lowercase hex; "" when it cannot be read.
 std::string file_sha256(const std::string &path);
+
+// What the relay's world document has on now (ARIADNE_WORLDS.md section 18.5, OW5f): the scene's
+// world that is on (a scene's worlds are on one at a time: SceneWorld::world_on, "" for a scene
+// without worlds), and the params each generated_world node of it (of the scene, without worlds)
+// made its world from (a
+// Regenerate, a new seed or preset, a changed count). A client building the same document
+// (world_replica) turns on the same world and makes the same generated worlds from these, so
+// its statics stay the relay's after a switch or a Regenerate. The relay writes it whenever it
+// changes (publish_world_on).
+//
+//   conf.rooms.<room>.world_on.{world, generated, g<i>.{node, seed, half, trees, rocks, buildings,
+//     tree_gen, amp, water_level, preset, ontology, cell, max_terrain_n, raster_n, sliver,
+//     terrain, city, terrain_file, edge}}, stamped {epoch, at, rev} (section.h)
+struct room_generated_world {
+  std::string node;
+  cvc::world::generated_world_params params;
+};
+struct room_world_on {
+  std::string world;
+  std::vector<room_generated_world> generated; // in the world's node order
+  bool operator==(const room_world_on &o) const;
+};
+std::string room_world_on_path(const std::string &room_id);
+// Write it in one revision (EPOCH as section_writer::commit takes it). Returns the stamp.
+section_stamp write_room_world_on(cvc::app &app, const std::string &room_id,
+                                  const room_world_on &on, std::uint64_t epoch = 0);
+// Read it; false (OUT untouched) if it was never written.
+bool read_room_world_on(cvc::app &app, const std::string &room_id, room_world_on &out);
+section_stamp room_world_on_stamp(cvc::app &app, const std::string &room_id);
 
 // The rig the stock worlds are lit by, as conference_roster.ari declared it before WD1: a
 // three_point rig staged over the 20 m floor whose key spot casts the shadows, with fill, back,

@@ -1528,6 +1528,10 @@ int main(int argc, char **argv) {
         serverDoc ? serverDoc->runtime().scene_world() : nullptr;
     const std::vector<cvc::ariadne::pose_subject> &entities =
         entity_relay.step(app, room, docWorld ? docWorld->vehicles() : nullptr);
+    // What the document's world has on (its world, its generated worlds' params), for clients
+    // that build the same document (ARIADNE_WORLDS.md section 18.5, OW5f).
+    if (docWorld)
+      cvc::ariadne::publish_world_on(app, room, *docWorld);
     cvc::ariadne::conference::relay_room_step(shard, planes, aoi_relay.get(), server_holon, now_s,
                                               trimJournal);
     const std::shared_ptr<const cvc::ariadne::conference::aoi_snapshot> tiers =

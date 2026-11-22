@@ -774,10 +774,50 @@ world_replica::world_replica() {
 
 world_replica::~world_replica() = default;
 
+conference::room_world_on world_on_of(const SceneWorld &world) {
+  conference::room_world_on on;
+  on.world = world.world_on();
+  // The world on's nodes; a scene without worlds has every node on.
+  for (const std::string &node :
+       on.world.empty() ? world.generated_nodes() : world.world_nodes(on.world)) {
+    conference::room_generated_world g;
+    g.node = node;
+    if (world.generated_params(node, g.params))
+      on.generated.push_back(std::move(g));
+  }
+  return on;
+}
+
+bool publish_world_on(cvc::app &app, const std::string &room, const SceneWorld &world) {
+  const conference::room_world_on now = world_on_of(world);
+  conference::room_world_on had;
+  if (conference::read_room_world_on(app, room, had) && had == now)
+    return false;
+  conference::write_room_world_on(app, room, now);
+  return true;
+}
+
+void world_replica::follow(cvc::app &app, const std::string &room) {
+  const section_stamp s = conference::room_world_on_stamp(app, room);
+  if (s.same(_on_stamp))
+    return;
+  _on_stamp = s;
+  conference::room_world_on on;
+  if (!conference::read_room_world_on(app, room, on))
+    return;
+  std::vector<std::string> warnings;
+  if (!on.world.empty() && on.world != _world->world_on())
+    _world->set_world(on.world, &warnings);
+  for (const conference::room_generated_world &g : on.generated)
+    _world->follow_generated(g.node, g.params, &warnings);
+}
+
 void world_replica::pump(cvc::app &app, const std::string &room) {
   const section_stamp s = conference::room_world_source_stamp(app, room);
   if (!s.same(_source_stamp)) {
     _source_stamp = s;
+    _on_stamp = section_stamp{}; // a new world follows what the relay has on afresh
+    _built_on.clear();
     _world.reset();
     _nodes.clear();
     _taken.clear();
@@ -819,11 +859,12 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
   }
   if (!_world)
     return;
+  follow(app, room); // the relay's world on, and its generated worlds' params
   std::vector<std::string> warnings;
   _world->sync(&warnings); // a generated world's colliders, as they become ready
   // Ready once every generated world has its colliders (its terrain is the ground); the statics
-  // again whenever a node's colliders change.
-  bool pending = false, changed = !_ready;
+  // again whenever the world on or a node's colliders change.
+  bool pending = false, changed = !_ready || _world->world_on() != _built_on;
   for (const std::string &id : _nodes) {
     std::uint64_t rev = 0;
     const bool has = _world->world_geometry(id, &rev) != nullptr;
@@ -843,6 +884,7 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
 void world_replica::build_statics() {
   _statics.clear();
   _taken.clear();
+  _built_on = _world->world_on();
   // What is in its physics world now: a scene's worlds are on one at a time (SceneWorld::world_on),
   // and the others' bodies are out.
   const auto in_world = [this](const SceneWorldBody &b) {

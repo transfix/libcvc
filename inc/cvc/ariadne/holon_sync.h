@@ -20,6 +20,7 @@
 #include <cvc/ariadne/avatar_physics.h> // avatar_static
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/conference/room_entities.h> // room_entity
+#include <cvc/ariadne/conference/room_scene.h>    // room_world_on
 #include <cvc/ariadne/holon.h>                    // holon_config
 #include <cvc/ariadne/pose_stream.h>              // pose_stream_decoder
 #include <cvc/ariadne/section.h>                  // section_stamp
@@ -295,6 +296,14 @@ private:
   cvc::physics::pose _predicted_at;
 };
 
+// SERVER: what the relay's world document has on now (room_world_on, ARIADNE_WORLDS.md section
+// 18.5, OW5f): its world on and the params each of that world's generated_world nodes made its
+// world from (every generated_world node's, in a scene without worlds).
+conference::room_world_on world_on_of(const SceneWorld &world);
+// Write it to the room when it is not what the room has (a switch, a Regenerate, the first
+// call). True when it wrote. arisrv calls it every loop.
+bool publish_world_on(cvc::app &app, const std::string &room, const SceneWorld &world);
+
 // CLIENT: the relay's world, built from the same document (ARIADNE_WORLDS.md section 18.5, OW5c).
 // The room names the document the relay runs (room_world_source: its URI and the SHA-256 of its
 // bytes). When this client resolves the same URI to a file with the same hash -- a stock world it
@@ -303,7 +312,9 @@ private:
 // bodies (a mesh's and a terrain's shapes) and the colliders its nodes make at run time (a
 // generated world's terrain and buildings, as each becomes ready). Its vehicles and moving bodies
 // are the relay's to run: the room's entities, not statics. A document it cannot resolve, or one
-// whose hash differs, leaves it not ready, and the statics stay the room scene's.
+// whose hash differs, leaves it not ready, and the statics stay the room scene's. It follows what
+// the relay has on (room_world_on, OW5f): the same world turned on, the same generated worlds
+// made, and the statics again from them.
 class world_replica {
 public:
   world_replica();
@@ -312,8 +323,9 @@ public:
   world_replica &operator=(const world_replica &) = delete;
 
   // One frame: the room's world source (when its stamp moved: resolve, check, load and build),
-  // then the world's sync (a generated world's colliders as they become ready), and the statics
-  // again when any node's colliders changed.
+  // what the relay has on (when its stamp moved, or the world was built again: the world turned
+  // on, the generated worlds asked for), then the world's sync (a generated world's colliders as
+  // they become ready), and the statics again when the world on or any node's colliders changed.
   void pump(cvc::app &app, const std::string &room);
   // Whether it holds the relay's document; its statics, and their stamp (its own epoch, a
   // revision more each time they change: holon::set_statics takes it).
@@ -327,7 +339,10 @@ public:
 
 private:
   void build_statics();
+  void follow(cvc::app &app, const std::string &room);
   section_stamp _source_stamp;
+  section_stamp _on_stamp; // the room_world_on followed
+  std::string _built_on;   // the world on when the statics were built
   std::unique_ptr<SceneWorld> _world;
   std::vector<std::string> _nodes; // the document's node ids (a node's colliders by id)
   bool _ready = false;
