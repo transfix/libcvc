@@ -478,6 +478,31 @@ demos' runner with two `CrossingLearner` agents for 60 ticks of the crossing, co
   delivery; positions agree within 5.6e-16, against an allowance of 1e-6. G1 to G12 are unchanged.
 - **Next, part 2b:** the vehicle driver below and the `plant_ledger` items.
 
+**Landed in part 2b: the vehicle driver.** `inc/cvc/nav/coph_driver.h`, tested by
+`nav_coph_driver_test` (C++ only: the learner is G13's and the allocation G11's).
+- **What it does.** `coph_driver` attaches to a `sim_world`'s agents. It runs every attached car's
+  learner in one `coph_fleet`, with three hooks the fleet gained:
+  - the transition carries the mean force the car took (D5);
+  - the sim's `reached` ends a car's run;
+  - a goal update slides the local goal (D12).
+
+  It reads the risk from the material plane and the obstacles from `visible_obstacles`, and
+  drives through `override_command` every tick.
+- **Results on Windows.**
+  - With nothing attached, a 400-tick run is byte-unchanged.
+  - Two RoboRacer-sized cars (s = 1) pass each other across a 20 m field and both arrive in
+    29.1 s, with packets between them. Their allocation residuals are 0.11 and 0.20.
+  - Each ledger's residual, about 1.1, says how far a kinematic car is from CoPH's damped point
+    mass: the car keeps its speed with no drag, while the learner's damping books heat.
+  - A car driving head-on at a 1 m block senses it 1.25 m away. It cannot turn as CoPH's point
+    mass would (a 0.74 m turning radius, and almost no lateral force at low speed). It stops
+    0.21 m short, where the router finds no clear start, and never touches the block. Turning
+    that stop into a way round is the allocation research §3.3.2 leaves open.
+- **Next, part 2c:** the `plant_ledger` items (D11). They need their own table, printed only with
+  CoPH attached, because adding rows to the plant table changes every run's output (the
+  `.cvcrun` columns, the panels, pycvc's item list and cvcGL's publish tests). sim_world's stats
+  collector also needs a public hook for the driver's terms.
+
 `coph_fleet` lives outside `sim_world`, as `route_follower` does (D10). Before each `step()`, it:
 - reads each attached agent's pose, heading and speed;
 - scales them (§3.3.1);

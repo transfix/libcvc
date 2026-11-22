@@ -124,6 +124,12 @@ public:
     bool hit = false;
     coph_observation observation;
     std::vector<coph_shape> obstacles;
+    // A vehicle's: the force its plant took over the held step (D5), which the transition carries
+    // in place of the held force; whether its world says it arrived, in place of the goal radius;
+    // and a new goal, taken before it observes (D12's sliding local goal).
+    std::optional<coph_vec2> u_used;
+    std::optional<bool> arrived;
+    std::optional<coph_vec2> goal;
   };
   // One boundary at `tick`, time `now` (the runner's clock, (tick dt_us) / 1e6 with dt_us =
   // round(dt 1e6)); one input per agent, read only for agents still running. Returns each agent's

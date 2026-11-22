@@ -72,6 +72,13 @@ public:
   const std::vector<coph_geometry_event> &geometry_events() const { return geometry_events_; }
   const coph_control_meta &last_control() const { return last_control_; }
 
+  // The learner's goal from now on (a car's sliding local goal, D12): the routing, the packets and
+  // the stages it enters next take it.
+  void set_goal(const coph_vec2 &goal) {
+    s_.goal = goal;
+    ledger_.set_goal(goal);
+  }
+
   // CrossingLearner.observe: the observation (its readings carry the world's uids, which the
   // agent prefixes with '<id>:'), the shapes the sensor sees, and the transition that led here.
   void observe(const coph_observation &observation, const std::vector<coph_shape> &obstacles,
