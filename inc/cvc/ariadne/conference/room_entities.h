@@ -47,6 +47,8 @@ namespace conference {
 struct room_entity {
   std::uint64_t id = 0;
   std::string name, archetype, plant, controller;
+  // The participant driving it (its pid), or "" for its controller (section 18.4).
+  std::string driver;
   int team = 0;
   std::array<float, 3> color{0.85f, 0.70f, 0.20f};
   std::array<float, 3> color2{0.12f, 0.12f, 0.14f};
@@ -63,6 +65,11 @@ struct room_entity {
   // Its archetype's look; a file's or an asset's path is its file name alone (the relay's own path
   // means nothing to a client, which finds the file its own way).
   vehicle_look look;
+  // Whether a participant may get in (its archetype's drivable:), from within `reach` metres of its
+  // chassis box, and the control scheme it is driven with (car, boat; vehicle_controls).
+  bool drivable = false;
+  double reach = 3.0;
+  std::string controls;
   bool operator==(const room_entity &) const = default;
 };
 

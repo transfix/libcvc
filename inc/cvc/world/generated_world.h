@@ -292,6 +292,9 @@ struct generated_world {
 // a client can make the same world from them. Fields a text leaves out keep their defaults.
 std::string generated_world_params_json(const generated_world_params &p);
 generated_world_params generated_world_params_from_json(const std::string &text);
+// The same over `base`: the fields the text leaves out keep base's.
+generated_world_params generated_world_params_from_json(const std::string &text,
+                                                        const generated_world_params &base);
 
 // The world as bundle files (city_bundle_bytes): geometry()'s items and the needles (render
 // only), the water level, and the generator ("generated_world", `generator_version`, the seed and

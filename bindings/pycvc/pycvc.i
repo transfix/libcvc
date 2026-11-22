@@ -377,11 +377,12 @@ namespace cvc {
 %include "cvc/core/clock_follower.h"
 
 // ── The one simulation tick (cvc/core/sim_tick.h) ──
-// SIM_TICK: the navigator's step and control period every host and trainer shares by default;
-// SIM_QUANTUM: the simulation hosts' clock quantum; SIM_CATCHUP: the world time a real-time frame
-// may catch up at 1x. A Python host's live clock: world_clock(SIM_QUANTUM, speed,
+// SIM_TICK: the navigator's step and control period every host and trainer shares by default,
+// SIM_TICK_QUANTA quanta; SIM_QUANTUM: the clock quantum every host runs at (1/120 s, a holon's);
+// SIM_CATCHUP: the world time a real-time frame may catch up at 1x. A Python host's live clock: world_clock(SIM_QUANTUM, speed,
 // round(SIM_CATCHUP / SIM_QUANTUM), 1, True), followed with clock_follower.for_step(clock, tick).
 %constant double SIM_TICK = cvc::kSimTick;
+%constant int SIM_TICK_QUANTA = cvc::kSimTickQuanta;
 %constant double SIM_QUANTUM = cvc::kSimQuantum;
 %constant double SIM_CATCHUP = cvc::kSimCatchup;
 
@@ -1440,6 +1441,7 @@ struct pycvc_py_conversion {
 %include "pycvc_segmentation.i"
 %include "pycvc_tiler.i"
 %include "pycvc_volume_slice.i"
+%include "pycvc_volume_grid.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does

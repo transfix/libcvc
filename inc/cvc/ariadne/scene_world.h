@@ -20,11 +20,13 @@
 //
 // Some nodes make what their body: collides with at run time, and the world swaps those bodies
 // when it changes (sync(), which follow() runs first):
-//   * a `generated_world` node: its terrain and buildings (scene_generated_world.h). Headless, the
-//     world runs the node itself (GeneratedWorldRuntime: its world.* keys and Regenerate);
-//     drawn, cvcGL's node does and hands over its colliders.
 //   * a `source: { data }` node: its dataset's world, terrain or geometry, once the dataset is
-//     ready and again each time it changes (its rev). It needs the scene's physics: block.
+//     ready (at once when it already is) and again each time it changes (its rev). It needs the
+//     scene's physics: block.
+//   * a `generated_world` node: the same, its dataset the world it made (scene_generated_world.h,
+//     publish_generated_world: the world as a version 2 bundle, read back). Headless, the world
+//     runs the node itself (GeneratedWorldRuntime: its world.* keys and Regenerate); drawn,
+//     cvcGL's node does. Either way each new world replaces the dataset, and the bodies follow.
 // Those colliders are static and placed as they were made: the node's transform does not move
 // them. A water node's field is swapped the same way when its sea changes, except one with a wake
 // (`wake_push`, cvc::physics::field_wake), which is set in place, so it keeps its id and the wake
@@ -173,10 +175,10 @@ struct SceneWorldBody {
 class SceneWorld {
 public:
   // A scene with vehicles (world: vehicles:) runs on the simulation hosts' clock (cvc/core/
-  // sim_tick.h): app.world_clock() goes to the 0.01 s quantum that the vehicles' tick and a 100 Hz
-  // physics step divide into, with real time's 0.25 s catch-up, unless it has already ticked (it
-  // warns then). Call it before the scene's physics world is made: from_scene does, and a host
-  // that builds the world itself (cvcGL's realize_scene) does too.
+  // sim_tick.h): app.world_clock() goes to the 1/120 s quantum that the vehicles' tick divides
+  // into, with real time's 0.25 s catch-up, unless it has already ticked (it warns then). Call it
+  // before the scene's physics world is made: from_scene does, and a host that builds the world
+  // itself (cvcGL's realize_scene) does too.
   static void use_vehicle_clock(cvc::app &app, const Scene &scene,
                                 std::vector<std::string> *warnings = nullptr);
   // The world of `scene` from its spec alone: the node transforms composed, each body node's mesh
@@ -211,8 +213,9 @@ public:
   // The bodies node `id` has now.
   std::vector<physics::body_id> bodies_of(const std::string &id) const;
 
-  // The world a generated_world node made, when this world runs the node (from_scene); null when a
-  // renderer runs it, or there is no such node.
+  // The world a generated_world node made: the one this world runs (from_scene), else the one its
+  // dataset holds (a renderer's node, or a data node on a made dataset: its `generated`). Null for
+  // any other node.
   std::shared_ptr<const cvc::world::generated_world> generated_world(const std::string &id) const;
   // The world node `id` makes at run time (a generated world's, a dataset's) as it is now, and its
   // revision, which each new world bumps (0: none yet). Null for any other node, or before it has
@@ -239,6 +242,13 @@ public:
   // between (pose_tracker::capture). Returns the steps run.
   std::uint64_t follow(const cvc::world_clock &clock,
                        const std::function<void()> &after_step = nullptr);
+  // The same, with `before_each` called before each step (after the vehicles, boats and weather
+  // have put their forces in, just before the world steps) and `after_each` after it (after the
+  // vehicles have read theirs), each with the clock tick the step ends on. A holon that runs this
+  // world puts its avatars' drives in the first and reads them in the second (holon::attach_world).
+  using step_hook = std::function<void(std::uint64_t tick)>;
+  std::uint64_t follow(const cvc::world_clock &clock, const std::function<void()> &after_step,
+                       const step_hook &before_each, const step_hook &after_each);
 
   // Rebuild the world as build() made it: the same object, a fresh physics world with the same
   // config and materials, each node's body where the document put it (at rest unless it declared

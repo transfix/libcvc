@@ -117,6 +117,12 @@ public:
     // Hosted chrome: draw no window frames and no menu bar, for a host that supplies its own (see
     // "hosted chrome" below).
     bool hosted = false;
+    // The colours the terminal shows. An RGB colour (a widget's `color:`, a group's fill, §5.26; a
+    // border's) is drawn as the nearest of them. Auto asks the terminal (FTXUI reads COLORTERM and
+    // TERM); the others say, for a host that knows better and for a test. TvisionBackend lays out
+    // at TrueColor, and tvision draws each colour as the nearest the terminal has.
+    enum class Palette { Auto, TrueColor, Colors256, Colors16 };
+    Palette palette = Palette::Auto;
   };
 
   FtxuiBackend();
@@ -178,6 +184,9 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.26 the leaf between them in that colour (FTXUI picks the terminal's nearest).
+  void begin_text_color(const float rgb[3]) override;
+  void end_text_color() override;
   // Kind::Heatmap: coloured cells (a value's text in black or white on its colour, a mark's corner
   // glyph), the labels, the legend as a bar under the grid. The pointer's cell is the hovered one;
   // with a pick or an on_click it takes focus, the arrows move a cursor cell and Enter or Space
@@ -189,6 +198,7 @@ public:
   void separator() override;
   bool unicode_glyphs() const override; // not on the Linux console, a dumb or a VT terminal
   bool button(const char *label) override;
+  bool button_with(const char *label, const ButtonLook &look) override; // §5.27 [>chosen<]
   bool menu_item_action(const char *label) override;
 
   bool item_clicked() override;
@@ -219,6 +229,9 @@ public:
                   const std::vector<std::string> &options) override;
   IndexEdit radio(const char *label, int current_index, const std::vector<std::string> &options,
                   bool row) override;
+  IndexEdit radio_colored(const char *label, int current_index,
+                          const std::vector<std::string> &options, bool row,
+                          const std::vector<ItemColor> &colors) override;
   StringEdit input_text(const char *label, const char *key, const std::string &current,
                         bool masked) override;
   // A message field: Enter sends it; Alt+Enter, Ctrl+J, or Shift+Enter where the terminal reports

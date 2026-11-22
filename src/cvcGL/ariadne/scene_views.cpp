@@ -17,6 +17,7 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/TouchScroll.h>
@@ -189,6 +190,10 @@ struct SceneViews::View {
   std::string pick_key, on_pick;
   bool picking = false; // a left press that picks is down
   long pick_seq = 0;
+  // pointer: where the pointer is, written under pointer_key (absolute) as it moves with no
+  // button down (phase "hover").
+  std::string pointer_key;
+  long pointer_seq = 0;
   bool drawn = false;  // a widget drew it this frame
   bool framed = false; // its camera has been framed on what it shows
   double region[4] = {-1.0, -1.0, -1.0, -1.0};
@@ -403,8 +408,8 @@ bool has_any(const std::vector<std::string> &tags, const std::vector<std::string
 }
 
 // Whether a node with `tags` is in a view that shows `show` (every tag when empty) and hides
-// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along;
-// an untagged node is in every view.
+// `hide`. A node's tags hold for its subtree, so a node out of the view takes its children along
+// (an entry with subtree false only its own props); an untagged node is in every view.
 bool in_view(const std::vector<std::string> &tags, const std::vector<std::string> &show,
              const std::vector<std::string> &hide) {
   if (tags.empty())
@@ -588,6 +593,7 @@ bool slice_hit(const VolumeSliceNode &s, const double origin[3], const double di
   for (int c = 0; c < 3; ++c)
     hit.ijk[c] = ijk[c];
   hit.value = value;
+  hit.axis = static_cast<int>(s.params().axis);
   return true;
 }
 
@@ -609,27 +615,74 @@ bool props_bounds(const std::unordered_set<vtkProp *> &props, double out[6]) {
   return any;
 }
 
+// Adds the world box `bb` to `out`. A box with no extent at all is none (an empty geometry's box
+// is the point at its origin), nor is an inverted one; a flat box (a plane) is.
+void add_box(const cvc::bounding_box &bb, double out[6], bool &any) {
+  const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+  if (!valid_bounds(b) || !(b[1] - b[0] + b[3] - b[2] + b[5] - b[4] > 0.0))
+    return;
+  for (int i = 0; i < 3; ++i) {
+    out[2 * i] = any ? std::min(out[2 * i], b[2 * i]) : b[2 * i];
+    out[2 * i + 1] = any ? std::max(out[2 * i + 1], b[2 * i + 1]) : b[2 * i + 1];
+  }
+  any = true;
+}
+
+// What the shown node `n` draws, in world space: its own box and, with `subtree`, its shown
+// descendants'. A hidden node is left out with what is under it (an overlay with nothing to draw),
+// and a group's own box counts only when it says so (a NullGraphicNode's default box is no
+// geometry). So an empty overlay or group does not stretch the box to the origin.
+void add_shown(const GraphicsNode &n, bool subtree, double out[6], bool &any) {
+  const auto *group = dynamic_cast<const NullGraphicNode *>(&n);
+  if (!group || group->getIncludeOwnBounds())
+    add_box(n.getWorldBoundingBox(), out, any);
+  if (subtree)
+    for (const std::shared_ptr<GraphicsNode> &c : n.getGraphicsChildren())
+      if (c && c->isVisible())
+        add_shown(*c, true, out, any);
+}
+
 // The world bounds of the tagged nodes `show` / `hide` let in, with their subtrees (the untagged
-// left out): what a view, or the main view, that names tags to show is framed on. False when
-// none has any.
+// left out): what a view, or the main view, that names tags to show is framed on. A node an entry
+// out of the view takes along is left out as the view leaves it out: an entry's own node, and
+// with subtree every node under it (a mesh_lab tagged lab takes its skeleton children, tagged lab
+// and skeleton, out of show: [skeleton]). Each gives what it draws (add_shown): a plane's flat
+// box counts, a hidden child's or an empty group's does not. A node hidden (or under a hidden
+// one) is let in but gives no bounds: a view whose nodes wait for their data (a volume_grid's
+// planes, before the app's volume is there) frames once they show. False when none has any.
+// `matched`, when given, counts the nodes let in, with bounds or not.
 bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
-                  const std::vector<std::string> &hide, double out[6]) {
+                  const std::vector<std::string> &hide, double out[6], int *matched = nullptr) {
+  std::vector<std::pair<const GraphicsNode *, bool>> outs; // node, subtree
+  for (const RealizedScene::TaggedNode &t : rs.nodes)
+    if (!t.tags.empty() && !in_view(t.tags, show, hide))
+      if (std::shared_ptr<GraphicsNode> n = t.node.lock())
+        outs.emplace_back(n.get(), t.subtree);
+  const auto left_out = [&outs](const GraphicsNode *n, bool subtree) {
+    for (const auto &[o, osub] : outs) {
+      if (o == n) {
+        if (osub || !subtree) // its own props out, and the entry's covered no more than those
+          return true;
+        continue;
+      }
+      if (osub)
+        for (const GraphicsNode *p = n->getParentNode(); p; p = p->getParentNode())
+          if (p == o)
+            return true;
+    }
+    return false;
+  };
   bool any = false;
   for (const RealizedScene::TaggedNode &t : rs.nodes) {
     if (t.tags.empty() || !in_view(t.tags, show, hide))
       continue;
     std::shared_ptr<GraphicsNode> n = t.node.lock();
-    if (!n)
+    if (!n || left_out(n.get(), t.subtree))
       continue;
-    const cvc::bounding_box bb = n->getCombinedWorldBoundingBox();
-    if (bb.isNull())
-      continue;
-    const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
-    for (int i = 0; i < 3; ++i) {
-      out[2 * i] = any ? std::min(out[2 * i], b[2 * i]) : b[2 * i];
-      out[2 * i + 1] = any ? std::max(out[2 * i + 1], b[2 * i + 1]) : b[2 * i + 1];
-    }
-    any = true;
+    if (matched)
+      ++*matched;
+    if (n->isVisibleInHierarchy())
+      add_shown(*n, t.subtree, out, any);
   }
   return any;
 }
@@ -858,12 +911,14 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
             hit.voxel = h.voxel;
             std::copy(h.ijk, h.ijk + 3, hit.ijk);
             hit.value = h.value;
+            hit.axis = h.axis;
           }
         }
   return true;
 }
 
-void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
+std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v, const char *phase,
+                                                                         long &seq) const {
 #ifdef CVC_ENABLE_IMGUI
   const ImGuiIO &io = ImGui::GetIO();
   // The pointer in VTK display coordinates: framebuffer pixels from the lower left.
@@ -885,20 +940,32 @@ void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
   };
   const bool at = hit.hit || hit.plane; // a slice view reports the plane's point past its edge
   const auto ijk = [&hit](int c) { return hit.voxel ? std::to_string(hit.ijk[c]) : std::string(); };
-  std::vector<std::pair<std::string, std::string>> f = {{"x", at ? num(hit.world[0]) : ""},
-                                                        {"y", at ? num(hit.world[1]) : ""},
-                                                        {"z", at ? num(hit.world[2]) : ""},
-                                                        {"hit", hit.hit ? "1" : "0"},
-                                                        {"node", hit.node},
-                                                        {"i", ijk(0)},
-                                                        {"j", ijk(1)},
-                                                        {"k", ijk(2)},
-                                                        {"value", hit.voxel ? num(hit.value) : ""},
-                                                        {"button", "1"},
-                                                        {"mods", mods},
-                                                        {"phase", phase},
-                                                        {"view", v.name},
-                                                        {"seq", std::to_string(++v.pick_seq)}};
+  const char *axes[] = {"x", "y", "z"};
+  return {{"x", at ? num(hit.world[0]) : ""},
+          {"y", at ? num(hit.world[1]) : ""},
+          {"z", at ? num(hit.world[2]) : ""},
+          {"hit", hit.hit ? "1" : "0"},
+          {"node", hit.node},
+          {"i", ijk(0)},
+          {"j", ijk(1)},
+          {"k", ijk(2)},
+          {"value", hit.voxel ? num(hit.value) : ""},
+          {"axis", hit.plane && hit.axis >= 0 && hit.axis < 3 ? axes[hit.axis] : ""},
+          {"button", std::string(phase) == "hover" ? "0" : "1"},
+          {"mods", mods},
+          {"phase", phase},
+          {"view", v.name},
+          {"seq", std::to_string(++seq)}};
+#else
+  (void)v, (void)phase, (void)seq;
+  return {};
+#endif
+}
+
+void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
+  std::vector<std::pair<std::string, std::string>> f = pick_fields(v, phase, v.pick_seq);
+  if (f.empty())
+    return;
   SceneSlot slot;
   if (!v.pick_key.empty() && scenes_ && scenes_(v.scene, slot) && slot.sg) {
     cvc::app &app = slot.sg->appContext();
@@ -909,9 +976,15 @@ void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
     edit.fire = v.on_pick;
     edit.fields = std::move(f);
   }
-#else
-  (void)v, (void)phase, (void)edit;
-#endif
+}
+
+void SceneViews::pointer(View &v) {
+  SceneSlot slot;
+  if (v.pointer_key.empty() || !scenes_ || !scenes_(v.scene, slot) || !slot.sg)
+    return;
+  cvc::app &app = slot.sg->appContext();
+  for (const auto &kv : pick_fields(v, "hover", v.pointer_seq)) // seq last, as a pick's
+    ari::write<std::string>(app, v.pointer_key + "." + kv.first, kv.second);
 }
 
 bool SceneViews::pick(const std::string &view, double x, double y, PickHit &hit) const {
@@ -1055,7 +1128,7 @@ void SceneViews::update(double dt) {
     std::unordered_set<vtkProp *> out;
     for (const RealizedScene::TaggedNode &t : mainSlot.realized->nodes)
       if (!in_view(t.tags, mainSlot.realized->main_show, mainSlot.realized->main_hide))
-        collect(t.node.lock(), out);
+        collect(t.node.lock(), out, t.subtree);
     main_hidden_.assign(out.begin(), out.end());
     if (!main_start_tag_)
       if (vtkRenderer *r = view_->renderer()) {
@@ -1101,7 +1174,7 @@ void SceneViews::update(double dt) {
     if (rs && (!v.show.empty() || !v.hide.empty()))
       for (const RealizedScene::TaggedNode &t : rs->nodes)
         if (!in_view(t.tags, v.show, v.hide))
-          collect(t.node.lock(), v.hidden);
+          collect(t.node.lock(), v.hidden, t.subtree);
     // A slice view leaves out the volume_slice nodes on the other two axes, with their overlays:
     // seen edge-on, each would only draw a line across its own.
     const bool slice_view = v.start.mode == "slice" && v.camera.empty();
@@ -1130,7 +1203,7 @@ void SceneViews::update(double dt) {
             if (vtkSmartPointer<vtkMatrix4x4> w = n->getWorldTransform())
               std::copy(w->GetData(), w->GetData() + 16, frame.begin());
           std::unordered_set<vtkProp *> props;
-          collect(n, props);
+          collect(n, props, t.subtree);
           for (vtkProp *p : props)
             e.props.emplace(p, frame); // an outer named node's frame wins over one inside it
         }
@@ -1216,9 +1289,18 @@ void SceneViews::update(double dt) {
             }
             own = true;
           }
-        if (!own && (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b)))
-          r->ComputeVisiblePropBounds(b);
-        if (valid_bounds(b)) {
+        // A view naming tags to show waits while the nodes it lets in have no bounds yet (a
+        // mesh_lab's skeleton before its run ends), rather than framing on what else it holds.
+        bool wait = false;
+        if (!own) {
+          int matched = 0;
+          if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b, &matched)) {
+            wait = matched > 0;
+            if (!wait)
+              r->ComputeVisiblePropBounds(b);
+          }
+        }
+        if (!wait && valid_bounds(b)) {
           frame_camera(cam, b, v.start, sg, v.slice_axis);
           v.framed = true;
         }
@@ -1291,6 +1373,12 @@ void SceneViews::register_widget() {
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
             v->pick_key = ari::resolve_bind(slot.sg->getStatePrefix(),
                                             w.props.str("pick", "viewers." + name + ".pick"));
+        }
+        v->pointer_key.clear();
+        if (w.props.has("pointer")) {
+          SceneSlot slot;
+          if (scenes_ && scenes_(v->scene, slot) && slot.sg)
+            v->pointer_key = ari::resolve_bind(slot.sg->getStatePrefix(), w.props.str("pointer"));
         }
         // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
         // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
@@ -1478,6 +1566,12 @@ void SceneViews::register_widget() {
               (ImGui::IsItemHovered() &&
                (io.MouseWheel != 0.0f || ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))))
             v->settle = kSettleFrames;
+        }
+        // pointer: the pointer over the view with no button down, once per frame it moves.
+        if (!v->pointer_key.empty() && ImGui::IsItemHovered() && !ImGui::IsAnyMouseDown()) {
+          const ImGuiIO &io = ImGui::GetIO();
+          if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || v->pointer_seq == 0)
+            pointer(*v);
         }
         if (v->settle > 0) {
           --v->settle;

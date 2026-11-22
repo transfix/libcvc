@@ -38,6 +38,7 @@
 #include <boost/regex.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <map>
 #include <sstream>
@@ -156,7 +157,7 @@ double tile_stepper::impl::world_z(double t) const {
 
 // The stack's slices in the range, as the vendored tiler's Slices: each contour's vertices snapped
 // onto the stack's grid, made counterclockwise, and kept if they make a simple polygon. A unit per
-// vertex.
+// vertex, and each simplicity test charged by its size.
 step_task tile_stepper::impl::build_slices() {
   ctx.stage("snapping", 0.0, 0.05);
   tiler::Logger logger = ctx.logger("tiler.tile_contours");
@@ -220,7 +221,9 @@ step_task tile_stepper::impl::build_slices() {
                                  << k << " component = " << name);
           continue;
         }
-        if (!P.is_simple()) {
+        const bool simple = P.is_simple();
+        TILER_UNITS(tiler::simple_test_units(P.size()));
+        if (!simple) {
           TILER_WARN(logger,
                      "Skipping non-simple contour: slice = " << k << " component = " << name);
           continue;
@@ -274,9 +277,10 @@ step_task tile_stepper::impl::assemble() {
         ctx.advance(double(done) / double(total));
       SK_UNIT;
     }
-    // Normals and colours.
+    // Normals and colours, a unit per 64 triangles or vertices.
     geometry::normals_t &normals = geom.normals();
     normals.assign(pts.size(), geometry::normal_t{{0, 0, 0}});
+    std::size_t counted = 0;
     for (const geometry::tri_t &tri : tris) {
       const auto &a = pts[tri[0]], &b = pts[tri[1]], &c = pts[tri[2]];
       const double ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
@@ -285,12 +289,16 @@ step_task tile_stepper::impl::assemble() {
       for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
           normals[tri[i]][j] += n[j];
+      if (++counted % 64 == 0)
+        SK_UNIT;
     }
     for (auto &n : normals) {
       const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
       if (len > 0)
         for (int j = 0; j < 3; ++j)
           n[j] /= len;
+      if (++counted % 64 == 0)
+        SK_UNIT;
     }
     geom.colors().assign(pts.size(), geometry::color_t{{color[0], color[1], color[2]}});
     result.components.emplace(name, std::move(geom));
@@ -357,7 +365,10 @@ step_task tile_stepper::impl::run() {
 
   if (vertices > 0)
     SK_RUN(tiler::tile(slices, options, ctx, out));
-  slices.clear();
+  while (!slices.empty()) { // freed a slice at a time
+    slices.pop_back();
+    SK_UNIT;
+  }
   SK_RUN(assemble());
   result.warnings = ctx.log.warnings();
 }
@@ -386,6 +397,9 @@ bool tile_stepper::step(std::size_t budget) {
   try {
     if (!m.task)
       m.task = m.run();
+    // A step ends where the phase changes (budget 0 runs on to the end): a budget sized on one
+    // phase's units is not spent on the next's, which cost differently.
+    const char *const phase = m.ctx.phase;
     for (std::size_t n = 0; budget == 0 || n < budget; ++n) {
       if (m.cancel.load(std::memory_order_acquire))
         break;
@@ -396,6 +410,8 @@ bool tile_stepper::step(std::size_t budget) {
         m.task = step_task();
         return true;
       }
+      if (budget != 0 && std::strcmp(m.ctx.phase, phase) != 0)
+        break;
     }
     if (m.cancel.load(std::memory_order_acquire)) {
       m.error = std::make_exception_ptr(tiler_error("tile_contours: cancelled"));

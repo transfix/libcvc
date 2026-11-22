@@ -296,7 +296,7 @@ struct SettingsSpec {
   std::vector<SettingsNode> nodes;
   bool search = false; // a search box above the keys, holding `search_text`
   std::string search_text;
-  bool narrowed = false; // a search or filter is narrowing it: draw every group open
+  bool narrowed = false; // a search or a filter that picks keys: draw every group open
   std::string empty;     // shown when no key is left ("" none)
 };
 // What the user did with it this frame. `node` >= 0: nodes[node]'s new `value` (text): `changed`
@@ -339,6 +339,12 @@ struct Backdrop {
   int banner_rows = 6;
   bool window = false; // the window's own background: it fills the window's inner area
   Size size;           // a group's authored size: the backdrop's area is at least this big
+  // §5.26 a solid colour under the picture (or alone, with no `image`), `opacity` strong.
+  bool has_fill = false;
+  float fill[3] = {0.0f, 0.0f, 0.0f};
+  // The group is a cell of a grid (Backend::begin_grid): where the backend can, the fill covers
+  // the whole cell, not only the area the content takes.
+  bool cell = false;
 };
 
 // How a group the document made one item (§4.6, Backend::begin_item_group) takes the pointer and
@@ -419,6 +425,17 @@ struct Capabilities {
   bool maximize = false;        // next_window_maximize fills a window to the screen: ui.maximize
   bool badge = false;           // item_badge shows a picture's label: image.badge
   bool rich_text = false;       // rich_text draws styles and links that can be activated: text.runs
+  bool button_icon = false;     // button_with draws ButtonLook::icon on the button: button.icon
+  bool button_selected = false; // button_with draws a chosen button pressed in: button.selected
+};
+
+// §5.27 how button_with draws a button: `icon`, a published image's name (set_image; empty for
+// none) drawn in place of the label, `icon_h` tall in the document's px (0: a line of text);
+// `selected`, the pressed-in look of the chosen button of a row.
+struct ButtonLook {
+  std::string icon;
+  float icon_h = 0.0f;
+  bool selected = false;
 };
 
 // The fullscreen view's area (Backend::begin_fullscreen_view): `shown` false where the backend has
@@ -530,6 +547,9 @@ public:
     (void)maximized;
     return false;
   }
+  // §5.9 / §5.14 whether the view is a phone's (under 500 logical px on its short side), for a
+  // window's `maximized: phone`. Default: no (a terminal, a test backend).
+  virtual bool view_is_phone() const { return false; }
   // §5.9 `resizable:`, for the NEXT begin_window: false, and the user can't resize the window by
   // its edges or corners (a maximize still fills it). Called before every begin_window. Default:
   // ignored (a backend whose windows the user can't resize).
@@ -627,6 +647,11 @@ public:
     (void)rgb;
     text_value(label, value);
   }
+  // §5.26 a colour scope: the text of what is drawn between begin_text_color and end_text_color (a
+  // button's label, a menu item's, a radio's) is in `rgb`. Balanced, never nested by the core,
+  // which opens one around a single leaf. Default: no-op, the backend's own colours.
+  virtual void begin_text_color(const float rgb[3]) { (void)rgb; }
+  virtual void end_text_color() {}
   // A line of text with pictures in it (§5.11 `emoji:`): the runs one after another on one line,
   // each picture one line tall at its own shape, in `rgb` when it is not null. Returns false when
   // the backend can't put a picture in a line (the terminals: the core then draws the text as it
@@ -723,6 +748,13 @@ public:
   // Whether the surface shows glyphs beyond ASCII (braille, box drawing). Default yes.
   virtual bool unicode_glyphs() const { return true; }
   virtual bool button(const char *label) = 0;           // returns clicked
+  // §5.27 a button with a picture and/or drawn chosen (ButtonLook); returns clicked. Default: the
+  // plain button(label), for a backend that draws neither (Capabilities::button_icon and
+  // button_selected say which one does).
+  virtual bool button_with(const char *label, const ButtonLook &look) {
+    (void)look;
+    return button(label);
+  }
   virtual bool menu_item_action(const char *label) = 0; // returns clicked
 
   // §4.6 widget-level on_click: did the LAST item drawn get clicked this frame? The walk queries
@@ -820,6 +852,15 @@ public:
     (void)row;
     return combo(label, current_index, options);
   }
+  // §5.26 a radio with a colour for each option: option i's text in `colors[i]` where that is set
+  // (`colors` may be shorter than `options`; the rest, and the caption, keep the backend's). The
+  // default draws the plain radio.
+  virtual IndexEdit radio_colored(const char *label, int current_index,
+                                  const std::vector<std::string> &options, bool row,
+                                  const std::vector<ItemColor> &colors) {
+    (void)colors;
+    return radio(label, current_index, options, row);
+  }
   // A single-line text field bound to a string state key (Kind::InputText; Kind::InputInt reuses it
   // with the core coercing to/from an int). `key` is the stable per-widget id (the resolved state
   // path), like the sliders, so the backend can hold the in-progress text across frames; `current`
@@ -902,8 +943,8 @@ public:
   // §5.12 a container's background: begin_backdrop comes right before a group's children (or
   // right after begin_window, with Backdrop::window, for a window's), end_backdrop right after them
   // (before end_window); balanced, nested like begin_grid. The backend draws `bd.image` behind
-  // what is emitted between them, fitted to the area they take. Default: no background, the
-  // content drawn as without one.
+  // what is emitted between them, fitted to the area they take, over `bd.fill` where has_fill
+  // (§5.26). Default: no background, the content drawn as without one.
   virtual void begin_backdrop(const Backdrop &bd) { (void)bd; }
   virtual void end_backdrop() {}
 

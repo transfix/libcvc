@@ -1,0 +1,51 @@
+# The browser smoke test's volume grid (src/arigl/web/test/arigl_web_smoke.mjs): the volume_grid
+# component over a volume_grid node on the bunny's 32^3 signed distance field, its switch on XZ (a
+# slice view down y). Once the planes are up and the slice view looks down y, it writes one click
+# as a slice view writes it (a down, then an up, a frame apart) and, once the node has marked the
+# voxel, prints one line the test waits for: the component, the node and its gesture in wasm. The
+# app makes the volume (data: generate: sdf) and the grid follows it, as natively.
+meta: {min_libcvc: 4.0.0}
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
+import:
+  - cvc://components/volume_grid.ari
+init: (begin (state-set "graphics.root.children.grid.grid.view" "xz") (state-set "vg.step" "start"))
+on_tick: |
+  (if (and (= (state-get "vg.step") "start")
+           (= (state-get "viewers.vg_slice.camera.slice.axis") "y")
+           (= (state-get "graphics.root.children.grid.grid.info.dims") "32 32 32"))
+      (begin
+        (state-set "graphics.root.children.grid.grid.pick.phase" "down")
+        (state-set "graphics.root.children.grid.grid.pick.i" "10")
+        (state-set "graphics.root.children.grid.grid.pick.j" "15")
+        (state-set "graphics.root.children.grid.grid.pick.k" "12")
+        (state-set "graphics.root.children.grid.grid.pick.axis" "y")
+        (state-set "graphics.root.children.grid.grid.pick.seq" "1")
+        (state-set "vg.step" "down"))
+      (if (= (state-get "vg.step") "down")
+          (begin
+            (state-set "graphics.root.children.grid.grid.pick.phase" "up")
+            (state-set "graphics.root.children.grid.grid.pick.seq" "2")
+            (state-set "vg.step" "up"))
+          (if (and (= (state-get "vg.step") "up")
+                   (= (state-get "graphics.root.children.grid.grid.classes.0.points") "1"))
+              (begin
+                (print (str-concat "volume_grid: " (state-get "graphics.root.children.grid.grid.info.dims")
+                                   ", slice view down "
+                                   (state-get "viewers.vg_slice.camera.slice.axis") ", "
+                                   (state-get "graphics.root.children.grid.grid.status")))
+                (state-set "vg.step" "done")))))
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vg, title: Volume grid, view_size: 240 }
+    pos: [8, 8]
+    size: [900, 440]
+scene:
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }
+      classes:
+        - { name: seeds, color: [1, 0.4, 0.2], radius: 1 }

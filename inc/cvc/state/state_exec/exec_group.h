@@ -46,7 +46,9 @@ namespace detail {
 struct group_pool_link {
   std::uint64_t seq = 0;           ///< creation order in its app (deterministic mode; threads 0)
   double last_pump_seconds = 0.0;  ///< its last pump's time: the LPT order and the helper wake
-  bool skipped = false;            ///< not started before its pump_all's deadline: first next time
+  /// Not started before its pump_all's deadline, or short-changed by it (started with under half
+  /// the call left, and the deadline ended its pump with work left): first next time.
+  bool skipped = false;
   std::uint64_t skipped_since = 0; ///< the pump_all that first skipped it (the oldest goes first)
   int last_thread = -1;            ///< which thread pumped it last (CVC_EXEC_FORCE_MOVE)
   std::atomic<void *> call{nullptr}; ///< the pump_all it belongs to now, or null
@@ -149,12 +151,14 @@ struct pump_budget {
   double seconds;
 };
 
-/// What one pump did: the steps it took, the processes wake_awaiting() woke, and whether a C++
-/// exception escaped it (the pool then fails the group, S1.6). Stage 2 (S2a, S2-Q4): what the
-/// pump left, read under the token from its run loop's end (async_scheduler::run_report), so a
-/// worker's release reads only this and the state word, never the scheduler. Unset when failed.
-/// While the group's scheduler has no wake notifier installed the report is not recomputed, so
-/// these fields repeat the last one computed (nothing reads them then).
+/// What one pump did: the steps it took, the processes wake_awaiting() woke, whether a C++
+/// exception escaped it (the pool then fails the group, S1.6), and whether a process was still
+/// runnable when it ended (a budget ended it, not a lack of work: the pool's short-changed rule).
+/// Stage 2 (S2a, S2-Q4): what the pump left, read under the token from its run loop's end
+/// (async_scheduler::run_report), so a worker's release reads only this and the state word, never
+/// the scheduler. Unset when failed. `runnable` is read from the scheduler itself, so it is current
+/// in every pump; while the group's scheduler has no wake notifier installed the report is not
+/// recomputed, so the fields after it repeat the last one computed (nothing reads them then).
 struct pump_result {
   std::uint64_t steps = 0;
   int woken = 0;

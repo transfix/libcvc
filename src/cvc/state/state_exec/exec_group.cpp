@@ -349,9 +349,11 @@ pump_result exec_group::pump(const pump_budget &budget) {
                                               : std::nullopt;
     r.steps = s.sync_run_steps(budget.steps, seconds);
     // What the run loop left (S2-Q4), read here under the token: a worker's release reads this,
-    // never the scheduler.
+    // never the scheduler. `runnable` comes from the scheduler itself (O(1), the value the report
+    // takes when it is computed): pump_all's short-changed rule reads it, and a fork-join group
+    // has no wake notifier, so its report is not recomputed.
     const async_scheduler::run_report &left = s.last_run_report();
-    r.runnable = left.runnable;
+    r.runnable = s.has_runnable();
     r.next_deadline = left.next_deadline;
     r.deadline_precise = left.precise;
     r.best_runnable = left.best_runnable;

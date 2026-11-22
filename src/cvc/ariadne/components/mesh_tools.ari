@@ -10,7 +10,12 @@
 # transfer function): the Colours editor edits its ramp and opacity curve over the values'
 # histogram -- the surface is see-through where the curve is low -- and Colormap resets it to a
 # named, opaque ramp. Load reads another mesh file (source.*), so one node can switch datasets.
-# Needs a libcvc built with CVC_ENABLE_LIBIGL (the mesh_lab node type is registered only there).
+# Skeleton computes the skeleton of the mesh's vertices (cvc::skeletonize: strands and sheets
+# inside the surface, drawn in the node's <node>_strands / <node>_sheets children) from the
+# mesh_ops.skeleton.* parameters, a slice at a time on the app's scheduler: its bar shows the
+# stage, and Stop ends it.
+# Needs a libcvc built with CVC_ENABLE_LIBIGL (the mesh_lab node type is registered only there);
+# the skeleton also needs Shewchuk's predicates (CVC_WITH_SHEWCHUK), else its status says so.
 #
 # Args (every one has a default, so a bare include works):
 #   node   the mesh_lab node's id (default mesh)
@@ -152,3 +157,72 @@ units:
         bind: graphics.root.children.{node}.mesh_ops.color.min
       - text: "max"
         bind: graphics.root.children.{node}.mesh_ops.color.max
+      - separator
+      - text: "Skeleton"
+      - checkbox: Robust Cocone first
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.robust
+        tooltip: "filter a noisy sample first: keep only the points that lie on a smooth surface"
+      - slider_float: Cocone angle
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.cocone_phi
+        lo: 0.05
+        hi: 1.5
+        fmt: "%.3f rad"
+        tooltip: "Tight Cocone: half the cocone's opening angle around the surface (default pi/8 = 0.393)"
+      - slider_float: Flat angle
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.flat_phi
+        lo: 0.05
+        hi: 1.5
+        fmt: "%.3f rad"
+        tooltip: "Tight Cocone: the normal deviation allowed between a flat point's cocone neighbours (default pi/3 = 1.047)"
+      - slider_float: Medial angle
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.medial_theta
+        lo: 0.05
+        hi: 1.5
+        fmt: "%.3f rad"
+        tooltip: "medial axis: a Delaunay edge within this angle of a tangent plane is not chosen by the angle test (default pi/8 = 0.393)"
+      - slider_float: Medial ratio
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.medial_ratio
+        lo: 1.0
+        hi: 400.0
+        fmt: "%.0f"
+        tooltip: "medial axis: a Delaunay edge is chosen when its squared length exceeds this times both ends' umbrella diameters (default 64)"
+      - checkbox: Sheets by area
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.discard_small
+        tooltip: "keep every planar cluster of at least Threshold times the largest one's area as a sheet, instead of the largest Sheets"
+      - slider_int: Sheets
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.sheet_count
+        lo: 0
+        hi: 20
+        tooltip: "how many of the largest planar clusters are sheets; the others become stars of strands"
+        visible_when: (not (= (state-get "graphics.root.children.{node}.mesh_ops.skeleton.discard_small") "1"))
+      - slider_float: Threshold
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.threshold
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+        tooltip: "the fraction of the largest cluster's area a sheet needs"
+        visible_when: (= (state-get "graphics.root.children.{node}.mesh_ops.skeleton.discard_small") "1")
+      - button: Skeleton
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "skeleton")
+        disabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.busy") "1")
+        tooltip: "the skeleton of the mesh's vertices, inside the surface: strands (green, blue stars) and sheets"
+      - button: Stop
+        on: (state-set "graphics.root.children.{node}.mesh_ops.request" "stop")
+        enabled_when: (= (state-get "graphics.root.children.{node}.mesh_ops.skeleton.stoppable") "1")
+        tooltip: "ends the skeleton running at its next step; the last skeleton stays"
+      # The run steps on the app's scheduler, so the bar moves while it runs (on single-threaded
+      # wasm too); the overlay names the stage.
+      - progress: progress
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.progress
+        hi: 100
+        overlay: graphics.root.children.{node}.mesh_ops.skeleton.phase
+      - text: "skeleton"
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.status
+      - text: "strands"
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.info.strands
+      - text: "sheets"
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.info.sheets
+      - checkbox: Show strands
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.view.strands
+      - checkbox: Show sheets
+        bind: graphics.root.children.{node}.mesh_ops.skeleton.view.sheets

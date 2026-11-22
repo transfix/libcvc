@@ -11,7 +11,8 @@ What a training script relies on (ARIADNE_WORLDS.md section 14, L4):
   * what a differentiable twin reads: fields() (the grid, its ground, its signed distance and
     gradient) and plants() (each agent's plant as a model, in the observation's order, with the
     drive that commanded it last and the limits it planned with on the plant);
-  * set_intent / intent / clear_intent: an agent's intent, its force summed by the drive.
+  * set_intent / intent / clear_intent: an agent's intent, its force summed by the drive;
+  * fleets=[...]: a document's fleet laid out at each reset, its vehicles the agents.
 """
 
 import math
@@ -201,8 +202,9 @@ for _ in range(60):
 check(bool(np.all(o["x"] > -27.0)) and bool(np.all(o["speed"] > 1.0)),
       f"each plant drives ({np.round(o['x'], 1)}, {np.round(o['speed'], 1)})")
 
-# libcvc's one simulation tick: the gym steps 0.06 s by default; tick= sets another.
-check(pycvc.SIM_TICK == 0.06 and pycvc.SIM_QUANTUM == 0.01 and pycvc.SIM_CATCHUP == 0.25,
+# libcvc's one simulation tick: the gym steps 7 quanta of 1/120 s by default; tick= sets another.
+check(pycvc.SIM_QUANTUM == 1.0 / 120.0 and pycvc.SIM_TICK_QUANTA == 7
+      and abs(pycvc.SIM_TICK - 7.0 / 120.0) < 1e-15 and pycvc.SIM_CATCHUP == 0.25,
       f"the shared tick ({pycvc.SIM_TICK}, {pycvc.SIM_QUANTUM}, {pycvc.SIM_CATCHUP})")
 check(abs(g3.dt() - pycvc.SIM_TICK) < 1e-12, f"the gym's tick is the shared one ({g3.dt()})")
 g5 = pycvc.WorldGym(doc, tick=0.05, agents=[{"plant": "kinematic", "controller": "none"}])
@@ -300,5 +302,29 @@ try:
 except RuntimeError as e:
     check("does not allow" in str(e), f"the spawn's refusal ({e})")
 
-del gym, other, g2, g3, g4, g5
+# ── a document's fleet as the agents (gym_options::fleets) ──
+fdoc = os.path.join(tmp, "fleet.ari")
+with open(fdoc, "w", encoding="utf-8") as f:
+    f.write(DOC.replace("scene:\n", "    start:\n      - { fleet: squad, archetype: humvee, count: 4, "
+                        "seed: 4, policy: builtin }\nscene:\n", 1))
+g6 = pycvc.WorldGym(fdoc, fleets=["squad"], max_steps=20)
+o6 = g6.reset(1)
+check(o6["n"] == 4, f"the fleet's four vehicles are the agents ({o6['n']})")
+x1 = o6["x"].copy()
+check(not np.array_equal(g6.reset(2)["x"], x1), "another seed, another layout")
+check(np.array_equal(g6.reset(1)["x"], x1), "the same seed, the same layout")
+o6, r6, term6, trunc6, info6 = g6.step(math.nan, math.nan)
+check(len(r6) == 4 and o6["step"] == 1, "a step, a reward per vehicle")
+try:
+    pycvc.WorldGym(fdoc, fleets=["armada"])
+    check(False, "a fleet the document does not declare")
+except RuntimeError as e:
+    check("has no fleet 'armada'" in str(e), f"refused: no such fleet ({e})")
+try:
+    pycvc.WorldGym(fdoc, fleets="squad")
+    check(False, "fleets as one str")
+except (ValueError, RuntimeError) as e:
+    check("list of names" in str(e), f"fleets is a list ({e})")
+
+del gym, other, g2, g3, g4, g5, g6
 print(f"test_pycvc_gym: {checks} checks passed")

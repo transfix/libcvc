@@ -46,6 +46,7 @@
 #include <cvc/physics/types.h>      // vec3
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,10 @@ struct vehicle_model_cache; // vehicle_view.h: the models it fits
 // intent carries `yaw`, so the avatar keeps facing it while it walks or strafes.
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
                                              double yaw, double speed);
+// The same from a stick (control_resolver::walk_axes): FORWARD and RIGHT shares in [-1, 1], the
+// walk as fast as the stick is pushed (a full push, or a key, at `speed`; never faster).
+cvc::ariadne::avatar_intent intent_from_axes(double forward, double right, double yaw,
+                                             double speed);
 
 // The camera's heading on a Z-up ground as a yaw (radians about +Z from +X): the view direction
 // (eye -> focal) flattened onto the ground. A camera looking straight down has none: +Y (pi/2).
@@ -119,6 +124,19 @@ public:
   // comes inside it -- looking straight up from just above the floor -- hides it rather than show
   // its inside. Shown by default; applied from the next update().
   void set_self_visible(bool visible) { _self_visible = visible; }
+  // The participants who are driving a vehicle (ARIADNE_WORLDS.md section 18.6): their pose is the
+  // vehicle's, so their markers are hidden (they are in it) and carry no name. Applied from the
+  // next update().
+  void set_riders(std::set<std::string> pids) { _riders = std::move(pids); }
+
+  // The get-in prompt (section 18.6) over a vehicle: TEXT ("E  Drive humvee") at world point AT,
+  // with a ring that fills as the key is held (PROGRESS in [0, 1]); empty text shows none. Drawn
+  // by draw_labels.
+  void set_prompt(std::string text, double progress, const cvc::physics::vec3 &at) {
+    _prompt = std::move(text);
+    _prompt_progress = progress;
+    _prompt_at = at;
+  }
 
   // The point on the horizontal plane z = GROUND_Z under display pixel (X, Y) (VTK display
   // coordinates, origin bottom-left, as CameraController::takeClick reports). False when the ray
@@ -201,6 +219,10 @@ private:
   cvc::physics::vec3 _self_offset{0.0, 0.0, 0.0};   // easing offset on the local avatar
   bool _have_self = false;
   bool _self_visible = true; // set_self_visible
+  std::set<std::string> _riders; // set_riders
+  std::string _prompt;           // set_prompt
+  double _prompt_progress = 0.0;
+  cvc::physics::vec3 _prompt_at{0.0, 0.0, 0.0};
   double _self_pos[3] = {0.0, 0.0, 0.0};
   std::vector<std::string> _warnings;
   // The entities drawn: id -> the identity its node was built with (a change rebuilds it), the pose

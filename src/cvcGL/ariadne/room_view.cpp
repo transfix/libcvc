@@ -86,16 +86,24 @@ void pose_matrix(const cvc::physics::quat &q, double tx, double ty, double tz, d
 
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
                                              double yaw, double speed) {
+  return intent_from_axes((forward ? 1.0 : 0.0) - (back ? 1.0 : 0.0),
+                          (right ? 1.0 : 0.0) - (left ? 1.0 : 0.0), yaw, speed);
+}
+
+cvc::ariadne::avatar_intent intent_from_axes(double forward, double right, double yaw,
+                                             double speed) {
   const double fx = std::cos(yaw), fy = std::sin(yaw);
   const double rx = fy, ry = -fx; // forward x up(0,0,1)
-  const double f = (forward ? 1.0 : 0.0) - (back ? 1.0 : 0.0);
-  const double r = (right ? 1.0 : 0.0) - (left ? 1.0 : 0.0);
+  const double f = std::isfinite(forward) ? std::clamp(forward, -1.0, 1.0) : 0.0;
+  const double r = std::isfinite(right) ? std::clamp(right, -1.0, 1.0) : 0.0;
   double mx = f * fx + r * rx, my = f * fy + r * ry;
   const double ml = std::hypot(mx, my);
   cvc::ariadne::avatar_intent in;
   in.yaw = yaw;
   if (ml > 1e-9) {
-    mx *= speed / ml, my *= speed / ml;
+    // As fast as pushed, never past `speed` (a diagonal of two keys is a full push).
+    const double share = std::min(1.0, ml);
+    mx *= speed * share / ml, my *= speed * share / ml;
     in.move = cvc::physics::vec3{mx, my, 0.0};
   }
   return in;
@@ -318,19 +326,23 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
         place(part_node_id(pid, i), off);
       }
     }
-    if (self) { // shown or hidden (set_self_visible); a rebuilt marker starts shown
-      const auto show = [&](const std::string &node_id) {
-        if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id);
-            g && g->isVisible() != _self_visible)
-          g->setVisible(_self_visible);
-      };
-      show(id);
-      show(visor_node_id(pid));
-      for (std::size_t i = 0; i < parts.size(); ++i)
-        show(part_node_id(pid, i));
-    }
-    _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y,
-                                     p.position.z + _body.height + kLabelAboveTop};
+    // Shown or hidden: our own by set_self_visible, anyone driving (in a vehicle) not at all. A
+    // rebuilt marker starts shown.
+    const bool rider = _riders.count(pid) != 0;
+    const bool visible = !rider && (!self || _self_visible);
+    const auto show = [&](const std::string &node_id) {
+      if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(node_id); g && g->isVisible() != visible)
+        g->setVisible(visible);
+    };
+    show(id);
+    show(visor_node_id(pid));
+    for (std::size_t i = 0; i < parts.size(); ++i)
+      show(part_node_id(pid, i));
+    if (rider)
+      _heads.erase(pid); // its vehicle carries the label
+    else
+      _heads[pid] = cvc::physics::vec3{p.position.x, p.position.y,
+                                       p.position.z + _body.height + kLabelAboveTop};
   }
 }
 
@@ -581,6 +593,30 @@ void room_view::draw_labels() const {
     const ImVec2 at(static_cast<float>(d[0]) - 0.5f * sz.x, h - static_cast<float>(d[1]) - sz.y);
     dl->AddText(ImVec2(at.x + 1.0f, at.y + 1.0f), IM_COL32(0, 0, 0, 200), text.c_str());
     dl->AddText(at, IM_COL32(255, 255, 255, 235), text.c_str());
+  }
+  // The get-in prompt: its text in a dark pill, a ring before it that fills as the key is held.
+  if (!_prompt.empty()) {
+    r->SetWorldPoint(_prompt_at.x, _prompt_at.y, _prompt_at.z, 1.0);
+    r->WorldToDisplay();
+    const double *d = r->GetDisplayPoint();
+    if (d[2] >= 0.0 && d[2] <= 1.0) {
+      const ImVec2 sz = ImGui::CalcTextSize(_prompt.c_str());
+      const float ring = sz.y * 0.6f, pad = sz.y * 0.4f;
+      const float w = 2.0f * ring + pad + sz.x;
+      const ImVec2 at(static_cast<float>(d[0]) - 0.5f * w, h - static_cast<float>(d[1]) - sz.y);
+      dl->AddRectFilled(ImVec2(at.x - pad, at.y - pad), ImVec2(at.x + w + pad, at.y + sz.y + pad),
+                        IM_COL32(0, 0, 0, 170), sz.y);
+      const ImVec2 c(at.x + ring, at.y + 0.5f * sz.y);
+      dl->AddCircle(c, ring, IM_COL32(255, 255, 255, 90), 24, 2.0f);
+      if (_prompt_progress > 0.0) {
+        constexpr float kTop = -1.5707963f, kTurn = 6.2831853f;
+        dl->PathArcTo(c, ring, kTop,
+                      kTop + kTurn * static_cast<float>(std::min(_prompt_progress, 1.0)), 24);
+        dl->PathStroke(IM_COL32(255, 215, 90, 255), 0, 3.0f);
+      }
+      dl->AddText(ImVec2(at.x + 2.0f * ring + pad, at.y), IM_COL32(255, 255, 255, 240),
+                  _prompt.c_str());
+    }
   }
 #endif
 }

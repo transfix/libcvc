@@ -159,6 +159,9 @@ struct entity_spec {
   // is its chassis's centre, ahead of it along the heading.
   bool placed = false;
   double x = 0.0, y = 0.0, yaw = std::numeric_limits<double>::quiet_NaN();
+  // The participant driving it (its pid; ARIADNE_WORLDS.md section 18.4), or "" for its controller.
+  // Set by WorldVehicles::set_driver (a holon's set_driver), not at spawn.
+  std::string driver;
 };
 
 // What an entity is told from outside: a command, a force, or both, kept until changed.
@@ -377,6 +380,19 @@ struct navigator_params {
   bool stop_at_goal = false, park_hold = false;
 };
 
+// A fleet's vehicles at one world tick (WorldVehicles::poses, FL1): each one's entity id, its
+// chassis's centre (world metres) and heading (rad, 0 along +x, counter-clockwise), its speed
+// along that heading (m/s, negative backing up) and its team (its rally point, -1 none), in the
+// fleet's order, as flat arrays of the same length; and the box they all lie in.
+struct fleet_poses {
+  std::uint64_t tick = 0; // the physics world's step these are of
+  std::vector<std::uint64_t> id;
+  std::vector<float> x, y, z, yaw, speed;
+  std::vector<std::int16_t> team;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0; // all 0 with none placed
+  std::size_t size() const { return id.size(); }
+};
+
 class WorldVehicles {
 public:
   // The vehicles of `world`, under `vehicles_key` (the catalog, the spawn keys), `entities_key`
@@ -427,6 +443,12 @@ public:
   // intent that is not finite or a weight outside [0, 1]. intent() is the one that will be used
   // (off for none).
   bool set_intent(std::uint64_t id, const entity_intent &intent);
+  // Who drives entity `id`: a participant's pid, or "" for its controller (section 18.4). The
+  // holon that runs the world sets it (holon::set_driver) and feeds the participant's drive axes
+  // in as the entity's intent. A change is a new revision (room_entities sends it). False for an
+  // unknown id.
+  bool set_driver(std::uint64_t id, const std::string &pid);
+  std::string driver(std::uint64_t id) const;
   bool clear_intent(std::uint64_t id);
   entity_intent intent(std::uint64_t id) const;
   // A second table of intents beside the entities' own keys (world: vehicles: intents:): an
@@ -500,6 +522,12 @@ public:
   // document's init: may set it before the world is made.
   void set_avoid(bool avoid);
   bool avoid() const;
+  // Other things that move in the world, which the navigators steer around as they do around each
+  // other's vehicles while avoid() is on (ARIADNE_WORLDS.md section 18.4): a holon's avatars
+  // (holon::attach_world sets them before each step), at their positions in the world's metres.
+  // Nothing moves them; kept until set again, empty for none (the default).
+  void set_movers(std::vector<std::array<double, 2>> xy);
+  const std::vector<std::array<double, 2>> &movers() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense
@@ -510,8 +538,8 @@ public:
   bool set_sense(const std::string &mode);
   const std::string &sense() const;
   // The occupancy plant `plant`'s navigator plans on now (row-major, the grid's rows and cols;
-  // 1 = blocked): the grid under known, its belief under fog. False when that plant has no
-  // navigator yet.
+  // 1 = blocked): the grid under known, its belief (its first plane) under fog. A fleet's own
+  // navigator is "<plant>/<fleet>". False when that plant has no navigator yet.
   bool belief(const std::string &plant, std::vector<std::uint8_t> &out, int &rows, int &cols) const;
   // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
   // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
@@ -556,6 +584,20 @@ public:
   // Fleets (world: vehicles: start: entries with fleet:, spawn_starts): their names in the
   // document's order. A fleet is laid out once the world's grid exists; its keys are
   // `vehicles.fleets.<name>.*` (rally points, restart and reseed requests, its counts).
+  // Each fleet has a navigator of its own per plant ("<plant>/<fleet>"), made with its sense and
+  // belief: writing `.sense` (known, fog) or `.belief` (shared, grouped, private) makes it again,
+  // its vehicles at rest where they are; `.planes` counts its belief planes. `.policy` (trained,
+  // builtin, data:<entry> or a uri) switches what drives it live, and `.drives` says what does:
+  // "trained (<where>, sha256:...)", "weights (<uri>, sha256:...)", "builtin", "builtin: loading
+  // <uri>" while weights are on their way, or "builtin: no trained weights (<why>)", which the
+  // host's log also gets once.
+  // `.plant` (fleet_plants::text: "jolt", "jolt, kinematic", "0: jolt, kinematic") switches its
+  // plants, its vehicles at rest where they are on the new ones (a bad one is said in
+  // vehicles.status and changes nothing). `.metric` (trained, vehicle, policy) is what it plans
+  // with (D9), and `.plans` what it does now: "trained" (the trainer's vehicle, while weights drive
+  // or are on their way) or "vehicle" (each plant's own); a change makes its navigators again.
+  // `.tick` is the physics world's step its keys are of, and `.bounds` the box its placed
+  // vehicles lie in ("min_x,min_y,max_x,max_y", world metres; "" with none placed).
   std::vector<std::string> fleets() const;
   // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
   // none (no such fleet or team, or not laid out yet).
@@ -567,6 +609,15 @@ public:
   // or from the next one. As changing vehicles.fleets.<fleet>.restart.request or
   // reseed.request.
   bool restart_fleet(const std::string &fleet, bool reseed);
+  // Fleet `fleet`'s vehicles as the last publish() left them (fleet_poses), for a view that draws
+  // hundreds without reading state: lock-free, from any thread, the snapshot the caller holds
+  // unchanged while later steps make new ones. Null for a name that is not a fleet's, and before
+  // its first publish.
+  std::shared_ptr<const fleet_poses> poses(const std::string &fleet) const;
+  // The start: entries spawn_starts has been given since the last clear(), in order: after a load,
+  // the document's (a gym keeps them to lay its fleets out again at each reset,
+  // gym_options::fleets).
+  const std::vector<vehicle_start> &starts() const;
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;

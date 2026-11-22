@@ -14,7 +14,8 @@
 // Widget tree from a .ari document; the state-tree layout, expressions, and the
 // full widget vocabulary follow the roadmap (docs/roadmap/CVCGL-UI-DSL-ROADMAP.md).
 
-#include <cvc/ariadne/value.h> // Widget::props for a Kind::Custom widget
+#include <cvc/ariadne/color_value.h> // ItemColor: a widget's colour (§5.26)
+#include <cvc/ariadne/value.h>       // Widget::props for a Kind::Custom widget
 #include <memory>
 #include <string>
 #include <utility>
@@ -131,7 +132,13 @@ struct Background {
   float opacity = 1.0f; // 0..1
   BackdropTerminal terminal = BackdropTerminal::Behind;
   int banner_rows = 6;
-  bool any() const { return !src.empty() || !bind.empty(); }
+  // §5.26 `color:` a solid fill behind the content (under the picture, when there is one too):
+  // `color` written in the document, or `color_src`, a state path or an expression giving one
+  // each frame.
+  ItemColor color;
+  std::string color_src;
+  bool any() const { return !src.empty() || !bind.empty() || color.set || !color_src.empty(); }
+  bool has_picture() const { return !src.empty() || !bind.empty(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -361,6 +368,10 @@ struct Widget {
   // SliderFloat `log: true`: the handle moves by ratio, not difference, so a range of 1 to 5000
   // is as easy to set at its low end as at its high (a backend without one draws it linear).
   bool log_scale = false;
+  // Slider `range: key`: the range is the bound key's "min" and "max" properties (as a parameter
+  // table writes them, cvc/core/param_table.h; a node may write them as its data changes), read
+  // each frame, each falling back to lo: / hi: while the key has none.
+  bool range_from_key = false;
   // A slider writes its key on every change while it is dragged, so what it drives follows the
   // drag. `commit: release` (true here) writes once, when the drag ends: for a key whose change is
   // too costly to redo every frame.
@@ -406,6 +417,10 @@ struct Widget {
   // Window `maximizable:` (default true): a square button in its title bar fills it to the screen
   // under the main menu bar, and back; its state is tree.<id>.maximized (§5.9).
   bool maximizable = true;
+  // Window `maximized:` (§5.9) the maximize it starts with, while tree.<id>.maximized holds
+  // nothing: "true", or "phone" (only where the view is a phone's, Backend::view_is_phone); "":
+  // not maximized. The user's restore writes the key, and that holds from then on.
+  std::string start_maximized;
   // Window `resizable:` (default true): the user may resize it by an edge or a corner. A window
   // that fits its content (no `size:`) follows its content either way (§5.8, §5.9).
   bool resizable = true;
@@ -419,6 +434,22 @@ struct Widget {
   // deliberately general (any Text, not a demo-specific status widget) so every HUD can reuse it.
   bool has_text_color = false;
   float text_color[3] = {1.0f, 1.0f, 1.0f};
+  // §5.26 a colour computed each frame, on a Text, a Radio, a Button or a menu item: `color_src` is
+  // a state path (`color: { bind: key }`) or an expression (`color: "(...)"`) whose value is a
+  // colour (color_value.h), or on a radio a list of them, one per option. It wins over
+  // text_color. `option_colors`: a radio's list written in the document (`color: [c0, c1]`).
+  std::string color_src;
+  std::vector<ItemColor> option_colors;
+  // §5.27 Kind::Button `icon:`: a picture drawn on the button in place of its label: a URI (§5.11,
+  // fetched as an image:'s is, with `auth:` in media_auth), a host-published image's name, or an
+  // expression giving either. Empty, not loaded yet, failed, or on a backend that can't draw one:
+  // the label. `icon_size` is its height in the document's px; 0, one line of text tall.
+  std::string button_icon;
+  float icon_size = 0.0f;
+  // §5.27 Kind::Button `selected:`: "true", "false", or an expression; while it holds the button
+  // is drawn pressed in, beside the raised buttons of its row (a choice of views, a bar's current
+  // place). "false": a button of such a row that is never the chosen one. Empty: a plain button.
+  std::string selected;
   // §5.11 Kind::Text `emoji:`: a state path holding a map of shortcode names to picture URIs. A
   // `:name:` in the text that the map names is drawn as that picture, one line tall, where the
   // backend can put a picture in a line. Empty: plain text.

@@ -310,9 +310,13 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       kids.push_back(text(mouse.note));
     kids.push_back(separator());
   }
-  kids.push_back(text(bindings.empty()
-                          ? "No keys to change here."
-                          : "Change, then press the new key. Escape keeps the old one."));
+  bool any_pad = false;
+  for (const KeyBinding &b : bindings)
+    any_pad = any_pad || !b.pad_path.empty();
+  kids.push_back(text(bindings.empty() ? "No keys to change here."
+                      : any_pad ? "Change, then press the new key or gamepad button (a stick: "
+                                  "push it). Escape keeps the old one."
+                                : "Change, then press the new key. Escape keeps the old one."));
   const std::string capture = kKeyCapture;
   bool first = true;
   std::string heading;
@@ -325,11 +329,27 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
     }
     // Its keys, or the prompt while its Change waits: kept by the runtime (key_shown_path), so the
     // window evaluates nothing per frame.
-    Widget row = group({text(b.label.empty() ? b.id : b.label), text_bound("", key_shown_path(b)),
-                        button("Change", "(state-set \"" + capture + "\" \"" + b.id + "\")")});
+    std::vector<Widget> cells = {
+        text(b.label.empty() ? b.id : b.label), text_bound("", key_shown_path(b)),
+        button("Change", "(state-set \"" + capture + "\" \"" + b.id + "\")")};
+    // Its gamepad's beside, where the host reads one for it: a group of its own (its id scopes
+    // its Change, apart from the keys').
+    if (!b.pad_path.empty()) {
+      Widget pad = group(
+          {text_bound("", pad_shown_path(b)),
+           button("Change", "(state-set \"" + capture + "\" \"" + kPadCapture + b.id + "\")")});
+      pad.id = "pad";
+      pad.layout.kind = LayoutKind::Grid;
+      pad.layout.col_widths = {Track{Unit::Px, 90.0f}, Track{}};
+      cells.push_back(std::move(pad));
+    }
+    Widget row = group(std::move(cells));
     row.id = "key_" + b.id; // each row's Change button its own
     row.layout.kind = LayoutKind::Grid;
     row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 130.0f}, Track{}};
+    if (!b.pad_path.empty())
+      row.layout.col_widths = {Track{Unit::Px, 150.0f}, Track{Unit::Px, 110.0f},
+                               Track{Unit::Px, 70.0f}, Track{}};
     kids.push_back(std::move(row));
   }
   Widget w = window("Controls", std::move(kids));
@@ -348,18 +368,25 @@ void AppRuntime::seed_keys(const std::vector<KeyBinding> &own, bool new_document
     else if (!b.keys.empty())
       read_or_seed<std::string>(app_, path, join_keys(b.keys));
   }
-  for (const KeyBinding &b : hostKeys_)
+  for (const KeyBinding &b : hostKeys_) {
     if (!b.keys.empty()) // one with no default of its own is seeded by its reader (the camera)
       read_or_seed<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)),
                                 join_keys(b.keys));
+    if (!b.pad_path.empty() && !b.pad.empty())
+      read_or_seed<std::string>(app_, resolve_bind(prefix_, b.pad_path), join_keys(b.pad));
+  }
 }
 
 void AppRuntime::add_keys(Widget &root, std::vector<KeyBinding> keys) {
   keys.insert(keys.end(), hostKeys_.begin(), hostKeys_.end());
   write<std::string>(app_, resolve_bind(prefix_, kKeyCapture), ""); // no Change waiting
-  for (const KeyBinding &b : keys) // shown from the first frame; the runtime keeps it after
+  for (const KeyBinding &b : keys) { // shown from the first frame; the runtime keeps it after
     write<std::string>(app_, resolve_bind(prefix_, key_shown_path(b)),
                        read_or<std::string>(app_, resolve_bind(prefix_, key_binding_path(b)), ""));
+    if (!b.pad_path.empty())
+      write<std::string>(app_, resolve_bind(prefix_, pad_shown_path(b)),
+                         read_or<std::string>(app_, resolve_bind(prefix_, b.pad_path), ""));
+  }
   if (keysWindow_ || !keys.empty()) {
     read_or_seed<int>(app_, resolve_bind(prefix_, kKeysWindowOpen), 0); // closed until asked for
     root.children.push_back(keys_window(keys, hostMouse_));
@@ -670,9 +697,12 @@ void AppRuntime::ensure_intrinsics() {
       [app, verbs](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
-        // bound to NAME follow when it is ready), (data-reload NAME), (data-status NAME),
-        // (data-files NAME) and (data-file NAME PATH) (its bytes, or nil).
-        // The store first: it is reset when this runtime dies, and only then is `app` still ours.
+        // bound to NAME follow when it is ready), (data-generate NAME GENERATOR [PARAMS]) points
+        // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-status
+        // NAME), (data-files NAME), (data-file NAME PATH) (its bytes, or nil) and (data-save PATH
+        // FILE [AS]) (what a state key's data channel holds, written beside the document or, in a
+        // browser, downloaded: data_save). The store first: it is reset when this runtime dies,
+        // and only then is `app` still ours.
         std::shared_ptr<DataStore> store;
         std::string prefix, doc_dir;
         {
@@ -736,8 +766,39 @@ void AppRuntime::ensure_intrinsics() {
               return se::value_t(live("data-load")->bind(prefix, spec));
             });
         se::builtins::register_fn(
+            env, "data-generate",
+            [live, text, name, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() < 2 || a.size() > 3)
+                throw se::dsl_error("TypeError",
+                                    "data-generate: expected NAME GENERATOR [PARAMS], got " +
+                                        std::to_string(a.size()) + " args");
+              DataSpec spec;
+              spec.name = name(a, "data-generate");
+              spec.generate = text(a, 1, "data-generate");
+              spec.params = a.size() > 2 ? text(a, 2, "data-generate") : std::string("{}");
+              spec.base = doc_dir;
+              return se::value_t(live("data-generate")->bind(prefix, spec));
+            });
+        se::builtins::register_fn(
             env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
               return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+            });
+        se::builtins::register_fn(
+            env, "data-save",
+            [app, text, prefix, doc_dir](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() < 2 || a.size() > 3)
+                throw se::dsl_error("TypeError", "data-save: expected PATH FILE [AS], got " +
+                                                     std::to_string(a.size()) + " args");
+              const std::string path = text(a, 0, "data-save");
+              try {
+                data_save(*app, resolve_bind(prefix, path), text(a, 1, "data-save"),
+                          a.size() > 2 ? text(a, 2, "data-save") : std::string(), doc_dir);
+              } catch (const se::dsl_error &) {
+                throw;
+              } catch (const std::exception &e) {
+                throw se::dsl_error("RuntimeError", std::string("data-save: ") + e.what());
+              }
+              return se::value_t(true);
             });
         se::builtins::register_fn(
             env, "data-status", [app, name, entry](std::span<const se::value_t> a) -> se::value_t {
@@ -1241,11 +1302,12 @@ void AppRuntime::drain_end() {
   }
   // No adapter: the scene's clock and world run here, on real time (a paused clock with step
   // requests, or lockstep, makes it deterministic).
-  if (worldClock_)
+  if (worldClock_ && !worldExternal_)
     worldClock_->drive(-1.0);
   if (world_) {
     try {
-      world_->follow(app_.world_clock());
+      if (!worldExternal_) // a holon steps it on its own clock (set_world_external)
+        world_->follow(app_.world_clock());
       for (std::string &w : world_->take_warnings()) { // a regenerated world's, a dataset's bodies
         post_warning(w);
         pendingWarnings_.push_back(std::move(w));

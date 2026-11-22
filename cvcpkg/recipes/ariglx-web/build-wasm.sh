@@ -161,7 +161,7 @@ BIN="$CVC_BUILD_DIR/bin"
 WEB="$CVC_INSTALL_DIR/share/ariglx-web"
 install -d "$WEB"
 install -m 644 "$BIN/ariglx.js" "$BIN/ariglx.wasm" "$BIN/python312.zip" \
-  "$BIN/arigl-web.js" "$BIN/arigl-web.css" "$WEB/"
+  "$BIN/arigl-web.js" "$BIN/arigl-web.css" "$BIN/cvc-audio-worklet.js" "$WEB/"
 install -m 644 "$BIN/ariglx.html" "$WEB/index.html"
 install -m 644 "$CVC_SOURCE_DIR/THIRD_PARTY_NOTICES.md" "$CVC_SOURCE_DIR/LICENSE" "$WEB/"
 

@@ -1069,6 +1069,100 @@ windows:
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
 }
 
+// §5.9 `maximized:` how a window starts while tree.<id>.maximized holds nothing: true, phone
+// (only on a phone's view), false; anything else warns and is false. An include may set it.
+TEST(AriadneLoader, WindowMaximizedParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  feed:
+    window: Feed
+    children: [ { text: hi } ]
+windows:
+  - window: Always
+    maximized: true
+    children: [ { text: hi } ]
+  - window: Phone
+    maximized: phone
+    children: [ { text: hi } ]
+  - window: Plain
+    children: [ { text: hi } ]
+  - window: Odd
+    maximized: sometimes
+    children: [ { text: hi } ]
+  - include: feed
+    maximized: phone
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const auto start = [&](const char *title) {
+    const Widget *w = find(r.root, Kind::Window, title);
+    EXPECT_NE(w, nullptr) << title;
+    return w ? w->start_maximized : std::string("?");
+  };
+  EXPECT_EQ(start("Always"), "true");
+  EXPECT_EQ(start("Phone"), "phone");
+  EXPECT_EQ(start("Plain"), "");
+  EXPECT_EQ(start("Odd"), "");
+  EXPECT_EQ(start("Feed"), "phone");
+  bool warned = false;
+  for (const std::string &w : r.warnings)
+    warned = warned || w.find("maximized: 'sometimes'") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+// §5.27 a button's `icon:` (a picture in place of its label, with auth: and icon_size:) and
+// `selected:` (true, or an expression; false and no are none; anything else warns).
+TEST(AriadneLoader, ButtonIconAndSelectedParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - button: Home
+        on: home
+        icon: https://media.example/e/home.png
+        auth: site
+        icon_size: 24
+        selected: true
+      - button: Tags
+        on: tags
+        icon: (state-get "nav.icon.tags")
+        selected: (= (state-get "view") "tags")
+      - button: Plain
+        on: plain
+        selected: false
+      - button: Odd
+        on: odd
+        selected: maybe
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *home = find(r.root, Kind::Button, "Home");
+  const Widget *tags = find(r.root, Kind::Button, "Tags");
+  const Widget *plain = find(r.root, Kind::Button, "Plain");
+  const Widget *odd = find(r.root, Kind::Button, "Odd");
+  ASSERT_NE(home, nullptr);
+  ASSERT_NE(tags, nullptr);
+  ASSERT_NE(plain, nullptr);
+  ASSERT_NE(odd, nullptr);
+  EXPECT_EQ(home->button_icon, "https://media.example/e/home.png");
+  EXPECT_EQ(home->media_auth, "site");
+  EXPECT_FLOAT_EQ(home->icon_size, 24.0f);
+  EXPECT_EQ(home->selected, "true");
+  EXPECT_EQ(tags->button_icon, "(state-get \"nav.icon.tags\")");
+  EXPECT_EQ(tags->selected, "(= (state-get \"view\") \"tags\")");
+  EXPECT_TRUE(plain->button_icon.empty());
+  EXPECT_EQ(plain->selected, "false") << "one of the row, drawn raised, never chosen";
+  EXPECT_TRUE(odd->selected.empty());
+  bool warned = false;
+  for (const std::string &w : r.warnings) {
+    warned = warned || w.find("selected: 'maybe'") != std::string::npos;
+    EXPECT_EQ(w.find("'icon'"), std::string::npos) << w; // a known key, not an unknown one
+  }
+  EXPECT_TRUE(warned);
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {
@@ -1204,6 +1298,175 @@ TEST(AriadneLoader, ColoredTextParses) {
   const Widget *t2 = find(r2.root, Kind::Text);
   ASSERT_NE(t2, nullptr);
   EXPECT_FALSE(t2->has_text_color);
+}
+
+// §5.26 a colour on a text, radio, button or menu item: written ([r, g, b], #rrggbb, c0..c7), from
+// a key ({ bind: key }) or computed ("(expr)"); a radio's may be a list, one per option.
+TEST(AriadneLoader, ComputedColorsParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - text: Hot
+        bind: temp
+        color: "(if (> (float (state-get \"temp\")) 80) \"1,0.2,0.2\" \"\")"
+      - text: Row
+        color: { bind: palette.0 }
+      - text: Hex
+        color: "#ff8000"
+      - text: Slot
+        color: c3
+      - text: Short
+        color: "#f80"
+      - text: Off
+        color: none
+      - button: Go
+        on: go
+        color: { bind: go.color }
+      - menu_item: Act
+        on: act
+        color: c1
+      - menu_item: Flag
+        bind: flag
+        color: [0, 1, 0]
+      - radio: Follow
+        bind: cam.follow
+        options: [a, b, c]
+        color: [c0, "#00ff00", none]
+      - radio_row: Mode
+        bind: mode
+        options: [x, y]
+        color: "c4;c5"
+      - radio: Whole
+        bind: whole
+        options: [p, q]
+        color: "(state-get \"whole.color\")"
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const Widget *hot = find(r.root, Kind::Text, "Hot");
+  ASSERT_NE(hot, nullptr);
+  EXPECT_EQ(hot->color_src.substr(0, 4), "(if ");
+  EXPECT_FALSE(hot->has_text_color);
+  EXPECT_EQ(find(r.root, Kind::Text, "Row")->color_src, "palette.0");
+  const Widget *hex = find(r.root, Kind::Text, "Hex");
+  ASSERT_TRUE(hex->has_text_color);
+  EXPECT_FLOAT_EQ(hex->text_color[0], 1.0f);
+  EXPECT_NEAR(hex->text_color[1], 128.0f / 255.0f, 1e-6);
+  EXPECT_FLOAT_EQ(hex->text_color[2], 0.0f);
+  const Widget *slot = find(r.root, Kind::Text, "Slot");
+  ASSERT_TRUE(slot->has_text_color); // c3: the chart's yellow, 0xeda100
+  EXPECT_NEAR(slot->text_color[0], 0xed / 255.0f, 1e-6);
+  const Widget *shorthex = find(r.root, Kind::Text, "Short"); // #rgb: #f80 is #ff8800
+  ASSERT_TRUE(shorthex->has_text_color);
+  EXPECT_FLOAT_EQ(shorthex->text_color[0], 1.0f);
+  EXPECT_NEAR(shorthex->text_color[1], 0x88 / 255.0f, 1e-6);
+  EXPECT_FLOAT_EQ(shorthex->text_color[2], 0.0f);
+  EXPECT_FALSE(find(r.root, Kind::Text, "Off")->has_text_color);
+  EXPECT_TRUE(find(r.root, Kind::Text, "Off")->color_src.empty());
+  // A `color:` beside `button:` is the button's colour, not a colour picker.
+  const Widget *go = find(r.root, Kind::Button, "Go");
+  ASSERT_NE(go, nullptr);
+  EXPECT_EQ(go->color_src, "go.color");
+  EXPECT_EQ(count(r.root, Kind::Color), 0);
+  const Widget *act = find(r.root, Kind::MenuItemAction, "Act");
+  ASSERT_NE(act, nullptr);
+  EXPECT_TRUE(act->has_text_color);
+  const Widget *flag = find(r.root, Kind::MenuItemToggle, "Flag");
+  ASSERT_NE(flag, nullptr);
+  EXPECT_TRUE(flag->has_text_color);
+  EXPECT_FLOAT_EQ(flag->text_color[1], 1.0f);
+  // A radio's list: one colour per option, none for the default.
+  const Widget *follow = find(r.root, Kind::Radio, "Follow");
+  ASSERT_NE(follow, nullptr);
+  ASSERT_EQ(follow->option_colors.size(), 3u);
+  EXPECT_TRUE(follow->option_colors[0].set);
+  EXPECT_NEAR(follow->option_colors[0].rgb[2], 0xd6 / 255.0f, 1e-6); // c0 0x2a78d6
+  EXPECT_TRUE(follow->option_colors[1].set);
+  EXPECT_FLOAT_EQ(follow->option_colors[1].rgb[1], 1.0f);
+  EXPECT_FALSE(follow->option_colors[2].set);
+  EXPECT_FALSE(follow->has_text_color);
+  const Widget *mode = find(r.root, Kind::Radio, "Mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_TRUE(mode->radio_row);
+  EXPECT_EQ(mode->option_colors.size(), 2u);
+  EXPECT_EQ(find(r.root, Kind::Radio, "Whole")->color_src, "(state-get \"whole.color\")");
+}
+
+// §5.26 a colour that is none of the forms warns once and draws the default; the colour picker
+// (`color: Tint`) is still a colour picker.
+TEST(AriadneLoader, BadColorWarnsAndThePickerStays) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - text: Bad
+        color: purple
+      - button: Map
+        on: x
+        color: { key: nope }
+      - color: Tint
+        bind: tint
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "'Bad' color: is [r, g, b]"));
+  EXPECT_TRUE(has_warning(r, "'Map' color: is [r, g, b]"));
+  EXPECT_FALSE(find(r.root, Kind::Text, "Bad")->has_text_color);
+  EXPECT_TRUE(find(r.root, Kind::Button, "Map")->color_src.empty());
+  const Widget *picker = find(r.root, Kind::Color);
+  ASSERT_NE(picker, nullptr);
+  EXPECT_EQ(picker->label, "Tint");
+  EXPECT_EQ(picker->bind, "tint");
+}
+
+// §5.26 `background: { color: }` on a group (a grid's cell) or a window: a fill, written or from a
+// key or an expression; `background: [r, g, b]` is short for it.
+TEST(AriadneLoader, BackgroundColorParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    background: [0.1, 0.1, 0.2]
+    layout: { kind: grid, col_widths: [100, 100] }
+    children:
+      - type: group
+        id: cell
+        repeat: "3"
+        background: { color: { bind: "palette.{i}" }, opacity: 0.5 }
+        children:
+          - text: "{i}"
+      - type: group
+        id: hot
+        background: { color: "(state-get \"hot.color\")" }
+        children:
+          - text: hot
+      - type: group
+        id: pic
+        background: { src: https://example.org/a.png, color: c2 }
+        children:
+          - text: pic
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  EXPECT_TRUE(win->background.color.set);
+  EXPECT_FLOAT_EQ(win->background.color.rgb[2], 0.2f);
+  EXPECT_FALSE(win->background.has_picture());
+  EXPECT_TRUE(win->background.any());
+  ASSERT_EQ(win->children.size(), 3u);
+  const Widget &cell = win->children[0];
+  EXPECT_EQ(cell.background.color_src, "palette.{i}");
+  EXPECT_FLOAT_EQ(cell.background.opacity, 0.5f);
+  EXPECT_EQ(win->children[1].background.color_src, "(state-get \"hot.color\")");
+  const Widget &pic = win->children[2];
+  EXPECT_TRUE(pic.background.has_picture());
+  EXPECT_TRUE(pic.background.color.set);
 }
 
 TEST(AriadneLoader, BareScalarsAndLiteralVsBoundText) {
@@ -5812,6 +6075,29 @@ TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
 }
 
+// A data: entry names a uri or a generator: the schema takes `generate:` (and its params) in place
+// of `uri:`, as the loader does, and still flags an entry that names neither.
+TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
+  if (!have_yaml() || !have_jsonschema())
+    GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
+  const std::string doc = "data:\n"
+                          "  made: { generate: generated_world, params: { seed: 7 } }\n"
+                          "  fetched: { uri: a.bin, as: bytes }\n"
+                          "  neither: { as: bytes }\n"
+                          "windows: []\n";
+  const LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  bool flagged = false;
+  for (const std::string &w : r.warnings) {
+    if (w.find("schema:") == std::string::npos)
+      continue;
+    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
+    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
+    flagged = flagged || w.find("'neither'") != std::string::npos;
+  }
+  EXPECT_TRUE(flagged);
+}
+
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
 
 namespace {
@@ -6421,6 +6707,144 @@ windows:
     for (const std::string &k : keys)
       EXPECT_EQ(k.find('{'), std::string::npos) << k;
   }
+}
+
+// volume_grid.ari (VolumeGridRover): every control drives its node's grid.* keys; the switch layout
+// binds its slice view's axis to grid.view, the quad layout gives each axis a view of its own; the
+// views write the node's picks and pointer and show its grid alone; the planes' sliders take their
+// ranges from the keys; and the tool panel's tabs end in a slot a document fills.
+TEST(AriadneComponents, VolumeGridDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+  - include: volume_grid
+    args: { node: skull, id: skull_grid, title: Skull, layout: quad }
+  - window: Own
+    children:
+      - include: volume_grid_tools
+        args: { node: skull, id: own }
+        slots:
+          tabs: [ { type: group, tab: Extra, children: [ { text: extra } ] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings) // cvcGL registers the viewport widget, not this test
+    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 3u);
+  EXPECT_EQ(windows[0]->label, "Volume grid");
+  EXPECT_EQ(windows[1]->id, "skull_grid");
+  for (int i = 0; i < 2; ++i) {
+    const std::string g =
+        i == 0 ? "graphics.root.children.grid.grid." : "graphics.root.children.skull.grid.";
+    std::vector<std::string> keys;
+    collect_key_strings(*windows[i], keys);
+    for (const char *want :
+         {"view", "tool", "slice.x", "slice.y", "slice.z", "classes", "classes.{i}.name",
+          "classes.{i}.color", "classes.{i}.radius", "selection.count", "display.point_scale",
+          "display.grey", "cursor.value", "info.source", "files.classes", "files.session",
+          "status"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end()) << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  // The views: their names, axes, picks, pointer and the grid they show.
+  std::vector<const Widget *> custom;
+  collect(r.root, Kind::Custom, custom);
+  std::map<std::string, const Widget *> views;
+  for (const Widget *w : custom)
+    if (w->props.has("view"))
+      views[w->props.str("view")] = w;
+  for (const char *v : {"volume_grid_slice", "volume_grid_3d", "skull_grid_xy", "skull_grid_xz",
+                        "skull_grid_zy", "skull_grid_quad_3d"})
+    EXPECT_TRUE(views.count(v)) << v;
+  ASSERT_TRUE(views.count("volume_grid_slice") && views.count("skull_grid_xz"));
+  const Widget &slice = *views["volume_grid_slice"];
+  EXPECT_EQ(slice.props.str("mode"), "slice");
+  ASSERT_NE(slice.props.find("axis"), nullptr);
+  EXPECT_EQ(slice.props.find("axis")->str("bind"), "graphics.root.children.grid.grid.view");
+  EXPECT_EQ(slice.props.str("pick"), "graphics.root.children.grid.grid.pick");
+  EXPECT_EQ(slice.props.str("pointer"), "graphics.root.children.grid.grid.pointer");
+  const Widget &xz = *views["skull_grid_xz"];
+  EXPECT_EQ(xz.props.str("axis"), "y");
+  EXPECT_EQ(xz.props.str("pick"), "graphics.root.children.skull.grid.pick");
+  ASSERT_NE(xz.props.find("show"), nullptr);
+  ASSERT_TRUE(xz.props.find("show")->is_seq());
+  EXPECT_EQ(xz.props.find("show")->items.front().scalar, "skull");
+  // The planes' sliders: range: key.
+  std::vector<const Widget *> sliders;
+  collect(*windows[0], Kind::SliderInt, sliders);
+  ASSERT_FALSE(sliders.empty());
+  for (const Widget *s : sliders)
+    if (s->bind.find(".slice.") != std::string::npos)
+      EXPECT_TRUE(s->range_from_key) << s->label;
+  // The slot: a tab of the document's own after the component's.
+  const Widget *tabs = find(*windows[2], Kind::Tabs);
+  ASSERT_NE(tabs, nullptr);
+  ASSERT_GE(tabs->children.size(), 4u);
+  EXPECT_EQ(tabs->tab_titles.back(), "Extra");
+}
+
+TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  // cvcGL registers the viewport widget and the sdf generator (the volume, data.bunny), not this
+  // test.
+  for (const std::string &w : r.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_grid");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.
+TEST(AriadneLoader, SliderRangeFromKey) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - slider_int: Plane
+        bind: grid.slice.z
+        range: key
+      - slider_float: Scale
+        bind: grid.scale
+        range: key
+      - slider_int: Odd
+        bind: grid.odd
+        range: data
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
+  const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
+  const Widget *odd = find(r.root, Kind::SliderInt, "Odd");
+  ASSERT_TRUE(plane && scale && odd);
+  EXPECT_TRUE(plane->range_from_key);
+  EXPECT_TRUE(scale->range_from_key);
+  EXPECT_FALSE(odd->range_from_key);
 }
 
 TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {

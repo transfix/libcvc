@@ -57,7 +57,21 @@ avatar_world::avatar_world(double fixed_dt, const avatar_body &body,
   cfg.max_body_pairs = 8192;
   cfg.max_contact_constraints = 8192;
   cfg.temp_allocator_bytes = 4u << 20;
-  _world = std::make_unique<ph::world>(cfg); // throws without a Jolt backend
+  _own = std::make_unique<ph::world>(cfg); // throws without a Jolt backend
+  _world = _own.get();
+  add_avatar_material();
+}
+
+avatar_world::avatar_world(ph::world &shared, const avatar_body &body,
+                           const avatar_energy_policy &energy)
+    : _body(body), _energy(energy), _dt(shared.config().fixed_dt), _world(&shared) {
+  _gravity = shared.config().gravity;
+  add_avatar_material();
+}
+
+avatar_world::~avatar_world() = default;
+
+void avatar_world::add_avatar_material() {
   // Frictionless: the drive is the avatar's grip on the floor (see the header), and a box dragged
   // across the floor with friction would tip and stutter.
   ph::material m;
@@ -67,7 +81,27 @@ avatar_world::avatar_world(double fixed_dt, const avatar_body &body,
   _avatar_material = _world->add_material(m);
 }
 
-avatar_world::~avatar_world() = default;
+void avatar_world::release() {
+  if (_own)
+    return;
+  for (const auto &kv : _avatars)
+    _world->remove_body(bid(kv.second.id));
+  _avatars.clear();
+}
+
+void avatar_world::move_to(ph::world &shared, const std::map<std::string, ph::body_state> &feet) {
+  if (_own)
+    throw std::logic_error("avatar_world::move_to: this world is its own, not a shared one");
+  _world = &shared;
+  _dt = shared.config().fixed_dt;
+  _gravity = shared.config().gravity;
+  add_avatar_material();
+  for (auto &kv : _avatars) {
+    const auto it = feet.find(kv.first);
+    kv.second.id = create_avatar(it != feet.end() ? it->second : ph::body_state{},
+                                 kv.second.dynamic, kv.second.mass);
+  }
+}
 
 std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynamic, double mass) {
   ph::body_desc d;
@@ -85,6 +119,8 @@ std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynam
 }
 
 void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
+  if (!_own)
+    throw std::logic_error("avatar_world::set_statics: a shared world's statics are its owner's");
   // Keep the avatars' states, clear the world, rebuild statics-then-avatars (creation order is
   // part of a deterministic Jolt run).
   std::map<std::string, ph::body_state> kept;
@@ -132,6 +168,10 @@ void avatar_world::set_body(const avatar_body &body) {
 }
 
 void avatar_world::set_gravity(const ph::vec3 &g) {
+  if (!_own) {
+    _gravity = _world->config().gravity; // the owner's: it prices the walk
+    return;
+  }
   if (g.x == _gravity.x && g.y == _gravity.y && g.z == _gravity.z)
     return;
   ph::world_config cfg = _world->config();
@@ -141,6 +181,8 @@ void avatar_world::set_gravity(const ph::vec3 &g) {
 }
 
 void avatar_world::set_wind(const cvc::algo::wind_state &w, double base_z) {
+  if (!_own)
+    return; // a shared world's air is its owner's
   ph::field_id id;
   id.value = _wind_field;
   if (!(w.speed_mps > 0.0)) {
@@ -160,7 +202,10 @@ void avatar_world::set_wind(const cvc::algo::wind_state &w, double base_z) {
     _wind_field = _world->add_field(f).value;
 }
 
-void avatar_world::set_time(double t) { _world->set_field_time(t); }
+void avatar_world::set_time(double t) {
+  if (_own)
+    _world->set_field_time(t);
+}
 
 ph::vec3 avatar_wind_drift(const ph::flow_velocity &wind, const avatar_body &body, double force_max,
                            const ph::vec3 &feet, double t) {
@@ -205,10 +250,41 @@ void avatar_world::drive(const std::string &pid, const avatar_intent &in) {
     return;
   ph::body_state s = _world->state(bid(a.id));
   drive_walker(a, s, in); // the only controller so far (§5k)
+  jump(a, s, in);
   // Upright, facing the intent: a pushed box must not tip over.
   s.rotation = yaw_quat(in.yaw);
   s.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
   _world->set_state(bid(a.id), s);
+}
+
+void avatar_world::jump(avatar &a, ph::body_state &s, const avatar_intent &in) const {
+  const double vj = _jump_speed;
+  // Not while rising, nor while still falling onto the floor (it lands first).
+  if (!in.jump || !(vj > 0.0) || s.linear_velocity.z > 0.5 * vj || s.linear_velocity.z < -1.0)
+    return;
+  // Something under its feet: a ray from a hair below the box (so it misses the avatar's own body)
+  // to kJumpReach under it, enough for the solver's resting gap.
+  constexpr double kJumpReach = 0.08;
+  const double feet = s.position.z - 0.5 * _body.height;
+  const ph::vec3 from{s.position.x, s.position.y, feet - 0.002};
+  const ph::vec3 to{s.position.x, s.position.y, feet - kJumpReach};
+  if (!_world->raycast(from, to))
+    return;
+  const double vz = std::max(0.0, s.linear_velocity.z);
+  if (_energy.enabled) {
+    const bool stopped =
+        _energy.empty == avatar_energy_policy::when_empty::stop && a.energy.exhausted;
+    const double cost = 0.5 * a.mass * (vj * vj - vz * vz);
+    if (stopped || cost > a.energy.reserve)
+      return;
+    a.energy.reserve -= cost;
+    a.energy.ledger.work += cost;
+    a.energy.power += cost / _dt;
+    a.energy.ledger.peak_power = std::max(a.energy.ledger.peak_power, a.energy.power);
+    if (a.energy.reserve <= 0.0)
+      a.energy.exhausted = true;
+  }
+  s.linear_velocity.z = vj;
 }
 
 void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_intent &in) const {
@@ -346,7 +422,11 @@ void avatar_world::set_mass(const std::string &pid, double kg) {
   a.own_mass = true;
 }
 
-void avatar_world::step() { _world->step(); }
+void avatar_world::step() {
+  if (!_own)
+    throw std::logic_error("avatar_world::step: a shared world is stepped by its owner");
+  _world->step();
+}
 
 ph::body_state avatar_world::state(const std::string &pid) const {
   ph::body_state s = _world->state(bid(_avatars.at(pid).id));

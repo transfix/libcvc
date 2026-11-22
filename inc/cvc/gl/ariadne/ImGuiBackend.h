@@ -76,6 +76,9 @@ public:
   void text_value(const char *label, const std::string &value) override;
   void text_line_colored(const char *text, const float rgb[3]) override;
   void text_value_colored(const char *label, const std::string &value, const float rgb[3]) override;
+  // §5.26 a widget's colour: ImGuiCol_Text over the leaf between them (a button's, a menu item's).
+  void begin_text_color(const float rgb[3]) override;
+  void end_text_color() override;
   // §5.11 a line with pictures in it: the runs with no gap, each picture one line tall.
   bool text_runs(const std::vector<cvc::ariadne::TextRun> &runs, const float *rgb) override;
   // §5.20 a paragraph wrapped to the line's width: bold drawn twice, italic slanted, code on a
@@ -101,6 +104,11 @@ public:
                                       const cvc::ariadne::SettingsSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
+  bool view_is_phone() const override; // §5.14 under 500 CSS px on its short side
+  // §5.27 a button with a picture (a published image, a line tall or look.icon_h) and/or the
+  // chosen one of a row: drawn pressed in (sunken, darker, its content nudged down and right),
+  // and the others raised beside it.
+  bool button_with(const char *label, const cvc::ariadne::ButtonLook &look) override;
   bool menu_item_action(const char *label) override;
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
   bool item_hovered() override; // §4.6 widget on_hover: ImGui::IsItemHovered() on the last item
@@ -154,6 +162,10 @@ public:
                                 const std::vector<std::string> &options) override;
   cvc::ariadne::IndexEdit radio(const char *label, int current_index,
                                 const std::vector<std::string> &options, bool row) override;
+  // §5.26 each option's button and text in its own colour.
+  cvc::ariadne::IndexEdit
+  radio_colored(const char *label, int current_index, const std::vector<std::string> &options,
+                bool row, const std::vector<cvc::ariadne::ItemColor> &colors) override;
   // An ImGui tab bar. The selection follows `current` (a write to the tab's key from anywhere
   // selects that tab); a click on another tab is reported as the pick.
   cvc::ariadne::IndexEdit tab_bar(const char *label, const char *id, int current,
@@ -388,6 +400,11 @@ private:
   // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
   struct BackdropFrame;
   std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
+  // §5.26 ImGuiCol_Text pushes begin_text_color made that end_text_color pops.
+  int m_textColorPushes = 0;
+  cvc::ariadne::IndexEdit radio_options(const char *label, int current_index,
+                                        const std::vector<std::string> &options, bool row,
+                                        const std::vector<cvc::ariadne::ItemColor> *colors);
   // §4.6 item groups open in this frame, innermost last; the last one closed (its button's
   // ImGuiID) and whether it was clicked.
   struct ItemGroupFrame;

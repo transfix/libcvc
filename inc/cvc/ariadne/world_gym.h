@@ -47,10 +47,10 @@ class SceneWorld;
 //
 // The agents are the world's vehicles (WorldVehicles), each a Jolt vehicle in the scene's own
 // physics world. A step gives each its command for one navigator tick (gym_options::tick, by
-// default cvc::kSimTick, 0.06 s: a whole number of physics steps): the steering's bicycle angle
-// (rad, + left) and the acceleration along its heading (m/s^2). A command that is not finite leaves
-// that agent to its controller for the tick (nav@1, the navigator, drives it to its goal; none
-// holds it still), so NaN everywhere is the navigator's baseline.
+// default cvc::kSimTick, 7 quanta of 1/120 s: a whole number of physics steps): the steering's
+// bicycle angle (rad, + left) and the acceleration along its heading (m/s^2). A command that is not
+// finite leaves that agent to its controller for the tick (nav@1, the navigator, drives it to its
+// goal; none holds it still), so NaN everywhere is the navigator's baseline.
 //
 // The world steps on its clock, paused, only by step(): N steps from a reset with one seed and
 // one list of commands give the same world on every run. Each gym has its own app (state tree,
@@ -149,13 +149,19 @@ struct gym_options {
   // free point; every draw follows the reset's seed.
   std::vector<entity_spec> agents;
   int count = 1;
+  // The document's fleets (its world: vehicles: start: entries with fleet:, by name) each reset
+  // lays out after `agents`, from the fleet's seed: plus the reset's seed, so each episode has a
+  // layout of its own and the same seed the same one. Their vehicles join the agents in the
+  // fleets' order, their goals held (a team's at its rally point). With fleets and no `agents`,
+  // the fleets' vehicles are the only agents.
+  std::vector<std::string> fleets;
   // Whether an agent at its goal gets another (nav@1's wandering). Off: goals are held for the
   // episode, and it ends when every agent is at its own.
   bool wander = false;
-  std::uint64_t max_steps = 1000; // steps per episode (60 s at the default 0.06 s); 0 unlimited
-  // The navigator's tick (s): one step of the gym. 0: cvc::kSimTick (0.06 s), the one simulation
+  std::uint64_t max_steps = 1000; // steps per episode (58.3 s at the default tick); 0 unlimited
+  // The navigator's tick (s): one step of the gym. 0: cvc::kSimTick (7/120 s), the one simulation
   // tick every host shares (cvc/core/sim_tick.h). A whole number of the physics world's steps
-  // (0.01 s in a world with vehicles); another is held to the nearest.
+  // (1/120 s); another is held to the nearest.
   double tick = 0.0;
   int rays = 16;
   double range_m = 60.0;

@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <array>
 #include <boost/any.hpp>
+#include <boost/property_tree/json_parser.hpp> // the sdf generator's params
+#include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cvc/ariadne/bind.h>
@@ -47,6 +49,7 @@
 #include <cvc/volume/volume.h>
 #include <cvc/world/generated_world.h> // source.heightfield.generator: a cvc::world terrain
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1554,6 +1557,52 @@ cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int
 #endif
 }
 
+void register_sdf_data_generator(cvc::app &app) {
+  cvc::ariadne::register_data_generator(app, "sdf", [](cvc::ariadne::DataDecode &d) {
+    namespace pt = boost::property_tree;
+    pt::ptree j;
+    try {
+      std::istringstream in(d.spec.params.empty() ? std::string("{}") : d.spec.params);
+      pt::read_json(in, j);
+    } catch (const std::exception &e) {
+      throw std::runtime_error(std::string("generate: sdf: params are not a JSON object: ") +
+                               e.what());
+    }
+    std::string mesh = j.get<std::string>("mesh", "");
+    if (mesh.empty())
+      throw std::runtime_error("generate: sdf: params need a mesh (a mesh URI or a file)");
+    if (!d.spec.base.empty() && d.spec.base.find("://") == std::string::npos) {
+      std::error_code ec; // a file beside the document; an embedded mesh's name stays as it is
+      const std::filesystem::path beside = std::filesystem::path(d.spec.base) / mesh;
+      if (std::filesystem::path(mesh).is_relative() && std::filesystem::exists(beside, ec))
+        mesh = beside.string();
+    }
+    const int dim = j.get<int>("dim", 64);
+    if (dim < 2 || dim > 1024)
+      throw std::runtime_error("generate: sdf: dim " + std::to_string(dim) +
+                               " is not between 2 and 1024");
+    const std::string alg = j.get<std::string>("algorithm", "v2");
+    cvc::sdf_algorithm algorithm = cvc::SDF_V2;
+    if (alg == "v1")
+      algorithm = cvc::SDF_V1;
+    else if (alg == "igl")
+      algorithm = cvc::mesh_ops_available() ? cvc::SDF_IGL : cvc::SDF_V2;
+    else if (alg != "v2")
+      throw std::runtime_error("generate: sdf: algorithm '" + alg + "' is not v1, v2 or igl");
+    const boost::optional<pt::ptree &> fit = j.get_child_optional("fit");
+    const std::string up = fit ? fit->get<std::string>("up", "z") : std::string("z");
+    const char fit_up = up == "y" ? 'y' : up == "x" ? 'x' : 'z';
+    const bool flip = fit && (fit->get<std::string>("flip", "false") == "true" ||
+                              fit->get<std::string>("flip", "0") == "1");
+    const float height = fit ? fit->get<float>("height", 1.0f) : 1.0f;
+    auto vol = std::make_shared<const cvc::volume>(sdf_volume_from_mesh(
+        d.app, mesh, dim, static_cast<bool>(fit), fit_up, flip, height, algorithm));
+    d.out("volume").value(std::string("volume"));
+    d.out("volume").data(boost::any(std::shared_ptr<const cvc::volume>(std::move(vol))));
+    return std::vector<cvc::archive::file>(); // its output written: no files to decode
+  });
+}
+
 // The volume a volren/volslice (or custom) node draws: loaded from `source: { file }`, or computed
 // as the SDF of a mesh (`source: { sdf: { mesh:, dim:, algorithm: } }`). Throws on failure — the
 // caller's try/catch warns and skips the node.
@@ -1590,7 +1639,8 @@ namespace {
 // The scene's world, built by core libcvc (cvc::ariadne::SceneWorld) from the nodes that declared a
 // body: their specs, their world matrices from the spec (as a headless host composes them, so both
 // make the same world), the meshes the nodes already hold, the terrains' grids, the colliders a
-// custom node makes (out.colliders: a generated world's) and the data nodes' datasets (their bodies
+// custom node makes (out.colliders: a water's), the dataset a custom node puts (out.body_data: a
+// generated world's) and the data nodes' datasets (their bodies
 // come once a dataset is ready, at the world's sync). The moving bodies are bound to their nodes so
 // tick_scene draws them where physics has them. Problems warn (naming the node) and leave that body
 // out; nothing here throws.
@@ -1607,8 +1657,10 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
     auto m = matrices.find(p.spec);
     if (m != matrices.end())
       in.world = m->second;
-    if (auto c = out.colliders.find(p.spec->id); c != out.colliders.end() && c->second) {
-      in.colliders = c->second; // a custom node's own colliders (a generated world's)
+    if (auto d = out.body_data.find(p.spec->id); d != out.body_data.end()) {
+      in.data_path = d->second; // a dataset the node puts (a generated world's)
+    } else if (auto c = out.colliders.find(p.spec->id); c != out.colliders.end() && c->second) {
+      in.colliders = c->second; // a custom node's own colliders (a water's)
     } else {
       auto gnode = std::dynamic_pointer_cast<GeometryNode>(p.node);
       if (gnode && gnode->getGeometry()) // a copy-on-write copy: the buffers are shared

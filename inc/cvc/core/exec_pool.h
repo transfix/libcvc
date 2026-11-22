@@ -82,6 +82,7 @@ struct pool_stats {
   std::uint64_t skipped = 0;      // groups a pump_all did not start before its deadline
   std::uint64_t worker_pumps = 0; // group pumps that ran on a worker
   unsigned effective_threads = 0; // the workers running: threads()
+  std::uint64_t short_changed = 0; // pumps the deadline cut short (pump_all): first next call
   // Stage 2 (continuous mode, S2a):
   std::uint64_t wakes = 0;           // groups queued by wake(g) (its `scheduled` transition)
   std::uint64_t timer_wakes = 0;     // groups queued because the deadline they published came
@@ -110,10 +111,15 @@ public:
   //   first; at 0 threads in creation order.
   // - A group starts only while `deadline` has not passed, with the smaller of budget.seconds
   //   and the time left. A group not started counts in stats().skipped and goes first next call,
-  //   the one skipped longest first. host_first (exec_pump_frame's group 0) counts as skipped
-  //   when it starts past the deadline, and is ordered with the caller's skipped groups: so of k
-  //   caller-pumped units that each fill a frame, each starts at least once in k frames, and
-  //   neither a busy group 0 nor busy frame groups starve the other.
+  //   the one skipped longest first. A group short-changed by the deadline (it started with less
+  //   than half the time from the call's start to the deadline left, and the deadline ended its
+  //   pump with work left and steps to spare) counts in stats().short_changed and goes first next
+  //   call too: one queued behind a group that takes nearly the whole frame is never skipped, and
+  //   would otherwise get only the frame's last sliver, every frame. host_first
+  //   (exec_pump_frame's group 0) counts as skipped when it starts past the deadline, and is
+  //   ordered with the caller's skipped groups: so of k caller-pumped units that each fill a
+  //   frame, each starts at least once in k frames, and neither a busy group 0 nor busy frame
+  //   groups starve the other.
   // - A group belongs to one pump_all at a time. Calls from several threads share the workers,
   //   each with its own list, host-call queue and accounting (S1-Q11).
   // - A C++ exception escaping a group's pump fails that group and kills its processes with

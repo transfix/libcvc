@@ -8,14 +8,16 @@
 // LOAD GATE (checked first — a document that needs a newer libcvc fails to load
 // rather than half-rendering), plus semantic validation surfaced as warnings.
 
-#include "heatmap_emit.h" // parse_heatmap_color: a heatmap's ramp stops and mark colour
+#include "heatmap_emit.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h> // has_widget_type (custom-widget load-time check)
+#include <cvc/ariadne/color_value.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
@@ -191,9 +193,11 @@ const char *const kAriSchema = R"ARISCHEMA({
           "uri": {"type": "string"},
           "path": {"type": "string"},
           "as": {"type": "string"},
+          "generate": {"type": "string"},
+          "params": {"type": "object"},
           "load": {"enum": ["eager", "lazy"]}
         },
-        "required": ["uri"]
+        "anyOf": [{"required": ["uri"]}, {"required": ["generate"]}]
       }
     },
     "args": {
@@ -245,6 +249,9 @@ const char *const kAriSchema = R"ARISCHEMA({
                  "items": {"type": ["number", "string"]}},
         "max_height": {"type": "number"},
         "emoji": {"type": "string"},
+        "icon": {"type": "string"},
+        "icon_size": {"type": "number"},
+        "selected": {"type": ["boolean", "string"]},
         "runs": {"type": ["array", "string"]},
         "on_link": {"type": "string"},
         "src": {"type": "string"},
@@ -252,7 +259,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "status": {"type": "string"},
         "fit": {"enum": ["contain", "cover", "fill"]},
         "shape": {"enum": ["rect", "circle"]},
-        "background": {"type": ["string", "object"]},
+        "background": {"type": ["string", "object", "array"]},
+        "color": {"type": ["string", "array", "object"]},
         "poster": {"type": "string"},
         "controls": {"$ref": "#/$defs/flag"},
         "fullscreen": {"$ref": "#/$defs/flag"},
@@ -373,16 +381,16 @@ namespace {
 // The widget types the loader builds itself (each is a .ari key: `slider_int: Speed`). Anything
 // else is a custom type, drawn by register_widget_type / a backend-native widget.
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
-// so tf_editor precedes color — a tf_editor's own config may carry a `color:` node list — and
-// progress and plot precede overlay, their caption. A chart's keys name no widget type, nor do a
-// heatmap's or a settings editor's.
+// so color comes last — a tf_editor's own config may carry a `color:` node list, and a text, radio,
+// button or menu item a `color:` of its own (§5.26) — and progress and plot precede overlay, their
+// caption. A chart's keys name no widget type, nor do a heatmap's or a settings editor's.
 constexpr const char *kBuiltinWidgetTypes[] = {
-    "group",         "menubar",      "menu",         "menu_item", "window", "progress",
-    "plot",          "chart",        "settings",     "overlay",   "panel",  "text",
-    "checkbox",      "slider_int",   "slider_float", "combo",     "radio",  "radio_row",
-    "input_text",    "input_int",    "tf_editor",    "color",     "image",  "button",
-    "separator",     "windows_menu", "spinner",      "video",     "audio",  "text_view",
-    "message_input", "tray_icon",    "tabs",         "list",      "heatmap"};
+    "group",        "menubar",    "menu",         "menu_item", "window",    "progress",
+    "plot",         "chart",      "settings",     "overlay",   "panel",     "text",
+    "checkbox",     "slider_int", "slider_float", "combo",     "radio",     "radio_row",
+    "input_text",   "input_int",  "tf_editor",    "image",     "button",    "separator",
+    "windows_menu", "spinner",    "video",        "audio",     "text_view", "message_input",
+    "tray_icon",    "tabs",       "list",         "heatmap",   "color"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -510,6 +518,7 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
 Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
+std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label); // §5.9
 
 // Widget keys the loader consumes directly; everything else on a custom widget flows
 // into Widget::props for a registered emit fn to read.
@@ -554,10 +563,11 @@ std::vector<KeyBinding> parse_keys(Ctx &ctx, const YAML::Node &n) {
   return out;
 }
 
-// A colour as a document writes one: "#rrggbb", "#rgb", or [r, g, b] with each 0..1.
+// A colour as a document writes one (color_value.h): "#rrggbb", "#rgb", c0..c7, "r,g,b", or
+// [r, g, b] with each 0..1.
 bool yaml_color(const YAML::Node &n, float rgb[3]) {
   if (n && n.IsScalar())
-    return parse_heatmap_color(n.Scalar(), rgb);
+    return parse_color_text(n.Scalar(), rgb);
   if (!n || !n.IsSequence() || n.size() != 3)
     return false;
   std::string joined;
@@ -566,7 +576,7 @@ bool yaml_color(const YAML::Node &n, float rgb[3]) {
       return false;
     joined += (joined.empty() ? "" : ",") + c.Scalar();
   }
-  return parse_heatmap_color(joined, rgb);
+  return parse_color_text(joined, rgb);
 }
 
 // A `heatmap:` (Kind::Heatmap): its subtree at `bind`, the `ramp:` stops ([at, colour], sorted
@@ -649,6 +659,18 @@ bool commit_on_release(Ctx &ctx, const YAML::Node &n, const std::string &label) 
   if (c != "live" && c != "release")
     ctx.warn("ari: slider '" + label + "' has commit: '" + c + "' (live or release) — live");
   return c == "release";
+}
+
+// A slider's `range:` -- key (the bound key's "min" and "max" properties, lo: / hi: until it has
+// them) or absent.
+bool range_from_key(Ctx &ctx, const YAML::Node &n, const char *type, const std::string &label) {
+  if (!has(n, "range"))
+    return false;
+  const std::string r = str(n, "range");
+  if (r != "key")
+    ctx.warn("ari: " + std::string(type) + " '" + label + "' has range: '" + r +
+             "' (only key, the bound key's min and max) -- lo: and hi:");
+  return r == "key";
 }
 
 std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
@@ -942,17 +964,13 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
     w.closable = flag(n, "closable", true);          // §5.9 a close (X) button + tree.<id>.open
     w.maximizable = flag(n, "maximizable", true);    // §5.9 a maximize button + .maximized
+    w.start_maximized = start_maximized(ctx, n, label); // §5.9 maximized: true | phone
     w.resizable = flag(n, "resizable", true);        // §5.9 the user resizes it by an edge
     return w;
   }
   if (type == "text") {
     Widget w = has(n, "bind") ? text_bound(label, str(n, "bind")) : text(label);
-    // Optional fixed tint: `color: [r, g, b]` in [0,1] (same sequence convention as a layout
-    // border colour). A colour-capable backend renders it; others fall back to plain text.
-    const YAML::Node col = n["color"];
-    if (col && col.IsSequence() && col.size() >= 3)
-      w = with_text_color(w, col[0].as<float>(1.0f), col[1].as<float>(1.0f),
-                          col[2].as<float>(1.0f));
+    // Its `color:` (§5.26) is parse_widget's, as a radio's, a button's and a menu item's.
     // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
     // the text that it names is drawn as that picture.
     w.emoji = str(n, "emoji");
@@ -1145,6 +1163,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
     Widget w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+    w.range_from_key = range_from_key(ctx, n, "slider_int", label);
     w.commit_on_release = commit_on_release(ctx, n, label);
     w.on = action(n); // fired on the commit edge (drag end / key step), not every drag frame
     return w;
@@ -1156,6 +1175,7 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     if (lo >= hi)
       ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
     Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+    w.range_from_key = range_from_key(ctx, n, "slider_float", label);
     w.log_scale = flag(n, "log", false);
     if (w.log_scale && !(lo > 0.0))
       ctx.warn("ari: slider_float '" + label + "' has log: true and lo <= 0; drawn linear");
@@ -1423,7 +1443,29 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     const std::string on = action(n);
     if (on.empty())
       ctx.warn("ari: button '" + label + "' has no on: action");
-    return button(label, on);
+    Widget b = button(label, on);
+    // §5.27 a picture in place of the label, and the pressed-in look of the chosen one
+    b.button_icon = str(n, "icon");
+    b.media_auth = str(n, "auth");
+    b.icon_size = static_cast<float>(std::max(0.0, num(n, "icon_size", 0.0)));
+    if (has(n, "selected")) {
+      const YAML::Node s = n["selected"];
+      const std::string v = s.IsScalar() ? s.Scalar() : std::string();
+      if (v == "true" || v == "yes" || v == "on")
+        b.selected = "true";
+      else if (v == "false" || v == "no" || v == "off")
+        b.selected = "false"; // one of a row, never the chosen one: drawn raised with the others
+      else if (v.empty())
+        b.selected.clear();
+      else if (v.front() == '(') // an expression, read each frame
+        b.selected = v;
+      else
+        ctx.warn("ari: button '" + label + "': selected: '" + v +
+                 "' is not true, false or an expression");
+    }
+    if (!b.button_icon.empty() && label.empty())
+      ctx.warn("ari: button with icon: has no label: it shows nothing where the picture can't");
+    return b;
   }
 
   if (!type.empty() && type != "group" && type != "panel") {
@@ -1491,6 +1533,90 @@ bool any_descendant_repeats(const Widget &w) {
 
 // §5.12 background: on a window / overlay / group — a map (src | bind, auth, fit, opacity,
 // terminal, banner_rows, status), or a bare URI or image name for src.
+// §5.26 whether a colour's text is an expression, computed each frame: it starts with '('.
+bool is_color_expr(const std::string &s) {
+  const std::size_t at = s.find_first_not_of(" \t\n\r");
+  return at != std::string::npos && s[at] == '(';
+}
+
+// §5.26 three numbers [r, g, b] (0..1, clamped) in `c` into out; false for anything else.
+bool rgb_seq(const YAML::Node &c, float out[3]) {
+  if (!c.IsSequence() || c.size() < 3)
+    return false;
+  float v[3];
+  for (std::size_t i = 0; i < 3; ++i) {
+    if (!c[i].IsScalar())
+      return false;
+    try {
+      v[i] = c[i].as<float>();
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  for (int i = 0; i < 3; ++i)
+    out[i] = std::clamp(v[i], 0.0f, 1.0f);
+  return true;
+}
+
+// §5.26 one colour as a document writes it: [r, g, b], "#rrggbb", c0..c7 or "r,g,b" (into
+// `fixed`), or { bind: key } read each frame, or "(expr)" computed each frame (into `src`). False
+// when it is none of them (`fixed` and `src` untouched); "none" is no colour, and true.
+bool one_color(const YAML::Node &c, ItemColor &fixed, std::string &src) {
+  if (c.IsMap()) {
+    src = str(c, "bind");
+    return !src.empty();
+  }
+  if (c.IsSequence())
+    return (fixed.set = rgb_seq(c, fixed.rgb));
+  if (!c.IsScalar())
+    return false;
+  const std::string &s = c.Scalar();
+  if (is_color_expr(s)) {
+    src = s;
+    return true;
+  }
+  if (is_no_color(s))
+    return true;
+  return (fixed.set = parse_color_text(s, fixed.rgb));
+}
+
+constexpr const char *kColorForms =
+    "[r, g, b], \"#rrggbb\", c0..c7, { bind: <key> } or an expression";
+
+// §5.26 a text's, radio's, button's or menu item's `color:`. On a radio it may also be a list, one
+// colour per option: [c0, c1, ...] or "c0;c1;...".
+void parse_item_color(Ctx &ctx, const YAML::Node &c, Widget &w) {
+  ItemColor fixed;
+  if (one_color(c, fixed, w.color_src)) {
+    w.has_text_color = fixed.set;
+    std::copy(fixed.rgb, fixed.rgb + 3, w.text_color);
+    return;
+  }
+  if (w.kind == Kind::Radio) {
+    std::vector<ItemColor> list;
+    bool ok = c.IsScalar() && parse_color_list(c.Scalar(), list);
+    if (c.IsSequence()) {
+      ok = true;
+      for (const YAML::Node &e : c) {
+        ItemColor ic;
+        std::string dynamic;
+        if (!one_color(e, ic, dynamic) || !dynamic.empty()) {
+          ok = false;
+          break;
+        }
+        list.push_back(ic);
+      }
+    }
+    if (ok) {
+      w.option_colors = std::move(list);
+      return;
+    }
+  }
+  ctx.warn("ari: '" + w.label + "' color: is " + kColorForms +
+           (w.kind == Kind::Radio ? ", or a list of colours, one per option" : "") +
+           " — drawn in the default colour");
+}
+
 void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (w.kind != Kind::Window && w.kind != Kind::Group) {
     ctx.warn("ari: background: is for a window, overlay or group — ignored");
@@ -1501,10 +1627,18 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
     bg.src = n.Scalar();
     return;
   }
-  if (!n.IsMap()) {
-    ctx.warn("ari: background: must be a map (src, fit, opacity, ...) or a URL — ignored");
+  if (n.IsSequence()) { // §5.26 `background: [r, g, b]`: a fill
+    bg.color.set = rgb_seq(n, bg.color.rgb);
+    if (!bg.color.set)
+      ctx.warn("ari: background: a list is a colour, [r, g, b] — ignored");
     return;
   }
+  if (!n.IsMap()) {
+    ctx.warn("ari: background: must be a map (src, color, fit, opacity, ...) or a URL — ignored");
+    return;
+  }
+  if (const YAML::Node c = n["color"]; c && !one_color(c, bg.color, bg.color_src))
+    ctx.warn(std::string("ari: background color: is ") + kColorForms + " — ignored");
   bg.src = str(n, "src");
   bg.bind = str(n, "bind");
   bg.auth = str(n, "auth");
@@ -1522,7 +1656,20 @@ void parse_background(Ctx &ctx, const YAML::Node &n, Widget &w) {
     ctx.warn("ari: background terminal: '" + term + "' is not behind, banner or none");
   bg.banner_rows = std::clamp(static_cast<int>(num(n, "banner_rows", 6.0)), 1, 60);
   if (!bg.any())
-    ctx.warn("ari: background: has neither src: nor bind: — nothing to draw");
+    ctx.warn("ari: background: has no src:, bind: or color: — nothing to draw");
+}
+
+// §5.9 a window's `maximized:`, the maximize it starts with until the user picks: true, false, or
+// phone (maximized only where the view is a phone's).
+std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+  const std::string v = str(n, "maximized");
+  if (v == "true" || v == "yes" || v == "on")
+    return "true";
+  if (v == "phone")
+    return "phone";
+  if (!v.empty() && v != "false" && v != "no" && v != "off")
+    ctx.warn("ari: window '" + label + "': maximized: '" + v + "' is not true, false or phone");
+  return std::string();
 }
 
 Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
@@ -1553,6 +1700,12 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "background"))
       parse_background(ctx, n["background"], w);
+    // §5.26 a colour, written here or computed each frame. The other kinds that take a `color:`
+    // key (the colour picker, whose label it is, a tf_editor, a custom type) read their own.
+    if (has(n, "color") &&
+        (w.kind == Kind::Text || w.kind == Kind::Radio || w.kind == Kind::Button ||
+         w.kind == Kind::MenuItemAction || w.kind == Kind::MenuItemToggle))
+      parse_item_color(ctx, n["color"], w);
     if (has(n, "on_click"))
       w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
     if (has(n, "on_hover"))
@@ -1998,6 +2151,8 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
       w.closable = flag(n, "closable", true);
     if (n["maximizable"])
       w.maximizable = flag(n, "maximizable", true);
+    if (n["maximized"])
+      w.start_maximized = start_maximized(ctx, n, w.label);
     if (n["resizable"])
       w.resizable = flag(n, "resizable", true);
   }
@@ -3227,9 +3382,10 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   sn.body = parse_scene_body(n["body"]);
   // Capture every key the built-ins did NOT consume into props (a neutral Map), so a
   // custom node type registered on the cvcGL side reads its own config from there. A source the
-  // built-ins have no field for, `{ state: <key> }` or `{ stream: <token> }`, goes there too, as
-  // written: it is a custom type's own to read (a ribbon's points).
-  const bool own_source = src && src.IsMap() && (src["state"] || src["stream"]);
+  // built-ins have no field for, `{ state: <key> }`, `{ stream: <token> }` or `{ node: <id> }`,
+  // goes there too, as written: it is a custom type's own to read (a ribbon's points, a
+  // contour_lab's contours from another node).
+  const bool own_source = src && src.IsMap() && (src["state"] || src["stream"] || src["node"]);
   sn.props.kind = Value::Kind::Map;
   if (n.IsMap())
     for (const auto &kv : n) {
@@ -3877,7 +4033,40 @@ void lint_channels(Ctx &ctx, LoadResult &r) {
   }
 }
 
-// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }.
+// A YAML node as JSON text: a map as an object, a sequence as an array, a scalar as a string
+// (the readers convert: generated_world_params_from_json reads "7" as 7).
+std::string yaml_json(const YAML::Node &n) {
+  const auto quote = [](const std::string &s) {
+    std::string o = "\"";
+    for (const char c : s) {
+      if (c == '"' || c == '\\')
+        o += '\\', o += c;
+      else if (static_cast<unsigned char>(c) < 0x20) {
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(c));
+        o += buf;
+      } else
+        o += c;
+    }
+    return o + "\"";
+  };
+  if (n.IsMap()) {
+    std::string o = "{";
+    for (const auto &kv : n)
+      o += (o.size() > 1 ? "," : "") + quote(kv.first.Scalar()) + ":" + yaml_json(kv.second);
+    return o + "}";
+  }
+  if (n.IsSequence()) {
+    std::string o = "[";
+    for (const auto &e : n)
+      o += (o.size() > 1 ? "," : "") + yaml_json(e);
+    return o + "]";
+  }
+  return n.IsScalar() ? quote(n.Scalar()) : std::string("null");
+}
+
+// The data: block (data.h): a map of name -> URI, or name -> { uri, path, as, load }, or a made
+// dataset, name -> { generate, params, as, load } (data-generate).
 std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
   std::vector<DataSpec> out;
   if (!n)
@@ -3897,6 +4086,14 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       d.uri = str(e, "uri");
       d.path = str(e, "path");
       d.as = str(e, "as");
+      d.generate = str(e, "generate");
+      if (const YAML::Node params = e["params"]; params) {
+        if (params.IsMap())
+          d.params = yaml_json(params);
+        else
+          ctx.warn("ari: data." + (kv.first.IsScalar() ? kv.first.Scalar() : std::string()) +
+                   ": params: is a MAP — ignored");
+      }
       const std::string load = str(e, "load", "eager");
       d.lazy = load == "lazy";
       if (load != "lazy" && load != "eager")
@@ -3907,8 +4104,14 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: data: '" + d.name + "' is not a name (one word, no '.') — ignored");
       continue;
     }
-    if (d.uri.empty()) {
-      ctx.warn("ari: data." + d.name + " names no uri — ignored");
+    if (!d.generate.empty()) {
+      if (!has_data_generator(*ctx.app, d.generate)) {
+        ctx.warn("ari: data." + d.name + ": generate: " + d.generate +
+                 " is not a generator this build has — ignored");
+        continue;
+      }
+    } else if (d.uri.empty()) {
+      ctx.warn("ari: data." + d.name + " names no uri (or generate:) — ignored");
       continue;
     }
     if (!d.as.empty() && !has_data_decoder(*ctx.app, d.as))

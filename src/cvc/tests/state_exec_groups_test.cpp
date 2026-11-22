@@ -7,6 +7,7 @@
 #include <atomic>
 #include <boost/thread/thread.hpp>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -351,6 +352,14 @@ namespace {
 
 constexpr double kNoTimeLimit = std::numeric_limits<double>::infinity();
 
+// A pump_all deadline that gives the groups' pumps no time budget. The pool reads
+// time_point::max() as infinitely many seconds left (exec_pool.cpp seconds_left), and
+// exec_group::pump hands the scheduler an infinite budget as none, so a steps_only pump runs on
+// steps alone, as a solo run (pump_alone) does. A far but finite deadline such as now + 1 h is a
+// time budget, and Stage S then cuts each run at state_exec.slice_seconds of wall-clock time: under
+// load that reorders a group's processes, and its record no longer equals the solo run's.
+constexpr clock_type::time_point kNoDeadline = clock_type::time_point::max();
+
 #ifdef NDEBUG
 constexpr bool kDebugBuild = false;
 #else
@@ -513,7 +522,11 @@ struct bare_world {
   void pump(const pump_budget &b) {
     sched.drain_ingress();
     sched.wake_awaiting();
-    sched.sync_run_steps(b.steps, b.seconds);
+    // As exec_group::pump does: a budget that is not finite is no time budget at all, so a
+    // steps_only pump is not cut at state_exec.slice_seconds.
+    sched.sync_run_steps(b.steps, std::isfinite(b.seconds)
+                                      ? std::optional<double>(std::max(0.0, b.seconds))
+                                      : std::nullopt);
   }
   bool done() {
     for (const process_info &i : sched.list_processes())
@@ -604,10 +617,9 @@ void pump_alone(group_world &gw, const budget_fn &budget, std::size_t max_pumps 
 }
 
 // Pump `worlds` on the pool: one pump_all a frame, over the groups not done, with budget(frame)
-// and no deadline that matters, until all are done. Returns the frames.
+// and no deadline (kNoDeadline), until all are done. Returns the frames.
 std::size_t pump_pooled(pool_app &w, const std::vector<group_world *> &worlds,
                         const budget_fn &budget, std::size_t max_frames = 200000) {
-  const auto no_deadline = clock_type::now() + std::chrono::hours(1);
   for (std::size_t frame = 0; frame < max_frames; ++frame) {
     std::vector<exec_group *> live;
     for (group_world *gw : worlds)
@@ -615,7 +627,7 @@ std::size_t pump_pooled(pool_app &w, const std::vector<group_world *> &worlds,
         live.push_back(&gw->g());
     if (live.empty())
       return frame;
-    w.pool.pump_all(live, budget(frame), no_deadline);
+    w.pool.pump_all(live, budget(frame), kNoDeadline);
   }
   return max_frames;
 }
@@ -716,7 +728,7 @@ void check_against_solo(const char *label, int groups, unsigned threads,
     first.push_back(&gw->g());
     w.pool.set_last_pump_for_test(gw->g(), 1e-3); // above inline_below: helpers are woken
   }
-  w.pool.pump_all(first, budget(0), clock_type::now() + std::chrono::hours(1));
+  w.pool.pump_all(first, budget(0), kNoDeadline);
   const std::size_t frames = 1 + pump_pooled(w, raw, [&](std::size_t i) { return budget(i + 1); });
   const cvc::pool_stats stats = w.pool.stats();
   std::printf("%s: %d groups at threads %u (effective %u): %zu frames, %llu of %llu pumps on a "
@@ -1169,8 +1181,7 @@ TEST(Groups, GR12_AnExceptionEscapingAPumpFailsOnlyItsGroup) {
     for (group_world *gw : raw)
       first.push_back(&gw->g());
     std::vector<exec_group *> failed;
-    EXPECT_NO_THROW(
-        failed = w.pool.pump_all(first, budget(0), clock_type::now() + std::chrono::hours(1)));
+    EXPECT_NO_THROW(failed = w.pool.pump_all(first, budget(0), kNoDeadline));
     ASSERT_GE(thrown.load(), 1);
     if (on_worker)
       EXPECT_NE(thrown_on, caller) << "the throwing pump ran on the caller";
