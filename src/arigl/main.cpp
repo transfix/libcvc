@@ -86,7 +86,9 @@
 #include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
 #include <cvc/ariadne/stream/stream_view.h>
 #include <cvc/ariadne/tvision_backend.h>
-#include <cvc/ariadne/web_document.h> // arigl-web: a document named by URL
+#include <cvc/ariadne/uri.h>            // register_cvc_uri_handler: the Network cache window
+#include <cvc/ariadne/uri_http_cache.h> // has_http_cache: Settings > Network cache...
+#include <cvc/ariadne/web_document.h>   // arigl-web: a document named by URL
 #include <cvc/core/app.h>
 #include <cvc/media/player.h> // cvcMedia's FFmpeg + SDL3 player for video: / audio:
 #include <cvc/net/browser.h>
@@ -464,6 +466,35 @@ ari::Widget clock_menu_item() { return ari::menu_toggle("Show clock", "ariadne.t
 // §5.24 the tray's bell, which shows while the notification feed has entries.
 ari::Widget bell_menu_item() {
   return ari::menu_toggle("Show notifications", "ariadne.tray.bell", true);
+}
+
+// The app's HTTP cache (enable_net's), for every document, whatever it shows: Settings' Network
+// cache... item, and the window it opens (components/http_cache.ari, which the host puts in each
+// document, closed until asked for). Nothing while the network is off, or when the component
+// cannot be found or loaded (said on stderr).
+constexpr const char *kHttpCacheWindow = "http_cache";
+
+bool add_http_cache_window(cvc::app &app, ari::AppRuntime &rt,
+                           const std::vector<std::string> &component_paths) {
+  if (!ari::has_http_cache(app))
+    return false;
+  ari::register_cvc_uri_handler(app, component_paths); // load() registers it again, the same
+  ari::LoadResult lr = ari::load_string(
+      app, std::string("import: cvc://components/http_cache.ari\nwindows:\n  - include: ") +
+               kHttpCacheWindow + "\n");
+  if (lr.ok)
+    for (ari::Widget &w : lr.root.children)
+      if (w.kind == ari::Kind::Window) {
+        rt.set_host_windows({std::move(w)});
+        return true;
+      }
+  std::fprintf(stderr, "arigl: no Network cache window: %s\n",
+               lr.ok ? "components/http_cache.ari has no window" : lr.error.c_str());
+  return false;
+}
+
+ari::Widget http_cache_menu_item() {
+  return ari::menu_toggle("Network cache...", std::string("tree.") + kHttpCacheWindow + ".open");
 }
 
 // The camera's mouse settings and distance, for the Controls window: it reads them from its own
@@ -2607,10 +2638,12 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     std::fprintf(stderr, "arigl: CVC_ARIGL_GALLERY: %s\n", gallery_error.c_str());
   std::string gallery_next;  // a document the Demos menu asked for
   bool gallery_left = false; // the Demos menu started another program
+  // The Network cache window, in every document, while the network is on.
+  const bool http_cache = add_http_cache_window(app, rt.app_runtime(), o.component_paths);
   // arigl's menus: Settings after the document's own; with a gallery, a menu bar of arigl's that
   // stays the same from document to document, the document's menus under Document. Settings opens
-  // the Keys window (every document's keys, and the camera's) and holds the scene's display
-  // settings.
+  // the Keys window (every document's keys, and the camera's) and the Network cache window, and
+  // holds the scene's display settings.
   const auto host_menus = [&](const std::string &doc) {
     std::vector<ari::Widget> menus;
     if (!gallery.empty())
@@ -2619,13 +2652,18 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     // Controls... (the camera's keys and mouse) and the scene's display settings mean nothing to a
     // document with no scene (a feed, a form): they show only while the loaded one has a scene
     // (AriRuntime::load writes ariadne.scene), so they come and go with a gallery's documents.
+    // The cache is the app's, so its item is in every document's.
     const auto scene_only = [](ari::Widget w) {
       w.visible_when = "(= (state-get \"ariadne.scene\") \"1\")";
       return w;
     };
-    menus.push_back(ari::menu("Settings", {scene_only(keys_menu_item()), clock_menu_item(),
-                                           bell_menu_item(), scene_only(ari::separator()),
-                                           scene_only(ari::custom("scene_settings"))}));
+    std::vector<ari::Widget> settings = {scene_only(keys_menu_item()), clock_menu_item(),
+                                         bell_menu_item()};
+    if (http_cache)
+      settings.push_back(http_cache_menu_item());
+    settings.push_back(scene_only(ari::separator()));
+    settings.push_back(scene_only(ari::custom("scene_settings")));
+    menus.push_back(ari::menu("Settings", std::move(settings)));
     return menus;
   };
   // The Controls window's UI size: the overlay's own scale in the state tree, which it applies at
@@ -2945,10 +2983,13 @@ int run_terminal(const ari::HostOptions &o, [[maybe_unused]] const Scripting &sc
     rt.add_component_path(d);
   rt.register_quit(); // on: quit and (quit [code]): the exit status is the code
   // As in a window, Settings after the document's own menus opens the Keys window (the terminal's
-  // camera has no keys to list; the scene's display settings are ImGui's).
+  // camera has no keys to list; the scene's display settings are ImGui's) and, while the network
+  // is on, the Network cache window.
+  std::vector<ari::Widget> settings = {keys_menu_item(), clock_menu_item(), bell_menu_item()};
+  if (add_http_cache_window(app, rt, o.component_paths))
+    settings.push_back(http_cache_menu_item());
   rt.set_host_menus(
-      {ari::AppRuntime::document_menus(),
-       ari::menu("Settings", {keys_menu_item(), clock_menu_item(), bell_menu_item()})});
+      {ari::AppRuntime::document_menus(), ari::menu("Settings", std::move(settings))});
   rt.runtime().set_clock(o.command == "run"); // the tray's clock (§5.22)
   rt.set_host_keys({});
   rt.set_document_args(o.doc_args, "arigl " + o.command + " --terminal " + o.doc,

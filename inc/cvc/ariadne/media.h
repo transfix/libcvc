@@ -12,7 +12,10 @@
 //
 // http(s) goes through the host's network (net_host.h): its allowlist, and with `auth: NAME` its
 // credential NAME, put in as the request is sent, on the terms the http verbs keep (§10.3). The
-// token never reaches state, a cache key, an error or a published name.
+// token never reaches state, a cache key, an error or a published name. A picture without `auth:`
+// goes through the app's HTTP cache (uri_http_cache.h) when it has one, so the encoded bytes of a
+// picture dropped from this cache are not fetched again while they are fresh; one with `auth:`
+// never does.
 
 #include <cstddef>
 #include <cvc/ariadne/widget.h>
@@ -111,11 +114,12 @@ using Fetcher =
     std::function<void(const std::string &uri, const std::string &auth, FetchDone done)>;
 
 // The default fetch, blocking, with `app`'s network and resolver: an http(s) URI through the host's
-// network when enable_net turned it on for `app` (its allowlist; `auth` through its credential
-// store, never following a redirect), else through whatever http(s) handler the host registered;
-// any other URI through the resolver (uri.h), relative file:// paths against `base`. `auth` on
-// anything but http(s), or with no credential store, is an error. A reply that is not 2xx is an
-// error ("http 404").
+// network when enable_net turned it on for `app` (its allowlist; with no `auth`, through the app's
+// HTTP cache when it has one, http_cache_get; `auth` through its credential store, never through
+// the cache, never following a redirect), else through whatever http(s) handler the host
+// registered; any other URI through the resolver (uri.h), relative file:// paths against `base`.
+// `auth` on anything but http(s), or with no credential store, is an error. A reply that is not 2xx
+// is an error ("http 404").
 FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string &auth,
                         const std::string &base = std::string());
 
