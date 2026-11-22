@@ -166,6 +166,12 @@ struct tf_binding_options {
   // VolumeNode's setVolume is, and the bars the bounds follow move to where the keys' values sit
   // on its range: the keys keep their values and nothing re-meshes. Unset: `vol` for good.
   std::function<std::shared_ptr<const cvc::volume>()> volume_source;
+  // The model's key, an absolute state path; empty (the default): the node's own
+  // <node>.transfer_function. A node that swaps the renderer under it (VolumeRenderNode) binds
+  // each new renderer to its own key, so one model drives whichever renderer draws; the renderer's
+  // keys (its tables, volslice.window) stay the renderer's, and <tf>.range and the overlays are
+  // published beside the model.
+  std::string model_key;
 };
 
 class tf_binding;
@@ -184,6 +190,15 @@ std::shared_ptr<tf_binding> attach_transfer_function(RealizedScene &out,
                                                      tf_target target, const cvc::volume &vol,
                                                      tf_binding_options opt,
                                                      std::vector<std::string> *warnings = nullptr);
+
+// As attach_transfer_function, but the caller owns the binding and ticks it: nothing is added to a
+// scene's ticks. For a node that re-binds at runtime (a renderer swapped from inside a tick, when
+// the scene's tick list cannot grow): drop the old binding, make the new one. Registered for
+// find_transfer_function as attach's are. Never throws; null on failure, with a warning.
+std::shared_ptr<tf_binding> make_transfer_function(std::shared_ptr<GraphicsNode> node,
+                                                   tf_target target, const cvc::volume &vol,
+                                                   tf_binding_options opt,
+                                                   std::vector<std::string> *warnings = nullptr);
 
 // The live binding whose model key is `model_path` (an absolute state path) in `app`, or null —
 // for a host or a test that needs the binding a realizer attached (e.g. to wait_overlays()).

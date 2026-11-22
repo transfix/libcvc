@@ -19,6 +19,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeGridNode.h>
+#include <cvc/gl/VolumeRenderNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h>
@@ -192,6 +193,10 @@ void VolumeGridNode::ensureChildren() {
   }
   m_surfaces = addGraphicsChild<NullGraphicNode>("surfaces");
   m_surfaces->setVisible(false); // with the planes: an empty group's box frames no view
+  // The volume in the 3D view (grid.display.render), in the surfaces group the slice views hide;
+  // nothing until a renderer is asked for.
+  m_volumeRender = m_surfaces->addGraphicsChild<VolumeRenderNode>("volume");
+  put(m_volumeRender->getState("renderer"), "none");
   // The grey display's model: the planes colour through it instead of the transfer function.
   getState("grey_transfer_function").value(cvc::tf::to_string(cvc::tf::model::preset("grayscale")));
   cvc::job_keys(app().root(), getState("grid").fullName()).idle();
@@ -235,6 +240,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
   if (vol) {
     m_histogramVolume = std::move(vol);
     getState("grid.volume").data(boost::any(m_histogramVolume));
+    m_volumeRender->setVolume(m_histogramVolume); // the 3D view draws the app's volume too
   } else {
     auto stand_in = std::make_shared<cvc::volume>(app());
     try {
@@ -251,6 +257,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
     stand_in->max(m_source->max());
     m_histogramVolume = stand_in;
     getState("grid.volume").data(boost::any());
+    m_volumeRender->setVolume(nullptr); // read plane by plane: no whole volume to draw
   }
   for (const auto &s : m_slices) {
     s->setSource(m_source);
@@ -548,6 +555,12 @@ void VolumeGridNode::readKeys() {
     for (const auto &s : m_slices)
       s->setModelKey(key);
   }
+  // What draws the volume in the 3D view.
+  const cvc::grid_render r = m_display.render;
+  put(m_volumeRender->getState("renderer"), r == cvc::grid_render::vtk        ? "vtk"
+                                            : r == cvc::grid_render::volren   ? "volren"
+                                            : r == cvc::grid_render::volslice ? "volslice"
+                                                                              : "none");
   syncSlices();
   fixCurrent();
 }
@@ -827,6 +840,7 @@ bool VolumeGridNode::tick() {
   }
   for (const auto &s : m_slices)
     changed = s->tick() || changed;
+  changed = m_volumeRender->tick() || changed;
   return changed;
 }
 

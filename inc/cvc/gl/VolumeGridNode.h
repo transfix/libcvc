@@ -35,15 +35,20 @@
 // the grid's own <node>.transfer_function, so one tf_editor drives all three; each holds two
 // overlay children, `points` (the classes' points on that plane, as disks of their radius in
 // voxels, unlit) and `lines` (the selection's rings, the crosshairs where the other two planes
-// cross it, and a rubber band being dragged). `surfaces` is an empty group for what later phases
-// put in the 3D view (P9's segmented classes, P10's tiled contours).
+// cross it, and a rubber band being dragged). `surfaces` is the group for what the 3D view shows
+// beyond the planes, which the slice views hide: `volume`, a VolumeRenderNode drawing the volume
+// by the renderer grid.display.render picks (none by default), and what later phases add (P9's
+// segmented classes, P10's tiled contours).
 //
 // KEYS, under the node's state path (all strings, as everywhere on the tree):
 //   grid.view, grid.tool, grid.slice.{x,y,z}   cvc::volume_grid_params: the switch's view, what a
 //                  click does, the three planes (-1 the middle, written back as its number; a
 //                  plane past the last is drawn as the last and written back). Each slice key's
 //                  "max" property is its last plane's number, so a slider takes its range from it
-//   grid.display.* cvc::volume_grid_display_params: point_scale, show_points, crosshairs, grey
+//   grid.display.* cvc::volume_grid_display_params: point_scale, show_points, crosshairs, grey,
+//                  render (none | vtk | volren | volslice: what draws the volume in the 3D view,
+//                  through the grid's transfer function; a file read plane by plane has no whole
+//                  volume to draw)
 //   grid.source.*  cvc::volume_grid_source_params: volume, points and session, the state keys
 //                  the node follows (relative to its scope, setScope; a leading '/' is the
 //                  root's), and var and time, the variable and timestep the volume holds. The
@@ -104,6 +109,7 @@ class volume;
 namespace gl {
 
 class GeometryNode;
+class VolumeRenderNode;
 class VolumeSliceNode;
 
 class VolumeGridNode : public NullGraphicNode {
@@ -139,6 +145,8 @@ public:
   // The plane looking down `a`, and the surfaces group; null before ensureChildren.
   std::shared_ptr<VolumeSliceNode> slice(cvc::slice_axis a) const;
   std::shared_ptr<NullGraphicNode> surfaces() const { return m_surfaces; }
+  // The volume in the 3D view (in the surfaces group); null before ensureChildren.
+  std::shared_ptr<VolumeRenderNode> volumeRender() const { return m_volumeRender; }
   // The overlay children of the plane looking down `a` ("points" and "lines").
   std::shared_ptr<GeometryNode> pointsOverlay(cvc::slice_axis a) const;
   std::shared_ptr<GeometryNode> linesOverlay(cvc::slice_axis a) const;
@@ -213,6 +221,7 @@ private:
   std::array<std::shared_ptr<VolumeSliceNode>, 3> m_slices;
   std::array<std::shared_ptr<GeometryNode>, 3> m_points, m_lines;
   std::shared_ptr<NullGraphicNode> m_surfaces;
+  std::shared_ptr<VolumeRenderNode> m_volumeRender;
   cvc::point_class_editor m_editor;
   cvc::point_class_gestures m_gestures;
   cvc::volume_grid_params m_params;

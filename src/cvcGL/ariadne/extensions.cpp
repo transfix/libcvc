@@ -31,6 +31,7 @@
 #include <cvc/gl/ariadne/swarm_nodes.h>   // register_swarm_node_types
 #include <cvc/gl/ariadne/vehicle_view.h>  // register_vehicle_preview_node
 #include <cvc/gl/ariadne/volume_grid_nodes.h>
+#include <cvc/gl/ariadne/volume_render_nodes.h>
 #include <cvc/gl/ariadne/volume_slice_nodes.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 
@@ -50,6 +51,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_ribbon_node_types(app);      // "ribbon", "draped_link"
   register_volume_slice_node_type(app); // "volume_slice"
   register_volume_grid_node_type(app);  // "volume_grid" (after volume_slice: it holds three)
+  register_volume_render_node_type(app); // "volume_render" (vtk / volren / volslice, switchable)
   register_sdf_data_generator(app);     // data: { generate: sdf } (a volume the app holds)
   register_contour_lab_node_type(app);  // "contour_lab"
   register_swarm_node_types(app);       // "nav_swarm", "swarm_layer"
