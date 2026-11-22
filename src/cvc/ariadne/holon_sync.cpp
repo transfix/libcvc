@@ -925,6 +925,9 @@ void world_replica::build_statics() {
       avatar_static s;
       s.type = avatar_static::kind::body;
       s.body = b.desc;
+      // Its surface as the relay's world has it (OW5h): the document's material, by value.
+      s.material = std::make_shared<const cvc::physics::material>(
+          _world->world().get_material(b.desc->material));
       _statics.push_back(std::move(s));
     }
   for (const std::string &id : _nodes) {

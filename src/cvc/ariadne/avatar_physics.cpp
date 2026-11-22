@@ -163,6 +163,23 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
         continue;
       d = *s.body; // its shape and pose; its material is another world's id
       d.material = ph::body_desc{}.material;
+      if (s.material) {
+        // Its surface as its world has it, added to this one once (OW5h).
+        const ph::material &m = *s.material;
+        const auto same = [&m](const std::pair<ph::material, ph::material_id> &x) {
+          return x.first.name == m.name && x.first.friction == m.friction &&
+                 x.first.restitution == m.restitution &&
+                 x.first.rolling_resistance == m.rolling_resistance &&
+                 x.first.nav_material == m.nav_material && x.first.wet_friction == m.wet_friction;
+        };
+        const auto it = std::find_if(_static_materials.begin(), _static_materials.end(), same);
+        if (it != _static_materials.end()) {
+          d.material = it->second;
+        } else {
+          d.material = _world->add_material(m);
+          _static_materials.emplace_back(m, d.material);
+        }
+      }
       d.linear_velocity = d.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
     } else {
       if (s.type == avatar_static::kind::sphere)

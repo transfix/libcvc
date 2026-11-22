@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -148,9 +149,12 @@ struct avatar_static {
   cvc::physics::quat rotation;
   cvc::physics::vec3 half_extents{0.5, 0.5, 0.5};             // box
   double radius = 0.5;                                        // sphere
-  std::shared_ptr<const cvc::physics::body_desc> body;        // body: made static, its material
-                                                              // the world's default
+  std::shared_ptr<const cvc::physics::body_desc> body;        // body: made static
   std::shared_ptr<const cvc::world::world_geometry> geometry; // geometry: its collide items
+  // body: its surface (friction, restitution) as the world it came from has it (body->material is
+  // that world's id, not this one's); null: this world's default (ARIADNE_WORLDS.md section 18.5,
+  // OW5h). A geometry's items carry their own surface classes.
+  std::shared_ptr<const cvc::physics::material> material;
 };
 
 class avatar_world {
@@ -281,6 +285,8 @@ private:
   cvc::physics::world *_world = nullptr;     // the world the avatars are in (_own's or shared)
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
+  // The statics' materials added to the world, each once (set_statics): the material and its id.
+  std::vector<std::pair<cvc::physics::material, cvc::physics::material_id>> _static_materials;
   std::vector<cvc::physics::field_id> _static_fields; // a static geometry's volumes
   std::map<std::string, avatar> _avatars;
   struct obstacle {

@@ -7723,6 +7723,82 @@ scene:
   fs::remove_all(dir, ec);
 }
 
+// The relay's surfaces on the client (ARIADNE_WORLDS.md section 18.5, OW5h): a static body's
+// material is the document's, and the replica's statics carry it by value
+// (avatar_static::material), so the client's world has the relay's ice where the relay has it, and
+// its default surface where the relay has that, not the default everywhere.
+TEST(AriadneOneWorld, AClientsStaticsHaveTheRelaysSurfaces) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5h_materials";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "rink.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << R"(meta: { name: rink, min_libcvc: "0.0.0" }
+scene:
+  physics: { materials: { ice: { friction: 0.05, restitution: 0.1 }, rubber: { friction: 1.6 } } }
+  nodes:
+    - node: rink
+      source: { box: { size: [10, 10, 1] } }
+      transform: { position: [-6, 0, -0.5] }
+      body: { motion: static, material: ice }
+    - node: track
+      source: { box: { size: [10, 10, 1] } }
+      transform: { position: [6, 0, -0.5] }
+      body: { motion: static, material: rubber }
+    - node: path
+      source: { box: { size: [2, 10, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  const std::string room = "rink";
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  world_replica world;
+  for (int i = 0; i < 3; ++i)
+    world.pump(app, room);
+  ASSERT_TRUE(world.ready()) << world.status();
+  std::size_t carried = 0;
+  for (const cvc::ariadne::avatar_static &st : world.statics())
+    carried += st.type == cvc::ariadne::avatar_static::kind::body && st.material != nullptr;
+  EXPECT_EQ(carried, 3u) << "each body's surface, the default's included";
+
+  // The client's world from those statics, as the holon makes it.
+  cvc::ariadne::avatar_world client(1.0 / 120.0, cvc::ariadne::avatar_body{});
+  client.set_statics(world.statics());
+  client.set_statics(world.statics()); // again: each surface added once
+  const auto surface = [&client](double x) {
+    const std::optional<cvc::physics::ray_hit> h =
+        client.world().raycast({x, 0.0, 5.0}, {x, 0.0, -5.0});
+    EXPECT_TRUE(h.has_value()) << x;
+    return h ? client.world().get_material(h->material) : cvc::physics::material{};
+  };
+  const cvc::physics::material ice = surface(-6.0), rubber = surface(6.0), plain = surface(0.0);
+  std::printf("  the client's surfaces: the rink '%s' friction %.2f restitution %.2f, the track "
+              "'%s' friction %.2f, the path friction %.2f (%zu materials in its world)\n",
+              ice.name.c_str(), ice.friction, ice.restitution, rubber.name.c_str(), rubber.friction,
+              plain.friction, client.world().material_count());
+  EXPECT_EQ(ice.name, "ice");
+  EXPECT_FLOAT_EQ(ice.friction, 0.05f);
+  EXPECT_FLOAT_EQ(ice.restitution, 0.1f);
+  EXPECT_EQ(rubber.name, "rubber");
+  EXPECT_FLOAT_EQ(rubber.friction, 1.6f);
+  EXPECT_FLOAT_EQ(plain.friction, cvc::physics::material{}.friction) << "the default where it is";
+  const std::size_t materials = client.world().material_count();
+  client.set_statics(world.statics());
+  EXPECT_EQ(client.world().material_count(), materials) << "not added again";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 namespace {
 // Two worlds in one document: a flat slab, and a 1 m dome of terrain on its own.
 const char *kTwoWorlds = R"(meta: { name: two, min_libcvc: "0.0.0" }
