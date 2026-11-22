@@ -135,6 +135,30 @@ drive_status read_drive_status(cvc::app &app, const std::string &room, const std
 // server_pump does this for every participant.
 void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::string &pid);
 
+// AVATARS THAT ARE VEHICLES (ARIADNE_WORLDS.md section 18.6, OW6c). CLIENT: ask for avatar
+// archetype ARCHETYPE (the room's avatars.archetypes, by id; "" the first) as our own PID, beside
+// our avatar's look (participants.<pid>.avatar.archetype). The server answers in archetype_status
+// and, for one that is a vehicle, seats us in it (driving).
+void request_archetype(cvc::app &app, const std::string &room, const std::string &pid,
+                       const std::string &archetype);
+// What PID asked for ("" for nothing yet, or the first).
+std::string read_requested_archetype(cvc::app &app, const std::string &room,
+                                     const std::string &pid);
+// The server's answer: the archetype it ruled on ("" the first), whether PID has it now, and why
+// not; `answered` false until the server has ruled on any.
+struct archetype_status {
+  bool answered = false;
+  std::string archetype;
+  bool ok = false;
+  std::string why;
+};
+archetype_status read_archetype_status(cvc::app &app, const std::string &room,
+                                       const std::string &pid);
+// SERVER: give PID the archetype it asks for (holon::set_archetype; the first until it asks), and
+// say so in archetype_status when it asked, was refused, or became a vehicle. server_pump does
+// this for every participant, before serve_drive.
+void serve_archetype(holon &h, cvc::app &app, const std::string &room, const std::string &pid);
+
 // CLIENT: the vehicle a participant standing at FEET, facing FACING (rad from +x), would get into:
 // the nearest drivable entity the playout shows whose chassis box is within its reach, one ahead
 // of it before one behind. 0 for none; OUT_GAP gets its distance (m, feet to box, in plan).

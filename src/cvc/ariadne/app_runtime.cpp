@@ -276,7 +276,7 @@ namespace {
 
 bool any_mouse_rows(const MouseControls &m) {
   return !m.look.empty() || !m.steer.empty() || !m.sensitivity.empty() || !m.invert_y.empty() ||
-         !m.invert_x.empty() || !m.distance.empty();
+         !m.invert_x.empty() || !m.distance.empty() || !m.first_person.empty();
 }
 
 // The Controls window: the host's pointer settings, then every key binding, with its keys and a
@@ -290,6 +290,8 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       look.values = {"0", "1"};
       kids.push_back(std::move(look));
     }
+    if (!mouse.first_person.empty())
+      kids.push_back(checkbox("Mouse look in first person", mouse.first_person));
     if (!mouse.steer.empty())
       kids.push_back(checkbox(mouse.steer_label, mouse.steer));
     if (!mouse.sensitivity.empty())

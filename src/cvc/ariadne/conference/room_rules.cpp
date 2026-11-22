@@ -112,6 +112,7 @@ section_stamp write_avatar_archetypes(cvc::app &app, const std::string &room_id,
     for (std::size_t j = 0; j < a.controllers.size(); ++j)
       w.set({idx(i), "controllers", idx(j)}, a.controllers[j]);
     w.set_uint({idx(i), "controllers", "count"}, a.controllers.size());
+    w.set({idx(i), "vehicle"}, a.vehicle);
   }
   w.set_uint({"count"}, list.size());
   return w.commit(at, epoch);
@@ -139,6 +140,7 @@ bool read_avatar_archetypes(cvc::app &app, const std::string &room_id,
     const std::uint64_t m = std::min(r.uint({k, "controllers", "count"}, 0), kMaxEntries);
     for (std::uint64_t j = 0; j < m; ++j)
       a.controllers.push_back(r.text({k, "controllers", idx(j)}));
+    a.vehicle = r.text({k, "vehicle"});
     list.push_back(std::move(a));
   }
   out = std::move(list);

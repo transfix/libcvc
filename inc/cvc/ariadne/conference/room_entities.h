@@ -71,6 +71,9 @@ struct room_entity {
   bool drivable = false;
   double reach = 3.0;
   std::string controls;
+  // The participant whose body it is (an avatar archetype that is a vehicle, holon::set_archetype;
+  // "" none): no one else gets in it.
+  std::string avatar;
   bool operator==(const room_entity &) const = default;
 };
 

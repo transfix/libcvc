@@ -248,6 +248,10 @@ TEST(RoomRulesTest, EachSectionRoundTrips) {
   tall.body = ca::avatar_body{95.0, 0.55, 2.1};
   tall.controllers = {"stroll@1", "walker@1"};
   r.archetypes.push_back(tall);
+  ca::avatar_archetype kart; // a vehicle (section 18.6): its id rides with the section
+  kart.id = "kart";
+  kart.vehicle = "roboracer";
+  r.archetypes.push_back(kart);
   ca::avatar_controller stroll;
   stroll.id = "stroll@1";
   stroll.params = {{"walk_speed", 1.1}, {"turn", 0.3}};
@@ -280,6 +284,42 @@ TEST(RoomRulesTest, EachSectionRoundTrips) {
   ASSERT_TRUE(rc::read_avatar_policy(app, "r", p));
   EXPECT_EQ(p.max_speed, 3.0);
   EXPECT_EQ(rc::avatar_policy_stamp(app, "r").at, 300u);
+}
+
+// An avatar archetype may be one of the world's vehicles (section 18.6, OW6c): its vehicle: names
+// a vehicle archetype, which must be there. A vehicle is no person's body: avatar() is the first
+// archetype that is not one.
+TEST(WorldRulesTest, AnAvatarArchetypeMayBeAVehicle) {
+  if (!ca::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  std::string why;
+  const ca::world_rules r = rules_of(R"(
+world:
+  vehicles:
+    archetypes:
+      rover: { plant: kinematic, vehicle: { preset: roboracer }, controllers: [nav@1, none] }
+  avatars:
+    archetypes:
+      racer: { vehicle: rover }
+      person: { body: { mass: 80 } }
+)",
+                                     why);
+  ASSERT_EQ(why, "");
+  ASSERT_EQ(r.archetypes.size(), 2u);
+  EXPECT_EQ(r.archetypes[0].id, "racer");
+  EXPECT_EQ(r.archetypes[0].vehicle, "rover");
+  EXPECT_EQ(r.archetypes[1].vehicle, "");
+  EXPECT_EQ(r.avatar().id, "person") << "the first person, not the vehicle";
+  EXPECT_EQ(r.avatar().body.mass, 80.0);
+  ASSERT_NE(r.find_avatar("racer"), nullptr);
+  EXPECT_EQ(r.find_avatar("dragon"), nullptr);
+
+  rules_of("world: { avatars: { archetypes: { racer: { vehicle: rover } } } }", why);
+  EXPECT_NE(why.find("is vehicle 'rover', which vehicles: archetypes: does not define"),
+            std::string::npos)
+      << why;
+  rules_of("world: { avatars: { archetypes: { racer: { vehicle: [a, b] } } } }", why);
+  EXPECT_NE(why.find("vehicle: expects a vehicle archetype's id"), std::string::npos) << why;
 }
 
 // A list is read by its count, so a shorter version leaves nothing of the longer one behind.

@@ -21,6 +21,7 @@
 #include <cvc/ariadne/conference/room_rules.h> // the policy section
 #include <cvc/ariadne/conference/room_write_gate.h>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/holon_sync.h> // archetype_status: the body verbs' test
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
@@ -515,4 +516,60 @@ TEST(RoomAvatar, TheAvatarVerbsRereadTheCatalogOnlyWhenItsRevisionMoves) {
                            "  (string.join (room-avatar-options \"elsewhere\" \"color\") \",\"))"),
             "");
   EXPECT_EQ(get("out.elsewhere"), "");
+}
+
+// The Avatar window's Body picker (conference_roster.ari's on_tick): room-archetypes lists what the
+// world offers, room-archetype says what we are (the first until we pick, then what we asked for,
+// then what the relay ruled), and room-set-archetype asks, under our own avatar choice beside the
+// look. A refusal says why and leaves us what the relay last gave us.
+TEST(RoomAvatar, TheBodyVerbsPickAnArchetype) {
+  cvc::app app;
+  conf::register_room_intrinsics(app);
+  cvc::ariadne::Runtime rt(app, "");
+  const auto get = [&](const std::string &path) {
+    cvc::state *n = app.root().findDescendant(path);
+    return n ? n->value() : std::string("<missing>");
+  };
+  cvc::ariadne::avatar_archetype person, rover;
+  person.id = "person";
+  rover.id = "rover";
+  rover.vehicle = "kart";
+  conf::write_avatar_archetypes(app, "room", {person, rover}, 0);
+  ASSERT_EQ(run_to_end(rt, "(begin (set j (room-join \"ep\" \"room\"))"
+                           "  (state-set \"tok\" (get-attr j \"token\"))"
+                           "  (state-set \"pid\" (get-attr j \"pid\")))"),
+            "");
+  const std::string pid = get("pid");
+  const std::string observe =
+      "(begin"
+      "  (state-set \"out.kinds\" (string.join (room-archetypes \"room\") \",\"))"
+      "  (set b (room-archetype (state-get \"tok\")))"
+      "  (state-set \"out.body\" (string.join (list (get-attr b \"archetype\")"
+      "    (get-attr b \"vehicle\") (if (get-attr b \"ok\") \"ok\" \"no\") (get-attr b \"why\"))"
+      "    \"/\")))";
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.kinds"), "person,rover");
+  EXPECT_EQ(get("out.body"), "person//ok/") << "the first until we pick";
+
+  ASSERT_EQ(run_to_end(rt, "(state-set \"out.set\" (get-attr (room-set-archetype (state-get "
+                           "\"tok\") \"rover\") \"ok\"))"),
+            "");
+  EXPECT_EQ(get("out.set"), "true");
+  EXPECT_EQ(cvc::ariadne::read_requested_archetype(app, "room", pid), "rover")
+      << "under our own avatar choice";
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.body"), "rover/kart/ok/") << "what we asked for, until the relay rules";
+
+  // The relay refuses it: why, and what we had.
+  app.root()(conf::room_participant_path("room", pid) + ".archetype_status")
+      .value(std::string("rover:refused: no room to spawn it"));
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.body"), "rover/kart/no/no room to spawn it");
+  app.root()(conf::room_participant_path("room", pid) + ".archetype_status")
+      .value(std::string("rover:ok"));
+  ASSERT_EQ(run_to_end(rt, observe), "");
+  EXPECT_EQ(get("out.body"), "rover/kart/ok/");
+  run_to_end(rt, "(room-set-archetype (state-get \"tok\") \"not a name\")");
+  EXPECT_EQ(cvc::ariadne::read_requested_archetype(app, "room", pid), "rover")
+      << "an id must be a name: nothing asked";
 }
