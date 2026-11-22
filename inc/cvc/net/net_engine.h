@@ -169,10 +169,12 @@ struct net_counters {
   std::uint64_t frames_in = 0;
   std::uint64_t bytes_out = 0;    // written to sockets
   std::uint64_t messages_out = 0; // buffers queued to connections (one a receiver)
-  std::uint64_t broadcasts = 0;   // the engine's only
-  std::uint64_t broadcast_receivers = 0;
-  std::uint64_t queued_bytes = 0;     // output queued now
-  std::uint64_t max_queued_bytes = 0; // the most one connection has had queued
+  // broadcast() calls: the engine's only (a listener's block reads 0), since one broadcast's
+  // receivers can come from several listeners.
+  std::uint64_t broadcasts = 0;
+  std::uint64_t broadcast_receivers = 0; // the receivers broadcasts reached (a listener's: its own)
+  std::uint64_t queued_bytes = 0;        // output queued now
+  std::uint64_t max_queued_bytes = 0;    // the most one connection has had queued
   std::uint64_t slow_reader() const {
     return closed[static_cast<std::size_t>(close_reason::slow_reader)];
   }

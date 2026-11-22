@@ -671,6 +671,43 @@ TEST(NetEngine, CountersIdsAndInfo) {
   EXPECT_EQ(open, 2u);
 }
 
+// One group with members from two listeners: each listener counts the receivers it gave, and only
+// the engine counts the broadcasts.
+TEST(NetEngine, EachListenerCountsItsOwnBroadcastReceivers) {
+  net_engine e;
+  program p(e);
+  auto oa = local(framing::raw());
+  oa.name = "hub";
+  auto ob = local(framing::raw());
+  ob.name = "admin";
+  const auto la = e.listen(oa), lb = e.listen(ob);
+  ASSERT_NE(la, 0u);
+  ASSERT_NE(lb, 0u);
+  client a1(e.port(la)), a2(e.port(la)), b1(e.port(lb));
+  const conn_id ia1 = p.id_of(a1), ia2 = p.id_of(a2), ib1 = p.id_of(b1);
+  for (conn_id id : {ia1, ia2, ib1})
+    e.join(id, "all");
+  e.broadcast("all", "x");      // a1, a2, b1
+  e.broadcast("all", "y", ia1); // a2, b1
+  EXPECT_EQ(a1.read(1), "x");
+  EXPECT_EQ(a2.read(2), "xy");
+  EXPECT_EQ(b1.read(2), "xy");
+  ASSERT_TRUE(p.until([&] { return e.stats().engine.broadcast_receivers == 5; }));
+  const auto st = e.stats();
+  EXPECT_EQ(st.engine.broadcasts, 2u);
+  ASSERT_EQ(st.listeners.size(), 2u);
+  EXPECT_EQ(st.listeners[0].id, la);
+  EXPECT_EQ(st.listeners[0].name, "hub");
+  EXPECT_EQ(st.listeners[0].counters.broadcast_receivers, 3u);
+  EXPECT_EQ(st.listeners[0].counters.messages_out, 3u);
+  EXPECT_EQ(st.listeners[0].counters.broadcasts, 0u);
+  EXPECT_EQ(st.listeners[1].id, lb);
+  EXPECT_EQ(st.listeners[1].name, "admin");
+  EXPECT_EQ(st.listeners[1].counters.broadcast_receivers, 2u);
+  EXPECT_EQ(st.listeners[1].counters.messages_out, 2u);
+  EXPECT_EQ(st.listeners[1].counters.broadcasts, 0u);
+}
+
 TEST(NetEngine, ABadAddressOrABusyPortFailsToListen) {
   net_engine e;
   std::string why;
@@ -749,8 +786,6 @@ std::size_t fanout_n() {
     return static_cast<std::size_t>(std::max(1, std::atoi(v)));
 #if defined(CVC_NET_TEST_TSAN)
   return 300;
-#elif defined(_WIN32)
-  return 1000; // Asio waits for a socket's readiness through a select() thread on Windows
 #else
   return 6000;
 #endif
