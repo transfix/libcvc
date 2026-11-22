@@ -67,6 +67,8 @@ set(CVCGL_VTK_COMPONENTS
   InteractionStyle
 )
 find_package(VTK REQUIRED COMPONENTS ${CVCGL_VTK_COMPONENTS})
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcVtkWasmExceptions.cmake")
+cvc_vtk_wasm_exceptions()
 
 file(GLOB CVCGL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 # Ariadne — the cvcGL UI & scene DSL (cvc::gl::ariadne). Sources live in a

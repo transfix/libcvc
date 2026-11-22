@@ -715,7 +715,7 @@ bool volume_grid_session_key(const std::string &path) {
   };
   return in("grid.", param_names<volume_grid_params>()) ||
          in("grid.display.", param_names<volume_grid_display_params>()) ||
-         in("grid.source.", param_names<volume_grid_source_params>());
+         in("grid.source.", {"var", "time"}); // not where the data come from: the document's
 }
 
 namespace {
