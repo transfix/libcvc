@@ -7023,6 +7023,31 @@ TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
+// The volume_render demo: one volume_render node on a data: entry, a Renderer combo bound to its
+// renderer key, and the transfer function editor on its model.
+TEST(AriadneComponents, VolumeRenderDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_render.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  // cvcGL registers the sdf generator (the volume, data.bunny), not this test.
+  for (const std::string &w : r.warnings)
+    EXPECT_NE(w.find("generate: sdf is not a generator this build has"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_render");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  const Widget *renderer = find(r.root, Kind::Combo, "Renderer");
+  ASSERT_NE(renderer, nullptr);
+  EXPECT_EQ(renderer->bind, "graphics.root.children.bunny.renderer");
+}
+
 // A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.
 TEST(AriadneLoader, SliderRangeFromKey) {
   SKIP_WITHOUT_YAML();
