@@ -68,8 +68,9 @@ constexpr double kPi = 3.14159265358979323846;
 // volume's, the points' and the session's): a new one written within the clock's resolution is
 // still a change (cvc::followed_key).
 const void *payload_pointee(const boost::any &d) {
-  return cvc::any_pointee<cvc::slice_source, const cvc::volume, cvc::volume,
-                          const cvc::point_classes, cvc::point_classes,
+  if (const void *v = cvc::volume_payload_pointee(d)) // a program's data object's too
+    return v;
+  return cvc::any_pointee<const cvc::point_classes, cvc::point_classes,
                           const cvc::volume_grid_session, cvc::volume_grid_session>(d);
 }
 

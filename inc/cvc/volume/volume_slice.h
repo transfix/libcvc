@@ -176,8 +176,10 @@ private:
 
 // A volume as a state key's data channel holds one (docs/roadmap/DATA_FROM_STATE_TREE.md): a
 // std::shared_ptr<const volume> (a data: entry's), a std::shared_ptr<volume>, a volume, or a
-// std::shared_ptr<slice_source> (a host's large file read plane by plane). `src` is then the slices
-// to cut, and `vol` the volume itself: the very object the key's pointer holds (a slice_source's in
+// std::shared_ptr<slice_source> (a host's large file read plane by plane), as such or as the payload
+// of a data object a program stored there (state-data-set: a DSL volume.filter's result, say).
+// `src` is then the slices to cut, and `vol` the volume itself: the very object the key's pointer
+// holds (a slice_source's in
 // memory, kept by the source; null for a file read plane by plane), or for a plain volume a new
 // handle on its voxels. False, leaving both alone, when `d` holds none of them or a null pointer.
 bool volume_payload(const boost::any &d, std::shared_ptr<slice_source> &src,

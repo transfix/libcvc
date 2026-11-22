@@ -29,6 +29,7 @@
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_exec/types.h>
 #include <cvc/tf/model.h>
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
@@ -192,9 +193,16 @@ void run(const fs::path &dir) {
         "value on that volume's range",
         val(app, tf));
 
-  // ---- a filter's result stored at the dataset's key: everything follows ----
+  // ---- a filter's result put as the dataset's volume: everything follows ----
+  // As a program's (data-put "head" "volume" result) puts it: in the store node, its rev up.
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
+  const std::string rev = val(app, d.dataset_key().substr(0, d.dataset_key().rfind('.')) + ".rev");
   const auto v2 = std::make_shared<const cvc::volume>(coded(app, 8, 6, 4, 1000.0));
-  cvc::state::instance(app)(d.dataset_key()).data(boost::any(v2));
+  store->set_output(d.head, "volume", boost::any(v2));
+  check(d.dataset() == v2 &&
+            val(app, d.dataset_key().substr(0, d.dataset_key().rfind('.')) + ".rev") !=
+                rev,
+        "set_output puts the volume in the dataset's store node, its rev up");
   d.tick(2);
   check(d.of("render") == v2 && d.of("grid", "grid.volume") == v2,
         "a new volume at the key: the volren and the grid both follow it, still one pointer");
@@ -231,6 +239,18 @@ void run(const fs::path &dir) {
   cvc::state::instance(app)("work.volume").data(boost::any(mine));
   d.tick();
   check(work->volumeCount() == 1 && d.of("work") == mine, "and shows the volume written there");
+  // A program's state-data-set stores the DSL's data object (volume.filter's result): its payload
+  // is the volume followed, the very pointer.
+  {
+    const auto filtered = std::make_shared<const cvc::volume>(coded(app, 3, 3, 3, 4000.0));
+    auto obj = std::make_shared<cvc::state_exec::data_object>();
+    obj->payload = filtered;
+    obj->type_name = "cvc::volume";
+    cvc::state::instance(app)("work.volume").data(boost::any(cvc::state_exec::value_t(obj)));
+    d.tick();
+    check(d.of("work") == filtered && work->volumeCount() == 1,
+          "a data object a program stored at the key is followed: its volume, the very pointer");
+  }
   cvc::state::instance(app)(w + ".source.volume").value(d.dataset_key().insert(0, "/"));
   d.tick();
   check(d.of("work") == v5, "source.volume pointed at the dataset: it follows that instead");
