@@ -98,14 +98,21 @@ bool volume_grid_segment_session_key(const std::string &path) {
 
 // ---- the stepper --------------------------------------------------------------------------------
 
+struct volume_grid_segment_stepper::shared {
+  std::atomic<bool> cancel{false};
+  mutable std::mutex live_m;
+  std::shared_ptr<const volume> live;
+  std::atomic<std::uint64_t> live_v{0};
+};
+
 struct volume_grid_segment_stepper::impl {
   volume in;
   seeded_segmentation_params seg;
   class_surface_params surf;
   bool want_surfaces;
   double live_seconds;
+  std::shared_ptr<shared> sh;
 
-  std::atomic<bool> cancel{false};
   bool finished = false, failed = false;
   std::exception_ptr error;
   double prog = 0.0;
@@ -114,17 +121,15 @@ struct volume_grid_segment_stepper::impl {
   std::optional<class_surfaces_stepper> surfaces;
   std::optional<volume_grid_segment_result> result;
 
-  mutable std::mutex live_m;
-  std::shared_ptr<const volume> live;
-  std::atomic<std::uint64_t> live_v{0};
   std::chrono::steady_clock::time_point live_at{};
   bool live_started = false;
 
   impl(const volume &v, point_classes seeds, seeded_segmentation_params s,
-       class_surface_params c, bool w, double ls)
-      : in(v), seg(s), surf(std::move(c)), want_surfaces(w), live_seconds(ls) {
+       class_surface_params c, bool w, double ls, std::shared_ptr<shared> sh_)
+      : in(v), seg(s), surf(std::move(c)), want_surfaces(w), live_seconds(ls), sh(std::move(sh_)) {
     labels.emplace(v, std::move(seeds), s);
   }
+  bool cancelled() const { return sh->cancel.load(std::memory_order_acquire); }
 
   double share() const { return want_surfaces ? 0.75 : 1.0; }
 
@@ -140,10 +145,10 @@ struct volume_grid_segment_stepper::impl {
     live_at = now;
     live_started = true;
     {
-      const std::lock_guard<std::mutex> hold(live_m);
-      live = std::move(copy);
+      const std::lock_guard<std::mutex> hold(sh->live_m);
+      sh->live = std::move(copy);
     }
-    live_v.fetch_add(1, std::memory_order_release);
+    sh->live_v.fetch_add(1, std::memory_order_release);
   }
 };
 
@@ -151,8 +156,9 @@ volume_grid_segment_stepper::volume_grid_segment_stepper(const volume &vol, poin
                                                          seeded_segmentation_params seg,
                                                          class_surface_params surf, bool surfaces,
                                                          double live_seconds)
-    : _impl(std::make_unique<impl>(vol, std::move(seeds), seg, std::move(surf), surfaces,
-                                   live_seconds)) {}
+    : _shared(std::make_shared<shared>()),
+      _impl(std::make_unique<impl>(vol, std::move(seeds), seg, std::move(surf), surfaces,
+                                   live_seconds, _shared)) {}
 
 volume_grid_segment_stepper::~volume_grid_segment_stepper() = default;
 volume_grid_segment_stepper::volume_grid_segment_stepper(volume_grid_segment_stepper &&) noexcept =
@@ -165,7 +171,7 @@ bool volume_grid_segment_stepper::step(std::size_t budget) {
     return true;
   impl &m = *_impl;
   if (m.failed) {
-    if (m.cancel.load(std::memory_order_acquire))
+    if (m.cancelled())
       return true;
     std::rethrow_exception(m.error);
   }
@@ -174,7 +180,7 @@ bool volume_grid_segment_stepper::step(std::size_t budget) {
   try {
     std::size_t left = budget == 0 ? std::numeric_limits<std::size_t>::max() : budget;
     while (left > 0 && !m.finished) {
-      if (m.cancel.load(std::memory_order_acquire))
+      if (m.cancelled())
         break;
       const std::size_t piece = std::min(left, kPiece);
       if (m.labels) {
@@ -203,7 +209,7 @@ bool volume_grid_segment_stepper::step(std::size_t budget) {
       if (left != std::numeric_limits<std::size_t>::max())
         left -= piece;
     }
-    if (m.cancel.load(std::memory_order_acquire) && !m.finished) {
+    if (m.cancelled() && !m.finished) {
       m.error = std::make_exception_ptr(segmentation_error("segment: cancelled"));
       m.failed = true;
       m.labels.reset();
@@ -278,8 +284,8 @@ std::string volume_grid_segment_stepper::status() const {
 }
 
 void volume_grid_segment_stepper::cancel() {
-  if (_impl)
-    _impl->cancel.store(true, std::memory_order_release);
+  if (_shared)
+    _shared->cancel.store(true, std::memory_order_release);
 }
 
 volume_grid_segment_result volume_grid_segment_stepper::take() {
@@ -293,14 +299,14 @@ volume_grid_segment_result volume_grid_segment_stepper::take() {
 }
 
 std::shared_ptr<const volume> volume_grid_segment_stepper::live_labels() const {
-  if (!_impl)
+  if (!_shared)
     return nullptr;
-  const std::lock_guard<std::mutex> hold(_impl->live_m);
-  return _impl->live;
+  const std::lock_guard<std::mutex> hold(_shared->live_m);
+  return _shared->live;
 }
 
 std::uint64_t volume_grid_segment_stepper::live_version() const {
-  return _impl ? _impl->live_v.load(std::memory_order_acquire) : 0;
+  return _shared ? _shared->live_v.load(std::memory_order_acquire) : 0;
 }
 
 std::unique_ptr<volume_grid_segment_stepper>

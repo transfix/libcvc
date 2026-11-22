@@ -1,7 +1,8 @@
 # volume_grid.ari — a REUSABLE Ariadne component: VolumeGridRover for a `type: volume_grid` node
 # (cvc::gl::VolumeGridNode, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4). Slice views down the
 # volume's axes with a 3D view beside them, the tool (navigate / points / probe), and a side panel:
-# the probe and the planes, the point classes, and the transfer function. Every control binds a key
+# the probe and the planes, the point classes, the transfer function and the segmentation (its
+# Segmentation tab, volume_grid_segmentation.ari). Every control binds a key
 # the node owns (graphics.root.children.<node>.grid.*, VolumeGridNode.h), and the views write their
 # picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO host C++.
 #
@@ -56,10 +57,13 @@
 # Keyboard: a document binds keys to requests (`keys:`), as examples/ariadne/documents/volume_grid.ari
 # does: PageUp / PageDown write `step 1` / `step -1`, Delete `delete_selected`.
 #
-# (P9 adds a Segmentation tab, P10 a Contours tab and a Tile button.)
+# The Segmentation tab (volume_grid_segmentation.ari) segments the volume from the shown point
+# classes (the grid's `segment` request): the labels draw on the slices, each class's surface in the
+# 3D view. (P10 adds a Contours tab and a Tile button.)
 
 import:
   - cvc://components/transfer_function.ari
+  - cvc://components/volume_grid_segmentation.ari
 
 units:
   volume_grid:
@@ -378,6 +382,11 @@ units:
             children:
               - include: transfer_function_editor
                 args: { node: "{node}", id: "{id}_tf", label: Colours }
+          - type: group
+            tab: Segmentation
+            children:
+              - include: volume_grid_segmentation
+                args: { node: "{node}", id: "{id}" }
           - slot: tabs
       - text: Status
         bind: graphics.root.children.{node}.grid.status

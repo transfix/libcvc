@@ -124,13 +124,16 @@ public:
   void cancel(); // thread-safe
   volume_grid_segment_result take(); // once done; moved out, so call it once
 
-  // The labels so far (above); null before the first copy. Thread-safe. The version rises with
-  // each copy.
+  // The labels so far (above); null before the first copy. Thread-safe, and safe while another
+  // thread steps or take()s: they outlive the run's own state until the stepper goes. The version
+  // rises with each copy.
   std::shared_ptr<const volume> live_labels() const;
   std::uint64_t live_version() const;
 
 private:
   struct impl;
+  struct shared; // cancel() and the live labels: kept apart from impl, which take() frees
+  std::shared_ptr<shared> _shared;
   std::unique_ptr<impl> _impl;
 };
 

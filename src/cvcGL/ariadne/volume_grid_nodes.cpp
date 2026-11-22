@@ -17,6 +17,7 @@
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeGridNode.h>
+#include <cvc/gl/VolumeGridSegmentation.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>
@@ -24,7 +25,9 @@
 #include <cvc/gl/ariadne/volume_slice_nodes.h> // transfer_function_prop
 #include <cvc/state/state.h>
 #include <cvc/volume/volume.h>
+#include <cvc/volume/segmentation_params.h>
 #include <cvc/volume/volume_grid.h>
+#include <cvc/volume/volume_grid_segment.h>
 #include <cvc/volume/volume_slice.h>
 #include <memory>
 #include <string>
@@ -158,6 +161,42 @@ void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, const data_source &vo
       warn(warnings, "ari: scene node '" + n.id + "': display: must be a map");
     }
   }
+  // segment: the Segmentation tab's keys: seeded_segmentation_params' and the view's, and under
+  // mesh: class_surface_params'.
+  if (const ari::Value *s = n.props.find("segment")) {
+    if (s->is_map()) {
+      std::vector<std::string> names = cvc::param_names<cvc::seeded_segmentation_params>();
+      const std::vector<std::string> view =
+          cvc::param_names<cvc::volume_grid_segment_view_params>();
+      names.insert(names.end(), view.begin(), view.end());
+      const std::vector<std::string> mesh = cvc::param_names<cvc::class_surface_params>();
+      const auto has = [](const std::vector<std::string> &v, const std::string &k) {
+        return std::find(v.begin(), v.end(), k) != v.end();
+      };
+      for (const auto &e : s->entries) {
+        if (e.first == "mesh" && e.second.is_map()) {
+          for (const auto &m : e.second.entries) {
+            if (has(mesh, m.first))
+              seed(grid("segment.mesh." + m.first), color_text(m.second));
+            else
+              warn(warnings, "ari: scene node '" + n.id + "': segment: mesh: '" + m.first +
+                                 "' is not one of its keys -- ignored");
+          }
+        } else if (has(names, e.first)) {
+          seed(grid("segment." + e.first), e.second.scalar);
+        } else {
+          warn(warnings, "ari: scene node '" + n.id + "': segment: '" + e.first +
+                             "' is not one of its keys -- ignored");
+        }
+      }
+    } else {
+      warn(warnings, "ari: scene node '" + n.id + "': segment: must be a map");
+    }
+  }
+  // request: one command the grid runs once its volume is there (request: segment: a document
+  // that opens segmented).
+  if (n.props.has("request"))
+    seed(grid("request"), n.props.str("request"));
   seed(grid("source.volume"), volume.path);
   seed(grid("source.points"), points.path);
   seed(grid("source.session"), session.path);
@@ -245,6 +284,12 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
   out.custom_ticks.push_back([weak](vtkRenderer *) {
     if (std::shared_ptr<VolumeGridNode> node = weak.lock())
       node->tick();
+  });
+  // While a segmentation runs (or a request waits for its volume), the scene has work in flight.
+  out.pending_work.push_back([weak]() {
+    const std::shared_ptr<VolumeGridNode> node = weak.lock();
+    return node && (node->segmentation().running() ||
+                    (node->source() && !node->getState("grid.request").value().empty()));
   });
   // While a dataset the node follows is loading, the scene has work in flight.
   std::vector<std::string> loading;

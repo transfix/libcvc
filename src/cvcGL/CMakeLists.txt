@@ -1264,6 +1264,18 @@ add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
 target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
 
+# The volume_grid node's Segmentation tab (VolumeGridSegmentation.h, roadmap P9): seeds by scripted
+# picks, `segment` run as a sliced task (the scheduler pumped as a host does), its result on the
+# data channel, the labels on the planes and the class surfaces in 3D, stop, a new volume, two apps;
+# and (offscreen, skipped where nothing rasterises unless CVC_REQUIRE_RENDER=1) the labels drawn.
+# Once more cooperatively, as single-threaded wasm runs it: the labels so far draw while it marches.
+add_executable(cvcgl_volume_grid_segment test/cvcgl_volume_grid_segment.cpp)
+target_link_libraries(cvcgl_volume_grid_segment PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid_segment COMMAND cvcgl_volume_grid_segment)
+add_test(NAME cvcgl_volume_grid_segment_cooperative COMMAND cvcgl_volume_grid_segment)
+set_tests_properties(cvcgl_volume_grid_segment_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative)
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
