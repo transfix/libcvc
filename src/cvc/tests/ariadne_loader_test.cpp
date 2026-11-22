@@ -6075,6 +6075,29 @@ TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
 }
 
+// A data: entry names a uri or a generator: the schema takes `generate:` (and its params) in place
+// of `uri:`, as the loader does, and still flags an entry that names neither.
+TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
+  if (!have_yaml() || !have_jsonschema())
+    GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
+  const std::string doc = "data:\n"
+                          "  made: { generate: generated_world, params: { seed: 7 } }\n"
+                          "  fetched: { uri: a.bin, as: bytes }\n"
+                          "  neither: { as: bytes }\n"
+                          "windows: []\n";
+  const LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  bool flagged = false;
+  for (const std::string &w : r.warnings) {
+    if (w.find("schema:") == std::string::npos)
+      continue;
+    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
+    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
+    flagged = flagged || w.find("'neither'") != std::string::npos;
+  }
+  EXPECT_TRUE(flagged);
+}
+
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
 
 namespace {
@@ -6725,7 +6748,8 @@ windows:
     for (const char *want :
          {"view", "tool", "slice.x", "slice.y", "slice.z", "classes", "classes.{i}.name",
           "classes.{i}.color", "classes.{i}.radius", "selection.count", "display.point_scale",
-          "display.grey", "cursor.value", "source.file", "files.classes", "status"})
+          "display.grey", "cursor.value", "info.source", "files.classes", "files.session",
+          "status"})
       EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end()) << g + want;
     for (const std::string &k : keys)
       if (k.find("{i}") == std::string::npos)
@@ -6780,10 +6804,15 @@ TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
     GTEST_SKIP() << "component sources not found";
   LoadResult r = load_file(app, doc.string());
   ASSERT_TRUE(r.ok) << r.error;
-  for (const std::string &w : r.warnings) // cvcGL registers the viewport widget, not this test
-    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  // cvcGL registers the viewport widget and the sdf generator (the volume, data.bunny), not this
+  // test.
+  for (const std::string &w : r.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
   ASSERT_EQ(r.scene.nodes.size(), 1u);
   EXPECT_EQ(r.scene.nodes[0].type, "volume_grid");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
