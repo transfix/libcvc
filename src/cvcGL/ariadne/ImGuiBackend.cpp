@@ -2414,6 +2414,24 @@ ariadne::ColorEdit ImGuiBackend::color(const char *label, const float rgb[3]) {
   return e;
 }
 
+ariadne::ColorEdit ImGuiBackend::color_hex(const char *label, const float rgb[3]) {
+  ariadne::ColorEdit e;
+  e.rgb[0] = rgb[0];
+  e.rgb[1] = rgb[1];
+  e.rgb[2] = rgb[2];
+#ifdef CVC_ENABLE_IMGUI
+  e.drawn = true;
+  reserve_label_width(label, in_flow_row());
+  // One "#RRGGBB" field beside the swatch (typed in, or the swatch's picker), not R, G and B
+  // fields.
+  e.changed = ImGui::ColorEdit3(label, e.rgb, ImGuiColorEditFlags_DisplayHex);
+  e.committed = e.changed;
+#else
+  (void)label;
+#endif
+  return e;
+}
+
 void ImGuiBackend::register_widget(cvc::app &app, std::string custom_type, CustomDrawFn draw) {
   if (draw) {
     // Tell the core loader this type is handled (natively, by this backend) so it does not warn at

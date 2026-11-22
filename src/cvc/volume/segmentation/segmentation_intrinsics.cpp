@@ -15,9 +15,9 @@
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/geometry/geometry.h>
-#include <cvc/volume/class_surfaces.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/volume/class_surfaces.h>
 #include <cvc/volume/point_class_intrinsics.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/segmentation.h>

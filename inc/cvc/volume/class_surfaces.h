@@ -128,10 +128,10 @@ struct class_surface_result {
 };
 
 // The surfaces of the classes of `labels`, a volume whose voxels are integer labels (any voxel
-// type; a segmentation's labels are UChar). Throws class_surfaces_error for an undefined voxel type,
-// a voxel that is not an integer (NaN, infinite, 2.5) or is out of int's range, and parameters that
-// are not valid (params_validate). Warnings, not errors: a label of params.labels the volume does
-// not hold, a label with no surface.
+// type; a segmentation's labels are UChar). Throws class_surfaces_error for an undefined voxel
+// type, a voxel that is not an integer (NaN, infinite, 2.5) or is out of int's range, and
+// parameters that are not valid (params_validate). Warnings, not errors: a label of params.labels
+// the volume does not hold, a label with no surface.
 class_surface_result class_surfaces(const volume &labels, const class_surface_params &params = {});
 
 // class_surfaces, a slice at a time (§1.9). Phases: "checking" (the parameters), "reading" (each

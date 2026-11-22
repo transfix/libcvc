@@ -50,13 +50,13 @@ class state;
 
 // How the segmentation draws: keys under <node>.grid.segment beside seeded_segmentation_params'.
 struct volume_grid_segment_view_params {
-  bool show = true;              // the labels on the slices, in the classes' colours
-  double opacity = 0.5;          // how much of the slice a label hides
-  bool show_surfaces = true;     // each class's surface in the 3D view
-  double surface_opacity = 1.0;  // the surfaces'
-  bool make_surfaces = true;     // a run makes the surfaces too (class_surfaces after the labels)
-  bool live = true;              // the labels draw while the fronts advance (a copy of the labels
-                                 // a few times a second)
+  bool show = true;             // the labels on the slices, in the classes' colours
+  double opacity = 0.5;         // how much of the slice a label hides
+  bool show_surfaces = true;    // each class's surface in the 3D view
+  double surface_opacity = 1.0; // the surfaces'
+  bool make_surfaces = true;    // a run makes the surfaces too (class_surfaces after the labels)
+  bool live = true;             // the labels draw while the fronts advance (a copy of the labels
+                                // a few times a second)
 };
 
 #ifndef SWIG
@@ -109,9 +109,8 @@ struct volume_grid_segment_result {
 class volume_grid_segment_stepper {
 public:
   volume_grid_segment_stepper(const volume &vol, point_classes seeds,
-                              seeded_segmentation_params seg = {},
-                              class_surface_params surf = {}, bool surfaces = true,
-                              double live_seconds = -1.0);
+                              seeded_segmentation_params seg = {}, class_surface_params surf = {},
+                              bool surfaces = true, double live_seconds = -1.0);
   ~volume_grid_segment_stepper();
   volume_grid_segment_stepper(volume_grid_segment_stepper &&) noexcept;
   volume_grid_segment_stepper &operator=(volume_grid_segment_stepper &&) noexcept;
@@ -121,7 +120,7 @@ public:
   const char *phase() const; // as listed above, "done", or "failed"
   double progress() const;   // in [0, 1], monotone; 1 once done
   std::string status() const;
-  void cancel(); // thread-safe
+  void cancel();                     // thread-safe
   volume_grid_segment_result take(); // once done; moved out, so call it once
 
   // The labels so far (above); null before the first copy. Thread-safe, and safe while another
@@ -177,8 +176,7 @@ bool read_segment_rows(state &rows, std::vector<segment_class_row> &r,
 // in rows[n]'s colour with alpha `opacity` when that row is shown, every other voxel (unlabelled,
 // a class with no row or not shown) clear. `opacity` is clamped to [0, 1].
 std::vector<std::uint8_t> color_labels(const volume_slice_data &labels,
-                                       const std::vector<segment_class_row> &rows,
-                                       double opacity);
+                                       const std::vector<segment_class_row> &rows, double opacity);
 
 } // namespace cvc
 

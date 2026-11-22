@@ -48,7 +48,8 @@ constexpr int none = 255;
 cvc::volume labels(cvc::app &a, int nx, int ny, int nz) {
   cvc::volume v(a, cvc::dimension(nx, ny, nz), cvc::UChar,
                 cvc::bounding_box(0, 0, 0, nx - 1, ny - 1, nz - 1));
-  std::fill(v.data_ptr(), v.data_ptr() + std::size_t(nx) * ny * nz, static_cast<unsigned char>(none));
+  std::fill(v.data_ptr(), v.data_ptr() + std::size_t(nx) * ny * nz,
+            static_cast<unsigned char>(none));
   return v;
 }
 
@@ -79,9 +80,8 @@ double enclosed(const cvc::geometry &g) {
   }
   for (const auto &kv : directed) {
     if (kv.second != 1)
-      return ::testing::AssertionFailure()
-             << "edge " << kv.first.first << "-" << kv.first.second << " runs " << kv.second
-             << " times the same way";
+      return ::testing::AssertionFailure() << "edge " << kv.first.first << "-" << kv.first.second
+                                           << " runs " << kv.second << " times the same way";
     const auto back = directed.find({kv.first.second, kv.first.first});
     if (back == directed.end())
       return ::testing::AssertionFailure()
@@ -223,8 +223,8 @@ TEST(ClassSurfaces, SmoothingKeepsABallsVolume) {
   // Smoothed, every vertex lies near the sphere (the steps are gone).
   double worst = 0.0;
   for (const auto &pt : r1.surfaces[0].points()) {
-    const double d =
-        std::sqrt((pt[0] - c) * (pt[0] - c) + (pt[1] - c) * (pt[1] - c) + (pt[2] - c) * (pt[2] - c));
+    const double d = std::sqrt((pt[0] - c) * (pt[0] - c) + (pt[1] - c) * (pt[1] - c) +
+                               (pt[2] - c) * (pt[2] - c));
     worst = std::max(worst, std::fabs(d - rad));
   }
   EXPECT_LT(worst, 0.75);
@@ -472,7 +472,8 @@ TEST(ClassSurfaces, ACancelledJobGivesNothing) {
   EXPECT_THROW((void)bad->result(), cvc::class_surfaces_error);
 }
 
-// ---- T8: the parameter table ----------------------------------------------------------------------
+// ---- T8: the parameter table
+// ----------------------------------------------------------------------
 
 TEST(ClassSurfaces, ParameterTable) {
   cvc::app a;

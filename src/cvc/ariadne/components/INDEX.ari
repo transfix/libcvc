@@ -303,6 +303,6 @@ catalog:
     file: volume_grid_segmentation.ari
     unit: volume_grid_segmentation
     binds: "<prefix>.graphics.root.children.{node}.grid.segment.* (t_low, t_high, gamma, automatic, show, opacity, show_surfaces, surface_opacity, make_surfaces, live, mesh.*, rows.*, info.*, warnings), .grid.request, .grid.busy / stoppable / progress / phase and .grid.files.segments"
-    for: "the Segmentation tab of a volume_grid (volume_grid.ari includes it): thresholds, gamma and the automatic seeds, Segment and Stop with a progress bar, the result's classes (colour, show, voxels, triangles), how the labels and surfaces draw, and Save (the classes as one multi-variable volume, the labels as one)"
-    args: { node: grid, id: volume_grid }   # defaults
-    note: "the grid's point classes of the shown variable and timestep are the seeds; the labels draw on the slices while the fronts advance, each class's surface in the 3D view; saving goes through the app (data-save)"
+    for: "the Segmentation tab of a volume_grid in a window of its own: thresholds, gamma and the automatic seeds, Segment and Stop with a progress bar, the result's classes (colour, show, voxels, triangles), how the labels and surfaces draw, and Save (the classes as one multi-variable volume, the labels as one)"
+    args: { node: grid, title: Segmentation, id: volume_grid_segmentation }   # defaults
+    note: "the grid's point classes of the shown variable and timestep are the seeds; the labels draw on the slices while the fronts advance, each class's surface in the 3D view; saving goes through the app (data-save). volume_grid_segmentation_tab is the controls alone (a group, args node and id), the volume_grid component's Segmentation tab"

@@ -1671,4 +1671,4 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
-                        cvcgl_imgui_colors cvcgl_contour_lab)
+                        cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid)

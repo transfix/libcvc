@@ -24,8 +24,8 @@
 #include <cvc/gl/ariadne/volume_grid_nodes.h>
 #include <cvc/gl/ariadne/volume_slice_nodes.h> // transfer_function_prop
 #include <cvc/state/state.h>
-#include <cvc/volume/volume.h>
 #include <cvc/volume/segmentation_params.h>
+#include <cvc/volume/volume.h>
 #include <cvc/volume/volume_grid.h>
 #include <cvc/volume/volume_grid_segment.h>
 #include <cvc/volume/volume_slice.h>

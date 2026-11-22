@@ -58,8 +58,7 @@ cvc::volume blobs(cvc::app &a, int n, const std::vector<bump> &bumps) {
           const double d2 = (i - b.x) * (i - b.x) + (j - b.y) * (j - b.y) + (k - b.z) * (k - b.z);
           s += std::exp(-d2 / (2 * b.sigma * b.sigma));
         }
-        v(static_cast<cvc::uint64>(i), static_cast<cvc::uint64>(j), static_cast<cvc::uint64>(k),
-          s);
+        v(static_cast<cvc::uint64>(i), static_cast<cvc::uint64>(j), static_cast<cvc::uint64>(k), s);
       }
   return v;
 }
@@ -148,8 +147,8 @@ TEST(VolumeGridSegment, TheRunIsTheSegmentationThenItsSurfaces) {
   // The surface parameters reach the surfaces.
   cvc::class_surface_params rough;
   rough.smoothing = 0;
-  EXPECT_TRUE(same_surf(run(v, pc, params(), rough).surfaces,
-                        cvc::class_surfaces(ref.labels, rough)));
+  EXPECT_TRUE(
+      same_surf(run(v, pc, params(), rough).surfaces, cvc::class_surfaces(ref.labels, rough)));
 }
 
 TEST(VolumeGridSegment, StepperIsResumable) {
@@ -198,8 +197,8 @@ TEST(VolumeGridSegment, ProgressIsSharedAndACancelLeavesNothing) {
   }
   // A cancel while it marches, and one while it makes the surfaces.
   for (const char *where : {"marching", "surfaces: extracting"}) {
-    auto job = cvc::make_result_job(
-        std::make_unique<cvc::volume_grid_segment_stepper>(v, pc, params()));
+    auto job =
+        cvc::make_result_job(std::make_unique<cvc::volume_grid_segment_stepper>(v, pc, params()));
     while (!job->done() && std::string(job->phase()) != where)
       job->step(16);
     ASSERT_EQ(std::string(job->phase()), where);
@@ -401,9 +400,9 @@ TEST(VolumeGridSegment, SessionsKeepTheTabsParameters) {
     EXPECT_TRUE(cvc::volume_grid_segment_session_key(k)) << k;
     EXPECT_TRUE(cvc::volume_grid_session_key(k)) << k << " (the grid's own predicate)";
   }
-  for (const char *k : {"grid.segment.rows.0.color", "grid.segment.info.classes",
-                        "grid.segment.labels", "grid.segment.mesh", "grid.segment",
-                        "grid.status", "grid.segment.surfaces.0"})
+  for (const char *k :
+       {"grid.segment.rows.0.color", "grid.segment.info.classes", "grid.segment.labels",
+        "grid.segment.mesh", "grid.segment", "grid.status", "grid.segment.surfaces.0"})
     EXPECT_FALSE(cvc::volume_grid_segment_session_key(k)) << k;
 }
 
@@ -416,9 +415,9 @@ TEST(VolumeGridSegment, ViewParameterTable) {
   EXPECT_EQ(s("opacity").value(), "0.5");
   EXPECT_EQ(s("live").value(), "1");
   s("opacity").value("2");
-  EXPECT_FALSE(cvc::params_validate(
-                   cvc::params_from_state<cvc::volume_grid_segment_view_params>(s).value)
-                   .empty());
+  EXPECT_FALSE(
+      cvc::params_validate(cvc::params_from_state<cvc::volume_grid_segment_view_params>(s).value)
+          .empty());
   // The run's and the view's tables share the subtree, and their names never meet.
   const std::vector<std::string> run = cvc::param_names<cvc::seeded_segmentation_params>();
   for (const std::string &v : cvc::param_names<cvc::volume_grid_segment_view_params>())

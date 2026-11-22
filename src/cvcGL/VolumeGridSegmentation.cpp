@@ -229,7 +229,8 @@ void VolumeGridSegmentation::launch() {
   m_stepper = std::make_shared<cvc::volume_grid_segment_stepper>(
       *vol, m_runSeeds, sp.value, cp.value, vp.value.make_surfaces,
       vp.value.live ? kLiveSeconds : -1.0);
-  m_job = cvc::make_result_job(std::make_unique<SharedSegmentStepper>(SharedSegmentStepper{m_stepper}));
+  m_job =
+      cvc::make_result_job(std::make_unique<SharedSegmentStepper>(SharedSegmentStepper{m_stepper}));
   m_live.reset();
   m_liveSeen = 0;
   m_keys->started("segmenting...");
@@ -248,8 +249,7 @@ void VolumeGridSegmentation::launch() {
   }
 }
 
-void VolumeGridSegmentation::publishInfo(const cvc::seeded_segmentation &s,
-                                         std::size_t triangles) {
+void VolumeGridSegmentation::publishInfo(const cvc::seeded_segmentation &s, std::size_t triangles) {
   cvc::state &info = m_grid.getState("grid.segment.info");
   std::size_t labelled = 0;
   for (std::size_t c : s.class_voxels)
@@ -445,8 +445,8 @@ bool VolumeGridSegmentation::syncLayers() {
       const cvc::slice_grid &g = src->grid();
       want = lab->XDim() == g.dim.xdim && lab->YDim() == g.dim.ydim && lab->ZDim() == g.dim.zdim;
     }
-    const std::string sig = want ? common + '|' + std::to_string(static_cast<int>(sd->axis)) +
-                                       ',' + std::to_string(sd->index)
+    const std::string sig = want ? common + '|' + std::to_string(static_cast<int>(sd->axis)) + ',' +
+                                       std::to_string(sd->index)
                                  : std::string("hidden");
     if (sig == m_layerSignature[ax])
       continue;

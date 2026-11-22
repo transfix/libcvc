@@ -155,7 +155,8 @@ template <class T> std::shared_ptr<const T> data_at(cvc::app &app, const std::st
 
 std::string doc(const std::string &name, const std::string &vol, const std::string &extra = "",
                 const std::string &segment_extra = "") {
-  return "meta:\n  name: " + name + "\n  min_libcvc: 4.0.0\nscene:\n  nodes:\n"
+  return "meta:\n  name: " + name +
+         "\n  min_libcvc: 4.0.0\nscene:\n  nodes:\n"
          "    - node: g\n      type: volume_grid\n      source: { state: " +
          vol +
          " }\n"
@@ -227,8 +228,8 @@ void run() {
         "the keys are described (ranges, docs)");
   check(std::abs(std::stod(root(k + ".segment.t_low").property("min")) - g->source()->min()) <
                 1e-9 &&
-            std::abs(std::stod(root(k + ".segment.t_high").property("max")) -
-                     g->source()->max()) < 1e-9 &&
+            std::abs(std::stod(root(k + ".segment.t_high").property("max")) - g->source()->max()) <
+                1e-9 &&
             std::abs(g->source()->max() - (1.0 + std::exp(-8.0))) < 1e-6,
         "the thresholds' sliders span the volume's data range",
         root(k + ".segment.t_low").property("min") + " .. " +
@@ -257,8 +258,7 @@ void run() {
   set(app, k + ".request", "segment");
   d.tick();
   check(val(app, k + ".status").find("error: segment.t_low") == 0 && !seg.running(),
-        "a parameter that does not parse is reported, and nothing runs",
-        val(app, k + ".status"));
+        "a parameter that does not parse is reported, and nothing runs", val(app, k + ".status"));
   set(app, k + ".segment.t_low", "0.15");
 
   // ---- seeds by picks, then a run ----
@@ -330,7 +330,8 @@ void run() {
   check(zl && zl->textureWidth() == N, "the z layer's texture is a texel a voxel");
   auto segments = seg.segments();
   check(segments && segments->getGraphicsChildren().size() == 2, "two class surfaces in 3D");
-  const auto child = [&segments](const std::string &name) -> std::shared_ptr<cvc::gl::GeometryNode> {
+  const auto child =
+      [&segments](const std::string &name) -> std::shared_ptr<cvc::gl::GeometryNode> {
     if (segments)
       for (const auto &c : segments->getGraphicsChildren())
         if (c->getName() == name)
@@ -405,9 +406,9 @@ void opens_segmented_and_two_apps() {
   for (cvc::app *a : {&a1, &a2}) {
     a->properties("system.log_verbosity", "0");
     cvc::gl::ariadne::register_cvcgl_extensions(*a);
-    cvc::state::instance(*a)("vols.b").data(
+    cvc::state::instance (*a)("vols.b").data(
         boost::any(std::make_shared<const cvc::volume>(blobs(*a))));
-    cvc::state::instance(*a)("vols.p").data(boost::any(blob_seeds()));
+    cvc::state::instance (*a)("vols.p").data(boost::any(blob_seeds()));
   }
   // a2's grid makes no surfaces: the two runs differ. (request: segment runs as the grid takes its
   // volume, during realize: the parameters are the props'.)
@@ -458,7 +459,8 @@ void live_labels() {
       boost::any(std::make_shared<const cvc::volume>(blobs(app, n))));
   cvc::state::instance(app)("vols.p").data(boost::any(blob_seeds(n)));
   realized_doc d(app, "live",
-                 doc("live", "/vols.b", "      points: { state: /vols.p }\n      request: segment\n",
+                 doc("live", "/vols.b",
+                     "      points: { state: /vols.p }\n      request: segment\n",
                      ", make_surfaces: false"));
   auto g = std::dynamic_pointer_cast<cvc::gl::VolumeGridNode>(d.sg.getGraphics("g"));
   if (!g) {

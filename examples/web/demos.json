@@ -12,6 +12,7 @@
     "volslice_bunny_ari",
     "orthoslicer_ari",
     "volume_grid_ari",
+    "volume_grid_segment_ari",
     "skeleton_lab_ari",
     "contour_tiler_ari",
     "fem_gallery_ari",
@@ -207,6 +208,15 @@
       "blurb":
           "VolumeGridRover rebuilt as an Ariadne component over a volume_grid node: the signed distance field of the embedded Stanford bunny in three slice planes, a slice view under the XY / XZ / ZY switch beside a 3D view of the planes, and a panel with the probe, the point classes and the transfer function. Click in the slice view to mark a point of the current class (or unmark one), drag to select points in a rubber band, Shift+Ctrl drag to move them; Navigate moves the other planes to the voxel clicked, and the probe follows the pointer.",
       "thumb": "img/volume_grid_ari.jpg"
+    },
+    "volume_grid_segment_ari": {
+      "app": "arigl",
+      "doc": "volume_grid_segment",
+      "title": "volume grid segmentation",
+      "desc": "VolumeGridRover's Segmentation tab: the bones of a CT segmented from three seeds",
+      "blurb":
+          "VolumeGridRover's Segmentation tab in Ariadne, on VolRover's own Visible Human CT of a torso: a seed on the spine and one in each arm seed GenSeg's fast marching (Bajaj, Yu and Auer 2003, ported to libcvc), which fills each bone above the threshold as a sliced task on the page's scheduler, the labels drawing on the slices as the fronts advance; then each class's surface is made, and the Bones view shows them alone. Move the thresholds or gamma and press Segment again, or mark more seeds with the Points tool; each class's colour and Show recolour or hide its labels and surface.",
+      "thumb": "img/volume_grid_segment_ari.jpg"
     },
     "skeleton_lab_ari": {
       "app": "arigl",

@@ -1,0 +1,70 @@
+# volume_grid_segment.ari — golden: the volume_grid component's Segmentation tab
+# (src/cvc/ariadne/components/volume_grid_segmentation.ari) after a run, over VolRover's Visible
+# Human CT (examples/data/fem/vh4.rawiv) with the seeds of examples/ariadne/documents/
+# volume_grid_segment.vgr: a seed on the spine and one in each arm, the bones above 72 segmented
+# (the node's request: segment, run as a sliced task the harness waits for), their labels on the
+# slices in the classes' colours, the classes listed in the tab, and a view of their surfaces
+# alone beside the grid. The live labels drawn while it marches are not what is captured: the
+# harness steps on until the run is done.
+
+meta:
+  name: golden volume_grid_segment
+  min_libcvc: 4.0.0
+
+import:
+  - cvc://components/volume_grid.ari
+
+data:
+  ct: ../../../../examples/data/fem/vh4.rawiv
+  bones: ../../../../examples/ariadne/documents/volume_grid_segment.vgr
+
+init: |
+  (state-set "tree.vg_panel.tab" "Segmentation")
+
+on_tick: |
+  (if (!= (state-get "vg.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-40 -40 -40 168 168 168")
+             (state-set "vg.opened" "1")))
+
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vg, title: Volume grid, view_size: 230 }
+    pos: [8, 8]
+    size: [944, 470]
+  - window: Bones
+    id: bones
+    pos: [8, 486]
+    size: [340, 226]
+    children:
+      - type: viewport
+        view: bones_3d
+        show: [surfaces]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        width: 320
+        height: 180
+        zoom: 0.8
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: ct }
+      points: { data: bones }
+      view: xy
+      slice: { z: 100 }
+      segment:
+        t_low: 72
+        t_high: 255
+        automatic: none
+        opacity: 0.6
+        mesh: { smoothing: 8 }
+      request: segment
+      transfer_function:
+        domain: [0, 160]
+        color: [[0, 0, 0, 0], [0.4, 0.45, 0.42, 0.4], [1, 1, 0.98, 0.94]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

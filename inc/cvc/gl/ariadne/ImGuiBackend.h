@@ -192,6 +192,7 @@ public:
   cvc::ariadne::TextViewEvent text_view(const char *label, const char *key, const std::string &text,
                                         const cvc::ariadne::TextViewOptions &opts) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
+  cvc::ariadne::ColorEdit color_hex(const char *label, const float rgb[3]) override; // #rrggbb
   // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
   // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
   // layers, context menu, colour picker, isocontour info). src/cvcGL/ariadne/tf_editor_imgui.cpp.

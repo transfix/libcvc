@@ -229,3 +229,60 @@ def tile_contours_job(stack, params=None, **keywords):
     """tile_contours as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
     return _tile_contours_job(stack, _tile_params(params, keywords, "tile_contours_job"))
 %}
+// Each class's surface of a label volume (cvc/volume/class_surfaces.h; pycvc_volume_grid_segment.i
+// wraps the result and its parameters): pycvc.class_surfaces_job(labels, smoothing=6, ...).
+PYCVC_RESULT_JOB(result_job_class_surface_result, cvc::class_surface_result)
+%exception _class_surfaces_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::class_surface_result>>
+_class_surfaces_job(const cvc::volume &labels, const cvc::class_surface_params &p) {
+  return cvc::class_surfaces_job(labels, p);
+}
+%}
+%pythoncode %{
+def class_surfaces_job(labels, params=None, **keywords):
+    """class_surfaces as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _class_surfaces_job(labels, _class_surface_params(params, keywords,
+                                                             "class_surfaces_job"))
+%}
+// The volume_grid Segmentation tab's run (cvc/volume/volume_grid_segment.h): segment_seeded,
+// then class_surfaces on its labels, as one job with one progress:
+// pycvc.volume_grid_segment_job(vol, seeds, t_low=0.2, mesh={"smoothing": 6}, surfaces=True).
+PYCVC_RESULT_JOB(result_job_volume_grid_segment_result, cvc::volume_grid_segment_result)
+%exception _volume_grid_segment_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::volume_grid_segment_result>>
+_volume_grid_segment_job(const cvc::volume &vol, const cvc::point_classes &seeds,
+                         const cvc::seeded_segmentation_params &p,
+                         const cvc::class_surface_params &mesh, bool surfaces) {
+  return cvc::make_result_job(
+      std::make_unique<cvc::volume_grid_segment_stepper>(vol, seeds, p, mesh, surfaces));
+}
+%}
+%pythoncode %{
+def volume_grid_segment_job(vol, seeds, params=None, mesh=None, surfaces=True, **keywords):
+    """The volume_grid's segment run as a resumable job: segment_seeded (a
+    seeded_segmentation_params, or its fields as keywords), then (with surfaces) class_surfaces on
+    the labels (mesh: a class_surface_params or a dict of its fields). result() is a
+    volume_grid_segment_result: .segmentation and .surfaces."""
+    p = _seeded_segmentation_params(params, keywords, "volume_grid_segment_job")
+    if mesh is None:
+        m = class_surface_params()
+    elif isinstance(mesh, dict):
+        m = _class_surface_params(None, mesh, "volume_grid_segment_job")
+    else:
+        m = mesh
+    return _volume_grid_segment_job(vol, seeds, p, m, bool(surfaces))
+%}

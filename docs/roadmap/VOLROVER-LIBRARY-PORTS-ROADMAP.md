@@ -1394,6 +1394,46 @@ their units and ranges as properties. Bulk data is on the data channel:
   `contours` tool, the Contours tab and `tile`. Both add tabs to `volume_grid_tools` and draw into
   the `<id>_surfaces` group, which slice views hide.
 
+**What P9 built** (the Segmentation tab).
+- **Core** (no GL): `cvc::class_surfaces` (`inc/cvc/volume/class_surfaces.h`): every class of a
+  label volume surfaced in one marching-cubes pass (a cell holding several classes adds a piece to
+  each, so 252 capsomers cost one pass), vertices at the grid edges' midpoints shared within a class,
+  closed at the volume's faces, then Taubin smoothing and outward normals; a resumable stepper
+  (`reading`, `extracting`, `smoothing`, `normals`, a unit per voxel, cell or vertex) with its job,
+  a parameter table, pycvc and `segment.surfaces` (three forms). `cvc::volume_grid_segment_stepper`
+  (`inc/cvc/volume/volume_grid_segment.h`): `segment_stepper` then `class_surfaces_stepper` as one
+  stepper, one progress bar and one Stop, keeping the labels so far a few times a second
+  (`segment_stepper::labels_so_far`, new: the march's `seed_index` while classifying and marching);
+  the tab's view table (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`,
+  `live`); the result's rows coloured as the seeding classes (the paper's feature gold, its
+  background blue and hidden); `color_labels`, a slice's see-through layer; `grid.segment.*` in grid
+  sessions. Tests `class_surfaces_test` and `volume_grid_segment_test` (ports lane, wasm-mt, the
+  sanitizer lanes), pycvc `test_pycvc_volume_grid_segment.py`.
+- **The node** (`VolumeGridSegmentation`, owned by `VolumeGridNode`): `request: segment` runs it on
+  the grid's volume (in memory; a volume read plane by plane is refused) seeded by the shown
+  classes, as a sliced task publishing the job keys under `grid.*`; `stop` keeps the last result; a
+  new volume clears it. Each plane gets a `labels` child, a quad textured with the labels (nearest
+  texels, pushed back in depth by half the slice's offset, so points and lines stay on top), live
+  while the fronts advance; each class's surface goes in `segments` under `<id>_surfaces`. Data:
+  `grid.segment.labels`, `classes` (the class volumes named after the classes), `border`,
+  `surfaces.<n>`; rows `grid.segment.rows` (colour and show edit the drawing). A document's
+  `segment:` props seed the keys and `request:` runs one request once the volume is there.
+  `register_cvcgl_extensions` installs the segmentation intrinsics per app (D1's finding).
+- **`save_segments`** became the app's, as P8 part 3's files did: the tab's Save classes is
+  `(data-save <grid>.grid.segment.classes FILE "volume")`, whose encoder now writes a list of volumes
+  as one file's variables (`.rawv`: VolumeGridRover's `SegTmp.rawv`, each variable named after its
+  class), and Save labels writes the labels. The node writes no file.
+- **The component:** `volume_grid_segmentation.ari` (the tab, also on its own), included as the
+  Segmentation tab. Demo `examples/ariadne/documents/volume_grid_segment.ari` on VolRover's Visible
+  Human CT (`examples/data/fem/vh4.rawiv`; seeds on the spine and in each arm, above 72: spine 10,744
+  voxels, the arms 6,404 and 3,946), in the gallery as `volume_grid_segment_ari`; golden
+  `src/cvcGL/test/golden/volume_grid_segment.ari`; arigl-web case `volume_grid_segment.ari` (a pick,
+  then `segment` on the page). Tests `cvcgl_volume_grid_segment` and its cooperative run (the labels
+  so far drawn while it marches).
+- **Found:** on vh4 the bone and soft-tissue intensities overlap (bone about 85-105, tissue 45-70),
+  so a bone seed and a tissue seed above 45 do not split there: the bone class floods the body
+  (gamma -0.12 or -0.04 alike). A bone threshold (72) segments each bone from its seed instead.
+
 ---
 
 ## 5. Seeded segmentation (GenSeg)
@@ -1688,7 +1728,7 @@ not as follow-ups.
 | P6 Paper mode | S–M | §5 steps 3–4: the SegMed audit, `cvc::gradient_vector_diffusion` as a stepper, `seed_mode::critical_points` and `critical_point_seeds`, `segment.critical-points`, and #123's seed generators. The default-seeding switch is its own later PR (§5 step 5) | P5 |
 | P7 Viewport pieces | M | §6: the `volume_slice` node, `mode: slice` with a bindable axis, `input: pick` / `pick:` / `on_pick:`, the overlay offset, the missing widgets. Each with tests, plus an orthoslicer demo next to `volren_bunny`, native and in arigl-web. *Built:* `examples/ariadne/documents/orthoslicer.ari` (golden `src/cvcGL/test/golden/orthoslicer.ari`, arigl-web smoke case `orthoslicer.ari` in the docset) | P0a |
 | P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6). *Built:* `cvc/volume/volume_grid.h`, `VolumeGridNode` and `type: volume_grid`, `volume_grid.ari` (§4, "What P8 built") | P7, P0d |
-| P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments` | P8, P5 |
+| P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments`. *Built:* `cvc::class_surfaces`, `volume_grid_segment.h`, `VolumeGridSegmentation`, `volume_grid_segmentation.ari`, the demo `volume_grid_segment.ari` on the Visible Human CT (§4, "What P9 built"); `save_segments` is the app's data-save of the class volumes as one multi-variable file | P8, P5 |
 | P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view | P8, P3b |
 | P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |
 

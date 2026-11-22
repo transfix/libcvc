@@ -400,6 +400,16 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /volume_grid: 32 32 32, slice view down y, added \(10, 15, 12\) to seeds/.test(l)),
   });
+  // The volume_grid's Segmentation tab (P9): its document marks a seed by a pick, then runs the
+  // grid's `segment` request, segmented and surfaced as a sliced task on the single-threaded page;
+  // it prints the node's status once the run is done.
+  cases.push({
+    name: 'a volume_grid segments its volume and surfaces the class (VolumeGridRover\'s Segmentation tab)',
+    url: `${ORIGIN}/apps/app/?src=volume_grid_segment.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /volume_grid segment: segmented: 1 classes, [1-9]\d* voxels labelled, 1 surfaces \([1-9]\d* triangles\)/.test(l)),
+  });
   // mesh_lab's skeleton (P2): the bunny decimated, then skeletonized a slice at a time on the
   // single-threaded page; its document prints the counts once the skeleton is drawn (or the error,
   // which fails the case: a page built without Shewchuk's predicates, say).

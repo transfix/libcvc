@@ -29,15 +29,16 @@
 //                         starts, since the shown classes are the seeds. t_low's and t_high's "min"
 //                         and "max" properties are the volume's data range (0 and 255 with
 //                         normalized_thresholds), for a slider's range: key
-//   grid.segment.*        cvc::volume_grid_segment_view_params' table: show, opacity, show_surfaces,
+//   grid.segment.*        cvc::volume_grid_segment_view_params' table: show, opacity,
+//   show_surfaces,
 //                         surface_opacity, make_surfaces, live
 //   grid.segment.mesh.*   cvc::class_surface_params' table (smoothing, lambda, mu, close, ...)
 //   grid.segment.rows     the last result's classes as rows a list: or repeat: binds: the count,
 //                         then <i>.name, <i>.color ("r,g,b"), <i>.visible, <i>.voxels and
 //                         <i>.triangles; editing a colour or visible recolours or hides that class
 //   grid.segment.info.*   published: classes, labelled, border, automatic_seeds, classified_seeds,
-//                         t_low_normalized, t_high_normalized, triangles; grid.segment.warnings (the
-//                         count, then <i>)
+//                         t_low_normalized, t_high_normalized, triangles; grid.segment.warnings
+//                         (the count, then <i>)
 //   grid.request          `segment` starts a run (a run under way is left alone, and says so);
 //                         `stop` stops it at its next step, keeping the last result
 //   grid.busy, stoppable, progress, phase, status, stats.work_ms, pid   the §1.9 job keys

@@ -332,6 +332,7 @@ units:
                     bind: graphics.root.children.{node}.grid.classes.{i}.name
                   - color: "##colour{i}"
                     bind: graphics.root.children.{node}.grid.classes.{i}.color
+                    fmt: hex
                   - slider_float: "##radius{i}"
                     bind: graphics.root.children.{node}.grid.classes.{i}.radius
                     lo: 0.5
@@ -382,11 +383,9 @@ units:
             children:
               - include: transfer_function_editor
                 args: { node: "{node}", id: "{id}_tf", label: Colours }
-          - type: group
+          - include: volume_grid_segmentation_tab
             tab: Segmentation
-            children:
-              - include: volume_grid_segmentation
-                args: { node: "{node}", id: "{id}" }
+            args: { node: "{node}", id: "{id}" }
           - slot: tabs
       - text: Status
         bind: graphics.root.children.{node}.grid.status

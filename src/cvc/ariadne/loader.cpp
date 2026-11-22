@@ -1378,6 +1378,12 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     check_bind(ctx, "color", label, bind);
     Widget w = color_widget(label, bind, str(n, "default", str(n, "def")));
     w.on = action(n);
+    // fmt: rgb (a field per channel, the default) or hex (one "#rrggbb" field).
+    w.fmt = str(n, "fmt", "rgb");
+    if (w.fmt != "rgb" && w.fmt != "hex") {
+      ctx.warn("ari: color '" + label + "': fmt '" + w.fmt + "' is not rgb or hex -- rgb");
+      w.fmt = "rgb";
+    }
     return w;
   }
   if (type == "image") { // a host-published image, or a picture by URI (§5.11)

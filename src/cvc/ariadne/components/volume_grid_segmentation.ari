@@ -15,15 +15,24 @@
 # labels as one volume, beside the document or, in a browser, as a download.
 #
 # Units:
-#   volume_grid_segmentation   the tab's controls (a group): args node and id, as volume_grid's
-#
-# volume_grid.ari includes it as its Segmentation tab; a document laying out its own panel includes
-# it the same way:
-#     - include: volume_grid_segmentation
+#   volume_grid_segmentation       the tab's controls in a window of their own (args node, title,
+#                                  id), for a document that keeps the segmentation apart
+#   volume_grid_segmentation_tab   the controls alone (a group, args node and id, as volume_grid's):
+#                                  volume_grid.ari includes it as its Segmentation tab, and a
+#                                  document laying out its own panel the same way:
+#     - include: volume_grid_segmentation_tab
 #       args: { node: grid, id: vg }
 
 units:
   volume_grid_segmentation:
+    args: { node: grid, title: Segmentation, id: volume_grid_segmentation }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: volume_grid_segmentation_tab
+        args: { node: "{node}", id: "{id}" }
+
+  volume_grid_segmentation_tab:
     args: { node: grid, id: volume_grid }
     type: group
     id: "{id}_segment"
@@ -55,7 +64,7 @@ units:
         tooltip: "front speed exp(gamma |grad I|): the more negative, the more fronts slow at edges"
       - radio_row: Automatic seeds
         bind: graphics.root.children.{node}.grid.segment.automatic
-        options: [None, Local maxima, Critical points]
+        options: [None, Maxima, Critical]
         values: [none, local_maxima, critical_points]
         tooltip: "seeds added to the point classes': none, GenSeg's local maxima, or the paper's critical points (two more classes, feature and background)"
       - type: group
@@ -78,7 +87,7 @@ units:
       - text: "Classes"
       - type: group
         id: "{id}_segment_head"
-        layout: { kind: grid, col_widths: [40, 110, 140, 70, 70] }
+        layout: { kind: grid, col_widths: [36, 80, 110, 56, 64] }
         children:
           - text: "show"
           - text: "name"
@@ -89,7 +98,7 @@ units:
       - type: group
         id: "{id}_segment_{i}"
         repeat: (int (state-get "graphics.root.children.{node}.grid.segment.rows"))
-        layout: { kind: grid, col_widths: [40, 110, 140, 70, 70] }
+        layout: { kind: grid, col_widths: [36, 80, 110, 56, 64] }
         children:
           - type: checkbox
             label: "##show{i}"
@@ -99,6 +108,7 @@ units:
             bind: graphics.root.children.{node}.grid.segment.rows.{i}.name
           - color: "##colour{i}"
             bind: graphics.root.children.{node}.grid.segment.rows.{i}.color
+            fmt: hex
           - text: ""
             bind: graphics.root.children.{node}.grid.segment.rows.{i}.voxels
           - text: ""

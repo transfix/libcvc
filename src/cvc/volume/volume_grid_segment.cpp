@@ -124,8 +124,8 @@ struct volume_grid_segment_stepper::impl {
   std::chrono::steady_clock::time_point live_at{};
   bool live_started = false;
 
-  impl(const volume &v, point_classes seeds, seeded_segmentation_params s,
-       class_surface_params c, bool w, double ls, std::shared_ptr<shared> sh_)
+  impl(const volume &v, point_classes seeds, seeded_segmentation_params s, class_surface_params c,
+       bool w, double ls, std::shared_ptr<shared> sh_)
       : in(v), seg(s), surf(std::move(c)), want_surfaces(w), live_seconds(ls), sh(std::move(sh_)) {
     labels.emplace(v, std::move(seeds), s);
   }
@@ -410,16 +410,15 @@ bool read_segment_rows(state &rows, std::vector<segment_class_row> &r,
 // ---- the colour layer ---------------------------------------------------------------------------
 
 std::vector<std::uint8_t> color_labels(const volume_slice_data &labels,
-                                       const std::vector<segment_class_row> &rows,
-                                       double opacity) {
+                                       const std::vector<segment_class_row> &rows, double opacity) {
   const double a = std::isfinite(opacity) ? std::clamp(opacity, 0.0, 1.0) : 0.0;
   const std::uint8_t alpha = static_cast<std::uint8_t>(std::lround(a * 255.0));
   // Each row's RGBA, looked up by label.
   std::vector<std::array<std::uint8_t, 4>> lut(rows.size());
   for (std::size_t i = 0; i < rows.size(); ++i) {
     for (int k = 0; k < 3; ++k)
-      lut[i][k] = static_cast<std::uint8_t>(std::lround(std::clamp(rows[i].color[k], 0.0, 1.0) *
-                                                        255.0));
+      lut[i][k] =
+          static_cast<std::uint8_t>(std::lround(std::clamp(rows[i].color[k], 0.0, 1.0) * 255.0));
     lut[i][3] = rows[i].visible ? alpha : 0;
   }
   const std::size_t w = labels.width, h = labels.height;

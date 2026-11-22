@@ -121,7 +121,7 @@ struct class_surfaces_stepper::impl {
   std::size_t s = 0, pass = 0, k = 0;
   std::vector<std::vector<std::uint32_t>> nbr;
   geometry::points_t moved;
-  std::size_t post_units = 0, post_total = 0;    // smoothing's
+  std::size_t post_units = 0, post_total = 0;     // smoothing's
   std::size_t normal_units = 0, normal_total = 0; // normals'
 
   std::vector<std::string> warnings;
@@ -399,8 +399,8 @@ void class_surfaces_stepper::impl::begin_post() {
   normal_total = 0;
   for (std::size_t q = 0; q < mesh.size(); ++q) {
     if (voxels[q] > 0 && mesh[q].tris().empty())
-      warnings.push_back(fmt("label %d fills the volume, so it has no surface (close is off)",
-                             wanted[q]));
+      warnings.push_back(
+          fmt("label %d fills the volume, so it has no surface (close is off)", wanted[q]));
     if (p.smoothing > 0)
       post_total += mesh[q].tris().size() + 2 * std::size_t(p.smoothing) * mesh[q].points().size();
     normal_total += mesh[q].tris().size() + mesh[q].points().size();
@@ -646,8 +646,8 @@ class_surface_result class_surfaces(const volume &labels, const class_surface_pa
   return s.take();
 }
 
-std::unique_ptr<result_job<class_surface_result>>
-class_surfaces_job(const volume &labels, class_surface_params params) {
+std::unique_ptr<result_job<class_surface_result>> class_surfaces_job(const volume &labels,
+                                                                     class_surface_params params) {
   return make_result_job(std::make_unique<class_surfaces_stepper>(labels, std::move(params)));
 }
 

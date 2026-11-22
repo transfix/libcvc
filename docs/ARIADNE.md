@@ -2826,6 +2826,12 @@ data:                                    # the app loads the data
     - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
   points: { data: seeds }                # point classes (item: classes), or { state: <key> }
   session: { data: last }                # a session to apply (item: session), or { state: <key> }
+  segment:                               # the Segmentation tab's keys (grid.segment.*)
+    t_low: 72                            # cvc::seeded_segmentation_params' fields
+    automatic: none
+    opacity: 0.6                         # cvc::volume_grid_segment_view_params' fields
+    mesh: { smoothing: 8 }               # cvc::class_surface_params' fields
+  request: segment                       # one request, run once the volume is there
   transfer_function: { preset: grayscale }
 ```
 
@@ -2842,8 +2848,10 @@ seeds its key only while the key is empty:
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
-| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane) |
-| `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
+| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane), `segment` (the Segmentation tab's run, below), `stop` (stops it, keeping the last result) |
+| `busy`, `stoppable`, `progress`, `phase`, `status`, `stats.work_ms`, `pid` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), while a `segment` runs |
+| `segment.*`, `segment.mesh.*` | the Segmentation tab's parameters: `cvc::seeded_segmentation_params` (`t_low`, `t_high`, `gamma`, `automatic`, ...; `variable` and `timestep` written as `source.var` and `time` when a run starts), `cvc::volume_grid_segment_view_params` (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`, `live`) and `cvc::class_surface_params` under `mesh` (`smoothing`, `close`, ...). `t_low`'s and `t_high`'s `min` and `max` properties are the volume's range |
+| `segment.rows`, `segment.rows.<i>.{name,color,visible,voxels,triangles}`, `segment.info.*`, `segment.warnings` | the last result's classes as rows (editing `color` or `visible` recolours or hides that class's labels and surface), and what it labelled |
 
 The point classes, the selection, the session and the volume are on the data channel at
 `grid.points`, `grid.selection` (`std::shared_ptr<const cvc::point_classes>`), `grid.session`
@@ -2864,14 +2872,35 @@ voxel. Every edit is one undo step. The planes are the node's children `slice_xy
 view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
 overlays draw its points as disks of their radius in voxels, the selection's rings, the crosshairs
 where the other planes cross it (each in the colour of the axis it runs along) and a rubber band
-being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is an empty group for the surfaces later
-phases draw in the 3D view. Until the first volume arrives the planes and that group are hidden,
+being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is the group for what the 3D view alone
+draws: slice views hide it. Until the first volume arrives the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
 `cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
 pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
 `test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
+
+**Segmentation** ([`VolumeGridSegmentation.h`](../inc/cvc/gl/VolumeGridSegmentation.h), the
+component's Segmentation tab, roadmap §5). `request: segment` segments the grid's volume, seeded by
+its point classes of the shown variable and timestep (`cvc::segment_seeded`, GenSeg's fast
+marching), then makes each class's surface (`cvc::class_surfaces`), as one sliced task on the app's
+scheduler: the views stay live, the job keys show its progress, and `stop` ends it keeping the last
+result. The labels draw on each plane as a see-through `labels` layer in the classes' colours (the
+point classes' at the run), while the fronts advance (`segment.live`) and then for good; each
+class's surface draws in a `segments` group under `<id>_surfaces`, so a view with
+`show: [surfaces]` shows the classes alone. The result is on the data channel:
+`grid.segment.labels` (a UChar `cvc::volume`, 255 none), `grid.segment.classes` (a
+`std::shared_ptr<const std::vector<cvc::volume>>`, each class's voxels named after it),
+`grid.segment.border` (`cvc::point_classes`) and `grid.segment.surfaces.<n>` (class n's
+`cvc::geometry`). The app saves them: `(data-save "graphics.root.children.grid.grid.segment.classes"
+"segments.rawv" "volume")` writes the classes as one file's variables (VolumeGridRover's
+`SegTmp.rawv`), as the tab's Save classes does. A new volume clears the result. The data side is
+core libcvc ([`volume_grid_segment.h`](../inc/cvc/volume/volume_grid_segment.h),
+[`class_surfaces.h`](../inc/cvc/volume/class_surfaces.h)) with pycvc and `segment.surfaces` in the
+DSL (`volume_grid_segment_test`, `class_surfaces_test`, `cvcgl_volume_grid_segment`,
+`test_pycvc_volume_grid_segment.py`). `examples/ariadne/documents/volume_grid_segment.ari` segments
+the bones of VolRover's Visible Human CT.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -4111,7 +4140,7 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 | encoder | Writes |
 |---|---|
 | `bytes` | the bytes (a `DataBytes` or a string) as they are |
-| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...) |
+| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...); or a `std::vector<cvc::volume>` as one file's variables, in a format that holds several (`.rawv`) |
 | `point_classes` | `cvc::point_classes` as a `.vgr` |
 | `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
 
@@ -4982,7 +5011,9 @@ colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directl
   group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
   a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
   `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
-  colour.
+  colour. The picker shows a field per channel; with `fmt: hex` it shows one `#rrggbb` field beside
+  its swatch instead (`Backend::color_hex`; a backend without one draws the default picker), as the
+  `volume_grid` component's class tables do. Its key holds `r,g,b` either way.
 
 **Backends.**
 
@@ -5221,7 +5252,8 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs` |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs` |
+| `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 
