@@ -1972,15 +1972,15 @@ target_compile_definitions(
 # touches the network on its own.
 if(EMSCRIPTEN)
   target_compile_definitions(cvc PRIVATE CVC_NET_HAVE_FETCH CVC_ARIADNE_HAVE_HTTP)
-  # The fetch backend's blocking send() spins on emscripten_sleep under Asyncify, so a wasm
-  # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
+  # The fetch backend's blocking send() spins on emscripten_sleep under JSPI, so a wasm
+  # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sJSPI (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
   # executable sets them (see examples/CMakeLists.txt).
   # The WebSocket client (net/ws_client.cpp) uses the browser's WebSocket through Emscripten's
   # library; unlike the fetch flags this one rides along to every executable that links cvc.
   target_link_options(cvc INTERFACE "-lwebsocket.js")
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
-                 "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
+                 "(link exes with -sFETCH=1 + -sJSPI or -pthread)")
 else()
   find_package(CURL QUIET)
   if(TARGET CURL::libcurl OR CURL_FOUND)

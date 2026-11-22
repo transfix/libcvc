@@ -4,6 +4,8 @@
 // P8; T6 and T13):
 //   - the document (the component's switch layout for one grid, its quad layout for the other)
 //     loads without warnings, and each include makes its own viewports;
+//   - the app loads the volume (the document's data: entry) and both grids show that one volume,
+//     the dataset's own, not a copy each;
 //   - the switch's slice view looks down the axis grid.view names, and follows it;
 //   - the pointer over the slice view fills the grid's probe (the viewport's pointer:);
 //   - a click in the slice view marks the voxel under it in the current class, its pick carrying
@@ -33,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vtkRenderer.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
@@ -52,6 +55,9 @@ std::string doc(const std::string &file) {
   min_libcvc: 4.0.0
 import:
   - cvc://components/volume_grid.ari
+data:
+  coded: ")" +
+         file + R"("
 windows:
   - include: volume_grid
     args: { node: a, id: ga, title: A, view_size: 200 }
@@ -65,15 +71,13 @@ scene:
   nodes:
     - node: a
       type: volume_grid
-      source: { file: ")" +
-         file + R"(" }
+      source: { data: coded }
       view: xy
       classes:
         - { name: seeds, color: [1, 0, 0], radius: 1 }
     - node: b
       type: volume_grid
-      source: { file: ")" +
-         file + R"(" }
+      source: { data: coded }
       classes:
         - { name: other, color: [0, 1, 0], radius: 1 }
 )";
@@ -153,6 +157,28 @@ int main() {
     check(false, "the document loads without warnings", w);
   for (int f = 0; f < 10; ++f)
     rt.step(kDt);
+  // The app loads the volume off the frame thread; the grids take it once it is there.
+  for (int f = 0; f < 1000 && (val(app, "vg.graphics.root.children.a.grid.info.dims").empty() ||
+                               val(app, "vg.graphics.root.children.b.grid.info.dims").empty());
+       ++f) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    rt.step(kDt);
+  }
+  for (int f = 0; f < 5; ++f)
+    rt.step(kDt);
+  {
+    const auto vol = [&](const char *node) {
+      const boost::any d = cvc::state::instance(app)(std::string("vg.graphics.root.children.") +
+                                                     node + ".grid.volume")
+                               .data();
+      const auto *p = boost::any_cast<std::shared_ptr<const cvc::volume>>(&d);
+      return p ? *p : nullptr;
+    };
+    check(vol("a") && vol("a") == vol("b") &&
+              val(app, "vg.graphics.root.children.a.grid.info.dims") == "8 6 4",
+          "the app loads the volume (data: coded) and both grids show that one volume",
+          val(app, "vg.graphics.root.children.a.grid.status"));
+  }
   cvc::gl::ViewportManager &vm = view.viewportManager();
   check(vm.hasViewport("ga_slice") && vm.hasViewport("ga_3d"),
         "the switch layout makes a slice view and a 3D view");

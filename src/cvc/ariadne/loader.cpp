@@ -193,9 +193,11 @@ const char *const kAriSchema = R"ARISCHEMA({
           "uri": {"type": "string"},
           "path": {"type": "string"},
           "as": {"type": "string"},
+          "generate": {"type": "string"},
+          "params": {"type": "object"},
           "load": {"enum": ["eager", "lazy"]}
         },
-        "required": ["uri"]
+        "anyOf": [{"required": ["uri"]}, {"required": ["generate"]}]
       }
     },
     "args": {

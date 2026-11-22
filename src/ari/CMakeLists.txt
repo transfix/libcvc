@@ -365,7 +365,7 @@ if(EMSCRIPTEN)
   # it imports into MEMFS at their URL paths (cvc/ariadne/web_document.h). Otherwise it runs the
   # one baked in (CVC_ARI_WASM_DOC). The shared component library is embedded where an install
   # keeps it (<prefix>/share/libcvc/ariadne), so cvc://components/... resolves with no download.
-  # FTXUI's run loop yields to the browser with emscripten_sleep, hence -sASYNCIFY (which
+  # FTXUI's run loop yields to the browser with emscripten_sleep, hence -sJSPI (which
   # cvc::net's fetch backend needs as well, with -sFETCH). Single-threaded: it runs on the
   # page's main thread and needs no COOP/COEP headers. EXIT_RUNTIME so a document that quits
   # reaches the page's onExit.
@@ -496,8 +496,7 @@ if(EMSCRIPTEN)
     target_link_options(${target} PRIVATE
       "--embed-file=${CVC_ARI_WASM_DOC}@/${_ari_doc_name}"
       "--embed-file=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components@/usr/share/libcvc/ariadne/components"
-      -sASYNCIFY=1
-      -sASYNCIFY_STACK_SIZE=131072
+      -sJSPI
       -sALLOW_MEMORY_GROWTH=1
       -sSTACK_SIZE=2097152
       -sFETCH=1
