@@ -98,6 +98,9 @@ struct realized_doc {
       cvc::pump_exec_frame(app.exec_scheduler());
     }
   }
+  // The nodes alone, the scheduler not stepped: a cooperative run does not advance, so a request
+  // made next reaches it running (a fast machine ends a 24^3 run in a frame or two).
+  void tick_nodes() { cvc::gl::ariadne::tick_scene(rs, nullptr, 1.0 / 30.0); }
   bool pending() const {
     for (const auto &p : rs.pending_work)
       if (p && p())
@@ -266,12 +269,12 @@ void run() {
   check(val(app, k + ".classes.0.points") == "1" && val(app, k + ".classes.1.points") == "1",
         "a seed in each class");
   set(app, k + ".request", "segment");
-  d.tick();
+  d.tick_nodes();
   check(seg.running() && val(app, k + ".busy") == "1" && val(app, k + ".stoppable") == "1",
         "segment starts the run, published as the job keys", val(app, k + ".status"));
   check(d.pending(), "the scene has work in flight while it runs");
   set(app, k + ".request", "segment");
-  d.tick();
+  d.tick_nodes();
   check(val(app, k + ".status").find("segmenting already") == 0 || !seg.running(),
         "segment while one runs is left alone, and says so", val(app, k + ".status"));
   check(d.settle(), "the run ends");
@@ -381,10 +384,12 @@ void run() {
         "a session keeps the tab's parameters, not its result");
 
   // ---- stop keeps the last result ----
+  // The scheduler does not step between segment and stop: a cooperative run has not begun when
+  // stop comes, and a threaded one has had only the moment between the two requests.
   set(app, k + ".request", "segment");
-  d.tick();
+  d.tick_nodes();
   set(app, k + ".request", "stop");
-  d.tick();
+  d.tick_nodes();
   d.settle();
   check(val(app, k + ".status") == "cancelled" && !seg.running(), "stop ends the run",
         val(app, k + ".status"));
