@@ -14,6 +14,9 @@
 #   • Chat       (id chat)    — the room's chat and your direct messages (components/chat.ari): pick
 #                               the room or a conversation, scroll up for older messages, Enter sends
 #                               and Shift+Enter adds a line.
+#   • Audio      (id audio)   — how full each person's jitter buffer is, a graph over the last 30 s,
+#                               and the buffers' tuning (components/audio_buffers.ari). LOCAL, like
+#                               the Users controls. Closed at first; open it from the View menu.
 #   • cam_<i>    (per peer)    — one window per OTHER participant, titled by their name, showing their
 #                               camera. Repeated over peer.count; opened automatically, closable, and
 #                               listed by name at the end of the View menu to open again (or click
@@ -43,13 +46,15 @@ requires:
   - room-roster
   - room-set-avatar                # the Avatar window
   - plot                           # its history graphs
+  - chart                          # the Audio window's buffer graphs (audio_buffers.ari)
+  - settings                       # and its tuning
   - chat-post                      # the Chat window (chat.ari; the relay keeps the history)
   - text_view
   - message_input
 
 # The Users and Chat windows are the shipped components: their units, and the functions that keep
 # them current (room-users-step, chat-ui-step), which on_tick calls.
-import: [cvc://components/room_users.ari, cvc://components/chat.ari]
+import: [cvc://components/room_users.ari, cvc://components/chat.ari, cvc://components/audio_buffers.ari]
 
 # No scene: block. The room and its LOOK are the world's (ARIADNE_WORLDS.md WD1, Q1): the relay
 # publishes the world document's scene into conf.rooms.<room>.scene (the ground, the reference
@@ -75,6 +80,8 @@ menubar:
         bind: tree.chat.open
       - menu_item: Avatar
         bind: tree.myavatar.open
+      - menu_item: Audio
+        bind: tree.audio.open
 
 windows:
   # ── My Camera: your name, self-view, device pickers + on/off toggles ──
@@ -356,6 +363,14 @@ windows:
     pos: [390, 310]
     size: [570, 320]
 
+  # ── Audio: each person's jitter buffer, and its tuning (components/audio_buffers.ari) ──
+  # The host publishes the graphs (media.<pid>.jb.*) and applies audio.jb.* to its mixer
+  # (cvc/ariadne/conference/voice_monitor.h). Closed until the View menu opens it.
+  - include: audio_buffers
+    args: { id: audio, title: Audio, rows: peer }
+    pos: [970, 300]
+    size: [560, 580]
+
   # ── One camera window per OTHER participant, titled by their name ──
   - window: Peer
     id: cam_{i}
@@ -380,6 +395,7 @@ on_tick: |
       (begin
         (state-set "joined" "1")
         (state-set "name_error" "") ; no name conflict yet (the web client's launch name is random)
+        (state-set "tree.audio.open" "0") ; the Audio window waits for the View menu
         ; the avatar pickers start blank; on_tick fills them once the relay's catalog is here
         ; (an unset key reads as nil, which compares unequal to "")
         (state-set "avatar.color" "")

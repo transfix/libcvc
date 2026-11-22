@@ -1,6 +1,7 @@
 # arisrv identity, admission and admin (ID1–ID4)
 
-Status: ID1 (#1293), ID2 and ID3 are built; ID4 is the plan. It extends the conference roadmap's §5f (room token,
+Status: ID1 (#1293), ID2 and ID3 are built, and so is ID4a (#1296) with arisrv's wiring of it;
+ID4b and ID4c are the plan. It extends the conference roadmap's §5f (room token,
 device id, device keys) and the scripting hosts' S5 (`set_authenticator`, principals, role gates),
 S3 (client programs) and G4 (client WebAssembly guests, #1283). It sits beside the resident guests
 plan (#1290, `ARIADNE_RESIDENT_GUESTS.md`), whose gas ledger keys on this plan's identity.
@@ -211,7 +212,8 @@ arisrv.clients.<client_id>.
     - The keys are S3's and G4's: `programs` and `guests` (true or false; false refuses the
       client that kind), `steps` and `memory_mb` (whole numbers), and `time` (seconds). 0 is the
       document's.
-    - They're kept by client id, and mirrored under `limits.*`. ID4a (#1296) makes them apply.
+    - They're kept by client id, and mirrored under `limits.*`. ID4a (#1296) and arisrv's
+      `main()` make them apply (2.6), from the client's next program or guest.
     - There's no `fuel`: gas is charged as steps. There's no `concurrency`: one program or guest at
       a time per client is by design, and #1290's residents get their own count. ID4c adds
       `python`.
@@ -233,7 +235,9 @@ arisrv.clients.<client_id>.
     client that kind (`forbidden`), and 0 is the document's.
   - arisrv's `main()` sets it from `client_registry::limits(pid)`, on the room loop, where
     `run_client_*` asks at each start. A change applies to the client's next start, not to one
-    already running. That wiring lands once #1296 and #1295 are both on master.
+    already running. A flag set false turns `on` off; `steps`, `time` and `memory_mb` (as bytes)
+    replace the document's caps where they aren't 0. ctest `arisrv_client_limits` has an admin
+    refuse a client programs, allow them again, and lower their steps.
   - A client's caps replace the document's for that client, lower or higher, up to
     `ariadne.limits.action_max_*` (D2; `ServerDocument::kClientLimitsAboveDocument` is true). A
     guest's memory stays under `wasm_max_memory`, and the action lane's caps apply on top.

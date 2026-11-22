@@ -166,11 +166,15 @@ struct RealizedScene {
   std::vector<std::weak_ptr<LodGraphicsNode>> lod_nodes;
   // Every realized node, at any depth, with its view tags (`tags:`, §9.5.1): what a viewport
   // widget leaves out when its show: / hide: rule out a node's tags, and what its override:s name
-  // by id or tag. Held weakly, like the tickers.
+  // by id or tag. Held weakly, like the tickers. A node's tags hold for its subtree. A custom node
+  // type may add entries for the parts it makes: a child of its own, or (subtree false) the node's
+  // own props alone, so its children can be in a view its own surface is not (mesh_lab's surface
+  // is tagged `surface`, its skeleton children `skeleton`).
   struct TaggedNode {
     std::string id;
     std::vector<std::string> tags;
     std::weak_ptr<GraphicsNode> node;
+    bool subtree = true; // false: the tags are the node's own props', not its children's
   };
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
@@ -183,6 +187,12 @@ struct RealizedScene {
   // capture a weak_ptr to its node (not the node), matching the volren/volslice
   // discipline, so a torn-down node's tick is a no-op.
   std::vector<std::function<void(vtkRenderer *)>> custom_ticks;
+  // Work a CUSTOM node has in flight, one probe per node: true while what it has started (a
+  // request waiting, a job or sliced task running, a result not drawn yet: a contour_lab's tile, a
+  // mesh_lab's skeleton) will still change what it draws. A host that captures a settled frame
+  // (cvcgl_ari_golden) steps until none is busy. A probe should hold its node weakly, like a tick,
+  // and say false once it is gone.
+  std::vector<std::function<bool()>> pending_work;
   // The same for a closure that reads the scene's world as this frame left it (the physics stepped
   // and its moving bodies posed: `world`, `physics_binding`) and the frame's clock step. The scene
   // is passed in, not captured, since it moves after realize. Run after the custom_ticks.
@@ -429,6 +439,19 @@ cvc::volume sdf_volume_from_mesh(cvc::app &app, const std::string &mesh_uri, int
 // The same for a mesh already in hand (any fit applied by the caller).
 cvc::volume sdf_volume_of_mesh(cvc::app &app, const cvc::geometry &mesh, int dim,
                                cvc::sdf_algorithm algorithm = cvc::SDF_V2);
+
+// The data generator `sdf` on `app` (cvc/ariadne/data.h): a mesh's signed distance field made as
+// a dataset, so the app holds the volume and every node that shows it shares it (a volume_grid's
+// source: { data: <name> }). Its params, a JSON object as a data: entry writes them:
+//   data:
+//     bunny:
+//       generate: sdf
+//       params: { mesh: stanford.bunny, dim: 64, algorithm: v2, fit: { height: 100, up: y } }
+// mesh (a mesh URI, or a file relative to the document), dim (default 64), algorithm (v1 | v2 |
+// igl; igl falls back to v2 without CVC_ENABLE_LIBIGL) and fit (height, up x | y | z, flip), as
+// a node's source: { sdf } and fit: take them. The volume is the dataset's `volume`. Needs a
+// CVC_ENABLE_SDF build (the load fails saying so without one). register_cvcgl_extensions calls it.
+void register_sdf_data_generator(cvc::app &app);
 
 // The volume a node's `source:` declares: `{ file }`, or `{ sdf: { mesh, dim, algorithm } }`
 // (algorithm v1 | v2 | igl; igl falls back to v2 with a warning when cvc::mesh_ops_available() is

@@ -91,7 +91,8 @@ world:
                                     # a list cycles over the vehicles; per team: { 0: jolt, ... }
         controller: nav@1
         policy: trained             # trained | builtin | { uri, path, sha256 } | { data: <entry> }
-        metric: trained             # trained (the trainer's vehicle) | vehicle (each plant's own)
+        metric: policy              # trained (the trainer's vehicle) | vehicle (each plant's own)
+                                    # | policy (follows the policy, the default)
         sense: fog                  # known | fog
         belief: grouped             # shared | grouped (max(2, n/64)) | private
         spawn: opposed              # opposed | scattered | points (world: spawns:)
@@ -157,8 +158,10 @@ world:
     trained weights live (`set_policy`) once they arrive.
 - **The metric** (settled, D9). `trained` plans with the trainer's vehicle, at the metric the
   weights learned in, as the demos do. `vehicle` plans with each plant's own size and limits
-  (`nav_plant_options::plan_with_vehicle`), as world vehicles do today. The default follows the
-  policy: `trained` with trained weights, `vehicle` with the built-in net. `metric:` overrides it.
+  (`nav_plant_options::plan_with_vehicle`), as world vehicles do today. The default (`policy`)
+  follows the policy: `trained` with trained weights (and while they are on their way, so their
+  arrival does not make the navigator again), `vehicle` with the built-in net. `metric:` overrides
+  it (FL1c).
 - **The navigator per fleet.** A fleet's entities share one `sim_world`, built with the fleet's
   belief mode (`sim_world::belief_mode`, which #1358's `SceneSwarm` already drives). Fog coverage
   and sensed walls come from the existing `WorldVehicles::belief`, extended per plane.
@@ -171,7 +174,7 @@ world:
   Per-entity keys are written only for `keys: all`, the entities `vehicles.watch` names (the
   followed or selected one), and entities with an intent. A view reads
   poses through a lock-free snapshot (`WorldVehicles::poses(fleet)`), never through state.
-- **Threading (D3).** A fleet's navigator tick (every 0.06 s, six physics steps) can run on a
+- **Threading (D3).** A fleet's navigator tick (every 7/120 s, seven physics steps) can run on a
   worker while the physics steps, with its commands taking effect a tick later. That keeps the
   render thread free, as the swarm's `sim_thread` did. It is opt-in for drawn hosts only; the gym,
   ari test and the relay stay synchronous and bit-for-bit.
@@ -289,6 +292,8 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 | **FL0** | **Done** (2026-11-19; §3.1). `AriadneWorldGym.FleetBench` (`CVC_FLEET_BENCH=1`) times kinematic fleets of 100, 400 and 800 (map known and fog) and Jolt fleets of 60, 120 and 240, headless. Two fixes from it: `WorldVehicles::entities()` found kinematic overlaps pair by pair (quadratic; now a grid, linear), and the navigators get the app's pool. D3 decided by the numbers: yes. | — | S |
 | **FL1a** | **Done** (2026-11-19). Fleets as named `start:` entries: `fleet:`, up to 4096 vehicles, `spawn:` (opposed, scattered, points), `seed:`, `rally: { count, assign: latitude }` (teams, hsv colours, goals held), `colors:`, `keys:` (summary, all). Laid out once the grid exists (linear: a hashed separation check); rally keys move a team; `restart.request` and `reseed.request`; `vehicles.watch`; `WorldVehicles::fleets`, `rally`, `move_rally`, `restart_fleet`; `entity_info::fleet` and `rally`. Tests: `AFleetIsANamedStartEntry`, `AFleetIsLaidOutInTeamsAtRallyPoints`, `AFleetWithoutRallyPointsHoldsItsOwnGoals`; the bench's `[fleet doc]` rows (§3.1). Left for FL1: sense, belief and policy per fleet, plant lists, the metric, `poses(fleet)`, the gym's fleet. | FL0 | M |
 | **FL1b** | **Done** (2026-11-20). A navigator per fleet (one per plant, `<plant>/<fleet>`): `sense:` (known, fog; the world's by default) and `belief:` (shared; grouped, max(2, n / 64) planes by team; private, one per vehicle), both switched by their keys, which make the navigator again with its vehicles at rest where they are; `.planes`. `policy:` `trained` (`$CVC_NAV_WEIGHTS`, an installed copy, else `cvcpkg://cvc/grl-snam-weights` through the data store), `builtin`, a `.cvcnav`, `{ uri, path, sha256 }` or `{ data: <entry> }`; `.policy` switches it live (`set_policy` / `reset_policy`), `.drives` says what drives, and the visible fallback (the built-in net, its reason in `.drives` and once in the host's log). `policy_library::get_bytes`. A fleet refuses `controller: pose`. Test: `AFleetHasANavigatorAndAPolicyOfItsOwn`. Left for FL1: plant lists and per-team plants, the metric (D9), `poses(fleet)` and the gym's fleet; D3 goes with ARIADNE_WORLDS §18 (below). | FL1a | M |
+| **FL1c** | **Done** (2026-11-20). A fleet's `plant:` is one plant, a list its vehicles cycle over, or each team's (`{ 0: jolt }`; a team not named on the archetype's), all floating or none, each plant a navigator of the fleet's own; `.plant` switches them live (`fleet_plants::text`: `jolt, kinematic`, `kinematic, 0: jolt`), its vehicles at rest where they are, and a bad one is said in `vehicles.status`. The metric (D9): `metric:` `trained` (the trainer's vehicle, `training_scene`'s rr, d_hat and vmax at the hosts' tick, and the plants' `plan_with_vehicle` off), `vehicle`, or `policy` (the default: trained while weights drive or are on their way, so their arrival does not make the navigator again; vehicle on the built-in net, a fallback's included); `.metric` switches it, `.plans` says which, and a change makes the navigators again. `plants()` reports each fleet's own bicycle. Tests: `AFleetHasPlantsAndAMetric`, `AFleetIsANamedStartEntry`'s plants and metric. Left for FL1: `poses(fleet)`, the summary's tick and bounds, and the gym's fleet. | FL1b | M |
+| **FL1d** | **Done** (2026-11-20). `WorldVehicles::poses(fleet)`: a fleet's placed vehicles (`fleet_poses`: ids, chassis centres, headings, speeds, teams, their box and the tick) made each publish and swapped in whole (`std::atomic_store`, as `sim_thread`'s snapshot), read from any thread without a lock; the summary's `.tick` and `.bounds`. The gym's fleets: `gym_options::fleets` (`fleets=` in pycvc) names the document's fleets each reset lays out from their seed plus the reset's, their vehicles the agents (`WorldVehicles::starts`). Tests: `AFleetsPosesAreASnapshot` (a reader thread while it steps), `AriadneWorldGym.AFleetIsTheGymsAgents`. With FL1a-FL1d, FL1 is done but D3 (OW7's local holon). FleetBench re-measured at 120 Hz on 2026-11-21 (§3.1). | FL1c | M |
 | **FL1** | **Fleets in `WorldVehicles`.** Named `world: vehicles: start:` entries (`fleet:`; count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
 | **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
@@ -302,49 +307,64 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 
 ### 3.1 FL0's numbers
 
-Headless, an open 400 m square, `nav@1` driving every vehicle, on the reference laptop. A tick is
-0.06 s of world time: at the demos' 3.6x a tick must take under 16.7 ms.
+Headless, an open 400 m square, `nav@1` driving every vehicle, on the reference laptop.
+Re-measured at OW1's 120 Hz clock (2026-11-21, the median of three runs). A tick is now 7/120 s of
+world time, seven physics steps, so at the demos' 3.6x a tick must take under 16.2 ms. The last
+column is FL0's first measurement, at 100 Hz: a 0.06 s tick of six steps.
 
-| Fleet | Tick | Physics | Publishing keys | The rest | Speed it keeps |
-|---|---|---|---|---|---|
-| 100 kinematic | 3.7 ms | 0.3 | 1.2 | 2.2 | 16x |
-| 400 kinematic | 15.8 ms | 1.4 | 9.2 | 5.3 | 3.8x |
-| 800 kinematic | 32.2 ms | 2.8 | 15.2 | 14.3 | 1.9x |
-| 800 kinematic, fog | 39.2 ms | 2.9 | 15.1 | 21.2 | 1.5x |
-| 60 Jolt | 9.4 ms | 6.8 | 1.0 | 1.6 | 6.4x |
-| 120 Jolt | 20.6 ms | 15.7 | 1.9 | 3.0 | 2.9x |
-| 240 Jolt | 47.8 ms | 42.7 | 3.9 | 1.3 | 1.3x |
+| Fleet | Tick | Physics | Publishing keys | The rest | Speed it keeps | At 100 Hz |
+|---|---|---|---|---|---|---|
+| 100 kinematic | 4.2 ms | 0.4 | 1.8 | 2.0 | 14x | 3.7 ms, 16x |
+| 400 kinematic | 17.0 ms | 1.9 | 7.9 | 7.3 | 3.4x | 15.8 ms, 3.8x |
+| 800 kinematic | 35.8 ms | 3.7 | 15.5 | 17.0 | 1.6x | 32.2 ms, 1.9x |
+| 800 kinematic, fog | 42.1 ms | 3.7 | 14.9 | 23.7 | 1.4x | 39.2 ms, 1.5x |
+| 60 Jolt | 11.8 ms | 8.5 | 1.0 | 2.1 | 4.9x | 9.4 ms, 6.4x |
+| 120 Jolt | 26.4 ms | 21.5 | 2.0 | 2.9 | 2.2x | 20.6 ms, 2.9x |
+| 240 Jolt | 58.2 ms | 46.2 | 4.0 | 7.7 | 1.0x | 47.8 ms, 1.3x |
 
 The rest is the navigator, the per-step vehicle hooks and the gym's own observation. Before the
 overlap fix, 800 kinematic vehicles took 42 ms a tick and the rest was 26 ms. #1358's swarm held 800
 under fog at 3.6x.
 
+What 120 Hz changed:
+- **A tick has seven physics steps, not six, and a step costs about what it did.** Jolt's step is
+  1.2, 3.1 and 6.6 ms at 60, 120 and 240 vehicles, against 1.1, 2.6 and 7.1 at 100 Hz. So a tick
+  costs more, mostly in physics, and a fleet keeps a little less speed. The tick is also 3 %
+  shorter in world time (58.3 ms, not 60).
+- **The comparison isn't only the clock.** These runs are a day later and after FL1b to FL1d, and
+  the rest is 1 to 3 ms higher. That isn't separated here.
+- **400 kinematic vehicles no longer keep 3.6x** (17.0 ms against 16.2). 60 Jolt still do, easily.
+
 What follows:
 - **Publishing is the largest cost of a kinematic fleet:** about 19 µs per vehicle per tick for its
-  25 keys. FL1's summary publishing removes it, and brings 800 kinematic vehicles to about 17 ms
-  a tick, near 3.6x.
-- **Jolt costs about 0.11 to 0.18 ms per vehicle per tick,** in the physics step itself. About 60
-  keep up at 3.6x, as the C++ drive's default assumed. More need a slower world, or fewer on Jolt
-  in a mixed fleet.
-- **D3: an asynchronous fleet is needed in drawn hosts.** At 3.6x a fleet ticks 60 times a wall
-  second, so even 60 Jolt vehicles (9.4 ms a tick) take more than half of a core, and 800
-  kinematic ones all of it. On the frame's thread that is the frame rate. FL1 steps a drawn host's
-  scene world (its physics and its navigators) on a worker, the frame reading its poses lock-free,
-  as #1358's swarm did with `sim_thread`. Headless hosts, the gym and the relay stay synchronous
-  and bit-for-bit.
-- Under fog, sensing adds about 7 ms at 800.
+  25 keys. FL1's summary publishing removes it (below).
+- **Jolt costs about 0.14 to 0.19 ms per vehicle per tick** (0.11 to 0.18 at 100 Hz), in the
+  physics step itself. About 60 keep up at 3.6x, as the C++ drive's default assumed. More need a
+  slower world, or fewer on Jolt in a mixed fleet.
+- **D3: an asynchronous fleet is needed in drawn hosts.** At 3.6x a fleet ticks 62 times a wall
+  second, so even 60 Jolt vehicles (11.8 ms a tick) take nearly three quarters of a core, and 800
+  kinematic ones all of it. On the frame's thread that is the frame rate. A drawn host steps its
+  scene world (its physics and its navigators) off the frame's thread, the frame reading its poses
+  lock-free (`poses(fleet)`), as #1358's swarm did with `sim_thread`. Headless hosts, the gym and
+  the relay stay synchronous and bit-for-bit.
+- Under fog, sensing adds 6 to 7 ms at 800.
 
 **FL1a's numbers** (the bench's `[fleet doc]` rows): a fleet declared in the document, 16 rally
-points, an opposed layout, a tick's six steps through the runtime (`step_world`), same machine.
+points, an opposed layout, on the built-in net, a tick's seven steps through the runtime
+(`step_world`), same machine. Re-measured at 120 Hz with FleetBench above; FL1a's own, at 100 Hz
+with six steps a tick, are in brackets.
 
 | Fleet | Load and layout | Tick, `keys: all` | Tick, `keys: summary` | One publish, all / summary |
 |---|---|---|---|---|
-| 800 kinematic | 48 ms | 31.4 ms (1.9x) | 11.4 ms (5.3x) | 14.6 / 0.12 ms |
-| 2000 kinematic | 250 ms | 83.5 ms | 35.6 ms (1.7x) | 36.4 / 0.35 ms |
+| 800 kinematic | 88 ms (48) | 33.1 ms, 1.8x (31.4, 1.9x) | 13.5 ms, 4.3x (11.4, 5.3x) | 14.5 / 0.23 ms (14.6 / 0.12) |
+| 2000 kinematic | 500 ms (250) | 94.6 ms, 0.6x (83.5) | 43.9 ms, 1.3x (35.6, 1.7x) | 38.2 / 0.8 ms (36.4 / 0.35) |
 
-Summary publishing took 800 kinematic vehicles past the demos' 3.6x on the stepping thread, better
-than the 17 ms FL0 expected. Each tick also ran faster beyond the publish itself (20 ms less where
-the publish was 14.5 ms), since the state tree stays small.
+- **Summary publishing still takes 800 kinematic vehicles past the demos' 3.6x** on the stepping
+  thread (13.5 ms against 16.2). It also makes each tick faster beyond the publish itself, since
+  the state tree stays small.
+- **Loading a fleet takes about twice as long as at FL1a.** The load steps nothing, so this isn't
+  the clock: it came with FL1b to FL1d or master since, and isn't traced yet. 2000 vehicles a tick
+  also grew more (23 % with summary keys) than the seventh step's physics accounts for.
 
 **Order.** FL0, FL1, FL2, then FL3, which completes #1358's rework. NL1 and NL2 can run beside
 FL1 and FL2. NL3 and NL4 come after FL2, and NL5 any time after NL1. FL4 goes with WD3's next
@@ -366,8 +386,8 @@ part.
   playout (OW5). Fleets need nothing else from §18: they live in `WorldVehicles`, which OW2 puts in
   the holon's world at 120 Hz (OW1's 7-quanta tick is `steps_per_tick` here), OW4's movers reach
   each fleet's navigator as foreign agents, and once OW3 lands a vehicle a participant drives is
-  to count as keyed in summary publishing. FleetBench's numbers are re-measured at 120 Hz once
-  OW1 lands.
+  to count as keyed in summary publishing. FleetBench's numbers were re-measured at 120 Hz
+  after OW1 (§3.1).
 - **D4. A fleet's per-entity keys by default:** `summary` or `all`.
 - **D5. Where Austin's lamps come from:** the bundle (does it carry street lights?), generated along
   roads, or OSM later.

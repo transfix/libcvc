@@ -50,6 +50,10 @@ add_executable(net_policy_test net_policy_test.cpp)
 add_executable(e2ee_test e2ee_test.cpp)
 add_executable(ariadne_e2ee_test ariadne_e2ee_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
+# The connection engine (cvc/net/net_engine.h): it listens, so native only.
+if(NOT EMSCRIPTEN)
+  add_executable(net_engine_test net_engine_test.cpp)
+endif()
 add_executable(uri_http_cache_test uri_http_cache_test.cpp)
 add_executable(state_test state_test.cpp)
 add_executable(state_lifetime_stress_test state_lifetime_stress_test.cpp)
@@ -70,6 +74,7 @@ add_executable(state_identity_test state_identity_test.cpp)
 add_executable(state_device_key_test state_device_key_test.cpp)
 add_executable(media_rungs_test media_rungs_test.cpp)
 add_executable(voice_mixer_test voice_mixer_test.cpp)
+add_executable(voice_monitor_test voice_monitor_test.cpp)
 add_executable(fast_lane_test fast_lane_test.cpp)
 add_executable(state_distributed_metrics_test state_distributed_metrics_test.cpp)
 add_executable(state_delegation_manager_test state_delegation_manager_test.cpp)
@@ -473,6 +478,7 @@ set(TEST_TARGETS
   state_device_key_test
   media_rungs_test
   voice_mixer_test
+  voice_monitor_test
   fast_lane_test
   state_distributed_metrics_test
   state_delegation_manager_test
@@ -730,6 +736,9 @@ list(APPEND TEST_TARGETS
 )
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
+endif()
+if(TARGET net_engine_test)
+  list(APPEND TEST_TARGETS net_engine_test)
 endif()
 if(TARGET state_exec_bench)
   list(APPEND TEST_TARGETS state_exec_bench)
@@ -1071,6 +1080,15 @@ target_link_libraries(net_policy_test
     GTest::gtest
     GTest::gtest_main
 )
+
+if(TARGET net_engine_test)
+  target_link_libraries(net_engine_test
+    PRIVATE
+      cvc
+      GTest::gtest
+      GTest::gtest_main
+  )
+endif()
 
 target_link_libraries(e2ee_test
   PRIVATE
@@ -1821,6 +1839,12 @@ target_link_libraries(media_rungs_test
     GTest::gtest_main
 )
 target_link_libraries(voice_mixer_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(voice_monitor_test
   PRIVATE
     cvc
     GTest::gtest
@@ -2936,6 +2960,7 @@ target_compile_features(state_identity_test PRIVATE cxx_std_17)
 target_compile_features(state_device_key_test PRIVATE cxx_std_17)
 target_compile_features(media_rungs_test PRIVATE cxx_std_17)
 target_compile_features(voice_mixer_test PRIVATE cxx_std_17)
+target_compile_features(voice_monitor_test PRIVATE cxx_std_17)
 target_compile_features(fast_lane_test PRIVATE cxx_std_17)
 target_compile_features(state_distributed_metrics_test PRIVATE cxx_std_17)
 target_compile_features(state_delegation_manager_test PRIVATE cxx_std_17)
@@ -3263,6 +3288,11 @@ cvc_discover_tests(net_policy_test)
 cvc_discover_tests(e2ee_test)
 cvc_discover_tests(ariadne_e2ee_test)
 cvc_discover_tests(net_oidc_test)
+if(TARGET net_engine_test)
+  # The fan-out case connects 6000 loopback clients (12000 descriptors; it lowers N to fit the
+  # limit): seconds in a Release build, longer in Debug or under a sanitizer.
+  cvc_discover_tests(net_engine_test PROPERTIES TIMEOUT 600)
+endif()
 cvc_discover_tests(uri_http_cache_test)
 cvc_discover_tests(state_test)
 cvc_discover_tests(state_lifetime_stress_test)
@@ -3521,6 +3551,7 @@ cvc_discover_tests(state_identity_test)
 cvc_discover_tests(state_device_key_test)
 cvc_discover_tests(media_rungs_test)
 cvc_discover_tests(voice_mixer_test)
+cvc_discover_tests(voice_monitor_test)
 cvc_discover_tests(fast_lane_test)
 cvc_discover_tests(state_distributed_metrics_test)
 cvc_discover_tests(state_delegation_manager_test)

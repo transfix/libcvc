@@ -963,6 +963,15 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   every side.
 - **Vehicles are in the same world.** `WorldVehicles` already puts every plant in the scene's
   world (L2b); now that world is the holon's, at 120 Hz.
+- **As built (OW2):** `holon::attach_world(SceneWorld *)` on a server holon with physics, for a
+  world on its quantum: the avatars move into the scene's physics world where they stood
+  (`avatar_world` over a shared world it does not own: no stepping, statics, gravity or air of its
+  own; `release`, `move_to` when the owner replaces its world), and the holon steps the world from
+  its own step through `SceneWorld::follow`'s per-step hooks, each avatar driven just before each
+  step. `AppRuntime::set_world_external` stops the document's runtime stepping it, and `arisrv`
+  attaches a server document's world to the room's holon at start-up. A Humvee driven into a
+  standing avatar carries it down the road and ends 0.67 m behind the same run without it
+  (`AriadneOneWorld`). Clients still build their statics from the published scene (OW5).
 - **Local is the same.** A lab, a gym or a demo with no relay runs a server-role holon in its own
   process: the same world, the same entities, the same code path as the relay. `WorldGym`,
   `HostCars` and the GRL-SNAM hosts move onto it.
@@ -995,9 +1004,20 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   (§5).
 - **A participant's avatar is the entity it owns and drives.** The participants' pose stream
   becomes the entities' pose stream; a participant pid names its entity.
+- **As built so far (OW3, server side):** `holon::entities()` lists every mover (each participant's
+  person, the world's entities) with its kind, controller, driver, owner and policy.
+  `holon::set_driver(pid, entity)` puts a participant in a world vehicle: its person leaves the
+  world (feet and reserve kept), its intent's drive axes (`avatar_intent::steer`, `throttle`,
+  `brake`, on the wire as `intent.steer` / `.throttle` / `.brake`; §18.6) replace the vehicle's
+  command, and it is where the vehicle is; out, the person stands beside it and the vehicle goes
+  back to its controller. The room's entities carry `driver`. Not yet: avatars that are vehicles,
+  a person driven by a navigator.
 - **Navigators avoid everything they don't drive.** `nav@1` takes every other entity as a foreign
   agent (position, velocity, radius), avatars included, and passes on the right
-  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`).
+  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`). **As built (OW4):**
+  `WorldVehicles::set_movers`, which a holon running the world fills with its avatars before
+  each step; a car on `nav@1` swings 3.1 m past a person standing in its lane and drives on,
+  where without avoiding it carries them 34 m down the road (`AriadneOneWorld`).
 
 ### 18.5 Clients: the same world, predicted where it is yours
 
@@ -1019,6 +1039,51 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   back to its driver before (a navigator, or nothing).
 - **An avatar can be a vehicle** where the world allows it: its avatar archetypes may include
   vehicles, and a participant picks one when it joins (WD4, WD6).
+- **Each thing driven has its own controls** (`cvc/ariadne/controls.h`). A control scheme per
+  kind, each with its own bindings (keys and mouse buttons, and a gamepad's buttons, triggers and
+  stick halves), so a car's keys are not a person's:
+
+  | Scheme | Actions (default keys) | Gamepad |
+  |---|---|---|
+  | walk | forward W/Up, backward S/Down, strafe left A/Left, strafe right D/Right, jump Space, mouse look on/off V, get in E (held 0.4 s) | walk on the left stick (as fast as it is pushed), look around on the right, jump A, mouse look on/off the right stick pressed, get in X (held) |
+  | car | throttle W/Up, reverse S/Down, brake Space, steer left A/Left, steer right D/Right (each ramps to the lock over 0.25 s), get out E (held) | steer on the left stick, throttle RT, brake LT, reverse LB, look around on the right stick, get out X (held) |
+  | boat | the car's, with no brake | the car's, with reverse on LT |
+
+  Getting in switches a participant to its vehicle's scheme (the archetype's `controls:`, car or
+  boat, by its plant when it names none), getting out back to walking. arigl keeps the bindings
+  where the Controls window changes them: walking's at `<viewer>.avatar.keys.<action>`, the
+  vehicles' at `<viewer>.controls.<scheme>.<action>`, a gamepad's at `<viewer>.pad.<scheme>.<action>`.
+  The Controls window lists each action's gamepad input beside its keys, with a Change of its own:
+  press the new button, pull the trigger or push the stick (`KeyBinding::pad_path`,
+  `Runtime::post_pad_press`; Escape keeps the old one).
+- **As built (OW6b):** a binding's `pad` names a gamepad's inputs (buttons A, B, X, Y by position,
+  LB, RB, the D-pad, the sticks pressed; triggers LT, RT; stick halves `LeftY-`, `LeftX+`, ...);
+  each has a deadzone (0.15 of a stick, 0.05 of a trigger), past which the rest of its travel is
+  0 to 1, and an action is its keys' value or its gamepad's, the larger (a key's steering ramps, a
+  stick's does not). cvcGL's `SdlGamepad` reads the first gamepad SDL finds (one plugged in later
+  within a second). Played on the gamepad, arigl faces where the camera looks, as under mouse
+  look; the right stick turns the camera (150 degrees a second at a full push, the chase camera
+  waiting while it does), and the get-in prompt names the gamepad's button.
+- **The drive axes are shares of the vehicle's envelope,** so one scheme drives any vehicle and
+  the server holds each to its own: `steer` in [-1, 1] of its lock (`max_steer`), `throttle` in
+  [-1, 1] of its `max_accel` (negative is reverse), `brake` in [0, 1] of its `max_decel`
+  (`holon::drive_command`). The brake stops the vehicle and never backs it up. Reverse brakes a
+  car still rolling forward (faster than 0.5 m/s), then backs it up; a boat has no brake, and its
+  reverse is the propeller astern.
+- **The walker jumps** (`avatar_intent::jump`, on the wire `intent.jump`) while it is held and
+  something is under its feet, at its controller's `jump_speed` (4 m/s by default: about 0.8 m);
+  the reserve pays the jump's kinetic energy.
+- **As built (OW6a):** the ask is a room leaf, `participants.<pid>.drive = "<seq>:<entity>"` (0
+  gets out; `request_drive`, the `room-drive` verb). The relay's `server_pump` answers each ask
+  once, in `drive_status` (`"<seq> ok"` or `"<seq> refused: <why>"`), and says what the
+  participant drives in `driving`; both are the relay's (`room_write_gate`). The rule
+  (`holon::get_in`): the vehicle's archetype is `drivable: true`, and the person stands within its
+  `reach:` (3 m by default) of its chassis box. The room's entities carry `drivable`, `reach` and
+  `controls`, so a client prompts for the nearest drivable vehicle in reach (`drive_target`, the
+  one ahead first): "E  Drive humvee", a ring filling as E is held. While the relay says a client
+  drives, its own pose (the vehicle's) is played out from the relay's samples, not predicted
+  (OW5 predicts it), its marker is hidden, and arigl's camera swings round behind the moving
+  vehicle.
 
 ### 18.7 Phases
 
@@ -1026,11 +1091,11 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 |---|---|---|
 | OW0 | This section. | S |
 | OW1 | **Built** (2026-11-19). **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it (§18.1: they hold). | M |
-| OW2 | **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
-| OW3 | **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
-| OW4 | **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
+| OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
+| OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
+| OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
-| OW6 | **Getting in and out of vehicles,** and avatars that are vehicles. | M |
+| OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme). OW6c: avatars that are vehicles, a first-person walk. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 
 **Open:**

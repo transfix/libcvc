@@ -1976,6 +1976,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.maximize = !m_->opt.hosted;        // a window's [^] (tvision's zoom box is its own)
   c.badge = true;                      // on the line under the picture
   c.rich_text = true;                  // a paragraph; Tab reaches each link, Enter activates it
+  c.button_selected = true;            // [>label<], bold
   return c;
 }
 
@@ -3141,11 +3142,16 @@ void FtxuiBackend::separator() {
   m.add(fx::separator());
 }
 
-bool FtxuiBackend::button(const char *label) {
+bool FtxuiBackend::button(const char *label) { return button_with(label, ButtonLook{}); }
+
+// §5.27 a chosen button is [>label<] in bold, as wide as [ label ], so choosing one moves nothing.
+// A picture (look.icon) isn't drawn: a button is its label in a terminal.
+bool FtxuiBackend::button_with(const char *label, const ButtonLook &look) {
   Impl &m = *m_;
   const std::string id = m.uid(std::string("b|") + label);
   const bool hit = m.activated(id);
-  fx::Element el = fx::text(std::string("[ ") + label + " ]");
+  fx::Element el = look.selected ? fx::text(std::string("[>") + label + "<]") | fx::bold
+                                 : fx::text(std::string("[ ") + label + " ]");
   if (m.has_focus(id))
     el = el | fx::inverted;
   m.leaf(id, true, el);
@@ -4765,6 +4771,7 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &, const RichTe
 }
 void FtxuiBackend::separator() {}
 bool FtxuiBackend::button(const char *) { return false; }
+bool FtxuiBackend::button_with(const char *, const ButtonLook &) { return false; }
 bool FtxuiBackend::menu_item_action(const char *) { return false; }
 bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }

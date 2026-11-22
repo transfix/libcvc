@@ -90,6 +90,7 @@ struct WorldGym::impl {
   gym_options opts;
   std::unique_ptr<cvc::app> app;
   std::unique_ptr<AppRuntime> rt;
+  std::vector<vehicle_start> fleets; // opts.fleets' entries, as the document declared them
   std::vector<std::string> warnings;
   gym_reward reward;
   gym_log log;
@@ -244,6 +245,22 @@ WorldGym::WorldGym(const std::string &document, gym_options options)
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   d.take(d.rt->take_warnings());
+  // The fleets it lays out at each reset, as the document declares them (reset clears them).
+  for (const std::string &name : d.opts.fleets) {
+    const std::vector<vehicle_start> &starts = d.vehicles().starts();
+    const auto it = std::find_if(starts.begin(), starts.end(),
+                                 [&](const vehicle_start &s) { return s.fleet == name; });
+    if (it == starts.end()) {
+      std::string named;
+      for (const vehicle_start &s : starts)
+        if (!s.fleet.empty())
+          named += (named.empty() ? "" : ", ") + s.fleet;
+      throw std::runtime_error(
+          "WorldGym: '" + document + "' has no fleet '" + name + "' (" +
+          (named.empty() ? std::string("it declares none") : "its fleets: " + named) + ")");
+    }
+    d.fleets.push_back(*it);
+  }
   d.put("status", "loaded");
 }
 
@@ -275,7 +292,7 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
   v.reseed(seed);
   v.set_wander(d.opts.wander);
   std::vector<entity_spec> agents = d.opts.agents;
-  if (agents.empty()) {
+  if (agents.empty() && d.fleets.empty()) {
     const vehicle_archetype &a = v.archetypes().front();
     const bool nav =
         std::find(a.controllers.begin(), a.controllers.end(), "nav@1") != a.controllers.end();
@@ -295,6 +312,16 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
     if (v.spawn(s, &why) == 0)
       throw std::runtime_error("WorldGym::reset: agent '" + s.name + "' (" + s.archetype +
                                "): " + why);
+  }
+  for (vehicle_start st : d.fleets) { // laid out now: the world's grid is there
+    st.seed += seed;
+    std::vector<std::string> w;
+    const std::size_t got = v.spawn_starts({st}, &w);
+    if (got < static_cast<std::size_t>(st.count))
+      throw std::runtime_error("WorldGym::reset: fleet '" + st.fleet + "': " +
+                               (w.empty() ? std::to_string(got) + " of its " +
+                                                std::to_string(st.count) + " vehicles spawned"
+                                          : w.front()));
   }
   for (const entity_info &e : v.entities()) {
     impl::body b;

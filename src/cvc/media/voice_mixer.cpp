@@ -18,9 +18,14 @@ voice_mixer::voice_mixer(int rate, int channels) : voice_mixer(rate, channels, p
 
 voice_mixer::voice_mixer(int rate, int channels, const params &p)
     : _rate(rate > 0 ? rate : 48000), _channels(channels > 0 ? channels : 1), _p(p) {
-  _p.min_delay_s = std::max(0.0, _p.min_delay_s);
+  normalize();
+}
+
+void voice_mixer::normalize() {
+  _p.min_delay_s = std::max({0.0, _p.min_delay_s, _floor_min});
   _p.max_delay_s = std::max(_p.max_delay_s, _p.min_delay_s);
-  _p.start_delay_s = std::min(std::max(_p.start_delay_s, _p.min_delay_s), _p.max_delay_s);
+  _p.start_delay_s =
+      std::min(std::max({_p.start_delay_s, _p.min_delay_s, _floor_start}), _p.max_delay_s);
 }
 
 voice_mixer::params voice_mixer::parameters() const {
@@ -30,12 +35,28 @@ voice_mixer::params voice_mixer::parameters() const {
 
 void voice_mixer::set_delay_floor(double min_s, double start_s) {
   std::lock_guard<std::mutex> lk(_mu);
-  _p.min_delay_s = std::max(_p.min_delay_s, min_s);
-  _p.max_delay_s = std::max(_p.max_delay_s, _p.min_delay_s);
-  _p.start_delay_s =
-      std::min(std::max({_p.start_delay_s, start_s, _p.min_delay_s}), _p.max_delay_s);
+  _floor_min = std::max(_floor_min, min_s);
+  _floor_start = std::max(_floor_start, start_s);
+  normalize();
   for (auto &kv : _peers)
     kv.second.target_s = std::max(kv.second.target_s, _p.min_delay_s);
+}
+
+void voice_mixer::set_params(const params &p) {
+  std::lock_guard<std::mutex> lk(_mu);
+  _p = p;
+  normalize();
+  for (auto &kv : _peers)
+    kv.second.target_s = std::min(std::max(kv.second.target_s, _p.min_delay_s), _p.max_delay_s);
+}
+
+void voice_mixer::reset_targets() {
+  std::lock_guard<std::mutex> lk(_mu);
+  for (auto &kv : _peers) {
+    kv.second.target_s = _p.start_delay_s;
+    kv.second.restart_s = -1.0;
+    kv.second.clean_s = 0.0;
+  }
 }
 
 double voice_mixer::seconds(std::size_t n) const {
@@ -73,12 +94,23 @@ void voice_mixer::push(const std::string &id, const float *s, std::size_t n, dou
   peer &p = at(id);
   if (p.underrun_at >= 0.0) {
     // It ran dry while playing and its audio is back: soon after, the audio was late (the buffer
-    // was too small for this link); long after, the peer had stopped sending.
-    if (now - p.underrun_at <= _p.late_window_s) {
-      p.target_s = std::min(_p.max_delay_s, p.target_s + _p.step_s);
+    // was too small for this link); long after, or after quiet audio, the peer had stopped
+    // sending. Late by what the device asked for and did not get meanwhile: a buffer that held
+    // that much more would have played through, so the target grows by it, in whole steps. Not
+    // by the time since: a device that pulled nothing in that time (a receiver whose own main
+    // thread stalled plays on from what it pulled before) missed nothing in it.
+    const double since = now - p.underrun_at;
+    if (since <= _p.late_window_s && !p.dry_quiet) {
+      if (_p.step_s > 0.0) {
+        const double late = std::max(seconds(p.short_by), _p.step_s);
+        const double steps = std::ceil(late / _p.step_s - 1e-9);
+        p.restart_s = p.target_s;
+        p.target_s = std::min(_p.max_delay_s, p.target_s + steps * _p.step_s);
+      }
       ++p.st.late_underruns;
     }
     p.underrun_at = -1.0;
+    p.short_by = 0;
   }
   p.buf.insert(p.buf.end(), s, s + n);
   const std::size_t cap = samples(_p.max_buffer_s);
@@ -108,19 +140,27 @@ bool voice_mixer::pull(float *out, std::size_t frames, double now) {
   const std::size_t fade = std::max<std::size_t>(
       1, static_cast<std::size_t>(std::llround(_p.fade_s * static_cast<double>(_rate))));
   const double pulled_s = static_cast<double>(frames) / static_cast<double>(_rate);
+  const float level_a = static_cast<float>(1.0 / (0.02 * _rate * _channels)); // 20 ms average
   bool any = false;
   std::lock_guard<std::mutex> lk(_mu);
   for (auto &kv : _peers) {
     peer &p = kv.second;
     const std::size_t target = samples(p.target_s);
     if (!p.playing) {
-      if (p.buf.empty())
+      if (p.buf.empty()) {
+        if (p.underrun_at >= 0.0) // dry, its audio not back yet
+          p.short_by += n;
         continue;
-      // It starts once its target is buffered, or once its audio has stopped coming (the tail of
-      // a talk spurt shorter than the target plays out rather than waiting for the next one).
+      }
+      // It starts once its target is buffered (after a late underrun, the target before it grew),
+      // or once its audio has stopped coming (the tail of a talk spurt shorter than the target
+      // plays out rather than waiting for the next one).
       const bool idle = p.last_push >= 0.0 && now - p.last_push > _p.late_window_s;
-      if (p.buf.size() < target && !idle)
+      const std::size_t start =
+          p.restart_s >= 0.0 ? samples(std::min(p.restart_s, p.target_s)) : target;
+      if (p.buf.size() < start && !idle)
         continue;
+      p.restart_s = -1.0;
       p.playing = true;
       p.fade_in = true;
       ++p.st.starts;
@@ -153,6 +193,7 @@ bool voice_mixer::pull(float *out, std::size_t frames, double now) {
         if (f < xf)
           v = v * w + p.cut[f * ch + c] * (1.0f - w);
         out[f * ch + c] += v * g;
+        p.level2 += (v * v - p.level2) * level_a;
       }
     }
     p.buf.erase(p.buf.begin(), p.buf.begin() + static_cast<std::ptrdiff_t>(k));
@@ -165,6 +206,8 @@ bool voice_mixer::pull(float *out, std::size_t frames, double now) {
     if (dry) {
       p.playing = false;
       p.underrun_at = now;
+      p.short_by = n - k;
+      p.dry_quiet = std::sqrt(p.level2) < _p.quiet_rms;
       p.clean_s = 0.0;
       ++p.st.underruns;
     } else {

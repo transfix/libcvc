@@ -42,18 +42,34 @@ struct sim_result {
   double target_s = 0.0;
 };
 
+// A main thread that stalls S seconds in every EVERY from FROM on (a browser's slow frames).
+struct stalls {
+  double s = 0.0, every = 0.0, from = 0.0;
+  // When the thread gets to what it had to do at T.
+  double release(double t) const {
+    if (every <= 0.0 || t < from)
+      return t;
+    const double in = std::fmod(t - from, every);
+    return in < s ? t - in + s : t;
+  }
+};
+
 // What one link looks like: talk spurts of SPURT_S seconds with GAP_S of silence between them
 // (the sender sends nothing through a silence), audio captured in blocks of BLOCK frames and
 // landing BASE + U(0, JITTER) after capture, plus SPIKE seconds more for a SPIKE_P share of them
 // (audio stuck behind a camera frame on the same connection). It lands in order (one TCP
 // connection), and the receiver sees it at its next frame (FRAME_S). A device pulls PULL frames
-// at a time.
+// at a time. The sender's main thread stalling (TX) sends what it captured in a stall at the
+// stall's end; the receiver's (RX) makes its device's pulls in a stall one pull at the stall's
+// end (a browser's worklet asks for what it played meanwhile), and what it received in the stall
+// is pushed after that.
 struct link_shape {
   double seconds = 30.0, spurt_s = 3.0, gap_s = 1.2;
   std::size_t block = 2048;
   double base = 0.03, jitter = 0.04, spike = 0.06, spike_p = 0.1;
   double frame_s = 1.0 / 60.0;
   std::size_t pull = 2048;
+  stalls tx, rx;
 };
 
 sim_result simulate(cvc::voice_mixer &mx, const link_shape &l, unsigned seed) {
@@ -70,13 +86,31 @@ sim_result simulate(cvc::voice_mixer &mx, const link_shape &l, unsigned seed) {
   for (double t = block_s; t <= l.seconds; t += block_s) {
     if (std::fmod(t, l.spurt_s + l.gap_s) > l.spurt_s)
       continue; // a silence: nothing sent
-    double at = t + l.base + l.jitter * u(rng) + (u(rng) < l.spike_p ? l.spike : 0.0);
+    double at = l.tx.release(t) + l.base + l.jitter * u(rng) + (u(rng) < l.spike_p ? l.spike : 0.0);
     at = std::max(at, last);
     last = at;
-    seen.push_back(std::ceil(at / l.frame_s) * l.frame_s);
+    at = std::ceil(at / l.frame_s) * l.frame_s;
+    const double rx_at = l.rx.release(at);
+    seen.push_back(rx_at == at ? at : rx_at + 1e-4); // after the stall's pull
   }
-  std::size_t next = 0;
+  std::size_t next = 0, owed = 0; // frames the device played in a receiver stall
+  double owed_at = 0.0;
   for (double t = 0.5 * pull_s; t < l.seconds + 1.0; t += pull_s) {
+    const double at = l.rx.release(t);
+    if (at != t) {
+      owed += l.pull;
+      owed_at = at;
+      continue;
+    }
+    if (owed > 0) {
+      for (; next < seen.size() && seen[next] <= owed_at; ++next) {
+        mx.push("a", b.data(), b.size(), seen[next]);
+        r.sent += l.block;
+      }
+      out.resize(owed);
+      mx.pull(out.data(), owed, owed_at);
+      owed = 0;
+    }
     for (; next < seen.size() && seen[next] <= t; ++next) {
       mx.push("a", b.data(), b.size(), seen[next]);
       r.sent += l.block;
@@ -137,6 +171,33 @@ TEST(VoiceMixer, SmallPacketsSmallDevice) {
   EXPECT_EQ(good.played, good.sent);
 }
 
+// Both main threads stall 150 ms at a time (a browser's slow frames), the sender every 400 ms and
+// the receiver every 370 (so how they line up drifts), once the voice plays, with a browser's
+// AudioWorklet shapes: 20 ms blocks, a 20 ms device. A late underrun grows the target by how late
+// the audio was, so it takes two of them; a step each takes five here (and took nine in headless
+// Chrome, 80 to 260 ms).
+TEST(VoiceMixer, StallingMainThreadsGrowTheTargetAtOnce) {
+  link_shape l;
+  l.block = 960;
+  l.pull = 960;
+  l.base = 0.005;
+  l.jitter = 0.01;
+  l.spike_p = 0.0;
+  l.spurt_s = l.seconds; // a steady tone
+  l.gap_s = 0.0;
+  l.tx = {0.15, 0.4, 3.0};
+  l.rx = {0.15, 0.37, 3.0};
+  for (unsigned seed : {1u, 2u, 3u}) {
+    cvc::voice_mixer mx(kRate, 1);
+    mx.set_delay_floor(l.pull / static_cast<double>(kRate) + 0.02,
+                       2.0 * l.pull / static_cast<double>(kRate)); // as the host does
+    const sim_result r = simulate(mx, l, seed);
+    EXPECT_GE(r.late_underruns, 1u) << seed;
+    EXPECT_LE(r.late_underruns, 2u) << seed;
+    EXPECT_LE(r.target_s, 0.30) << seed;
+  }
+}
+
 TEST(VoiceMixer, StartsAtTheTarget) {
   cvc::voice_mixer::params p;
   p.start_delay_s = 0.06;
@@ -158,8 +219,8 @@ TEST(VoiceMixer, StartsAtTheTarget) {
   EXPECT_NEAR(mx.buffered_s("a"), 0.05, 1e-9);
 }
 
-// A late underrun (its audio came back soon) grows the target; a talk spurt's end (nothing came
-// back) leaves it.
+// A late underrun (its audio came back soon) grows the target, by how late it was in whole steps;
+// a talk spurt's end (nothing came back) leaves it.
 TEST(VoiceMixer, OnlyLateUnderrunsGrowTheTarget) {
   cvc::voice_mixer::params p;
   p.start_delay_s = 0.04;
@@ -176,10 +237,12 @@ TEST(VoiceMixer, OnlyLateUnderrunsGrowTheTarget) {
   ASSERT_TRUE(mx.stats("a", st));
   EXPECT_EQ(st.underruns, 1u);
   EXPECT_FALSE(st.playing);
+  mx.pull(out.data(), out.size(), 0.07);
+  mx.pull(out.data(), out.size(), 0.09);
   mx.push("a", pkt.data(), pkt.size(), 0.10); // back 50 ms later: it was late
   ASSERT_TRUE(mx.stats("a", st));
   EXPECT_EQ(st.late_underruns, 1u);
-  EXPECT_NEAR(st.target_s, 0.06, 1e-9);
+  EXPECT_NEAR(st.target_s, 0.10, 1e-9) << "the device went 60 ms short: three steps more";
 
   // Play that out and stop sending: the end of a spurt.
   for (double t = 0.11; t < 0.70; t += 0.02)
@@ -188,7 +251,205 @@ TEST(VoiceMixer, OnlyLateUnderrunsGrowTheTarget) {
   ASSERT_TRUE(mx.stats("a", st));
   EXPECT_EQ(st.underruns, 2u);
   EXPECT_EQ(st.late_underruns, 1u);
+  EXPECT_NEAR(st.target_s, 0.10, 1e-9);
+}
+
+// One arrival far past the target: the sender stalls 200 ms while its voice plays 80 ms behind.
+// The one late underrun grows the target by all of it, and the next stall like it plays through.
+// A step a stall would have taken seven stalls, each a gap.
+TEST(VoiceMixer, OneLargeLateArrival) {
+  cvc::voice_mixer mx(kRate, 1);                      // target 80 ms, steps of 20
+  const std::vector<float> pkt = constant(960, 0.5f); // 20 ms, every 20 ms
+  std::vector<float> out(480);                        // a 10 ms device
+  cvc::voice_mixer::peer_stats st;
+  std::size_t owed = 0;           // packets captured while the sender stalled, sent when it is back
+  for (int i = 0; i < 400; ++i) { // 4 s in 10 ms ticks
+    const double t = 0.01 * i;
+    const bool stalled = (t >= 1.0 && t < 1.2) || (t >= 3.0 && t < 3.2);
+    if (i % 2 == 0) {
+      ++owed;
+      for (; !stalled && owed > 0; --owed)
+        mx.push("a", pkt.data(), pkt.size(), t);
+    }
+    mx.pull(out.data(), out.size(), t);
+    if (i == 199) { // just before the second stall
+      ASSERT_TRUE(mx.stats("a", st));
+      EXPECT_EQ(st.underruns, 1u);
+      EXPECT_EQ(st.late_underruns, 1u);
+      EXPECT_NEAR(st.target_s, 0.22, 1e-9) << "back 130 ms after it ran dry: seven steps";
+    }
+  }
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_EQ(st.underruns, 1u) << "the second stall played through";
+  EXPECT_NEAR(st.target_s, 0.22, 1e-9);
+}
+
+// A receiver whose own main thread stalled: its device asks for the stall's worth at once, the
+// buffer runs dry part way through it, and the audio that came in the stall is pushed just after.
+// The time since running dry is nothing; what the device went short of is how late the audio was.
+TEST(VoiceMixer, ADeviceThatPullsAStallAtOnce) {
+  cvc::voice_mixer mx(kRate, 1);                                                    // target 80 ms
+  const std::vector<float> pkt = constant(3840, 0.5f), late = constant(9600, 0.5f); // 80, 200 ms
+  std::vector<float> out(9600);
+  mx.push("a", pkt.data(), pkt.size(), 0.0);
+  mx.pull(out.data(), 480, 0.0);  // playing, 70 ms left
+  mx.pull(out.data(), 9600, 0.2); // 200 ms at once: 130 ms short
+  mx.push("a", late.data(), late.size(), 0.201);
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_EQ(st.late_underruns, 1u);
+  EXPECT_NEAR(st.target_s, 0.22, 1e-9) << "130 ms short: seven steps";
+}
+
+// After a late underrun the voice plays again once what it waited for before is back, not the
+// grown target: here the audio comes back at its own pace, and waiting for 220 ms of it would be a
+// gap of 140 ms more. The grown target is for the next talk spurt and for trimming.
+TEST(VoiceMixer, ALateVoicePlaysOnceItsOldTargetIsBack) {
+  cvc::voice_mixer mx(kRate, 1);                      // target 80 ms
+  const std::vector<float> pkt = constant(960, 0.5f); // 20 ms
+  std::vector<float> out(960);                        // a 20 ms device
+  double t = 0.0;
+  for (int i = 0; i < 4; ++i) // 80 ms
+    mx.push("a", pkt.data(), pkt.size(), 0.0);
+  for (int i = 0; i < 11; ++i, t += 0.02) // 4 pulls play it, 7 go 140 ms short
+    mx.pull(out.data(), out.size(), t);
+  cvc::voice_mixer::peer_stats st;
+  for (int i = 0; i < 4; ++i, t += 0.02) { // back, at its own pace
+    mx.push("a", pkt.data(), pkt.size(), t);
+    ASSERT_TRUE(mx.stats("a", st));
+    EXPECT_FALSE(st.playing) << i;
+    if (i < 3)
+      mx.pull(out.data(), out.size(), t);
+  }
+  EXPECT_NEAR(st.target_s, 0.22, 1e-9);
+  EXPECT_TRUE(mx.pull(out.data(), out.size(), t)) << "80 ms back: it plays";
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_TRUE(st.playing);
+  EXPECT_EQ(st.starts, 2u);
+}
+
+// The other way round: the receiver stalls just after its voice runs dry, so its device pulls
+// nothing (it plays on from what it pulled before), and the audio is there when it pulls again.
+// 100 ms passed, but the device went short only in the pull that ran dry.
+TEST(VoiceMixer, TimeTheDeviceDidNotPullIsNotLate) {
+  cvc::voice_mixer mx(kRate, 1);                       // target 80 ms
+  const std::vector<float> pkt = constant(3840, 0.5f); // 80 ms
+  std::vector<float> out(960);
+  mx.push("a", pkt.data(), pkt.size(), 0.0);
+  for (int i = 0; i < 5; ++i) // 4 pulls of 20 ms play it, the 5th runs dry, 20 ms short
+    mx.pull(out.data(), out.size(), 0.02 * i);
+  mx.push("a", pkt.data(), pkt.size(), 0.18); // 100 ms on, before the next pull
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_EQ(st.late_underruns, 1u);
+  EXPECT_NEAR(st.target_s, 0.10, 1e-9) << "one step, not six";
+}
+
+// Growth is in whole steps, at least one however soon the audio comes back, and stops at
+// max_delay_s.
+TEST(VoiceMixer, LateGrowthIsWholeStepsUpToTheMost) {
+  cvc::voice_mixer::params p;
+  p.start_delay_s = p.min_delay_s = 0.04;
+  p.max_delay_s = 0.10;
+  cvc::voice_mixer mx(kRate, 1, p);
+  const std::vector<float> pkt = constant(1920, 0.5f); // 40 ms
+  std::vector<float> out(48);                          // a 1 ms device
+  cvc::voice_mixer::peer_stats st;
+  double t = 0.0;
+  // Play PKT (and anything buffered) dry in 1 ms pulls, and pull on for AFTER seconds before
+  // the audio is back.
+  auto dry_then_back = [&](double after) {
+    mx.push("a", pkt.data(), pkt.size(), t);
+    do {
+      mx.pull(out.data(), out.size(), t);
+      t += 0.001;
+      ASSERT_TRUE(mx.stats("a", st));
+    } while (st.playing);
+    for (double until = t + after - 0.001; t < until; t += 0.001)
+      mx.pull(out.data(), out.size(), t);
+    mx.push("a", pkt.data(), pkt.size(), t);
+    ASSERT_TRUE(mx.stats("a", st));
+  };
+  dry_then_back(0.0); // back before the next pull, 1 ms short: a step
+  EXPECT_EQ(st.late_underruns, 1u);
   EXPECT_NEAR(st.target_s, 0.06, 1e-9);
+  dry_then_back(0.25); // 250 ms short: past the most
+  EXPECT_EQ(st.late_underruns, 2u);
+  EXPECT_NEAR(st.target_s, 0.10, 1e-9);
+}
+
+// A pause in speech: the sender sends its quiet mic for 0.8 s after the voice, then nothing, so the
+// voice runs dry on quiet audio, and the next talk spurt can come soon after. That is not late.
+TEST(VoiceMixer, APauseInSpeechIsNotLate) {
+  cvc::voice_mixer mx(kRate, 1); // target 80 ms
+  const std::vector<float> loud = constant(3840, 0.5f), hush = constant(960, 0.002f); // 80, 20 ms
+  std::vector<float> out(480);
+  mx.push("a", loud.data(), loud.size(), 0.0);
+  double t = 0.0;
+  for (int i = 0; i < 40; ++i, t += 0.02) { // the hold: 0.8 s of the quiet mic, in step
+    mx.push("a", hush.data(), hush.size(), t);
+    mx.pull(out.data(), out.size(), t);
+    mx.pull(out.data(), out.size(), t + 0.01);
+  }
+  for (int i = 0; i < 9; ++i, t += 0.01) // then nothing: it plays out and runs dry on the hush
+    mx.pull(out.data(), out.size(), t);
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_EQ(st.underruns, 1u);
+  EXPECT_FALSE(st.playing);
+  mx.push("a", loud.data(), loud.size(), t + 0.1); // the next spurt, 100 ms on
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_EQ(st.late_underruns, 0u);
+  EXPECT_NEAR(st.target_s, 0.08, 1e-9);
+}
+
+// Two minutes of speech on a clean link, sent as a conference sender sends it: while the voice is
+// on and for 0.8 s after (quiet), then nothing until it is on again. Every pause between 0.8 and
+// 1.1 s comes back within late_window_s; counted late, they grew the target 20 ms each, and by the
+// pause each would take it to the most.
+TEST(VoiceMixer, PausesInSpeechDoNotGrowTheTarget) {
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  std::vector<std::pair<double, double>> on; // when the voice is on
+  for (double t = 0.5; t < 120.0;) {
+    const double talk = 0.5 + 2.5 * u(rng), pause = 0.2 + 1.4 * u(rng);
+    on.push_back({t, t + talk});
+    t += talk + pause;
+  }
+  const auto voice_on = [&](double t) {
+    for (const auto &s : on)
+      if (t >= s.first && t < s.second)
+        return true;
+    return false;
+  };
+  const std::vector<float> loud = constant(960, 0.25f), hush = constant(960, 0.002f); // 20 ms
+  struct packet {
+    double at;
+    bool loud;
+  };
+  std::vector<packet> sent;
+  double send_until = -1.0, last = 0.0;
+  for (double t = 0.02; t < 120.0; t += 0.02) {
+    if (voice_on(t))
+      send_until = t + 0.8;
+    if (t > send_until)
+      continue; // a silence: nothing sent
+    last = std::max(last, t + 0.03 + 0.01 * u(rng));
+    sent.push_back({last, voice_on(t)});
+  }
+  cvc::voice_mixer mx(kRate, 1);
+  std::vector<float> out(480);
+  std::size_t next = 0;
+  for (double t = 0.005; t < 121.0; t += 0.01) {
+    for (; next < sent.size() && sent[next].at <= t; ++next)
+      mx.push("a", sent[next].loud ? loud.data() : hush.data(), 960, sent[next].at);
+    mx.pull(out.data(), out.size(), t);
+  }
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_GE(st.underruns, 20u) << "a dry end a pause past 0.8 s";
+  EXPECT_LE(st.late_underruns, 1u);
+  EXPECT_LE(st.target_s, 0.08);
 }
 
 // A spurt shorter than the target plays once its audio stops coming, instead of waiting for (and
@@ -328,6 +589,55 @@ TEST(VoiceMixer, DelayFloorRaisesTargets) {
   mx.push("b", pkt.data(), pkt.size(), 0.0);
   ASSERT_TRUE(mx.stats("b", st));
   EXPECT_NEAR(st.target_s, 0.10, 1e-9);
+}
+
+// set_params replaces the tunables, a UI's: the device's floor still holds, and the greatest
+// target caps the rest, known peers' targets included.
+TEST(VoiceMixer, SetParamsKeepsTheFloor) {
+  cvc::voice_mixer mx(kRate, 1);
+  mx.set_delay_floor(0.064, 0.10);
+  const std::vector<float> pkt = constant(960, 0.1f);
+  mx.push("a", pkt.data(), pkt.size(), 0.0); // target 0.10
+  cvc::voice_mixer::params p;
+  p.min_delay_s = 0.02;
+  p.start_delay_s = 0.05;
+  p.max_delay_s = 0.09;
+  mx.set_params(p);
+  const cvc::voice_mixer::params q = mx.parameters();
+  EXPECT_NEAR(q.min_delay_s, 0.064, 1e-9) << "the floor's";
+  EXPECT_NEAR(q.max_delay_s, 0.09, 1e-9);
+  EXPECT_NEAR(q.start_delay_s, 0.09, 1e-9) << "the floor's start, capped at the greatest";
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.09, 1e-9);
+  p.max_delay_s = 0.4;
+  p.start_delay_s = 0.2;
+  mx.set_params(p);
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.09, 1e-9) << "a known peer keeps its target inside the range";
+}
+
+// reset_targets puts every target back to the start; a peer holding much more is trimmed down to
+// it at its next pull, so the delay drops at once.
+TEST(VoiceMixer, ResetTargetsDropsTheDelay) {
+  cvc::voice_mixer::params p;
+  p.start_delay_s = 0.3;
+  cvc::voice_mixer mx(kRate, 1, p);
+  const std::vector<float> pkt = constant(960, 0.5f);
+  std::vector<float> out(480);
+  for (int i = 0; i < 15; ++i) // 300 ms
+    mx.push("a", pkt.data(), pkt.size(), 0.0);
+  mx.pull(out.data(), out.size(), 0.0); // plays, 300 ms behind
+  p.start_delay_s = 0.08;
+  mx.set_params(p);
+  cvc::voice_mixer::peer_stats st;
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.3, 1e-9) << "set_params alone leaves it";
+  mx.reset_targets();
+  mx.pull(out.data(), out.size(), 0.01);
+  ASSERT_TRUE(mx.stats("a", st));
+  EXPECT_NEAR(st.target_s, 0.08, 1e-9);
+  EXPECT_NEAR(st.buffered_s, 0.07, 1e-9) << "trimmed to the target, then 10 ms played";
 }
 
 } // namespace
