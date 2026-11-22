@@ -727,7 +727,14 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
       r.vehicle_markers.emplace_back(id, e.chassis);
       continue;
     }
-    const vehicle_shape shape = shape_of(ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed));
+    const cvc::physics::vehicle_desc desc = ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
+    const vehicle_shape shape = shape_of(desc);
+    // A fitted model's base, below its chassis. A plant's chassis rides on the grid's ground, so
+    // the base is that ground's depth under it. A `pose` entity's is wherever its poses put it, on
+    // the terrain of whatever placed it, which the grid may not match (flat, or coarser), and the
+    // view is rebuilt whenever an entity comes or goes: its model hangs its stand height below its
+    // chassis, where it stands when a pose gives no z.
+    const double base_z = e.posed ? -ari::stand_height(desc) : e.ground_z - e.z;
     ari::Scene one;
     one.nodes.push_back(
         vehicle_scene_node(id, a->look, shape, e.spec.color.data(), e.spec.color2.data()));
@@ -736,8 +743,8 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     if (!node)
       continue;
     if (fitted_look(a->look) &&
-        !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape,
-                      e.ground_z - e.z, e.spec.color.data(), warnings)) {
+        !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape, base_z,
+                      e.spec.color.data(), warnings)) {
       if (vehicle_model_state(sg.appContext(), *models, a->look, shape.length) ==
           vehicle_model_status::pending)
         r.vehicle_models_pending = true;
