@@ -57,7 +57,8 @@ struct room_entity {
   // Its wheels: the wheelbase, the track and a wheel's radius (m); a boat's are 0.
   std::array<double, 3> wheels{3.3, 1.82, 0.45};
   // The ground (or the water) under its chassis's centre, relative to that centre (m, negative):
-  // where a fitted model's base goes.
+  // where a fitted model's base goes. A `pose` entity's is its stand height below it
+  // (stand_height), wherever its poses put it.
   double base_z = -1.0;
   // The length a model look is fitted to (m): a boat's overall length (dyn_boat_desc::
   // length_overall), longer than its hull's box; 0 for the chassis's, size[0].

@@ -3263,6 +3263,57 @@ TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
 
 // Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
 // a jump, a time gone back or the first one taken at once; the same time again changes nothing.
+// A `pose` entity's model, as a relay sends it to its clients (conference::room_entities_of): its
+// base hangs the vehicle's stand height below its chassis (stand_height, where its chassis stands
+// when a pose gives no z), however high over the grid's ground its poses put it.
+TEST(AriadneWorldVehicles, APoseEntitysModelHangsItsStandHeightBelowIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_posed(v);
+  const auto step = [&](int n) {
+    for (int i = 0; i < n; ++i) {
+      v.before_step();
+      w->world().step();
+      v.after_step();
+    }
+  };
+  ASSERT_EQ(r.scene.vehicles.size(), 2u);
+  const double stand = stand_height(vehicle_desc_of(r.scene.vehicles[0]));
+  EXPECT_DOUBLE_EQ(stand, 0.45 + 0.47) << "the Humvee's: half its 0.9 m box, its 0.47 m wheels";
+  for (const double z : {6.0, 2.5}) {
+    entity_pose p;
+    p.x = 10.0;
+    p.y = 2.0;
+    p.z = z;
+    ASSERT_TRUE(v.set_pose(id, p));
+    step(2);
+    const entity_info e = entity(v, id);
+    ASSERT_TRUE(e.posed);
+    EXPECT_DOUBLE_EQ(e.z, z);
+    EXPECT_NEAR(e.ground_z, 0.0, 1e-9) << "the square's top";
+    const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+    ASSERT_EQ(wire.size(), 1u);
+    EXPECT_DOUBLE_EQ(wire[0].base_z, -stand) << "at z " << z << ", not the ground's depth under it";
+  }
+  // Without a z, it stands on the ground: its model's base is the ground.
+  entity_pose p;
+  p.x = 12.0;
+  p.y = 2.0;
+  ASSERT_TRUE(v.set_pose(id, p));
+  step(2);
+  const entity_info e = entity(v, id);
+  EXPECT_NEAR(e.z + conference::room_entities_of(v)[0].base_z, e.ground_z, 1e-9);
+}
+
 TEST(AriadneWorldVehicles, TimedPosesAreDrawnBetweenTheLastTwo) {
   REQUIRE_YAML();
   if (!jolt())

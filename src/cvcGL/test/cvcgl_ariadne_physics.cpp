@@ -1041,6 +1041,113 @@ void test_vehicle_poses_headless_and_drawn() {
   }
 }
 
+// A `pose` entity drawn as a fitted model: its model hangs the vehicle's stand height below its
+// chassis (stand_height, where it stands when a pose gives no z), however high over the grid's
+// ground its poses put it. An outside simulation's poses are on its own terrain, which the grid
+// may not have (a flat grid, or a coarser one), and the view is rebuilt whenever an entity comes
+// or goes: a base taken from the grid's ground under the chassis then floats or sinks the model by
+// whatever lay between the two when it was rebuilt.
+void test_vehicle_pose_model_base() {
+  std::printf("test_vehicle_pose_model_base\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ariadne_pose_model";
+  fs::create_directories(dir, ec);
+  const fs::path obj = dir / "block.obj";
+  { // a block on its ground plane, longest along x: a model the look fits to the chassis
+    std::ofstream out(obj);
+    for (int k = 0; k < 8; ++k)
+      out << "v " << (k & 1 ? 2.0 : -2.0) << " " << (k & 2 ? 1.0 : -1.0) << " "
+          << (k & 4 ? 1.5 : 0.0) << "\n";
+    const int f[12][3] = {{1, 3, 4}, {1, 4, 2}, {5, 6, 8}, {5, 8, 7}, {1, 2, 6}, {1, 6, 5},
+                          {3, 7, 8}, {3, 8, 4}, {1, 5, 7}, {1, 7, 3}, {2, 4, 8}, {2, 8, 6}};
+    for (const auto &t : f)
+      out << "f " << t[0] << " " << t[1] << " " << t[2] << "\n";
+  }
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [pose], look: { file: ")" +
+                          obj.generic_string() + R"(", fit: true } }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+  cvc::app app;
+  cvc::ariadne::register_world_block(app);
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+  r.scene.vehicles = rules.vehicles;
+  CHECK(rules.vehicles.size() == 1);
+  if (rules.vehicles.size() != 1)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  // Its chassis 6 m over the grid's ground (the square's top, z 0), then a second entity comes
+  // (the view is rebuilt) while the first is 2.5 m over it.
+  cvc::state &st = cvc::state::instance(app);
+  const auto pose = [&](int id, double x, double z) {
+    const std::string at = "entities." + std::to_string(id) + ".pose.";
+    st(at + "x").value(std::to_string(x));
+    st(at + "y").value("0");
+    st(at + "z").value(std::to_string(z));
+    st(at + "heading").value("0");
+  };
+  st("vehicles.spawn.controller").value("pose");
+  st("vehicles.spawn.request").value("1");
+  for (int i = 0; i < 10; ++i) {
+    if (i >= 1)
+      pose(1, -10.0, 6.0);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+  const double stand = cvc::ariadne::stand_height(cvc::ariadne::vehicle_desc_of(rules.vehicles[0]));
+  CHECK(near(stand, 0.45 + 0.47, 1e-12)); // the Humvee's: half its 0.9 m box, its 0.47 m wheels
+  const auto model_z = [&](const std::string &id) {
+    std::shared_ptr<cvc::gl::GraphicsNode> g = sg.getGraphics(id);
+    std::shared_ptr<cvc::gl::GraphicsNode> m = g ? g->findChildByName(id + "_mesh") : nullptr;
+    return m ? m->getTransform()->GetElement(2, 3) : std::nan("");
+  };
+  CHECK(out.world->vehicles()->size() == 1);
+  if (out.world->vehicles()->size() == 1) {
+    const cvc::ariadne::entity_info e = out.world->vehicles()->entities()[0];
+    CHECK(e.posed && near(e.z, 6.0, 1e-9) && near(e.ground_z, 0.0, 1e-9));
+  }
+  CHECK(near(model_z("vehicle_1"), -stand, 1e-9));
+  st("vehicles.spawn.request").value("2");
+  for (int i = 0; i < 10; ++i) {
+    pose(1, -10.0, 2.5);
+    pose(2, 10.0, 4.0);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+  CHECK(out.world->vehicles()->size() == 2);
+  CHECK(near(model_z("vehicle_1"), -stand, 1e-9));
+  CHECK(near(model_z("vehicle_2"), -stand, 1e-9));
+}
+
 // Every plant in a scene world (L2b): a Jolt Humvee, the dynamic single track, the dynamic four
 // wheels and the kinematic bicycle, spawned on the keys and run by nav@1 on a hill, reach the same
 // state headless and drawn, bit for bit; and the drawn four-wheeler's wheels are posed where its
@@ -1875,6 +1982,7 @@ int main() {
   test_vehicles_drawn();
   test_vehicle_intents_headless_and_drawn();
   test_vehicle_poses_headless_and_drawn();
+  test_vehicle_pose_model_base();
   test_every_plant_headless_and_drawn();
   test_boats_drawn();
   test_fit_vehicle_geometry();

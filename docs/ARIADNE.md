@@ -2202,7 +2202,7 @@ scene:
     | Key, under `entities.<id>.pose` | What it is |
     |---|---|
     | `x`, `y` | world metres: its chassis's centre (as `entities.<id>.x`), or with `ref: rear` its rear axle (as a spawn's `at:`). Both are needed |
-    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands |
+    | `z` | its chassis's centre; not given: standing on the ground under it, as a kinematic box stands (`stand_height`: half its box's height plus its wheel radius). Its model is drawn that stand height below its chassis wherever its `z` puts it, so an outside simulation's poses keep its wheels on that simulation's terrain, whatever the grid's ground |
     | `heading`, `pitch`, `roll` | rad: its rotation is Rz(heading) Ry(pitch) Rx(roll); pitch + nose down, roll + right side down |
     | `matrix` | 16 numbers, row-major (as a node's `matrix` key): its translation and rotation, in place of the six above |
     | `speed` | m/s along its heading: listed as its speed, and its wheels roll at it |
@@ -2741,13 +2741,16 @@ running tet-mesh or Poisson solve to finish.
 **`type: volume_slice`** ([`volume_slice_nodes.h`](../inc/cvc/gl/ariadne/volume_slice_nodes.h),
 [`VolumeSliceNode.h`](../inc/cvc/gl/VolumeSliceNode.h)) is one axis-aligned plane of a volume: a
 textured quad coloured through the node's transfer function, as VolumeGridRover's slice views and
-the classic three-plane orthoslicer show a volume. It reads `source: { file }` or `{ sdf }` (with
-`fit:`) like a `volren` node.
+the classic three-plane orthoslicer show a volume. It cuts the volume the app holds
+(`source: { data: NAME }`, `{ state: KEY }` or `{ node: ID }`), its voxels shared, and follows it,
+as a `volren` does (§5.17, Scene nodes); it publishes it as `<node>.volume`. It still reads
+`source: { file }` or `{ sdf }` (with `fit:`) itself, until those become `data:` entries
+(docs/roadmap/DATA_FROM_STATE_TREE.md, D6).
 
 ```yaml
 - node: ct_z
   type: volume_slice
-  source: { file: head.rawiv }
+  source: { data: head }           # a data: entry the app loads (head: head.rawiv)
   axis: z                          # x | y | z, or a view's name: xy (z), xz (y), zy (x)
   index: 40                        # the plane along the axis; -1 (the default) the middle one
   transfer_function: { preset: grayscale }
@@ -4130,6 +4133,20 @@ the document's link points at another dataset. What it drew before goes, and so 
 - a mesh or a height field becomes one mesh node;
 - a volume becomes a volume node.
 
+A `volren`, a `volume_slice` and a `volume_grid` are no such group: each shows the volume itself and
+follows it (docs/roadmap/DATA_FROM_STATE_TREE.md, `node_data.h`). Their source is
+`{ data: NAME, item }` (item `volume` by default), `{ state: KEY }` (a program's or a filter's
+key) or `{ node: ID, key }` (another node's published volume: `volume`, or a `volume_grid`'s
+`grid.volume`). The node keeps where it looks in `<node>.source.volume` (a program may point it
+elsewhere) and says in `<node>.source.status` what it waits for, or why it shows nothing. It
+publishes the volume it shows as `<node>.volume` (a grid: `grid.volume`), the very pointer the key
+held: no copy, so the main scene's volren and a grid's planes over one dataset show one volume, and
+both redraw when a new one is put there (`data-put`, below) or the dataset loads again. A volren's
+transfer function is seeded once its first volume arrives, since its `isosurfaces:` are values on
+that volume's range.
+[`volume_shared.ari`](../examples/ariadne/documents/volume_shared.ari) shows the bunny in a volren
+and a grid, and smooths it with `volume.filter`.
+
 `tint: satellite` colours each vertex of what it drew other than the terrain (a city's buildings) by
 the dataset's aerial image under it, over a grey floor so shaded facades still read (0.3 + 0.7 of the
 photo), as the nav demos tinted Austin.
@@ -4145,6 +4162,11 @@ or host can write as well.
 - `(data-generate NAME GENERATOR [PARAMS])` points `data.NAME` at a made dataset, PARAMS a JSON
   object string: `(data-generate "world" "generated_world" "{\"seed\": 7}")`.
 - `(data-reload NAME)` loads it again (a made dataset is made again from its params).
+- `(data-put NAME ITEM VALUE)` puts VALUE, a data object (a `volume.filter` result), as the
+  dataset's output ITEM and raises its rev, so every node viewing `NAME` follows it; it returns
+  the store path. A `state-data-set` of `data.NAME.ITEM` would make a key under the document's link
+  instead. ITEM is one word and not one of the store's own keys (`status`, `rev`, ...). Reloading
+  the dataset makes it again from its source.
 - `(data-status NAME)` returns its status.
 - `(data-files NAME)` lists its file paths.
 - `(data-file NAME PATH)` returns one file's bytes, or nil.
