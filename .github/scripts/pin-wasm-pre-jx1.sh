@@ -21,6 +21,9 @@ PLATFORM="${2:?usage: pin-wasm-pre-jx1.sh PREFIX PLATFORM}"
 # cvc.5, master's FinishEveryRender build. Its JS-exceptions wasm bundle is from 2026-11-17.
 # imagemagick is pinned ahead of its republish (JX1 bumped it, but its wasm package.files fix
 # came later): cvc.23 is the newest JS-exceptions bundle on wasm and wasm-mt.
+# numpy-cp312 went to -fwasm-exceptions later, in cvc.7 (2026-11-21, for JX2's #1409); against
+# libcvc its _multiarray_umath and _pocketfft_umath need __cpp_exception. cvc.6 is the last
+# JS-exceptions bundle on wasm and wasm-mt, the one ariglx-web linked through #1417.
 PINS=(
   boost==1.86.0+cvc.8
   datachannel-wasm==0.4.0+cvc.1
@@ -31,6 +34,7 @@ PINS=(
   lua==5.4.9+cvc.1
   mujoco==4.0.0+cvc.3
   mujoco3==3.17.0+cvc.2
+  numpy-cp312==2.4.6+cvc.6
   qhull==8.0.2+cvc.2
   tiff==4.7.0+cvc.3
   vtk==9.5.0+cvc.5
