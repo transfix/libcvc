@@ -2483,6 +2483,7 @@ scene:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.scene.clock.hz, 60.0);
+  EXPECT_TRUE(r.schema_issues.empty()) << "the schema takes hz too";
   for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
     LoadResult b = fresh_load(
         std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
@@ -2492,6 +2493,7 @@ scene:
     for (const std::string &w : b.warnings)
       warned = warned || w.find("clock: hz") != std::string::npos;
     EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+    EXPECT_TRUE(has_schema_issue(b, "/scene/clock/hz")) << bad;
   }
 }
 

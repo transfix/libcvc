@@ -2508,7 +2508,8 @@
             "speed_key": {"$ref": "#/$defs/string"},
             "paused_key": {"$ref": "#/$defs/string"},
             "time_key": {"$ref": "#/$defs/string"},
-            "tick_key": {"$ref": "#/$defs/string"}
+            "tick_key": {"$ref": "#/$defs/string"},
+            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."}
           },
           "patternProperties": {"^x-": true},
           "additionalProperties": false
@@ -2640,7 +2641,8 @@
             "speed_key": {"$ref": "#/$defs/string"},
             "paused_key": {"$ref": "#/$defs/string"},
             "time_key": {"$ref": "#/$defs/string"},
-            "tick_key": {"$ref": "#/$defs/string"}
+            "tick_key": {"$ref": "#/$defs/string"},
+            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."}
           },
           "patternProperties": {"^x-": true},
           "additionalProperties": false
