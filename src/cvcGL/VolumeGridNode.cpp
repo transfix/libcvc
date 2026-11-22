@@ -18,6 +18,7 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/state/state.h>
@@ -126,6 +127,7 @@ VolumeGridNode::VolumeGridNode(cvc::app &ctx, const std::string &statePath, cons
   cvc::params_describe_state<cvc::volume_grid_params>(getState("grid"));
   cvc::params_describe_state<cvc::volume_grid_display_params>(getState("grid.display"));
   cvc::params_describe_state<cvc::volume_grid_source_params>(getState("grid.source"));
+  m_contours = std::make_unique<VolumeGridContours>(*this);
 }
 
 VolumeGridNode::~VolumeGridNode() = default;
@@ -181,6 +183,7 @@ void VolumeGridNode::ensureChildren() {
   }
   m_surfaces = addGraphicsChild<NullGraphicNode>("surfaces");
   m_surfaces->setVisible(false); // with the planes: an empty group's box frames no view
+  m_contours->ensureChildren();  // after the planes' own overlays, so it draws over them
   // The grey display's model: the planes colour through it instead of the transfer function.
   getState("grey_transfer_function").value(cvc::tf::to_string(cvc::tf::model::preset("grayscale")));
   cvc::job_keys(app().root(), getState("grid").fullName()).idle();
@@ -219,6 +222,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
   m_editor.clear_selection();
   m_gestures.reset();
   m_band = cvc::grid_pick_outcome{};
+  m_contours->setFrame(cvc::grid_frame_of(g));
 
   // The volume the transfer function's histogram is taken over: the app's own, published as is.
   if (vol) {
@@ -393,6 +397,7 @@ cvc::volume_grid_session VolumeGridNode::session() {
   }
   s.transfer_function = getState("transfer_function").value();
   s.classes = m_editor.classes();
+  s.contours = m_contours->contours();
   return s;
 }
 
@@ -403,15 +408,16 @@ void VolumeGridNode::applySession(const cvc::volume_grid_session &s, const std::
     getState("transfer_function").value(s.transfer_function);
   m_editor.set_classes(s.classes);
   publishPoints(true);
+  m_contours->setContours(s.contours, from);
   ++m_keysVersion;
   status("applied the session from " + from);
 }
 
 // grid.session, rebuilt when what it holds changed: the keys, the classes, the transfer function.
 void VolumeGridNode::publishSession() {
-  const std::string sig = std::to_string(m_editor.version()) + '|' +
-                          std::to_string(m_keysVersion.load()) + '|' +
-                          getState("transfer_function").value();
+  const std::string sig =
+      std::to_string(m_editor.version()) + '|' + std::to_string(m_contours->editor().version()) +
+      '|' + std::to_string(m_keysVersion.load()) + '|' + getState("transfer_function").value();
   if (sig == m_sessionSignature)
     return;
   m_sessionSignature = sig;
@@ -437,7 +443,7 @@ void VolumeGridNode::handleStateChanged(const std::string &child) {
     else if (k == "view" || k == "tool" || k == "classes.current" || starts_with(k, "slice.") ||
              starts_with(k, "display.") || starts_with(k, "source."))
       ++m_keysVersion;
-    else
+    else if (!m_contours || !m_contours->stateChanged(k)) // null while constructing
       read = false;
     if (read)
       if (SceneGraph *sg = getSceneGraph())
@@ -646,6 +652,34 @@ void VolumeGridNode::consumePick() {
   p.ijk[static_cast<int>(p.axis)] = m_index[static_cast<int>(p.axis)]; // on the plane shown
   cvc::parse_grid_pick_mods(field("mods"), p);
   cursorFrom("grid.pick");
+  if (m_params.tool == cvc::grid_tool::contours) {
+    // Contours take where the pick met the plane, not a voxel: the plane coordinates of the point
+    // (the voxel's centre for a pick that named only its voxel).
+    double w[3], local[3];
+    const char *coords[3] = {"x", "y", "z"};
+    bool at = true;
+    for (int c = 0; c < 3; ++c)
+      at = at && cvc::param_detail::parse_double(field(coords[c]), w[c]);
+    if (at) {
+      worldToLocal(w, local);
+    } else {
+      const std::int64_t v[3] = {p.ijk[0], p.ijk[1], p.ijk[2]};
+      m_source->grid().voxel_center(v, local);
+    }
+    const std::pair<int, int> ru = cvc::grid_plane_axes(p.axis);
+    cvc::contour_pick cp;
+    cp.phase = static_cast<cvc::contour_pick::phase_t>(p.phase);
+    cp.axis = p.axis;
+    cp.index = m_index[static_cast<int>(p.axis)];
+    cp.r = local[ru.first];
+    cp.u = local[ru.second];
+    cp.inside = p.inside;
+    cp.shift = p.shift;
+    cp.ctrl = p.ctrl;
+    cp.alt = p.alt;
+    m_contours->pick(cp);
+    return;
+  }
 
   long long current = -1;
   cvc::param_detail::parse_integer(getState("grid.classes.current").value(), current);
@@ -673,6 +707,8 @@ void VolumeGridNode::runRequest(const std::string &request) {
   const std::string arg = sp == std::string::npos ? std::string() : trim(line.substr(sp));
   const cvc::slice_grid &g = m_source->grid();
   try {
+    if (m_contours->request(cmd, arg, m_params.tool == cvc::grid_tool::contours))
+      return;
     if (cmd == "delete_selected") {
       const std::size_t n = m_editor.delete_selected();
       status("deleted " + std::to_string(n) + " point" + (n == 1 ? "" : "s"));
@@ -714,6 +750,7 @@ bool VolumeGridNode::tick() {
   }
   followSources(); // the app's volume, points and session, as they change
   if (!m_source) {
+    m_contours->tick(m_index); // its keys and its source: the curves wait for the planes
     publishSession();
     return false;
   }
@@ -767,6 +804,7 @@ bool VolumeGridNode::tick() {
     rebuildOverlays();
     changed = true;
   }
+  changed = m_contours->tick(m_index) || changed;
   for (const auto &s : m_slices)
     changed = s->tick() || changed;
   return changed;

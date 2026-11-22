@@ -1,0 +1,60 @@
+# The browser smoke test's volume grid contours (src/arigl/web/test/arigl_web_smoke.mjs): the
+# volume_grid component over a volume_grid node on the bunny's 32^3 signed distance field. Once the
+# planes are up it traces the field's zero level on every other z plane (the node's trace request)
+# and auto_tile tiles the curves as a sliced task on the page; then it draws with the contours tool
+# (three clicks as a slice view writes them, a down and an up a frame apart, on plane 16) and closes
+# the curve with a fourth on its first point. Once the tile is done and the curve closed it prints
+# one line the test waits for: the component, the node, its tracer, its tiler and its gestures in
+# wasm. The app makes the volume (data: generate: sdf) and the grid follows it, as natively.
+meta: {min_libcvc: 4.0.0}
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
+import:
+  - cvc://components/volume_grid.ari
+init: |
+  (begin (state-set "graphics.root.children.grid.grid.request" "trace 0 3 27 2")
+         (state-set "vgc.step" "0"))
+# The clicks name voxels (i, j on plane 16), as a slice view's pick inside the volume does; the
+# fourth lands on the first point and closes the curve. They start once the tile is done (bunny's
+# row counts its triangles), each object's curves then drawn into `drawn` (object 1).
+on_tick: |
+  (let ((g "graphics.root.children.grid.grid.")
+        (step (int (state-get "vgc.step")))
+        (tris (state-get "graphics.root.children.grid.grid.objects.0.triangles")))
+    (if (and (< step 8) (!= tris "") (!= tris "-")
+             (= (state-get (str-concat g "info.dims")) "32 32 32"))
+        (let ((p (nth (list (list 8 8) (list 24 8) (list 16 24) (list 8 8)) (int (/ step 2)))))
+          (state-set (str-concat g "objects.current") "1")
+          (state-set (str-concat g "pick.phase") (if (= (% step 2) 0) "down" "up"))
+          (state-set (str-concat g "pick.i") (str (car p)))
+          (state-set (str-concat g "pick.j") (str (car (cdr p))))
+          (state-set (str-concat g "pick.k") "16")
+          (state-set (str-concat g "pick.axis") "z")
+          (state-set (str-concat g "pick.seq") (str (+ step 1)))
+          (state-set "vgc.step" (str (+ step 1))))
+        (if (and (= step 8)
+                 (= (state-get (str-concat g "objects.1.curves")) "1"))
+            (begin
+              (print (str-concat "volume_grid_contours: " (state-get (str-concat g "info.dims"))
+                                 ", " (state-get (str-concat g "tile.status"))
+                                 ", " (state-get (str-concat g "status"))))
+              (state-set "vgc.step" "9")))))
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vgc, title: Volume grid, view_size: 240 }
+    pos: [8, 8]
+    size: [900, 480]
+scene:
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }
+      view: xy
+      tool: contours
+      slice: { z: 16 }
+      objects:
+        - { name: bunny, color: [0.95, 0.7, 0.3] }
+        - { name: drawn, color: [0.3, 0.8, 1.0] }
+      contour: { auto_tile: true }

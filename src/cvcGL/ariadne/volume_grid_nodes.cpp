@@ -10,12 +10,15 @@
 
 // The `volume_grid` scene node type. See inc/cvc/gl/ariadne/volume_grid_nodes.h.
 
+#include "volume_grid_contour_props.h"
+
 #include <algorithm>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
@@ -213,6 +216,7 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
   g->setScope(prefix);
   g->ensureChildren();
   seed_keys(*g, n, volume, points, session, warnings);
+  const std::string contour_data = seed_volume_grid_contour_props(app, prefix, *g, n, warnings);
 
   // The views find the planes by their tags: the grid's id (a view showing this grid alone) and
   // their own name (slice_xy ...).
@@ -246,6 +250,22 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
     if (std::shared_ptr<VolumeGridNode> node = weak.lock())
       node->tick();
   });
+  // The contours' tile (running, asked for, or due once the contours load) is work in flight too.
+  {
+    cvc::app *ap = &app;
+    out.pending_work.push_back([weak, ap, contour_data]() {
+      const std::shared_ptr<VolumeGridNode> node = weak.lock();
+      if (!node)
+        return false;
+      if (!contour_data.empty()) {
+        const std::string st = ari::data_status(*ap, contour_data);
+        if (st == "fetching" || st == "unpacking" || st == "generating" || st == "decoding")
+          return true;
+      }
+      // A request waits for the volume: a document's trace or tile is work to come.
+      return node->contours().busy() || !node->getState("grid.request").value().empty();
+    });
+  }
   // While a dataset the node follows is loading, the scene has work in flight.
   std::vector<std::string> loading;
   for (const data_source *s : {&volume, &points, &session})
