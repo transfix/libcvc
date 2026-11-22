@@ -98,16 +98,26 @@ jobs:
         run: |
           export PATH="$RUNNER_TEMP/cvcpkg-bin:/opt/cvc-wasm/cmake-cvcpkg/bin:$PATH"
           echo "cvcpkg: $(command -v cvcpkg), $(cvcpkg --version)"
+          # wasm32: what cvcpkg's wasm bundles are tagged now. Under x86_64 the catalog has only old
+          # ones (imagemagick 7.1.1+cvc.22, assimp cvc.6) that need a wasm cmake, so every install
+          # here failed without a word, and the gallery linked whatever this runner's prefix held.
+          # Until JX2 the pin script put imagemagick there; after it, the prefix still held the
+          # pin's JS-exceptions cvc.23, and the first JX2 deploy (d6b0bb83) failed to link
+          # MagickCore's __resumeException. A package that fails now says so.
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick; do
             echo "=== $p ==="
-            cvcpkg install "$p" \
-              --prefix "$CVC_WASM_DEPS" \
-              --platform wasm --arch x86_64 --config release --link static \
-              --no-fallback-to-source 2>&1 | tail -3 || echo "  (skipped: $p)"
+            if ! out=$(cvcpkg install "$p" \
+                         --prefix "$CVC_WASM_DEPS" \
+                         --platform wasm --arch wasm32 --config release --link static \
+                         --no-fallback-to-source 2>&1); then
+              printf '%s\n' "$out" | tail -5
+              echo "::warning::cvcpkg could not install $p for wasm; the build gets whatever copy this prefix already holds, if any"
+              continue
+            fi
+            printf '%s\n' "$out" | tail -3
           done
           # pegtl (header-only) is cvc's build-only state_exec grammar engine, and
-          # cvc's configure REQUIRES it, so it may not be skipped. Its wasm bundle
-          # is tagged wasm32, not x86_64 like the older bundles above.
+          # cvc's configure REQUIRES it, so it may not be skipped.
           echo "=== pegtl ==="
           cvcpkg install pegtl --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
