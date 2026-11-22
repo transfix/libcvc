@@ -35,6 +35,7 @@
 
 namespace cvc {
 class app;
+class height_field;
 namespace physics {
 class world;
 class flow_velocity;
@@ -557,6 +558,9 @@ public:
   // and on dynamic4w the height its vehicles ride from. False as kinematics() is, for one on
   // neither the `dynamic` nor the `dynamic4w` plant.
   bool dynamics(std::uint64_t id, dynamic_drive &out) const;
+  // The ground the vehicles drive on (m) at (x, y): vehicle_ground_height of the world's grid and
+  // terrain.
+  double ground_height(double x, double y) const;
   // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
   // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a
   // restart: WorldGym::reset), held to the nearest whole number of physics steps (the status says
@@ -612,6 +616,13 @@ private:
   struct impl;
   std::unique_ptr<impl> _impl;
 };
+
+// The ground a vehicle drives on at (x, y), in world metres: the world's terrain where it has one
+// (the physics collider's own heights), else the navigator's grid's heights between its samples,
+// else 0. WorldVehicles' plants drive on it; a client running one of its vehicles drives on the
+// same (OW5g: SceneWorld::vehicle_ground gives the two).
+double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
+                             double x, double y);
 
 } // namespace ariadne
 } // namespace cvc

@@ -20,7 +20,7 @@
 #include <cstdint>
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
-#include <cvc/ariadne/section.h>     // section_stamp
+#include <cvc/ariadne/section.h> // section_stamp
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
@@ -31,6 +31,7 @@
 #include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/pose_tracker.h>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -495,6 +496,12 @@ public:
   // sample it is not within reconcile_tol of starts it again from the sample, with the yaw rate,
   // steering and driver it had predicted for that tick (dynamic_vehicle_model::at).
   bool predict_vehicle(const std::string &pid, const dynamic_drive &drive);
+  // The ground a dynamic plant's vehicle is predicted on (OW5g): the ground the relay's vehicles
+  // drive on, as this client has it (world_replica::ground: the same document's grid and terrain);
+  // empty: flat. REVISION names it (a new one rebuilds each predicted model on it, its state
+  // kept); 0 is none. client_pump sets it from its world_replica.
+  void set_vehicle_ground(std::function<double(double, double)> ground, std::uint64_t revision);
+  std::uint64_t vehicle_ground_revision() const { return _vground_rev; }
   // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now (false for the
   // other plant's).
   bool predicts_vehicle(const std::string &pid) const;
@@ -662,6 +669,9 @@ private:
   cvc::world_clock _clock; // declared before _driver: _driver references it
   cvc::clock_driver _driver;
   std::map<std::string, participant> _participants;
+  // The ground dynamic plants' vehicles are predicted on (set_vehicle_ground), and its revision.
+  std::function<double(double, double)> _vground;
+  std::uint64_t _vground_rev = 0;
   // CLIENT: pid -> the newest tick seen before it left (remove_participant), until a sample of it
   // is applied; at most kMaxLeft of them (a client sees a fresh pid per launch of every peer).
   std::map<std::string, std::uint64_t> _left;

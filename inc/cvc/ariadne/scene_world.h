@@ -277,6 +277,12 @@ public:
   std::vector<std::string> world_nodes(const std::string &name) const;
   // The generated_world nodes this world runs (from_scene), in the scene's order.
   std::vector<std::string> generated_nodes() const;
+  // The ground the scene's vehicles drive on in the world on (OW5g): its first node's grid (the
+  // world block's cell, 2 m without one, and half) and its terrain, when the node makes one (a
+  // generated world's). vehicle_ground_height (world_vehicles.h) reads the two as WorldVehicles
+  // does. Either may be null (no grid yet, no terrain); a grid is made once per world revision.
+  void vehicle_ground(std::shared_ptr<const cvc::nav::world_grid> &grid,
+                      std::shared_ptr<const cvc::height_field> &terrain);
   // The world on made again with `seed`, when it is a generated world this world runs (from_scene)
   // and that is not its seed now: each of its generated_world nodes' seed key is set and its
   // request key asks for a new world, which the next sync() makes. False when there is nothing to
@@ -351,6 +357,10 @@ public:
 
 private:
   SceneWorld();
+  // The world on's first grid and the world its node makes (its terrain, its roads), as the
+  // vehicles take them.
+  void ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> &grid,
+                          std::shared_ptr<const cvc::world::world_geometry> &made);
   // The scene.world keys, when the world on changed since the last time (or `force`).
   void publish_worlds(bool force);
   // The wind's field after the scene wind's keys (bind_wind) and the weathers' storms.

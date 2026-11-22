@@ -1243,15 +1243,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     std::shared_ptr<const cvc::nav::world_grid> g;
     std::shared_ptr<const cvc::world::world_geometry> made; // its roads, for the spawn points
     std::vector<ph::body_id> ground = d.ground_bodies();
-    if (const impl::world_def *w = d.find_world(d.on)) {
-      const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
-      for (const std::string &node : w->nodes) {
-        if (!g)
-          g = grid(node, cell, d.grid_half, nullptr);
-        if (!made)
-          made = world_geometry(node);
-      }
-    }
+    ground_of_world_on(g, made);
     if (g != d.ground_grid || !d.ground_given) {
       d.ground_grid = g;
       d.ground_given = true;
@@ -1538,6 +1530,29 @@ bool SceneWorld::regenerate_world(double seed) {
 std::vector<std::string> SceneWorld::world_nodes(const std::string &name) const {
   const impl::world_def *w = _impl->find_world(name);
   return w ? w->nodes : std::vector<std::string>{};
+}
+
+void SceneWorld::ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> &g,
+                                    std::shared_ptr<const cvc::world::world_geometry> &made) {
+  impl &d = *_impl;
+  g.reset();
+  made.reset();
+  if (const impl::world_def *w = d.find_world(d.on)) {
+    const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
+    for (const std::string &node : w->nodes) {
+      if (!g)
+        g = grid(node, cell, d.grid_half, nullptr);
+      if (!made)
+        made = world_geometry(node);
+    }
+  }
+}
+
+void SceneWorld::vehicle_ground(std::shared_ptr<const cvc::nav::world_grid> &grid,
+                                std::shared_ptr<const cvc::height_field> &terrain) {
+  std::shared_ptr<const cvc::world::world_geometry> made;
+  ground_of_world_on(grid, made);
+  terrain = made ? made->terrain() : nullptr;
 }
 
 std::vector<std::string> SceneWorld::generated_nodes() const {

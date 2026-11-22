@@ -22,6 +22,7 @@
 #include <cvc/physics/body.h>
 #include <cvc/physics/dyn_4w_plant.h>
 #include <cvc/physics/dyn_bike_plant.h>
+#include <functional>
 #include <memory>
 #include <variant>
 
@@ -41,9 +42,10 @@ namespace ariadne {
 // Its vehicle is its archetype's preset with five numbers (vehicle_desc_of), so a client that
 // has them, the navigator's hold and the clock ticks it ticks on builds the same model and runs it
 // step for step as the relay does, where nothing else touches the vehicle: the one it drives is
-// predicted. The relay's poses correct what it cannot know (a wall, another vehicle, a slope: a
-// client's model runs on flat ground, at the plant's reference height). dynamic_drive
-// (vehicle_drive.h) holds the numbers.
+// predicted. The relay's poses correct what it cannot know (a wall, another vehicle). Given the
+// world's ground (OW5g: the ground the relay's vehicles drive on, vehicle_ground_height of the
+// same document's grid and terrain), it drives on the relay's slopes too; without it, on flat
+// ground at the plant's reference height. dynamic_drive (vehicle_drive.h) holds the numbers.
 
 // One of them as it runs, at the end of a physics step.
 struct dynamic_vehicle {
@@ -68,20 +70,24 @@ struct dynamic_vehicle {
 class dynamic_vehicle_model {
 public:
   // Throws std::invalid_argument for a drive that is not valid() or a preset that is not one.
-  // A dynamic4w model's flat ground is at drive.ground.
-  dynamic_vehicle_model(const dynamic_drive &drive, double fixed_dt);
+  // GROUND (world metres at x, y) is the ground it drives on; empty: flat, at drive.ground. A
+  // dynamic4w model measures its heights from drive.ground either way, as the relay's plant does.
+  using ground_fn = std::function<double(double, double)>;
+  dynamic_vehicle_model(const dynamic_drive &drive, double fixed_dt, ground_fn ground = {});
   ~dynamic_vehicle_model();
   dynamic_vehicle_model(const dynamic_vehicle_model &) = delete;
   dynamic_vehicle_model &operator=(const dynamic_vehicle_model &) = delete;
 
   const dynamic_drive &drive() const { return _drive; }
   double fixed_dt() const { return _dt; }
+  // Whether it drives on a ground it was given (else flat).
+  bool on_ground() const { return static_cast<bool>(_ground); }
 
   // The vehicle whose chassis is at CHASSIS (its centre, heading and velocity, as the pose
   // stream carries it) at the end of the step ending on clock tick TICK. The pose stream carries
   // no yaw rate, steering angle, drive lag or driver, nor the suspension's state: they are LIKE's
-  // (the model as it was predicted for that tick, on the same plant), else at rest. The command
-  // is LIKE's, else none.
+  // (the model as it was predicted for that tick, on the same plant), else at rest (on dynamic4w,
+  // its suspension settled on the ground under it). The command is LIKE's, else none.
   dynamic_vehicle at(const cvc::physics::body_state &chassis, std::uint64_t tick,
                      const dynamic_vehicle *like = nullptr) const;
   // One physics step ending on clock tick TICK: the navigator's tick first when it falls due (the
@@ -104,6 +110,7 @@ private:
 
   dynamic_drive _drive;
   double _dt = 0.0;
+  ground_fn _ground;
   std::unique_ptr<cvc::physics::dyn_bike_plant> _bike;
   std::unique_ptr<cvc::physics::dyn_4w_plant> _four;
 };

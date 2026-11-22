@@ -76,8 +76,9 @@ void held(const dynamic_drive &d, double dt, double steer_cmd, double accel_cmd,
 }
 } // namespace
 
-dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double fixed_dt)
-    : _drive(drive), _dt(fixed_dt) {
+dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double fixed_dt,
+                                             ground_fn ground)
+    : _drive(drive), _dt(fixed_dt), _ground(std::move(ground)) {
   if (!drive.valid())
     throw std::invalid_argument("dynamic_vehicle_model: not a dynamic drive to run");
   if (!(fixed_dt > 0.0) || !std::isfinite(fixed_dt))
@@ -100,12 +101,17 @@ dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double 
   if (drive.plant == "dynamic4w") {
     ph::dyn_4w_plant_options o;
     o.substep = fixed_dt;
-    o.plant.ground_z = drive.ground; // flat, at the relay's reference height
+    o.plant.ground_z = drive.ground; // flat, at the relay's reference height, without a ground
+    if (_ground)
+      o.plant.ground_height = _ground;
+    o.reference = drive.ground; // its heights from the relay's datum
     _four = std::make_unique<ph::dyn_4w_plant>(std::vector<ph::vehicle_desc>{desc}, o);
     _four->attach(1, &start, si, fixed_dt);
   } else {
     ph::dyn_bike_plant_options o;
     o.substep = fixed_dt;
+    if (_ground)
+      o.plant.ground_height = _ground;
     _bike = std::make_unique<ph::dyn_bike_plant>(std::vector<ph::vehicle_desc>{desc}, o);
     _bike->attach(1, &start, si, fixed_dt);
   }
@@ -172,7 +178,16 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
     v.steer_cmd = like->steer_cmd;
     v.accel_cmd = like->accel_cmd;
   } else {
-    // At rest on the flat ground, as the plant's attach placed its vehicle.
+    // At rest where the sample is, its suspension settled on the ground under its wheels, as the
+    // plant places a vehicle.
+    const double psi = yaw_of(chassis.rotation);
+    const double rear_x = _four->rear_axle(0);
+    cvc::nav::plant_state start;
+    start.x = static_cast<float>(chassis.position.x + rear_x * std::cos(psi));
+    start.y = static_cast<float>(chassis.position.y + rear_x * std::sin(psi));
+    start.heading = static_cast<float>(psi);
+    _four->remove_vehicle(0);
+    _four->add_vehicle(start);
     m = _four->save(0);
     const double z = m.body.z, phi = m.body.phi, th = m.body.th;
     m.body = {};
@@ -230,22 +245,28 @@ void dynamic_vehicle_model::step_bike(dynamic_vehicle &v, bool tick) {
     held(_drive, _dt, v.steer_cmd, v.accel_cmd, _bike->body(0).vx, steer, accel);
     _bike->command(0, steer, accel);
   }
-  const ph::dyn_bike_saved before = _bike->save(0);
+  // The box where the substep starts: on the ground under it, leaning with it
+  // (dyn_bike_plant::step_model's chassis_pose).
+  ph::vec3 pos;
+  ph::quat rot;
+  _bike->box_pose(0, pos, rot);
+  const double psi0 = _bike->body(0).psi;
   _bike->advance(); // one substep: one physics step
   const ph::dyn_bike_saved after = _bike->save(0);
   v.model = after;
-  // The box: put where the substep starts, moving as the model moved, for the world's step
-  // (dyn_bike_plant::step_model, then the world).
+  // Moving as the model moved, for the world's step: along the ground, turning about +z.
   const double rear_x = _bike->rear_axle(0);
   const double off = -rear_x - _bike->params(0).lr;
-  const cvc::nav::diff::dyn_state<double> &s0 = before.body, &o = after.body;
-  const double c0 = std::cos(s0.psi), sn0 = std::sin(s0.psi);
+  const cvc::nav::diff::dyn_state<double> &o = after.body;
   const double c1 = std::cos(o.psi), s1 = std::sin(o.psi);
   v.vx = c1 * o.vx - s1 * o.vy - o.r * off * s1;
   v.vy = s1 * o.vx + c1 * o.vy + o.r * off * c1;
   v.wz = o.r;
-  v.box = {s0.x - rear_x * c0 + v.vx * _dt, s0.y - rear_x * sn0 + v.vy * _dt, v.box[2],
-           s0.psi + o.r * _dt};
+  v.box = {pos.x + v.vx * _dt, pos.y + v.vy * _dt, pos.z, psi0 + o.r * _dt};
+  // The ground's pitch and roll under it (Rz(psi) Ry(pitch) Rx(roll)).
+  v.pitch = std::asin(std::max(-1.0, std::min(1.0, 2.0 * (rot.w * rot.y - rot.z * rot.x))));
+  v.roll = std::atan2(2.0 * (rot.w * rot.x + rot.y * rot.z),
+                      1.0 - 2.0 * (rot.x * rot.x + rot.y * rot.y));
 }
 
 void dynamic_vehicle_model::step_four(dynamic_vehicle &v, bool tick) {

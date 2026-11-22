@@ -1431,7 +1431,7 @@ bool holon::predict_vehicle(const std::string &pid, const dynamic_drive &drive) 
     return true;
   std::shared_ptr<dynamic_vehicle_model> model;
   try {
-    model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt());
+    model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt(), _vground);
   } catch (const std::exception &) {
     return false; // a preset this build does not know
   }
@@ -1446,6 +1446,25 @@ bool holon::predict_vehicle(const std::string &pid, const dynamic_drive &drive) 
   if (_world && _world->has_avatar(pid))
     _world->remove_avatar(pid);
   return true;
+}
+
+void holon::set_vehicle_ground(std::function<double(double, double)> ground,
+                               std::uint64_t revision) {
+  if (revision == _vground_rev)
+    return;
+  _vground = std::move(ground);
+  _vground_rev = revision;
+  // Each model on the new ground, its vehicle's state kept (a dynamic4w model's heights are from
+  // the relay's datum on any ground).
+  for (auto &[pid, p] : _participants) {
+    if (!p.vdyn)
+      continue;
+    try {
+      p.vdyn =
+          std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(), _vground);
+    } catch (const std::exception &) {
+    }
+  }
 }
 
 bool holon::predicts_vehicle(const std::string &pid) const {

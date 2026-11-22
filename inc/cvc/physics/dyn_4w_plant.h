@@ -54,6 +54,7 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -76,6 +77,10 @@ struct dyn_4w_plant_options {
   // as it drives that one; false: as the model's drive force per unit mass, raw.
   bool driver = true;
   bool grade_force = true; // gravity along the slope acts on the body (dyn4_params::grade_force)
+  // The height (m) the model's heights are measured from (ground_reference()). Not finite (the
+  // default): the ground under the first vehicle's start, as attach() takes it. A twin of another
+  // plant passes that plant's ground_reference(), so its heave is the other's, number for number.
+  double reference = std::numeric_limits<double>::quiet_NaN();
   // The world the chassis collide in (borrowed; null: no collisions), and its bodies the wheels
   // drive on (touching them is not a collision). attach() sets its contact reporting to all.
   world *physics = nullptr;

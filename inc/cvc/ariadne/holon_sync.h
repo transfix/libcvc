@@ -27,6 +27,7 @@
 #include <cvc/core/namespace.h>
 #include <cvc/physics/body.h>
 #include <cvc/state/pose_snapshot.h>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -35,6 +36,10 @@
 namespace cvc {
 
 class app;
+class height_field;
+namespace nav {
+struct world_grid;
+}
 
 namespace ariadne {
 
@@ -336,6 +341,12 @@ public:
   const std::string &status() const { return _status; }
   // The world it built (null when not ready).
   const SceneWorld *world() const { return _world.get(); }
+  // The ground the relay's vehicles drive on, as this world has it (OW5g: SceneWorld::
+  // vehicle_ground, read by vehicle_ground_height), and its revision, a new one each time its
+  // grid or terrain changes (a switch, a Regenerate, another document); 0 and empty before it has
+  // either. client_pump gives it to the holon (holon::set_vehicle_ground).
+  std::function<double(double, double)> ground() const;
+  std::uint64_t ground_revision() const { return _ground_rev; }
 
 private:
   void build_statics();
@@ -343,6 +354,10 @@ private:
   section_stamp _source_stamp;
   section_stamp _on_stamp; // the room_world_on followed
   std::string _built_on;   // the world on when the statics were built
+  void refresh_ground();
+  std::shared_ptr<const cvc::nav::world_grid> _ground_grid;
+  std::shared_ptr<const cvc::height_field> _ground_terrain;
+  std::uint64_t _ground_rev = 0;
   std::unique_ptr<SceneWorld> _world;
   std::vector<std::string> _nodes; // the document's node ids (a node's colliders by id)
   bool _ready = false;

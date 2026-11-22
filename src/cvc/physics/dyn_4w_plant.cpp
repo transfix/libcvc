@@ -105,7 +105,9 @@ void dyn_4w_plant::attach(int n, const cvc::nav::plant_state *start,
   _agents.clear();
   _agents.reserve(static_cast<std::size_t>(n));
   _z0 = 0.0;
-  if (n > 0) {
+  if (std::isfinite(_o.reference)) {
+    _z0 = _o.reference;
+  } else if (n > 0) {
     const cvc::world_units::xyz p0 =
         _units.normalized_point_to_si(start[0].x, start[0].y, 0.0, frame);
     _z0 = dyn::ground_at(_o.plant, p0.x, p0.y);
@@ -174,7 +176,7 @@ int dyn_4w_plant::add_vehicle(const cvc::nav::plant_state &start, int vehicle) {
     throw std::invalid_argument("dyn_4w_plant::add_vehicle: vehicle " + std::to_string(vehicle) +
                                 " is not one of the plant's " + std::to_string(_descs.size()));
   const int i = size();
-  if (i == 0) {
+  if (i == 0 && !std::isfinite(_o.reference)) {
     // The heights' datum, as attach takes it from its first vehicle: no vehicle holds the old one.
     const cvc::world_units::xyz p0 = _units.normalized_point_to_si(start.x, start.y, 0.0, _frame);
     _z0 = dyn::ground_at(_o.plant, p0.x, p0.y);

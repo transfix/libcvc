@@ -24,9 +24,10 @@
 #include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_stamp
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
-#include <cvc/ariadne/loader.h>      // load_file: the world document
-#include <cvc/ariadne/scene_world.h> // world_replica's world
-#include <cvc/ariadne/uri.h>         // resolve
+#include <cvc/ariadne/loader.h>         // load_file: the world document
+#include <cvc/ariadne/scene_world.h>    // world_replica's world
+#include <cvc/ariadne/uri.h>            // resolve
+#include <cvc/ariadne/world_vehicles.h> // vehicle_ground_height
 #include <cvc/core/app.h>
 #include <cvc/physics/types.h> // vec3, quat
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
@@ -438,6 +439,8 @@ void sync_statics(holon &h, cvc::app &app, const std::string &room,
   // The world document's statics, once this client holds the relay's document (OW5c).
   if (world) {
     world->pump(app, room);
+    if (world->ground_revision() != h.vehicle_ground_revision())
+      h.set_vehicle_ground(world->ground(), world->ground_revision()); // OW5g
     if (world->ready()) {
       if (!world->stamp().same(h.statics_stamp()))
         h.set_statics(world->statics(), world->stamp());
@@ -818,6 +821,10 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
     _source_stamp = s;
     _on_stamp = section_stamp{}; // a new world follows what the relay has on afresh
     _built_on.clear();
+    _ground_grid.reset();
+    _ground_terrain.reset();
+    if (_ground_rev)
+      ++_ground_rev; // none now
     _world.reset();
     _nodes.clear();
     _taken.clear();
@@ -879,6 +886,26 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
   if (changed)
     build_statics();
   _ready = true;
+  refresh_ground();
+}
+
+void world_replica::refresh_ground() {
+  std::shared_ptr<const cvc::nav::world_grid> g;
+  std::shared_ptr<const cvc::height_field> t;
+  _world->vehicle_ground(g, t);
+  if (g == _ground_grid && t == _ground_terrain)
+    return;
+  _ground_grid = std::move(g);
+  _ground_terrain = std::move(t);
+  ++_ground_rev;
+}
+
+std::function<double(double, double)> world_replica::ground() const {
+  if (!_ground_grid && !_ground_terrain)
+    return {};
+  std::shared_ptr<const cvc::nav::world_grid> g = _ground_grid;
+  std::shared_ptr<const cvc::height_field> t = _ground_terrain;
+  return [g, t](double x, double y) { return vehicle_ground_height(g.get(), t.get(), x, y); };
 }
 
 void world_replica::build_statics() {

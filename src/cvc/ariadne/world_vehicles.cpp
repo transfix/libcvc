@@ -3594,6 +3594,13 @@ bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
   return false;
 }
 
+double WorldVehicles::ground_height(double x, double y) const { return _impl->ground_height(x, y); }
+
+double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
+                             double x, double y) {
+  return ground_at(grid, terrain, x, y);
+}
+
 void WorldVehicles::set_tick(double seconds) {
   if (!(seconds > 0.0) || !std::isfinite(seconds))
     throw std::invalid_argument("WorldVehicles::set_tick: the tick must be finite and > 0");

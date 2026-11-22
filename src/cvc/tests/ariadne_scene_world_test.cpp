@@ -7808,6 +7808,11 @@ TEST(AriadneOneWorld, AClientFollowsTheRelaysWorldSwitch) {
   EXPECT_NEAR(on_slab, 0.0, 0.1) << "on the slab";
   EXPECT_EQ(world.world()->world_on(), "dome") << "the replica followed";
   EXPECT_NEAR(on_dome, 1.0, 0.1) << "on the dome, as the relay's avatar stands";
+  // The ground the relay's vehicles would drive on, handed to the holon (OW5g).
+  EXPECT_GT(world.ground_revision(), 0u);
+  EXPECT_EQ(client.vehicle_ground_revision(), world.ground_revision()) << "client_pump gave it";
+  ASSERT_TRUE(static_cast<bool>(world.ground()));
+  EXPECT_NEAR(world.ground()(0.0, 0.0), 1.0, 0.05) << "the dome's top";
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
@@ -7941,6 +7946,35 @@ scene:
       body: static
 )";
 
+// A 3 m dome of terrain 28 m east of where the Humvee starts (level there), on PLANT.
+std::string hill_drivable(const std::string &plant) {
+  return R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: )" +
+         plant + R"(
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: hill, cell: 2 }
+  nodes:
+    - node: hill
+      world: hill
+      source:
+        heightfield:
+          size: 160
+          resolution: 161
+          layers:
+            - { kind: dome, amplitude: 3.0, radius: 7 }
+      transform: { position: [-16, 0, 0] }
+      body: static
+)";
+}
+
 // The same on the dynamic4w plant.
 const char *kDynamic4wDrivable = R"(
 world:
@@ -7983,13 +8017,16 @@ void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic
 // vehicle, tires, actuator lag and driver and all, through throttle, a turn, the brake and reverse.
 // What drive_as_the_world_does found, for a plant's own checks.
 struct client_run {
-  double worst_z = 0.0, worst_tilt = 0.0;
+  double worst = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0, climb = 0.0;
   cvc::ariadne::dynamic_drive drive;
 };
 
-// A drivable Humvee on PLANT in DOC's square, driven through throttle, a turn, the brake and
-// reverse, against the client's model of it on the same drive axes.
-void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result) {
+// A drivable Humvee on PLANT in DOC's world, driven through throttle, a turn, the brake and
+// reverse, against the client's model of it on the same drive axes. ON_GROUND: the model drives on
+// the world's ground as a client building the same document has it (SceneWorld::vehicle_ground),
+// else flat; CHECK: the model must keep to the relay's vehicle.
+void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result,
+                             bool on_ground = false, bool check = true) {
   cvc::app app;
   register_world_block(app);
   LoadResult r = load_string(app, doc);
@@ -8038,7 +8075,27 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   EXPECT_TRUE(carried);
 
   // From where the relay has it, at rest, on the same drive axes at each tick.
-  cvc::ariadne::dynamic_vehicle_model model(k, dt);
+  cvc::ariadne::dynamic_vehicle_model::ground_fn ground;
+  std::unique_ptr<SceneWorld> mine; // the client's world from the same document
+  if (on_ground) {
+    Scene copy = r.scene;
+    copy.vehicles.clear();
+    mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+    EXPECT_NE(mine, nullptr);
+    if (mine) {
+      mine->sync(&warnings);
+      std::shared_ptr<const cvc::nav::world_grid> g;
+      std::shared_ptr<const cvc::height_field> t;
+      mine->vehicle_ground(g, t);
+      EXPECT_TRUE(g || t) << "the world's ground";
+      ground = [g, t](double x, double y) {
+        return cvc::ariadne::vehicle_ground_height(g.get(), t.get(), x, y);
+      };
+      EXPECT_NEAR(ground(-12.0, 3.0), v.ground_height(-12.0, 3.0), 1e-9) << "the relay's ground";
+    }
+  }
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground);
+  EXPECT_EQ(model.on_ground(), on_ground);
   cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
   const auto axes = [](int step) {
     avatar_intent in;
@@ -8062,6 +8119,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   };
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
+  double climb = 0.0;
   for (int step = 0; step < 1080; ++step) {
     const avatar_intent in = axes(step);
     h.set_intent("ann", in);
@@ -8087,21 +8145,30 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
+    climb = std::max(climb, relay.position.z - start.z);
   }
   const cvc::physics::body_state end = h.state("ann");
   std::printf("  the %s model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s; "
               "height %.6f m, attitude %.6f rad (top %.2f m/s, %.1f m from the start, speed at "
-              "the end %.2f m/s)\n",
+              "the end %.2f m/s; climbed %.2f m, %s)\n",
               plant.c_str(), worst, worst_yaw, worst_z, worst_tilt, top,
               std::hypot(end.position.x - start.x, end.position.y - start.y),
-              cvc::ariadne::dynamic_vehicle_model::speed(m));
+              cvc::ariadne::dynamic_vehicle_model::speed(m), climb,
+              on_ground ? "on the world's ground" : "on flat ground");
+  result.worst = worst;
+  result.worst_yaw = worst_yaw;
+  result.worst_z = worst_z;
+  result.worst_tilt = worst_tilt;
+  result.climb = climb;
+  result.drive = k;
   EXPECT_GT(top, 5.0) << "it drove";
+  if (!check)
+    return;
   EXPECT_LT(cvc::ariadne::dynamic_vehicle_model::speed(m), -0.5) << "and backed up at the end";
   EXPECT_LT(worst, 0.01) << "step for step";
   EXPECT_LT(worst_yaw, 0.002);
   result.worst_z = worst_z;
   result.worst_tilt = worst_tilt;
-  result.drive = k;
 }
 } // namespace
 
@@ -8117,6 +8184,25 @@ TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
 // The same on the dynamic4w plant (OW5e): the client's model is the relay's dyn_4w_plant alone,
 // four wheels on their suspension, its flat ground at the plant's reference height, so the box's
 // height and attitude follow the relay's too.
+// Over a hill (OW5g): the client's model drives on the world's ground as the relay's vehicles do
+// (SceneWorld::vehicle_ground of the same document: the terrain node's grid), on either dynamic
+// plant, so it climbs the dome with the relay's vehicle. On flat ground it would not.
+TEST(AriadneOneWorld, AClientDrivesOverTheRelaysHill) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *plant : {"dynamic", "dynamic4w"}) {
+    const std::string doc = hill_drivable(plant);
+    client_run ground, flat;
+    drive_as_the_world_does(doc.c_str(), plant, ground, true);
+    drive_as_the_world_does(doc.c_str(), plant, flat, false, false);
+    EXPECT_GT(ground.climb, 0.5) << plant << ": up the hill";
+    EXPECT_LT(ground.worst_z, 0.01) << plant << ": the ride height on the slope";
+    EXPECT_LT(ground.worst_tilt, 0.01) << plant << ": leaning with it";
+    EXPECT_GT(flat.worst, 10.0 * ground.worst + 0.01) << plant << ": flat ground strays";
+  }
+}
+
 TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
   REQUIRE_YAML();
   if (!jolt())

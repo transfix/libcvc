@@ -407,6 +407,11 @@ cvc::nav::plant_limits dyn_bike_plant::limits(int i) const {
   return l;
 }
 
+void dyn_bike_plant::box_pose(int i, vec3 &position, quat &rotation) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  chassis_pose(a, a.s, position, rotation);
+}
+
 dyn_bike_saved dyn_bike_plant::save(int i) const {
   const agent &a = _agents.at(static_cast<std::size_t>(i));
   dyn_bike_saved s;

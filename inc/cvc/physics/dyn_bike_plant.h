@@ -232,6 +232,9 @@ public:
   // Agent i's rear axle along its chassis from the box's centre (m, negative behind): the model's
   // point, where its chassis box is drawn from (the box's centre is rear_axle(i) behind it).
   double rear_axle(int i) const { return _agents.at(i).rear_x; }
+  // Agent i's chassis box at its state now (its centre and attitude, world metres: on the ground
+  // under it, leaning with it), where a world step puts it.
+  void box_pose(int i, vec3 &position, quat &rotation) const;
   // Agent i's state, kept and put back: a client that predicts a vehicle on this model replays its
   // steps from one (ARIADNE_WORLDS.md section 18.5). Restoring leaves the books and the last tick's
   // record as they were; with a world, the box goes where the state is, at rest until its step.

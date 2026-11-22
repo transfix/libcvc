@@ -1102,9 +1102,8 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   0.5 mm of the relay's height and 0.7 mrad of its chassis's attitude (`AriadneOneWorld`); the
   holon predicts it with nothing to correct, and corrects a 1.5 m push exactly (`HolonVehicleTest`).
 - **Still to come:** the other plants predicted (`jolt` needs the vehicle in the client's world; a
-  boat needs the water), played out until then. The dynamic plants' prediction runs on flat
-  ground (a client's model has no ground under it, so a slope's grade and a wall are the relay's
-  corrections). For the statics: a document the client does not ship with fetched as a world pack
+  boat needs the water), played out until then. A wall or another vehicle is the relay's
+  correction (a client's model touches nothing). For the statics: a document the client does not ship with fetched as a world pack
   (section 12); a static body's physics material (a client's statics take the default friction).
 - **As built (OW5f, the relay's world followed):** the relay publishes what its document has on
   (`room_world_on`: `conf.rooms.<room>.world_on`, `publish_world_on`, written when it changes):
@@ -1119,6 +1118,22 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   (the cell, the terrain's and the raster's caps) stay the document's, which are the relay's;
   a DEM file the client cannot resolve makes its world from the default generators, as the relay
   would.
+- **As built (OW5g, the world's ground under the prediction):** the relay's vehicles drive on the
+  world on's ground: its terrain where its node makes one (a generated world's), else its first
+  node's navigator grid between samples (`vehicle_ground_height`, now public). A client building the
+  same document has both (`SceneWorld::vehicle_ground`: the same grid from the world block's cell
+  and half, the same terrain), so its replica hands that ground to the holon
+  (`world_replica::ground`, a revision more each time its grid or terrain changes; `client_pump`
+  calls `holon::set_vehicle_ground`, which rebuilds each predicted model on it, its state kept),
+  and the dynamic plants' models drive on it: the slope's grade in the driver and the model, the
+  bike's box on the ground and leaning with it (`dyn_bike_plant::box_pose`), the four wheels on
+  the ground under each (a sample at rest settles its suspension there). The four-wheel model
+  measures its heights from the relay's datum (`dyn_4w_plant_options::reference`, opt-in, unset
+  by default), so its heave is the relay's on any ground. Over a 3 m dome the client's model stays
+  within 0.5 mm (bike) and 0.6 mm (four wheels) of the relay's vehicle over 9 s as it climbs
+  0.7-0.8 m, where on flat ground it strays 3.2 and 4.6 m (`AriadneOneWorld`). The driver's hold
+  on a slope is not in the pose stream: a vehicle first predicted while parked on a slope starts
+  from a fresh driver, and the relay's samples correct the difference.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1201,7 +1216,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 
