@@ -2158,11 +2158,19 @@ TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
   EXPECT_EQ(st.findDescendant("entities." + first), nullptr);
   EXPECT_NE(val(app, "entities.summary").find("fleet city  64 v (keys: summary)"),
             std::string::npos);
+  // The physics stats likewise: the fleet's one line, the unnamed entry's own.
+  const std::string stats = val(app, "physics.stats.vehicles");
+  EXPECT_NE(stats.find("fleet city  64 v (keys: summary)"), std::string::npos) << stats;
+  EXPECT_NE(stats.find(solo + "  solo  "), std::string::npos) << stats;
+  EXPECT_EQ(stats.find(first + "  city 1  "), std::string::npos) << stats;
   st("vehicles.watch").value(first); // a camera follows it: it has keys
   art.step_world(6);
   art.drain();
   EXPECT_EQ(val(app, "entities.ids"), first + "," + solo);
   EXPECT_NE(val(app, "entities." + first + ".x"), "");
+  EXPECT_NE(val(app, "physics.stats.vehicles").find(first + "  city 1  "), std::string::npos);
+  EXPECT_NE(val(app, "physics.stats.vehicles").find("fleet city  63 v (keys: summary)"),
+            std::string::npos);
   EXPECT_EQ(val(app, "entities." + first + ".team"), std::to_string(es[0].rally));
   st("vehicles.watch").value("");
   art.step_world(6);

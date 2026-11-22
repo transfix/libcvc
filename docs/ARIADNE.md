@@ -2166,7 +2166,8 @@ scene:
     `distance`, `wheel_load`, `aero_force` and `gear` (the dynamic models give their books'
     power and energy, and an odometer), and `command.steer` / `command.accel`
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
-    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named.
+    `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named
+    (a summary fleet's one line for the vehicles that have no keys, as in `entities.summary`).
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
@@ -2303,7 +2304,8 @@ scene:
     - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
-      `entities.count` counts them all. `keys: all` writes every vehicle's.
+      `entities.count` counts them all. The others share a line in `entities.summary` and in
+      `physics.stats.vehicles`. `keys: all` writes every vehicle's.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
