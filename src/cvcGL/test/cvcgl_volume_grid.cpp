@@ -15,13 +15,15 @@
 //     key is edited; a grid waits for a volume not there yet; a grid with source: { node } shows
 //     another's volume; the app saves grid.points and grid.session (data_save) and loads them back
 //     as datasets the grid follows (grid.source.points, grid.source.session); the sdf generator
-//     makes a volume as a dataset;
+//     makes a volume as a dataset; grid.volumes offers the data: entries' volumes (the panel's
+//     Source combo), and a volume picked from it is the one the grid shows;
 //   - T6: two grids in one document share nothing (one a slice_source read plane by plane); a
 //     second app without cvcGL's extensions has no volume_grid type, sdf generator or encoder of
 //     the first's.
 
 #include "streaming_test_util.h"
 
+#include <algorithm>
 #include <boost/any.hpp>
 #include <chrono>
 #include <cstdio>
@@ -46,6 +48,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -520,6 +523,56 @@ void run(const fs::path &dir) {
   check((made && sdf && sdf->XDim() == 8 && sdf->ZDim() == 8) ||
             (!made && error.find("CVC_ENABLE_SDF") != std::string::npos),
         "generate: sdf makes the mesh's signed distance field as the dataset's volume", error);
+
+  // ---- the Source combo's list: grid.volumes ----
+  cvc::ariadne::register_data_generator(app, "x_coded", [](cvc::ariadne::DataDecode &dd) {
+    dd.out("volume").value(std::string("volume"));
+    dd.out("volume").data(boost::any(std::make_shared<const cvc::volume>(coded(dd.app, 3, 4, 5))));
+    return std::vector<cvc::archive::file>();
+  });
+  cvc::ariadne::DataSpec cube;
+  cube.name = "cube";
+  cube.generate = "x_coded";
+  store->bind(prefix, cube);
+  const std::string cube_at = cvc::ariadne::resolve_bind(prefix, "data.cube");
+  check(store->wait(cube_at, 30.0), "(a second volume made as a dataset)",
+        cvc::ariadne::data_status(app, cube_at));
+  d.tick();
+  const auto lines = [&](const std::string &key) {
+    std::vector<std::string> out;
+    std::istringstream in(val(app, key));
+    for (std::string line; std::getline(in, line);)
+      out.push_back(line);
+    return out;
+  };
+  const auto has = [](const std::vector<std::string> &v, const std::string &s) {
+    return std::find(v.begin(), v.end(), s) != v.end();
+  };
+  std::vector<std::string> offered = lines(k + ".volumes");
+  check(has(offered, "data.cube.volume") && has(offered, "data.bunny.volume") == made &&
+            offered.size() == (made ? 3u : 2u),
+        "grid.volumes offers each data: entry's output that holds a volume, and none of the "
+        "entries holding point classes or a session",
+        val(app, k + ".volumes"));
+  check(offered.back() == "/vols.g2",
+        "and, last, the key grid.source.volume names when that is no data: entry",
+        val(app, k + ".volumes"));
+  set(app, k + ".source.volume", "data.cube.volume"); // what the Source combo writes
+  d.tick();
+  offered = lines(k + ".volumes");
+  check(val(app, k + ".info.dims") == "3 4 5" &&
+            volume_at(app, k + ".volume") ==
+                volume_at(app, cvc::state::instance(app).findThroughLinks(cube_at)->fullName() +
+                                   ".volume"),
+        "a volume picked from the list is the one the grid shows: the app's, not a copy",
+        val(app, k + ".info.dims") + " " + val(app, k + ".status"));
+  check(has(offered, "data.cube.volume") && !has(offered, "/vols.g2"),
+        "and the list is the data: entries' volumes again", val(app, k + ".volumes"));
+  set(app, k + ".source.volume", "");
+  d.tick();
+  check(val(app, k + ".volumes").empty(),
+        "a grid naming no volume offers none (a host that calls setSource keeps its volume)",
+        val(app, k + ".volumes"));
 
   // ---- two apps ----
   cvc::app other;
