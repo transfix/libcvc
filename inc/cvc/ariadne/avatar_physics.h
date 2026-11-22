@@ -179,10 +179,10 @@ public:
                const std::map<std::string, cvc::physics::body_state> &feet);
   cvc::physics::world &world() { return *_world; }
 
-  // Replace the static objects (a body or a geometry without one is skipped). Avatars are re-created
-  // after them (same pids, same states), so the
-  // world's creation order stays statics-then-avatars. Not in a shared world (its owner's bodies
-  // are the statics): std::logic_error.
+  // Replace the static objects (a body or a geometry without one is skipped). Avatars are
+  // re-created after them (same pids, same states), so the world's creation order stays
+  // statics-then-avatars. Not in a shared world (its owner's bodies are the statics):
+  // std::logic_error.
   void set_statics(const std::vector<avatar_static> &statics);
   // Every avatar's body from now on: each is re-created at its feet, keeping its velocity and its
   // reserve, with the new mass unless set_mass gave it its own.

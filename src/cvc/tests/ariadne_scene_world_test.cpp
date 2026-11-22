@@ -16,8 +16,8 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
-#include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/conference/room_scene.h> // room_world_source
+#include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/requires.h>

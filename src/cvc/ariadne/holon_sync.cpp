@@ -28,10 +28,10 @@
 #include <cvc/ariadne/scene_world.h> // world_replica's world
 #include <cvc/ariadne/uri.h>         // resolve
 #include <cvc/core/app.h>
-#include <random>
 #include <cvc/physics/types.h> // vec3, quat
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -431,7 +431,8 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) 
 namespace {
 // Physics: reload the statics when the room scene changed (its stamp moved: a new revision, or a
 // restarted relay's revision 1 under a new epoch).
-void sync_statics(holon &h, cvc::app &app, const std::string &room, world_replica *world = nullptr) {
+void sync_statics(holon &h, cvc::app &app, const std::string &room,
+                  world_replica *world = nullptr) {
   if (!h.physics())
     return;
   // The world document's statics, once this client holds the relay's document (OW5c).

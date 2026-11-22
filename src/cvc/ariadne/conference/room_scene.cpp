@@ -19,11 +19,11 @@
 #include <cstdlib>
 #include <cvc/ariadne/conference/room_scene.h>
 #include <cvc/core/app.h>
-#include <cvc/state/state.h> // cvc::state, SEPARATOR, findDescendant, children
+#include <cvc/state/state.h>            // cvc::state, SEPARATOR, findDescendant, children
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <fstream>
-#include <iterator>
 #include <initializer_list>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <string>
