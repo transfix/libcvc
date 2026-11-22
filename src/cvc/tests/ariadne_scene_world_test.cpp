@@ -2364,6 +2364,30 @@ TEST(AriadneWorldVehicles, AFleetHasANavigatorAndAPolicyOfItsOwn) {
   EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
       << key_of("scouts", "drives");
   EXPECT_EQ(key_of("scouts", "plans"), "vehicle"); // the fallback's built-in net
+  // trained without $CVC_NAV_WEIGHTS: a copy installed, else the download (D8). The test's network
+  // is off and its registry isn't there (for the package below too), so the download's why is said.
+  cvc::state::instance(app)("sys.data.cvcpkg.registry").value(std::string("http://127.0.0.1:9"));
+  {
+    EnvFor no_override("CVC_NAV_WEIGHTS", "");
+    const std::string installed = cvc::nav::coef_mlp::default_weights_path();
+    cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("trained"));
+    art.step_world(1);
+    art.drain();
+    if (fs::is_regular_file(installed)) {
+      EXPECT_EQ(key_of("scouts", "drives").rfind("trained (" + installed, 0), 0u)
+          << key_of("scouts", "drives");
+    } else {
+      for (int k = 0; k < 400 && key_of("scouts", "drives").rfind("builtin: no trained", 0) != 0;
+           ++k) {
+        art.step_world(1);
+        art.drain();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      EXPECT_NE(key_of("scouts", "drives").find("grl-snam-weights"), std::string::npos)
+          << "the download, not " << key_of("scouts", "drives");
+      EXPECT_EQ(key_of("scouts", "plans"), "vehicle");
+    }
+  }
   cvc::state::instance(app)("vehicles.fleets.scouts.policy")
       .value(std::string("cvcpkg://cvc/no-such-weights-for-a-test"));
   art.step_world(1);
@@ -7179,8 +7203,8 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
   for (int i = 0; i < ticks; ++i)
     gym.step(none, none);
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
-  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, six a tick), and
-  // one publish of the entities' keys (timed here alone).
+  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, a tick's
+  // cvc::kSimTickQuanta of them), and one publish of the entities' keys (timed here alone).
   double phys = 0.0;
   int nphys = 0;
   {
@@ -7193,28 +7217,30 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
         ++nphys;
       }
   }
-  const double phys_tick = nphys ? 6.0 * phys / nphys : 0.0;
+  const double phys_tick = nphys ? cvc::kSimTickQuanta * phys / nphys : 0.0;
   const auto t2 = clk::now();
   gym.vehicles().publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
-  // A tick is 0.06 s of world time: at 1x a tick under 60 ms keeps up, at the demos' 3.6x under
-  // 16.7 ms.
+  // A tick is cvc::kSimTick of world time (7/120 s): at 1x a tick under 58.3 ms keeps up, at the
+  // demos' 3.6x under 16.2 ms.
   std::printf("[fleet] %-9s n=%4d sense=%-5s avoid=%d spawn %7.1f ms  tick %7.2f ms (%5.1fx)  "
               "physics %6.2f  publish %6.2f  rest %6.2f ms\n",
               plant.c_str(), n, sense.c_str(), avoid ? 1 : 0, spawn_ms, tick_ms,
-              tick_ms > 0.0 ? 60.0 / tick_ms : 0.0, phys_tick, pub_ms,
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, phys_tick, pub_ms,
               tick_ms - phys_tick - pub_ms);
 }
 
 // A fleet declared in the document (start: fleet:) on a paused clock: the load (spawn and layout),
-// six steps, and one publish, with its per-entity keys (keys: all) or its summary alone.
+// a tick's steps (cvc::kSimTickQuanta), and one publish, with its per-entity keys (keys: all) or
+// its summary alone. On the built-in net, so it runs the same offline as with the weights.
 void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, int ticks) {
   std::string doc = fleet_bench_doc(bundle);
   const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
   doc.insert(doc.find(arch) + arch.size(),
              "    start:\n      - { fleet: city, archetype: humvee, plant: kinematic, count: " +
                  std::to_string(n) +
-                 ", spawn: opposed, seed: 7, rally: { count: 16 }, keys: " + keys + " }\n");
+                 ", spawn: opposed, seed: 7, rally: { count: 16 }, policy: builtin, keys: " + keys +
+                 " }\n");
   doc.insert(doc.find("scene:\n") + 7, "  clock: { paused: true }\n");
   const fs::path path = write_doc("fleet_doc_bench", doc);
   using clk = std::chrono::steady_clock;
@@ -7230,22 +7256,25 @@ void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, 
   }
   WorldVehicles &v = *art.scene_world()->vehicles();
   for (int i = 0; i < 10; ++i) {
-    art.step_world(6);
+    art.step_world(cvc::kSimTickQuanta);
     art.drain();
   }
   const auto t1 = clk::now();
   for (int i = 0; i < ticks; ++i) {
-    art.step_world(6);
+    art.step_world(cvc::kSimTickQuanta);
     art.drain();
   }
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
   const auto t2 = clk::now();
   v.publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
-  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  6 steps %7.2f ms  publish "
-              "%6.2f ms  (%zu entities, %s)\n",
-              n, keys.c_str(), load_ms, tick_ms, pub_ms, v.size(),
-              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str());
+  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  tick %7.2f ms (%5.1fx)  "
+              "publish %6.2f ms  (%zu entities, %s; drives %s, plans %s)\n",
+              n, keys.c_str(), load_ms, tick_ms,
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, pub_ms, v.size(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.drives", "").c_str(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.plans", "").c_str());
 }
 
 } // namespace
