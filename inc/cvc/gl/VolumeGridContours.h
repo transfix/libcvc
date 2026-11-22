@@ -55,16 +55,14 @@
 #include <array>
 #include <atomic>
 #include <boost/any.hpp>
-#include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <cstdint>
+#include <cvc/state/followed_key.h>
 #include <cvc/volume/volume_grid_contours.h>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
-#include <typeindex>
-#include <typeinfo>
 #include <vector>
 
 namespace cvc {
@@ -139,12 +137,6 @@ public:
   };
 
 private:
-  struct followed {
-    std::string path, node;
-    boost::posix_time::ptime mod;
-    std::type_index type = typeid(void);
-    const void *id = nullptr;
-  };
   void seed();
   void status(const std::string &s);
   std::string resolve(const std::string &key) const;
@@ -174,7 +166,7 @@ private:
   bool m_haveFrame = false;
   bool m_seeded = false;
   bool m_newCurve = false; // new_curve: the next click starts a curve
-  followed m_follow;
+  cvc::followed_key m_follow; // grid.contour.source
   boost::any m_pending; // a stack that came before the frame: converted once the frame is known
   std::string m_pendingFrom;
   bool m_tileDue = false; // auto_tile asked for a tile on the next tick

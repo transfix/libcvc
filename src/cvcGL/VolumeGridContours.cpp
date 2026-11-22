@@ -32,6 +32,7 @@
 #include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
+#include <cvc/state/followed_key.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/types.h>
 #include <cvc/volume/volume_grid.h>
@@ -107,22 +108,15 @@ template <class T> std::shared_ptr<const T> held(const boost::any &a) {
 }
 
 // The object a followed payload points at (a pointer the data channel holds, or a data object),
-// so a write within the clock's resolution still tells.
+// so a write within the clock's resolution still tells (cvc::followed_key).
 const void *payload_id(const boost::any &a) {
   if (const auto *v = boost::any_cast<se::value_t>(&a))
     if (const auto *d = std::get_if<se::data_object_ptr>(&v->v))
       return d->get();
   if (const auto *d = boost::any_cast<se::data_object_ptr>(&a))
     return d->get();
-  if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::grid_contours>>(&a))
-    return c->get();
-  if (const auto *c = boost::any_cast<std::shared_ptr<cvc::grid_contours>>(&a))
-    return c->get();
-  if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::contour_stack>>(&a))
-    return c->get();
-  if (const auto *c = boost::any_cast<std::shared_ptr<cvc::contour_stack>>(&a))
-    return c->get();
-  return nullptr;
+  return cvc::any_pointee<const cvc::grid_contours, cvc::grid_contours, const cvc::contour_stack,
+                          cvc::contour_stack>(a);
 }
 
 // grid_tile_stepper with its label copied out after each step, so the tick reads it while a pool
@@ -280,26 +274,10 @@ std::string VolumeGridContours::resolve(const std::string &key) const {
 }
 
 void VolumeGridContours::followSource() {
-  const std::string path = resolve(m_params.source);
-  if (path.empty()) {
-    m_follow = followed{};
+  boost::any d;
+  if (!m_follow.changed(m_grid.app().root(), resolve(m_params.source), d, payload_id))
     return;
-  }
-  cvc::state *s = m_grid.app().root().findThroughLinks(path);
-  if (!s) {
-    m_follow.path = path; // not there yet: followed until it is
-    m_follow.node.clear();
-    return;
-  }
-  const std::string node = s->fullName();
-  const boost::posix_time::ptime mod = s->lastMod();
-  boost::any d = s->data();
-  const std::type_index type(d.type());
-  const void *id = payload_id(d);
-  if (path == m_follow.path && node == m_follow.node && mod == m_follow.mod &&
-      type == m_follow.type && id == m_follow.id)
-    return;
-  m_follow = followed{path, node, mod, type, id};
+  const std::string &node = m_follow.node();
   if (node == m_grid.getState("grid.curves").fullName() ||
       node == m_grid.getState("grid.contours").fullName()) {
     status("error: grid.contour.source names this grid's own contours");
