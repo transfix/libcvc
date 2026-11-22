@@ -63,6 +63,17 @@ avatar_world::avatar_world(double fixed_dt, const avatar_body &body,
   add_avatar_material();
 }
 
+avatar_world::avatar_world(const ph::world_config &cfg, const avatar_body &body,
+                           const avatar_energy_policy &energy)
+    : _body(body), _energy(energy), _dt(cfg.fixed_dt) {
+  ph::world_config c = cfg;
+  c.backend = ph::backend::jolt;
+  _gravity = c.gravity;
+  _own = std::make_unique<ph::world>(c); // throws without a Jolt backend
+  _world = _own.get();
+  add_avatar_material();
+}
+
 avatar_world::avatar_world(ph::world &shared, const avatar_body &body,
                            const avatar_energy_policy &energy)
     : _body(body), _energy(energy), _dt(shared.config().fixed_dt), _world(&shared) {

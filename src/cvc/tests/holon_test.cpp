@@ -27,10 +27,12 @@
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules: the rules tests
+#include <cvc/physics/backend.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 using cvc::ariadne::avatar_intent;
@@ -1833,8 +1835,20 @@ void predicted_and_reconciled(const cvc::ariadne::dynamic_drive &k) {
   EXPECT_GT(std::hypot(relay.box[0] + 40.0, relay.box[1]), 20.0) << "it drove";
 
   // A push the client cannot know: the relay's vehicle 1.5 m to its left.
-  std::visit([](auto &m) { m.body.y += 1.5; }, relay.model);
-  relay.box[1] += 1.5;
+  if (std::holds_alternative<cvc::ariadne::jolt_vehicle_saved>(relay.model)) {
+    body_state pushed = cvc::ariadne::dynamic_vehicle_state(relay);
+    pushed.position.y += 1.5;
+    relay = truth.at(pushed, client.tick(), &relay); // its chassis moved, its world kept
+  } else {
+    std::visit(
+        [](auto &m) {
+          if constexpr (!std::is_same_v<std::decay_t<decltype(m)>,
+                                        cvc::ariadne::jolt_vehicle_saved>)
+            m.body.y += 1.5;
+        },
+        relay.model);
+    relay.box[1] += 1.5;
+  }
   double after = 0.0;
   for (int step = 0; step < 120; ++step) {
     avatar_intent in;
@@ -1884,7 +1898,34 @@ TEST(HolonVehicleTest, TheFourWheelVehicleWeDriveIsPredictedAndReconciled) {
     EXPECT_THROW(bike.step(v, 1), std::invalid_argument) << "a vehicle of the other plant";
   }
   cvc::ariadne::dynamic_drive other = k;
-  other.plant = "jolt";
+  other.plant = "dynamicboat";
   EXPECT_FALSE(other.valid()) << "not a plant a client runs";
+  predicted_and_reconciled(k);
+}
+
+// The same on the jolt plant (OW5i): its model is a Jolt vehicle in a world of the client's own
+// (here flat ground, as the holon has no statics), and the whole of that world is what a sample
+// takes from the prediction for its tick: the wheels, the powertrain, the driver.
+TEST(HolonVehicleTest, TheJoltVehicleWeDriveIsPredictedAndReconciled) {
+  cvc::ariadne::dynamic_drive k = humvee_dynamics();
+  k.plant = "jolt";
+  ASSERT_TRUE(k.valid());
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  {
+    cvc::ariadne::dynamic_vehicle_model m(k, 1.0 / 120.0);
+    ASSERT_NE(m.jolt(), nullptr);
+    EXPECT_EQ(m.bike(), nullptr);
+    EXPECT_EQ(m.four(), nullptr);
+    EXPECT_FALSE(m.on_ground()) << "flat ground, no statics";
+    body_state start;
+    start.position = vec3{0.0, 0.0, 1.2};
+    cvc::ariadne::dynamic_vehicle v = m.at(start, 0);
+    EXPECT_TRUE(std::holds_alternative<cvc::ariadne::jolt_vehicle_saved>(v.model));
+    cvc::ariadne::dynamic_vehicle_model bike(humvee_dynamics(), 1.0 / 120.0);
+    EXPECT_THROW(bike.step(v, 1), std::invalid_argument) << "a vehicle of the other plant";
+    cvc::ariadne::dynamic_vehicle other = bike.at(start, 0);
+    EXPECT_THROW(m.step(other, 1), std::invalid_argument) << "and the other way";
+  }
   predicted_and_reconciled(k);
 }

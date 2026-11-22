@@ -8675,6 +8675,28 @@ scene:
       body: static
 )";
 
+// The same on the jolt plant (OW5i): a Jolt vehicle in the world, its wheels, suspension and
+// powertrain the engine's.
+const char *kJoltDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: jolt
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
 // The command the relay sets after a step for a driver's next navigator tick (holon's drive).
 void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic_drive &k,
                    const avatar_intent &in, double dt) {
@@ -8697,6 +8719,7 @@ void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic
 // What drive_as_the_world_does found, for a plant's own checks.
 struct client_run {
   double worst = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0, climb = 0.0;
+  double end_speed = 0.0; // the model's, at the end
   cvc::ariadne::dynamic_drive drive;
 };
 
@@ -8773,8 +8796,29 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
       EXPECT_NEAR(ground(-12.0, 3.0), v.ground_height(-12.0, 3.0), 1e-9) << "the relay's ground";
     }
   }
-  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground);
-  EXPECT_EQ(model.on_ground(), on_ground);
+  // A jolt vehicle's model runs in a world of the client's own with the client's statics: each
+  // static body of the same document's world, on its surface (world_replica's statics).
+  cvc::ariadne::jolt_vehicle_world jw;
+  if (plant == "jolt") {
+    Scene copy = r.scene;
+    copy.vehicles.clear();
+    mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+    ASSERT_NE(mine, nullptr);
+    mine->sync(&warnings);
+    for (const SceneWorldBody &b : mine->bodies())
+      if (!b.moves && b.desc) {
+        cvc::ariadne::avatar_static s;
+        s.type = cvc::ariadne::avatar_static::kind::body;
+        s.body = b.desc;
+        s.material = std::make_shared<const cvc::physics::material>(
+            mine->world().get_material(b.desc->material));
+        jw.statics.push_back(std::move(s));
+      }
+    jw.gravity = mine->world().config().gravity;
+    EXPECT_FALSE(jw.statics.empty()) << "the document's ground";
+  }
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, plant == "jolt" ? &jw : nullptr);
+  EXPECT_EQ(model.on_ground(), on_ground || plant == "jolt");
   cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
   const auto axes = [](int step) {
     avatar_intent in;
@@ -8798,6 +8842,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   };
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
+  const bool sampled = plant == "jolt";
   double climb = 0.0;
   for (int step = 0; step < 1080; ++step) {
     const avatar_intent in = axes(step);
@@ -8825,6 +8870,11 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
     climb = std::max(climb, relay.position.z - start.z);
+    // A jolt vehicle's gear, clutch and engine are not in the pose stream, so its model is
+    // corrected by the relay's samples as the holon corrects it: every 4 ticks the sample, the rest
+    // of its world as predicted for that tick. What is measured is the gap a sample finds.
+    if (sampled && h.tick() % 4 == 0)
+      m = model.at(relay, h.tick(), &m);
   }
   const cvc::physics::body_state end = h.state("ann");
   std::printf("  the %s model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s; "
@@ -8833,12 +8883,15 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
               plant.c_str(), worst, worst_yaw, worst_z, worst_tilt, top,
               std::hypot(end.position.x - start.x, end.position.y - start.y),
               cvc::ariadne::dynamic_vehicle_model::speed(m), climb,
-              on_ground ? "on the world's ground" : "on flat ground");
+              sampled     ? "on the client's statics, the relay's sample every 4 ticks"
+              : on_ground ? "on the world's ground"
+                          : "on flat ground");
   result.worst = worst;
   result.worst_yaw = worst_yaw;
   result.worst_z = worst_z;
   result.worst_tilt = worst_tilt;
   result.climb = climb;
+  result.end_speed = cvc::ariadne::dynamic_vehicle_model::speed(m);
   result.drive = k;
   EXPECT_GT(top, 5.0) << "it drove";
   if (!check)
@@ -8879,6 +8932,34 @@ TEST(AriadneOneWorld, AClientDrivesOverTheRelaysHill) {
     EXPECT_LT(ground.worst_z, 0.01) << plant << ": the ride height on the slope";
     EXPECT_LT(ground.worst_tilt, 0.01) << plant << ": leaning with it";
     EXPECT_GT(flat.worst, 10.0 * ground.worst + 0.01) << plant << ": flat ground strays";
+  }
+}
+
+// The same on the jolt plant (OW5i): the client's model is a Jolt vehicle in a world of its own
+// made as the relay's is, on the same document's statics, so it keeps to the relay's vehicle,
+// its height and attitude on its suspension included, on the square and over the hill.
+TEST(AriadneOneWorld, AClientRunsTheJoltVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  // Its gear, clutch and engine are not in the pose stream (the relay's vehicle pulls away half a
+  // second after its model would, the navigator's hold before the driver got in left in its
+  // powertrain), so the model takes the relay's sample every 4 ticks as the holon does, and what
+  // is checked is the gap a sample finds: millimetres, where the plant's own drift between samples
+  // is what is left. The attitude is the chassis's on its suspension, which a sample does not
+  // carry.
+  client_run run, over;
+  drive_as_the_world_does(kJoltDrivable, "jolt", run, false, false);
+  const std::string hill = hill_drivable("jolt");
+  drive_as_the_world_does(hill.c_str(), "jolt", over, false, false);
+  EXPECT_EQ(run.drive.plant, "jolt");
+  EXPECT_GT(over.climb, 0.5) << "up the hill, on the client's statics";
+  for (const client_run *c : {&run, &over}) {
+    EXPECT_LT(c->end_speed, -0.5) << "and backed up at the end";
+    EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
+    EXPECT_LT(c->worst_yaw, 0.005);
+    EXPECT_LT(c->worst_z, 0.02) << "the ride height";
+    EXPECT_LT(c->worst_tilt, 0.05) << "the body's pitch and roll";
   }
 }
 

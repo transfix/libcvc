@@ -37,6 +37,7 @@ class world_geometry;
 namespace cvc {
 namespace physics {
 class world;
+struct world_config;
 class flow_velocity;
 } // namespace physics
 namespace ariadne {
@@ -161,6 +162,10 @@ class avatar_world {
 public:
   // Throws cvc::unsupported_exception when this build has no Jolt backend.
   avatar_world(double fixed_dt, const avatar_body &body,
+               const avatar_energy_policy &energy = avatar_energy_policy{});
+  // ... in a world of its own made with CFG (its backend Jolt, its step and gravity CFG's), for a
+  // world that must step as another does (vehicle_dynamics.h's jolt plant: the relay's config).
+  avatar_world(const cvc::physics::world_config &cfg, const avatar_body &body,
                const avatar_energy_policy &energy = avatar_energy_policy{});
   // The avatars in `shared`, a world the caller owns and steps (see ONE WORLD above): its fixed_dt
   // is the walker's step and its gravity prices the walk. `shared` must outlive this, or this must

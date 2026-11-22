@@ -32,6 +32,7 @@
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/app.h>
+#include <cvc/physics/backend.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
 #include <cvc/state/state.h>
@@ -1764,4 +1765,81 @@ TEST(HolonSyncTest, TheClientPumpPredictsTheFourWheelVehicleWeDrive) {
   for (int i = 0; i < 30; ++i)
     cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
   EXPECT_GT(client.state("ann").position.x, x0 + 0.5) << "and run on from there";
+}
+
+// And on the jolt plant (OW5i): the vehicle is predicted in a Jolt world of the client's own, on
+// the holon's statics; new statics rebuild that world, the vehicle placed again where it is.
+TEST(HolonSyncTest, TheClientPumpPredictsTheJoltVehicleWeDrive) {
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  conf::room_entity car_entity;
+  car_entity.id = 11;
+  car_entity.plant = "jolt";
+  const cvc::physics::vehicle_desc d = cvc::physics::vehicle_desc::humvee();
+  cvc::ariadne::dynamic_drive &k = car_entity.dynamics;
+  k.plant = "jolt";
+  k.preset = "humvee";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_accel = d.max_accel;
+  k.max_decel = d.max_decel;
+  k.max_steer = d.max_steer;
+  k.lock = 0.5;
+  k.vmax = 12.0;
+  k.a_hold = 6.0;
+  k.tick_steps = 12;
+  k.phase = 5;
+  conf::write_room_entities(app, room, {car_entity});
+  {
+    const std::vector<conf::room_entity> back = conf::read_room_entities(app, room);
+    ASSERT_EQ(back.size(), 1u);
+    EXPECT_EQ(back[0].dynamics, k) << "the plant round-trips";
+  }
+  cvc::ariadne::entity_playout playout;
+  playout.pump(app, room, 1.0 / 60.0);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  cvc::state &driving = app.root()(conf::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("11"));
+  body_state car;
+  car.position = vec3{4.0, 2.0, 1.0};
+  car.linear_velocity = vec3{3.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", car, 200);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann"));
+  cvc::ariadne::dynamic_vehicle now;
+  ASSERT_TRUE(client.predicted_vehicle("ann", now)) << "on its model";
+  EXPECT_TRUE(std::holds_alternative<cvc::ariadne::jolt_vehicle_saved>(now.model))
+      << "a Jolt vehicle's world";
+  const double x0 = client.state("ann").position.x;
+  for (int i = 0; i < 30; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_GT(client.state("ann").position.x, x0 + 0.5) << "and run on from there";
+
+  // New statics: a slab under it. The model's world is made again on them, the vehicle where it
+  // is, and it still runs.
+  auto slab = std::make_shared<cvc::physics::body_desc>();
+  slab->shape = cvc::physics::box{{50.0, 50.0, 0.5}};
+  slab->motion = cvc::physics::motion_type::static_;
+  slab->position = vec3{0.0, 0.0, -0.5};
+  cvc::ariadne::avatar_static st;
+  st.type = cvc::ariadne::avatar_static::kind::body;
+  st.body = slab;
+  const vec3 was = client.state("ann").position;
+  client.set_statics({st}, 1);
+  const vec3 at = client.state("ann").position;
+  EXPECT_NEAR(at.x, was.x, 1e-6) << "placed again where it was";
+  EXPECT_NEAR(at.y, was.y, 1e-6);
+  ASSERT_TRUE(client.predicted_vehicle("ann", now)) << "still predicted";
+  for (int i = 0; i < 30; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.predicts_vehicle("ann"));
+  EXPECT_LT(std::fabs(client.state("ann").position.z), 3.0) << "on the ground, not fallen through";
 }

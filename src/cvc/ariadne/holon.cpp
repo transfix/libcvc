@@ -495,6 +495,28 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
   _statics_list = statics;
   if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
+  // A jolt vehicle's model runs on the statics (OW5i): its world again, the vehicle where it is.
+  for (auto &[pid, p] : _participants) {
+    if (!p.vdyn || !p.vdyn->jolt())
+      continue;
+    try {
+      const jolt_vehicle_world jw = jolt_world();
+      auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
+                                                           _vground, &jw);
+      p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick());
+      p.dprev = p.dnow;
+      p.vlog.clear();
+      p.vdyn = std::move(model);
+    } catch (const std::exception &) {
+    }
+  }
+}
+
+jolt_vehicle_world holon::jolt_world() const {
+  jolt_vehicle_world jw;
+  jw.statics = _statics_list;
+  jw.gravity = _applied.physics.gravity;
+  return jw;
 }
 
 bool holon::attach_world(SceneWorld *world, std::string *why) {
@@ -1459,9 +1481,10 @@ bool holon::predict_vehicle(const std::string &pid, const dynamic_drive &drive) 
     return true;
   std::shared_ptr<dynamic_vehicle_model> model;
   try {
-    model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt(), _vground);
+    const jolt_vehicle_world jw = jolt_world(); // a jolt vehicle's statics and gravity (OW5i)
+    model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt(), _vground, &jw);
   } catch (const std::exception &) {
-    return false; // a preset this build does not know
+    return false; // a preset this build does not know, or a jolt vehicle without Jolt
   }
   // As the kinematic plant's: on from where it is, or where it stands until a sample places it.
   const cvc::physics::body_state now = state(pid);
@@ -1485,7 +1508,7 @@ void holon::set_vehicle_ground(std::function<double(double, double)> ground,
   // Each model on the new ground, its vehicle's state kept (a dynamic4w model's heights are from
   // the relay's datum on any ground).
   for (auto &[pid, p] : _participants) {
-    if (!p.vdyn)
+    if (!p.vdyn || p.vdyn->jolt()) // a jolt vehicle drives on the statics
       continue;
     try {
       p.vdyn =

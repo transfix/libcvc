@@ -4060,7 +4060,8 @@ bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
     const int i = d.index(e);
     cvc::nav::sim_world::plant_plan plan;
     if (!f || i < 0 ||
-        !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four)))
+        !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four) ||
+          (f->plant == "jolt" && f->jolt)))
       return false;
     if (!f->sim->plant_plan_of(i, plan))
       return false;
