@@ -20,7 +20,10 @@ PLATFORM="${2:?usage: pin-wasm-pre-jx1.sh PREFIX PLATFORM}"
 # The newest wasm/wasm-mt bundle of each package from before the republish (2026-11-19). vtk's is
 # cvc.5, master's FinishEveryRender build. Its JS-exceptions wasm bundle is from 2026-11-17.
 # imagemagick is pinned ahead of its republish (JX1 bumped it, but its wasm package.files fix
-# came later): cvc.23 is the newest JS-exceptions bundle on wasm and wasm-mt.
+# came later): cvc.23 is the newest JS-exceptions bundle on wasm and wasm-mt. numpy-cp312's cvc.7
+# (cy-pca/cvcpkg#633, 2026-11-21) rebuilt its wasm and wasm-mt extensions with wasm exceptions:
+# ariglx's link then fails on "undefined symbol: __cpp_exception" in _multiarray_umath. cvc.6 is
+# its last JS-exceptions bundle.
 PINS=(
   boost==1.86.0+cvc.8
   datachannel-wasm==0.4.0+cvc.1
@@ -31,6 +34,7 @@ PINS=(
   lua==5.4.9+cvc.1
   mujoco==4.0.0+cvc.3
   mujoco3==3.17.0+cvc.2
+  numpy-cp312==2.4.6+cvc.6
   qhull==8.0.2+cvc.2
   tiff==4.7.0+cvc.3
   vtk==9.5.0+cvc.5
