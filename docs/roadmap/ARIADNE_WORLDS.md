@@ -1039,6 +1039,23 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   back to its driver before (a navigator, or nothing).
 - **An avatar can be a vehicle** where the world allows it: its avatar archetypes may include
   vehicles, and a participant picks one when it joins (WD4, WD6).
+- **As built (OW6c):** an avatar archetype's `vehicle:` names one of the world's vehicle
+  archetypes (`world: avatars: archetypes: { person: {...}, rover: { vehicle: rover } }`). A
+  participant picks an archetype beside its look, under the same choice subtree
+  (`participants.<pid>.avatar.archetype`, beside `avatar.color` and `avatar.accessory`;
+  ARIADNE_CONFERENCE_ROADMAP.md §5g, §5k phase 3), with the Avatar window's Body combo or
+  `room-set-archetype`; until it picks, it has the first. The relay rules on it
+  (`holon::set_archetype`, from `server_pump`), answers in the relay-owned `archetype_status`, and
+  for a vehicle spawns it where the person stands and seats the participant in it for good: it
+  drives it with its vehicle scheme, cannot get out or into another, and the vehicle goes when it
+  leaves or picks a person again (it stands beside it then). The room's entities carry `avatar`,
+  so a client offers no one else that vehicle and shows its owner no get-out prompt. A person's
+  body is still the first person archetype's for everyone: bodies that differ by archetype are
+  still to come. `traffic.ari` offers a rover body.
+- **Mouse look is first person** (OW6c): walking under mouse look, arigl's camera sits at the
+  walker's eyes (0.92 of its body's height) and its own avatar is hidden; W walks where you look.
+  The Controls window's "Mouse look in first person" (the camera's `settings.first_person`, on by
+  default) turns it off for the view over your shoulder. Driving keeps the chase camera.
 - **Each thing driven has its own controls** (`cvc/ariadne/controls.h`). A control scheme per
   kind, each with its own bindings (keys and mouse buttons, and a gamepad's buttons, triggers and
   stick halves), so a car's keys are not a person's:
@@ -1095,7 +1112,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
-| OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme). OW6c: avatars that are vehicles, a first-person walk. | M |
+| OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 
 **Open:**

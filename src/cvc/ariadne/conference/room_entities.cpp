@@ -138,6 +138,7 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set_flag({k, "drivable"}, e.drivable);
     w.set_double({k, "reach"}, e.reach);
     w.set({k, "controls"}, e.controls);
+    w.set({k, "avatar"}, e.avatar);
     w.set_flag({k, "present"}, true); // last: a reader that sees it present sees its fields
     written.insert(e.id);
   }
@@ -179,6 +180,7 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     e.drivable = r.flag({k, "drivable"}, false);
     e.reach = r.number({k, "reach"}, 3.0);
     e.controls = r.text({k, "controls"});
+    e.avatar = r.text({k, "avatar"});
     out.push_back(std::move(e));
   }
   return out;
@@ -204,6 +206,8 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
     e.color = info.spec.color;
     e.color2 = info.spec.color2;
     e.base_z = info.ground_z - info.z;
+    if (const auto av = info.spec.metadata.find("avatar"); av != info.spec.metadata.end())
+      e.avatar = av->second;
     for (const vehicle_archetype &a : vehicles.archetypes()) {
       if (a.id != info.spec.archetype)
         continue;
@@ -217,6 +221,8 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
         const physics::vehicle_desc d = vehicle_desc_of(a, info.spec.mass, info.spec.max_speed);
         e.size = {2.0 * d.half_extents.x, 2.0 * d.half_extents.y, 2.0 * d.half_extents.z};
         e.wheels = {d.wheelbase(), d.track(), d.axles.empty() ? 0.0 : d.axles.front().wheel_radius};
+        if (info.posed) // placed by an outside simulation: its model hangs its stand height below
+          e.base_z = -stand_height(d);
         if (vehicle_plant_floats(info.plant)) { // a boat's model spans its overall length
           const physics::dyn_boat_desc b = boat_desc_of(a, info.spec.mass, info.spec.max_speed);
           if (b.length_overall > 0.0)

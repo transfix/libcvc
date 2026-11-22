@@ -37,6 +37,7 @@
 //   /apps/shared/       the docset's shared/
 //   /apps/tiler/        the app again, with a page config that preloads the contour tiler's series
 //                       from /apps/data/, the repository's examples/data
+//   /apps/mol/          the app again, with a page config that preloads PDB entry 1GRL from there
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
 //   /apps/wasm/         ariglx-web's files again, beside the --wasmdocs documents and guests
@@ -129,14 +130,19 @@ const SERIES = '../data/contours/kuwajima2019/VYLNH_20181017';
 const TILER_CONFIG = JSON.stringify({
   preload: [`${SERIES}.ser`, ...Array.from({length: 20}, (_, i) => `${SERIES}.${14 + i}`)],
 });
+// /apps/mol/: the app again, preloading the PDB file molecule.ari's mesh_lab reads (a node's
+// source file is not a reference the page follows).
+const MOL_CONFIG = JSON.stringify({preload: ['../data/molecules/1grl.pdb']});
 function fileFor(urlPath) {
   const p = decodeURIComponent(urlPath);
   if (!p.startsWith('/apps/') || p.includes('..')) return null;
   let rest = p.slice('/apps/'.length);
   if (rest === 'cfg/ariadne.config.json') return {json: CONFIG};
   if (rest === 'tiler/ariadne.config.json') return {json: TILER_CONFIG};
+  if (rest === 'mol/ariadne.config.json') return {json: MOL_CONFIG};
   if (rest.startsWith('data/')) return path.join(EXAMPLES_DATA, rest.slice('data/'.length));
   if (rest.startsWith('tiler/')) rest = 'app/' + rest.slice('tiler/'.length);
+  if (rest.startsWith('mol/')) rest = 'app/' + rest.slice('mol/'.length);
   if (PYDOCS && rest === 'pyprog/ariadne.config.json') return {json: PY_CONFIG};
   if (PYDOCS && (rest.startsWith('py/') || rest.startsWith('pyprog/'))) {
     const name = rest.slice(rest.indexOf('/') + 1);
@@ -409,6 +415,16 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     inject: LOGGED,
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)),
+  });
+  // The skeleton of a molecule: mesh_lab makes PDB entry 1GRL's surface (its blur map's isosurface,
+  // cvc::mol), decimates it and skeletonizes it on the single-threaded page; its document prints
+  // the counts once the skeleton is drawn (or the error, which fails the case).
+  cases.push({
+    name: 'a mesh_lab skeleton of a PDB molecule runs on the page',
+    url: `${ORIGIN}/apps/mol/?src=molecule.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /molecule skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)),
   });
   // The contour tiler (arigl only, as the orthoslicer): a contour_lab node reads a Reconstruct
   // series the page config preloads and tiles it as a sliced task on the page's scheduler; the
