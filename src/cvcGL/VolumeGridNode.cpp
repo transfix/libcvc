@@ -20,6 +20,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
+#include <cvc/state/followed_key.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h>
 #include <cvc/volume/point_classes.h>
@@ -63,50 +64,13 @@ cvc::geometry::color_t axis_color(int a) {
 constexpr int kDiskSides = 16;
 constexpr double kPi = 3.14159265358979323846;
 
-// What a followed volume key holds, as the planes cut it, and the volume it is (null for a file
-// read plane by plane). The volume is the one the app holds: a slice_source over it shares its
-// voxels (cvc::volume is copy-on-write), and grid.volume publishes the very pointer.
-bool volume_of(const boost::any &d, std::shared_ptr<cvc::slice_source> &src,
-               std::shared_ptr<const cvc::volume> &vol) {
-  if (const auto *s = boost::any_cast<std::shared_ptr<cvc::slice_source>>(&d)) {
-    src = *s;
-    vol = nullptr;
-    if (src)
-      if (const cvc::volume *v = src->in_memory_volume())
-        vol = std::shared_ptr<const cvc::volume>(src, v); // kept by the source
-    return static_cast<bool>(src);
-  }
-  if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::volume>>(&d))
-    vol = *c;
-  else if (const auto *m = boost::any_cast<std::shared_ptr<cvc::volume>>(&d))
-    vol = *m;
-  else if (const auto *v = boost::any_cast<cvc::volume>(&d))
-    vol = std::make_shared<const cvc::volume>(*v); // a handle on the same voxels
-  else
-    return false;
-  if (!vol)
-    return false;
-  src = std::make_shared<cvc::slice_source>(*vol);
-  return true;
-}
-
-template <class T> bool pointee(const boost::any &d, const void *&id) {
-  if (const auto *p = boost::any_cast<std::shared_ptr<T>>(&d)) {
-    id = p->get();
-    return true;
-  }
-  return false;
-}
-
-// The object a followed key's payload points at, for the payloads the grid reads as pointers (the
-// data channel's convention); null for anything else, which its type and the key's mod tell apart.
-const void *payload_id(const boost::any &d) {
-  const void *id = nullptr;
-  (void)(pointee<cvc::slice_source>(d, id) || pointee<const cvc::volume>(d, id) ||
-         pointee<cvc::volume>(d, id) || pointee<const cvc::point_classes>(d, id) ||
-         pointee<cvc::point_classes>(d, id) || pointee<const cvc::volume_grid_session>(d, id) ||
-         pointee<cvc::volume_grid_session>(d, id));
-  return id;
+// The object a followed key's payload points at, for the payloads the grid reads as pointers (a
+// volume's, the points' and the session's): a new one written within the clock's resolution is
+// still a change (cvc::followed_key).
+const void *payload_pointee(const boost::any &d) {
+  return cvc::any_pointee<cvc::slice_source, const cvc::volume, cvc::volume,
+                          const cvc::point_classes, cvc::point_classes,
+                          const cvc::volume_grid_session, cvc::volume_grid_session>(d);
 }
 
 // The point in object space at plane coordinates (r, u) on the plane `plane` along axis `a`.
@@ -277,35 +241,12 @@ std::string VolumeGridNode::sourcePath(const std::string &which) {
   return m_scope.empty() ? key : m_scope + cvc::state::SEPARATOR + key;
 }
 
-// Whether the key grid.source.<which> names data that changed since `f` last saw them: another
-// node than before (the key edited, or a link moved: a dataset loaded again under its name), or
-// the same node's data written since. `payload` is then what it holds (empty when nothing).
-bool VolumeGridNode::follow(const char *which, followed &f, boost::any &payload) {
-  const std::string path = sourcePath(which);
-  if (path.empty()) {
-    f = followed{};
-    return false;
-  }
-  cvc::state *s = app().root().findThroughLinks(path);
-  if (!s) {
-    f.path = path; // not there yet: followed until it is
-    f.node.clear();
-    return false;
-  }
-  const std::string node = s->fullName();
-  const boost::posix_time::ptime mod = s->lastMod();
-  boost::any d = s->data();
-  const std::type_index type(d.type());
-  const void *id = payload_id(d);
-  if (path == f.path && node == f.node && mod == f.mod && type == f.type && id == f.id)
-    return false;
-  f.path = path;
-  f.node = node;
-  f.mod = mod;
-  f.type = type;
-  f.id = id;
-  payload = std::move(d);
-  return true;
+// Whether the key grid.source.<which> names data that changed since `f` last saw them
+// (cvc::followed_key): another node than before (the key edited, or a link moved: a dataset
+// loaded again under its name), or the same node's data written since. `payload` is then what
+// it holds (empty when nothing).
+bool VolumeGridNode::follow(const char *which, cvc::followed_key &f, boost::any &payload) {
+  return f.changed(app().root(), sourcePath(which), payload, payload_pointee);
 }
 
 void VolumeGridNode::followSources() {
@@ -313,9 +254,9 @@ void VolumeGridNode::followSources() {
   if (follow("volume", m_followVolume, d)) {
     std::shared_ptr<cvc::slice_source> src;
     std::shared_ptr<const cvc::volume> vol;
-    if (m_followVolume.node == getState("grid.volume").fullName()) {
+    if (m_followVolume.node() == getState("grid.volume").fullName()) {
       status("error: grid.source.volume names this grid's own grid.volume");
-    } else if (volume_of(d, src, vol)) {
+    } else if (cvc::volume_payload(d, src, vol)) {
       // The same volume written again (or a link moved to it) changes nothing.
       if (!(vol && vol == m_histogramVolume) && !(!vol && src == m_source)) {
         const cvc::volume_grid_source_params sp =
@@ -323,7 +264,7 @@ void VolumeGridNode::followSources() {
         adopt(src, vol, getState("grid.source.volume").value(), sp.var, sp.time);
       }
     } else if (!d.empty()) {
-      status("error: " + m_followVolume.path + " holds no volume");
+      status("error: " + m_followVolume.path() + " holds no volume");
     }
   }
   // Not there yet (a dataset still loading, a program that has not written it): said once.
@@ -349,7 +290,7 @@ void VolumeGridNode::followSources() {
     if (s)
       applySession(*s, getState("grid.source.session").value());
     else if (!d.empty())
-      status("error: " + m_followSession.path + " holds no volume grid session");
+      status("error: " + m_followSession.path() + " holds no volume grid session");
   }
 }
 

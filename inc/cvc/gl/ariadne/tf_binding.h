@@ -166,6 +166,12 @@ struct tf_binding_options {
   // VolumeNode's setVolume is, and the bars the bounds follow move to where the keys' values sit
   // on its range: the keys keep their values and nothing re-meshes. Unset: `vol` for good.
   std::function<std::shared_ptr<const cvc::volume>()> volume_source;
+  // With volume_source: the seed is made from the volume, for a node whose document states its
+  // transfer function in data units (a volren's isosurfaces: values, placed on the volume's range).
+  // Called with the first volume volume_source gives, at attach when one is there, it sets seed,
+  // seed_is_applied and shininess. Until that volume arrives the key is not seeded and nothing is
+  // lowered (a node following a dataset still loading). Unset: `seed` as given.
+  std::function<void(const cvc::volume &, tf_binding_options &)> seed_from_volume;
 };
 
 class tf_binding;

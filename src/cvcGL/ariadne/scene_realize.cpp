@@ -30,6 +30,7 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
+#include <cvc/gl/ariadne/node_data.h> // a node's data on the state tree, followed
 #include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
@@ -303,10 +304,11 @@ void warn_clip_capability(GraphicsNode &node, const cvc::ariadne::SceneNode &n,
                        " apply (its own first, then its parent's, ...)");
 }
 
-// Translate the backend-neutral SceneVolRen into cvc::volren settings + apply them to
-// a freshly created VolRenNode. Warns (never throws) on configs that render blank.
-void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const cvc::volume &vol,
-                      const std::string &id, std::vector<std::string> *warnings) {
+// The backend-neutral SceneVolRen's per-volume settings (cvc::volren::volume_settings). Warns
+// (never throws) on configs that render blank.
+cvc::volren::volume_settings volren_volume_settings(const cvc::ariadne::SceneVolRen &v,
+                                                    const std::string &id,
+                                                    std::vector<std::string> *warnings) {
   cvc::volren::volume_settings vs;
   vs.shaded = v.shaded;
   vs.unshaded = v.unshaded;
@@ -342,8 +344,12 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
     warn(warnings,
          "ari: volren node '" + id +
              "' is shaded with no lights and ambient 0; the surface reads as a black silhouette");
+  return vs;
+}
+
+// The SceneVolRen's renderer-wide settings (resolution, steps, lights, shadows, backend), on `vn`.
+void configure_volren_render(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v) {
   vn.setResolutionScale(v.resolution_scale);
-  vn.addVolume(vol, vs);
   cvc::volren::render_settings rs = vn.renderConfig();
   rs.ambient = v.ambient;
   rs.steps = v.steps;
@@ -363,6 +369,14 @@ void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const 
     vn.setBackend(cvc::volren::backend::automatic);
   else
     vn.setBackend(cvc::volren::backend::cpu);
+}
+
+// Translate the backend-neutral SceneVolRen into cvc::volren settings + apply them to
+// a freshly created VolRenNode drawing `vol`. Warns (never throws) on configs that render blank.
+void configure_volren(VolRenNode &vn, const cvc::ariadne::SceneVolRen &v, const cvc::volume &vol,
+                      const std::string &id, std::vector<std::string> *warnings) {
+  vn.addVolume(vol, volren_volume_settings(v, id, warnings));
+  configure_volren_render(vn, v);
 }
 
 // Translate SceneVolSlice into cvc::volslice settings + apply. Warns on an empty TF.
@@ -563,6 +577,74 @@ tf_binding_options volslice_tf_options(const cvc::ariadne::SceneVolSlice &v,
     o.seed_is_applied = true;
   }
   return o;
+}
+
+// A volren whose source: names data on the state tree ({ data | state | node }; node_data.h): the
+// node raycasts the volume the app holds, its voxels shared, and follows it. The first volume is
+// added with the document's settings; each later one replaces its voxels, the settings (the
+// transfer function's lowering included) kept. The transfer function's seed is made on the first
+// volume's range, since the document's isosurfaces are values.
+std::shared_ptr<VolRenNode> realize_followed_volren(SceneGraph &sg, const cvc::ariadne::SceneNode &n,
+                                                    GraphicsNode *parent, RealizedScene &out,
+                                                    const NodeDataSource &src,
+                                                    std::vector<std::string> *warnings) {
+  cvc::app &app = sg.appContext();
+  if (n.has_fit)
+    warn(warnings, "ari: scene node '" + n.id +
+                       "' (volren): fit: places a volume the node reads itself; a data: entry's "
+                       "volume is placed where it is made (an sdf generator's fit:) -- ignored");
+  GraphicsNode *pr = parent ? parent : sg.getGraphicsRoot().get();
+  if (!parent && sg.hasGraphics(n.id)) // last-wins parity with sg.addGraphics (see volren)
+    sg.removeGraphics(n.id);
+  std::shared_ptr<VolRenNode> vn = pr->addGraphicsChild<VolRenNode>(n.id);
+  if (!vn)
+    return nullptr;
+  if (!parent)
+    sg.registerGraphics(n.id, vn);
+  if (cvc::state &key = vn->getState("source.volume"); key.value().empty())
+    key.value(src.path); // a reload over a live tree keeps where a program pointed it
+  const cvc::volren::volume_settings vs = volren_volume_settings(n.volren, n.id, warnings);
+  configure_volren_render(*vn, n.volren);
+
+  auto follower = std::make_shared<VolumeFollower>(vn, out.bind_prefix);
+  std::weak_ptr<VolRenNode> weak = vn;
+  const auto take = [weak, follower, vs]() {
+    if (!follower->tick())
+      return;
+    const std::shared_ptr<VolRenNode> node = weak.lock();
+    if (!node)
+      return;
+    const std::shared_ptr<const cvc::volume> &vol = follower->volume();
+    if (!vol)
+      node->getState("source.status")
+          .value(std::string("error: a volren raycasts a volume in memory, not a file read "
+                             "plane by plane"));
+    else if (node->volumeCount() == 0)
+      node->addVolume(*vol, vs);
+    else
+      node->setVolume(0, *vol);
+  };
+  take(); // a volume already on the tree is taken now, so the scene frames on it
+  out.custom_ticks.push_back([take](vtkRenderer *) { take(); });
+
+  tf_binding_options opt;
+  opt.volume_source = [follower]() { return follower->volume(); };
+  opt.seed_from_volume = [v = n.volren, id = n.id, ap = &app](const cvc::volume &vol,
+                                                              tf_binding_options &o) {
+    std::vector<std::string> w;
+    tf_binding_options seeded = volren_tf_options(v, vol, id, &w);
+    o.seed = std::move(seeded.seed);
+    o.seed_is_applied = seeded.seed_is_applied;
+    o.shininess = std::move(seeded.shininess);
+    for (const std::string &m : w)
+      ap->log(1, m + "\n");
+  };
+  const std::shared_ptr<const cvc::volume> now = follower->volume();
+  attach_transfer_function(out, vn, tf_target::volren, now ? *now : cvc::volume(app), opt,
+                           warnings);
+  out.volren_ticks.push_back(vn); // needs a per-frame tick() (tick_scene)
+  wait_for_datasets(out, app, vn, {src});
+  return vn;
 }
 
 // volume (VTK): the document's model, else the legacy points (absolute values, so an explicit
@@ -778,8 +860,12 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
     return;
   }
   std::shared_ptr<GraphicsNode> node;
+  // A volren views the volume the app holds when its source: names one on the state tree (data,
+  // state or node), and follows it (node_data.h); it is no generic data node.
+  const NodeDataSource followed =
+      n.type == "volren" ? volume_data_source(sg, out, n) : NodeDataSource{};
 
-  if (!n.source_data.empty() && !type_reads_data(sg.appContext(), n.type)) {
+  if (!n.source_data.empty() && !followed && !type_reads_data(sg.appContext(), n.type)) {
     // source: { data: <name> } — an empty group now; sync_scene_data draws the dataset into it
     // once it is loaded, and again each time it changes.
     node = parent ? parent->createChild(n.id) : sg.addGraphics(n.id);
@@ -902,9 +988,14 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
         attach_transfer_function(out, vnode, tf_target::volume, *v,
                                  volume_tf_options(n.volume.tf, *vnode), warnings);
     }
+  } else if (n.type == "volren" && followed) {
+    node = realize_followed_volren(sg, n, parent, out, followed, warnings);
+    if (!node)
+      return;
   } else if (n.type == "volren") {
     if (n.source_file.empty() && n.source_sdf_mesh.empty()) {
-      warn(warnings, "ari: scene node '" + n.id + "' (volren) has no source (file or sdf)");
+      warn(warnings, "ari: scene node '" + n.id +
+                         "' (volren) has no source (data, state, node, file or sdf)");
       return;
     }
     std::shared_ptr<VolRenNode> vn;

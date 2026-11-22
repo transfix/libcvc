@@ -242,6 +242,8 @@ struct tf_binding::impl {
   // overlay task).
   std::weak_ptr<const cvc::volume> volume_seen;
   bool has_volume = true;
+  // opt.seed_from_volume: the key is seeded once the first volume arrives (follow_volume).
+  bool seed_pending = false;
 
   // fe_lab: the ids of the isocontours fe.mesh.isovalue (fe_isocontour) and, in interval mode,
   // fe.mesh.isovalue2 (fe_isocontour2) follow; each key as last read or written; fe.mesh.region as
@@ -499,6 +501,59 @@ struct tf_binding::impl {
     return opt.volume_source ? opt.volume_source() : nullptr;
   }
 
+  // Seed the key (when it is empty, or still holds an earlier attach's seed: a hot reload) and
+  // take in what it holds: the seed as already drawn (opt.seed_is_applied), else lowered.
+  void seed_key(std::vector<std::string> *warnings) {
+    tf_bindings &bindings = app->slot<tf_bindings>();
+    std::string before = ari::read_or<std::string>(*app, model_key, "");
+    bool reseed = before.empty();
+    {
+      std::lock_guard<std::mutex> lock(bindings.m);
+      std::string &prev = bindings.seeds[model_key];
+      reseed = reseed || (!prev.empty() && before == prev);
+      prev = seed_str;
+    }
+    if (reseed) { // written outside the lock: the write runs the node's state handlers
+      ari::write<std::string>(*app, model_key, seed_str);
+      before = ari::read_or<std::string>(*app, model_key, seed_str);
+    }
+    if (opt.seed_is_applied && before == seed_str) {
+      // The renderer already draws the seed: record it as lowered.
+      seen = applied = before;
+      model = opt.seed;
+      model_ok = true;
+    } else {
+      std::string err;
+      if (!read_model(&err) && warnings)
+        warnings->push_back("ari: scene node '" + name + "': the transfer-function model at '" +
+                            model_key + "' does not parse (" + err +
+                            "); the renderer keeps the document's transfer function");
+    }
+    if (target == tf_target::fe_lab && model_ok) {
+      // fe.mesh.isovalue (and, for an interval, isovalue2) follow these isocontours, by id, from
+      // here on.
+      fe_isocontour(model);
+      fe_isocontour2(model);
+      // The keys follow the model (an interval needs both bounds in it, even under an applied
+      // seed), but attaching never re-meshes: auto_mesh or Tet-mesh meshes what the keys hold. A
+      // bar fe_lab's seed pinned at an end leaves a bound past that end as it is (bar_holds).
+      if (dirty || fe_interval) {
+        lower_fe(false);
+        applied = seen;
+        dirty = false;
+      }
+    } else if (model_ok && dirty) {
+      lower();
+    }
+  }
+
+  // opt.seed_from_volume's seed, on `vol`.
+  void make_seed() {
+    opt.seed_from_volume(vol, opt);
+    opt.seed.normalize();
+    seed_str = cvc::tf::to_string(opt.seed);
+  }
+
   // volume: follow a reload (setVolume); fe_lab: a load (opt.volume_source). Asked every tick,
   // whatever data_min/data_max say -- a new volume with the same range (the next time step)
   // re-publishes the same strings -- and by the shared owner of the volume, which a later volume
@@ -513,6 +568,14 @@ struct tf_binding::impl {
     cancel_tasks(); // computing from the volume the node no longer draws
     vol = *now;
     read_volume_range();
+    if (seed_pending) { // the seed the document's values make on this volume's range
+      seed_pending = false;
+      make_seed();
+      std::vector<std::string> warnings;
+      seed_key(&warnings);
+      for (const std::string &w : warnings)
+        app->log(1, w + "\n");
+    }
     ++generation;
     inflight = computed = 0;
     raw = cvc::tf::overlays();
@@ -950,8 +1013,6 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
     std::lock_guard<std::mutex> lock(bindings.m);
     bindings.status_owners[d.model_key] = d.owner;
   }
-  d.opt.seed.normalize();
-  d.seed_str = cvc::tf::to_string(d.opt.seed);
   if (target == tf_target::volume) {
     if (auto *vn = dynamic_cast<VolumeNode *>(node.get()))
       d.volume_seen = vn->getSharedVolume();
@@ -964,6 +1025,14 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
       d.vol = *v;
     }
   }
+  if (d.opt.volume_source && d.opt.seed_from_volume) {
+    if (d.has_volume)
+      d.opt.seed_from_volume(d.vol, d.opt);
+    else
+      d.seed_pending = true; // seeded when follow_volume takes the first volume
+  }
+  d.opt.seed.normalize();
+  d.seed_str = cvc::tf::to_string(d.opt.seed);
   d.read_volume_range();
   cvc::app &a = *d.app;
 
@@ -986,46 +1055,8 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
     d.fe_iso2_id = d.opt.fe_isocontour2;
   }
   d.refresh_range(*node);
-  std::string before = ari::read_or<std::string>(a, d.model_key, "");
-  bool reseed = before.empty();
-  {
-    std::lock_guard<std::mutex> lock(bindings.m);
-    std::string &prev = bindings.seeds[d.model_key];
-    reseed = reseed || (!prev.empty() && before == prev);
-    prev = d.seed_str;
-  }
-  if (reseed) { // written outside the lock: the write runs the node's state handlers
-    ari::write<std::string>(a, d.model_key, d.seed_str);
-    before = ari::read_or<std::string>(a, d.model_key, d.seed_str);
-  }
-  if (d.opt.seed_is_applied && before == d.seed_str) {
-    // The renderer already draws the seed: record it as lowered.
-    d.seen = d.applied = before;
-    d.model = d.opt.seed;
-    d.model_ok = true;
-  } else {
-    std::string err;
-    if (!d.read_model(&err) && warnings)
-      warnings->push_back("ari: scene node '" + d.name + "': the transfer-function model at '" +
-                          d.model_key + "' does not parse (" + err +
-                          "); the renderer keeps the document's transfer function");
-  }
-  if (target == tf_target::fe_lab && d.model_ok) {
-    // fe.mesh.isovalue (and, for an interval, isovalue2) follow these isocontours, by id, from
-    // here on.
-    d.fe_isocontour(d.model);
-    d.fe_isocontour2(d.model);
-    // The keys follow the model (an interval needs both bounds in it, even under an applied
-    // seed), but attaching never re-meshes: auto_mesh or Tet-mesh meshes what the keys hold. A
-    // bar fe_lab's seed pinned at an end leaves a bound past that end as it is (bar_holds).
-    if (d.dirty || d.fe_interval) {
-      d.lower_fe(false);
-      d.applied = d.seen;
-      d.dirty = false;
-    }
-  } else if (d.model_ok && d.dirty) {
-    d.lower();
-  }
+  if (!d.seed_pending)
+    d.seed_key(warnings);
   if (target == tf_target::fe_lab)
     d.publish_interval();
 

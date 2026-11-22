@@ -18,6 +18,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
+#include <cvc/gl/ariadne/node_data.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/tf_binding.h>
 #include <cvc/gl/ariadne/volume_grid_nodes.h>
@@ -59,59 +60,12 @@ std::string color_text(const ari::Value &v) {
   return out;
 }
 
-// One of the node's data on the state tree, as a document names it: the key grid.source.* holds
-// (relative to the document's scope, or '/'-rooted) and, for a dataset, its store entry (the
-// document's data.<name>), whose loading the scene waits for.
-struct data_source {
-  std::string path;
-  std::string dataset;
-};
-
-// A dataset's output: data.<name>.<item> (a name with a leading '/' is the root's).
-data_source dataset_source(cvc::app &app, const std::string &prefix, const std::string &name,
-                           const std::string &item) {
-  data_source s;
-  s.dataset = name[0] == '/' ? name : std::string(ari::kDataRoot) + cvc::state::SEPARATOR + name;
-  s.path = s.dataset + cvc::state::SEPARATOR + item;
-  ari::DataStore::of(app)->touch(ari::resolve_bind(prefix, s.dataset)); // a lazy one loads now
-  return s;
-}
-
-// points: and session: -- { data: <name>, item: <output> } or { state: <key> }.
-data_source prop_source(cvc::app &app, const std::string &prefix, const ari::SceneNode &n,
-                        const char *prop, const char *item, std::vector<std::string> *warnings) {
-  const ari::Value *v = n.props.find(prop);
-  if (!v)
-    return {};
-  if (v->is_map() && v->has("data"))
-    return dataset_source(app, prefix, v->str("data"), v->str("item", item));
-  if (v->is_map() && v->has("state"))
-    return {v->str("state"), std::string()};
-  warn(warnings, "ari: scene node '" + n.id + "': " + prop +
-                     ": is { data: <name> } (a data: entry the app loads) or { state: <key> }; "
-                     "the node reads no file -- ignored");
-  return {};
-}
-
-// The volume: source: { data: <name>, item }, { state: <key> } or { node: <id>, key: <key> }.
-data_source volume_source(cvc::app &app, const std::string &prefix, const ari::SceneNode &n,
-                          std::vector<std::string> *warnings) {
-  if (!n.source_data.empty())
-    return dataset_source(app, prefix, n.source_data,
-                          n.source_item.empty() ? std::string("volume") : n.source_item);
-  if (const ari::Value *src = n.props.find("source"); src && src->is_map()) {
-    if (src->has("state"))
-      return {src->str("state"), std::string()};
-    if (src->has("node")) {
-      // A top-level node's keys are graphics.root.children.<id>; a dotted one is a path.
-      const std::string id = src->str("node");
-      const std::string at =
-          id.find('.') != std::string::npos
-              ? id
-              : std::string("graphics.root.children") + cvc::state::SEPARATOR + id;
-      return {at + cvc::state::SEPARATOR + src->str("key", "grid.volume"), std::string()};
-    }
-  }
+// The volume: source: { data: <name>, item }, { state: <key> } or { node: <id>, key: <key> }
+// (node_data.h). Says what to write when the source: names none of them.
+NodeDataSource grid_volume_source(SceneGraph &sg, const RealizedScene &out,
+                                  const ari::SceneNode &n, std::vector<std::string> *warnings) {
+  if (NodeDataSource s = volume_data_source(sg, out, n))
+    return s;
   if (!n.source_file.empty() || !n.source_sdf_mesh.empty()) {
     const std::string entry =
         !n.source_file.empty() ? n.source_file
@@ -128,8 +82,8 @@ data_source volume_source(cvc::app &app, const std::string &prefix, const ari::S
 }
 
 // The props that seed <node>.grid.*.
-void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, const data_source &volume,
-               const data_source &points, const data_source &session,
+void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, const NodeDataSource &volume,
+               const NodeDataSource &points, const NodeDataSource &session,
                std::vector<std::string> *warnings) {
   cvc::state &grid = g.getState("grid");
   for (const char *k : {"view", "tool"})
@@ -194,9 +148,10 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
                                                   std::vector<std::string> *warnings) {
   cvc::app &app = sg.appContext();
   const std::string prefix = out.bind_prefix;
-  const data_source volume = volume_source(app, prefix, n, warnings);
-  const data_source points = prop_source(app, prefix, n, "points", "classes", warnings);
-  const data_source session = prop_source(app, prefix, n, "session", "session", warnings);
+  const NodeDataSource volume = grid_volume_source(sg, out, n, warnings);
+  const NodeDataSource points = prop_data_source(app, prefix, n, "points", "classes", warnings);
+  const NodeDataSource session =
+      prop_data_source(app, prefix, n, "session", "session", warnings);
   if (n.props.has("region_reads"))
     warn(warnings, "ari: scene node '" + n.id +
                        "': region_reads: the node reads no file (a host gives a large one read "
@@ -247,23 +202,7 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
       node->tick();
   });
   // While a dataset the node follows is loading, the scene has work in flight.
-  std::vector<std::string> loading;
-  for (const data_source *s : {&volume, &points, &session})
-    if (!s->dataset.empty())
-      loading.push_back(ari::resolve_bind(prefix, s->dataset));
-  if (!loading.empty()) {
-    cvc::app *ap = &app;
-    out.pending_work.push_back([weak, ap, loading]() {
-      if (!weak.lock())
-        return false;
-      for (const std::string &d : loading) {
-        const std::string st = ari::data_status(*ap, d);
-        if (st == "fetching" || st == "unpacking" || st == "generating" || st == "decoding")
-          return true;
-      }
-      return false;
-    });
-  }
+  wait_for_datasets(out, app, g, {volume, points, session});
   return g;
 }
 
