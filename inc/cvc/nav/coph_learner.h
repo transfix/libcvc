@@ -69,6 +69,14 @@ struct coph_network {
 // 12, joined by rows at y = 0, 4 and 7.5.
 coph_network coph_crossing_network();
 
+// maze_geometry.corridor_clear: points every 0.04 m along a-b all lie within the corridor's
+// radius less margin (the routed controller uses 0.17, the crossing world's hits 0.12).
+bool coph_corridor_clear(const coph_vec2 &a, const coph_vec2 &b, const coph_network &network,
+                         double margin);
+
+// shapes.slab_sweep: the distance from the motion a-b to a slab's surface (negative through it).
+double coph_slab_sweep(const coph_vec2 &a, const coph_vec2 &b, const coph_shape &slab);
+
 // What the maze router reads of a navigation context, and the route it leaves there.
 struct coph_route_context {
   std::vector<coph_shape> reported_geometry; // closures: shapes reported by sensors or packets
@@ -210,6 +218,9 @@ struct coph_route {
   std::string reason; // maze_graph, maze_no_route or unsafe_connector
   std::vector<int> nodes;
   std::vector<int> blocked;
+  // maze_route's route_changed: the nodes or the blocked edges differ from the context's last
+  // route; always true without a route.
+  bool changed = false;
 };
 coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph_network &network,
                            coph_route_context &ctx, int step);
@@ -224,6 +235,8 @@ struct coph_control_meta {
   coph_vec2 waypoint{};
   coph_vec2 applied{};
   bool infeasible = false;
+  coph_vec2 proposed{}; // the raw command, before the force limit (guarded_control's nominal)
+  bool route_changed = false;
 };
 template <class T> struct coph_control_of {
   coph_vec2_of<T> applied;

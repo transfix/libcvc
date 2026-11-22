@@ -34,6 +34,7 @@ using detail::coph_cholesky;
 using detail::coph_cholesky_solve;
 using detail::coph_features;
 using detail::coph_forward;
+using detail::coph_shape_less;
 using detail::coph_spd_inverse;
 
 constexpr double kSupportRadius = 0.65; // Stage.supported, TerrainLearner's route support
@@ -90,22 +91,6 @@ std::string fixed9(double v) {
 #endif
 }
 
-// A Python tuple's order on shapes: (x, y, r) for a disk, (x, y, r, hx, hy) for a slab,
-// element by element, a disk before a slab it is a prefix of.
-bool shape_less(const coph_shape &a, const coph_shape &b) {
-  if (a.x != b.x)
-    return a.x < b.x;
-  if (a.y != b.y)
-    return a.y < b.y;
-  if (a.r != b.r)
-    return a.r < b.r;
-  if (!a.slab || !b.slab)
-    return !a.slab && b.slab;
-  if (a.hx != b.hx)
-    return a.hx < b.hx;
-  return a.hy < b.hy;
-}
-
 std::vector<const coph_reading *> export_readings(const coph_stage &st) {
   std::vector<const coph_reading *> out;
   for (const coph_reading &r : st.readings)
@@ -142,7 +127,6 @@ std::vector<double> ridge_fit(const std::vector<const coph_reading *> &rs, const
   return coph_cholesky_solve(normal, m, rhs);
 }
 
-// cooperative.field_vector: (value, gx, gy) of G3's risk at each point, flattened.
 std::vector<double> field_vector(const std::vector<double> &w, const coph_stage &st,
                                  const coph_config &cfg, const std::vector<coph_vec2> &points) {
   coph_field_view f;
@@ -207,6 +191,12 @@ typename std::vector<Entry>::iterator find_key(std::vector<Entry> &v, const Key 
 // ---------------------------------------------------------------------------
 // G9: export
 // ---------------------------------------------------------------------------
+
+std::vector<double> coph_field_vector(const coph_stage &stage, const std::vector<double> &weights,
+                                      const coph_config &cfg,
+                                      const std::vector<coph_vec2> &points) {
+  return field_vector(weights, stage, cfg, points);
+}
 
 int coph_bootstrap_blocks(const coph_learner_state &s) {
   if (s.stages.empty())
@@ -429,7 +419,7 @@ void coph_refresh_geometry(coph_learner_state &s) {
     add(geometry, r.shape);
   for (const auto &r : remote)
     add(geometry, r.shape);
-  std::sort(geometry.begin(), geometry.end(), shape_less);
+  std::sort(geometry.begin(), geometry.end(), coph_shape_less);
   s.reported_geometry = geometry;
   std::vector<coph_shape> relevant;
   for (const coph_shape &o : geometry)
@@ -443,7 +433,7 @@ void coph_refresh_geometry(coph_learner_state &s) {
   std::vector<coph_shape> store = s.geometry;
   for (const coph_shape &o : relevant)
     add(store, o);
-  std::sort(store.begin(), store.end(), shape_less);
+  std::sort(store.begin(), store.end(), coph_shape_less);
   if (static_cast<int>(store.size()) > s.cfg.obstacle_cap)
     store.resize(static_cast<std::size_t>(s.cfg.obstacle_cap));
   s.geometry = store;
