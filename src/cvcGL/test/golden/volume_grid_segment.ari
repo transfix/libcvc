@@ -6,6 +6,11 @@
 # slices in the classes' colours, the classes listed in the tab, and a view of their surfaces
 # alone beside the grid. The live labels drawn while it marches are not what is captured: the
 # harness steps on until the run is done.
+#
+# No `lights:` rig: the scene keeps the default headlight. With the demo's three_point rig the
+# surfaces' views (mirrors of the main view) came out lit by the rig in the Release build and by
+# the headlight in the Debug one (seen on CI's package-linux lanes), so the golden could match only
+# one of them. The surfaces appear only once the run ends, frames after the rig is set up.
 
 meta:
   name: golden volume_grid_segment
@@ -65,6 +70,3 @@ scene:
       transfer_function:
         domain: [0, 160]
         color: [[0, 0, 0, 0], [0.4, 0.45, 0.42, 0.4], [1, 1, 0.98, 0.94]]
-  lights:
-    - rig: three_point
-      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
