@@ -37,8 +37,10 @@
 // double-click puts the camera back where azimuth: / elevation: / zoom: start it. In mode: slice
 // (CameraController::Mode::Slice) it looks straight down one axis: drags pan, the wheel zooms
 // about the pointer, it is framed on the volume_slice nodes on its axis, and it leaves out those
-// on the other two; a pick meets the plane of its slice exactly and writes the voxel (i, j, k)
-// and its value.
+// on the other two; a pick meets the plane of its slice exactly and writes the voxel (i, j, k),
+// its value and the slice's axis. `pointer: <key>` writes the same keys (phase "hover") as the
+// pointer moves over the view with no button down, so a probe can follow it (in an orbit view each
+// move costs a cell pick).
 //
 // A view's camera is its own unless it names one: `camera: <id>` draws from a camera the scene
 // declares (`scene: cameras:`), so every viewport bound to it moves together, and `camera: main`
@@ -58,6 +60,8 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -124,6 +128,7 @@ public:
     bool voxel = false;
     long long ijk[3] = {0, 0, 0};
     double value = 0.0;
+    int axis = -1; // with plane: the axis the slice looks down (0 x, 1 y, 2 z)
   };
   // Pick in view `view` at (x, y) in VTK display coordinates (framebuffer pixels from the lower
   // left), against what the view drew last frame: what an `input: pick` viewport's left button
@@ -149,6 +154,13 @@ private:
   // An input: pick view's pick at the pointer, in `phase` (down, drag, up): written under its
   // pick key, and its on_pick raised through `edit`.
   void pick(View &v, const char *phase, ::cvc::ariadne::CustomEdit &edit);
+  // A pointer: view's pick at the pointer as it moves with no button down: written under its
+  // pointer key with phase "hover" (no on_pick).
+  void pointer(View &v);
+  // The keys a pick at the pointer writes (x, y, z, hit, node, i, j, k, value, axis, button,
+  // mods, phase, view, seq), `seq` counted by `seq`.
+  std::vector<std::pair<std::string, std::string>> pick_fields(View &v, const char *phase,
+                                                               long &seq) const;
 
   SceneRenderer *view_;
   ImGuiBackend *backend_;

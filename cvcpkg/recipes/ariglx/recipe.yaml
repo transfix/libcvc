@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ariglx
-  upstream_version: "4.0.2"
+  upstream_version: "4.0.4"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -45,9 +45,9 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.4"
     - name: cvcgl
-      version: "^4.0"
+      version: "==4.0.4"
     # ariglx itself links VTK's RenderingUI and IOImage modules (its window and --png), beyond
     # what cvcGL links.
     - name: vtk
@@ -60,18 +60,18 @@ depends:
     - name: wasmtime
   runtime:
     - name: libcvc
-      version: "^4.0"
+      version: "==4.0.4"
     - name: cvcgl
-      version: "^4.0"
+      version: "==4.0.4"
     - name: vtk
     - name: imgui-w32
     - name: sdl3
     - name: python312
     - name: wasmtime
     - name: pycvc-cp312
-      version: "^4.0"
+      version: "==4.0.4"
     - name: pycvc-gl-cp312
-      version: "^4.0"
+      version: "==4.0.4"
     - name: numpy-cp312
   host_tools:
     - cmake

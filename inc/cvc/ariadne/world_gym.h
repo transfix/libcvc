@@ -149,6 +149,12 @@ struct gym_options {
   // free point; every draw follows the reset's seed.
   std::vector<entity_spec> agents;
   int count = 1;
+  // The document's fleets (its world: vehicles: start: entries with fleet:, by name) each reset
+  // lays out after `agents`, from the fleet's seed: plus the reset's seed, so each episode has a
+  // layout of its own and the same seed the same one. Their vehicles join the agents in the
+  // fleets' order, their goals held (a team's at its rally point). With fleets and no `agents`,
+  // the fleets' vehicles are the only agents.
+  std::vector<std::string> fleets;
   // Whether an agent at its goal gets another (nav@1's wandering). Off: goals are held for the
   // episode, and it ends when every agent is at its own.
   bool wander = false;

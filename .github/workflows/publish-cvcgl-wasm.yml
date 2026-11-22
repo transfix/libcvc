@@ -106,8 +106,6 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build + install libcvc + cvcGL (wasm-mt, with imgui + sdl3)
         # ONE emscripten configure builds both cvc + cvcGL targets and installs
@@ -232,6 +230,15 @@ jobs:
               --prefix "$WASM_DEPS" --no-fallback-to-source 2>&1 | tail -2 \
               || { echo "::error::failed to install data package $p"; exit 1; }
           done
+          # cvc::planar's libraries, which the contour tiler demo's contour_lab node tiles on: for
+          # the gallery's own build only, after the SDK above (which does not take them yet).
+          for p in clipper2 cdt shewchuk-predicates; do
+            echo "=== install gallery dep: $p ==="
+            cvcpkg install "$p" --prefix "$WASM_DEPS" \
+              --platform wasm-mt --arch wasm32 --config release --link static \
+              --no-fallback-to-source 2>&1 | tail -2 \
+              || { echo "::error::failed to install wasm dep $p"; exit 1; }
+          done
           # The trained weights + Austin scene are ESSENTIAL: without them
           # build-wasm.sh silently falls back to a synthetic city + default net.
           # Fail loudly on a preload miss rather than shipping a gutted gallery.
@@ -345,8 +352,6 @@ jobs:
             --platform "$PLATFORM" --arch wasm32 --config release --link static \
             --no-fallback-to-source \
             || { echo "::error::failed to install arigl-web's $PLATFORM deps"; exit 1; }
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" "$PLATFORM"
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
           if [ "$PLATFORM" = wasm ]; then
             cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
@@ -365,7 +370,7 @@ jobs:
           bash cvcpkg/recipes/arigl-web/build-wasm.sh
           WEB="$INST/share/arigl-web"
           log="$CVC_BUILD_DIR/configure.log"
-          for f in index.html arigl-web.js arigl-web.css arigl.js arigl.wasm \
+          for f in index.html arigl-web.js arigl-web.css arigl.js arigl.wasm cvc-audio-worklet.js \
                    THIRD_PARTY_NOTICES.md LICENSE; do
             test -f "$WEB/$f" || { echo "::error::arigl-web ($PLATFORM) has no $f"; exit 1; }
           done

@@ -56,6 +56,12 @@ public:
   void stop();  // idempotent; joins the worker
   void set_rate(double hz);
 
+  // Tick now, on the calling thread, where the producer runs on the browser's main thread (the
+  // single-threaded build): a source fed from outside has a frame (frame_source::
+  // set_ready_callback), and the timer may not fire again for a second in a hidden tab. Not
+  // while a tick is running. Elsewhere the worker polls at its rate and this does nothing.
+  void run_now();
+
   bool running() const noexcept { return run_.load(std::memory_order_relaxed); }
   long ticks() const noexcept { return ticks_.load(std::memory_order_relaxed); }
   long behind() const noexcept { return behind_.load(std::memory_order_relaxed); }
@@ -66,6 +72,7 @@ private:
   // throw), so the tick is driven by a browser interval timer that fires on the main thread during
   // the app's Asyncify yields. These are only defined/used on that target.
   static void em_tick_trampoline(void *self);
+  void em_tick(); // one tick on the main thread (the timer's, or run_now's)
 
   std::function<bool()> tick_;
   std::atomic<double> period_;
@@ -74,6 +81,7 @@ private:
   std::atomic<long> behind_{0};
   std::thread thr_;      // native / pthread-wasm: the dedicated worker (unused in non-pthread wasm)
   long interval_id_{-1}; // non-pthread wasm: the emscripten_set_interval id, or -1 when none
+  bool in_tick_{false};  // non-pthread wasm: a tick is running (run_now from inside it is a no-op)
 };
 
 } // namespace stream

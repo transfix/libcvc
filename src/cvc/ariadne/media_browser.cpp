@@ -4,11 +4,22 @@
 //
 // Each player is a hidden element the page keeps (Module.cvcMedia[id]). The element plays the sound
 // itself, through the browser's output. A video's pictures are drawn, at most once per new frame,
-// into a canvas the size of the widget's box, and getImageData hands them to the widget, which
-// publishes them as any picture (an ImGui texture in arigl-web, terminal cells in ari.html). The
-// tradeoff, against a <video> laid over the canvas: one copy per frame shown (about 1-3 ms at
-// 480x270), for one path that works in both pages, under windows and menus, clipped and scaled like
-// every other widget.
+// into a canvas the size of the widget's box, and read back to the widget, which publishes them as
+// any picture (an ImGui texture in arigl-web, terminal cells in ari.html). The tradeoff, against a
+// <video> laid over the canvas: one copy per frame shown (about 1-3 ms at 480x270), for one path
+// that works in both pages, under windows and menus, clipped and scaled like every other widget.
+//
+// How a frame is read back, in order, the first that gives a picture:
+//   - "2d": a 2D canvas kept in memory (willReadFrequently), drawImage and getImageData;
+//   - "gl": WebGL (one context for the page's players), texImage2D and readPixels: the GPU's own
+//     copy of a hardware-decoded frame;
+//   - "gpu": a GPU-backed 2D canvas (no willReadFrequently).
+// A frame that reads back empty (nothing drawn) or all one colour (black; the green of a zeroed
+// frame) is tried on the others, at most twice a second, and the first to give a picture is kept.
+// A phone's hardware decoder can hand out frames that one way reads as black. Until a video has
+// shown a picture its blank frames are not shown: the box keeps its placeholder and says why
+// (Player::notice). Module.cvcMediaPaths, set before a player opens, is another order (["gl"]
+// alone, to try one).
 //
 // Where the source comes from:
 //   - an http(s) URL with no auth: the element loads it itself (it streams, and seeks with range
@@ -109,22 +120,53 @@ EM_JS(int, cvc_media_open, (int id, int video, const char *url, const char *toke
     el.muted = !!muted;
     el.loop = !!loop;
     el.playsInline = true;
-    // In the document (a browser may not decode a detached video), where no one sees it.
+    // In the document (a browser may not decode a detached video) and in the viewport (a phone may
+    // not start or decode one far outside it), where no one sees it: 2 px in the top-left corner,
+    // under the page (the canvas covers it) and all but transparent.
     el.style.position = 'fixed';
-    el.style.left = '-10000px';
+    el.style.left = '0';
+    el.style.top = '0';
     el.style.width = '2px';
     el.style.height = '2px';
-    el.style.opacity = '0';
+    el.style.opacity = '0.01';
+    el.style.zIndex = '-1';
     el.style.pointerEvents = 'none';
     el.setAttribute('aria-hidden', 'true');
     document.body.appendChild(el);
+    var order = Module.cvcMediaPaths;
     var st = {el: el, frame: 0, key: '', blob: null, err: '', started: false, blocked: false,
-              canvas: null, ctx: null, tainted: false};
+              idle: false, fetched: false, opened: performance.now(), tainted: false,
+              paths: Array.isArray(order) && order.length ? order.slice() : ['2d', 'gl', 'gpu'],
+              path: 0, canvases: {}, buf: null, good: 0, blank: 0, probed: -1e9, tried: ''};
     Module.cvcMedia = Module.cvcMedia || {};
     Module.cvcMedia[id] = st;
     el.addEventListener('error', function() {
       st.err = (el.error && el.error.message) || 'the browser cannot play it';
     });
+    // Loading stopped before anything came (preload none: a phone on Data Saver, a low-end one):
+    // the element waits for play(), so the player is Ready, and autoplay starts it. (A small file
+    // fetched whole is suspended before its metadata too, but after a progress event.)
+    el.addEventListener('progress', function() { st.fetched = true; });
+    el.addEventListener('suspend', function() {
+      if (el.readyState < 1 && el.networkState == 1 && !st.fetched) st.idle = true;
+    });
+    st.play = function() {
+      var p = el.play();
+      if (p && p.catch)
+        p.catch(function(e) {
+          if (e && e.name == 'NotAllowedError') st.blocked = true; // no tap on the page yet
+          else if (e && e.name != 'AbortError') st.err = String((e && e.message) || e);
+        });
+    };
+    // Refused for want of a tap (sound, or a browser that starts no video by itself): the next tap
+    // or key anywhere on the page plays it, within that gesture.
+    st.unlock = function() {
+      if (!st.blocked || (navigator.userActivation && !navigator.userActivation.isActive)) return;
+      st.blocked = false;
+      st.play();
+    };
+    st.gestures = ['pointerup', 'touchend', 'keydown', 'click'];
+    st.gestures.forEach(function(t) { document.addEventListener(t, st.unlock, true); });
     if (video && el.requestVideoFrameCallback) {
       var tick = function() { st.frame++; el.requestVideoFrameCallback(tick); };
       el.requestVideoFrameCallback(tick);
@@ -162,6 +204,7 @@ EM_JS(void, cvc_media_close, (int id), {
   var st = Module.cvcMedia && Module.cvcMedia[id];
   if (!st) return;
   delete Module.cvcMedia[id];
+  st.gestures.forEach(function(t) { document.removeEventListener(t, st.unlock, true); });
   try {
     st.el.pause();
     st.el.removeAttribute('src');
@@ -176,17 +219,14 @@ EM_JS(void, cvc_media_play, (int id), {
   if (!st) return;
   st.started = true;
   st.blocked = false;
-  var p = st.el.play();
-  if (p && p.catch)
-    p.catch(function(e) {
-      if (e && e.name == 'NotAllowedError') st.blocked = true; // no click on the page yet
-      else if (e && e.name != 'AbortError') st.err = String((e && e.message) || e);
-    });
+  st.play();
 });
 
 EM_JS(void, cvc_media_pause, (int id), {
   var st = Module.cvcMedia && Module.cvcMedia[id];
-  if (st) st.el.pause();
+  if (!st) return;
+  st.blocked = false; // not to be played by the next tap now
+  st.el.pause();
 });
 
 EM_JS(void, cvc_media_seek, (int id, double t), {
@@ -210,7 +250,7 @@ EM_JS(int, cvc_media_state, (int id), {
   if (!st) return 6;
   var el = st.el;
   if (st.err) return 6;
-  if (el.readyState < 1) return 1;
+  if (el.readyState < 1) return st.idle && !st.started ? 2 : 1;
   if (el.ended && !el.loop) return 5;
   if (!el.paused) return 3;
   return st.started ? 4 : 2;
@@ -235,6 +275,30 @@ EM_JS(char *, cvc_media_error, (int id), {
   return p;
 });
 
+// What keeps the picture away though nothing failed, in a few words for the box ("" for nothing).
+EM_JS(char *, cvc_media_notice, (int id), {
+  var st = Module.cvcMedia && Module.cvcMedia[id];
+  var s = '';
+  if (st && !st.err) {
+    var el = st.el;
+    if (st.blocked) s = 'tap to start it';
+    else if (st.tainted) s = 'no CORS: its pictures cannot be read';
+    else if (el.tagName == 'VIDEO' && !st.good && performance.now() - st.opened > 3000) {
+      if (st.blank)
+        s = 'its frames come out ' +
+            (st.blank == 1 ? 'empty'
+             : st.flat[0] + st.flat[1] + st.flat[2] <= 12 ? 'black'
+             : 'all rgb(' + st.flat.join(',') + ')') + ' (' + st.tried + ')';
+      else if (!el.paused && el.readyState < 2)
+        s = 'playing, no picture yet (readyState ' + el.readyState + ')';
+    }
+  }
+  var n = lengthBytesUTF8(s) + 1;
+  var p = _malloc(n);
+  stringToUTF8(s, p, n);
+  return p;
+});
+
 // A new picture, scaled into the bw x bh box (never up), as RGBA into `out`; its size into wh.
 EM_JS(int, cvc_media_frame, (int id, int bw, int bh, unsigned char *out, int *wh), {
   var st = Module.cvcMedia && Module.cvcMedia[id];
@@ -246,20 +310,140 @@ EM_JS(int, cvc_media_frame, (int id, int bw, int bh, unsigned char *out, int *wh
   st.key = key;
   var k = Math.min(bw / el.videoWidth, bh / el.videoHeight, 1);
   var w = Math.max(1, Math.floor(el.videoWidth * k)), h = Math.max(1, Math.floor(el.videoHeight * k));
-  if (!st.canvas || st.canvas.width != w || st.canvas.height != h) {
-    st.canvas = typeof OffscreenCanvas != 'undefined' ? new OffscreenCanvas(w, h)
-                                                       : document.createElement('canvas');
-    st.canvas.width = w;
-    st.canvas.height = h;
-    st.ctx = st.canvas.getContext('2d', {willReadFrequently: true});
-  }
-  st.ctx.drawImage(el, 0, 0, w, h);
-  var data;
+  // A 2D canvas: kept in memory (willReadFrequently), or GPU-backed where the browser can.
+  var draw_2d = function(gpu) {
+    var c = st.canvases[gpu ? 'gpu' : '2d'];
+    if (!c || c.canvas.width != w || c.canvas.height != h) {
+      var cv = !gpu && typeof OffscreenCanvas != 'undefined' ? new OffscreenCanvas(w, h)
+                                                             : document.createElement('canvas');
+      cv.width = w;
+      cv.height = h;
+      c = cv.getContext('2d', gpu ? {} : {willReadFrequently: true});
+      if (!c) return null;
+      st.canvases[gpu ? 'gpu' : '2d'] = c;
+    }
+    c.clearRect(0, 0, w, h); // a draw that does nothing reads back empty, not the last frame
+    c.drawImage(el, 0, 0, w, h);
+    return c.getImageData(0, 0, w, h).data;
+  };
+  // WebGL: the frame as a texture, drawn into a w x h viewport and read back. One context for the
+  // page's players (a page has few to spare), made the first time a player needs it.
+  var draw_gl = function() {
+    if (Module.cvcMediaGL === undefined) {
+      Module.cvcMediaGL = null;
+      var cv = typeof OffscreenCanvas != 'undefined' ? new OffscreenCanvas(1, 1)
+                                                     : document.createElement('canvas');
+      var gl = cv.getContext('webgl', {alpha: true, premultipliedAlpha: false, antialias: false,
+                                       depth: false, stencil: false});
+      if (!gl) return null;
+      var shader = function(type, src) {
+        var s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        return s;
+      };
+      var prog = gl.createProgram();
+      // Texture row 0 is the frame's top, and readPixels gives the bottom row first: the quad's
+      // bottom samples the top, so the rows come back top first.
+      gl.attachShader(prog, shader(gl.VERTEX_SHADER,
+          'attribute vec2 a; varying vec2 t;' +
+          'void main() { t = a * 0.5 + 0.5; gl_Position = vec4(a, 0.0, 1.0); }'));
+      gl.attachShader(prog, shader(gl.FRAGMENT_SHADER,
+          'precision mediump float; varying vec2 t; uniform sampler2D s;' +
+          'void main() { gl_FragColor = texture2D(s, t); }'));
+      gl.bindAttribLocation(prog, 0, 'a');
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return null;
+      gl.useProgram(prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+                    gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      Module.cvcMediaGL = gl;
+    }
+    var g = Module.cvcMediaGL;
+    if (!g || g.isContextLost()) return null;
+    if (g.canvas.width != w || g.canvas.height != h) {
+      g.canvas.width = w;
+      g.canvas.height = h;
+    }
+    g.viewport(0, 0, w, h);
+    g.texImage2D(g.TEXTURE_2D, 0, g.RGBA, g.RGBA, g.UNSIGNED_BYTE, el);
+    g.clearColor(0, 0, 0, 0);
+    g.clear(g.COLOR_BUFFER_BIT);
+    g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
+    if (!st.buf || st.buf.length != w * h * 4) st.buf = new Uint8Array(w * h * 4);
+    g.readPixels(0, 0, w, h, g.RGBA, g.UNSIGNED_BYTE, st.buf);
+    return st.buf;
+  };
+  // A path's pixels, or null where it cannot draw here. Another origin without CORS throws.
+  var draw = function(path) {
+    try {
+      if (path == 'gl') return draw_gl();
+      return path == '2d' || path == 'gpu' ? draw_2d(path == 'gpu') : null;
+    } catch (e) {
+      if (e && e.name == 'SecurityError') throw e;
+      return null;
+    }
+  };
+  // 0: a picture; 1: empty (nothing drawn); 2: all one colour, st.flat (black, or the green of a
+  // zeroed frame). Every 3rd row and 7th column, a pixel in from the edges: through WebGL a
+  // decoder's padding can tint the outer column of an all-black frame.
+  var blank = function(d) {
+    if (!d) return 1;
+    var x0 = w > 2 ? 1 : 0, y0 = h > 2 ? 1 : 0, c = null;
+    for (var y = y0; y < h - y0; y += 3) {
+      for (var x = x0 + y % 7; x < w - x0; x += 7) {
+        var i = (y * w + x) * 4;
+        if (!d[i + 3]) continue;
+        if (!c) c = [d[i], d[i + 1], d[i + 2]];
+        else if (Math.abs(d[i] - c[0]) > 4 || Math.abs(d[i + 1] - c[1]) > 4 ||
+                 Math.abs(d[i + 2] - c[2]) > 4) return 0;
+      }
+    }
+    if (!c) return 1;
+    st.flat = c;
+    return 2;
+  };
+  var data, kind;
   try {
-    data = st.ctx.getImageData(0, 0, w, h).data;
+    data = draw(st.paths[st.path]);
+    kind = blank(data);
+    var now = performance.now();
+    if (kind && now - st.probed >= 500) { // the others, twice a second at most
+      st.probed = now;
+      var tried = [st.paths[st.path] + (data ? '' : ' none')];
+      for (var i = 0; i < st.paths.length; i++) {
+        if (i == st.path) continue;
+        var d = draw(st.paths[i]);
+        tried.push(st.paths[i] + (d ? '' : ' none'));
+        if (d && !blank(d)) {
+          st.path = i;
+          data = d;
+          kind = 0;
+          break;
+        }
+      }
+      st.tried = tried.join(', ');
+    }
   } catch (e) {
     st.tainted = true; // another origin without CORS: the sound plays, the pictures can't be read
     return 0;
+  }
+  if (kind) {
+    st.blank = kind;
+    // Never a picture yet: keep the placeholder, whose box says why (cvc_media_notice). After one,
+    // a black frame is the video's own (a fade).
+    if (!st.good || !data) return 0;
+  } else {
+    st.good++;
+    st.blank = 0;
   }
   HEAPU8.set(data, out);
   setValue(wh, w, 'i32');
@@ -300,6 +484,14 @@ public:
     if (!open_)
       return "the page could not make a media element";
     char *s = cvc_media_error(id_);
+    std::string out = s ? s : "";
+    free(s);
+    return out;
+  }
+  std::string notice() const override {
+    if (!open_)
+      return std::string();
+    char *s = cvc_media_notice(id_);
     std::string out = s ? s : "";
     free(s);
     return out;

@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace cvc {
 namespace nav {
@@ -50,11 +51,19 @@ public:
   // isn't 64 hex digits, or a sha256 with no uri. Thread-safe.
   entry get(const policy_ref &ref);
 
+  // The same for a .cvcnav's bytes already in hand (a download, a data: entry's file): loaded the
+  // first time their hash is seen and shared after. A `sha256` they don't hash to is refused, and
+  // `what` names them in the error. Throws as get() does.
+  entry get_bytes(const std::string &bytes, const std::string &sha256 = std::string(),
+                  const std::string &what = "the bytes");
+
   // How many policies are loaded, and forget them all (copies already handed out live on).
   std::size_t size() const;
   void clear();
 
 private:
+  entry load(const std::vector<unsigned char> &bytes, const std::string &want,
+             const std::string &what);
   mutable std::mutex mu_;
   std::map<std::string, std::shared_ptr<const coef_mlp>> by_key_;
 };

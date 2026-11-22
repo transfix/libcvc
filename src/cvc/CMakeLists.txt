@@ -112,6 +112,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/media/media_router.h
   ../../inc/cvc/media/media_rungs.h
   ../../inc/cvc/media/media_opus.h
+  ../../inc/cvc/media/voice_mixer.h
   ../../inc/cvc/geometry/bunny.h
   ../../inc/cvc/volume/endians.h
   ../../inc/cvc/utility/archive.h
@@ -172,6 +173,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/geometry_file_io.h
   ../../inc/cvc/geometry/contours.h
   ../../inc/cvc/geometry/contour_intrinsics.h
+  ../../inc/cvc/mol/blur.h
+  ../../inc/cvc/mol/molecule.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/volume/segmentation.h
@@ -191,6 +194,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/contour_spectrum.h
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/volume/volume_slice.h
+  ../../inc/cvc/volume/volume_grid.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -338,6 +342,8 @@ set(SOURCE_FILES
   geometry/contour_formats.cpp
   geometry/contour_intrinsics.cpp
   utility/xml_lite.cpp
+  mol/blur.cpp
+  mol/molecule.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp
@@ -451,6 +457,7 @@ set(SOURCE_FILES
   media/media_router.cpp
   media/media_rungs.cpp
   media/media_opus.cpp
+  media/voice_mixer.cpp
   state/state_message_bus.cpp
   state/state_peer_registry.cpp
   state/state_link_stats.cpp
@@ -482,6 +489,7 @@ set(SOURCE_FILES
   volume/contour_spectrum.cpp
   volume/resize_stepper.cpp
   volume/volume_slice.cpp
+  volume/volume_grid.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp
@@ -521,6 +529,9 @@ set(SOURCE_FILES
   nav/coph_model.cpp
   nav/coph_allocation.cpp
   nav/coph_learner.cpp
+  nav/coph_packet.cpp
+  nav/coph_exchange.cpp
+  nav/coph_channel.cpp
   nav/sim_world.cpp
   nav/yield.cpp
   nav/sim_world_binding.cpp
@@ -642,6 +653,15 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# cvc::mol's blur is TexMol's GOABlur to the bit (blur_test's MolBlurLegacy compares it with
+# TexMol's own maps): float grid positions and float sums of double kernels. FMA contraction
+# (Clang's default on aarch64, macOS CI) rounds a grid point's position once instead of twice and
+# moves densities by up to 5e-5 relative (on MSVC, /fp:contract /arch:AVX2 gives the same misses),
+# so it is built without contraction. MSVC's /fp:strict, libcvc's default there, never contracts.
+if(NOT MSVC)
+  set_source_files_properties(mol/blur.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
+
 # Architectural rule (roadmap §14.4): the cvc::world generator library is a FILE
 # seam to the material consumer and MUST NOT reference cvc::nav — a change to
 # material_build's blur/EDT/gradients must invalidate no generated bundle.
@@ -700,10 +720,10 @@ endforeach()
 # this one gets the explicit flag (the CPU analog of the nav .cu precise-math
 # properties below).
 if(NOT MSVC)
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp nav/coph_packet.cpp nav/coph_exchange.cpp nav/coph_channel.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp
+  set_source_files_properties(nav/material.cpp nav/terrain.cpp nav/coef_energy_net.cpp nav/coef_energy_net_backward.cpp nav/material_rollout.cpp nav/material_bike_rollout.cpp nav/material_train.cpp nav/geom_rollout.cpp nav/belief_material.cpp nav/belief_material_controller.cpp nav/coph_config.cpp nav/coph_ledger.cpp nav/coph_model.cpp nav/coph_allocation.cpp nav/coph_learner.cpp nav/coph_packet.cpp nav/coph_exchange.cpp nav/coph_channel.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
@@ -1639,6 +1659,11 @@ list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cp
 # (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
 list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
+# The connection engine (cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1): TCP
+# listeners on Boost.Asio I/O threads of its own, framing, groups and one-copy broadcast. Always
+# compiled; a browser build has the stubs (it cannot listen).
+list(APPEND SOURCE_FILES net/net_engine.cpp)
+list(APPEND INCLUDE_FILES ../../inc/cvc/net/net_engine.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
   ../../inc/cvc/net/browser.h ../../inc/cvc/ariadne/oidc_host.h)
 
@@ -1646,7 +1671,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/scene_swarm.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/controls.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp ariadne/heatmap_emit.cpp ariadne/settings_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/voice_monitor.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/scene_swarm.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/controls.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp ariadne/heatmap_emit.cpp ariadne/settings_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1944,15 +1969,15 @@ target_compile_definitions(
 # touches the network on its own.
 if(EMSCRIPTEN)
   target_compile_definitions(cvc PRIVATE CVC_NET_HAVE_FETCH CVC_ARIADNE_HAVE_HTTP)
-  # The fetch backend's blocking send() spins on emscripten_sleep under Asyncify, so a wasm
-  # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sASYNCIFY (main thread, the demo gallery)
+  # The fetch backend's blocking send() spins on emscripten_sleep under JSPI, so a wasm
+  # EXECUTABLE that links it must add -sFETCH=1 and EITHER -sJSPI (main thread, the demo gallery)
   # OR -pthread (off the main thread). Link flags do not propagate out of this static archive; the
   # executable sets them (see examples/CMakeLists.txt).
   # The WebSocket client (net/ws_client.cpp) uses the browser's WebSocket through Emscripten's
   # library; unlike the fetch flags this one rides along to every executable that links cvc.
   target_link_options(cvc INTERFACE "-lwebsocket.js")
   message(STATUS "cvc::net: Emscripten-fetch HTTP backend ENABLED "
-                 "(link exes with -sFETCH=1 + -sASYNCIFY or -pthread)")
+                 "(link exes with -sFETCH=1 + -sJSPI or -pthread)")
 else()
   find_package(CURL QUIET)
   if(TARGET CURL::libcurl OR CURL_FOUND)
@@ -3197,9 +3222,16 @@ function(cvc_setup_physics_replay target)
   target_compile_features(${target} PRIVATE cxx_std_17)
   if(EMSCRIPTEN)
     # node reads the trace from the host's file system, and the process exits with main's
-    # status. main runs on a pthread, so the cvc::app's workers can start while it waits.
+    # status.
     target_link_options(${target} PRIVATE -sNODERAWFS=1 -sEXIT_RUNTIME=1
-      -sALLOW_MEMORY_GROWTH=1 -sPROXY_TO_PTHREAD=1 -sSTACK_SIZE=4mb)
+      -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=4mb)
+    # Threaded (wasm-mt), main runs on a pthread, so the cvc::app's workers can start while it
+    # waits. Single-threaded (wasm, the gh-pages gallery's flavor) there are no workers, Jolt runs
+    # its single-threaded job system, and Emscripten refuses PROXY_TO_PTHREAD without -pthread.
+    # The -pthread test is the cvc_igl one above: CVC_WASM_PTHREADS, or -pthread in the flags.
+    if(CVC_WASM_PTHREADS OR "${CMAKE_CXX_FLAGS}" MATCHES "(^| )-pthread($| )")
+      target_link_options(${target} PRIVATE -sPROXY_TO_PTHREAD=1)
+    endif()
   endif()
 endfunction()
 

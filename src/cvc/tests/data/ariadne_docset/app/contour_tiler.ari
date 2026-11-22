@@ -1,0 +1,37 @@
+# The browser smoke test's contour tiler (src/arigl/web/test/arigl_web_smoke.mjs): the
+# examples/ariadne/documents/contour_tiler.ari series, sections 14 to 33 of the axon ax010 and its
+# two mitochondria, read by a contour_lab node and tiled as a sliced task on the page's
+# scheduler. The test serves it at /apps/tiler/, whose page config preloads the series' files
+# from /apps/data/ (the repository's examples/data). Once the three surfaces are up it prints one
+# line the test waits for.
+meta: {min_libcvc: 4.0.0}
+on_tick: |
+  (if (and (!= (state-get "smoke.reported") "1")
+           (= (state-get "graphics.root.children.axons.tiler.info.surfaces") "3"))
+      (begin
+        (print (str-concat "contour_tiler: "
+                           (state-get "graphics.root.children.axons.tiler.info.surfaces")
+                           " surfaces, "
+                           (state-get "graphics.root.children.axons.tiler.info.triangles")
+                           " triangles"))
+        (state-set "smoke.reported" "1")))
+windows:
+  - window: Contour tiler
+    id: contour_tiler
+    pos: [16, 16]
+    size: [340, 120]
+    children:
+      - text: "status"
+        bind: graphics.root.children.axons.tiler.status
+      - progress: progress
+        bind: graphics.root.children.axons.tiler.progress
+        hi: 100
+        overlay: graphics.root.children.axons.tiler.phase
+scene:
+  chrome: false
+  nodes:
+    - node: axons
+      type: contour_lab
+      source: { file: ../data/contours/kuwajima2019/VYLNH_20181017.ser }
+      read: { first: 14, last: 33, include: ["ax010.*"] }
+      auto_tile: true

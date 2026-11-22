@@ -67,6 +67,8 @@ set(CVCGL_VTK_COMPONENTS
   InteractionStyle
 )
 find_package(VTK REQUIRED COMPONENTS ${CVCGL_VTK_COMPONENTS})
+include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcVtkWasmExceptions.cmake")
+cvc_vtk_wasm_exceptions()
 
 file(GLOB CVCGL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 # Ariadne — the cvcGL UI & scene DSL (cvc::gl::ariadne). Sources live in a
@@ -1166,6 +1168,17 @@ set_tests_properties(cvcgl_tf_binding PROPERTIES RUN_SERIAL TRUE)
 add_executable(cvcgl_fe_interval test/cvcgl_fe_interval.cpp)
 target_link_libraries(cvcgl_fe_interval PRIVATE cvcGL)
 add_test(NAME cvcgl_fe_interval COMMAND cvcgl_fe_interval)
+# mesh_lab's skeleton request (VOLROVER-LIBRARY-PORTS-ROADMAP.md P2): its keys, children, view
+# tags, data channel, stop, bad values and two apps; headless. The second entry runs it the way
+# single-threaded wasm runs it (cooperative slices on the scheduler thread), where it also bounds
+# the frames the run spans (RUN_SERIAL: parallel ctest jobs preempting the thread would stretch
+# them).
+add_executable(cvcgl_mesh_skeleton test/cvcgl_mesh_skeleton.cpp)
+target_link_libraries(cvcgl_mesh_skeleton PRIVATE cvcGL)
+add_test(NAME cvcgl_mesh_skeleton COMMAND cvcgl_mesh_skeleton)
+add_test(NAME cvcgl_mesh_skeleton_cooperative COMMAND cvcgl_mesh_skeleton)
+set_tests_properties(cvcgl_mesh_skeleton_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative RUN_SERIAL TRUE)
 # ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
 # its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a
 # sized window scrolls both ways. No window, no GL.
@@ -1245,6 +1258,30 @@ endif()
 add_executable(cvcgl_volume_slice test/cvcgl_volume_slice.cpp)
 target_link_libraries(cvcgl_volume_slice PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
+
+# The volume_grid node (VolumeGridNode.h, volume_grid_nodes.h), headless: its keys and planes, picks
+# written as a slice view writes them (marks, a rubber band, a drag, navigate), its requests, rows,
+# data channel and sessions, and two grids in one document sharing nothing (T6, T13).
+add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
+target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
+
+# The volume_grid component over two grids in one document (switch and quad layouts), through
+# AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
+# unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_volume_grid test/cvcgl_ariadne_volume_grid.cpp)
+  target_link_libraries(cvcgl_ariadne_volume_grid PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_volume_grid COMMAND cvcgl_ariadne_volume_grid)
+endif()
+
+# The contour_lab node (contour_lab_nodes.h, roadmap P4): a contour stack from a file, another
+# node or a state key, its rows and keys, and the tiler run as a sliced task (tile, untick, stop),
+# its surfaces on the data channel; two apps. Headless.
+add_executable(cvcgl_contour_lab test/cvcgl_contour_lab.cpp)
+target_link_libraries(cvcgl_contour_lab PRIVATE cvcGL)
+add_test(NAME cvcgl_contour_lab COMMAND cvcgl_contour_lab)
 
 # A document's assets (read once, shared buffers) and its scenes: of their own (each a SceneGraph
 # with its own viewport, mirrored by the viewports that name it), and main_view: show. Offscreen;
@@ -1576,6 +1613,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_tf_editor # a bare ImGui context, no GL
   cvcgl_tf_binding # scene nodes + state only, never renders
   cvcgl_fe_interval # LBIE + cvc::fem + an fe_lab node's state, never renders
+  cvcgl_mesh_skeleton cvcgl_mesh_skeleton_cooperative # a mesh_lab node's state, never renders
   cvcgl_smoke cvcgl_metadata_mirror cvcgl_volume_range cvcgl_traversal cvcgl_x11_macros
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
@@ -1623,4 +1661,4 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
-                        cvcgl_imgui_colors)
+                        cvcgl_imgui_colors cvcgl_contour_lab)
