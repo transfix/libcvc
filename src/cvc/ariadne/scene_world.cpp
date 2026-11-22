@@ -1702,7 +1702,7 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       sync_wind();
     d.wake_in_fronts(tick, clock.fixed_dt());
     if (d.vehicles)
-      d.vehicles->before_step();
+      d.vehicles->before_step(tick); // the navigators' tick notes the clock tick it ran on
     for (const auto &b : d.boats)
       b->before_step();
     for (const auto &wf : d.weathers)

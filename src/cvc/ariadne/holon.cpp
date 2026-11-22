@@ -578,23 +578,41 @@ void holon::scene_step() {
       participant &p = kv.second;
       if (_world->has_avatar(kv.first))
         movers.push_back({p.last_feet.position.x, p.last_feet.position.y});
-      // A driver's drive axes in place of its vehicle's controller (section 18.4): the intent in
-      // force now (a stamped one due by the frame's steps takes over at the next frame).
-      if (p.drives != 0) {
-        const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
-        const double speed =
-            p.ride.linear_velocity.x * std::cos(yaw) + p.ride.linear_velocity.y * std::sin(yaw);
-        const drive_cmd c = drive_command(p.intent, p.envelope, speed, v->tick_seconds());
-        entity_intent in;
-        in.command = entity_intent::mode::replace;
-        in.steer = c.steer;
-        in.accel = c.accel;
-        if (v->intent(p.drives) != in)
-          v->set_intent(p.drives, in);
-      }
     }
     v->set_movers(std::move(movers));
   }
+  // A driver's drive axes in place of its vehicle's controller (section 18.4), after each step:
+  // the intent in force at that step's tick and the vehicle as the step left it, for the
+  // navigator's next tick. Per step, not per frame, so a client predicting the vehicle runs the
+  // same commands (predict_vehicle) whatever the relay's frame rate.
+  const auto drive = [this](WorldVehicles &v) {
+    bool any = false;
+    for (const auto &kv : _participants)
+      any = any || kv.second.drives != 0;
+    if (!any)
+      return;
+    const std::vector<entity_info> all = v.entities();
+    for (auto &kv : _participants) {
+      participant &p = kv.second;
+      if (p.drives == 0)
+        continue;
+      for (const entity_info &e : all)
+        if (e.id == p.drives) {
+          p.ride = ride_of(e);
+          break;
+        }
+      const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
+      const double speed =
+          p.ride.linear_velocity.x * std::cos(yaw) + p.ride.linear_velocity.y * std::sin(yaw);
+      const drive_cmd c = drive_command(p.intent, p.envelope, speed, v.tick_seconds());
+      entity_intent in;
+      in.command = entity_intent::mode::replace;
+      in.steer = c.steer;
+      in.accel = c.accel;
+      if (v.intent(p.drives) != in)
+        v.set_intent(p.drives, in);
+    }
+  };
   _scene->follow(
       _clock, nullptr,
       [this](std::uint64_t tick) {
@@ -609,7 +627,7 @@ void holon::scene_step() {
             _world->drive(kv.first, veto(p.intent, _applied.policy));
         }
       },
-      [this](std::uint64_t) {
+      [this, &drive](std::uint64_t) {
         for (auto &kv : _participants) {
           if (!_world->has_avatar(kv.first))
             continue;
@@ -617,6 +635,8 @@ void holon::scene_step() {
             _world->place(kv.first, kv.second.spawn); // fell off the world
           kv.second.last_feet = _world->state(kv.first);
         }
+        if (WorldVehicles *v = _scene->vehicles())
+          drive(*v);
       });
   update_rides();
 }
@@ -1009,7 +1029,9 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   }
 
   participant &p = it->second;
-  if (p.local && _world) {
+  if (p.local && p.vehicle) {
+    vehicle_reconcile(p, auth, server_tick);
+  } else if (p.local && _world) {
     world_reconcile(pid, p, auth, server_tick);
   } else if (p.local) {
     const cvc::physics::vec3 before = p.predicted.state().position;
@@ -1314,6 +1336,10 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
                                        [](const auto &kv) { return kv.second.local; });
         if (self == _participants.end())
           continue;
+        if (self->second.vehicle) { // driving: the vehicle's step, not the walker's
+          vehicle_step(self->second, self->second.intent, tick);
+          continue;
+        }
         self->second.render_prev = _world->state(self->first);
         self->second.have_render_prev = true;
         for (auto &kv : _held)
@@ -1351,6 +1377,10 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
       // each with its tick so reconcile can replay the right suffix.
       for (int i = 0; i < steps; ++i) {
         const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
+        if (p.vehicle) { // driving: the vehicle's step
+          vehicle_step(p, p.intent, tick);
+          continue;
+        }
         p.render_prev = p.predicted.state();
         p.have_render_prev = true;
         p.predicted.predict(
@@ -1396,6 +1426,132 @@ bool holon::held_entity_state(std::uint64_t id, cvc::physics::body_state &out) c
   return true;
 }
 
+bool holon::predict_vehicle(const std::string &pid, const kinematic_drive &drive) {
+  if (_role != holon_role::client || !drive.valid())
+    return false;
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.local)
+    return false;
+  participant &p = it->second;
+  if (p.vehicle && p.vdrive == drive)
+    return true;
+  // Other numbers (a navigator built again): on from where it is. New: where it stands until its
+  // first sample places it.
+  p.vnow = kinematic_vehicle_at(drive, state(pid), _clock.tick(), _clock.fixed_dt());
+  p.vprev = p.vnow;
+  p.vehicle = true;
+  p.vdrive = drive;
+  p.vlog.clear();
+  if (_world && _world->has_avatar(pid))
+    _world->remove_avatar(pid); // its person is out of the world while it drives
+  return true;
+}
+
+bool holon::predicts_vehicle(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it != _participants.end() && it->second.vehicle;
+}
+
+bool holon::predicted_vehicle(const std::string &pid, kinematic_vehicle &out) const {
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.vehicle)
+    return false;
+  out = it->second.vnow;
+  return true;
+}
+
+namespace {
+// The vehicle one step at TICK on IN, as the relay's world runs it: the step, then the command
+// the navigator's next tick takes (WorldVehicles' kinematic plant; holon::scene_step's drive).
+void step_vehicle(kinematic_vehicle &v, const kinematic_drive &k, const avatar_intent &in,
+                  std::uint64_t tick, double dt) {
+  kinematic_vehicle_step(v, k, tick, dt);
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double yaw = v.box[3];
+  const double speed = v.vx * std::cos(yaw) + v.vy * std::sin(yaw);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  v.steer_cmd = c.steer;
+  v.accel_cmd = c.accel;
+}
+} // namespace
+
+void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick) {
+  if (!p.vehicle_placed)
+    return; // nothing to run until a sample places it
+  p.vprev = p.vnow;
+  step_vehicle(p.vnow, p.vdrive, in, tick, _clock.fixed_dt());
+  participant::vlogged e;
+  e.tick = tick;
+  e.in = in;
+  e.after = p.vnow;
+  p.vlog.push_back(e);
+  if (p.vlog.size() > predicted_avatar::kMaxLog)
+    p.vlog.pop_front();
+}
+
+void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
+                              std::uint64_t server_tick) {
+  if (p.acked && server_tick <= p.last_acked)
+    return;
+  p.acked = true;
+  p.last_acked = server_tick;
+  const double dt = _clock.fixed_dt();
+  const double tol2 = _cfg.reconcile_tol * _cfg.reconcile_tol;
+  // The input in force at the sample's tick: its command is the one the next navigator tick takes.
+  avatar_intent at = p.intent;
+  for (const participant::vlogged &e : p.vlog)
+    if (e.tick == server_tick) {
+      const double dx = e.after.box[0] - auth.position.x, dy = e.after.box[1] - auth.position.y;
+      if (dx * dx + dy * dy <= tol2) {
+        while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
+          p.vlog.pop_front();
+        return;
+      }
+      at = e.in;
+      break;
+    }
+  const cvc::physics::vec3 before = kinematic_vehicle_state(p.vnow).position;
+  // From the sample, with the command it left for the next tick...
+  kinematic_vehicle v = kinematic_vehicle_at(p.vdrive, auth, server_tick, dt);
+  {
+    drive_envelope env;
+    env.max_steer = p.vdrive.max_steer;
+    env.max_accel = p.vdrive.max_accel;
+    env.max_decel = p.vdrive.max_decel;
+    const double speed = v.vx * std::cos(v.box[3]) + v.vy * std::sin(v.box[3]);
+    const drive_cmd c =
+        drive_command(at, env, speed, static_cast<double>(p.vdrive.tick_steps) * dt);
+    v.steer_cmd = c.steer;
+    v.accel_cmd = c.accel;
+  }
+  while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
+    p.vlog.pop_front();
+  if (!p.vehicle_placed) {
+    // ...placed for the first time: on to now on the input in force, logged.
+    p.vehicle_placed = true;
+    p.vlog.clear();
+    p.vnow = p.vprev = v;
+    for (std::uint64_t t = server_tick + 1; t <= _clock.tick(); ++t)
+      vehicle_step(p, p.intent, t);
+    return;
+  }
+  // ...then the inputs since, again.
+  kinematic_vehicle prev = v;
+  for (participant::vlogged &e : p.vlog) {
+    prev = v;
+    step_vehicle(v, p.vdrive, e.in, e.tick, dt);
+    e.after = v;
+  }
+  p.vnow = v;
+  p.vprev = prev;
+  const cvc::physics::vec3 d = kinematic_vehicle_state(p.vnow).position - before;
+  p.correction = p.correction + d;
+}
+
 void holon::on_present(const cvc::clock_driver::clock_frame &f) {
   _alpha = f.alpha;
   if (_role != holon_role::client)
@@ -1416,6 +1572,8 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
   const participant &p = _participants.at(pid);
   if (p.drives != 0)
     return p.ride; // driving: where its vehicle is
+  if (p.vehicle)
+    return kinematic_vehicle_state(p.vnow); // driving, predicted
   if (_world && (_role == holon_role::server || p.local))
     return _world->state(pid);
   if (_role == holon_role::server)
@@ -1429,6 +1587,9 @@ cvc::physics::pose holon::display_pose(const std::string &pid) const {
   const participant &p = _participants.at(pid);
   if (p.drives != 0)
     return cvc::physics::pose{p.ride.position, p.ride.rotation};
+  if (p.vehicle) // driving, predicted: between its last two quanta
+    return interpolate_peer(kinematic_vehicle_state(p.vprev), kinematic_vehicle_state(p.vnow),
+                            _alpha);
   // The client's own avatar: between its last two quanta, by the frame's alpha.
   if (_role == holon_role::client && p.local && p.have_render_prev)
     return interpolate_peer(p.render_prev, _world ? _world->state(pid) : p.predicted.state(),

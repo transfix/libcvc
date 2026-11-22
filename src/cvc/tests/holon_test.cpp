@@ -24,6 +24,7 @@
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/section.h>     // section_stamp: the rules tests
+#include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules: the rules tests
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
@@ -1612,4 +1613,122 @@ TEST(HolonPhysicsTest, AHeldEntityOnTheMovePushesTheAvatar) {
   EXPECT_GT(box.position.x, 10.0) << "it drove on";
   EXPECT_GT(client.state("A").position.x, 5.0) << "and pushed the avatar along";
   EXPECT_NEAR(client.state("A").position.z, 0.0, 0.1) << "on its feet";
+}
+
+namespace {
+// A Humvee on the kinematic plant as the relay's world reports it (WorldVehicles::kinematics).
+cvc::ariadne::kinematic_drive humvee_drive() {
+  cvc::ariadne::kinematic_drive k;
+  k.wheelbase = 3.3;
+  k.lock = 0.45;
+  k.vmax = 9.0;
+  k.a_max = 2.4;
+  k.rear_x = -1.65;
+  k.tick_steps = 7;
+  k.nsub = 5;
+  k.phase = 3;
+  k.max_steer = 0.6;
+  k.max_accel = 3.0;
+  k.max_decel = 7.0;
+  return k;
+}
+
+// The relay's vehicle one step on IN (the step, then the driver's command for the next tick).
+void relay_step(cvc::ariadne::kinematic_vehicle &v, const cvc::ariadne::kinematic_drive &k,
+                const avatar_intent &in, std::uint64_t tick, double dt) {
+  cvc::ariadne::kinematic_vehicle_step(v, k, tick, dt);
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double speed = v.vx * std::cos(v.box[3]) + v.vy * std::sin(v.box[3]);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  v.steer_cmd = c.steer;
+  v.accel_cmd = c.accel;
+}
+} // namespace
+
+// The vehicle the client drives, predicted (ARIADNE_WORLDS.md section 18.5, OW5b): with its
+// numbers (holon::predict_vehicle) the client runs it on its own drive axes as the relay does,
+// so the relay's samples agree with what it predicted for their ticks and nothing is corrected.
+// When the relay's vehicle is moved by what the client cannot know (another vehicle's push), its
+// next sample corrects the prediction, and it agrees again from there.
+TEST(HolonVehicleTest, TheVehicleWeDriveIsPredictedAndReconciled) {
+  const cvc::ariadne::kinematic_drive k = humvee_drive();
+  holon server(holon_role::server);
+  server.add_participant("A");
+  EXPECT_FALSE(server.predict_vehicle("A", k)) << "the server runs the world's vehicle";
+  holon client(holon_role::client);
+  client.add_participant("A", true);
+  client.add_participant("B", false);
+  EXPECT_FALSE(client.predict_vehicle("B", k)) << "a peer";
+  EXPECT_FALSE(client.predict_vehicle("A", cvc::ariadne::kinematic_drive{})) << "no numbers";
+  EXPECT_FALSE(client.predicts_vehicle("A"));
+  ASSERT_TRUE(client.predict_vehicle("A", k));
+  EXPECT_TRUE(client.predicts_vehicle("A"));
+  EXPECT_TRUE(client.predict_vehicle("A", k)) << "again: a no-op";
+
+  const double dt = client.clock().fixed_dt();
+  body_state start;
+  start.position = vec3{-40.0, 0.0, 1.2};
+  cvc::ariadne::kinematic_vehicle relay = cvc::ariadne::kinematic_vehicle_at(k, start, 1000, dt);
+  client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), 1000);
+  ASSERT_EQ(client.tick(), 1000u) << "the first sample sets the clock";
+  client.take_correction("A");
+
+  const auto axes = [](int step) {
+    avatar_intent in;
+    in.steer = step >= 200 && step < 400 ? 0.7 : 0.0;
+    in.throttle = step < 500 ? 1.0 : 0.0;
+    in.brake = step >= 500 ? 0.6 : 0.0;
+    return in;
+  };
+  double corrected = 0.0, worst = 0.0;
+  for (int step = 0; step < 600; ++step) {
+    const avatar_intent in = axes(step);
+    client.set_intent("A", in);
+    const std::uint64_t before = client.tick();
+    client.advance(dt);
+    for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
+      relay_step(relay, k, in, t, dt);
+    if (client.tick() % 4 == 0) // the relay's samples, every 4 ticks
+      client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), client.tick());
+    const vec3 c = client.take_correction("A");
+    corrected += std::sqrt(cvc::physics::dot(c, c));
+    const body_state s = client.state("A");
+    worst = std::max(worst, std::hypot(s.position.x - relay.box[0], s.position.y - relay.box[1]));
+  }
+  std::printf("  predicted: %.6f m from the relay's at worst, %.6f m corrected in all\n", worst,
+              corrected);
+  EXPECT_LT(worst, 1e-9) << "the same steps";
+  EXPECT_EQ(corrected, 0.0) << "nothing to correct";
+  EXPECT_GT(std::hypot(relay.box[0] + 40.0, relay.box[1]), 20.0) << "it drove";
+
+  // A push the client cannot know: the relay's vehicle 1.5 m to its left.
+  for (double *y : {&relay.ry, &relay.from[1], &relay.to[1], &relay.box[1]})
+    *y += 1.5;
+  double after = 0.0;
+  for (int step = 0; step < 120; ++step) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = 0.5;
+    in.brake = 0.0;
+    client.set_intent("A", in);
+    const std::uint64_t before = client.tick();
+    client.advance(dt);
+    for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
+      relay_step(relay, k, in, t, dt);
+    if (client.tick() % 4 == 0)
+      client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), client.tick());
+    const vec3 c = client.take_correction("A");
+    after += std::sqrt(cvc::physics::dot(c, c));
+    if (step >= 60) {
+      const body_state s = client.state("A");
+      worst = std::hypot(s.position.x - relay.box[0], s.position.y - relay.box[1]);
+    }
+  }
+  std::printf("  pushed 1.5 m: corrected %.3f m; then %.4f m from the relay's\n", after, worst);
+  EXPECT_NEAR(after, 1.5, 0.3) << "the sample corrected it";
+  EXPECT_LT(worst, 0.05) << "and it agrees again";
 }

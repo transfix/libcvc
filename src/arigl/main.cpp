@@ -1572,6 +1572,15 @@ struct ConferenceSession {
     if (entities_)
       entities_->pump(*app_, room_, f.wall_dt);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get());
+    // The vehicle we drive is drawn where we predict it (section 18.5, OW5b), not a round trip
+    // behind our keys where its samples put it.
+    if (entities_) {
+      const std::uint64_t driving = cvc::ariadne::read_driving(*app_, room_, pid_);
+      if (driving != 0 && holon_->predicts_vehicle(pid_))
+        entities_->show_predicted(driving, holon_->display_pose(pid_));
+      else
+        entities_->show_predicted(0, cvc::physics::pose{});
+    }
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())
       avatar_panel_.publish(*app_, prefix_);

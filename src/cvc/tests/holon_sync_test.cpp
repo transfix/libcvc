@@ -1574,3 +1574,78 @@ TEST(HolonSyncTest, TheClientPumpHoldsTheVehiclesWeShow) {
   cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
   EXPECT_TRUE(client.held_entities().empty()) << "gone from the room, let go";
 }
+
+// The vehicle we drive, predicted (section 18.5, OW5b): with the room's entities saying how it
+// runs (the kinematic plant's numbers, room_entity::drive), client_pump keeps us local and the
+// holon predicts it; a vehicle on another plant is played out as before; out, the walker again.
+TEST(HolonSyncTest, TheClientPumpPredictsTheVehicleWeDrive) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  conf::room_entity kinematic, jolt;
+  kinematic.id = 5;
+  kinematic.plant = "kinematic";
+  kinematic.drive.wheelbase = 3.3;
+  kinematic.drive.lock = 0.45;
+  kinematic.drive.vmax = 9.0;
+  kinematic.drive.a_max = 2.4;
+  kinematic.drive.rear_x = -1.65;
+  kinematic.drive.tick_steps = 7;
+  kinematic.drive.nsub = 5;
+  kinematic.drive.phase = 2;
+  jolt.id = 6;
+  jolt.plant = "jolt";
+  conf::write_room_entities(app, room, {kinematic, jolt});
+  {
+    const std::vector<conf::room_entity> back = conf::read_room_entities(app, room);
+    ASSERT_EQ(back.size(), 2u);
+    EXPECT_EQ(back[0].drive, kinematic.drive) << "the numbers round-trip";
+    EXPECT_FALSE(back[1].drive.valid());
+  }
+  cvc::ariadne::entity_playout playout;
+  playout.pump(app, room, 1.0 / 60.0);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann"));
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "walking";
+
+  cvc::state &driving = app.root()(conf::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("5"));
+  body_state car;
+  car.position = vec3{4.0, 2.0, 1.2};
+  car.linear_velocity = vec3{3.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", car, 200);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann")) << "driving a vehicle we can run: still ours";
+  EXPECT_TRUE(client.predicts_vehicle("ann"));
+  EXPECT_NEAR(client.state("ann").position.x, 4.0, 0.2) << "placed by the vehicle's pose";
+  const double x0 = client.state("ann").position.x;
+  for (int i = 0; i < 30; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_GT(client.state("ann").position.x, x0 + 0.5) << "and run on from there";
+  // The host draws it where it is predicted (arigl), not where its samples put it.
+  playout.apply(conf::entity_pid(5), car, 200);
+  playout.pump(app, room, 1.0 / 60.0);
+  playout.show_predicted(5, client.display_pose("ann"));
+  cvc::physics::pose drawn;
+  ASSERT_TRUE(playout.pose(5, drawn));
+  EXPECT_DOUBLE_EQ(drawn.position.x, client.display_pose("ann").position.x);
+  playout.show_predicted(0, cvc::physics::pose{});
+  ASSERT_TRUE(playout.pose(5, drawn));
+  EXPECT_LT(drawn.position.x, client.display_pose("ann").position.x - 0.3) << "its samples'";
+
+  driving.value(std::string("6"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_FALSE(client.is_local("ann")) << "one on another plant: played out";
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_FALSE(client.is_local("ann")) << "no entities: played out";
+
+  driving.value(std::string("0"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann"));
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "out: the walker again";
+}

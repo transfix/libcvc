@@ -1040,10 +1040,30 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   it draws: walking into a parked Humvee stops at its side, and a car at 3 m/s pushes the avatar
   along (`HolonPhysicsTest`), where before the prediction walked through and the relay's pose
   snapped it back.
-- **Still to come:** OW5b, the vehicle a participant drives (or is) predicted with its plant and
-  reconciled, as the walker is (today it is played out from the relay's samples, a round trip
-  behind the keys); OW5c, the client's statics from the document's bodies (meshes, terrain, a
-  generated world's buildings), not only the plane, boxes and spheres the room scene carries.
+- **As built (OW5b, the kinematic plant):** the vehicle a participant drives (or is) is predicted
+  when it runs on the `kinematic` plant, as traffic.ari's trucks and rovers do. That plant is nav's
+  bicycle integrated once a navigator tick on the tick's command, its chassis box moved a step at
+  a time between where the ticks leave it, and nothing else moves a driven one, so a client that
+  knows its numbers runs it step for step: `vehicle_kinematics.h`'s `kinematic_drive` (the
+  wheelbase, lock, top speed, the acceleration it is held to, the rear axle, the steps per tick
+  and substeps, the envelope) and the clock ticks the navigator ticks on
+  (`WorldVehicles::kinematics`; `SceneWorld::follow` passes each step's clock tick to
+  `before_step`), carried by the room's entities (`room_entity::drive`). The relay sets a driver's
+  command after each step rather than once a frame, from the intent in force at that tick and the
+  vehicle as the step left it, so the client's steps match it whatever the relay's frame rate.
+  `holon::predict_vehicle` runs the model (`kinematic_vehicle_step`) as the walker is predicted,
+  logged by tick, and reconciles to the vehicle's samples: within `reconcile_tol` in plan, nothing;
+  else it starts again from the sample (`kinematic_vehicle_at`, which takes the box as moving
+  straight through its tick, the pose stream carrying no angular velocity) and replays the inputs
+  since. `client_pump` keeps the participant local and predicts the vehicle when its room entity
+  carries the numbers, and arigl draws it at the predicted pose (`entity_playout::
+  show_predicted`). The model stays within 0.05 mm of the relay's Humvee over 9 s of throttle, a
+  turn, the brake and reverse (`AriadneOneWorld`); the holon predicts it with nothing to correct,
+  and a 1.5 m push the client cannot know is corrected at the next sample (`HolonVehicleTest`).
+- **Still to come:** the other plants predicted (`dynamic` and `dynamic4w` are deterministic models
+  too; `jolt` needs the vehicle in the client's world; a boat needs the water), played out until
+  then; OW5c, the client's statics from the document's bodies (meshes, terrain, a generated
+  world's buildings), not only the plane, boxes and spheres the room scene carries.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1126,7 +1146,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |

@@ -219,8 +219,10 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // holon ignores a sample it has already seen, so re-reading an unchanged pose every frame is
 // harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
 // as in server_pump. While the relay says SELF_PID drives a vehicle (driving, section 18.6), its
-// pose is the vehicle's, which it does not predict: it is played out from the relay's samples as a
-// peer is, and predicted again once it is out. With physics, both pumps (re)load the holon's
+// pose is the vehicle's: with ENTITIES, and a vehicle whose room entity says how it runs (the
+// kinematic plant's room_entity::drive), the holon predicts it (holon::predict_vehicle; section
+// 18.5, OW5b); otherwise it is played out from the relay's samples as a peer is. Out again, the
+// walker is predicted. With physics, both pumps (re)load the holon's
 // statics from the room scene whenever its revision changes, and both take each of the room's rules
 // sections (room_rules.h) whenever its stamp moves (holon::set_physics and the rest).
 //
@@ -274,8 +276,13 @@ public:
   const conference::room_entity *find(std::uint64_t id) const;
   // The ids being played out (a sample has arrived), in id order.
   std::vector<std::uint64_t> shown() const;
-  // Where entity `id` is shown this frame; false before its first sample.
+  // Where entity `id` is shown this frame; false before its first sample. The one predicted (below)
+  // is shown where it is predicted.
   bool pose(std::uint64_t id, cvc::physics::pose &out) const;
+  // Entity `id` -- the vehicle the client drives, which its holon predicts (holon::predict_vehicle;
+  // ARIADNE_WORLDS.md section 18.5, OW5b) -- shown at AT this frame instead of where its samples
+  // put it; 0 for none. A host sets it each frame from the holon's display_pose.
+  void show_predicted(std::uint64_t id, const cvc::physics::pose &at);
   // ... and its velocity, its newest sample's.
   bool state(std::uint64_t id, cvc::physics::body_state &out) const;
   // Bumps whenever the section's entities or the ones shown change (a view rebuilds on it).
@@ -287,6 +294,8 @@ private:
   section_stamp _stamp;
   std::vector<conference::room_entity> _entities;
   std::uint64_t _rev = 0;
+  std::uint64_t _predicted = 0; // show_predicted's entity (0: none), and where
+  cvc::physics::pose _predicted_at;
 };
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
