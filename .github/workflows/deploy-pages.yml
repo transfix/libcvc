@@ -34,7 +34,6 @@ on:
       - 'THIRD_PARTY_NOTICES.md'
       - '!.github/**'
       - '.github/workflows/deploy-pages.yml'
-      - '.github/scripts/pin-wasm-pre-jx1.sh'
       - '.github/actions/cvcpkg-cli/**'
       - '!bindings/**'
   schedule:
@@ -166,15 +165,6 @@ jobs:
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (xterm-js packages absent — the configure downloads xterm.js)"
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          # Last, after every wasm install above, so none of them moves a pinned package again.
-          # Without it the link fails on freetype's __wasm_longjmp.
-          # The pin reads what the prefix holds from its lockfile, so check that the lockfile
-          # still lists VTK, installed above: it does not when a cvcpkg replaces the lockfile on
-          # each install, and the pin then quietly skips everything.
-          grep -qx -- "- name: vtk" "$CVC_WASM_DEPS/share/libcvc-deps/lockfile.yaml" \
-            || { echo "::error::the prefix's lockfile does not list vtk; the pin cannot see it"; exit 1; }
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$CVC_WASM_DEPS" wasm
 
       - name: Build the gallery (libcvc-examples-web, single-threaded)
         # Non-pthread: matches the single-threaded wasm dep bundles + does not
