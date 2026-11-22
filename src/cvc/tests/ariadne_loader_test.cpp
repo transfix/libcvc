@@ -1163,6 +1163,35 @@ windows:
   EXPECT_TRUE(warned);
 }
 
+// §5.22 a tray icon's picture (an avatar), and §5.24 `notifications: always`.
+TEST(AriadneLoader, TrayIconPictureAndBellAlways) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+notifications: always
+menubar:
+  - tray_icon: user
+    icon: (state-get "me.avatar_url")
+    auth: site
+    on: profile
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *you = find(r.root, Kind::TrayIcon, "user");
+  ASSERT_NE(you, nullptr);
+  EXPECT_EQ(you->button_icon, "(state-get \"me.avatar_url\")");
+  EXPECT_EQ(you->media_auth, "site");
+  // The document's bell setting, outside the bar: on, and shown with an empty feed.
+  const Widget *bell = nullptr;
+  for (const Widget &c : r.root.children)
+    if (c.kind == Kind::TrayIcon && c.tray_bell)
+      bell = &c;
+  ASSERT_NE(bell, nullptr);
+  EXPECT_TRUE(bell->bdef);
+  EXPECT_TRUE(bell->bell_always);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("notifications"), std::string::npos) << w;
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {

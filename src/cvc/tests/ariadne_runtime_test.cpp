@@ -7906,6 +7906,27 @@ TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
     rt.render();
     EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
   }
+  // An empty feed: no bell, unless the document says `notifications: always`.
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({menubar({tray_icon("W")}), tray_bell(true)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
+  }
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    Widget always = tray_bell(true);
+    always.bell_always = true;
+    rt.set_root(group({menubar({tray_icon("W")}), always}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("tray_menu:\xF0\x9F\x94\x94||0")) << "shown, no badge\n" << mb.dump();
+  }
 }
 
 // §5.25 a loaded document with its own menubar, as the loader makes it: a mount (scope, the

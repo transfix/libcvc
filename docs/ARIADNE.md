@@ -3227,10 +3227,18 @@ How each backend does it:
   font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
   input, combo or colour widget rather than run past the window's edge. A
-  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
-  each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
-  with a column per entry. `borders` and `resizable` need that table, so a row using them needs
-  `col_widths` as well; without it the table has one column.
+  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side, each at its
+  natural width, as the terminal backends do; a cell that would run past the line's room goes to
+  the next line, as a word in a paragraph does (from the width the cell had the frame before, so
+  a row settles in a frame). One with `col_widths` is an ImGui table with a column per entry.
+  `borders` and `resizable` need that table, so a row using them needs `col_widths` as well;
+  without it the table has one column.
+- **Nothing runs past a narrow window (ImGui).** The line's room is the window's (a table cell's),
+  or, in a window whose width fits its content, the view's right edge, as a rich text paragraph
+  measures it (§5.20). A plain `text:` wider than it wraps at a word there; one that fits draws as
+  always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
+  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
+  bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
@@ -4682,6 +4690,11 @@ menubar:
     It is drawn over the icon's top right corner. "" and "0" show no badge.
   - `tone:` (`info`, `warn` or `error`, or an expression giving one) colours the badge: blue,
     amber or red.
+  - `icon:` is a picture in place of the glyph: a URI (§5.11, with `auth:` for a credential), a
+    picture the host published, or an expression giving either (an account's avatar URL). ImGui
+    draws it round, as tall as the bar, cover-fitted; an animated GIF or WebP moves, and a video
+    URL (an avatar can be one) plays there as a decorative video: silent, looping, by itself
+    (§5.13). Until it loads, if it fails, and in a terminal, the glyph shows.
   - `tooltip:`, `visible_when:` and `id:` work as on any widget.
   - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
     the icon so it stays on the screen.
@@ -4826,14 +4839,16 @@ menubar:
   (`bind: /notify.unread`): `notify.count`, `notify.unread`, `notify.worst` (`info`, `warn`,
   `error`, or "" when none is unread), `notify.rev`, and
   `notify.items.<id>.{text, level, source, time, read, repeat}`.
-- **The bell** shows while the feed has entries. Its badge is the unread count, and its tone is
-  the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
+- **The bell** shows while the feed has entries, or always for a document's top-level
+  `notifications: always` (its menu then says there are none). Its badge is the unread count, and
+  its tone is the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
   window with every entry (`tree._notifications.open`; its X closes it).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
-  - A document's top-level `notifications: true|false` overrides the host.
+  - A document's top-level `notifications: true|false` overrides the host; `always` is true, the
+    bell shown with an empty feed too.
   - The user's choice overrides both: arigl's *Settings > Show notifications* toggles the state
     key `ariadne.tray.bell`.
   - Opening the menu does not mark anything read: a hosted backend (tvision) has every menu open
@@ -5035,9 +5050,10 @@ current one to look pressed:
   own: an emoji, or a word.
 - **`selected:`** is `true`, `false`, or an expression. While it holds, the button is drawn
   pressed in; `false` is a button of such a row that is never the chosen one (a bar's Back). On
-  ImGui sunken (a shadow along its top and left edges, a darker face, its content a step down and
-  to the right), with the row's other buttons raised beside it (a light top and left, a shadow at
-  the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
+  ImGui sunken, plainly so even where a picture covers most of the face: a deep shadow two steps
+  wide along its top and left, its face lit in the active colour, its content two steps down and
+  to the right (a picture a shade darker), with the row's other buttons raised beside it (a light
+  top and left, a shadow two steps wide at the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
   choosing another moves nothing. It is a look only: a click runs `on:` as on any button.
 - In a `repeat:`, `{i}` reaches both.
 - `(has? "button.icon")` and `(has? "button.selected")` say where the backend draws them (§5.7).

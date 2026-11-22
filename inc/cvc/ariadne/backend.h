@@ -502,6 +502,8 @@ public:
     bool text = false;   // the glyph is text (the clock's time), drawn as the bar's text is
     std::string icon;    // the named icon it shows (cvc/ariadne/icons.h), "" when none: a backend
                          // may draw its own picture for a name ("bell") instead of the glyph
+    std::string picture; // §5.22 a published image (round, already shaped) to draw in place of
+                         // the glyph, the bar's height; "" when none or not loaded: the glyph
   };
   virtual int begin_tray(const std::vector<TrayIcon> &icons) {
     (void)icons;
