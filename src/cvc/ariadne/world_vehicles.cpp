@@ -2318,9 +2318,18 @@ struct WorldVehicles::impl {
         g.drives = "builtin";
       } else if (ask == "trained") {
         // $CVC_NAV_WEIGHTS, an installed copy, else the published package (settled, D8).
+        // default_weights_path() names the baked path when nothing is there (so a load says
+        // where it looked): only a file that is there is an installed copy.
         const char *env = std::getenv("CVC_NAV_WEIGHTS");
-        const std::string installed =
-            env && *env ? std::string(env) : cvc::nav::coef_mlp::default_weights_path();
+        std::string installed;
+        if (env && *env) {
+          installed = env;
+        } else {
+          const std::string found = cvc::nav::coef_mlp::default_weights_path();
+          std::error_code ec;
+          if (std::filesystem::is_regular_file(found, ec))
+            installed = found;
+        }
         if (!installed.empty()) {
           g.model = policies.get(cvc::nav::policy_ref{installed, ""});
           g.drives = "trained (" + installed + ", " + g.model.key + ")";

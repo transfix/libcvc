@@ -2,8 +2,13 @@
 # component over a volume_grid node on the bunny's 32^3 signed distance field, its switch on XZ (a
 # slice view down y). Once the planes are up and the slice view looks down y, it writes one click
 # as a slice view writes it (a down, then an up, a frame apart) and, once the node has marked the
-# voxel, prints one line the test waits for: the component, the node and its gesture in wasm.
+# voxel, prints one line the test waits for: the component, the node and its gesture in wasm. The
+# app makes the volume (data: generate: sdf) and the grid follows it, as natively.
 meta: {min_libcvc: 4.0.0}
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
 import:
   - cvc://components/volume_grid.ari
 init: (begin (state-set "graphics.root.children.grid.grid.view" "xz") (state-set "vg.step" "start"))
@@ -41,7 +46,6 @@ scene:
   nodes:
     - node: grid
       type: volume_grid
-      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
-      fit: { height: 100, up: y }
+      source: { data: bunny }
       classes:
         - { name: seeds, color: [1, 0.4, 0.2], radius: 1 }

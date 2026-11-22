@@ -123,12 +123,13 @@ TEST(VolumeGridParams, TheTablesRoundTripThroughTheTree) {
       << bad.message();
 
   cvc::state &source = grid("source");
-  source("file").value("head.rawiv");
+  source("volume").value("data.head.volume");
   source("var").value("-1");
   const auto src = cvc::params_from_state<cvc::volume_grid_source_params>(source);
   EXPECT_NE(src.message().find("var = -1 is below its minimum 0"), std::string::npos)
       << src.message();
-  EXPECT_EQ(src.value.file, "head.rawiv");
+  EXPECT_EQ(src.value.volume, "data.head.volume");
+  EXPECT_EQ(src.value.points, "");
 }
 
 TEST(VolumeGridParams, ViewsLookDownTheLegacyAxes) {
@@ -477,12 +478,9 @@ TEST(PointClassRows, RowsRoundTripAndReconcileListEdits) {
 
 cvc::volume_grid_session a_session() {
   cvc::volume_grid_session s;
-  s.keys = {{"grid.view", "xz"},
-            {"grid.tool", "navigate"},
-            {"grid.slice.z", "7"},
-            {"grid.display.point_scale", "2"},
-            {"grid.source.file", "dir with spaces/head \"1\".rawiv"},
-            {"grid.classes.current", "1"}};
+  s.keys = {{"grid.view", "xz"},      {"grid.tool", "navigate"},
+            {"grid.slice.z", "7"},    {"grid.display.point_scale", "2"},
+            {"grid.source.var", "1"}, {"grid.classes.current", "1"}};
   s.transfer_function = "{\"color\":[[0,0,0,0],[1,1,1,1]]}";
   s.classes = two_classes();
   s.classes.classes[0].points = {1, 2, 3, 4, 5, 6};
@@ -513,7 +511,9 @@ TEST(VolumeGridSession, OnlyTheSessionsKeysGoIn) {
   EXPECT_TRUE(cvc::volume_grid_session_key("grid.slice.y"));
   EXPECT_TRUE(cvc::volume_grid_session_key("grid.display.grey"));
   EXPECT_TRUE(cvc::volume_grid_session_key("grid.source.time"));
-  for (const char *k : {"grid.cursor.i", "grid.pick.seq", "grid.request", "grid.busy",
+  // Where the data come from is the document's, not the session's.
+  for (const char *k : {"grid.source.volume", "grid.source.points", "grid.source.session",
+                        "grid.cursor.i", "grid.pick.seq", "grid.request", "grid.busy",
                         "grid.info.dims", "grid.classes.0.name", "transfer_function", "grid"})
     EXPECT_FALSE(cvc::volume_grid_session_key(k)) << k;
   cvc::volume_grid_session s = a_session();
