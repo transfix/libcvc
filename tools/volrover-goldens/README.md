@@ -205,7 +205,9 @@ from VolumeRover's, which is the same at the pinned commit. It needs CGAL, as Sk
   protein's surface, which needs libcvc to make: PDB 1GRL's heavy atoms blurred by
   `cvc::mol::blur` (blobbiness -0.2, a 3 Å grid) and `cvc::iso` at 10, the points as floats.
   `pocket_tunnel_test`'s `OnAProtein` makes it again natively, checks the committed copy against
-  it, and writes it with `CVC_POCKETTUNNEL_WRITE_1GRL=<path>`.
+  it, and writes it with `CVC_POCKETTUNNEL_WRITE_1GRL=<path>`. x86 Linux and Windows make the same
+  2,609 points. On aarch64 (macOS CI) the mesher's multiply-adds are fused and it makes 2,606, so
+  there the test checks only the count, to 1%.
 - **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/pockettunnel/`:
   - `<case>.ptv.txt`: every cluster outside the surface (kind, mouths, volume, cells, maxima), the
     geometry `pocket_tunnel_fromsurf()` returned (its points with their colours, its triangles,
