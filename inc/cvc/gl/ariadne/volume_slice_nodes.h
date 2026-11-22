@@ -44,14 +44,28 @@
 #ifndef CVC_GL_ARIADNE_VOLUME_SLICE_NODES_H
 #define CVC_GL_ARIADNE_VOLUME_SLICE_NODES_H
 
+#include <cvc/tf/model.h>
+#include <string>
+#include <vector>
+
 namespace cvc {
 class app;
+namespace ariadne {
+struct SceneNode;
+}
 namespace gl {
 namespace ariadne {
 
 // Register the "volume_slice" scene node type on `app`. Idempotent; call before realize_scene
 // (register_cvcgl_extensions does).
 void register_volume_slice_node_type(cvc::app &app);
+
+// A node's `transfer_function:` prop as a model: `preset:` (grayscale when absent), then each of
+// the model's own keys it gives (color, alpha, isocontours, domain, opacity_cubed, resolution)
+// replacing the preset's. Problems are appended to `warnings`, naming the node. (volume_slice's and
+// volume_grid's.)
+cvc::tf::model transfer_function_prop(const cvc::ariadne::SceneNode &n,
+                                      std::vector<std::string> *warnings);
 
 } // namespace ariadne
 } // namespace gl

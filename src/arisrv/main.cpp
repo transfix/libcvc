@@ -95,6 +95,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1585,6 +1586,36 @@ int main(int argc, char **argv) {
     return false;
   };
   cvc::ariadne::conference::rcon_guard rconGuard; // wrong rcon passwords, by address and client
+  // Each client's limits (ARISRV_IDENTITY.md ID4): what an admin set with server.limits, kept in
+  // the client's record, over the document's caps for that client's programs and guests. A flag
+  // set false refuses the client that kind (forbidden); true enables nothing the document doesn't.
+  // A cap left 0 keeps the document's; one set replaces it, lower or higher (decision D2: up to
+  // the action lane's, which the document holds it to). Asked at each start, on this thread
+  // (call_step), so a change applies from the client's next program or guest.
+  if (serverDoc) {
+    using ServerDocument = cvc::ariadne::ServerDocument;
+    serverDoc->set_client_limits([&clients](const std::string &pid, ServerDocument::ClientKind kind,
+                                            const cvc::ariadne::ClientLimits &document) {
+      cvc::ariadne::ClientLimits caps = document;
+      const std::optional<client_registry::client_limits> own = clients.limits(pid);
+      if (!own)
+        return caps;
+      const std::optional<bool> &allowed =
+          kind == ServerDocument::ClientKind::program ? own->programs : own->guests;
+      if (allowed && !*allowed)
+        caps.on = false;
+      if (own->steps != 0)
+        caps.max_steps = own->steps;
+      if (own->time > 0.0)
+        caps.max_time = own->time;
+      if (own->memory_mb != 0) {
+        constexpr std::uint64_t kMaxMb = std::numeric_limits<std::uint64_t>::max() >> 20;
+        caps.max_memory = own->memory_mb > kMaxMb ? std::numeric_limits<std::uint64_t>::max()
+                                                  : own->memory_mb << 20;
+      }
+      return caps;
+    });
+  }
   // The shared 3D scene (H1 slice 5, roadmap §5g), from the world chosen above (WD1): the relay is
   // its sole writer, and every client builds the room from it, its rig and shadows included (the
   // look is the world's, Q1). One revision for the whole scene. The writes are local shard
@@ -2491,6 +2522,8 @@ int main(int argc, char **argv) {
   aoi_relay.reset();
   chat.reset();
   calls.reset();
+  if (serverDoc)
+    serverDoc->set_client_limits(nullptr); // it reads `clients`, which goes before the document
   relay.stop();
   media_tp.stop();
 #if CVC_ENABLE_WS

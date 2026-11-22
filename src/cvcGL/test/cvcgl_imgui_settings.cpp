@@ -1,7 +1,8 @@
 // ImGuiBackend's settings editor (Kind::Settings) on a bare ImGui context (no GL): dragging a
 // key's slider writes the key as it moves and runs on: once, at the release; the key's reset then
 // shows, and a click on it puts its default back; a text field is applied on Enter, not when it
-// loses focus; and each row has the editor its metadata asks for.
+// loses focus; each row has the editor its metadata asks for; and an excluding filter leaves the
+// groups closable, while a filter that picks keys draws them open.
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
@@ -12,6 +13,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -64,6 +66,9 @@ struct Session {
   ari::Runtime rt{app, "ui"};
   RecordingBackend be;
   explicit Session(ari::Widget root) {
+    // CreateContext keeps an earlier context current, and the test and libcvcGL may each have
+    // their own imgui globals (Windows): this session's context must be current in both.
+    ImGui::SetCurrentContext(ctx);
     cvc::gl::ImGuiBackend::setImGuiContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2(800.0f, 600.0f);
@@ -197,6 +202,52 @@ int main() {
   s.key(ImGuiKey_Enter);
   chk(st("ui.cfg.name").value() == "alpha2",
       "Enter applies it (" + st("ui.cfg.name").value() + ")");
+
+  // A filter of '-' patterns only leaves keys out, so a click on a group's header closes it; a
+  // filter that picks keys draws every group open, open: false or not.
+  const auto filtered = [](std::vector<std::string> filter, bool open) {
+    ari::Widget f = ari::settings("", "cfg");
+    f.settings_filter = std::move(filter);
+    f.settings_open = open;
+    ari::Widget fw = ari::window("Filtered", {f});
+    fw.has_pos = true;
+    fw.size.w = {ari::Unit::Px, 520.0f};
+    fw.size.h = {ari::Unit::Px, 420.0f};
+    return fw;
+  };
+  const auto keys = [](cvc::app &app) {
+    cvc::state &t = cvc::state::instance(app);
+    t("ui.cfg.name").value("alpha");
+    t("ui.cfg.nav.gain").value("1");
+    t("ui.cfg.nav.gain").property("unit", "1").property("min", "0.01").property("max", "10");
+    t("ui.cfg.nav.vmax").value("10");
+    t("ui.cfg.nav.vmax").property("unit", "m/s").property("min", "0").property("max", "40");
+    t("ui.cfg.nav.mode").value("b");
+  };
+  {
+    Session x(filtered({"-nav.mode"}, true));
+    keys(x.app);
+    for (int f = 0; f < 3; ++f)
+      x.move(ImVec2(5.0f, 590.0f));
+    chk(x.be.rows.count("nav.gain") && x.be.rows.count("nav.vmax") && !x.be.rows.count("nav.mode"),
+        "an excluding filter leaves the key out; open: true opens the group");
+    // The header sits between the root's key and the group's first key.
+    const RecordingBackend::Row name = x.be.rows["name"];
+    const RecordingBackend::Row gain = x.be.rows["nav.gain"];
+    x.click(ImVec2(0.5f * name.e0.x, 0.5f * (name.e1.y + gain.e0.y)));
+    for (int f = 0; f < 3; ++f)
+      x.move(ImVec2(5.0f, 590.0f));
+    chk(x.be.rows.count("name") && !x.be.rows.count("nav.gain") && !x.be.rows.count("nav.vmax"),
+        "a click on its header closes the group (" + std::to_string(x.be.rows.size()) + " rows)");
+  }
+  {
+    Session y(filtered({"nav.*"}, false));
+    keys(y.app);
+    for (int f = 0; f < 3; ++f)
+      y.move(ImVec2(5.0f, 590.0f));
+    chk(y.be.rows.count("nav.gain") && y.be.rows.count("nav.vmax") && !y.be.rows.count("name"),
+        "a filter that picks keys draws the group open");
+  }
 
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;

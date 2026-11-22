@@ -37,6 +37,9 @@
 #include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/nav/coef_mlp.h>
+#include <cvc/nav/coef_train.h> // training_scene: the trainer's vehicle
+#include <cvc/nav/policy_library.h>
 #include <cvc/nav/world_grid.h>
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
@@ -1981,6 +1984,26 @@ TEST(AriadneWorldVehicles, AFleetIsANamedStartEntry) {
   error("[{fleet: c, archetype: v}, {fleet: c, archetype: v}]", "is named twice");
   error("[{fleet: c, archetype: v, at: [1, 2]}]", "laid out by spawn:, not at:");
   error("[{fleet: c, archetype: v, controller: pose}]", "controller: pose places one");
+  error("[{fleet: c, archetype: v, sense: sonar}]", "sense: 'sonar' is not one");
+  error("[{fleet: c, archetype: v, belief: hive}]", "belief: 'hive' is not one");
+  error("[{fleet: c, archetype: v, policy: {path: a.cvcnav}}]",
+        "policy: expects a uri: or a data:");
+  error("[{fleet: c, archetype: v, policy: {uri: a, data: b}}]", "not both");
+  {
+    world_rules y;
+    ASSERT_EQ(parse("[{fleet: c, archetype: v, sense: fog, belief: private, policy: {uri: "
+                    "'cvcpkg://o/w', path: share/w/a.cvcnav, sha256: ab}}, {fleet: d, archetype: "
+                    "v, policy: {data: weights}}]",
+                    y),
+              "");
+    ASSERT_EQ(y.vehicle_starts.size(), 2u);
+    EXPECT_EQ(y.vehicle_starts[0].sense, "fog");
+    EXPECT_EQ(y.vehicle_starts[0].belief, "private");
+    EXPECT_EQ(y.vehicle_starts[0].policy, "cvcpkg://o/w");
+    EXPECT_EQ(y.vehicle_starts[0].policy_path, "share/w/a.cvcnav");
+    EXPECT_EQ(y.vehicle_starts[0].policy_sha256, "ab");
+    EXPECT_EQ(y.vehicle_starts[1].policy_data, "weights");
+  }
   error("[{fleet: c, archetype: v, spawn: ring}]", "spawn: 'ring' is not one");
   error("[{fleet: c, archetype: v, rally: 0}]", "rally: expects a count");
   error("[{fleet: c, archetype: v, rally: {count: 65}}]", "rally: expects a count");
@@ -1988,6 +2011,42 @@ TEST(AriadneWorldVehicles, AFleetIsANamedStartEntry) {
   error("[{fleet: c, archetype: v, colors: rainbow}]", "colors: 'rainbow' is not one");
   error("[{fleet: c, archetype: v, keys: some}]", "keys: 'some' is not one");
   error("[{fleet: c, archetype: v, seed: -1}]", "seed: expects a whole number");
+  // Its plants (FL1c): a list its vehicles cycle over, or each team's; and its metric.
+  {
+    world_rules y;
+    ASSERT_EQ(parse("[{fleet: c, archetype: v, plant: [jolt, kinematic], metric: trained}, "
+                    "{fleet: d, archetype: v, rally: 3, plant: {0: jolt, 2: dynamic}}]",
+                    y),
+              "");
+    ASSERT_EQ(y.vehicle_starts.size(), 2u);
+    EXPECT_EQ(y.vehicle_starts[0].plants.cycle, (std::vector<std::string>{"jolt", "kinematic"}));
+    EXPECT_EQ(y.vehicle_starts[0].plant, "jolt");
+    EXPECT_EQ(y.vehicle_starts[0].metric, "trained");
+    EXPECT_EQ(y.vehicle_starts[0].plants.of(3, -1), "kinematic");
+    EXPECT_EQ(y.vehicle_starts[1].plants.text(), "0: jolt, 2: dynamic");
+    EXPECT_EQ(y.vehicle_starts[1].plants.of(5, 2), "dynamic");
+    EXPECT_EQ(y.vehicle_starts[1].plants.of(5, 1), ""); // the archetype's
+    EXPECT_EQ(y.vehicle_starts[1].plant, "");
+  }
+  error("[{fleet: c, archetype: v, plant: [jolt, hover]}]", "'hover' is not a plant");
+  error("[{fleet: c, archetype: v, plant: {0: jolt}}]", "(it has no rally points)");
+  error("[{fleet: c, archetype: v, rally: 2, plant: {2: jolt}}]", "team 2 is not one of the "
+                                                                  "fleet's 0 to 1");
+  error("[{fleet: c, archetype: v, plant: [jolt, dynamicboat]}]", "all float");
+  error("[{fleet: c, archetype: v, metric: lidar}]", "metric: 'lidar' is not one");
+  ASSERT_EQ(parse("[{archetype: v, plant: [jolt, kinematic], metric: trained}]", x), "");
+  EXPECT_EQ(x.vehicle_starts[0].plant, "jolt");
+  EXPECT_TRUE(x.vehicle_starts[0].plants.empty());
+  EXPECT_EQ(x.vehicle_starts[0].metric, "");
+  ASSERT_EQ(warnings.size(), 2u);
+  // The live key's text: the rest cycle, the named teams their own.
+  fleet_plants p;
+  EXPECT_EQ(parse_fleet_plants("kinematic, 1: jolt", p, 2), "");
+  EXPECT_EQ(p.of(0, 1), "jolt");
+  EXPECT_EQ(p.of(0, 0), "kinematic");
+  EXPECT_EQ(p.text(), "kinematic, 1: jolt");
+  EXPECT_NE(parse_fleet_plants("1: jolt, 1: kinematic", p).find("named twice"), std::string::npos);
+  EXPECT_NE(parse_fleet_plants(" , ", p).find("names no plant"), std::string::npos);
 }
 
 namespace {
@@ -1998,7 +2057,8 @@ world:
     archetypes:
       v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
     start:
-      - { fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 } }
+      - { fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 },
+          policy: builtin }
       - { archetype: v, name: solo, controller: none, at: [0, 0] }
 scene:
   clock: { paused: true }
@@ -2131,7 +2191,8 @@ TEST(AriadneWorldVehicles, AFleetIsLaidOutInTeamsAtRallyPoints) {
   EXPECT_LE(rx, 201.0);
   EXPECT_FALSE(v->move_rally("city", 9, 0.0, 0.0));
   EXPECT_FALSE(v->move_rally("town", 0, 0.0, 0.0));
-  art.step_world(static_cast<int>(std::lround(2.4 / cvc::kSimQuantum))); // 2.4 s
+  // 3 s, whatever the clock's quantum: from rest they are ~9 m east by then (4.4 m at 2 s).
+  art.step_world(static_cast<int>(std::lround(3.0 / cvc::kSimQuantum)));
   art.drain();
   EXPECT_GT(fleet_mean_x(v->entities()), x0 + 5.0); // under way, east
 
@@ -2180,10 +2241,11 @@ TEST(AriadneWorldVehicles, AFleetWithoutRallyPointsHoldsItsOwnGoals) {
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
   std::string doc = kFleetDoc;
-  const std::string entry =
-      "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, rally: { count: 4 } }";
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
   doc.replace(doc.find(entry), entry.size(),
-              "{ fleet: city, archetype: v, count: 12, seed: 3, keys: all, colors: spawn }");
+              "{ fleet: city, archetype: v, count: 12, seed: 3, keys: all, colors: spawn, "
+              "policy: builtin }");
   cvc::app app;
   AppRuntime art(app, "");
   art.load(write_doc("fleet_own_goals", doc).string());
@@ -2218,6 +2280,417 @@ TEST(AriadneWorldVehicles, AFleetWithoutRallyPointsHoldsItsOwnGoals) {
     EXPECT_DOUBLE_EQ(later[k].goal_x, es[k].goal_x) << k;
     EXPECT_DOUBLE_EQ(later[k].goal_y, es[k].goal_y) << k;
   }
+}
+
+// A fleet's navigator is its own (FL1b): made with its sense: and belief: (grouped: max(2, n / 64)
+// planes, teammates together; private: one a vehicle), and made again when its keys change them.
+// Its policy: is the built-in net, a .cvcnav checked against its sha256, or trained (here
+// $CVC_NAV_WEIGHTS), each said in .drives, and .policy switches it live. Weights that can't be had
+// fall back to the built-in net, and .drives says why.
+TEST(AriadneWorldVehicles, AFleetHasANavigatorAndAPolicyOfItsOwn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string weights =
+      (fs::path(::testing::TempDir()) / "fleet_policy.cvcnav").generic_string();
+  cvc::nav::coef_mlp::default_biased().save(weights, "a fleet test's weights");
+  const std::string key = cvc::nav::policy_library().get({weights, ""}).key; // sha256:<hex>
+  std::string doc = kFleetDoc;
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: city, archetype: v, count: 130, spawn: opposed, seed: 7, rally: { count: "
+              "4 }, belief: grouped, policy: builtin }\n      - { fleet: scouts, archetype: v, "
+              "count: 6, seed: 2, sense: fog, belief: private, policy: { uri: '" +
+                  weights + "', sha256: " + key.substr(7) + " } }");
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_navigators", doc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  ASSERT_EQ(v->fleets(), (std::vector<std::string>{"city", "scouts"}));
+  ASSERT_EQ(v->entities().size(), 137u);
+  art.step_world(1);
+  art.drain();
+  const auto key_of = [&](const std::string &fleet, const std::string &leaf) {
+    return val(app, "vehicles.fleets." + fleet + "." + leaf);
+  };
+  EXPECT_EQ(key_of("city", "sense"), "known"); // the world's
+  EXPECT_EQ(key_of("city", "belief"), "grouped");
+  EXPECT_EQ(key_of("city", "planes"), "2");
+  EXPECT_EQ(key_of("city", "drives"), "builtin");
+  EXPECT_EQ(key_of("city", "plans"), "vehicle"); // the built-in net: each plant's own (D9)
+  EXPECT_EQ(key_of("scouts", "sense"), "fog");
+  EXPECT_EQ(key_of("scouts", "belief"), "private");
+  EXPECT_EQ(key_of("scouts", "planes"), "6");
+  EXPECT_EQ(key_of("scouts", "drives"), "weights (" + weights + ", " + key + ")");
+  EXPECT_EQ(key_of("scouts", "plans"), "trained"); // weights: the trainer's vehicle
+  EXPECT_EQ(key_of("scouts", "metric"), "policy");
+  // Each fleet's navigator, beside the plant's for the unnamed vehicle.
+  std::vector<std::uint8_t> occ;
+  int rows = 0, cols = 0;
+  EXPECT_TRUE(v->belief("kinematic/city", occ, rows, cols));
+  EXPECT_TRUE(v->belief("kinematic/scouts", occ, rows, cols));
+  EXPECT_TRUE(v->belief("kinematic", occ, rows, cols));
+
+  // The keys switch them: a shared belief, then what drives, live.
+  cvc::state::instance(app)("vehicles.fleets.scouts.belief").value(std::string("shared"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "planes"), "1");
+  int placed = 0;
+  for (const entity_info &e : v->entities())
+    placed += e.fleet == "scouts" && e.placed ? 1 : 0;
+  EXPECT_EQ(placed, 6);
+  cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("builtin"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "drives"), "builtin");
+  EXPECT_EQ(key_of("scouts", "plans"), "vehicle");
+  {
+    EnvFor env("CVC_NAV_WEIGHTS", weights);
+    cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("trained"));
+    art.step_world(1);
+    art.drain();
+    EXPECT_EQ(key_of("scouts", "drives"), "trained (" + weights + ", " + key + ")");
+    EXPECT_EQ(key_of("scouts", "plans"), "trained");
+  }
+  // Weights that can't be had: the built-in net drives, and says why.
+  cvc::state::instance(app)("vehicles.fleets.scouts.policy")
+      .value(std::string("C:/no/such/weights.cvcnav"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
+      << key_of("scouts", "drives");
+  EXPECT_EQ(key_of("scouts", "plans"), "vehicle"); // the fallback's built-in net
+  // trained without $CVC_NAV_WEIGHTS: a copy installed, else the download (D8). The test's network
+  // is off and its registry isn't there (for the package below too), so the download's why is said.
+  cvc::state::instance(app)("sys.data.cvcpkg.registry").value(std::string("http://127.0.0.1:9"));
+  {
+    EnvFor no_override("CVC_NAV_WEIGHTS", "");
+    const std::string installed = cvc::nav::coef_mlp::default_weights_path();
+    cvc::state::instance(app)("vehicles.fleets.scouts.policy").value(std::string("trained"));
+    art.step_world(1);
+    art.drain();
+    if (fs::is_regular_file(installed)) {
+      EXPECT_EQ(key_of("scouts", "drives").rfind("trained (" + installed, 0), 0u)
+          << key_of("scouts", "drives");
+    } else {
+      for (int k = 0; k < 400 && key_of("scouts", "drives").rfind("builtin: no trained", 0) != 0;
+           ++k) {
+        art.step_world(1);
+        art.drain();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      EXPECT_NE(key_of("scouts", "drives").find("grl-snam-weights"), std::string::npos)
+          << "the download, not " << key_of("scouts", "drives");
+      EXPECT_EQ(key_of("scouts", "plans"), "vehicle");
+    }
+  }
+  cvc::state::instance(app)("vehicles.fleets.scouts.policy")
+      .value(std::string("cvcpkg://cvc/no-such-weights-for-a-test"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: ", 0), 0u) << key_of("scouts", "drives");
+  for (int k = 0; k < 400 && key_of("scouts", "drives").rfind("builtin: no trained", 0) != 0; ++k) {
+    art.step_world(1);
+    art.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  EXPECT_EQ(key_of("scouts", "drives").rfind("builtin: no trained weights (", 0), 0u)
+      << key_of("scouts", "drives");
+  EXPECT_EQ(key_of("scouts", "drives").find("no/such"), std::string::npos); // this one's why
+  EXPECT_EQ(key_of("scouts", "plans"), "vehicle");
+  placed = 0;
+  for (const entity_info &e : v->entities())
+    placed += e.fleet == "scouts" && e.placed ? 1 : 0;
+  EXPECT_EQ(placed, 6); // each change made the navigator again, its vehicles still in the world
+}
+
+// A fleet's plants (FL1c): a list its vehicles cycle over, or each team's (a team not named on the
+// archetype's), each plant a navigator of the fleet's own; `.plant` switches them live, its
+// vehicles at rest where they were. Its metric (D9) follows the policy unless `metric:` says, and
+// `.metric` switches it: the trainer's vehicle (here the kinematic bicycle's 3 m disc and 18 m/s)
+// or each plant's own.
+TEST(AriadneWorldVehicles, AFleetHasPlantsAndAMetric) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string doc = kFleetDoc;
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: mix, archetype: v, count: 8, seed: 3, plant: [kinematic, dynamic], "
+              "policy: builtin }\n      - { fleet: teams, archetype: v, count: 16, spawn: opposed, "
+              "seed: 5, rally: { count: 2 }, plant: { 0: dynamic }, policy: builtin }");
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_plants", doc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  art.step_world(1);
+  art.drain();
+  const auto key_of = [&](const std::string &fleet, const std::string &leaf) {
+    return val(app, "vehicles.fleets." + fleet + "." + leaf);
+  };
+  const auto of = [&](const std::string &fleet) {
+    std::vector<entity_info> out;
+    for (const entity_info &e : v->entities())
+      if (e.fleet == fleet)
+        out.push_back(e);
+    return out;
+  };
+  std::vector<entity_info> mix = of("mix"), teams = of("teams");
+  ASSERT_EQ(mix.size(), 8u);
+  ASSERT_EQ(teams.size(), 16u);
+  for (std::size_t k = 0; k < mix.size(); ++k) {
+    EXPECT_EQ(mix[k].plant, k % 2 == 0 ? "kinematic" : "dynamic") << k;
+    EXPECT_TRUE(mix[k].placed) << k;
+  }
+  int on_dynamic = 0;
+  for (const entity_info &e : teams) {
+    ASSERT_GE(e.rally, 0);
+    EXPECT_EQ(e.plant, e.rally == 0 ? "dynamic" : "kinematic") << e.id;
+    on_dynamic += e.plant == "dynamic" ? 1 : 0;
+  }
+  EXPECT_GT(on_dynamic, 0);
+  EXPECT_LT(on_dynamic, 16);
+  EXPECT_EQ(key_of("mix", "plant"), "kinematic, dynamic");
+  EXPECT_EQ(key_of("teams", "plant"), "0: dynamic");
+  std::vector<std::uint8_t> occ;
+  int rows = 0, cols = 0;
+  for (const char *nav : {"kinematic/mix", "dynamic/mix", "kinematic/teams", "dynamic/teams"})
+    EXPECT_TRUE(v->belief(nav, occ, rows, cols)) << nav;
+  EXPECT_FALSE(v->belief("dynamic", occ, rows, cols)); // no unnamed vehicle on it
+
+  // .plant switches them: every vehicle on the new plant, where it was, at rest.
+  art.step_world(120);
+  art.drain();
+  mix = of("mix");
+  cvc::state::instance(app)("vehicles.fleets.mix.plant").value(std::string("dynamic4w"));
+  art.step_world(1);
+  art.drain();
+  const std::vector<entity_info> moved = of("mix");
+  ASSERT_EQ(moved.size(), 8u);
+  for (std::size_t k = 0; k < moved.size(); ++k) {
+    EXPECT_EQ(moved[k].plant, "dynamic4w") << k;
+    EXPECT_TRUE(moved[k].placed) << k;
+    EXPECT_LT(std::hypot(moved[k].x - mix[k].x, moved[k].y - mix[k].y), 3.0) << k;
+    EXPECT_LT(std::fabs(moved[k].speed), 1.0) << k;
+  }
+  EXPECT_FALSE(v->belief("kinematic/mix", occ, rows, cols)); // its old navigators are gone
+  EXPECT_TRUE(v->belief("dynamic4w/mix", occ, rows, cols));
+  // A bad one is said, and changes nothing.
+  cvc::state::instance(app)("vehicles.fleets.teams.plant").value(std::string("0: hover"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_NE(v->status().find("fleet 'teams': plant: 'hover' is not a plant"), std::string::npos)
+      << v->status();
+  cvc::state::instance(app)("vehicles.fleets.teams.plant").value(std::string("5: jolt"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_NE(v->status().find("team 5 is not one of the fleet's 0 to 1"), std::string::npos)
+      << v->status();
+  for (const entity_info &e : of("teams"))
+    EXPECT_EQ(e.plant, e.rally == 0 ? "dynamic" : "kinematic") << e.id;
+
+  // The metric: the built-in net plans with each plant's own, metric: trained with the trainer's.
+  const auto kinematic_limits = [&](const std::string &fleet) {
+    for (const entity_info &e : of(fleet))
+      if (e.plant == "kinematic")
+        for (const entity_plant &p : v->plants())
+          if (p.id == e.id)
+            return p.limits;
+    return cvc::nav::diff::bike_veh{};
+  };
+  EXPECT_EQ(key_of("teams", "plans"), "vehicle");
+  const double own = kinematic_limits("teams").rr;
+  EXPECT_GT(own, 0.5);
+  EXPECT_LT(own, 2.0); // a Humvee's 1.2 m
+  cvc::state::instance(app)("vehicles.fleets.teams.metric").value(std::string("trained"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("teams", "plans"), "trained");
+  const cvc::nav::training_scene ts;
+  EXPECT_NEAR(kinematic_limits("teams").rr, ts.rr / 0.05, 1e-4);     // 3 m
+  EXPECT_NEAR(kinematic_limits("teams").vmax, ts.vmax / 0.05, 1e-3); // 18 m/s
+  int still = 0;
+  for (const entity_info &e : of("teams"))
+    still += e.placed ? 1 : 0;
+  EXPECT_EQ(still, 16);
+  cvc::state::instance(app)("vehicles.fleets.teams.metric").value(std::string("policy"));
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(key_of("teams", "plans"), "vehicle");
+  EXPECT_NEAR(kinematic_limits("teams").rr, own, 1e-6);
+}
+
+// A fleet's poses are a snapshot (FL1d): poses(fleet) gives its placed vehicles as the last
+// publish left them (ids, chassis centres, headings, speeds, teams, the box they lie in and the
+// tick), the same the fleet's .tick and .bounds keys say. A snapshot held stays as it was while the
+// world steps on, another thread reads them without a lock, and a fleet gone has none.
+TEST(AriadneWorldVehicles, AFleetsPosesAreASnapshot) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_poses", kFleetDoc).string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  art.step_world(1);
+  art.drain();
+  const std::shared_ptr<const fleet_poses> p = v->poses("city");
+  ASSERT_NE(p, nullptr);
+  ASSERT_EQ(p->size(), 64u);
+  EXPECT_EQ(p->tick, art.scene_world()->world().tick());
+  EXPECT_EQ(v->poses("solo"), nullptr); // an unnamed vehicle is no fleet's
+  EXPECT_EQ(v->poses("town"), nullptr);
+  std::vector<entity_info> city;
+  for (const entity_info &e : v->entities())
+    if (e.fleet == "city")
+      city.push_back(e);
+  ASSERT_EQ(city.size(), 64u);
+  for (std::size_t k = 0; k < 64; ++k) {
+    EXPECT_EQ(p->id[k], city[k].id) << k;
+    EXPECT_NEAR(p->x[k], city[k].x, 1e-3) << k;
+    EXPECT_NEAR(p->y[k], city[k].y, 1e-3) << k;
+    EXPECT_NEAR(p->yaw[k], city[k].yaw, 1e-4) << k;
+    EXPECT_EQ(p->team[k], city[k].rally) << k;
+    EXPECT_GE(p->x[k], p->min_x - 1e-3);
+    EXPECT_LE(p->x[k], p->max_x + 1e-3);
+    EXPECT_GE(p->y[k], p->min_y - 1e-3);
+    EXPECT_LE(p->y[k], p->max_y + 1e-3);
+  }
+  EXPECT_LT(p->max_x, -200.0 * 0.4 + 4.0); // laid out in the west 30 %
+  EXPECT_EQ(val(app, "vehicles.fleets.city.tick"), std::to_string(p->tick));
+  double b[4] = {};
+  ASSERT_EQ(std::sscanf(val(app, "vehicles.fleets.city.bounds").c_str(), "%lf,%lf,%lf,%lf", &b[0],
+                        &b[1], &b[2], &b[3]),
+            4);
+  EXPECT_NEAR(b[0], p->min_x, 1e-3);
+  EXPECT_NEAR(b[3], p->max_y, 1e-3);
+
+  // A reader on another thread while the world steps: every snapshot whole, and newer ones come.
+  const std::uint64_t held_tick = p->tick;
+  const std::vector<float> held_x = p->x;
+  std::atomic<bool> stop{false};
+  std::atomic<int> reads{0}, torn{0};
+  std::atomic<std::uint64_t> latest{0};
+  std::thread reader([&] {
+    while (!stop.load()) {
+      if (const std::shared_ptr<const fleet_poses> q = v->poses("city")) {
+        if (q->size() != 64 || q->x.size() != 64 || q->team.size() != 64)
+          ++torn;
+        latest = q->tick;
+        ++reads;
+      }
+      std::this_thread::yield();
+    }
+  });
+  for (int k = 0; k < 120; ++k) // a batch publishes once, at its end: a step a batch, 120 swaps
+    art.step_world(1);
+  art.drain();
+  const std::shared_ptr<const fleet_poses> later = v->poses("city");
+  const std::uint64_t newest = later ? later->tick : 0;
+  // The reader takes the newest too, in its own time: a loaded runner may not have run it since.
+  for (int k = 0; k < 5000 && latest.load() < newest; ++k)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  stop = true;
+  reader.join();
+  ASSERT_NE(later, nullptr);
+  EXPECT_GT(reads.load(), 0);
+  EXPECT_EQ(torn.load(), 0);
+  EXPECT_EQ(latest.load(), newest);
+  EXPECT_GT(newest, p->tick);
+  EXPECT_EQ(p->tick, held_tick); // the one held is as it was
+  EXPECT_EQ(p->x, held_x);
+  EXPECT_NE(later->x, p->x); // they drove
+
+  // Its vehicles gone, it has none.
+  v->clear();
+  art.step_world(1);
+  art.drain();
+  EXPECT_EQ(v->poses("city"), nullptr);
+  EXPECT_TRUE(v->starts().empty());
+}
+
+// A gym lays a document's fleet out at each reset (FL1d, gym_options::fleets): its vehicles are
+// the agents (after any of the options' own), laid out from the fleet's seed plus the reset's, so
+// each seed has its layout and the same seed the same one. Their goals are held, and the episode
+// ends with every one of them at its own.
+TEST(AriadneWorldGym, AFleetIsTheGymsAgents) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string doc = kFleetDoc;
+  const std::string entry = "{ fleet: city, archetype: v, count: 64, spawn: opposed, seed: 7, "
+                            "rally: { count: 4 },\n          policy: builtin }";
+  doc.replace(doc.find(entry), entry.size(),
+              "{ fleet: squad, archetype: v, count: 6, seed: 4, policy: builtin }");
+  const std::string path = write_doc("gym_fleet", doc).string();
+  {
+    gym_options bad;
+    bad.fleets = {"armada"};
+    try {
+      WorldGym refused(path, bad);
+      ADD_FAILURE() << "a fleet the document does not declare";
+    } catch (const std::runtime_error &e) {
+      EXPECT_NE(std::string(e.what()).find("has no fleet 'armada' (its fleets: squad)"),
+                std::string::npos)
+          << e.what();
+    }
+  }
+  gym_options o;
+  o.fleets = {"squad"};
+  o.max_steps = 2000;
+  WorldGym gym(path, o);
+  const gym_observation first = gym.reset(1);
+  ASSERT_EQ(first.n, 6u); // the fleet's alone: the document's solo is not an agent
+  for (std::size_t i = 0; i < first.n; ++i) {
+    EXPECT_EQ(first.plant[i], "kinematic");
+    EXPECT_GT(first.goal_dist[i], 1.0) << i;
+  }
+  EXPECT_EQ(gym.vehicles().fleets(), std::vector<std::string>{"squad"});
+  const std::vector<double> none(6, std::numeric_limits<double>::quiet_NaN());
+  gym.step(none, none);
+  EXPECT_EQ(val(gym.app(), "vehicles.fleets.squad.seed"), "5"); // its 4, plus the reset's 1
+  const gym_observation other = gym.reset(2);
+  ASSERT_EQ(other.n, 6u);
+  EXPECT_NE(other.x, first.x);
+  const gym_observation again = gym.reset(1);
+  ASSERT_EQ(again.n, 6u);
+  for (std::size_t i = 0; i < 6; ++i) {
+    EXPECT_DOUBLE_EQ(again.x[i], first.x[i]) << i;
+    EXPECT_DOUBLE_EQ(again.goal_x[i], first.goal_x[i]) << i;
+  }
+  // The navigator drives them all to their goals, and the episode ends.
+  gym_step s;
+  for (std::uint64_t k = 0; k < o.max_steps; ++k) {
+    s = gym.step(none, none);
+    if (s.terminated || s.truncated)
+      break;
+  }
+  EXPECT_TRUE(s.terminated) << "step " << s.observation.step;
+  for (std::size_t i = 0; i < 6; ++i)
+    EXPECT_EQ(s.observation.reached[i], 1) << i;
+  for (std::size_t i = 0; i < 6; ++i) // held: the goals laid out, not wandered from
+    EXPECT_DOUBLE_EQ(s.observation.goal_x[i], again.goal_x[i]) << i;
+
+  // The options' own agents come first.
+  gym_options both = o;
+  entity_spec lead;
+  lead.archetype = "v";
+  lead.name = "lead";
+  lead.controller = "none";
+  both.agents = {lead};
+  WorldGym mixed(path, both);
+  const gym_observation m = mixed.reset(1);
+  ASSERT_EQ(m.n, 7u);
+  EXPECT_EQ(mixed.vehicles().entities().front().spec.name, "lead");
 }
 
 TEST(AriadneWorldVehicles, TheWorldBlockTakesIntentsAndTheExternalController) {
@@ -2790,6 +3263,57 @@ TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
 
 // Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
 // a jump, a time gone back or the first one taken at once; the same time again changes nothing.
+// A `pose` entity's model, as a relay sends it to its clients (conference::room_entities_of): its
+// base hangs the vehicle's stand height below its chassis (stand_height, where its chassis stands
+// when a pose gives no z), however high over the grid's ground its poses put it.
+TEST(AriadneWorldVehicles, APoseEntitysModelHangsItsStandHeightBelowIt) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_posed(v);
+  const auto step = [&](int n) {
+    for (int i = 0; i < n; ++i) {
+      v.before_step();
+      w->world().step();
+      v.after_step();
+    }
+  };
+  ASSERT_EQ(r.scene.vehicles.size(), 2u);
+  const double stand = stand_height(vehicle_desc_of(r.scene.vehicles[0]));
+  EXPECT_DOUBLE_EQ(stand, 0.45 + 0.47) << "the Humvee's: half its 0.9 m box, its 0.47 m wheels";
+  for (const double z : {6.0, 2.5}) {
+    entity_pose p;
+    p.x = 10.0;
+    p.y = 2.0;
+    p.z = z;
+    ASSERT_TRUE(v.set_pose(id, p));
+    step(2);
+    const entity_info e = entity(v, id);
+    ASSERT_TRUE(e.posed);
+    EXPECT_DOUBLE_EQ(e.z, z);
+    EXPECT_NEAR(e.ground_z, 0.0, 1e-9) << "the square's top";
+    const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+    ASSERT_EQ(wire.size(), 1u);
+    EXPECT_DOUBLE_EQ(wire[0].base_z, -stand) << "at z " << z << ", not the ground's depth under it";
+  }
+  // Without a z, it stands on the ground: its model's base is the ground.
+  entity_pose p;
+  p.x = 12.0;
+  p.y = 2.0;
+  ASSERT_TRUE(v.set_pose(id, p));
+  step(2);
+  const entity_info e = entity(v, id);
+  EXPECT_NEAR(e.z + conference::room_entities_of(v)[0].base_z, e.ground_z, 1e-9);
+}
+
 TEST(AriadneWorldVehicles, TimedPosesAreDrawnBetweenTheLastTwo) {
   REQUIRE_YAML();
   if (!jolt())
@@ -6730,8 +7254,8 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
   for (int i = 0; i < ticks; ++i)
     gym.step(none, none);
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
-  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, six a tick), and
-  // one publish of the entities' keys (timed here alone).
+  // Where a tick goes: the physics world's steps (the last 120 steps' wall time, a tick's
+  // cvc::kSimTickQuanta of them), and one publish of the entities' keys (timed here alone).
   double phys = 0.0;
   int nphys = 0;
   {
@@ -6744,28 +7268,30 @@ void fleet_bench(const std::string &doc, const std::string &plant, int n, const 
         ++nphys;
       }
   }
-  const double phys_tick = nphys ? 6.0 * phys / nphys : 0.0;
+  const double phys_tick = nphys ? cvc::kSimTickQuanta * phys / nphys : 0.0;
   const auto t2 = clk::now();
   gym.vehicles().publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
-  // A tick is 0.06 s of world time: at 1x a tick under 60 ms keeps up, at the demos' 3.6x under
-  // 16.7 ms.
+  // A tick is cvc::kSimTick of world time (7/120 s): at 1x a tick under 58.3 ms keeps up, at the
+  // demos' 3.6x under 16.2 ms.
   std::printf("[fleet] %-9s n=%4d sense=%-5s avoid=%d spawn %7.1f ms  tick %7.2f ms (%5.1fx)  "
               "physics %6.2f  publish %6.2f  rest %6.2f ms\n",
               plant.c_str(), n, sense.c_str(), avoid ? 1 : 0, spawn_ms, tick_ms,
-              tick_ms > 0.0 ? 60.0 / tick_ms : 0.0, phys_tick, pub_ms,
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, phys_tick, pub_ms,
               tick_ms - phys_tick - pub_ms);
 }
 
 // A fleet declared in the document (start: fleet:) on a paused clock: the load (spawn and layout),
-// six steps, and one publish, with its per-entity keys (keys: all) or its summary alone.
+// a tick's steps (cvc::kSimTickQuanta), and one publish, with its per-entity keys (keys: all) or
+// its summary alone. On the built-in net, so it runs the same offline as with the weights.
 void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, int ticks) {
   std::string doc = fleet_bench_doc(bundle);
   const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
   doc.insert(doc.find(arch) + arch.size(),
              "    start:\n      - { fleet: city, archetype: humvee, plant: kinematic, count: " +
                  std::to_string(n) +
-                 ", spawn: opposed, seed: 7, rally: { count: 16 }, keys: " + keys + " }\n");
+                 ", spawn: opposed, seed: 7, rally: { count: 16 }, policy: builtin, keys: " + keys +
+                 " }\n");
   doc.insert(doc.find("scene:\n") + 7, "  clock: { paused: true }\n");
   const fs::path path = write_doc("fleet_doc_bench", doc);
   using clk = std::chrono::steady_clock;
@@ -6781,22 +7307,25 @@ void fleet_doc_bench(const std::string &bundle, int n, const std::string &keys, 
   }
   WorldVehicles &v = *art.scene_world()->vehicles();
   for (int i = 0; i < 10; ++i) {
-    art.step_world(6);
+    art.step_world(cvc::kSimTickQuanta);
     art.drain();
   }
   const auto t1 = clk::now();
   for (int i = 0; i < ticks; ++i) {
-    art.step_world(6);
+    art.step_world(cvc::kSimTickQuanta);
     art.drain();
   }
   const double tick_ms = std::chrono::duration<double, std::milli>(clk::now() - t1).count() / ticks;
   const auto t2 = clk::now();
   v.publish();
   const double pub_ms = std::chrono::duration<double, std::milli>(clk::now() - t2).count();
-  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  6 steps %7.2f ms  publish "
-              "%6.2f ms  (%zu entities, %s)\n",
-              n, keys.c_str(), load_ms, tick_ms, pub_ms, v.size(),
-              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str());
+  std::printf("[fleet doc] kinematic n=%4d keys=%-7s load %7.1f ms  tick %7.2f ms (%5.1fx)  "
+              "publish %6.2f ms  (%zu entities, %s; drives %s, plans %s)\n",
+              n, keys.c_str(), load_ms, tick_ms,
+              tick_ms > 0.0 ? 1000.0 * cvc::kSimTick / tick_ms : 0.0, pub_ms, v.size(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.status", "").c_str(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.drives", "").c_str(),
+              cvc::ariadne::read_or<std::string>(app, "vehicles.fleets.city.plans", "").c_str());
 }
 
 } // namespace

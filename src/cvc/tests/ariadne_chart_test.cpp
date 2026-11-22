@@ -288,6 +288,35 @@ TEST(AriadneChart, SeriesEntriesAndStyles) {
   EXPECT_EQ(d.frame().series[1].y.size(), 4u);
 }
 
+// A repeated chart: each instance's series, cursor and log axis take its index, so a row per
+// person charts that person's own numbers (audio_buffers.ari).
+TEST(AriadneChart, ARepeatedChartTakesItsIndex) {
+  Widget w = chart("C{i}", "", {{"rows.{i}.y", "row {i}", ""}});
+  w.cursor = "rows.{i}.t";
+  w.log_y = "rows.{i}.log";
+  w.repeat = "2";
+  Doc d(std::move(w));
+  put(d.app, "doc.rows.0.y", "1,2");
+  put(d.app, "doc.rows.1.y", "3,4,5");
+  put(d.app, "doc.rows.1.t", "2");
+  put(d.app, "doc.rows.1.log", "1");
+  d.be.charts.clear();
+  d.rt.render();
+  ASSERT_EQ(d.be.charts.size(), 2u);
+  const ChartSpec &a = d.be.charts[0].second, &b = d.be.charts[1].second;
+  ASSERT_EQ(a.series.size(), 1u);
+  ASSERT_EQ(b.series.size(), 1u);
+  EXPECT_EQ(a.series[0].y, (std::vector<double>{1, 2}));
+  EXPECT_EQ(a.series[0].label, "row 0");
+  EXPECT_FALSE(a.has_cursor);
+  EXPECT_FALSE(a.log_y);
+  EXPECT_EQ(b.series[0].y, (std::vector<double>{3, 4, 5}));
+  EXPECT_EQ(b.series[0].label, "row 1");
+  EXPECT_TRUE(b.has_cursor);
+  EXPECT_EQ(b.cursor, 2.0);
+  EXPECT_TRUE(b.log_y);
+}
+
 // What the cache saves: a frame that changed nothing hands the backend the same parsed arrays; a
 // write to one series re-parses it.
 TEST(AriadneChart, SeriesAreParsedOnlyWhenTheirTextChanges) {

@@ -1043,6 +1043,7 @@ struct FakePlayback {
   long frame_gen = 0;
   cvc::image frame;
   bool destroyed = false;
+  std::string notice; // what it says keeps its picture away
 };
 
 class FakePlayer : public media::Player {
@@ -1086,6 +1087,10 @@ public:
     return f_->duration;
   }
   std::string error() const override { return "fake failure"; }
+  std::string notice() const override {
+    std::lock_guard<std::mutex> l(f_->mu);
+    return f_->notice;
+  }
   bool frame(cvc::image &out, long &gen) override {
     std::lock_guard<std::mutex> l(f_->mu);
     if (f_->frame.empty() || f_->frame_gen == gen)
@@ -1212,6 +1217,70 @@ TEST(MediaPlayer, TheLoaderReadsVideoAndAudio) {
   for (const std::string &w : lr.warnings)
     warned = warned || w.find("'nothing' has no src") != std::string::npos;
   EXPECT_TRUE(warned);
+}
+
+// A video with no frame says why over its box (§5.13): what its player says keeps the picture
+// away (a browser waiting for a tap), that it failed, and after 3 s loading or playing with no
+// frame, that state. Not once a frame shows, nor in a box too small for words (an avatar).
+TEST(MediaBadge, AVideoWithNoPictureSaysWhyOverItsBox) {
+  cvc::app app;
+  FakeFactory ff(app);
+  media::set_play_policy(app, media::PlayPolicy::Always);
+  LoadResult lr =
+      load_string(app, std::string(kPlayerDoc) + "      - video: decor\n"
+                                                 "        src: https://media.test/loop.webm\n"
+                                                 "        size: [120, 68]\n"
+                                                 "        controls: false\n"
+                                                 "      - video: tiny\n"
+                                                 "        src: https://media.test/tiny.webm\n"
+                                                 "        size: [48, 48]\n"
+                                                 "        controls: false\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  Runtime rt(app);
+  ImageBackend b;
+  rt.set_backend(&b);
+  rt.set_root(std::move(lr.root));
+  const auto start = std::chrono::steady_clock::now();
+  rt.render();
+  ASSERT_EQ(ff.made.size(), 3u); // clip, decor, tiny
+  EXPECT_TRUE(b.badges.empty()) << "loading, but not for 3 s";
+  const auto set = [&](std::size_t i, media::PlayerState s, const std::string &notice) {
+    std::lock_guard<std::mutex> l(ff.made[i]->mu);
+    ff.made[i]->state = s;
+    ff.made[i]->notice = notice;
+  };
+  set(0, media::PlayerState::Paused, "tap to start it");
+  set(2, media::PlayerState::Paused, "tap to start it");
+  rt.render();
+  EXPECT_EQ(b.badges,
+            (std::vector<std::string>{"media:placeholder:loading:160x90=tap to start it"}))
+      << "the 48 px one says nothing";
+  // Failed: with controls the box says so and their line has the error; without, the box has it.
+  set(0, media::PlayerState::Failed, "");
+  set(1, media::PlayerState::Failed, "");
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"media:placeholder:failed:160x90=failed",
+                                                "media:placeholder:failed:120x68=fake failure"}));
+  EXPECT_NE(std::find(b.texts.begin(), b.texts.end(), "clip: fake failure"), b.texts.end());
+  // A frame: the picture, and nothing over it, even once frames stop coming.
+  set(0, media::PlayerState::Playing, "");
+  {
+    std::lock_guard<std::mutex> l(ff.made[0]->mu);
+    ff.made[0]->frame = make_image(
+        16, 9, [](int, int) -> std::array<unsigned char, 4> { return {10, 200, 10, 255}; });
+    ff.made[0]->frame_gen = 1;
+  }
+  set(1, media::PlayerState::Loading, "");
+  rt.render();
+  rt.render();
+  EXPECT_TRUE(b.badges.empty());
+  // 3 s on, still loading with no frame: the box says so.
+  std::this_thread::sleep_until(start + std::chrono::milliseconds(3100));
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"media:placeholder:loading:120x68=loading"}));
+  set(1, media::PlayerState::Playing, "");
+  rt.render();
+  EXPECT_EQ(b.badges, (std::vector<std::string>{"media:placeholder:loading:120x68=playing"}));
 }
 
 TEST(MediaPlayer, WithoutAPlayerTheWidgetSaysSoAndOffersTheBrowser) {

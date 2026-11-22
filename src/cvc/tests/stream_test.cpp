@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <cvc/ariadne/stream/audio_sources.h>
 #include <cvc/ariadne/stream/frame.h>
 #include <cvc/ariadne/stream/frame_pool.h>
@@ -94,6 +95,25 @@ struct test_source : frame_source {
     out.stop = (limit_ > 0 && made_ >= limit_); // spent after `limit_` frames
     return out;
   }
+};
+
+// A FIFO frame_source (a recording device's model): it holds a backlog of whole frames, fills one
+// per call while any is left, and says so in more().
+struct backlog_source : frame_source {
+  std::size_t bytes_;
+  std::atomic<int> backlog{0};
+  explicit backlog_source(std::size_t bytes) : bytes_(bytes) {}
+  std::size_t frame_bytes() const override { return bytes_; }
+  produced_frame fill(std::uint8_t *buf, std::size_t cap) override {
+    produced_frame out;
+    if (bytes_ > cap || backlog.load() <= 0)
+      return out;
+    std::memset(buf, 0xCD, bytes_);
+    out.bytes = bytes_;
+    backlog.fetch_sub(1);
+    return out;
+  }
+  bool more() const override { return backlog.load() > 0; }
 };
 
 } // namespace
@@ -862,6 +882,47 @@ TEST(StreamProducer, SelfStoppingSourceEndsTheProducer) {
   std::this_thread::sleep_for(std::chrono::milliseconds(10)); // let the stop tick settle
   EXPECT_EQ(s->channel().total_published(), 5u) << "self-stopping source published the wrong count";
   s->close(); // joins the already-finished thread — no hang
+}
+
+// A late tick drains a FIFO source's whole backlog (frame_source::more), up to 16 frames a tick,
+// instead of one frame a tick for good.
+TEST(StreamProducer, DrainsAFifoSourcesBacklogEachTick) {
+  cvc::app app;
+  stream_params p;
+  p.id = "mic0";
+  p.format = rgba(4, 4); // slab = 64 bytes
+  auto s = stream::open(app, p);
+  ASSERT_TRUE(s);
+  auto src = std::make_unique<backlog_source>(64);
+  backlog_source *raw = src.get();
+  raw->backlog = 5;
+  s->start_producer(std::move(src), /*hz*/ 1.0); // a tick a second: the first one at once
+  for (int i = 0; i < 500 && s->channel().total_published() < 1; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(s->channel().total_published(), 5u) << "one tick should drain all five";
+  raw->backlog = 40;
+  for (int i = 0; i < 2000 && s->channel().total_published() < 6; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(s->channel().total_published(), 21u) << "and a tick takes at most 16";
+  s->close();
+}
+
+TEST(StreamProducer, MutedSourceForwardsMore) {
+  std::atomic<bool> flag{true};
+  auto inner = std::make_unique<backlog_source>(16);
+  backlog_source *raw = inner.get();
+  muted_source m(std::move(inner), flag);
+  EXPECT_FALSE(m.more());
+  raw->backlog = 2;
+  EXPECT_TRUE(m.more());
+  std::uint8_t buf[16];
+  EXPECT_EQ(m.fill(buf, sizeof(buf)).bytes, 16u);
+  EXPECT_EQ(buf[0], 0) << "muted: blanked";
+  EXPECT_TRUE(m.more());
+  m.fill(buf, sizeof(buf));
+  EXPECT_FALSE(m.more());
 }
 
 TEST(StreamProducer, RejectsASourceWhoseFrameExceedsTheSlab) {

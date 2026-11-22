@@ -50,6 +50,13 @@ Number_type interpolate(const Polygon_2 &P, const Point_3 &point) { return 0; }
 template <typename Poly_iter, typename Iter>
 Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin,
                         Iter points_end, Number_type zmid) {
+  run_to_end(interpolate_steps(poly_begin, poly_end, points_begin, points_end, zmid));
+  return 0;
+}
+
+template <typename Poly_iter, typename Iter>
+step_task interpolate_steps(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin,
+                            Iter points_end, Number_type zmid) {
   const Number_type nan = std::numeric_limits<Number_type>::quiet_NaN();
   typedef typename iterator_traits<Iter>::value_type point_type;
 
@@ -86,8 +93,8 @@ Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_be
     }
     const planar::triangulation T = planar::delaunay(pts);
     p.z() = planar::sibson_interpolate(T, values, g.to_grid(planar::pointd(p.x(), p.y())));
+    TILER_UNITS(delaunay_units(pts.size()));
   }
-  return 0;
 }
 
 template Number_type interpolate(Polygon_2::Vertex_iterator poly_begin,
@@ -98,5 +105,13 @@ template Number_type interpolate(list<Point_2>::iterator poly_begin,
                                  list<Point_2>::iterator poly_end,
                                  list<Point_2>::iterator points_begin,
                                  list<Point_2>::iterator points_end, Number_type zmid);
+template step_task interpolate_steps(Polygon_2::Vertex_iterator poly_begin,
+                                     Polygon_2::Vertex_iterator poly_end,
+                                     list<Point_2>::iterator points_begin,
+                                     list<Point_2>::iterator points_end, Number_type zmid);
+template step_task interpolate_steps(list<Point_2>::iterator poly_begin,
+                                     list<Point_2>::iterator poly_end,
+                                     list<Point_2>::iterator points_begin,
+                                     list<Point_2>::iterator points_end, Number_type zmid);
 
 } // namespace cvc::tiler

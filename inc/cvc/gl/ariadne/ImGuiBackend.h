@@ -104,6 +104,11 @@ public:
                                       const cvc::ariadne::SettingsSpec &spec) override;
   void spinner(const char *label, double seconds, bool ascii) override; // a turning arc
   bool button(const char *label) override;
+  bool view_is_phone() const override; // §5.14 under 500 CSS px on its short side
+  // §5.27 a button with a picture (a published image, a line tall or look.icon_h) and/or the
+  // chosen one of a row: drawn pressed in (sunken, darker, its content nudged down and right),
+  // and the others raised beside it.
+  bool button_with(const char *label, const cvc::ariadne::ButtonLook &look) override;
   bool menu_item_action(const char *label) override;
   bool item_clicked() override; // §4.6 widget on_click: ImGui::IsItemClicked() on the last item
   bool item_hovered() override; // §4.6 widget on_hover: ImGui::IsItemHovered() on the last item

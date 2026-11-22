@@ -1,8 +1,9 @@
 schema_version: 1
 recipe:
   name: arigl-web
-  upstream_version: "4.0.2"
-  # Reset to 1 for the 4.0.2 upstream version: a version bump restarts cvc_revision.
+  upstream_version: "4.0.4"
+  # Bumped 1 -> 2: the contour tiler (cvc::planar's clipper2, cdt and shewchuk-predicates).
+  # Reset to 1 for the 4.0.4 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -89,6 +90,14 @@ depends:
     - name: assimp
     - name: eigen
     - name: libigl
+    # cvc::planar (Clipper2, CDT and Shewchuk's predicates), which the contour tiler runs on: a
+    # document's contour_lab node tiles its contours (roadmap P4). Without them the tiler is not
+    # built in, and a tile says so. Shewchuk's predicates also carry cvc::tet_complex and the
+    # skeleton built on it, which a mesh_lab node's `skeleton` request runs (P2); without them that
+    # request reports an error.
+    - name: clipper2
+    - name: cdt
+    - name: shewchuk-predicates
     # cvc's image I/O (ImageMagick), static, plus every codec library the static MagickCore and
     # libtiff link. `cvcpkg install` lays bundles down flat (a bundle's own deps are not pulled
     # in), so the closure is listed here, as in libcvc-examples-web.
