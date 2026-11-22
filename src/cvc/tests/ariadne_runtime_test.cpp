@@ -7930,6 +7930,23 @@ TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
   }
 }
 
+// §5.22 a tray icon's icon: (an expression here, giving a host-published picture's name) reaches
+// the backend as the icon's picture; with none it has none.
+TEST(AriadneRuntime, ATrayIconsPictureReachesTheBackend) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.me.pic").value("host-avatar");
+  Widget you = tray_icon("user");
+  you.button_icon = "(state-get \"me.pic\")";
+  rt.set_root(group({menubar({tray_icon("W"), you})}));
+  rt.render();
+  ASSERT_EQ(mb.asked.size(), 2u) << mb.dump();
+  EXPECT_TRUE(mb.asked[0].picture.empty());
+  EXPECT_EQ(mb.asked[1].picture, "host-avatar");
+}
+
 // §5.25 a loaded document with its own menubar, as the loader makes it: a mount (scope, the
 // document's name, its init:) around the fragment, whose bar has a menu and a tray icon.
 Widget fe_lab_mount() {
