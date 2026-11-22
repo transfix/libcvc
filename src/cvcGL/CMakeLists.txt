@@ -1272,6 +1272,16 @@ add_executable(cvcgl_shared_volume test/cvcgl_shared_volume.cpp)
 target_link_libraries(cvcgl_shared_volume PRIVATE cvcGL)
 add_test(NAME cvcgl_shared_volume COMMAND cvcgl_shared_volume)
 
+# The shared-volume demo (examples/ariadne/documents/volume_shared.ari) through AriRuntime: the main
+# scene's volren and a volume_grid show one volume; Filter > Smooth (volume.filter-start, then
+# data-put) and Original (data-reload) are followed by both. Offscreen; skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_shared_volume test/cvcgl_ariadne_shared_volume.cpp)
+  target_link_libraries(cvcgl_ariadne_shared_volume PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_shared_volume COMMAND cvcgl_ariadne_shared_volume)
+endif()
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing

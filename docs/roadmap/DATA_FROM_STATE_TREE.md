@@ -69,9 +69,10 @@ the Windows clock ticks in milliseconds).
     and `volume_slice` cuts through a `slice_source` on that volume.
   - The node publishes the pointer as `<node>.volume`. The transfer function follows it through
     `tf_binding_options::volume_source`.
-  - Without `key:`, `{ node }` takes the first of `volume` and `grid.volume` that holds data, the
-    way `contour_lab` picks between `grid.contours` and `tiler.contours`.
-  - `volume_slice` is registered `reads_data`.
+  - Without `key:`, `{ node }` takes `grid.volume` for a `volume_grid` realized before the node,
+    else `volume`.
+  - `volume_slice` is registered `reads_data`. A `volume_of:` plane follows its source plane's
+    volume.
 - `source: { file }` and `{ sdf }` work as they do now until the file decision (D6).
 - `volume.filter` (decision 2).
 - Demo: `examples/ariadne/documents/volume_shared.ari`. One `data:` entry is shown by the main
@@ -80,6 +81,19 @@ the Windows clock ticks in milliseconds).
 - Test (cvcGL, two apps): the volren's `volume`, the grid's `grid.volume` and the dataset's
   `volume` are one pointer. After a new volume is written, both nodes hold the new pointer, and the
   other app's nodes are unchanged.
+
+What D1 found and added on the way:
+- A program can't store a filter's result in a dataset with `state-data-set "data.NAME.volume"`:
+  that write makes a key under the document's link, not in the store node. `(data-put NAME ITEM
+  VALUE)` (`DataStore::set_output`) puts it in the store node and raises the rev.
+- `state-data-set` stores the DSL's data object, not the `shared_ptr` it holds. `volume_payload`
+  unwraps it, so every follower sees a program's volume as the very pointer.
+- A volren's `isosurfaces:` are data values, and the transfer function's seed places them on the
+  volume's range, so a followed volren has no seed until its first volume arrives.
+  `tf_binding_options::seed_from_volume` makes the seed then; until then the key is left empty.
+- `VolRenNode::setVolume(index, vol)` replaces a volume's voxels and keeps its settings.
+- No host installed the ports' intrinsics (segmentation, skeleton, ...) for Ariadne documents.
+  `register_cvcgl_extensions` now installs `volume.filter`; the others are P9's to install.
 
 **D2, the built-ins `volume` and `volslice`:** they use the same follower, publish `<node>.volume`, and
 take the `state` and `node` sources.

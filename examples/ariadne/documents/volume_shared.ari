@@ -1,0 +1,136 @@
+# volume_shared.ari — one volume the app holds, shown by the main scene's volume renderer and by a
+# volume grid's three slice planes, and both following it when a filter changes it
+# (docs/roadmap/DATA_FROM_STATE_TREE.md; docs/ARIADNE.md §5.17).
+#
+# The app holds the volume: the document's data: block makes the signed distance field of the
+# embedded Stanford bunny (cvcGL's sdf generator). The `volren` node in the main scene and the
+# `volume_grid` node both name it (source: { data: bunny }). Neither reads a file or keeps a copy:
+# the volren's <node>.volume and the grid's grid.volume are the dataset's own pointer.
+#
+# Filter > Smooth runs VolumeRover's bilateral filter on that volume as a job beside the frame
+# (volume.filter-start), its progress in the Filter window. When it is done, on_tick puts the
+# result back as the dataset's volume (data-put). The volren and the grid's planes both redraw on
+# it, and Smooth again filters the smoothed volume. Original makes the bunny again (data-reload).
+#
+#   ariadne_hello examples/ariadne/documents/volume_shared.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/volume_shared.ari
+
+meta:
+  name: Shared volume (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/volume_grid.ari
+
+# A filter job's result goes back where both views look, once the job is done: the dataset's
+# volume. filtering.pid names the last job started; filtering.stored the last one taken in.
+on_tick: |
+  (if (!= (state-get "vs.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-160 -120 -140 100 120 130")
+             (state-set "vs.opened" "1")))
+  (if (and (= (state-get "filtering.busy") "0")
+           (!= (state-get "filtering.pid") "")
+           (!= (state-get "filtering.pid") (state-get "filtering.stored")))
+      (begin
+        (if (state-data-get "filtering.result")
+            (data-put "bunny" "volume" (state-data-get "filtering.result")))
+        (state-set "filtering.stored" (state-get "filtering.pid"))))
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: Filter
+    items:
+      - menu_item: Smooth
+        on: |
+          (volume.filter-start "data.bunny.volume"
+            (dict "filter" "bilateral" "radius" 3 "spatial_sigma" 2.0 "radiometric_sigma" 1000.0)
+            "filtering")
+      - menu_item: Original
+        on: (data-reload "bunny")
+
+# The data both views show: the bunny's signed distance field, made and held by the app.
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 64, fit: { height: 100, up: y } }
+
+windows:
+  - window: Filter
+    id: filter
+    pos: [12, 30]
+    size: [290, 170]
+    children:
+      - text: "One volume (data.bunny), two views"
+      - type: group
+        layout: { kind: horizontal }
+        children:
+          - button: Smooth
+            on: |
+              (volume.filter-start "data.bunny.volume"
+                (dict "filter" "bilateral" "radius" 3 "spatial_sigma" 2.0
+                      "radiometric_sigma" 1000.0)
+                "filtering")
+            enabled_when: (!= (state-get "filtering.busy") "1")
+            tooltip: "VolumeRover's bilateral filter on the shared volume, as a job beside the frame"
+          - button: Stop
+            on: (job.cancel (int (state-get "filtering.pid")))
+            enabled_when: (= (state-get "filtering.stoppable") "1")
+          - button: Original
+            on: (data-reload "bunny")
+            tooltip: "the app makes the bunny's distance field again"
+      - progress: progress
+        bind: filtering.progress
+        hi: 100
+        overlay: filtering.phase
+      - text: "status"
+        bind: filtering.status
+      - text: "rev"
+        bind: data.bunny.rev
+        tooltip: "the dataset's rev: up one each time a volume is put back or made again"
+  - include: volume_grid
+    args: { node: grid, title: Volume grid, id: volume_grid, view_size: 200 }
+    pos: [12, 400]
+    size: [936, 310]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  main_view: { hide: [grid] }        # the planes are the grid window's; the main view is the volren
+  nodes:
+    # The main scene's view of the volume: its surface, raycast.
+    - node: render
+      type: volren
+      source: { data: bunny }        # the app's volume (data: above), followed
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 384
+        resolution_scale: 0.6
+        isosurfaces:
+          - { value: 0.0, color: [0.85, 0.82, 0.88], opacity: 1.0, shininess: 24 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    # The grid's three planes of the same volume: negative inside (warm), positive outside (cool),
+    # white at the surface.
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }        # the same volume, the same pointer
+      view: xy
+      slice: { z: 24 }
+      classes:
+        - { name: inside, color: [1.0, 0.45, 0.2], radius: 1.5 }
+        - { name: outside, color: [0.3, 0.6, 1.0], radius: 1.5 }
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.58, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
