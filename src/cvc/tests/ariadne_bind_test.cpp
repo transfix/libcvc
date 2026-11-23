@@ -220,6 +220,31 @@ TEST(AriadneBind, SyncFollowsKeysTakenOutAndLinksSet) {
   EXPECT_EQ(sval(app, "node.visible"), "1");
 }
 
+// A binding whose two keys were not written since the last poll is skipped (state::revision); a
+// write to either, or a node made again in either's place, is followed.
+TEST(AriadneBind, SyncSkipsOnlyWhatWasNotWritten) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.vis").value(0);
+  std::vector<SceneVisibilityBinding> binds = {{"s.vis", "n.visible", true}};
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "0");
+  const std::uint64_t r = root("n.visible").revision();
+  for (int i = 0; i < 3; ++i)
+    sync_scene_visibility(app, binds);
+  EXPECT_EQ(root("n.visible").revision(), r) << "nothing written";
+  root("n.visible").value(1); // something else wrote the node's key: the source puts it back
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "0");
+  root("s.vis").value(1);
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "1");
+  root("s").removeChild("vis"); // made again with another value: not the node it was
+  root("s.vis").value(0);
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "0");
+}
+
 // --- sync_scene_clip: bound clip `offset:`s -> the node's `clip_planes` key ----
 
 namespace {

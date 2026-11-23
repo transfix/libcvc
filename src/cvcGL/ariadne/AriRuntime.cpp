@@ -589,11 +589,14 @@ double AriRuntime::frameDt(double dt_seconds) {
 void AriRuntime::tickQuality(double frame_s) {
   const std::string p = prefix();
   const auto at = [&p](const char *k) { return ari::resolve_bind(p, k); };
-  if (ari::read_or_seed<double>(app_, at("quality.adaptive"), 1.0) == 0.0) {
+  // The keys read each frame, kept resolved (bind_key); seeded while they are empty.
+  if (ari::read_or_seed<double>(ari::kept_key(qualityAdaptive_, app_, at("quality.adaptive")),
+                                1.0) == 0.0) {
     qualityHeld_ = true; // quality.tier and quality.scale are the keys' own until it runs again
     return;
   }
-  const double fps = ari::read_or_seed<double>(app_, at("quality.target_fps"), 30.0);
+  const double fps =
+      ari::read_or_seed<double>(ari::kept_key(qualityFps_, app_, at("quality.target_fps")), 30.0);
   if (!quality_)
     quality_ = std::make_unique<ari::AdaptiveQuality>();
   if (qualityHeld_) // (re)starting: from the tier the keys hold

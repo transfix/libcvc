@@ -83,6 +83,12 @@ struct SceneDataBinding {
   // material: { texture: { stream } }: the terrain's live texture, bound again with each drawing
   // and ticked by tick_scene.
   std::shared_ptr<LiveTextureBinding> texture;
+  // sync_scene_data's lookups, kept resolved between frames: the dataset's node (bind_key), and
+  // the store it is, with its status and rev keys, as of that node and the tree's shape then.
+  cvc::state_key data_key, status_key, rev_key;
+  const cvc::state *store_node = nullptr;
+  std::uint64_t store_epoch = 0;
+  std::string store;
 };
 
 // A node whose material: { opacity: <path> } (or { bind, default }) follows state. tick_scene

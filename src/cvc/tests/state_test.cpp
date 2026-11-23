@@ -5795,6 +5795,30 @@ TEST_F(StateStructureEpoch, AKeyPinsWhatItResolved) {
   EXPECT_EQ(held.use_count(), 1) << "the key let go at its next look";
 }
 
+// A node's revision moves with each change of its value or data (as its change signals fire), and
+// never on a write of the value it holds.
+TEST_F(StateStructureEpoch, ARevisionCountsAValuesChanges) {
+  state &root = state::instance(ctx);
+  state &n = root("r.v");
+  const std::uint64_t r0 = n.revision();
+  n.value("1");
+  EXPECT_EQ(n.revision(), r0 + 1);
+  n.value("1");
+  n.value(1);
+  EXPECT_EQ(n.revision(), r0 + 1) << "the same value again";
+  n.value(2.5);
+  EXPECT_EQ(n.revision(), r0 + 2) << "a typed write";
+  n.data(std::string("payload"));
+  EXPECT_EQ(n.revision(), r0 + 3) << "data";
+  EXPECT_TRUE(n.compareAndSetValue("2.5", "3"));
+  EXPECT_EQ(n.revision(), r0 + 4) << "an atomic update";
+  EXPECT_TRUE(n.compareAndSetValue("3", "3"));
+  EXPECT_EQ(n.revision(), r0 + 4);
+  n.touch();
+  EXPECT_EQ(n.revision(), r0 + 5) << "touch fires its signals: a change";
+  EXPECT_EQ(root("r").revision(), 0u) << "a child's write is not its parent's";
+}
+
 // Main function to handle custom flags
 int main(int argc, char **argv) {
   // Parse custom flags before GoogleTest removes them
