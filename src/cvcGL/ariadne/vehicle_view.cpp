@@ -702,9 +702,9 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
         hub->createChild<GeometryNode>(w + "_mesh", reflect ? m->wheel_reflected : m->wheel);
     if (!mesh)
       continue;
-    mesh->setScale(f.wheel_scale, f.wheel_scale, f.wheel_scale);
-    if (right && m->rig.mirror == "turn")
+    if (right && m->rig.mirror == "turn") // before the scale: setRotation drops it
       mesh->setRotation(0.0, 0.0, 180.0); // half a turn about its upright: its outside to -y
+    mesh->setScale(f.wheel_scale, f.wheel_scale, f.wheel_scale);
     colour(*mesh, m->wheel_texture, tyre);
     drawn_wheel d;
     d.node = hub;
