@@ -2476,7 +2476,8 @@ scene:
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **At scale: entity layers.** Past 32 entities the world's vehicles are drawn as one mesh per
     archetype and level of detail, and only the nearest 8 to the camera (and the one it follows)
-    as their own nodes, with their wheels and labels as above
+    as their own nodes, with their wheels and labels as above (the others' wheels stand still: a
+    parted look's in a tyre's dark)
     ([`entity_view.h`](../inc/cvc/gl/ariadne/entity_view.h); the fleets roadmap's FL2). A
     `type: entity_layer` node says how:
 

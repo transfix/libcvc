@@ -934,6 +934,72 @@ void add_box(vehicle_look_mesh &out, const double c[3], const double l[3], unsig
   }
 }
 
+// A part's mesh `g` into `out` as a node drawing it places it: each point p at a p + t (`a` a 3x3
+// matrix, row-major); its normals by a's inverse transpose (from its triangles, area-weighted,
+// when it has none); its uvs when `uvs` (zeros where it has none); each point in role `role`,
+// `own` its colour.
+void add_part(vehicle_look_mesh &out, const cvc::geometry &g, const std::array<double, 9> &a,
+              const std::array<double, 3> &t, bool uvs, unsigned char role,
+              const unsigned char own[3]) {
+  const auto &pts = g.points();
+  const bool normals = g.normals().size() == pts.size();
+  const bool has_uvs = g.uvs().size() == pts.size();
+  // a's cofactors: its inverse transpose times its determinant (the sign kept outward).
+  const std::array<double, 9> c = {
+      a[4] * a[8] - a[5] * a[7], a[5] * a[6] - a[3] * a[8], a[3] * a[7] - a[4] * a[6],
+      a[2] * a[7] - a[1] * a[8], a[0] * a[8] - a[2] * a[6], a[1] * a[6] - a[0] * a[7],
+      a[1] * a[5] - a[2] * a[4], a[2] * a[3] - a[0] * a[5], a[0] * a[4] - a[1] * a[3]};
+  const double sign = a[0] * c[0] + a[1] * c[1] + a[2] * c[2] < 0.0 ? -1.0 : 1.0;
+  const std::size_t v0 = out.verts.size() / 3, t0 = out.tris.size();
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const double p[3] = {pts[i][0], pts[i][1], pts[i][2]};
+    for (int r = 0; r < 3; ++r)
+      out.verts.push_back(a[3 * r] * p[0] + a[3 * r + 1] * p[1] + a[3 * r + 2] * p[2] + t[r]);
+    if (normals) {
+      const auto &n = g.normals()[i];
+      double m[3], len = 0.0;
+      for (int r = 0; r < 3; ++r) {
+        m[r] = sign * (c[3 * r] * n[0] + c[3 * r + 1] * n[1] + c[3 * r + 2] * n[2]);
+        len += m[r] * m[r];
+      }
+      len = std::sqrt(len);
+      for (int r = 0; r < 3; ++r)
+        out.normals.push_back(len > 0.0 ? m[r] / len : (r == 2 ? 1.0 : 0.0));
+    } else {
+      out.normals.insert(out.normals.end(), {0.0, 0.0, 0.0});
+    }
+    if (uvs)
+      out.uvs.insert(out.uvs.end(), {has_uvs ? static_cast<float>(g.uvs()[i][0]) : 0.0f,
+                                     has_uvs ? static_cast<float>(g.uvs()[i][1]) : 0.0f});
+    out.role.push_back(role);
+    out.own.insert(out.own.end(), own, own + 3);
+  }
+  for (const auto &tri : g.tris())
+    out.tris.insert(out.tris.end(), {static_cast<std::uint32_t>(v0 + tri[0]),
+                                     static_cast<std::uint32_t>(v0 + tri[1]),
+                                     static_cast<std::uint32_t>(v0 + tri[2])});
+  if (normals)
+    return;
+  for (std::size_t k = t0; k + 2 < out.tris.size(); k += 3) {
+    const double *p = &out.verts[3 * out.tris[k]], *q = &out.verts[3 * out.tris[k + 1]],
+                 *r = &out.verts[3 * out.tris[k + 2]];
+    const double u[3] = {q[0] - p[0], q[1] - p[1], q[2] - p[2]},
+                 v[3] = {r[0] - p[0], r[1] - p[1], r[2] - p[2]};
+    const double n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                         u[0] * v[1] - u[1] * v[0]};
+    for (int j = 0; j < 3; ++j)
+      for (int e = 0; e < 3; ++e)
+        out.normals[3 * out.tris[k + j] + e] += n[e];
+  }
+  for (std::size_t i = 3 * v0; i + 2 < out.normals.size(); i += 3) {
+    const double len =
+        std::sqrt(out.normals[i] * out.normals[i] + out.normals[i + 1] * out.normals[i + 1] +
+                  out.normals[i + 2] * out.normals[i + 2]);
+    for (int e = 0; e < 3; ++e)
+      out.normals[i + e] = len > 0.0 ? out.normals[i + e] / len : (e == 2 ? 1.0 : 0.0);
+  }
+}
+
 } // namespace
 
 vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &cache,
@@ -941,6 +1007,37 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
                                           double base_z, vehicle_look_mesh &out,
                                           std::vector<std::string> *warnings) {
   out = vehicle_look_mesh{};
+  static const unsigned char white[3] = {255, 255, 255}, tyre[3] = {18, 18, 20};
+  if (look.parted()) {
+    // As attach_parts places it: the chassis fitted per axis, each wheel at its hub at rest (a
+    // right one reflected or turned as the rig says), in a tyre's dark: the layer draws one
+    // texture, the chassis's.
+    bool pending = false;
+    const std::shared_ptr<const parted_model> m = parted(app, cache, look, warnings, pending);
+    if (!m)
+      return pending ? vehicle_model_status::pending : vehicle_model_status::failed;
+    const parted_fit f = fit_parts(m->rig, s, base_z);
+    const bool textured =
+        !m->chassis_texture.empty() && m->chassis.uvs().size() == m->chassis.points().size();
+    add_part(out, m->chassis, {f.scale[0], 0.0, 0.0, 0.0, f.scale[1], 0.0, 0.0, 0.0, f.scale[2]},
+             f.offset, textured, 3, white);
+    const double ws = f.wheel_scale;
+    for (const std::array<double, 3> &h : f.hubs) {
+      const bool right = h[1] < 0.0;
+      const double turn = right && m->rig.mirror == "turn" ? -1.0 : 1.0; // half a turn about z
+      const std::array<double, 16> hub = wheel_matrix(h[0], h[1], h[2], 0.0, 0.0);
+      std::array<double, 9> a{};
+      for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+          a[3 * r + c] = hub[4 * r + c] * (c < 2 ? turn : 1.0) * ws;
+      add_part(out, right && m->rig.mirror == "reflect" ? m->wheel_reflected : m->wheel, a,
+               {hub[3], hub[7], hub[11]}, textured, 2, tyre);
+    }
+    if (textured)
+      out.texture = std::shared_ptr<const cvc::image>(m, &m->chassis_texture);
+    out.model = true;
+    return out.tris.empty() ? vehicle_model_status::failed : vehicle_model_status::ready;
+  }
   if (fitted_look(look)) {
     bool pending = false;
     const std::shared_ptr<const fitted_model> m =
@@ -950,57 +1047,12 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
     // As attach_model places it: scaled, turned by the look's yaw, its base base_z + z below.
     const cvc::geometry &g = m->geometry;
     const double yaw = look.yaw * 3.14159265358979323846 / 180.0;
-    const double cy = std::cos(yaw), sy = std::sin(yaw), sc = look.scale, dz = base_z + look.z;
-    const auto &pts = g.points();
-    const bool normals = g.normals().size() == pts.size();
-    const bool uvs = g.uvs().size() == pts.size();
-    out.verts.reserve(3 * pts.size());
-    for (std::size_t i = 0; i < pts.size(); ++i) {
-      const double x = sc * pts[i][0], y = sc * pts[i][1], z = sc * pts[i][2];
-      out.verts.insert(out.verts.end(), {cy * x - sy * y, sy * x + cy * y, z + dz});
-      if (normals) {
-        const auto &n = g.normals()[i];
-        out.normals.insert(out.normals.end(), {cy * n[0] - sy * n[1], sy * n[0] + cy * n[1], n[2]});
-      }
-      if (uvs)
-        out.uvs.insert(out.uvs.end(),
-                       {static_cast<float>(g.uvs()[i][0]), static_cast<float>(g.uvs()[i][1])});
-    }
-    for (const auto &t : g.tris())
-      out.tris.insert(out.tris.end(),
-                      {static_cast<std::uint32_t>(t[0]), static_cast<std::uint32_t>(t[1]),
-                       static_cast<std::uint32_t>(t[2])});
-    if (!normals) { // area-weighted, from its triangles
-      out.normals.assign(out.verts.size(), 0.0);
-      for (std::size_t t = 0; t + 2 < out.tris.size(); t += 3) {
-        const double *a = &out.verts[3 * out.tris[t]], *b = &out.verts[3 * out.tris[t + 1]],
-                     *c = &out.verts[3 * out.tris[t + 2]];
-        const double u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]},
-                     v[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
-        const double n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
-                             u[0] * v[1] - u[1] * v[0]};
-        for (int k = 0; k < 3; ++k)
-          for (int a2 = 0; a2 < 3; ++a2)
-            out.normals[3 * out.tris[t + k] + a2] += n[a2];
-      }
-      for (std::size_t i = 0; i + 2 < out.normals.size(); i += 3) {
-        const double len =
-            std::sqrt(out.normals[i] * out.normals[i] + out.normals[i + 1] * out.normals[i + 1] +
-                      out.normals[i + 2] * out.normals[i + 2]);
-        for (int a2 = 0; a2 < 3; ++a2)
-          out.normals[i + a2] = len > 0.0 ? out.normals[i + a2] / len : (a2 == 2 ? 1.0 : 0.0);
-      }
-    }
-    const bool textured = !m->texture.empty() && uvs;
+    const double cy = std::cos(yaw), sy = std::sin(yaw), sc = look.scale;
+    const bool textured = !m->texture.empty() && g.uvs().size() == g.points().size();
+    add_part(out, g, {sc * cy, -sc * sy, 0.0, sc * sy, sc * cy, 0.0, 0.0, 0.0, sc},
+             {0.0, 0.0, base_z + look.z}, textured, 3, white);
     if (textured)
       out.texture = std::shared_ptr<const cvc::image>(m, &m->texture);
-    else
-      out.uvs.clear();
-    static const unsigned char white[3] = {255, 255, 255};
-    out.role.assign(pts.size(), textured ? 2 : 0);
-    out.own.clear();
-    for (std::size_t i = 0; i < pts.size(); ++i)
-      out.own.insert(out.own.end(), white, white + 3);
     out.model = true;
     return out.tris.empty() ? vehicle_model_status::failed : vehicle_model_status::ready;
   }
@@ -1008,7 +1060,7 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
     return vehicle_model_status::failed; // a mesh node of its own (vehicle_scene_node)
   // The box look, as vehicle_scene_node lays it out.
   const double L = s.length, W = s.width, H = s.height;
-  static const unsigned char tyre[3] = {18, 18, 20}, none[3] = {0, 0, 0};
+  static const unsigned char none[3] = {0, 0, 0};
   const double body_c[3] = {0.0, 0.0, 0.0}, body_l[3] = {L, W, H};
   add_box(out, body_c, body_l, 0, none);
   const double cab_c[3] = {-0.12 * L, 0.0, 0.5 * H + 0.375 * H},

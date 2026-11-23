@@ -222,12 +222,13 @@ world:
   the entities section's identities, posed where the client's `entity_playout` shows them, the
   vehicle the client drives promoted). The `bodies` layer only: one mesh per archetype and rung (a
   fitted model's four from #1358's rungs, `decimate_mesh` now shared in `mesh_lod.h`; a box look's
-  one), posed in 3-D with their normals, culled on the frustum's sides (not its near and far: the
+  one; a parted look's, #1471, its chassis with its wheels at rest in a tyre's dark at every rung,
+  each colour decimated on its own), posed in 3-D with their normals, culled on the frustum's sides (not its near and far: the
   renderer fits those to what it draws, and an unposed rung is a point). `sync_vehicle_markers`
   draws only the promoted, adding and removing them as they change. With no `entity_layer`, an
   implicit one over every entity (node `entities`, `room_entities` on a client). Test:
   `cvcgl_ariadne_entities` (the implicit layer, follow, keep, the threshold, `of:`, the worker,
-  the room). Measured on arigl, 200 kinematic at 3.6x with `--world-thread`, alternating runs:
+  the room, a parted look). Measured on arigl, 200 kinematic at 3.6x with `--world-thread`, alternating runs:
   8 ms a frame against 61 (`threshold: 100000`, each its own node). Not yet: the other layers
   (flags, goals, trails, path, belief, dots, targets, follow, headlights), `of: { fleet }` on a
   client (the room's identities carry no fleet), and #1358's `swarm_layer` moving here (FL3).

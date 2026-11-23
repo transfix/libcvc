@@ -201,21 +201,23 @@ vehicle_shape vehicle_shape_of(const cvc::physics::vehicle_desc &desc);
 // A look as one mesh about its chassis box's centre, as a vehicle's own node draws it
 // (vehicle_scene_node, attach_vehicle_model): an entity layer's template (entity_view.h). Each
 // vertex has a normal and a role: 0 the entity's colour, 1 its second colour, 2 its own (`own`:
-// a tyre's dark, or white under a texture).
+// a tyre's dark), 3 the model's (white under its texture, else the entity's colour).
 struct vehicle_look_mesh {
   std::vector<double> verts, normals;        // [3V] each
   std::vector<std::uint32_t> tris;           // [3T]
   std::vector<unsigned char> role;           // [V]
-  std::vector<unsigned char> own;            // [3V]: role 2's colour
+  std::vector<unsigned char> own;            // [3V]: roles 2 and 3's colour
   std::vector<float> uvs;                    // [2V], or empty
   std::shared_ptr<const cvc::image> texture; // null: untextured
   bool model = false;                        // a fitted model (else the box look's boxes)
 };
 // The look's mesh, its base `base_z` below the chassis's centre (a model's; the boxes sit on the
 // chassis as vehicle_scene_node puts them): the box look (kind "" or box), or a fitted model (a
-// file look with `fit`, a data look) once it is ready; pending while a data look's package loads;
-// failed for a look an entity layer cannot draw (a mesh file without `fit`, a model that cannot
-// be read): its entities are drawn as their own nodes.
+// file look with `fit`, a data look) once it is ready; a parted look's chassis and its wheels at
+// rest, as attach_parted_model places them, the wheels in a tyre's dark (one texture: the
+// chassis's); pending while a data look's package loads; failed for a look an entity layer cannot
+// draw (a mesh file without `fit`, a model that cannot be read): its entities are drawn as their
+// own nodes.
 vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &cache,
                                           const cvc::ariadne::vehicle_look &look,
                                           const vehicle_shape &shape, double base_z,

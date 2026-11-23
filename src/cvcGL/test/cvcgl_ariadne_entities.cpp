@@ -21,7 +21,9 @@
 //   worker     the world stepped by a local holon on a thread of its own (world_worker): the same
 //              copies, where the frame's own stepping puts them;
 //   room       a relay's entities on a client (room_view, its entity_playout): 40 at scale, the
-//              one the client drives promoted with the nearest.
+//              one the client drives promoted with the nearest;
+//   parted     a parted look (a chassis, a wheel and a rig): its mesh the chassis and four wheels
+//              at rest where its nodes draw them, the wheels dark; 40 of them at scale.
 //
 // Skips (rc 0) without Jolt, or where nothing rasterises unless CVC_REQUIRE_RENDER=1.
 
@@ -46,16 +48,22 @@
 #include <cvc/gl/ariadne/entity_view.h>
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/vehicle_view.h>
 #include <cvc/gl/physics_scene_binding.h>
 #include <cvc/physics/backend.h>
 #include <cvc/state/state.h>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
 #include <vtkActor.h>
 #include <vtkCamera.h>
+#include <vtkDataArray.h>
 #include <vtkMapper.h>
+#include <vtkMatrix4x4.h>
+#include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkRenderer.h>
 
@@ -72,9 +80,9 @@ namespace {
 constexpr int W = 320, H = 240;
 
 // A world of `fleets` (each "name:count") of kinematic Humvees on a 240 m square, and `extra`
-// scene nodes.
+// scene nodes; the Humvee in `look` when it names one (a look: map), else the box look.
 std::string world_doc(const std::vector<std::pair<std::string, int>> &fleets,
-                      const std::string &extra = "") {
+                      const std::string &extra = "", const std::string &look = "") {
   std::string start;
   int seed = 3;
   for (const auto &[name, count] : fleets)
@@ -87,7 +95,8 @@ requires: [scene.physics]
 world:
   vehicles:
     archetypes:
-      humvee: { vehicle: humvee, controllers: [nav@1, none] }
+      humvee: { vehicle: humvee, controllers: [nav@1, none])" +
+         (look.empty() ? std::string() : ", look: " + look) + R"( }
     start:
 )" + start +
          R"(scene:
@@ -436,6 +445,206 @@ void test_room() {
         std::to_string(c.size()) + " copies");
 }
 
+// A box from lo to hi, offset by `at`, as an OBJ file (8 points, 12 triangles).
+void box_obj(const std::filesystem::path &p, const std::array<double, 3> &lo,
+             const std::array<double, 3> &hi, const std::array<double, 3> &at = {0.0, 0.0, 0.0}) {
+  std::ofstream out(p);
+  for (int k = 0; k < 8; ++k)
+    out << "v " << at[0] + (k & 1 ? hi[0] : lo[0]) << " " << at[1] + (k & 2 ? hi[1] : lo[1]) << " "
+        << at[2] + (k & 4 ? hi[2] : lo[2]) << "\n";
+  const int f[12][3] = {{1, 3, 4}, {1, 4, 2}, {5, 6, 8}, {5, 8, 7}, {1, 2, 6}, {1, 6, 5},
+                        {3, 7, 8}, {3, 8, 4}, {1, 5, 7}, {1, 7, 3}, {2, 4, 8}, {2, 8, 6}};
+  for (const auto &t : f)
+    out << "f " << t[0] << " " << t[1] << " " << t[2] << "\n";
+}
+
+// The colour of each point a mesh node draws now, 0 to 255.
+std::vector<double> drawn_colors(const std::shared_ptr<GraphicsNode> &n) {
+  std::vector<double> out;
+  auto g = std::dynamic_pointer_cast<GeometryNode>(n);
+  vtkActor *actor = g ? vtkActor::SafeDownCast(g->prop()) : nullptr;
+  vtkPolyData *pd = actor && actor->GetMapper()
+                        ? vtkPolyData::SafeDownCast(actor->GetMapper()->GetInputAsDataSet())
+                        : nullptr;
+  vtkDataArray *c = pd ? pd->GetPointData()->GetScalars() : nullptr;
+  if (!c || c->GetNumberOfComponents() < 3)
+    return out;
+  const double scale = c->GetDataType() == VTK_UNSIGNED_CHAR ? 1.0 : 255.0;
+  for (vtkIdType i = 0; i < c->GetNumberOfTuples(); ++i)
+    for (int k = 0; k < 3; ++k)
+      out.push_back(scale * c->GetComponent(i, k));
+  return out;
+}
+
+// A node's local matrix applied to p.
+std::array<double, 3> node_point(const GraphicsNode &n, const std::array<double, 3> &p) {
+  const vtkMatrix4x4 *m = n.getTransform();
+  std::array<double, 3> q{};
+  for (int r = 0; r < 3; ++r)
+    q[r] = m->GetElement(r, 0) * p[0] + m->GetElement(r, 1) * p[1] + m->GetElement(r, 2) * p[2] +
+           m->GetElement(r, 3);
+  return q;
+}
+
+// A parted look (look: { chassis:, wheel:, rig: }) at scale: its mesh is its chassis and its four
+// wheels at rest, each point where attach_parted_model's nodes draw it (a right wheel turned, or
+// reflected), the chassis the model's (its entity's colour, untextured) and the wheels a tyre's
+// dark; a world of them is drawn as the model's four rungs, the wheels dark at each, and with
+// lod: false each copy's chassis in its colour and its wheels dark.
+void test_parted() {
+  std::printf("parted\n");
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ariadne_entities_parted";
+  fs::create_directories(dir, ec);
+  // In the rig's frame (x forward, y left, z up, the ground at z 0); the wheel filed away from the
+  // origin (the look takes it about its middle).
+  box_obj(dir / "chassis.obj", {-2.0, -0.6, 0.7}, {2.0, 0.6, 1.7});
+  box_obj(dir / "wheel.obj", {-0.45, -0.15, -0.12}, {0.45, 0.15, 0.12}, {3.0, 3.0, 3.0});
+  const std::string chassis = (dir / "chassis.obj").generic_string(),
+                    wheel = (dir / "wheel.obj").generic_string();
+  std::size_t per = 0, body = 0;
+  for (const std::string mirror : {"turn", "reflect"}) {
+    cvc::app app;
+    SceneGraph sg(app, "parted");
+    ca::vehicle_look look;
+    look.kind = "file";
+    look.fit = true;
+    look.chassis = chassis;
+    look.wheel = wheel;
+    look.rig.radius = 0.45;
+    look.rig.hubs = {
+        {1.6, 0.95, 0.45}, {1.6, -0.95, 0.45}, {-1.6, 0.95, 0.45}, {-1.6, -0.95, 0.45}};
+    look.rig.mirror = mirror;
+    ari::vehicle_shape s;
+    s.wheelbase = 3.3;
+    s.track = 1.82;
+    s.wheel_radius = 0.47;
+    s.axle_x = 0.1;
+    const double base_z = -0.92;
+    const std::shared_ptr<ari::vehicle_model_cache> cache = ari::make_vehicle_model_cache();
+    std::vector<std::string> warnings;
+    ari::vehicle_look_mesh mesh;
+    const ari::vehicle_model_status st =
+        ari::vehicle_look_mesh_of(app, *cache, look, s, base_z, mesh, &warnings);
+    const std::string at = "parted (" + mirror + "): ";
+    check(st == ari::vehicle_model_status::ready && mesh.model && !mesh.texture,
+          at + "its mesh is ready, a model's, untextured");
+    std::shared_ptr<GraphicsNode> group = sg.addGraphics("v");
+    const float color[3] = {0.5f, 0.5f, 0.5f};
+    if (!check(group && ari::attach_parted_model(app, *cache, *group, "v", look, s, base_z, color,
+                                                 nullptr, &warnings),
+               at + "attach_parted_model draws it as nodes"))
+      return;
+    // Each part's points where the group draws them: the chassis by its node, a wheel by its hub's
+    // node and its mesh's under it.
+    std::vector<std::array<double, 3>> want;
+    if (auto c = std::dynamic_pointer_cast<GeometryNode>(group->findChildByName("v_chassis")))
+      for (const auto &p : c->getGeometry()->const_points())
+        want.push_back(node_point(*c, {p[0], p[1], p[2]}));
+    body = want.size();
+    for (int k = 0; k < 4; ++k) {
+      const std::string w = "v_wheel" + std::to_string(k);
+      std::shared_ptr<GraphicsNode> hub = group->findChildByName(w);
+      auto m = hub ? std::dynamic_pointer_cast<GeometryNode>(hub->findChildByName(w + "_mesh"))
+                   : nullptr;
+      if (!check(m != nullptr, at + "node " + w + "_mesh"))
+        return;
+      for (const auto &p : m->getGeometry()->const_points())
+        want.push_back(node_point(*hub, node_point(*m, {p[0], p[1], p[2]})));
+    }
+    per = want.size();
+    double worst = body > 0 && mesh.verts.size() == 3 * per ? 0.0 : 1e30;
+    for (std::size_t i = 0; worst < 1e30 && i < per; ++i)
+      for (int c = 0; c < 3; ++c)
+        worst = std::max(worst, std::fabs(mesh.verts[3 * i + c] - want[i][c]));
+    check(worst < 1e-9, at + "the chassis and its four wheels where the nodes draw them",
+          std::to_string(worst) + " m, " + std::to_string(mesh.verts.size() / 3) + " points, " +
+              std::to_string(per) + " drawn by the nodes");
+    bool roles = mesh.role.size() == per && mesh.own.size() == 3 * per;
+    for (std::size_t i = 0; roles && i < per; ++i)
+      roles = i < body ? mesh.role[i] == 3
+                       : mesh.role[i] == 2 && mesh.own[3 * i] == 18 && mesh.own[3 * i + 2] == 20;
+    check(roles, at + "the chassis the model's, the wheels a tyre's dark");
+  }
+  if (per == 0)
+    return;
+  const std::string look = "{ chassis: \"" + chassis + "\", wheel: \"" + wheel +
+                           "\", rig: { radius: 0.45, hubs: [[1.6, 0.95, 0.45], [1.6, -0.95, 0.45], "
+                           "[-1.6, 0.95, 0.45], [-1.6, -0.95, 0.45]] } }";
+  const auto is_tyre = [](const double *rgb) {
+    return std::fabs(rgb[0] - 18.0) < 1.0 && std::fabs(rgb[2] - 20.0) < 1.0;
+  };
+  {
+    // The model's four rungs: at each, the copies' wheels dark and their chassis not (each colour
+    // decimated on its own).
+    world_run w(world_doc({{"city", 40}}, "", look), false);
+    if (!w.ok || !check(w.settle(40), "parted: the view takes all 40"))
+      return;
+    const ari::entity_view_stats s = ari::entity_view_stats_of(w.rs);
+    check(s.meshes == 4 && s.promoted == 8 && own_nodes(w.rs) == 8,
+          "parted: the nearest 8 nodes, the rest in the model's four rungs",
+          std::to_string(s.meshes) + " meshes, " + std::to_string(own_nodes(w.rs)) + " nodes");
+    std::shared_ptr<GraphicsNode> layer = w.sg.getGraphics("entities");
+    std::size_t rungs = 0;
+    bool both = true;
+    std::string seen;
+    for (int k = 0; k < 4; ++k) {
+      std::shared_ptr<GraphicsNode> m =
+          layer ? layer->findChildByName("entities_humvee_lod" + std::to_string(k)) : nullptr;
+      const std::vector<double> pts = drawn(m), cols = drawn_colors(m);
+      // The slots past the copies are collapsed onto the first copy's place (or the origin
+      // before any): the tail of points all at the last one's.
+      std::size_t end = pts.size();
+      while (end >= 6 && pts[end - 6] == pts[pts.size() - 3] &&
+             pts[end - 5] == pts[pts.size() - 2] && pts[end - 4] == pts[pts.size() - 1])
+        end -= 3;
+      if (end < pts.size())
+        end -= 3; // the tail's first point too
+      std::size_t dark = 0, light = 0;
+      for (std::size_t i = 0; cols.size() == pts.size() && i + 2 < end; i += 3)
+        (is_tyre(&cols[i]) ? dark : light) += 1;
+      seen += " lod" + std::to_string(k) + ": " + std::to_string(dark) + " dark, " +
+              std::to_string(light) + " not;";
+      if (dark + light == 0)
+        continue;
+      ++rungs;
+      both = both && dark > 0 && light > 0;
+    }
+    check(rungs > 0 && both, "parted: at every rung drawn, dark wheels on chassis in colour", seen);
+  }
+  // One rung (lod: false), the model's whole mesh: in each copy, its chassis's points in its
+  // colour and its wheels' dark.
+  world_run w(world_doc({{"city", 40}}, R"(    - node: bodies
+      type: entity_layer
+      lod: false
+)",
+                        look),
+              false);
+  if (!w.ok || !check(w.settle(40), "parted, one rung: the layer takes all 40"))
+    return;
+  std::shared_ptr<GraphicsNode> layer = w.sg.getGraphics("bodies");
+  std::shared_ptr<GraphicsNode> lod0 =
+      layer ? layer->findChildByName("bodies_humvee_lod0") : nullptr;
+  const std::vector<double> pts = drawn(lod0), cols = drawn_colors(lod0);
+  std::size_t placed = 0;
+  bool dark = cols.size() == pts.size() && !pts.empty();
+  for (std::size_t c = 0; dark && (c + 1) * per * 3 <= pts.size(); ++c) {
+    double lo = 1e30, hi = -1e30;
+    for (std::size_t k = 0; k < per; ++k) {
+      lo = std::min(lo, pts[(c * per + k) * 3]);
+      hi = std::max(hi, pts[(c * per + k) * 3]);
+    }
+    if (hi - lo < 1e-9)
+      continue; // collapsed: no entity in this slot
+    ++placed;
+    for (std::size_t k = 0; dark && k < per; ++k)
+      dark = k < body ? !is_tyre(&cols[(c * per + k) * 3]) : is_tyre(&cols[(c * per + k) * 3]);
+  }
+  check(dark && placed >= 24, "parted, one rung: each copy's chassis in its colour, wheels dark",
+        std::to_string(placed) + " copies");
+}
+
 } // namespace
 
 int main() {
@@ -455,5 +664,6 @@ int main() {
   test_of_fleet();
   test_worker();
   test_room();
+  test_parted();
   return finish("cvcgl_ariadne_entities");
 }

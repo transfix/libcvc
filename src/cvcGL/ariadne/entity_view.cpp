@@ -235,18 +235,64 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
     if (r.textured)
       r.uv = mesh.uvs;
     if (specs[k].reduction > 0.0) {
+      // Each colour role's triangles decimated on their own, so a wheeled look's wheels keep a
+      // tyre's dark; a role's that collapse are kept as they are.
       std::vector<double> rv;
       std::vector<std::uint32_t> rt;
-      if (decimate_mesh(mesh.verts, mesh.tris, specs[k].reduction, rv, rt)) {
+      std::vector<unsigned char> rrole, rown;
+      bool coarser = false;
+      std::vector<unsigned char> roles;
+      for (std::size_t t = 0; t + 2 < mesh.tris.size(); t += 3) {
+        const unsigned char q = mesh.role[mesh.tris[t]];
+        if (std::find(roles.begin(), roles.end(), q) == roles.end())
+          roles.push_back(q);
+      }
+      for (const unsigned char q : roles) {
+        std::vector<std::int64_t> at(mesh.verts.size() / 3, -1);
+        std::vector<std::uint32_t> from; // each of the part's points, its point in the mesh
+        std::vector<double> pv;
+        std::vector<std::uint32_t> pt;
+        for (std::size_t t = 0; t + 2 < mesh.tris.size(); t += 3) {
+          if (mesh.role[mesh.tris[t]] != q)
+            continue;
+          for (int c = 0; c < 3; ++c) {
+            const std::uint32_t v = mesh.tris[t + c];
+            if (at[v] < 0) {
+              at[v] = static_cast<std::int64_t>(from.size());
+              from.push_back(v);
+              pv.insert(pv.end(),
+                        {mesh.verts[3 * v], mesh.verts[3 * v + 1], mesh.verts[3 * v + 2]});
+            }
+            pt.push_back(static_cast<std::uint32_t>(at[v]));
+          }
+        }
+        std::vector<double> dv;
+        std::vector<std::uint32_t> dt;
+        const bool ok = decimate_mesh(pv, pt, specs[k].reduction, dv, dt);
+        coarser = coarser || ok;
+        const std::vector<double> &uv = ok ? dv : pv;
+        const std::vector<std::uint32_t> &ut = ok ? dt : pt;
+        const auto base = static_cast<std::uint32_t>(rv.size() / 3);
+        rv.insert(rv.end(), uv.begin(), uv.end());
+        for (const std::uint32_t i : ut)
+          rt.push_back(base + i);
+        const std::size_t n = uv.size() / 3;
+        rrole.insert(rrole.end(), n, q);
+        for (std::size_t i = 0; i < n; ++i) { // a decimated part's points take its first's colour
+          const std::uint32_t v = from[ok ? 0 : i];
+          rown.insert(rown.end(), {mesh.own[3 * v], mesh.own[3 * v + 1], mesh.own[3 * v + 2]});
+        }
+      }
+      if (coarser) {
         r.tv = std::move(rv);
         r.tt = std::move(rt);
         r.tn = normals_of(r.tv, r.tt);
-        r.role.assign(r.tv.size() / 3, 0);
-        r.own.assign(r.tv.size(), 255);
+        r.role = std::move(rrole);
+        r.own = std::move(rown);
       }
     }
-    if (!r.textured && mesh.model) // untextured: in its entity's colour
-      std::replace(r.role.begin(), r.role.end(), static_cast<unsigned char>(2),
+    if (!r.textured) // untextured: the model's points in its entity's colour
+      std::replace(r.role.begin(), r.role.end(), static_cast<unsigned char>(3),
                    static_cast<unsigned char>(0));
     const int V = r.verts();
     const std::size_t total = static_cast<std::size_t>(r.cap) * static_cast<std::size_t>(V);
