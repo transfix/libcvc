@@ -211,6 +211,26 @@ world:
 - **The same view on a client of the relay.** The client's entity table (`room_entities` and
   `entity_playout`) feeds the same layers. A server-hosted fleet then draws like a local one, and
   its model looks come from the same cache (WD3's "a model look drawn on the client").
+- **As built, first part (2026-11-22; Joe: "make sure this works in the local and server side
+  holon").** `cvc::gl::ariadne::entity_view` (`entity_view.h`) is the view of a set of entities,
+  whatever feeds it: `set_entities` (who each is: archetype, fleet, team, colours, look and size)
+  when they change, `promote` from the camera and the ids followed, then `pose` and `draw` each
+  frame. Two feeds: a scene's own world (`update_entity_view`, each frame in `tick_scene`: the
+  world's vehicles, posed by the physics binding's group of their chassis bodies,
+  `physics_scene_binding::bind_group`, between steps, whether the frame steps the world or a local
+  holon on a worker does, D3), and a relay's entities on a client (`room_view::update_entities`:
+  the entities section's identities, posed where the client's `entity_playout` shows them, the
+  vehicle the client drives promoted). The `bodies` layer only: one mesh per archetype and rung (a
+  fitted model's four from #1358's rungs, `decimate_mesh` now shared in `mesh_lod.h`; a box look's
+  one), posed in 3-D with their normals, culled on the frustum's sides (not its near and far: the
+  renderer fits those to what it draws, and an unposed rung is a point). `sync_vehicle_markers`
+  draws only the promoted, adding and removing them as they change. With no `entity_layer`, an
+  implicit one over every entity (node `entities`, `room_entities` on a client). Test:
+  `cvcgl_ariadne_entities` (the implicit layer, follow, keep, the threshold, `of:`, the worker,
+  the room). Measured on arigl, 200 kinematic at 3.6x with `--world-thread`, alternating runs:
+  8 ms a frame against 61 (`threshold: 100000`, each its own node). Not yet: the other layers
+  (flags, goals, trails, path, belief, dots, targets, follow, headlights), `of: { fleet }` on a
+  client (the room's identities carry no fleet), and #1358's `swarm_layer` moving here (FL3).
 
 ### 2.3 Lights after dark (NL1 to NL5)
 
@@ -297,7 +317,7 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 | **FL1c** | **Done** (2026-11-20). A fleet's `plant:` is one plant, a list its vehicles cycle over, or each team's (`{ 0: jolt }`; a team not named on the archetype's), all floating or none, each plant a navigator of the fleet's own; `.plant` switches them live (`fleet_plants::text`: `jolt, kinematic`, `kinematic, 0: jolt`), its vehicles at rest where they are, and a bad one is said in `vehicles.status`. The metric (D9): `metric:` `trained` (the trainer's vehicle, `training_scene`'s rr, d_hat and vmax at the hosts' tick, and the plants' `plan_with_vehicle` off), `vehicle`, or `policy` (the default: trained while weights drive or are on their way, so their arrival does not make the navigator again; vehicle on the built-in net, a fallback's included); `.metric` switches it, `.plans` says which, and a change makes the navigators again. `plants()` reports each fleet's own bicycle. Tests: `AFleetHasPlantsAndAMetric`, `AFleetIsANamedStartEntry`'s plants and metric. Left for FL1: `poses(fleet)`, the summary's tick and bounds, and the gym's fleet. | FL1b | M |
 | **FL1d** | **Done** (2026-11-20). `WorldVehicles::poses(fleet)`: a fleet's placed vehicles (`fleet_poses`: ids, chassis centres, headings, speeds, teams, their box and the tick) made each publish and swapped in whole (`std::atomic_store`, as `sim_thread`'s snapshot), read from any thread without a lock; the summary's `.tick` and `.bounds`. The gym's fleets: `gym_options::fleets` (`fleets=` in pycvc) names the document's fleets each reset lays out from their seed plus the reset's, their vehicles the agents (`WorldVehicles::starts`). Tests: `AFleetsPosesAreASnapshot` (a reader thread while it steps), `AriadneWorldGym.AFleetIsTheGymsAgents`. With FL1a-FL1d, FL1 is done but D3 (OW7's local holon; its first part built 2026-11-22, §4). FleetBench re-measured at 120 Hz on 2026-11-21 (§3.1). | FL1c | M |
 | **FL1** | **Fleets in `WorldVehicles`.** Named `world: vehicles: start:` entries (`fleet:`; count, archetype, controller, sense, belief per fleet navigator, spawn layout, seed, rally points as teams and colours, goals held), summary publishing, `poses(fleet)`, fleet restart and reseed. Its plant: any world plant, Jolt included, a list or per team, switched live. Its policy: `trained` (downloads `cvcpkg://cvc/grl-snam-weights` unless installed or overridden), `builtin`, or other weights by cvcpkg package, URL, file or `data:` entry, per team or entity, switched live; the visible fallback; the metric following the policy. The gym spawns a fleet. Tests: `ariadne_scene_world_test` fleets (build, step, rally move, restart, belief modes, a Jolt fleet against a building, a mixed fleet, each policy choice, the download and the visible missing-weights fallback); a gym fleet episode. | L2, #1339, #1340 | L |
-| **FL2** | **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
+| **FL2** | **Started** (2026-11-22, first part: the `bodies` layer, promotion and the threshold, in both holons; §2.2). **The entity view.** `entity_layer` (bodies with LOD rungs, flags, goals, trails, path, belief, dots, targets, follow) over world vehicles; promotion of K entities to `vehicle_view` nodes; the threshold. #1358's `swarm_layer` code moves here. Test: `cvcgl_ariadne_entities`. | FL1 | M |
 | **FL3** | **The nav city documents on fleets.** nav_city_swarm/drive declare `world: data` and a fleet with entity layers. `nav_swarm` and `SceneSwarm` are removed. The minimap drags rally keys; the chase follows an entity. Perf gate: at least #1358's numbers on the reference laptop (and twice the C++ programs, measured back to back). | FL2 | M |
 | **FL4** | **Fleets on the relay.** A fleet identity section, batched quantized fleet pose packets, an area of interest for entities, and the client's entity view with model looks. `traffic.ari` becomes a fleet. Test: a relay room with 800 entities, bytes per client. | FL2, WD3 | L |
 | **NL1** | **Lights in the DSL.** `shadows:`, `range`, `softness`, `kelvin`, `attach:` or lights as node children, per-light resolution; focus for directional lights only; per-light dirtiness. The world's wire carries them. Tests: a lamp and a headlight offscreen, 16 texture units. | — | M |
@@ -355,7 +375,10 @@ What follows:
   the relay stay synchronous and bit-for-bit. Built 2026-11-22 (§4, D3). On arigl with 200
   kinematic vehicles at 3.6x, alternating runs, it takes 8 ms off a frame (58.3 ms against
   66.4), the world at 3.6x both ways. The rest is drawing them: 200 vehicles are FL2's problem
-  well before 800 are physics'.
+  well before 800 are physics'. FL2's first part (§2.2) draws them at scale: 200 take 8 ms a frame
+  (2.4 of it the frame's own, 5.4 to 6.6 drawing) against 61 with each its own node, and 800 take
+  8 ms of drawing, where they took seconds; their world, at 16 to 18 ms a frame waiting on the
+  worker, is then the cost.
 - Under fog, sensing adds 6 to 7 ms at 800.
 
 **FL1a's numbers** (the bench's `[fleet doc]` rows): a fleet declared in the document, 16 rally

@@ -999,7 +999,10 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   both ways; the rest of the frame is drawing 200 vehicles (the fleets roadmap's FL2). Not yet:
   avatars and participants in that holon (relay-less arigl has none), the `scenes:` entries'
   worlds (they step on the frame's thread), the gym and the GRL-SNAM hosts on it, and the drawn
-  host as the holon's client (OW5's entity playout).
+  host as the holon's client (OW5's entity playout). The fleets roadmap's entity view (FL2,
+  `entity_view.h`) draws a world's vehicles at scale in both holons: a scene's own world, posed
+  by the physics binding whether the frame or this worker steps it, and a relay's entities on a
+  client, posed where its `entity_playout` shows them (`room_view`).
 
 ### 18.3 Contact
 

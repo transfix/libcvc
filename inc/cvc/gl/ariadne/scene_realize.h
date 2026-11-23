@@ -280,6 +280,10 @@ struct RealizedScene {
   // A vehicle drawn as its box while its look's data package loads: the vehicles are drawn again
   // once none is loading (sync_vehicle_markers).
   bool vehicle_models_pending = false;
+  // The world's entities drawn at scale (entity_view.h, FL2): its entity_layer nodes' view, and
+  // the physics binding's group that poses it. Made by the first entity_layer node, else by
+  // update_entity_view (the implicit layer over every entity).
+  std::shared_ptr<struct scene_entities> entities;
   // The document's data: entries (Scene::data), which a node's model names (a boat's `model:`).
   std::vector<cvc::ariadne::SceneData> data;
   // The spawn points as drawn (their node ids), as of the spawn points' revision `spawns_rev`.
