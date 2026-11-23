@@ -58,8 +58,9 @@ enum class terrain_mask : int {
   buildable = 0, // flat and firm enough for a lot
   channel,       // where water runs (a river bed, a ravine floor): no road or lot
   cliff,         // a scarp: no road or lot
+  beach,         // a beach: dry ground there is sand, however high (a shore edge's berm)
 };
-constexpr int terrain_mask_count = 3;
+constexpr int terrain_mask_count = 4;
 
 class terrain_source {
 public:

@@ -30,6 +30,7 @@
 #ifdef CVC_ENABLE_ASSIMP
 #include <assimp/Exporter.hpp>
 #include <assimp/Importer.hpp>
+#include <assimp/config.h>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -44,6 +45,8 @@
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #include <process.h>
@@ -85,6 +88,17 @@ unsigned int import_flags() {
 
 // model_read_options::exact: what the file stores, in its order, nothing joined or generated.
 unsigned int import_flags(const model_read_options &o) { return o.exact ? 0u : import_flags(); }
+
+// The file in its own axes and units. Assimp's Collada and FBX importers turn a Z-up file to Y-up
+// (and the Collada one scales it to metres) by folding a transform into the root node, which
+// model::nodes now applies; a model is in the file's authoring space (model::extents), and its
+// readers turn it themselves (a glTF file's +Y up, a fit's up axis). The file's own node
+// transforms are kept.
+void keep_file_axes(Assimp::Importer &imp) {
+  imp.SetPropertyBool(AI_CONFIG_IMPORT_COLLADA_IGNORE_UP_DIRECTION, true);
+  imp.SetPropertyBool(AI_CONFIG_IMPORT_COLLADA_IGNORE_UNIT_SIZE, true);
+  imp.SetPropertyBool(AI_CONFIG_IMPORT_FBX_IGNORE_UP_DIRECTION, true);
+}
 
 // Directory containing `p` ("." if none), for resolving relative texture paths.
 std::string dir_of(const std::string &p) {
@@ -372,6 +386,39 @@ material build_material(app &ctx, const aiScene *scene, const aiMaterial *aim,
   return mat;
 }
 
+// The scene's node tree as model::nodes: the root first, then each node's children together, in
+// their order (instances() walks the children lists, so the drawing order is depth first either
+// way). An explicit stack, since a file's tree can be deep. A mesh index past the scene's meshes is
+// dropped.
+void read_nodes(const aiScene *s, model &m) {
+  const auto add = [&](const aiNode *an) {
+    model::node nd;
+    nd.name = an->mName.C_Str();
+    const aiMatrix4x4 &t = an->mTransformation;
+    nd.transform = {{t.a1, t.a2, t.a3, t.a4, t.b1, t.b2, t.b3, t.b4, t.c1, t.c2, t.c3, t.c4, t.d1,
+                     t.d2, t.d3, t.d4}};
+    for (unsigned int i = 0; i < an->mNumMeshes; ++i)
+      if (an->mMeshes[i] < s->mNumMeshes)
+        nd.meshes.push_back(static_cast<int>(an->mMeshes[i]));
+    m.nodes.push_back(nd);
+    return static_cast<int>(m.nodes.size() - 1);
+  };
+  std::vector<std::pair<const aiNode *, int>> stack;
+  stack.push_back(std::make_pair(s->mRootNode, add(s->mRootNode)));
+  while (!stack.empty()) {
+    const aiNode *an = stack.back().first;
+    const int index = stack.back().second;
+    stack.pop_back();
+    for (unsigned int c = 0; c < an->mNumChildren; ++c) {
+      if (!an->mChildren[c])
+        continue;
+      const int child = add(an->mChildren[c]);
+      m.nodes[index].children.push_back(child);
+      stack.push_back(std::make_pair(an->mChildren[c], child));
+    }
+  }
+}
+
 // A read scene as a model; `model_dir` resolves its external textures (empty: none resolve).
 model model_of_scene(app &ctx, const aiScene *s, const std::string &model_dir) {
   model m;
@@ -389,12 +436,15 @@ model model_of_scene(app &ctx, const aiScene *s, const std::string &model_dir) {
     m.meshes.push_back(mm);
   }
 
+  if (s->mRootNode)
+    read_nodes(s, m);
   return m;
 }
 
 // Shared read path for both handlers.
 model read_model_assimp(app &ctx, const std::string &path) {
   Assimp::Importer imp;
+  keep_file_axes(imp);
   const aiScene *s = imp.ReadFile(path, import_flags());
   if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
     throw std::runtime_error(std::string("cvc::model assimp read '") + path +
@@ -406,6 +456,7 @@ model read_model_assimp(app &ctx, const std::string &path) {
 model read_model_assimp_memory(app &ctx, const void *data, std::size_t size,
                                const std::string &hint, const model_read_options &options) {
   Assimp::Importer imp;
+  keep_file_axes(imp);
   const aiScene *s = imp.ReadFileFromMemory(data, size, import_flags(options), hint.c_str());
   if (!s || (s->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !s->mRootNode)
     throw std::runtime_error("cvc::model assimp read of " + std::to_string(size) + " bytes of ." +
@@ -485,8 +536,51 @@ aiMesh *mesh_to_ai(const geometry &g, const std::string &name, unsigned int mate
   return am;
 }
 
+// The aiNode for model node `n` and, below it, its children's: its name and transform, and the
+// aiMeshes (`parts`, by model mesh) of each mesh it draws. A file's scene graph is a tree, so a
+// node two parents list is written under each; a child that is its own ancestor (`on_path`) is
+// left out. Indices out of range are skipped.
+aiNode *node_to_ai(const model &m, int n, const std::vector<std::vector<unsigned int>> &parts,
+                   std::vector<char> &on_path) {
+  const model::node &nd = m.nodes[n];
+  auto *an = new aiNode(nd.name);
+  const model::transform_t &t = nd.transform;
+  an->mTransformation = aiMatrix4x4(
+      static_cast<ai_real>(t[0]), static_cast<ai_real>(t[1]), static_cast<ai_real>(t[2]),
+      static_cast<ai_real>(t[3]), static_cast<ai_real>(t[4]), static_cast<ai_real>(t[5]),
+      static_cast<ai_real>(t[6]), static_cast<ai_real>(t[7]), static_cast<ai_real>(t[8]),
+      static_cast<ai_real>(t[9]), static_cast<ai_real>(t[10]), static_cast<ai_real>(t[11]),
+      static_cast<ai_real>(t[12]), static_cast<ai_real>(t[13]), static_cast<ai_real>(t[14]),
+      static_cast<ai_real>(t[15]));
+  std::vector<unsigned int> meshes;
+  for (int mi : nd.meshes)
+    if (mi >= 0 && mi < static_cast<int>(parts.size()))
+      meshes.insert(meshes.end(), parts[mi].begin(), parts[mi].end());
+  if (!meshes.empty()) {
+    an->mNumMeshes = static_cast<unsigned int>(meshes.size());
+    an->mMeshes = new unsigned int[meshes.size()];
+    std::copy(meshes.begin(), meshes.end(), an->mMeshes);
+  }
+  on_path[n] = 1;
+  std::vector<aiNode *> children;
+  for (int c : nd.children)
+    if (c >= 0 && c < static_cast<int>(m.nodes.size()) && !on_path[c]) {
+      aiNode *child = node_to_ai(m, c, parts, on_path);
+      child->mParent = an;
+      children.push_back(child);
+    }
+  on_path[n] = 0;
+  if (!children.empty()) {
+    an->mNumChildren = static_cast<unsigned int>(children.size());
+    an->mChildren = new aiNode *[children.size()];
+    std::copy(children.begin(), children.end(), an->mChildren);
+  }
+  return an;
+}
+
 // A cvc model as an aiScene for the exporter: each mesh's triangles one aiMesh and its lines
-// another, all under the root node, and a "default" material for a mesh that has none.
+// another, and a "default" material for a mesh that has none. The model's node tree is written as
+// it is; a model without one has every mesh under the root node.
 std::unique_ptr<aiScene> scene_of_model(const model &m) {
   auto scene = std::make_unique<aiScene>();
   std::vector<aiMaterial *> mats;
@@ -503,14 +597,20 @@ std::unique_ptr<aiScene> scene_of_model(const model &m) {
   const unsigned int fallback = static_cast<unsigned int>(mats.size());
   bool need_fallback = false;
   std::vector<aiMesh *> meshes;
-  for (const model::mesh &mm : m.meshes) {
+  std::vector<std::vector<unsigned int>> parts(m.meshes.size()); // each model mesh's aiMeshes
+  for (std::size_t i = 0; i < m.meshes.size(); ++i) {
+    const model::mesh &mm = m.meshes[i];
     const bool has = mm.material >= 0 && mm.material < static_cast<int>(m.materials.size());
     const unsigned int mat = has ? static_cast<unsigned int>(mm.material) : fallback;
     need_fallback = need_fallback || !has;
-    if (!mm.geom.tris().empty())
+    if (!mm.geom.tris().empty()) {
+      parts[i].push_back(static_cast<unsigned int>(meshes.size()));
       meshes.push_back(mesh_to_ai(mm.geom, mm.name, mat, 3));
-    if (!mm.geom.lines().empty())
+    }
+    if (!mm.geom.lines().empty()) {
+      parts[i].push_back(static_cast<unsigned int>(meshes.size()));
       meshes.push_back(mesh_to_ai(mm.geom, mm.name + ".lines", mat, 2));
+    }
   }
   if (need_fallback || mats.empty()) {
     auto *am = new aiMaterial();
@@ -524,6 +624,11 @@ std::unique_ptr<aiScene> scene_of_model(const model &m) {
   scene->mNumMeshes = static_cast<unsigned int>(meshes.size());
   scene->mMeshes = new aiMesh *[meshes.size()];
   std::copy(meshes.begin(), meshes.end(), scene->mMeshes);
+  if (!m.nodes.empty()) {
+    std::vector<char> on_path(m.nodes.size(), 0);
+    scene->mRootNode = node_to_ai(m, 0, parts, on_path);
+    return scene;
+  }
   scene->mRootNode = new aiNode("root");
   scene->mRootNode->mNumMeshes = scene->mNumMeshes;
   scene->mRootNode->mMeshes = new unsigned int[scene->mNumMeshes];

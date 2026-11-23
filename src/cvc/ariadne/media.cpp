@@ -12,6 +12,7 @@
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/uri.h>
+#include <cvc/ariadne/uri_http_cache.h>
 #include <cvc/core/app.h>
 #include <cvc/net/http_client.h>
 #include <deque>
@@ -258,6 +259,25 @@ cvc::image placeholder_image(int box_w, int box_h, Shape shape, bool failed) {
   return out;
 }
 
+namespace {
+
+// A host-side GET's reply as a fetch's result, on host_get's terms: ok only for a 2xx ("http 404"
+// otherwise).
+FetchResult fetch_result(cvc::net::HttpResponse reply) {
+  FetchResult r;
+  if (!reply.ok)
+    r.error = reply.error.empty() ? std::string("http: no reply") : reply.error;
+  else if (reply.status < 200 || reply.status >= 300)
+    r.error = "http " + std::to_string(reply.status);
+  else {
+    r.ok = true;
+    r.bytes = std::move(reply.body);
+  }
+  return r;
+}
+
+} // namespace
+
 FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string &auth,
                         const std::string &base) {
   FetchResult r;
@@ -265,6 +285,12 @@ FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string
   try {
     if (scheme == "http" || scheme == "https") {
       if (const std::optional<NetAccess> access = net_host_access(app)) {
+        // Without a credential, through the app's HTTP cache when it has one (enable_net's), on
+        // the same allowlist: a picture or a video asked for again is not fetched again while it
+        // is fresh. A request with a credential never goes through it.
+        if (auth.empty())
+          if (std::optional<cvc::net::HttpResponse> cached = http_cache_get(app, uri))
+            return fetch_result(std::move(*cached));
         HostGet g = host_get(app, uri, auth, *access);
         r.ok = g.ok;
         r.bytes = std::move(g.body);
@@ -299,15 +325,20 @@ FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string
 namespace {
 
 // fetch_bytes, started rather than sent where the transport starts requests without blocking (a
-// browser build without threads, #914): an http(s) URI through the host's network (host_get_start)
-// or the http(s) handler's non-blocking form (resolve_async). `done` is called later, from the
-// browser's event loop. False when this can't start it (another scheme: local, read in place).
+// browser build without threads, #914): an http(s) URI through the app's HTTP cache, or the host's
+// network (host_get_start), or the http(s) handler's non-blocking form (resolve_async). `done` is
+// called later, from the browser's event loop. False when this can't start it (another scheme:
+// local, read in place).
 bool start_fetch(cvc::app &app, const std::string &uri, const std::string &auth,
                  const std::string &base, FetchDone done) {
   const std::string scheme = scheme_of(uri);
   if (!cvc::net::http_starts_async(app) || (scheme != "http" && scheme != "https"))
     return false;
   if (const std::optional<NetAccess> access = net_host_access(app)) {
+    if (auth.empty() && http_cache_start(app, uri, [done](cvc::net::HttpResponse reply) {
+          done(fetch_result(std::move(reply)));
+        }))
+      return true; // as fetch_bytes: no credential, through the cache
     host_get_start(app, uri, auth, *access, [done](HostGet g) {
       FetchResult r;
       r.ok = g.ok;

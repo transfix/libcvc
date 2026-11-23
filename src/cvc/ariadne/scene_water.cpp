@@ -59,6 +59,9 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr int kShoreMaxSide = 1025;             // the shore grid's most samples a side
 constexpr double kShoreMarginMax = 512.0;       // m: the most it goes past a rim of sea
 constexpr std::uint64_t kSwellSeed = 0x5E11ull; // the trains' phases (lsystem_coast's)
+// The swell's least share on a lee shore (shore_layer_params::lee_exposure): what diffraction
+// carries round an island, so its far side has small breakers and a gentle swash, not a dead calm.
+constexpr double kSwellLee = 0.25;
 
 // The wind sea and the swell of spec s. The cascades draw the wind sea alone (their h0 is built
 // with the swell's height 0); the shore layer draws the swell.
@@ -253,6 +256,7 @@ std::shared_ptr<const SceneWaterShore> scene_water_shore(const cvc::height_field
     cvc::ocean::shore_layer_params lp;
     lp.trains = 3; // the drawn water sums three
     lp.seed = kSwellSeed;
+    lp.lee_exposure = kSwellLee;
     out->layer = std::make_shared<const cvc::ocean::shore_layer>(
         cvc::ocean::shore_layer::build(*grid, sw, lp));
   }

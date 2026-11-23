@@ -323,6 +323,10 @@ std::optional<coph_packet> coph_export(const coph_learner_state &s, const coph_s
       p.support_points.push_back(r->q);
   p.uncertainty = "block_bootstrap; calibration_scale=" + coph_repr(comm.covariance_scale);
   t.path = "cooperative";
+  if (s.network.nodes.empty()) { // a car's learner: CooperativeLearner's packet alone
+    p.maze = false;
+    return p;
+  }
 
   // TerrainLearner.export: the supported readings with the most risk, 0.3 apart.
   t.terrain = coph_bootstrap_field(st, cfg, draws[1]);
@@ -359,6 +363,19 @@ std::optional<coph_packet> coph_export(const coph_learner_state &s, const coph_s
   p.geometry_schema = 1;
   p.geometry = s.exchange.local_geometry;
   return p;
+}
+
+bool coph_can_export(const coph_learner_state &s, const coph_state &x) {
+  if (s.stages.empty())
+    return false;
+  const coph_stage &st = s.stages.back();
+  if (export_readings(st).empty())
+    return false;
+  const coph_vec2 offsets[] = {{0.0, 0.0}, {0.4, 0.0}, {0.0, 0.4}, {0.0, -0.4}};
+  for (const coph_vec2 &o : offsets)
+    if (supported(st, {x[0] + o[0], x[1] + o[1]}, s.cfg))
+      return true;
+  return false;
 }
 
 std::optional<coph_packet> coph_export(const coph_learner_state &s, const coph_state &x,
@@ -569,12 +586,14 @@ coph_packet_event coph_assimilate(coph_learner_state &s, const coph_packet &m) {
   ev.time = s.now;
   ev.version_before = s.version;
 
+  // A car's learner (no network): CooperativeLearner.assimilate alone.
+  const bool car = s.network.nodes.empty();
   // MazeLearner.assimilate: the geometry first.
-  if (m.geometry_schema != 1) {
+  if (!car && m.geometry_schema != 1) {
     ev.reason = "incompatible_geometry";
     return ev;
   }
-  if (!valid_geometry(m)) {
+  if (!car && !valid_geometry(m)) {
     ev.reason = "invalid_geometry";
     return ev;
   }
@@ -601,6 +620,8 @@ coph_packet_event coph_assimilate(coph_learner_state &s, const coph_packet &m) {
       e.received.erase(oldest);
     }
   }
+  if (car)
+    return ev;
 
   if (ev.reason == "eligible" || ev.reason == "unsupported") {
     bool valid = !m.support_points.empty();

@@ -1245,6 +1245,94 @@ TEST(StateTransportGrpcTest, RelayForwardsBetweenStarClients) {
   sB.detach();
 }
 
+namespace {
+bool has_node(cvc::app &a, const std::string &path) {
+  return cvc::state::instance(a).findDescendant(path) != nullptr;
+}
+} // namespace
+
+// A node the relay's tree loses goes from its clients too, over gRPC as over WS: the removal is
+// journaled as one delete and published like a write.
+TEST(StateTransportGrpcTest, ARelayDeleteReachesItsClients) {
+  using ms = std::chrono::milliseconds;
+  cvc::app aR, aB;
+  cvc::state_transport_grpc tR, tB;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tB.start("127.0.0.1:0", "B", "C");
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sR.attach();
+  sB.attach();
+  tR.register_shard(&sR);
+  tB.register_shard(&sB);
+  ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), ms(2000)));
+  ASSERT_TRUE(wait_until([&] { return tR.connection_count() >= 1; }, ms(3000)));
+
+  cvc::state::instance(aR)("room.vehicles.v1.x").value(std::string("1"));
+  cvc::state::instance(aR)("room.vehicles.v2.x").value(std::string("2"));
+  EXPECT_GT(tR.pump_all(), 0u);
+  ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.vehicles.v2.x"); }, ms(3000)));
+  ASSERT_TRUE(has_node(aB, "room.vehicles.v1.x"));
+
+  ASSERT_TRUE(cvc::state::instance(aR)("room.vehicles").removeChild("v1"));
+  EXPECT_EQ(tR.pump_all(), 1u);
+  EXPECT_TRUE(wait_until([&] { return !has_node(aB, "room.vehicles.v1"); }, ms(3000)));
+  EXPECT_TRUE(has_node(aB, "room.vehicles.v2.x"));
+  EXPECT_EQ(tB.pump_all(), 0u) << "B applied the delete without journaling one";
+
+  tB.stop();
+  tR.stop();
+  sR.detach();
+  sB.detach();
+}
+
+// A relay that does not backfill repeats, after a joiner's admit snapshot, the deletes it remembers
+// whose subtree is still gone, so a client back from a dropped link loses what went meanwhile.
+TEST(StateTransportGrpcTest, AnAdmitRepeatsTheDeletesAReturningClientMissed) {
+  using ms = std::chrono::milliseconds;
+  cvc::app aR, aB;
+  cvc::state_transport_grpc tR;
+  tR.start("127.0.0.1:0", "R", "C");
+  tR.set_relay(true);
+  tR.set_backfill_on_connect(false);
+  cvc::state_cluster_shard sR(aR, "C", "R");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sR.attach();
+  sB.attach();
+  tR.register_shard(&sR);
+  cvc::state::instance(aR)("room.v1.x").value(std::string("1"));
+  cvc::state::instance(aR)("room.v2.x").value(std::string("2"));
+  tR.pump_all();
+  {
+    cvc::state_transport_grpc tB;
+    tB.start("127.0.0.1:0", "B", "C");
+    tB.register_shard(&sB);
+    ASSERT_TRUE(tB.connect_to_peer(tR.listen_address(), ms(2000)));
+    ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.v2.x"); }, ms(3000)));
+    tB.unregister_shard(&sB);
+    tB.stop();
+  }
+  ASSERT_TRUE(wait_until([&] { return tR.connection_count() == 0; }, ms(3000)));
+
+  ASSERT_TRUE(cvc::state::instance(aR)("room").removeChild("v1"));
+  tR.pump_all(); // to no one
+  ASSERT_TRUE(has_node(aB, "room.v1.x"));
+
+  cvc::state_transport_grpc tB2;
+  tB2.start("127.0.0.1:0", "B", "C");
+  tB2.register_shard(&sB);
+  ASSERT_TRUE(tB2.connect_to_peer(tR.listen_address(), ms(2000)));
+  EXPECT_TRUE(wait_until([&] { return !has_node(aB, "room.v1"); }, ms(3000)));
+  EXPECT_TRUE(has_node(aB, "room.v2.x"));
+  EXPECT_EQ(tR.total_deletes_repeated(), 1u);
+
+  tB2.stop();
+  tR.stop();
+  sR.detach();
+  sB.detach();
+}
+
 // ----------------------------------------------------------------------------
 // Per-peer delivery on a relay: connection identity, the relay interest gate, registry-filtered
 // forwards and snapshots, targeted snapshot pushes, and the media egress gate.

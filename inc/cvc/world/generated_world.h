@@ -140,15 +140,21 @@ struct generated_world_params {
 
 // The shore edge's band: how far in from the world's edge the coast starts (metres, 20 % of the
 // half-size, between 50 and 300 m), and the sea floor at the edge (as deep as the island preset's
-// shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the sea
-// floor rises to the waterline by 25 % of the band, the beach climbs world_beach_slope to 50 %, and
-// the ground eases back to the relief's own by the band's end. Its edge is a rounded square
+// shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the coast
+// is a beach's profile: the sea floor shelves up by 15 % of the band to the foot of a surf zone
+// that rises at world_surf_slope to the waterline at 45 % (a swell shoals and breaks across it),
+// a beach face climbs world_beach_face_slope to a berm world_berm_m up (at most 20 % of the band
+// wide; the swash runs up it), the backshore goes on at world_beach_slope to 70 %, and the ground
+// eases back to the relief's own by the band's end. Its edge is a rounded square
 // (|x|^r + |y|^r = half^r, r = world_shore_roundness), so the corners curve away into the sea, and
 // the coastline wanders: it lies up to 35 % of the band further in, by a smooth wobble the seed
 // sets (bays and headlands).
 double world_shore_band_m(const generated_world_params &p);
 double world_shore_floor_m(const generated_world_params &p);
-constexpr double world_beach_slope = 0.02;    // 1 in 50
+constexpr double world_surf_slope = 1.0 / 12.0;       // the surf zone, under the water
+constexpr double world_beach_face_slope = 1.0 / 10.0; // the beach face, above it
+constexpr double world_berm_m = 1.5;                  // the berm: the face's top over the waterline
+constexpr double world_beach_slope = 0.02;            // the backshore, 1 in 50
 constexpr double world_shore_roundness = 4.0; // the corners: 2 a circle, larger nearer a square
 
 // A lane of the generated city's streets: the widest vehicle driven on them, the Humvee (2.18 m
@@ -399,6 +405,14 @@ std::vector<unsigned char> paint_water(const generated_world &w, int size = 2048
 // the world's edge out reach_m further, in the deep water's colour (water_colour of the depth at
 // the edge), its normals up. Empty for any other edge.
 cvc::geometry outer_sea(const generated_world &w, double reach_m = 6000.0);
+
+// The rock under a floating world, for the wall and none edges: a mesh hung from the terrain
+// mesh's rim (its top ring is the rim's own samples, so the two meet), falling as a sheer cliff and
+// then narrowing to a rounded, ragged cone and a point about half the world's half-size further
+// down, its faces outward, coloured soil at the cut edge and banded rock below. Seen from beneath,
+// the world is a chunk of ground hanging in the air. Drawing only: nothing collides with it. Empty
+// for a shore edge, whose sea hides the world's underside.
+cvc::geometry world_underside(const generated_world &w);
 
 // The dirt verge along the streets: how much of the light dirt (0..1) the ground at (x, y) takes,
 // from_edge_m past a road's pavement, painted over texels texel_m wide. About half the road length
