@@ -65,8 +65,9 @@
 
 namespace cvc {
 namespace ariadne {
-struct CustomEdit; // backend.h: what a custom widget hands back
-}
+struct CustomEdit;  // backend.h: what a custom widget hands back
+struct SceneCamera; // scene.h: a camera's mode, start and viewpoint
+} // namespace ariadne
 namespace gl {
 class SceneRenderer;
 class ImGuiBackend;
@@ -75,6 +76,13 @@ class SceneGraph;
 namespace ariadne {
 
 struct RealizedScene; // scene_realize.h
+
+// Frame `cam` on the bounds `b` (VTK's order: min x, max x, min y, max y, min z, max z) as the
+// scene camera `s` says (§5.18, Cameras): its mode and where its orbit starts, or its authored
+// viewpoint, with its lens and up axis. What a viewport does with its own camera and a named one,
+// and what AriRuntime does with the main view's when the scene's `cameras:` has one named `main`.
+void frame_scene_camera(CameraController &cam, const double b[6],
+                        const ::cvc::ariadne::SceneCamera &s, SceneGraph &sg);
 
 // A scene a viewport can show: the document's main one ("") or a `scenes:` entry, as the host has
 // realized it.
