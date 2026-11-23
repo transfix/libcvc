@@ -30,7 +30,8 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/ariadne/node_data.h> // a node's data on the state tree, followed
+#include <cvc/gl/ariadne/entity_view.h> // the world's vehicles at scale (FL2)
+#include <cvc/gl/ariadne/node_data.h>   // a node's data on the state tree, followed
 #include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
@@ -2271,6 +2272,7 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
       } else {
         realized.world->follow(wc, [&view] { view.tracker().capture(); });
       }
+      update_entity_view(realized, renderer);  // the entity layers, and who is promoted
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
       pose_vehicle_wheels(realized);           // each wheel where its plant has it
       sync_spawn_markers(realized, nullptr);   // the spawn points, as edited

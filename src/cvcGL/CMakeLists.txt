@@ -1501,6 +1501,11 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_swarm test/cvcgl_ariadne_swarm.cpp)
   target_link_libraries(cvcgl_ariadne_swarm PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_swarm COMMAND cvcgl_ariadne_swarm)
+  # The entity view (entity_view.h, FL2): a world's vehicles at scale, the nearest promoted to nodes,
+  # an entity_layer of one fleet, the world on a local holon's worker, a relay's entities on a client.
+  add_executable(cvcgl_ariadne_entities test/cvcgl_ariadne_entities.cpp)
+  target_link_libraries(cvcgl_ariadne_entities PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_entities COMMAND cvcgl_ariadne_entities)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})

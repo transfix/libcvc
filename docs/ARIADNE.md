@@ -2367,6 +2367,39 @@ scene:
     under it, the front ones steered (Ackermann's on a dynamic4w); a pose entity's on the ground
     under it, steered by its pose's steer and rolled at its speed. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **At scale: entity layers.** Past 32 entities the world's vehicles are drawn as one mesh per
+    archetype and level of detail, and only the nearest 8 to the camera (and the one it follows)
+    as their own nodes, with their wheels and labels as above
+    ([`entity_view.h`](../inc/cvc/gl/ariadne/entity_view.h); the fleets roadmap's FL2). A
+    `type: entity_layer` node says how:
+
+    ```yaml
+    - node: city_bodies
+      type: entity_layer
+      of: { fleet: city }                     # or { archetype: humvee } | { team: 3 } | all
+      layer: bodies                           # the bodies (flags, goals, trails, ... are to come)
+      lod: { near_cap: 10, px: [24, 8, 3] }   # or lod: false
+      promote: 8                              # their own nodes: the followed, then the nearest
+      threshold: 32                           # a layer of at most this many: each its own node
+    ```
+
+    - A fitted model look (a file with `fit`, a data look) has four rungs: the model, textured,
+      and three quadric-decimated copies in each entity's colour. An entity on screen takes the
+      finest rung its size there allows (a radius of at least `px` pixels; at most `near_cap` on
+      the finest, 28 and 72 on the next two), and one off screen is drawn by none. A box look is
+      one mesh.
+    - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
+      `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
+      another is a fifth nearer, so a moving camera does not swap them frame by frame.
+    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
+      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
+      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - The meshes are posed from the physics binding's poses, between steps, whether the frame
+      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      entities the same way (`room_view`, from its entity playout, under node `room_entities`),
+      the vehicle it drives among the promoted.
+    - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
+      node, and 800 take 8 ms of drawing, where they took seconds.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
