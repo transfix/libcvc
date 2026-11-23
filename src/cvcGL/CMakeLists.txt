@@ -1245,6 +1245,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
+# A node's own on_pick: (its nearest ancestor's when it has none) run by a press that lands on it,
+# and by that press's drags and release wherever they land, in the document's scope, beside the
+# view's own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_node_pick test/cvcgl_ariadne_node_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_node_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_node_pick COMMAND cvcgl_ariadne_node_pick)
+endif()
+
 # A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,
 # picks that name the voxel and its value, the wheel zooming about the pointer. Offscreen; skips
 # where nothing rasterises unless CVC_REQUIRE_RENDER=1.

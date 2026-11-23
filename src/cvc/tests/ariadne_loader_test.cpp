@@ -2969,6 +2969,36 @@ scene:
   EXPECT_EQ(scene_node_instance(r.scene.nodes[0], 2).material_texture_stream, "fog.tile2");
 }
 
+// A node's on_pick: is its own (not a custom type's prop), at any depth, and a copy's names it.
+TEST(AriadneScene, OnPickParsedOntoNodeAndCopies) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: shelf
+      on_pick: shelf_clicked
+      children:
+        - node: jar
+          source: { box: 1 }
+    - node: crate_{i}
+      repeat: 3
+      source: { box: 1 }
+      on_pick: (state-set "selected" "crate_{i}")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    ADD_FAILURE() << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  EXPECT_EQ(r.scene.nodes[0].on_pick, "shelf_clicked");
+  EXPECT_EQ(r.scene.nodes[0].props.find("on_pick"), nullptr);
+  ASSERT_EQ(r.scene.nodes[0].children.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].children[0].on_pick, "");
+  EXPECT_EQ(r.scene.nodes[1].on_pick, "(state-set \"selected\" \"crate_{i}\")");
+  EXPECT_EQ(scene_node_instance(r.scene.nodes[1], 2).on_pick,
+            "(state-set \"selected\" \"crate_2\")");
+}
+
 // A copy has no body and no world (both are built once from the declared nodes), and a nested
 // repeat: cannot see the outer index: each is said, not silent.
 TEST(AriadneScene, RepeatDropsBodiesAndWarnsNested) {

@@ -124,9 +124,20 @@ struct CustomEdit {
   bool committed = false;
   std::string value;
   // An event the widget raises this frame (a program, or a bare name for a host handler), and the
-  // fields a program reads from its `event` dict (a viewport's on_pick:). Empty: none.
+  // fields a program reads from its `event` dict. Empty: none.
   std::string fire;
   std::vector<std::pair<std::string, std::string>> fields;
+  // More events this frame, queued after `fire` in this order, each with fields of its own (each
+  // program runs as a process of its own, so not necessarily in this order). One with `document`
+  // runs in the document's own scope (its prefix and functions), as on_key: does, wherever the
+  // widget sits: a viewport raises a scene node's on_pick:, which is the scene's, that way, and
+  // its own on_pick: as a plain one.
+  struct Event {
+    std::string fire;
+    std::vector<std::pair<std::string, std::string>> fields;
+    bool document = false;
+  };
+  std::vector<Event> events;
 };
 // An RGB colour edit (§ G7). `drawn` is the backend's signal that it actually rendered a colour
 // widget (false on a backend that has none — the core then shows the value as text). `rgb` is the

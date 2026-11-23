@@ -2328,6 +2328,16 @@ struct Runtime::Impl {
       queued_events.back().event_fields = std::move(fields);
     }
   }
+  // As enqueue_fields, in the document's own scope (its prefix and functions) wherever the walk
+  // is, as the programs no widget owns run (a scene node's on_pick:, on_key:).
+  void enqueue_document_fields(const std::string &event,
+                               std::vector<std::pair<std::string, std::string>> fields) {
+    if (!event.empty()) {
+      queued_events.push_back({event, prefix});
+      queued_events.back().functions = doc_functions;
+      queued_events.back().event_fields = std::move(fields);
+    }
+  }
 
   void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
   void emit_node(const Widget &w); // draw the widget assuming it is visible
@@ -3747,6 +3757,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, path, e.value);
     if (e.handled && !e.fire.empty()) // an event it raised, with its fields
       enqueue_fields(e.fire, std::move(e.fields));
+    for (CustomEdit::Event &ev : e.events) // and any more, in order
+      if (e.handled && ev.document)
+        enqueue_document_fields(ev.fire, std::move(ev.fields));
+      else if (e.handled)
+        enqueue_fields(ev.fire, std::move(ev.fields));
     break;
   }
   }

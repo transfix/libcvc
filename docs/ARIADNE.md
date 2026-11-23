@@ -1243,7 +1243,7 @@ scene:
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
   its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
-  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  bound offsets, its `on_pick:`, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -1266,6 +1266,21 @@ and `TerminalScene`) counts an expression on the document's read lane
 (`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
+
+**Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
+handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
+descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the
+viewport's `on_pick:` does, and runs in the document's scope. The press's drags and release run
+it too, wherever they land (§5.18, Picking):
+
+```yaml
+scene:
+  nodes:
+    - node: crate_{i}
+      repeat: 4
+      source: { box: 1 }
+      on_pick: (if (= (get-attr event "phase") "down") (state-set "selected" "crate_{i}"))
+```
 
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
@@ -4287,7 +4302,7 @@ windows:
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
-| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. The picked node's own `on_pick:` (below) runs as well. |
 | `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
@@ -4309,6 +4324,25 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**A node's own `on_pick:`.** A node can carry an `on_pick:` (§5.4), so the scene says what a
+click on each thing does and the view need not sort picks by node:
+
+- **Which node's.** A press runs the `on_pick:` of the node it hits or, when that node has none,
+  of its nearest ancestor that has one: a group's handler covers its children, and a child's own
+  replaces it. A press that hits no such node runs none. In a slice view a press past the
+  volume's edge lands on the plane, not on the node.
+- **The press is the node's.** The node a press lands on keeps it: its `on_pick:` runs again on
+  each `drag` and on the `up`, wherever they land, with the same fields. `node` and `hit` say what
+  is under the pointer then, and `x`, `y` and `z` where, so a program can drag what it picked.
+- **Scope.** It runs in the document's scope, as `on_key:` does (§6.3): its keys resolve against
+  the document's prefix and it calls the document's functions, wherever the viewport sits, a
+  `load:`ed module's included.
+- **With the view's.** The view's own `on_pick:` runs too, in the view's scope. The two are
+  separate programs, so neither waits for the other: do not count on which runs first.
+  `SceneViews::pick` reports the node's in `PickHit::on_pick`.
+
+(`cvcgl_ariadne_node_pick`.)
 
 **Slice views.** `mode: slice` is a parallel view straight down one axis with no rotation
 (`CameraController::Mode::Slice`): the plane a `volume_slice` node (§5.4) lies in, with the

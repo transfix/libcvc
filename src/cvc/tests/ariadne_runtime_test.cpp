@@ -3034,6 +3034,35 @@ TEST(AriadneRuntime, CustomWidgetUncommittedEscapeDoesNotWrite) {
   EXPECT_EQ(cvc::state::instance(app)("c2").value(), "keep"); // uncommitted -> no write
 }
 
+// A custom widget's further events all run, each with its fields; one marked `document` runs at
+// the document's prefix wherever the widget sits (a viewport in a load:ed module raising a scene
+// node's on_pick:), the rest at the widget's own.
+TEST(AriadneRuntime, CustomWidgetEventsRunEachInItsScope) {
+  cvc::app app;
+  Runtime rt(app, "doc");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  mock.custom_ret = CustomEdit{true, false, false, ""};
+  mock.custom_ret.events.push_back(
+      {"(state-set \"who\" (get-attr event \"node\"))", {{"node", "crate"}}, true});
+  mock.custom_ret.events.push_back(
+      {"(state-set \"who\" (get-attr event \"node\"))", {{"node", "lid"}}, false});
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "picker";
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "mod";
+  mount.children = {c};
+  rt.set_root(group({mount}));
+  rt.render();
+  mock.custom_ret = CustomEdit{}; // raised once
+  rt.drain();
+  cvc::state &tree = cvc::state::instance(app);
+  EXPECT_EQ(tree("doc.who").value(), "crate");   // the document's scope
+  EXPECT_EQ(tree("doc.mod.who").value(), "lid"); // the widget's
+}
+
 TEST(AriadneInit, RunawayScriptIsBoundedNotHang) {
   cvc::app app;
   std::vector<std::string> errs;
