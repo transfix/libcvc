@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cvc/ariadne/pose_stream.h> // pose_subject
 #include <cvc/ariadne/section.h>
+#include <cvc/ariadne/vehicle_drive.h>      // dynamic_drive
 #include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h> // vehicle_look
 #include <string>
@@ -79,6 +80,9 @@ struct room_entity {
   // it drives is predicted (ARIADNE_WORLDS.md section 18.5, OW5b; WorldVehicles::kinematics). Not
   // valid() on another plant.
   kinematic_drive drive;
+  // On the dynamic or dynamic4w plant: the same, for its model (OW5d, OW5e;
+  // WorldVehicles::dynamics). Not valid() on another plant.
+  dynamic_drive dynamics;
   bool operator==(const room_entity &) const = default;
 };
 

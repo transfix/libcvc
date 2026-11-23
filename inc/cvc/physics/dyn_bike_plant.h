@@ -137,6 +137,16 @@ struct dyn_bike_plant_options {
   bool side_slope = false;
 };
 
+// One agent's state as the plant steps it, to keep and put back (dyn_bike_plant::save, restore):
+// the model's (the rear axle, the heading, the body twist, the actuators), its wheels' speeds
+// (wheel_spin), what its driver has learnt, and the command it holds (SI: rad, m/s^2).
+struct dyn_bike_saved {
+  cvc::nav::diff::dyn_state<double> body{};
+  double wheels[2] = {0.0, 0.0};
+  dyn_driver driver;
+  double steer_cmd = 0.0, accel_cmd = 0.0;
+};
+
 // One agent's energy, in J: over the last tick, or since attach().
 struct dyn_bike_books {
   double kinetic = 0.0;    // 1/2 v^T M v at the end (wheel_spin: and the wheels' spin)
@@ -219,6 +229,17 @@ public:
   // sine); empty before the first tick. A tick through a contact split into pieces has a value per
   // piece.
   double steer_command(int i) const { return _agents.at(i).steer_cmd; }
+  // Agent i's rear axle along its chassis from the box's centre (m, negative behind): the model's
+  // point, where its chassis box is drawn from (the box's centre is rear_axle(i) behind it).
+  double rear_axle(int i) const { return _agents.at(i).rear_x; }
+  // Agent i's chassis box at its state now (its centre and attitude, world metres: on the ground
+  // under it, leaning with it), where a world step puts it.
+  void box_pose(int i, vec3 &position, quat &rotation) const;
+  // Agent i's state, kept and put back: a client that predicts a vehicle on this model replays its
+  // steps from one (ARIADNE_WORLDS.md section 18.5). Restoring leaves the books and the last tick's
+  // record as they were; with a world, the box goes where the state is, at rest until its step.
+  dyn_bike_saved save(int i) const;
+  void restore(int i, const dyn_bike_saved &s);
   double accel_command(int i) const { return _agents.at(i).accel_cmd; }
   const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
   const std::vector<double> &applied_grade(int i) const { return _agents.at(i).applied_grade; }
