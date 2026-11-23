@@ -122,8 +122,10 @@ struct SceneData;
 // file), a document asset's file, a file beside the document (`doc_dir`), a data: entry's package
 // (`data`: its uri and path: copied into the look, so it is whole without the document; a view
 // loads it, cvcGL's vehicle_model_state), and the default look made explicit (the Humvee model for
-// a humvee when it is installed, else the box). A look that cannot be found is drawn as its box,
-// with a warning.
+// a humvee when it is installed, else the box). A wheeled look's wheel is found as its mesh is (a
+// model's by name, an asset's file, a file beside the document; a data look's stays a file in its
+// package). A look that cannot be found, or whose wheel cannot, is drawn as its box, with a
+// warning.
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings, const std::vector<SceneData> &data);

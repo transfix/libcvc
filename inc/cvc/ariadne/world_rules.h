@@ -101,6 +101,20 @@ struct avatar_policy {
 // its longest forward, the nose the end whose top sits lower) and scales it to the chassis box's
 // length, standing on the ground under the chassis. With no look:, a humvee is drawn as the
 // Humvee model when it is installed, and as its box otherwise.
+//
+// A wheeled look (`wheel:`) is a model in two parts, so that its wheels turn: the look's mesh is
+// the chassis without its wheels, and `wheel` is one wheel, drawn once for each of the vehicle's
+// wheels where its plant or its poses have it (WorldVehicles::wheels): rolled, steered, and on
+// its suspension or the ground under it. Both are in the vehicle's frame, as the files have them
+// (metres; x forward, y left, z up): the chassis's origin midway between its axles, on its centre
+// line, on the ground under its tyres; the wheel's its hub, its axle along y, its outer face
+// toward +y (a left wheel; a right one is it turned half a turn about z). `wheelbase` and `track`
+// are the model's own (m: its front and rear hubs' spread, its left and right hubs'; 0, the
+// vehicle's). With `fit` (a wheeled look's default) the chassis is scaled on each axis so that
+// its axles, track and wheel radius (half the wheel mesh's height) are the vehicle's, and the
+// wheel alike on every axis to the vehicle's wheel radius; without, both are drawn at their own
+// size. `wheel` is found as the mesh is: a file beside the document, an asset's id, a model's
+// name, or with data: a file in the same package.
 struct vehicle_look {
   std::string kind; // box, file, asset, model or data; "" the default (above)
   std::string path; // the file, the asset's id, the model's name, or (data) the file in the package
@@ -111,6 +125,8 @@ struct vehicle_look {
   std::string data, uri, subpath;
   double scale = 1.0, yaw = 0.0, z = 0.0;
   bool fit = false;
+  std::string wheel;                   // a wheeled look's wheel (above); "" none
+  double wheelbase = 0.0, track = 0.0; // a wheeled look's model's own; 0 the vehicle's
   bool operator==(const vehicle_look &) const = default;
 };
 
