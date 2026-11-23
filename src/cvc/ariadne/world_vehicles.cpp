@@ -14,9 +14,11 @@
 */
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cvc/ariadne/data.h> // DataStore: a fleet's weights
 #include <cvc/ariadne/scene.h> // SceneAsset
 #include <cvc/ariadne/world_vehicles.h>
@@ -37,6 +39,7 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <cvc/volume/volume.h>
 #include <cvc/world/world_geometry.h>
 #include <exception>
@@ -363,6 +366,22 @@ bool parse_number(const std::string &t, double &out) {
   }
 }
 
+// The same for a token in place: std::from_chars where it takes the whole token (both round
+// correctly, so the number is the one stod reads), else stod's own rules (a sign, hex, ...).
+bool parse_number(std::string_view t, double &out) {
+  if (t.empty())
+    return false;
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+  double x = 0.0;
+  const std::from_chars_result r = std::from_chars(t.data(), t.data() + t.size(), x);
+  if (r.ec == std::errc() && r.ptr == t.data() + t.size()) {
+    out = x;
+    return true;
+  }
+#endif
+  return parse_number(std::string(t), out);
+}
+
 // A pose's numbers as a pose takes them: x, y, the angles, speed and steer finite; z and the time
 // finite or not given (NaN), never infinite.
 bool finite_pose(const entity_pose &p) {
@@ -482,22 +501,19 @@ std::string pack_poses(const std::vector<std::pair<std::string, entity_pose>> &r
 bool parse_poses(const std::string &text, std::vector<std::pair<std::string, entity_pose>> &out) {
   out.clear();
   bool all = true;
-  std::string record;
-  const auto take = [&]() {
-    std::vector<std::string> tok;
-    std::string t;
-    for (const char ch : record) {
+  // A record and its tokens are views of `text` (a host writes it every frame).
+  std::vector<std::string_view> tok;
+  const auto take = [&](std::string_view record) {
+    tok.clear();
+    std::size_t from = 0;
+    for (std::size_t i = 0; i <= record.size(); ++i) {
+      const char ch = i < record.size() ? record[i] : ' ';
       if (ch == ' ' || ch == '\t' || ch == ',' || ch == '\r') {
-        if (!t.empty())
-          tok.push_back(std::move(t));
-        t.clear();
-      } else {
-        t += ch;
+        if (i > from)
+          tok.push_back(record.substr(from, i - from));
+        from = i + 1;
       }
     }
-    if (!t.empty())
-      tok.push_back(std::move(t));
-    record.clear();
     if (tok.empty())
       return;
     entity_pose p;
@@ -510,17 +526,17 @@ bool parse_poses(const std::string &text, std::vector<std::pair<std::string, ent
       ok = parse_number(tok[i + 1], *fields[i]);
     p.rear_axle = tok.size() == 11 && tok[10] == "rear";
     if (ok && finite_pose(p))
-      out.emplace_back(tok[0], p);
+      out.emplace_back(std::string(tok[0]), p);
     else
       all = false;
   };
-  for (const char ch : text) {
-    if (ch == '\n' || ch == ';')
-      take();
-    else
-      record += ch;
-  }
-  take();
+  std::size_t from = 0;
+  for (std::size_t i = 0; i < text.size(); ++i)
+    if (text[i] == '\n' || text[i] == ';') {
+      take(std::string_view(text).substr(from, i - from));
+      from = i + 1;
+    }
+  take(std::string_view(text).substr(from));
   return all;
 }
 
@@ -973,6 +989,66 @@ struct WorldVehicles::impl {
   std::uint64_t rev = 0;
   std::string status;
   std::set<std::string> published; // the entity ids with keys
+  mutable cvc::state::state_ptr root_hold;                      // root()'s
+  mutable std::unordered_map<std::string, cvc::state_key> kept; // kept_key()'s
+  // A number publish_entities writes every publish: its node kept resolved, and its text
+  // formatted again (num(), the same text) only when the number changed.
+  struct num_key {
+    cvc::state_key key;
+    double last = 0.0;
+    bool have = false;
+    std::string text;
+    void put(double v) {
+      if (!have || std::memcmp(&v, &last, sizeof v) != 0) {
+        text = num(v);
+        last = v;
+        have = true;
+      }
+      key.get().value(text);
+    }
+  };
+  // An entity's telemetry keys (`<entities>.<id>.*`), made at its first publish, gone with it.
+  struct entity_keys {
+    std::string base; // `<entities>.<id>.`
+    cvc::state_key placed, gear, by;
+    num_key x, y, z, yaw, speed, power_kw, energy_wh, wh_per_km, distance, wheel_load, aero_force,
+        steer, accel;
+  };
+  std::map<std::uint64_t, entity_keys> ent_keys;
+  // stats_lines()' line per entity, and what it was made from: made again when that changed.
+  struct stats_line {
+    std::string name, plant;
+    bool placed = false;
+    double v[4] = {0.0, 0.0, 0.0, 0.0};
+    std::string text;
+  };
+  mutable std::map<std::uint64_t, stats_line> stat_lines;
+  entity_keys &keys_of(std::uint64_t id, const std::string &base) {
+    entity_keys &k = ent_keys[id];
+    if (k.base != base) {
+      k = entity_keys{};
+      k.base = base;
+      const auto key = [&](const char *leaf) { return cvc::state_key(*app, base + leaf); };
+      k.placed = key("placed");
+      k.gear = key("gear");
+      k.by = key("command.by");
+      for (auto [n, leaf] : {std::pair<num_key *, const char *>{&k.x, "x"},
+                             {&k.y, "y"},
+                             {&k.z, "z"},
+                             {&k.yaw, "yaw"},
+                             {&k.speed, "speed"},
+                             {&k.power_kw, "power_kw"},
+                             {&k.energy_wh, "energy_wh"},
+                             {&k.wh_per_km, "wh_per_km"},
+                             {&k.distance, "distance"},
+                             {&k.wheel_load, "wheel_load"},
+                             {&k.aero_force, "aero_force"},
+                             {&k.steer, "command.steer"},
+                             {&k.accel, "command.accel"}})
+        n->key = key(leaf);
+    }
+    return k;
+  }
 
   // The request keys as last seen (a change is a request).
   std::string seen_spawn, seen_remove, seen_clear, seen_sel;
@@ -1425,7 +1501,7 @@ struct WorldVehicles::impl {
       for (std::size_t k = 0; k < 3; ++k) {
         if (bases[k].empty())
           continue;
-        cvc::state *base = r->findDescendant(bases[k]);
+        cvc::state *base = find_key(bases[k]);
         std::array<std::string, kIntentKeys> v;
         std::string sig;
         for (std::size_t j = 0; j < kIntentKeys; ++j) {
@@ -1896,7 +1972,8 @@ struct WorldVehicles::impl {
                    std::uint64_t now) {
     if (table.empty())
       return;
-    cvc::state *n = r.findDescendant(table + cvc::state::SEPARATOR + "poses");
+    (void)r;
+    cvc::state *n = find_key(table + cvc::state::SEPARATOR + "poses");
     std::string text = n ? n->value() : std::string();
     if (text == seen)
       return;
@@ -1943,7 +2020,7 @@ struct WorldVehicles::impl {
       for (std::size_t k = 0; k < 4; ++k) {
         if (bases[k].empty())
           continue;
-        cvc::state *base = r->findDescendant(bases[k] + cvc::state::SEPARATOR + "pose");
+        cvc::state *base = find_key(bases[k] + cvc::state::SEPARATOR + "pose");
         std::array<std::string, kPoseKeys> v;
         std::string sig;
         if (base)
@@ -2004,9 +2081,14 @@ struct WorldVehicles::impl {
     cvc::state *r = root();
     if (!r || pkey.empty())
       return;
-    std::map<std::string, entity_spec> want;
+    // Each entry's keys as text; its spec is made from them only when it is spawned (an entry
+    // already in the world costs its reads every frame, nothing more).
+    struct entry {
+      std::string archetype, name, team, color, color2;
+    };
+    std::map<std::string, entry> want;
     std::map<std::string, std::string> asked; // each entry's request, as text
-    if (cvc::state *t = r->findDescendant(pkey))
+    if (cvc::state *t = find_key(pkey))
       for (const std::string &key : t->childNames()) {
         if (key == "poses")
           continue;
@@ -2015,22 +2097,18 @@ struct WorldVehicles::impl {
           cvc::state *l = c ? c->findDescendant(name) : nullptr;
           return l ? l->value() : std::string();
         };
-        entity_spec s;
-        s.archetype = leaf("archetype");
-        if (s.archetype.empty())
+        entry w;
+        w.archetype = leaf("archetype");
+        if (w.archetype.empty())
           continue;
-        s.controller = "pose";
-        s.name = leaf("name");
-        if (s.name.empty())
-          s.name = key;
-        const std::string team = leaf("team"), color = leaf("color"), color2 = leaf("color2");
-        double n = 0.0;
-        if (parse_number(team, n) && std::isfinite(n))
-          s.team = static_cast<int>(n);
-        parse_rgb(color, s.color);
-        parse_rgb(color2, s.color2);
-        asked[key] = s.archetype + "|" + s.name + "|" + team + "|" + color + "|" + color2;
-        want[key] = std::move(s);
+        w.name = leaf("name");
+        if (w.name.empty())
+          w.name = key;
+        w.team = leaf("team");
+        w.color = leaf("color");
+        w.color2 = leaf("color2");
+        asked[key] = w.archetype + "|" + w.name + "|" + w.team + "|" + w.color + "|" + w.color2;
+        want[key] = std::move(w);
       }
     // Those whose entry went, or asks for something else now, go.
     std::vector<std::uint64_t> gone;
@@ -2045,7 +2123,7 @@ struct WorldVehicles::impl {
     for (auto it = table_refused.begin(); it != table_refused.end();)
       it = asked.count(it->first) && asked[it->first] == it->second ? std::next(it)
                                                                     : table_refused.erase(it);
-    for (auto &[key, spec] : want) {
+    for (auto &[key, w] : want) {
       if (table_refused.count(key))
         continue;
       bool have = false;
@@ -2053,6 +2131,15 @@ struct WorldVehicles::impl {
         have = have || e.table_key == key;
       if (have)
         continue;
+      entity_spec spec;
+      spec.archetype = w.archetype;
+      spec.controller = "pose";
+      spec.name = w.name;
+      double n = 0.0;
+      if (parse_number(w.team, n) && std::isfinite(n))
+        spec.team = static_cast<int>(n);
+      parse_rgb(w.color, spec.color);
+      parse_rgb(w.color2, spec.color2);
       std::string why;
       const std::uint64_t id = self.spawn(spec, &why);
       if (!id) {
@@ -3051,25 +3138,46 @@ struct WorldVehicles::impl {
     return out;
   }
 
-  cvc::state *root() const { return app ? &cvc::state::instance(*app) : nullptr; }
+  cvc::state *root() const {
+    if (!app)
+      return nullptr;
+    if (!root_hold)
+      root_hold = cvc::state::instance(*app).shared_from_this();
+    return root_hold.get();
+  }
+  // The paths read or written each frame or step (the telemetry, the pose, intent and panel keys),
+  // kept resolved (cvc::state_key): a look while the state tree's shape holds still walks nothing
+  // from the root. Past kKeptPaths (entities come and go) the cache starts again.
+  static constexpr std::size_t kKeptPaths = 4096;
+  cvc::state_key &kept_key(const std::string &path) const {
+    auto it = kept.find(path);
+    if (it == kept.end()) {
+      if (kept.size() >= kKeptPaths)
+        kept.clear();
+      it = kept.emplace(path, cvc::state_key(*app, path)).first;
+    }
+    return it->second;
+  }
+  // findDescendant(path) from the root, kept.
+  cvc::state *find_key(const std::string &path) const {
+    return app ? kept_key(path).find() : nullptr;
+  }
   std::string get(const std::string &leaf) const {
-    cvc::state *r = root();
-    if (!r || vkey.empty())
+    if (!app || vkey.empty())
       return std::string();
-    cvc::state *k = r->findDescendant(vkey + cvc::state::SEPARATOR + leaf);
+    cvc::state *k = find_key(vkey + cvc::state::SEPARATOR + leaf);
     return k ? k->value() : std::string();
   }
   void put(const std::string &key, const std::string &value) {
-    if (cvc::state *r = root())
-      (*r)(key).value(value);
+    if (app)
+      kept_key(key).get().value(value);
   }
   void seed(const std::string &key, const std::string &value) {
-    cvc::state *r = root();
-    if (!r)
+    if (!app)
       return;
-    cvc::state *k = r->findDescendant(key);
+    cvc::state *k = find_key(key);
     if (!k || k->value().empty())
-      (*r)(key).value(value);
+      kept_key(key).get().value(value);
   }
 
   const vehicle_archetype *find(const std::string &id) const {
@@ -3337,33 +3445,35 @@ struct WorldVehicles::impl {
         for (const auto &[k, v] : e.spec.metadata)
           put(at + "metadata." + k, v);
       }
-      put(at + "placed", in.placed ? "1" : "0");
-      put(at + "x", num(in.x));
-      put(at + "y", num(in.y));
-      put(at + "z", num(in.z));
-      put(at + "yaw", num(in.yaw));
-      put(at + "speed", num(in.speed));
-      put(at + "power_kw", num(in.power_kw));
-      put(at + "energy_wh", num(in.energy_wh));
-      put(at + "wh_per_km", num(in.wh_per_km));
-      put(at + "distance", num(in.distance));
-      put(at + "wheel_load", num(in.wheel_load));
-      put(at + "aero_force", num(in.aero_force));
-      put(at + "gear", std::to_string(in.gear));
-      put(at + "command.steer", num(in.command_steer));
-      put(at + "command.accel", num(in.command_accel));
-      put(at + "command.by", e.command_by);
+      entity_keys &k = keys_of(e.id, at); // kept resolved; a number formatted when it changed
+      k.placed.get().value(std::string(in.placed ? "1" : "0"));
+      k.x.put(in.x);
+      k.y.put(in.y);
+      k.z.put(in.z);
+      k.yaw.put(in.yaw);
+      k.speed.put(in.speed);
+      k.power_kw.put(in.power_kw);
+      k.energy_wh.put(in.energy_wh);
+      k.wh_per_km.put(in.wh_per_km);
+      k.distance.put(in.distance);
+      k.wheel_load.put(in.wheel_load);
+      k.aero_force.put(in.aero_force);
+      k.gear.get().value(std::to_string(in.gear));
+      k.steer.put(in.command_steer);
+      k.accel.put(in.command_accel);
+      k.by.get().value(e.command_by);
       summary += (summary.empty() ? "" : "\n") + id + "  " + e.spec.name + "  " + e.spec.archetype +
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
     }
     if (const std::string q = quiet_lines(quiet_count); !q.empty())
       summary += (summary.empty() ? "" : "\n") + q;
-    cvc::state *r = root();
     for (const std::string &id : published)
       if (!now.count(id))
-        if (cvc::state *t = r->findDescendant(ekey))
+        if (cvc::state *t = find_key(ekey))
           t->removeChild(id);
+    for (auto it = ent_keys.begin(); it != ent_keys.end();) // a departed entity's keys go with it
+      it = now.count(std::to_string(it->first)) ? std::next(it) : ent_keys.erase(it);
     published = now;
     put(ekey + ".ids", ids);
     put(ekey + ".count", std::to_string(ents.size()));
@@ -4407,12 +4517,27 @@ std::string WorldVehicles::stats_lines() const {
       continue;
     }
     const entity_info in = d.info(e);
-    out +=
-        (out.empty() ? "" : "\n") + std::to_string(e.id) + "  " + e.spec.name + "  " + e.plant +
-        "  " +
-        (in.placed ? fixed(in.speed, 1) + " m/s  " + fixed(in.power_kw, 1) + " kW  " +
-                         fixed(in.energy_wh, 1) + " Wh  " + fixed(in.wheel_load / 1000.0, 1) + " kN"
-                   : std::string("waiting"));
+    impl::stats_line &l = d.stat_lines[e.id];
+    const double v[4] = {in.speed, in.power_kw, in.energy_wh, in.wheel_load};
+    if (l.text.empty() || l.placed != in.placed || std::memcmp(l.v, v, sizeof v) != 0 ||
+        l.name != e.spec.name || l.plant != e.plant) {
+      l.text = std::to_string(e.id) + "  " + e.spec.name + "  " + e.plant + "  " +
+               (in.placed ? fixed(in.speed, 1) + " m/s  " + fixed(in.power_kw, 1) + " kW  " +
+                                fixed(in.energy_wh, 1) + " Wh  " +
+                                fixed(in.wheel_load / 1000.0, 1) + " kN"
+                          : std::string("waiting"));
+      l.placed = in.placed;
+      std::memcpy(l.v, v, sizeof v);
+      l.name = e.spec.name;
+      l.plant = e.plant;
+    }
+    out += (out.empty() ? "" : "\n") + l.text;
+  }
+  if (d.stat_lines.size() > d.ents.size()) { // the lines of the entities gone go too
+    std::set<std::uint64_t> ids;
+    for (const impl::entity &e : d.ents)
+      ids.insert(e.id);
+    std::erase_if(d.stat_lines, [&](const auto &kv) { return !ids.count(kv.first); });
   }
   if (const std::string q = d.quiet_lines(quiet); !q.empty())
     out += (out.empty() ? "" : "\n") + q;

@@ -94,6 +94,7 @@ struct SceneOpacityBinding {
   double fallback = 1.0;            // the opacity while the key is unset (or not a number)
   std::weak_ptr<GraphicsNode> node; // the node
   int data = -1;                    // a source: { data } node: its entry in data_nodes
+  cvc::state_key key;               // `source`, kept resolved between frames (bind_key)
 };
 
 // Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.
