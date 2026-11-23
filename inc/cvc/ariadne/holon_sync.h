@@ -332,12 +332,21 @@ bool publish_world_on(cvc::app &app, const std::string &room, const SceneWorld &
 // whose hash differs, leaves it not ready, and the statics stay the room scene's. It follows what
 // the relay has on (room_world_on, OW5f): the same world turned on, the same generated worlds
 // made, and the statics again from them.
+//
+// Where the URI does not give the relay's bytes here, it looks for the document by its SHA-256 in
+// the world packs it is pointed at (OW5k, world_pack.h: CVC_WORLD_PACKS when it is made, then
+// add_pack), in that order, and loads it from the first pack that lists it and whose files all
+// match its index; the document's assets resolve inside that pack.
 class world_replica {
 public:
   world_replica();
   ~world_replica();
   world_replica(const world_replica &) = delete;
   world_replica &operator=(const world_replica &) = delete;
+
+  // A world pack directory to look in after those it has (OW5k). The next source change uses it.
+  void add_pack(const std::string &dir);
+  const std::vector<std::string> &packs() const { return _packs; }
 
   // One frame: the room's world source (when its stamp moved: resolve, check, load and build),
   // what the relay has on (when its stamp moved, or the world was built again: the world turned
@@ -353,7 +362,7 @@ public:
   // (a water node's), else the still water the relay adds for its boats over the world's grid
   // (boat_still_water). It changes with the statics, under their stamp.
   const std::vector<cvc::physics::field> &water() const { return _water; }
-  // What it did with the source last: what it built, or why not.
+  // What it did with the source last: what it built (and from which pack), or why not.
   const std::string &status() const { return _status; }
   // The world it built (null when not ready).
   const SceneWorld *world() const { return _world.get(); }
@@ -381,6 +390,9 @@ private:
   std::vector<avatar_static> _statics;
   std::vector<cvc::physics::field> _water;
   section_stamp _stamp;
+  std::vector<std::string> _packs;
+  // The document with this SHA-256 in the packs, its path ("" when none has it); why not in WHY.
+  std::string from_packs(const std::string &sha256, std::string &why) const;
   std::string _status;
 };
 

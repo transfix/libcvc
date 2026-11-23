@@ -446,6 +446,18 @@ already holds the world should download nothing.
   loaded a world once doesn't fetch it again.
 - **Live edits list changed hashes** in the section revision that carries them, so a client fetches
   only what changed.
+- **As built (OW5k, a pack as a directory):** `cvc::ariadne::world_pack` (world_pack.h) is a
+  directory with an index, `world-pack.index` at its root: one line per file,
+  `<sha256> <size> <path>`, the path relative to the root. `write_world_pack_index` writes one for
+  every file under a directory. A client is pointed at packs by `CVC_WORLD_PACKS` (directories,
+  separated as PATH's are) or `world_replica::add_pack`. When the room's document URI does not
+  give the relay's bytes here, the replica finds the document by the SHA-256 the room names
+  (`room_world_source`), in the first pack that lists it and whose files all match its index
+  (`world_pack::verify`: each file's size and SHA-256). It builds the world from there, and the
+  document's assets resolve inside the pack. A pack with a file that differs from its index is
+  refused, and the replica's status says which file (`AriadneOneWorld`). Still to come: packs from
+  a cvcpkg package or an archive at a URL, a viewer document's and a command-line flag's packs,
+  the relay deployed with a pack, the manifest's priorities, and fetching from the relay.
 
 ## 13. Private rooms: end-to-end encrypted, the relay only forwards
 
@@ -795,7 +807,7 @@ asset delivery, **E** = end-to-end encryption.
 | RM2 | **Rooms made at run time,** by server programs and by participants where the rules allow. | RM1, S0 | S |
 | CF1 | **The features sections** and server tokens in `requires:`. | RM1 | S |
 | CF2 | **The stock conference components** under `cvc://conference/`; the example documents become layouts over them. | CF1 | M |
-| AD1 | **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs from a cvcpkg package, an archive at a URL or a directory, each read through its index. | WD1 | M |
+| AD1 | **Started** (2026-11-23, OW5k: a pack as a directory with its index; a client finds the relay's document in one by its hash). **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs from a cvcpkg package, an archive at a URL or a directory, each read through its index. | WD1 | M |
 | AD2 | **Fetch by need:** colliders first, cells near the client, coarse before fine; stand-ins; the browser's content cache. | AD1, WD9 for cells | M |
 | E0 | **Keys:** X25519 identity and prekeys signed by the device key, the key directory on the relay, safety numbers, the libsodium recipe. | — | M |
 | E1 | **Encrypted direct messages:** X3DH and the Double Ratchet; `chat.ari` gets txwtf's lock. | E0 | M |
@@ -1106,7 +1118,8 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 - **Still to come:** a wall or another vehicle is the relay's correction (a client's dynamic
   model touches nothing; a jolt or boat model touches only the statics and the water). A sea's
   waves under a predicted boat (OW5j predicts it on still water). For the statics: a document the
-  client does not ship with fetched as a world pack (section 12).
+  client does not ship with, from a pack it was pointed at (OW5k: a directory), or fetched from
+  the relay (section 12).
 - **As built (OW5f, the relay's world followed):** the relay publishes what its document has on
   (`room_world_on`: `conf.rooms.<room>.world_on`, `publish_world_on`, written when it changes):
   the scene's world that is on, and the params each generated_world node of it (of the scene,
@@ -1267,7 +1280,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
