@@ -176,9 +176,25 @@ namespace cvc {
 namespace gl {
 
 namespace {
+// Whether `items` holds exactly `want`, in that order.
+bool sameItems(vtkCollection *items, const std::vector<vtkObject *> &want) {
+  if (items->GetNumberOfItems() != static_cast<int>(want.size()))
+    return false;
+  vtkCollectionSimpleIterator it;
+  items->InitTraversal(it);
+  for (vtkObject *w : want)
+    if (items->GetNextItemAsObject(it) != w)
+      return false;
+  return true;
+}
+
 // Copy the source renderer's current props into the mirror's renderer, so the
 // mirror shows the live scene (any node added / re-meshed since last frame) from
 // its OWN camera. The props are shared by reference — one geometry, drawn twice.
+// A mirror that already holds exactly what it should draw is left alone: taking
+// every prop out and putting it back each frame makes the next draw of them
+// slower (measured on viewer_grid.ari, a view re-synced just before it draws:
+// 1.6 ms a draw instead of 0.4).
 void syncMirrorProps(Viewport &mirror) {
   vtkRenderer *dst = mirror.renderer();
   vtkRenderer *src = mirror.mirrorSource();
@@ -187,29 +203,37 @@ void syncMirrorProps(Viewport &mirror) {
   // 3-D props only: skip vtkActor2D (FpsHud, ScreenTextHud, scalar bars). A 2-D
   // overlay is positioned in the WINDOW, not the scene, so copying it would draw
   // the source's HUD a second time on top of the inset.
-  dst->RemoveAllViewProps();
   const Viewport::PropFilter &keep = mirror.mirrorFilter(); // a subset, restyled, if set
+  std::vector<vtkObject *> drawn;
   vtkPropCollection *props = src->GetViewProps();
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
   while (vtkProp *p = props->GetNextProp(it)) {
     if (vtkActor2D::SafeDownCast(p))
       continue;
-    vtkProp *drawn = keep ? keep(p) : p;
-    if (!drawn)
-      continue;
-    dst->AddViewProp(drawn);
+    if (vtkProp *d = keep ? keep(p) : p)
+      drawn.push_back(d);
+  }
+  if (!sameItems(dst->GetViewProps(), drawn)) {
+    dst->RemoveAllViewProps();
+    for (vtkObject *d : drawn)
+      dst->AddViewProp(static_cast<vtkProp *>(d));
   }
   // Copy the source's lights so a mirror of a StageLighting-rigged scene is lit
   // the same instead of rendering flat. World-space lights are correct from the
   // mirror's own camera; with none, the mirror falls back to VTK's automatic
   // headlight following its own camera.
-  dst->RemoveAllLights();
+  std::vector<vtkObject *> lit;
   vtkLightCollection *lights = src->GetLights();
-  vtkCollectionSimpleIterator lit;
-  lights->InitTraversal(lit);
-  while (vtkLight *l = lights->GetNextLight(lit))
-    dst->AddLight(l);
+  vtkCollectionSimpleIterator li;
+  lights->InitTraversal(li);
+  while (vtkLight *l = lights->GetNextLight(li))
+    lit.push_back(l);
+  if (!sameItems(dst->GetLights(), lit)) {
+    dst->RemoveAllLights();
+    for (vtkObject *l : lit)
+      dst->AddLight(static_cast<vtkLight *>(l));
+  }
 }
 
 // limitTextureUnits: VTK's texture-unit table with `count` units, whatever the GL says (VTK sizes

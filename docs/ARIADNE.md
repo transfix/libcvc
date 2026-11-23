@@ -4390,16 +4390,16 @@ other view a pick that lands on a `volume_slice` node writes its voxel too. (`cv
 **Refresh rate.** A view draws the scene a second time, every frame: a mirror of the main view
 draws every node again, with its own camera, so a map beside a busy scene can cost as much as the
 scene. `refresh_hz: 5` draws it at most five times a second; the frames in between show its last
-picture, kept in a texture the size of the window (`Viewport::setRefreshHz`). It draws at once,
-whatever the rate:
+picture, which stays in the view's texture (*How it draws*, below; `Viewport::setRefreshHz`).
+Moving or scrolling the view shows the same picture elsewhere and does not draw it. It draws at
+once, whatever the rate:
 
-- when it moves or changes size, or is shown again;
+- when it changes size, or is shown again;
 - when its `show`, `hide`, `chrome`, `camera`, `shadows`, `override` or starting camera change;
 - while the pointer drags, wheels or picks in it, and for three frames after, so what a pick
   changed shows without waiting.
 
-Picks test the scene as it is, not the last picture. A view that does not clear its rect (one that
-draws over what is under it) draws every frame whatever the rate. (`cvcgl_viewport_refresh`,
+Picks test the scene as it is, not the last picture. (`cvcgl_viewport_refresh`,
 `cvcgl_ariadne_pick`.)
 
 **Tags.** A node's `tags:` hold for its whole subtree, so a tagged child under a tagged parent is
@@ -4528,8 +4528,8 @@ SceneGraph of its own, under state `<prefix>.scenes.<id>`, so its nodes are at
 `scenes.<id>.graphics.root.children.<node>`. Its nodes' `visible:` binds and the widgets share the
 document's prefix. It gets a viewport of its own (`scene.<id>`), never shown, which holds its
 lights, background and shadow chain; the views of it mirror that viewport. While its shadows are on
-and one of its views shows, that viewport draws one pixel in a corner of the view, under it, so its
-maps are baked. While none shows, nothing bakes them. On the first frame one shows again, they are
+and one of its views shows, that viewport draws one pixel, into a texture of its own that nothing
+shows, so its maps are baked. While none shows, nothing bakes them. On the first frame one shows again, they are
 baked for whatever moved meanwhile, whatever the scene's `update_interval`, so a view never draws
 stale maps. A document may have only `scenes:`, and then the main view is empty.
 `examples/ariadne/documents/viewer_scenes.ari` has three scenes (day, night, a studio) built from
@@ -4547,23 +4547,43 @@ a viewport.
 **How it draws.** Each view is a mirror viewport of the main one
 (`ViewportManager::addMirrorViewport`). It draws the same props, the same geometry, from its own
 camera, less the props of the nodes it leaves out and with its twins in place of the props it restyles
-(`Viewport::setMirrorFilter`). The widget
-reserves its rect in the window and cuts that rect out of the window's background
-(`ImGuiBackend::cut_window_background`); the view is drawn there. So the view moves and scrolls with
-its window, is clipped where the window clips it, and is hidden on any frame its widget is not
-drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, pycvc_gl) has the
-widget. A terminal backend shows its placeholder. A new document removes the last one's views.
+(`Viewport::setMirrorFilter`).
+
+It draws into a texture of its own, the size of the widget in framebuffer pixels
+(`Viewport::setTextureSize`), and the widget draws that texture as an image in its window. So the
+window stacks, clips and scrolls the view as it does any of its content:
+
+- a window in front of the view's window covers the view, and the view covers a window behind its
+  own;
+- a window too small for the view cuts it off, and scrolling moves it; the picture keeps its size
+  and its camera's aspect either way;
+- later content in the same window draws over it, as over any image (a long `caption:` of one view
+  is covered by the view beside it).
+
+The view is drawn in the window's render, after the widget has placed it, at the window's
+multisampling, and resolved as the window's own pixels are. It shows in the same frame as its
+widget, the first frame included, and it is hidden on any frame its widget is not drawn: a closed
+or collapsed window, another tab, scrolled out of sight. A pick, a pointer probe or a wheel at a
+point on screen lands in the view's texture (`Viewport::windowToRenderer`). The main view is still
+drawn into the window's own frame, under all of the UI.
+
+What it costs: drawing the scene again, as before, and one resolve of the view's pixels each time
+it draws. A mirror's props are re-synced from its source only when what it draws changes
+(`syncMirrorProps`), which leaves the view examples cheaper per frame than when the views drew into
+the window. `cvcgl_ari_frame_bench doc.ari` measures what a document's frame costs offscreen.
+
+Every AriRuntime host (arigl, arigl-web, pycvc_gl) has the widget. A terminal backend shows its
+placeholder. A new document removes the last one's views. (`cvcgl_ariadne_view_stacking`,
+`cvcgl_ariadne_views`.)
 
 Limits:
 - A `volren` node is in the main view only. A `volslice` node takes `transform` but no restyling;
   a `type: volume` node takes `opacity` and `transform`.
-- The view lies under the whole UI. Another window behind the viewport's window still draws over
-  the view.
 - A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
   out still casts its shadow there, and with `shadows: { focus: camera }` the maps follow the main
   camera, not the view's.
-- A view's first frame is opaque: the window's background is cut from the frame after the widget
-  first draws.
+- A view's texture is no larger than the window: a widget larger than the window draws at the
+  window's size and is stretched.
 
 ### 5.19 Clickable groups: `on_click:` on a group, `hover: highlight`
 
