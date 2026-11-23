@@ -395,10 +395,22 @@ TEST(RoomWriteGate, AParticipantWritesOnlyItsOwnSubtree) {
   EXPECT_FALSE(gate.may_write("alice", "ui.docs.ari.conf.self", op::set_value));
 
   // Ops no client uses, even on its own keys.
-  for (op o : {op::delete_subtree, op::reset_node, op::delegate_subtree, op::revoke_delegation,
-               op::set_read_only, op::set_hidden, op::set_comment, op::set_property})
+  for (op o : {op::reset_node, op::delegate_subtree, op::revoke_delegation, op::set_read_only,
+               op::set_hidden, op::set_comment, op::set_property})
     EXPECT_FALSE(gate.may_write("alice", alice + ".intent.move.x", o));
-  EXPECT_FALSE(gate.may_write("alice", alice, op::delete_subtree));
+
+  // A delete of its own nodes replicates (state_sync_adapter journals a removal), but not one of
+  // the participant itself, another's, or one that would take a key of the relay's with it.
+  EXPECT_TRUE(gate.may_write("alice", alice + ".intent.move.x", op::delete_subtree));
+  EXPECT_TRUE(gate.may_write("alice", alice + ".intent", op::delete_subtree));
+  EXPECT_TRUE(gate.may_write("alice", alice + ".profile.avatar", op::delete_subtree));
+  EXPECT_TRUE(gate.may_write("alice", alice + ".streams.camera.endpoint", op::delete_subtree));
+  EXPECT_FALSE(gate.may_write("alice", alice, op::delete_subtree)) << "leaving is the relay's";
+  EXPECT_FALSE(gate.may_write("alice", bob + ".intent", op::delete_subtree));
+  for (const char *relays : {".pose", ".pose.pos", ".device", ".profile", ".profile.name", ".net",
+                             ".net.relay", ".streams", ".streams.camera", ".streams.camera.ready",
+                             ".energy", ".driving", ".drive_status", ".archetype_status"})
+    EXPECT_FALSE(gate.may_write("alice", alice + relays, op::delete_subtree)) << relays;
 
   // A pid must be one identifier: "bob.pose" would otherwise own bob's pose.
   EXPECT_FALSE(gate.may_write("bob.pose", bob + ".pose.pos.x", op::set_value));

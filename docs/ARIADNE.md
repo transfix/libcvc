@@ -2275,8 +2275,9 @@ scene:
     stock clients draw: a server document (or arisrvx's Python) publishes the table (`server:
     publish: [fleet]`) and writes it each step, the relay replicates it, and each client's world
     document, with `poses: /fleet` and the archetypes, spawns and places the entities where the
-    server has them. Over a relay, take an entity out by emptying its archetype: the relay
-    replicates a value, and a client may not see an entry's removal.
+    server has them. Over a relay, take an entity out either way: emptying its archetype is a
+    value, and removing the entry is a delete, which replicates as a write does (a client that
+    missed it loses the entry at the relay's next broadcast, or when it rejoins).
 
     ```yaml
     world:
@@ -6650,7 +6651,8 @@ on_tick: |
   - Each is a writable hole of the same name in the document's chroot (§7.4): `board` there is
     the tree's `board`. `state-set`, `state-set-tree` and the atomics write through it.
     `state-delete` and `state-watch` act on the physical path (§7.4), so to take entries out,
-    rewrite their parent with `state-set-tree`.
+    rewrite their parent with `state-set-tree`. The entries it drops go from every client too: a
+    removal replicates as one delete, like a write.
   - Every client is sent the published namespaces, live and in a joiner's snapshot. Clients'
     interest takes only `conf` for now, so they drop them until a document subscribes (the
     roadmap's `relay: subscribe:`, S2).

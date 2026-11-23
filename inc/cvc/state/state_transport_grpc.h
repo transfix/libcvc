@@ -312,6 +312,9 @@ public:
   std::size_t refresh_read_scope(const std::string &principal) override;
   // Deletes refresh_read_scope sent, one per subtree retracted from a stream.
   std::uint64_t total_scope_retractions() const noexcept { return _scope_retractions.load(); }
+  // Deletes repeated to admitted peers after their admit snapshot (state_transport::
+  // missed_deletes), when backfill_on_connect is off.
+  std::uint64_t total_deletes_repeated() const noexcept { return _deletes_repeated.load(); }
   std::uint64_t total_inbound_rejected() const override { return _inbound_rejected.load(); }
   // Streams refused for a missing or wrong bearer token (auth_config).
   std::uint64_t total_auth_rejected() const noexcept { return _auth_rejected.load(); }
@@ -498,6 +501,7 @@ private:
   state_authenticator _authenticator; // under _inbound_gate_mu
   state_read_scope _read_scope;       // under _inbound_gate_mu
   std::atomic<std::uint64_t> _scope_retractions{0};
+  std::atomic<std::uint64_t> _deletes_repeated{0};
   std::atomic<std::uint64_t> _inbound_rejected{0};
   std::atomic<std::uint64_t> _auth_rejected{0};
   std::atomic<std::uint64_t> _connection_serial{0}; // the last connection admit_connection numbered
