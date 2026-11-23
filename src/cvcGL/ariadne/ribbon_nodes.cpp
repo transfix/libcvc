@@ -12,9 +12,7 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <boost/any.hpp>
-#include <boost/signals2/connection.hpp>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -339,25 +337,20 @@ private:
       _floats.clear();
       _text.clear();
       _node = nullptr;
-      _on_value.disconnect();
-      _on_data.disconnect();
       same = 0;
       return true;
     }
     cvc::state &node = cvc::ariadne::read_effective(*found);
-    // Writes are counted by the node's own change signals: a timestamp would not do, since two
-    // writes can share one tick of the clock (Windows' is coarse).
-    if (&node != _node || !_on_value.connected() || !_on_data.connected()) {
-      std::shared_ptr<std::atomic<std::uint64_t>> writes = _writes;
-      _on_value = node.valueChanged.connect([writes]() { ++*writes; });
-      _on_data = node.dataChanged.connect([writes]() { ++*writes; });
-      _node = &node;
-      _seen = ~std::uint64_t(0); // a node seen for the first time is read
-    }
-    const std::uint64_t writes = _writes->load();
-    if (writes == _seen)
+    // Writes are counted by the node's revision (state::revision, which moves as its change
+    // signals fire): a timestamp would not do, since two writes can share one tick of the clock
+    // (Windows' is coarse). A node seen for the first time, or after the tree changed shape (a
+    // node made again may be another at the same address), is read.
+    const std::uint64_t epoch = node.structureEpoch(), rev = node.revision();
+    if (&node == _node && epoch == _seenEpoch && rev == _seen)
       return false; // not written since the last read: the per-frame fast path
-    _seen = writes;
+    _node = &node;
+    _seenEpoch = epoch;
+    _seen = rev;
     std::vector<float> next;
     const boost::any d = node.data();
     if (!d.empty() && floats_of(d, next)) {
@@ -500,11 +493,8 @@ private:
   // state
   std::string _path;
   cvc::state_key _key;               // `_path`, kept resolved between polls
-  const cvc::state *_node = nullptr; // the node the counter listens to (compared only)
-  std::shared_ptr<std::atomic<std::uint64_t>> _writes =
-      std::make_shared<std::atomic<std::uint64_t>>(0);
-  std::uint64_t _seen = ~std::uint64_t(0);
-  boost::signals2::scoped_connection _on_value, _on_data;
+  const cvc::state *_node = nullptr; // the node last read (compared only)
+  std::uint64_t _seen = 0, _seenEpoch = 0; // its revision then, and the tree's shape
   std::string _text;
   // stream
   std::vector<std::string> _tokens; // what to look the stream up by, in turn

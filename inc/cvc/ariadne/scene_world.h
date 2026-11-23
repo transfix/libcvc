@@ -35,18 +35,26 @@
 // The world steps on the app's world clock, never on frames, so N quanta give one state whether a
 // window draws them or not.
 //
-// Each step publishes its telemetry under `<stats>.stats` (stats_key, "physics" by default,
-// resolved against the host's bind prefix):
+// Each frame that steps publishes its telemetry under `<stats>.stats` (stats_key, "physics" by
+// default, resolved against the host's bind prefix):
 //   tick, time            the world's tick and its time in seconds
 //   step_ms               the wall time of the last step
-//   step_ms_history       the last 120 steps' step_ms, oldest first, comma-separated (a plot:)
 //   bodies                the bodies in the world
 //   active_bodies         the ones awake (moving)
 //   contact_events        the last step's contact events
 //   saturated             an engine buffer filled and contacts were dropped
+//   hash                  the world's state hash, while `<stats>.hash` is 1
+// and, at the telemetry rate (below), its lines and its vehicles' keys (WorldVehicles::publish):
+//   step_ms_history       the last 120 steps' step_ms, oldest first, comma-separated (a plot:)
 //   nodes                 a line per node with bodies: "<node>  <bodies>  <awake>"
-// and `<stats>.enabled` (seeded 1) turns the stepping off and on: off, the steps due are let go,
-// so the world holds still while the clock runs on and carries on from there when it is back on.
+//   vehicles              a line per vehicle (WorldVehicles::stats_lines)
+// `<stats>.telemetry_hz` (seeded kSceneTelemetryHz, 10) is that rate, in the world's seconds: the
+// first frame whose steps cross into a new 1 / rate of world time writes them (every
+// round(1 / (rate x fixed_dt)) steps, counted from tick 0, so at the same ticks at any frame
+// rate; 0 writes them every frame that steps). A world that stops (physics off, or the clock
+// held) writes them once more, so they show where it stopped. `<stats>.enabled` (seeded 1) turns
+// the stepping off and on: off, the steps due are let go, so the world holds still while the
+// clock runs on and carries on from there when it is back on.
 //
 // A scene's worlds (bind_worlds; SceneWorldSpec): the nodes with `world: <name>` are the worlds a
 // scene can be (a generated world, a data bundle's city, a terrain, a flat ground), and one is on
@@ -109,6 +117,10 @@ struct SceneWorldSpec;
 struct SceneColliders;
 struct vehicle_archetype;
 struct spawn_rules;
+
+// The world's telemetry rate by default (`<stats>.telemetry_hz`): how many times a second of world
+// time its lines and its vehicles' keys are written (SceneWorld::follow).
+inline constexpr double kSceneTelemetryHz = 10.0;
 class WorldVehicles;
 class BoatRuntime;
 class WaterRuntime;
@@ -260,7 +272,7 @@ public:
   // Problems warn, naming the node.
   void restart(std::vector<std::string> *warnings = nullptr);
 
-  // The telemetry, written now.
+  // The telemetry, all of it, written now (as a frame that steps at the telemetry rate does).
   void publish_stats();
   // Take on the scene's worlds: each node with `world: <name>` (at any depth, with a body or not),
   // and the scene's `world:` block. The world on starts as `<world_key>.source` says if it names

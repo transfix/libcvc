@@ -290,6 +290,10 @@ int main() {
               static_cast<unsigned long long>(cvc::state::instance(app).structureEpoch() - epoch0));
 #endif
 
+  // The checks below read the telemetry every frame: written every frame from here (the frames
+  // above ran at the default rate, physics.telemetry_hz, where it exists).
+  st(app, "physics.telemetry_hz").value("0");
+
   // 1. Two physics ticks a frame, published.
   wv::SceneWorld &w = *rs.world;
   const std::uint64_t tick = w.world().tick();

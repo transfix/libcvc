@@ -524,6 +524,13 @@ public:
   void after_step();
   // The entities' keys and the selection's, now.
   void publish();
+  // The same, but what changes every step (each entity's pose, speed, books and command, the
+  // summary, the fleets' keys) only when `telemetry` is true: the world writes those at its
+  // telemetry rate (SceneWorld::follow, `physics.telemetry_hz`). A newly listed entity's keys, and
+  // all of them after a change of the entities (a spawn, a placing, a removal: rev), are written
+  // either way; its identity, ids, count and rev are never late. True when the listed entities
+  // (ids) changed.
+  bool publish(bool telemetry);
 
   // ---- what a gym drives (WorldGym, L4) ----
   // The draws from here on: the free points spawns and goals are drawn at, and the spawn

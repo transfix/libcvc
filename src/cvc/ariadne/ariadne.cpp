@@ -2145,6 +2145,7 @@ struct Runtime::Impl {
   // set_key_bindings. post_input (any thread) queues key downs; drain() (the host thread) rebinds
   // or runs them, so a key's action is queued like a button's.
   std::vector<KeyBinding> key_bindings_;
+  cvc::state_key key_capture_; // run_key_bindings reads the capture key each frame: kept resolved
   std::atomic<bool> have_key_bindings_{false};
   std::mutex pressed_mutex_;
   std::vector<std::string> pressed_keys_;
@@ -7376,7 +7377,8 @@ void Runtime::Impl::run_key_bindings() {
     pads.swap(pressed_pads_);
   }
   const std::string capture_path = resolve_bind(prefix, kKeyCapture);
-  if (!key_capture_pending() && !read_or<std::string>(app, capture_path, "").empty())
+  if (!key_capture_pending() &&
+      !read_or<std::string>(kept_key(key_capture_, app, capture_path), "").empty())
     write<std::string>(app, capture_path, ""); // the Keys window closed while it waited
   const std::string pad_capture = kPadCapture;
   const auto waiting_pad = [&](std::string *id) {

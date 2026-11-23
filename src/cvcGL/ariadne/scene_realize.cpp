@@ -2171,17 +2171,26 @@ void sync_scene_opacity(RealizedScene &realized) {
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings) {
   if (!realized.app || realized.data_nodes.empty())
     return 0;
-  cvc::state &root = cvc::state::instance(*realized.app);
+  cvc::app &app = *realized.app;
+  cvc::state &root = cvc::state::instance(app);
   int rebuilt = 0;
   for (SceneDataBinding &b : realized.data_nodes) {
-    cvc::state *node = root.findThroughLinks(b.path);
+    cvc::state *node = cvc::ariadne::kept_key(b.data_key, app, b.path).find();
     if (!node)
       continue;
-    const std::string store = node->fullName();
-    cvc::state *status = root.findDescendant(store + cvc::state::SEPARATOR + "status");
+    // The store's name and its keys, again only when the node or the tree's shape changed.
+    if (node != b.store_node || node->structureEpoch() != b.store_epoch) {
+      b.store_node = node;
+      b.store_epoch = node->structureEpoch();
+      b.store = node->fullName();
+      b.status_key = cvc::state_key(app, b.store + cvc::state::SEPARATOR + "status");
+      b.rev_key = cvc::state_key(app, b.store + cvc::state::SEPARATOR + "rev");
+    }
+    const std::string &store = b.store;
+    cvc::state *status = b.status_key.find();
     if (!status || status->value() != "ready")
       continue;
-    cvc::state *rev = root.findDescendant(store + cvc::state::SEPARATOR + "rev");
+    cvc::state *rev = b.rev_key.find();
     const std::string r = rev ? rev->value() : std::string();
     if (store == b.drawn_target && r == b.drawn_rev)
       continue;

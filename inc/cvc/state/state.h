@@ -367,6 +367,7 @@ public:
       _value = str_value;
       _lastMod = boost::posix_time::microsec_clock::universal_time();
       _initialized = true;
+      _revision.fetch_add(1, std::memory_order_release);
       // Notify any threads waiting for value
       _valueCondition.notify_all();
     }
@@ -749,6 +750,12 @@ public:
   // left.
   std::uint64_t structureEpoch() const { return _structure->load(std::memory_order_acquire); }
 
+  // This node's revision: a count that moves each time its value or data changes, as valueChanged
+  // or dataChanged fires (a write of the value it holds fires nothing and leaves it; touch() moves
+  // it). A reader that keeps the count it last read can tell whether the node was written since
+  // without copying the value or connecting a slot.
+  std::uint64_t revision() const { return _revision.load(std::memory_order_acquire); }
+
   // childThroughLinks is the WRITE view, create-or-get like operator(): an interior hop on a
   // WRITABLE transparent link continues at its target (a write that cannot be resolved throws
   // read_only_error, as value(v) does), and one on a non-writable transparent link continues at the
@@ -975,6 +982,8 @@ protected:
 
   // The tree's structureEpoch(): one count for all of its nodes, made by the root.
   std::shared_ptr<std::atomic<std::uint64_t>> _structure;
+  // revision(): moved under _mutex with each change of the value or data.
+  std::atomic<std::uint64_t> _revision{0};
   void structureChanged() { _structure->fetch_add(1, std::memory_order_acq_rel); }
 
   // Phase 8: empty when this node is not a link.

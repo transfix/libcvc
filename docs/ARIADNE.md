@@ -2085,11 +2085,23 @@ scene:
   scene's world takes them, headless or drawn, and it needs the scene's `physics:` block.
 - **Made colliders stay put.** A generated world's and a dataset's colliders sit where they were
   made: the node's transform does not move them (it warns).
-- **Telemetry.** Each step publishes `physics.stats.{tick, time, step_ms, bodies, active_bodies,
-  contact_events, saturated}` under the document's prefix, drawn or not (a `scenes:` entry's
-  under `scenes.<id>.physics.stats`), and also:
+- **Telemetry.** Each frame that steps publishes `physics.stats.{tick, time, step_ms, bodies,
+  active_bodies, contact_events, saturated}` under the document's prefix, drawn or not (a
+  `scenes:` entry's under `scenes.<id>.physics.stats`), and also, at the telemetry rate:
   - `step_ms_history`: the last 120 step times, comma-separated, which a `plot:` draws;
-  - `nodes`: a line per node with bodies, giving its bodies and the ones awake.
+  - `nodes`: a line per node with bodies, giving its bodies and the ones awake;
+  - `vehicles`: a line per vehicle (below), with the world's entities' keys (`entities.*`).
+- **The telemetry rate.** `physics.telemetry_hz` (seeded `10`) is how many
+  times a second of world time those are written. A period is `round(1 / (rate × fixed_dt))`
+  steps, counted from tick 0, and the frame whose steps cross into a new one writes them, so they
+  are written at the same ticks at any frame rate, drawn or not. `0` writes them every frame that
+  steps. A world that stops (physics off, or the clock held) writes them once more, so they show
+  where it stopped.
+  - **A change:** libcvc used to write them every frame. A panel reads them at 10 Hz,
+    and a document or host that reads an entity's pose or the lines every frame now sees them
+    change at that rate: it sets the rate it needs, or `0`.
+  - **Why:** written every frame as text, two dozen vehicles' keys cost a browser's frame more than
+    drawing them did.
 - **Physics on and off.** `physics.enabled` (seeded 1) turns the stepping off and on. While it is
   off, the world holds still and the clock runs on, so the steps due are dropped. Turned back on,
   the world carries on from where it stopped without catching up. `world_physics.ari` is the
@@ -2278,6 +2290,10 @@ scene:
     (what its plant took on the last navigator tick) with `command.by` (its controller, `intent`,
     `blend`, `hold`, or `pose`). `physics.stats.vehicles` has a line per vehicle, its plant named
     (a summary fleet's one line for the vehicles that have no keys, as in `entities.summary`).
+    An entity's keys are all written when it is listed, and again whenever the entities change
+    (`rev`: a spawn, a placing, a removal). Between those, its pose, speed, books and command, the
+    summary and the fleets' keys are written at the world's telemetry rate (`physics.telemetry_hz`,
+    above). The identity, `ids`, `count` and `rev` are never late.
   - **Intents.** Any entity can be steered from outside. A document, a script or a server writes
     its keys, and a C++ or Python host calls `WorldVehicles::set_intent` (`pycvc.WorldEntities`,
     below). Each navigator tick (0.06 s by default, `cvc::kSimTick`) reads them, and a change
