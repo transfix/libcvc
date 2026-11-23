@@ -488,12 +488,20 @@ public:
   // from AT along AT's velocity; a replay holds it where it is. The host holds each again every
   // frame (holon_sync's client_pump with an entity_playout does) and releases one it no longer
   // shows. False on a server, without physics, or for a size that is not finite and positive.
+  // MASS (kg): the vehicle's on the relay, when something there can push it (a jolt vehicle, a
+  // dynamic plant's box); 0 for a kinematic box. A jolt or boat model the participant drives meets
+  // it so (OW5o, held_obstacles).
   bool hold_entity(std::uint64_t id, const std::array<double, 3> &size,
-                   const cvc::physics::body_state &at);
+                   const cvc::physics::body_state &at, double mass = 0.0);
   void release_entity(std::uint64_t id);
   // The entities held, in id order; and where entity ID's box is now (false for one not held).
   std::vector<std::uint64_t> held_entities() const;
   bool held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const;
+  // The entities held as the vehicle the local participant drives meets them (OW5o): a jolt or
+  // boat model holds their boxes in its world (dynamic_vehicle_model::hold_obstacles), each where
+  // it is at the end of the coming step. How many times a model was made again for room for more.
+  std::vector<vehicle_obstacle> held_obstacles() const;
+  std::uint64_t vehicle_rebuilds() const { return _vehicle_rebuilds; }
 
   // THE VEHICLE IT DRIVES, PREDICTED (section 18.5, OW5b). CLIENT: the local avatar PID drives (or
   // is) a vehicle on the kinematic plant with DRIVE's numbers (room_entity::drive): from now on its
@@ -641,8 +649,10 @@ private:
     cvc::physics::vec3 half_extents;
     cvc::physics::body_state at;
     int steps = 0;
+    double mass = 0.0;
   };
   std::map<std::uint64_t, held> _held;
+  std::uint64_t _vehicle_rebuilds = 0; // models made again for room for the room's vehicles
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
   // CLIENT: the predicted vehicle one quantum at TICK on IN (its step, then the command for the
