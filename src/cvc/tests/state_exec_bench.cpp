@@ -2066,7 +2066,7 @@ struct sample {
   mem_info mem;
   int threads = -1;
   int64_t handles = -1, created = -1;
-  int64_t app_threads = -1, app_active = -1, app_pending = -1;
+  int64_t app_threads = -1, app_active = -1, app_pending = -1, app_cpu_pool = -1;
 };
 
 // The measured region of one rep: begin() just before the first submit, end() right after the
@@ -2089,6 +2089,10 @@ struct meter {
       s.app_threads = static_cast<int64_t>(app->threads().size());
       s.app_active = app->getActiveThreadCount();
       s.app_pending = app->getPendingThreadCount();
+      // Once the exec pool has workers the kernel pools are split (td 4.9, S2-Q11): the two
+      // counts above are then the background pool's (background_io) alone, and background_cpu,
+      // where every kernel but an io call's runs, is sized apart (0 until it starts).
+      s.app_cpu_pool = app->backgroundCpuPoolSize();
     }
   }
   void begin() {
@@ -2301,7 +2305,8 @@ void point_ctx::record(int rep, const meter &m, rep_out &o) {
     r.i("app_threads_before", m.a.app_threads)
         .i("app_threads_after", m.b.app_threads)
         .i("app_pool_active_after", m.b.app_active)
-        .i("app_pool_pending_after", m.b.app_pending);
+        .i("app_pool_pending_after", m.b.app_pending)
+        .i("app_cpu_pool_size_after", m.b.app_cpu_pool);
   if (!o.extra.body.empty())
     r.raw("extra", o.extra.str());
   if (!o.sample.body.empty())
@@ -4051,24 +4056,28 @@ struct mt_prog {
 // `n` rounds (2000, smoke 50) of state-set, state-get and state-data-set under the context's
 // chroot, after a state-watch on "w"; every 16th round writes "w" (the watch's handler counts in
 // "events") and calls bench-post, which posts controls to the next thread's scheduler
-// (run_multi_exec).
-mt_prog mt_program(const std::string &prog, bool smoke) {
+// (run_multi_exec). `heavy` (mt.groups' shape=uneven) gives fib, exceptions and cycle about
+// kHeavyWork times the work: fib 5 more (fib(n + 6) / fib(n + 1) is about 11.09), 11 times the
+// raises or the cycles.
+constexpr int64_t kHeavyWork = 11;
+mt_prog mt_program(const std::string &prog, bool smoke, bool heavy = false) {
   mt_prog p;
+  const int64_t scale = heavy ? kHeavyWork : 1;
   if (prog == "fib") {
-    const int64_t size = smoke ? 10 : 18;
+    const int64_t size = (smoke ? 10 : 18) + (heavy ? 5 : 0);
     p.src = "(begin (defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib " +
             istr(size) + "))";
     p.expect = istr(fib(size));
     p.iters = 2 * fib(size + 1) - 1;
   } else if (prog == "exceptions") {
-    const int64_t size = smoke ? 50 : 2000;
+    const int64_t size = (smoke ? 50 : 2000) * scale;
     p.src =
         loop_src(size, "(set c 0)",
                  "(set c (+ c (try (raise (ValueError \"boom\")) (catch (ValueError e) 1))))", "c");
     p.expect = istr(size);
     p.iters = size;
   } else if (prog == "cycle") {
-    const int64_t n = smoke ? 50 : 2000;
+    const int64_t n = (smoke ? 50 : 2000) * scale;
     p.src =
         loop_src(n, "(set c 0)", "(set c (+ c (let ((h nil)) (set h (lambda () i)) (h))))", "c");
     p.expect = istr(n * (n - 1) / 2);
@@ -4102,9 +4111,12 @@ struct ind_worker {
 
 // Where run_independent's threads run, when given (mt.groups: as the pool's pumping threads).
 // Thread 0 is the caller's twin: on caller_cpu, or floating at -1. Thread k is worker k's: on
-// placement_cpus(performance)[k - 1] while there is one, else floating (exec_pool.cpp).
+// placement_cpus(performance)[k - 1] while there is one, else floating (exec_pool.cpp). With
+// all_workers (pump=continuous with workers, where the caller pumps nothing), thread k is worker
+// k + 1's, on placement_cpus(performance)[k].
 struct ind_placement {
   int caller_cpu = -1;
+  bool all_workers = false;
 };
 
 // Run `count` of them from a barrier: each parses its own AST, or runs `shared` when given
@@ -4117,7 +4129,10 @@ int64_t run_independent(int64_t count, const mt_prog &p, int64_t runs, const se:
   const auto work = [&](std::atomic<bool> &go, std::atomic<int64_t> &ready, ind_worker &me,
                         std::size_t k) {
     try {
-      if (place && k == 0 && place->caller_cpu >= 0)
+      if (place && place->all_workers) {
+        if (k < placed)
+          cvc::place_current_thread(cvc::cpu_set::performance, static_cast<unsigned>(k));
+      } else if (place && k == 0 && place->caller_cpu >= 0)
         cvc::pin_current_thread(place->caller_cpu);
       else if (place && k > 0 && k - 1 < placed)
         cvc::place_current_thread(cvc::cpu_set::performance, static_cast<unsigned>(k - 1));
@@ -4376,11 +4391,19 @@ int64_t run_multi_exec(cvc::app *app, const std::string &prog, const mt_prog &p,
 
 // ---------------------------------------------------------------------------------------------
 // mt.groups, mt.groups.flood, mt.state_tree: exec_groups on the app's exec_pool, fork-join
-// (docs/STATE_EXEC_THREADED.md 4.1, 6.3; threaded execution's Stage 1).
+// (docs/STATE_EXEC_THREADED.md 4.1, 6.3; threaded execution's Stage 1); mt.groups'
+// pump=continuous, mt.groups.async and mt.groups.move: attached groups (Stage 2a, td 4.4).
 // ---------------------------------------------------------------------------------------------
 
 // A group's pump: Exec::run's slice (pycvc_exec.cpp), as mt.multi_exec's threads take it.
 constexpr se::pump_budget kGroupSlice{2000000, 0.05};
+
+// The pool's workers for `t` pumping threads. Fork-join: t - 1 and the caller. Continuous: the
+// attaching thread pumps nothing while the pool has workers (exec_pool.h), so t of them, or none
+// at t=1, where it pumps every group itself in pump_host.
+unsigned pool_workers_for(int64_t t, bool continuous) {
+  return static_cast<unsigned>(continuous && t > 1 ? t : std::max<int64_t>(0, t - 1));
+}
 
 // A point's pool: the app's exec_pool with `workers` workers besides the caller, built before any
 // group of the app (so threads above 0 make its lock manager shared and the workers pump, S1-Q1)
@@ -4391,13 +4414,15 @@ constexpr se::pump_budget kGroupSlice{2000000, 0.05};
 // rule, can be worker 1's) moves there for the point when no worker takes it, and back after, so
 // at every t the caller, the reference runs and mt.independent's thread 0 run on one CPU of the
 // workers' class that no worker shares. An unpinned driver (spawns_threads on Linux, --pin none)
-// stays unpinned.
+// stays unpinned. The second form does the same for a pool built apart (mt.groups.move's).
 struct pool_point {
   cvc::exec_pool &pool;
   int caller_cpu = -1; // where the caller pumps for the point, or -1: floating
   int home = -1;       // where the driver was pinned before it
   bool moved = false;
-  pool_point(cvc::app &app, unsigned workers, point_ctx &pc) : pool(build(app, workers)) {
+  pool_point(cvc::app &app, unsigned workers, point_ctx &pc)
+      : pool_point(build(app, workers), pc) {}
+  pool_point(cvc::exec_pool &built, point_ctx &pc) : pool(built) {
     home = caller_cpu = pc.pin_cpu;
     const std::vector<cvc::logical_cpu> cpus = cvc::placement_cpus(cvc::cpu_set::performance);
     if (home >= 0 && pool.threads() < cpus.size() && cpus.back().index != home) {
@@ -4447,24 +4472,47 @@ struct group_set {
 // What a run of groups did.
 struct groups_out {
   uint64_t steps = 0, rounds = 0;
+  uint64_t idle_waits = 0; // waits with nothing to pump (run_groups' `idle`; wait_for_work's)
   std::string error;
 };
 
+// While it lives, every one of `gs`' schedulers calls a notifier that notifies `idle`: a post to
+// any of them (a message, an async completion, a control) ends an idle wait of run_groups', as
+// pycvc's ExecPool.run_all waits once for its batch (S2a.8, S2-Q6). For unattached groups only.
+struct batch_notifier {
+  std::vector<se::exec_group *> gs;
+  se::detail::wakeup idle;
+  explicit batch_notifier(const std::vector<se::exec_group *> &groups) : gs(groups) {
+    for (se::exec_group *g : gs)
+      g->sched().set_wake_notifier(&notify, &idle);
+  }
+  ~batch_notifier() {
+    for (se::exec_group *g : gs)
+      g->sched().set_wake_notifier(nullptr, nullptr);
+  }
+  batch_notifier(const batch_notifier &) = delete;
+  batch_notifier &operator=(const batch_notifier &) = delete;
+  static void notify(void *ctx) noexcept { static_cast<se::detail::wakeup *>(ctx)->notify(); }
+};
+
 // Pump `gs` with pool.pump_all rounds (kGroupSlice, no deadline) until each group's program has
-// ended `runs` times. Group k runs asts[k % asts.size()] (expect[...] the same), one run at a time,
-// each run a process of its own, reaped once read. Completion is read from the groups' process
-// info after each round, never from on_complete (S1.md section 0, item 13). Returns the time from
-// the first submit to the last round's end (the meter, when given, brackets it). What is left of a
-// failed run is killed and reaped outside it.
+// ended runs[k % runs.size()] times. Group k runs asts[k % asts.size()] (expect[...] the same),
+// one run at a time, each run a process of its own, reaped once read. Completion is read from the
+// groups' process info after each round, never from on_complete (S1.md section 0, item 13).
+// With `idle` (a batch_notifier's), a round after which no live group wants a pump waits on it
+// for a post, 50 ms at most. Returns the time from the first submit to the last round's end (the
+// meter, when given, brackets it). What is left of a failed run is killed and reaped outside it.
 int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
                    const std::vector<se::value_t> &asts, const std::vector<std::string> &expect,
-                   int64_t runs, double timeout, meter *m, groups_out &out) {
+                   const std::vector<int64_t> &runs, double timeout, meter *m, groups_out &out,
+                   se::detail::wakeup *idle = nullptr) {
   const std::size_t n = gs.size();
   std::vector<int> pid(n, -1);
-  std::vector<int64_t> left(n, runs);
+  std::vector<int64_t> left(n);
   std::vector<uint64_t> steps0(n);
   std::vector<std::size_t> live;
   for (std::size_t k = 0; k < n; ++k) {
+    left[k] = runs[k % runs.size()];
     steps0[k] = gs[k]->sched().get_stats().total_steps;
     live.push_back(k);
   }
@@ -4513,6 +4561,12 @@ int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs
     live.resize(kept);
     if (!live.empty() && out.error.empty() && clk::now() > deadline)
       out.error = "timeout: " + istr(int64_t(live.size())) + " groups still running";
+    if (idle && !live.empty() && out.error.empty() &&
+        std::none_of(live.begin(), live.end(),
+                     [&](std::size_t k) { return gs[k]->wants_pump(); })) {
+      idle->wait_until(clk::now() + std::chrono::milliseconds(50));
+      ++out.idle_waits;
+    }
   }
   const int64_t wall = now_ns() - t0;
   if (m)
@@ -4524,6 +4578,149 @@ int64_t run_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs
   for (std::size_t k = 0; k < n; ++k)
     out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
   return wall;
+}
+
+// The groups of a continuous point, attached to `pool` by this thread (their attaching thread) for
+// as long as it lives, and detached here before it goes, so none is attached when the groups or
+// the pool go (~exec_pool asserts so).
+struct attached_groups {
+  cvc::exec_pool &pool;
+  std::vector<se::exec_group *> gs;
+  attached_groups(cvc::exec_pool &p, const std::vector<se::exec_group *> &groups) : pool(p) {
+    try {
+      for (se::exec_group *g : groups) {
+        pool.attach(*g);
+        gs.push_back(g);
+      }
+    } catch (...) {
+      detach_all();
+      throw;
+    }
+  }
+  ~attached_groups() { detach_all(); }
+  attached_groups(const attached_groups &) = delete;
+  attached_groups &operator=(const attached_groups &) = delete;
+  void detach_all() noexcept {
+    for (se::exec_group *g : gs)
+      try {
+        if (pool.attached(*g))
+          pool.detach(*g);
+      } catch (...) {
+      }
+    gs.clear();
+  }
+};
+
+// pump=continuous (S2a; exec_pool.h's host loop): the same runs as run_groups', on groups this
+// thread attached to `pool`, which pumps each whenever it has work (the workers, or at no workers
+// this thread in pump_host), with no rounds. This thread runs pump_host, and wait_for_work when
+// that had nothing, until each group's program has ended runs[k % runs.size()] times. It submits,
+// reads and reaps a group only under its token (with_group), once the run's on_complete has said
+// it ended: on_complete runs on this thread, deferred to its host queue (pump_host and
+// wait_for_work run it) or inline in pump_host. A run that fails calls none (S1.md section 0, item
+// 13), so when wait_for_work finds nothing for kIdleBeat (100 ms) every live group is read (a
+// with_group, which waits for a pump in progress and wakes the group after). The same checks
+// as run_groups'; out.rounds counts the loop's turns, out.idle_waits the waits that found nothing.
+int64_t run_attached(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
+                     const std::vector<se::value_t> &asts, const std::vector<std::string> &expect,
+                     const std::vector<int64_t> &runs, double timeout, meter *m, groups_out &out) {
+  constexpr double kHostSlice = 1e-3; // pump_host's time, so finished runs restart between pumps
+  constexpr double kIdleBeat = 0.1;   // a wait that ends early when there is work
+  const std::size_t n = gs.size();
+  std::vector<int> pid(n, -1);
+  std::vector<int64_t> left(n);
+  std::vector<uint64_t> steps0(n);
+  std::vector<std::size_t> live;
+  // Set by a run's on_complete, cleared when the run is read. Shared with the callbacks, since a
+  // deferred one that a read beat to it runs at the detach, after this returns.
+  const auto ended = std::make_shared<std::vector<std::atomic<bool>>>(n);
+  for (std::size_t k = 0; k < n; ++k) {
+    left[k] = runs[k % runs.size()];
+    pool.with_group(*gs[k], [&] { steps0[k] = gs[k]->sched().get_stats().total_steps; });
+    live.push_back(k);
+  }
+  const auto submit = [&](std::size_t k) {
+    se::execute_options opts;
+    opts.on_complete = [ended, k](se::value_t) { (*ended)[k].store(true); };
+    pid[k] = gs[k]->execute(asts[k % asts.size()], opts);
+  };
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  for (std::size_t k = 0; k < n; ++k)
+    pool.with_group(*gs[k], [&] { submit(k); });
+  while (!live.empty() && out.error.empty()) {
+    bool poll = false;
+    if (!pool.pump_host(kHostSlice) && !pool.wait_for_work(kIdleBeat)) {
+      poll = true;
+      ++out.idle_waits;
+    }
+    ++out.rounds;
+    for (se::exec_group *g : pool.take_failed())
+      if (out.error.empty())
+        out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    std::size_t kept = 0;
+    for (std::size_t k : live) {
+      if (!(*ended)[k].exchange(false) && !poll) {
+        live[kept++] = k;
+        continue;
+      }
+      bool running = false;
+      pool.with_group(*gs[k], [&] {
+        se::async_scheduler &s = gs[k]->sched();
+        const std::optional<se::process_info> info = s.get_process_info(pid[k]);
+        if (info && !se::is_finished(info->status)) {
+          running = true;
+          return;
+        }
+        const std::string &want = expect[k % expect.size()];
+        if (!info) {
+          out.error = gs[k]->opts().name + ": pid " + std::to_string(pid[k]) + " vanished";
+        } else if (info->status != se::process_status::terminated) {
+          out.error = gs[k]->opts().name + ": " + se::to_string(info->status) + ": " +
+                      info->exit_error.value_or("");
+        } else if (const std::optional<se::value_t> r = s.get_result(pid[k]);
+                   !r || se::to_string(*r) != want) {
+          out.error = gs[k]->opts().name + " returned " + (r ? se::to_string(*r) : "nothing") +
+                      ", expected " + want;
+        }
+        s.reap(pid[k]);
+        if (--left[k] > 0 && out.error.empty()) {
+          submit(k);
+          running = true;
+        }
+      });
+      if (running)
+        live[kept++] = k;
+    }
+    live.resize(kept);
+    if (!live.empty() && out.error.empty() && clk::now() > deadline)
+      out.error = "timeout: " + istr(int64_t(live.size())) + " groups still running";
+  }
+  const int64_t wall = now_ns() - t0;
+  if (m)
+    m->end();
+  for (std::size_t k : live)
+    pool.with_group(*gs[k], [&] {
+      gs[k]->sched().kill(pid[k]);
+      gs[k]->sched().reap(pid[k]);
+    });
+  for (std::size_t k = 0; k < n; ++k)
+    pool.with_group(*gs[k],
+                    [&] { out.steps += gs[k]->sched().get_stats().total_steps - steps0[k]; });
+  return wall;
+}
+
+// The pool's Stage 2 counters (continuous mode, S2a), from s0 to s1.
+void stage2_extras(jobj &e, const cvc::pool_stats &s0, const cvc::pool_stats &s1) {
+  e.i("wakes", int64_t(s1.wakes - s0.wakes))
+      .i("timer_wakes", int64_t(s1.timer_wakes - s0.timer_wakes))
+      .i("requeues", int64_t(s1.requeues - s0.requeues))
+      .i("parks", int64_t(s1.parks - s0.parks))
+      .i("empty_wakes", int64_t(s1.empty_wakes - s0.empty_wakes))
+      .i("moves", int64_t(s1.moves - s0.moves))
+      .i("host_pumps", int64_t(s1.host_pumps - s0.host_pumps));
 }
 
 // mt.groups.flood's run: programs [b, e) of `src` submitted at once, program i to group
@@ -6598,26 +6795,308 @@ std::vector<scenario> make_scenarios() {
     all.push_back(std::move(sc));
   }
 
-  // mt.groups: G groups on the app's exec_pool, fork-join (td 6.3, threaded Stage 1).
+  // mt.groups: G groups on the app's exec_pool, fork-join or continuous (td 6.3; threaded Stage 1,
+  // and Stage 2a's pump key).
   {
     scenario sc;
     sc.name = "mt.groups";
-    sc.what = "G exec_groups on the app's exec_pool with t - 1 workers (t pumping threads, the "
-              "caller one of them), each running fib 18, 2000 caught raises or 2000 closure cycles "
-              "`runs` times, one run at a time, pumped by pump_all rounds until every group's last "
-              "run ends: extra.speedup over one group alone and extra.of_ceiling, that over "
-              "mt.independent's speedup at t, both measured in the same rep with the pool's CPU "
-              "placement (Stage 1's gate: at least 0.9 at t=8 for fib), extra.pumps, "
-              "extra.helper_wakes and extra.effective_threads (td 6.3; the sanitizer jobs)";
+    sc.what = "G exec_groups on the app's exec_pool, t pumping threads, each running fib 18, 2000 "
+              "caught raises or 2000 closure cycles `runs` times, one run at a time, until every "
+              "group's last run ends: pump=fork_join (the default) pumps them by pump_all rounds "
+              "on t - 1 workers and the caller; pump=continuous attaches them to t workers (none "
+              "at t=1: the caller pumps every group in pump_host), the caller driving them by "
+              "pump_host and wait_for_work. extra.speedup over one group alone, in the same mode, "
+              "and extra.of_ceiling, that over mt.independent's speedup at t, both measured in the "
+              "same rep with the pool's CPU placement (Stage 1's gate: at least 0.9 at t=8 for "
+              "fib; Stage 2a's the same at pump=continuous), extra.pumps, extra.helper_wakes, "
+              "extra.effective_threads, and continuous mode's extra.wakes, timer_wakes, requeues, "
+              "parks, empty_wakes, moves and host_pumps. shape=uneven (S2-Q6's evidence, recorded, "
+              "never gated): group 0 runs the program at about 11 times its work `runs` times, and "
+              "every other group the program itself 11 times as often, so the groups have equal "
+              "work in runs of unequal length; its speedup is over the groups' solo runs summed "
+              "(td 6.3; the sanitizer jobs)";
     sc.executors = {"async"};
-    sc.sizes = {{"t", {"1", "2", "4", "8", "16"}},
-                {"groups", {"8", "16"}},
-                {"prog", {"fib", "exceptions", "cycle"}},
-                {"runs", {"5"}}};
+    sc.sizes = {{"t", {"1", "2", "4", "8", "16"}},        {"groups", {"8", "16"}},
+                {"prog", {"fib", "exceptions", "cycle"}}, {"runs", {"5"}},
+                {"pump", {"fork_join", "continuous"}},    {"shape", {"even", "uneven"}}};
     sc.smoke = {{"t", {"1", "2"}},
                 {"groups", {"2"}},
                 {"prog", {"fib", "exceptions", "cycle"}},
-                {"runs", {"1"}}};
+                {"runs", {"1"}},
+                {"pump", {"fork_join", "continuous"}},
+                {"shape", {"even", "uneven"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string prog = pc.s("prog"), pump = pc.s("pump", "fork_join");
+      const std::string shape = pc.s("shape", "even");
+      std::string why;
+      if (prog != "fib" && prog != "exceptions" && prog != "cycle")
+        why = "prog=" + prog + " is not fib, exceptions or cycle";
+      else if (pump != "fork_join" && pump != "continuous")
+        why = "pump=" + pump + " is not fork_join or continuous";
+      else if (shape != "even" && shape != "uneven")
+        why = "shape=" + shape + " is not even or uneven";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), ng = std::max<int64_t>(1, pc.i("groups"));
+      const int64_t runs = std::max<int64_t>(1, pc.i("runs"));
+      const bool continuous = pc.s("pump", "fork_join") == "continuous";
+      const bool uneven = pc.s("shape", "even") == "uneven";
+      const mt_prog p = mt_program(pc.s("prog"), pc.cfg.smoke);
+      const double per_group = double(runs * p.iters);
+      // Group k runs asts[k % size], each run checked against expect[k % size], each[k % size]
+      // times (a group's execute copies the AST). shape=uneven: group 0 the heavy program.
+      const se::value_t ast = se::parse(p.src);
+      std::vector<se::value_t> asts{ast};
+      std::vector<std::string> expect{p.expect};
+      std::vector<int64_t> each{runs};
+      const mt_prog heavy = uneven ? mt_program(pc.s("prog"), pc.cfg.smoke, true) : p;
+      if (uneven) {
+        asts.assign(std::size_t(ng), ast);
+        asts[0] = se::parse(heavy.src);
+        expect.assign(std::size_t(ng), p.expect);
+        expect[0] = heavy.expect;
+        each.assign(std::size_t(ng), runs * kHeavyWork);
+        each[0] = runs;
+      }
+      auto app = make_app();
+      pool_point pp(*app, pool_workers_for(nt, continuous), pc);
+      const group_set groups(*app, ng);
+      std::optional<attached_groups> attached; // continuous: for the point, by this thread
+      if (continuous)
+        attached.emplace(pp.pool, groups.gs);
+      const auto drive = [&](const std::vector<se::exec_group *> &gs, std::size_t k, meter *m,
+                             groups_out &out) {
+        const std::vector<se::value_t> a =
+            gs.size() == 1 ? std::vector<se::value_t>{asts[k]} : asts;
+        const std::vector<std::string> e =
+            gs.size() == 1 ? std::vector<std::string>{expect[k]} : expect;
+        const std::vector<int64_t> r = gs.size() == 1 ? std::vector<int64_t>{each[k]} : each;
+        return continuous ? run_attached(pp.pool, gs, a, e, r, pc.cfg.timeout, m, out)
+                          : run_groups(pp.pool, gs, a, e, r, pc.cfg.timeout, m, out);
+      };
+      const std::vector<se::exec_group *> first(groups.gs.begin(), groups.gs.begin() + 1);
+      const std::vector<se::exec_group *> second(groups.gs.begin() + (ng > 1 ? 1 : 0),
+                                                 groups.gs.begin() + (ng > 1 ? 2 : 0));
+      const ind_placement place{pp.caller_cpu, continuous && pp.pool.threads() > 0};
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false; // the workers keep their CPUs (Linux)
+        // The ceiling, from this rep: mt.independent's ast=private speedup at t, its threads
+        // placed as the pool's.
+        std::vector<ind_worker> iw;
+        const int64_t ind_one = run_independent(1, p, runs, nullptr, iw, nullptr, &place);
+        const int64_t ind_wall = run_independent(nt, p, runs, nullptr, iw, nullptr, &place);
+        for (const ind_worker &w : iw)
+          if (!w.error.empty())
+            o.fail("mt.independent: " + w.error);
+        const double ceiling = ind_wall > 0 ? double(nt) * double(ind_one) / double(ind_wall) : 0.0;
+        // One group alone (fork-join: the caller pumps it), the reference; shape=uneven also a
+        // light one alone. Then all of them, measured.
+        groups_out ref, out;
+        const int64_t one = drive(first, 0, nullptr, ref);
+        if (!ref.error.empty())
+          o.fail("one group: " + ref.error);
+        double serial = double(ng) * double(one); // the groups' solo runs, summed
+        int64_t one_light = 0;
+        if (uneven && !second.empty()) {
+          groups_out light;
+          one_light = drive(second, 1, nullptr, light);
+          if (!light.error.empty())
+            o.fail("one light group: " + light.error);
+          serial = double(one) + double(ng - 1) * double(one_light);
+        }
+        const cvc::pool_stats s0 = pp.pool.stats();
+        drive(groups.gs, 0, &m, out);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        o.iterations = uneven ? runs * heavy.iters + (ng - 1) * runs * kHeavyWork * p.iters
+                              : ng * runs * p.iters;
+        o.programs = uneven ? runs + (ng - 1) * runs * kHeavyWork : ng * runs;
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        const double speedup = wall > 0 ? serial / wall : 0.0;
+        o.extra.d("speedup", speedup)
+            .d("ceiling_speedup", ceiling)
+            .d("of_ceiling", ceiling > 0 ? speedup / ceiling : 0.0)
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("worker_pumps", int64_t(s1.worker_pumps - s0.worker_pumps))
+            .i("skipped", int64_t(s1.skipped - s0.skipped))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds))
+            .d("single_group_ns_per_iter",
+               uneven && !second.empty() ? double(one_light) / double(runs * kHeavyWork * p.iters)
+                                         : double(one) / per_group)
+            .d("independent_ns_per_iter", double(ind_one) / per_group)
+            .i("caller_cpu", pp.caller_cpu);
+        if (uneven)
+          o.extra.d("heavy_group_ns_per_iter", double(one) / double(runs * heavy.iters));
+        if (continuous) {
+          stage2_extras(o.extra, s0, s1);
+          o.extra.i("idle_waits", int64_t(out.idle_waits));
+        }
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.groups.async: async kernels from G groups, completion latency and calls per second, in
+  // both pump modes (td 6.3, threaded Stage 2a).
+  {
+    scenario sc;
+    sc.name = "mt.groups.async";
+    sc.what = "G exec_groups on the app's exec_pool (t as mt.groups'), each running one program "
+              "of `calls` async calls in turn, (bench-lat (bench-async i)): the kernel spins 20 us "
+              "(kernel=spin; background_cpu once the kernel pools split) or blocks 1 ms "
+              "(kernel=sleep, an io call: the background pool) and returns when it ended, and "
+              "bench-lat takes the time since. pump=fork_join drives pump_all rounds and, with "
+              "nothing to pump, waits for a post on a notifier every group's scheduler calls (as "
+              "pycvc's ExecPool.run_all waits for its batch, S2-Q6); pump=continuous attaches the "
+              "groups and drives them by pump_host and wait_for_work. extra.lat_p50_ns and "
+              "extra.lat_p99_ns, a call's completion latency from its kernel's end to its "
+              "process running on (latency_ns has every percentile), extra.calls_per_s, and the "
+              "pool's counters (td 6.3; S2.md section 6, recorded)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"1", "2", "4", "8"}},
+                {"groups", {"8"}},
+                {"kernel", {"spin", "sleep"}},
+                {"calls", {"200"}},
+                {"pump", {"fork_join", "continuous"}}};
+    sc.smoke = {{"t", {"1", "2"}},
+                {"groups", {"2"}},
+                {"kernel", {"spin"}},
+                {"calls", {"5"}},
+                {"pump", {"fork_join", "continuous"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string kernel = pc.s("kernel"), pump = pc.s("pump", "fork_join");
+      std::string why;
+      if (kernel != "spin" && kernel != "sleep")
+        why = "kernel=" + kernel + " is not spin or sleep";
+      else if (pump != "fork_join" && pump != "continuous")
+        why = "pump=" + pump + " is not fork_join or continuous";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), ng = std::max<int64_t>(1, pc.i("groups"));
+      const int64_t calls = std::max<int64_t>(1, pc.i("calls"));
+      const bool continuous = pc.s("pump", "fork_join") == "continuous";
+      const bool blocks = pc.s("kernel") == "sleep";
+      auto app = make_app();
+      pool_point pp(*app, pool_workers_for(nt, continuous), pc);
+      // Group k's latencies, appended by its pumps (under its token, on whichever thread pumps
+      // it) and read once its program has ended. Declared before the groups, which use them.
+      std::vector<std::vector<int64_t>> lat(static_cast<std::size_t>(ng));
+      std::vector<se::environment_ptr> envs;
+      const group_set groups(*app, ng, [&](int64_t) {
+        envs.push_back(se::environment::extend(se::frozen_builtins(*app)));
+        return envs.back();
+      });
+      // The natives, in each group's own base, on its own host (each group's kernels post to it).
+      se::async_options ao;
+      ao.io = blocks;
+      for (std::size_t k = 0; k < std::size_t(ng); ++k) {
+        se::register_async_fn(
+            envs[k], groups.gs[k]->host(), "bench-async",
+            [blocks](std::span<const se::value_t>) -> se::async_kernel {
+              return [blocks](se::async_call &) -> se::value_t {
+                if (blocks)
+                  block_1ms();
+                else
+                  spin_for_ns(20000);
+                return se::value_t(now_ns());
+              };
+            },
+            ao);
+        se::builtins::register_fn(envs[k], "bench-lat",
+                                  [log = &lat[k]](std::span<const se::value_t> a) -> se::value_t {
+                                    log->push_back(now_ns() - int_arg(a, 0, 0));
+                                    return se::value_t(int64_t(0));
+                                  });
+      }
+      const std::vector<se::value_t> asts{
+          se::parse(loop_src(calls, "", "(bench-lat (bench-async i))", "i"))};
+      const std::vector<std::string> expect{istr(calls)};
+      std::optional<attached_groups> attached;
+      std::optional<batch_notifier> batch;
+      if (continuous)
+        attached.emplace(pp.pool, groups.gs);
+      else
+        batch.emplace(groups.gs);
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false;
+        m.app = app.get(); // the kernel pools' counts (background_cpu's size apart)
+        for (std::vector<int64_t> &v : lat) {
+          v.clear();
+          v.reserve(std::size_t(calls));
+        }
+        groups_out out;
+        const cvc::pool_stats s0 = pp.pool.stats();
+        if (continuous)
+          run_attached(pp.pool, groups.gs, asts, expect, {1}, pc.cfg.timeout, &m, out);
+        else
+          run_groups(pp.pool, groups.gs, asts, expect, {1}, pc.cfg.timeout, &m, out, &batch->idle);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        if (!out.error.empty())
+          o.fail(out.error);
+        std::vector<int64_t> all_lat;
+        for (const std::vector<int64_t> &v : lat)
+          all_lat.insert(all_lat.end(), v.begin(), v.end());
+        if (o.ok && int64_t(all_lat.size()) != ng * calls)
+          o.fail("timed " + istr(int64_t(all_lat.size())) + " calls, not " + istr(ng * calls));
+        std::sort(all_lat.begin(), all_lat.end());
+        o.programs = ng;
+        o.async_calls = ng * calls;
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        o.extra.d("calls_per_s", wall > 0 ? double(ng * calls) * 1e9 / wall : 0.0)
+            .i("lat_p50_ns", all_lat.empty() ? 0 : pct_at(all_lat, 0.50))
+            .i("lat_p99_ns", all_lat.empty() ? 0 : pct_at(all_lat, 0.99))
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("worker_pumps", int64_t(s1.worker_pumps - s0.worker_pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds))
+            .i("idle_waits", int64_t(out.idle_waits));
+        if (continuous)
+          stage2_extras(o.extra, s0, s1);
+        o.latency_ns = std::move(all_lat);
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.groups.move: what a group's move to another thread costs in continuous mode (td 6.3,
+  // threaded Stage 2a).
+  {
+    scenario sc;
+    sc.name = "mt.groups.move";
+    sc.what =
+        "G exec_groups attached in turn to two pools of t workers built alike but for "
+        "pool_options::force_move (on: every pump on another thread than the group's last), "
+        "each group running prog `runs` times in pumps of `steps` steps, both pools in each "
+        "rep, twice each, in the order off, on, on, off: extra.ns_per_move, the time force_move "
+        "added over the moves it added (the pools' stats().moves; extra.moves), with each "
+        "pool's time, moves and pumps, summed. Stage 2a's gate: at most 5000 ns, judged where "
+        "extra.moves is above 0 (td 6.3)";
+    sc.executors = {"async"};
+    sc.sizes = {{"t", {"2", "4", "8"}},
+                {"groups", {"16"}},
+                {"prog", {"fib"}},
+                {"runs", {"5"}},
+                {"steps", {"2000"}}};
+    sc.smoke = {
+        {"t", {"2"}}, {"groups", {"4"}}, {"prog", {"fib"}}, {"runs", {"1"}}, {"steps", {"500"}}};
     sc.spawns_threads = true;
     sc.accept = [](const std::string &exec, const point_ctx &pc) {
       const std::string prog = pc.s("prog");
@@ -6630,54 +7109,65 @@ std::vector<scenario> make_scenarios() {
     sc.run = [](point_ctx &pc) {
       const int64_t nt = std::max<int64_t>(1, pc.i("t")), ng = std::max<int64_t>(1, pc.i("groups"));
       const int64_t runs = std::max<int64_t>(1, pc.i("runs"));
+      const int64_t steps = std::max<int64_t>(1, pc.i("steps"));
       const mt_prog p = mt_program(pc.s("prog"), pc.cfg.smoke);
-      const double per_group = double(runs * p.iters);
-      const std::vector<se::value_t> asts{se::parse(p.src)}; // a group's execute copies it
+      const std::vector<se::value_t> asts{se::parse(p.src)};
       const std::vector<std::string> expect{p.expect};
       auto app = make_app();
-      pool_point pp(*app, static_cast<unsigned>(nt - 1), pc);
+      // Neither pool is the app's, so nothing makes its lock manager shared: the setting does,
+      // before the first group, or every group would stay on its attaching thread (S1-Q1).
+      cvc::state::instance (*app)("state_exec.locks.threading").value(std::string("shared"));
+      const auto build = [&](bool force_move) {
+        unpinned_scope u;
+        cvc::pool_options o;
+        o.threads = static_cast<unsigned>(nt);
+        o.pump_steps = static_cast<std::uint64_t>(steps);
+        o.force_move = force_move;
+        return std::make_unique<cvc::exec_pool>(o);
+      };
+      const std::unique_ptr<cvc::exec_pool> steady = build(false), mover = build(true);
+      pool_point pp(*steady, pc); // the caller's CPU, as mt.groups'
       const group_set groups(*app, ng);
-      const std::vector<se::exec_group *> first(groups.gs.begin(), groups.gs.begin() + 1);
-      const ind_placement place{pp.caller_cpu};
       pc.reps([&](meter &m, rep_out &o) {
-        m.widen = false; // the workers keep their CPUs (Linux)
-        // The ceiling, from this rep: mt.independent's ast=private speedup at t, its threads
-        // placed as the pool's.
-        std::vector<ind_worker> iw;
-        const int64_t ind_one = run_independent(1, p, runs, nullptr, iw, nullptr, &place);
-        const int64_t ind_wall = run_independent(nt, p, runs, nullptr, iw, nullptr, &place);
-        for (const ind_worker &w : iw)
-          if (!w.error.empty())
-            o.fail("mt.independent: " + w.error);
-        const double ceiling = ind_wall > 0 ? double(nt) * double(ind_one) / double(ind_wall) : 0.0;
-        // One group alone (the caller pumps it), the reference; then all of them, measured.
-        groups_out ref, out;
-        const int64_t one =
-            run_groups(pp.pool, first, asts, expect, runs, pc.cfg.timeout, nullptr, ref);
-        if (!ref.error.empty())
-          o.fail("one group: " + ref.error);
-        const cvc::pool_stats s0 = pp.pool.stats();
-        run_groups(pp.pool, groups.gs, asts, expect, runs, pc.cfg.timeout, &m, out);
-        const cvc::pool_stats s1 = pp.pool.stats();
-        if (!out.error.empty())
-          o.fail(out.error);
-        o.iterations = ng * runs * p.iters;
-        o.programs = ng * runs;
-        o.steps_total = out.steps;
-        const double wall = double(m.wall());
-        const double speedup = wall > 0 ? double(ng) * double(one) / wall : 0.0;
-        o.extra.d("speedup", speedup)
-            .d("ceiling_speedup", ceiling)
-            .d("of_ceiling", ceiling > 0 ? speedup / ceiling : 0.0)
-            .i("pumps", int64_t(s1.pumps - s0.pumps))
-            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
-            .i("worker_pumps", int64_t(s1.worker_pumps - s0.worker_pumps))
-            .i("skipped", int64_t(s1.skipped - s0.skipped))
-            .i("effective_threads", s1.effective_threads)
-            .i("rounds", int64_t(out.rounds))
-            .d("single_group_ns_per_iter", double(one) / per_group)
-            .d("independent_ns_per_iter", double(ind_one) / per_group)
-            .i("caller_cpu", pp.caller_cpu);
+        m.widen = false;
+        // Each pool's runs, summed: [0] force_move off, [1] on.
+        struct side {
+          int64_t wall = 0, moves = 0, pumps = 0;
+          uint64_t steps = 0;
+        } sides[2];
+        // ABBA (off, on, on, off), so a drift across the rep, or the cost of going first, falls on
+        // both pools alike.
+        m.begin();
+        for (const int which : {0, 1, 1, 0}) {
+          cvc::exec_pool &pool = which ? *mover : *steady;
+          const attached_groups attached(pool, groups.gs);
+          groups_out out;
+          const cvc::pool_stats s0 = pool.stats();
+          sides[which].wall +=
+              run_attached(pool, groups.gs, asts, expect, {runs}, pc.cfg.timeout, nullptr, out);
+          const cvc::pool_stats s1 = pool.stats();
+          sides[which].moves += int64_t(s1.moves - s0.moves);
+          sides[which].pumps += int64_t(s1.pumps - s0.pumps);
+          sides[which].steps += out.steps;
+          if (!out.error.empty())
+            o.fail(out.error);
+        }
+        m.end();
+        const int64_t added = sides[1].moves - sides[0].moves;
+        o.iterations = 4 * ng * runs * p.iters;
+        o.programs = 4 * ng * runs;
+        o.steps_total = sides[0].steps + sides[1].steps;
+        o.extra
+            .d("ns_per_move",
+               added > 0 ? double(sides[1].wall - sides[0].wall) / double(added) : 0.0)
+            .i("moves", added)
+            .i("moves_off", sides[0].moves)
+            .i("moves_on", sides[1].moves)
+            .i("pumps_off", sides[0].pumps)
+            .i("pumps_on", sides[1].pumps)
+            .i("wall_off_ns", sides[0].wall)
+            .i("wall_on_ns", sides[1].wall)
+            .i("effective_threads", steady->threads());
       });
     };
     all.push_back(std::move(sc));
@@ -6832,7 +7322,7 @@ std::vector<scenario> make_scenarios() {
         m.widen = false;
         groups_out out;
         const cvc::pool_stats s0 = pp.pool.stats();
-        run_groups(pp.pool, groups.gs, asts, expect, 1, pc.cfg.timeout, &m, out);
+        run_groups(pp.pool, groups.gs, asts, expect, {1}, pc.cfg.timeout, &m, out);
         const cvc::pool_stats s1 = pp.pool.stats();
         if (!out.error.empty())
           o.fail(out.error);

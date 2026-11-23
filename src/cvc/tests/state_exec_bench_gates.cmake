@@ -12,7 +12,11 @@
 #     the same steps (threaded execution's Stage 1, rule 1);
 #   - the same points on the async scheduler at slice_steps 256 (threaded execution's Stage S): a
 #     pick that runs up to 256 steps of its process takes the same steps as one that runs one, so
-#     the pins are the same numbers (S2.md: step counts unchanged at any slice_steps).
+#     the pins are the same numbers (S2.md: step counts unchanged at any slice_steps);
+#   - mt.groups at its smoke sizes, continuous against fork-join (Stage 2a): attached groups,
+#     pumped whenever they have work in pumps of the pool's budget, take the same steps as groups
+#     pumped by pump_all rounds, on the caller (t=1) and on workers (t=2), for even and uneven
+#     groups.
 #
 # Run by CTest as
 #   cmake -DBENCH=<state_exec_bench> -DPYTHON=<python3> -DRUNNER=<tools/bench/state_exec_bench.py>
@@ -32,7 +36,8 @@ file(MAKE_DIRECTORY "${WORK_DIR}")
 set(LOCKS_RUN "${WORK_DIR}/lock_uncontended.jsonl")
 set(SCHED_RUN "${WORK_DIR}/sched_single.jsonl")
 set(SLICE_RUN "${WORK_DIR}/sched_single_slice.jsonl")
-file(REMOVE "${LOCKS_RUN}" "${SCHED_RUN}" "${SLICE_RUN}") # --json appends
+set(GROUPS_RUN "${WORK_DIR}/mt_groups.jsonl")
+file(REMOVE "${LOCKS_RUN}" "${SCHED_RUN}" "${SLICE_RUN}" "${GROUPS_RUN}") # --json appends
 
 set(failed "")
 
@@ -59,6 +64,10 @@ gate_step("state_exec_bench sched.single.* slice_steps=256"
   "${BENCH}" --scenario sched.single.arith_loop --scenario sched.single.tail_rec
   --executor async --size slice_steps=256 --size driver=spin,group --size base=own,frozen
   --reps 1 --warmup 0 --json "${SLICE_RUN}")
+# Stage 2a: mt.groups in both pump modes, at its smoke sizes.
+gate_step("state_exec_bench mt.groups pump=fork_join,continuous"
+  "${BENCH}" --scenario mt.groups --smoke --size t=1,2 --size pump=fork_join,continuous
+  --size shape=even,uneven --reps 1 --warmup 0 --json "${GROUPS_RUN}")
 
 # 0 steps and 0 allocations per uncontended lock, for a one-form body (design 8.8, 11.2).
 foreach(metric extra.steps_per_lock extra.allocs_per_lock)
@@ -90,6 +99,12 @@ foreach(point "arith_loop;40000;1080020" "tail_rec;1000;25020" "tail_rec;10000;2
     "${PYTHON}" -I "${RUNNER}" gate "${SLICE_RUN}" --scenario "sched.single.${program}"
     --where n=${n} --where slice_steps=256 --metric steps_total --min ${steps} --max ${steps})
 endforeach()
+
+# Continuous mode takes fork-join's steps, point by point (one run, paired on pump: a fork-join
+# point without its continuous twin fails, as does a continuous point that failed its checks).
+gate_step("compare mt.groups pump=fork_join:continuous steps_total unchanged"
+  "${PYTHON}" -I "${RUNNER}" compare "${GROUPS_RUN}" "${GROUPS_RUN}"
+  --pair pump=fork_join:continuous --metric steps_total --threshold 0 --fail-on-change)
 
 if(failed)
   message(FATAL_ERROR "state_exec_bench_gates failed:${failed}")

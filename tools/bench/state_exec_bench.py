@@ -46,7 +46,8 @@ run (a gate the design states in nanoseconds, steps or allocations rather than a
 the same exit statuses. A scenario in GATE_GUARDS has its gate judge only points that could fail
 it: mt.ariadne_docs' points with documents outside `any` groups of their own fail as vacuous,
 points that can wake no helper are n/a (a gate with nothing but n/a fails), and the run's heavy
-points must show a worker pumping (the control).
+points must show a worker pumping (the control); mt.groups' speedup gates judge even groups only
+(shape=uneven is n/a), and mt.groups.move's points where force_move added no move fail as vacuous.
 
 Standard library only.
 """
@@ -123,8 +124,10 @@ def load(path):
 # async points: driver=group's base env, own by default). sched.single.*'s driver key was already
 # there (spin, the bare scheduler's loop), so its new value, group, needs no default. Stage S added
 # slice_steps (sched.single.*'s and limits.*'s async points): 1 is the loop every point ran before.
+# Stage 2a added mt.groups' pump (fork_join, Stage 1's pump_all rounds; continuous, attached groups)
+# and shape (even, every group alike; uneven, S2-Q6's evidence point).
 IMPLICIT_DEFAULTS = {"policy": "rr", "locks": "none", "chroot": "0", "writes": "none",
-                     "base": "own", "slice_steps": "1"}
+                     "base": "own", "slice_steps": "1", "pump": "fork_join", "shape": "even"}
 
 
 def param(r, name):
@@ -403,22 +406,38 @@ def parse_pair(text):
 
 
 # Scenarios whose gates judge something only at points that could fail them, and the metrics that
-# holds for. mt.ariadne_docs' small-frames gate (S1.md section 6: small frames wake no helper):
-# - vacuous: each row's metric must be at least the row's value of the param, else the point
-#   fails. Every document must be in a group of its own (extra.isolated) and an `any` one
-#   (extra.any_groups): the caller pumps group 0 and host-affinity groups, and they wake nobody;
+# holds for; each key of an entry is optional. mt.ariadne_docs' small-frames gate (S1.md section
+# 6: small frames wake no helper):
+# - vacuous: each row's metric must be at least the row's value of the param (or the number, when
+#   one is given), else the point fails. Every document must be in a group of its own
+#   (extra.isolated) and an `any` one (extra.any_groups): the caller pumps group 0 and
+#   host-affinity groups, and they wake nobody;
 # - not_applicable: a point whose rows all have this metric at 0 can wake no helper (t=0, no
 #   worker; docs=1, the caller takes the lone group itself), so it prints n/a, neither PASS nor
 #   FAIL. A gate where every point is n/a fails: it judged nothing;
 # - control: the same run's points matching `where` that can wake a helper must have the metric's
 #   median at least `min` (heavy frames pumped on a worker), else the gate fails: a pool whose
 #   adaptive wake never fires passes small frames too.
+# mt.groups' speedup gates (Stage 1's and Stage 2a's: extra.of_ceiling at t=8; S2.md section 6):
+# - applies: a point whose params differ from these (implicit defaults apply) is n/a. shape=uneven
+#   is S2-Q6's evidence, recorded and never gated: the heavy group bounds its speedup.
+# mt.groups.move's move cost (S2a: under 5 us a move): a point where force_move added no move
+# (extra.moves 0: no other worker to move to, or CVC_EXEC_FORCE_MOVE set for both pools) has no
+# cost to judge, and fails as vacuous.
 GATE_GUARDS = {
     "mt.ariadne_docs": {
         "metrics": ("extra.helper_wakes", "extra.wakes_per_frame", "extra.worker_pumps"),
         "vacuous": (("extra.isolated", "docs"), ("extra.any_groups", "docs")),
         "not_applicable": "extra.wakeable",
         "control": {"where": {"frame": "heavy"}, "metric": "extra.worker_pumps", "min": 1},
+    },
+    "mt.groups": {
+        "metrics": ("extra.of_ceiling", "extra.speedup"),
+        "applies": {"shape": "even"},
+    },
+    "mt.groups.move": {
+        "metrics": ("extra.ns_per_move",),
+        "vacuous": (("extra.moves", 1),),
     },
 }
 
@@ -431,9 +450,14 @@ def guard_of(scenario, metric_name):
 
 def unmet_guard(rs, guard):
     """Why the rows of one point leave the gate vacuous (the guard's `vacuous`), or ""."""
-    for metric_name, name in guard["vacuous"]:
+    for metric_name, name in guard.get("vacuous", ()):
         for r in rs:
-            have, need = metric(r, metric_name), param(r, name)
+            have = metric(r, metric_name)
+            if isinstance(name, (int, float)):
+                need, what = name, f"{name:g}"
+            else:
+                need = param(r, name)
+                what = f"{name} {need}"
             if have is None:
                 return f"vacuous: no {metric_name}"
             try:
@@ -441,14 +465,24 @@ def unmet_guard(rs, guard):
             except ValueError:
                 below = False
             if below:
-                return f"vacuous: {metric_name} {have:g} below {name} {need}"
+                return f"vacuous: {metric_name} {have:g} below {what}"
+    return ""
+
+
+def outside_guard(rs, guard):
+    """The first of the guard's `applies` params a row of one point differs on, as K=V, or ""."""
+    for name, want in sorted(guard.get("applies", {}).items()):
+        for r in rs:
+            have = param(r, name)
+            if have != want:
+                return f"{name}={have}"
     return ""
 
 
 def not_applicable(rs, guard):
     """Whether every row of one point has the guard's not_applicable metric at 0."""
-    name = guard["not_applicable"]
-    return all(metric(r, name) == 0 for r in rs)
+    name = guard.get("not_applicable")
+    return name is not None and all(metric(r, name) == 0 for r in rs)
 
 
 def control_failures(recs, scenario, guard, executor, out):
@@ -516,6 +550,11 @@ def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=
         guard = guard_of(key[0], metric_name)
         if guard:
             guarded[key[0]] = guard
+        outside = outside_guard(rs, guard) if guard else ""
+        if outside:
+            print(f"{label} {'':>12} {'':>7}  n/a ({outside}: recorded, not gated)", file=out)
+            na += 1
+            continue
         if not all(r.get("ok", False) for r in rs):
             print(f"{label} {'':>12} {'':>7}  FAIL (a rep failed its checks)", file=out)
             failed += 1
@@ -551,7 +590,8 @@ def gate(recs, scenario, metric_name, lo=None, hi=None, stat="median", executor=
         print("  every point is n/a: the gate judged nothing", file=out)
         failed += 1
     for name in sorted(guarded):
-        failed += control_failures(recs, name, guarded[name], executor, out)
+        if "control" in guarded[name]:
+            failed += control_failures(recs, name, guarded[name], executor, out)
     return 1 if failed else (2 if inconclusive else 0)
 
 

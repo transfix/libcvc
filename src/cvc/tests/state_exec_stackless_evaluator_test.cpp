@@ -14,6 +14,9 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <set>
+#include <span>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -1139,4 +1142,140 @@ TEST(AndOr, ARestrictedEvaluatorGatesThemAsSpecialForms) {
   ev.restrict_special_forms(
       std::make_shared<const std::set<std::string>>(std::set<std::string>{"if", "and", "or"}));
   EXPECT_EQ(to_string(ev.evaluate_script("(if (and 1 (or nil 2)) 3 4)")), "3");
+}
+
+// --- evaluator_state::native_site, the long-step monitor's name (S2a.7, S2-Q11) ---
+
+namespace {
+
+// One step of a program: native_site's name after it ("" while null), and whether a probe native
+// ran in it.
+struct site_step {
+  std::string site;
+  bool probed = false;
+};
+
+// An evaluator whose environment has (probe-op x), which returns x, and (probe-raise), which
+// throws; both count their calls in `probes`.
+struct site_world {
+  int probes = 0;
+  stackless_evaluator ev{make_env()};
+
+  environment_ptr make_env() {
+    environment_ptr env = builtins::make_default_environment();
+    builtins::register_fn(env, "probe-op", [this](std::span<const value_t> a) -> value_t {
+      ++probes;
+      return a.empty() ? nil_value() : a[0];
+    });
+    builtins::register_fn(env, "probe-raise", [this](std::span<const value_t>) -> value_t {
+      ++probes;
+      throw std::runtime_error("probe-raise: raised");
+    });
+    return env;
+  }
+
+  // `script` stepped to its end (data_step_nodes `nodes`): each step's name, read right after it
+  // as the monitor does, the step that raised out of step() included.
+  std::vector<site_step> steps(const std::string &script, std::size_t nodes = 0) {
+    evaluator_state st = ev.create_state(script);
+    st.data_step_nodes = nodes;
+    std::vector<site_step> out;
+    for (int i = 0; i < 100000; ++i) {
+      const int before = probes;
+      bool done = false;
+      try {
+        done = ev.step(st);
+      } catch (const std::exception &) {
+        done = true;
+      }
+      out.push_back(
+          {st.native_site ? std::string(st.native_site) : std::string(), probes != before});
+      if (done)
+        break;
+    }
+    return out;
+  }
+};
+
+// The names of the steps that named one, in order.
+std::vector<std::string> named(const std::vector<site_step> &steps) {
+  std::vector<std::string> out;
+  for (const site_step &s : steps)
+    if (!s.site.empty())
+      out.push_back(s.site);
+  return out;
+}
+
+// The names of the steps a probe native ran in, in order.
+std::vector<std::string> probed(const std::vector<site_step> &steps) {
+  std::vector<std::string> out;
+  for (const site_step &s : steps)
+    if (s.probed)
+      out.push_back(s.site);
+  return out;
+}
+
+using names = std::vector<std::string>;
+
+} // namespace
+
+TEST(NativeSite, AStepNamesTheNativeItAppliedAndOnlyThatStep) {
+  site_world w;
+  const std::vector<site_step> steps = w.steps("(begin (probe-op 1) 2)");
+  EXPECT_EQ(probed(steps), names{"probe-op"});
+  EXPECT_EQ(named(steps), names{"probe-op"}); // every other step leaves it null
+  EXPECT_GT(steps.size(), 2u);
+}
+
+TEST(NativeSite, ArithmeticIsANativeToo) {
+  // + and * are natives (builtins.cpp's register_fn), applied by step_apply like any other.
+  site_world w;
+  EXPECT_EQ(named(w.steps("(+ 1 2)")), names{"+"});
+  EXPECT_EQ(named(w.steps("(* (+ 1 2) 3)")), (names{"+", "*"}));
+}
+
+TEST(NativeSite, ItIsTheCallSitesSymbol) {
+  // The name the call used, not the function's: a native bound to another name.
+  site_world w;
+  EXPECT_EQ(probed(w.steps("(let ((f probe-op)) (f 1))")), names{"f"});
+}
+
+TEST(NativeSite, AFunctionAJobCallsIsNative) {
+  site_world w;
+  // Slicing (one node a step): collections.map's job calls probe-op at the evaluator's level,
+  // where no symbol is at hand.
+  // (A step may make more than one of the calls.)
+  const std::vector<site_step> sliced = w.steps("(collections.map (list 1 2 3) probe-op)", 1);
+  EXPECT_EQ(w.probes, 3);
+  const names via_job = probed(sliced);
+  ASSERT_FALSE(via_job.empty());
+  for (const std::string &name : via_job)
+    EXPECT_EQ(name, "native");
+  const names all = named(sliced);
+  ASSERT_GE(all.size(), 2u);
+  EXPECT_EQ(all[0], "list");
+  EXPECT_EQ(all[1], "collections.map");
+  // Not slicing, the job calls it inside collections.map's own call: that call's name.
+  EXPECT_EQ(probed(w.steps("(collections.map (list 1 2) probe-op)")), (names{"collections.map"}));
+  // A DSL function it calls runs as frames: the call sites in its body name themselves.
+  EXPECT_EQ(probed(w.steps("(collections.map (list 1 2) (lambda (x) (probe-op x)))", 1)),
+            (names{"probe-op", "probe-op"}));
+}
+
+TEST(NativeSite, AFormOnlyItsFrameHoldsKeepsTheName) {
+  // A macro's expansion and an eval'd list are held by the call's frame alone, which the step
+  // pops: the name outlives them (an ASan build checks the read).
+  site_world w;
+  EXPECT_EQ(probed(w.steps("(begin (defmacro m (x) (probe-op x)) (m 5))")), names{"probe-op"});
+  EXPECT_EQ(probed(w.steps("(eval (list (quote probe-op) 7))")), names{"probe-op"});
+}
+
+TEST(NativeSite, ARaisingNativeKeepsItsNameThroughTheUnwind) {
+  // The unwinding pops the frames that held the form, caught or not.
+  site_world w;
+  EXPECT_EQ(probed(w.steps("(try (eval (list (quote probe-raise))) (catch (Exception e) 1))")),
+            names{"probe-raise"});
+  const std::vector<site_step> uncaught = w.steps("(eval (list (quote probe-raise)))");
+  EXPECT_EQ(probed(uncaught), names{"probe-raise"});
+  EXPECT_EQ(uncaught.back().site, "probe-raise"); // the step that raised out of step()
 }

@@ -1299,9 +1299,10 @@ files beside them:
 | `terrain.json` | As version 1. A large world's grid may be `grid_file: terrain.f32` instead of `grid` (little-endian float32, rows x cols, north first, as `grid`). |
 | `terrain_surfaces.u16` | One surface per terrain cell (little-endian uint16, north first): the nav and contact materials. |
 | `buildings.glb` | As version 1: world metres, z up, at terrain height. |
-| `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
-| `streets.json` | The street centrelines and widths the roads were extruded from. |
-| `ground.png` | The painted ground texture, where a city has `satellite.png`. |
+| `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs `props_r1` and `props_r2`), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
+| `props.json` | The props' render cells: the cell size and, per cell, its bounds and its run of triangles (lines, for the needles) in each prop mesh, so a renderer draws a cell as a ladder of rungs. A cell's points are the ones its faces use. |
+| `streets.json` | The street network the roads were extruded from (nodes, and segments with their widths and classes), and the city's counts (buildings, districts, road length). |
+| `ground.png` | The painted ground texture (the material colours, 2048 a side, north at the top), where a city has `satellite.png`. |
 
 - **Nav materials** are the terrain's cell surfaces and each item's face surfaces, read through
   the one surface table, so the renderer, the physics and the navigator read the same materials
@@ -1352,7 +1353,7 @@ a mesh (`terrain.glb`) and a 16-bit height map PNG.
 |---|---|---|
 | GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
-| GB3 | **One renderer** for any world dataset. | L |
+| GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: cvcGL draws a world dataset, a city's included, with the generated-world renderer. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
 | GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
 

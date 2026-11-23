@@ -13,18 +13,20 @@ you can drop directly into a test or application.
 
 Each scheduler steps its processes on one thread at a time. The design for
 running programs on several threads is in
-[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted; its Stage 0 and Stage 1a
-are built): execution groups, each one scheduler stepped by one thread at a time, run in
-parallel on a shared worker pool, added in stages. Stage 0 fixed what a second thread
-would race on: read-only built-in exception classes, an isolating copy on the
-data channel, pinned state-tree lookups and a single-node `state-delete`, a root per
-watch, and `stop()` and `post_control` from any thread. Stage 1a built the groups and
-the app's fork-join pool, a cycle registry and `math.random` stream per scheduler, one
+[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted; its Stages 0, 1 and S, and
+Stage 2's first part, S2a, are built): execution groups, each one scheduler stepped by one
+thread at a time, run in parallel on a shared worker pool, added in stages. Stage 0 fixed
+what a second thread would race on: read-only built-in exception classes, an isolating
+copy on the data channel, pinned state-tree lookups and a single-node `state-delete`, a
+root per watch, and `stop()` and `post_control` from any thread. Stage 1a built the groups
+and the app's fork-join pool, a cycle registry and `math.random` stream per scheduler, one
 pid source per app, the pump owner, provider kinds, and pycvc's `ExecPool`
-([Execution Groups and the Pool](#execution-groups-and-the-pool)); Ariadne's documents
-still all run on the app scheduler until Stage 1b. Which scheduler each host and
-Ariadne lane runs, and which settings choose what, is in
-[Which Scheduler Runs a Program](#which-scheduler-runs-a-program).
+([Execution Groups and the Pool](#execution-groups-and-the-pool)); Stage 1b gave Ariadne's
+isolated documents groups of their own. Stage S lets a pick run several steps
+([Runs](#runs-several-steps-a-pick-slice_steps)). S2a built continuous mode, groups
+pumped whenever they have work ([Continuous mode](#continuous-mode)), the split kernel
+pools and the long-step monitor. Which scheduler each host and Ariadne lane runs, and which
+settings choose what, is in [Which Scheduler Runs a Program](#which-scheduler-runs-a-program).
 
 ---
 
@@ -607,7 +609,7 @@ environment variable chooses it.
 | Ariadne's read lane (`visible_when`, computed `bind:`, ...) | none: a long-lived `stackless_evaluator` (`ReactiveEngine`), during the render walk | - | - |
 | pycvc `Exec(app)` | a private `async_scheduler` per `Exec`, stepped by whichever Python thread calls `run()` | its `policy` argument, else `state_exec.policy` | the app's manager, `threaded_host_attach()` |
 | pycvc `ExecPool(app)`'s pooled `Exec`s | an `exec_group` each, pumped by the app's `exec_pool` on its workers and the thread calling `run_all` | `state_exec.policy` | the app's manager, in the manager's own mode |
-| A host's `exec_group` | the group's own `async_scheduler`, pumped by `app.exec_pool().pump_all` (or `app.exec_pump_frame()` for a registered frame group) on the pool's workers and the calling thread, or by `exec_group::pump` on the host's thread | `state_exec.policy` | the app's manager, in the manager's own mode |
+| A host's `exec_group` | the group's own `async_scheduler`, pumped by `app.exec_pool().pump_all` (or `app.exec_pump_frame()` for a registered frame group) on the pool's workers and the calling thread, or by `exec_group::pump` on the host's thread; attached (`exec_pool::attach`), by the pool's workers whenever it has work, or by its attaching thread's `pump_host` ([Continuous mode](#continuous-mode)) | `state_exec.policy` | the app's manager, in the manager's own mode |
 | `pycvc.scheduler(policy)`, `pycvc.async_scheduler(policy)`, or one built in C++ | the one built | the one passed (`round_robin` by default in C++) | private, unless given one with `set_lock_manager` |
 | `cvc exec`, `cvc ps`, `cvc serve --enable-exec` (`exec_coordinator`) | a `scheduler` | `round_robin` | private |
 
@@ -641,9 +643,12 @@ them either: its programs' writes are chrooted under its own prefix. So `ari` ru
 with a `single` lock manager unless pycvc is loaded in the same process.
 
 What does change at run time: a process's priority (`set-priority`, `Exec.set_priority`,
-`post_control`), and the settings read on every submission (`state_exec.defaults.parser.*`,
+`post_control`), the settings read on every submission (`state_exec.defaults.parser.*`,
 `state_exec.defaults.data.*` and `state_exec.defaults.limits.*` on the async scheduler,
-`ariadne.limits.*` and `ariadne.exec.lock_timeout`).
+`ariadne.limits.*` and `ariadne.exec.lock_timeout`), and those each async scheduler reads when a
+run loop starts after a change under `state_exec`: `state_exec.slice_steps`,
+`state_exec.slice_seconds` ([Runs](#runs-several-steps-a-pick-slice_steps)) and
+`state_exec.long_step_ms` ([The long-step monitor](#the-long-step-monitor)).
 
 ### Submitting Programs
 
@@ -930,7 +935,9 @@ time. The app's **pool** (`app::exec_pool()`, `<cvc/core/exec_pool.h>`) pumps a 
 once, fork-join: `pump_all(groups, budget, deadline)` pumps each group once, on persistent workers
 and on the calling thread, and returns when all are done. Outside a `pump_all` no worker touches any
 group, so host code (`get_process_info`, `get_result`, `reap`, `kill_owner`, `post_message`) runs
-between pumps on the host's own thread, as it does on one scheduler today.
+between pumps on the host's own thread, as it does on one scheduler today. A host can instead
+attach its groups to the pool, which then pumps each whenever it has work, with no frame barrier
+(S2a; [Continuous mode](#continuous-mode)).
 
 ```cpp
 #include <cvc/core/app.h>
@@ -1112,7 +1119,7 @@ runs as it is. In an isolated document's `any` group, which a worker may pump
 
 | Kind | In an `any` document group | Choose it for |
 |---|---|---|
-| `any` | runs as it is; its natives run on whatever thread pumps the group | natives that touch only their arguments, their context, thread-safe tables and the tree through pinned lookups; async functions on `*ictx.host`, whose marshal touches nothing and whose kernel runs on the background pool (libcvc's net and stream verbs, `AppRuntime::register_async_verb`) |
+| `any` | runs as it is; its natives run on whatever thread pumps the group | natives that touch only their arguments, their context, thread-safe tables and the tree through pinned lookups; async functions on `*ictx.host`, whose marshal touches nothing and whose kernel runs on the app's kernel pools ([The kernel pools](#the-kernel-pools)) (libcvc's net and stream verbs, `AppRuntime::register_async_verb`) |
 | `host_proxied` | runs into a scratch scope over the env; each native it binds there is installed through `exec_group::install(..., host_proxied)`, so on a worker its process parks and the native runs on the frame's thread after the group's pump, the program resuming a frame later; anything else it bound is bound as it is | synchronous natives over host state one thread may touch: a UI side effect (`open-url`), raw tree walks (`data-*`, the room verbs), process-global sessions (oidc) |
 | `host_only` | does not run: its names are `NameError`s there, and `has?` does not see them; a document whose env would hold one gets a `host` group instead, pumped on the frame's thread | natives that need the host thread itself (GL, SDL's devices, a callback holding a lock or the GIL), and any nobody has audited (`AppRuntime::register_verb`, `register_function`, `register_async_function`) |
 
@@ -1219,6 +1226,8 @@ and `pump_all` returns only with its queue empty. The rules that keep it deadloc
   of the body's `pump_all`. With two threads calling `pump_all` at once, the bodies of one provider
   can run on both at once, so a provider whose state only one thread may touch serializes its
   bodies itself.
+- An attached group has no `pump_all`: its bodies go onto its attaching thread's queue instead
+  ([Continuous mode](#continuous-mode)).
 
 #### `on_complete` in groups the pool pumps
 
@@ -1231,7 +1240,111 @@ threads 0 and in deterministic mode the callbacks run inline in the pump, as a s
 has. A callback given to `group.sched().execute` instead runs where the group is pumped, inside
 the pump, on a worker included. The values a callback gets belong to the group, so drop them before
 the next pump. A host that wants completion without a callback reads `get_process_info` after each
-`pump_all`, as the bench's `mt.groups` does.
+`pump_all`, as the bench's `mt.groups` does. An attached group's callbacks run on its attaching
+thread's host queue instead ([Continuous mode](#continuous-mode)).
+
+#### Continuous mode
+
+`pump_all` pumps groups when the host asks, a frame at a time. A host that wants its groups pumped
+whenever they have work (a server, a headless simulation) attaches them instead (threaded
+execution's S2a; STATE_EXEC_THREADED.md 4.4, 4.9, 4.12; APP_API.md, "Continuous mode", has the
+loop): `pool.attach(group)`, on the thread that will drive them, the group's **attaching thread**.
+Ariadne and pycvc's `ExecPool` stay fork-join.
+
+**What runs where.**
+- The group's processes run on the pool's workers, a pump at a time on the pool's budget
+  (`pool_options::pump_steps`, 20000 steps, and `pump_seconds`, 2 ms), whenever a post (a message,
+  a completed async call, a lock grant, a control) or a timer it published wakes it; an idle group
+  takes no thread. A `group_affinity::host` group, a group on a single lock manager, and every
+  group of a pool with no workers or in deterministic mode are pumped by the attaching thread
+  alone, in `pump_host` (deterministic mode: one pass in creation order a call, the frames counted
+  by the calls, so a run repeats).
+- Its natives run where it is pumped, as in fork-join.
+- Its `host_proxied` bodies and `on_complete` callbacks run on the attaching thread, from its host
+  queue, under the group's token with the group's registry and stream bound, in that thread's
+  `pump_host`, `wait_for_work`, `with_group` and `detach`, or inline when the attaching thread
+  pumps the group itself. One group's bodies run in the order queued, except a waiting body (a
+  call that cannot park), which runs at once under its blocked worker's token.
+- A C++ exception escaping a pump fails the group: its processes are killed with "internal error"
+  where it was pumped, and `take_failed()` on the attaching thread returns it once, detached.
+
+**The token.** A worker may pump an attached group at any moment, so the host touches its
+scheduler only inside `pool.with_group(group, fn)`: to submit, read process info or results, kill
+or reap. `fn` runs on the calling thread once a pump in progress has ended, workers stay off the
+group while it runs, and the group is woken after it, since a submit or a kill made under the
+token posts nothing. `group.execute(...)` from outside `with_group` takes it by itself;
+`group.sched()`'s mutators do not (debug builds and `CVC_EXEC_VERIFY=1` abort on one called while
+a worker pumps: [The pump owner](#the-pump-owner)). Posts (`post_message`, `post_control`) need no
+token, and wake the group.
+
+**The host loop.** The attaching thread never blocks without servicing its host queue: a worker
+whose process waits for a host body is stuck until the thread runs it (each wait over 10 ms is
+counted in `pool_stats::long_host_waits` and logged, once a group a minute). So it keeps calling
+`pool.pump_host(budget)`, else `pool.wait_for_work(timeout)`, and `pool.take_failed()` each turn (a
+failed group counts as work for `wait_for_work` until it is taken). `pump_host` and
+`wait_for_work` rethrow the first exception a body or callback threw. Work elsewhere on that
+thread (rendering, computing) freezes no group: the workers go on pumping it, and only its waiting
+bodies wait.
+
+**Detaching.** `pool.detach(group)`, on the attaching thread, waits for a pump in progress
+(servicing the queue), runs the group's queued bodies and callbacks, and leaves an ordinary group,
+which `pump_all` takes again. Destroying an attached group, on its attaching thread, detaches it
+first, then kills; its queued entries are dropped unrun, since the kills cancel their calls.
+Detach everything before the attaching thread exits: nothing checks it, and `~exec_pool` asserts
+that nothing is attached.
+
+**Refusals and aborts.**
+- `attach` throws `std::logic_error` for a group attached already (to any pool), one a `pump_all`
+  holds, or one whose scheduler has a wake notifier installed (`ExecPool.run_all` installs one for
+  its batch); `pump_all` refuses an attached group (an assertion; `std::logic_error` in release
+  builds).
+- `detach` throws `std::logic_error` from inside the group's own pump (a native or an inline
+  callback of a group the attaching thread pumps) or its own waiting body, and `with_group` does
+  inside the group's own waiting body: each would wait for itself. `with_group` inside the group's
+  own pump or `with_group` nests.
+- Destroying a group inside its own `with_group`, host body or waiting body aborts in every build,
+  as inside its own pump.
+
+#### The long-step monitor
+
+A step that holds a worker for long stalls its group, and in fork-join mode its frame. The
+long-step monitor (S2a; STATE_EXEC_THREADED.md 4.9) counts each step longer than a threshold, one
+that throws included, and logs it with the name of the native it ended in, at most once per name
+per minute, through the app at level 2:
+
+```
+long step: http-get took 12.4 ms (group 'docs.d1')
+```
+
+- The name is the call site's head symbol (`+`, `f` in `(f x)`), `native` for a function a
+  deep-data job called (`collections.map`'s callback), `with-lock` for a lock wait, `super`, or
+  `(no native)` when the step applied none.
+- The threshold is the tree's `state_exec.long_step_ms` (milliseconds, a number read strictly,
+  under the scheduler's watch root, when a run loop starts after a change under `state_exec`; 0 or
+  less turns it off), else 1 ms for every group a pool with workers pumps (fork-join or
+  continuous), else off. Group 0 logs `(group 0)`. Off, it reads no clock.
+- At `slice_steps` above 1 it times a run's windows between its clock readings (steps 2, 4, 8, 16,
+  then every 16th) and names each window's last step's native.
+- From C++, `async_scheduler::long_steps()` counts the caught steps, `set_long_step_sink(fn)`
+  replaces where they go and `set_long_step_default(seconds)` the default, on the pump owner's
+  thread.
+- The time is wall time: on a loaded machine the OS's preemption can make any step long at 1 ms.
+
+#### The kernel pools
+
+Async functions' kernels (`executor::background()`, the default) run on the app's kernel pools.
+While the app's exec pool has no workers, that is one pool, the background pool, as it always was.
+Once `app.exec_pool()` is built with workers, they split (STATE_EXEC_THREADED.md 4.9; APP_API.md,
+"The kernel pools"):
+- the kernel of an I/O call (`async_options::io`: it waits on something outside the program, as the
+  net and room calls do) stays on the background pool, `background_io` then, at its size;
+- any other runs on `background_cpu`, max(1, cores - exec workers) workers of its own, so CPU-bound
+  kernels and exec workers fill the cores without oversubscribing them.
+
+So a kernel that blocks (a transfer, a long file read) is registered with `io` set, which also
+charges its call its one step and no run time or CPU (`docs/STATE_EXEC_EXCEPTIONS.md` 3.8); else
+it holds a `background_cpu` worker the CPU-bound kernels need. `setThreadPoolSize` then sizes
+`background_io` only.
 
 #### `ExecPool` or several `Exec`s
 
@@ -2106,9 +2219,13 @@ se::register_async_fn(
 ```
 
 `async_options` (the last argument) sets:
-- `where`: `executor::background()` (the default), `executor::on_lane(name)`, or
+- `where`: `executor::background()` (the default: the app's kernel pools,
+  [The kernel pools](#the-kernel-pools)), `executor::on_lane(name)`, or
   `executor::inline_call()`;
-- `priority`: the kernel's place in the background pool's queue;
+- `priority`: the kernel's place in its pool's queue;
+- `io`: an I/O call, whose kernel waits on something outside the program: charged
+  its one step and no run time or CPU, and, once the app's exec pool has workers,
+  run on the background pool (`background_io`), not `background_cpu`;
 - `timeout`: seconds, past which the call raises `TimeoutError`;
 - `future_variant`: whether to register `<name>-async` too (the default).
 
@@ -2633,6 +2750,11 @@ reads. Each is read once, when that object is built, and a later change does not
 | `state_exec.cpu_set` | the app's pool is built, unless the host gives `pool_options` | `performance` (workers on the highest efficiency class only), `all` (anything else is logged and `performance` used) | `performance` |
 | `state_exec.deterministic` | the app's pool is built, unless the host gives `pool_options`; by `exec_pump_frame()` for group 0 when no pool exists | `true`, `1`, `on`, `yes`; `false`, `0`, `off`, `no` (anything else is logged and `false` used) | `false` |
 | `state_exec.process_class` | `app::exec_scheduler()` is first built ([THREAD_POOL.md](THREAD_POOL.md)) | `background`, `utility`, `normal` (anything else is logged and ignored) | unset (the OS's) |
+
+`state_exec.slice_steps`, `state_exec.slice_seconds` and `state_exec.long_step_ms` are not read
+once: each async scheduler reads them under its watch root when a run loop starts after a change
+under `state_exec` ([Runs](#runs-several-steps-a-pick-slice_steps),
+[The long-step monitor](#the-long-step-monitor)).
 
 ---
 
