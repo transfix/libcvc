@@ -3769,7 +3769,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
     const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
+    b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
     CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+    b.set_custom_scope(std::string());
     if (!e.handled)
       b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
     else if (e.committed && !w.bind.empty())

@@ -1039,6 +1039,24 @@ CameraController &SceneViews::controller(View &v) {
   return v.vp->camera();
 }
 
+// A viewport's keys resolve as its bind: does, in the scope its widget sits in: the document's
+// prefix, or a load:ed module's <prefix>.includes.<as> (§6.3), so a module's view writes its picks
+// inside its sandbox. A view of a scenes: entry keeps them under that scene's scenes.<id> in that
+// scope, as it always has at the document's. The camera does not follow: it is the viewport's own
+// (<scene prefix>.viewers.<view>.camera, beside the viewer's other keys), one per view name.
+std::string SceneViews::key_scope(const SceneGraph &sg) const {
+  const std::string &own = sg.getStatePrefix();
+  const std::string &doc = view_->scene().getStatePrefix(); // the document's (AriRuntime's prefix)
+  const std::string &scope = backend_->custom_scope();
+  if (scope.empty() || scope == doc)
+    return own; // not in a mount (or drawn outside the walk): the scene's prefix, as always
+  const std::string sep = cvc::state::SEPARATOR;
+  if (own.size() > doc.size() + sep.size() && own.compare(0, doc.size(), doc) == 0 &&
+      own.compare(doc.size(), sep.size(), sep) == 0)
+    return scope + own.substr(doc.size()); // <scope>.scenes.<id>
+  return scope;
+}
+
 SceneViews::View *SceneViews::view_for(const std::string &name, const std::string &scene) {
   ViewportManager &vm = view_->viewportManager();
   auto it = views_.find(name);
@@ -1409,14 +1427,14 @@ void SceneViews::register_widget() {
         if (v->pick) {
           SceneSlot slot;
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
-            v->pick_key = ari::resolve_bind(slot.sg->getStatePrefix(),
+            v->pick_key = ari::resolve_bind(key_scope(*slot.sg),
                                             w.props.str("pick", "viewers." + name + ".pick"));
         }
         v->pointer_key.clear();
         if (w.props.has("pointer")) {
           SceneSlot slot;
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
-            v->pointer_key = ari::resolve_bind(slot.sg->getStatePrefix(), w.props.str("pointer"));
+            v->pointer_key = ari::resolve_bind(key_scope(*slot.sg), w.props.str("pointer"));
         }
         // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
         // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
@@ -1451,7 +1469,7 @@ void SceneViews::register_widget() {
             if (a->is_map()) {
               SceneSlot slot;
               if (a->has("bind") && scenes_ && scenes_(v->scene, slot) && slot.sg) {
-                v->axis_key = ari::resolve_bind(slot.sg->getStatePrefix(), a->str("bind"));
+                v->axis_key = ari::resolve_bind(key_scope(*slot.sg), a->str("bind"));
                 axis_text = ari::read_or<std::string>(slot.sg->appContext(), v->axis_key, "");
               }
             } else {
