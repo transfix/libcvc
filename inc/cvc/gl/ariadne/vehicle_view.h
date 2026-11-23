@@ -49,6 +49,7 @@ struct vehicle_model_cache; // the vehicle models a realized scene has fitted
 struct vehicle_shape {
   double length = 4.84, width = 2.18, height = 0.9; // the chassis box (m)
   double wheelbase = 3.3, track = 1.82, wheel_radius = 0.45;
+  double axle_x = 0.0; // the axles' middle, ahead of the chassis box's centre (m)
 };
 
 // How a vehicle model's file holds it (axes 0 x, 1 y, 2 z): `up` its up axis and `forward` the
@@ -89,7 +90,8 @@ std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache();
 // loaded once per request and cached), and is pending while it loads: draw the box or the hull
 // meanwhile and ask again on a later frame; then ready, or, when the package cannot load (no
 // network, no such package), a local install of the file by its name
-// (cvc::ariadne::find_vehicle_model), else failed (a warning says why). Any other look has no
+// (cvc::ariadne::find_vehicle_model), else failed (a warning says why). A wheeled look (`wheel`)
+// is ready once both its meshes are read, pending while either loads. Any other look has no
 // fitted model: failed. attach_vehicle_model draws a ready one.
 enum class vehicle_model_status { ready, pending, failed };
 vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cache,
@@ -98,8 +100,12 @@ vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cac
 // A fitted file look (`look.kind` file, `look.fit`) or a data look under `group` as node `id`: the
 // model scaled to the chassis's length, its base `base_z` below the group's origin (the ground
 // under the chassis's centre, negative), turned and lifted by the look's yaw and z, in `color` when
-// it has no texture. False when the model is not ready (vehicle_model_state says whether it is
-// still loading or failed; a failure's warning says why); draw the box look then.
+// it has no texture. A wheeled look's chassis is placed so, its origin at the shape's axles'
+// middle (fitted to the shape's wheels as cvc::ariadne::vehicle_look says), and its wheels go
+// under `group` beside it, as <group's name>_tyre<k>, at the shape's four hubs at rest (the
+// ground `base_z` under them); a vehicle's view poses them where its plant has them
+// (pose_vehicle_wheels). False when the model is not ready (vehicle_model_state says whether it
+// is still loading or failed; a failure's warning says why); draw the box look then.
 bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                           const std::string &id, const cvc::ariadne::vehicle_look &look,
                           const vehicle_shape &shape, double base_z, const float color[3],
@@ -151,8 +157,10 @@ std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &i
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);
 // Each frame after the world steps: a box look's wheels, each where its plant has it
 // (WorldVehicles::wheels): its height on its suspension or the ground under it, the front ones
-// steered. A dynamic4w's four wheels each follow the ground under them. A mesh look's wheels are
-// the mesh's.
+// steered. A dynamic4w's four wheels each follow the ground under them. A wheeled look's wheels
+// (<node>_tyre<k>, one for each of the plant's wheels, in its order) the same way: each at its
+// hub, turned by its steer and rolled by its spin (a `pose` entity's, at its pose's speed). A
+// one-piece model's wheels are the mesh's, and do not move.
 void pose_vehicle_wheels(RealizedScene &realized);
 
 // Each frame after the world steps: when the spawn points' revision has moved, their markers are

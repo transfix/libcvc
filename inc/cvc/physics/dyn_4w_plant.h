@@ -54,6 +54,7 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -76,6 +77,10 @@ struct dyn_4w_plant_options {
   // as it drives that one; false: as the model's drive force per unit mass, raw.
   bool driver = true;
   bool grade_force = true; // gravity along the slope acts on the body (dyn4_params::grade_force)
+  // The height (m) the model's heights are measured from (ground_reference()). Not finite (the
+  // default): the ground under the first vehicle's start, as attach() takes it. A twin of another
+  // plant passes that plant's ground_reference(), so its heave is the other's, number for number.
+  double reference = std::numeric_limits<double>::quiet_NaN();
   // The world the chassis collide in (borrowed; null: no collisions), and its bodies the wheels
   // drive on (touching them is not a collision). attach() sets its contact reporting to all.
   world *physics = nullptr;
@@ -91,6 +96,15 @@ struct dyn_4w_plant_options {
   // them, and advance() ends the tick they ran (its books and its sample) and begins the next
   // under the new command. Without a world it does not apply.
   bool step_world = true;
+};
+
+// One agent's state as the plant steps it, to keep and put back (dyn_4w_plant::save, restore):
+// the model's (the rear axle, the heading, the twist, heave, roll and pitch and their rates, the
+// actuators), what its driver has learnt, and the command it holds (SI: rad, m/s^2).
+struct dyn_4w_saved {
+  cvc::nav::diff::dyn4_state<double> body{};
+  dyn_driver driver;
+  double steer_cmd = 0.0, accel_cmd = 0.0;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -168,6 +182,16 @@ public:
   const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
   // The ground (m) under a world point, as the model sees it.
   double ground_height(double x, double y) const;
+  // Agent i's rear axle on its body's x axis (m from the chassis box's centre, - behind it): the
+  // model's reference point, where its chassis box is drawn from.
+  double rear_axle(int i) const { return _agents.at(i).rear_x; }
+  // Agent i's chassis box at its state now (its centre and attitude, world metres), where a world
+  // step puts it.
+  void box_pose(int i, vec3 &position, quat &rotation) const;
+  // Agent i's state to put back later (restore), as dyn_bike_plant's: a twin of the plant replays
+  // from it. restore() with a world puts its box at the restored pose, at rest. Between ticks.
+  dyn_4w_saved save(int i) const;
+  void restore(int i, const dyn_4w_saved &s);
 
   // ── the books ──
   const dyn_4w_books &books(int i) const { return _agents.at(i).total; }

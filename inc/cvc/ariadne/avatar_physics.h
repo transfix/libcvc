@@ -20,15 +20,24 @@
 #include <cvc/algo/wind_field.h>
 #include <cvc/ariadne/avatar_sim.h> // avatar_intent
 #include <cvc/physics/body.h>
+#include <cvc/physics/field.h> // field_id
 #include <cvc/physics/types.h>
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
+
+namespace cvc {
+namespace world {
+class world_geometry;
+}
+} // namespace cvc
 
 namespace cvc {
 namespace physics {
 class world;
+struct world_config;
 class flow_velocity;
 } // namespace physics
 namespace ariadne {
@@ -130,20 +139,33 @@ struct avatar_energy {
   avatar_ledger ledger;
 };
 
-// A static object avatars collide with (the room scene's ground, boxes, spheres).
+// A static object avatars collide with: the room scene's ground, boxes and spheres; or, from the
+// world document itself (world_replica, ARIADNE_WORLDS.md section 18.5, OW5c), a static body as
+// the document's world made it (`body`: its shape and pose, a mesh's or a terrain's included) or
+// the colliders a node makes at run time (`geometry`: a generated world's terrain and buildings).
 struct avatar_static {
-  enum class kind { box, sphere };
+  enum class kind { box, sphere, body, geometry };
   kind type = kind::box;
   cvc::physics::vec3 center;
   cvc::physics::quat rotation;
-  cvc::physics::vec3 half_extents{0.5, 0.5, 0.5}; // box
-  double radius = 0.5;                            // sphere
+  cvc::physics::vec3 half_extents{0.5, 0.5, 0.5};             // box
+  double radius = 0.5;                                        // sphere
+  std::shared_ptr<const cvc::physics::body_desc> body;        // body: made static
+  std::shared_ptr<const cvc::world::world_geometry> geometry; // geometry: its collide items
+  // body: its surface (friction, restitution) as the world it came from has it (body->material is
+  // that world's id, not this one's); null: this world's default (ARIADNE_WORLDS.md section 18.5,
+  // OW5h). A geometry's items carry their own surface classes.
+  std::shared_ptr<const cvc::physics::material> material;
 };
 
 class avatar_world {
 public:
   // Throws cvc::unsupported_exception when this build has no Jolt backend.
   avatar_world(double fixed_dt, const avatar_body &body,
+               const avatar_energy_policy &energy = avatar_energy_policy{});
+  // ... in a world of its own made with CFG (its backend Jolt, its step and gravity CFG's), for a
+  // world that must step as another does (vehicle_dynamics.h's jolt plant: the relay's config).
+  avatar_world(const cvc::physics::world_config &cfg, const avatar_body &body,
                const avatar_energy_policy &energy = avatar_energy_policy{});
   // The avatars in `shared`, a world the caller owns and steps (see ONE WORLD above): its fixed_dt
   // is the walker's step and its gravity prices the walk. `shared` must outlive this, or this must
@@ -166,9 +188,10 @@ public:
                const std::map<std::string, cvc::physics::body_state> &feet);
   cvc::physics::world &world() { return *_world; }
 
-  // Replace the static objects. Avatars are re-created after them (same pids, same states), so the
-  // world's creation order stays statics-then-avatars. Not in a shared world (its owner's bodies
-  // are the statics): std::logic_error.
+  // Replace the static objects (a body or a geometry without one is skipped). Avatars are
+  // re-created after them (same pids, same states), so the world's creation order stays
+  // statics-then-avatars. Not in a shared world (its owner's bodies are the statics):
+  // std::logic_error.
   void set_statics(const std::vector<avatar_static> &statics);
   // Every avatar's body from now on: each is re-created at its feet, keeping its velocity and its
   // reserve, with the new mass unless set_mass gave it its own.
@@ -267,6 +290,9 @@ private:
   cvc::physics::world *_world = nullptr;     // the world the avatars are in (_own's or shared)
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
+  // The statics' materials added to the world, each once (set_statics): the material and its id.
+  std::vector<std::pair<cvc::physics::material, cvc::physics::material_id>> _static_materials;
+  std::vector<cvc::physics::field_id> _static_fields; // a static geometry's volumes
   std::map<std::string, avatar> _avatars;
   struct obstacle {
     std::uint32_t id = 0; // cvc::physics::body_id value

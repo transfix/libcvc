@@ -1286,6 +1286,14 @@ public:
   std::size_t MovingCasters = 0;
   double MapShare = 0.0; // of the maps' texels, the share the last bake drew into
 
+  // Where `p` stood at the last bake (its vtkProp3D matrix, row-major), if it was a caster then
+  // and is still alive; else null. The shadow pass shades a caster that has moved since as it
+  // stood then (FilteredShadowMapPass::SetShaderParameters).
+  const double *BakedPose(const vtkProp *p) const {
+    const auto it = m_bakedPoses.find(p);
+    return it != m_bakedPoses.end() && it->second.prop.Get() == p ? it->second.matrix : nullptr;
+  }
+
   // GL objects made by a bake: the FBO and the shadow maps, the static ones too. None before the
   // first bake (or after a release), when the window may have no context yet.
   bool HoldsGLObjects() const {
@@ -1376,6 +1384,8 @@ public:
     } else if (redraw) {
       m_drawnTexels = 0.0;
       bake(s, nullptr, &sc.movingProps, /*movingOnly=*/true);
+      for (vtkProp *p : sc.movingProps) // the maps hold them where they stand now
+        notePose(p);
       ++Bakes;
       noteShare(casters);
       m_movingSet = sc.movingSet;
@@ -2137,12 +2147,23 @@ protected:
     MapShare = lights ? m_drawnTexels / (res * res * static_cast<double>(lights)) : 0.0;
   }
 
+  // Where `p` stands now is where the maps hold it (BakedPose).
+  void notePose(vtkProp *p) {
+    if (auto *p3 = vtkProp3D::SafeDownCast(p)) {
+      BakedPoseEntry &e = m_bakedPoses[p];
+      e.prop = p;
+      const double *m = &p3->GetMatrix()->Element[0][0];
+      std::copy(m, m + 16, e.matrix);
+    }
+  }
+
   // A whole bake made: the layers it drew (`layered`: the static ones into the static maps) are
   // the layers from now on, and the casters no longer drawn are forgotten.
   void noteBake(const std::vector<vtkProp *> &still, const std::vector<vtkProp *> &moving,
                 bool layered) {
     m_lastBake.Modified();
     m_baked = true;
+    m_bakedPoses.clear();
     std::unordered_map<const vtkProp *, Caster> kept;
     kept.reserve(still.size() + moving.size());
     m_staticSet = CasterSet();
@@ -2151,11 +2172,13 @@ protected:
       Caster &c = kept[p] = m_casters[p];
       c.moving = false;
       m_staticSet.add(p);
+      notePose(p);
     }
     for (vtkProp *p : moving) {
       Caster &c = kept[p] = m_casters[p];
       c.moving = true;
       m_movingSet.add(p);
+      notePose(p);
     }
     m_casters.swap(kept);
     m_staticValid = layered;
@@ -2194,6 +2217,13 @@ private:
   // With several casting lights, each one's framebuffer for the cache (liveFramebuffer).
   std::vector<vtkSmartPointer<ShadowBakeFramebuffer>> m_live;
   double m_drawnTexels = 0.0; // texels a bake drew into the maps the lookup reads (MapShare)
+  // Where each caster stood when the maps last drew it (BakedPose); weak, so a prop freed since,
+  // or a new one at its address, reads as no pose.
+  struct BakedPoseEntry {
+    vtkWeakPointer<vtkProp> prop;
+    double matrix[16] = {};
+  };
+  std::unordered_map<const vtkProp *, BakedPoseEntry> m_bakedPoses;
   // casterGeometryChanged's cache: per mapper, its MTime when its input was
   // last looked up, and that input (weak: the mapper owns it).
   struct MapperInput {
@@ -2228,12 +2258,34 @@ vtkStandardNewMacro(StridedShadowBaker);
 // lit, and the shadow fades out
 // over the map's outer tenth: with a focus (StridedShadowBaker) the map covers part of the scene,
 // and its edge must not show.
+//
+// Between bakes (an update interval over 1) the maps hold every caster where it stood at the last
+// bake. A caster that has moved since is looked up there too: its shadow transforms are composed
+// with its motion since the bake, carried into view coordinates (SetShaderParameters), so its own
+// surface agrees with the depth the maps hold for it. Looked up where it is now, it shadowed itself
+// wherever it had moved behind its baked surface, and a bobbing body flashed at the bake cadence.
+// The shadows it throws on others lag to the next bake as before; so does the shade it receives,
+// read at its pose then (as eaf5524a reads a swaying tree's at rest).
 class FilteredShadowMapPass : public vtkShadowMapPass {
 public:
   static FilteredShadowMapPass *New();
   vtkTypeMacro(FilteredShadowMapPass, vtkShadowMapPass);
 
   double Softness = 2.0; // the disc's radius, texels (0: one tap)
+
+  // The frame's view (world to view coordinates, the space of vertexVC), for carrying a moved
+  // caster's motion into it (movedSinceBake); then VTK's pass.
+  void Render(const vtkRenderState *s) override {
+    m_haveView = false;
+    if (vtkRenderer *r = s ? s->GetRenderer() : nullptr)
+      if (vtkCamera *cam = r->GetActiveCamera()) {
+        const double *v = &cam->GetModelViewTransformMatrix()->Element[0][0];
+        std::copy(v, v + 16, m_view);
+        vtkMatrix4x4::Invert(m_view, m_viewInv);
+        m_haveView = true;
+      }
+    this->Superclass::Render(s);
+  }
 
   bool PreReplaceShaderValues(std::string &vertexShader, std::string &geometryShader,
                               std::string &fragmentShader, vtkAbstractMapper *mapper,
@@ -2303,6 +2355,25 @@ public:
       program->SetUniformf(("cvcShadowTexel" + std::to_string(n)).c_str(),
                            static_cast<float>(texel));
       ++n;
+    }
+    // A caster that moved since the bake: each shadow transform T (view coordinates to the map,
+    // as VTK uploads it: column-major, one per casting light in order) becomes T * D, D its motion
+    // back to its baked pose. Every other prop keeps the transforms VTK set above.
+    double d[16];
+    if (movedSinceBake(prop, d)) {
+      const std::size_t maps = std::min<std::size_t>(n, this->ShadowTransforms.size() / 16);
+      for (std::size_t k = 0; k < maps; ++k) {
+        const double *t = &this->ShadowTransforms[k * 16];
+        float td[16];
+        for (int c = 0; c < 4; ++c)
+          for (int r = 0; r < 4; ++r) {
+            double sum = 0.0;
+            for (int j = 0; j < 4; ++j)
+              sum += t[j * 4 + r] * d[j * 4 + c]; // T(r, j) * D(j, c)
+            td[c * 4 + r] = static_cast<float>(sum);
+          }
+        program->SetUniformMatrix4x4(("shadowTransform" + std::to_string(k)).c_str(), td);
+      }
     }
     return true;
   }
@@ -2389,6 +2460,29 @@ protected:
   }
 
 private:
+  // Whether `prop` is a caster that has moved since the maps were baked; if so `d` (row-major)
+  // takes a view-space point on it now to where that point stood at the bake:
+  // D = V * M_bake * M_now^-1 * V^-1, V this frame's view.
+  bool movedSinceBake(vtkProp *prop, double d[16]) {
+    auto *baker = StridedShadowBaker::SafeDownCast(this->ShadowMapBakerPass);
+    auto *p3 = vtkProp3D::SafeDownCast(prop);
+    const double *was = m_haveView && baker && p3 ? baker->BakedPose(prop) : nullptr;
+    if (!was)
+      return false;
+    const double *now = &p3->GetMatrix()->Element[0][0];
+    if (std::equal(was, was + 16, now))
+      return false;
+    double nowInv[16], a[16], b[16];
+    vtkMatrix4x4::Invert(now, nowInv);
+    vtkMatrix4x4::Multiply4x4(was, nowInv, a);  // world now -> world at the bake
+    vtkMatrix4x4::Multiply4x4(m_view, a, b);    // ... then to view
+    vtkMatrix4x4::Multiply4x4(b, m_viewInv, d); // from view now
+    return true;
+  }
+
+  bool m_haveView = false; // Render found the frame's camera
+  double m_view[16] = {};  // its world to view matrix (row-major)
+  double m_viewInv[16] = {};
   std::vector<bool> m_casting; // per light: casting, when GetShaderStageMTime last looked
   vtkTimeStamp m_shaderStage;  // when that changed
   FilteredShadowMapPass(const FilteredShadowMapPass &) = delete;

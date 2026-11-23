@@ -152,8 +152,9 @@ std::vector<tile> partition_parts(const std::vector<named_part> &parts, double c
                                   const partition_params &params = partition_params(),
                                   thread_pool *pool = nullptr);
 
-// partition_parts over a model's meshes, each named by model::mesh::name.
-// Materials are not carried (a tile mixes meshes of any material).
+// partition_parts over a model's drawn meshes (model::instances: each copy
+// placed by its nodes), each named by model::mesh::name. Materials are not
+// carried (a tile mixes meshes of any material).
 std::vector<tile> partition_model(const model &m, double cell_m,
                                   const group_key_fn &group_key = group_key_fn(),
                                   const partition_params &params = partition_params(),
