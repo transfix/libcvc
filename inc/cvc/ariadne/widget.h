@@ -575,6 +575,10 @@ struct Widget {
   // §5.25 a mount's application name: the loaded document's meta.name ("" leaves it to the mount
   // id). Its menubar becomes one menu of the outer bar under this name.
   std::string app_name;
+  // ... and the load: node's own `name:`, which the loader's scope works out each frame: a state
+  // key, or an expression on the read lane, with `{i}` the instance under `repeat:`. Its value,
+  // when not empty, names the application instead (one site's menu by the site's name).
+  std::string app_name_bind;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative
   // state-path segment (e.g. "includes.stats") appended to the enclosing scope, so its whole

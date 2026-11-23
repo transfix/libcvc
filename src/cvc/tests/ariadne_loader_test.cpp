@@ -5493,6 +5493,33 @@ root:
   EXPECT_EQ(other->app_name, "other");
 }
 
+// §5.25 a load:'s own name: (a key or an expression, `{i}` its instance) is kept for the Runtime
+// to work out; and a repeated mount whose module repeats widgets of its own is not a nested
+// repeat (the module's {i} is its own), so it loads without that warning.
+TEST(AriadneMount, ALoadsNameIsKeptAndARepeatedMountIsNotANestedRepeat) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("site_app.ari", "meta: { name: Site, min_libcvc: \"3.4.0\" }\n"
+                                 "menubar:\n  - menu_item: Home\n    on: (state-set \"h\" 1)\n"
+                                 "root:\n  - type: group\n    repeat: (int 2)\n"
+                                 "    children: [ { text: \"row {i}\" } ]\n");
+  const std::string main = write_temp_ari("main_named_sites.ari", R"(
+meta: { min_libcvc: "3.4.0" }
+root:
+  - load: site_app.ari
+    as: site
+    repeat: (int 2)
+    name: slots.{i}.name
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *site = find_scope(r.root, "includes.site");
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->app_name, "Site");
+  EXPECT_EQ(site->app_name_bind, "slots.{i}.name");
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("nested 'repeat'"), std::string::npos) << w;
+}
+
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
   SKIP_WITHOUT_YAML();
   write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");
