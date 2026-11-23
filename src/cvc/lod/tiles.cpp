@@ -376,10 +376,18 @@ std::vector<tile> partition_parts(const std::vector<named_part> &parts, double c
 
 std::vector<tile> partition_model(const model &m, double cell_m, const group_key_fn &group_key,
                                   const partition_params &params, thread_pool *pool) {
+  // Each drawn copy of a mesh, placed by its nodes (model::instances), under its mesh's name.
+  // `placed` owns the geometries the parts point at (reserved, so they never move).
+  const std::vector<model::instance> drawn = m.instances();
+  std::vector<geometry> placed;
+  placed.reserve(drawn.size());
   std::vector<named_part> parts;
-  parts.reserve(m.meshes.size());
-  for (const model::mesh &mm : m.meshes)
-    parts.push_back(named_part(mm.name, mm.geom));
+  parts.reserve(drawn.size());
+  for (const model::instance &in : drawn) {
+    const model::mesh &mm = m.meshes[in.mesh];
+    placed.push_back(model::placed(mm.geom, in.transform));
+    parts.push_back(named_part(mm.name, placed.back()));
+  }
   return partition_parts(parts, cell_m, group_key, params, pool);
 }
 
