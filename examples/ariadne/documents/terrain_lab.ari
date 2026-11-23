@@ -6,7 +6,8 @@
 # network grown from them, lots along it holding the Austin building archetypes or procedural
 # buildings) and the water below water_level, drawn as a handful of merged meshes: the terrain with
 # its baked surface texture, the
-# props, the buildings, the roads, the foliage and the needles, plus the water volume. Its
+# props, the buildings, the roads, the foliage and the needles, plus the water volume. Its edge is a
+# shore: the rim eases down to beaches and the sea goes on past the world, so it is an island. Its
 # world_controls panel regenerates it live; nothing here is host C++.
 #
 # The look and the render discipline are demo3-csma's (CVC-DBG's Austin convoy demo, our fastest
@@ -202,7 +203,8 @@ scene:
       amp: 90              # relief, metres
       water_level: 0       # metres from sea level (the shoreline); everything below is water
       water: 0             # the water node below draws it (the world's own flat water rungs off)
-      color: material      # material | risk | occupancy | height | water (the water bodies)
+      edge: shore          # shore (beaches, the sea past the world) | wall | none (a floating rock)
+      color: material     # material | risk | occupancy | height | water (the water bodies)
       look: soft           # soft (demo3's matte daylight) | classic (the C++ lab's)
       material: { opaque: true }
       shader: { preset: terrain_bump }   # value-noise fBm ground detail

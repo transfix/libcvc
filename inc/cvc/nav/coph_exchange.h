@@ -111,6 +111,10 @@ std::optional<coph_packet> coph_export(const coph_learner_state &s, const coph_s
                                        const std::array<coph_draws, 2> &draws,
                                        coph_export_trace *trace = nullptr);
 
+// Whether coph_export at x makes a packet: the newest stage has export readings and supports one
+// of the candidates. It does not depend on the draws, so a caller can ask before drawing them.
+bool coph_can_export(const coph_learner_state &s, const coph_state &x);
+
 // The same, with both bootstraps' indices drawn from rng (D8).
 std::optional<coph_packet> coph_export(const coph_learner_state &s, const coph_state &x,
                                        const std::string &recipient, std::mt19937 &rng);

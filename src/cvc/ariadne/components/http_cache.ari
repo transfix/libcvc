@@ -1,0 +1,82 @@
+# http_cache.ari — a REUSABLE Ariadne component: the settings window of the app's HTTP cache, which
+# keeps what the app reads over http(s): import:, load: and source: URLs, (fetch ...), pictures
+# (image:, a button's icon:) and, natively, video and audio (docs/ARIADNE.md 13.9). A host that
+# turns the network on has it (enable_net). It is the app's, so every control binds an app-root
+# key under sys.net.http_cache (a leading / in the bind), and the window shows and sets the same
+# cache in any document, whatever its prefix:
+#
+#   sys.net.http_cache.stats.{entries,bytes,hits,misses,revalidated,evicted}  what it holds and did
+#   sys.net.http_cache.stats.fill, .used        its bytes over the budget (0..1), and as text
+#   sys.net.http_cache.policy.enabled           1: reads use it; 0: every read is a request
+#   sys.net.http_cache.policy.max_mib           the budget in MiB (policy.max_bytes, in bytes)
+#   sys.net.http_cache.policy.max_entry_mib     the largest body kept (policy.max_entry_bytes)
+#   sys.net.http_cache.policy.freshness_secs    how long a reply that says nothing stays fresh
+#
+# The Clear button runs the bare action http_cache.clear, which every AppRuntime host handles
+# (a document's own programs cannot write app-root keys). Writing any value to
+# sys.net.http_cache.clear does the same from a host.
+#
+# Args (every one has a default, so a bare include works):
+#   title  the window's title (default Network cache)
+#   id     the instance id: the window's geometry persists under tree.<id> (default http_cache)
+#
+# Use it:
+#     import: cvc://components/http_cache.ari
+#     windows:
+#       - include: http_cache
+#
+# arigl puts it in every document (Settings > Network cache...), closed until asked for.
+
+units:
+  http_cache:
+    args: { title: Network cache, id: http_cache }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - checkbox: Enabled
+        bind: /sys.net.http_cache.policy.enabled
+        def: true
+        tooltip: "off: every read goes to the network and nothing is kept (what is kept stays)"
+      - progress: Used
+        bind: /sys.net.http_cache.stats.fill
+        overlay: /sys.net.http_cache.stats.used
+        tooltip: "what the cache holds, of its budget"
+      - text: "Entries"
+        bind: /sys.net.http_cache.stats.entries
+      - text: "Hits"
+        bind: /sys.net.http_cache.stats.hits
+        tooltip: "reads served from the cache with no request"
+      - text: "Misses"
+        bind: /sys.net.http_cache.stats.misses
+        tooltip: "reads whose body came from the network"
+      - text: "Revalidated"
+        bind: /sys.net.http_cache.stats.revalidated
+        tooltip: "stale reads the server said were unchanged (304), served from the cache"
+      - text: "Evicted"
+        bind: /sys.net.http_cache.stats.evicted
+        tooltip: "entries dropped to stay in the budget, or past their retention"
+      - separator
+      - slider_int: Budget (MiB)
+        bind: /sys.net.http_cache.policy.max_mib
+        lo: 8
+        hi: 2048
+        def: 256
+        commit: release
+        tooltip: "the most the cache holds; past it the least recently used entries go"
+      - slider_int: Largest entry (MiB)
+        bind: /sys.net.http_cache.policy.max_entry_mib
+        lo: 1
+        hi: 64
+        def: 64
+        commit: release
+        tooltip: "a bigger reply is used but not kept"
+      - slider_int: Fresh for (s)
+        bind: /sys.net.http_cache.policy.freshness_secs
+        lo: 0
+        hi: 3600
+        def: 60
+        commit: release
+        tooltip: "how long a reply with no max-age and no ETag or Last-Modified is used without asking again"
+      - button: Clear
+        on: http_cache.clear
+        tooltip: "empty the cache now"

@@ -20,6 +20,7 @@
 #include <cvc/state/state_inbound_gate.h>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -33,8 +34,11 @@ namespace conference {
 // connection to the pid of its Hello. A participant (whose pid is one identifier, no '.', and does
 // not begin with '_', the form of a bridged user's pid, room_intrinsics.h) may then write only
 // inside its own participant subtree, conf.rooms.<room>.participants.<pid>, and there only:
-//   - a value, a touch or a data() payload (no delete, reset, delegation, read-only or hidden
-//     flag: no client uses them, and each could take a key from the relay);
+//   - a value, a touch or a data() payload, or a delete of a node below the participant's own
+//     (state_sync_adapter journals a removal) that takes no key of the relay's with it: not the
+//     participant itself, nor `profile`, `net`, `streams` or a `streams.<kind>` (no reset,
+//     delegation, read-only or hidden flag: no client uses them, and each could take a key from
+//     the relay);
 //   - outside the keys the relay owns there: `pose` (the server holon's authoritative pose),
 //     `net.relay` (the relay's view of the link), `device` (its device tag), `profile.name` (its
 //     username, client_registry.h) and each `streams.<kind>.ready` (SFU mode);
@@ -68,6 +72,10 @@ public:
   bool sources(const std::string &node_id, const std::string &path) const override;
 
 private:
+  // PATH's segments below PID's participant node (none for the node itself) in REST; false when
+  // PATH is not at or below it, or is not canonical.
+  bool below_participant(const std::string &pid, const std::string &path,
+                         std::vector<std::string> &rest) const;
   bool own_path(const std::string &pid, const std::string &path) const;
 
   std::string _room;

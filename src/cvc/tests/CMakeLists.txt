@@ -338,6 +338,8 @@ add_executable(nav_coph_model_test nav_coph_model_test.cpp)
 add_executable(nav_coph_learner_test nav_coph_learner_test.cpp)
 add_executable(nav_coph_exchange_test nav_coph_exchange_test.cpp)
 add_executable(nav_coph_fleet_test nav_coph_fleet_test.cpp)
+add_executable(nav_coph_cars_test nav_coph_cars_test.cpp)
+add_executable(nav_coph_driver_test nav_coph_driver_test.cpp)
 add_executable(nav_material_deploy_test nav_material_deploy_test.cpp)
 add_executable(nav_coef_energy_test nav_coef_energy_test.cpp)
 add_executable(nav_material_rollout_grad_test nav_material_rollout_grad_test.cpp)
@@ -618,6 +620,8 @@ set(TEST_TARGETS
   nav_coph_learner_test
   nav_coph_exchange_test
   nav_coph_fleet_test
+  nav_coph_cars_test
+  nav_coph_driver_test
   nav_material_deploy_test
   nav_material_raster_test
   nav_coef_energy_test
@@ -1530,6 +1534,18 @@ target_link_libraries(nav_coph_exchange_test
 )
 
 target_link_libraries(nav_coph_fleet_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_coph_cars_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_link_libraries(nav_coph_driver_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3357,6 +3373,15 @@ cvc_discover_tests(nav_coph_exchange_test)
 # slower than usual. Its own budget, as the segmentation action test has, so a slow box fails on a
 # real hang only.
 cvc_discover_tests(nav_coph_fleet_test PROPERTIES TIMEOUT 900)
+# G13's five cases (CophCarsGolden: each replays both cars' learners over the 120 ticks) take
+# about 21 s each in a Debug job and 116 s on the slow runner of transfix/libcvc#1461's first run,
+# where the fleet's goldens took 25 s against 5. The same budget as the fleet's.
+cvc_discover_tests(nav_coph_cars_test PROPERTIES TIMEOUT 900)
+# The driver's runs (CophDriver: two cars crossing the field, about 485 ticks; a car stopped by a
+# block until it has stood still for 6 s) take about 2 s each in Release. On the slow runner of
+# transfix/libcvc#1461's first run the crossing took 298 s in a Debug job. The same budget as the
+# fleet's.
+cvc_discover_tests(nav_coph_driver_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)
@@ -3811,6 +3836,11 @@ if(_cvc_bench_python)
     add_test(NAME state_exec_bench_tool_test
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/bench/test_state_exec_bench.py")
+    # The continuous pool's state-word model (tools/locks_model/test_state_word.py; S2a PL-1):
+    # its quick suite and checks of its explorer, about 30 s, standard library only.
+    add_test(NAME state_exec_state_word_model_test
+             COMMAND "${_cvc_bench_python}" -I
+                     "${PROJECT_SOURCE_DIR}/tools/locks_model/test_state_word.py")
   endif()
 endif()
 # The deterministic bench gates (state_exec_bench_gates.cmake): 0 steps and 0 allocations per

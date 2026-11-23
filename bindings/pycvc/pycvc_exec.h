@@ -15,6 +15,8 @@
 #include <string>
 #ifndef SWIG
 #include <atomic>
+#include <cstdint>
+#include <cvc/state/state_exec/process_table.h> // detail::wakeup (run_all's batch wait)
 #include <exception>
 #include <span>
 #include <vector>
@@ -37,6 +39,20 @@ typedef _object PyObject;
 namespace pycvc {
 
 class ExecPool;
+
+#ifndef SWIG
+// What an ExecPool shares with its run_all batches, one at a time (S2a.8, S2-Q6): close()'s
+// request; the batch wait, a flag the batch's notifier sets on each post to a pooled group and
+// the wakeup it (and close()) notifies; and ExecPool.stats()'s counters. The pool owns it, so
+// close() reaches a batch in progress.
+struct batch_control {
+  std::atomic<bool> closing{false};
+  std::atomic<bool> posted{false};
+  cvc::state_exec::detail::wakeup wake;
+  std::atomic<std::uint64_t> waits{0};         // batch waits
+  std::atomic<std::uint64_t> wait_timeouts{0}; // ... that ran out with work posted meanwhile
+};
+#endif
 
 class Exec {
 public:
@@ -224,10 +240,12 @@ private:
   // execs[i % execs.size()], each pooled Exec's programs one at a time and in order, in its env
   // (a fresh extend of its natives with `fresh_env`). It pumps their groups on `pool` in fork-join
   // rounds until every program has ended or passed its idle limit, then waits for their kernels.
-  // Once `closing` is set, what runs is killed and what has not started is not started.
+  // With nothing to pump between rounds it waits once for the batch, on `control`'s wakeup, which
+  // its groups' posts notify for the batch (S2-Q6). Once `control.closing` is set, what runs is
+  // killed and what has not started is not started.
   static std::vector<batch_outcome> run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                               std::span<const std::string> programs, bool fresh_env,
-                                              const std::atomic<bool> &closing);
+                                              batch_control &control);
 #endif
 };
 

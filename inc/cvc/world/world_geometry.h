@@ -136,6 +136,23 @@ private:
   bool _edge_walls = true;
 };
 
+// A rectangle of the ground plane (world metres): a world's region (ARIADNE_WORLDS 18.8).
+struct world_rect {
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0;
+  bool valid() const { return max_x > min_x && max_y > min_y; }
+};
+
+// The world cut to `r`, so the physics, the navigator and the edge walls follow one cut, made once:
+//  - each height field to the samples that cover r (whole cells, at least one), its cell
+//    materials with it, so the walls stand at its new edge;
+//  - each mesh to the faces whose centroid (placement applied) is inside r, and the lines whose
+//    midpoint is, its face materials with them and its unused vertices dropped; an item left with
+//    no faces goes;
+//  - the volumes as they are, and the same surfaces and edge_walls.
+// Throws std::invalid_argument for a rectangle that is not valid() or that misses every height
+// field (a world with no terrain inside r is no world).
+world_geometry crop_world_geometry(const world_geometry &w, const world_rect &r);
+
 } // namespace world
 } // namespace cvc
 

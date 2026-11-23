@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <boost/signals2/connection.hpp>
+#include <chrono>
 #include <cvc/core/namespace.h>
 #include <cvc/state/state_change_journal.h>
 #include <cvc/state/state_codec_registry.h>
@@ -34,6 +35,7 @@ namespace cvc {
 class app;
 class state;
 class state_data_hydrator;
+class hybrid_clock;
 
 // ----------------
 // cvc::state_sync_adapter
@@ -64,6 +66,20 @@ class state_data_hydrator;
 //   This unit deliberately knows nothing about the wire protocol or
 //   the network transport. Phase 2 wires it to a codec + blob store,
 //   phase 3 to gRPC.
+//
+// Deletes:
+//   A node taken out of the observed subtree (state::removeChild: a (state-delete), a
+//   (state-set-tree) dropping the children its value does not name, a list row going, a world
+//   letting an entity go) is journaled as ONE delete_subtree at its path, stamped with the clock's
+//   time (set_clock), so a peer's copy loses it as a write would change it. A remote delete is
+//   applied, never journaled. state::reset(false) drops children without telling anyone, so it
+//   replicates nothing.
+//
+//   Each delete this adapter applies, local or remote, leaves a tombstone: its path and time.
+//   buried(m) says a remote write at or below one is older than the delete, so its writer made it
+//   before it saw the delete, and it must not bring the subtree back
+//   (state_cluster_shard::ingest_remote drops it). A write made after its writer saw the delete is
+//   later on any clock that merged the delete's time, so it makes the node again, as meant.
 //
 class state_sync_adapter {
 public:
@@ -125,11 +141,28 @@ public:
   // Set before attach(). An inline set_data payload never consults the hydrator.
   void set_data_hydrator(state_data_hydrator *hydrator) noexcept { _hydrator = hydrator; }
 
+  // The clock that times local deletes (and their tombstones): typically the owning shard's. Not
+  // owned. Without one a local delete goes out untimed (the shard stamps it as it sends it) and
+  // leaves no tombstone. Set before attach().
+  void set_clock(hybrid_clock *clock) noexcept { _clock = clock; }
+
   // Apply a mutation received from a remote peer. Marks the calling
   // thread as "applying remote" for the duration so that the
   // resulting state signal does NOT loop back into the journal.
   // Returns true if the mutation was applied successfully.
   bool apply_remote(const state_mutation &m);
+
+  // Whether the remote mutation `m` is older than a delete at or above its path that this adapter
+  // applied (see Deletes above): a timed write, touch or metadata change whose hlc_time is at most
+  // the tombstone's. A delete, a delegation op and an untimed mutation (hlc_time 0) never are.
+  bool buried(const state_mutation &m) const;
+
+  // The tombstones, oldest first: each the delete that left it (path, origin, sequence, time).
+  std::vector<state_mutation> tombstones() const;
+
+  // How long a tombstone lasts, in the clock's time (default 10 min), and how many there may be
+  // (default 4096: past that the oldest go). A delete takes the older tombstones below it with it.
+  void set_tombstone_limits(std::size_t max_entries, std::chrono::milliseconds ttl);
 
   // Test/diagnostic helpers.
   std::size_t observed_paths() const noexcept;
@@ -190,7 +223,15 @@ private:
   // Attach observers to `s` whose full path is `full_path`.
   void attach_node(state &s, const std::string &full_path);
   // Disconnect and forget the observers at and below `full_path` (a removed subtree). With _mutex.
-  void drop_subtree(const std::string &full_path);
+  // Returns whether there were any: only the first of the removal's childChanged slots (it fires
+  // on every observed ancestor) finds them. A node made on the way to a deeper write has no slot
+  // of its own, but the deeper node does.
+  bool drop_subtree(const std::string &full_path);
+
+  // Journal + dispatch the local removal of the node at `path`, and leave its tombstone.
+  void journal_delete(const std::string &path);
+  // Leave a tombstone for the delete `m` (timed: hlc_time != 0).
+  void bury(const state_mutation &m);
 
   // Connect all per-node change signals (value/data/comment/hidden/readOnly/child) for `node`,
   // whose full dotted path is `full_path`, and return the resulting connection set. Does not touch
@@ -230,6 +271,12 @@ private:
       nullptr; // not owned; data() replication codecs (may be null)
   state_data_hydrator *_hydrator =
       nullptr; // not owned; resolves blob-ref data() payloads (may be null)
+  hybrid_clock *_clock = nullptr; // not owned; times local deletes (may be null)
+
+  // The tombstones (see Deletes), defined in the .cpp over file-local element types, which keeps
+  // their containers' template code out of the cvc.dll export table.
+  struct tombstone_table;
+  std::unique_ptr<tombstone_table> _tombstones;
 
   mutable std::mutex _mutex;
   // Written under _mutex, but the slots read it unlocked on the writing thread: a race once a

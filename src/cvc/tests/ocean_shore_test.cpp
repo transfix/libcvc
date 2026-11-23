@@ -419,7 +419,9 @@ TEST(OceanShore, TheSwashWetsTheBeachAndItDries) {
 // same on every platform: its transcendentals are cvc/algo/det_math.h's, and its fast marching
 // pops (value, cell) pairs, which every standard library orders alike. The digest was measured on
 // Windows (MSVC, x86_64); a platform that disagrees has found a determinism leak, to be fixed,
-// never re-baselined. The grid itself is built from correctly rounded operations only.
+// never re-baselined. The grid itself is built from correctly rounded operations only. (Measured
+// again when the waterline's slope took the depth across it and the carried phase and runup were
+// evened out: both changed, by design.)
 TEST(OceanShore, IsTheSameOnEveryPlatform) {
   const double cx = 120.0, cy = 120.0, rad = 30.0;
   const auto dist = [&](double x, double y) {
@@ -466,7 +468,7 @@ TEST(OceanShore, IsTheSameOnEveryPlatform) {
       fnv(&w.wet, sizeof w.wet);
       fnv(&w.age, sizeof w.age);
     }
-  EXPECT_EQ(h, 0x0d101cbd6365b13full) << std::hex << "shore layer digest 0x" << h;
+  EXPECT_EQ(h, 0x7524b796ce361d62ull) << std::hex << "shore layer digest 0x" << h;
 }
 
 TEST(OceanShore, RejectsABadGrid) {

@@ -188,6 +188,38 @@ TEST(AriadneBind, WidgetAndSceneBindShareOneKey) {
   EXPECT_EQ(sval(app, "mesh.visible"), "0");
 }
 
+// The poll keeps both paths resolved between frames (bind_key), and still follows a source that
+// is deleted and made again, a target node that is taken out, and a link set over the source's
+// parent.
+TEST(AriadneBind, SyncFollowsKeysTakenOutAndLinksSet) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("src.vis").value(0);
+  std::vector<SceneVisibilityBinding> binds = {{"src.vis", "node.visible", true}};
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "0");
+  root("src").removeChild("vis"); // unset: the default
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "1");
+  root("src.vis").value(0); // made again: followed
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "0");
+  root.removeChild("node"); // the node's key taken out: written again where a reader looks
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "0");
+  root("alt.vis").value(1);
+  root("src").linkTo("alt", cvc::state::link_mode::transparent); // read through the hole
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "1");
+  root("src").clearLink();
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "0");
+  // A binding whose path changes is read at its new path.
+  binds[0].source_path = "alt.vis";
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "node.visible"), "1");
+}
+
 // --- sync_scene_clip: bound clip `offset:`s -> the node's `clip_planes` key ----
 
 namespace {

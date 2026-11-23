@@ -240,30 +240,32 @@ std::string coph_packet::json() const {
   }
   out += "],\"expires\":";
   write_number(out, expires);
-  out += ",\"geometry\":[";
-  for (std::size_t i = 0; i < geometry.size(); ++i) {
-    const coph_geometry_report &g = geometry[i];
-    out += i ? ",[" : "[";
-    write_number(out, g.shape.x);
-    out += ',';
-    write_number(out, g.shape.y);
-    out += ',';
-    write_number(out, g.shape.r);
-    if (g.shape.slab) {
+  if (maze) {
+    out += ",\"geometry\":[";
+    for (std::size_t i = 0; i < geometry.size(); ++i) {
+      const coph_geometry_report &g = geometry[i];
+      out += i ? ",[" : "[";
+      write_number(out, g.shape.x);
       out += ',';
-      write_number(out, g.shape.hx);
+      write_number(out, g.shape.y);
       out += ',';
-      write_number(out, g.shape.hy);
+      write_number(out, g.shape.r);
+      if (g.shape.slab) {
+        out += ',';
+        write_number(out, g.shape.hx);
+        out += ',';
+        write_number(out, g.shape.hy);
+      }
+      for (double v : {g.sensor[0], g.sensor[1], g.sensor_radius, g.time}) {
+        out += ',';
+        write_number(out, v);
+      }
+      out += ',';
+      write_string(out, g.source);
+      out += ']';
     }
-    for (double v : {g.sensor[0], g.sensor[1], g.sensor_radius, g.time}) {
-      out += ',';
-      write_number(out, v);
-    }
-    out += ',';
-    write_string(out, g.source);
-    out += ']';
+    out += "],\"geometry_schema\":" + std::to_string(geometry_schema);
   }
-  out += "],\"geometry_schema\":" + std::to_string(geometry_schema);
   out += ",\"goal\":";
   write_pair(out, goal);
   out += ",\"identity\":";

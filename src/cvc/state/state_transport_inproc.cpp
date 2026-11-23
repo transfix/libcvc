@@ -94,7 +94,7 @@ state_transport::publish_stats state_transport_inproc::publish(const state_mutat
   _published.fetch_add(1, std::memory_order_relaxed);
 
   for (auto *peer : peers) {
-    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path, is_subtree_op(m.op))) {
       _peers.note_delivery_filtered(peer->local_node_id());
       continue;
     }

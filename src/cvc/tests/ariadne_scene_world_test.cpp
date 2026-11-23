@@ -144,7 +144,7 @@ SceneClock resolved_clock(const Scene &scene) {
 
 } // namespace
 
-TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
+TEST(AriadneSceneWorld, LocalMatrixIsScaleThenRotationThenPosition) {
   SceneNode n;
   n.has_transform = true;
   n.rotation[2] = 90.0; // about z: +x goes to +y
@@ -152,10 +152,11 @@ TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
   n.position[0] = 5.0;
   double m[16];
   scene_node_local_matrix(n, m);
-  // Rz(90) = [[0,-1,0],[1,0,0],[0,0,1]], row 0 scaled by 2.
+  // Rz(90) = [[0,-1,0],[1,0,0],[0,0,1]], column 0 scaled by 2: the node's own x is stretched, then
+  // turned onto +y.
   EXPECT_NEAR(m[0], 0.0, 1e-12);
-  EXPECT_NEAR(m[1], -2.0, 1e-12);
-  EXPECT_NEAR(m[4], 1.0, 1e-12);
+  EXPECT_NEAR(m[1], -1.0, 1e-12);
+  EXPECT_NEAR(m[4], 2.0, 1e-12);
   EXPECT_NEAR(m[5], 0.0, 1e-12);
   EXPECT_NEAR(m[10], 1.0, 1e-12);
   EXPECT_NEAR(m[3], 5.0, 1e-12);
@@ -163,6 +164,58 @@ TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
   scene_node_local_matrix(plain, m);
   for (int k = 0; k < 16; ++k)
     EXPECT_EQ(m[k], (k % 5 == 0) ? 1.0 : 0.0);
+}
+
+// The rotation is about the parent's x, then y, then z: Rz Ry Rx.
+TEST(AriadneSceneWorld, LocalMatrixTurnsAboutXThenYThenZ) {
+  SceneNode n;
+  n.has_transform = true;
+  n.rotation[0] = 90.0; // +y to +z
+  n.rotation[2] = 90.0; // then +x to +y
+  double m[16];
+  scene_node_local_matrix(n, m);
+  // +x: x leaves it alone, z takes it to +y. +y: x takes it to +z, z leaves it.
+  EXPECT_NEAR(m[0], 0.0, 1e-12); // column 0, the image of +x: (0, 1, 0)
+  EXPECT_NEAR(m[4], 1.0, 1e-12);
+  EXPECT_NEAR(m[8], 0.0, 1e-12);
+  EXPECT_NEAR(m[1], 0.0, 1e-12); // column 1, the image of +y: (0, 0, 1)
+  EXPECT_NEAR(m[5], 0.0, 1e-12);
+  EXPECT_NEAR(m[9], 1.0, 1e-12);
+}
+
+// A turned node scaled along its own axes is a rigid body like any other: its box is the node's
+// box stretched along the node's x, the body turned as the node is, and nothing is skewed.
+TEST(AriadneSceneWorld, ATurnedNodesScaleIsAlongItsOwnAxes) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  nodes:
+    - node: beam
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [0, 0, 5], rotation: [0, 0, 30], scale: [4, 1, 0.5] }
+      body: { mass: 10 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_FALSE(any_contains(warnings, "skewed"));
+  ASSERT_EQ(w->bodies().size(), 1u);
+  const SceneWorldBody &b = w->bodies().front();
+  ASSERT_TRUE(b.desc);
+  const auto *box = std::get_if<cvc::physics::box>(&b.desc->shape);
+  ASSERT_NE(box, nullptr);
+  EXPECT_NEAR(box->half_extents.x, 2.0, 1e-9);
+  EXPECT_NEAR(box->half_extents.y, 0.5, 1e-9);
+  EXPECT_NEAR(box->half_extents.z, 0.25, 1e-9);
+  // 30 degrees about z, to the engine's precision (it keeps a body's rotation in floats).
+  const cvc::physics::quat q = w->world().state(b.id).rotation;
+  EXPECT_NEAR(std::fabs(q.w), std::cos(15.0 * 3.141592653589793 / 180.0), 1e-6);
+  EXPECT_NEAR(std::fabs(q.z), std::sin(15.0 * 3.141592653589793 / 180.0), 1e-6);
+  EXPECT_NEAR(q.x, 0.0, 1e-6);
+  EXPECT_NEAR(q.y, 0.0, 1e-6);
 }
 
 TEST(AriadneSceneWorld, BuildsTheBodiesFromTheSceneAlone) {
@@ -1334,6 +1387,148 @@ scene:
             fs::weakly_canonical(dir / "models" / "pkg"));
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+// A look in parts: `chassis:`, `wheel:` and `rig:` (inline, or a rig file: YAML, or JSON) parse to
+// a parted look, on disk or with `data:` in a package; the rig's hubs, its radius, its steering
+// hubs (the front axle's unless steer: names them) and its mirror; its files beside the document;
+// the catalog carries it, an inline rig as its text, which reads back.
+TEST(AriadneWorldVehicles, ALookInPartsTakesAChassisAWheelAndARig) {
+  REQUIRE_YAML();
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, R"(
+data:
+  parts: { uri: cvcpkg://example/vehicle-parts, path: share/cvc-scenes/rover, load: lazy }
+world:
+  vehicles:
+    archetypes:
+      inline:
+        look:
+          chassis: rover/chassis.glb
+          wheel: rover/wheel.glb
+          rig:
+            radius: 0.4
+            hubs: [[1.5, 0.9, 0.4], [1.5, -0.9, 0.4], [-1.5, 0.9, 0.4], [-1.5, -0.9, 0.4]]
+            mirror: reflect
+      named:
+        look:
+          chassis: c.obj
+          wheel: w.obj
+          rig:
+            hubs: { order: [fl, fr, rl, rr], xyz: [[1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0]] }
+            steer: [rl, 3]
+      packed: { look: { data: parts, chassis: chassis.glb, wheel: wheel.glb, rig: rig.json } }
+scene:
+  nodes: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  world_rules rules = default_world_rules();
+  ASSERT_NE(find_world_block(r), nullptr);
+  ASSERT_EQ(parse_world_block(*find_world_block(r), rules), "");
+  ASSERT_EQ(rules.vehicles.size(), 3u);
+  const vehicle_look &in = rules.vehicles[0].look;
+  EXPECT_TRUE(in.parted());
+  EXPECT_EQ(in.kind, "file");
+  EXPECT_TRUE(in.fit);
+  EXPECT_EQ(in.chassis, "rover/chassis.glb");
+  EXPECT_EQ(in.wheel, "rover/wheel.glb");
+  EXPECT_EQ(in.rig_file, "");
+  ASSERT_EQ(in.rig.hubs.size(), 4u);
+  EXPECT_EQ(in.rig.hubs[1], (std::array<double, 3>{1.5, -0.9, 0.4}));
+  EXPECT_EQ(in.rig.radius, 0.4);
+  EXPECT_EQ(in.rig.steers, (std::vector<bool>{true, true, false, false})) << "the front axle's";
+  EXPECT_EQ(in.rig.mirror, "reflect");
+  EXPECT_FALSE(in.rig.y_up);
+  const vehicle_look &named = rules.vehicles[1].look;
+  EXPECT_EQ(named.rig.steers, (std::vector<bool>{false, false, true, true})) << "by name, by index";
+  EXPECT_EQ(named.rig.radius, 0.0) << "none given: the wheel mesh's";
+  EXPECT_EQ(named.rig.mirror, "turn");
+  const vehicle_look &packed = rules.vehicles[2].look;
+  EXPECT_EQ(packed.kind, "data");
+  EXPECT_TRUE(packed.parted());
+  EXPECT_EQ(packed.rig_file, "rig.json");
+  EXPECT_TRUE(packed.rig.hubs.empty()) << "read by the view, from the package";
+
+  // Resolved: files beside the document; a data look's package copied in.
+  const fs::path dir = fs::temp_directory_path() / "ariadne_parted_look";
+  fs::create_directories(dir / "rover");
+  std::ofstream(dir / "rover" / "chassis.glb") << "x";
+  std::vector<std::string> warnings;
+  resolve_vehicle_looks(rules.vehicles, dir.string(), r.scene.assets, &warnings, r.scene.data);
+  EXPECT_EQ(fs::path(rules.vehicles[0].look.chassis), dir / "rover" / "chassis.glb");
+  EXPECT_EQ(fs::path(rules.vehicles[0].look.wheel), dir / "rover" / "wheel.glb")
+      << "not there, nor installed: beside the document still";
+  EXPECT_EQ(rules.vehicles[2].look.uri, "cvcpkg://example/vehicle-parts");
+  EXPECT_EQ(rules.vehicles[2].look.subpath, "share/cvc-scenes/rover");
+  EXPECT_EQ(rules.vehicles[2].look.chassis, "chassis.glb") << "in the package";
+  EXPECT_TRUE(warnings.empty());
+
+  // The catalog: each part, an inline rig as its text, which reads back whole.
+  cvc::physics::world_config c;
+  c.backend = cvc::physics::backend::null;
+  cvc::physics::world world(c);
+  WorldVehicles v(&app, world, rules.vehicles, "vehicles", "entities");
+  EXPECT_EQ(fs::path(val(app, "vehicles.archetypes.inline.look.chassis")),
+            dir / "rover" / "chassis.glb");
+  EXPECT_EQ(val(app, "vehicles.archetypes.packed.look.rig"), "rig.json");
+  const std::string text = val(app, "vehicles.archetypes.inline.look.rig");
+  EXPECT_EQ(text, vehicle_rig_text(rules.vehicles[0].look.rig));
+  Value back;
+  vehicle_rig again;
+  ASSERT_TRUE(parse_value(text, back));
+  ASSERT_TRUE(parse_vehicle_rig(back, again));
+  EXPECT_EQ(again, rules.vehicles[0].look.rig);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+
+  // A rig file's shape: JSON, with its provenance beside the rig (ignored), the radius under
+  // wheel:, the hubs under hubs: xyz:, glTF's frame.
+  Value json;
+  std::string why;
+  ASSERT_TRUE(parse_value(R"({
+    "source": { "title": "a test rover", "license": "CC0" },
+    "frame": "metres",
+    "wheel": { "radius": 0.35, "width": 0.2 },
+    "hubs": { "order": ["a", "b", "c"], "xyz": [[0.8, 0.3, 1.2], [-0.8, 0.3, 1.2], [0, 0.3, -1]] },
+    "up": "y",
+    "size": [2, 1.5, 3]
+  })",
+                          json, &why))
+      << why;
+  vehicle_rig rig;
+  ASSERT_TRUE(parse_vehicle_rig(json, rig, &why)) << why;
+  EXPECT_EQ(rig.radius, 0.35);
+  EXPECT_TRUE(rig.y_up);
+  EXPECT_EQ(rig.steers, (std::vector<bool>{true, true, false})) << "forward is +z in glTF's frame";
+
+  // What is not a rig, or not a parted look.
+  for (const auto &[bad, says] : std::vector<std::pair<std::string, std::string>>{
+           {"{ hubs: [] }", "hubs:"},
+           {"{ hubs: [[1, 2]] }", "three numbers"},
+           {"{ hubs: [[1, 0, 0]], radius: -1 }", "radius:"},
+           {"{ hubs: [[1, 0, 0]], steer: [front] }", "names no hub"},
+           {"{ hubs: [[1, 0, 0]], mirror: flip }", "mirror:"},
+           {"{ hubs: [[1, 0, 0]], up: x }", "up:"}}) {
+    Value v2;
+    ASSERT_TRUE(parse_value(bad, v2));
+    std::string w;
+    vehicle_rig r2;
+    EXPECT_FALSE(parse_vehicle_rig(v2, r2, &w)) << bad;
+    EXPECT_NE(w.find(says), std::string::npos) << bad << ": " << w;
+  }
+  for (const auto &[look, says] : std::vector<std::pair<std::string, std::string>>{
+           {"{ chassis: c.glb, rig: r.json }", "needs chassis:, wheel: and rig:"},
+           {"{ chassis: c.glb, wheel: w.glb }", "needs chassis:, wheel: and rig:"},
+           {"{ model: humvee, chassis: c.glb, wheel: w.glb, rig: r.json }", "drop model:"},
+           {"{ chassis: c.glb, wheel: w.glb, rig: { hubs: [] } }", "rig: hubs:"}}) {
+    LoadResult bad =
+        load_string(app, "world:\n  vehicles:\n    archetypes:\n      h: { look: " + look +
+                             " }\nscene:\n  nodes: []\n");
+    ASSERT_TRUE(bad.ok) << bad.error;
+    world_rules br = default_world_rules();
+    EXPECT_NE(parse_world_block(*find_world_block(bad), br).find(says), std::string::npos) << look;
+  }
 }
 
 TEST(AriadneWorldVehicles, ArchetypeStatsAndSettings) {
@@ -3130,6 +3325,20 @@ TEST(AriadneWorldVehicles, TheWorldBlockTakesPosesAndThePoseController) {
       parse_poses(text + "\nbad 1 2\n2 1 2 nan 0 0 0 0 0 nan;3 inf 0 0 0 0 0 0 0 nan", back));
   ASSERT_EQ(back.size(), 3u) << "the good ones, the bad two left";
   EXPECT_EQ(back[2].first, "2");
+  // Numbers read as std::stod reads them, in any spelling: a sign, an exponent, hex, separators;
+  // one out of range (or not a number) makes its record bad.
+  EXPECT_TRUE(parse_poses("p +1.5 -2e1 nan 0x10 0 0 0.25 0 nan\r\n", back));
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_EQ(back[0].first, "p");
+  EXPECT_EQ(back[0].second.x, 1.5);
+  EXPECT_EQ(back[0].second.y, -20.0);
+  EXPECT_EQ(back[0].second.heading, 16.0);
+  EXPECT_EQ(back[0].second.speed, 0.25);
+  EXPECT_TRUE(parse_poses("q,1,2,nan,0,0,0,0,0,nan;;", back));
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_EQ(back[0].second.y, 2.0);
+  EXPECT_FALSE(parse_poses("r 1e400 0 nan 0 0 0 0 0 nan\ns 1 0 nan 0 0 0 0 0x nan", back));
+  EXPECT_TRUE(back.empty());
 }
 
 // Poses on the keys, each frame, with no plant integrating the entity: it is exactly where they
@@ -3784,6 +3993,36 @@ TEST(AriadneWorldVehicles, EveryPlantDrivesInTheScenesWorld) {
   const std::string lines = val(app, "physics.stats.vehicles");
   for (const char *plant : {"  jolt  ", "  dynamic  ", "  dynamic4w  ", "  kinematic  "})
     EXPECT_NE(lines.find(plant), std::string::npos) << plant << " in\n" << lines;
+
+  // Every plant's wheels roll at its speed: over a second, each turns by about the way its
+  // chassis went over its radius (a Jolt wheel by its own rotation, slip and all); each says its
+  // radius and whether its axle steers.
+  const double r0 = cvc::physics::vehicle_desc::humvee().axles.front().wheel_radius;
+  std::array<double, 4> turned{}, rolled{}, spin{}, speed{};
+  for (std::size_t k = 0; k < 4; ++k) {
+    const std::vector<entity_wheel> now = v.wheels(ids[k]);
+    ASSERT_EQ(now.size(), 4u) << kinds[k];
+    for (std::size_t j = 0; j < 4; ++j) {
+      EXPECT_DOUBLE_EQ(now[j].radius, r0) << kinds[k] << " " << j;
+      EXPECT_EQ(now[j].steered, j < 2) << kinds[k] << " " << j << ": the front axle steers";
+    }
+    spin[k] = now[2].spin;
+    speed[k] = entity_of(v, ids[k]).speed;
+  }
+  for (int f = 0; f < 60; ++f) {
+    drive(app, *w, clock, 1);
+    for (std::size_t k = 0; k < 4; ++k) {
+      const double s = v.wheels(ids[k])[2].spin, u = entity_of(v, ids[k]).speed;
+      turned[k] += std::remainder(s - spin[k], 2.0 * 3.14159265358979);
+      rolled[k] += 0.5 * (u + speed[k]) / 60.0 / r0;
+      spin[k] = s;
+      speed[k] = u;
+    }
+  }
+  for (std::size_t k = 0; k < 4; ++k) {
+    EXPECT_GT(std::fabs(rolled[k]), 0.2) << kinds[k] << ": it drove";
+    EXPECT_NEAR(turned[k], rolled[k], 0.2 * std::fabs(rolled[k])) << kinds[k];
+  }
 
   // The four-wheeler's wheels as drawn: on the ground, below its box, the front ones steered.
   const std::uint64_t turning = spawn_one(v, "four", "external", -60.0, -30.0, 0.0);
@@ -6247,6 +6486,62 @@ TEST(AriadneSceneWorld, AGeneratedWorldsEdgeCanBeAShore) {
   EXPECT_EQ(gw->params.edge, int(cvc::world::world_edge::shore));
   EXPECT_EQ(w->bodies_of("land").size(), collide_items(*gw));         // no walls
   EXPECT_LT(gw->height(-149.9, 0.0), gw->params.water_level_m - 5.0); // the sea at the edge
+}
+
+// A shore-edged world's beach takes the swell's swash all round, as the water node's coast builds
+// it (scene_water_shore): terrain_lab's world and swell (0.8 m, 9 s, travelling toward 200 deg, so
+// the east side is windward and the west the lee). Its surf zone shoals the swell, and the runup
+// carried up the beach from the waterline reaches well over the first dry ground on every side,
+// highest to windward. Before, the sea floor rose almost sheer to a 1 in 50 beach, the waterline's
+// slope came out of half a cell's distance, and the lee had none: 0.18 m to windward, 0.02 in the
+// lee, so the edge's beaches showed no swash.
+TEST(AriadneSceneWorld, AShoreEdgedWorldsBeachTakesTheSwashAllRound) {
+  cvc::app app;
+  cvc::world::generated_world_params p; // terrain_lab's world, its ground alone
+  p.trees = 0;
+  p.rocks = 0;
+  p.buildings = 0;
+  p.city = "none";
+  p.edge = int(cvc::world::world_edge::shore);
+  const cvc::world::generated_world w = cvc::world::generate_world(app, p);
+  ASSERT_NE(w.terrain, nullptr);
+  SceneWaterSpec s;
+  s.swell_height = 0.8;
+  s.swell_period = 9.0;
+  s.swell_dir = 200.0;
+  const std::shared_ptr<const SceneWaterShore> sh = scene_water_shore(*w.terrain, s);
+  ASSERT_NE(sh, nullptr);
+  ASSERT_NE(sh->layer, nullptr);
+  const cvc::ocean::shore_layer &L = *sh->layer;
+  // Walking in from the middle of each side: the waves in the surf zone, and the runup and height
+  // of the first dry ground.
+  struct side {
+    const char *name;
+    double x, y, dx, dy;
+  };
+  const double h = p.half_m;
+  for (const side &sd : {side{"east (windward)", h, 0, -1, 0}, side{"north", 0, h, 0, -1},
+                         side{"west (lee)", -h, 0, 1, 0}, side{"south", 0, -h, 0, 1}}) {
+    double wave = 0.0, runup = -1.0, ground = 0.0;
+    for (double t = 0.0; t < 0.5 * h; t += 1.0) {
+      const double x = sd.x + sd.dx * t, y = sd.y + sd.dy * t, z = w.height(x, y);
+      if (z < p.water_level_m) {
+        wave = std::max(wave, L.sample_field(L.amplitude, x, y));
+        continue;
+      }
+      runup = L.sample_field(L.runup, x, y);
+      ground = z - p.water_level_m;
+      break;
+    }
+    std::printf("[shore edge] %s: surf zone waves to %.2f m, runup %.2f m over the first dry "
+                "ground (%.2f m up)\n",
+                sd.name, wave, runup, ground);
+    EXPECT_GT(wave, 0.08) << sd.name << ": the swell reaches its surf zone";
+    EXPECT_GT(runup, 0.2) << sd.name;
+    EXPECT_GT(runup, ground + 0.15) << sd.name << ": the swash runs up over it";
+    if (sd.dx < 0.0) // the east side, square to the swell
+      EXPECT_GT(runup, 0.8) << sd.name;
+  }
 }
 
 // The world's edge is a live setting (world.edge, the World panel's Edge), seeded from the node's

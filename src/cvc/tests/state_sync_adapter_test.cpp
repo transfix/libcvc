@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_hybrid_time.h>
 #include <cvc/state/state_sync_adapter.h>
 #include <gtest/gtest.h>
 #include <string>
@@ -175,6 +176,158 @@ TEST(StateSyncAdapterTest, ARemoteDeleteTakesTheSubtreeOut) {
   for (const auto &m : adapter.journal().snapshot())
     journaled = journaled || (m.path == root + ".gone.leaf" && m.string_value == "local");
   EXPECT_TRUE(journaled) << "a node made there later is observed again";
+}
+
+namespace {
+std::uint64_t at_ms(std::uint64_t wall_ms) { return cvc::hybrid_time{wall_ms, 0}.packed(); }
+
+cvc::state_mutation remote_delete(const std::string &path, std::uint64_t hlc) {
+  cvc::state_mutation m;
+  m.origin_node_id = "peer";
+  m.path = path;
+  m.op = cvc::state_mutation_op::delete_subtree;
+  m.hlc_time = hlc;
+  return m;
+}
+} // namespace
+
+// A local removal is journaled as ONE delete_subtree at the removed node, though its childChanged
+// reaches every observed ancestor, and the nodes below it add nothing. A removal while journaling
+// is suppressed (a bulk load, a remote apply) is not.
+TEST(StateSyncAdapterTest, ALocalRemovalIsJournaledOnce) {
+  cvc::app a;
+  std::string root = unique_root("localdelete");
+  cvc::state::instance(a)(root + ".x.y.z").value("1");
+  cvc::state::instance(a)(root + ".x.w").value("2");
+  cvc::state_sync_adapter adapter(a, root, "nodeA");
+  adapter.attach();
+  const std::size_t before = adapter.journal().size();
+
+  ASSERT_TRUE(cvc::state::instance(a)(root + ".x").removeChild("y"));
+  const auto journal = adapter.journal().snapshot();
+  ASSERT_EQ(journal.size(), before + 1);
+  EXPECT_EQ(journal.back().op, cvc::state_mutation_op::delete_subtree);
+  EXPECT_EQ(journal.back().path, root + ".x.y");
+  EXPECT_EQ(journal.back().hlc_time, 0u) << "untimed without a clock";
+  EXPECT_TRUE(adapter.tombstones().empty()) << "and so no tombstone";
+  EXPECT_EQ(cvc::state::instance(a).findDescendant(root + ".x.y"), nullptr)
+      << "the slots did not make it again";
+
+  {
+    cvc::state_sync_adapter::suppression_scope quiet(adapter);
+    ASSERT_TRUE(cvc::state::instance(a)(root + ".x").removeChild("w"));
+  }
+  EXPECT_EQ(adapter.journal().size(), before + 1);
+
+  // A node made at a removed path later is observed afresh, and its removal journaled again.
+  cvc::state::instance(a)(root + ".x.y").value("again");
+  ASSERT_TRUE(cvc::state::instance(a)(root + ".x").removeChild("y"));
+  const auto after = adapter.journal().snapshot();
+  EXPECT_EQ(after.back().op, cvc::state_mutation_op::delete_subtree);
+  EXPECT_EQ(after.back().path, root + ".x.y");
+}
+
+// Two trees wired as a client is to its relay (the 2026-11-22 probe): a removal on the source
+// reaches the replica, which journals nothing of its own for it.
+TEST(StateSyncAdapterTest, ALocalDeleteReachesTheReplica) {
+  cvc::app server, client;
+  std::string root = unique_root("mirror");
+  cvc::state::instance(server)(root).touch();
+  cvc::state::instance(client)(root).touch();
+  cvc::state_sync_adapter source(server, root, "srv");
+  cvc::state_sync_adapter replica(client, root, "cli");
+  source.set_on_local_mutation([&](const cvc::state_mutation &m) { replica.apply_remote(m); });
+  source.attach();
+  replica.attach();
+
+  cvc::state::instance(server)(root + ".y.leaf").value("1");
+  cvc::state::instance(server)(root + ".keep").value("2");
+  ASSERT_EQ(cvc::state::instance(client)(root + ".y.leaf").value(), "1");
+
+  ASSERT_TRUE(cvc::state::instance(server)(root).removeChild("y"));
+  EXPECT_EQ(cvc::state::instance(client).findDescendant(root + ".y"), nullptr);
+  EXPECT_NE(cvc::state::instance(client).findDescendant(root + ".keep"), nullptr);
+  EXPECT_EQ(replica.journal().size(), 0u) << "an applied delete is not echoed";
+}
+
+// With a clock, a local delete is timed and leaves a tombstone, as a timed remote one does. A
+// remote write at or below it no later than it is buried; a later one, one above or beside it, an
+// untimed one and a delete are not.
+TEST(StateSyncAdapterTest, ATombstoneBuriesOlderWritesBelowIt) {
+  cvc::app a;
+  std::string root = unique_root("tombstone");
+  cvc::state::instance(a)(root + ".x.y.z").value("1");
+  cvc::hybrid_clock clock;
+  cvc::state_sync_adapter adapter(a, root, "nodeA");
+  adapter.set_clock(&clock);
+  adapter.attach();
+
+  ASSERT_TRUE(cvc::state::instance(a)(root + ".x").removeChild("y"));
+  const auto journal = adapter.journal().snapshot();
+  ASSERT_FALSE(journal.empty());
+  const std::uint64_t t = journal.back().hlc_time;
+  EXPECT_NE(t, 0u);
+  const auto stones = adapter.tombstones();
+  ASSERT_EQ(stones.size(), 1u);
+  EXPECT_EQ(stones[0].path, root + ".x.y");
+  EXPECT_EQ(stones[0].hlc_time, t);
+  EXPECT_EQ(stones[0].origin_node_id, "nodeA");
+  EXPECT_EQ(stones[0].sequence, journal.back().sequence) << "a repeat keeps its identity";
+
+  cvc::state_mutation w;
+  w.origin_node_id = "peer";
+  w.op = cvc::state_mutation_op::set_value;
+  w.path = root + ".x.y.z";
+  w.hlc_time = t - 1;
+  EXPECT_TRUE(adapter.buried(w));
+  w.hlc_time = t;
+  EXPECT_TRUE(adapter.buried(w)) << "a tie goes to the delete";
+  w.hlc_time = t + 1;
+  EXPECT_FALSE(adapter.buried(w)) << "made after its writer saw the delete";
+  w.hlc_time = 0;
+  EXPECT_FALSE(adapter.buried(w)) << "untimed";
+  w.hlc_time = t - 1;
+  w.path = root + ".x.y";
+  EXPECT_TRUE(adapter.buried(w)) << "at the deleted node";
+  w.path = root + ".x";
+  EXPECT_FALSE(adapter.buried(w)) << "above it";
+  w.path = root + ".x.yy";
+  EXPECT_FALSE(adapter.buried(w)) << "beside it";
+  w.path = root + ".x.y.z";
+  w.op = cvc::state_mutation_op::delete_subtree;
+  EXPECT_FALSE(adapter.buried(w)) << "a delete always applies";
+
+  // A later delete above takes the tombstones below it.
+  EXPECT_TRUE(adapter.apply_remote(remote_delete(root + ".x", t + 10)));
+  const auto merged = adapter.tombstones();
+  ASSERT_EQ(merged.size(), 1u);
+  EXPECT_EQ(merged[0].path, root + ".x");
+  EXPECT_EQ(merged[0].origin_node_id, "peer");
+  EXPECT_EQ(adapter.journal().size(), journal.size()) << "a remote delete is not journaled";
+}
+
+// Tombstones are kept newest first up to the cap, and for the ttl before the newest.
+TEST(StateSyncAdapterTest, TombstonesAreBounded) {
+  cvc::app a;
+  std::string root = unique_root("tombcap");
+  cvc::state_sync_adapter adapter(a, root, "nodeA");
+  adapter.attach();
+  for (int i = 1; i <= 3; ++i)
+    adapter.apply_remote(remote_delete(root + ".a" + std::to_string(i), at_ms(1000 * i)));
+  EXPECT_EQ(adapter.tombstones().size(), 3u);
+  adapter.apply_remote(remote_delete(root + ".untimed", 0));
+  EXPECT_EQ(adapter.tombstones().size(), 3u) << "an untimed delete leaves none";
+
+  adapter.set_tombstone_limits(2, std::chrono::minutes(10));
+  auto stones = adapter.tombstones();
+  ASSERT_EQ(stones.size(), 2u);
+  EXPECT_EQ(stones[0].path, root + ".a2") << "oldest first, the oldest gone";
+  EXPECT_EQ(stones[1].path, root + ".a3");
+
+  adapter.set_tombstone_limits(10, std::chrono::milliseconds(500));
+  stones = adapter.tombstones();
+  ASSERT_EQ(stones.size(), 1u);
+  EXPECT_EQ(stones[0].path, root + ".a3") << "a2 is 1 s before the newest";
 }
 
 TEST(StateSyncAdapterTest, RemoteApplyDoesNotFeedback) {

@@ -155,8 +155,15 @@ public:
       if (l.rig.empty()) // a rig's lights belong to (and leave with) its StageLighting
         lights_.push_back(l.id);
     const cvc::bounding_box bb = view_->scene().computeGraphicsBounds();
-    if (!bb.isNull())
+    if (!bb.isNull()) {
       cam_->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+      // `cameras:` names one `main`: where the main view starts, as a viewport's camera does.
+      for (const ari::SceneCamera &c : scene.cameras)
+        if (c.id == "main") {
+          const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+          frame_scene_camera(*cam_, b, c, sg);
+        }
+    }
     // The scene's background (a view property): a solid colour, or a top-to-bottom gradient set on
     // the renderer (SceneRenderer exposes only a flat setBackground).
     apply_background(view_->renderer(), scene);
@@ -571,10 +578,10 @@ std::vector<std::string> AriRuntime::load(const std::string &path) {
   if (quality_)    // the same machine, so the same tier; the start's cooldown for the new document
     quality_->reset(quality_->tier());
   std::vector<std::string> warnings = app_rt_.load(path);
-  // §5.14 on a phone the panels start hidden so a scene isn't buried; a document with no scene
-  // (a feed, a form) is nothing but its panels, so it starts with them shown.
+  // §5.14 a document's panels start shown on a phone as anywhere else, its scene or not; the
+  // round button hides them.
   const bool scene = realized() != nullptr;
-  overlay_->setPhoneHidesPanels(scene);
+  overlay_->setPhoneHidesPanels(false);
   // §5.4 whether the document draws a scene, under its own prefix: a host's scene-only menu items
   // (arigl's Settings: Controls..., the scene's display settings) show only then.
   cvc::state::instance(app_)(prefix() + ".ariadne.scene").value(std::string(scene ? "1" : "0"));
