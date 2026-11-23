@@ -1698,11 +1698,15 @@ protected:
     bool overlaps(const TexelRect &o) const {
       return !empty() && !o.empty() && x0 < o.x1 && o.x0 < x1 && y0 < o.y1 && o.y0 < y1;
     }
+    double area() const {
+      return empty() ? 0.0 : static_cast<double>(x1 - x0) * static_cast<double>(y1 - y0);
+    }
   };
 
-  // The props' footprints (see footprint) as a few rectangles: overlapping ones merged (a vehicle
-  // and its wheels, a caster now and at the last bake), and all of them as one past 16, so a
-  // bake makes a handful of copies, not one a caster.
+  // The props' footprints (see footprint) as a few rectangles: merged where one rectangle around
+  // two covers at most twice what they do (a vehicle and its wheels, the vehicles of a convoy, a
+  // caster now and at the last bake), and all of them as one past 16, so a bake makes a few
+  // copies, not one a caster, while casters far apart are not copied with all between them.
   static void footprints(vtkCamera *cam, const std::vector<vtkProp *> &props, int res,
                          std::vector<TexelRect> &out) {
     vtkMatrix4x4 *m = cam->GetCompositeProjectionTransformMatrix(1.0, -1.0, 1.0);
@@ -1717,7 +1721,11 @@ protected:
       merged = false;
       for (std::size_t i = 0; i < rects.size() && !merged; ++i)
         for (std::size_t j = i + 1; j < rects.size(); ++j)
-          if (rects[i].overlaps(rects[j])) {
+          if (rects[i].overlaps(rects[j]) || [&] {
+                TexelRect u = rects[i];
+                u |= rects[j];
+                return u.area() <= 2.0 * (rects[i].area() + rects[j].area());
+              }()) {
             rects[i] |= rects[j];
             rects.erase(rects.begin() + static_cast<std::ptrdiff_t>(j));
             merged = true;
