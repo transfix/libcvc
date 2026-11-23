@@ -43,6 +43,7 @@
 #include <vtkOpenGLState.h>
 #include <vtkOverlayPass.h>
 #include <vtkProp.h>
+#include <vtkProp3D.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderPass.h>
 #include <vtkRenderPassCollection.h>
@@ -1680,34 +1681,67 @@ protected:
       y1 = std::max(y1, o.y1);
       return *this;
     }
+    bool overlaps(const TexelRect &o) const {
+      return !empty() && !o.empty() && x0 < o.x1 && o.x0 < x1 && y0 < o.y1 && o.y0 < y1;
+    }
   };
 
-  // The texels of a res x res map drawn through `cam` that the props' bounds cover, two texels
-  // wider all round; the whole map where a bound cannot be projected (a corner behind a spot's
-  // eye, a prop without bounds). Pinned at aspect 1, as ShadowCasterFilterPass draws.
-  static TexelRect footprint(vtkCamera *cam, const std::vector<vtkProp *> &props, int res) {
-    const TexelRect whole{0, 0, res, res};
+  // The props' footprints (see footprint) as a few rectangles: overlapping ones merged (a vehicle
+  // and its wheels, a caster now and at the last bake), and all of them as one past 16, so a
+  // bake makes a handful of copies, not one a caster.
+  static void footprints(vtkCamera *cam, const std::vector<vtkProp *> &props, int res,
+                         std::vector<TexelRect> &out) {
     vtkMatrix4x4 *m = cam->GetCompositeProjectionTransformMatrix(1.0, -1.0, 1.0);
-    double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
     for (vtkProp *p : props) {
-      const double *b = p->GetBounds();
-      if (!b || b[0] > b[1])
+      const TexelRect r = footprint(m, p, res);
+      if (!r.empty())
+        out.push_back(r);
+    }
+  }
+  static void mergeRects(std::vector<TexelRect> &rects) {
+    for (bool merged = true; merged;) {
+      merged = false;
+      for (std::size_t i = 0; i < rects.size() && !merged; ++i)
+        for (std::size_t j = i + 1; j < rects.size(); ++j)
+          if (rects[i].overlaps(rects[j])) {
+            rects[i] |= rects[j];
+            rects.erase(rects.begin() + static_cast<std::ptrdiff_t>(j));
+            merged = true;
+            break;
+          }
+    }
+    if (rects.size() > 16) {
+      TexelRect all;
+      for (const TexelRect &r : rects)
+        all |= r;
+      rects.assign(1, all);
+    }
+  }
+
+  // The texels of a res x res map drawn through `m` (a light camera's, at aspect 1, as
+  // ShadowCasterFilterPass draws) that a prop's bounds cover, two texels wider all round; none
+  // for empty bounds, and the whole map where they cannot be projected (a corner behind a spot's
+  // eye, a prop without bounds).
+  static TexelRect footprint(vtkMatrix4x4 *m, vtkProp *p, int res) {
+    const TexelRect whole{0, 0, res, res};
+    double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
+    const double *b = p->GetBounds();
+    if (!b)
+      return whole;
+    if (b[0] > b[1])
+      return TexelRect{}; // nothing to draw
+    for (int c = 0; c < 8; ++c) {
+      const double in[4] = {b[c & 1], b[2 + ((c >> 1) & 1)], b[4 + ((c >> 2) & 1)], 1.0};
+      double out[4];
+      m->MultiplyPoint(in, out);
+      if (!(out[3] > 1e-12))
         return whole;
-      for (int c = 0; c < 8; ++c) {
-        const double in[4] = {b[c & 1], b[2 + ((c >> 1) & 1)], b[4 + ((c >> 2) & 1)], 1.0};
-        double out[4];
-        m->MultiplyPoint(in, out);
-        if (!(out[3] > 1e-12))
-          return whole;
-        for (int k = 0; k < 2; ++k) {
-          const double t = (0.5 * out[k] / out[3] + 0.5) * res;
-          lo[k] = std::min(lo[k], t);
-          hi[k] = std::max(hi[k], t);
-        }
+      for (int k = 0; k < 2; ++k) {
+        const double t = (0.5 * out[k] / out[3] + 0.5) * res;
+        lo[k] = std::min(lo[k], t);
+        hi[k] = std::max(hi[k], t);
       }
     }
-    if (props.empty())
-      return TexelRect{};
     auto clamp = [res](double v) {
       return static_cast<int>(std::max(0.0, std::min(static_cast<double>(res), v)));
     };
@@ -1798,33 +1832,40 @@ protected:
         fbo->startBake(res, res, map);
       else
         target->StartNonOrtho(res, res);
-      TexelRect rect{0, 0, res, res};
+      // Where the moving casters are drawn: all the map in a whole bake; else what they cover now
+      // and what they covered at the last bake, the rest of the map holding the static casters
+      // alone already. `rect` bounds it all, for the draws' scissor.
+      std::vector<TexelRect> copies(1, TexelRect{0, 0, res, res});
+      TexelRect rect = copies[0];
       if (over) {
-        // Where the moving casters are drawn: all the map in a whole bake; else what they cover
-        // now and what they covered at the last bake, the rest of the map holding the static
-        // casters alone already.
         if (m_movingRects.size() != this->ShadowMaps->size())
-          m_movingRects.assign(this->ShadowMaps->size(), rect);
-        const TexelRect now = footprint(lightCamera, props, res);
+          m_movingRects.assign(this->ShadowMaps->size(), copies);
+        std::vector<TexelRect> now;
+        footprints(lightCamera, props, res, now);
         if (layer == Layer::Moving) {
-          rect = m_movingRects[i];
-          rect |= now;
+          copies = m_movingRects[i];
+          copies.insert(copies.end(), now.begin(), now.end());
+          mergeRects(copies);
+          rect = TexelRect{};
+          for (const TexelRect &c : copies)
+            rect |= c;
         }
+        mergeRects(now);
         m_movingRects[i] = now;
         // The static casters' colour and depth there, into the map and the depth buffer the
-        // moving casters are drawn over: one copy on the GPU in place of the static casters'
-        // draws.
-        if (!rect.empty()) {
+        // moving casters are drawn over: copies on the GPU in place of the static casters' draws.
+        if (!copies.empty()) {
           ShadowBakeFramebuffer *from = m_static[i].fbo;
           from->Bind(GL_READ_FRAMEBUFFER);
           from->ActivateReadBuffer(0);
-          const int ext[4] = {rect.x0, rect.x1, rect.y0, rect.y1};
-          vtkOpenGLFramebufferObject::Blit(ext, ext, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
-                                           GL_NEAREST);
+          for (const TexelRect &c : copies) {
+            const int ext[4] = {c.x0, c.x1, c.y0, c.y1};
+            vtkOpenGLFramebufferObject::Blit(ext, ext, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                                             GL_NEAREST);
+            m_drawnTexels += static_cast<double>(c.x1 - c.x0) * (c.y1 - c.y0);
+          }
           target->Bind();
         }
-        m_drawnTexels +=
-            static_cast<double>(rect.x1 - rect.x0) * (rect.y1 - rect.y0) * !rect.empty();
       } else if (layer == Layer::All) {
         m_drawnTexels += static_cast<double>(res) * res;
       }
@@ -1932,7 +1973,10 @@ protected:
     vtkCollectionSimpleIterator pit;
     props->InitTraversal(pit);
     while (vtkProp *p = props->GetNextProp(pit)) {
-      if (!p->GetVisibility() || !GraphicsNode::propCastsShadow(*App, p))
+      // Only a 3-D prop draws into a depth map: a 2-D one (a HUD's text, an overlay image) that
+      // changes every frame must not make every frame bake.
+      if (!p->GetVisibility() || !vtkProp3D::SafeDownCast(p) ||
+          !GraphicsNode::propCastsShadow(*App, p))
         continue;
       const bool changed = m_baked && (p->GetMTime() > t || casterGeometryChanged(p, t));
       const auto at = m_casters.try_emplace(p);
@@ -2093,7 +2137,7 @@ private:
   };
   std::vector<StaticMap> m_static;
   // Per casting light, the texels the moving casters were drawn into at the last bake.
-  std::vector<TexelRect> m_movingRects;
+  std::vector<std::vector<TexelRect>> m_movingRects;
   double m_drawnTexels = 0.0; // texels a bake drew into the maps the lookup reads (MapShare)
   // casterGeometryChanged's cache: per mapper, its MTime when its input was
   // last looked up, and that input (weak: the mapper owns it).
