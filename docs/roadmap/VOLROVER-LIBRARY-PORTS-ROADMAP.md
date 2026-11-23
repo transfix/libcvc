@@ -1389,6 +1389,13 @@ their units and ranges as properties. Bulk data is on the data channel:
   decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
   Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane
   (which disk shows depends on draw order); the slice views show them all.
+- **Which volume** (after Joe on 2026-11-21: with several volumes loaded, how does the grid pick
+  one?): the node publishes `grid.volumes`, the outputs of the document's `data:` entries that
+  hold a volume, and the key `grid.source.volume` names when it is elsewhere; the Probe tab's
+  Source combo picks from it and writes `grid.source.volume`, which the grid follows. The demo
+  holds a coarser bunny beside the fine one. Not offered: volumes at keys outside `data:` that the
+  grid does not name (a filter's output a document points at with `source: { state }` shows while
+  named), and a scene-wide "current volume" that every node follows.
 - **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
   and `axis` on a pick; a slider's `range: key`.
 - **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and
