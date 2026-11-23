@@ -18,7 +18,8 @@
 
 #include <array>
 #include <cstdint>
-#include <cvc/ariadne/world_rules.h> // vehicle_archetype
+#include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
+#include <cvc/ariadne/world_rules.h>        // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
 #include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
@@ -97,6 +98,11 @@ namespace ariadne {
 // std::invalid_argument for a preset that is not one.
 physics::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass = 0.0,
                                       double max_speed = 0.0);
+// How high a vehicle's chassis's centre stands over the ground under it (m): half its box's height
+// plus its front wheels' radius (0.4 m with no axles). Where a kinematic box and a `pose` entity
+// whose pose gives no z stand, and how far below a `pose` entity's chassis its drawn model's base
+// hangs.
+double stand_height(const physics::vehicle_desc &d);
 // A boat archetype's boat (dynamicboat): its preset (launch, jonboat) with the archetype's mass and
 // max_speed overrides, then a spawn's, held to its ranges. Throws std::invalid_argument for a
 // preset that is not a boat's.
@@ -159,6 +165,9 @@ struct entity_spec {
   // is its chassis's centre, ahead of it along the heading.
   bool placed = false;
   double x = 0.0, y = 0.0, yaw = std::numeric_limits<double>::quiet_NaN();
+  // The participant driving it (its pid; ARIADNE_WORLDS.md section 18.4), or "" for its controller.
+  // Set by WorldVehicles::set_driver (a holon's set_driver), not at spawn.
+  std::string driver;
 };
 
 // What an entity is told from outside: a command, a force, or both, kept until changed.
@@ -377,6 +386,19 @@ struct navigator_params {
   bool stop_at_goal = false, park_hold = false;
 };
 
+// A fleet's vehicles at one world tick (WorldVehicles::poses, FL1): each one's entity id, its
+// chassis's centre (world metres) and heading (rad, 0 along +x, counter-clockwise), its speed
+// along that heading (m/s, negative backing up) and its team (its rally point, -1 none), in the
+// fleet's order, as flat arrays of the same length; and the box they all lie in.
+struct fleet_poses {
+  std::uint64_t tick = 0; // the physics world's step these are of
+  std::vector<std::uint64_t> id;
+  std::vector<float> x, y, z, yaw, speed;
+  std::vector<std::int16_t> team;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0; // all 0 with none placed
+  std::size_t size() const { return id.size(); }
+};
+
 class WorldVehicles {
 public:
   // The vehicles of `world`, under `vehicles_key` (the catalog, the spawn keys), `entities_key`
@@ -427,6 +449,12 @@ public:
   // intent that is not finite or a weight outside [0, 1]. intent() is the one that will be used
   // (off for none).
   bool set_intent(std::uint64_t id, const entity_intent &intent);
+  // Who drives entity `id`: a participant's pid, or "" for its controller (section 18.4). The
+  // holon that runs the world sets it (holon::set_driver) and feeds the participant's drive axes
+  // in as the entity's intent. A change is a new revision (room_entities sends it). False for an
+  // unknown id.
+  bool set_driver(std::uint64_t id, const std::string &pid);
+  std::string driver(std::uint64_t id) const;
   bool clear_intent(std::uint64_t id);
   entity_intent intent(std::uint64_t id) const;
   // A second table of intents beside the entities' own keys (world: vehicles: intents:): an
@@ -481,6 +509,10 @@ public:
   // the step's contacts did. The `pose` entities need no grid: they are placed at their first
   // pose, on the world's ground when it has one.
   void before_step();
+  // The same, for a step ending on CLOCK_TICK of the clock the world steps on (SceneWorld::follow
+  // passes it): the navigator's tick then also notes the clock tick it ran on, so kinematics()
+  // can say which clock ticks it runs on.
+  void before_step(std::uint64_t clock_tick);
   // After it, too: the step's contacts, counted on the vehicles they touch.
   void after_step();
   // The entities' keys and the selection's, now.
@@ -500,6 +532,12 @@ public:
   // document's init: may set it before the world is made.
   void set_avoid(bool avoid);
   bool avoid() const;
+  // Other things that move in the world, which the navigators steer around as they do around each
+  // other's vehicles while avoid() is on (ARIADNE_WORLDS.md section 18.4): a holon's avatars
+  // (holon::attach_world sets them before each step), at their positions in the world's metres.
+  // Nothing moves them; kept until set again, empty for none (the default).
+  void set_movers(std::vector<std::array<double, 2>> xy);
+  const std::vector<std::array<double, 2>> &movers() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense
@@ -510,8 +548,8 @@ public:
   bool set_sense(const std::string &mode);
   const std::string &sense() const;
   // The occupancy plant `plant`'s navigator plans on now (row-major, the grid's rows and cols;
-  // 1 = blocked): the grid under known, its belief under fog. False when that plant has no
-  // navigator yet.
+  // 1 = blocked): the grid under known, its belief (its first plane) under fog. A fleet's own
+  // navigator is "<plant>/<fleet>". False when that plant has no navigator yet.
   bool belief(const std::string &plant, std::vector<std::uint8_t> &out, int &rows, int &cols) const;
   // Entity `id`'s command for the navigator's next tick only, in place of its controller's: the
   // steering's bicycle angle (rad, + left) and the acceleration along its heading (m/s^2), held to
@@ -524,10 +562,17 @@ public:
   // grid.
   double tick_seconds() const;
   int steps_per_tick() const;
-  // The navigator's tick to use (s), cvc::kSimTick by default: the one simulation tick every host
-  // shares (cvc/core/sim_tick.h). It takes effect when the navigator is next built (a new grid, a
-  // restart: WorldGym::reset), held to the nearest whole number of physics steps (the status says
-  // when it is not one). Throws std::invalid_argument for a tick that is not finite and > 0.
+  // Entity `id` on the kinematic plant as a client runs it (ARIADNE_WORLDS.md section 18.5, OW5b;
+  // vehicle_kinematics.h): its bicycle's numbers, its envelope and the clock ticks the navigator
+  // ticks on. False for one on another plant, not in the world, or before the navigator has
+  // ticked on a step with a clock tick (before_step(clock_tick)). The phase it reports changes
+  // only when the navigator is built again; revision() moves when it does.
+  bool kinematics(std::uint64_t id, kinematic_drive &out) const;
+  // The navigator's tick to use (s). By default the world's: cvc::sim_tick of its physics step
+  // (cvc/core/sim_tick.h), kSimTick (7/120 s) at the default 120 Hz, 4/60 s at 60 Hz. It takes
+  // effect when the navigator is next built (a new grid, a restart: WorldGym::reset), held to the
+  // nearest whole number of physics steps (the status says when it is not one). Throws
+  // std::invalid_argument for a tick that is not finite and > 0.
   void set_tick(double seconds);
   double tick() const;
   // The navigator's grid of the world on (null without one).
@@ -556,6 +601,20 @@ public:
   // Fleets (world: vehicles: start: entries with fleet:, spawn_starts): their names in the
   // document's order. A fleet is laid out once the world's grid exists; its keys are
   // `vehicles.fleets.<name>.*` (rally points, restart and reseed requests, its counts).
+  // Each fleet has a navigator of its own per plant ("<plant>/<fleet>"), made with its sense and
+  // belief: writing `.sense` (known, fog) or `.belief` (shared, grouped, private) makes it again,
+  // its vehicles at rest where they are; `.planes` counts its belief planes. `.policy` (trained,
+  // builtin, data:<entry> or a uri) switches what drives it live, and `.drives` says what does:
+  // "trained (<where>, sha256:...)", "weights (<uri>, sha256:...)", "builtin", "builtin: loading
+  // <uri>" while weights are on their way, or "builtin: no trained weights (<why>)", which the
+  // host's log also gets once.
+  // `.plant` (fleet_plants::text: "jolt", "jolt, kinematic", "0: jolt, kinematic") switches its
+  // plants, its vehicles at rest where they are on the new ones (a bad one is said in
+  // vehicles.status and changes nothing). `.metric` (trained, vehicle, policy) is what it plans
+  // with (D9), and `.plans` what it does now: "trained" (the trainer's vehicle, while weights drive
+  // or are on their way) or "vehicle" (each plant's own); a change makes its navigators again.
+  // `.tick` is the physics world's step its keys are of, and `.bounds` the box its placed
+  // vehicles lie in ("min_x,min_y,max_x,max_y", world metres; "" with none placed).
   std::vector<std::string> fleets() const;
   // Fleet `fleet`'s rally point `team` (0 to rally.count - 1): where it is, false when there is
   // none (no such fleet or team, or not laid out yet).
@@ -567,6 +626,15 @@ public:
   // or from the next one. As changing vehicles.fleets.<fleet>.restart.request or
   // reseed.request.
   bool restart_fleet(const std::string &fleet, bool reseed);
+  // Fleet `fleet`'s vehicles as the last publish() left them (fleet_poses), for a view that draws
+  // hundreds without reading state: lock-free, from any thread, the snapshot the caller holds
+  // unchanged while later steps make new ones. Null for a name that is not a fleet's, and before
+  // its first publish.
+  std::shared_ptr<const fleet_poses> poses(const std::string &fleet) const;
+  // The start: entries spawn_starts has been given since the last clear(), in order: after a load,
+  // the document's (a gym keeps them to lay its fleets out again at each reset,
+  // gym_options::fleets).
+  const std::vector<vehicle_start> &starts() const;
   // Bumps whenever a chassis comes or goes (a spawn, a removal, a new grid, a restart): a view
   // binds its drawings to the chassis again.
   std::uint64_t revision() const;

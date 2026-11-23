@@ -2762,20 +2762,27 @@ jobs:
         if: ${{ !cancelled() && matrix.config == 'release' }}
         uses: ./.github/actions/install-cvcpkg-swig
 
-      - name: Install CUDA family deps (Python 3.11 + numpy + VTK + cvcgl)
+      - name: Install CUDA family deps (Python 3.11 + numpy + VTK)
         if: ${{ !cancelled() && matrix.config == 'release' }}
         shell: bash
         run: |
           set -euo pipefail
           PY="$GITHUB_WORKSPACE/py"
-          # Same set as the CPU family step, plus the PUBLISHED cvcgl: this job
-          # deliberately does not build cvcgl from source, because there is only
-          # one cvcgl and it is ABI-compatible with either libcvc variant.
-          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto cvcgl \
+          # Same set as the CPU family step. The PUBLISHED cvcgl that
+          # pycvc-gl-cp311-cuda links comes later, from "Install this release's
+          # cvcgl", which waits for the build job to publish it.
+          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto \
             --prefix "$PY" --config release --link shared
           # numpy's bundled openblas is not self-resolved by RPATH, so a bare
           # `import numpy` (which find_package(Python3 ... NumPy) performs)
           # fails without numpy.libs on the loader path. Same guard as the CPU job.
+          #
+          # This reaches every later step (GITHUB_ENV), so each cvcpkg call below
+          # drops it (env -u LD_LIBRARY_PATH): cvcpkg is a frozen binary with its
+          # own libraries, and once cvcgl's closure is in $PY/lib it loads those
+          # instead and segfaults on exit. v4.0.3's cvcgl install did, 40 times out
+          # of 40, each after "done", and the wait below read it as "not on the
+          # catalog yet" for 120 min.
           export LD_LIBRARY_PATH="$PY/lib/python3.11/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
           NPY_INC="$("$PY/bin/python3.11" -c 'import numpy; print(numpy.get_include())')"
           {
@@ -2816,7 +2823,7 @@ jobs:
           cmake --build build-pycvc-cuda --parallel
           cmake --install build-pycvc-cuda
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/pycvc-cp311-cuda \
+          env -u LD_LIBRARY_PATH cvcpkg pack cvcpkg/recipes/pycvc-cp311-cuda \
             --from-prefix stage-pycvc-cuda \
             --platform linux \
             --config release --link shared --local \
@@ -2826,7 +2833,7 @@ jobs:
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish pycvc-cp311-cuda \
+            env -u LD_LIBRARY_PATH cvcpkg publish pycvc-cp311-cuda \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform linux --config release --link shared \
               --output-dir dist --token "$CVCPKG_TOKEN"
@@ -2834,8 +2841,73 @@ jobs:
             echo "dry-run: skipping pycvc-cp311-cuda publish"
           fi
 
-      - name: Build, pack & publish pycvc-gl-cp311-cuda
+      # pycvc-gl-cp311-cuda links the published cvcgl (this job does not build
+      # cvcgl; see the family header above), and it must be THIS release's: its
+      # recipe pins cvcgl ==<version>, so consumers install it beside this
+      # release's cvcgl whatever it was built against. An unversioned install
+      # took the newest cvcgl on the catalog, and the build job publishes cvcgl
+      # well after this lane gets here: v4.0.1's pycvc-gl-cp311-cuda was built
+      # against cvcgl 4.0.0+cvc.3 (installed 20:16Z; cvcgl 4.0.1 published at
+      # 21:05Z). So wait for `cvcgl==<version>` (any +cvc.N) on the catalog, up
+      # to WAIT_MINUTES, and fail rather than link another release. A dry run
+      # publishes nothing, so there it falls back to the newest cvcgl.
+      - name: Install this release's cvcgl (waits for the build job to publish it)
+        id: cvcgl
         if: ${{ !cancelled() && steps.swig.outcome == 'success' && matrix.config == 'release' }}
+        shell: bash
+        env:
+          DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          WAIT_MINUTES: '120'
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/py"
+          VER="$(sed -n 's/^  upstream_version: "\(.*\)"$/\1/p' cvcpkg/recipes/cvcgl/recipe.yaml | head -1)"
+          : "${VER:?no upstream_version in cvcpkg/recipes/cvcgl/recipe.yaml}"
+          log="${RUNNER_TEMP:-/tmp}/cvcgl-install.log"
+          install() {
+            env -u LD_LIBRARY_PATH cvcpkg install "cvcgl==$VER" --prefix "$PY" --config release \
+              --link shared >"$log" 2>&1
+          }
+          # Exit 128 + N is cvcpkg killed by signal N (a crash), not a cvcgl still
+          # to come: say so and stop rather than wait out WAIT_MINUTES.
+          crashed() {
+            [ "$1" -ge 128 ] || return 1
+            cat "$log"
+            echo "::error::cvcpkg install cvcgl==$VER died on signal $(($1 - 128)) (exit $1); that is a crash, not a cvcgl missing from the catalog"
+          }
+          rc=0
+          install || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            cat "$log"
+            exit 0
+          fi
+          if crashed "$rc"; then
+            exit 1
+          fi
+          if [ "$DO_PUBLISH" != "1" ]; then
+            cat "$log"
+            echo "::warning::dry run: cvcgl $VER is not on the catalog, so pycvc-gl-cp311-cuda builds against the newest cvcgl instead (and is not published)"
+            env -u LD_LIBRARY_PATH cvcpkg install cvcgl --prefix "$PY" --config release --link shared
+            exit 0
+          fi
+          deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+          until install; do
+            rc=$?
+            if crashed "$rc"; then
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              cat "$log"
+              echo "::error::cvcgl $VER (linux/x86_64/release) did not reach the catalog within $WAIT_MINUTES min, so pycvc-gl-cp311-cuda is not built against another release's cvcgl. Rerun this job once the build job has published cvcgl $VER."
+              exit 1
+            fi
+            echo "$(date -u +%H:%M:%SZ) cvcgl $VER is not on the catalog yet (the build job publishes it); retrying in 2 min"
+            sleep 120
+          done
+          cat "$log"
+
+      - name: Build, pack & publish pycvc-gl-cp311-cuda
+        if: ${{ !cancelled() && steps.swig.outcome == 'success' && steps.cvcgl.outcome == 'success' && matrix.config == 'release' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -2874,7 +2946,7 @@ jobs:
           cmake --build build-pycvcgl-cuda --parallel
           cmake --install build-pycvcgl-cuda
           mkdir -p dist
-          cvcpkg pack cvcpkg/recipes/pycvc-gl-cp311-cuda \
+          env -u LD_LIBRARY_PATH cvcpkg pack cvcpkg/recipes/pycvc-gl-cp311-cuda \
             --from-prefix stage-pycvcgl-cuda \
             --platform linux \
             --config release --link shared --local \
@@ -2884,7 +2956,7 @@ jobs:
             if [ -z "${CVCPKG_TOKEN:-}" ]; then
               echo "CVCPKG_TOKEN secret is required to publish"; exit 1
             fi
-            cvcpkg publish pycvc-gl-cp311-cuda \
+            env -u LD_LIBRARY_PATH cvcpkg publish pycvc-gl-cp311-cuda \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform linux --config release --link shared \
               --output-dir dist --token "$CVCPKG_TOKEN"

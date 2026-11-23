@@ -11,6 +11,10 @@
     "volslice_bunny",
     "volslice_bunny_ari",
     "orthoslicer_ari",
+    "volume_grid_ari",
+    "volume_grid_contours_ari",
+    "skeleton_lab_ari",
+    "contour_tiler_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
     "viewer_looks_ari",
@@ -195,6 +199,42 @@
       "blurb":
           "The classic orthoslicer beside a raycast volume, as one Ariadne document: the signed distance field of the embedded Stanford bunny, raycast with a see-through surface and cut by three axis-aligned volume_slice planes that share one volume and one transfer function. A slice view looks straight down whichever axis the XY / XZ / ZY switch picks: drag to pan, the wheel zooms about the pointer, a click reads out the voxel under it. The sliders move the planes, and the transfer-function editor recolours all three.",
       "thumb": "img/orthoslicer_ari.jpg"
+    },
+    "volume_grid_ari": {
+      "app": "arigl",
+      "doc": "volume_grid",
+      "title": "volume grid",
+      "desc": "VolumeGridRover in Ariadne: slice views, a probe and point classes on a volume",
+      "blurb":
+          "VolumeGridRover rebuilt as an Ariadne component over a volume_grid node: the signed distance field of the embedded Stanford bunny in three slice planes, a slice view under the XY / XZ / ZY switch beside a 3D view of the planes, and a panel with the probe, the point classes and the transfer function. Click in the slice view to mark a point of the current class (or unmark one), drag to select points in a rubber band, Shift+Ctrl drag to move them; Navigate moves the other planes to the voxel clicked, and the probe follows the pointer.",
+      "thumb": "img/volume_grid_ari.jpg"
+    },
+    "volume_grid_contours_ari": {
+      "app": "arigl",
+      "doc": "volume_grid_contours",
+      "title": "volume grid contours",
+      "desc": "VolumeGridRover's contours: trace, draw and tile objects into surfaces",
+      "blurb":
+          "The volume_grid component's Contours tab over the bunny's signed distance field: the document traces the field's zero level on every third plane into the object bunny and the contour tiler tiles those curves into a surface in the 3D view, a slice at a time while the views stay live. Pick the object drawn and click in the slice view to draw its curve on any plane, click the first point to close it, Shift+click to start another, drag a point to move it; each object draws linear or as a spline. Tile tiles every object's closed curves; Save writes them as .cvcc, .contour or .pcd.",
+      "thumb": "img/volume_grid_contours_ari.jpg"
+    },
+    "skeleton_lab_ari": {
+      "app": "arigl",
+      "doc": "skeleton_lab",
+      "title": "skeleton lab",
+      "desc": "the skeleton of a protein's surface: strands along its helices, from a PDB file",
+      "blurb":
+          "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node and a real protein: PDB entry 1GRL, a subunit of the chaperonin GroEL. Its heavy atoms are blurred into a density (TexMol's blur maps, ported too) like a low-resolution map, where a helix reads as a rod, and the density's isosurface is decimated to 4,000 triangles and skeletonized a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) run along the helices, and the sheets are drawn inside the see-through surface; a second view shows the skeleton alone. The Molecule window changes the blur and makes the surface again; the Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
+      "thumb": "img/skeleton_lab_ari.jpg"
+    },
+    "contour_tiler_ari": {
+      "app": "arigl",
+      "doc": "contour_tiler",
+      "title": "contour tiler",
+      "desc": "surfaces through serial-section contours: axons and mitochondria from a real Reconstruct series",
+      "blurb":
+          "VolumeRover's contour tiler as one Ariadne document: a contour_lab node reads a real Reconstruct series from mouse hippocampus (two axons traced through 72 sections, a third that branches, and two mitochondria inside one of them; Kuwajima 2019, CC0), draws the traced contours and tiles a surface through each object's contours, slice pair by slice pair, as a sliced task, so the page keeps drawing while it works and the progress bar names the pair it is on. Tick the components to tile, change the slice range or the parameters, and tile again; the surfaces are see-through, so the mitochondria show inside their axon.",
+      "thumb": "img/contour_tiler_ari.jpg"
     },
     "arigl_term": {
       "title": "arigl --terminal",

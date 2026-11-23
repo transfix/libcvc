@@ -25,6 +25,7 @@
 #define __INTERP_H__
 
 #include "common.h"
+#include "stepping.h"
 
 namespace cvc::tiler {
 
@@ -33,6 +34,12 @@ Number_type interpolate(const Polygon_2 &P, const Point_3 &p);
 template <typename Poly_iter, typename Iter>
 Number_type interpolate(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin,
                         Iter points_end, Number_type zmid);
+
+// The same, a point at a time: each point's triangulation and interpolation is a unit, charged by
+// the points it takes (stepping.h). The ranges must outlive the task.
+template <typename Poly_iter, typename Iter>
+step_task interpolate_steps(Poly_iter poly_begin, Poly_iter poly_end, Iter points_begin,
+                            Iter points_end, Number_type zmid);
 
 } // namespace cvc::tiler
 

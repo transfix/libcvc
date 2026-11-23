@@ -366,6 +366,17 @@ std::size_t VolRenNode::volumeCount() const {
   return m_volumes.size();
 }
 
+void VolRenNode::setVolume(std::size_t index, const cvc::volume &vol) {
+  {
+    std::lock_guard<std::mutex> lock(m_configMutex);
+    if (index >= m_volumes.size())
+      throw cvc::volren_error("VolRenNode: volume index out of range");
+    m_volumes[index] = vol;
+    ++m_settingsVersion; // the next tick raycasts the new voxels
+  }
+  ownBoundsChanged();
+}
+
 cvc::volren::volume_settings VolRenNode::volumeConfig(std::size_t index) const {
   std::lock_guard<std::mutex> lock(m_configMutex);
   if (index >= m_snapshotSettings.volumes.size())

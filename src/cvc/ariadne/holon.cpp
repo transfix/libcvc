@@ -18,8 +18,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/holon.h>
+#include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/world_vehicles.h>
+#include <cvc/core/sim_tick.h> // holon_config_at: a world's rate
+#include <cvc/physics/world.h>
 #include <exception>
 #include <iterator>
+#include <stdexcept>
+#include <string>
 
 namespace cvc {
 namespace ariadne {
@@ -68,7 +74,36 @@ quat unit(quat q) {
   const double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
   return n > 0.0 && std::isfinite(n) ? quat{q.w / n, q.x / n, q.y / n, q.z / n} : quat{};
 }
+
+// The walker's jump speed (m/s) under R: its controller's jump_speed, 4 m/s (about 0.8 m) when it
+// names none.
+double jump_speed_of(const world_rules &r) { return r.controller().param("jump_speed", 4.0); }
 } // namespace
+
+holon_config holon_config_at(holon_config cfg, double hz) {
+  if (!cvc::sim_rate_valid(hz))
+    throw std::invalid_argument("holon_config_at: " + std::to_string(hz) +
+                                " Hz is not a world's rate (a whole number from 10 to 240)");
+  const double from = cfg.clock.fixed_dt;
+  const double to = cvc::sim_quantum(hz);
+  const auto span = [&](std::uint64_t &ticks) {
+    ticks = std::max<std::uint64_t>(
+        1, static_cast<std::uint64_t>(std::llround(static_cast<double>(ticks) * from / to)));
+  };
+  span(cfg.max_skew_ticks);
+  span(cfg.stale_reading_ticks);
+  span(cfg.lead_slack_behind_ticks);
+  span(cfg.lead_slack_ahead_ticks);
+  span(cfg.max_peer_span_ticks);
+  span(cfg.peer_max_delay_ticks);
+  span(cfg.peer_interval_ticks);
+  span(cfg.peer_max_extrapolate_ticks);
+  span(cfg.max_intent_lead_ticks);
+  cfg.clock.max_steps_per_advance =
+      std::max(1, static_cast<int>(std::lround(cfg.clock.max_steps_per_advance * from / to)));
+  cfg.clock.fixed_dt = to;
+  return cfg;
+}
 
 holon::holon(holon_role role, holon_config cfg)
     : _role(role), _cfg(cfg), _clock(cfg.clock), _driver(_clock) {
@@ -79,6 +114,7 @@ holon::holon(holon_role role, holon_config cfg)
       _world = std::make_unique<avatar_world>(_clock.fixed_dt(), _cfg.rules.avatar().body,
                                               _cfg.rules.policy.energy);
       _world->set_gravity(_cfg.rules.physics.gravity);
+      _world->set_jump_speed(jump_speed_of(_cfg.rules));
       const world_physics &wp = _cfg.rules.physics; // the room's wind (O14)
       _world->set_wind(
           {wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
@@ -125,15 +161,484 @@ void holon::remove_participant(const std::string &pid) {
     if (_left.size() > kMaxLeft)
       _left.erase(_left.begin() == _left.find(pid) ? std::next(_left.begin()) : _left.begin());
   }
+  if (it != _participants.end() && it->second.drives != 0)
+    get_out(pid, it->second); // the vehicle goes back to its controller
+  if (it != _participants.end() && it->second.body != 0)
+    if (WorldVehicles *v = _scene ? _scene->vehicles() : nullptr)
+      v->despawn(it->second.body); // its body goes with it
   _participants.erase(pid);
   if (_world)
     _world->remove_avatar(pid);
 }
 
+namespace {
+cvc::physics::body_state ride_of(const entity_info &e) {
+  cvc::physics::body_state s;
+  s.position = {e.x, e.y, e.z};
+  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
+  s.linear_velocity = {e.vx, e.vy, 0.0};
+  return s;
+}
+bool find_entity(const WorldVehicles &v, std::uint64_t id, entity_info &out) {
+  for (const entity_info &e : v.entities())
+    if (e.id == id) {
+      out = e;
+      return true;
+    }
+  return false;
+}
+} // namespace
+
+bool holon::set_driver(const std::string &pid, std::uint64_t id, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (_role != holon_role::server)
+    return fail("a client asks the server to drive; the server sets the driver");
+  const auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return fail("no participant '" + pid + "'");
+  participant &p = it->second;
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  if (id == 0) {
+    if (p.drives != 0)
+      get_out(pid, p);
+    return true;
+  }
+  if (!v)
+    return fail("no world with vehicles attached (attach_world)");
+  entity_info e;
+  if (!find_entity(*v, id, e) || !e.placed)
+    return fail("no entity " + std::to_string(id) + " in the world");
+  if (!e.spec.driver.empty() && e.spec.driver != pid)
+    return fail("entity " + std::to_string(id) + " is driven by '" + e.spec.driver + "'");
+  if (p.drives == id)
+    return true;
+  if (p.drives != 0)
+    get_out(pid, p);
+  // Into the vehicle: the person leaves the world, its feet and reserve kept.
+  if (_world->has_avatar(pid)) {
+    p.parked_feet = _world->state(pid);
+    p.parked_reserve = _world->energy(pid).reserve;
+    _world->remove_avatar(pid);
+  }
+  v->set_driver(id, pid);
+  p.drives = id;
+  p.ride = ride_of(e);
+  // The envelope its drive axes are shares of (avatar_intent).
+  p.envelope = drive_envelope{};
+  for (const vehicle_archetype &a : v->archetypes())
+    if (a.id == e.spec.archetype) {
+      try {
+        const cvc::physics::vehicle_desc d = vehicle_desc_of(a, e.spec.mass, e.spec.max_speed);
+        p.envelope.max_steer = d.max_steer;
+        p.envelope.max_accel = d.max_accel;
+        p.envelope.max_decel = d.max_decel;
+      } catch (const std::exception &) {
+      }
+      p.envelope.floats = vehicle_plant_floats(e.plant.empty() ? a.plant : e.plant);
+      break;
+    }
+  return true;
+}
+
+holon::drive_cmd holon::drive_command(const avatar_intent &in, const drive_envelope &env,
+                                      double speed, double dt) {
+  const auto axis = [](double x) { return std::isfinite(x) ? x : 0.0; };
+  const double steer = std::clamp(axis(in.steer), -1.0, 1.0);
+  const double throttle = std::clamp(axis(in.throttle), -1.0, 1.0);
+  const double brake = env.floats ? 0.0 : std::clamp(axis(in.brake), 0.0, 1.0);
+  drive_cmd out;
+  out.steer = steer * env.max_steer;
+  if (brake > 0.0) {
+    // Toward a stop and no further: what stops it within the tick, at most the brake's share.
+    const double cap = brake * env.max_decel;
+    out.accel = std::clamp(-speed / std::max(dt, 1e-6), -cap, cap);
+  } else if (throttle >= 0.0) {
+    out.accel = throttle * env.max_accel;
+  } else if (env.floats) {
+    out.accel = throttle * env.max_decel; // the propeller astern (a boat's max_decel)
+  } else {
+    // Reverse: braking while it still rolls forward, then backing up from rest (the plant backs
+    // up on a negative command from rest).
+    out.accel = throttle * (speed > kRollingForward ? env.max_decel : env.max_accel);
+  }
+  return out;
+}
+
+bool holon::get_in(const std::string &pid, std::uint64_t id, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (_role == holon_role::server && _participants.count(pid)) {
+    const participant &p = _participants.at(pid);
+    if (p.body != 0 && id != p.body) // its body is a vehicle: it is in it for good
+      return fail(id == 0 ? "you are your vehicle: pick a person to get out"
+                          : "you are a vehicle: pick a person to get in another");
+    if (p.body != 0)
+      return true;
+  }
+  if (id == 0 || _role != holon_role::server || !_participants.count(pid))
+    return set_driver(pid, id, why);
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  entity_info e;
+  if (!v || !find_entity(*v, id, e) || !e.placed)
+    return set_driver(pid, id, why); // its own refusal
+  const vehicle_archetype *a = nullptr;
+  for (const vehicle_archetype &x : v->archetypes())
+    if (x.id == e.spec.archetype)
+      a = &x;
+  if (!a || !a->drivable)
+    return fail("entity " + std::to_string(id) + " (" + e.spec.archetype + ") is not drivable");
+  if (_participants.at(pid).drives != id) {
+    // Its feet to the chassis box, in the vehicle's frame, in plan.
+    double hx = 2.0, hy = 1.0;
+    try {
+      const cvc::physics::vehicle_desc d = vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
+      hx = d.half_extents.x;
+      hy = d.half_extents.y;
+    } catch (const std::exception &) {
+    }
+    const cvc::physics::body_state feet = state(pid);
+    const double dx = feet.position.x - e.x, dy = feet.position.y - e.y;
+    const double c = std::cos(e.yaw), s = std::sin(e.yaw);
+    const double lx = c * dx + s * dy, ly = -s * dx + c * dy;
+    const double gap =
+        std::hypot(std::max(0.0, std::fabs(lx) - hx), std::max(0.0, std::fabs(ly) - hy));
+    if (gap > a->reach) {
+      char m[96];
+      std::snprintf(m, sizeof m, "%.1f m away (reach %.1f m)", gap, a->reach);
+      return fail(m);
+    }
+  }
+  return set_driver(pid, id, why);
+}
+
+std::uint64_t holon::drives(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it == _participants.end() ? 0 : it->second.drives;
+}
+
+bool holon::set_archetype(const std::string &pid, const std::string &archetype, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (_role != holon_role::server)
+    return fail("a client asks the server for an archetype; the server sets it");
+  const auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return fail("no participant '" + pid + "'");
+  participant &p = it->second;
+  const world_rules &r = rules();
+  const avatar_archetype *want = archetype.empty()
+                                     ? (r.archetypes.empty() ? nullptr : &r.archetypes.front())
+                                     : r.find_avatar(archetype);
+  if (!want && !archetype.empty())
+    return fail("no avatar archetype '" + archetype + "'");
+  const std::string id = want ? want->id : std::string();
+  const std::string have =
+      p.archetype.empty() && !r.archetypes.empty() ? r.archetypes.front().id : p.archetype;
+  if (id == have && (want == nullptr || want->vehicle.empty() || p.body != 0))
+    return true;
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  if (want && !want->vehicle.empty() && !v)
+    return fail("archetype '" + id + "' is a vehicle, and there is no world to spawn it in");
+  // Out of the vehicle it is now, if it is one: it stands beside it, and the vehicle goes.
+  if (p.body != 0) {
+    const std::uint64_t old = p.body;
+    p.body = 0;
+    if (p.drives != 0)
+      get_out(pid, p);
+    if (v)
+      v->despawn(old);
+  }
+  if (want && !want->vehicle.empty()) {
+    // Where its person stands, facing its way: out of the world first, so the two never overlap.
+    cvc::physics::body_state feet = state(pid);
+    if (p.drives != 0) { // in someone else's vehicle: out of that one first
+      get_out(pid, p);
+      feet = state(pid);
+    }
+    if (_world->has_avatar(pid)) {
+      p.parked_feet = _world->state(pid);
+      p.parked_reserve = _world->energy(pid).reserve;
+      _world->remove_avatar(pid);
+    }
+    const cvc::physics::quat &q = feet.rotation;
+    entity_spec spec;
+    spec.archetype = want->vehicle;
+    spec.name = pid;
+    spec.metadata["avatar"] = pid;
+    for (const vehicle_archetype &a : v->archetypes())
+      if (a.id == want->vehicle &&
+          std::find(a.controllers.begin(), a.controllers.end(), "external") != a.controllers.end())
+        spec.controller = "external"; // its driver's intent alone; the archetype's first else
+    spec.placed = true;
+    spec.x = feet.position.x;
+    spec.y = feet.position.y;
+    spec.yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    std::string refused;
+    const std::uint64_t body = v->spawn(spec, &refused);
+    if (body == 0) { // back on its feet, as it was
+      _world->add_avatar(pid, p.parked_feet, /*dynamic=*/true);
+      _world->set_reserve(pid, p.parked_reserve);
+      return fail("the world will not spawn vehicle '" + want->vehicle + "': " + refused);
+    }
+    p.body = body;
+    set_driver(pid, body); // not placed yet (no grid): scene_step seats it once it is
+  }
+  p.archetype = id;
+  return true;
+}
+
+std::string holon::archetype_of(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it == _participants.end() ? std::string() : it->second.archetype;
+}
+
+std::uint64_t holon::embodies(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it == _participants.end() ? 0 : it->second.body;
+}
+
+void holon::get_out(const std::string &pid, participant &p) {
+  const std::uint64_t id = p.drives;
+  p.drives = 0;
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  cvc::physics::body_state feet = p.parked_feet;
+  entity_info e;
+  if (v && find_entity(*v, id, e)) {
+    v->set_driver(id, std::string());
+    v->clear_intent(id); // back to its controller
+    // A clear point beside it: off its left side, past half its width, on the ground under it.
+    double half_w = 1.0;
+    for (const vehicle_archetype &a : v->archetypes())
+      if (a.id == e.spec.archetype) {
+        try {
+          half_w = vehicle_desc_of(a, e.spec.mass, e.spec.max_speed).half_extents.y;
+        } catch (const std::exception &) {
+        }
+        break;
+      }
+    const double out = half_w + 0.5 * _applied.avatar().body.width + 0.5;
+    feet = cvc::physics::body_state{};
+    feet.position = {e.x - std::sin(e.yaw) * out, e.y + std::cos(e.yaw) * out, e.ground_z};
+    feet.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
+  }
+  if (_world && !_world->has_avatar(pid)) {
+    _world->add_avatar(pid, feet, /*dynamic=*/true);
+    _world->set_reserve(pid, p.parked_reserve);
+  }
+  p.last_feet = feet;
+}
+
+void holon::update_rides() {
+  WorldVehicles *v = _scene ? _scene->vehicles() : nullptr;
+  if (!v)
+    return;
+  bool any = false;
+  for (const auto &kv : _participants)
+    any = any || kv.second.drives != 0;
+  if (!any)
+    return;
+  const std::vector<entity_info> all = v->entities();
+  for (auto &kv : _participants) {
+    participant &p = kv.second;
+    if (p.drives == 0)
+      continue;
+    for (const entity_info &e : all)
+      if (e.id == p.drives) {
+        p.ride = ride_of(e);
+        break;
+      }
+  }
+}
+
+std::vector<holon::entity> holon::entities() const {
+  std::vector<entity> out;
+  for (const auto &kv : _participants) {
+    entity e;
+    e.id = "p:" + kv.first;
+    e.kind = "person";
+    e.controller = "walker@1";
+    e.driver = "participant:" + kv.first;
+    e.owner = kv.first;
+    e.in_world = !_world || _world->has_avatar(kv.first);
+    e.state = kv.second.drives != 0 ? kv.second.parked_feet : state(kv.first);
+    out.push_back(std::move(e));
+  }
+  if (const WorldVehicles *v = _scene ? _scene->vehicles() : nullptr)
+    for (const entity_info &info : v->entities()) {
+      entity e;
+      e.id = "e" + std::to_string(info.id);
+      e.kind = info.spec.archetype;
+      e.controller = info.plant;
+      e.driver =
+          info.spec.driver.empty() ? info.spec.controller : "participant:" + info.spec.driver;
+      e.owner = info.spec.driver.empty() ? "server" : info.spec.driver;
+      e.policy = info.spec.policy;
+      e.in_world = info.placed;
+      e.state = ride_of(info);
+      out.push_back(std::move(e));
+    }
+  return out;
+}
+
 void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
   _statics = stamp;
-  if (_world)
+  _statics_list = statics;
+  if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
+}
+
+bool holon::attach_world(SceneWorld *world, std::string *why) {
+  const auto fail = [&](const std::string &m) {
+    if (why)
+      *why = m;
+    return false;
+  };
+  if (world == _scene)
+    return true;
+  if (world && _role != holon_role::server)
+    return fail("a client holon runs the server's world as its replica, not a scene's");
+  if (!_world)
+    return fail("no avatar physics (holon_config::physics off, or no Jolt in this build)");
+  if (world && std::fabs(world->world().config().fixed_dt - _clock.fixed_dt()) > 1e-12)
+    return fail("the world steps " + std::to_string(world->world().config().fixed_dt) +
+                " s, the holon's quantum is " + std::to_string(_clock.fixed_dt()) + " s");
+  for (auto &kv : _participants) // out of the old world's vehicles first
+    if (kv.second.drives != 0)
+      get_out(kv.first, kv.second);
+  // Where everyone stands, and what they carry, before the move.
+  std::map<std::string, cvc::physics::body_state> feet;
+  std::map<std::string, avatar_energy> energy;
+  for (const auto &kv : _participants)
+    if (_world->has_avatar(kv.first)) {
+      feet[kv.first] = _world->state(kv.first);
+      energy[kv.first] = _world->energy(kv.first);
+    }
+  if (_world->shares_world())
+    _world->release(); // out of the old scene's world
+  std::unique_ptr<avatar_world> next;
+  if (world) {
+    next = std::make_unique<avatar_world>(world->world(), _applied.avatar().body,
+                                          _applied.policy.energy);
+    next->set_jump_speed(jump_speed_of(_applied));
+  } else {
+    next = std::make_unique<avatar_world>(_clock.fixed_dt(), _applied.avatar().body,
+                                          _applied.policy.energy);
+    next->set_gravity(_applied.physics.gravity);
+    next->set_jump_speed(jump_speed_of(_applied));
+    const world_physics &wp = _applied.physics; // the room's wind (O14)
+    next->set_wind({wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
+                   wp.wind_base);
+    next->set_statics(_statics_list);
+  }
+  for (auto &kv : _participants) {
+    const auto it = feet.find(kv.first);
+    if (it == feet.end())
+      continue;
+    next->add_avatar(kv.first, it->second, /*dynamic=*/true);
+    next->set_reserve(kv.first, energy[kv.first].reserve);
+    kv.second.last_feet = it->second;
+  }
+  if (_scene && _scene != world)
+    if (WorldVehicles *v = _scene->vehicles())
+      v->set_movers({}); // the avatars have left that world
+  _world = std::move(next);
+  _scene = world;
+  _scene_world = world ? static_cast<const void *>(&world->world()) : nullptr;
+  return true;
+}
+
+void holon::scene_step() {
+  // The world's owner replaced its physics world (a restart): the avatars go into the new one.
+  if (static_cast<const void *>(&_scene->world()) != _scene_world) {
+    std::map<std::string, cvc::physics::body_state> feet;
+    for (const auto &kv : _participants)
+      feet[kv.first] = kv.second.last_feet;
+    _world->move_to(_scene->world(), feet);
+    _scene_world = &_scene->world();
+  }
+  // A body spawned before the world could place it (set_archetype): seated once it is placed.
+  for (auto &kv : _participants)
+    if (kv.second.body != 0 && kv.second.drives == 0)
+      set_driver(kv.first, kv.second.body);
+  // The world's navigators steer around the avatars (section 18.4), where they stood after the
+  // last step.
+  if (WorldVehicles *v = _scene->vehicles()) {
+    std::vector<std::array<double, 2>> movers;
+    for (auto &kv : _participants) {
+      participant &p = kv.second;
+      if (_world->has_avatar(kv.first))
+        movers.push_back({p.last_feet.position.x, p.last_feet.position.y});
+    }
+    v->set_movers(std::move(movers));
+  }
+  // A driver's drive axes in place of its vehicle's controller (section 18.4), after each step:
+  // the intent in force at that step's tick and the vehicle as the step left it, for the
+  // navigator's next tick. Per step, not per frame, so a client predicting the vehicle runs the
+  // same commands (predict_vehicle) whatever the relay's frame rate.
+  const auto drive = [this](WorldVehicles &v) {
+    bool any = false;
+    for (const auto &kv : _participants)
+      any = any || kv.second.drives != 0;
+    if (!any)
+      return;
+    const std::vector<entity_info> all = v.entities();
+    for (auto &kv : _participants) {
+      participant &p = kv.second;
+      if (p.drives == 0)
+        continue;
+      for (const entity_info &e : all)
+        if (e.id == p.drives) {
+          p.ride = ride_of(e);
+          break;
+        }
+      const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
+      const double speed =
+          p.ride.linear_velocity.x * std::cos(yaw) + p.ride.linear_velocity.y * std::sin(yaw);
+      const drive_cmd c = drive_command(p.intent, p.envelope, speed, v.tick_seconds());
+      entity_intent in;
+      in.command = entity_intent::mode::replace;
+      in.steer = c.steer;
+      in.accel = c.accel;
+      if (v.intent(p.drives) != in)
+        v.set_intent(p.drives, in);
+    }
+  };
+  _scene->follow(
+      _clock, nullptr,
+      [this](std::uint64_t tick) {
+        world_rules_for(tick);
+        for (auto &kv : _participants) {
+          participant &p = kv.second;
+          while (!p.queued.empty() && p.queued.front().first <= tick) {
+            p.intent = p.queued.front().second;
+            p.queued.pop_front();
+          }
+          if (_world->has_avatar(kv.first))
+            _world->drive(kv.first, veto(p.intent, _applied.policy));
+        }
+      },
+      [this, &drive](std::uint64_t) {
+        for (auto &kv : _participants) {
+          if (!_world->has_avatar(kv.first))
+            continue;
+          if (_world->state(kv.first).position.z < _cfg.respawn_below_z)
+            _world->place(kv.first, kv.second.spawn); // fell off the world
+          kv.second.last_feet = _world->state(kv.first);
+        }
+        if (WorldVehicles *v = _scene->vehicles())
+          drive(*v);
+      });
+  update_rides();
 }
 
 void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
@@ -149,6 +654,11 @@ std::uint64_t holon::left_tick(const std::string &pid) const {
 
 bool holon::has_participant(const std::string &pid) const {
   return _participants.find(pid) != _participants.end();
+}
+
+bool holon::is_local(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return _role == holon_role::client && it != _participants.end() && it->second.local;
 }
 
 bool holon::pose_known(const std::string &pid) const {
@@ -177,6 +687,13 @@ avatar_intent holon::finite_intent(const avatar_intent &in) {
     out.yaw = 0.0;
   else if (out.yaw > kPi || out.yaw < -kPi)
     out.yaw = std::remainder(out.yaw, 2.0 * kPi);
+  // The drive axes are shares (avatar_intent): held to their ranges; none stays none.
+  if (std::isfinite(out.steer))
+    out.steer = std::clamp(out.steer, -1.0, 1.0);
+  if (std::isfinite(out.throttle))
+    out.throttle = std::clamp(out.throttle, -1.0, 1.0);
+  if (std::isfinite(out.brake))
+    out.brake = std::clamp(out.brake, 0.0, 1.0);
   return out;
 }
 
@@ -357,6 +874,7 @@ void holon::apply_world_rules(const world_rules &r) {
   }
   if (r.policy.energy != _applied.policy.energy)
     _world->set_energy_policy(r.policy.energy);
+  _world->set_jump_speed(jump_speed_of(r));
   _applied = r;
 }
 
@@ -511,7 +1029,9 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
   }
 
   participant &p = it->second;
-  if (p.local && _world) {
+  if (p.local && p.vehicle) {
+    vehicle_reconcile(p, auth, server_tick);
+  } else if (p.local && _world) {
     world_reconcile(pid, p, auth, server_tick);
   } else if (p.local) {
     const cvc::physics::vec3 before = p.predicted.state().position;
@@ -710,6 +1230,14 @@ void holon::world_step_client(const std::string &self, const avatar_intent &in,
   for (const auto &kv : _participants)
     if (!kv.second.local && _world->has_avatar(kv.first))
       _world->move_kinematic(kv.first, display_pose(kv.first));
+  // So are the entities held (hold_entity): each on from where it was shown, along its velocity.
+  for (const auto &kv : _held) {
+    const held &e = kv.second;
+    const double t = static_cast<double>(e.steps) * _clock.fixed_dt();
+    _world->hold_obstacle(
+        kv.first, e.half_extents,
+        cvc::physics::pose{e.at.position + e.at.linear_velocity * t, e.at.rotation});
+  }
   _world->drive(self, veto(in, _applied.policy));
   _world->set_time(double(tick) * _clock.fixed_dt()); // the wind's gusts at the tick's time
   _world->step();
@@ -778,6 +1306,11 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
   const double dt = f.fixed_dt;
   const int steps = f.step.steps;
   if (_world) {
+    // One world: the scene's, on this clock (attach_world).
+    if (_scene) {
+      scene_step();
+      return;
+    }
     // Rigid bodies. Nothing moves until the room's statics exist (there is nothing to stand on).
     if (!_statics.written())
       return;
@@ -803,8 +1336,14 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
                                        [](const auto &kv) { return kv.second.local; });
         if (self == _participants.end())
           continue;
+        if (self->second.vehicle) { // driving: the vehicle's step, not the walker's
+          vehicle_step(self->second, self->second.intent, tick);
+          continue;
+        }
         self->second.render_prev = _world->state(self->first);
         self->second.have_render_prev = true;
+        for (auto &kv : _held)
+          ++kv.second.steps;
         participant::logged e;
         e.reserve_before = _world->energy(self->first).reserve;
         world_step_client(self->first, self->second.intent, tick);
@@ -838,6 +1377,10 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
       // each with its tick so reconcile can replay the right suffix.
       for (int i = 0; i < steps; ++i) {
         const std::uint64_t tick = f.step.first_tick + 1 + static_cast<std::uint64_t>(i);
+        if (p.vehicle) { // driving: the vehicle's step
+          vehicle_step(p, p.intent, tick);
+          continue;
+        }
         p.render_prev = p.predicted.state();
         p.have_render_prev = true;
         p.predicted.predict(
@@ -847,6 +1390,166 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
     }
     // Peers integrate nothing: they are driven by apply_authoritative samples.
   }
+}
+
+bool holon::hold_entity(std::uint64_t id, const std::array<double, 3> &size,
+                        const cvc::physics::body_state &at) {
+  if (_role != holon_role::client || !_world)
+    return false;
+  for (double d : size)
+    if (!std::isfinite(d) || d <= 0.0)
+      return false;
+  held &e = _held[id];
+  e.half_extents = cvc::physics::vec3{0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
+  e.at = at;
+  e.steps = 0;
+  _world->hold_obstacle(id, e.half_extents, cvc::physics::pose{at.position, at.rotation});
+  return true;
+}
+
+void holon::release_entity(std::uint64_t id) {
+  if (_held.erase(id) && _world)
+    _world->remove_obstacle(id);
+}
+
+std::vector<std::uint64_t> holon::held_entities() const {
+  std::vector<std::uint64_t> ids;
+  for (const auto &kv : _held)
+    ids.push_back(kv.first);
+  return ids;
+}
+
+bool holon::held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const {
+  if (!_held.count(id) || !_world || !_world->has_obstacle(id))
+    return false;
+  out = _world->obstacle_state(id);
+  return true;
+}
+
+bool holon::predict_vehicle(const std::string &pid, const kinematic_drive &drive) {
+  if (_role != holon_role::client || !drive.valid())
+    return false;
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.local)
+    return false;
+  participant &p = it->second;
+  if (p.vehicle && p.vdrive == drive)
+    return true;
+  // Other numbers (a navigator built again): on from where it is. New: where it stands until its
+  // first sample places it.
+  p.vnow = kinematic_vehicle_at(drive, state(pid), _clock.tick(), _clock.fixed_dt());
+  p.vprev = p.vnow;
+  p.vehicle = true;
+  p.vdrive = drive;
+  p.vlog.clear();
+  if (_world && _world->has_avatar(pid))
+    _world->remove_avatar(pid); // its person is out of the world while it drives
+  return true;
+}
+
+bool holon::predicts_vehicle(const std::string &pid) const {
+  const auto it = _participants.find(pid);
+  return it != _participants.end() && it->second.vehicle;
+}
+
+bool holon::predicted_vehicle(const std::string &pid, kinematic_vehicle &out) const {
+  const auto it = _participants.find(pid);
+  if (it == _participants.end() || !it->second.vehicle)
+    return false;
+  out = it->second.vnow;
+  return true;
+}
+
+namespace {
+// The vehicle one step at TICK on IN, as the relay's world runs it: the step, then the command
+// the navigator's next tick takes (WorldVehicles' kinematic plant; holon::scene_step's drive).
+void step_vehicle(kinematic_vehicle &v, const kinematic_drive &k, const avatar_intent &in,
+                  std::uint64_t tick, double dt) {
+  kinematic_vehicle_step(v, k, tick, dt);
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double yaw = v.box[3];
+  const double speed = v.vx * std::cos(yaw) + v.vy * std::sin(yaw);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  v.steer_cmd = c.steer;
+  v.accel_cmd = c.accel;
+}
+} // namespace
+
+void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick) {
+  if (!p.vehicle_placed)
+    return; // nothing to run until a sample places it
+  p.vprev = p.vnow;
+  step_vehicle(p.vnow, p.vdrive, in, tick, _clock.fixed_dt());
+  participant::vlogged e;
+  e.tick = tick;
+  e.in = in;
+  e.after = p.vnow;
+  p.vlog.push_back(e);
+  if (p.vlog.size() > predicted_avatar::kMaxLog)
+    p.vlog.pop_front();
+}
+
+void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
+                              std::uint64_t server_tick) {
+  if (p.acked && server_tick <= p.last_acked)
+    return;
+  p.acked = true;
+  p.last_acked = server_tick;
+  const double dt = _clock.fixed_dt();
+  const double tol2 = _cfg.reconcile_tol * _cfg.reconcile_tol;
+  // The input in force at the sample's tick: its command is the one the next navigator tick takes.
+  avatar_intent at = p.intent;
+  for (const participant::vlogged &e : p.vlog)
+    if (e.tick == server_tick) {
+      const double dx = e.after.box[0] - auth.position.x, dy = e.after.box[1] - auth.position.y;
+      if (dx * dx + dy * dy <= tol2) {
+        while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
+          p.vlog.pop_front();
+        return;
+      }
+      at = e.in;
+      break;
+    }
+  const cvc::physics::vec3 before = kinematic_vehicle_state(p.vnow).position;
+  // From the sample, with the command it left for the next tick...
+  kinematic_vehicle v = kinematic_vehicle_at(p.vdrive, auth, server_tick, dt);
+  {
+    drive_envelope env;
+    env.max_steer = p.vdrive.max_steer;
+    env.max_accel = p.vdrive.max_accel;
+    env.max_decel = p.vdrive.max_decel;
+    const double speed = v.vx * std::cos(v.box[3]) + v.vy * std::sin(v.box[3]);
+    const drive_cmd c =
+        drive_command(at, env, speed, static_cast<double>(p.vdrive.tick_steps) * dt);
+    v.steer_cmd = c.steer;
+    v.accel_cmd = c.accel;
+  }
+  while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
+    p.vlog.pop_front();
+  if (!p.vehicle_placed) {
+    // ...placed for the first time: on to now on the input in force, logged.
+    p.vehicle_placed = true;
+    p.vlog.clear();
+    p.vnow = p.vprev = v;
+    for (std::uint64_t t = server_tick + 1; t <= _clock.tick(); ++t)
+      vehicle_step(p, p.intent, t);
+    return;
+  }
+  // ...then the inputs since, again.
+  kinematic_vehicle prev = v;
+  for (participant::vlogged &e : p.vlog) {
+    prev = v;
+    step_vehicle(v, p.vdrive, e.in, e.tick, dt);
+    e.after = v;
+  }
+  p.vnow = v;
+  p.vprev = prev;
+  const cvc::physics::vec3 d = kinematic_vehicle_state(p.vnow).position - before;
+  p.correction = p.correction + d;
 }
 
 void holon::on_present(const cvc::clock_driver::clock_frame &f) {
@@ -867,6 +1570,10 @@ void holon::advance(double wall_dt) { _driver.advance(wall_dt); }
 
 cvc::physics::body_state holon::state(const std::string &pid) const {
   const participant &p = _participants.at(pid);
+  if (p.drives != 0)
+    return p.ride; // driving: where its vehicle is
+  if (p.vehicle)
+    return kinematic_vehicle_state(p.vnow); // driving, predicted
   if (_world && (_role == holon_role::server || p.local))
     return _world->state(pid);
   if (_role == holon_role::server)
@@ -878,6 +1585,11 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
 
 cvc::physics::pose holon::display_pose(const std::string &pid) const {
   const participant &p = _participants.at(pid);
+  if (p.drives != 0)
+    return cvc::physics::pose{p.ride.position, p.ride.rotation};
+  if (p.vehicle) // driving, predicted: between its last two quanta
+    return interpolate_peer(kinematic_vehicle_state(p.vprev), kinematic_vehicle_state(p.vnow),
+                            _alpha);
   // The client's own avatar: between its last two quanta, by the frame's alpha.
   if (_role == holon_role::client && p.local && p.have_render_prev)
     return interpolate_peer(p.render_prev, _world ? _world->state(pid) : p.predicted.state(),

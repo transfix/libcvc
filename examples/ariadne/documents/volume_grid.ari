@@ -1,0 +1,108 @@
+# volume_grid.ari — VolumeGridRover as an Ariadne document: the signed distance field of the
+# embedded Stanford bunny in a `volume_grid` node (three slice planes, one down each axis), laid out
+# by the volume_grid component: a slice view under the XY / XZ / ZY switch, a 3D view of the three
+# planes beside it, and a panel with the probe, the point classes and the transfer function
+# (docs/ARIADNE.md §5.4, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4).
+#
+# The app holds the volume: the document's data: block makes the bunny's signed distance field
+# (cvcGL's sdf generator), and the grid shows that volume, not a copy, and follows it: Data >
+# Coarser and Finer make it again at another size, and the planes redraw on the new one. The
+# panel's Save and Load write and read point classes and sessions through the app (data-save,
+# data-load), beside this document.
+#
+# In the slice view, with the Points tool: click to mark a point of the current class (or unmark the
+# one under the pointer), drag to select points in a rubber band (Shift adds, Ctrl or Alt takes
+# away), Shift+Ctrl drag to move the selection. Navigate moves the other planes to the voxel
+# clicked. PageUp / PageDown step the plane shown, Delete deletes the selection. The probe follows
+# the pointer.
+#
+#   ariadne_hello examples/ariadne/documents/volume_grid.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/volume_grid.ari
+
+meta:
+  name: Volume grid (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/volume_grid.ari
+
+# The main view opens on the volume from further out than the scene's own bounds (which the host
+# frames tightly once the scene is realized, after init:), on the first tick, once.
+on_tick: |
+  (if (!= (state-get "vg.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-140 -140 -60 140 140 160")
+             (state-set "vg.opened" "1")))
+
+# VolumeGridRover's keys: PageUp / PageDown step the plane the switch shows, Delete deletes the
+# selected points (the arrow keys stay arigl's camera keys).
+keys:
+  grid_next:
+    label: Next plane
+    key: [PageUp]
+    on: (state-set "graphics.root.children.grid.grid.request" "step 1")
+  grid_previous:
+    label: Previous plane
+    key: [PageDown]
+    on: (state-set "graphics.root.children.grid.grid.request" "step -1")
+  grid_delete:
+    label: Delete the selected points
+    key: [Delete]
+    on: (state-set "graphics.root.children.grid.grid.request" "delete_selected")
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+  # The app makes the volume again at another size (data-generate re-points data.bunny); the grid
+  # follows it.
+  - menu: Data
+    items:
+      - menu_item: Coarser (32^3)
+        on: |
+          (data-generate "bunny" "sdf"
+            (json-encode (dict "mesh" "stanford.bunny" "dim" 32
+                               "fit" (dict "height" 100 "up" "y"))))
+      - menu_item: Finer (64^3)
+        on: |
+          (data-generate "bunny" "sdf"
+            (json-encode (dict "mesh" "stanford.bunny" "dim" 64
+                               "fit" (dict "height" 100 "up" "y"))))
+
+# The data the grid shows: the bunny's signed distance field, made and held by the app.
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 64, fit: { height: 100, up: y } }
+
+windows:
+  - include: volume_grid
+    args: { node: grid, title: Volume grid, id: volume_grid, view_size: 340 }
+    pos: [12, 12]
+    size: [1060, 640]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The bunny's signed distance field: negative inside (warm), positive outside (cool), white at
+    # the surface. Two classes to mark, inside and outside, as GenSeg's seeds would be.
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }       # the app's volume (data: above)
+      view: xy
+      slice: { z: 24 }                # a plane through the bunny's body
+      classes:
+        - { name: inside, color: [1.0, 0.45, 0.2], radius: 1.5 }
+        - { name: outside, color: [0.3, 0.6, 1.0], radius: 1.5 }
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.58, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

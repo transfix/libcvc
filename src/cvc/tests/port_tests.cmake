@@ -16,8 +16,11 @@ set(CVC_PORT_TESTS
   tet_complex_test
   skeleton_test
   skeleton_intrinsics_test
+  pocket_tunnel_test
   contour_stack_test
   point_classes_test
+  molecule_test
+  blur_test
   planar_test
   tiler_test
   tiler_legacy_test
@@ -29,6 +32,10 @@ set(CVC_PORT_TESTS
   seed_generators_test
   volume_slice_test
   tabs_list_test
+  volume_grid_test
+  volume_filter_test
+  volume_grid_contours_test
+  volume_grid_contour_intrinsics_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
@@ -59,6 +66,10 @@ target_link_libraries(tet_complex_test PRIVATE cvc_permissive_geometry)
 target_compile_definitions(skeleton_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 
+# pocket_tunnel_test compares the PocketTunnel port with the legacy library's goldens the same way.
+target_compile_definitions(pocket_tunnel_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
 # segmentation_test compares the GenSeg port with the legacy library's goldens the same way, and
 # critical_points_test the paper mode with SegMed's.
 target_compile_definitions(segmentation_test PRIVATE
@@ -71,4 +82,10 @@ target_compile_definitions(critical_points_test PRIVATE
 target_include_directories(tiler_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
 target_include_directories(tiler_legacy_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../geometry/tiler)
 target_compile_definitions(tiler_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# molecule_test reads PDB entry 1GRL from the source tree (examples/data/molecules).
+target_compile_definitions(molecule_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_compile_definitions(blur_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

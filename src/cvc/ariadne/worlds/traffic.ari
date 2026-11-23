@@ -21,13 +21,20 @@ world:
         plant: kinematic
         vehicle: { preset: roboracer, max_speed: 7 }
         controllers: [nav@1, none]
-      truck:
+      truck: # a participant may get in and drive one: walk up to it and hold E (§18.6)
         plant: kinematic
         vehicle: { preset: humvee, max_speed: 9 }
         controllers: [nav@1, none]
+        drivable: true
     start:
       - { archetype: rover, count: 12, name: rover, team: 1 }
       - { archetype: truck, count: 6, name: truck, team: 2 }
+  # What a participant is (the Avatar window's Body): a person, who may get into a truck, or a
+  # rover of its own, which it drives as its body (section 18.6).
+  avatars:
+    archetypes:
+      person: { controllers: [walker@1] }
+      rover: { vehicle: rover }
   spawns:
     policy: random
 

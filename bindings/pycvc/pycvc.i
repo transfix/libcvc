@@ -1441,6 +1441,8 @@ struct pycvc_py_conversion {
 %include "pycvc_segmentation.i"
 %include "pycvc_tiler.i"
 %include "pycvc_volume_slice.i"
+%include "pycvc_volume_grid_contours.i" // before volume_grid.i: its session holds contours
+%include "pycvc_volume_grid.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
@@ -4865,6 +4867,10 @@ def register_intrinsics(env, ctx):
 
 // pycvc.WorldGym: a world document driven by reset, step and observe, headless (L4).
 %include "pycvc_gym.i"
+
+// pycvc.net_engine and the rest of cvc::net: the connection engine, with its callbacks on an
+// asyncio loop (docs/roadmap/ARIADNE_NET_ENGINE.md §2.7). pycvc.ariadne.net is the same names.
+%include "pycvc_net.i"
 
 // pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
 // needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,

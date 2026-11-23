@@ -21,6 +21,7 @@
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/section.h>     // section_stamp
+#include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/clock_driver.h>
 #include <cvc/core/namespace.h>
@@ -37,6 +38,8 @@
 
 namespace cvc {
 namespace ariadne {
+
+class SceneWorld;
 
 // ----------------
 // cvc::ariadne::holon (H1 slice 3)
@@ -136,6 +139,12 @@ struct holon_config {
   double respawn_below_z = -10.0;
 };
 
+// CFG on a clock of HZ ticks a second (a world's rate, cvc::sim_rate_valid: a room's, room_clock):
+// its quantum 1/HZ, and every span it counts in ticks -- the catch-up, the windows above, all sized
+// for the default 120 Hz -- the same time at HZ as at CFG's own quantum, at least one tick each.
+// At 60 Hz max_skew_ticks 60 (0.5 s) becomes 30. Throws std::invalid_argument for another HZ.
+holon_config holon_config_at(holon_config cfg, double hz);
+
 // The world's four rules sections, as a holon takes them (holon::set_physics and the rest).
 enum class rules_section : int { physics = 0, archetypes, policy, controllers };
 
@@ -177,6 +186,9 @@ public:
   // CLIENT: the newest server tick seen from `pid` is remembered when it is removed (left_tick).
   void remove_participant(const std::string &pid);
   bool has_participant(const std::string &pid) const;
+  // Whether `pid` is this client's own, predicted avatar (added with local); false for a peer, an
+  // unknown pid, and on a server.
+  bool is_local(const std::string &pid) const;
   // CLIENT: the newest server tick seen from `pid` before it was last removed, until a sample of
   // it is applied again; 0 otherwise. The pose subtree a departed peer leaves behind in the room
   // tree carries a tick no newer, so the host (client_pump) can tell it from a pose for its rejoin.
@@ -232,6 +244,93 @@ public:
   // Whether avatars are rigid bodies in a Jolt world (holon_config::physics, and a build that
   // has the backend).
   bool physics() const noexcept { return _world != nullptr; }
+
+  // ONE WORLD (ARIADNE_WORLDS.md section 18.2). SERVER with physics: run WORLD -- a server
+  // document's SceneWorld, its statics, vehicles and other bodies -- as this holon's one physics
+  // world. The avatars move into it, where they stood, and leave the holon's own world; from then
+  // on WORLD steps on this holon's clock (SceneWorld::follow from the holon's step), with each
+  // avatar driven just before each of its steps, so a car shoves an avatar and an avatar stops what
+  // it is heavy enough to stop. The room's statics (set_statics) are kept but not used: the
+  // scene's bodies are the statics. Its host stops stepping WORLD itself
+  // (AppRuntime::set_world_external). WORLD's step must be the holon's quantum. If its owner
+  // replaces its physics world (a restart), the avatars follow, from where they were last.
+  //
+  // Null detaches: the avatars go back to a world of the holon's own, with the room's statics.
+  // False (with WHY) on a client, without physics, or for a world on another step; the holon is
+  // then as it was. WORLD must outlive the holon, or be detached first.
+  bool attach_world(SceneWorld *world, std::string *why = nullptr);
+  SceneWorld *attached_world() const noexcept { return _scene; }
+
+  // GENERIC ENTITIES (ARIADNE_WORLDS.md section 18.4). Every thing that moves in the holon's world,
+  // one table: each participant's person, and the attached world's entities (its vehicles, boats).
+  struct entity {
+    std::string id;         // "p:<pid>" for a participant's person, "e<id>" for a world entity
+    std::string kind;       // "person", or the entity's archetype
+    std::string controller; // what turns an intent into forces: "walker@1", or its plant
+    // Who supplies the intent: "participant:<pid>", or the entity's own controller as its spec
+    // names it (nav@1, external, none); a person no one drives is its participant's.
+    std::string driver;
+    std::string owner;    // "server", or the participant's pid
+    std::string policy;   // nav@1's policy (a .cvcnav), "" the default
+    bool in_world = true; // a body in the physics world now (a person driving a vehicle: false)
+    cvc::physics::body_state state; // a person's feet, an entity's chassis centre
+  };
+  std::vector<entity> entities() const;
+
+  // SERVER with a world attached: participant PID drives world entity ENTITY (its id in the
+  // world's WorldVehicles), or nothing with 0. Driving, the participant's intent's drive axes
+  // (avatar_intent::steer, throttle, brake) replace the entity's controller's command: after each
+  // step, from the intent in force at that step's tick and the vehicle as the step left it
+  // (drive_command), for the navigator's next tick to take -- so a client can run the same steps
+  // (predict_vehicle). Its person
+  // leaves the world (its feet and reserve kept), and its state() and display_pose() are the
+  // vehicle's. Getting out, the person comes back at a clear point beside the vehicle, and the
+  // vehicle goes back to its controller. False (with WHY) on a client, with no world or no such
+  // pid or entity, or for an entity someone else drives; nothing changes then. A participant
+  // removed while driving gets out first.
+  bool set_driver(const std::string &pid, std::uint64_t entity, std::string *why = nullptr);
+  // The world entity PID drives, 0 for none (or an unknown pid).
+  std::uint64_t drives(const std::string &pid) const;
+  // SERVER: a participant's own ask to get in (section 18.6; the room's drive request): set_driver
+  // under the world's rules. ENTITY's archetype must be drivable, and PID's person within its
+  // reach (metres from its feet to the vehicle's chassis box, in plan). 0 gets out, always.
+  bool get_in(const std::string &pid, std::uint64_t entity, std::string *why = nullptr);
+
+  // SERVER: participant PID's avatar archetype (the world's avatars: archetypes:, by id; "" the
+  // first). One that is a vehicle (avatar_archetype::vehicle) is PID's body (section 18.6, OW6c):
+  // the server spawns that vehicle where PID's person stands, facing its way, and seats PID in it
+  // for good -- its person leaves the world as when it gets in, get_in refuses it any other
+  // vehicle and getting out, and the vehicle goes when PID leaves the room. Back to a person, it
+  // stands beside its vehicle, which goes. False (with WHY) on a client, for an unknown pid or
+  // archetype, a vehicle with no world to spawn it in, or one the world will not spawn; nothing
+  // changes then.
+  bool set_archetype(const std::string &pid, const std::string &archetype,
+                     std::string *why = nullptr);
+  // PID's archetype as set_archetype last took it ("" until then: the first).
+  std::string archetype_of(const std::string &pid) const;
+  // The world entity that is PID's body (0: PID is a person).
+  std::uint64_t embodies(const std::string &pid) const;
+
+  // What a driven vehicle can do, which a driver's drive axes are shares of (avatar_intent): its
+  // steering lock (rad), its acceleration and braking (m/s^2; a boat's max_decel is its
+  // propeller astern), and whether it floats (a boat: no brakes).
+  struct drive_envelope {
+    double max_steer = 0.6, max_accel = 3.0, max_decel = 7.0;
+    bool floats = false;
+  };
+  // Faster than this forward (m/s), a car's reverse brakes first.
+  static constexpr double kRollingForward = 0.5;
+  // A driver's drive axes as the vehicle's command, for a vehicle at SPEED (m/s along its heading)
+  // commanded every DT s: steer times the lock; a brake toward a stop within DT and no further, at
+  // most its share of max_decel (a boat: none); throttle forward its share of max_accel; reverse,
+  // a boat's propeller astern (its share of max_decel), a car braking while it rolls forward faster
+  // than kRollingForward and backing up from there (its share of max_accel). None is 0. The
+  // command is entity_intent's: steer in rad (+ left), accel in m/s^2 along the heading.
+  struct drive_cmd {
+    double steer = 0.0, accel = 0.0;
+  };
+  static drive_cmd drive_command(const avatar_intent &in, const drive_envelope &env, double speed,
+                                 double dt);
 
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
   // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
@@ -367,9 +466,55 @@ public:
   // holon itself stays exact. Zero for a peer, on a server, or for an unknown pid.
   cvc::physics::vec3 take_correction(const std::string &pid);
 
+  // THE SAME WORLD ON A CLIENT (ARIADNE_WORLDS.md section 18.5, OW5). CLIENT with physics: hold
+  // world entity ID -- one of the room's entities (its vehicles) this client does not drive -- as
+  // a kinematic box of SIZE (full extents in metres: x forward, y left, z up) where the client
+  // shows it, AT (its chassis centre, heading and velocity), so the local avatar's prediction bumps
+  // into it and is pushed by it as the server's will be. Through the frame's steps it carries on
+  // from AT along AT's velocity; a replay holds it where it is. The host holds each again every
+  // frame (holon_sync's client_pump with an entity_playout does) and releases one it no longer
+  // shows. False on a server, without physics, or for a size that is not finite and positive.
+  bool hold_entity(std::uint64_t id, const std::array<double, 3> &size,
+                   const cvc::physics::body_state &at);
+  void release_entity(std::uint64_t id);
+  // The entities held, in id order; and where entity ID's box is now (false for one not held).
+  std::vector<std::uint64_t> held_entities() const;
+  bool held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const;
+
+  // THE VEHICLE IT DRIVES, PREDICTED (section 18.5, OW5b). CLIENT: the local avatar PID drives (or
+  // is) a vehicle on the kinematic plant with DRIVE's numbers (room_entity::drive): from now on its
+  // pose is that vehicle's, predicted as the relay's world runs it -- each quantum one physics step
+  // of it (kinematic_vehicle_step), on the drive axes of the intent in force at the tick before
+  // (drive_command), as the walker is predicted -- and its samples (the vehicle's, while it drives)
+  // reconcile it: within reconcile_tol in plan of what it predicted for that tick, nothing; else it
+  // starts again from the sample (kinematic_vehicle_at) and replays the inputs since. Its first
+  // sample after this places it; until then it holds where it was. Its walker leaves the world
+  // (with physics) while it drives. Calling it again with the same DRIVE is a no-op; with other
+  // numbers (a navigator built again) it starts again from where it is. False on a server, for a
+  // peer or an unknown pid, or for a DRIVE that is not valid(). A host stops it by registering the
+  // participant again (client_pump does when the relay lets it out).
+  bool predict_vehicle(const std::string &pid, const kinematic_drive &drive);
+  // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now.
+  bool predicts_vehicle(const std::string &pid) const;
+  bool predicted_vehicle(const std::string &pid, kinematic_vehicle &out) const;
+
 private:
   struct participant {
     bool local = false;
+    // SERVER with a world attached: the world entity it drives (0: none), its person's feet and
+    // reserve while it is out of the world, and the vehicle's state as of the last step.
+    std::uint64_t drives = 0;
+    drive_envelope envelope; // the vehicle's, while it drives one
+    // Its archetype (set_archetype; "" the first), and the entity that is its body when that is
+    // a vehicle (0: a person).
+    std::string archetype;
+    std::uint64_t body = 0;
+    cvc::physics::body_state parked_feet;
+    double parked_reserve = 0.0;
+    cvc::physics::body_state ride;
+    // SERVER with a world attached: its feet after the last step, where it goes back in if the
+    // world is replaced.
+    cvc::physics::body_state last_feet;
     // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
     bool pose_known = true;
     avatar_sim sim;       // server authoritative integrator
@@ -432,6 +577,19 @@ private:
       double reserve_after = 0.0;     // and after it, to compare with the server's
     };
     std::deque<logged> log;
+    // CLIENT: the vehicle it drives, predicted (predict_vehicle): its numbers, the model now and
+    // before the last quantum, whether a sample has placed it, and its log (the input in force at
+    // each tick and the model after that tick's step).
+    bool vehicle = false;
+    bool vehicle_placed = false;
+    kinematic_drive vdrive;
+    kinematic_vehicle vnow, vprev;
+    struct vlogged {
+      std::uint64_t tick = 0;
+      avatar_intent in;
+      kinematic_vehicle after;
+    };
+    std::deque<vlogged> vlog;
     bool acked = false;
     std::uint64_t last_acked = 0;
     std::uint64_t reserve_tick = 0; // the server tick of the last reserve applied (0: none)
@@ -440,8 +598,21 @@ private:
   // physics: one quantum of the world at TICK, under the rules in force then (the drive, the
   // peers' kinematic poses, the step).
   void world_step_client(const std::string &self, const avatar_intent &in, std::uint64_t tick);
+  // CLIENT physics: the entities held (hold_entity), where the host last held each, and the live
+  // steps since (each carries it on along its velocity; a replay's steps do not).
+  struct held {
+    cvc::physics::vec3 half_extents;
+    cvc::physics::body_state at;
+    int steps = 0;
+  };
+  std::map<std::uint64_t, held> _held;
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
+  // CLIENT: the predicted vehicle one quantum at TICK on IN (its step, then the command for the
+  // navigator's next tick); and reconciled to a sample.
+  void vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick);
+  void vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
+                         std::uint64_t server_tick);
   // CLIENT physics: re-run the logged steps of the local avatar from FIRST on (the one before it,
   // if any, is where they start) under the rules in force at each; the jump is a correction.
   void replay_log(const std::string &pid, participant &p, std::size_t first);
@@ -508,6 +679,12 @@ private:
   bool _have_reading = false;           // CLIENT: _newest_reading holds a tick
   std::uint64_t _newest_reading = 0;    // CLIENT: the newest tick taken as a clock reading
   section_stamp _statics;               // the room scene the statics came from
+  std::vector<avatar_static> _statics_list; // ... and the statics themselves (for a detach)
+  SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
+  const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
+  void scene_step();                        // SERVER with a world attached: the due steps
+  void update_rides();                      // ... each driver's ride, from its vehicle
+  void get_out(const std::string &pid, participant &p); // ... its person back beside it
 };
 
 } // namespace ariadne

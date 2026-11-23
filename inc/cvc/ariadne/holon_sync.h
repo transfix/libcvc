@@ -53,6 +53,10 @@ class holon;
 //   <participant>.intent.move.{x,y,z}       proposed, CLIENT-written
 //   <participant>.intent.yaw                facing (radians about +Z), CLIENT-written
 //   <participant>.intent.tick               the client tick it applies from (0 = at once)
+//   <participant>.intent.{steer,throttle,brake,jump}  the drive axes and the walker's jump
+//   <participant>.drive                     "<seq>:<entity>", a get-in (0: get out), CLIENT-written
+//   <participant>.driving                   the entity it drives (0: none), SERVER-written
+//   <participant>.drive_status              "<seq> ok" or "<seq> refused: <why>", SERVER-written
 //
 // Scalar leaves (not a typed body_state data() object) are used on purpose: they
 // already journal and replicate through the existing "conf" interest filter with
@@ -111,11 +115,74 @@ bool read_intent(cvc::app &app, const std::string &room, const std::string &pid,
 bool read_current_intent(cvc::app &app, const std::string &room, const std::string &pid,
                          std::uint64_t proposed_tick, avatar_intent &out);
 
+// GETTING IN AND OUT (ARIADNE_WORLDS.md section 18.6). CLIENT: ask to drive world entity ENTITY
+// (0: get out) as our own PID. Each ask has the next seq (one more than the last in the tree), so
+// asking again after a refusal is a new ask; returns it. The server answers in drive_status and,
+// when it lets us in or out, in driving.
+std::uint64_t request_drive(cvc::app &app, const std::string &room, const std::string &pid,
+                            std::uint64_t entity);
+// The entity PID drives as the server says (0: none).
+std::uint64_t read_driving(cvc::app &app, const std::string &room, const std::string &pid);
+// The server's answer to PID's last ask: its seq (0: none yet), whether it was let in or out, and
+// why not.
+struct drive_status {
+  std::uint64_t seq = 0;
+  bool ok = false;
+  std::string why;
+};
+drive_status read_drive_status(cvc::app &app, const std::string &room, const std::string &pid);
+// SERVER: answer PID's ask, if it has a new one (holon::get_in), and publish what it drives.
+// server_pump does this for every participant.
+void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::string &pid);
+
+// AVATARS THAT ARE VEHICLES (ARIADNE_WORLDS.md section 18.6, OW6c). CLIENT: ask for avatar
+// archetype ARCHETYPE (the room's avatars.archetypes, by id; "" the first) as our own PID, beside
+// our avatar's look (participants.<pid>.avatar.archetype). The server answers in archetype_status
+// and, for one that is a vehicle, seats us in it (driving).
+void request_archetype(cvc::app &app, const std::string &room, const std::string &pid,
+                       const std::string &archetype);
+// What PID asked for ("" for nothing yet, or the first).
+std::string read_requested_archetype(cvc::app &app, const std::string &room,
+                                     const std::string &pid);
+// The server's answer: the archetype it ruled on ("" the first), whether PID has it now, and why
+// not; `answered` false until the server has ruled on any.
+struct archetype_status {
+  bool answered = false;
+  std::string archetype;
+  bool ok = false;
+  std::string why;
+};
+archetype_status read_archetype_status(cvc::app &app, const std::string &room,
+                                       const std::string &pid);
+// SERVER: give PID the archetype it asks for (holon::set_archetype; the first until it asks), and
+// say so in archetype_status when it asked, was refused, or became a vehicle. server_pump does
+// this for every participant, before serve_drive.
+void serve_archetype(holon &h, cvc::app &app, const std::string &room, const std::string &pid);
+
+// CLIENT: the vehicle a participant standing at FEET, facing FACING (rad from +x), would get into:
+// the nearest drivable entity the playout shows whose chassis box is within its reach, one ahead
+// of it before one behind. 0 for none; OUT_GAP gets its distance (m, feet to box, in plan).
+class entity_playout;
+std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
+                           double facing, double *out_gap = nullptr);
+
 // The holon configuration every conference room uses, on the relay and in every client (they must
 // agree: the client predicts with the server's physics): rigid-body avatars in a Jolt world, under
 // the room's rules -- the body, controller, veto, energy budget and gravity the relay publishes as
 // sections (room_rules.h), which both pumps take into the holon from their activation ticks.
 holon_config room_holon_config();
+// ... at HZ ticks a second (a world's rate, holon_config_at; 0: the default 120 Hz). The relay
+// builds its holon at the rate its world runs at.
+holon_config room_holon_config(double hz);
+// ... at ROOM's rate: the relay's clock section (room_rules.h's read_room_clock), the default
+// 120 Hz while there is none. A client builds its holon from this.
+holon_config room_holon_config(cvc::app &app, const std::string &room);
+
+// Whether H runs at ROOM's rate (120 Hz while the room has no clock section). A host whose holon
+// does not -- built before the room's tree arrived, or the relay restarted at another rate --
+// builds it again from room_holon_config(app, room): a rate changes what every tick means, so a
+// holon cannot switch to it in place.
+bool on_room_clock(const holon &h, cvc::app &app, const std::string &room);
 
 // The room scene's objects as physics statics (holon::set_statics): the ground plane as a thin
 // slab under z = its height, boxes as boxes, spheres as spheres, each at its transform (Euler
@@ -151,11 +218,20 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
 // nothing to draw) -- drop the ones that left, apply each replicated authoritative .pose (the
 // holon ignores a sample it has already seen, so re-reading an unchanged pose every frame is
 // harmless), then advance the holon one frame. Read the result with h.display_pose(pid). wall_dt
-// as in server_pump. With physics, both pumps (re)load the holon's statics from the room scene
-// whenever its revision changes, and both take each of the room's rules sections (room_rules.h)
-// whenever its stamp moves (holon::set_physics and the rest).
+// as in server_pump. While the relay says SELF_PID drives a vehicle (driving, section 18.6), its
+// pose is the vehicle's: with ENTITIES, and a vehicle whose room entity says how it runs (the
+// kinematic plant's room_entity::drive), the holon predicts it (holon::predict_vehicle; section
+// 18.5, OW5b); otherwise it is played out from the relay's samples as a peer is. Out again, the
+// walker is predicted. With physics, both pumps (re)load the holon's
+// statics from the room scene whenever its revision changes, and both take each of the room's rules
+// sections (room_rules.h) whenever its stamp moves (holon::set_physics and the rest).
+//
+// With ENTITIES (the room's entities, pumped this frame first) and physics, every entity it shows
+// that SELF_PID neither drives nor is (section 18.5, OW5) is held in the holon's world as a
+// kinematic box where it is shown (holon::hold_entity), so the avatar we predict bumps into the
+// room's vehicles and is pushed by them as on the relay; one no longer shown is released.
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                 double wall_dt = -1.0);
+                 double wall_dt = -1.0, const entity_playout *entities = nullptr);
 
 // A pose snapshot from the relay (room_pose_relay; transports' set_on_pose_snapshot): decode it
 // with this connection's DECODER and give each participant the holon already has its sample, as
@@ -200,8 +276,15 @@ public:
   const conference::room_entity *find(std::uint64_t id) const;
   // The ids being played out (a sample has arrived), in id order.
   std::vector<std::uint64_t> shown() const;
-  // Where entity `id` is shown this frame; false before its first sample.
+  // Where entity `id` is shown this frame; false before its first sample. The one predicted (below)
+  // is shown where it is predicted.
   bool pose(std::uint64_t id, cvc::physics::pose &out) const;
+  // Entity `id` -- the vehicle the client drives, which its holon predicts (holon::predict_vehicle;
+  // ARIADNE_WORLDS.md section 18.5, OW5b) -- shown at AT this frame instead of where its samples
+  // put it; 0 for none. A host sets it each frame from the holon's display_pose.
+  void show_predicted(std::uint64_t id, const cvc::physics::pose &at);
+  // ... and its velocity, its newest sample's.
+  bool state(std::uint64_t id, cvc::physics::body_state &out) const;
   // Bumps whenever the section's entities or the ones shown change (a view rebuilds on it).
   std::uint64_t revision() const { return _rev; }
   holon &playout() { return *_holon; }
@@ -211,6 +294,8 @@ private:
   section_stamp _stamp;
   std::vector<conference::room_entity> _entities;
   std::uint64_t _rev = 0;
+  std::uint64_t _predicted = 0; // show_predicted's entity (0: none), and where
+  cvc::physics::pose _predicted_at;
 };
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next

@@ -949,6 +949,8 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   GRL-SNAM's Python stories mirror) move with GRL-SNAM's hosts.
 - **Not changed:** the 50 Hz drift-tooling protocol (`plant_log_scene`, `cvc plant-log`), which
   the plant fits were measured at.
+- **120 Hz is the default, not a law:** a world may run at a rate of its own, and the relay's
+  clients follow it (§18.9).
 
 ### 18.2 The world: the holon runs the document's scene
 
@@ -963,6 +965,15 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   every side.
 - **Vehicles are in the same world.** `WorldVehicles` already puts every plant in the scene's
   world (L2b); now that world is the holon's, at 120 Hz.
+- **As built (OW2):** `holon::attach_world(SceneWorld *)` on a server holon with physics, for a
+  world on its quantum: the avatars move into the scene's physics world where they stood
+  (`avatar_world` over a shared world it does not own: no stepping, statics, gravity or air of its
+  own; `release`, `move_to` when the owner replaces its world), and the holon steps the world from
+  its own step through `SceneWorld::follow`'s per-step hooks, each avatar driven just before each
+  step. `AppRuntime::set_world_external` stops the document's runtime stepping it, and `arisrv`
+  attaches a server document's world to the room's holon at start-up. A Humvee driven into a
+  standing avatar carries it down the road and ends 0.67 m behind the same run without it
+  (`AriadneOneWorld`). Clients still build their statics from the published scene (OW5).
 - **Local is the same.** A lab, a gym or a demo with no relay runs a server-role holon in its own
   process: the same world, the same entities, the same code path as the relay. `WorldGym`,
   `HostCars` and the GRL-SNAM hosts move onto it.
@@ -995,9 +1006,20 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   (§5).
 - **A participant's avatar is the entity it owns and drives.** The participants' pose stream
   becomes the entities' pose stream; a participant pid names its entity.
+- **As built so far (OW3, server side):** `holon::entities()` lists every mover (each participant's
+  person, the world's entities) with its kind, controller, driver, owner and policy.
+  `holon::set_driver(pid, entity)` puts a participant in a world vehicle: its person leaves the
+  world (feet and reserve kept), its intent's drive axes (`avatar_intent::steer`, `throttle`,
+  `brake`, on the wire as `intent.steer` / `.throttle` / `.brake`; §18.6) replace the vehicle's
+  command, and it is where the vehicle is; out, the person stands beside it and the vehicle goes
+  back to its controller. The room's entities carry `driver`. Not yet: avatars that are vehicles,
+  a person driven by a navigator.
 - **Navigators avoid everything they don't drive.** `nav@1` takes every other entity as a foreign
   agent (position, velocity, radius), avatars included, and passes on the right
-  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`).
+  (`sim_world::set_foreign_agents`, `WorldVehicles::set_avoid`). **As built (OW4):**
+  `WorldVehicles::set_movers`, which a holon running the world fills with its avatars before
+  each step; a car on `nav@1` swings 3.1 m past a person standing in its lane and drives on,
+  where without avoiding it carries them 34 m down the road (`AriadneOneWorld`).
 
 ### 18.5 Clients: the same world, predicted where it is yours
 
@@ -1009,6 +1031,39 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 - **The entity it drives is predicted** with its controller (the walker, or the vehicle's plant)
   and reconciled to the server's poses, as the avatar is today. A client without the kernel
   interpolates its own entity (§5).
+- **As built (OW5a):** the room's vehicles are in the client's world. `holon::hold_entity(id,
+  size, at)` holds one as a kinematic box of its chassis's size where the client shows it (its
+  playout's pose, carried on along its velocity through the frame's steps; a replay holds it
+  still), on `avatar_world`'s obstacles; `client_pump(..., entities)` holds every entity the
+  `entity_playout` shows except the one the participant drives or is, and releases one the room no
+  longer lists. arigl pumps the entities before the holon, so the walk it predicts meets the cars
+  it draws: walking into a parked Humvee stops at its side, and a car at 3 m/s pushes the avatar
+  along (`HolonPhysicsTest`), where before the prediction walked through and the relay's pose
+  snapped it back.
+- **As built (OW5b, the kinematic plant):** the vehicle a participant drives (or is) is predicted
+  when it runs on the `kinematic` plant, as traffic.ari's trucks and rovers do. That plant is nav's
+  bicycle integrated once a navigator tick on the tick's command, its chassis box moved a step at
+  a time between where the ticks leave it, and nothing else moves a driven one, so a client that
+  knows its numbers runs it step for step: `vehicle_kinematics.h`'s `kinematic_drive` (the
+  wheelbase, lock, top speed, the acceleration it is held to, the rear axle, the steps per tick
+  and substeps, the envelope) and the clock ticks the navigator ticks on
+  (`WorldVehicles::kinematics`; `SceneWorld::follow` passes each step's clock tick to
+  `before_step`), carried by the room's entities (`room_entity::drive`). The relay sets a driver's
+  command after each step rather than once a frame, from the intent in force at that tick and the
+  vehicle as the step left it, so the client's steps match it whatever the relay's frame rate.
+  `holon::predict_vehicle` runs the model (`kinematic_vehicle_step`) as the walker is predicted,
+  logged by tick, and reconciles to the vehicle's samples: within `reconcile_tol` in plan, nothing;
+  else it starts again from the sample (`kinematic_vehicle_at`, which takes the box as moving
+  straight through its tick, the pose stream carrying no angular velocity) and replays the inputs
+  since. `client_pump` keeps the participant local and predicts the vehicle when its room entity
+  carries the numbers, and arigl draws it at the predicted pose (`entity_playout::
+  show_predicted`). The model stays within 0.05 mm of the relay's Humvee over 9 s of throttle, a
+  turn, the brake and reverse (`AriadneOneWorld`); the holon predicts it with nothing to correct,
+  and a 1.5 m push the client cannot know is corrected at the next sample (`HolonVehicleTest`).
+- **Still to come:** the other plants predicted (`dynamic` and `dynamic4w` are deterministic models
+  too; `jolt` needs the vehicle in the client's world; a boat needs the water), played out until
+  then; OW5c, the client's statics from the document's bodies (meshes, terrain, a generated
+  world's buildings), not only the plane, boxes and spheres the room scene carries.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1019,6 +1074,68 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   back to its driver before (a navigator, or nothing).
 - **An avatar can be a vehicle** where the world allows it: its avatar archetypes may include
   vehicles, and a participant picks one when it joins (WD4, WD6).
+- **As built (OW6c):** an avatar archetype's `vehicle:` names one of the world's vehicle
+  archetypes (`world: avatars: archetypes: { person: {...}, rover: { vehicle: rover } }`). A
+  participant picks an archetype beside its look, under the same choice subtree
+  (`participants.<pid>.avatar.archetype`, beside `avatar.color` and `avatar.accessory`;
+  ARIADNE_CONFERENCE_ROADMAP.md §5g, §5k phase 3), with the Avatar window's Body combo or
+  `room-set-archetype`; until it picks, it has the first. The relay rules on it
+  (`holon::set_archetype`, from `server_pump`), answers in the relay-owned `archetype_status`, and
+  for a vehicle spawns it where the person stands and seats the participant in it for good: it
+  drives it with its vehicle scheme, cannot get out or into another, and the vehicle goes when it
+  leaves or picks a person again (it stands beside it then). The room's entities carry `avatar`,
+  so a client offers no one else that vehicle and shows its owner no get-out prompt. A person's
+  body is still the first person archetype's for everyone: bodies that differ by archetype are
+  still to come. `traffic.ari` offers a rover body.
+- **Mouse look is first person** (OW6c): walking under mouse look, arigl's camera sits at the
+  walker's eyes (0.92 of its body's height) and its own avatar is hidden; W walks where you look.
+  The Controls window's "Mouse look in first person" (the camera's `settings.first_person`, on by
+  default) turns it off for the view over your shoulder. Driving keeps the chase camera.
+- **Each thing driven has its own controls** (`cvc/ariadne/controls.h`). A control scheme per
+  kind, each with its own bindings (keys and mouse buttons, and a gamepad's buttons, triggers and
+  stick halves), so a car's keys are not a person's:
+
+  | Scheme | Actions (default keys) | Gamepad |
+  |---|---|---|
+  | walk | forward W/Up, backward S/Down, strafe left A/Left, strafe right D/Right, jump Space, mouse look on/off V, get in E (held 0.4 s) | walk on the left stick (as fast as it is pushed), look around on the right, jump A, mouse look on/off the right stick pressed, get in X (held) |
+  | car | throttle W/Up, reverse S/Down, brake Space, steer left A/Left, steer right D/Right (each ramps to the lock over 0.25 s), get out E (held) | steer on the left stick, throttle RT, brake LT, reverse LB, look around on the right stick, get out X (held) |
+  | boat | the car's, with no brake | the car's, with reverse on LT |
+
+  Getting in switches a participant to its vehicle's scheme (the archetype's `controls:`, car or
+  boat, by its plant when it names none), getting out back to walking. arigl keeps the bindings
+  where the Controls window changes them: walking's at `<viewer>.avatar.keys.<action>`, the
+  vehicles' at `<viewer>.controls.<scheme>.<action>`, a gamepad's at `<viewer>.pad.<scheme>.<action>`.
+  The Controls window lists each action's gamepad input beside its keys, with a Change of its own:
+  press the new button, pull the trigger or push the stick (`KeyBinding::pad_path`,
+  `Runtime::post_pad_press`; Escape keeps the old one).
+- **As built (OW6b):** a binding's `pad` names a gamepad's inputs (buttons A, B, X, Y by position,
+  LB, RB, the D-pad, the sticks pressed; triggers LT, RT; stick halves `LeftY-`, `LeftX+`, ...);
+  each has a deadzone (0.15 of a stick, 0.05 of a trigger), past which the rest of its travel is
+  0 to 1, and an action is its keys' value or its gamepad's, the larger (a key's steering ramps, a
+  stick's does not). cvcGL's `SdlGamepad` reads the first gamepad SDL finds (one plugged in later
+  within a second). Played on the gamepad, arigl faces where the camera looks, as under mouse
+  look; the right stick turns the camera (150 degrees a second at a full push, the chase camera
+  waiting while it does), and the get-in prompt names the gamepad's button.
+- **The drive axes are shares of the vehicle's envelope,** so one scheme drives any vehicle and
+  the server holds each to its own: `steer` in [-1, 1] of its lock (`max_steer`), `throttle` in
+  [-1, 1] of its `max_accel` (negative is reverse), `brake` in [0, 1] of its `max_decel`
+  (`holon::drive_command`). The brake stops the vehicle and never backs it up. Reverse brakes a
+  car still rolling forward (faster than 0.5 m/s), then backs it up; a boat has no brake, and its
+  reverse is the propeller astern.
+- **The walker jumps** (`avatar_intent::jump`, on the wire `intent.jump`) while it is held and
+  something is under its feet, at its controller's `jump_speed` (4 m/s by default: about 0.8 m);
+  the reserve pays the jump's kinetic energy.
+- **As built (OW6a):** the ask is a room leaf, `participants.<pid>.drive = "<seq>:<entity>"` (0
+  gets out; `request_drive`, the `room-drive` verb). The relay's `server_pump` answers each ask
+  once, in `drive_status` (`"<seq> ok"` or `"<seq> refused: <why>"`), and says what the
+  participant drives in `driving`; both are the relay's (`room_write_gate`). The rule
+  (`holon::get_in`): the vehicle's archetype is `drivable: true`, and the person stands within its
+  `reach:` (3 m by default) of its chassis box. The room's entities carry `drivable`, `reach` and
+  `controls`, so a client prompts for the nearest drivable vehicle in reach (`drive_target`, the
+  one ahead first): "E  Drive humvee", a ring filling as E is held. While the relay says a client
+  drives, its own pose (the vehicle's) is played out from the relay's samples, not predicted
+  (OW5 predicts it), its marker is hidden, and arigl's camera swings round behind the moving
+  vehicle.
 
 ### 18.7 Phases
 
@@ -1026,19 +1143,21 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 |---|---|---|
 | OW0 | This section. | S |
 | OW1 | **Built** (2026-11-19). **The clock.** 1/120 s quanta everywhere, the navigator's tick 7 quanta; the trained policies checked at it (§18.1: they hold). | M |
-| OW2 | **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
-| OW3 | **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
-| OW4 | **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
-| OW6 | **Getting in and out of vehicles,** and avatars that are vehicles. | M |
+| OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
+| OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
+| OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**
 
 - The dynamic plants are libcvc's own C++, not Jolt, so their cross-platform determinism is not
   pinned; a client's prediction of a vehicle may drift and be corrected. A gate per kernel (§5)
   says how much.
-- The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow.
+- The cost of 120 Hz with many vehicles, measured on the relay before the stock worlds grow. A
+  world that does not need 120 Hz can run at 60 or less (§18.9).
 - An area of interest for entities: today every client gets every one.
 
 ### 18.8 World contents: a generated world is a bundle
@@ -1131,3 +1250,54 @@ a mesh (`terrain.glb`) and a 16-bit height map PNG.
 | GB3 | **One renderer** for any world dataset. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
 | GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
+
+### 18.9 A world's rate: the server chooses, the clients follow
+
+The owner, 2026-11-21: "some worlds might not need 120hz and can do 60hz or lower if bandwidth and
+compute are an issue." So a world's rate is a knob: the relay picks it, and its clients follow.
+
+- **The knob.** A scene's `clock: { hz: <n> }`, a whole number of ticks a second from 10 to 240
+  (`cvc::sim_rate_valid`; 0 or absent is 120). `arisrv --sim-hz <n>` overrides the document's.
+  Everything that ticks takes it from there:
+  - **the quantum,** 1/hz: the app's world clock (`SceneWorld::use_vehicle_clock` puts it there
+    before the physics world is made), a physics step, the holon's clock;
+  - **the navigator's tick,** the whole quanta nearest the 0.06 s the policies were trained at
+    (`cvc::sim_tick_quanta`): 7 at 120 Hz (`kSimTick`, as before), 6 at 100, 4 at 60 (0.0667 s), 2
+    at 30, one at 20 and below. A tick asked for (`WorldVehicles::set_tick`) still wins;
+  - **the holon's windows,** which are counted in ticks and were sized for 120 Hz: the skew, the
+    lead slack, the peers' playout spans, the intent lead, the catch-up. `holon_config_at` keeps
+    each one's time at the new rate (at 60 Hz each is half the ticks), at least one tick.
+- **The relay.** `arisrv` takes `--sim-hz`, else the document's (or the stock world's) `clock: hz`,
+  else 120. It builds its holon at that rate and the server document's world on it (a load hook
+  sets the scene's `hz`, so `attach_world` finds the world on the holon's quantum), logs
+  `[arisrv] clock: 60 Hz (...)`, and publishes the rate.
+- **The wire.** `conf.rooms.<room>.clock.hz`, a revisioned section (§3) the relay writes once at
+  start-up with its epoch (`room_rules.h`: `write_room_clock`, `read_room_clock`). A value that is
+  no rate reads as none, and a room with none (a relay from before this) runs at 120 Hz. A client
+  never writes it (`room_write_gate`).
+- **The clients.** A host builds its holon from `room_holon_config(app, room)`, at the room's rate.
+  A holon cannot change its quantum in place (every tick it counts would mean another time), so a
+  host whose holon is off the room's clock (`on_room_clock`: it was built before the section came,
+  or the relay restarted at another rate) builds it again; the roster puts everyone back at the
+  next pump and the stream's next entries bring their poses. `arigl` does this each frame
+  (`follow_room_clock`), keeping its lead in seconds.
+- **What it saves.** The relay's CPU, mostly: physics, the navigators and the holon's integration
+  run per tick. Bandwidth much less, since poses already go out at 60, 30 or 20 Hz by each
+  viewer's round trip (room_pose_relay) and the room steps at 60 Hz whatever the rate; a near
+  entity's pose is capped at 30 Hz at any rate. Video has its own knobs (`--video-max`,
+  `--viewer-kbps-max`, `--aoi`, `--aoi-video-max`).
+- **The policies hold at 4/60 s** (2026-11-21), which is the tick at 60 Hz and at 30 Hz. That tick
+  is 11% longer than the 0.06 s they were trained at; 7/120 s was 3% shorter. The run is the
+  same as OW1's (§18.1): Jolt RoboRacers through the city for 24 s, 20 seeds of 48 agents
+  (`NavPlantConvergence.PoliciesHoldTheirReachAtTheSimulationTick`, `CVC_NAV_TICK_AB=1`, which now
+  has the 4/60 s arm). Reach at 0.06 s, then at 4/60 s:
+  - the shipped weights: 0.519, then 0.512;
+  - the untrained default: 0.522, then 0.517.
+
+  Both are within the seeds' noise. No retraining.
+- **Not yet:**
+  - A rate change while a relay runs. It is a restart: the clients follow the new run's section.
+    In place it would be a world restart under a new epoch (§6, #1076) that every holon rebuilds
+    on.
+  - The scene swarm (`scene_swarm`) runs its own plant host and tick at 1/120 s and needs the
+    120 Hz clock: a scene with a swarm and a rate of its own is not supported yet.

@@ -47,6 +47,13 @@
 //     world:
 //       generate: generated_world
 //       params: { seed: 7, half_m: 1000, preset: 1 }
+//
+// Saving is the app's too (data_save, a program's (data-save PATH FILE [AS])): what a state key's
+// data channel holds, encoded by an encoder (register_data_encoder; the built-ins write a volume,
+// point classes, a volume grid session and bytes) and written beside the document, or in a
+// browser downloaded. So a node that edits data in memory (a volume_grid's point classes) reads
+// and writes no file itself: the app loads its data onto the tree, and saves it from there.
+#include <boost/any.hpp>
 #include <cvc/utility/archive.h>
 #include <functional>
 #include <memory>
@@ -101,7 +108,12 @@ struct DataDecode {
 using DataDecoder = std::function<void(DataDecode &)>;
 
 // Register (or replace) `app`'s decoder named `as` (an empty decoder removes it). Every app
-// starts with the built-ins: files, bytes, text, json, mesh, heightfield, volume and city_bundle.
+// starts with the built-ins: files, bytes, text, json, mesh, heightfield, volume, city_bundle,
+// point_classes (a .vgr's classes, cvc/volume/point_classes.h, at `classes`),
+// volume_grid_session (a volume grid session's JSON, cvc/volume/volume_grid.h, at `session`) and
+// contours (a cvc::contour_stack, cvc/geometry/contours.h, at `contours`: .ser, .contour, .cvcc and
+// the other formats the app reads; a .ser's section files come from its archive or the page's
+// preload).
 // Thread-safe; a decoder runs on a load's worker thread and throws std::exception to fail the
 // load. Another app's documents don't see it.
 void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder decoder);
@@ -111,13 +123,47 @@ std::vector<std::string> data_decoders(cvc::app &app);
 // What a request with `generate:` runs in place of a fetch: it makes the dataset's files from
 // d.spec.params (a version 2 city bundle's, for city_bundle), on the load's worker thread and
 // holding the app as a decoder does, and may write outputs of its own under d.node (d.out), beside
-// the decoder's. d.files is empty. Throws std::exception to fail the load. Every app starts with
+// the decoder's. d.files is empty. A generator that makes no files and names no `as:` has written
+// its outputs itself, and no decoder runs (cvcGL's sdf: a mesh's signed distance field, as
+// `volume`). Throws std::exception to fail the load. Every app starts with
 // generated_world (scene_generated_world.h: the world as a version 2 bundle, and the world itself
 // as `generated`). Thread-safe, per app, as the decoders are.
 using DataGenerator = std::function<std::vector<cvc::archive::file>(DataDecode &)>;
 void register_data_generator(cvc::app &app, const std::string &name, DataGenerator generator);
 bool has_data_generator(cvc::app &app, const std::string &name);
 std::vector<std::string> data_generators(cvc::app &app);
+
+// What an encoder gets: the payload to write (a state node's data()) and the file it is for, whose
+// extension names the format where an encoder writes several (.rawiv, .mrc, ...).
+struct DataEncode {
+  cvc::app &app;
+  const boost::any &payload;
+  std::string file;
+};
+// The file's bytes. Throws std::exception (saying why) when it can't encode the payload.
+using DataEncoder = std::function<std::string(const DataEncode &)>;
+
+// Register (or replace) `app`'s encoder named `as` (an empty encoder removes it). Every app starts
+// with: bytes (DataBytes or a std::string), volume (a cvc::volume, in any format libcvc writes, by
+// the file's extension), point_classes (cvc::point_classes as .vgr), volume_grid_session (its
+// JSON) and contours (a cvc::contour_stack in a one-file format: .cvcc, .contour or .pcd). Each
+// takes the payload as a std::shared_ptr<const T>, a std::shared_ptr<T> or a T.
+// Thread-safe and per app, as the decoders are.
+void register_data_encoder(cvc::app &app, const std::string &as, DataEncoder encoder);
+bool has_data_encoder(cvc::app &app, const std::string &as);
+std::vector<std::string> data_encoders(cvc::app &app);
+
+// The built-in encoder a payload takes when no `as` names one (by its type), or "".
+std::string default_data_encoder(const boost::any &payload);
+
+// Save what the state node at `path` (an absolute state path, followed through links) holds on its
+// data channel as `file`, through the encoder `as` (empty: default_data_encoder). A relative file
+// is the document's directory's (`base`; empty, the working directory's). A document whose
+// directory is a URL (an https:// one) writes no file. In a browser the file downloads under its
+// name instead. Throws std::runtime_error saying why: nothing at `path`, no encoder, the encoder's
+// own error, or the file not written.
+void data_save(cvc::app &app, const std::string &path, const std::string &file,
+               const std::string &as = std::string(), const std::string &base = std::string());
 
 // The store key of a request: a slug of its source and a hash of the request (uri, path, as).
 std::string data_key(const DataSpec &spec);
@@ -158,6 +204,17 @@ public:
   // The store node a path names: the store path itself, or a document's link to one. "" when the
   // path is neither.
   std::string resolve(const std::string &path) const;
+
+  // Put `payload` as the output `item` of the dataset `path` names (a store path or a document's
+  // link to one), as a decoder writes its outputs, and raise its rev, so every node viewing the
+  // dataset follows it: a filter's volume put back where the scene shows it. A write to
+  // <prefix>.data.<name>.<item> through the document's link makes a node under the link instead;
+  // this reaches the store node. `item` is one word, and not one of the store's own keys (status,
+  // error, progress, bytes, sha256, uri, canonical, as, size, rev, files). Reloading the dataset
+  // makes its outputs again from its source. Returns the store path; throws std::invalid_argument
+  // naming the problem (no dataset there, a bad item, an empty payload).
+  std::string set_output(const std::string &path, const std::string &item,
+                         const boost::any &payload);
 
   // Load `path`'s request if it was bound lazily and is not loaded yet.
   void touch(const std::string &path);

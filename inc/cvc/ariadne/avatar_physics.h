@@ -58,6 +58,14 @@ namespace ariadne {
 // Poses in and out are the avatar's FEET (body_state.position at floor level, as holon_sync
 // replicates and room_view draws); the box's centre is half its height above them.
 //
+// ONE WORLD (ARIADNE_WORLDS.md section 18.2): an avatar_world made over a world it does not own
+// (the shared-world constructor: a server document's SceneWorld, with its statics, its vehicles and
+// its other bodies) puts the avatars in that world. Its owner steps it, and its gravity and air are
+// the owner's: step(), set_statics(), set_wind() and set_time() are then not this class's to do
+// (step and set_statics throw std::logic_error; the wind and the time are the owner's, no-ops), and
+// set_gravity() only prices the walk. Avatars there meet everything else in the world: a car
+// shoves them, and they stop what they are heavy enough to stop.
+//
 // The world runs in cvc::physics' cross-platform determinism mode, so the server (Linux) and a
 // client (Windows, wasm) stepping the same inputs from the same state agree -- what client
 // prediction relies on. Creation order is part of a Jolt run, so statics are always created first,
@@ -137,12 +145,30 @@ public:
   // Throws cvc::unsupported_exception when this build has no Jolt backend.
   avatar_world(double fixed_dt, const avatar_body &body,
                const avatar_energy_policy &energy = avatar_energy_policy{});
+  // The avatars in `shared`, a world the caller owns and steps (see ONE WORLD above): its fixed_dt
+  // is the walker's step and its gravity prices the walk. `shared` must outlive this, or this must
+  // be released (release()) first.
+  avatar_world(cvc::physics::world &shared, const avatar_body &body,
+               const avatar_energy_policy &energy = avatar_energy_policy{});
+  // A shared world's avatars stay in it (the world may be gone already); release() takes them out.
   ~avatar_world();
   avatar_world(const avatar_world &) = delete;
   avatar_world &operator=(const avatar_world &) = delete;
 
+  // Whether the world is someone else's (the shared-world constructor).
+  bool shares_world() const { return _own == nullptr; }
+  // A shared world: take every avatar's body out of it, and forget the avatars.
+  void release();
+  // A shared world that its owner replaced (a restart): the avatars again, in `shared` now, each at
+  // `feet` (by pid; one not there keeps where it was last read, at rest), with its mass and its
+  // reserve. The old world is not touched (it may be gone).
+  void move_to(cvc::physics::world &shared,
+               const std::map<std::string, cvc::physics::body_state> &feet);
+  cvc::physics::world &world() { return *_world; }
+
   // Replace the static objects. Avatars are re-created after them (same pids, same states), so the
-  // world's creation order stays statics-then-avatars.
+  // world's creation order stays statics-then-avatars. Not in a shared world (its owner's bodies
+  // are the statics): std::logic_error.
   void set_statics(const std::vector<avatar_static> &statics);
   // Every avatar's body from now on: each is re-created at its feet, keeping its velocity and its
   // reserve, with the new mass unless set_mass gave it its own.
@@ -168,6 +194,13 @@ public:
   // Before a step: drive a dynamic avatar from its intent through its controller, paying from its
   // reserve (see above).
   void drive(const std::string &pid, const avatar_intent &in);
+  // The walker's jump (avatar_intent::jump): the upward speed it leaves the ground with (m/s; 4
+  // clears about 0.8 m under Earth's gravity, 0 no jumping). It jumps while the intent holds jump
+  // and something is under its feet (within 8 cm), and not while already rising; with a budget
+  // (avatar_energy_policy) the reserve pays the jump's kinetic energy, and one it cannot pay for
+  // is no jump.
+  void set_jump_speed(double v) { _jump_speed = v; }
+  double jump_speed() const { return _jump_speed; }
   // The energy policy every avatar spends under. An avatar added later starts with a full reserve;
   // one already here keeps its reserve, cut to the new reserve_max.
   void set_energy_policy(const avatar_energy_policy &p);
@@ -185,6 +218,20 @@ public:
   // avatar has no mass (a no-op).
   void set_mass(const std::string &pid, double kg);
 
+  // OBSTACLES (ARIADNE_WORLDS.md section 18.5, OW5): a box the host holds where it shows something
+  // this world does not simulate -- a client's view of the room's vehicles. Each is a kinematic
+  // body, HALF_EXTENTS about its centre: it moves only as the host moves it, and pushes what it
+  // meets as it goes. The first hold of KEY (or one with other extents) creates it at CENTRE; a
+  // later one moves it there by the end of the next step. Kept through set_statics (re-created
+  // after the avatars), set_body and move_to; release() takes them out with the avatars.
+  void hold_obstacle(std::uint64_t key, const cvc::physics::vec3 &half_extents,
+                     const cvc::physics::pose &centre);
+  void remove_obstacle(std::uint64_t key);
+  bool has_obstacle(std::uint64_t key) const;
+  // Its centre now. Throws std::out_of_range for an unknown key.
+  cvc::physics::body_state obstacle_state(std::uint64_t key) const;
+
+  // One step of the world. Not in a shared world (its owner steps it): std::logic_error.
   void step();
 
   // An avatar's state, at its feet. Throws std::out_of_range for an unknown pid.
@@ -201,20 +248,33 @@ private:
     avatar_energy energy;
   };
   std::uint32_t create_avatar(const cvc::physics::body_state &feet, bool dynamic, double mass);
+  void add_avatar_material();
   // Remove every avatar's body and create it again (statics untouched, so the order stays
   // statics-then-avatars), each from its feet state.
   void recreate_avatars(const std::map<std::string, cvc::physics::body_state> &feet);
   // The walker controller: ease the horizontal velocity of S toward the intent's within the
   // force limit and what A can pay for, and charge A for it.
   void drive_walker(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
+  // The walker's jump: S (its centre's state) leaves the ground if the intent asks, it stands on
+  // something and A can pay.
+  void jump(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
+  double _jump_speed = 4.0;
   avatar_body _body;
   avatar_energy_policy _energy;
   cvc::physics::vec3 _gravity{0.0, 0.0, -9.80665};
   double _dt;
-  std::unique_ptr<cvc::physics::world> _world;
+  std::unique_ptr<cvc::physics::world> _own; // the world, when this owns it
+  cvc::physics::world *_world = nullptr;     // the world the avatars are in (_own's or shared)
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
   std::map<std::string, avatar> _avatars;
+  struct obstacle {
+    std::uint32_t id = 0; // cvc::physics::body_id value
+    cvc::physics::vec3 half_extents;
+  };
+  std::map<std::uint64_t, obstacle> _obstacles;
+  std::uint32_t create_obstacle(const cvc::physics::vec3 &half_extents,
+                                const cvc::physics::body_state &centre);
   std::uint32_t _wind_field = 0xffffffffu; // the wind's flow field (none)
 };
 

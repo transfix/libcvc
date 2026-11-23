@@ -984,8 +984,64 @@ Each viewer's rung adapts to its link.
     `media_frame` each (codec `opus`). Each packet gets its own `seq`, so a gap means a lost
     packet. Silence suppression still applies, and a new talk spurt resets the encoder.
   - A receiver decodes each peer with its own decoder, since Opus is stateful. It conceals up to
-    two lost packets, and cuts the result into mixer-sized chunks, because the mixer sums one chunk
-    per peer.
+    two lost packets and drops a packet at or behind the last one (a sender far behind has started
+    over, and so does its decoder).
+- **Jitter buffers (`cvc::voice_mixer`, `voice_mixer.h`).** Each peer's decoded audio goes into
+  a jitter buffer, and the playback device pulls the mix at its own pace
+  (`open_audio_output_pull`, SDL's get-callback), not the frame loop's.
+  - A peer starts playing once its target is buffered: 80 ms to start, at least the device's
+    block plus 20 ms (a browser's Web Audio block is 43 ms, so 63 ms there).
+  - When a playing peer runs dry and its audio is back within 300 ms, the audio was late. Its
+    target grows by how late it was to the device, up to 400 ms: the audio the device asked for
+    from running dry to the audio's return and did not get, rounded up to 20 ms steps and at
+    least one. For a device that pulls at its own pace (SDL's audio thread) that is the time
+    since. A browser's main thread pulls for its AudioWorklet ring, so a stall of its own makes it
+    ask for the stall's worth at once after it, or nothing during it: under SwiftShader, late
+    underruns were 3 ms by the clock and 56 ms short, and 90 ms by the clock and 1 ms short. A
+    late underrun used to grow the target 20 ms, so against a sender whose main thread stalls
+    150 ms it took one gap per step (9 in headless Chrome, 80 to 260 ms).
+  - After a late underrun the voice plays again once what it waited for before is buffered, not
+    the grown target. The audio that comes back brings the delay the stall needed with it, and
+    waiting for the rest was a gap of its own (up to 580 ms in one, in headless Chrome). The grown
+    target keeps that audio from being trimmed away, and the next talk spurt starts at it.
+  - A peer that stops sending runs dry too. A sender sends nothing through a silence once its mic
+    has been below 0.004 RMS for 0.8 s, so the voice runs dry on quiet audio, and a peer that runs
+    dry on audio below 0.008 RMS (over about its last 20 ms) is not late, however soon it comes
+    back. Without that, every pause of 0.8 to 1.1 s came back within 300 ms and counted: 20 ms a
+    pause before, and the whole pause with the growth above. In a simulation of 5 minutes of
+    speech on a clean link the targets averaged 109 ms with a step a pause, 320 ms growing by the
+    pause, and 45 ms with the quiet check.
+  - After 10 s without running dry the target shrinks 20 ms. Shrinking faster after a big jump
+    gives the delay back sooner after a one-off stall, but a stall that comes back finds the buffer
+    small again: simulated with stalls that recur (every 0.4, 15 or 40 s), undoing the last jump
+    after 10 s ran dry 1.6-3.0 times as often as shrinking a step at a time, nearly as often as
+    the old 20 ms growth did. So it stays a step. The cost is the delay a one-off stall added:
+    after one of 250 ms the target goes from 80 to 240 ms, and is back to 80 ms about 85 s later.
+  - A burst after a stall, past twice the target (and at least 120 ms past it), loses its oldest
+    audio down to the target, cross-faded across the cut.
+  - Every 10 s the client logs each heard peer's target, what it holds, how often it ran dry
+    (and how often that was late audio), and what was trimmed.
+  - **The Audio window** (`cvc://components/audio_buffers.ari`) shows the same per person, live: a
+    graph of what each voice's buffer holds and its target over the last 30 s (sampled every
+    0.2 s), how often it ran dry, and the speaker's block and what it holds past the buffers. A
+    line that drops to 0 is a gap the user heard; a high target is delay. The host's
+    `cvc::ariadne::conference::voice_monitor` publishes `media.<pid>.jb.*` from the mixer's stats.
+  - The same window tunes the buffers, LOCALLY (what this client hears; never sent): a
+    `settings:` editor over `audio.jb.*`, which the monitor describes and applies with
+    `voice_mixer::set_params`. Adaptive (the least, starting and greatest targets, and how long a
+    voice plays clean before its target shrinks a step) or fixed (one target for every voice), and
+    a reset that puts every target back to its start (`voice_mixer::reset_targets`; a voice holding
+    much more is trimmed down at once). The device's floor still holds. The rest of the mixer's
+    parameters (the late window, the quiet level, the step) stay internal: they are easy to set
+    wrong and say little to a user.
+  - Before this, the client played audio the moment it landed, into a 100 ms output it filled
+    once a frame. Over a WebSocket the audio lands in bursts, and a burst that was late left the
+    speaker with nothing to play, so the voice broke up.
+- **The mic drains its backlog each tick.** A browser delivers its mic in 43 ms blocks on the
+  main thread, and its timers skip the beats a busy frame makes them miss. The mic producer used
+  to read one 21 ms chunk a tick, so every skipped tick left a chunk behind for good, and at 80 ms
+  of backlog the capture dropped it (about 64 ms of audio each time). Now a tick reads every whole
+  chunk queued (`frame_source::more`), and the capture keeps up to 250 ms before it drops.
   - The relay forwards a mic as sent, whatever its codec, so it needs no libopus. A client
     without libopus sends f32, which every client plays. It cannot decode a peer's Opus, so it
     logs once and that peer is silent to it. Older clients are not provided for; this is not
@@ -995,6 +1051,106 @@ Each viewer's rung adapts to its link.
     (`opus.lib`, cvcpkg libopus cvc.8, or `libopus.dll.a`), never the MinGW `libopus.a`. The wasm
     bundle is cy-pca/cvcpkg#467; the browser client needs it to hear Opus.
   - Audio is not re-encoded per viewer: 32 kbit/s is already far below anything video sends.
+- **A native client's audio is off the frame loop.** A long frame (a loaded machine, software
+  GL) used to hold audio up both ways. A peer's mic was decoded and pushed to its jitter buffer
+  once a frame, so a stall let the device drain the buffer. Our own mic went out once a frame from
+  a ring of 8 chunks (170 ms), so a stall delayed it, and one past 170 ms dropped it.
+  - A peer's mic is decoded and pushed to `voice_mixer` on the thread it arrives on: the
+    transport's reader, or the lane's. The decoders, one per peer, are under their own mutex, since
+    the connection and the lane can both deliver one peer's packets. The frame takes each peer's
+    talk highlight and A/V clock from there.
+  - The mixer is made when the client joins, at 48 kHz mono, so the reader can feed it from the
+    first chunk. The output still opens on the frame's thread, once there is audio to play.
+  - Our mic goes out on a sender thread as the producer delivers each chunk. It is stamped with the
+    last frame's world-clock time, moved on by the steady clock since.
+  - `CVC_ARIGL_AUDIO_THREADS=0` puts both back on the frame. A browser build always has them on
+    the page's one thread, which its transport, its audio and its frames share. There the
+    AudioWorklets' clock (below) also runs them between frames.
+- **Browser audio off the main thread (AudioWorklets, `cvc/media/web_audio.h`).** SDL 3.4.12's
+  Web Audio backend plays and captures through a ScriptProcessorNode, in 2048-frame (43 ms)
+  blocks, and its callback runs on the page's main thread between arigl's frames
+  (`arigl_wait_frame`, paced by requestAnimationFrame under Asyncify). A frame longer than a block
+  makes the speaker play a gap. In a hidden tab the loop draws no frames and the page's timers
+  run about once a second, so the mic's producer (an interval timer in the single-threaded build)
+  and `forward_streams` (a frame step) run about once a second too, and that participant's mic
+  breaks up for everyone else.
+  - **Two AudioWorklet processors** (`src/cvcMedia/web/cvc-audio-worklet.js`) do the device's
+    work on the browser's audio rendering thread: `cvc-capture` posts the mic in 20 ms blocks,
+    and `cvc-playback` plays from a ring that the main thread keeps filled.
+  - **One thread is enough.** The worklets hold no wasm and share no memory with it. Every block
+    goes over the node's MessagePort. So the path works in the single-threaded build, which is
+    what cyprty runs, and on a page that is not cross-origin isolated. The cyprty page is isolated
+    (COOP `same-origin`, COEP `require-corp`, checked 2026-11-20), but a SharedArrayBuffer ring
+    would buy nothing there: in a single-threaded build the main thread has to be woken to encode
+    and send anyway, and a message both wakes it and carries the block. That is 50 messages a
+    second each way, 3.8 KB each at 48 kHz mono.
+  - **The audio's clock.** The browser delivers a worklet's message between frames, and in a
+    hidden tab at full rate (checked in headless Chrome 152: 50 blocks a second hidden, against a
+    20 ms timer's 1 a second and no animation frames). Each message is a tick of
+    `web_audio::audio_clock`, and on each one the conference does its audio step
+    (`ConferenceSession::audio_tick`). It sends the mic chunks the stream has, and puts the peers'
+    mic frames that have arrived into their jitter buffers. Then the speaker is topped up. The
+    frame loop still does the same each frame, and whichever runs first takes a chunk. A mic
+    chunk sent between frames is stamped with the last frame's stamp plus the wall time since.
+  - **Capture.** Each block goes into the source's queue (`web_audio::open_capture`, a FIFO
+    `frame_source`), and the stream's producer fills from it at once
+    (`frame_source::set_ready_callback` → `producer_thread::run_now`), not at its next timer
+    tick. Like SDL's mic, it drops the oldest audio past 250 ms queued. It asks for echo
+    cancellation, noise suppression and gain control.
+  - **Playback.** The jitter buffers stay in `cvc::voice_mixer`. The playback node holds a ring
+    of the mix that is already pulled. On each of its ticks the sink pulls from the mixer what the
+    device took, so the ring stays TARGET ahead of the speaker. A main thread busy for less than
+    TARGET leaves the speaker playing. TARGET starts at 60 ms and grows 20 ms (to 400 ms) each
+    time the ring runs dry. After 10 s without that it shrinks 20 ms, and the ring skips 20 ms
+    with a cross-fade across one render quantum (2.7 ms). The sink reports a 20 ms device block,
+    so the mixer's floor is 40 ms (SDL's 43 ms block made it 63 ms), and A/V sync counts what the
+    ring holds (`queued_bytes`).
+  - **SDL is the fallback.** SDL is used when the browser has no AudioWorklet or the page is not a
+    secure context, and when the worklets have not loaded by the time a device opens (they load
+    at the conference's setup and take a few milliseconds). It is also used for a rate other than
+    the page's context (48 kHz where the browser allows it), for more than two channels, for a
+    device index other than the default, and for push-mode outputs (`stream-play-audio`).
+    `CVC_WEB_AUDIO=sdl` forces it for everything; a page config can map `?audio=sdl` to that
+    variable for an A/B.
+  - **Loading.** The page loads `cvc-audio-worklet.js` from beside itself (arigl-web and
+    ariglx-web ship it). Failing that, it loads the copy compiled into cvcMedia from a `blob:`
+    URL. A page whose Content-Security-Policy allows only its own scripts needs the file.
+  - **Autoplay.** The page's AudioContext starts suspended until the page is touched, as SDL's
+    did, and the arigl-web page resumes every AudioContext on the first click, key or touch. While
+    it is suspended nothing is captured or played.
+  - **Not done.** A threaded build (wasm-mt, on an isolated page) could run `voice_mixer::pull` on
+    the audio thread itself, with Emscripten's Wasm Audio Worklets (`-sAUDIO_WORKLET`), and drop
+    the ring. Picking a mic in the browser (`enumerateDevices`) is not done either: SDL offers the
+    default only, and so does this.
+  - **The test.** `src/arigl/web/test/arigl_web_audio.mjs` runs a local arisrv and two headless
+    Chrome processes with fake media. The sender's mic is a steady 440 Hz tone; the receiver
+    records what its page plays, with an AudioWorklet tap on its own audio thread. Over 30 s the
+    test counts how much of the time the tone is heard, the gaps (5 ms windows below a quarter of
+    the tone's level), and the clicks (misses of the tone's own recurrence). It runs four cases:
+    idle, both main threads busy 150 ms in every 400, the sender's tab hidden, and the
+    receiver's tab hidden. Each case runs in both modes. `cvc_audio_worklet_test.js` tests the
+    two processors in node (`run-js-tests.sh`).
+  - **Measured** (2026-11-20, headless Chrome 152, 30 s a case, 48 kHz Opus). On the machine's
+    GPU, arigl's frames are short, as on a desktop browser:
+
+    | Case | AudioWorklets: heard, gaps, clicks | SDL (`?audio=sdl`) |
+    |---|---|---|
+    | idle | 99.7%, 3 (85 ms), 2 | 99.6%, 4 (120 ms), 10 |
+    | busy | 99.8%, 6 (60 ms), 4 | 98.8%, 8 (350 ms), 346 |
+    | sender hidden | 100%, 2 (15 ms), 2 | 0%: it sends nothing |
+    | receiver hidden | 99.9%, 3 (35 ms), 3 | 12.7%, 31 (26 s; up to 900 ms) |
+
+    In SwiftShader each frame is a long task of about 100 ms (the main thread is 40-60% busy).
+    There the worklets keep the tone 97.9-99.3% of the time. SDL keeps it 89.9% busy, 0% with the
+    sender hidden, and 18.7% with the receiver hidden, with hundreds of clicks. SDL's capture and
+    playback nodes all but stop in a hidden tab: a hidden sender sends nothing, and a hidden
+    receiver's jitter buffer fills to a second and is trimmed. What the worklets still lost came
+    while the ring and the jitter buffers grew to the stalls: a jitter buffer grew 20 ms per late
+    underrun, 9-13 of them against main threads that stall 150 ms. It now grows by how late the
+    audio was to the device (Jitter buffers, above; #1416). Against #1412's head, 3 trials a case
+    (2026-11-20, load 3-15), busy under SwiftShader went from 95.3-97.0% heard (0.9-1.4 s of gaps)
+    to 98.2-99.9% (30-550 ms), and late underruns from 10-13 to 4-7. The GPU and the other cases
+    were within noise (98.7-100% before, 99.1-100% after).
 
 ### 5k. Avatars: look, body, controller, energy (the frame for bring-your-own)
 
@@ -1046,7 +1202,10 @@ chosen so each part can later come from the user without changing who decides.
 1. Server looks (§5g).
 2. The energy budget, server policy, and the walker as the first controller (this step).
 3. Server-supplied bodies and controllers a participant picks from the catalog (sizes within the
-   policy; a Jolt vehicle among them).
+   policy; a Jolt vehicle among them). **Vehicles built (2026-11-21, ARIADNE_WORLDS.md §18.6
+   OW6c):** the world's avatar archetypes may be vehicles; a participant picks one beside its look
+   (`participants.<pid>.avatar.archetype`, the Avatar window's Body combo), and the relay spawns it
+   and seats the participant in it. Person bodies that differ by archetype are still to come.
 4. User looks, then user bodies.
 5. User controllers (sandboxed, deterministic, metered), or a user's body driven by a server
    controller of their choosing.

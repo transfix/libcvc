@@ -21,7 +21,8 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h>
-#include <cvc/state/state.h> // isValidStateName, SEPARATOR
+#include <cvc/core/sim_tick.h> // the room's rate (scene: clock: hz)
+#include <cvc/state/state.h>   // isValidStateName, SEPARATOR
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -35,8 +36,6 @@ namespace cvc {
 namespace ariadne {
 
 namespace {
-
-constexpr double kRoomQuantum = 1.0 / 120.0; // the holon's fixed_dt (world_clock's default)
 
 bool finite_positive(double v) { return std::isfinite(v) && v > 0.0; }
 bool finite_nonnegative(double v) { return std::isfinite(v) && v >= 0.0; }
@@ -143,7 +142,7 @@ std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
     arch.id = id;
     const std::string at = where + " " + id + ":";
     if (!a.is_map())
-      return at + " expects a map (body:, controllers:)";
+      return at + " expects a map (body:, controllers:, or vehicle:)";
     for (const auto &[key, val] : a.entries) {
       if (key == "body") {
         if (std::string e = parse_body(val, at + " body:", arch.body, warnings); !e.empty())
@@ -151,6 +150,10 @@ std::string parse_archetypes(const Value &v, std::vector<avatar_archetype> &out,
       } else if (key == "controllers") {
         if (!names(val, at + " controllers:", arch.controllers, why))
           return why;
+      } else if (key == "vehicle") {
+        if (!val.is_scalar() || val.scalar.empty())
+          return at + " vehicle: expects a vehicle archetype's id";
+        arch.vehicle = val.scalar;
       } else {
         warn(warnings, at + " unknown key '" + key + "', ignored");
       }
@@ -255,6 +258,18 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
     } else if (key == "controllers") {
       if (!names(val, at + " controllers:", v.controllers, why))
         return why;
+    } else if (key == "drivable") {
+      if (!boolean(val, at + " drivable:", v.drivable, why))
+        return why;
+    } else if (key == "reach") {
+      if (!number(val, at + " reach:", v.reach, why))
+        return why;
+      if (!(v.reach >= 0.0))
+        return at + " reach: expects metres, 0 or more";
+    } else if (key == "controls") {
+      v.controls = val.as_string();
+      if (v.controls != "car" && v.controls != "boat")
+        return at + " controls: '" + v.controls + "' is not one (car, boat)";
     } else {
       warn(warnings, at + " unknown key '" + key + "', ignored");
     }
@@ -293,17 +308,50 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
                   "policy:, at:, heading:)";
     vehicle_start s;
     for (const auto &[k, x] : item.entries) {
-      if (k == "archetype" || k == "name" || k == "controller" || k == "plant" || k == "policy") {
+      if (k == "policy" && x.is_map()) {
+        // A fleet's weights: { uri:, path:, sha256: } or { data: <entry> }.
+        for (const auto &[pk, pv] : x.entries) {
+          if (pk == "uri" || pk == "path" || pk == "sha256" || pk == "data")
+            (pk == "uri"      ? s.policy
+             : pk == "path"   ? s.policy_path
+             : pk == "sha256" ? s.policy_sha256
+                              : s.policy_data) = pv.as_string();
+          else
+            warn(warnings, at + " policy: unknown key '" + pk + "', ignored");
+        }
+        if (s.policy.empty() && s.policy_data.empty())
+          return at + " policy: expects a uri: or a data: entry ({uri:, path:, sha256:} or "
+                      "{data:})";
+        if (!s.policy.empty() && !s.policy_data.empty())
+          return at + " policy: names a uri: or a data: entry, not both";
+      } else if (k == "plant" && (x.is_seq() || x.is_map())) {
+        // A fleet's plants: a list its vehicles cycle over, or each team's ({ 0: jolt }).
+        std::string text;
+        if (x.is_seq())
+          for (const Value &p : x.items)
+            text += (text.empty() ? "" : ", ") + p.as_string();
+        else
+          for (const auto &[t, p] : x.entries)
+            text += (text.empty() ? "" : ", ") + t + ": " + p.as_string();
+        if (std::string e = parse_fleet_plants(text, s.plants); !e.empty())
+          return at + " plant: " + e;
+        s.plant = s.plants.cycle.empty() ? std::string() : s.plants.cycle.front();
+      } else if (k == "archetype" || k == "name" || k == "controller" || k == "plant" ||
+                 k == "policy") {
         (k == "archetype"    ? s.archetype
          : k == "name"       ? s.name
          : k == "controller" ? s.controller
          : k == "plant"      ? s.plant
                              : s.policy) = x.as_string();
-      } else if (k == "fleet" || k == "spawn" || k == "colors" || k == "keys") {
+      } else if (k == "fleet" || k == "spawn" || k == "colors" || k == "keys" || k == "sense" ||
+                 k == "belief" || k == "metric") {
         (k == "fleet"    ? s.fleet
          : k == "spawn"  ? s.layout
          : k == "colors" ? s.colors
-                         : s.keys) = x.as_string();
+         : k == "keys"   ? s.keys
+         : k == "sense"  ? s.sense
+         : k == "belief" ? s.belief
+                         : s.metric) = x.as_string();
       } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
         if (!number(x, at + " " + k + ":", n, why))
@@ -361,15 +409,31 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
         return at + " count: expects a whole number from 1 to " +
                std::to_string(kMaxVehicleStartCount) + " (name a fleet: for more)";
       for (const auto &[k, x] : item.entries)
-        if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys")
+        if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys" ||
+            k == "sense" || k == "belief" || k == "metric" || (k == "policy" && x.is_map()))
           warn(warnings, at + " " + k + ": is a fleet's (fleet: names one), ignored");
+        else if (k == "plant" && (x.is_seq() || x.is_map()))
+          warn(warnings,
+               at + " plant: a list or each team's is a fleet's (fleet: names one); " +
+                   (s.plant.empty() ? std::string("the archetype's") : "'" + s.plant + "'") +
+                   " is used");
       const vehicle_start plain;
+      s.metric = plain.metric;
+      s.plants = plain.plants;
       s.layout = plain.layout;
       s.seed = plain.seed;
       s.rally = plain.rally;
       s.assign = plain.assign;
       s.colors = plain.colors;
       s.keys = plain.keys;
+      s.sense = plain.sense;
+      s.belief = plain.belief;
+      if (!s.policy_path.empty() || !s.policy_sha256.empty() || !s.policy_data.empty()) {
+        s.policy = plain.policy;
+        s.policy_path = plain.policy_path;
+        s.policy_sha256 = plain.policy_sha256;
+        s.policy_data = plain.policy_data;
+      }
     } else {
       if (!cvc::state::isValidStateName(s.fleet))
         return at + " fleet: '" + s.fleet + "' is not a state name";
@@ -389,6 +453,16 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
         return at + " colors: '" + s.colors + "' is not one (hsv, spawn)";
       if (!s.keys.empty() && s.keys != "summary" && s.keys != "all")
         return at + " keys: '" + s.keys + "' is not one (summary, all)";
+      if (!s.sense.empty() && s.sense != "known" && s.sense != "fog")
+        return at + " sense: '" + s.sense + "' is not one (known, fog)";
+      if (!s.belief.empty() && s.belief != "shared" && s.belief != "grouped" &&
+          s.belief != "private")
+        return at + " belief: '" + s.belief + "' is not one (shared, grouped, private)";
+      if (!s.metric.empty() && !fleet_metric_known(s.metric))
+        return at + " metric: '" + s.metric + "' is not one (trained, vehicle, policy)";
+      if (!s.plants.teams.empty()) // its teams are its rally points (rally: may come after)
+        if (std::string e = parse_fleet_plants(s.plants.text(), s.plants, s.rally); !e.empty())
+          return at + " plant: " + e;
     }
     if (!s.plant.empty() && !vehicle_plant_known(s.plant))
       return at + " plant: '" + s.plant +
@@ -638,7 +712,17 @@ double avatar_controller::param(const std::string &name, double def) const {
   return it == params.end() ? def : it->second;
 }
 
+const avatar_archetype *world_rules::find_avatar(const std::string &id) const {
+  for (const avatar_archetype &a : archetypes)
+    if (a.id == id)
+      return &a;
+  return nullptr;
+}
+
 const avatar_archetype &world_rules::avatar() const {
+  for (const avatar_archetype &a : archetypes) // the first person: a vehicle has no body here
+    if (a.vehicle.empty())
+      return a;
   return archetypes.empty() ? fallback_avatar : archetypes.front();
 }
 
@@ -666,6 +750,12 @@ std::vector<std::string> vehicle_presets() { return {"humvee", "roboracer"}; }
 std::vector<std::string> boat_presets() { return {"launch", "jonboat", "tactical"}; }
 bool vehicle_plant_floats(const std::string &plant) { return plant == "dynamicboat"; }
 
+std::string vehicle_controls(const vehicle_archetype &a) {
+  if (!a.controls.empty())
+    return a.controls;
+  return a.plant.rfind("dynamicboat", 0) == 0 ? "boat" : "car";
+}
+
 bool vehicle_controller_known(const std::string &id) {
   return id == "nav@1" || id == "none" || id == "external" || id == "pose";
 }
@@ -682,6 +772,72 @@ bool spawn_scope_known(const std::string &scope) {
 bool vehicle_plant_known(const std::string &plant) {
   return plant == "jolt" || plant == "kinematic" || plant == "dynamic" || plant == "dynamic4w" ||
          plant == "dynamicboat";
+}
+
+std::string fleet_plants::of(int member, int team) const {
+  if (const auto it = teams.find(team); team >= 0 && it != teams.end())
+    return it->second;
+  return cycle.empty() ? std::string()
+                       : cycle[static_cast<std::size_t>(std::max(0, member)) % cycle.size()];
+}
+
+std::string fleet_plants::text() const {
+  std::string out;
+  for (const std::string &p : cycle)
+    out += (out.empty() ? "" : ", ") + p;
+  for (const auto &[t, p] : teams)
+    out += (out.empty() ? "" : ", ") + std::to_string(t) + ": " + p;
+  return out;
+}
+
+std::string parse_fleet_plants(const std::string &text, fleet_plants &out, int teams) {
+  fleet_plants p;
+  const auto trim = [](std::string s) {
+    const std::size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+    return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+  };
+  std::size_t at = 0;
+  while (at <= text.size()) {
+    const std::size_t comma = std::min(text.find(',', at), text.size());
+    const std::string item = trim(text.substr(at, comma - at));
+    at = comma + 1;
+    if (item.empty())
+      continue;
+    const std::size_t colon = item.find(':');
+    const std::string plant = trim(colon == std::string::npos ? item : item.substr(colon + 1));
+    if (!vehicle_plant_known(plant))
+      return "'" + plant + "' is not a plant (jolt, kinematic, dynamic, dynamic4w, dynamicboat)";
+    if (colon == std::string::npos) {
+      p.cycle.push_back(plant);
+      continue;
+    }
+    const std::string ts = trim(item.substr(0, colon));
+    char *end = nullptr;
+    const long t = std::strtol(ts.c_str(), &end, 10);
+    if (ts.empty() || !end || *end || t < 0 || t >= kMaxFleetRally)
+      return "'" + ts + "' is not a team (0 to " + std::to_string(kMaxFleetRally - 1) + ")";
+    if (teams >= 0 && t >= teams)
+      return "team " + ts + " is not one of the fleet's " +
+             (teams == 0 ? std::string("(it has no rally points)")
+                         : "0 to " + std::to_string(teams - 1));
+    if (!p.teams.emplace(static_cast<int>(t), plant).second)
+      return "team " + ts + " is named twice";
+  }
+  if (p.empty())
+    return "names no plant";
+  std::size_t floating = 0;
+  for (const std::string &q : p.cycle)
+    floating += vehicle_plant_floats(q) ? 1 : 0;
+  for (const auto &[t, q] : p.teams)
+    floating += vehicle_plant_floats(q) ? 1 : 0;
+  if (floating > 0 && floating < p.cycle.size() + p.teams.size())
+    return "its plants all float (dynamicboat) or none do";
+  out = std::move(p);
+  return std::string();
+}
+
+bool fleet_metric_known(const std::string &metric) {
+  return metric == "trained" || metric == "vehicle" || metric == "policy";
 }
 
 world_rules default_world_rules() { return world_rules{}; }
@@ -728,6 +884,14 @@ std::string check_world_rules(const world_rules &r) {
       return at + ": an id must be a name (letters, digits and _)";
     if (!archetypes.insert(a.id).second)
       return at + " is defined twice";
+    if (!a.vehicle.empty()) { // its body is the vehicle's: checked against vehicles: below
+      bool offered = false;
+      for (const vehicle_archetype &v : r.vehicles)
+        offered = offered || v.id == a.vehicle;
+      if (!offered)
+        return at + " is vehicle '" + a.vehicle + "', which vehicles: archetypes: does not define";
+      continue;
+    }
     if (!finite_positive(a.body.mass) || !finite_positive(a.body.width) ||
         !finite_positive(a.body.height))
       return at + ": body mass, width and height must be positive";
@@ -885,9 +1049,12 @@ std::string world_rules_from(const Scene &scene, const Value *world, world_rules
   }
   if (ph.present) {
     r.physics.gravity = cvc::physics::vec3{ph.gravity[0], ph.gravity[1], ph.gravity[2]};
-    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - kRoomQuantum) > 1e-9)
+    // The room's quantum: its rate's (scene: clock: hz, ARIADNE_WORLDS.md section 18.9).
+    const double hz = scene.clock.hz > 0.0 ? scene.clock.hz : cvc::kSimRateDefault;
+    if (ph.fixed_dt != 0.0 && std::fabs(ph.fixed_dt - cvc::sim_quantum(hz)) > 1e-9)
       warn(warnings, "scene: physics: fixed_dt " + num_text(ph.fixed_dt) +
-                         " is ignored: a room steps its avatars every 1/120 s");
+                         " is ignored: a room steps its avatars every 1/" + num_text(hz) +
+                         " s (its rate is scene: clock: hz)");
     if (ph.backend != "auto" && ph.backend != "jolt")
       warn(warnings, "scene: physics: backend " + ph.backend +
                          " is ignored: a room's avatars are Jolt bodies when the build has Jolt");

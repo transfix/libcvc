@@ -1040,13 +1040,20 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
 
 void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
                                    std::vector<std::string> *warnings) {
-  // The simulation clock (cvc::kSimQuantum, the scenes' own 1/120 s, with a real-time catch-up of
-  // cvc::kSimCatchup), of which the vehicles' tick (cvc::kSimTick) is whole quanta. A clock that
-  // has ticked keeps its quantum, and the tick is then held to whole physics steps of it.
-  if (!scene.vehicles.empty() && !cvc::adopt_sim_clock(app.world_clock()))
-    warn(warnings, "ari: world: vehicles: the clock has already run at " +
+  // The simulation clock (the scene's rate, clock: { hz }, else cvc::kSimQuantum, the scenes' own
+  // 1/120 s; with a real-time catch-up of cvc::kSimCatchup), of which the vehicles' tick
+  // (cvc::sim_tick) is whole quanta. A clock that has ticked keeps its quantum, and the tick is
+  // then held to whole physics steps of it.
+  const bool rated = scene.clock.hz > 0.0;
+  if (!rated && scene.vehicles.empty())
+    return;
+  const double quantum = rated ? cvc::sim_quantum(scene.clock.hz) : cvc::kSimQuantum;
+  if (!cvc::adopt_sim_clock(app.world_clock(), quantum))
+    warn(warnings, std::string(rated ? "ari: scene: clock: hz" : "ari: world: vehicles") +
+                       ": the clock has already run at " +
                        std::to_string(app.world_clock().fixed_dt()) +
-                       " s quanta; the vehicles' tick is held to whole physics steps of it");
+                       " s quanta; the world keeps them, and the vehicles' tick is held to whole "
+                       "physics steps of it");
 }
 
 std::unique_ptr<SceneWorld> SceneWorld::from_scene(cvc::app &app, const Scene &scene,
@@ -1749,6 +1756,12 @@ std::vector<std::string> SceneWorld::take_warnings() {
 
 std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
                                  const std::function<void()> &after_step) {
+  return follow(clock, after_step, nullptr, nullptr);
+}
+
+std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
+                                 const std::function<void()> &after_step,
+                                 const step_hook &before_each, const step_hook &after_each) {
   impl &d = *_impl;
   sync(&d.warnings);
   if (!d.follower) {
@@ -1802,16 +1815,20 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       sync_wind();
     d.wake_in_fronts(tick, clock.fixed_dt());
     if (d.vehicles)
-      d.vehicles->before_step();
+      d.vehicles->before_step(tick); // the navigators' tick notes the clock tick it ran on
     for (const auto &b : d.boats)
       b->before_step();
     for (const auto &wf : d.weathers)
       wf->before_step(*d.world, tick, clock.fixed_dt());
+    if (before_each)
+      before_each(tick);
     d.last = d.world->step();
     for (const auto &b : d.boats)
       b->after_step();
     if (d.vehicles)
       d.vehicles->after_step();
+    if (after_each)
+      after_each(tick);
     d.step_history.push_back(d.last.step_ms);
     if (d.step_history.size() > 120)
       d.step_history.pop_front();

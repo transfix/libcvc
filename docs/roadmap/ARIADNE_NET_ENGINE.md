@@ -1,6 +1,9 @@
 # Native connection engine: TCP and TLS streams with groups and fan-out (N1–N6)
 
-Status: design, for review. Nothing is built.
+Status: N1 (the C++ engine) is built: `inc/cvc/net/net_engine.h`, `src/cvc/net/net_engine.cpp`,
+`net_engine_test`. N2 (pycvc and arisrvx) is built: `bindings/pycvc/pycvc_net.i`, `host.net`,
+`test_pycvc_net.py`, `bench_pycvc_net.py`. N3-N6 and the registry tie-in are designs. What building
+N1 and N2 changed in this design is marked *(N1)* and *(N2)* below.
 
 This adds one native component to libcvc: a **connection engine** that owns raw TCP and TLS
 connections on I/O threads of its own. It accepts connections and makes them, splits their bytes
@@ -73,11 +76,23 @@ The engine splits each connection's input into frames, in one of these modes:
 |---|---|---|
 | `delimiter(byte)` | the bytes up to and including the byte | NMDC (`|`), line protocols (`\n`) |
 | `length(prefix)` | a 1-, 2- or 4-byte big-endian length, then that many bytes | binary protocols |
-| `raw` | whatever one read returned | anything else |
+| `raw` | whatever one read returned (at most `max_frame`) | anything else |
+
+A `length` frame is the bytes after the prefix, without it. A frame longer than the listener's
+`max_frame` closes the connection, with reason `frame_too_long`: a `delimiter` frame as soon as
+`max_frame` bytes have come with no delimiter, a `length` frame as soon as its prefix says so.
 
 A program can switch a connection's mode between frames: NMDC switches to `raw` for a compressed
-block, and back. A frame longer than the listener's `max_frame` closes the connection, with reason
-`frame_too_long`.
+block, and back. *(N1)* The I/O threads split input as it arrives, ahead of the program, so a
+switch the program makes after seeing a frame comes too late for bytes the peer sent right behind
+it (NMDC's `$ADCSND` and the file's bytes come in one write). So:
+
+- `set_framing(conn, f)` applies from the first byte not yet split.
+- A framing's `pause_after` names frame prefixes (`$ADCSND`). After such a frame the engine splits
+  nothing more of that connection, and stops reading it, until the program's next `set_framing`
+  (or `resume`). The switch then lands exactly after the frame.
+- `raw(n)` delivers the next `n` bytes as raw frames and then pauses the same way, for the switch
+  back.
 
 ### 2.3 Input: batches to the program
 
@@ -91,7 +106,13 @@ block, and back. A frame longer than the listener's `max_frame` closes the conne
   keeps a frame.
 - **Limits** the engine enforces before the program sees anything: bytes per window per
   connection, frames per window, and the time a connection may take to send its first frame.
-  Exceeding one closes the connection with a reason the program receives.
+  Exceeding one closes the connection with a reason the program receives (`bytes_limit`,
+  `frames_limit`, `first_frame_timeout`).
+- *(N1)* In C++, `wait(batch, timeout)` and `poll(batch)` hand over everything queued as a
+  `net_batch`; its frames are `string_view`s into refcounted buffers the batch holds until it is
+  cleared. `set_notify(fn)` is called on an I/O thread when the queue goes from empty to not, for
+  N2's waker. A read's bytes are copied once, from the I/O thread's read buffer into a buffer
+  sized to them, so an idle connection holds no read buffer at all.
 
 ### 2.4 Output: sends, broadcasts and backpressure
 
@@ -108,6 +129,11 @@ block, and back. A frame longer than the listener's `max_frame` closes the conne
   drop messages from the middle of a stream, so dropping is not offered. A program that wants to
   slow a producer asks for `writable(conn)` at a low mark instead.
 - `close(conn, flush=True)` sends what is queued, then closes. `flush=False` closes now.
+  *(N1)* A flushing close ends our side once the output is out and posts `closed` then; the socket
+  is read and dropped until the peer ends its side (at most `flush_timeout`, 10 s), so input the
+  peer sent that nobody read does not turn the close into a reset that loses the output.
+- *(N1)* The I/O threads gather: what reaches one connection in one turn of its thread (the
+  commands taken together, say ten broadcasts issued in a row) goes out in one `writev`.
 
 ### 2.5 TLS
 
@@ -180,6 +206,39 @@ net.stats()                                     # counters, below
 - Under plain `python`, `pycvc.ariadne.net` runs the same engine on its own threads, so a
   service's tests and a stand-alone run (sublevels' `run_hub.py`) work without arisrvx.
 
+*(N2)* What was built differs from the sketch above in one way: Python gets the C++ API itself,
+not a wrapper over it (Joe, 2026-11-20: "we want the full C++ api in python"). So:
+
+- pycvc wraps `net_engine.h` with SWIG under its C++ names: `net_engine`, `engine_options`,
+  `listener_options`, `framing`, `inbound_limits`, `conn_info`, `net_event`, `net_batch`,
+  `net_counters`, `net_stats`, and the enums as SWIG spells them (`close_reason_slow_reader`,
+  `net_event.type_frames`, `framing.mode_delimiter`). `pycvc.ariadne.net` is the same objects.
+  `host.net` is a `net_engine`.
+- Every command is the C++ one: `send`, `send_many`, `broadcast(group, bytes, exclude)`,
+  `close(conn, flush)`, `join`, `leave`, `set_framing`, `resume`, `want_writable`, `port`,
+  `stop_listening`, `stats`, `stop`, `wait(batch, ms)`, `poll(batch)`, `set_notify(fn)`.
+- Additions only where Python needs them: bytes-like arguments (or a str, as UTF-8);
+  `framing.delimited(b"|")` as well as an int; milliseconds as ints; the option structs take their
+  members as keywords (`listener_options(port=411, frames=framing.delimited(b"|"))`) and read as
+  values (assign a whole nested struct); `listen(options)` or `listen(**members)` raises OSError
+  instead of returning 0; `net_counters.closed` is a dict by reason name; wait, poll, stop and the
+  destruction release the GIL.
+- Frames: `net_batch.events` gives each event's `frames` as memoryviews into the batch's buffers.
+  Each memoryview holds a reference to those buffers, so a frame kept past the callback stays
+  valid (it keeps its read's buffer alive) rather than dangling.
+- The asyncio side: `listen()` returns a `net_listener`, the listener id (an int), whose
+  `on_accept`, `on_frames`, `on_close`, `on_writable` and `on_error` register callbacks for the
+  loop. A waker thread waits in `wait()` without the GIL and hands each batch to the loop with
+  `call_soon_threadsafe`, then waits for the loop to take it, so input that arrives while the loop
+  is busy comes as one larger batch. A batch goes out as accepts, then one `on_frames` call per
+  listener (each connection once), then writables, closes and errors, which keeps each
+  connection's order. `set_notify` is still there for a program with a loop of its own, but its
+  callable runs on an I/O thread with the GIL taken, so the waker is the default.
+- arisrvx makes the engine when the program first asks for `host.net` (`_arihost.net()`), with
+  `--net-threads N` I/O threads (2 by default). It outlives the program; at the program's end only
+  the waker stops. Under plain `python`, `Host(net_threads=2)` starts an engine of its own and stops
+  it at shutdown, after its closes have reached `on_close`.
+
 ### 2.8 Documents (N5)
 
 - Verbs for `ari` and `arigl`: `(net-connect "tcp://host:port" opts)` and `(net-send conn bytes)`,
@@ -211,6 +270,8 @@ net.stats()                                     # counters, below
 - per I/O thread, busy time.
 
 Programs publish them as they like; sublevels' analytics (its roadmap D14) draws them.
+*(N1)* `messages_out` counts buffers queued to connections (one a receiver), `bytes_out` bytes
+written; the per-thread counters are each thread's own, summed by `stats()`.
 
 ## 3. Parts
 
@@ -236,6 +297,58 @@ through it. N4 and N5 follow for nicotina, and N6 after G4 and #1290.
 - Logins: 400 a second accepted with no backlog loss.
 - These targets are estimates from per-write costs, not measurements. N2's soak is the check, and
   its numbers go in that PR.
+
+*(N1, measured.)* The first target was wrong about the floor. `net_engine_test`'s fan-out
+benchmark sends a 113-byte line to 6000 loopback connections. On prettyhatemachine (Xeon E5-2650
+v2, Linux 7.0, retpolines), one `write()` to a loopback TCP socket costs 16.5 µs on its own,
+because the sender's syscall also runs the receiving socket's side of the loopback. So 6000
+receivers cost about 100 ms of CPU however the engine is written. The engine adds about 1 µs a
+receiver to that:
+
+| I/O threads | `broadcast()` call | I/O CPU a receiver | all 6000 received |
+|---|---|---|---|
+| 1 | 15 µs | 17.3 µs | 104 ms |
+| 2 | 20 µs | 18.4 µs | 57 ms |
+| 4 | 31 µs | 21.8 µs | 44 ms |
+| 8 | 50 µs | 25.3 µs | 25 ms |
+
+("All received" includes the test's own two reader threads. A bare loop of `write()`s to the same
+6000 sockets takes 99-103 ms.)
+
+What this changes:
+- The program's loop pays one call of 15-50 µs, not 0.2 s. The loop is free, which was the point.
+- The I/O CPU a message to all is one write a receiver: about 100 ms here over loopback. "Under
+  10 ms" holds only where a write is about 1.5 µs. A real NIC's send does not run the receiver's
+  stack, so it is cheaper than loopback, but by how much is for N2's soak to measure.
+- Messages a second can far exceed writes a second: broadcasts that reach a thread together share
+  one write a receiver (the burst line of the benchmark). A hub that sends its loop's broadcasts
+  together pays per burst, not per message.
+- The wall time falls with I/O threads, while the CPU a receiver rises a little (the kernel's
+  locks). On the soak's machine, 4 threads would be the default to try.
+
+*(N2, measured.)* `bindings/pycvc/bench_pycvc_net.py` drives the same fan-out from Python: 6000
+loopback receivers, the 113-byte line, 2 I/O threads, 21 rounds, prettyhatemachine with other
+sessions' builds running (load 10 on 32 cores), run twice, interleaved with N1's C++ benchmark:
+
+| | C++ (`net_engine_test`) | Python (`bench_pycvc_net.py`) |
+|---|---|---|
+| I/O CPU a receiver | 19.3, 17.9 µs | 17.8, 20.1 µs |
+| `broadcast()` call | 19.5, 23.3 µs | 30.5, 34.9 µs |
+| burst of 10: I/O CPU a receiver a message | — | 2.0, 2.7 µs |
+| all received | 63, 56 ms (C++ readers) | 69, 67 ms (Python readers) |
+
+- From Python the engine costs what it costs from C++: the I/O CPU a receiver is the same within
+  the runs' spread, and both sit at the write floor (17.6 µs idle in N1's table).
+- The binding adds about 1 µs a call: `io_threads()` costs 0.8 µs, `send` 2.8 µs and an empty
+  group's `broadcast` 5.3 µs, the engine's queueing included. The single-broadcast gap above is
+  the benchmark's Python reader threads waking as the call returns.
+- The program's side, which is what N2 was for: a Python loop of `sock.send()` to 6000 loopback
+  sockets costs the program 33.5-34.1 µs a receiver, 0.20 s a message (sublevels' soak measured
+  about 35 µs with asyncio's transports). Through the engine the program pays one call of
+  30-35 µs.
+- Input: 6000 receivers each send a line; all 6000 reach `on_frames` on an asyncio loop in
+  116-122 ms, in 2 `on_frames` calls, and the loop thread spends 1.3-1.4 µs a frame (the waker's
+  hand-off, the memoryviews, the callback).
 
 ## 5. Open questions
 

@@ -11,7 +11,8 @@ What a training script relies on (ARIADNE_WORLDS.md section 14, L4):
   * what a differentiable twin reads: fields() (the grid, its ground, its signed distance and
     gradient) and plants() (each agent's plant as a model, in the observation's order, with the
     drive that commanded it last and the limits it planned with on the plant);
-  * set_intent / intent / clear_intent: an agent's intent, its force summed by the drive.
+  * set_intent / intent / clear_intent: an agent's intent, its force summed by the drive;
+  * fleets=[...]: a document's fleet laid out at each reset, its vehicles the agents.
 """
 
 import math
@@ -301,5 +302,29 @@ try:
 except RuntimeError as e:
     check("does not allow" in str(e), f"the spawn's refusal ({e})")
 
-del gym, other, g2, g3, g4, g5
+# ── a document's fleet as the agents (gym_options::fleets) ──
+fdoc = os.path.join(tmp, "fleet.ari")
+with open(fdoc, "w", encoding="utf-8") as f:
+    f.write(DOC.replace("scene:\n", "    start:\n      - { fleet: squad, archetype: humvee, count: 4, "
+                        "seed: 4, policy: builtin }\nscene:\n", 1))
+g6 = pycvc.WorldGym(fdoc, fleets=["squad"], max_steps=20)
+o6 = g6.reset(1)
+check(o6["n"] == 4, f"the fleet's four vehicles are the agents ({o6['n']})")
+x1 = o6["x"].copy()
+check(not np.array_equal(g6.reset(2)["x"], x1), "another seed, another layout")
+check(np.array_equal(g6.reset(1)["x"], x1), "the same seed, the same layout")
+o6, r6, term6, trunc6, info6 = g6.step(math.nan, math.nan)
+check(len(r6) == 4 and o6["step"] == 1, "a step, a reward per vehicle")
+try:
+    pycvc.WorldGym(fdoc, fleets=["armada"])
+    check(False, "a fleet the document does not declare")
+except RuntimeError as e:
+    check("has no fleet 'armada'" in str(e), f"refused: no such fleet ({e})")
+try:
+    pycvc.WorldGym(fdoc, fleets="squad")
+    check(False, "fleets as one str")
+except (ValueError, RuntimeError) as e:
+    check("list of names" in str(e), f"fleets is a list ({e})")
+
+del gym, other, g2, g3, g4, g5, g6
 print(f"test_pycvc_gym: {checks} checks passed")

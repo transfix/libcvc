@@ -1069,6 +1069,100 @@ windows:
     EXPECT_EQ(w.find("maximizable"), std::string::npos) << w;
 }
 
+// §5.9 `maximized:` how a window starts while tree.<id>.maximized holds nothing: true, phone
+// (only on a phone's view), false; anything else warns and is false. An include may set it.
+TEST(AriadneLoader, WindowMaximizedParses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+units:
+  feed:
+    window: Feed
+    children: [ { text: hi } ]
+windows:
+  - window: Always
+    maximized: true
+    children: [ { text: hi } ]
+  - window: Phone
+    maximized: phone
+    children: [ { text: hi } ]
+  - window: Plain
+    children: [ { text: hi } ]
+  - window: Odd
+    maximized: sometimes
+    children: [ { text: hi } ]
+  - include: feed
+    maximized: phone
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const auto start = [&](const char *title) {
+    const Widget *w = find(r.root, Kind::Window, title);
+    EXPECT_NE(w, nullptr) << title;
+    return w ? w->start_maximized : std::string("?");
+  };
+  EXPECT_EQ(start("Always"), "true");
+  EXPECT_EQ(start("Phone"), "phone");
+  EXPECT_EQ(start("Plain"), "");
+  EXPECT_EQ(start("Odd"), "");
+  EXPECT_EQ(start("Feed"), "phone");
+  bool warned = false;
+  for (const std::string &w : r.warnings)
+    warned = warned || w.find("maximized: 'sometimes'") != std::string::npos;
+  EXPECT_TRUE(warned);
+}
+
+// §5.27 a button's `icon:` (a picture in place of its label, with auth: and icon_size:) and
+// `selected:` (true, or an expression; false and no are none; anything else warns).
+TEST(AriadneLoader, ButtonIconAndSelectedParse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - button: Home
+        on: home
+        icon: https://media.example/e/home.png
+        auth: site
+        icon_size: 24
+        selected: true
+      - button: Tags
+        on: tags
+        icon: (state-get "nav.icon.tags")
+        selected: (= (state-get "view") "tags")
+      - button: Plain
+        on: plain
+        selected: false
+      - button: Odd
+        on: odd
+        selected: maybe
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *home = find(r.root, Kind::Button, "Home");
+  const Widget *tags = find(r.root, Kind::Button, "Tags");
+  const Widget *plain = find(r.root, Kind::Button, "Plain");
+  const Widget *odd = find(r.root, Kind::Button, "Odd");
+  ASSERT_NE(home, nullptr);
+  ASSERT_NE(tags, nullptr);
+  ASSERT_NE(plain, nullptr);
+  ASSERT_NE(odd, nullptr);
+  EXPECT_EQ(home->button_icon, "https://media.example/e/home.png");
+  EXPECT_EQ(home->media_auth, "site");
+  EXPECT_FLOAT_EQ(home->icon_size, 24.0f);
+  EXPECT_EQ(home->selected, "true");
+  EXPECT_EQ(tags->button_icon, "(state-get \"nav.icon.tags\")");
+  EXPECT_EQ(tags->selected, "(= (state-get \"view\") \"tags\")");
+  EXPECT_TRUE(plain->button_icon.empty());
+  EXPECT_EQ(plain->selected, "false") << "one of the row, drawn raised, never chosen";
+  EXPECT_TRUE(odd->selected.empty());
+  bool warned = false;
+  for (const std::string &w : r.warnings) {
+    warned = warned || w.find("selected: 'maybe'") != std::string::npos;
+    EXPECT_EQ(w.find("'icon'"), std::string::npos) << w; // a known key, not an unknown one
+  }
+  EXPECT_TRUE(warned);
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {
@@ -2349,6 +2443,30 @@ scene:
   EXPECT_EQ(r.scene.clock.paused_key, "demo.hold");
   EXPECT_TRUE(r.scene.clock.time_key.empty()); // explicit "" disables the publish lane
   EXPECT_EQ(r.scene.clock.tick_key, "demo.tick");
+  EXPECT_EQ(r.scene.clock.hz, 0.0) << "no hz: the default 120 Hz";
+}
+
+// The world's rate (ARIADNE_WORLDS.md section 18.9): clock: { hz } takes a whole number of ticks a
+// second from 10 to 240; anything else is a warning, and the world runs at 120 Hz.
+TEST(AriadneScene, ClockBlockTakesAWorldsRate) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: { hz: 60 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.clock.hz, 60.0);
+  for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
+    LoadResult b = fresh_load(
+        std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
+    ASSERT_TRUE(b.ok) << b.error;
+    EXPECT_EQ(b.scene.clock.hz, 0.0) << bad;
+    bool warned = false;
+    for (const std::string &w : b.warnings)
+      warned = warned || w.find("clock: hz") != std::string::npos;
+    EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+  }
 }
 
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
@@ -4352,6 +4470,61 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   fs::remove_all(decoy, ec);
 }
 
+// The baseline conference app (examples/ariadne/documents/conference_roster.ari) is the shipped
+// conference library's windows (components/conference.ari, with room_users.ari, chat.ari and
+// audio_buffers.ari) placed in a document, and its tick is the library's conference-step: an app
+// built on the conference takes the same pieces. The windows keep the ids the app's View menu opens
+// them by.
+TEST(AriadneComponents, TheBaselineConferenceAppIsTheLibrarysWindows) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  namespace fs = std::filesystem;
+  const fs::path src = fs::path(__FILE__).parent_path().parent_path();
+  const fs::path doc = src.parent_path().parent_path() / "examples" / "ariadne" / "documents" /
+                       "conference_roster.ari";
+  if (!fs::is_regular_file(doc) ||
+      !fs::is_regular_file(src / "ariadne" / "components" / "conference.ari"))
+    GTEST_SKIP() << "the conference sources are not here";
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler(app, {(src / "ariadne").string()});
+  }
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings) {
+    EXPECT_EQ(w.find("unknown unit"), std::string::npos) << w;
+    EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
+    EXPECT_EQ(w.find("parse error"), std::string::npos) << w;
+  }
+  std::vector<std::string> ids;
+  for (const Widget &w : r.root.children)
+    if (w.kind == Kind::Window)
+      ids.push_back(w.id);
+  for (const char *id : {"mycam", "myavatar", "users", "chat", "audio", "cam_{i}"})
+    EXPECT_NE(std::find(ids.begin(), ids.end(), id), ids.end()) << "no window " << id;
+  const Widget *peers = nullptr;
+  for (const Widget &w : r.root.children)
+    if (w.id == "cam_{i}")
+      peers = &w;
+  ASSERT_NE(peers, nullptr);
+  EXPECT_EQ(peers->repeat, "(state-get \"peer.count\")") << "one per row of the Users window";
+  const Widget *body = find(r.root, Kind::Combo, "Body");
+  EXPECT_NE(body, nullptr) << "the Avatar window's Body picker";
+  std::vector<std::string> fns;
+  for (const FunctionDef &f : r.functions)
+    fns.push_back(f.name);
+  for (const char *f :
+       {"conference-step", "conference-join", "conference-media-open", "conference-name-step",
+        "conference-devices-step", "conference-avatar-step", "room-users-step", "chat-ui-step"})
+    EXPECT_NE(std::find(fns.begin(), fns.end(), f), fns.end()) << "no function " << f;
+  EXPECT_NE(r.on_tick_script.find("(conference-step)"), std::string::npos) << r.on_tick_script;
+  bool audio_closed = false; // the Audio window waits for the View menu
+  for (const FunctionDef &f : r.functions)
+    if (f.name == "conference-join")
+      audio_closed = f.source.find("(state-set \"tree.audio.open\" \"0\")") != std::string::npos;
+  EXPECT_TRUE(audio_closed) << "conference-join seeds the Audio window closed";
+}
+
 // scene_view.ari: a window around one `viewport` widget. Its args reach the widget's props (the
 // cvcGL widget reads view / show / hide / mode / camera / chrome / width / height), bare and
 // overridden.
@@ -5981,6 +6154,29 @@ TEST(AriadneLoader, ComboOptionsMayBeAReactiveExpression) {
     EXPECT_EQ(w.find("schema:"), std::string::npos) << w;
 }
 
+// A data: entry names a uri or a generator: the schema takes `generate:` (and its params) in place
+// of `uri:`, as the loader does, and still flags an entry that names neither.
+TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
+  if (!have_yaml() || !have_jsonschema())
+    GTEST_SKIP() << "libcvc built without yaml-cpp or json-schema-validator";
+  const std::string doc = "data:\n"
+                          "  made: { generate: generated_world, params: { seed: 7 } }\n"
+                          "  fetched: { uri: a.bin, as: bytes }\n"
+                          "  neither: { as: bytes }\n"
+                          "windows: []\n";
+  const LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  bool flagged = false;
+  for (const std::string &w : r.warnings) {
+    if (w.find("schema:") == std::string::npos)
+      continue;
+    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
+    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
+    flagged = flagged || w.find("'neither'") != std::string::npos;
+  }
+  EXPECT_TRUE(flagged);
+}
+
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
 
 namespace {
@@ -6590,6 +6786,261 @@ windows:
     for (const std::string &k : keys)
       EXPECT_EQ(k.find('{'), std::string::npos) << k;
   }
+}
+
+// volume_grid.ari (VolumeGridRover): every control drives its node's grid.* keys; the switch layout
+// binds its slice view's axis to grid.view, the quad layout gives each axis a view of its own; the
+// views write the node's picks and pointer and show its grid alone; the planes' sliders take their
+// ranges from the keys; and the tool panel's tabs end in a slot a document fills.
+TEST(AriadneComponents, VolumeGridDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+  - include: volume_grid
+    args: { node: skull, id: skull_grid, title: Skull, layout: quad }
+  - window: Own
+    children:
+      - include: volume_grid_tools
+        args: { node: skull, id: own }
+        slots:
+          tabs: [ { type: group, tab: Extra, children: [ { text: extra } ] } ]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings) // cvcGL registers the viewport widget, not this test
+    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 3u);
+  EXPECT_EQ(windows[0]->label, "Volume grid");
+  EXPECT_EQ(windows[1]->id, "skull_grid");
+  for (int i = 0; i < 2; ++i) {
+    const std::string g =
+        i == 0 ? "graphics.root.children.grid.grid." : "graphics.root.children.skull.grid.";
+    std::vector<std::string> keys;
+    collect_key_strings(*windows[i], keys);
+    for (const char *want :
+         {"view", "tool", "slice.x", "slice.y", "slice.z", "classes", "classes.{i}.name",
+          "classes.{i}.color", "classes.{i}.radius", "selection.count", "display.point_scale",
+          "display.grey", "cursor.value", "info.source", "files.classes", "files.session",
+          "status"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end()) << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  // The views: their names, axes, picks, pointer and the grid they show.
+  std::vector<const Widget *> custom;
+  collect(r.root, Kind::Custom, custom);
+  std::map<std::string, const Widget *> views;
+  for (const Widget *w : custom)
+    if (w->props.has("view"))
+      views[w->props.str("view")] = w;
+  for (const char *v : {"volume_grid_slice", "volume_grid_3d", "skull_grid_xy", "skull_grid_xz",
+                        "skull_grid_zy", "skull_grid_quad_3d"})
+    EXPECT_TRUE(views.count(v)) << v;
+  ASSERT_TRUE(views.count("volume_grid_slice") && views.count("skull_grid_xz"));
+  const Widget &slice = *views["volume_grid_slice"];
+  EXPECT_EQ(slice.props.str("mode"), "slice");
+  ASSERT_NE(slice.props.find("axis"), nullptr);
+  EXPECT_EQ(slice.props.find("axis")->str("bind"), "graphics.root.children.grid.grid.view");
+  EXPECT_EQ(slice.props.str("pick"), "graphics.root.children.grid.grid.pick");
+  EXPECT_EQ(slice.props.str("pointer"), "graphics.root.children.grid.grid.pointer");
+  const Widget &xz = *views["skull_grid_xz"];
+  EXPECT_EQ(xz.props.str("axis"), "y");
+  EXPECT_EQ(xz.props.str("pick"), "graphics.root.children.skull.grid.pick");
+  ASSERT_NE(xz.props.find("show"), nullptr);
+  ASSERT_TRUE(xz.props.find("show")->is_seq());
+  EXPECT_EQ(xz.props.find("show")->items.front().scalar, "skull");
+  // The planes' sliders: range: key.
+  std::vector<const Widget *> sliders;
+  collect(*windows[0], Kind::SliderInt, sliders);
+  ASSERT_FALSE(sliders.empty());
+  for (const Widget *s : sliders)
+    if (s->bind.find(".slice.") != std::string::npos)
+      EXPECT_TRUE(s->range_from_key) << s->label;
+  // The slot: a tab of the document's own after the component's.
+  const Widget *tabs = find(*windows[2], Kind::Tabs);
+  ASSERT_NE(tabs, nullptr);
+  ASSERT_GE(tabs->children.size(), 4u);
+  EXPECT_EQ(tabs->tab_titles.back(), "Extra");
+}
+
+TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  // cvcGL registers the viewport widget and the sdf generator (the volume, data.bunny), not this
+  // test.
+  for (const std::string &w : r.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_grid");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// volume_grid.ari's Contours tab (P10): a tab titled Contours in the tools' panel, every control
+// on its node's grid.objects / grid.contour.* / grid.tile.* keys, the tool's radio with Contours,
+// and the tab alone as a unit; the contours demo loads clean.
+TEST(AriadneComponents, VolumeGridContoursTabDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+    args: { node: skull, id: skull_grid }
+  - window: Own
+    children:
+      - include: volume_grid_contours_tab
+        args: { node: skull, id: own }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  std::vector<const Widget *> all_tabs;
+  collect(*windows[0], Kind::Tabs, all_tabs);
+  bool titled = false; // the panel's (the view switch is a tabs: too)
+  for (const Widget *t : all_tabs)
+    titled = titled || std::find(t->tab_titles.begin(), t->tab_titles.end(), "Contours") !=
+                           t->tab_titles.end();
+  EXPECT_TRUE(titled) << "the panel has a tab titled Contours";
+  for (const Widget *w : windows) {
+    std::vector<std::string> keys;
+    collect_key_strings(*w, keys);
+    const std::string g = "graphics.root.children.skull.grid.";
+    for (const char *want : {"objects",
+                             "objects.{i}.name",
+                             "objects.{i}.color",
+                             "objects.{i}.interpolation",
+                             "objects.{i}.samples",
+                             "objects.{i}.visible",
+                             "objects.{i}.curves",
+                             "contour.active",
+                             "contour.info",
+                             "contour.selected",
+                             "contour.show",
+                             "contour.control_points",
+                             "contour.show_3d",
+                             "contour.snap",
+                             "contour.point_size",
+                             "contour.auto_tile",
+                             "contour.show_surfaces",
+                             "contour.surface_opacity",
+                             "tile.progress",
+                             "tile.phase",
+                             "tile.status",
+                             "tile.curation_delta",
+                             "tile.cap_ends",
+                             "files.contours"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end())
+          << w->label << ": " << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  std::vector<const Widget *> radios;
+  collect(*windows[0], Kind::Radio, radios);
+  bool contours = false;
+  for (const Widget *w : radios)
+    if (w->bind == "graphics.root.children.skull.grid.tool")
+      contours = std::find(w->values.begin(), w->values.end(), "contours") != w->values.end();
+  EXPECT_TRUE(contours) << "the tool radio offers contours";
+
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid_contours.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app demo_app;
+  ASSERT_TRUE(register_source_components(demo_app));
+  LoadResult d = load_file(demo_app, doc.string());
+  ASSERT_TRUE(d.ok) << d.error;
+  for (const std::string &w : d.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(d.scene.nodes.size(), 1u);
+  EXPECT_EQ(d.scene.nodes[0].type, "volume_grid");
+  EXPECT_NE(d.scene.nodes[0].props.find("objects"), nullptr);
+}
+
+// The shared-volume demo (docs/roadmap/DATA_FROM_STATE_TREE.md, D1): a volren and a volume_grid
+// over one data: entry, and a Filter window.
+TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_shared.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volren");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  EXPECT_EQ(r.scene.nodes[1].type, "volume_grid");
+  EXPECT_EQ(r.scene.nodes[1].source_data, "bunny");
+  EXPECT_NE(find(r.root, Kind::Window, "Filter"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.
+TEST(AriadneLoader, SliderRangeFromKey) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - slider_int: Plane
+        bind: grid.slice.z
+        range: key
+      - slider_float: Scale
+        bind: grid.scale
+        range: key
+      - slider_int: Odd
+        bind: grid.odd
+        range: data
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.warnings.size(), 1u);
+  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
+  const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
+  const Widget *odd = find(r.root, Kind::SliderInt, "Odd");
+  ASSERT_TRUE(plane && scale && odd);
+  EXPECT_TRUE(plane->range_from_key);
+  EXPECT_TRUE(scale->range_from_key);
+  EXPECT_FALSE(odd->range_from_key);
 }
 
 TEST(AriadneComponents, TransferFunctionDemoLoadsClean) {

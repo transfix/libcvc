@@ -133,12 +133,15 @@ jobs:
           fi
           "$py" .github/scripts/recipe-deps-parity.py
 
-      # A package built here (ari*, arisrv*, pycvc*, cvcgl*, cvc-cli*, ...) loads only the libcvc
-      # major it was built against (libcvc.so.4), but an unversioned dependency lets
-      # `cvcpkg install` pick any: arisrvx 3.7.13 took libcvc-cuda 4.0.0 and did not load. Every
-      # dependency on one of these recipes, or a name one provides, pins "^<major>.0" from
-      # CMakeLists.txt, so a major bump moves the pins with upstream_version. A step of this job.
-      - name: Dependencies on libcvc's own packages pin its major version
+      # A package built here (ari*, arisrv*, pycvc*, cvcgl*, cvc-cli*, ...) links the libcvc,
+      # cvcgl and pycvc of its own release, and their ABI changes between patch releases. A wider
+      # range lets `cvcpkg install` mix releases: arisrvx 3.7.13 took libcvc-cuda 4.0.0, and while
+      # 4.0.1 was half-published GRL-SNAM's CI got pycvc-gl 4.0.1 with cvcgl 4.0.0 (undefined
+      # symbol) and pycvc 4.0.0 with libcvc 4.0.1 (segfaults). Every dependency on one of these
+      # recipes, or a name one provides, pins "==<VERSION>" from CMakeLists.txt (any +cvc.N), so
+      # cvcpkg's resolver falls back to the last release that is all on the catalog.
+      # bump-version.py moves the pins with upstream_version. A step of this job.
+      - name: Dependencies on libcvc's own packages pin its release
         shell: bash
         run: |
           set -euo pipefail
@@ -267,6 +270,7 @@ jobs:
              && git cat-file -e "${base}^{commit}" 2>/dev/null; then
             if ! git diff --name-only "$base" HEAD -- src/cvcGL/wasm \
                    src/cvcGL/test/webgl_state_shadow_test.js \
+                   src/cvcMedia/web src/cvcMedia/test/cvc_audio_worklet_test.js \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -291,20 +295,27 @@ jobs:
   #
   # physics_replay_test replays src/cvc/tests/data/physics_replay_trace.json, recorded natively,
   # and requires the state_hash after every step: the recipe jobs run it natively (ctest), and
-  # this one builds a minimal wasm-mt libcvc (no cvcGL, no codecs) on the catalog's Jolt and runs
-  # it under the emsdk's node. Only when physics, what it builds on, or this file changed: the
-  # emsdk is a big download.
+  # this one builds a minimal libcvc (no cvcGL, no codecs) on the catalog's Jolt, threaded (wasm-mt)
+  # and single-threaded (wasm), and runs it under the emsdk's node. Only when physics, what it
+  # builds on, or this file changed: the emsdk is a big download.
   physics-wasm:
-    name: physics replay (wasm-mt, node)
+    name: physics replay (${{ matrix.flavor }}, node)
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # wasm-mt runs Jolt's thread-pool job system; wasm its single-threaded one
+        # (jolt_backend.cpp), which is what the gh-pages gallery runs (deploy-pages.yml).
+        flavor: [wasm-mt, wasm]
     concurrency:
-      group: ci-${{ github.ref }}-physics-wasm
+      group: ci-${{ github.ref }}-physics-${{ matrix.flavor }}
       cancel-in-progress: true
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install is not hidden behind `| tail`
     env:
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
+      FLAVOR: ${{ matrix.flavor }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -345,24 +356,24 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
-      - name: Install the wasm-mt deps (boost, pegtl, Jolt, the compression libraries)
+      - name: Install the ${{ matrix.flavor }} deps (boost, pegtl, Jolt, the compression libraries)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
           for p in zlib bzip2 xz zstd boost pegtl joltphysics; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
-              --platform wasm-mt --arch wasm32 --config release --link static \
+              --platform "$FLAVOR" --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
-      - name: Build libcvc (wasm-mt, physics only) and physics_replay_test
+      - name: Build libcvc (${{ matrix.flavor }}, physics only) and physics_replay_test
         if: steps.paths.outputs.run == 'true'
         run: |
           # shellcheck disable=SC1091
           source "$CVC_EMSDK_DIR/emsdk_env.sh"
+          pthreads=OFF
+          [ "$FLAVOR" = wasm-mt ] && pthreads=ON
           emcmake cmake -G Ninja -S . -B build-wasm \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_FIND_ROOT_PATH="$WASM_DEPS" -DCMAKE_PREFIX_PATH="$WASM_DEPS" \
@@ -371,14 +382,17 @@ jobs:
             -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=OFF -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
             -DCVC_ENABLE_SDF=OFF -DCVC_ENABLE_LIBIGL=OFF -DCVC_BUILD_LSYS_TOOLS=OFF \
-            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS="$pthreads" \
             | tee configure.log
           grep -q "cvc::physics Jolt backend ENABLED" configure.log \
-            || { echo "::error::the wasm-mt configure did not find Jolt"; exit 1; }
+            || { echo "::error::the $FLAVOR configure did not find Jolt"; exit 1; }
           cmake --build build-wasm --target physics_replay_test -j"$(nproc)"
 
       - name: Replay the native trace under node
         if: steps.paths.outputs.run == 'true'
+        # It takes about a second; a run that waits on a thread a single-threaded build has not got
+        # fails here instead of holding the job for hours.
+        timeout-minutes: 10
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           "$node" --version
@@ -467,8 +481,6 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt) and the port tests
         if: steps.paths.outputs.run == 'true'
@@ -582,8 +594,6 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build libcvc (wasm, single-threaded) and ariadne_wasm_browser_test
         if: steps.paths.outputs.run == 'true'
@@ -682,8 +692,6 @@ jobs:
               --platform wasm-mt --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm-mt
 
       - name: Build libcvc (wasm-mt) and permissive_libs_test
         if: steps.paths.outputs.run == 'true'
@@ -760,7 +768,8 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/cvc/nav/spatial.cpp inc/cvc/nav/grid_nav.h \
                    src/cvc/geometry/project_verts.cpp inc/cvc/geometry/project_verts.h \
                    src/cvc/geometry/tet_complex.cpp inc/cvc/geometry/tet_complex.h \
-                   src/cvc/geometry/skeleton inc/cvc/geometry/skeleton.h \
+                   src/cvc/geometry/cocone src/cvc/geometry/skeleton \
+                   inc/cvc/geometry/skeleton.h \
                    src/cvc/geometry/planar inc/cvc/geometry/planar.h \
                    src/cvc/third_party tools/cgal_ab CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    .github/workflows/ci.yml | grep -q .; then
@@ -992,6 +1001,57 @@ jobs:
           path: ${{ runner.temp }}/volrover-goldens/check
           if-no-files-found: ignore
 
+  # cvc::mol's T1 goldens (tools/texmol-goldens/README.md): build TexMol's PDB parser and GOABlur
+  # from transfix/TexMol at the pinned sha, run them on PDB entry 1GRL, and require the committed
+  # goldens to come out again. Nothing built here is linked into libcvc. When they differ, the
+  # goldens this run made are uploaded. Only when the tool, the goldens or this file changed.
+  texmol-goldens:
+    name: texmol goldens (legacy parity data)
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ci-${{ github.ref }}-texmol-goldens
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the tool or the goldens change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- tools/texmol-goldens \
+                   src/cvc/tests/data/texmol-goldens examples/data/molecules \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "goldens or their tool changed: $run"
+
+      - name: Build TexMol's parser and GOABlur and check the goldens
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          python3 tools/texmol-goldens/make_goldens.py --check --work "$RUNNER_TEMP/texmol-goldens"
+
+      - name: Upload the goldens this run made
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: texmol-goldens
+          path: ${{ runner.temp }}/texmol-goldens/check
+          if-no-files-found: ignore
+
   # ari in the browser (roadmap §16.4): the FTXUI terminal backend built for single-threaded wasm,
   # the target the gh-pages gallery serves (no COOP/COEP there). Builds the `ari` web target
   # (ari.js/ari.wasm + the xterm.js page, terminal_tour.ari baked in), then runs the same module
@@ -1054,6 +1114,14 @@ jobs:
             --config release --link shared --no-fallback-to-source
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+          # ari's web build links -sJSPI (JX2), and emsdk's own node (22.16, V8 12.4) has no
+          # WebAssembly.Suspending. Node has JSPI on by default from 24.20; cvcpkg's nodejs26 runs
+          # ari.js below. The two test binaries link no JSPI and stay on emsdk's node.
+          cvcpkg install nodejs26 --prefix "$RUNNER_TEMP/node26" \
+            --config release --link shared --no-fallback-to-source
+          "$RUNNER_TEMP/node26/bin/node" -p 'typeof WebAssembly.Suspending' | grep -qx function \
+            || { echo "::error::cvcpkg's nodejs26 has no JSPI"; exit 1; }
+          echo "JSPI_NODE=$RUNNER_TEMP/node26/bin/node" >> "$GITHUB_ENV"
 
       - name: Install the wasm deps (boost, pegtl, yaml-cpp, ftxui, ImageMagick and its codecs)
         if: steps.paths.outputs.run == 'true'
@@ -1068,8 +1136,6 @@ jobs:
               --platform wasm --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3
           done
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
 
       - name: Build the ari web target (wasm, single-threaded)
         if: steps.paths.outputs.run == 'true'
@@ -1103,7 +1169,7 @@ jobs:
       - name: Render the baked tour under node
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           "$node" build-wasm/bin/ari.js snapshot --width 100 --height 24 /terminal_tour.ari \
             | tee snapshot.txt
           for want in "Controls" "Status" "Layout" "agents: 64" "Belief: < shared >"; do
@@ -1119,7 +1185,7 @@ jobs:
         # output.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/net_probe_server.py > probe-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1144,7 +1210,7 @@ jobs:
         # the credential; and the device code. No token may reach the output.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           bash src/ari/tests/oidc_wasm_node_test.sh "$node" "$PWD/build-wasm/bin/ari.js"
 
       - name: Frames go on while a request is out (L4)
@@ -1154,7 +1220,7 @@ jobs:
         # a request that blocked the frame loop would leave that near 0.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/net_probe_server.py > probe-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1178,7 +1244,7 @@ jobs:
         # send its message; a connect or a wait that blocked the frame loop would leave them near 0.
         if: steps.paths.outputs.run == 'true'
         run: |
-          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          node="$JSPI_NODE"
           python3 src/ari/tests/ws_probe_server.py > ws-port.txt &
           server=$!
           trap 'kill $server' EXIT
@@ -1307,8 +1373,6 @@ jobs:
         run: |
           cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" wasm
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
           cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
             --platform any --config release --link shared --no-fallback-to-source
@@ -1429,8 +1493,6 @@ jobs:
           cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
             --platform ${{ matrix.platform }} --arch wasm32 --config release --link static \
             --no-fallback-to-source
-          # Until JX2: the pre-JX1 bundles of what cvcpkg#624 republished (the script says why).
-          bash .github/scripts/pin-wasm-pre-jx1.sh "$WASM_DEPS" ${{ matrix.platform }}
           grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
 
       - name: Build ariglx-web (${{ matrix.platform }}, the lean tier) with the recipe's script
@@ -2586,6 +2648,7 @@ jobs:
               state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
               ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
+              net_engine_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
             bench: mt.groups --size t=8 --size groups=8 --size runs=1
@@ -2606,10 +2669,12 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
-        ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
-        skeleton_test contour_stack_test point_classes_test planar_test tiler_test
+        net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
+        skeleton_test pocket_tunnel_test contour_stack_test point_classes_test planar_test
+        tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
+        volume_grid_test volume_grid_contours_test volume_grid_contour_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -2766,6 +2831,19 @@ jobs:
         state_exec_async_calls_test: OK ] AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher
         stream_test: OK ] Stream.EventsGoToTheSchedulerItWasOpenedWith
         net_ws_client_test: OK ] NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages
+      # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
+      # in every leg: its I/O threads take commands from the test's thread and post events back,
+      # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
+      # run under each sanitizer.
+      SAN_REQUIRED_NET: |
+        net_engine_test: OK ] NetEngineFraming.APausedConnectionSwitchesFramingExactlyAtTheFrame
+        net_engine_test: OK ] NetEngineOutput.SendsAndBroadcastsKeepTheirOrderOnEveryConnection
+        net_engine_test: OK ] NetEngineOutput.AJoinIssuedBeforeABroadcastIncludesTheConnection
+        net_engine_test: OK ] NetEngineGroups.ExcludeLeaveAndCloseLeaveEveryGroup
+        net_engine_test: OK ] NetEngineBackpressure.ASlowReaderClosesPastMaxQueued
+        net_engine_test: OK ] NetEngineClose.AFlushingCloseSendsWhatIsQueuedThenEnds
+        net_engine_test: OK ] NetEngine.StopClosesEveryConnectionAndLaterCommandsDoNothing
+        net_engine_test: OK ] NetEngineFanOut.OneMessageToManyLoopbackReceivers
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:
@@ -2870,6 +2948,7 @@ jobs:
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
             ${{ env.SAN_REQUIRED_S1B }}
+            ${{ env.SAN_REQUIRED_NET }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
       - name: Upload the sanitizer logs

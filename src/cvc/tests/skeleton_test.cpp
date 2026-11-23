@@ -10,10 +10,11 @@
 
 // cvc::skeletonize (cvc/geometry/skeleton.h), the VolumeRover Skeletonization port
 // (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §2, P1): known shapes (T3), invariants (T4),
-// bad input (T5), no singletons (T6), resumable (T7) and the parameter table (T8). Runs natively
-// and under node (the ports lane).
+// bad input (T5), no singletons (T6), resumable (T7), the parameter table and its keys on the
+// state tree (T8, the keys mesh_lab's skeleton request holds, P2). Runs natively and under node
+// (the ports lane).
 
-#include "../geometry/skeleton/datastruct.h"
+#include "../geometry/cocone/datastruct.h"
 #include "resumable_harness.h"
 
 #include <algorithm>
@@ -21,9 +22,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/core/app.h>
 #include <cvc/geometry/skeleton.h>
 #include <cvc/geometry/skeleton_params.h>
 #include <cvc/geometry/tet_complex.h>
+#include <cvc/state/state.h>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <map>
@@ -671,6 +674,70 @@ TEST_F(Skeleton, ParameterTable) {
   cvc::skeleton_params q = p;
   q.medial_theta = -1.0;
   EXPECT_FALSE(cvc::params_validate(q).empty());
+}
+
+// The parameters on the state tree (§1.5), as mesh_lab's skeleton keys hold them (P2): every
+// field goes struct -> keys -> struct bit for bit; a missing key is seeded from the base a node's
+// props give (else the default) and gets its properties; a value that does not parse is reported,
+// its field keeps the base's value and its key is left as it was; a value out of range is reported
+// too. Needs no exact predicates, so it runs in every build.
+TEST(SkeletonParams, OnTheStateTree) {
+  cvc::app app;
+  cvc::state &node = cvc::state::instance(app)("doc.mesh.skeleton");
+  cvc::skeleton_params p;
+  p.robust = true;
+  p.big_ball_ratio = 1.0 / 3.0; // shortest round-trip text, not a rounded one
+  p.theta_if = 0.1;
+  p.theta_ff = 0.2;
+  p.cocone_phi = 0.3;
+  p.sharp_phi = 2.0;
+  p.flat_phi = 0.9;
+  p.flatness_ratio = 1.7;
+  p.medial_theta = 0.35;
+  p.medial_ratio = 50.0;
+  p.discard_small = true;
+  p.threshold = 0.25;
+  p.sheet_count = 4;
+  p.helix_window = true;
+  ASSERT_TRUE(cvc::params_validate(p).empty());
+  cvc::params_to_state(p, node);
+  const auto back = cvc::params_from_state<cvc::skeleton_params>(node);
+  ASSERT_TRUE(back.ok()) << back.message();
+  std::size_t fields = 0;
+  cvc::for_each_param<cvc::skeleton_params>([&](const auto &f) {
+    EXPECT_EQ(back.value.*(f.member), p.*(f.member)) << f.name;
+    EXPECT_FALSE(node(f.name).property("doc").empty()) << f.name;
+    ++fields;
+  });
+  EXPECT_EQ(fields, 14u);
+
+  // A node's keys before any run: seeded from its props' base, else the defaults, with properties.
+  cvc::state &fresh = cvc::state::instance(app)("doc.other.skeleton");
+  cvc::skeleton_params base;
+  base.sheet_count = 3;
+  const auto seeded = cvc::params_from_state<cvc::skeleton_params>(fresh, base);
+  EXPECT_TRUE(seeded.ok()) << seeded.message();
+  EXPECT_EQ(seeded.value.sheet_count, 3);
+  EXPECT_EQ(fresh("sheet_count").value(), "3");
+  EXPECT_EQ(fresh("robust").value(), "0");
+  EXPECT_EQ(fresh("sheet_count").property("default"), "2");
+  EXPECT_EQ(fresh("cocone_phi").property("unit"), "rad");
+  EXPECT_EQ(fresh("threshold").property("min"), "0");
+  EXPECT_EQ(fresh("threshold").property("max"), "1");
+  EXPECT_EQ(fresh("robust").property("type"), "bool");
+
+  // A value that does not parse, then one out of range.
+  fresh("sheet_count").value("many");
+  const auto bad = cvc::params_from_state<cvc::skeleton_params>(fresh, base);
+  EXPECT_FALSE(bad.ok());
+  EXPECT_NE(bad.message().find("sheet_count"), std::string::npos) << bad.message();
+  EXPECT_EQ(bad.value.sheet_count, 3);
+  EXPECT_EQ(fresh("sheet_count").value(), "many");
+  fresh("sheet_count").value("3");
+  fresh("threshold").value("5");
+  const auto out = cvc::params_from_state<cvc::skeleton_params>(fresh, base);
+  EXPECT_FALSE(out.ok());
+  EXPECT_NE(out.message().find("threshold"), std::string::npos) << out.message();
 }
 
 } // namespace
