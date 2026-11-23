@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cvc/ariadne/bind.h> // resolve_bind, read_or
 #include <cvc/ariadne/data.h> // a data look's package
+#include <cvc/ariadne/loader.h> // parse_value: a parted look's rig file
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_spawns.h>
@@ -37,6 +38,8 @@
 #include <cvc/state/state.h>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -79,7 +82,23 @@ vehicle_shape shape_of(const cvc::physics::vehicle_desc &d) {
   s.wheelbase = d.wheelbase();
   s.track = d.track();
   s.wheel_radius = d.axles.empty() ? 0.4 : d.axles.front().wheel_radius;
+  if (!d.axles.empty()) {
+    double lo = d.axles.front().x, hi = lo;
+    for (const cvc::physics::axle_desc &a : d.axles) {
+      lo = std::min(lo, a.x);
+      hi = std::max(hi, a.x);
+    }
+    s.axle_x = 0.5 * (lo + hi);
+  }
   return s;
+}
+
+// A wheel's pose at (x, y, z): turned about its upright by its steer and rolled about its axle by
+// its spin, Rz(steer) Ry(spin), row-major.
+std::array<double, 16> wheel_matrix(double x, double y, double z, double steer, double spin) {
+  const double c = std::cos(steer), sn = std::sin(steer);
+  const double cs = std::cos(spin), ss = std::sin(spin);
+  return {c * cs, -sn, c * ss, x, sn * cs, c, sn * ss, y, -ss, 0.0, cs, z, 0.0, 0.0, 0.0, 1.0};
 }
 
 std::string get(cvc::state &root, const std::string &key) {
@@ -112,10 +131,26 @@ struct fitted_model {
 
 } // namespace
 
-// The models a realized scene has fitted, by file and length (null: it could not be read). The
-// scene's own (RealizedScene::vehicle_models), on its render thread.
+namespace {
+
+// A parted look's parts as read, once per look: the chassis's and the wheel's meshes in the rig's
+// frame (x forward, y left, z up), the wheel about its middle and, for a rig that reflects its
+// right wheels, mirrored as well; each part's first base-colour texture; and the rig, in that
+// frame, its radius found from the wheel mesh when it gives none.
+struct parted_model {
+  cvc::geometry chassis, wheel, wheel_reflected;
+  cvc::image chassis_texture, wheel_texture;
+  ari::vehicle_rig rig;
+};
+
+} // namespace
+
+// The models a realized scene has fitted, by file and length (null: it could not be read), and
+// the parted looks it has read, by look. The scene's own (RealizedScene::vehicle_models), on its
+// render thread.
 struct vehicle_model_cache {
   std::map<std::string, std::shared_ptr<const fitted_model>> models;
+  std::map<std::string, std::shared_ptr<const parted_model>> parts;
 };
 
 cvc::geometry fit_vehicle_geometry(cvc::geometry g, double length, const vehicle_fit_axes &axes) {
@@ -353,6 +388,17 @@ std::string data_node_of(cvc::app &app, const ari::vehicle_look &look) {
   return ari::DataStore::of(app)->load(spec);
 }
 
+// A file in a loaded package: at its path, else by its name anywhere in the package.
+ari::DataBytes package_file(cvc::app &app, const std::string &node, const std::string &file) {
+  namespace fs = std::filesystem;
+  ari::DataBytes bytes = ari::data_file(app, node, file);
+  if (!bytes)
+    for (const std::string &f : ari::data_files(app, node))
+      if (fs::path(f).filename() == fs::path(file).filename())
+        return ari::data_file(app, node, f);
+  return bytes;
+}
+
 // A data look's model: from its package once it has loaded (`pending` while it loads), else a
 // local install of the file by its name, else none.
 std::shared_ptr<const fitted_model> fitted_data(cvc::app &app, vehicle_model_cache &cache,
@@ -370,13 +416,7 @@ std::shared_ptr<const fitted_model> fitted_data(cvc::app &app, vehicle_model_cac
       look.uri + (look.subpath.empty() ? "" : "/" + look.subpath) + "/" + look.path;
   std::shared_ptr<const fitted_model> out;
   if (status == "ready") {
-    ari::DataBytes bytes = ari::data_file(app, node, look.path);
-    if (!bytes) // the file by its name anywhere in the package
-      for (const std::string &f : ari::data_files(app, node))
-        if (fs::path(f).filename() == fs::path(look.path).filename()) {
-          bytes = ari::data_file(app, node, f);
-          break;
-        }
+    const ari::DataBytes bytes = package_file(app, node, look.path);
     try {
       if (!bytes)
         throw std::runtime_error("the package has no " + look.path);
@@ -409,6 +449,8 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
                                            const ari::vehicle_look &look, const model_fit &fit,
                                            std::vector<std::string> *warnings, bool &pending) {
   pending = false;
+  if (look.parted()) // its parts (parted), not one model
+    return nullptr;
   if (look.kind == "data")
     return fitted_data(app, cache, look, fit, warnings, pending);
   if (look.kind == "file" && (look.fit || fit.box))
@@ -416,9 +458,266 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
   return nullptr;
 }
 
-// Whether a look is drawn as a fitted model (attach_model), not as a mesh node or boxes.
+// Whether a look is drawn as a fitted model (attach_model), not as a mesh node or boxes: a
+// one-piece model or a parted one.
 bool fitted_look(const ari::vehicle_look &look) {
-  return (look.kind == "file" && look.fit) || look.kind == "data";
+  return (look.kind == "file" && (look.fit || look.parted())) || look.kind == "data";
+}
+
+// ---- a parted look ----
+
+// A cache key of a parted look's: where its parts are, and its rig given inline.
+std::string parted_key(const ari::vehicle_look &look) {
+  return "parts|" + look.kind + "|" + look.uri + "|" + look.subpath + "|" + look.chassis + "|" +
+         look.wheel + "|" + look.rig_file + "|" +
+         (look.rig.hubs.empty() ? std::string() : ari::vehicle_rig_text(look.rig));
+}
+
+// A file of a parted look's as bytes: from its package (a data look's loaded `node`), else from
+// disk. Null when it is not there.
+ari::DataBytes part_bytes(const std::string &node, cvc::app &app, const std::string &file) {
+  if (!node.empty())
+    return package_file(app, node, file);
+  std::ifstream in(file, std::ios::binary);
+  if (!in)
+    return nullptr;
+  return std::make_shared<const std::string>(std::istreambuf_iterator<char>(in),
+                                             std::istreambuf_iterator<char>());
+}
+
+// A mesh turned from glTF's frame (+y up, +z forward, +x left) into the rig's (x forward, y left,
+// z up): (x, y, z) to (z, x, y), a rotation.
+void turn_y_up(cvc::geometry &g) {
+  const auto pts = g.const_points();
+  auto &moved = g.points();
+  for (std::size_t i = 0; i < pts.size(); ++i)
+    moved[i] = {pts[i][2], pts[i][0], pts[i][1]};
+  const auto nn = g.const_normals();
+  if (!nn.empty()) {
+    auto &turned = g.normals();
+    for (std::size_t i = 0; i < nn.size(); ++i)
+      turned[i] = {nn[i][2], nn[i][0], nn[i][1]};
+  }
+}
+
+// A part's mesh (its meshes merged) and its first base-colour texture, turned into the rig's frame.
+cvc::geometry read_part(cvc::app &app, const std::string &node, const std::string &file, bool y_up,
+                        cvc::image &texture) {
+  namespace fs = std::filesystem;
+  cvc::model m;
+  if (node.empty()) {
+    m = cvc::read_model(app, file);
+  } else {
+    const ari::DataBytes bytes = part_bytes(node, app, file);
+    if (!bytes)
+      throw std::runtime_error("the package has no " + file);
+    m = cvc::read_model_from_memory(app, bytes->data(), bytes->size(),
+                                    fs::path(file).extension().string());
+  }
+  cvc::geometry g = m.merged();
+  if (g.num_tris() == 0)
+    throw std::runtime_error(file + " has no triangles");
+  for (const auto &mat : m.materials)
+    if (mat.has_base_color_texture()) {
+      texture = mat.base_color_texture;
+      break;
+    }
+  if (y_up)
+    turn_y_up(g);
+  return g;
+}
+
+// A parted look's parts, read once: on disk (a file look), or from its package once it has loaded
+// (`pending` while it loads; when it cannot load, the parts installed here by their names, as a
+// one-piece data look falls back). Null when one cannot be read or its rig is not one (a warning
+// says why).
+std::shared_ptr<const parted_model> parted(cvc::app &app, vehicle_model_cache &cache,
+                                           const ari::vehicle_look &look,
+                                           std::vector<std::string> *warnings, bool &pending) {
+  pending = false;
+  if (!look.parted() || (look.kind != "file" && look.kind != "data"))
+    return nullptr;
+  const std::string key = parted_key(look);
+  if (auto it = cache.parts.find(key); it != cache.parts.end())
+    return it->second;
+  ari::vehicle_look from = look; // where its parts are read: its package's node, or disk
+  std::string node;
+  if (look.kind == "data") {
+    node = data_node_of(app, look);
+    const std::string status = ari::data_status(app, node);
+    if (status != "ready" && status != "error") {
+      pending = true; // idle, fetching, unpacking or decoding
+      return nullptr;
+    }
+    if (status == "error") { // installed here instead: under the package's directory's name
+      node.clear();          // (share/cvc-scenes/rover: rover/chassis.glb), else by their own
+      const std::string dir = std::filesystem::path(look.subpath).filename().string();
+      for (std::string *part : {&from.chassis, &from.wheel, &from.rig_file})
+        if (!part->empty()) {
+          const std::string under =
+              dir.empty() ? std::string() : ari::find_vehicle_model(dir + "/" + *part);
+          *part = under.empty() ? ari::find_vehicle_model(*part) : under;
+        }
+      if (from.chassis.empty() || from.wheel.empty() ||
+          (from.rig.hubs.empty() && from.rig_file.empty())) {
+        if (warnings) {
+          const std::string error =
+              get(cvc::state::instance(app), data_node_of(app, look) + ".error");
+          warnings->push_back("ari: parted model " + look.uri + ": " +
+                              (error.empty() ? std::string("its package did not load") : error) +
+                              ", and its parts are not installed here; drawn as its box");
+        }
+        cache.parts[key] = nullptr;
+        return nullptr;
+      }
+    }
+  }
+  std::shared_ptr<parted_model> out = std::make_shared<parted_model>();
+  try {
+    out->rig = look.rig;
+    if (out->rig.hubs.empty()) { // its rig's file
+      const ari::DataBytes text = part_bytes(node, app, from.rig_file);
+      if (!text)
+        throw std::runtime_error("no rig " + from.rig_file);
+      ari::Value v;
+      std::string why;
+      if (!ari::parse_value(*text, v, &why) || !ari::parse_vehicle_rig(v, out->rig, &why))
+        throw std::runtime_error("rig " + from.rig_file + ": " + why);
+    }
+    ari::vehicle_rig &rig = out->rig;
+    if (rig.y_up)
+      for (std::array<double, 3> &h : rig.hubs)
+        h = {h[2], h[0], h[1]};
+    out->chassis = read_part(app, node, from.chassis, rig.y_up, out->chassis_texture);
+    out->wheel = read_part(app, node, from.wheel, rig.y_up, out->wheel_texture);
+    // The wheel about its middle; its radius, when the rig gives none, half its larger extent
+    // across its axle (along x or z).
+    double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
+    for (const auto &v : out->wheel.const_points())
+      for (int k = 0; k < 3; ++k) {
+        lo[k] = std::min(lo[k], static_cast<double>(v[k]));
+        hi[k] = std::max(hi[k], static_cast<double>(v[k]));
+      }
+    auto &pts = out->wheel.points();
+    for (auto &v : pts)
+      for (int k = 0; k < 3; ++k)
+        v[k] -= 0.5 * (lo[k] + hi[k]);
+    if (!(rig.radius > 0.0))
+      rig.radius = 0.5 * std::max(hi[0] - lo[0], hi[2] - lo[2]);
+    if (!(rig.radius > 0.0))
+      throw std::runtime_error("its wheel has no size");
+    if (rig.mirror == "reflect") { // mirrored across its xz plane, its triangles wound again
+      cvc::geometry r = out->wheel;
+      for (auto &v : r.points())
+        v[1] = -v[1];
+      for (auto &n : r.normals())
+        n[1] = -n[1];
+      for (auto &t : r.tris())
+        std::swap(t[1], t[2]);
+      out->wheel_reflected = std::move(r);
+    }
+  } catch (const std::exception &e) {
+    if (warnings)
+      warnings->push_back("ari: parted model (" + from.chassis + ", " + from.wheel +
+                          "): " + e.what() + "; drawn as its box");
+    out.reset();
+  }
+  cache.parts[key] = out;
+  return out;
+}
+
+// How a parted model sits on a vehicle (the namespace comment in vehicle_view.h): box = s m + o
+// for a point m of the chassis's mesh, each hub's place and its height at rest, and each wheel's
+// scale.
+struct parted_fit {
+  std::array<double, 3> scale{1.0, 1.0, 1.0}, offset{0.0, 0.0, 0.0};
+  double wheel_scale = 1.0;
+  std::vector<std::array<double, 3>> hubs; // in the chassis box's frame
+};
+
+parted_fit fit_parts(const ari::vehicle_rig &rig, const vehicle_shape &s, double base_z) {
+  parted_fit f;
+  double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300}, mean_z = 0.0;
+  for (const std::array<double, 3> &h : rig.hubs) {
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], h[k]);
+      hi[k] = std::max(hi[k], h[k]);
+    }
+    mean_z += h[2] / static_cast<double>(rig.hubs.size());
+  }
+  const double sz = s.wheel_radius > 0.0 ? s.wheel_radius / rig.radius : 1.0;
+  const double wb = hi[0] - lo[0], tr = hi[1] - lo[1];
+  const double sx = wb > 1e-9 && s.wheelbase > 0.0 ? s.wheelbase / wb : sz;
+  const double sy = tr > 1e-9 && s.track > 0.0 ? s.track / tr : sz;
+  const double mx = 0.5 * (lo[0] + hi[0]), my = 0.5 * (lo[1] + hi[1]);
+  const double ground = mean_z - rig.radius;
+  f.scale = {sx, sy, sz};
+  f.offset = {s.axle_x - sx * mx, -sy * my, base_z - sz * ground};
+  f.wheel_scale = sz;
+  for (const std::array<double, 3> &h : rig.hubs)
+    f.hubs.push_back({sx * h[0] + f.offset[0], sy * h[1] + f.offset[1], sz * h[2] + f.offset[2]});
+  return f;
+}
+
+void colour(GeometryNode &node, const cvc::image &texture, const float color[3]) {
+  if (!texture.empty()) {
+    node.setUseSingleColor(false);
+    node.setTexture(texture, false);
+  } else {
+    node.setUseSingleColor(true);
+    node.setColor(color[0], color[1], color[2]);
+  }
+  node.setAmbient(0.3);
+  node.setDiffuse(0.8);
+}
+
+// A ready parted model under `group` as id_chassis and id_wheel<k> (vehicle_view.h). False when it
+// is not ready.
+bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                  const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
+                  double base_z, const float color[3], std::vector<drawn_wheel> *wheels,
+                  std::vector<std::string> *warnings) {
+  bool pending = false;
+  const std::shared_ptr<const parted_model> m = parted(app, cache, look, warnings, pending);
+  if (!m)
+    return false;
+  const parted_fit f = fit_parts(m->rig, s, base_z);
+  std::shared_ptr<GeometryNode> chassis =
+      group.createChild<GeometryNode>(id + "_chassis", m->chassis);
+  if (!chassis)
+    return false;
+  chassis->setPosition(f.offset[0], f.offset[1], f.offset[2]);
+  chassis->setScale(f.scale[0], f.scale[1], f.scale[2]);
+  colour(*chassis, m->chassis_texture, color);
+  static const float tyre[3] = {0.07f, 0.07f, 0.08f};
+  for (std::size_t k = 0; k < f.hubs.size(); ++k) {
+    const std::array<double, 3> &h = f.hubs[k];
+    const std::string w = id + "_wheel" + std::to_string(k);
+    std::shared_ptr<GraphicsNode> hub = group.createChild(w);
+    if (!hub)
+      continue;
+    const bool right = h[1] < 0.0;
+    const bool reflect = right && m->rig.mirror == "reflect";
+    std::shared_ptr<GeometryNode> mesh =
+        hub->createChild<GeometryNode>(w + "_mesh", reflect ? m->wheel_reflected : m->wheel);
+    if (!mesh)
+      continue;
+    mesh->setScale(f.wheel_scale, f.wheel_scale, f.wheel_scale);
+    if (right && m->rig.mirror == "turn")
+      mesh->setRotation(0.0, 0.0, 180.0); // half a turn about its upright: its outside to -y
+    colour(*mesh, m->wheel_texture, tyre);
+    drawn_wheel d;
+    d.node = hub;
+    d.x = h[0];
+    d.y = h[1];
+    d.rest_z = h[2];
+    d.steers = k < m->rig.steers.size() && m->rig.steers[k];
+    const std::array<double, 16> rest = wheel_matrix(d.x, d.y, d.rest_z, 0.0, 0.0);
+    hub->setPoseMatrix(rest.data());
+    if (wheels)
+      wheels->push_back(d);
+  }
+  return true;
 }
 
 // The fitted model under `group`: its base `base_z` below the group's origin (the ground under a
@@ -426,6 +725,8 @@ bool fitted_look(const ari::vehicle_look &look) {
 bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                   const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
                   double base_z, const float color[3], std::vector<std::string> *warnings) {
+  if (look.parted()) // its wheels at rest
+    return attach_parts(app, cache, group, id, look, s, base_z, color, nullptr, warnings);
   bool pending = false;
   std::shared_ptr<const fitted_model> m =
       fitted(app, cache, look, model_fit::vehicle(s.length), warnings, pending);
@@ -458,6 +759,8 @@ std::shared_ptr<vehicle_model_cache> make_vehicle_model_cache() {
 vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cache,
                                          const ari::vehicle_look &look, double length,
                                          std::vector<std::string> *warnings) {
+  if (look.parted())
+    return parted_model_state(app, cache, look, warnings);
   bool pending = false;
   const std::shared_ptr<const fitted_model> m =
       fitted(app, cache, look, model_fit::vehicle(length), warnings, pending);
@@ -542,6 +845,54 @@ bool set_boxed_model(cvc::app &app, vehicle_model_cache &cache, GeometryNode &no
     node.setColor(1.0, 1.0, 1.0); // the texture's own colours
   }
   return true;
+}
+
+vehicle_model_status parted_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                        const ari::vehicle_look &look,
+                                        std::vector<std::string> *warnings) {
+  bool pending = false;
+  const std::shared_ptr<const parted_model> m = parted(app, cache, look, warnings, pending);
+  return m ? vehicle_model_status::ready
+           : (pending ? vehicle_model_status::pending : vehicle_model_status::failed);
+}
+
+bool attach_parted_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                         const std::string &id, const ari::vehicle_look &look,
+                         const vehicle_shape &shape, double base_z, const float color[3],
+                         std::vector<drawn_wheel> *wheels, std::vector<std::string> *warnings) {
+  return attach_parts(app, cache, group, id, look, shape, base_z, color, wheels, warnings);
+}
+
+std::vector<std::array<double, 16>>
+parted_wheel_poses(const std::vector<drawn_wheel> &wheels,
+                   const std::vector<ari::entity_wheel> &plant) {
+  // The plant's wheel nearest (x, y), on the same side first (y's sign), among those `ok` takes.
+  const auto nearest = [&](const drawn_wheel &d, bool steered) -> const ari::entity_wheel * {
+    const ari::entity_wheel *best = nullptr;
+    double best_d = 0.0;
+    bool best_side = false;
+    for (const ari::entity_wheel &e : plant) {
+      if (steered && !e.steered)
+        continue;
+      const bool side = (e.y < 0.0) == (d.y < 0.0);
+      const double dd = (e.x - d.x) * (e.x - d.x) + (e.y - d.y) * (e.y - d.y);
+      if (!best || (side && !best_side) || (side == best_side && dd < best_d)) {
+        best = &e;
+        best_d = dd;
+        best_side = side;
+      }
+    }
+    return best;
+  };
+  std::vector<std::array<double, 16>> out;
+  out.reserve(wheels.size());
+  for (const drawn_wheel &d : wheels) {
+    const ari::entity_wheel *m = nearest(d, false);
+    const ari::entity_wheel *s = d.steers ? nearest(d, true) : nullptr;
+    out.push_back(
+        wheel_matrix(d.x, d.y, m ? m->z : d.rest_z, s ? s->steer : 0.0, m ? m->spin : 0.0));
+  }
+  return out;
 }
 
 bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
@@ -696,6 +1047,7 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     sg.removeGraphics(node);
   }
   r.vehicle_markers.clear();
+  r.vehicle_wheels.clear();
   for (const ari::entity_info &e : v->entities()) {
     if (!e.placed)
       continue;
@@ -742,9 +1094,12 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     std::shared_ptr<GraphicsNode> node = sg.getGraphics(id);
     if (!node)
       continue;
+    std::vector<drawn_wheel> wheels; // a parted look's, posed each frame
     if (fitted_look(a->look) &&
-        !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape, base_z,
-                      e.spec.color.data(), warnings)) {
+        !(a->look.parted() ? attach_parts(sg.appContext(), *models, *node, id, a->look, shape,
+                                          base_z, e.spec.color.data(), &wheels, warnings)
+                           : attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look,
+                                          shape, base_z, e.spec.color.data(), warnings))) {
       if (vehicle_model_state(sg.appContext(), *models, a->look, shape.length) ==
           vehicle_model_status::pending)
         r.vehicle_models_pending = true;
@@ -759,6 +1114,8 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
       if (!node)
         continue;
     }
+    if (!wheels.empty())
+      r.vehicle_wheels[id] = std::move(wheels);
     apply_entity_label(sg, node, r.entity_labels,
                        {{"name", e.spec.name},
                         {"id", std::to_string(e.id)},
@@ -783,12 +1140,20 @@ void pose_vehicle_wheels(RealizedScene &r) {
     return;
   SceneGraph &sg = *r.sg;
   for (const auto &[node, chassis] : r.vehicle_markers) {
+    const std::uint64_t id = std::stoull(node.substr(std::string("vehicle_").size()));
+    if (auto parts = r.vehicle_wheels.find(node); parts != r.vehicle_wheels.end()) {
+      const std::vector<std::array<double, 16>> poses =
+          parted_wheel_poses(parts->second, v->wheels(id));
+      for (std::size_t k = 0; k < poses.size(); ++k)
+        if (const std::shared_ptr<GraphicsNode> w = parts->second[k].node.lock())
+          w->setPoseMatrix(poses[k].data()); // change-detected, published rather than written
+      continue;
+    }
     const std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
     const std::shared_ptr<GraphicsNode> first =
         group ? group->findChildByName(node + "_wheel0") : nullptr;
-    if (!first) // a mesh look
+    if (!first) // a one-piece model
       continue;
-    const std::uint64_t id = std::stoull(node.substr(std::string("vehicle_").size()));
     const std::vector<ari::entity_wheel> wheels = v->wheels(id);
     if (wheels.empty())
       continue;
@@ -810,17 +1175,9 @@ void pose_vehicle_wheels(RealizedScene &r) {
       // Turned about its own upright by its steer, at its centre, and rolled about its axle by its
       // spin (Rz(steer) Ry(spin)): the per-frame pose path (change-detected, published rather
       // than written).
-      const double c = std::cos(best->steer), sn = std::sin(best->steer);
-      if (best->spin == 0.0) {
-        const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
-                              0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
-        w->setPoseMatrix(m);
-      } else {
-        const double cs = std::cos(best->spin), ss = std::sin(best->spin);
-        const double m[16] = {c * cs, -sn, c * ss, best->x, sn * cs, c,   sn * ss, best->y,
-                              -ss,    0.0, cs,     best->z, 0.0,     0.0, 0.0,     1.0};
-        w->setPoseMatrix(m);
-      }
+      const std::array<double, 16> m =
+          wheel_matrix(best->x, best->y, best->z, best->steer, best->spin);
+      w->setPoseMatrix(m.data());
     }
   }
 }
@@ -907,8 +1264,9 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
     const std::string sig = sel + "|" + get(st, a + "length") + "|" + get(st, a + "width") + "|" +
                             get(st, a + "height") + "|" + get(st, a + "look.kind") + "|" +
                             get(st, a + "look.path") + "|" + get(st, a + "look.uri") + "|" +
-                            get(st, a + "look.fit") + "|" + get(st, root + ".spawn.color") + "|" +
-                            get(st, root + ".spawn.color2");
+                            get(st, a + "look.fit") + "|" + get(st, a + "look.chassis") + "|" +
+                            get(st, a + "look.wheel") + "|" + get(st, a + "look.rig") + "|" +
+                            get(st, root + ".spawn.color") + "|" + get(st, root + ".spawn.color2");
     if (sig != *last) {
       *last = sig;
       if (graph->getGraphics(drawn))
@@ -930,6 +1288,14 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         look.yaw = num(get(st, a + "look.yaw"), 0.0);
         look.z = num(get(st, a + "look.z"), 0.0);
         look.fit = get(st, a + "look.fit") == "1";
+        look.chassis = get(st, a + "look.chassis");
+        look.wheel = get(st, a + "look.wheel");
+        const std::string rig = get(st, a + "look.rig"); // its file, or its text when inline
+        ari::Value inline_rig;
+        if (rig.find('{') == 0 && ari::parse_value(rig, inline_rig))
+          ari::parse_vehicle_rig(inline_rig, look.rig);
+        else
+          look.rig_file = rig;
         float c1[3] = {0.85f, 0.7f, 0.2f}, c2[3] = {0.12f, 0.12f, 0.14f};
         rgb(get(st, root + ".spawn.color"), c1);
         rgb(get(st, root + ".spawn.color2"), c2);

@@ -149,6 +149,15 @@ struct SceneRepeatBinding;
 // or the lights vanish. The volren/volslice tickers are held as weak_ptr — the
 // SceneGraph is the sole owner, so a torn-down node simply drops out of the tick
 // rather than dangling (consistent with the string-only visibility bindings).
+// A parted look's wheel as drawn (vehicle_view.h): its node, posed each frame; its hub in its
+// chassis box's frame (its rig's, fitted to the vehicle) and the hub's height there at rest; and
+// whether the rig steers it.
+struct drawn_wheel {
+  std::weak_ptr<GraphicsNode> node;
+  double x = 0.0, y = 0.0, rest_z = 0.0;
+  bool steers = false;
+};
+
 struct RealizedScene {
   std::vector<std::string> created;
   std::vector<cvc::ariadne::SceneVisibilityBinding> visibility;
@@ -269,6 +278,8 @@ struct RealizedScene {
   // bound to, as of the vehicles' revision `vehicles_rev`.
   std::vector<std::pair<std::string, cvc::physics::body_id>> vehicle_markers;
   std::uint64_t vehicles_rev = ~std::uint64_t(0);
+  // A parted look's wheels, by its entity's node (pose_vehicle_wheels poses them each frame).
+  std::map<std::string, std::vector<drawn_wheel>> vehicle_wheels;
   // The vehicle models this scene has read and fitted, read once each (vehicle_view.cpp).
   std::shared_ptr<struct vehicle_model_cache> vehicle_models;
   // A vehicle drawn as its box while its look's data package loads: the vehicles are drawn again

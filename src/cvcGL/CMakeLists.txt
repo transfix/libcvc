@@ -1342,6 +1342,13 @@ add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
 target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
 
+# A world vehicle's parted look (vehicle_view.h; docs/ARIADNE.md, "A model in parts"): a chassis,
+# a wheel and a rig, each wheel posed from its vehicle's speed and steer, headless; then the pixels
+# of a wheel's spin and steer, offscreen.
+add_executable(cvcgl_ariadne_wheeled_look test/cvcgl_ariadne_wheeled_look.cpp)
+target_link_libraries(cvcgl_ariadne_wheeled_look PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_wheeled_look COMMAND cvcgl_ariadne_wheeled_look)
+
 # material: { opacity } on Ariadne scene nodes (docs/ARIADNE.md §5.4): literal and bound, on a mesh,
 # a LOD ladder's rungs and a data node's drawing, and the see-through pixels in the main view.
 add_executable(cvcgl_ariadne_opacity test/cvcgl_ariadne_opacity.cpp)

@@ -4417,6 +4417,17 @@ LoadResult load_file(cvc::app &app, const std::string &path) {
   }
 }
 
+bool parse_value(const std::string &text, Value &out, std::string *why) {
+  try {
+    out = to_value(YAML::Load(text));
+    return true;
+  } catch (const std::exception &e) {
+    if (why)
+      *why = e.what();
+    return false;
+  }
+}
+
 bool have_yaml() { return true; }
 
 #else // !CVC_ARIADNE_HAVE_YAML — stub: the rest of Ariadne still builds/runs.
@@ -4432,6 +4443,11 @@ LoadResult unavailable() {
 
 LoadResult load_string(cvc::app &, const std::string &) { return unavailable(); }
 LoadResult load_file(cvc::app &, const std::string &) { return unavailable(); }
+bool parse_value(const std::string &, Value &, std::string *why) {
+  if (why)
+    *why = "libcvc was built without yaml-cpp";
+  return false;
+}
 bool have_yaml() { return false; }
 
 #endif

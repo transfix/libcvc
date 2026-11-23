@@ -28,6 +28,9 @@ class geometry;
 namespace physics {
 struct boat_desc;
 }
+namespace ariadne {
+struct entity_wheel;
+}
 namespace gl {
 class GeometryNode;
 class GraphicsNode;
@@ -35,6 +38,7 @@ class SceneGraph;
 namespace ariadne {
 
 struct RealizedScene;
+struct drawn_wheel;         // a parted look's wheel as drawn (scene_realize.h)
 struct vehicle_model_cache; // the vehicle models a realized scene has fitted
 
 // ----------------
@@ -49,6 +53,7 @@ struct vehicle_model_cache; // the vehicle models a realized scene has fitted
 struct vehicle_shape {
   double length = 4.84, width = 2.18, height = 0.9; // the chassis box (m)
   double wheelbase = 3.3, track = 1.82, wheel_radius = 0.45;
+  double axle_x = 0.0; // the axles' middle, ahead of the chassis box's centre (m)
 };
 
 // How a vehicle model's file holds it (axes 0 x, 1 y, 2 z): `up` its up axis and `forward` the
@@ -106,6 +111,46 @@ bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNod
                           std::vector<std::string> *warnings = nullptr);
 
 // ----------------
+// A parted look (`chassis:`, `wheel:`, `rig:`; cvc::ariadne::vehicle_rig)
+// ----------------
+// A model in parts, fitted to its vehicle by its rig, each axis on its own: along x so the rig's
+// axles lie on the vehicle's (its wheelbase over the rig's), across y so its track is the
+// vehicle's, and up z so its wheels are the vehicle's size (the vehicle's wheel radius over the
+// rig's); its ground (its hubs' mean height less its radius) on the ground under the chassis. An
+// axis the rig's hubs do not spread along (one axle; every hub on the centre line) takes z's
+// scale. Each wheel is the wheel mesh about its middle (its bounds' centre), scaled alike on every
+// axis to the vehicle's wheel radius, at its hub; a right one (y < 0) mirrored as the rig says.
+
+// How far a parted look's parts (its chassis, its wheel and its rig) have got: ready (each read
+// once, in `cache`); pending while a data look's package loads (draw the box meanwhile and ask
+// again on a later frame); failed when one cannot be read, or its rig is not one (a warning says
+// why), or the look is not a parted one.
+vehicle_model_status parted_model_state(cvc::app &app, vehicle_model_cache &cache,
+                                        const cvc::ariadne::vehicle_look &look,
+                                        std::vector<std::string> *warnings = nullptr);
+// A ready parted look under `group` (a vehicle's node, about its chassis box's centre): the
+// chassis as node `id`_chassis and each wheel, in the rig's order, as node `id`_wheel<k> (a group,
+// its mesh `id`_wheel<k>_mesh under it), at rest; the chassis in `color` and the wheels a dark
+// tyre's, where a part has no texture. `base_z` is the ground under the chassis, below the group's
+// origin (negative). `wheels` (when not null) gets the wheels as drawn, for pose_vehicle_wheels.
+// False when the parts are not ready (parted_model_state says why): draw the box look then.
+bool attach_parted_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
+                         const std::string &id, const cvc::ariadne::vehicle_look &look,
+                         const vehicle_shape &shape, double base_z, const float color[3],
+                         std::vector<drawn_wheel> *wheels,
+                         std::vector<std::string> *warnings = nullptr);
+// Each drawn wheel's pose now (its node's matrix, row-major 4x4, in the chassis box's frame), from
+// its vehicle's wheels as its plant or its poses have them (WorldVehicles::wheels): at its hub; at
+// the height of the plant's wheel nearest it on its side (on its suspension, or the ground under
+// it; at rest without one); rolled about its axle by that wheel's spin; and, when its rig steers
+// it, turned about its upright by the steer of the plant's steered wheel nearest it (on its side
+// first): a Jolt vehicle's or a dynamic4w's own angle, each wheel its own; a `pose` entity's, its
+// pose's steer; none when the plant steers no wheel. Rz(steer) Ry(spin), as the box look's.
+std::vector<std::array<double, 16>>
+parted_wheel_poses(const std::vector<drawn_wheel> &wheels,
+                   const std::vector<cvc::ariadne::entity_wheel> &plant);
+
+// ----------------
 // A scene node's model (`model:`)
 // ----------------
 // The look a scene node's `model:` value names (`where` and `instead` word its warnings: "ari:
@@ -151,8 +196,9 @@ std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &i
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);
 // Each frame after the world steps: a box look's wheels, each where its plant has it
 // (WorldVehicles::wheels): its height on its suspension or the ground under it, the front ones
-// steered. A dynamic4w's four wheels each follow the ground under them. A mesh look's wheels are
-// the mesh's.
+// steered, every one rolled. A dynamic4w's four wheels each follow the ground under them. A
+// parted look's wheels each as parted_wheel_poses has them. A one-piece model's wheels are the
+// mesh's, and do not move.
 void pose_vehicle_wheels(RealizedScene &realized);
 
 // Each frame after the world steps: when the spawn points' revision has moved, their markers are

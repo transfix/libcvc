@@ -2157,6 +2157,70 @@ scene:
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
     name is used (`find_vehicle_model`), else the box.
+  - **A model in parts.** A one-piece model is one mesh: its wheels are in it and cannot turn. A
+    parted look is the chassis without its wheels, one wheel, and a rig that says where the
+    wheels go, so each wheel is drawn on its own and rolls and steers as the vehicle drives:
+
+    ```yaml
+    world:
+      vehicles:
+        archetypes:
+          rover:
+            vehicle: humvee
+            controllers: [pose]
+            look: { chassis: rover/chassis.glb, wheel: rover/wheel.glb, rig: rover/rig.json }
+          inline:
+            look:
+              chassis: rover/chassis.glb
+              wheel: rover/wheel.glb
+              rig:
+                radius: 0.47       # the wheel mesh's; none: half its size across its axle
+                hubs: [[1.6, 0.94, 0.48], [1.6, -0.94, 0.48], [-1.6, 0.94, 0.48], [-1.6, -0.94, 0.48]]
+                steer: [0, 1]      # the hubs that steer; none given: the front axle's
+                mirror: turn       # the right wheels: turn (the default), reflect or none
+          packaged:              # the three in a data: entry's package
+            look: { data: parts, chassis: chassis.glb, wheel: wheel.glb, rig: rig.json }
+    ```
+
+    - **The parts.** All three in one frame: metres, x forward, y left, z up (`up: y` in the rig
+      for glTF's own: +y up, +z forward, +x left). The wheel mesh is the left wheel, its axle along
+      y and its outside toward +y; it is taken about its middle (its bounds' centre), wherever its
+      file has it. Files sit beside the document, else where the vehicle models are installed
+      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package such as
+      vehicle-humvee can ship them; with `data:`, they are files in that entry's package, loaded as
+      a one-piece data look is (the box until it loads).
+    - **The rig** (`cvc::ariadne::vehicle_rig`), inline or a file of a map, YAML or JSON:
+      `radius:` (or `wheel: { radius: }`), `hubs:` (a list of `[x, y, z]`, or a map whose `xyz:`
+      lists them and whose `order:` names them, so `steer:` may name them), `steer:` (by index or
+      name), `mirror:` and `up:`. Any other key is ignored, so a rig file keeps its provenance
+      beside it (`source:`, `frame:`, `size:`). How the right wheels (y < 0) are drawn: `turn`, the
+      mesh turned half a turn about its upright; `reflect`, the mesh mirrored across its xz plane
+      (for a tread that must run the same way); `none`, as the mesh is.
+    - **The fit.** The rig is fitted to the vehicle on each axis on its own: along x its axles on
+      the vehicle's (its wheelbase over the rig's), across y its track, up z its wheels the
+      vehicle's size (the vehicle's wheel radius over the rig's); its ground, its hubs' mean
+      height less its radius, on the ground under the chassis. Each wheel is the mesh scaled to the
+      vehicle's wheel radius, alike on every axis, at its hub. `scale:`, `yaw:` and `z:` do not
+      apply to a parted look.
+    - **The wheels' motion.** Each frame each wheel is posed from its vehicle's wheels as its
+      plant or its poses have them (`WorldVehicles::wheels`, `parted_wheel_poses` in
+      `vehicle_view.h`): at its hub; at the height of the plant's wheel nearest it on its side (a
+      Jolt wheel on its suspension, a dynamic4w's on the ground under it, a pose entity's on the
+      ground under it); rolled by that wheel's spin; and, when the rig steers it, turned by the
+      steer of the plant's steered wheel nearest it: a Jolt vehicle's and a dynamic4w's own angle
+      for each wheel, a pose entity's its pose's steer. A wheel's spin is the way its chassis has
+      gone over its radius, integrated each physics step, on every plant and for a pose entity
+      (its pose's speed); a Jolt wheel's is its own rotation, slip and all. So a `pose` entity's
+      wheels turn as fast as its host's `speed` says, and steer as its `steer` says: a host
+      passes both with each pose (`entity_pose`, the pose keys or the packed poses).
+    - **Nodes.** The entity's group `vehicle_<id>` holds `vehicle_<id>_chassis` and
+      `vehicle_<id>_wheel<k>` (a group posed each frame, its mesh `vehicle_<id>_wheel<k>_mesh`
+      under it), the wheels in the rig's order. The catalog publishes the parts too:
+      `<vehicles>.archetypes.<id>.look.chassis`, `.look.wheel` and `.look.rig` (the rig's file, or
+      an inline rig's text, `vehicle_rig_text`), so a `vehicle_preview` draws them, at rest.
+    - **Later.** Each wheel's own suspension travel for a `pose` entity: today its wheels stand on
+      the ground under them, so on uneven ground the hubs follow the ground, not a simulated
+      suspension. That needs per-wheel state in `entity_pose` (and the packed poses).
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
@@ -2365,7 +2429,9 @@ scene:
     bodies are. The box look poses each wheel where its plant has it
     (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
     under it, the front ones steered (Ackermann's on a dynamic4w); a pose entity's on the ground
-    under it, steered by its pose's steer and rolled at its speed. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    under it, steered by its pose's steer; every one rolled at its speed (a Jolt wheel by its own
+    rotation). A parted look's wheels move the same way (above); a one-piece model's wheels are
+    the mesh's and do not move. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
