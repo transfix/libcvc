@@ -115,6 +115,8 @@ using city_bundle_reader =
     std::function<std::shared_ptr<const std::string>(const std::string &name)>;
 city_bundle load_city_bundle(app &ctx, const city_bundle_reader &read, const std::string &label,
                              const city_bundle_options &options = {});
+// A reader over the files in directory `dir` (what the directory form reads with).
+city_bundle_reader city_bundle_dir_reader(const std::string &dir);
 
 // ── Version 2: writing (ARIADNE_WORLDS section 18.8) ────────────────────────────────────────────
 //
