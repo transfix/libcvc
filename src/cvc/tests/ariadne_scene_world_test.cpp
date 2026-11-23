@@ -6392,6 +6392,62 @@ TEST(AriadneSceneWorld, AGeneratedWorldsEdgeCanBeAShore) {
   EXPECT_LT(gw->height(-149.9, 0.0), gw->params.water_level_m - 5.0); // the sea at the edge
 }
 
+// A shore-edged world's beach takes the swell's swash all round, as the water node's coast builds
+// it (scene_water_shore): terrain_lab's world and swell (0.8 m, 9 s, travelling toward 200 deg, so
+// the east side is windward and the west the lee). Its surf zone shoals the swell, and the runup
+// carried up the beach from the waterline reaches well over the first dry ground on every side,
+// highest to windward. Before, the sea floor rose almost sheer to a 1 in 50 beach, the waterline's
+// slope came out of half a cell's distance, and the lee had none: 0.18 m to windward, 0.02 in the
+// lee, so the edge's beaches showed no swash.
+TEST(AriadneSceneWorld, AShoreEdgedWorldsBeachTakesTheSwashAllRound) {
+  cvc::app app;
+  cvc::world::generated_world_params p; // terrain_lab's world, its ground alone
+  p.trees = 0;
+  p.rocks = 0;
+  p.buildings = 0;
+  p.city = "none";
+  p.edge = int(cvc::world::world_edge::shore);
+  const cvc::world::generated_world w = cvc::world::generate_world(app, p);
+  ASSERT_NE(w.terrain, nullptr);
+  SceneWaterSpec s;
+  s.swell_height = 0.8;
+  s.swell_period = 9.0;
+  s.swell_dir = 200.0;
+  const std::shared_ptr<const SceneWaterShore> sh = scene_water_shore(*w.terrain, s);
+  ASSERT_NE(sh, nullptr);
+  ASSERT_NE(sh->layer, nullptr);
+  const cvc::ocean::shore_layer &L = *sh->layer;
+  // Walking in from the middle of each side: the waves in the surf zone, and the runup and height
+  // of the first dry ground.
+  struct side {
+    const char *name;
+    double x, y, dx, dy;
+  };
+  const double h = p.half_m;
+  for (const side &sd : {side{"east (windward)", h, 0, -1, 0}, side{"north", 0, h, 0, -1},
+                         side{"west (lee)", -h, 0, 1, 0}, side{"south", 0, -h, 0, 1}}) {
+    double wave = 0.0, runup = -1.0, ground = 0.0;
+    for (double t = 0.0; t < 0.5 * h; t += 1.0) {
+      const double x = sd.x + sd.dx * t, y = sd.y + sd.dy * t, z = w.height(x, y);
+      if (z < p.water_level_m) {
+        wave = std::max(wave, L.sample_field(L.amplitude, x, y));
+        continue;
+      }
+      runup = L.sample_field(L.runup, x, y);
+      ground = z - p.water_level_m;
+      break;
+    }
+    std::printf("[shore edge] %s: surf zone waves to %.2f m, runup %.2f m over the first dry "
+                "ground (%.2f m up)\n",
+                sd.name, wave, runup, ground);
+    EXPECT_GT(wave, 0.08) << sd.name << ": the swell reaches its surf zone";
+    EXPECT_GT(runup, 0.2) << sd.name;
+    EXPECT_GT(runup, ground + 0.15) << sd.name << ": the swash runs up over it";
+    if (sd.dx < 0.0) // the east side, square to the swell
+      EXPECT_GT(runup, 0.8) << sd.name;
+  }
+}
+
 // The world's edge is a live setting (world.edge, the World panel's Edge), seeded from the node's
 // `edge:`: an edit waits for Regenerate like the others, and the new world has that edge, its
 // walls going with it.
