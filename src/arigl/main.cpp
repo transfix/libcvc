@@ -2874,6 +2874,12 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     if (has_flag(o, "--world-thread")) // D3: the world steps while the frame renders and sleeps
       rt.set_world_thread(true);
 #else
+    // A browser steps the world on the frame's thread (single-threaded or not, its main thread
+    // must not wait on a worker's step), as it does without the flag; the scene's max_lag is then
+    // the catch-up a frame may run.
+    if (has_flag(o, "--world-thread"))
+      std::fprintf(stderr, "arigl: --world-thread: a browser steps the scene's world on the "
+                           "frame's thread\n");
     // $CVC_ARIGL_YIELD=timeout (the page's ?yield=timeout) yields on a 0 ms timer instead of the
     // next animation frame: the pacing's A/B.
     const char *yield_env = std::getenv("CVC_ARIGL_YIELD");

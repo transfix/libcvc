@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cvc/core/namespace.h>
+#include <cvc/core/sim_tick.h> // kSimCatchup: options::max_lag
 #include <functional>
 #include <memory>
 #include <string>
@@ -51,14 +52,18 @@ public:
   struct options {
     // After each step, on the worker, under the lock: a view's pose_tracker::capture.
     std::function<void()> capture;
-    // How far (quanta) the world may fall behind `leader` before behind() tells the host to hold
-    // its clock: a world too heavy for its speed runs slower, as it would on the frame's thread,
-    // instead of drifting further behind. 0.25 s at 120 Hz.
-    std::uint64_t max_lag = 30;
+    // How far the world may fall behind `leader` before behind() tells the host to hold its
+    // clock (s of world time at 1x, growing with the speed as the clock's stall guard does): a
+    // world too heavy for its speed runs slower, as it would on the frame's thread, instead of
+    // drifting further behind. A scene's `clock: { max_lag }` (SceneClock::max_lag), which on the
+    // frame's thread is the catch-up a frame may run; cvc::kSimCatchup, 0.25 s, by default.
+    double max_lag = cvc::kSimCatchup;
   };
 
   // Throws std::runtime_error (saying why) when the holon cannot take the world: a build without
-  // threads (single-thread wasm) or without Jolt, or a world whose quantum is no holon rate.
+  // threads (single-thread wasm) or without Jolt, a world whose quantum is no holon rate, or a
+  // max_lag that is no catch-up (cvc::sim_catchup_valid). Without one the host steps the world on
+  // its frame's thread, as every single-threaded host (native or browser) does.
   world_worker(SceneWorld &world, const cvc::world_clock &leader, options opt);
   world_worker(SceneWorld &world, const cvc::world_clock &leader);
   // Stops and joins the thread, then hands the world back synchronous (and published).
@@ -85,9 +90,16 @@ public:
   };
   frame_lock lock() { return frame_lock(*this); }
 
+  // Whether this build can step a world on a thread: false in single-thread wasm, where the
+  // constructor throws and the world stays on its host's frame.
+  static bool available();
+
   // Quanta the world has still to run to reach `leader`'s tick.
   std::uint64_t lag() const;
-  // lag() at or past max_lag: the host holds its clock (advances it by no time) this frame.
+  // max_lag in quanta at `leader`'s speed now (cvc::sim_catchup_quanta_at).
+  std::uint64_t max_lag_quanta() const;
+  // lag() at or past max_lag_quanta(): the host holds its clock (advances it by no time) this
+  // frame.
   bool behind() const;
   // Steps the worker has run.
   std::uint64_t steps() const;

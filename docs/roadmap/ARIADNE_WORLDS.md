@@ -986,8 +986,10 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   that writes, and the host calls `publish_due()` (its syncs and telemetry) under the lock the
   steps take. The host holds that lock for its frame, and the worker yields to a waiting host
   between steps. A restart (the clock back to tick 0) anchors the world on the holon's clock again
-  at once. A world behind its clock by `max_lag` (0.25 s) holds the host's clock
-  (`SceneClockDriver::hold`). arigl runs it with `--world-thread` (`AriRuntime::set_world_thread`);
+  at once. A world behind its clock by the scene's `clock: { max_lag }` (0.25 s by default, at 1x
+  and growing with the speed) holds the host's clock (`SceneClockDriver::hold`). On the frame's
+  thread, as every single-threaded host (native or browser) steps it, the same setting is the
+  catch-up one frame may run, so a document bounds its world's lag the same way on every host. arigl runs it with `--world-thread` (`AriRuntime::set_world_thread`);
   the frame publishes and draws from the poses the worker captured. Tests:
   `AriadneWorldWorker.StepsTheWorldAsTheHostsFollowWould` (24 kinematic and 4 Jolt vehicles,
   through a restart, the same poses bit for bit as the host's own follow, the per-entity keys

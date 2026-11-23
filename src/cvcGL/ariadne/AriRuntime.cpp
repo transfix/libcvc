@@ -266,6 +266,8 @@ public:
     world_thread_tried_ = true;
     RealizedScene *r = &realized_; // the adapter's: it doesn't move while the worker runs
     ari::world_worker::options o;
+    if (realized_.clock.max_lag > 0.0) // the scene's clock: { max_lag }, else kSimCatchup
+      o.max_lag = realized_.clock.max_lag;
     o.capture = [r] { // on the worker, under the lock: the binding may be a restart's new one
       if (r->physics_binding)
         r->physics_binding->tracker().capture();

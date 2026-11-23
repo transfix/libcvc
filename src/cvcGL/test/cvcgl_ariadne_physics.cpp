@@ -1981,6 +1981,10 @@ void test_world_worker_drawn() {
     std::printf("  skipped: no YAML or no Jolt in this build\n");
     return;
   }
+  if (!cvc::ariadne::world_worker::available()) {
+    std::printf("  skipped: no threads (the world steps on the frame's thread)\n");
+    return;
+  }
   struct result {
     cvc::physics::vec3 crate, ball;
     double drawn_z = 0.0;

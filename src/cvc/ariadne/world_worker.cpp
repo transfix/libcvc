@@ -20,6 +20,7 @@
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_worker.h>
+#include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/physics/world.h>
 #include <mutex>
@@ -136,6 +137,10 @@ world_worker::world_worker(SceneWorld &world, const cvc::world_clock &leader, op
   throw std::runtime_error("world_worker: this build has no threads");
 #else
   impl &d = *_impl;
+  if (!cvc::sim_catchup_valid(d.opt.max_lag))
+    throw std::runtime_error("world_worker: max_lag is " + std::to_string(d.opt.max_lag) +
+                             " s; it is more than 0 and at most " +
+                             std::to_string(static_cast<int>(cvc::kSimCatchupMax)) + " s");
   const double dt = world.world().config().fixed_dt;
   if (std::fabs(dt - leader.fixed_dt()) > 1e-12)
     throw std::runtime_error("world_worker: the world steps " + std::to_string(dt) +
@@ -219,12 +224,25 @@ world_worker::frame_lock::frame_lock(frame_lock &&o) noexcept = default;
 
 world_worker::frame_lock &world_worker::frame_lock::operator=(frame_lock &&o) noexcept = default;
 
+bool world_worker::available() {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  return false;
+#else
+  return true;
+#endif
+}
+
 std::uint64_t world_worker::lag() const {
   const std::uint64_t t = _impl->leader.tick(), at = _impl->at.load();
   return t > at ? t - at : 0;
 }
 
-bool world_worker::behind() const { return lag() >= _impl->opt.max_lag; }
+std::uint64_t world_worker::max_lag_quanta() const {
+  const cvc::world_clock &l = _impl->leader;
+  return cvc::sim_catchup_quanta_at(_impl->opt.max_lag, l.fixed_dt(), l.scale());
+}
+
+bool world_worker::behind() const { return lag() >= max_lag_quanta(); }
 
 std::uint64_t world_worker::steps() const { return _impl->steps.load(); }
 

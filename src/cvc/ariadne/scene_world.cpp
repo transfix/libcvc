@@ -257,6 +257,12 @@ cvc::world_clock::step_result SceneClockDriver::drive(double wall_dt) {
       wc.set_mode(cvc::world_clock::mode::paused);
     else if (wc.current_mode() == cvc::world_clock::mode::paused)
       wc.set_mode(cvc::world_clock::mode::live);
+    // The scene's max_lag is the catch-up one frame may run, at 1x and growing with the speed; a
+    // world on a worker trails the clock by as much at most (world_worker::options::max_lag).
+    if (d.clock.max_lag > 0.0) {
+      wc.set_max_steps_per_advance(cvc::sim_catchup_quanta(d.clock.max_lag, wc.fixed_dt()));
+      wc.set_cap_scales_with_rate(true);
+    }
     d.binding = std::make_unique<cvc::world_clock_binding>(d.app, wc, scene_clock_keys(d.clock));
   }
   // Wall delta: a caller's fixed dt (deterministic capture, a test) when non-negative, else the

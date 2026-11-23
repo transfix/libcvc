@@ -8004,6 +8004,8 @@ TEST(AriadneWorldWorker, StepsTheWorldAsTheHostsFollowWould) {
   REQUIRE_YAML();
   if (!jolt())
     GTEST_SKIP() << "a holon's world needs Jolt";
+  if (!world_worker::available())
+    GTEST_SKIP() << "no threads: the world steps on its host's frame";
   std::string doc = fleet_bench_doc("");
   const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
   doc.insert(
@@ -8096,6 +8098,74 @@ TEST(AriadneWorldWorker, StepsTheWorldAsTheHostsFollowWould) {
   EXPECT_EQ(threaded.stats, plain.stats);
   EXPECT_EQ(threaded.steps, 40u * cvc::kSimTickQuanta);
   EXPECT_GE(threaded.captures, static_cast<int>(threaded.steps));
+}
+
+// A scene's clock: { max_lag } on the frame's thread (every single-threaded host, native or
+// browser): the catch-up one frame may run, at 1x and growing with the speed, the rest of a
+// stall dropped and said. Unset, the clock keeps the catch-up its host gave it.
+TEST(AriadneSceneWorld, TheScenesMaxLagIsTheCatchUpAFrameMayRun) {
+  const auto stall = [](double max_lag, double scale) {
+    cvc::app app;
+    SceneClock c;
+    c.present = true;
+    c.scale = scale;
+    c.max_lag = max_lag;
+    SceneClockDriver clock(app, c);
+    clock.drive(0.0);        // binds the clock
+    return clock.drive(1.0); // a frame a second late
+  };
+  const cvc::world_clock::step_result at1 = stall(0.1, 1.0);
+  EXPECT_EQ(at1.steps, 12) << "0.1 s at 120 Hz";
+  EXPECT_EQ(at1.steps + at1.dropped_steps, 120u);
+  const cvc::world_clock::step_result fast = stall(0.1, 3.6);
+  EXPECT_EQ(fast.steps, 48) << "four times as many at 3.6x";
+  EXPECT_GT(fast.dropped_steps, 0u);
+  EXPECT_EQ(stall(0.0, 1.0).steps, cvc::world_clock::config{}.max_steps_per_advance)
+      << "unset: the clock's own";
+}
+
+// The same max_lag on a worker: how far the world may trail its clock before behind() tells the
+// host to hold its clock, growing with the speed. A lag that is no catch-up is refused, and the
+// world stays on its host's thread; so does every world in a build without threads.
+TEST(AriadneWorldWorker, TheWorldMayTrailItsClockByMaxLag) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "a holon's world needs Jolt";
+  LoadResult r = fresh_load(kScene);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", nullptr);
+  ASSERT_NE(w, nullptr);
+  cvc::world_clock &wc = app.world_clock();
+  if (!world_worker::available()) {
+    EXPECT_THROW({ world_worker none(*w, wc); }, std::runtime_error);
+    EXPECT_FALSE(w->deferred());
+    GTEST_SKIP() << "no threads: the world steps on its host's frame";
+  }
+  for (const double bad : {0.0, -1.0, cvc::kSimCatchupMax + 1.0, std::nan("")}) {
+    world_worker::options o;
+    o.max_lag = bad;
+    EXPECT_THROW({ world_worker refused(*w, wc, o); }, std::runtime_error) << bad;
+    EXPECT_FALSE(w->deferred()) << "a refused worker leaves the world on its host";
+  }
+  world_worker::options o;
+  o.max_lag = 0.05;
+  world_worker ww(*w, wc, o);
+  EXPECT_EQ(ww.max_lag_quanta(), 6u) << "0.05 s at 120 Hz";
+  {
+    const world_worker::frame_lock held = ww.lock(); // the worker steps nothing while it is held
+    wc.advance_ticks(5);
+    EXPECT_EQ(ww.lag(), 5u);
+    EXPECT_FALSE(ww.behind());
+    wc.advance_ticks(1);
+    EXPECT_TRUE(ww.behind()) << "6 quanta behind: the host holds its clock";
+    wc.set_scale(3.6);
+    EXPECT_EQ(ww.max_lag_quanta(), 24u) << "four times as many at 3.6x";
+    EXPECT_FALSE(ww.behind());
+  }
+  EXPECT_TRUE(ww.wait_caught_up(60.0)) << ww.error();
+  EXPECT_EQ(ww.lag(), 0u);
+  EXPECT_EQ(ww.steps(), 6u);
 }
 
 TEST(AriadneWorldGym, KinematicBoxesTouchWhenTheyOverlap) {

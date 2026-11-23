@@ -5631,11 +5631,19 @@ tick for tick, one quantum at a time, so the world takes the same steps in the s
 frame holds the world's lock from its start to its end: it pumps the document, publishes what
 the worker ran (the `physics.stats` and vehicle keys are written on the frame's thread, as
 always), and draws the bodies from the poses the worker captured; the worker steps while the
-frame renders and waits. A world more than 0.25 s behind its clock holds the clock, so it runs
-slower than its speed rather than further behind, as it would on the frame's thread. A world the
-holon can't take (no Jolt, a build without threads) stays on the frame's thread, and arigl says
-so once. Snapshots, `--terminal`, the browser, the headless hosts, the gym and arisrv step on
-their own thread as before, bit for bit. It is the fleets roadmap's D3
+frame renders and waits. A world further behind its clock than the scene allows holds the clock,
+so it runs slower than its speed rather than further behind, as it would on the frame's thread.
+How far is a setting, `scene: clock: { max_lag: <s> }`: seconds of world time at 1x, growing with
+the speed as the clock's catch-up does (by ceil(speed) past 1x), more than 0 and at most 10;
+0.25 s (`cvc::kSimCatchup`) by default. A world the holon can't take (no Jolt, a build without
+threads) stays on the frame's thread, and arigl says so once. Snapshots, `--terminal`, the
+browser (single-threaded or not: its main thread must not wait on a worker's step, so arigl says
+so and ignores the flag), the headless hosts, the gym and arisrv step on their own thread as
+before, bit for bit. On the frame's thread (arigl without the flag, snapshots, `--terminal`, the
+browser, the headless `AppRuntime`) `max_lag` is the catch-up one frame may run (the clock's stall
+guard: a stall's time past it is dropped and counted in `sim.dropped`), so the same document
+bounds its world's lag the same way on each of them. The gym runs the steps it is asked for, and
+the relay keeps its holon's own catch-up. It is the fleets roadmap's D3
 ([FLEETS_AND_NIGHT_ROADMAP.md](roadmap/FLEETS_AND_NIGHT_ROADMAP.md)), and OW7's first part
 ([ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §18.2).
 
