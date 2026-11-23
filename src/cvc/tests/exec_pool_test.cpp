@@ -1925,8 +1925,9 @@ TEST(ExecPoolContinuous, AGroupWokenByABusyWorkerIsPumpedByAnIdleOne) {
 }
 
 // S-M3 (R2b): a callback queued for the attaching thread must not freeze a busy group while that
-// thread is busy elsewhere (not in the pool): the counter ends on the workers meanwhile; the
-// callback runs at the next service.
+// thread is busy elsewhere (not in the pool): the workers go on pumping the counter meanwhile (a
+// frozen group stops at its first pump, which queued the callback); the callback runs at the next
+// service. The case counts pumps, not time: a slow runner takes longer to reach them.
 TEST(ExecPoolContinuous, AQueuedCallbackDoesNotFreezeABusyGroup) {
   cvc::app app;
   share_locks(app);
@@ -1944,19 +1945,23 @@ TEST(ExecPoolContinuous, AQueuedCallbackDoesNotFreezeABusyGroup) {
   g.execute(std::string("(+ 1 2)"), quick); // ends in the first pump: its callback is queued here
   execute_options slow;
   slow.env = env_with_fin(fin);
-  const int pid = g.execute(counting_then_fin(20000), slow); // runs over many pumps
+  const int pid = g.execute(counting_then_fin(5000), slow); // runs over hundreds of pumps
   pool.attach(g);
-  const auto t0 = clock_type::now(); // busy elsewhere, servicing nothing, for up to 10 s
-  while (!fin.load() && clock_type::now() - t0 < std::chrono::seconds(10))
+  // Busy elsewhere, servicing nothing, until the workers have pumped the group 100 times or it
+  // finished (30 s only as a hang guard).
+  constexpr int kPumpsAlone = 100;
+  const auto t0 = clock_type::now();
+  while (!fin.load() && count.n.load() < kPumpsAlone &&
+         clock_type::now() - t0 < std::chrono::seconds(30))
     std::this_thread::yield();
-  const bool ran_alone = fin.load();
   const int pumps_alone = count.n.load();
+  const bool ran_alone = fin.load() || pumps_alone >= kPumpsAlone;
   const bool called_alone = called.load();
   const bool done = drive(pool, [&] { return fin.load() && called.load(); }, 30.0);
   pool.detach(g);
   std::printf("S-M3: %d pumps while the host serviced nothing\n", pumps_alone);
   ASSERT_TRUE(done);
-  EXPECT_EQ(result_of(g, pid), "20000");
+  EXPECT_EQ(result_of(g, pid), "5000");
   EXPECT_FALSE(called_alone) << "the callback ran off its attaching thread's service";
   EXPECT_TRUE(ran_alone) << "the busy group stopped being pumped once a callback of it was queued "
                          << "for its attaching thread (" << pumps_alone << " pumps)";
@@ -2512,7 +2517,8 @@ TEST(ExecPoolContinuous, AGroupFailingAfterAnotherIsTornDownIsWork) {
 // K-4: the attaching thread pumping its own caller-pumped group inside pump_host is not waiting:
 // a worker group with a callback queued for it is not handed over meanwhile. The host's native
 // blocks until the busy worker group has been pumped 20 more times (10 s only as a hang guard); a
-// handed-over group froze until the native's guard ran out.
+// handed-over group froze until the native's guard ran out. The busy group's count only has to
+// outlast those pumps (it runs over thousands); the rest of it is run out after.
 TEST(ExecPoolContinuous, AHostPumpingItsOwnGroupDoesNotFreezeABusyOne) {
   cvc::app app;
   share_locks(app);
@@ -2546,7 +2552,7 @@ TEST(ExecPoolContinuous, AHostPumpingItsOwnGroupDoesNotFreezeABusyOne) {
   busy.execute(std::string("(+ 1 2)"), quick); // its callback is queued for this thread
   execute_options eo;
   eo.env = env_with_fin(fin);
-  busy.execute(counting_then_fin(200000), eo); // runs over many pumps
+  busy.execute(counting_then_fin(20000), eo); // runs over thousands of pumps
   pool.attach(slow);
   pool.attach(busy);
   pool.pump_host(kInf); // pumps slow: its native waits on busy's progress
