@@ -27,6 +27,7 @@
 #include <cvc/ariadne/loader.h>         // load_file: the world document
 #include <cvc/ariadne/scene_world.h>    // world_replica's world
 #include <cvc/ariadne/uri.h>            // resolve
+#include <cvc/ariadne/world_pack.h>     // world_replica's packs
 #include <cvc/ariadne/world_vehicles.h> // vehicle_ground_height
 #include <cvc/core/app.h>
 #include <cvc/core/sim_tick.h> // the room's rate (on_room_clock)
@@ -784,12 +785,34 @@ bool entity_playout::state(std::uint64_t id, cvc::physics::body_state &out) cons
   return true;
 }
 
-world_replica::world_replica() {
+world_replica::world_replica() : _packs(world_pack_dirs_from_env()) {
   // Its own epoch, so its stamps are never the room scene's (holon::set_statics takes either).
   std::random_device rd;
   do
     _stamp.epoch = ((static_cast<std::uint64_t>(rd()) << 21) ^ rd()) & ((1ull << 53) - 1);
   while (_stamp.epoch == 0);
+}
+
+void world_replica::add_pack(const std::string &dir) { _packs.push_back(dir); }
+
+std::string world_replica::from_packs(const std::string &sha256, std::string &why) const {
+  for (const std::string &dir : _packs) {
+    try {
+      const world_pack pack(dir);
+      const std::string path = pack.find(sha256);
+      if (path.empty())
+        continue;
+      std::string bad;
+      if (!pack.verify(&bad)) {
+        why += (why.empty() ? "" : "; ") + std::string("the pack ") + dir + " has it, but " + bad;
+        continue;
+      }
+      return path;
+    } catch (const std::exception &e) {
+      why += (why.empty() ? "" : "; ") + std::string(e.what());
+    }
+  }
+  return {};
 }
 
 world_replica::~world_replica() = default;
@@ -853,12 +876,27 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
       _status = "the room names no world document";
     } else {
       const UriResult found = resolve(app, src.uri);
+      std::string path, why, pack_note;
       if (!found.ok || found.canonical.empty()) {
-        _status = src.uri + ": not here" + (found.error.empty() ? "" : " (" + found.error + ")");
+        why = "not here" + (found.error.empty() ? "" : " (" + found.error + ")");
       } else if (conference::file_sha256(found.canonical) != src.sha256 || src.sha256.empty()) {
-        _status = src.uri + ": not the relay's document (its SHA-256 differs)";
+        why = "not the relay's document (its SHA-256 differs)";
       } else {
-        LoadResult r = load_file(app, found.canonical);
+        path = found.canonical;
+      }
+      if (path.empty() && !src.sha256.empty() && !_packs.empty()) {
+        // The relay's bytes by their hash, in a pack this client was pointed at (OW5k).
+        std::string packs_why;
+        path = from_packs(src.sha256, packs_why);
+        if (!path.empty())
+          pack_note = " (from a world pack: " + path + ")";
+        else
+          why += packs_why.empty() ? "; in no world pack" : "; " + packs_why;
+      }
+      if (path.empty()) {
+        _status = src.uri + ": " + why;
+      } else {
+        LoadResult r = load_file(app, path);
         if (!r.ok) {
           _status = src.uri + ": " + r.error;
         } else {
@@ -868,7 +906,7 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
           // Its keys (the world switch, a dataset's) under a prefix of its own, apart from the
           // client's document.
           _world = SceneWorld::from_scene(app, r.scene, "world_replica", "", &warnings);
-          _status = src.uri + (_world ? ": built" : ": its world could not be made");
+          _status = src.uri + (_world ? ": built" + pack_note : ": its world could not be made");
           const std::function<void(const std::vector<SceneNode> &)> ids =
               [&](const std::vector<SceneNode> &nodes) {
                 for (const SceneNode &n : nodes) {

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +33,7 @@
 #include <cvc/ariadne/server_document.h>
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_gym.h>
+#include <cvc/ariadne/world_pack.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
@@ -8256,6 +8258,126 @@ TEST(AriadneOneWorld, AClientBuildsTheWorldFromTheRelaysDocument) {
   EXPECT_NE(differs.status.find("SHA-256"), std::string::npos) << differs.status;
   EXPECT_NEAR(differs.z, 0.0, 0.1) << "not the relay's document: the room scene's statics";
   std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A world pack (OW5k, section 12): a directory with an index of its files' SHA-256 and sizes. A
+// client that does not ship the relay's document finds it there by the hash the room names, and
+// builds the same world from it. A pack whose files do not match its index is refused, whatever
+// it holds.
+TEST(AriadneOneWorld, AClientFindsTheRelaysDocumentInAWorldPack) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5k_world_pack";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  const fs::path pack = dir / "pack";
+  fs::create_directories(pack / "worlds");
+  {
+    std::ofstream out(pack / "worlds" / "dome.ari", std::ios::binary);
+    out << kDomeWorld;
+  }
+  {
+    std::ofstream out(pack / "README.txt", std::ios::binary);
+    out << "the dome, as the relay runs it\n";
+  }
+  const std::string sha = conference::file_sha256((pack / "worlds" / "dome.ari").string());
+  ASSERT_EQ(write_world_pack_index(pack.string()), 2u);
+  {
+    const world_pack p(pack.string());
+    ASSERT_EQ(p.entries().size(), 2u);
+    EXPECT_EQ(p.entries()[0].path, "README.txt") << "sorted by path";
+    EXPECT_EQ(p.entries()[1].path, "worlds/dome.ari");
+    EXPECT_EQ(p.entries()[1].sha256, sha);
+    EXPECT_EQ(p.entries()[1].size, std::string(kDomeWorld).size());
+    const std::string found = p.find(sha);
+    EXPECT_TRUE(fs::equivalent(found, pack / "worlds" / "dome.ari"));
+    std::string upper = sha;
+    for (char &c : upper)
+      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    EXPECT_EQ(p.find(upper), found) << "either case";
+    EXPECT_EQ(p.find(std::string(64, '0')), "");
+    std::string why;
+    EXPECT_TRUE(p.verify(&why)) << why;
+  }
+
+  // The room names a document this client does not ship (no such stock world here).
+  cvc::app app;
+  register_world_block(app);
+  const std::string room = "dome";
+  conference::write_room_world_source(app, room, {"cvc://worlds/ow5k-unshipped-dome.ari", sha});
+  const auto pump = [&](world_replica &w) {
+    for (int i = 0; i < 5 && !w.ready(); ++i)
+      w.pump(app, room);
+  };
+  {
+    world_replica none;
+    pump(none);
+    EXPECT_FALSE(none.ready()) << none.status();
+    EXPECT_NE(none.status().find("not here"), std::string::npos) << none.status();
+  }
+  world_replica packed;
+  packed.add_pack((dir / "elsewhere").string()); // not a pack: passed over
+  packed.add_pack(pack.string());
+  pump(packed);
+  std::printf("  from a world pack: %s (%zu statics)\n", packed.status().c_str(),
+              packed.statics().size());
+  ASSERT_TRUE(packed.ready()) << packed.status();
+  EXPECT_NE(packed.status().find("from a world pack"), std::string::npos) << packed.status();
+  EXPECT_FALSE(packed.statics().empty()) << "the dome's terrain";
+
+  // A file that is not what the index says: the pack is refused, and the replica says why.
+  {
+    std::ofstream out(pack / "README.txt", std::ios::binary | std::ios::app);
+    out << "edited\n";
+  }
+  {
+    std::string why;
+    EXPECT_FALSE(world_pack(pack.string()).verify(&why));
+    EXPECT_NE(why.find("README.txt"), std::string::npos) << why;
+  }
+  world_replica tampered;
+  tampered.add_pack(pack.string());
+  pump(tampered);
+  EXPECT_FALSE(tampered.ready());
+  EXPECT_NE(tampered.status().find("README.txt"), std::string::npos) << tampered.status();
+
+  // Indexes it refuses: a path out of the pack, a bad hash, no index at all.
+  const fs::path bad = dir / "bad";
+  fs::create_directories(bad);
+  const auto index = [&](const std::string &text) {
+    std::ofstream out(bad / world_pack::kIndex, std::ios::binary | std::ios::trunc);
+    out << text;
+  };
+  index(sha + " 10 ../outside.ari\n");
+  EXPECT_THROW(world_pack(bad.string()), std::runtime_error) << "a path out of the pack";
+  index("abc 10 a.ari\n");
+  EXPECT_THROW(world_pack(bad.string()), std::runtime_error) << "not a SHA-256";
+  index("# only a comment\n\n");
+  EXPECT_TRUE(world_pack(bad.string()).entries().empty());
+  EXPECT_THROW(world_pack((dir / "elsewhere").string()), std::runtime_error) << "no pack there";
+
+  // CVC_WORLD_PACKS names packs as PATH names directories.
+#ifdef _WIN32
+  _putenv_s("CVC_WORLD_PACKS", "C:/packs/a;;C:/packs/b");
+  const std::vector<std::string> want{"C:/packs/a", "C:/packs/b"};
+#else
+  setenv("CVC_WORLD_PACKS", "/packs/a::/packs/b", 1);
+  const std::vector<std::string> want{"/packs/a", "/packs/b"};
+#endif
+  EXPECT_EQ(world_pack_dirs_from_env(), want);
+  {
+    world_replica from_env;
+    EXPECT_EQ(from_env.packs(), want);
+  }
+#ifdef _WIN32
+  _putenv_s("CVC_WORLD_PACKS", "");
+#else
+  unsetenv("CVC_WORLD_PACKS");
+#endif
+  EXPECT_TRUE(world_pack_dirs_from_env().empty());
   fs::remove_all(dir, ec);
 }
 
