@@ -368,6 +368,21 @@ void headless(const fs::path &dir) {
     s.tick();
     check(val(app, lk + ".info.slices") == "3", "and again when it changes",
           val(app, lk + ".info.slices"));
+    // Writes closer together than the clock's resolution (15.6 ms on a Windows VM) share a
+    // lastMod, so the lab also compares the stack it holds with the one the key holds.
+    cvc::state &key = cvc::state::instance(app)(s.sg.getStatePrefix().empty()
+                                                    ? std::string("demo.stack")
+                                                    : s.sg.getStatePrefix() + ".demo.stack");
+    std::string slices;
+    bool every = true;
+    for (int i = 3; i < 23 && every; ++i) {
+      one.add(i, "dot", circle(0, 0, 1));
+      key.data(boost::any(std::make_shared<const cvc::contour_stack>(one)));
+      s.tick();
+      slices = val(app, lk + ".info.slices");
+      every = slices == std::to_string(i + 1);
+    }
+    check(every, "and on every write, however close together", slices);
   }
 
   // Two apps: the type is the app's that registered it, and two apps tile apart.

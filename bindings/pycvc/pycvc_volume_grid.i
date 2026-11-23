@@ -419,7 +419,7 @@ def _grid_pick_mods(p, v):
 # phase by name or value, mods as the pick.mods text (or shift= / ctrl= / alt=).
 _pycvc_keywords(grid_pick, ["phase", "axis", "ijk", "inside", "shift", "ctrl", "alt", "mods"],
                 {"phase": _grid_pick_phase, "mods": _grid_pick_mods})
-_pycvc_keywords(volume_grid_session, ["keys", "transfer_function", "classes"])
+_pycvc_keywords(volume_grid_session, ["keys", "transfer_function", "classes", "contours"])
 
 
 def read_point_class_rows(rows, variable=0, timestep=0, problems=None):

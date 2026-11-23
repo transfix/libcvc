@@ -1,0 +1,67 @@
+# molecule_skeleton.ari — golden: the skeleton demo's molecule (examples/ariadne/documents/
+# skeleton_lab.ari) at a fixed size. A mesh_lab node reads PDB entry 1GRL (a GroEL subunit,
+# examples/data/molecules) and makes its surface: its heavy atoms' blur map (cvc::mol::blur,
+# blobbiness -0.2 on a 2 Å grid) and that map's isosurface at 10. init: asks for the skeleton of the
+# surface as it is, not decimated as the demo does it, so every platform skeletonizes the same
+# points. The strands (green, the blue stars of small clusters) and the sheets are drawn inside the
+# see-through surface, and a viewport shows the skeleton alone. The harness waits for the run
+# (RealizedScene::pending_work) before the capture.
+
+meta:
+  name: golden molecule skeleton
+  min_libcvc: 4.0.0
+
+customs:
+  - node: mesh_lab
+    required: true
+
+init: |
+  (state-set "graphics.root.children.molecule.mesh_ops.request" "skeleton")
+
+# The main view from a little further out than the scene's own bounds, on the first tick (after
+# the host framed the realized scene).
+on_tick: |
+  (if (!= (state-get "skel.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-190 -75 -5 75 75 105")
+             (state-set "skel.opened" "1")))
+
+windows:
+  - window: Skeleton
+    id: skeleton
+    pos: [16, 16]
+    size: [540, 462]
+    children:
+      - text: "skeleton"
+        bind: graphics.root.children.molecule.mesh_ops.skeleton.status
+      - text: "strands"
+        bind: graphics.root.children.molecule.mesh_ops.skeleton.info.strands
+      - text: "sheets"
+        bind: graphics.root.children.molecule.mesh_ops.skeleton.info.sheets
+      - progress: progress
+        bind: graphics.root.children.molecule.mesh_ops.skeleton.progress
+        hi: 100
+        overlay: graphics.root.children.molecule.mesh_ops.skeleton.phase
+      - type: viewport
+        view: skeleton
+        show: [skeleton]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        zoom: 0.6
+        width: 500
+        height: 300
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: molecule
+      type: mesh_lab
+      source: { file: ../../../../examples/data/molecules/1grl.pdb }
+      blobbiness: -0.2
+      resolution: 2.0
+      isovalue: 10
+      fit: { height: 100 }
+      material: { color: [0.80, 0.86, 0.92], ambient: 0.22, diffuse: 0.9, opacity: 0.3 }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

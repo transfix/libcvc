@@ -24,7 +24,7 @@
 // skeletonize() and build_simple_skel() as one coroutine over the cocone core (cocone.h), with
 // the call's own context (skeleton_context) in place of the legacy globals.
 
-#include "cocone.h"
+#include "skeleton_stages.h"
 
 #include <algorithm>
 #include <atomic>

@@ -138,6 +138,20 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
     w.set_flag({k, "drivable"}, e.drivable);
     w.set_double({k, "reach"}, e.reach);
     w.set({k, "controls"}, e.controls);
+    w.set({k, "avatar"}, e.avatar);
+    const kinematic_drive &kd = e.drive;
+    w.set({k, "drive", "tick_steps"}, std::to_string(kd.tick_steps));
+    w.set({k, "drive", "nsub"}, std::to_string(kd.nsub));
+    w.set({k, "drive", "phase"}, std::to_string(static_cast<unsigned long long>(kd.phase)));
+    w.set_double({k, "drive", "wheelbase"}, kd.wheelbase);
+    w.set_double({k, "drive", "lock"}, kd.lock);
+    w.set_double({k, "drive", "vmax"}, kd.vmax);
+    w.set_double({k, "drive", "a_max"}, kd.a_max);
+    w.set_flag({k, "drive", "reverse"}, kd.allow_reverse);
+    w.set_double({k, "drive", "rear_x"}, kd.rear_x);
+    w.set_double({k, "drive", "max_steer"}, kd.max_steer);
+    w.set_double({k, "drive", "max_accel"}, kd.max_accel);
+    w.set_double({k, "drive", "max_decel"}, kd.max_decel);
     w.set_flag({k, "present"}, true); // last: a reader that sees it present sees its fields
     written.insert(e.id);
   }
@@ -179,6 +193,20 @@ std::vector<room_entity> read_room_entities(cvc::app &app, const std::string &ro
     e.drivable = r.flag({k, "drivable"}, false);
     e.reach = r.number({k, "reach"}, 3.0);
     e.controls = r.text({k, "controls"});
+    e.avatar = r.text({k, "avatar"});
+    kinematic_drive &kd = e.drive;
+    kd.tick_steps = static_cast<int>(r.number({k, "drive", "tick_steps"}, 0.0));
+    kd.nsub = static_cast<int>(r.number({k, "drive", "nsub"}, 1.0));
+    kd.phase = std::strtoull(r.text({k, "drive", "phase"}).c_str(), nullptr, 10);
+    kd.wheelbase = r.number({k, "drive", "wheelbase"}, 0.0);
+    kd.lock = r.number({k, "drive", "lock"}, 0.0);
+    kd.vmax = r.number({k, "drive", "vmax"}, 0.0);
+    kd.a_max = r.number({k, "drive", "a_max"}, 0.0);
+    kd.allow_reverse = r.flag({k, "drive", "reverse"}, true);
+    kd.rear_x = r.number({k, "drive", "rear_x"}, 0.0);
+    kd.max_steer = r.number({k, "drive", "max_steer"}, 0.6);
+    kd.max_accel = r.number({k, "drive", "max_accel"}, 3.0);
+    kd.max_decel = r.number({k, "drive", "max_decel"}, 7.0);
     out.push_back(std::move(e));
   }
   return out;
@@ -204,6 +232,8 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
     e.color = info.spec.color;
     e.color2 = info.spec.color2;
     e.base_z = info.ground_z - info.z;
+    if (const auto av = info.spec.metadata.find("avatar"); av != info.spec.metadata.end())
+      e.avatar = av->second;
     for (const vehicle_archetype &a : vehicles.archetypes()) {
       if (a.id != info.spec.archetype)
         continue;
@@ -217,6 +247,8 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
         const physics::vehicle_desc d = vehicle_desc_of(a, info.spec.mass, info.spec.max_speed);
         e.size = {2.0 * d.half_extents.x, 2.0 * d.half_extents.y, 2.0 * d.half_extents.z};
         e.wheels = {d.wheelbase(), d.track(), d.axles.empty() ? 0.0 : d.axles.front().wheel_radius};
+        if (info.posed) // placed by an outside simulation: its model hangs its stand height below
+          e.base_z = -stand_height(d);
         if (vehicle_plant_floats(info.plant)) { // a boat's model spans its overall length
           const physics::dyn_boat_desc b = boat_desc_of(a, info.spec.mass, info.spec.max_speed);
           if (b.length_overall > 0.0)
@@ -226,6 +258,7 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
       }
       break;
     }
+    vehicles.kinematics(info.id, e.drive); // the kinematic plant's, for a client to run
     out.push_back(std::move(e));
   }
   std::sort(out.begin(), out.end(),

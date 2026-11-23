@@ -1,0 +1,106 @@
+# volume_grid_contours.ari — VolumeGridRover's contours as an Ariadne document: the signed distance
+# field of the embedded Stanford bunny in a `volume_grid` node, laid out by the volume_grid component
+# on its Contours tab (docs/ARIADNE.md §5.4, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4, P10).
+#
+# On load the document traces the field's zero level on every third z plane into the object
+# `bunny` (the node's trace request: VolumeGridRover's isocontouring), and the contour tiler tiles
+# those curves into a surface in the 3D view (auto_tile, a sliced task: the views stay live while
+# it runs). The object `drawn` is yours: pick it in the Objects list and draw on any plane.
+#
+# In the slice view, with the Contours tool: click to add a point of the current object (at the end
+# of the curve being drawn, else at the nearer end of its open curve on that plane, else a new
+# curve), click the first point again to close the curve, Shift+click to start another, drag a
+# point to move it, drag elsewhere to select points in a rubber band. Each object draws linear or
+# as a spline (samples points per span). Tile tiles every object's closed curves; Save writes the z
+# planes' closed curves through the app (.cvcc, .contour or .pcd), Load reads a contour file
+# (.ser, .contour, .cvcc, ...) into the grid's planes. A session keeps everything as drawn.
+#
+#   ariadne_hello examples/ariadne/documents/volume_grid_contours.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/volume_grid_contours.ari
+
+meta:
+  name: Volume grid contours (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/volume_grid.ari
+
+# The trace waits in the request key until the volume is there. Every third plane from 5 (plane
+# 31 of this 64^3 field has a sliver signed inside at the grid's edge).
+init: |
+  (begin (state-set "tree.volume_grid_panel.tab" "Contours")
+         (state-set "graphics.root.children.grid.grid.request" "trace 0 5 59 3"))
+
+on_tick: |
+  (if (!= (state-get "vgc.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-140 -140 -60 140 140 160")
+             (state-set "vgc.opened" "1")))
+
+# PageUp / PageDown step the plane the switch shows, Delete deletes the selected control points,
+# Enter closes the curve being drawn.
+keys:
+  grid_next:
+    label: Next plane
+    key: [PageUp]
+    on: (state-set "graphics.root.children.grid.grid.request" "step 1")
+  grid_previous:
+    label: Previous plane
+    key: [PageDown]
+    on: (state-set "graphics.root.children.grid.grid.request" "step -1")
+  grid_delete:
+    label: Delete the selected points
+    key: [Delete]
+    on: (state-set "graphics.root.children.grid.grid.request" "delete_selected")
+  grid_close:
+    label: Close the curve
+    key: [Enter]
+    on: (state-set "graphics.root.children.grid.grid.request" "close_curve")
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: Contours
+    items:
+      - menu_item: Trace again
+        on: (state-set "graphics.root.children.grid.grid.request" "trace 0 5 59 3")
+      - menu_item: Tile
+        on: (state-set "graphics.root.children.grid.grid.request" "tile")
+
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 64, fit: { height: 100, up: y } }
+
+windows:
+  - include: volume_grid
+    args: { node: grid, title: Volume grid contours, view_size: 360 }
+    pos: [8, 30]
+    size: [1180, 640]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }
+      view: xy
+      tool: contours
+      slice: { z: 32 }
+      objects:
+        - { name: bunny, color: [0.95, 0.7, 0.3] }
+        - { name: drawn, color: [0.3, 0.8, 1.0], interpolation: spline, samples: 5 }
+      contour: { auto_tile: true }
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.58, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

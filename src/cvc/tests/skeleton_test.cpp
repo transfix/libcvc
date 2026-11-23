@@ -14,7 +14,7 @@
 // state tree (T8, the keys mesh_lab's skeleton request holds, P2). Runs natively and under node
 // (the ports lane).
 
-#include "../geometry/skeleton/datastruct.h"
+#include "../geometry/cocone/datastruct.h"
 #include "resumable_harness.h"
 
 #include <algorithm>

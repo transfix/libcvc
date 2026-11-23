@@ -71,6 +71,7 @@
 #include <cvc/ariadne/world_rules.h>       // the world: block (world_rules_from)
 #include <cvc/ariadne/world_vehicles.h>    // ... and how many it runs
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h>      // --sim-hz: the world's rate
 #include <cvc/media/media_router.h> // protocol-agnostic media hub (WS + gRPC + future protocols)
 #include <cvc/net/fast_lane_rtc.h>  // the unreliable lane (WebRTC data channels)
 #include <cvc/state/state_cluster_shard.h>
@@ -84,6 +85,8 @@
 #ifdef CVC_ARIADNE_PYTHON
 #include "python_engine.h" // arisrvx: the embedded Python (src/ariadne_python)
 #include "server_link.h"   // its writes and the relay's events, between the two threads
+
+#include <cvc/net/net_engine.h> // host.net: the program's connection engine
 #endif
 #ifdef CVC_ARIADNE_WASM
 #include "wasm_engine.h" // arisrvx: clients' WebAssembly guests (src/ariadne_wasm)
@@ -233,6 +236,15 @@ int main(int argc, char **argv) {
   //   --scene default|large      the world the room starts in: cvc://worlds/default.ari (the 20 m
   //                              room) or cvc://worlds/large.ari (a 100 m plane of LOD meshes).
   //                              A --doc whose document has a scene: is the world instead
+  //   --sim-hz N                 the rate the room's world runs at (ARIADNE_WORLDS.md section
+  //                              18.9), a whole number of ticks a second from 10 to 240: the
+  //                              holon's clock, the server document's physics steps and its
+  //                              vehicles' navigator tick (the whole quanta nearest 0.06 s).
+  //                              Default: the world document's scene: clock: hz, else 120. The
+  //                              relay publishes it (conf.rooms.<room>.clock) and every client
+  //                              runs its holon at it. Poses still go out at 60, 30 or 20 Hz by
+  //                              round trip and the room steps at 60 Hz: a lower rate saves the
+  //                              relay's CPU more than bandwidth
   // Debugging (repeatable, in order):
   //   --set KEY=VALUE            write VALUE to the state key KEY (from the app's root, e.g.
   //                              conf.rooms.main.topic) once the room's world and policies are
@@ -363,6 +375,9 @@ int main(int argc, char **argv) {
   //                              limit); past it a call is answered rate_limited
   //   --call-rate N              the calls one principal may make a second (default 0 = no
   //                              limit); past it a call is answered rate_limited
+  //   --net-threads N            the I/O threads of the host's connection engine, host.net
+  //                              (docs/roadmap/ARIADNE_NET_ENGINE.md; default 2, at most the core
+  //                              count). The engine starts when the program first asks for it
   // With an authenticate hook, the hook decides who joins instead of the room token: each
   // connection's bearer (gRPC's authorization header, WS's cvc-token.<t>) is handed to it, and its
   // principal keys the connection's bound writes, its calls' ctx.principal and their limits.
@@ -389,12 +404,14 @@ int main(int argc, char **argv) {
               admissionHoldArg = "2000";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
+  std::string simHzArg;                        // --sim-hz ("": the world's)
   bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
   std::string docPath;
   bool docFlag = false;                                       // --doc was given (even with no path)
   std::vector<std::pair<std::string, std::string>> stateSets; // --set KEY=VALUE
   std::string pythonScript, httpListen, shutdownTimeoutArg = "10", writeBudgetArg = "65536";
   std::string slowMsArg = "50", authTimeoutArg = "5", callConcurrencyArg = "8", callRateArg = "0";
+  std::string netThreadsArg = "2";
   std::string tlsCert, tlsKey, callResultMaxArg = "1048576";
   std::string clientsMaxArg = "4096", clientLogMaxArg = "32";
   std::string guestPasswordFile, rconPasswordFile;
@@ -486,6 +503,8 @@ int main(int argc, char **argv) {
       avatarEnergyArg = next("on");
     else if (!std::strcmp(a, "--avatar-empty"))
       avatarEmptyArg = next("rest");
+    else if (!std::strcmp(a, "--sim-hz"))
+      simHzArg = next("");
     else if (!std::strcmp(a, "--doc")) {
       docFlag = true;
       docPath = next("");
@@ -516,6 +535,9 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(a, "--call-rate")) {
       pythonFlags.push_back(a);
       callRateArg = next("");
+    } else if (!std::strcmp(a, "--net-threads")) {
+      pythonFlags.push_back(a);
+      netThreadsArg = next("");
     } else if (!std::strcmp(a, "--tls-cert")) {
       tlsCertFlag = true;
       tlsCert = next("");
@@ -571,15 +593,23 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "arisrv: --clients-max and --client-log-max must be at least 1\n");
     return 2;
   }
+  long simHzN = 0; // 0: the world's rate
+  if (!simHzArg.empty() && (!check_count("--sim-hz", simHzArg, simHzN) ||
+                            !cvc::sim_rate_valid(static_cast<double>(simHzN)))) {
+    std::fprintf(stderr, "arisrv: --sim-hz must be a whole number from %.0f to %.0f\n",
+                 cvc::kSimRateMin, cvc::kSimRateMax);
+    return 2;
+  }
 #ifdef CVC_ARIADNE_PYTHON
   double shutdownTimeout = 10.0, authTimeout = 5.0, callRate = 0.0;
-  long writeBudget = 65536, slowMs = 50, callConcurrency = 8;
+  long writeBudget = 65536, slowMs = 50, callConcurrency = 8, netThreads = 2;
   if (!check_seconds("--shutdown-timeout", shutdownTimeoutArg, shutdownTimeout) ||
       !check_count("--script-write-budget", writeBudgetArg, writeBudget) ||
       !check_count("--script-slow-ms", slowMsArg, slowMs) ||
       !check_seconds("--auth-timeout", authTimeoutArg, authTimeout) ||
       !check_count("--call-concurrency", callConcurrencyArg, callConcurrency) ||
       !check_rate("--call-rate", callRateArg, callRate) ||
+      !check_count("--net-threads", netThreadsArg, netThreads) ||
       (!httpListen.empty() && !check_address("--http-listen", httpListen)))
     return 2;
   const bool pythonGiven =
@@ -911,6 +941,7 @@ int main(int argc, char **argv) {
   std::vector<std::string> worldWarnings;
   cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
   std::string rulesFrom;
+  double stockHz = 0.0; // the stock world's scene: clock: hz (0: none)
   const bool docWorld =
       serverDoc && (!serverDoc->scene().nodes.empty() || !serverDoc->scene().lights.empty());
   if (serverDoc && (docWorld || serverDoc->world())) {
@@ -939,6 +970,7 @@ int main(int argc, char **argv) {
     if (found.ok)
       lr = cvc::ariadne::load_file(app, found.canonical);
     if (found.ok && lr.ok) {
+      stockHz = lr.scene.clock.hz;
       world = rconf::room_world_from_scene(lr.scene, &worldWarnings);
       for (const std::string &w : lr.warnings)
         worldWarnings.push_back(w);
@@ -969,6 +1001,22 @@ int main(int argc, char **argv) {
     rules.policy.energy.empty = avatarEmptyArg == "stop"
                                     ? cvc::ariadne::avatar_energy_policy::when_empty::stop
                                     : cvc::ariadne::avatar_energy_policy::when_empty::rest;
+  // The world's rate (ARIADNE_WORLDS.md section 18.9): --sim-hz, else the world document's scene:
+  // clock: hz, else 120 Hz. The holon runs at it, the server document's world is built on it (its
+  // physics steps and its vehicles' navigator tick), and the room's clock section (written with
+  // the rules below) has every client run its holon at it.
+  double simHz = cvc::kSimRateDefault;
+  std::string simHzFrom = "the default";
+  if (simHzN > 0) {
+    simHz = static_cast<double>(simHzN);
+    simHzFrom = "--sim-hz";
+  } else if (serverDoc && serverDoc->scene().clock.hz > 0.0) {
+    simHz = serverDoc->scene().clock.hz;
+    simHzFrom = docPath + "'s scene: clock: hz";
+  } else if (stockHz > 0.0) {
+    simHz = stockHz;
+    simHzFrom = worldFrom + "'s scene: clock: hz";
+  }
 
 #ifdef CVC_ARIADNE_PYTHON
   // The operator's Python (arisrvx --python, a server document's python: block;
@@ -979,7 +1027,23 @@ int main(int argc, char **argv) {
   // document's Python functions) reach its loop through the link too, so this thread never takes
   // the GIL. It starts now, before anything listens.
   cvc::ariadne::python::ServerLink scriptLink;
+  // The host's connection engine (host.net; ARIADNE_NET_ENGINE.md §2.7), made when the program
+  // first asks for it. Declared before the loan, so it outlives what Python holds of it.
+  std::mutex netMu;
+  std::unique_ptr<cvc::net::net_engine> netEngine;
   cvc::ariadne::python::HostHandles scriptHandles;
+  scriptHandles.net = [&]() {
+    std::lock_guard<std::mutex> lock(netMu);
+    if (!netEngine) {
+      cvc::net::engine_options o;
+      o.io_threads = static_cast<unsigned>(std::max(1L, netThreads));
+      netEngine = std::make_unique<cvc::net::net_engine>(o);
+      std::printf("[arisrvx] net: the connection engine runs %u I/O thread(s)\n",
+                  netEngine->io_threads());
+      std::fflush(stdout);
+    }
+    return netEngine.get();
+  };
   scriptHandles.app = &app;
   scriptHandles.runtime = serverDoc ? &serverDoc->runtime() : nullptr;
   scriptHandles.mode = "server";
@@ -1426,7 +1490,7 @@ int main(int argc, char **argv) {
   // (1 Hz), for late joiners and the log -- and an avatar standing still is re-stamped there only
   // every kTreePoseHeartbeatS, since the stream's own heartbeat is what keeps clients' clocks.
   cvc::ariadne::holon server_holon(cvc::ariadne::holon_role::server,
-                                   cvc::ariadne::room_holon_config());
+                                   cvc::ariadne::room_holon_config(simHz));
   std::printf("[arisrv] avatar physics: %s\n",
               server_holon.physics() ? "Jolt rigid bodies" : "kinematic (no Jolt in this build)");
   constexpr int kRoomSubsteps = 12;
@@ -1439,6 +1503,9 @@ int main(int argc, char **argv) {
   pose_cfg.push_interval_ticks = cvc::ariadne::conference::aoi_pose_push_interval_ticks(
       aoiParams, 1.0 / server_holon.clock().fixed_dt());
   pose_cfg.keyframe_ticks = 2 * pose_cfg.heartbeat_ticks;
+  // A near entity at most 30 times a second, at any rate (4 ticks at 120 Hz, 2 at 60).
+  pose_cfg.entity_interval_ticks = static_cast<std::uint64_t>(
+      std::max(1LL, std::llround(1.0 / (30.0 * server_holon.clock().fixed_dt()))));
   // The room's entities by distance, with the area of interest's radii (off: every one near).
   if (aoi_relay) {
     pose_cfg.entity_near_m = aoiParams.inner_enter_m;
@@ -1647,6 +1714,12 @@ int main(int argc, char **argv) {
   // the relay's own and each client's, reads them from the tree (holon_sync).
   {
     rconf::write_room_rules(app, room, rules);
+    rconf::write_room_clock(app, room, simHz);
+    const double quantum = server_holon.clock().fixed_dt();
+    std::printf("[arisrv] clock: %.0f Hz (%s): every holon in the room steps %.4f s, and a "
+                "world's vehicles navigate every %d steps (%.4f s)\n",
+                simHz, simHzFrom.c_str(), quantum, cvc::sim_tick_quanta(quantum),
+                cvc::sim_tick(quantum));
     const cvc::ariadne::avatar_archetype &a = rules.avatar();
     const cvc::ariadne::avatar_energy_policy &e = rules.policy.energy;
     const cvc::physics::vec3 &g = rules.physics.gravity;
@@ -1683,6 +1756,10 @@ int main(int argc, char **argv) {
       std::printf("[arisrv] server document: %s\n", w.c_str());
       std::fflush(stdout);
     });
+    // Its world on the room's clock (ARIADNE_WORLDS.md section 18.9): the load builds it at simHz
+    // (SceneWorld::use_vehicle_clock), whatever its scene: clock: says, so the holon can run it.
+    serverDoc->runtime().add_load_hook(
+        [simHz](cvc::ariadne::LoadResult &lr, const std::string &) { lr.scene.clock.hz = simHz; });
     try {
       for (const std::string &w : serverDoc->load(docPath))
         std::printf("[arisrv] server document: %s\n", w.c_str());
