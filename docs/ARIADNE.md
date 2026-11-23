@@ -7927,7 +7927,9 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
   every frame, so a remote session is better off with half-blocks (`--graphics color`).
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
-  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
+  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A
+  loaded document's `scene:`, `scenes:`, `data:`, `assets:` and `keys:` are dropped. The shell
+  design ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md)) proposes keeping them.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).
