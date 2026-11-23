@@ -329,3 +329,11 @@ catalog:
     for: "the Segmentation tab of a volume_grid in a window of its own: thresholds, gamma and the automatic seeds, Segment and Stop with a progress bar, the result's classes (colour, show, voxels, triangles), how the labels and surfaces draw, and Save (the classes as one multi-variable volume, the labels as one)"
     args: { node: grid, title: Segmentation, id: volume_grid_segmentation }   # defaults
     note: "the grid's point classes of the shown variable and timestep are the seeds; the labels draw on the slices while the fronts advance, each class's surface in the 3D view; saving goes through the app (data-save). volume_grid_segmentation_tab is the controls alone (a group, args node and id), the volume_grid component's Segmentation tab"
+  - component: http_cache
+    file: http_cache.ari
+    unit: http_cache
+    binds: "/sys.net.http_cache.{stats.*,policy.enabled,policy.max_mib,policy.max_entry_mib,policy.freshness_secs} (app-root: the app's cache, whatever the document's prefix)"
+    for: "the app's HTTP cache (enable_net's): what it holds of its budget, hits / misses / revalidated / evicted, the budget, the largest entry kept, how long a reply that says nothing stays fresh, on / off, and Clear"
+    args: { title: Network cache, id: http_cache }   # defaults
+    verbs: [http_cache.clear]
+    note: "arigl puts it in every document, opened from Settings > Network cache...; Clear is the bare action http_cache.clear, which AppRuntime handles (uri_http_cache.h: clear_http_cache)"

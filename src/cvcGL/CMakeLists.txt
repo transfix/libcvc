@@ -751,6 +751,13 @@ add_executable(cvcgl_pose_matrix test/cvcgl_pose_matrix.cpp)
 target_link_libraries(cvcgl_pose_matrix PRIVATE cvcGL)
 add_test(NAME cvcgl_pose_matrix COMMAND cvcgl_pose_matrix)
 
+# A GraphicsNode's rotation and scale: T Rz Ry Rx S, the matrix the physics world and a view
+# entry's transform: make; a rotation keeps the scale (0 and mirrors included) and a scale the
+# rotation, after a whole matrix too; the rotation and scale keys do the same. Headless.
+add_executable(cvcgl_node_transform test/cvcgl_node_transform.cpp)
+target_link_libraries(cvcgl_node_transform PRIVATE cvcGL)
+add_test(NAME cvcgl_node_transform COMMAND cvcgl_node_transform)
+
 # physics_scene_binding: a cvc::physics world's bodies drawn between its last two
 # states (setPoseMatrix per node, a pose sink per merged-mesh group). Headless.
 add_executable(cvcgl_physics_scene_binding test/cvcgl_physics_scene_binding.cpp)
@@ -963,6 +970,12 @@ add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
 target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+# An authored viewpoint and lens: lookAt(eye, target) in Orbit and Fly, orthographic projection in
+# the 3-D modes (the wheel still zooms; Map takes over and gives it back), a fixed clipping range,
+# and a new controller as before. Bare vtkCamera.
+add_executable(cvcgl_camera_viewpoint test/cvcgl_camera_viewpoint.cpp)
+target_link_libraries(cvcgl_camera_viewpoint PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_viewpoint COMMAND cvcgl_camera_viewpoint)
 # Slice mode: a parallel view down one axis with VolumeGridRover's screen axes, its state keys,
 # its pan, and the wheel zooming about the pointer. Headless.
 add_executable(cvcgl_camera_slice test/cvcgl_camera_slice.cpp)
@@ -1243,6 +1256,15 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
   target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
+endif()
+
+# Authored viewpoints: a scene camera's position:, target:, fov:, near:, far: and orthographic:
+# with height:, on the main view (a `cameras:` entry named main), a named camera and a viewport's
+# own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_viewpoints test/cvcgl_ariadne_viewpoints.cpp)
+  target_link_libraries(cvcgl_ariadne_viewpoints PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_viewpoints COMMAND cvcgl_ariadne_viewpoints)
 endif()
 
 # A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,

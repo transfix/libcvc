@@ -245,6 +245,8 @@ void place_icon(float x, float y, const ariadne::Backend::TrayIcon &t) {
 // What the icon's item is labelled: its glyph, or, for a picture ImGui draws itself (the bell: its
 // fonts have none), blanks as wide as the picture, with an id.
 std::string icon_label(const ariadne::Backend::TrayIcon &t) {
+  if (!t.picture.empty())
+    return "    ##tray.pic." + t.picture;
   if (t.icon == "bell")
     return "   ##tray.bell";
   return t.glyph;
@@ -276,6 +278,23 @@ void draw_bell(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t) {
                     col, s * 0.04f);
   dl->AddCircleFilled(ImVec2(cx, cy - s * 0.37f), s * 0.06f, col);
   dl->AddCircleFilled(ImVec2(cx, cy + s * 0.37f), s * 0.08f, col);
+}
+
+// §5.22 a tray icon's picture (an avatar: round, already shaped by the core) over the icon that
+// starts at x in the bar `win`, as tall as the bar's line less a pixel above and below, centred
+// where the glyph would be.
+void draw_tray_picture(ImGuiWindow *win, float x, const ariadne::Backend::TrayIcon &t,
+                       unsigned int tex) {
+  if (t.picture.empty() || tex == 0)
+    return;
+  const ImGuiStyle &st = ImGui::GetStyle();
+  const ImRect bar = win->MenuBarRect();
+  const float s = std::max(8.0f, bar.GetHeight() - 2.0f);
+  const float cx = x + st.ItemSpacing.x * 0.5f + glyph_width(t) * 0.5f;
+  const float cy = (bar.Min.y + bar.Max.y) * 0.5f;
+  win->DrawList->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)),
+                          ImVec2(cx - s * 0.5f, cy - s * 0.5f),
+                          ImVec2(cx + s * 0.5f, cy + s * 0.5f));
 }
 
 // What a tray icon takes in the bar: its glyph laid out as a menubar item lays out its label
@@ -377,6 +396,10 @@ bool ImGuiBackend::tray_button(const TrayIcon &icon) {
     clicked = ImGui::MenuItem(icon_label(icon).c_str());
   }
   draw_bell(win, x, icon);
+  if (!icon.picture.empty()) {
+    int W = 0, H = 0;
+    draw_tray_picture(win, x, icon, image_texture(icon.picture.c_str(), W, H));
+  }
   draw_badge(win, x, icon);
   return clicked;
 #else
@@ -400,6 +423,10 @@ bool ImGuiBackend::begin_tray_menu(const TrayIcon &icon) {
     open = ImGui::BeginMenu(icon_label(icon).c_str());
   }
   draw_bell(win, x, icon); // on the bar, though an open menu is now the current window
+  if (!icon.picture.empty()) {
+    int W = 0, H = 0;
+    draw_tray_picture(win, x, icon, image_texture(icon.picture.c_str(), W, H));
+  }
   draw_badge(win, x, icon);
   return open;
 #else
@@ -1116,6 +1143,12 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   if (layout.kind == ariadne::LayoutKind::Horizontal && layout.col_widths.empty() &&
       !layout.resizable && layout.borders == ariadne::BorderShow::Off) {
     gs.flow = true;
+    // Its cells flow: one that would run past the line's room (a phone's narrow window) goes to
+    // the next line, as words in a paragraph. A cell's width is known once it is drawn, so the
+    // row decides from the width each cell had last frame, kept under the row's id.
+    gs.flow_key = ImGui::GetID(id && *id ? id : "##cvcflow");
+    gs.flow_left = ImGui::GetCursorScreenPos().x;
+    gs.flow_right = gs.flow_left + line_room();
     m_grids.push_back(std::move(gs));
     return true;
   }
@@ -1191,6 +1224,24 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #endif
 }
 
+#ifdef CVC_ENABLE_IMGUI
+// The width a flowing row keeps for the cell just ended (the last item, its group), for next
+// frame's wrap; `kept` is what it kept last frame. One that ran past the line's end has the width
+// it took. One that reached the end filled it: a widget as wide as the line's room (a field, a
+// list) stretches to whatever is left, so beside other cells it keeps 0 and never moves down a
+// line for its width (a scroll bar coming in would send a side panel below the views). At the
+// start of a line it keeps what it had: it went there because it ran past the end beside the
+// others, and on a line of its own it fills that line, a width that says nothing of whether it
+// would fit back beside them (it would come back, run past, and go down again, frame after frame).
+static float flow_cell_width(float flow_left, float flow_right, float kept) {
+  const float left = ImGui::GetItemRectMin().x;
+  const float right = ImGui::GetItemRectMax().x;
+  if (right >= flow_right - 1.0f && right <= flow_right + 1.0f)
+    return left <= flow_left + 1.0f ? kept : 0.0f;
+  return ImGui::GetItemRectSize().x;
+}
+#endif
+
 void ImGuiBackend::grid_next_cell() {
 #ifdef CVC_ENABLE_IMGUI
   if (m_grids.empty())
@@ -1199,7 +1250,16 @@ void ImGuiBackend::grid_next_cell() {
   if (g.flow) {
     if (g.cell > 0) {
       ImGui::EndGroup();
-      ImGui::SameLine();
+      ImGuiStorage *store = ImGui::GetStateStorage();
+      const auto key = [&](int i) { return ImHashData(&i, sizeof i, g.flow_key); };
+      store->SetFloat(key(g.cell - 1), flow_cell_width(g.flow_left, g.flow_right,
+                                                       store->GetFloat(key(g.cell - 1), 0.0f)));
+      // The next cell on this line (after the one just ended), unless last frame's width of it
+      // would run past the room: then it starts the next line. One that filled the line (0) stays.
+      const float next = store->GetFloat(key(g.cell), 0.0f);
+      const float x1 = ImGui::GetItemRectMax().x;
+      if (!(next > 0.0f && x1 + ImGui::GetStyle().ItemSpacing.x + next > g.flow_right))
+        ImGui::SameLine();
     }
     ImGui::BeginGroup();
     ++g.cell;
@@ -1253,8 +1313,13 @@ void ImGuiBackend::end_grid() {
   m_lastGridTracks.clear();
   m_lastGridColumns.clear();
   if (g.flow) {
-    if (g.cell > 0)
+    if (g.cell > 0) {
       ImGui::EndGroup();
+      int last = g.cell - 1; // its width, for next frame's wrap (grid_next_cell)
+      ImGuiStorage *store = ImGui::GetStateStorage();
+      const ImGuiID k = ImHashData(&last, sizeof last, g.flow_key);
+      store->SetFloat(k, flow_cell_width(g.flow_left, g.flow_right, store->GetFloat(k, 0.0f)));
+    }
   } else if (g.split) {
     if (g.cell > 0)
       ImGui::EndChild(); // close the last pane FIRST -> back to the parent window, whose
@@ -1340,20 +1405,82 @@ void ImGuiBackend::item_badge(const char *text) {
 void ImGuiBackend::push_id(const char *id) { ui::PushId(id); }
 void ImGuiBackend::pop_id() { ui::PopId(); }
 
-void ImGuiBackend::text_line(const char *text) { ui::TextLine(text); }
+float ImGuiBackend::line_room() const {
+#ifdef CVC_ENABLE_IMGUI
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  float room = ImGui::GetContentRegionAvail().x;
+  const bool fitting =
+      (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 || win->AutoFitFramesX > 0;
+  if (fitting && !ImGui::GetCurrentTable()) {
+    // Such a window is as wide as its widest line, so its own width says nothing.
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float x = ImGui::GetCursorScreenPos().x;
+    if (win->Flags & ImGuiWindowFlags_ChildWindow) {
+      // A child (a panel's region that fits its widgets) stays where its parent put it: its
+      // room runs to its parent's right edge, or the view's where the parent fits too.
+      const ImGuiWindow *parent = win->ParentWindow;
+      const bool parent_fits = parent == nullptr ||
+                               (parent->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 ||
+                               parent->AutoFitFramesX > 0;
+      const float right = parent_fits ? vp->WorkPos.x + vp->WorkSize.x - style.ScrollbarSize
+                                      : parent->WorkRect.Max.x;
+      room = right - x - style.WindowPadding.x;
+    } else {
+      // A window's room is the widest it can be, the view less ImGui's safe-area padding each
+      // side, wherever it opened: one opened near the view's right edge is moved in, not wrapped
+      // there (cvcgl_imgui_view_shrink).
+      room = vp->WorkSize.x - 2.0f * style.DisplaySafeAreaPadding.x - (x - win->Pos.x) -
+             style.WindowPadding.x - style.ScrollbarSize;
+    }
+  }
+  return room;
+#else
+  return 0.0f;
+#endif
+}
+
+void ImGuiBackend::fitted_text(const char *text, const float *rgb) {
+#ifdef CVC_ENABLE_IMGUI
+  if (rgb)
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+  // A line that fits draws as it always did; a wider one wraps at a word where the line ends
+  // (a phone's narrow window), as a rich text paragraph does. A single word draws as it always
+  // did too: ImGui would break it between its letters ("pts" in a narrow table column, as
+  // "pt" over "s").
+  const float room = line_room();
+  if (room > ImGui::GetFontSize() && std::strchr(text, ' ') != nullptr &&
+      ImGui::CalcTextSize(text).x > room) {
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + room);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+  } else {
+    ImGui::TextUnformatted(text);
+  }
+  if (rgb)
+    ImGui::PopStyleColor();
+#else
+  if (rgb)
+    ui::TextLineColored(text, rgb[0], rgb[1], rgb[2]);
+  else
+    ui::TextLine(text);
+#endif
+}
+
+void ImGuiBackend::text_line(const char *text) { fitted_text(text, nullptr); }
 void ImGuiBackend::text_value(const char *label, const std::string &value) {
   // A non-empty label prefixes "label: value"; an empty label shows just the value (e.g. a roster
   // name bound with no caption).
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
-  ui::TextLine(line.c_str());
+  fitted_text(line.c_str(), nullptr);
 }
 void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
-  ui::TextLineColored(text, rgb[0], rgb[1], rgb[2]);
+  fitted_text(text, rgb);
 }
 void ImGuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
-  ui::TextLineColored(line.c_str(), rgb[0], rgb[1], rgb[2]);
+  fitted_text(line.c_str(), rgb);
 }
 void ImGuiBackend::begin_text_color(const float rgb[3]) {
 #ifdef CVC_ENABLE_IMGUI
@@ -1572,12 +1699,17 @@ cvc::ariadne::RichTextEvent ImGuiBackend::rich_text(const std::vector<ariadne::T
 #endif
 }
 void ImGuiBackend::separator() { ui::Separator(); }
+#ifdef CVC_ENABLE_IMGUI
+void reserve_label_width(const char *label, bool in_row); // below, with the sliders
+#endif
 void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
 #ifdef CVC_ENABLE_IMGUI
   // The bar fills the line but leaves the label's width, as the sliders do; the label (up to any
   // "##") follows it.
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
   const bool labelled = label && end != label;
+  if (labelled) // past the line's room it shrinks, as a slider does (a side panel's Tiling bar)
+    reserve_label_width(label, in_flow_row());
   const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
   ImGui::ProgressBar(fraction, ImVec2(width, 0.f), overlay.empty() ? nullptr : overlay.c_str());
   if (labelled) {
@@ -1595,6 +1727,8 @@ void ImGuiBackend::plot_lines(const char *label, const std::vector<float> &value
   // shows the value under the mouse; FLT_MAX for a range fits it to the values.
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
   const bool labelled = label && end != label;
+  if (labelled)
+    reserve_label_width(label, in_flow_row());
   const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
   const float a = lo < hi ? static_cast<float>(lo) : FLT_MAX;
   const float z = lo < hi ? static_cast<float>(hi) : FLT_MAX;
@@ -1676,30 +1810,39 @@ bool ImGuiBackend::button_with(const char *label, const cvc::ariadne::ButtonLook
   const ImVec4 base = st.Colors[held      ? ImGuiCol_ButtonActive
                                 : hovered ? ImGuiCol_ButtonHovered
                                           : ImGuiCol_Button];
-  const ImU32 light = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.30f));
-  const ImU32 dark = ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.60f));
+  const ImU32 light = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
+  const ImU32 dark = ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.65f));
+  const ImU32 deep = ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.85f));
+  const float e2 = 2.0f * e;
   ImVec2 nudge(0.0f, 0.0f);
+  ImU32 tint = IM_COL32_WHITE;
   if (look.selected) {
-    // Pressed in: the shadow along the top and left, the light along the bottom and right, a
-    // darker face (the active colour, opaque), and the content a step down and to the right.
+    // Pressed in, and plainly so where a picture covers most of the face: a deep shadow two steps
+    // wide along the top and left, the light along the bottom and right, the face lit in the
+    // active colour (opaque), and the content two steps down and to the right, a picture a shade
+    // darker, as if in the button's shadow.
     const ImVec4 a = st.Colors[ImGuiCol_ButtonActive];
     dl->AddRectFilled(r.Min, r.Max, light, round);
-    dl->AddRectFilled(r.Min, r.Max - ImVec2(e, e), dark, round);
-    dl->AddRectFilled(r.Min + ImVec2(2.0f * e, 2.0f * e), r.Max - ImVec2(e, e),
-                      shade(ImVec4(a.x, a.y, a.z, 1.0f), hovered ? 0.75f : 0.6f), round);
-    nudge = ImVec2(e, e);
+    dl->AddRectFilled(r.Min, r.Max - ImVec2(e, e), deep, round);
+    dl->AddRectFilled(r.Min + ImVec2(e2, e2), r.Max - ImVec2(e, e),
+                      shade(ImVec4(a.x, a.y, a.z, 1.0f), hovered ? 1.0f : 0.85f), round);
+    nudge = ImVec2(e2, e2);
+    tint = ImGui::GetColorU32(ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
   } else {
-    // Raised: the light along the top and left, the shadow along the bottom and right.
+    // Raised: the light along the top and left, a shadow two steps wide along the bottom and
+    // right.
     dl->AddRectFilled(r.Min, r.Max, dark, round);
-    dl->AddRectFilled(r.Min, r.Max - ImVec2(e, e), light, round);
-    dl->AddRectFilled(r.Min + ImVec2(e, e), r.Max - ImVec2(e, e), ImGui::GetColorU32(base), round);
+    dl->AddRectFilled(r.Min, r.Max - ImVec2(e2, e2), light, round);
+    dl->AddRectFilled(r.Min + ImVec2(e, e), r.Max - ImVec2(e2, e2), ImGui::GetColorU32(base),
+                      round);
     if (held)
-      nudge = ImVec2(e, e);
+      nudge = ImVec2(e2, e2);
   }
   ImGui::RenderNavCursor(r, ImGui::GetItemID());
   const ImVec2 at = r.Min + st.FramePadding + nudge;
   if (tex != 0)
-    dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), at, at + content);
+    dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), at, at + content,
+                 ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), tint);
   else
     ImGui::RenderTextClipped(at, r.Max + nudge - st.FramePadding, label, end, &content,
                              ImVec2(0.5f, 0.5f), &r);
@@ -2501,6 +2644,10 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
   if (tex == 0)
     return false;
   width = ui_px(width); // a document's px (the image widget's size:, a stream view's)
+  // No wider than the line's room (a phone's narrow window): smaller, its shape kept.
+  const float room = line_room();
+  if (room > ImGui::GetFontSize() && width > room)
+    width = room;
   const float h = width * static_cast<float>(H) / static_cast<float>(W);
   ImGui::Image(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), ImVec2(width, h));
   return true;
@@ -2896,6 +3043,12 @@ bool ImGuiBackend::draw_image_fit(const char *name, float box_w, float box_h) {
     return false;
   box_w = ui_px(box_w);
   box_h = ui_px(box_h);
+  // A box wider than the line's room (a phone's narrow window) shrinks to it, its shape kept.
+  const float room = line_room();
+  if (room > ImGui::GetFontSize() && box_w > room) {
+    box_h *= room / box_w;
+    box_w = room;
+  }
   const float s = std::min(box_w / static_cast<float>(W), box_h / static_cast<float>(H));
   const ImVec2 size(static_cast<float>(W) * s, static_cast<float>(H) * s);
   // The box (black bars where the picture leaves it), the picture centred in it, then the box's
