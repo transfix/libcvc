@@ -2001,6 +2001,18 @@ TEST(HolonVehicleTest, TheBoatWeDriveIsPredictedAndReconciled) {
     const auto *saved = std::get_if<cvc::ariadne::jolt_vehicle_saved>(&v.model);
     ASSERT_NE(saved, nullptr);
     EXPECT_NE(saved->world, nullptr);
+    // A sample's attitude (OW5m: the relay's hull's) puts the hull at it; a sample with a heading
+    // alone (a turn about z, an older relay's) keeps the predicted pitch and roll.
+    body_state rolled = afloat;
+    rolled.rotation = {std::cos(0.05), std::sin(0.05), 0.0, 0.0}; // 0.1 rad about x
+    const cvc::ariadne::dynamic_vehicle r = m.at(rolled, 0, &v);
+    EXPECT_NEAR(r.roll, 0.1, 1e-6) << "the sample's roll";
+    EXPECT_NEAR(r.pitch, 0.0, 1e-6);
+    body_state turned = afloat;
+    turned.rotation = {std::cos(0.2), 0.0, 0.0, std::sin(0.2)}; // a heading of 0.4 rad alone
+    const cvc::ariadne::dynamic_vehicle h = m.at(turned, 0, &r);
+    EXPECT_NEAR(h.box[3], 0.4, 1e-6) << "the sample's heading";
+    EXPECT_NEAR(h.roll, 0.1, 1e-5) << "the predicted roll";
     cvc::ariadne::dynamic_vehicle_model bike(humvee_dynamics(), 1.0 / 120.0);
     EXPECT_THROW(bike.step(v, 1), std::invalid_argument) << "a vehicle of the other plant";
     cvc::ariadne::dynamic_vehicle wheeled = bike.at(afloat, 0);

@@ -172,12 +172,14 @@ void holon::remove_participant(const std::string &pid) {
 }
 
 namespace {
-cvc::physics::body_state ride_of(const entity_info &e) {
-  cvc::physics::body_state s;
-  s.position = {e.x, e.y, e.z};
-  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
-  s.linear_velocity = {e.vx, e.vy, 0.0};
-  return s;
+// A driver's pose and the entities' (entity_ride), in SCENE's world when there is one.
+cvc::physics::body_state ride_of(const entity_info &e, const SceneWorld *scene) {
+  return entity_ride(e, scene ? &scene->world() : nullptr);
+}
+
+// The heading of a rotation (about z, from x), whatever its pitch and roll.
+double heading_of(const cvc::physics::quat &q) {
+  return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
 }
 bool find_entity(const WorldVehicles &v, std::uint64_t id, entity_info &out) {
   for (const entity_info &e : v.entities())
@@ -226,7 +228,7 @@ bool holon::set_driver(const std::string &pid, std::uint64_t id, std::string *wh
   }
   v->set_driver(id, pid);
   p.drives = id;
-  p.ride = ride_of(e);
+  p.ride = ride_of(e, _scene);
   // The envelope its drive axes are shares of (avatar_intent).
   p.envelope = drive_envelope{};
   for (const vehicle_archetype &a : v->archetypes())
@@ -454,7 +456,7 @@ void holon::update_rides() {
       continue;
     for (const entity_info &e : all)
       if (e.id == p.drives) {
-        p.ride = ride_of(e);
+        p.ride = ride_of(e, _scene);
         break;
       }
   }
@@ -484,7 +486,7 @@ std::vector<holon::entity> holon::entities() const {
       e.owner = info.spec.driver.empty() ? "server" : info.spec.driver;
       e.policy = info.spec.policy;
       e.in_world = info.placed;
-      e.state = ride_of(info);
+      e.state = ride_of(info, _scene);
       out.push_back(std::move(e));
     }
   return out;
@@ -624,10 +626,10 @@ void holon::scene_step() {
         continue;
       for (const entity_info &e : all)
         if (e.id == p.drives) {
-          p.ride = ride_of(e);
+          p.ride = ride_of(e, _scene);
           break;
         }
-      const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
+      const double yaw = heading_of(p.ride.rotation);
       const double speed =
           p.ride.linear_velocity.x * std::cos(yaw) + p.ride.linear_velocity.y * std::sin(yaw);
       const drive_cmd c = drive_command(p.intent, p.envelope, speed, v.tick_seconds());
