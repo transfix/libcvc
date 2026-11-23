@@ -8,6 +8,7 @@
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
+#include <cvc/ariadne/uri_http_cache.h>
 #include <cvc/core/app.h>
 #include <cvc/net/browser.h>
 #include <cvc/net/credentials.h>
@@ -126,7 +127,12 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   register_net_intrinsics(app, access);
   // Keys for end-to-end encrypted DMs. One that cannot open is no error: (e2ee-status) says why.
   enable_e2ee(app, config.e2ee_store);
-  register_http_uri_handler(app, policy);
+  // The http(s) URIs, and the host's own GETs for pictures and native media, through the app's
+  // cache (uri_http_cache.h), checked against the same allowlist; or each one a request.
+  if (config.http_cache)
+    register_cached_http_uri_handler(app, policy);
+  else
+    register_http_uri_handler(app, policy);
   if (status.oidc) {
     enable_oidc(app, policy, store, config.oidc, live);
     status.oidc_flows = oidc_flows(app);
@@ -146,10 +152,9 @@ void disable_net(cvc::app &app) {
     return;
   h.live->store(false);
   disable_oidc(app);
-  unregister_uri_handler(app, "http");
-  unregister_uri_handler(app, "https");
-  unregister_uri_store_handler(app, "http");
-  unregister_uri_store_handler(app, "https");
+  // The http(s) read and write handlers, the cache's or the plain ones (what the cache holds
+  // stays in the state tree).
+  unregister_cached_http_uri_handler(app);
   h = NetHost{};
 }
 

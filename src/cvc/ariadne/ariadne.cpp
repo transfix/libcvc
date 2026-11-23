@@ -2381,6 +2381,7 @@ struct Runtime::Impl {
     // §5.24 the tray's bell: the document's `notifications:` and whether `- bell` places it.
     int bell_setting = -1;
     bool bell_placed = false;
+    bool bell_always = false; // `notifications: always`: shown with an empty feed too
     // §5.25 the loaded documents with a menubar of their own, in tree order: each is one menu of
     // the outer bar, its bar is not drawn where it is, and its tray icons join the outer tray.
     struct App {
@@ -2472,6 +2473,7 @@ struct Runtime::Impl {
     std::string tip;
   };
   Backend::TrayIcon tray_spec(const Widget &w);
+  std::string tray_picture(const Widget &w);
   std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
   void emit_tray(const std::vector<TrayEntry> &icons);
   void emit_tray_items(const TrayEntry &icon); // a tray menu's items: its children, or the bell's
@@ -5049,8 +5051,10 @@ void Runtime::Impl::plan_windows_menu() {
             p.clock_setting = w.bdef ? 1 : 0;
           else if (w.tray_bell && in_menubar)
             p.bell_placed = true;
-          else if (w.tray_bell)
+          else if (w.tray_bell) {
             p.bell_setting = w.bdef ? 1 : 0;
+            p.bell_always = w.bell_always;
+          }
           break;
         case Kind::WindowsMenu:
           if (mount) // a loaded document's Windows menu is the outer document's
@@ -5189,7 +5193,49 @@ Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
   const std::string tone = is_expr(w.tone) ? eval_text(w.tone) : w.tone;
   t.tone = tone == "error" ? 2 : tone == "warn" ? 1 : 0;
   t.menu = !w.children.empty();
+  t.picture = tray_picture(w);
   return t;
+}
+
+// §5.22 a tray icon's `icon:`: the published name of its picture, round and a little over the
+// bar's height (64 px, sharp on a phone's dense screen), or "" while it loads, if it fails, in a
+// terminal, or with none. A video URL (an avatar can be one) plays as a decorative video: silent,
+// looping, by itself; an animated GIF or WebP moves, as an image:'s does.
+std::string Runtime::Impl::tray_picture(const Widget &w) {
+  if (w.button_icon.empty() || backend->capabilities().terminal)
+    return std::string();
+  const std::string icon = is_expr(w.button_icon) ? eval_text(w.button_icon) : w.button_icon;
+  if (icon.empty())
+    return std::string();
+  if (!media::is_uri(icon))
+    return icon; // a host-published picture
+  constexpr int kPx = 64;
+  if (media::is_video_uri(icon)) {
+    media::PlayerSource ps;
+    ps.uri = icon;
+    ps.auth = w.media_auth;
+    ps.video = true;
+    ps.frame_w = ps.frame_h = kPx;
+    ps.loop = ps.muted = true;
+    ps.audio = false;
+    PlayerSlot &p = player_slot("tray#" + icon, ps);
+    if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+      p.autoplay_done = true;
+      p.player->play();
+    }
+    if (player_frame(p, kPx, kPx, ImageFit::Cover, ImageShape::Circle, steady_seconds()))
+      return p.frame_name;
+    return std::string();
+  }
+  media::ImageRequest rq;
+  rq.uri = icon;
+  rq.auth = w.media_auth;
+  rq.w = rq.h = kPx;
+  rq.fit = media::Fit::Cover;
+  rq.shape = media::Shape::Circle;
+  media::ImageView v;
+  const std::string name = media_picture(rq, v);
+  return v.status == media::Status::Ready ? name : std::string();
 }
 
 namespace {
@@ -5723,10 +5769,11 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
     c.spec.tooltip = c.tip;
     return c;
   };
-  // §5.24 the bell: while the feed has entries; its badge the unread, its tone the worst of them.
+  // §5.24 the bell: while the feed has entries (always, for `notifications: always`); its badge the
+  // unread, its tone the worst of them.
   const cvc::notify_summary feed = cvc::notify_status(app);
   // The clock and the bell are the document's first bar's (a second bar of its own has neither).
-  const bool bell_on = !first_bar_drawn && feed.count > 0 &&
+  const bool bell_on = !first_bar_drawn && (feed.count > 0 || windows_menu.bell_always) &&
                        read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
   const auto bell_icon = [&](const Widget *at) {
     Icon c;

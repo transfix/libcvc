@@ -3378,10 +3378,20 @@ How each backend does it:
   font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
   input, combo or colour widget rather than run past the window's edge. A
-  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
-  each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
-  with a column per entry. `borders` and `resizable` need that table, so a row using them needs
-  `col_widths` as well; without it the table has one column.
+  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side, each at its
+  natural width, as the terminal backends do; a cell that would run past the line's room goes to
+  the next line, as a word in a paragraph does (from the width the cell had the frame before, so
+  a row settles in a frame). A cell whose widgets stretch to the line's end (a side panel's
+  progress bar) stays on its line and takes what is left. One with `col_widths` is an ImGui table with a column per entry.
+  `borders` and `resizable` need that table, so a row using them needs `col_widths` as well;
+  without it the table has one column.
+- **Nothing runs past a narrow window (ImGui).** The line's room is the window's (a table cell's),
+  or, in a window whose width fits its content, the widest that window can be: the view's width,
+  wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
+  `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
+  draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
+  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
+  bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
@@ -3602,7 +3612,10 @@ windows:
   drawing time, not the wall's: a page that draws nothing for a while (a hidden browser tab, a
   phone put away) ages nothing, so its pictures are all still there when it draws again, never
   fetched a second time. Two widgets that show the same URL
-  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
+  share one fetch. The encoded bytes of an http(s) picture without `auth:` are also kept in the
+  app's HTTP cache (§10.3), so a picture dropped here and drawn again later is decoded from the
+  cache, with no request while it is fresh. `ari snapshot` and `arigl snapshot` wait for the
+  pictures they draw, those
   whose URL a reply puts in state included: they draw again until no picture is still loading
   (at most 10 s, as for requests).
 - **The box.** `size: [w, h]` is a box; `fit` says how the picture fills it: `contain` (all of it,
@@ -3818,7 +3831,9 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - `ari-media` (§9.2) and `arigl` have cvcMedia's FFmpeg + SDL3 player. FFmpeg decodes,
     frames are scaled to the box, and the sound plays through SDL3's audio subsystem, which is
     the clock (the wall clock without sound). The source is fetched whole first (the host's
-    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory.
+    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory. One with
+    no `auth:` is fetched through the app's HTTP cache (§10.3), so playing it again does not
+    download it again while it is fresh.
   - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
   - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
     `unsupported` and offer "Open".
@@ -3841,7 +3856,8 @@ has loaded, or when it failed, nothing is drawn behind the content.
       - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
         requests), once the host allows its origin;
       - one with `auth:` is fetched with the bearer token alone (no cookies, no redirect) into a
-        blob;
+        blob, with `cache: 'no-store'`: the browser's cache keys a reply by its URL alone, so a
+        kept copy could be served to another user signed in later in the same browser;
       - `file://`, `cvc://` and `state://` sources are read from the page's files into a blob.
         A page lists its media in the config's `preload` to have them there.
     - A picture from another origin needs CORS to be read back. Without it the sound still
@@ -4869,6 +4885,11 @@ menubar:
     It is drawn over the icon's top right corner. "" and "0" show no badge.
   - `tone:` (`info`, `warn` or `error`, or an expression giving one) colours the badge: blue,
     amber or red.
+  - `icon:` is a picture in place of the glyph: a URI (§5.11, with `auth:` for a credential), a
+    picture the host published, or an expression giving either (an account's avatar URL). ImGui
+    draws it round, as tall as the bar, cover-fitted; an animated GIF or WebP moves, and a video
+    URL (an avatar can be one) plays there as a decorative video: silent, looping, by itself
+    (§5.13). Until it loads, if it fails, and in a terminal, the glyph shows.
   - `tooltip:`, `visible_when:` and `id:` work as on any widget.
   - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
     the icon so it stays on the screen.
@@ -5013,14 +5034,16 @@ menubar:
   (`bind: /notify.unread`): `notify.count`, `notify.unread`, `notify.worst` (`info`, `warn`,
   `error`, or "" when none is unread), `notify.rev`, and
   `notify.items.<id>.{text, level, source, time, read, repeat}`.
-- **The bell** shows while the feed has entries. Its badge is the unread count, and its tone is
-  the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
+- **The bell** shows while the feed has entries, or always for a document's top-level
+  `notifications: always` (its menu then says there are none). Its badge is the unread count, and
+  its tone is the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
   window with every entry (`tree._notifications.open`; its X closes it).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
-  - A document's top-level `notifications: true|false` overrides the host.
+  - A document's top-level `notifications: true|false` overrides the host; `always` is true, the
+    bell shown with an empty feed too.
   - The user's choice overrides both: arigl's *Settings > Show notifications* toggles the state
     key `ariadne.tray.bell`.
   - Opening the menu does not mark anything read: a hosted backend (tvision) has every menu open
@@ -5242,9 +5265,10 @@ current one to look pressed:
   own: an emoji, or a word.
 - **`selected:`** is `true`, `false`, or an expression. While it holds, the button is drawn
   pressed in; `false` is a button of such a row that is never the chosen one (a bar's Back). On
-  ImGui sunken (a shadow along its top and left edges, a darker face, its content a step down and
-  to the right), with the row's other buttons raised beside it (a light top and left, a shadow at
-  the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
+  ImGui sunken, plainly so even where a picture covers most of the face: a deep shadow two steps
+  wide along its top and left, its face lit in the active colour, its content two steps down and
+  to the right (a picture a shade darker), with the row's other buttons raised beside it (a light
+  top and left, a shadow two steps wide at the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
   choosing another moves nothing. It is a look only: a click runs `on:` as on any button.
 - In a `repeat:`, `{i}` reaches both.
 - `(has? "button.icon")` and `(has? "button.selected")` say where the backend draws them (§5.7).
@@ -5387,8 +5411,10 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
 - **`state://…?value | ?data | ?children`** — reads from the `cvc::state` tree
   ([`uri_state.cpp`](../src/cvc/ariadne/uri_state.cpp)).
 - **`http(s)://`** — **opt-in**: registered when the host turns the network on (`ari` /
-  `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
-  cached variant). It is *not* registered by default — see the caveats (§11).
+  `arigl --net-allow ...`, §10.3), which registers the app's HTTP cache
+  (`register_cached_http_uri_handler`, "The HTTP cache" in §10.3), or by a host calling
+  `register_http_uri_handler()` (or the cached variant) itself. It is *not* registered by
+  default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
   `$CVC_ARIADNE_PATH` → host-supplied extra dirs → `share/libcvc/ariadne` beside the file
   holding libcvc (`<lib>/..` or `<bin>/..`, so a relocated install such as a cvcpkg prefix
@@ -5432,6 +5458,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
+| `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its
@@ -5833,14 +5860,16 @@ for every document: **Demos**, **Document** (the document's own menus, as submen
 scene's items show only while the loaded document has a scene (`scene:`): `AriRuntime::load`
 writes `ariadne.scene` (`1` or `0`) under the document's prefix, and the items'
 `visible_when:` reads it. A document with no scene (a feed, a form) gets *Show clock* and *Show
-notifications* alone. A demo picked from Demos that is a
+notifications* alone, and *Network cache...* while the network is on: it opens the `http_cache`
+component (§6.5), the settings window of the app's HTTP cache (§10.3), which arigl puts in every
+document, closed, in a window and in `--terminal` alike. A demo picked from Demos that is a
 `.ari` document loads in place of the running one, in the same window; any other demo opens on
 its own (its page in the browser, its program natively). That is how the examples' browser gallery runs every `.ari` demo in one app
 (`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree
 and the `libcvc-examples` install get one (`share/libcvc-examples/gallery.json`), and the browser
 gallery writes one for what it deployed.
 
-Two `AppRuntime` pieces make that possible for any host:
+These `AppRuntime` pieces make that possible for any host:
 
 - `set_host_menus(menus)` puts the host's menus in every document it mounts, and gives a
   document without a menubar one. Their `menu_action` events go to the host's `on()` handlers.
@@ -5852,6 +5881,10 @@ Two `AppRuntime` pieces make that possible for any host:
 - `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
   document the Controls window (§5.3), even one with no keys of its own. `set_host_mouse(m)`
   adds the host camera's pointer settings to that window, above the keys.
+- `set_host_windows(windows)` puts the host's windows in every document, after its own, each
+  closed until its `tree.<id>.open` is set (a host menu's `menu_toggle` on that key opens it).
+  A document that has a window with the same id keeps its own. arigl's Network cache window is
+  one: arigl loads it from `components/http_cache.ari`.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last
@@ -7406,7 +7439,8 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
   and the browser's own rule of dropping `Authorization` on a cross-origin hop bound the
   rest.
 - **registers the verbs and the `http(s)://` URI handler** with that allowlist, so
-  `import:` of an https URL and `(fetch "https://...")` are checked too.
+  `import:` of an https URL and `(fetch "https://...")` are checked too. The handler is the app's
+  HTTP cache (below).
 - **keeps a credential store** ([`credentials.h`](../inc/cvc/net/credentials.h)) of bearer
   tokens by name. A document never holds one:
   - `(http-get url (dict "auth" "txwtf"))` has the host add `Authorization: Bearer <token>`
@@ -7473,6 +7507,58 @@ network with the capability tokens `net` (the host turned it on), `net.auth` (it
 credentials) and `net.auth.persist` (it keeps them across runs), in `requires:` or with
 `(has? "net")` (§5.7). `ari info` and `arigl info` show the allowlist and where credentials
 are kept.
+
+**The HTTP cache.** With the network on, the app keeps what it reads over http(s) in a cache
+([`uri_http_cache.h`](../inc/cvc/ariadne/uri_http_cache.h)), so a large file the document asks
+for again is not downloaded again. It holds the replies to:
+
+- `import:`, `load:` and `source:` of an http(s) URL, and `(fetch ...)` of one;
+- pictures: an `image:` or a `background:` with an http(s) `src`, and a button's `icon:` (§5.11);
+- video and audio natively (`arigl` in a window, `ari-media`): the player downloads the whole
+  file first (§5.13).
+
+It does not hold the replies to `http-get`, `http-request` and the other verbs, which go to the
+network every time. Nor does it hold a reply to a request with a credential: a picture or a video
+with `auth:`, or a URI read the host's options provider adds headers to. In a browser, a video or
+audio without `auth:` plays from its URL, so the browser's own HTTP cache keeps it; one with
+`auth:` is fetched with `cache: 'no-store'`, so the browser keeps no copy of a signed-in user's
+file under a URL another user may open in the same browser.
+
+A reply with `Cache-Control: max-age` is served from the cache, with no request, for that long. A
+reply with an `ETag` or `Last-Modified` and no `max-age` is asked about again each time: a `304`
+from the server serves the kept copy. A reply with neither is fresh for `freshness_secs`.
+`no-store` is never kept, and `no-cache` is always asked about again. An entry stays for
+`retention_secs` at least, past its freshness. When the cache is over its budget, the entries used
+longest ago go first. A cached reply is served only for a URL the allowlist allows: an entry kept
+before a stricter `--net-allow` is not served past it.
+
+The cache lives in the app's state tree, under `sys.net.http_cache`, where a widget binds it with
+a leading `/` (§7.1). Its policy keys take effect at once, with no restart:
+
+| key | default | what |
+|---|---|---|
+| `policy.enabled` | `1` | `0`: every read is a request and nothing is kept (what is kept stays) |
+| `policy.max_bytes` | 256 MiB (48 MiB in a browser) | the budget, in bytes; lowering it drops entries at once |
+| `policy.max_entry_bytes` | 64 MiB | the largest reply kept; a larger one is used but not kept. 64 MiB is also the most any reply may be |
+| `policy.max_mib`, `policy.max_entry_mib` | | the same two sizes in MiB, for a slider: writing either form sets the other |
+| `policy.freshness_secs` | 60 | how long a reply with no `max-age`, `ETag` or `Last-Modified` is fresh |
+| `policy.retention_secs` | 3600 | how long an entry stays at least (for entries stored after a change) |
+
+A key that is set before the network is turned on keeps its value. The cache writes what it holds
+and has done to `stats.entries`, `stats.bytes`, `stats.hits` (reads with no request),
+`stats.misses` (reads whose body came from the network), `stats.revalidated` (a `304` served the
+kept copy), `stats.evicted` (entries dropped for the budget or their retention), and `stats.fill`
+(bytes over the budget, 0 to 1) and `stats.used` (`12.5 MiB of 256 MiB`) for a progress bar.
+
+To empty it, write any value to `sys.net.http_cache.clear` (the cache empties and the key goes
+back to `""`), call `clear_http_cache(app)` from C++, or run the bare action `http_cache.clear`,
+which every `AppRuntime` host handles. A document's programs write under their own prefix, so a
+button uses the action: the shipped component `http_cache.ari` (§6.5) is the cache's settings
+window, and arigl opens it from *Settings > Network cache...*. The counters keep counting across
+a clear.
+
+A host that wants every read to be a request sets `NetHostConfig::http_cache = false`, and gets
+the plain handler.
 
 A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfig)` or
 `AriRuntime::enable_net`, before `load()`; the runtime turns it off again when it is
@@ -8026,12 +8112,16 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   `arigl` register the handler, checked against their allowlist, when given `--net` or its
   kin; otherwise `import:` / `load:` over http and `fetch("http://…")` fail with an
   unknown-scheme error.
-- **The §13.9 HTTP cache is implemented and unit-tested but wired into nothing**
+- **The HTTP cache (§10.3) holds reads, not the verbs' requests.** `enable_net` registers it
   (`register_cached_http_uri_handler`,
-  [`uri_http_cache.cpp`](../src/cvc/ariadne/uri_http_cache.cpp)), and it does not check a
-  `NetPolicy`. Even once installed, the primary `http-get*` verbs go straight to
-  `cvc::net::send` and bypass it; only `fetch`/`fetch-async` route through the resolver where
-  the cache lives.
+  [`uri_http_cache.cpp`](../src/cvc/ariadne/uri_http_cache.cpp)) with the host's allowlist, and
+  `import:` / `load:` / `source:`, `fetch`, pictures and native video and audio go through it.
+  The `http-get*` and `http-request` verbs go straight to `cvc::net::send` and bypass it. It keys
+  an entry by its URL only: it does not read `Vary` or `Cache-Control: private`, which is why a
+  request with a credential bypasses it, and it does not use `Expires` (a reply with neither
+  `max-age` nor a validator is fresh for `policy.freshness_secs`). It keeps entries in memory,
+  in the app's state tree, so a new run starts empty. In a browser build without threads, two
+  reads of one URL at once make two requests (natively they share one).
 - **The network verbs are not reachable from `pycvc.Exec`.** They live in the Ariadne
   Runtime action lane; `AriRuntime` and `AppRuntime` reach them through `enable_net`. A pycvc
   author registers a `register_async_fn` HTTP wrapper instead.
