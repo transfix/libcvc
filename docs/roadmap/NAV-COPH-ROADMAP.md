@@ -521,6 +521,28 @@ run is byte-unchanged.
   natively. pycvc-gl's wasm build then runs the CoPH demo in the browser, without torch.
 - **Live parity.** GRL-SNAM's parity test can check the native fleet against the torch one.
 
+**Landed in part 1: the bindings.** `bindings/pycvc/pycvc_nav_coph.i`, tested by `pycvc_nav_coph`
+(`test_pycvc_nav_coph.py`).
+- **The kernels.** `nav_coph_flow`, `nav_coph_balance`, `nav_coph_risk`, `nav_coph_potential`,
+  `nav_coph_grad_potential`, `nav_coph_command`, `nav_coph_shaping` and `nav_coph_allocate`. A
+  packet's bytes are `NavCophPacket.bytes()`, the length of its `json()`.
+- **The configurations.** Dicts over the demos' profile, with `coph_config`'s field names.
+  `nav_coph_profile()` and `nav_coph_communication_profile()` return the whole of each, and an
+  unknown key is an error.
+- **`NavCophAgent`.** One learner, a crossing one or a car's (`network="none"`): observe, advance,
+  action, update, `export_to` (a `NavCophPacket`) and assimilate.
+- **`NavCophFleet`.** The runner's fleet:
+  - `run_crossing()` on the crossing world; its sensor noise may be a Python callable;
+  - `boundary()` for a world of the caller's;
+  - the samples, controls, updates, events and energy accounts.
+- **Results on Windows.**
+  - G2, G3 and G11 come within the golden's tier from Python, through the same file libcvc's C++
+    tests read.
+  - The fleet on G12's crossing world and noise matches libcvc's
+    `CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun`: both agents reach their goals (767
+    and 784 steps), with residuals of 7.5e-15 and 7.0e-15.
+- **Next, part 2:** `--controller coph` in the cars template, then the browser demo.
+
 ## 5. Golden cases and tiers
 
 FLOAT64 means `|mine − golden| ≤ rtol |golden| + atol`, with `rtol` 1e-12 for closed forms and

@@ -369,6 +369,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_input_trace:test_pycvc_input_trace.py
              pycvc_nav_lab:test_pycvc_nav_lab.py
              pycvc_ph:test_pycvc_ph.py
+             pycvc_nav_coph:test_pycvc_nav_coph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py
