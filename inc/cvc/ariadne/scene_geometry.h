@@ -64,9 +64,10 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &node, cvc::geometr
                               std::shared_ptr<const cvc::height_field> &field,
                               std::vector<std::string> *warnings);
 
-// A node's local transform (`transform: { position, rotation, scale }`) as a row-major 4x4: the
-// rotation Rz * Ry * Rx (degrees, about the parent's axes), each row then scaled (the scene graph's
-// setScale), the position last. Identity without a transform.
+// A node's local transform (`transform: { position, rotation, scale }`) as a row-major 4x4:
+// T * Rz * Ry * Rx * S, so a point is scaled along the node's own axes, turned (degrees, about the
+// parent's x, then y, then z), then moved, as the scene graph's setRotation and setScale make it.
+// Identity without a transform.
 void scene_node_local_matrix(const SceneNode &node, double out[16]);
 
 // a * b, row-major 4x4.

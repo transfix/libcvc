@@ -631,6 +631,10 @@ struct CameraController::Impl {
   bool trackFed = false;      // true => use fedTarget, ignore the scene node
   double fieldOfView = 0.0;   // 0 = leave VTK default untouched; >0 applied (non-Map)
   double trackWidenTau = 0.0; // 0 = symmetric follow (bit-identical to before)
+  bool orthographic = false;  // settings.orthographic: parallel projection in Orbit, Fly, Track
+  bool orthoProjection = false;         // applyToCamera() turned parallel projection on for it
+  double clipNear = 0.0, clipFar = 0.0; // settings.clip_near/far: a fixed range (0, 0: fitted)
+  bool fixedClip() const { return clipNear > 0.0 && clipFar > clipNear; }
 
   vtkCamera *camera = nullptr;
   vtkRenderer *renderer = nullptr;
@@ -648,6 +652,8 @@ struct CameraController::Impl {
     double fieldOfView = 0.0;
     double mapScale = 0.0;
     double sliceScale = 0.0;
+    bool orthographic = false;
+    double clipNear = 0.0, clipFar = 0.0;
     Mode mode = Mode::Orbit;
     vtkCamera *camera = nullptr;
     vtkRenderer *renderer = nullptr;
@@ -850,6 +856,9 @@ void CameraController::seedState() {
   getState("track.cam_tau").value(s.trackCamTau);
   getState("track.min_speed").value(s.trackMinSpeed);
   getState("settings.field_of_view").value(s.fieldOfView);
+  getState("settings.orthographic").value(s.orthographic ? 1 : 0);
+  getState("settings.clip_near").value(s.clipNear);
+  getState("settings.clip_far").value(s.clipFar);
   getState("track.widen_tau").value(s.trackWidenTau);
   getState("settings.fly_accelerate").value(s.flyAccelerate);
   getState("settings.fly_friction").value(s.flyFriction);
@@ -959,6 +968,9 @@ void CameraController::readAllFromState() {
   s.trackCamTau = d("track.cam_tau", s.trackCamTau);
   s.trackMinSpeed = d("track.min_speed", s.trackMinSpeed);
   s.fieldOfView = d("settings.field_of_view", s.fieldOfView);
+  s.orthographic = i("settings.orthographic", s.orthographic ? 1 : 0) != 0;
+  s.clipNear = d("settings.clip_near", s.clipNear);
+  s.clipFar = d("settings.clip_far", s.clipFar);
   s.trackWidenTau = d("track.widen_tau", s.trackWidenTau);
   s.flyAccelerate = std::max(0.0, d("settings.fly_accelerate", s.flyAccelerate));
   s.flyFriction = std::max(0.0, d("settings.fly_friction", s.flyFriction));
@@ -1015,6 +1027,9 @@ void CameraController::syncConfigToState() {
   getState("track.cam_tau").value(s.trackCamTau);
   getState("track.min_speed").value(s.trackMinSpeed);
   getState("settings.field_of_view").value(s.fieldOfView);
+  getState("settings.orthographic").value(s.orthographic ? 1 : 0);
+  getState("settings.clip_near").value(s.clipNear);
+  getState("settings.clip_far").value(s.clipFar);
   getState("track.widen_tau").value(s.trackWidenTau);
   getState("settings.fly_accelerate").value(s.flyAccelerate);
   getState("settings.fly_friction").value(s.flyFriction);
@@ -1243,6 +1258,45 @@ void CameraController::setFieldOfView(double degrees) {
   applyToCamera();
 }
 double CameraController::fieldOfView() const { return m_impl->fieldOfView; }
+void CameraController::lookAt(const double eye[3], const double target[3]) {
+  Impl &s = *m_impl;
+  const Basis b = s.basis();
+  const Vec3 e{eye[0], eye[1], eye[2]}, t{target[0], target[1], target[2]};
+  s.zooming = false; // a glide would carry the distance off the one given
+  s.orbitCenter = t;
+  s.mapCenterX = t.x;
+  s.mapCenterY = t.y;
+  const Vec3 off = e - t;
+  if (length(off) > 1e-9) {
+    s.orbitDistance = length(off);
+    dirToYawPitch(b, off, s.orbitAzimuth, s.orbitElevation);
+    const double lo = std::max(-89.0, s.minElevation), hi = std::min(89.0, s.maxElevation);
+    s.orbitElevation = std::max(lo, std::min(hi, s.orbitElevation));
+    s.flyPos = e;
+    dirToYawPitch(b, t - e, s.flyYaw, s.flyPitch);
+  }
+  syncConfigToState();
+  syncPoseToState();
+  applyToCamera();
+}
+void CameraController::setOrthographic(bool on) {
+  m_impl->orthographic = on;
+  syncConfigToState();
+  applyToCamera();
+}
+bool CameraController::orthographic() const { return m_impl->orthographic; }
+void CameraController::setClipRange(double nearDist, double farDist) {
+  Impl &s = *m_impl;
+  s.clipNear = std::max(0.0, nearDist);
+  s.clipFar = std::max(0.0, farDist);
+  syncConfigToState();
+  applyToCamera();
+}
+bool CameraController::clipRange(double &nearDist, double &farDist) const {
+  nearDist = m_impl->clipNear;
+  farDist = m_impl->clipFar;
+  return m_impl->fixedClip();
+}
 void CameraController::setWidenTau(double tau) {
   m_impl->trackWidenTau = std::max(0.0, tau);
   syncConfigToState();
@@ -1646,7 +1700,9 @@ bool CameraController::applyNeeded() const {
   if (!s.scene || !a.valid)
     return true;
   if (a.camera != s.camera || a.renderer != s.renderer || a.scene != s.scene || a.mode != s.mode ||
-      a.fieldOfView != s.fieldOfView || (s.mode == Mode::Map && a.mapScale != s.mapScale) ||
+      a.fieldOfView != s.fieldOfView || a.orthographic != s.orthographic ||
+      a.clipNear != s.clipNear || a.clipFar != s.clipFar ||
+      (s.mode == Mode::Map && a.mapScale != s.mapScale) ||
       (s.mode == Mode::Slice && a.sliceScale != s.sliceScale))
     return true;
   double e[3], f[3], u[3];
@@ -2307,6 +2363,7 @@ void CameraController::applyToCamera() {
     s.camera->ParallelProjectionOn();
     s.camera->SetParallelScale(s.mode == Mode::Slice ? s.sliceScale : s.mapScale);
     s.mapProjection = true;
+    s.orthoProjection = false; // Map's or Slice's own now
   } else if (s.mapProjection) {
     // Leaving Map gives the 3-D modes their perspective back. Only a projection
     // Map turned on: a host's own parallel camera in Orbit is left alone.
@@ -2317,10 +2374,26 @@ void CameraController::applyToCamera() {
   // parallel). 0 leaves whatever VTK/app default the camera already carries.
   if (!s.parallel() && s.fieldOfView > 0.0)
     s.camera->SetViewAngle(s.fieldOfView);
+  // settings.orthographic in the 3-D modes: parallel, as tall as the field of view is at the
+  // focal point, so the wheel's distance still zooms. Only a projection it turned on goes off.
+  if (!s.parallel() && s.orthographic) {
+    // Fly's focal point is a step ahead of the eye, not a distance: it keeps the orbit's.
+    const Vec3 off{f[0] - e[0], f[1] - e[1], f[2] - e[2]};
+    const double dist = s.mode == Mode::Fly ? s.orbitDistance : length(off);
+    const double half = std::tan(0.5 * s.camera->GetViewAngle() * kDeg2Rad) * dist;
+    s.camera->ParallelProjectionOn();
+    s.camera->SetParallelScale(std::max(1e-9, half));
+    s.orthoProjection = true;
+  } else if (s.orthoProjection) {
+    s.camera->ParallelProjectionOff();
+    s.orthoProjection = false;
+  }
   // Read the content version BEFORE the reset, so a change racing it (another
   // thread) is seen again next frame rather than lost.
   const std::uint64_t content = s.scene ? s.scene->contentVersion() : 0;
-  if (s.renderer)
+  if (s.fixedClip())
+    s.camera->SetClippingRange(s.clipNear, s.clipFar);
+  else if (s.renderer)
     s.renderer->ResetCameraClippingRange();
 
   Impl::Applied &a = s.applied;
@@ -2328,6 +2401,9 @@ void CameraController::applyToCamera() {
   std::copy(f, f + 3, a.focal);
   std::copy(u, u + 3, a.up);
   a.fieldOfView = s.fieldOfView;
+  a.orthographic = s.orthographic;
+  a.clipNear = s.clipNear;
+  a.clipFar = s.clipFar;
   a.mapScale = s.mapScale;
   a.sliceScale = s.sliceScale;
   a.mode = s.mode;

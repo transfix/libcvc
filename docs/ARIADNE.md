@@ -1227,6 +1227,38 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Transforms.** A node's `transform: { position, rotation, scale }` places it in its parent's
+frame (the scene's, for a top-level node). Each key is optional:
+
+```yaml
+- node: crate
+  source: { box: 1 }
+  transform: { position: [4, 0, 0.5], rotation: [0, 0, 30], scale: 2 }
+```
+
+- `position` is `[x, y, z]`, in the parent's units.
+- `rotation` is `[rx, ry, rz]` in degrees, about the parent's axes and applied in that order: x
+  first, then y, then z. As a matrix on column vectors it is R = Rz(rz) Ry(ry) Rx(rx). Read the
+  other way, it is a turn of rz about z, then ry about the turned y, then rx about the twice-turned
+  x: the heading, pitch and roll of a vehicle's `pose` (below), in degrees here rather than
+  radians. A positive angle turns counter-clockwise seen from the axis's positive end, so
+  `rotation: [0, 0, 90]` takes +x to +y.
+- `scale` is one number (uniform) or `[sx, sy, sz]`, along the node's own axes, before the
+  rotation: a point p of the node lands at position + R S p, so `scale: [4, 1, 1]` with
+  `rotation: [0, 0, 30]` is a shape stretched along its own x and then turned. This is how glTF,
+  USD and X3D compose a node, how a view entry's `transform:` (§5.18) does, and how the physics
+  world shapes a body.
+
+A running scene keeps each node's pose in keys under its path (`graphics.root.children.<node>`
+for a top-level one): `position`, `rotation` and `scale` as comma-separated numbers, in the units
+and order above, and `matrix`, the whole transform as 16 numbers, row-major. A program, a script
+or a host moves a node by writing them, and each keeps the others: a new `rotation` keeps the
+scale (0, or below 0, included) and a new `scale` keeps the rotation. Writing `matrix` sets the
+pose exactly, so an outside simulation or an importer can give any orientation without Euler
+angles (a vehicle's `pose` takes the same `matrix`). A `rotation` or `scale` written after it
+keeps the rest of that matrix: its columns' lengths as the scale (the last negative when it
+mirrors) and what is left as the rotation.
+
 **Repeated nodes.** `repeat:` on a node makes it a template, drawn as copies beside one another,
 as a widget's `repeat:` draws its instances (§6.5). A pool of markers sized by a list in state is
 one node:
@@ -1606,7 +1638,9 @@ turns it off, and `weather.wetness` publishes the wetness it last applied.
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
 three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), and a swell
 (`swell_height` m, 0 for none; `swell_period`, `swell_dir`) carried by the shore layer, which
-refracts it over the bottom, shoals it, and breaks it on the beaches that face it. Both follow the
+refracts it over the bottom, shoals it, and breaks it on the beaches that face it; a quarter of it
+reaches a lee shore, as diffraction carries it round an island, so no beach the swell can reach
+is dead calm. Both follow the
 coast: a shore grid over the ground (still-water depth, distance to the shore, normal). Each cascade
 fades out as the water shoals, over half its peak wavelength and at most `shore_fade` metres of
 depth, and no point moves sideways more than 0.8 of the way to the shore. A grid `near` metres each
@@ -2037,7 +2071,13 @@ scene:
   touching one has hit an obstacle. That is the node's `edge: wall`, the default; `edge: shore`
   lines the world with a beach instead, the ground falling under the sea over a band at the rim
   (20 % of `half`, 50-300 m), its corners rounded and its coastline wandering, with the sea drawn
-  on past the world, and no walls; `edge: none` leaves the edge open. It is live too: `world.edge`
+  on past the world, and no walls; `edge: none` leaves the edge open. The shore's band is a
+  beach's profile: the sea floor shelves up to a 1 in 12 surf zone, so a water node's swell
+  shoals and breaks across it, then a 1 in 10 beach face rises to a sand berm 1.5 m up, so its
+  swash runs well up the beach on every side (to windward most); the streets keep behind it.
+  A world with walls or none hangs over a rock: under its rim a cliff falls into a ragged cone
+  about half of `half` deep (`world::world_underside`, drawing only), so seen from beneath it is
+  a chunk of ground floating in the air. It is live too: `world.edge`
   (0 wall, 1 shore, 2 none), the World panel's Edge, which Regenerate applies. A data node's world
   always has the walls. The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),
@@ -2283,8 +2323,9 @@ scene:
     stock clients draw: a server document (or arisrvx's Python) publishes the table (`server:
     publish: [fleet]`) and writes it each step, the relay replicates it, and each client's world
     document, with `poses: /fleet` and the archetypes, spawns and places the entities where the
-    server has them. Over a relay, take an entity out by emptying its archetype: the relay
-    replicates a value, and a client may not see an entry's removal.
+    server has them. Over a relay, take an entity out either way: emptying its archetype is a
+    value, and removing the entry is a delete, which replicates as a write does (a client that
+    missed it loses the entry at the relay's next broadcast, or when it rejoins).
 
     ```yaml
     world:
@@ -2898,7 +2939,7 @@ seeds its key only while the key is empty:
 | key | meaning |
 |---|---|
 | `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
-| `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
+| `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`, and `render`: what draws the volume in the 3D view) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
 | `volumes` | published: the volumes `source.volume` may name, one per line, as it names them: each output of the document's `data:` entries that holds a volume (`data.<name>.<output>`), then the key `source.volume` names when it is not one of them; empty while it names none (a host that calls `setSource`). The component's Source combo picks from it, writing `source.volume` |
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
@@ -2928,9 +2969,13 @@ voxel. Every edit is one undo step. The planes are the node's children `slice_xy
 view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
 overlays draw its points as disks of their radius in voxels, the selection's rings, the crosshairs
 where the other planes cross it (each in the colour of the axis it runs along) and a rubber band
-being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is the group for what the 3D view alone
-shows: the contours' curves and tiled surfaces, and later phases'. Until the first volume arrives
-the planes and that group are hidden,
+being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is the group for what the 3D view shows
+beyond the planes, which the slice views hide: the volume itself, drawn by the renderer
+`display.render` picks (`none` by default; `vtk`, `volren` or `volslice`, a
+[`VolumeRenderNode`](../inc/cvc/gl/VolumeRenderNode.h) as `volume_render` below has, through the
+grid's transfer function, so one `tf_editor` colours the planes and the volume; the component's
+Transfer function tab picks it), the contours' curves and tiled surfaces, and later phases'.
+Until the first volume arrives the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
@@ -2964,6 +3009,36 @@ editing is core libcvc ([`volume_grid_contours.h`](../inc/cvc/volume/volume_grid
 pycvc (`volume_grid_contours_test`, `volume_grid_contour_intrinsics_test`,
 `cvcgl_volume_grid_contours`, `test_pycvc_volume_grid_contours.py`).
 `examples/ariadne/documents/volume_grid_contours.ari` is the demo.
+
+**`type: volume_render`** ([`volume_render_nodes.h`](../inc/cvc/gl/ariadne/volume_render_nodes.h),
+[`VolumeRenderNode.h`](../inc/cvc/gl/VolumeRenderNode.h)) is one volume the app holds, drawn by the
+renderer a key picks, switchable while the document runs:
+
+```yaml
+data:
+  head: { generate: sdf, params: { mesh: stanford.bunny, dim: 64, fit: { height: 100 } } }
+scene:
+  nodes:
+    - node: head
+      type: volume_render
+      source: { data: head }         # or { state: <key> }, or { node: <id>, key: <key> }
+      renderer: volren               # vtk (the default), volren, volslice or none
+      transfer_function: { preset: grayscale }
+```
+
+`vtk` is VTK's GPU mapper (the `volume` type's), `volren` libcvc's raycaster (shading,
+isosurfaces, shadows) and `volslice` view-aligned texture slices; `none` draws nothing. Writing
+`<node>.renderer` swaps the renderer on the next frame: each is a child named for its kind, so its
+own settings stay under `<node>.children.<kind>` (where `volren_controls` and `volslice_controls`
+bind) and a renderer switched back to finds them as it left them. `<node>.transfer_function` is
+one model bound to whichever renderer draws (`tf_binding_options::model_key`), so an edit carries
+over a switch; with `none` the model keeps its range and overlays. The node reads no file:
+`source:` resolves into `<node>.source.volume` as `volren`'s does (node_data.h: `{ node: <id> }`
+follows a `volume_grid` realized before it by its `grid.volume`, else that node's `volume`), the renderers draw
+the volume as it is held (its voxels shared), and a new volume at the key is drawn by the renderer
+drawing then. Keys: `renderer`, `status` (what draws, or what the node waits for),
+`source.volume`, `source.status`; data channel `volume`. Test: `cvcgl_volume_render`. The built-in
+`volume`, `volren` and `volslice` types each keep their one renderer.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 
@@ -3319,10 +3394,20 @@ How each backend does it:
   font sizes), and a row-split pane as wide as its own widgets. A window with a size gets a
   horizontal scroll bar as well as ImGui's vertical one, and a long label shrinks its slider,
   input, combo or colour widget rather than run past the window's edge. A
-  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side on one line,
-  each at its natural width, as the terminal backends do. One with `col_widths` is an ImGui table
-  with a column per entry. `borders` and `resizable` need that table, so a row using them needs
-  `col_widths` as well; without it the table has one column.
+  `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side, each at its
+  natural width, as the terminal backends do; a cell that would run past the line's room goes to
+  the next line, as a word in a paragraph does (from the width the cell had the frame before, so
+  a row settles in a frame). A cell whose widgets stretch to the line's end (a side panel's
+  progress bar) stays on its line and takes what is left. One with `col_widths` is an ImGui table with a column per entry.
+  `borders` and `resizable` need that table, so a row using them needs `col_widths` as well;
+  without it the table has one column.
+- **Nothing runs past a narrow window (ImGui).** The line's room is the window's (a table cell's),
+  or, in a window whose width fits its content, the widest that window can be: the view's width,
+  wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
+  `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
+  draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
+  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
+  bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
@@ -3543,7 +3628,10 @@ windows:
   drawing time, not the wall's: a page that draws nothing for a while (a hidden browser tab, a
   phone put away) ages nothing, so its pictures are all still there when it draws again, never
   fetched a second time. Two widgets that show the same URL
-  share one fetch. `ari snapshot` and `arigl snapshot` wait for the pictures they draw, those
+  share one fetch. The encoded bytes of an http(s) picture without `auth:` are also kept in the
+  app's HTTP cache (§10.3), so a picture dropped here and drawn again later is decoded from the
+  cache, with no request while it is fresh. `ari snapshot` and `arigl snapshot` wait for the
+  pictures they draw, those
   whose URL a reply puts in state included: they draw again until no picture is still loading
   (at most 10 s, as for requests).
 - **The box.** `size: [w, h]` is a box; `fit` says how the picture fills it: `contain` (all of it,
@@ -3759,7 +3847,9 @@ has loaded, or when it failed, nothing is drawn behind the content.
   - `ari-media` (§9.2) and `arigl` have cvcMedia's FFmpeg + SDL3 player. FFmpeg decodes,
     frames are scaled to the box, and the sound plays through SDL3's audio subsystem, which is
     the clock (the wall clock without sound). The source is fetched whole first (the host's
-    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory.
+    network policy and `auth:`, as for `image:`, at most 64 MiB) and read from memory. One with
+    no `auth:` is fetched through the app's HTTP cache (§10.3), so playing it again does not
+    download it again while it is fresh.
   - FFmpeg is cvcpkg's `ffmpeg-lgpl`, linked shared, so the LGPL's terms are kept.
   - The lean `ari`, or any build without FFmpeg, has no player. Its media widgets say
     `unsupported` and offer "Open".
@@ -3782,7 +3872,8 @@ has loaded, or when it failed, nothing is drawn behind the content.
       - an http(s) URL with no `auth:` is given to the element (it streams and seeks with range
         requests), once the host allows its origin;
       - one with `auth:` is fetched with the bearer token alone (no cookies, no redirect) into a
-        blob;
+        blob, with `cache: 'no-store'`: the browser's cache keys a reply by its URL alone, so a
+        kept copy could be served to another user signed in later in the same browser;
       - `file://`, `cvc://` and `state://` sources are read from the page's files into a blob.
         A page lists its media in the config's `preload` to have them there.
     - A picture from another origin needs CORS to be read back. Without it the sound still
@@ -4343,6 +4434,7 @@ windows:
 | `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
 | `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
 | `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
+| `position`, `target`, `up`, `fov`, `near`, `far`, `orthographic`, `height` | Its own camera's authored viewpoint and lens, as a named camera's (Cameras, below). |
 | `override` | Per-view restyling, and moving, turning or scaling, below. |
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
@@ -4350,6 +4442,15 @@ windows:
 | `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
 | `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
+
+**Where its keys resolve.** `pick:` (and its default), `pointer:` and `axis: { bind }` resolve as
+`bind:` does: in the scope the widget sits in, the document's prefix or a `load:`ed module's
+`includes.<as>` (§6.3), and a leading `/` means the root. So a module's view writes its picks
+inside the module's sandbox, where the module's own widgets and programs read them. A view of a
+`scenes:` entry (below) keeps them under that scene's `scenes.<id>` in that scope. The view's
+camera is not one of these: it stays under the scene's own prefix (`<prefix>.viewers.<view>.camera`,
+or `<prefix>.scenes.<id>.viewers.<view>.camera`) wherever the widget sits, one camera per view
+name. (`cvcgl_ariadne_pick`.)
 
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
 move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
@@ -4447,7 +4548,8 @@ An entry with `mode: replace` starts over from the node's own look: the entries 
 apply to the nodes it covers (`"*"`'s included), and the ones after it add to it as usual.
 
 An entry's `transform: { position, rotation, scale }` moves, turns and scales what it covers in
-that view, spelled as a node's `transform:` is (rotation in degrees; `scale` one number or three).
+that view, spelled and composed as a node's `transform:` is (§5.4, Transforms: rotation in
+degrees, x then y then z; `scale` one number or three, along the node's own axes).
 It applies in the frame of the node the entry names, so `pack: { transform: { scale: 2 } }` draws
 the group `pack` twice its size about its own origin, children and all. A tag entry applies in each
 tagged node's frame, and `"*"` in world space. Transforms from several entries compose in order.
@@ -4481,7 +4583,7 @@ one layer, and a clay model. `viewer_grid.ari` is four independent cameras on on
 
 **Cameras.** A view's camera is its own unless it names one. `scene: cameras:` declares named
 cameras, each at `<prefix>.viewers.<id>.camera`, with the same `mode`, `track`, `azimuth`,
-`elevation` and `zoom` keys. Every viewport with `camera: <id>` draws from that camera, so a drag,
+`elevation` and `zoom` keys, and the viewpoint keys below. Every viewport with `camera: <id>` draws from that camera, so a drag,
 the wheel or a double-click in any of them moves all of them, whatever each one shows or restyles.
 `camera: main` follows the main view's camera, and moves it.
 
@@ -4502,6 +4604,47 @@ windows:
 A named camera is framed on the whole scene the first time a view shows it, and its near and far
 planes span the whole scene. Named cameras and views share the `viewers.*` names, so give them
 different ones.
+
+**Authored viewpoints.** A camera can also say exactly where it looks from, and with what lens. A
+named camera, a viewport's own camera and the main view take these keys. The main view takes them
+from a `cameras:` entry named `main`. That entry is not a named camera of its own: `camera: main`
+on a viewport still follows the main view, which now starts there.
+
+```yaml
+scene:
+  cameras:
+    - camera: main               # where the main view starts
+      position: [12, -9, 7]
+      target: [1, 1, 0]
+      fov: 35
+      near: 0.25
+      far: 400
+    - camera: plan
+      orthographic: true
+      position: [5, -20, 30]
+      target: [0, 0, 0]
+      height: 16                 # the view is 16 tall at the target
+```
+
+- **`position` and `target`**, `[x, y, z]` in world coordinates: the eye and the point it looks at.
+  Together they replace `azimuth`, `elevation` and `zoom`. A `target` alone turns the framed view
+  to look at it, from the same angle and distance, so `azimuth`, `elevation` and `zoom` still
+  apply. A `position` alone looks from there at what the view framed. The pose is the orbit's own,
+  so a drag or the wheel goes on from it; the orbit's elevation stays within 89 degrees, so a
+  camera straight above its target sits just off vertical. With `mode: fly` the eye stands at
+  `position` facing `target`.
+- **`up`**, `[x, y, z]`: the world's up axis the camera turns about (`+z` by default; the scene is
+  z-up).
+- **`fov`**: the vertical field of view in degrees (VTK's 30 when unset).
+- **`near` and `far`**: fixed clipping distances. Unset, they are fitted to what the view draws
+  every frame.
+- **`orthographic: true`**: a parallel projection in `orbit`, `fly` and `track`, as tall at the
+  target as the field of view is, so the wheel still zooms it. `height` sets that height at the
+  start; the eye slides along its line of sight to make it so, which a parallel view does not
+  show. `map` and `slice` are parallel anyway.
+
+`mode: map` and `mode: slice` take `near` and `far` but frame themselves otherwise.
+(`cvcgl_ariadne_viewpoints`, `cvcgl_camera_viewpoint`.)
 
 **Shadows.** When the scene casts shadows (`shadows: { enabled: true }`), every view draws them. A
 view does not bake shadow maps of its own: it reads the ones the main view bakes
@@ -4809,6 +4952,11 @@ menubar:
     It is drawn over the icon's top right corner. "" and "0" show no badge.
   - `tone:` (`info`, `warn` or `error`, or an expression giving one) colours the badge: blue,
     amber or red.
+  - `icon:` is a picture in place of the glyph: a URI (§5.11, with `auth:` for a credential), a
+    picture the host published, or an expression giving either (an account's avatar URL). ImGui
+    draws it round, as tall as the bar, cover-fitted; an animated GIF or WebP moves, and a video
+    URL (an avatar can be one) plays there as a decorative video: silent, looping, by itself
+    (§5.13). Until it loads, if it fails, and in a terminal, the glyph shows.
   - `tooltip:`, `visible_when:` and `id:` work as on any widget.
   - A click raises `on:`. An icon with `items:` opens them as a menu instead, hanging left from
     the icon so it stays on the screen.
@@ -4953,14 +5101,16 @@ menubar:
   (`bind: /notify.unread`): `notify.count`, `notify.unread`, `notify.worst` (`info`, `warn`,
   `error`, or "" when none is unread), `notify.rev`, and
   `notify.items.<id>.{text, level, source, time, read, repeat}`.
-- **The bell** shows while the feed has entries. Its badge is the unread count, and its tone is
-  the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
+- **The bell** shows while the feed has entries, or always for a document's top-level
+  `notifications: always` (its menu then says there are none). Its badge is the unread count, and
+  its tone is the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
   window with every entry (`tree._notifications.open`; its X closes it).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
-  - A document's top-level `notifications: true|false` overrides the host.
+  - A document's top-level `notifications: true|false` overrides the host; `always` is true, the
+    bell shown with an empty feed too.
   - The user's choice overrides both: arigl's *Settings > Show notifications* toggles the state
     key `ariadne.tray.bell`.
   - Opening the menu does not mark anything read: a hosted backend (tvision) has every menu open
@@ -5015,7 +5165,27 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   state keys (`tree.<id>.*`) are the mount's own, as before.
 - **A repeated mount** (`repeat:`) is an application per instance, named "<name> 1", "<name> 2"
   and so on, each in its instance's scope (`includes.<as>.<i>`). Each can be quit and restarted on
-  its own. How many there are is worked out each frame, as the repeat's count is.
+  its own. How many there are is worked out each frame, as the repeat's count is. An instance is
+  made once from its template, not copied each frame: it is a whole loaded document.
+- **A name of the loader's** (`name:` on the `load:`, libcvc 4.0.7) names the application instead,
+  worked out each frame in the loader's scope: a state key, or an expression on the read lane
+  (`'(string.join (list "Lab" (state-get "lab.n")) " ")'`), with `{i}` the instance under
+  `repeat:`. An empty value leaves the name above. A name two applications both come to is told
+  apart by a number: "tx.wtf", "tx.wtf 2". Its notifications go by it too. nicotina's main.ari
+  opens a copy of its client per site and names each by its site:
+
+  ```yaml
+  windows:
+    - load: nicotina.ari
+      as: nicotina
+      repeat: (int (state-get "slots.n"))
+      name: slots.{i}.ui.name          # the site's host, which the copy writes
+      link:
+        ui: {to: "slots.{i}.ui", mode: rw}
+  ```
+
+  A repeated mount isn't a nested repeat: the module's own `repeat:`s use their `{i}` at its
+  instance's sub-prefix, so the loader doesn't warn about them.
 - **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
   each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and a
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
@@ -5162,9 +5332,10 @@ current one to look pressed:
   own: an emoji, or a word.
 - **`selected:`** is `true`, `false`, or an expression. While it holds, the button is drawn
   pressed in; `false` is a button of such a row that is never the chosen one (a bar's Back). On
-  ImGui sunken (a shadow along its top and left edges, a darker face, its content a step down and
-  to the right), with the row's other buttons raised beside it (a light top and left, a shadow at
-  the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
+  ImGui sunken, plainly so even where a picture covers most of the face: a deep shadow two steps
+  wide along its top and left, its face lit in the active colour, its content two steps down and
+  to the right (a picture a shade darker), with the row's other buttons raised beside it (a light
+  top and left, a shadow two steps wide at the bottom and right). FTXUI and tvision draw it `[>label<]` in bold, as wide as `[ label ]`, so
   choosing another moves nothing. It is a look only: a click runs `on:` as on any button.
 - In a `repeat:`, `{i}` reaches both.
 - `(has? "button.icon")` and `(has? "button.selected")` say where the backend draws them (§5.7).
@@ -5307,8 +5478,10 @@ resolver ([`inc/cvc/ariadne/uri.h`](../inc/cvc/ariadne/uri.h)):
 - **`state://…?value | ?data | ?children`** — reads from the `cvc::state` tree
   ([`uri_state.cpp`](../src/cvc/ariadne/uri_state.cpp)).
 - **`http(s)://`** — **opt-in**: registered when the host turns the network on (`ari` /
-  `arigl --net-allow ...`, §10.3), or by a host calling `register_http_uri_handler()` (or the
-  cached variant). It is *not* registered by default — see the caveats (§11).
+  `arigl --net-allow ...`, §10.3), which registers the app's HTTP cache
+  (`register_cached_http_uri_handler`, "The HTTP cache" in §10.3), or by a host calling
+  `register_http_uri_handler()` (or the cached variant) itself. It is *not* registered by
+  default — see the caveats (§11).
 - **`cvc://<relpath>`** — a location-independent component path, searched along
   `$CVC_ARIADNE_PATH` → host-supplied extra dirs → `share/libcvc/ariadne` beside the file
   holding libcvc (`<lib>/..` or `<bin>/..`, so a relocated install such as a cvcpkg prefix
@@ -5352,6 +5525,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
+| `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
 
 Each window component also takes `title` and `id` args, and every arg has a default, so a bare
 `include:` works. A document with two nodes of a kind includes the panel twice, each with its
@@ -5753,14 +5927,16 @@ for every document: **Demos**, **Document** (the document's own menus, as submen
 scene's items show only while the loaded document has a scene (`scene:`): `AriRuntime::load`
 writes `ariadne.scene` (`1` or `0`) under the document's prefix, and the items'
 `visible_when:` reads it. A document with no scene (a feed, a form) gets *Show clock* and *Show
-notifications* alone. A demo picked from Demos that is a
+notifications* alone, and *Network cache...* while the network is on: it opens the `http_cache`
+component (§6.5), the settings window of the app's HTTP cache (§10.3), which arigl puts in every
+document, closed, in a window and in `--terminal` alike. A demo picked from Demos that is a
 `.ari` document loads in place of the running one, in the same window; any other demo opens on
 its own (its page in the browser, its program natively). That is how the examples' browser gallery runs every `.ari` demo in one app
 (`<gallery>/arigl/?doc=<name>`). The catalogs come from `examples/web/demos.json`: the build tree
 and the `libcvc-examples` install get one (`share/libcvc-examples/gallery.json`), and the browser
 gallery writes one for what it deployed.
 
-Two `AppRuntime` pieces make that possible for any host:
+These `AppRuntime` pieces make that possible for any host:
 
 - `set_host_menus(menus)` puts the host's menus in every document it mounts, and gives a
   document without a menubar one. Their `menu_action` events go to the host's `on()` handlers.
@@ -5772,6 +5948,10 @@ Two `AppRuntime` pieces make that possible for any host:
 - `set_host_keys(keys)` adds the host's key bindings to every document's, and gives each
   document the Controls window (§5.3), even one with no keys of its own. `set_host_mouse(m)`
   adds the host camera's pointer settings to that window, above the keys.
+- `set_host_windows(windows)` puts the host's windows in every document, after its own, each
+  closed until its `tree.<id>.open` is set (a host menu's `menu_toggle` on that key opens it).
+  A document that has a window with the same id keeps its own. arigl's Network cache window is
+  one: arigl loads it from `components/http_cache.ari`.
 - `load()` clears the last document's scene first (`SceneAdapter::clear()`: its nodes, free
   lights, rigs, physics, and the background, shadows and chrome it set), whether it is a hot
   reload or a switch to another document. A document without `channels:` also drops the last
@@ -6604,7 +6784,8 @@ on_tick: |
   - Each is a writable hole of the same name in the document's chroot (§7.4): `board` there is
     the tree's `board`. `state-set`, `state-set-tree` and the atomics write through it.
     `state-delete` and `state-watch` act on the physical path (§7.4), so to take entries out,
-    rewrite their parent with `state-set-tree`.
+    rewrite their parent with `state-set-tree`. The entries it drops go from every client too: a
+    removal replicates as one delete, like a write.
   - Every client is sent the published namespaces, live and in a joiner's snapshot. Clients'
     interest takes only `conf` for now, so they drop them until a document subscribes (the
     roadmap's `relay: subscribe:`, S2).
@@ -7325,7 +7506,8 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
   and the browser's own rule of dropping `Authorization` on a cross-origin hop bound the
   rest.
 - **registers the verbs and the `http(s)://` URI handler** with that allowlist, so
-  `import:` of an https URL and `(fetch "https://...")` are checked too.
+  `import:` of an https URL and `(fetch "https://...")` are checked too. The handler is the app's
+  HTTP cache (below).
 - **keeps a credential store** ([`credentials.h`](../inc/cvc/net/credentials.h)) of bearer
   tokens by name. A document never holds one:
   - `(http-get url (dict "auth" "txwtf"))` has the host add `Authorization: Bearer <token>`
@@ -7392,6 +7574,58 @@ network with the capability tokens `net` (the host turned it on), `net.auth` (it
 credentials) and `net.auth.persist` (it keeps them across runs), in `requires:` or with
 `(has? "net")` (§5.7). `ari info` and `arigl info` show the allowlist and where credentials
 are kept.
+
+**The HTTP cache.** With the network on, the app keeps what it reads over http(s) in a cache
+([`uri_http_cache.h`](../inc/cvc/ariadne/uri_http_cache.h)), so a large file the document asks
+for again is not downloaded again. It holds the replies to:
+
+- `import:`, `load:` and `source:` of an http(s) URL, and `(fetch ...)` of one;
+- pictures: an `image:` or a `background:` with an http(s) `src`, and a button's `icon:` (§5.11);
+- video and audio natively (`arigl` in a window, `ari-media`): the player downloads the whole
+  file first (§5.13).
+
+It does not hold the replies to `http-get`, `http-request` and the other verbs, which go to the
+network every time. Nor does it hold a reply to a request with a credential: a picture or a video
+with `auth:`, or a URI read the host's options provider adds headers to. In a browser, a video or
+audio without `auth:` plays from its URL, so the browser's own HTTP cache keeps it; one with
+`auth:` is fetched with `cache: 'no-store'`, so the browser keeps no copy of a signed-in user's
+file under a URL another user may open in the same browser.
+
+A reply with `Cache-Control: max-age` is served from the cache, with no request, for that long. A
+reply with an `ETag` or `Last-Modified` and no `max-age` is asked about again each time: a `304`
+from the server serves the kept copy. A reply with neither is fresh for `freshness_secs`.
+`no-store` is never kept, and `no-cache` is always asked about again. An entry stays for
+`retention_secs` at least, past its freshness. When the cache is over its budget, the entries used
+longest ago go first. A cached reply is served only for a URL the allowlist allows: an entry kept
+before a stricter `--net-allow` is not served past it.
+
+The cache lives in the app's state tree, under `sys.net.http_cache`, where a widget binds it with
+a leading `/` (§7.1). Its policy keys take effect at once, with no restart:
+
+| key | default | what |
+|---|---|---|
+| `policy.enabled` | `1` | `0`: every read is a request and nothing is kept (what is kept stays) |
+| `policy.max_bytes` | 256 MiB (48 MiB in a browser) | the budget, in bytes; lowering it drops entries at once |
+| `policy.max_entry_bytes` | 64 MiB | the largest reply kept; a larger one is used but not kept. 64 MiB is also the most any reply may be |
+| `policy.max_mib`, `policy.max_entry_mib` | | the same two sizes in MiB, for a slider: writing either form sets the other |
+| `policy.freshness_secs` | 60 | how long a reply with no `max-age`, `ETag` or `Last-Modified` is fresh |
+| `policy.retention_secs` | 3600 | how long an entry stays at least (for entries stored after a change) |
+
+A key that is set before the network is turned on keeps its value. The cache writes what it holds
+and has done to `stats.entries`, `stats.bytes`, `stats.hits` (reads with no request),
+`stats.misses` (reads whose body came from the network), `stats.revalidated` (a `304` served the
+kept copy), `stats.evicted` (entries dropped for the budget or their retention), and `stats.fill`
+(bytes over the budget, 0 to 1) and `stats.used` (`12.5 MiB of 256 MiB`) for a progress bar.
+
+To empty it, write any value to `sys.net.http_cache.clear` (the cache empties and the key goes
+back to `""`), call `clear_http_cache(app)` from C++, or run the bare action `http_cache.clear`,
+which every `AppRuntime` host handles. A document's programs write under their own prefix, so a
+button uses the action: the shipped component `http_cache.ari` (§6.5) is the cache's settings
+window, and arigl opens it from *Settings > Network cache...*. The counters keep counting across
+a clear.
+
+A host that wants every read to be a request sets `NetHostConfig::http_cache = false`, and gets
+the plain handler.
 
 A host of its own turns the network on with `AppRuntime::enable_net(NetHostConfig)` or
 `AriRuntime::enable_net`, before `load()`; the runtime turns it off again when it is
@@ -7945,12 +8179,16 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   `arigl` register the handler, checked against their allowlist, when given `--net` or its
   kin; otherwise `import:` / `load:` over http and `fetch("http://…")` fail with an
   unknown-scheme error.
-- **The §13.9 HTTP cache is implemented and unit-tested but wired into nothing**
+- **The HTTP cache (§10.3) holds reads, not the verbs' requests.** `enable_net` registers it
   (`register_cached_http_uri_handler`,
-  [`uri_http_cache.cpp`](../src/cvc/ariadne/uri_http_cache.cpp)), and it does not check a
-  `NetPolicy`. Even once installed, the primary `http-get*` verbs go straight to
-  `cvc::net::send` and bypass it; only `fetch`/`fetch-async` route through the resolver where
-  the cache lives.
+  [`uri_http_cache.cpp`](../src/cvc/ariadne/uri_http_cache.cpp)) with the host's allowlist, and
+  `import:` / `load:` / `source:`, `fetch`, pictures and native video and audio go through it.
+  The `http-get*` and `http-request` verbs go straight to `cvc::net::send` and bypass it. It keys
+  an entry by its URL only: it does not read `Vary` or `Cache-Control: private`, which is why a
+  request with a credential bypasses it, and it does not use `Expires` (a reply with neither
+  `max-age` nor a validator is fresh for `policy.freshness_secs`). It keeps entries in memory,
+  in the app's state tree, so a new run starts empty. In a browser build without threads, two
+  reads of one URL at once make two requests (natively they share one).
 - **The network verbs are not reachable from `pycvc.Exec`.** They live in the Ariadne
   Runtime action lane; `AriRuntime` and `AppRuntime` reach them through `enable_net`. A pycvc
   author registers a `register_async_fn` HTTP wrapper instead.

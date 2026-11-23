@@ -395,11 +395,12 @@ void scene_node_local_matrix(const SceneNode &n, double out[16]) {
   rot(0, n.rotation[0] * kDeg, rx);
   multiply_matrix4(rz, ry, r);
   multiply_matrix4(r, rx, r);
-  // The scene graph's setScale scales each row of the rotation.
+  // R S: scaled along the node's own axes, then turned (each column of the rotation scaled), as
+  // the scene graph's setScale makes it.
   const double s[3] = {n.scale[0], n.scale[1], n.scale[2]};
   for (int i = 0; i < 3; ++i)
     for (int j = 0; j < 3; ++j)
-      out[i * 4 + j] = r[i * 4 + j] * s[i];
+      out[i * 4 + j] = r[i * 4 + j] * s[j];
   out[3] = n.position[0];
   out[7] = n.position[1];
   out[11] = n.position[2];

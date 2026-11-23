@@ -2154,6 +2154,7 @@
           "additionalProperties": false
         },
         "visible": {"$ref": "#/$defs/visible"},
+        "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
         "volren": {
           "type": "object",
           "properties": {
@@ -2284,6 +2285,7 @@
           "additionalProperties": false
         },
         "visible": {"$ref": "#/$defs/visible"},
+        "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
         "volren": {
           "type": "object",
           "properties": {
@@ -2447,7 +2449,15 @@
         "track": {"$ref": "#/$defs/string"},
         "azimuth": {"type": "number"},
         "elevation": {"type": "number"},
-        "zoom": {"type": "number"}
+        "zoom": {"type": "number"},
+        "position": {"$ref": "#/$defs/vec3", "description": "The eye, in world coordinates."},
+        "target": {"$ref": "#/$defs/vec3", "description": "The point the eye looks at."},
+        "up": {"$ref": "#/$defs/vec3", "description": "The world's up axis the camera turns about (+z by default)."},
+        "fov": {"type": "number", "description": "The vertical field of view, degrees (0 to 180)."},
+        "near": {"type": "number", "description": "A fixed near clipping distance (with far:)."},
+        "far": {"type": "number", "description": "A fixed far clipping distance (with near:)."},
+        "orthographic": {"$ref": "#/$defs/flag", "description": "A parallel projection in orbit, fly and track."},
+        "height": {"type": "number", "description": "An orthographic view's height at the target, at the start."}
       },
       "patternProperties": {"^x-": true},
       "additionalProperties": false

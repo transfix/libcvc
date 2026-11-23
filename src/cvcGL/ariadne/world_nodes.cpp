@@ -171,6 +171,9 @@ struct WorldRT {
   // The sea past a shore-edged world (world::outer_sea), under <id>_water too: made the first time
   // a world has one, emptied for a world that has none.
   std::weak_ptr<GeometryNode> outer_sea;
+  // The rock under a floating world (world::world_underside: the wall and none edges), under
+  // <id>_underside: made the first time a world has one, emptied for a shore-edged world.
+  std::weak_ptr<GeometryNode> underside;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
   // A made world going into the scene a piece at a time (put_world_step), or null. The job stays
@@ -610,6 +613,35 @@ void put_outer_sea(SceneGraph &sg, const std::string &id, WorldRT &rt,
   style_water(*n, {}); // after setGeometry, as make_mesh's
 }
 
+// The shown world's rock beneath it (world::world_underside): a floating world (the wall and none
+// edges) has one, lit as the ground's solids are, in its own vertex colours; it casts no shadow
+// (nothing lies below it to take one). A shore-edged world empties the node.
+void put_underside(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                   const world::generated_world &w) {
+  const cvc::geometry g = world::world_underside(w);
+  auto n = rt.underside.lock();
+  if (!n) {
+    if (g.const_points().empty())
+      return;
+    std::shared_ptr<GraphicsNode> group = sg.getGraphics(id + "_underside");
+    if (!group) {
+      group = sg.addGraphics(id + "_underside");
+      group->setVisible(rt.shown); // a hidden world's rock stays hidden
+    }
+    n = std::dynamic_pointer_cast<GeometryNode>(
+        group->createChild<GeometryNode>("rock", cvc::geometry()));
+    rt.underside = n;
+    if (!n)
+      return;
+  }
+  n->setGeometry(g);
+  n->setUseSingleColor(false); // after setGeometry, as make_mesh's: its vertex colours
+  n->setAmbient(0.5);
+  n->setDiffuse(0.7);
+  n->setSpecular(0.0);
+  n->setCastsShadow(false);
+}
+
 // A merged mesh of the new world as a hidden child of its holder; none when the world has none.
 std::weak_ptr<GeometryNode> make_mesh(GeometryNode &holder, const std::string &name,
                                       const cvc::geometry &g,
@@ -694,8 +726,8 @@ void begin_world_install(WorldRT &rt, std::shared_ptr<WorldJob> job) {
 }
 
 // The parts of the world beside the terrain node, which follow its visibility.
-const char *const kWorldParts[] = {"_props",     "_foliage", "_needles",
-                                   "_buildings", "_roads",   "_water"};
+const char *const kWorldParts[] = {"_props", "_foliage", "_needles",  "_buildings",
+                                   "_roads", "_water",   "_underside"};
 
 // A world's nodes on their way out: hidden now, removed later (retire_world_step).
 void retire_world_nodes(SceneGraph &sg, const std::string &id, WorldRT &rt,
@@ -845,6 +877,7 @@ void swap_world(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   rt.color = in.job->color;
   *rt.field = *rt.w->terrain; // the published ground follows the world
   put_outer_sea(sg, id, rt, *rt.w);
+  put_underside(sg, id, rt, *rt.w);
   { // the world shown is the node's dataset: its physics, its grid, generated_world(id). The
     // task wrote a rebuild's bundle; the first world's is written here.
     std::vector<std::string> why;
