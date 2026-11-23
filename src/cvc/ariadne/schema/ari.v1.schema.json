@@ -249,12 +249,21 @@
           "description": "Tooling data (the component library's INDEX.ari); not a widget tree."
         },
         "python": {"type": ["object", "string"], "description": "Python for a scripting host (arix, ariglx)."},
-        "wasm": {"type": "object", "description": "A WebAssembly module for a scripting host."},
-        "server": {"type": "object", "description": "For the relay that runs the document (arisrv --doc)."},
-        "relay": {"type": "object", "description": "For a host that joins a relay."},
+        "wasm": {
+          "type": ["object", "string"],
+          "description": "A WebAssembly module for a scripting host: its path alone, or a map with module:."
+        },
+        "server": {
+          "type": ["object", "null"],
+          "description": "For the relay that runs the document (arisrv --doc); a bare server: asks for nothing."
+        },
+        "relay": {
+          "type": ["object", "string"],
+          "description": "For a host that joins a relay: the relay's URL alone, or a map with url:."
+        },
         "world": {
-          "type": "object",
-          "description": "The world's rules (vehicles, spawns, ...), read by the world runtime."
+          "type": ["object", "null"],
+          "description": "The world's rules (vehicles, spawns, ...), read by the world runtime; a bare world: sets none."
         }
       },
       "patternProperties": {"^x-": true},

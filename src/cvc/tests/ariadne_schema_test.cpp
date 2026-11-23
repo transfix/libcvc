@@ -238,6 +238,13 @@ const char *const kValid[] = {
     // a document that is a list of widgets, and an anonymous group
     "- text: hi\n- separator\n",
     "windows:\n  - window: W\n    children:\n      - children:\n          - text: a\n",
+    // the hosts' blocks in their short forms: a guest's path, a relay's URL, a bare server: and
+    // world:
+    "requires: [wasm]\nwasm: guest.wat\nroot:\n  - text: hi\n",
+    "relay: grpc://localhost:50051\nroot:\n  - text: hi\n",
+    "server:\nworld:\nroot:\n  - text: hi\n",
+    "wasm: {module: guest.wat, export: [echo]}\nrelay: {url: grpc://localhost:50051}\n"
+    "server: {}\nworld: {}\n",
 };
 } // namespace
 
