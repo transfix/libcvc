@@ -17,9 +17,13 @@ applications:
 - an application that asks may take over what only the outermost document gets today (keys,
   the pointer, signals) and add to the shell (its menus, tray, right-click menus and Settings
   window), and may even change the shell's settings, but only what the shell grants it;
-- a Processes window lists the DSL processes running in the shell and in each application.
+- a Processes window lists the DSL processes running in the shell and in each application;
+- a link to an `.ari` document, clicked in an application such as nicotina's feed, opens that
+  document from the network as an application of its own, once the user has seen what it is and
+  what it asks for (4.12).
 
-The first user is one arigl window that can open every libcvc example document.
+The first user is one arigl window that can open every libcvc example document. The goal beyond
+it is 4.12's golden: applications that travel as links in posts.
 
 **The design follows two rules.**
 
@@ -81,7 +85,10 @@ The first user is one arigl window that can open every libcvc example document.
    out of every view but the main one. A view can scale a `type: volume` node's opacity, at the
    cost of uploading the volume again, and cannot restyle a `volslice` node at all. Scene windows
    need all three fixed (4.4).
-8. **Mounts share their document's frame budget.** In group 0 that is the app's; under
+8. **The network, its credentials and the end-to-end keys are the host's, not each
+   document's**, and a mounted document may call every host verb. Harmless while every document
+   is the launcher's own; not once one comes from a link (4.12).
+9. **Mounts share their document's frame budget.** In group 0 that is the app's; under
    `isolate_documents` it is the document's group's 200000 steps and 0.1 s (§2.5). Every open
    application competes for it.
 
@@ -145,7 +152,8 @@ shell.apps.<as>.background   hold (the default) or run (4.4)
   state key (`allow: { bind: <key> }`). A URI outside them is refused, and the refusal is posted
   to the feed. The fragment's `requires:` goes through the scan `check_host_requirements` runs
   over a static load's modules. Where that scan warns, a `mounts:` entry is refused instead, with
-  the need named (`gl.scene` under `ari`, say).
+  the need named (`gl.scene` under `ari`, say). A URL from the network is mounted as a remote
+  principal, and only through the consent sheet (4.12).
 - **Grants.** A `mounts:` application gets no `link:` holes and no functions of the shell's.
   What it may reach beyond its own scope is what it asks for and the shell grants (4.5): the
   shell's input, signals, menus, right-click menus and Settings window, and the settings the
@@ -503,10 +511,179 @@ The shell adds to §5.25's applications:
 
 ### 4.11 Budgets
 
-The first version keeps one budget per document: the applications share the shell's. The
-Processes view shows each application's share of the steps. A budget per mount, or a mount in an
-execution group of its own, comes later. The second needs processes that can move between
-groups (threaded execution Stage 3).
+Local applications may share one budget per document at first: the applications share the
+shell's, and the Processes view shows each application's share of the steps. A document from the
+network (4.12) may not: it gets a budget of its own per frame and a memory cap from the start
+(SH12), so a stranger's busy loop cannot stall the shell. A mount in an execution group of its own
+comes later; it needs processes that can move between groups (threaded execution Stage 3).
+
+### 4.12 Documents from the network: the nicotina golden
+
+**The golden.** cy-pca/nicotina, the TX.WTF client written as `.ari` documents, runs as an
+application in the shell. Someone posts a link to an `.ari` document. A reader clicks it in
+nicotina's feed. The shell fetches the document over https, shows the reader what it is, where it
+comes from, who published it and what it asks for, and on the reader's yes runs it as an
+application of its own beside nicotina, in a scene window. Applications that travel as links are
+the start of a software ecosystem, so the shell treats every such document as code from a
+stranger. That scenario, run end to end, is this section's acceptance test (SH15).
+
+**What stands in the way today** (checked in the code):
+
+- **The network, its credentials and the end-to-end keys belong to the host, not to a
+  document** (`AppRuntime::enable_net`, §10.3). A credential is found by name, so a document
+  fetched from a post and mounted beside nicotina could send
+  `(http-request "POST" "https://tx.wtf/..." (dict "auth" "txwtf" ...))` and post as the reader.
+  The allowlist is shared the same way: it reaches every origin nicotina may.
+- A mounted document may call every host verb and function the host registered (§11: the
+  provider registry is process-global). Its `data:` paths and scene sources resolve on the local
+  disk, and a `python:` block runs CPython (arix, ariglx).
+- Only arigl-web fetches a document set from a URL (`doc_fetch.h`, §9.4). A native host has no
+  fetcher for one, and nothing checks what is fetched against a hash or a signature.
+- nicotina copies any link it does not know (`open-link` in `nicotina.ari`) and never opens one.
+
+**Principals.** Every mount runs as a principal, and every check below keys on it:
+
+- `local`: a document the shell's launcher or catalog named from the local disk or `cvc://`,
+  trusted as documents are today;
+- `remote:<origin>`: a document fetched from a URL, such as `remote:https://apps.example.org`,
+  with its publisher when it is signed (below).
+
+The principal is fixed at mount time from where the bytes came; a document cannot name its own.
+What it loads inherits it: a remote document that `load:`s a file from its own origin runs that
+file as the same principal and cannot raise it.
+
+**What a remote document can reach.** Default-deny, as the relay already runs its clients'
+programs (`room-run`: the read lane's builtins and a list of allowed names, `server_document.h`)
+and as `LaneProcess::allow` does for any program from outside a document:
+
+| Resource | A remote document by default | With a grant (on the consent sheet) |
+|---|---|---|
+| Its own state, widgets, windows and scene | yes, under its mount (§7.3) | |
+| Another document's state, the shell's | never | the settings the shell shares (`access.settings`, 4.8) |
+| Host verbs and functions | only those marked safe for remote principals: the DSL's own, the state verbs, `notify`, the scene's | each other verb by name (`clipboard-set`, `open-url`, `file-pick`, `http-upload`, ...) |
+| The network | its own origin, for its files and its API | more origins it names in `requires:` (`{name: net.origin, origins: [...]}`) |
+| Credentials | its own, under its principal: its `txwtf` is not nicotina's | never another principal's |
+| End-to-end keys, OIDC sign-in | none | its own, under its principal |
+| Local files | none: relative paths resolve in its fetched set, and `file://` is refused | a file the user picks (`file-pick`) |
+| Persistent storage | its own, per principal, with a quota | |
+| `python:` blocks, native extensions | refused: the mount fails | never |
+| WebAssembly guests (`wasm:`) | yes, sandboxed, under its budget | |
+| CPU and memory | a budget of its own per frame and a memory cap (4.11) | |
+| Input, menus, tray, right-click menus, Settings | as 4.5 to 4.7 | the tokens of 4.5 |
+
+**Network, credentials and keys per principal (SH11).** The host checks each request against
+the principal of the program that makes it; the program's scope tells the runtime which mount it
+runs for. The allowlist is per principal: the launcher's (`--net-allow`, `--net-policy`) for
+`local` documents, as today, and for a remote one its own origin plus what it was granted.
+Credentials are kept as (principal, name, origin, token), and a lookup by name finds only the
+caller's principal's; the credential file's lines gain the principal. The end-to-end keys and
+OIDC sign-ins are split the same way. A local application can also have a policy and a store of
+its own: `shell.apps.<as>.net_policy` and `.credential_store`, as `bin/nicotina` passes
+`--net-policy fleet.policy --credential-store nicotina` today. This split is needed as soon as the
+shell hosts nicotina beside any other application, remote or not.
+
+**Untrusted bytes in native readers.** A remote document's datasets, scene sources, pictures and
+videos are a stranger's bytes handed to native readers: VTK's, the mesh and image decoders, the
+media player. Those are not memory-safe. Until they are fuzzed, or moved out of the process, a
+remote principal may load only a vetted list of formats (settled in SH12; glTF, PNG and JPEG are
+candidates), and anything else is refused with a notification. Isolation out of the process is
+the strong answer (section 7). The browser host, arigl-web, has the browser's sandbox around all
+of it already.
+
+**Links and fetching (SH13).**
+
+- **An `.ari` link** is an `https://` URL whose path ends in `.ari` (a single document, or a
+  set's main document) or `.aripack` (a pack, below). `http://` is accepted for `localhost` only,
+  for tests. Other sources come through the same fetcher later: `cvcpkg://` (a registry package,
+  checked against the registry's SHA-256 as a `data:` package is, §5.17) and a relay's world pack
+  (OW5k).
+- **A pin.** A fragment pins the content: `https://apps.example.org/orrery/main.ari#sha256=<hex>`.
+  A fragment never reaches the server, so the link works in any client, and the shell refuses
+  bytes that do not match.
+- **Fetching.** The shell fetches with `doc_fetch` (§9.4), which arigl-web uses today: the
+  document and every file it names relative to itself, from its own origin only. The files go in
+  a cache directory per principal and content hash and run from there, as an installed set does.
+  The native fetcher is new; the browser keeps its own.
+- **Packs.** A pin on a set's main document does not cover its imports. A pack is a set with an
+  index of every file's SHA-256 and size: the `world-pack.index` format OW5k brings for world
+  packs (transfix/libcvc#1470, `world_pack.h`), made general for any document set. A link pins the
+  index's hash, and the shell checks every file against the index. `ari pack DIR` writes one.
+- **Signatures.** A pack may carry a signature over its index by a publisher's key. The shell
+  shows a verified publisher only when the key is bound to an identity it can check: a TX.WTF
+  account that publishes it. Accounts already publish an Ed25519 identity key for end-to-end DMs
+  (`identity_key_ed25519` in `GET /e2ee/keys/{username}`, §10.8), so the place to publish a key
+  exists. Whether packs are signed with that key or with a signing key of their own published
+  beside it (keeping the two uses apart), and how keys are rotated, is settled in SH13
+  (section 6). An unsigned document still opens, marked unsigned.
+- **Updates.** A pinned link always runs the same bytes. An unpinned one is fetched again when
+  it is opened; if it changed and asks for more than before, the sheet asks again.
+- **The cache** is content-addressed, so a pack posted twice is fetched once. It has a size cap,
+  and the Launcher lists what it holds.
+
+**The consent sheet (SH14).** Before a remote document runs any program, its `init:` included,
+the shell shows a sheet. It is the shell's own window, drawn at the top of the stack (SH2 makes
+that hold), so no application can draw over it or imitate it. It shows:
+
+- the document's `meta.name` and description, marked as the document's own words;
+- where it comes from: the origin, and whether the link pinned it;
+- who published it: the verified publisher, or *unsigned*;
+- who asked to open it: "posted by @user, opened from nicotina", from the request (below);
+- what it asks for, in words: each token beyond the default, each host verb, each network origin,
+  and its size;
+- *Open*, *Cancel*, and for a signed document *Always trust this publisher*, which keeps the
+  answer in the shell's settings, so that the sheet comes back only when the asks grow.
+
+A running remote application carries a badge the shell draws in its window's title and in its
+menu: its origin and how far it is trusted (pinned, signed, unsigned). *Permissions...* (4.5)
+lists what it holds. Close ends it. Its state and storage stay under its principal until the user
+clears them.
+
+**Opening from inside an application: `request.open` (SH14).** nicotina must not mount the
+document itself: a mount of nicotina's would be its child, inside its scope. It asks the shell:
+
+- A new token, `request.open`, lets a document ask its shell to open a document as the shell's
+  own application. With it, `(app-open URI (dict "from" TEXT))` from a mounted document is not a
+  mount. It is a request to the nearest enclosing document with a `mounts:` slot, which applies
+  its own `allow:` and principals and shows the sheet, naming the requester ("nicotina asks to
+  open ..."). The new application is the requester's sibling: neither reaches the other's state.
+- Without the token, or with no enclosing `mounts:` slot (nicotina run on its own),
+  `(has? "request.open")` is false, and nicotina copies the link as it does today. So nicotina
+  runs the same in the shell and outside it.
+- The shell takes a request only within a second of the requester's own input (a click or a key
+  in its window, or a link it drew), as a browser allows a pop-up, and drops it otherwise.
+- `(app-info URI)`, under the same token, has the shell fetch a document's metadata without
+  running anything: `{name description origin pinned publisher size}`, or why it could not.
+
+**nicotina's part** (cy-pca/nicotina, once SH14 is in):
+
+- `open-link` sends a link whose path ends in `.ari` or `.aripack` to
+  `(app-open href (dict "from" <the post's URL and author>))` when `(has? "request.open")`, and
+  copies it otherwise, as now.
+- `nicotina.ari` asks for `{name: request.open, optional: true}`. The shell's entry for nicotina
+  grants it, with nicotina's `fleet.policy` and credential store as its own (SH11).
+- A card may show an `.ari` link as an application chip: its name, origin and publisher, from
+  `(app-info href)`. Later, TX.WTF posts could carry the pin and the
+  publisher as fields of their own.
+
+**The golden test (SH15)**, one form in each repository:
+
+- **libcvc**, `shell_remote_golden`: a local https server, with a test certificate, serves a
+  small pack (a document with a scene, an import and a dataset). A fixture feed document stands in
+  for nicotina: a post whose link's `on_link` calls `(app-open ...)`. The shell runs the feed with
+  `request.open` granted, and the test answers the sheet. It checks that:
+  - the click opens the pack as the feed's sibling, principal `remote:https://localhost:<port>`,
+    its scene window drawn (an image golden) and its badge saying *pinned*;
+  - it cannot read the feed's state or the shell's; its `(http-get ... (dict "auth" "txwtf"))`
+    finds no credential while the feed's still works; a request to any origin but its own is
+    refused;
+  - a busy loop in it keeps to its budget, and the shell's frame time holds;
+  - a tampered file under a pinned link, a `python:` block, and a format off the vetted list are
+    each refused, the last with a notification;
+  - a `request.open` with no click before it is dropped;
+  - Close takes it away, and a second click opens it from the cache.
+- **nicotina**, `tests/shell.sh`: nicotina runs inside `shell.ari` against `stub_txwtf.py`, with
+  a post linking to the same pack, and the test checks the same opening and the same credential
+  isolation through nicotina's own card.
 
 ## 5. Phases
 
@@ -527,9 +704,18 @@ ship drawn under the UI.
 | SH8 | Right-click menus (4.7): `context_menu:`, its `id:`, the `event` dict and the pick over a view, `ui.context_menu`; ImGui, FTXUI and tvision | runtime: an item runs with its `event`; an ImGui golden of an open menu; a tmux run on FTXUI |
 | SH9 | `contributes:` (menus, right-click menus, Settings pages) with their tokens; `shares:` and `access.settings`; `grants: { ask }` and Permissions... | an item added to File runs in the application's scope; a withdrawn token takes its items away at the next frame; `access.settings` writes the shell's key and `access.settings.read` cannot; a document alone adds the same items to its own menus |
 | SH10 | `arigl --shell [catalog]` opens `shell.ari` on the examples catalog | an arigl smoke test that opens three examples and switches between them |
+| SH11 | The network, credentials, end-to-end keys and OIDC sign-ins per principal (4.12); an application's own `net_policy` and `credential_store` | a credential captured by one mount is not found from another; each mount's allowlist holds; the credential file's new lines; nicotina in the shell still signs in and posts |
+| SH12 | The remote principal's sandbox (4.12): host verbs default-deny, with a list per principal; `python:` and local files refused; the vetted formats; a budget per mount and a memory cap (4.11) | runtime: each refusal, named; a busy remote mount keeps to its budget and the shell's frame holds |
+| SH13 | Fetching into the shell (4.12): `doc_fetch` natively into a cache per principal and hash; `#sha256=` pins; packs (the world-pack index made general, `ari pack`); signatures | a pinned set verifies and a tampered file is refused; a pack's index checks every file; a signature verifies, or is reported missing or wrong; a second open comes from the cache |
+| SH14 | The consent sheet, the badge and remembered publishers; `request.open`, taken only after the requester's own input (4.12) | the sheet comes before any program runs; Cancel runs nothing; a request with no input before it is dropped; the opened application is the requester's sibling |
+| SH15 | The golden (4.12): `shell_remote_golden` in libcvc; `open-link` and `tests/shell.sh` in cy-pca/nicotina | the checks 4.12 lists, in both repositories |
+
+SH11 comes before SH12 to SH15, and before the shell hosts nicotina beside any other
+application. SH13 needs SH1; SH14 needs SH7 and SH13; SH15 needs all of them and SH3.
 
 The closed `.ari` schema (transfix/libcvc#1464, open) learns the new keys (`mounts:`, `front:`,
-`grants:`, `argv:`, `contributes:`, `shares:`, `context_menu:`) in the phase that adds each.
+`grants:`, `argv:`, `contributes:`, `shares:`, `context_menu:`, and the `net.origin` form of a
+`requires:` entry) in the phase that adds each.
 
 ## 6. Open questions
 
@@ -537,15 +723,28 @@ The closed `.ari` schema (transfix/libcvc#1464, open) learns the new keys (`moun
    per scene wanted, so applications side by side keep rates of their own?
 2. Does the shell replace arigl's gallery mode (`CVC_ARIGL_GALLERY`), and later the browser
    gallery, or sit beside them?
-3. Which URIs may the shell mount: catalog entries only (proposed), or any file the user picks?
+3. Which URIs may the shell mount without the sheet: catalog entries only (proposed), or also any
+   local file the user picks? (Links from the network always go through the sheet, 4.12.)
 4. Should an application's scene open in a window (proposed) or in the main view by default?
-5. A budget per mount in the first version, or later (proposed)?
+5. A budget per mount is required for remote documents (SH12). Should local applications get one
+   at the same time, or later (proposed)?
 6. With no `grants:`, should a mount get `[extend.tray]`, today's behaviour (proposed), or
    nothing?
 7. Should the user's answers to `grants: { ask }` be kept for the run (proposed) or saved across
    runs? Saving needs a place for the shell's settings to persist.
 8. Contributed menu items under the application's name, after a separator (proposed), or among
    the parent's own items with a mark?
+9. How is an `.ari` link recognised: by its path's extension, `.ari` or `.aripack` (proposed), by
+   a media type the server sends, or by a scheme of its own? Should TX.WTF posts carry an
+   application attachment with the pin and the publisher?
+10. Signing: Ed25519 over the pack index (proposed), with the account's end-to-end identity key or
+    with a signing key of its own published beside it (proposed, to keep the uses apart)? How are
+    keys rotated, and what does a pack signed by a rotated-out key show?
+11. Unsigned remote documents: open them through the sheet, marked *unsigned* (proposed), or
+    refuse them unless the user turns them on?
+12. The first list of formats a remote document may load (4.12).
+13. Is the in-process sandbox enough to ship the golden natively, or should it ship in the browser
+    host first, under the browser's sandbox, until remote principals run out of the process?
 
 ## 7. Not in scope
 
@@ -555,3 +754,6 @@ The closed `.ari` schema (transfix/libcvc#1464, open) learns the new keys (`moun
   of an `AppRuntime` of their own.
 - Scenes in the terminal hosts. `ari`'s backends draw no scene, so there the shell runs documents
   without scenes; `arigl --terminal` draws scenes (§9.2).
+- Each remote principal in a process of its own, talking to the shell over a state transport.
+  It is the strong answer to a stranger's bytes in native readers (4.12) and needs a design of
+  its own. The in-process sandbox and the vetted formats come first.
