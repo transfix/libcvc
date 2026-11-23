@@ -1491,13 +1491,17 @@ constexpr double kPumpMaxSeconds = 0.1;
 // The host-thread calls (S1.10): post_input, post_signal and render start, post to and kill
 // residents, so they run on the host thread between pumps, never inside the app pool's pump_all
 // (from a native, an on_complete callback or a host_proxied body). Debug builds check it (AR-3's
-// latch), through the probe, which never builds the pool.
-void assert_outside_pump(const cvc::app &app) {
+// latch), through the probe, which never builds the pool. Stage 2: nor inside a pump of the
+// document's own group outside any pump_all (an attached group's, on a worker or its attaching
+// thread; S2-Q6 keeps Ariadne's groups fork-join).
+void assert_outside_pump(const cvc::app &app, const cvc::state_exec::exec_group *group) {
 #ifndef NDEBUG
   if (const cvc::exec_pool *pool = app.exec_pool_probe())
     assert(!pool->in_pump_all() && "ariadne: a host-thread call made inside a pump");
+  assert(!(group && group->pumping_here()) && "ariadne: a host-thread call made inside a pump");
 #else
   (void)app;
+  (void)group;
 #endif
 }
 
@@ -1506,9 +1510,13 @@ void assert_outside_pump(const cvc::app &app) {
 // host verb or body of that call, or from another thread), a worker may be pumping it, and the
 // group's own teardown would abort anyway. That is refused in every build, from any thread: logged,
 // then aborted before anything is touched. A group-0 document's teardown or move is not refused.
+// An attached group (Stage 2; Ariadne's never are, S2-Q6) is held by no pump_all: the teardown or
+// move waits for a worker's pump instead (detach_begin, S2-Q4), and no worker pumps it after.
 void refuse_if_held(cvc::app &app, cvc::state_exec::exec_group *group,
                     const std::string &what) noexcept {
-  if (!group || group->pool_link().call.load(std::memory_order_acquire) == nullptr)
+  if (!group || cvc::detail::detach_begin(*group))
+    return;
+  if (group->pool_link().call.load(std::memory_order_acquire) == nullptr)
     return; // held from its pump_all's entry until that call returns (exec_pool.cpp)
   const std::string text = "ari: " + what +
                            " while a pump of the app's pool holds its group: refused (host thread, "
@@ -2381,6 +2389,7 @@ struct Runtime::Impl {
     // §5.24 the tray's bell: the document's `notifications:` and whether `- bell` places it.
     int bell_setting = -1;
     bool bell_placed = false;
+    bool bell_always = false; // `notifications: always`: shown with an empty feed too
     // §5.25 the loaded documents with a menubar of their own, in tree order: each is one menu of
     // the outer bar, its bar is not drawn where it is, and its tray icons join the outer tray.
     struct App {
@@ -2472,6 +2481,7 @@ struct Runtime::Impl {
     std::string tip;
   };
   Backend::TrayIcon tray_spec(const Widget &w);
+  std::string tray_picture(const Widget &w);
   std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
   void emit_tray(const std::vector<TrayEntry> &icons);
   void emit_tray_items(const TrayEntry &icon); // a tray menu's items: its children, or the bell's
@@ -3767,7 +3777,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
     const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
+    b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
     CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+    b.set_custom_scope(std::string());
     if (!e.handled)
       b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
     else if (e.committed && !w.bind.empty())
@@ -4820,7 +4832,7 @@ void Runtime::Impl::render() {
   // Render starts mount ticks and runs mount init:s, and its reconcile kills residents: on the host
   // thread, between pumps (S1.10). A new document is placed before its tree is drawn, so its
   // holes are planted and its mount ticks started where it runs.
-  assert_outside_pump(app);
+  assert_outside_pump(app, group_.get());
   ensure_placement(/*submitting=*/false);
   if (!backend)
     return;
@@ -5049,8 +5061,10 @@ void Runtime::Impl::plan_windows_menu() {
             p.clock_setting = w.bdef ? 1 : 0;
           else if (w.tray_bell && in_menubar)
             p.bell_placed = true;
-          else if (w.tray_bell)
+          else if (w.tray_bell) {
             p.bell_setting = w.bdef ? 1 : 0;
+            p.bell_always = w.bell_always;
+          }
           break;
         case Kind::WindowsMenu:
           if (mount) // a loaded document's Windows menu is the outer document's
@@ -5189,7 +5203,49 @@ Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
   const std::string tone = is_expr(w.tone) ? eval_text(w.tone) : w.tone;
   t.tone = tone == "error" ? 2 : tone == "warn" ? 1 : 0;
   t.menu = !w.children.empty();
+  t.picture = tray_picture(w);
   return t;
+}
+
+// §5.22 a tray icon's `icon:`: the published name of its picture, round and a little over the
+// bar's height (64 px, sharp on a phone's dense screen), or "" while it loads, if it fails, in a
+// terminal, or with none. A video URL (an avatar can be one) plays as a decorative video: silent,
+// looping, by itself; an animated GIF or WebP moves, as an image:'s does.
+std::string Runtime::Impl::tray_picture(const Widget &w) {
+  if (w.button_icon.empty() || backend->capabilities().terminal)
+    return std::string();
+  const std::string icon = is_expr(w.button_icon) ? eval_text(w.button_icon) : w.button_icon;
+  if (icon.empty())
+    return std::string();
+  if (!media::is_uri(icon))
+    return icon; // a host-published picture
+  constexpr int kPx = 64;
+  if (media::is_video_uri(icon)) {
+    media::PlayerSource ps;
+    ps.uri = icon;
+    ps.auth = w.media_auth;
+    ps.video = true;
+    ps.frame_w = ps.frame_h = kPx;
+    ps.loop = ps.muted = true;
+    ps.audio = false;
+    PlayerSlot &p = player_slot("tray#" + icon, ps);
+    if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+      p.autoplay_done = true;
+      p.player->play();
+    }
+    if (player_frame(p, kPx, kPx, ImageFit::Cover, ImageShape::Circle, steady_seconds()))
+      return p.frame_name;
+    return std::string();
+  }
+  media::ImageRequest rq;
+  rq.uri = icon;
+  rq.auth = w.media_auth;
+  rq.w = rq.h = kPx;
+  rq.fit = media::Fit::Cover;
+  rq.shape = media::Shape::Circle;
+  media::ImageView v;
+  const std::string name = media_picture(rq, v);
+  return v.status == media::Status::Ready ? name : std::string();
 }
 
 namespace {
@@ -5723,10 +5779,11 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
     c.spec.tooltip = c.tip;
     return c;
   };
-  // §5.24 the bell: while the feed has entries; its badge the unread, its tone the worst of them.
+  // §5.24 the bell: while the feed has entries (always, for `notifications: always`); its badge the
+  // unread, its tone the worst of them.
   const cvc::notify_summary feed = cvc::notify_status(app);
   // The clock and the bell are the document's first bar's (a second bar of its own has neither).
-  const bool bell_on = !first_bar_drawn && feed.count > 0 &&
+  const bool bell_on = !first_bar_drawn && (feed.count > 0 || windows_menu.bell_always) &&
                        read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
   const auto bell_icon = [&](const Widget *at) {
     Icon c;
@@ -7206,7 +7263,7 @@ void Runtime::on(std::string event, std::function<void()> handler) {
 // (S1-Q6): setting one decides the placement again before the next program starts (s-m2). Host
 // thread, outside a pump (they kill residents).
 void Runtime::set_tick_program(std::string script) {
-  assert_outside_pump(m_->app);
+  assert_outside_pump(m_->app, m_->group_.get());
   // Replacing the program kills any running resident so the new body starts fresh next drain.
   m_->stop_resident(m_->tick_resident_);
   m_->tick_script_ = std::move(script);
@@ -7214,21 +7271,21 @@ void Runtime::set_tick_program(std::string script) {
 }
 
 void Runtime::set_key_program(std::string script) {
-  assert_outside_pump(m_->app);
+  assert_outside_pump(m_->app, m_->group_.get());
   m_->stop_resident(m_->key_resident_);
   m_->key_script_ = std::move(script);
   m_->placement_decided_ = false;
 }
 
 void Runtime::set_pointer_program(std::string script) {
-  assert_outside_pump(m_->app);
+  assert_outside_pump(m_->app, m_->group_.get());
   m_->stop_resident(m_->pointer_resident_);
   m_->pointer_script_ = std::move(script);
   m_->placement_decided_ = false;
 }
 
 void Runtime::set_signal_program(std::string script) {
-  assert_outside_pump(m_->app);
+  assert_outside_pump(m_->app, m_->group_.get());
   m_->stop_resident(m_->signal_resident_);
   m_->signal_script_ = std::move(script);
   m_->placement_decided_ = false;
@@ -7237,7 +7294,7 @@ void Runtime::set_signal_program(std::string script) {
 bool Runtime::has_signal_program() const { return !m_->signal_script_.empty(); }
 
 bool Runtime::post_signal(const std::string &signal, const std::string &source) {
-  assert_outside_pump(m_->app); // host thread, outside a pump (S1.10)
+  assert_outside_pump(m_->app, m_->group_.get()); // host thread, outside a pump (S1.10)
   const bool tapped = (m_->tap_kinds_.load() & tap_signal) != 0;
   bool resident = false;
   if (!m_->signal_script_.empty()) {
@@ -7288,7 +7345,7 @@ void Runtime::post_input(const InputEvent &ev) {
   // Submit the input residents on first use so the delivered event is consumed, not dropped, then
   // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
   // delivery (see the header contract). Host thread, outside a pump (S1.10).
-  assert_outside_pump(m_->app);
+  assert_outside_pump(m_->app, m_->group_.get());
   m_->ensure_input_residents();
   if (ev.kind == InputEvent::Kind::KeyDown && m_->have_key_bindings_.load()) {
     const bool capture = m_->key_capture_pending();
@@ -7509,7 +7566,7 @@ void Runtime::pump() {
   // drain_end's pump and sweep, whatever exec_pump_frame did this frame: group 0 a bounded slice
   // (as scheduler_to_pump says) and the document's group through the app's pool, then the sweep
   // where its processes run. Host thread, outside a pump, which this would re-enter.
-  assert_outside_pump(m_->app);
+  assert_outside_pump(m_->app, m_->group_.get());
   m_->pump_frame();
   m_->sweep_document();
 }

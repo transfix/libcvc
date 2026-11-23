@@ -528,10 +528,14 @@ public:
 
   // Set the maximum number of concurrent threads in the pool
   // Default is hardware_concurrency() or 4 if unknown
+  // Once this app's exec pool has workers and the kernel pools have split (trySubmitKernel), it
+  // sizes the background pool, background_io, only: background_cpu, which runs the async kernels
+  // other than io calls', keeps max(1, cores - exec workers) (backgroundCpuPoolSize()).
   void setThreadPoolSize(unsigned int size);
   unsigned int getThreadPoolSize() const;
 
-  // Get thread pool statistics
+  // Get thread pool statistics (the background pool's: background_io's once the kernel pools have
+  // split, so background_cpu's tasks are not counted)
   unsigned int getActiveThreadCount() const;
   unsigned int getPendingThreadCount() const;
 
@@ -590,6 +594,35 @@ public:
   void compute_async(int n, std::function<void(int)> fn, std::function<void()> on_done,
                      std::function<void(const std::string &)> on_error,
                      thread_priority priority = PRIORITY_NORMAL);
+
+  // The kernel pools (docs/STATE_EXEC_THREADED.md 4.9, S2-Q11): where the exec async host runs a
+  // threaded call's kernel (executor_kind::background). Until this app's exec pool is built with
+  // workers (exec_pool_probe()->threads() > 0), every kernel goes to the background pool above,
+  // as trySubmitPooled sends it: one pool, as before. Once it has workers the pools are split, for
+  // the app's life: a kernel of an io call (async_options::io) stays on the background pool, which
+  // is then background_io (its size and its other tasks unchanged; compute_async's blocking jobs
+  // stay there too), and any other kernel runs on background_cpu, max(1, cores - exec workers)
+  // persistent workers of its own, started together when the first such kernel comes, in the
+  // order of its priorities and FIFO within one, so CPU-bound kernels and the exec workers fill
+  // the cores without oversubscribing them. What the caller hears is trySubmitPooled's: queued;
+  // stopped (~app has stopped the pools: the task is destroyed unrun, here, with kPoolStopped as
+  // poolDropReason()); or no_worker (handed back unrun: no worker could be started for it and the
+  // pool has none). If no background_cpu worker can be started, the kernel goes to the background
+  // pool, as before the split. wait_for_threads() and ~app interrupt and wait for background_cpu's
+  // tasks as they do the background pool's.
+  PoolSubmit trySubmitKernel(std::function<void()> &task, thread_priority priority, bool io);
+  // A kernel pool (kernelPoolHere).
+  enum class kernel_pool {
+    none,          // not a kernel pool's worker
+    background,    // the background pool's persistent workers (background_io once split)
+    background_cpu // background_cpu's workers
+  };
+  // Which of this app's kernel pools the calling thread is a worker of (a keyed task's own thread
+  // is none).
+  kernel_pool kernelPoolHere() const;
+  // background_cpu's size, max(1, cores - exec workers): 0 until the pools are split and its
+  // workers started.
+  unsigned int backgroundCpuPoolSize() const;
 
   // This application's simulation clock and world-unit base. Both are owned by
   // the app and lazily constructed on first access — the per-app-instance model
@@ -1055,6 +1088,27 @@ protected:
   // that first construction. unique_ptr so app.h needs only a forward declaration.
   std::unique_ptr<cvc::thread_pool> _computePool;
   boost::mutex _computePoolMutex;
+
+  // background_cpu (trySubmitKernel; app.cpp, "The kernel pools"), defined in app.cpp: made with
+  // its workers once this app's exec pool has workers, under _cpuKernelPoolMutex, and published in
+  // _cpuKernelPoolLive (read without the mutex). _kernelPoolsUnsplit: the exec pool was built
+  // without workers, so the pools never split. _execPoolBuilt: _execPool once exec_pool(opts) has
+  // built it (cleared by ~app before it goes), so a kernel submitted before any exec pool exists
+  // reads one atomic instead of taking _execPoolMutex (R2's S-m13).
+  std::atomic<cvc::exec_pool *> _execPoolBuilt{nullptr};
+  struct CpuKernelPool;
+  std::unique_ptr<CpuKernelPool> _cpuKernelPool;
+  std::atomic<CpuKernelPool *> _cpuKernelPoolLive{nullptr};
+  std::atomic<bool> _kernelPoolsUnsplit{false};
+  boost::mutex _cpuKernelPoolMutex;
+  // background_cpu once the pools are split (made now, its workers started), else null.
+  CpuKernelPool *cpuKernelPool();
+  void cpuKernelWorkerLoop(CpuKernelPool *pool);
+  // _cpuKernelPool's mutex held: interrupt its running tasks (wait_for_threads, ~app).
+  static void interruptCpuKernelWorkersLocked(CpuKernelPool &pool);
+  // ~app's step for background_cpu, as closeThreadPool's for the background pool: close it,
+  // interrupt its running tasks, destroy its queued ones unrun, and return its workers to join.
+  std::vector<thread_ptr> closeCpuKernelPool();
 
   // Per-app simulation clock and world-unit base (world_clock()/world_units()).
   // Lazily built; the mutex guards first construction. unique_ptr so app.h needs

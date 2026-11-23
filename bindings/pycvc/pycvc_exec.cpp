@@ -1328,17 +1328,30 @@ cvc::state_exec::cycle_stats Exec::collect_cycles() {
   return cvc::state_exec::collect_cycles(r);
 }
 
+namespace {
+
+// run_all's notifier (S2-Q6), on each pooled group's scheduler for the batch: a post to any of
+// them sets the batch flag, then notifies the batch's wakeup. It runs on the posting thread under
+// the group's notifier lock (detail::wake_notifier's rules): a store and a signal.
+void batch_notify(void *ctx) noexcept {
+  batch_control &c = *static_cast<batch_control *>(ctx);
+  c.posted.store(true, std::memory_order_release);
+  c.wake.notify();
+}
+
+} // namespace
+
 std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                                  std::span<const std::string> programs,
-                                                 bool fresh_env, const std::atomic<bool> &closing) {
+                                                 bool fresh_env, batch_control &control) {
   using clock = std::chrono::steady_clock;
   // A group's slice per round, as run()'s.
   static constexpr uint64_t kSliceSteps = 2000000;
   static constexpr double kSliceSeconds = 0.05;
-  // With nothing runnable, the wait on one parked group, rotating, so that a completion posted to
-  // any group is seen within about this long (S1.12; Stage 2's eventcount replaces it). It is
-  // also the frame beat, run()'s 1 ms: a process awaiting the next frame gets one per round.
-  static constexpr auto kIdleBeat = std::chrono::milliseconds(1);
+  // The batch wait's longest, a backstop for work that arrives some other way, as run()'s
+  // kMaxIdleWait.
+  static constexpr auto kMaxBatchWait = std::chrono::milliseconds(50);
+  const std::atomic<bool> &closing = control.closing;
   std::vector<batch_outcome> out(programs.size());
   struct slot {
     ExecImpl *impl;
@@ -1370,7 +1383,6 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
   };
   std::vector<exec_group *> groups;
   std::vector<int> lock_waiters;
-  std::size_t rotate = 0;
   // After a round, run()'s tests on slot `s`'s program: ended (its outcome set, its process
   // reaped), runnable (true), or parked, killed past its idle limit.
   const auto settle = [&](slot &s) -> bool {
@@ -1458,6 +1470,18 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
     }
     return false;
   };
+  // The batch wait (S2-Q6): for the batch, a post to any pooled group calls batch_notify. Every
+  // notifier is cleared on each way out, after the last kernel has ended, before the batch returns.
+  control.posted.store(false, std::memory_order_relaxed);
+  struct notifier_scope {
+    std::span<Exec *const> execs;
+    ~notifier_scope() {
+      for (Exec *e : execs)
+        e->impl_->sched.set_wake_notifier(nullptr, nullptr);
+    }
+  } notifiers{execs};
+  for (Exec *e : execs)
+    e->impl_->sched.set_wake_notifier(&batch_notify, &control);
   try {
     for (;;) {
       // Each pooled Exec with no program running starts its next one. One that cannot start (a
@@ -1497,6 +1521,9 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
         }
       if (groups.empty())
         break;
+      // The batch flag is cleared before the round, so a post from here on sets it. The exchange
+      // reads the last post's store, so what that post queued is the pumps' drains' to find.
+      (void)control.posted.exchange(false, std::memory_order_acq_rel);
       // One fork-join round: each group pumped once, on the pool's workers and this thread.
       pool.pump_all(groups, pump_budget{kSliceSteps, kSliceSeconds}, clock::time_point::max());
       bool runnable = false;
@@ -1505,29 +1532,65 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
           runnable = settle(s) || runnable;
       if (runnable)
         continue;
-      // Pump again at once only for what a pump would do now: a runnable process, or
-      // (wait_for_work's checks) pending ingress, a lock post, a timer due or a call to charge. A
-      // process waiting for the next frame ((await v)) waits for it, at most kIdleBeat, as run()
-      // makes it; wants_pump() counts it, and pumping it at once would spin a core (R1, N2).
+      // Pump again at once only for what a pump would do now: a runnable process, a program to
+      // start, a post since the round began (the batch flag: a message, a kernel's result, a
+      // control or a lock post, to any group), or a deadline of a group's run report already
+      // passed. Otherwise the batch waits once for all its groups (S2-Q6), until the earliest of
+      // their reports' deadlines (a timer, a call's timeout or charge, the 1 ms beat of a process
+      // waiting for the next frame, as run() beats it, a collection falling due) and their idle
+      // limits, at most kMaxBatchWait. The reports are read here, after the join, as the round's
+      // other state is; no group's wait_for_work blocks while the batch's notifier is installed.
       bool work = false;
-      clock::time_point until = clock::now() + kIdleBeat;
       std::size_t parked = 0;
-      for (slot &s : slots)
-        if (s.pid >= 0) {
-          async_scheduler &sched = s.impl->sched;
-          work = work || sched.has_runnable() || sched.wait_for_work(clock::time_point::min());
-          until = std::min(until, s.idle_deadline);
-          ++parked;
+      clock::time_point until = clock::now() + kMaxBatchWait;
+      bool precise = false; // `until` is a sleeper's or a timed wait's (wakeup::wait_until)
+      const auto earliest = [&until, &precise](clock::time_point t, bool p) {
+        if (t < until) {
+          until = t;
+          precise = p;
+        } else if (t == until) {
+          precise = precise || p;
         }
-      if (work || parked == 0)
+      };
+      for (slot &s : slots) {
+        if (s.pid < 0) {
+          work = work || !s.queue.empty();
+          continue;
+        }
+        async_scheduler &sched = s.impl->sched;
+        const async_scheduler::run_report &left = sched.last_run_report();
+        work = work || sched.has_runnable();
+        earliest(left.next_deadline, left.precise);
+        earliest(s.idle_deadline, false);
+        ++parked;
+      }
+      if (work || parked == 0 || control.posted.load(std::memory_order_acquire) ||
+          closing.load(std::memory_order_acquire) || until <= clock::now())
         continue;
-      // Nothing to pump yet: wait on one parked group, the next each time.
-      std::size_t k = rotate++ % parked;
-      for (slot &s : slots)
-        if (s.pid >= 0 && k-- == 0) {
-          s.impl->sched.wait_for_work(until);
+      // The batch wait, the GIL released (run_all's): a post to any group ends it (a wake with no
+      // post since the round began is a stale one, of a post the round found), as does close().
+      control.waits.fetch_add(1, std::memory_order_relaxed);
+      bool timed_out = false;
+      while (!control.posted.load(std::memory_order_acquire) &&
+             !closing.load(std::memory_order_acquire))
+        if (!control.wake.wait_until(until, precise)) {
+          timed_out = true;
           break;
         }
+      if (timed_out) {
+        // Counted when work was posted meanwhile and its wake never came (ExecPool.stats()): the
+        // flag, or a probe (its deadline passed: it never blocks) finding work at a group whose
+        // own deadline is more than kGrace off, which only a post makes. A wake in flight at the
+        // deadline gets kGrace more.
+        constexpr auto kGrace = std::chrono::milliseconds(1);
+        const clock::time_point off = clock::now() + kGrace;
+        bool pending = control.posted.load(std::memory_order_acquire);
+        for (slot &s : slots)
+          if (!pending && s.pid >= 0 && s.impl->sched.last_run_report().next_deadline > off)
+            pending = s.impl->sched.wait_for_work(clock::time_point::min());
+        if (pending && !control.wake.wait_until(clock::now() + kGrace))
+          control.wait_timeouts.fetch_add(1, std::memory_order_relaxed);
+      }
     }
   } catch (...) {
     // As run()'s catch: what runs is killed, no kernel outlives the batch, and the processes are

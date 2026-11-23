@@ -21,7 +21,7 @@ windows:
     children:
       - text: "A window with size: [320, 150]."
       - separator
-      - text: "Text wraps nowhere: what runs past the window's edge scrolls into view."
+      - text: "A line too long for the window wraps at a word, not past its edge."
 
   - window: Tinted text
     id: tinted

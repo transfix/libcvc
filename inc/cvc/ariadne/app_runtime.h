@@ -102,6 +102,13 @@ public:
   // calls this gets the window too. Applied by the next load() or set_root().
   void set_host_mouse(MouseControls mouse);
 
+  // Windows the host puts in every document it mounts, after the document's own: arigl's
+  // Network cache window (components/http_cache.ari). Each is closed until its tree.<id>.open is
+  // set (a host's menu_toggle on that key opens it, and the Windows menu then leaves it out), and
+  // one whose id a window of the document already has is left out. Applied by the next load() or
+  // set_root(); empty (the default) adds none.
+  void set_host_windows(std::vector<Widget> windows);
+
   // Register a host verb the .ari program can call. Verbs and host functions (below) are this
   // runtime's own: its documents' programs call them, and those of another runtime on the same
   // app don't, whatever names that one registers. register_verb is SYNCHRONOUS (fn runs
@@ -312,7 +319,9 @@ public:
 
   // The built-in sim.step and sim.restart (sim_transport.ari's Step and Restart buttons, and any
   // document's bare `on: sim.step` / `on: sim.restart`), which the constructor registers. A host's
-  // own on("sim.step", ...) or on("sim.restart", ...) replaces them.
+  // own on("sim.step", ...) or on("sim.restart", ...) replaces them. The constructor registers
+  // http_cache.clear too (http_cache.ari's Clear button): it empties the app's HTTP cache
+  // (clear_http_cache, uri_http_cache.h).
   //
   // step_world(n): n more quanta on the scene's clock, through its step key (<prefix>.sim.step by
   // default; world_clock_binding), so it works the same whether this runtime drives the clock or an
@@ -404,6 +413,8 @@ private:
   std::vector<KeyBinding> hostKeys_;         // set_host_keys: bound, and listed, in every one
   bool keysWindow_ = false;                  // set_host_keys was called: always a Keys window
   MouseControls hostMouse_;                  // set_host_mouse: the window's Mouse rows
+  std::vector<Widget> hostWindows_;          // set_host_windows: put in every mounted tree
+  void add_host_windows(Widget &root) const; // ... closed until asked for
   // The keys' defaults at keys.<id>, before init: (which may set its own). A new document's own
   // replace whatever an earlier document left at the same keys.<id> (they share the prefix), ""
   // for one with no key; a reload keeps the user's keys, and the host's are only seeded.

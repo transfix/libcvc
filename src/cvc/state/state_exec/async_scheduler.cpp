@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -61,6 +62,17 @@ bool collect_cycles_if_due(cycle_registry &r) {
   return true;
 }
 
+// CVC_EXEC_FUZZ (S2-Q15), read whenever a scheduler is made, as a lock manager reads it: the
+// fuzzing of its ingress posts, or null when it is off.
+std::unique_ptr<detail::lock_fuzz> ingress_fuzz_from_environment() {
+  const std::uint64_t seed = detail::lock_fuzz_seed_from_environment();
+  if (seed == 0)
+    return nullptr;
+  auto fuzz = std::make_unique<detail::lock_fuzz>();
+  fuzz->seed.store(seed, std::memory_order_relaxed);
+  return fuzz;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -70,8 +82,8 @@ bool collect_cycles_if_due(cycle_registry &r) {
 async_scheduler::async_scheduler(scheduling_policy policy)
     : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
       evaluator_(builtins::make_default_environment()),
-      procs_(policy != scheduling_policy::round_robin),
-      wakeup_(std::make_shared<detail::wakeup>()) {}
+      procs_(policy != scheduling_policy::round_robin), wakeup_(std::make_shared<detail::wakeup>()),
+      ingress_fuzz_(ingress_fuzz_from_environment()) {}
 
 // A group's scheduler (S1.3): its global environment is its own scope over `base`. A program's
 // `set` binds in its process's own run env (step_set_value's env->set), so nothing a program writes
@@ -79,8 +91,8 @@ async_scheduler::async_scheduler(scheduling_policy policy)
 async_scheduler::async_scheduler(scheduling_policy policy, environment_ptr base)
     : policy_(policy), slice_steps_(slice_steps_knob()), slice_steps_default_(slice_steps_),
       evaluator_(environment::extend(std::move(base))),
-      procs_(policy != scheduling_policy::round_robin),
-      wakeup_(std::make_shared<detail::wakeup>()) {}
+      procs_(policy != scheduling_policy::round_robin), wakeup_(std::make_shared<detail::wakeup>()),
+      ingress_fuzz_(ingress_fuzz_from_environment()) {}
 
 void async_scheduler::set_slice(std::uint64_t steps, double seconds) {
   set_slice_steps(steps);
@@ -98,7 +110,9 @@ void async_scheduler::set_slice_seconds(double seconds) {
 }
 
 void async_scheduler::refresh_slice() {
-  if ((slice_steps_set_ && slice_seconds_set_) || !watch_root_)
+  // Read even with both slice settings given, for the long-step threshold: one settings lookup a
+  // run loop then, a cost accepted (R2b S-m3).
+  if (!watch_root_)
     return;
   const uint64_t seen = settings_changes_.version(watch_root_); // before the reads
   if (seen == slice_seen_)
@@ -121,6 +135,14 @@ void async_scheduler::refresh_slice() {
     else if (const auto s = parse_slice_seconds(*v)) // 0 or less: 1 ms, as in set_slice_seconds
       slice_seconds_ = *s > 0.0 ? *s : 1e-3;
   }
+  // The long-step monitor's threshold (S2a.7, S2-Q11), by the same rules: state_exec.long_step_ms
+  // when set (0 or less: off), else the default (set_long_step_default).
+  const auto ms = detail::setting_value(*watch_root_, "state_exec.long_step_ms");
+  if (!ms || ms->empty())
+    long_step_tree_.reset();
+  else if (const auto v = parse_slice_seconds(*ms))
+    long_step_tree_ = *v > 0.0 ? *v / 1e3 : 0.0;
+  long_step_seconds_ = long_step_tree_.value_or(long_step_default_);
 }
 
 void async_scheduler::set_cycle_registry(cycle_registry *r) {
@@ -173,6 +195,47 @@ async_scheduler::pump_owner_scope::~pump_owner_scope() {
 bool async_scheduler::pumped_elsewhere() const noexcept {
   const std::thread::id owner = pump_owner_.load(std::memory_order_relaxed);
   return owner != std::thread::id{} && owner != std::this_thread::get_id();
+}
+
+// Stage 2 (S2a.0): the notifier is the wakeup's, which the lock home's port shares (S2-Q2).
+void async_scheduler::set_wake_notifier(detail::wake_notifier fn, void *ctx) {
+  wakeup_->set_notifier(fn, ctx);
+}
+
+bool async_scheduler::has_wake_notifier() const noexcept { return wakeup_->has_notifier(); }
+
+// The long-step monitor's settings (S2a.7, S2-Q11): its default threshold applies while the tree
+// sets no state_exec.long_step_ms (refresh_slice).
+void async_scheduler::set_long_step_sink(long_step_sink sink) { long_step_sink_ = std::move(sink); }
+
+void async_scheduler::set_long_step_default(double seconds) {
+  long_step_default_ = std::isfinite(seconds) && seconds > 0.0 ? seconds : 0.0;
+  long_step_seconds_ = long_step_tree_.value_or(long_step_default_);
+}
+
+// The long-step monitor (S2a.7, S2-Q11). A step, or a run's window between two of its clock
+// readings, that took longer than the threshold is counted, and reported to the sink with the
+// native its last step applied ("(no native)" when none), at most once a minute per name. The name
+// is copied only then. A sink that throws is dropped: the step goes on.
+void async_scheduler::time_long_step(const process &proc, clock::time_point now) noexcept {
+  const double seconds = std::chrono::duration<double>(now - long_window_).count();
+  long_window_ = now;
+  if (seconds <= long_step_seconds_)
+    return;
+  long_steps_.fetch_add(1, std::memory_order_relaxed);
+  if (!long_step_sink_)
+    return;
+  try {
+    std::string native = proc.state.native_site ? proc.state.native_site : "(no native)";
+    const auto [last, first] = long_step_reported_.try_emplace(native, now);
+    if (!first) {
+      if (now - last->second < std::chrono::minutes(1))
+        return;
+      last->second = now;
+    }
+    long_step_sink_(native, seconds);
+  } catch (...) {
+  }
 }
 
 namespace {
@@ -525,6 +588,10 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   const double chained_cpu = chain_cpu_;
   chain_valid_ = false; // until this step ends plainly
   proc.last_run_start = step_start;
+  // The long-step monitor (S2a.7) times the step, or the run's first window, from here.
+  const bool timing = long_step_seconds_ > 0.0;
+  if (timing)
+    long_window_ = step_start;
   // Async calls that run inline in this step are charged as calls (3.8), not as the step.
   proc.step_async_wall = 0.0;
   proc.step_async_cpu = 0.0;
@@ -578,6 +645,9 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
     if (max_run > 1 && !done)
       done = continue_run(proc, max_run, step_start, charged.before, charge_cpu, cpu0);
   } catch (const std::exception &e) {
+    // A long step that threw is timed first, while its native's name holds (S2a.7).
+    if (timing)
+      time_long_step(proc, clock::now());
     // A signal or watch handler's uncaught exception is raised in the program where the handler
     // interrupted it (docs/STATE_EXEC_EXCEPTIONS.md 2.4), for the program's own try to catch.
     bool raised_in_program = false;
@@ -630,6 +700,8 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   }
 
   const clock::time_point now = clock::now();
+  if (timing)
+    time_long_step(proc, now); // the step, or the run's last window
   if (home_)
     home_->store_progress(now); // the home's last_progress, read by blocking_sinks (design 8.4)
   // A parking intrinsic (sleep / yield-frame / receive_message) already closed out this running
@@ -851,6 +923,9 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
     const uint64_t n = run_steps_;
     if ((n & 15) == 0 || n == 2 || n == 4 || n == 8) {
       const clock::time_point t = clock::now();
+      // The long-step monitor's window (S2a.7): the steps since its last reading.
+      if (long_step_seconds_ > 0.0)
+        time_long_step(proc, t);
       if (timed && t - start >= slice)
         break;
       if (run_budget_ && run_budget_->spent(t, n - checked))
@@ -998,6 +1073,48 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   // and an unthrottled rule would walk the whole registry each frame an Ariadne action ends.
   if (registry_ && !has_runnable() && cycle_collection_due(*registry_))
     collect_cycles(*registry_);
+
+  // The pump's report (S2-Q4): what the run left, which a pool's release (or a host batch's wait)
+  // reads instead of the scheduler. Computed only while a wake notifier is installed, for those
+  // readers: with none it is left as it was and the run loop is master's (R2b S-m2: the timer peek
+  // below pops stale heap entries). The deadline is the earliest work no post announces: the
+  // earliest live timer (precise, as wait_for_work keeps it), the calls' next timeout or charge,
+  // the frame waiters' beat (a coarse 1 ms, as Exec.run's), and the idle collection falling due.
+  // The clock is read only for a beat.
+  if (!wakeup_->has_notifier())
+    return taken;
+  run_report_.runnable = has_runnable();
+  run_report_.best_runnable = procs_.best_runnable();
+  run_report_.awaiting_frame = procs_.awaiting_count() > 0;
+  clock::time_point next = clock::time_point::max();
+  bool precise = false;
+  if (procs_.timed_count() > 0) {
+    if (const std::optional<clock::time_point> timer = procs_.next_timer()) {
+      next = *timer;
+      precise = true;
+    }
+  }
+  const auto coarse = [&next, &precise](clock::time_point t) {
+    if (t < next) {
+      next = t;
+      precise = false;
+    }
+  };
+  if (!async_calls_.empty() || procs_.awaiting_count() > 0) {
+    const clock::time_point now = clock::now();
+    if (!async_calls_.empty()) {
+      if (const std::optional<clock::time_point> charge = next_call_charge(now))
+        coarse(*charge);
+    }
+    if (procs_.awaiting_count() > 0)
+      coarse(now + std::chrono::milliseconds(1));
+  }
+  if (registry_) {
+    if (const std::optional<clock::time_point> due = cycle_collection_due_at(*registry_))
+      coarse(*due);
+  }
+  run_report_.next_deadline = next;
+  run_report_.precise = precise;
   return taken;
 }
 
@@ -1084,8 +1201,13 @@ bool async_scheduler::wait_for_work(clock::time_point deadline) {
     // look (seen here) or sees idle_waiting_ and notifies (both sides are seq_cst). A lock post
     // notifies whatever idle_waiting_ says (protocol 2.3): one this look misses ends the wait.
     idle_waiting_.store(true, std::memory_order_seq_cst);
-    if (!ingress_pending_.load(std::memory_order_seq_cst) && !(home_ && home_->port_pending()))
+    if (!ingress_pending_.load(std::memory_order_seq_cst) && !(home_ && home_->port_pending())) {
+      // S2-Q2: a scheduler with a notifier (a pool's group) is woken through it, never waited on
+      // here; a probe whose deadline has passed returned above. The notifier takes every post's
+      // signal, so in a release build this wait lasts to `until` whatever is posted.
+      assert(!wakeup_->has_notifier() && "wait_for_work: the scheduler has a wake notifier");
       wakeup_->wait_until(until, precise);
+    }
     idle_waiting_.store(false, std::memory_order_relaxed);
   }
 }
@@ -1095,7 +1217,13 @@ bool async_scheduler::wait_for_work(double seconds) {
 }
 
 void async_scheduler::notify_work() {
-  if (idle_waiting_.load(std::memory_order_seq_cst))
+  // CVC_EXEC_FUZZ (S2-Q15): a yield between the post's push and its wake, under the ingress mutex.
+  // (lock_home.h's points are frozen; the draw is a lock post's, which it only mixes in.)
+  if (ingress_fuzz_)
+    detail::lock_fuzz_point(ingress_fuzz_.get(), detail::lock_fuzz_at::post_exit);
+  // A wait in progress is notified, as is a notifier whatever idle_waiting_ says (S2-Q2): a
+  // pool's group is woken by every post.
+  if (idle_waiting_.load(std::memory_order_seq_cst) || wakeup_->has_notifier())
     wakeup_->notify();
 }
 

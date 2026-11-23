@@ -316,6 +316,22 @@ public:
   // is applied in perspective modes (not Map). State "settings.field_of_view".
   void setFieldOfView(double degrees);
   double fieldOfView() const;
+  // Look from `eye` at `target`, as the current pose of every 3-D mode, so a drag goes on from
+  // there: Orbit and Track centre on the target at the eye's distance and direction (the
+  // elevation kept within the orbit's limits), Fly stands at the eye facing the target, and Map
+  // centres on the target's x and y. An eye on the target moves only the centre.
+  void lookAt(const double eye[3], const double target[3]);
+  // Parallel projection in Orbit, Fly and Track (state "settings.orthographic"; off by default):
+  // the view's half-height is the orbit's distance (the eye's from its focal point) times
+  // tan(fov / 2), the field of view the camera has, so the wheel still zooms; Fly keeps the
+  // orbit's distance. Map and Slice are parallel anyway.
+  void setOrthographic(bool on);
+  bool orthographic() const;
+  // A fixed near and far clipping distance (state "settings.clip_near" and "settings.clip_far").
+  // 0 and 0, the default, fit the range to what the renderer draws on each apply; so does a pair
+  // with near <= 0 or far <= near.
+  void setClipRange(double nearDist, double farDist);
+  bool clipRange(double &nearDist, double &farDist) const; // false: fitted
 
   // Pointer capture: the cursor is hidden and the pointer's motion keeps coming at the window's
   // edge, so mouse-look is continuous. Auto-enabled in fly mode; Escape releases it. State

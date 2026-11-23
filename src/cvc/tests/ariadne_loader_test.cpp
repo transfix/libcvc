@@ -1163,6 +1163,35 @@ windows:
   EXPECT_TRUE(warned);
 }
 
+// §5.22 a tray icon's picture (an avatar), and §5.24 `notifications: always`.
+TEST(AriadneLoader, TrayIconPictureAndBellAlways) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+notifications: always
+menubar:
+  - tray_icon: user
+    icon: (state-get "me.avatar_url")
+    auth: site
+    on: profile
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *you = find(r.root, Kind::TrayIcon, "user");
+  ASSERT_NE(you, nullptr);
+  EXPECT_EQ(you->button_icon, "(state-get \"me.avatar_url\")");
+  EXPECT_EQ(you->media_auth, "site");
+  // The document's bell setting, outside the bar: on, and shown with an empty feed.
+  const Widget *bell = nullptr;
+  for (const Widget &c : r.root.children)
+    if (c.kind == Kind::TrayIcon && c.tray_bell)
+      bell = &c;
+  ASSERT_NE(bell, nullptr);
+  EXPECT_TRUE(bell->bdef);
+  EXPECT_TRUE(bell->bell_always);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("notifications"), std::string::npos) << w;
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {
@@ -2870,6 +2899,54 @@ scenes:
   for (const std::string &w : r.warnings)
     warned = warned || w.find("no `scene:` name") != std::string::npos;
   EXPECT_TRUE(warned);
+}
+
+// §5.18 a camera's authored viewpoint: position, target, up, fov, near, far, orthographic, height;
+// a camera without them keeps the defaults, and a malformed vector or an fov out of range is left
+// out rather than half read.
+TEST(AriadneScene, CameraViewpoints) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  cameras:
+    - camera: main
+      position: [12, -9, 7.5]
+      target: [1, 1, 0]
+      up: [0, 1, 0]
+      fov: 35
+      near: 0.25
+      far: 400
+    - { camera: plan, orthographic: true, height: 16, target: [0, 0, 0] }
+    - { camera: rig, azimuth: -30 }
+    - { camera: bad, position: [1, two, 3], target: [1, 2], up: [0, 0, 0], fov: 200 }
+  nodes: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.cameras.size(), 4u);
+  const SceneCamera &m = r.scene.cameras[0];
+  EXPECT_EQ(m.id, "main");
+  EXPECT_TRUE(m.has_position && m.has_target && m.has_up);
+  EXPECT_DOUBLE_EQ(m.position[2], 7.5);
+  EXPECT_DOUBLE_EQ(m.target[0], 1.0);
+  EXPECT_DOUBLE_EQ(m.up[1], 1.0);
+  EXPECT_DOUBLE_EQ(m.fov, 35.0);
+  EXPECT_DOUBLE_EQ(m.near_clip, 0.25);
+  EXPECT_DOUBLE_EQ(m.far_clip, 400.0);
+  EXPECT_FALSE(m.orthographic);
+  const SceneCamera &p = r.scene.cameras[1];
+  EXPECT_TRUE(p.orthographic);
+  EXPECT_DOUBLE_EQ(p.height, 16.0);
+  EXPECT_FALSE(p.has_position);
+  EXPECT_TRUE(p.has_target);
+  const SceneCamera &g = r.scene.cameras[2];
+  EXPECT_FALSE(g.has_position || g.has_target || g.has_up || g.orthographic);
+  EXPECT_DOUBLE_EQ(g.fov, 0.0);
+  EXPECT_DOUBLE_EQ(g.near_clip, 0.0);
+  EXPECT_DOUBLE_EQ(g.up[2], 1.0);
+  const SceneCamera &b = r.scene.cameras[3];
+  EXPECT_FALSE(b.has_position || b.has_target || b.has_up);
+  EXPECT_DOUBLE_EQ(b.fov, 0.0);
 }
 
 // §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's

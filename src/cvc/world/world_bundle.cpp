@@ -14,6 +14,7 @@
 #include "city_bundle_v2.h"
 
 #include <algorithm>
+#include <array>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cctype>
@@ -21,6 +22,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cvc/geometry/height_field.h>
+#include <cvc/image/image.h>
+#include <cvc/image/image_decode.h>
+#include <cvc/image/image_encode.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
@@ -29,6 +33,7 @@
 #include <cvc/world/surface.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -690,23 +695,374 @@ generated_world_params generated_world_params_from_json(const std::string &text,
   return p;
 }
 
+namespace {
+
+// ── What the renderer reads beside the meshes (generated_world_bundle, world_from_bundle) ──
+
+// props.json: the props' cells, a row of numbers each, in kPropCellFields' order.
+const char *const kPropCellFields[] = {"min_x",    "min_y",        "min_z",    "max_x",
+                                       "max_y",    "max_z",        "props",    "props_end",
+                                       "foliage",  "foliage_end",  "needles",  "needles_end",
+                                       "props_r1", "props_r1_end", "props_r2", "props_r2_end"};
+constexpr std::size_t kPropCellWidth = sizeof(kPropCellFields) / sizeof(kPropCellFields[0]);
+
+std::string props_json(const generated_world &w) {
+  std::vector<std::string> fields;
+  for (const char *f : kPropCellFields)
+    fields.push_back(jstr(f));
+  std::string o = "{\n  \"cell_m\": " + jnum(w.prop_cell_m) + ",\n  \"fields\": " + jarr(fields) +
+                  ",\n  \"cells\": [";
+  for (std::size_t i = 0; i < w.prop_cells.size(); ++i) {
+    const generated_world::prop_cell &c = w.prop_cells[i];
+    std::vector<std::string> v;
+    for (int k = 0; k < 3; ++k)
+      v.push_back(jnum(c.min[k]));
+    for (int k = 0; k < 3; ++k)
+      v.push_back(jnum(c.max[k]));
+    for (const generated_world::prop_span *s :
+         {&c.props, &c.foliage, &c.needles, &c.props_r1, &c.props_r2}) {
+      v.push_back(juint(s->c0));
+      v.push_back(juint(s->c1));
+    }
+    o += (i ? ",\n    " : "\n    ") + jarr(v);
+  }
+  return o + (w.prop_cells.empty() ? "]\n}\n" : "\n  ]\n}\n");
+}
+
+// streets.json: the street network and the city's counts.
+std::string streets_json(const generated_world &w) {
+  std::string nodes = "[", segs = "[";
+  for (std::size_t i = 0; i < w.streets.nodes.size(); ++i) {
+    const road_node &n = w.streets.nodes[i];
+    nodes += (i ? ",\n    " : "\n    ") + jarr({jnum(n.x), jnum(n.y), jint(n.degree)});
+  }
+  nodes += w.streets.nodes.empty() ? "]" : "\n  ]";
+  for (std::size_t i = 0; i < w.streets.segments.size(); ++i) {
+    const road_segment &s = w.streets.segments[i];
+    segs += (i ? ",\n    " : "\n    ") + jarr({jint(s.a), jint(s.b), jnum(s.width),
+                                               jint(static_cast<int>(s.kind)), jbool(s.arterial)});
+  }
+  segs += w.streets.segments.empty() ? "]" : "\n  ]";
+  return jobj({{"half", jnum(w.streets.half)},
+               {"buildings", juint(w.building_count)},
+               {"archetypes", jbool(w.archetypes)},
+               {"districts", juint(w.districts)},
+               {"road_length", jnum(w.road_length)},
+               {"fields",
+                jarr({jstr("a"), jstr("b"), jstr("width"), jstr("class"), jstr("arterial")})},
+               {"nodes", nodes},
+               {"segments", segs}}) +
+         "\n";
+}
+
+// ground.png: the painted ground, north at the top (its rows are south first).
+std::string ground_png(const world_ground &g) {
+  if (g.width <= 0 || g.height <= 0 ||
+      g.rgb.size() != static_cast<std::size_t>(g.width) * g.height * 3)
+    throw std::invalid_argument("generated_world_bundle: the ground is not width x height RGB");
+  const cvc::image img(g.width, g.height, cvc::image::pixel_format::RGB, cvc::image::data_type::u8,
+                       g.rgb.data());
+  return encode_png(img.flipped_vertical());
+}
+
+// The ground in ground.png, else satellite.png, rows south first; empty when there is neither.
+world_ground read_ground(const city_bundle_reader &read) {
+  std::string name = "ground.png";
+  std::shared_ptr<const std::string> png = read(name);
+  if (!png) {
+    name = "satellite.png";
+    png = read(name);
+  }
+  world_ground out;
+  if (!png)
+    return out;
+  cvc::image_decode_limits lim;
+  lim.max_side = 16384;
+  lim.max_pixels = 16384u * 16384u;
+  lim.max_bytes = 1024u * 1024u * 1024u;
+  std::string why;
+  cvc::image img = cvc::decode_image(png->data(), png->size(), lim, &why);
+  if (img.empty())
+    throw std::runtime_error("world_from_bundle: " + name + ": " + why);
+  img = img.converted(cvc::image::pixel_format::RGB, cvc::image::data_type::u8).flipped_vertical();
+  out.width = img.width();
+  out.height = img.height();
+  out.rgb.assign(img.data(), img.data() + img.size_bytes());
+  return out;
+}
+
+// The faces of a cell's run use one run of points (a mesh read back keeps its faces' order and
+// its points in the order its faces first use them): those are the cell's points.
+void span_points(const cvc::geometry &g, generated_world::prop_span &s, bool lines,
+                 const char *what) {
+  const std::size_t n = lines ? g.const_lines().size() : g.const_tris().size();
+  if (s.c1 < s.c0 || s.c1 > n)
+    throw std::runtime_error(std::string("props.json: a cell's ") + what +
+                             " run is outside its mesh");
+  s.p0 = s.p1 = 0;
+  if (s.c0 == s.c1)
+    return;
+  std::size_t lo = std::numeric_limits<std::size_t>::max(), hi = 0;
+  for (std::size_t f = s.c0; f < s.c1; ++f)
+    for (int k = 0; k < (lines ? 2 : 3); ++k) {
+      const std::size_t v = lines ? g.const_lines()[f][k] : g.const_tris()[f][k];
+      lo = std::min(lo, v);
+      hi = std::max(hi, v);
+    }
+  s.p0 = lo;
+  s.p1 = hi + 1;
+}
+
+// A JSON array of numbers' values as text, each child's.
+std::vector<std::string> row_of(const ptree &row) {
+  std::vector<std::string> v;
+  for (const auto &x : row)
+    v.push_back(x.second.get_value<std::string>());
+  return v;
+}
+
+void read_props(const std::string &text, generated_world &w) {
+  const ptree j = parse_json(text, "props.json");
+  w.prop_cell_m = j.get<double>("cell_m", 0.0);
+  if (const auto cells = j.get_child_optional("cells"))
+    for (const auto &kv : *cells) {
+      const std::vector<std::string> v = row_of(kv.second);
+      if (v.size() != kPropCellWidth)
+        throw std::runtime_error("props.json: a cell is not " + std::to_string(kPropCellWidth) +
+                                 " numbers");
+      generated_world::prop_cell c;
+      for (int k = 0; k < 3; ++k) {
+        c.min[k] = std::stod(v[std::size_t(k)]);
+        c.max[k] = std::stod(v[std::size_t(k) + 3]);
+      }
+      std::size_t at = 6;
+      for (generated_world::prop_span *s :
+           {&c.props, &c.foliage, &c.needles, &c.props_r1, &c.props_r2}) {
+        s->c0 = static_cast<std::size_t>(std::stoull(v[at++]));
+        s->c1 = static_cast<std::size_t>(std::stoull(v[at++]));
+      }
+      span_points(w.props, c.props, false, "props");
+      span_points(w.foliage, c.foliage, false, "foliage");
+      span_points(w.needles, c.needles, true, "needles");
+      span_points(w.props_r1, c.props_r1, false, "props_r1");
+      span_points(w.props_r2, c.props_r2, false, "props_r2");
+      w.prop_cells.push_back(c);
+    }
+}
+
+void read_streets(const std::string &text, generated_world &w) {
+  const ptree j = parse_json(text, "streets.json");
+  road_network net;
+  net.half = j.get<double>("half", net.half);
+  if (const auto nodes = j.get_child_optional("nodes"))
+    for (const auto &kv : *nodes) {
+      const std::vector<std::string> v = row_of(kv.second);
+      if (v.size() != 3)
+        throw std::runtime_error("streets.json: a node is not [x, y, degree]");
+      road_node n;
+      n.x = std::stod(v[0]);
+      n.y = std::stod(v[1]);
+      n.degree = std::stoi(v[2]);
+      net.nodes.push_back(n);
+    }
+  if (const auto segs = j.get_child_optional("segments"))
+    for (const auto &kv : *segs) {
+      const std::vector<std::string> v = row_of(kv.second);
+      if (v.size() != 5)
+        throw std::runtime_error("streets.json: a segment is not [a, b, width, class, arterial]");
+      road_segment s;
+      s.a = std::stoi(v[0]);
+      s.b = std::stoi(v[1]);
+      if (s.a < 0 || s.b < 0 || std::size_t(s.a) >= net.nodes.size() ||
+          std::size_t(s.b) >= net.nodes.size())
+        throw std::runtime_error("streets.json: a segment's node is not in nodes");
+      s.width = std::stod(v[2]);
+      const int kind = std::stoi(v[3]);
+      if (kind < 0 || kind > 2)
+        throw std::runtime_error("streets.json: a segment's class is not 0, 1 or 2");
+      s.kind = static_cast<road_class>(kind);
+      s.arterial = v[4] == "true";
+      net.segments.push_back(s);
+    }
+  w.streets = std::move(net);
+  w.building_count = j.get<std::size_t>("buildings", 0);
+  w.archetypes = j.get<bool>("archetypes", false);
+  w.districts = j.get<std::size_t>("districts", 0);
+  w.road_length = j.get<double>("road_length", 0.0);
+}
+
+// An item's mesh in world coordinates: its placement (a unit quaternion, then a move) applied.
+cvc::geometry placed_mesh(const geometry_item &it) {
+  const auto &q = it.rotation;
+  const auto &t = it.position;
+  if (q[0] == 1.0 && q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0 && t[0] == 0.0 && t[1] == 0.0 &&
+      t[2] == 0.0)
+    return *it.geometry;
+  auto rot = [&q](double x, double y, double z) {
+    // v' = v + 2 w (u x v) + 2 u x (u x v), u the quaternion's vector part
+    const double cx = q[2] * z - q[3] * y, cy = q[3] * x - q[1] * z, cz = q[1] * y - q[2] * x;
+    const double ccx = q[2] * cz - q[3] * cy, ccy = q[3] * cx - q[1] * cz,
+                 ccz = q[1] * cy - q[2] * cx;
+    return std::array<double, 3>{x + 2.0 * (q[0] * cx + ccx), y + 2.0 * (q[0] * cy + ccy),
+                                 z + 2.0 * (q[0] * cz + ccz)};
+  };
+  cvc::geometry g = *it.geometry;
+  for (auto &p : g.points()) {
+    const auto r = rot(p[0], p[1], p[2]);
+    p[0] = r[0] + t[0];
+    p[1] = r[1] + t[1];
+    p[2] = r[2] + t[2];
+  }
+  for (auto &n : g.normals()) {
+    const auto r = rot(n[0], n[1], n[2]);
+    n[0] = r[0];
+    n[1] = r[1];
+    n[2] = r[2];
+  }
+  return g;
+}
+
+} // namespace
+
 city_bundle_files generated_world_bundle(app &ctx, const generated_world &w,
-                                         const std::string &generator_version) {
+                                         const std::string &generator_version,
+                                         const world_ground *ground) {
   world_geometry g = w.geometry();
-  if (!w.needles.const_points().empty()) {
+  auto add_render = [&g](const char *name, const cvc::geometry &m) {
+    if (m.const_points().empty())
+      return;
     geometry_item it;
-    it.name = "needles";
-    it.geometry = std::make_shared<const cvc::geometry>(w.needles);
+    it.name = name;
+    it.geometry = std::make_shared<const cvc::geometry>(m);
     it.roles = role_render;
     g.add(std::move(it));
-  }
+  };
+  add_render("needles", w.needles);
+  add_render("props_r1", w.props_r1);
+  add_render("props_r2", w.props_r2);
   city_bundle_write info;
   info.generator.name = "generated_world";
   info.generator.version = generator_version;
   info.generator.seed = w.params.seed;
   info.generator.params = generated_world_params_json(w.params);
   info.water_level = w.params.water_level_m;
+  if (!w.prop_cells.empty())
+    info.extra["props.json"] = bytes_of(props_json(w));
+  info.extra["streets.json"] = bytes_of(streets_json(w));
+  world_ground painted;
+  if ((!ground || ground->empty()) && !w.raster.klass.empty()) {
+    painted.width = painted.height = world_ground_size;
+    painted.rgb = paint_surface(w, surface_color::material, world_ground_size);
+    ground = &painted;
+  }
+  if (ground && !ground->empty())
+    info.extra["ground.png"] = bytes_of(ground_png(*ground));
   return city_bundle_bytes(ctx, g, info);
+}
+
+bundle_world world_from_bundle(app &ctx, const city_bundle &b, const city_bundle_reader &read) {
+  (void)ctx;
+  const std::shared_ptr<const cvc::height_field> t0 = b.geometry.terrain();
+  if (!t0)
+    throw std::runtime_error("world_from_bundle: the bundle has no terrain");
+  auto w = std::make_shared<generated_world>();
+  w->surfaces = &b.geometry.surfaces();
+  w->terrain = std::make_shared<cvc::height_field>(*t0);
+  const cvc::height_field &t = *w->terrain;
+
+  // The params: the generator's, else a world over the terrain's extent.
+  const bool generated = b.generator.name == "generated_world";
+  if (generated) {
+    w->params = generated_world_params_from_json(b.generator.params);
+  } else {
+    w->params.half_m = 0.5 * std::max(t.max_x() - t.x0(), t.max_y() - t.y0());
+    w->params.edge = int(b.geometry.edge_walls() ? world_edge::wall : world_edge::none);
+    w->params.trees = w->params.rocks = w->params.buildings = 0;
+    w->params.terrain = w->params.city = "bundle";
+  }
+  double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+  for (const float z : t.heights())
+    if (std::isfinite(z)) {
+      lo = std::min(lo, double(z));
+      hi = std::max(hi, double(z));
+    }
+  if (!std::isfinite(lo))
+    lo = hi = 0.0;
+  w->height_min = lo;
+  w->height_max = hi;
+  const bool wet = b.water_level.has_value() || generated;
+  if (b.water_level)
+    w->params.water_level_m = *b.water_level;
+  else if (!generated)
+    w->params.water_level_m = lo - 1000.0; // under all ground: no water
+  w->grid.rows = t.rows();
+  w->grid.cols = t.cols();
+  w->grid.min_x = t.x0();
+  w->grid.min_y = t.y0();
+  w->grid.max_x = t.max_x();
+  w->grid.max_y = t.max_y();
+
+  // The meshes, by name; any other mesh item draws with the buildings.
+  for (const geometry_item &it : b.geometry.items()) {
+    if (it.height_field() || !it.geometry)
+      continue;
+    cvc::geometry *to = it.name == "buildings"  ? &w->buildings
+                        : it.name == "roads"    ? &w->roads
+                        : it.name == "props"    ? &w->props
+                        : it.name == "foliage"  ? &w->foliage
+                        : it.name == "needles"  ? &w->needles
+                        : it.name == "props_r1" ? &w->props_r1
+                        : it.name == "props_r2" ? &w->props_r2
+                                                : &w->buildings;
+    cvc::geometry m = placed_mesh(it);
+    if (to->const_points().empty())
+      *to = std::move(m);
+    else
+      to->merge(m);
+  }
+
+  try {
+    if (const auto s = read("streets.json"))
+      read_streets(*s, *w);
+    if (const auto p = read("props.json"))
+      read_props(*p, *w);
+  } catch (const boost::property_tree::ptree_error &e) {
+    throw std::runtime_error(std::string("world_from_bundle: ") + e.what());
+  } catch (const std::logic_error &e) { // a number that does not parse (stoi, stod)
+    throw std::runtime_error(std::string("world_from_bundle: a number in streets.json or "
+                                         "props.json: ") +
+                             e.what());
+  } catch (const std::runtime_error &e) {
+    throw std::runtime_error(std::string("world_from_bundle: ") + e.what());
+  }
+
+  // Rebuilt from the stored terrain: the water, the ground under its columns, the render LOD.
+  const double level = w->params.water_level_m;
+  if (wet) {
+    w->water = terrain_water_bodies(t, level);
+    const int n = water_resolution(*w);
+    const double half = w->params.half_m;
+    w->water_ground.assign(std::size_t(n) * n, 0.0f);
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < n; ++i)
+        w->water_ground[std::size_t(j) * n + i] = static_cast<float>(
+            t.height(-half + 2.0 * half * i / (n - 1), -half + 2.0 * half * j / (n - 1)));
+  }
+  w->terrain_layout = plan_terrain_chunks(t);
+  const terrain_chunk_layout &L = w->terrain_layout;
+  const int chunks = L.chunk_rows * L.chunk_cols;
+  w->terrain_chunks.reserve(std::size_t(std::max(0, chunks)));
+  for (int i = 0; i < chunks; ++i) {
+    terrain_chunk ch = make_terrain_chunk(t, L, i / L.chunk_cols, i % L.chunk_cols);
+    if (wet)
+      ch.water = make_water_rungs(t, L, ch, level);
+    w->terrain_chunks.push_back(std::move(ch));
+  }
+
+  bundle_world out;
+  out.world = std::move(w);
+  out.ground = read_ground(read);
+  return out;
 }
 
 } // namespace world

@@ -13,12 +13,14 @@
 
 #include <cstdint>
 #include <cvc/core/world_clock.h>
+#include <memory>
 #include <mutex>
 #include <string>
 
 namespace cvc {
 
 class app;
+class state_key;
 
 // ---------------
 // cvc::world_clock_keys
@@ -86,6 +88,7 @@ public:
   world_clock_binding(cvc::app &ctx, cvc::world_clock &clock, std::string prefix = "sim");
   // Explicit paths, e.g. a scene's resolved `clock:` keys. Empty ones are off.
   world_clock_binding(cvc::app &ctx, cvc::world_clock &clock, world_clock_keys keys);
+  ~world_clock_binding();
 
   // Control keys -> clock. Seeds any unset key from the clock first.
   void pull();
@@ -126,6 +129,11 @@ private:
   long long _step_seen = 0;
   std::uint64_t _pending_steps = 0;
   cvc::world_clock::mode _requested = cvc::world_clock::mode::live;
+  // The keys' nodes, kept resolved (cvc::state_key, in the .cpp): drive() reads and writes them
+  // every frame. kept(path) is null for a lane that is off.
+  struct kept_keys;
+  std::unique_ptr<kept_keys> _kept;
+  cvc::state_key *kept(const std::string &path);
 
   void seed();
   void pull_locked();

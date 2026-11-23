@@ -338,8 +338,10 @@ struct Widget {
   // is the document's setting for it (bdef: shown or not).
   bool tray_clock = false;
   // Kind::TrayIcon: the tray's bell (§5.24), the host's notification feed. In a menubar it places
-  // the bell there; elsewhere it is the document's setting for it (bdef: shown or not).
+  // the bell there; elsewhere it is the document's setting for it (bdef: shown or not), and
+  // bell_always (`notifications: always`) shows it with an empty feed too.
   bool tray_bell = false;
+  bool bell_always = false;
   // Kind::Menubar: when its menus fold into one ≡ menu (§5.23): "auto" (or empty) when they and
   // the tray do not fit across the bar, "never", or "always".
   std::string collapse;
@@ -440,7 +442,9 @@ struct Widget {
   // text_color. `option_colors`: a radio's list written in the document (`color: [c0, c1]`).
   std::string color_src;
   std::vector<ItemColor> option_colors;
-  // §5.27 Kind::Button `icon:`: a picture drawn on the button in place of its label: a URI (§5.11,
+  // §5.27 Kind::Button `icon:` (and §5.22 a Kind::TrayIcon's, round, the bar's height, in place of
+  // its glyph; a video URL plays there as a decorative video): a picture drawn on the button in
+  // place of its label: a URI (§5.11,
   // fetched as an image:'s is, with `auth:` in media_auth), a host-published image's name, or an
   // expression giving either. Empty, not loaded yet, failed, or on a backend that can't draw one:
   // the label. `icon_size` is its height in the document's px; 0, one line of text tall.
