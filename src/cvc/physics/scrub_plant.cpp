@@ -8,9 +8,12 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <cmath>
+#include <cvc/geometry/height_field.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/scrub_plant.h>
 #include <cvc/physics/world.h>
+#include <cvc/world/world_geometry.h>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -59,6 +62,12 @@ std::vector<cell_rect> wall_rects(const std::uint8_t *truth, int rows, int cols)
   return out;
 }
 
+// A deployed run's plant: its host, and the geometry the host's world borrows.
+struct world_plant {
+  std::shared_ptr<const cvc::world::world_geometry> geometry;
+  std::shared_ptr<plant_host> host;
+};
+
 } // namespace
 
 int scrub_wall_boxes(const std::uint8_t *truth, int rows, int cols) {
@@ -96,6 +105,31 @@ cvc::nav::scrub_plant_fn scrub_plant(plant_host_options o, double wall_height) {
       b.material = wall;
       w->add_body(b);
     }
+    return on;
+  };
+}
+
+cvc::nav::scrub_plant_fn scrub_plant(std::shared_ptr<const cvc::world::world_geometry> world,
+                                     plant_host_options o, std::vector<int> nav_materials) {
+  if (!world)
+    throw std::invalid_argument("cvc::physics::scrub_plant: no world geometry");
+  if (!o.plant.ground_height)
+    if (std::shared_ptr<const cvc::height_field> t = world->terrain())
+      // the vehicles start on the terrain, not at ground_z under it (a body that starts below a
+      // height field falls through it); off it, or over a hole, at ground_z
+      o.plant.ground_height = [t, z = o.ground_z](double x, double y) {
+        const double h = t->height(x, y);
+        return std::isfinite(h) ? h : z;
+      };
+  return [world, o, nav_materials](cvc::nav::sim_world &sim, const std::string &plant) {
+    plant_host::check(plant);
+    auto p = std::make_shared<world_plant>();
+    p->geometry = world;
+    p->host = std::make_shared<plant_host>(o);
+    p->host->set_geometry(world.get(), nav_materials);
+    cvc::nav::scrub_plant_attached on;
+    on.driving = p->host->use(sim, plant);
+    on.owner = p;
     return on;
   };
 }
