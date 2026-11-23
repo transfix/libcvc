@@ -3427,8 +3427,10 @@ How each backend does it:
   wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
   `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
   draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
-  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
-  bar for a document laid out for 600.
+  smaller, its shape kept. A `tabs` bar fits the line's room, left of a vertical scroll bar: tabs
+  that cannot shrink into it scroll there behind arrows, and the ones scrolled out are not the
+  line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
+  little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a

@@ -2191,6 +2191,18 @@ ariadne::IndexEdit ImGuiBackend::tab_bar(const char *label, const char *id, int 
   auto told = m_tabSelected.find(id);
   const bool force = told == m_tabSelected.end() || told->second != current;
   int shown = -1;
+  // The bar fits the line's visible room. ImGui spans it to the window's work rect, which runs
+  // under a vertical scroll bar (and, in a window that scrolls sideways, as wide as last frame's
+  // content), and tabs that cannot shrink into it scroll there, their arrows hidden; the tabs
+  // scrolled out of the bar are not the line's width either. Else a flowing row (§5.8) sees the
+  // bar's cell run past its room and moves it to the next line for good (volume_grid's side
+  // panel, its Contours page taller than the window, below the views).
+  ImGuiWindow *win = ImGui::GetCurrentWindow();
+  const float work_right = win->WorkRect.Max.x;
+  const float visible_right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+  const float widest_before = win->DC.CursorMaxPos.x;
+  if (visible_right < work_right)
+    win->WorkRect.Max.x = visible_right;
   if (ImGui::BeginTabBar(id)) {
     for (std::size_t i = 0; i < labels.size(); ++i) {
       const ImGuiTabItemFlags flags = force && static_cast<int>(i) == current
@@ -2205,6 +2217,8 @@ ariadne::IndexEdit ImGuiBackend::tab_bar(const char *label, const char *id, int 
     }
     ImGui::EndTabBar();
   }
+  win->WorkRect.Max.x = work_right;
+  win->DC.CursorMaxPos.x = std::max(widest_before, std::min(win->DC.CursorMaxPos.x, visible_right));
   if (force) {
     m_tabSelected[id] = current;
   } else if (shown >= 0 && shown != current) {
