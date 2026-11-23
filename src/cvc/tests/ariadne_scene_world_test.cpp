@@ -9227,6 +9227,7 @@ struct ram_run {
   double parked_moved = 0.0; // how far the relay pushed the parked vehicle (m)
   std::size_t held = 0;      // the boxes the model held at the end
   double mass = 0.0;         // the parked vehicle's, as the room carries it (0: kinematic)
+  double box_off = 0.0;      // the worst the model's box got from the relay's body (m, in plan)
 };
 
 // The relay's driver at full throttle straight at a parked vehicle of PLANT 30 m ahead, and the
@@ -9235,7 +9236,11 @@ struct ram_run {
 // meets only the statics. PLANT "avatar": in its place a participant standing there, held as
 // holon::held_obstacles holds a peer (OW5p). DELAY: the box is where the relay had it that many
 // ticks before (a playout's delay; 0, where it is).
-void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0) {
+// WALK: an avatar's box gets its walker when knocked loose (vehicle_obstacle::walk_force).
+// BRAKE: the driver brakes once its car is 3 m short of where the parked one stood, so what it hit
+// flies on alone.
+void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0, bool walk = true,
+                bool brake = false) {
   const bool avatar = plant == "avatar";
   cvc::app app;
   register_world_block(app);
@@ -9355,6 +9360,10 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0
   in.steer = 0.0;
   in.brake = 0.0;
   for (int step = 0; step < 720; ++step) {
+    if (brake && h.state("ann").position.x > -10.0 - 3.0 - 2.25) {
+      in.throttle = 0.0;
+      in.brake = 1.0;
+    }
     h.set_intent("ann", in);
     const std::uint64_t before = h.tick();
     // Where the client shows the parked vehicle: where the relay has it now (or DELAY ticks
@@ -9364,9 +9373,10 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0
     for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
       if (hold) {
         cvc::ariadne::vehicle_obstacle o;
-        o.key = parked;
+        o.key = avatar ? 1 : parked;
         o.half_extents = half;
         o.mass = mass;
+        o.walk_force = avatar && walk ? h.rules().policy.energy.force_max : 0.0;
         o.at = shown;
         o.at.position =
             shown.position + shown.linear_velocity * (static_cast<double>(t - before) * dt);
@@ -9377,6 +9387,12 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0
     }
     const cvc::physics::body_state relay = h.state("ann");
     out.stopped_at = std::max(out.stopped_at, relay.position.x);
+    cvc::physics::body_state box;
+    if (hold && model.obstacle_state(avatar ? 1 : parked, box)) {
+      const cvc::physics::vec3 there = parked_now().position;
+      out.box_off =
+          std::max(out.box_off, std::hypot(box.position.x - there.x, box.position.y - there.y));
+    }
     if (h.tick() % 4 == 0) {
       out.worst =
           std::max(out.worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
@@ -9447,6 +9463,17 @@ TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsAvatars) {
     EXPECT_LT(held.worst, c.within) << "the model meets it as the relay's car does";
     EXPECT_LT(held.worst, through.worst);
   }
+  // Its walker, knocked loose: the relay's walker brings the avatar it knocks back to rest. The
+  // model's box, without one, slides on where the knock sent it until where it is shown catches
+  // up with it; with one it stops as the relay's avatar does.
+  ram_run walks, slides;
+  ram_parked("avatar", true, walks, 12, true, true);
+  ram_parked("avatar", true, slides, 12, false, true);
+  std::printf(
+      "  OW5P the avatar knocked by a braking car (knocked %.2f m): its box at worst %.3f m "
+      "from the relay's with its walker, %.3f m without\n",
+      walks.parked_moved, walks.box_off, slides.box_off);
+  EXPECT_LT(walks.box_off, 0.5 * slides.box_off) << "its walker stops it as the relay's does";
 }
 
 TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {

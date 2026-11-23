@@ -290,6 +290,15 @@ void dynamic_vehicle_model::add_obstacle_room(const jolt_vehicle_world *world) {
   }
 }
 
+bool dynamic_vehicle_model::obstacle_state(std::uint64_t key, ph::body_state &out) const {
+  for (const obstacle_box &b : _boxes)
+    if (b.held && b.key == key) {
+      out = _jolt->world().state(b.id);
+      return true;
+    }
+  return false;
+}
+
 std::size_t dynamic_vehicle_model::obstacles_held() const {
   std::size_t n = 0;
   for (const obstacle_box &b : _boxes)
@@ -359,6 +368,22 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
           (ph::dot(off, off) > kKnocked * kKnocked || ph::dot(dv, dv) > kKnockedV * kKnockedV);
       if (knocked) {
         ++b.loose;
+        const double walk = obstacles[i].walk_force;
+        if (walk > 0.0) {
+          // Its walker (avatar_world::drive_walker): toward the velocity it is shown at, in plan,
+          // with at most WALK_FORCE; upright, as the walker keeps it.
+          ph::body_state s = now;
+          double dx = at.linear_velocity.x - s.linear_velocity.x;
+          double dy = at.linear_velocity.y - s.linear_velocity.y;
+          const double dv = std::sqrt(dx * dx + dy * dy), cap = walk / b.mass * _dt;
+          if (dv > cap && dv > 0.0)
+            dx *= cap / dv, dy *= cap / dv;
+          s.linear_velocity.x += dx;
+          s.linear_velocity.y += dy;
+          s.rotation = at.rotation;
+          s.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
+          w.set_state(b.id, s);
+        }
       } else {
         b.loose = 0;
         ph::body_state put;

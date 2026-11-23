@@ -573,6 +573,7 @@ std::vector<vehicle_obstacle> holon::held_obstacles() const {
     o.key = p.obstacle_key;
     o.half_extents = cvc::physics::vec3{0.5 * body.width, 0.5 * body.width, 0.5 * body.height};
     o.mass = body.mass;
+    o.walk_force = _applied.policy.energy.force_max;
     o.at.position = feet.position + cvc::physics::vec3{0.0, 0.0, 0.5 * body.height};
     o.at.rotation = feet.rotation;
     if (all_finite(p.newest.linear_velocity))

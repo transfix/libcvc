@@ -95,11 +95,15 @@ struct jolt_vehicle_world {
 // mass, put where it is shown before each step, so the chassis shoves it as the relay's shoves
 // that vehicle (a jolt vehicle, a dynamic plant's box) or avatar (OW5p). Its surface is
 // frictionless: an avatar's box slides so on the relay (avatar_world's material), and a vehicle
-// shoved along rolls on its wheels.
+// shoved along rolls on its wheels. WALK_FORCE (N, > 0 for an avatar's): its walker, the most it
+// pushes the body with (avatar_energy_policy::force_max). Knocked loose, the box is pushed back
+// toward the velocity it is shown at with up to that force each step, upright, as the relay's
+// walker pushes the avatar toward its intent.
 struct vehicle_obstacle {
   std::uint64_t key = 0;
   cvc::physics::vec3 half_extents;
   double mass = 0.0;
+  double walk_force = 0.0;
   cvc::physics::body_state at;
 };
 
@@ -194,6 +198,9 @@ public:
   // free box. The host then builds the model again with room for them. True and nothing on the
   // dynamic plants (they meet nothing, as on the relay) and for a boat not yet on the water.
   bool hold_obstacles(dynamic_vehicle &v, const std::vector<vehicle_obstacle> &obstacles);
+  // Where the box held for KEY is in the model's world as the last step left it (OW5p); false
+  // for a key no box holds.
+  bool obstacle_state(std::uint64_t key, cvc::physics::body_state &out) const;
   // The boxes it has room for, and how many hold one of the room's vehicles now.
   std::size_t obstacle_room() const { return _boxes.size(); }
   std::size_t obstacles_held() const;
