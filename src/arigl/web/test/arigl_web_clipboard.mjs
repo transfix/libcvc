@@ -12,7 +12,9 @@
 //      (navigator.clipboard.readText) and puts what it read in the field, which Enter commits;
 //   3. its Cut takes the field's text to the clipboard and out of the field;
 //   4. with the read refused (the permission denied), Paste puts the focus in the field, and a
-//      paste the browser delivers (Ctrl+V's paste event) still lands there.
+//      paste the browser delivers (Ctrl+V's paste event) still lands there;
+//   5. when the package has ari's terminal page (ari.html), the same document there: Shift+F10 on
+//      the field and Paste, which the program asks for with an OSC 52 read that the page answers.
 //
 // The menu's items are found without knowing where ImGui draws them: the page's clipboard glue
 // is told which item the pointer is over (cvc::gl::clipboard::arm: window.__cvcglClip.arm), so
@@ -136,6 +138,9 @@ const evaluate = async (expr, gesture = false) => {
   return m.result && m.result.result ? m.result.result.value : undefined;
 };
 await page.send('Page.enable');
+// The clipboard API wants a focused document, which a headless tab is not unless told so.
+await page.send('Page.bringToFront');
+await page.send('Emulation.setFocusEmulationEnabled', {enabled: true});
 await page.send('Page.addScriptToEvaluateOnNewDocument', {source: `(() => {
 window.__out = [];
 const log = console.log;
@@ -183,26 +188,35 @@ const key = async (k, code, vk, modifiers = 0, commands = []) => {
 const enter = () => key('Enter', 'Enter', 13);
 const armed = () => evaluate('JSON.stringify(window.__cvcglClip ? window.__cvcglClip.arm : null)')
                         .then(s => JSON.parse(s || 'null'));
-const printed = () => evaluate('JSON.stringify(window.__out)').then(s => JSON.parse(s));
+// What the document printed, each line as the string it printed ((print S) quotes a string).
+const printed = () => evaluate('JSON.stringify(window.__out)')
+                          .then(s => JSON.parse(s).map(l => l.replace(/^"(.*)"$/, '$1')));
 const clipboard = () => evaluate('navigator.clipboard.readText()', true);
 
 // Right-click at (x, y), then walk the pointer down the menu that opened there until WANT(arm)
 // holds for the item under it: where to click it, or null when no menu item there does.
+const seen = []; // what each probe found armed, for a failure's message
 async function menuItem(x, y, want) {
   await click(x, y, 'right');
+  const found = new Set();
   for (let dy = 4; dy < 160; dy += 3) {
     await move(x + 24, y + dy);
     await sleep(60); // a frame or two: the item under the pointer arms in the frame's end
     const a = await armed();
+    if (a) found.add(JSON.stringify(a));
     if (a && want(a)) return {x: x + 24, y: y + dy};
   }
+  seen.push(`y ${y}: ${[...found].join(' ') || 'nothing armed'}`);
   await key('Escape', 'Escape', 27);
   return null;
 }
 // The first of the candidate rows (the window's first lines) whose menu has an item WANT takes.
+// X is a few characters into the window, so it is over a short text too (a text is as wide as it
+// is long); the field spans the window.
+const X = 60;
 async function find(want) {
-  for (let y = 62; y < 200; y += 8) {
-    const at = await menuItem(120, y, want);
+  for (let y = 62; y < 220; y += 8) {
+    const at = await menuItem(X, y, want);
     if (at) return {row: y, at};
   }
   return null;
@@ -216,7 +230,8 @@ try {
   // 1. The text's Copy.
   await evaluate('navigator.clipboard.writeText("before")', true);
   const text = await find(a => a.copy === 'copy me');
-  step(!!text, 'a right-click on the text opens a menu whose Copy copies it');
+  step(!!text, 'a right-click on the text opens a menu whose Copy copies it' +
+                   (text ? '' : '\n  ' + seen.join('\n  ')));
   if (text) {
     await click(text.at.x, text.at.y);
     step((await clipboard()) === 'copy me', 'Copy puts the text on the clipboard');
@@ -235,7 +250,7 @@ try {
     step(out === 'name=from the clipboard', `Paste puts what the clipboard holds in it: ${out}`);
 
     // 3. Its Cut: the whole text (nothing selected) to the clipboard, and out of the field.
-    const cut = await menuItem(120, field.row, a => a.copy === 'from the clipboard');
+    const cut = await menuItem(X, field.row, a => a.copy === 'from the clipboard');
     step(!!cut, 'its Cut copies the field\'s text');
     if (cut) {
       await click(cut.x, cut.y);
@@ -248,9 +263,11 @@ try {
     }
 
     // 4. The read refused: the focus goes to the field, and the browser's own paste lands there.
-    await evaluate('navigator.clipboard.writeText("typed paste")', true);
+    // The clipboard holds another text than the paste event carries, so the field shows which
+    // one it took: a read the browser refused takes nothing.
+    await evaluate('navigator.clipboard.writeText("not read")', true);
     await grant(false);
-    const refused = await menuItem(120, field.row, a => a.paste === true);
+    const refused = await menuItem(X, field.row, a => a.paste === true);
     if (refused) {
       await click(refused.x, refused.y);
       await sleep(1000);
@@ -260,7 +277,14 @@ try {
         dt.setData('text/plain', 'typed paste');
         document.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt}));
       })()`);
+      await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Control',
+                                                 code: 'ControlLeft', modifiers: 2,
+                                                 windowsVirtualKeyCode: 17});
+      await sleep(60);
       await key('v', 'KeyV', 86, 2);
+      await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Control',
+                                                 code: 'ControlLeft', windowsVirtualKeyCode: 17});
+      await sleep(250);
       await enter();
       const lines = await printed();
       step(lines.at(-1) === 'name=typed paste',
@@ -269,14 +293,45 @@ try {
       step(false, 'the field\'s menu again');
     }
   }
+
+  // 5. ari's terminal page (FTXUI in xterm.js), when the package has it: Tab to the field, Shift+F10
+  // for its menu, Enter on Paste. The program asks with an OSC 52 read, which the page answers
+  // with navigator.clipboard.readText(), and the answer is typed into the field.
+  if (fs.existsSync(path.join(WEB, 'ari.html'))) {
+    await grant(true);
+    await page.send('Page.navigate', {url: `${ORIGIN}/clip/ari.html?src=main.ari`});
+    await until('ari\'s page runs the document', async () =>
+      (await evaluate('window.ariadneWeb && ariadneWeb.state')) === 'running' &&
+      /Name: \[/.test(await evaluate('ariadneWeb.text()')));
+    await sleep(1000);
+    await evaluate('navigator.clipboard.writeText("into the terminal")', true);
+    await key('Tab', 'Tab', 9);
+    await key('F10', 'F10', 121, 8); // Shift+F10
+    const menu = await until('the field\'s menu', async () =>
+      /Paste/.test(await evaluate('ariadneWeb.text()')), 10000).catch(() => false);
+    step(menu, 'Shift+F10 opens the focused field\'s menu in the terminal');
+    await enter(); // the field is empty: Paste is the first entry that can run
+    const shown = await until('the paste', async () =>
+      /Name: \[into the terminal/.test(await evaluate('ariadneWeb.text()')), 10000)
+                      .catch(() => false);
+    step(shown, 'its Paste reads the clipboard through the page (OSC 52) into the field');
+  }
 } catch (e) {
   step(false, e.message);
 }
 
 page.ws.close();
 browser.ws.close();
+const exited = new Promise(r => chrome.once('exit', r));
 chrome.kill();
+await Promise.race([exited, sleep(5000)]); // Chrome writes its profile until it has gone
 server.close();
-if (!argv.includes('--keep')) fs.rmSync(profile, {recursive: true, force: true});
+if (!argv.includes('--keep')) {
+  try {
+    fs.rmSync(profile, {recursive: true, force: true, maxRetries: 10, retryDelay: 300});
+  } catch (e) {
+    console.warn('could not remove the profile ' + profile + ': ' + e.message);
+  }
+}
 console.log(failures ? `FAILED (${failures})` : 'passed');
 process.exit(failures ? 1 : 0);

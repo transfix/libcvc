@@ -5197,8 +5197,10 @@ The tests:
   `APasteWithNoTerminalToAskSaysHowToPaste`.
 - `ariadne_term_graphics_test`'s `Osc52ReadsAndItsAnswer`.
 - `ariadne_runtime_test`'s `ANotificationsEntryCopiesItsWholeMessage`.
-- In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs`, which runs arigl-web in headless
-  Chrome, grants it the clipboard and right-clicks through the page's own input.
+- In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs` runs arigl-web in headless Chrome,
+  grants it the clipboard, and right-clicks through the page's own input. It covers Copy, Paste,
+  Cut, and a refused read followed by Ctrl+V. On ari.html it uses Shift+F10 and Paste through the
+  OSC 52 read.
 
 ## 6. Composition: include / import / load
 
