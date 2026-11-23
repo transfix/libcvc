@@ -977,6 +977,27 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
 - **Local is the same.** A lab, a gym or a demo with no relay runs a server-role holon in its own
   process: the same world, the same entities, the same code path as the relay. `WorldGym`,
   `HostCars` and the GRL-SNAM hosts move onto it.
+- **As built (OW7, first part: a drawn host's world on a worker; the fleets roadmap's D3).**
+  `cvc::ariadne::world_worker` attaches a scene's `SceneWorld` to a server-role holon of its own
+  (physics on, at the world's rate, `holon_config_at`) and steps it on a thread: the holon's clock
+  is lockstep, and the thread runs it one quantum at a time behind the host's clock, tick for
+  tick, so the world takes the steps the host's own `follow()` would. The world is deferred
+  (`SceneWorld::set_deferred`): a step writes no key, since a state subscriber runs on the thread
+  that writes, and the host calls `publish_due()` (its syncs and telemetry) under the lock the
+  steps take. The host holds that lock for its frame, and the worker yields to a waiting host
+  between steps. A restart (the clock back to tick 0) anchors the world on the holon's clock again
+  at once. A world behind its clock by `max_lag` (0.25 s) holds the host's clock
+  (`SceneClockDriver::hold`). arigl runs it with `--world-thread` (`AriRuntime::set_world_thread`);
+  the frame publishes and draws from the poses the worker captured. Tests:
+  `AriadneWorldWorker.StepsTheWorldAsTheHostsFollowWould` (24 kinematic and 4 Jolt vehicles,
+  through a restart, the same poses bit for bit as the host's own follow, the per-entity keys
+  written on the host's thread) and cvcGL's `test_world_worker_drawn` (bodies and their drawn
+  poses as the frame's own follow leaves them). Measured on arigl with 200 kinematic vehicles at
+  3.6x, alternating runs: 58.3 ms a frame against 66.4 on the frame's thread, the world at 3.6x
+  both ways; the rest of the frame is drawing 200 vehicles (the fleets roadmap's FL2). Not yet:
+  avatars and participants in that holon (relay-less arigl has none), the `scenes:` entries'
+  worlds (they step on the frame's thread), the gym and the GRL-SNAM hosts on it, and the drawn
+  host as the holon's client (OW5's entity playout).
 
 ### 18.3 Contact
 
@@ -1148,7 +1169,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
-| OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**

@@ -306,6 +306,8 @@ int usage(int code) {
                "\n"
                "flags (before the document):\n"
                "  --terminal             run in the terminal, the scene drawn behind the widgets\n"
+               "  --world-thread         run: step the scene's world on a thread of its own, in a\n"
+               "                         local holon (not in a browser, or with --terminal)\n"
                "%s"
                "\n"
                "A window by default (ImGui over the VTK scene). snapshot renders offscreen: write\n"
@@ -2869,6 +2871,8 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     const double fps = o.fps > 0 ? o.fps : 120.0;
 #ifndef __EMSCRIPTEN__
     const auto period = std::chrono::duration<double>(1.0 / fps);
+    if (has_flag(o, "--world-thread")) // D3: the world steps while the frame renders and sleeps
+      rt.set_world_thread(true);
 #else
     // $CVC_ARIGL_YIELD=timeout (the page's ?yield=timeout) yields on a 0 ms timer instead of the
     // next animation frame: the pacing's A/B.
@@ -3152,7 +3156,7 @@ int arigl_main(int argc, char **argv) {
                                             std::vector<std::string>(argv + 2, argv + argc));
 #endif
   const ari::HostOptions o =
-      ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions"});
+      ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions", "--world-thread"});
   if (o.help)
     return usage(0);
   if (!o.error.empty()) {

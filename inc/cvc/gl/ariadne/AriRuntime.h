@@ -131,6 +131,12 @@ public:
   // not by frame()'s dt: a host steps at a nominal rate (arigl's 1 / 120 s) that a heavy scene, or
   // a browser at 15 fps, does not keep, and the camera's speeds are per second.
   void set_fixed_clock(bool fixed);
+  // D3 (FLEETS_AND_NIGHT_ROADMAP.md): step the scene's world off the frame's thread, in a local
+  // server-role holon (cvc::ariadne::world_worker), from the next frame. frame() holds the world's
+  // lock from its start to its end, so the worker steps while the frame renders and waits. Off by
+  // default, and with the fixed clock (a capture's frames stay synchronous). A world the holon
+  // can't take (no Jolt, no threads) stays on the frame's thread, saying why once.
+  void set_world_thread(bool on);
 
   // --- the parts a host composes with ---
   cvc::ariadne::AppRuntime &app_runtime(); // e.g. set_document_args before load()

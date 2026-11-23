@@ -1971,6 +1971,86 @@ scene:
   fs::remove_all(dir, ec);
 }
 
+// D3: the drawn world on a world_worker (a local holon on a thread of its own), as arigl
+// --world-thread runs it: each frame's tick_scene, under the frame's lock, drives the clock and
+// publishes what the worker ran, and draws from the poses the worker captured. The bodies end where
+// the frame's own follow() leaves them, bit for bit, and are drawn there.
+void test_world_worker_drawn() {
+  std::printf("test_world_worker_drawn\n");
+  if (!cvc::ariadne::have_yaml() || !cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no YAML or no Jolt in this build\n");
+    return;
+  }
+  struct result {
+    cvc::physics::vec3 crate, ball;
+    double drawn_z = 0.0;
+    std::uint64_t steps = 0, ticks = 0;
+  };
+  const auto go = [](bool threaded) {
+    result res;
+    cvc::ariadne::LoadResult r = fresh_load(kScene);
+    CHECK(r.ok);
+    if (!r.ok)
+      return res;
+    cvc::app app;
+    SceneGraph sg(app);
+    std::vector<std::string> warnings;
+    ari::RealizedScene out = ari::realize_scene(sg, r.scene, sg.getStatePrefix(), &warnings);
+    CHECK(out.physics != nullptr && out.world != nullptr);
+    if (!out.physics || !out.world)
+      return res;
+    ari::tick_scene(out, nullptr, 1.0 / 60.0); // anchors the world on the clock
+    const std::uint64_t t0 = app.world_clock().tick();
+    std::unique_ptr<cvc::ariadne::world_worker> ww;
+    if (threaded) {
+      cvc::ariadne::world_worker::options o;
+      ari::RealizedScene *rs = &out;
+      o.capture = [rs] {
+        if (rs->physics_binding)
+          rs->physics_binding->tracker().capture();
+      };
+      ww = std::make_unique<cvc::ariadne::world_worker>(*out.world, app.world_clock(), o);
+      out.world_worker = ww.get();
+      CHECK(out.world->deferred());
+    }
+    const auto frame = [&](double dt) {
+      if (!ww) {
+        ari::tick_scene(out, nullptr, dt);
+        return;
+      }
+      {
+        const cvc::ariadne::world_worker::frame_lock held = ww->lock();
+        ari::tick_scene(out, nullptr, dt);
+      }
+      CHECK(ww->wait_caught_up(30.0));
+    };
+    for (int i = 0; i < 180; ++i)
+      frame(1.0 / 60.0);
+    frame(0.0); // what the last steps ran, published and drawn
+    res.ticks = app.world_clock().tick() - t0;
+    res.crate = out.physics->state(out.body("crate")).position;
+    res.ball = out.physics->state(out.body("ball")).position;
+    if (auto crate = sg.getGraphics("crate"))
+      res.drawn_z = crate->getTransform()->GetElement(2, 3);
+    if (ww) {
+      CHECK(ww->error().empty());
+      res.steps = ww->steps();
+      out.world_worker = nullptr;
+      ww.reset();
+      CHECK(!out.world->deferred());
+    }
+    return res;
+  };
+  const result plain = go(false), threaded = go(true);
+  CHECK(threaded.ticks > 0 && threaded.steps == threaded.ticks);
+  CHECK(plain.ticks == threaded.ticks);
+  CHECK(threaded.crate.x == plain.crate.x && threaded.crate.y == plain.crate.y &&
+        threaded.crate.z == plain.crate.z);
+  CHECK(threaded.ball.x == plain.ball.x && threaded.ball.z == plain.ball.z);
+  CHECK(plain.crate.z < 3.9); // it fell
+  CHECK(near(threaded.drawn_z, plain.drawn_z, 1e-9));
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -1990,6 +2070,7 @@ int main() {
   test_boat_models_drawn();
   test_boat_model_from_data();
   test_node_model_from_data();
+  test_world_worker_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

@@ -5609,7 +5609,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 `cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
-arigl run      [--terminal] [flags] doc.ari [document args...]
+arigl run      [--terminal] [--world-thread] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
 arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
@@ -5623,6 +5623,21 @@ with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
 frame rather than the wall time, so its frames are reproducible.
+
+**`--world-thread`** (`arigl run` in a window, native builds): the scene's world (its physics and
+its vehicles' navigators) steps on a thread of its own, in a local server-role holon
+(`cvc::ariadne::world_worker`), rather than on the frame's. The holon's clock follows the scene's
+tick for tick, one quantum at a time, so the world takes the same steps in the same order. The
+frame holds the world's lock from its start to its end: it pumps the document, publishes what
+the worker ran (the `physics.stats` and vehicle keys are written on the frame's thread, as
+always), and draws the bodies from the poses the worker captured; the worker steps while the
+frame renders and waits. A world more than 0.25 s behind its clock holds the clock, so it runs
+slower than its speed rather than further behind, as it would on the frame's thread. A world the
+holon can't take (no Jolt, a build without threads) stays on the frame's thread, and arigl says
+so once. Snapshots, `--terminal`, the browser, the headless hosts, the gym and arisrv step on
+their own thread as before, bit for bit. It is the fleets roadmap's D3
+([FLEETS_AND_NIGHT_ROADMAP.md](roadmap/FLEETS_AND_NIGHT_ROADMAP.md)), and OW7's first part
+([ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §18.2).
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit

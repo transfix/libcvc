@@ -272,6 +272,13 @@ cvc::world_clock::step_result SceneClockDriver::drive(double wall_dt) {
   return d.binding->drive(dt);
 }
 
+cvc::world_clock::step_result SceneClockDriver::hold() {
+  impl &d = *_impl;
+  d.last = std::chrono::steady_clock::now(); // what passed until now is not booked
+  d.primed = true;
+  return drive(0.0);
+}
+
 // ── SceneWorld ───────────────────────────────────────────────────────────────────────────────────
 
 struct SceneWorld::impl {
@@ -288,6 +295,11 @@ struct SceneWorld::impl {
   std::string stats; // "<stats_key>.stats", or empty
   std::optional<cvc::clock_follower> follower;
   ph::step_report last;
+  // set_deferred: follow() steps, publish_due() syncs and publishes on the host's thread.
+  bool deferred = false;
+  std::function<void()> capture;   // after each step while deferred (a view's pose_tracker)
+  std::function<void()> restarted; // at the end of a restart() while deferred
+  std::uint64_t unpublished = 0;   // steps run while deferred since the last publish_due()
 
   // A node whose colliders come at run time: a generated world's, or a dataset's.
   struct tracked {
@@ -923,6 +935,8 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   for (const auto &wf : d.weathers) // and its materials, dry: the friction again at the next step
     wf->world_gone();
   publish_stats();
+  if (d.deferred && d.restarted)
+    d.restarted(); // its stepper anchors it again (set_deferred)
 }
 
 void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
@@ -1650,15 +1664,18 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
                                  const std::function<void()> &after_step,
                                  const step_hook &before_each, const step_hook &after_each) {
   impl &d = *_impl;
-  sync(&d.warnings);
+  if (!d.deferred)
+    sync(&d.warnings);
+  // Deferred, the world's own capture follows each step a holon runs (it gives no after_step).
+  const std::function<void()> &capture = after_step || !d.deferred ? after_step : d.capture;
   if (!d.follower) {
     d.follower = cvc::clock_follower::for_step(clock, d.world->config().fixed_dt);
     // The world's steps follow the clock from here: the storms in its air are read at the clock's
     // time, as the drawn ones are (StormWindFlow's offset), however late it anchored.
     d.clock_offset = clock.t() - d.world->field_time();
     sync_wind();
-    if (after_step)
-      after_step();
+    if (capture)
+      capture();
     return 0;
   }
   const std::uint64_t last_tick = d.follower->last_tick();
@@ -1720,18 +1737,48 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (d.step_history.size() > 120)
       d.step_history.pop_front();
     // A view draws between the last two ticks, not the first and the last of a batch.
-    if (after_step && i + 1 >= n)
-      after_step();
+    if (capture && i + 1 >= n)
+      capture();
   }
-  if (n > 0) {
-    publish_stats();
-    if (d.vehicles)
-      d.vehicles->publish();
-    for (const auto &b : d.boats)
-      b->publish();
-    for (const auto &wf : d.weathers)
-      wf->publish();
+  if (n > 0 && d.deferred)
+    d.unpublished += n; // publish_due() writes them, on the host's thread
+  else if (n > 0)
+    publish_steps();
+  return n;
+}
+
+void SceneWorld::publish_steps() {
+  impl &d = *_impl;
+  publish_stats();
+  if (d.vehicles)
+    d.vehicles->publish();
+  for (const auto &b : d.boats)
+    b->publish();
+  for (const auto &wf : d.weathers)
+    wf->publish();
+}
+
+void SceneWorld::set_deferred(bool on, std::function<void()> capture,
+                              std::function<void()> restarted) {
+  impl &d = *_impl;
+  d.deferred = on;
+  d.capture = on ? std::move(capture) : nullptr;
+  d.restarted = on ? std::move(restarted) : nullptr;
+  if (!on && d.unpublished > 0) { // what ran deferred is published now
+    d.unpublished = 0;
+    publish_steps();
   }
+}
+
+bool SceneWorld::deferred() const { return _impl->deferred; }
+
+std::uint64_t SceneWorld::publish_due(std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  sync(warnings ? warnings : &d.warnings);
+  const std::uint64_t n = d.unpublished;
+  d.unpublished = 0;
+  if (n > 0)
+    publish_steps();
   return n;
 }
 
