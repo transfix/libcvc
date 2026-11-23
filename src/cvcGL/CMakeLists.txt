@@ -875,6 +875,13 @@ add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
 target_link_libraries(cvcgl_renderer PRIVATE cvcGL)
 add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
 
+# Physically based shading: GeometryNode::setPBR (the base colour made linear, the lights times
+# pi, emissive without a texture) and SceneGraph's image-based lighting, checked by pixel against
+# VTK's BRDF in closed form. Offscreen.
+add_executable(cvcgl_pbr_material test/cvcgl_pbr_material.cpp)
+target_link_libraries(cvcgl_pbr_material PRIVATE cvcGL)
+add_test(NAME cvcgl_pbr_material COMMAND cvcgl_pbr_material)
+
 # SceneRenderer is now a facade over ViewportManager: pin its state-footprint
 # parity (no viewer camera/layout state) and the HostStyle host-input contract.
 add_executable(cvcgl_scene_renderer_facade test/cvcgl_scene_renderer_facade.cpp)
@@ -1243,6 +1250,16 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_pick test/cvcgl_ariadne_pick.cpp)
   target_link_libraries(cvcgl_ariadne_pick PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
+endif()
+
+# material: { pbr: } and the scene's environment: through AriRuntime (the main view and a
+# viewport's mirror lit by the environment, an emissive node's glow) and realize_scene alone (the
+# default environment, environment: false). Offscreen; the runtime half skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_pbr test/cvcgl_ariadne_pbr.cpp)
+  target_link_libraries(cvcgl_ariadne_pbr PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_pbr COMMAND cvcgl_ariadne_pbr)
 endif()
 
 # A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,

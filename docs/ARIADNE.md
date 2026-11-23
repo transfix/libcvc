@@ -1388,6 +1388,56 @@ scene:
       material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
 ```
 
+**Physically based materials.** `material: { pbr: ... }` shades a geometry node physically, with
+VTK's PBR, in place of the Phong keys. The scene's `environment:` is the light that reaches it
+from all round:
+
+```yaml
+scene:
+  environment:                    # optional: the light from all round
+    sky: [0.55, 0.62, 0.75]       # straight up
+    horizon: [0.45, 0.45, 0.45]
+    ground: [0.18, 0.16, 0.14]    # straight down
+  nodes:
+    - node: body
+      source: { file: car.glb }
+      material:
+        color: [0.75, 0.05, 0.05] # the base colour
+        pbr: { metallic: 0.6, roughness: 0.35, coat: { strength: 1, roughness: 0.05 } }
+    - node: lamp
+      source: { sphere: 0.2 }
+      material: { color: [0, 0, 0], pbr: { emissive: [1.0, 0.85, 0.5] } }
+    - node: rail
+      source: { box: 1 }
+      material: { pbr: { metallic: 1, roughness: 0.1 } }
+```
+
+- **The keys.** `pbr: true` takes the defaults. Each value is 0..1, clamped with a warning.
+  - `metallic`: 0 (the default) a dielectric, such as paint, plastic or stone; 1 a metal.
+  - `roughness`: 0 a mirror, 1 matte; 0.5 by default.
+  - `emissive: [r, g, b]`: the colour the node glows with, lit or not. None by default.
+  - `coat`: a clear coat over the surface, such as car paint's or varnish. Either its strength,
+    or `{ strength, roughness }` (strength 1 and roughness 0 when left out).
+- **The base colour** is what the node shows when Phong-shaded: its `color`, its `texture` or its
+  mesh's own colours, read as sRGB.
+- **The lights** light it face on as brightly as a Phong surface with `diffuse: 1`. VTK's BRDF
+  divides a light by π; libcvc multiplies it back, as three.js's legacy light units did.
+- **The Phong keys** (`ambient`, `diffuse`, `specular`, `specular_power`) do not apply, and warn
+  beside `pbr:`.
+- **The environment** is image-based lighting from a gradient: `sky` straight up, through
+  `horizon`, to `ground` straight down, about +z. It lights every side of a `pbr:` node and is
+  what a metal reflects. Phong nodes ignore it.
+  - A scene with a `pbr:` node and no `environment:` gets the default: sky
+    `[0.50, 0.53, 0.60]`, horizon `[0.42, 0.42, 0.42]`, ground `[0.20, 0.19, 0.18]`, about as
+    bright as Phong's `ambient: 0.2`.
+  - `environment: false` (or `none`) leaves the lights alone, and a side they miss is black.
+  - The first frame after it is set filters it on the GPU, once per view.
+- **Where it applies.** The main view and every `viewport` widget are lit by the environment.
+  The material reaches whatever the node draws: its mesh, its `model:`, every rung of an LOD
+  ladder, and a dataset's meshes.
+- **Not yet:** metallic, roughness, normal and emissive textures; an image as the environment;
+  the materials a glTF model carries.
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
