@@ -24,11 +24,13 @@
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
 #include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
+#include <cvc/physics/field.h>          // boat_still_water's field
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -665,6 +667,14 @@ private:
 // same (OW5g: SceneWorld::vehicle_ground gives the two).
 double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
                              double x, double y);
+
+// The still water WorldVehicles adds for its boats when WORLD has none over GRID's water: a
+// fluid field (1000 kg/m^3, drag coefficient 1, damping 1e4) at the grid's water level over the
+// grid, from a metre below its lowest ground. Nothing for a grid without water, or where the
+// world's own water (a water node's field) covers the grid's first deep cell. A client predicting
+// a boat floats it on the same (OW5j: world_replica's water).
+std::optional<physics::field> boat_still_water(cvc::app &app, const nav::world_grid &grid,
+                                               const physics::world &world);
 
 } // namespace ariadne
 } // namespace cvc

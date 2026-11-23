@@ -8697,6 +8697,39 @@ scene:
       body: static
 )";
 
+// A launch on the dynamicboat plant (OW5j), drivable, on a calm lake: the terrain's 6 m bowl and
+// the water node's water at -1 m over it (about 107 m across, 5 m deep in the middle), no wind and
+// no waves, so the water is still.
+const char *kBoatDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      launch:
+        plant: dynamicboat:launch
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: lakeside, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lakeside
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0
+      wave_amp: 0
+      body: {}
+)";
+
 // The command the relay sets after a step for a driver's next navigator tick (holon's drive).
 void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic_drive &k,
                    const avatar_intent &in, double dt) {
@@ -8726,9 +8759,12 @@ struct client_run {
 // A drivable Humvee on PLANT in DOC's world, driven through throttle, a turn, the brake and
 // reverse, against the client's model of it on the same drive axes. ON_GROUND: the model drives on
 // the world's ground as a client building the same document has it (SceneWorld::vehicle_ground),
-// else flat; CHECK: the model must keep to the relay's vehicle.
+// else flat; CHECK: the model must keep to the relay's vehicle. ARCHETYPE: the vehicle (its preset
+// the same name), spawned at (X, 0) heading +x; TOP: the speed it reaches at least (m/s).
 void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result,
-                             bool on_ground = false, bool check = true) {
+                             bool on_ground = false, bool check = true,
+                             const std::string &archetype = "humvee", double x = -40.0,
+                             double top_at_least = 5.0) {
   cvc::app app;
   register_world_block(app);
   LoadResult r = load_string(app, doc);
@@ -8745,12 +8781,12 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   ASSERT_NE(w, nullptr);
   WorldVehicles &v = *w->vehicles();
   w->sync(&warnings);
-  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  const std::uint64_t id = spawn_kind(v, archetype, x, 0.0);
   holon h(holon_role::server, one_world_holon());
   std::string why;
   ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
   cvc::physics::body_state feet;
-  feet.position = {-40.0, 3.0, 0.0};
+  feet.position = {x, 3.0, 0.0};
   h.add_participant("ann", false, feet);
   for (int i = 0; i < 30; ++i)
     h.advance(1.0 / 60.0);
@@ -8764,7 +8800,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   cvc::ariadne::dynamic_drive k;
   ASSERT_TRUE(v.dynamics(id, k));
   EXPECT_TRUE(k.valid());
-  EXPECT_EQ(k.preset, "humvee");
+  EXPECT_EQ(k.preset, archetype);
   EXPECT_EQ(k.plant, plant);
   EXPECT_EQ(k.tick_steps, v.steps_per_tick());
   bool carried = false;
@@ -8797,9 +8833,12 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     }
   }
   // A jolt vehicle's model runs in a world of the client's own with the client's statics: each
-  // static body of the same document's world, on its surface (world_replica's statics).
+  // static body of the same document's world, on its surface (world_replica's statics); a boat's
+  // with its water too (world_replica's water: the world's fluid fields, else the still water the
+  // relay adds for its boats).
   cvc::ariadne::jolt_vehicle_world jw;
-  if (plant == "jolt") {
+  const bool own_world = plant == "jolt" || plant == "dynamicboat";
+  if (own_world) {
     Scene copy = r.scene;
     copy.vehicles.clear();
     mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
@@ -8816,9 +8855,21 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
       }
     jw.gravity = mine->world().config().gravity;
     EXPECT_FALSE(jw.statics.empty()) << "the document's ground";
+    if (plant == "dynamicboat") {
+      for (const cvc::physics::field_snapshot &f : mine->world().snapshot().fields)
+        if (f.desc.kind == cvc::physics::field_kind::fluid)
+          jw.water.push_back(f.desc);
+      std::shared_ptr<const cvc::nav::world_grid> g;
+      std::shared_ptr<const cvc::height_field> t;
+      mine->vehicle_ground(g, t);
+      if (g)
+        if (const auto still = cvc::ariadne::boat_still_water(app, *g, mine->world()))
+          jw.water.push_back(*still);
+      EXPECT_FALSE(jw.water.empty()) << "the document's water";
+    }
   }
-  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, plant == "jolt" ? &jw : nullptr);
-  EXPECT_EQ(model.on_ground(), on_ground || plant == "jolt");
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, own_world ? &jw : nullptr);
+  EXPECT_EQ(model.on_ground(), on_ground || own_world);
   cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
   const auto axes = [](int step) {
     avatar_intent in;
@@ -8842,7 +8893,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   };
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
-  const bool sampled = plant == "jolt";
+  const bool sampled = own_world;
   double climb = 0.0;
   for (int step = 0; step < 1080; ++step) {
     const avatar_intent in = axes(step);
@@ -8870,9 +8921,10 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
     climb = std::max(climb, relay.position.z - start.z);
-    // A jolt vehicle's gear, clutch and engine are not in the pose stream, so its model is
-    // corrected by the relay's samples as the holon corrects it: every 4 ticks the sample, the rest
-    // of its world as predicted for that tick. What is measured is the gap a sample finds.
+    // A jolt vehicle's gear, clutch and engine are not in the pose stream, nor a boat's driver, so
+    // its model is corrected by the relay's samples as the holon corrects it: every 4 ticks the
+    // sample, the rest of its world as predicted for that tick. What is measured is the gap a
+    // sample finds.
     if (sampled && h.tick() % 4 == 0)
       m = model.at(relay, h.tick(), &m);
   }
@@ -8893,7 +8945,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   result.climb = climb;
   result.end_speed = cvc::ariadne::dynamic_vehicle_model::speed(m);
   result.drive = k;
-  EXPECT_GT(top, 5.0) << "it drove";
+  EXPECT_GT(top, top_at_least) << "it drove";
   if (!check)
     return;
   EXPECT_LT(cvc::ariadne::dynamic_vehicle_model::speed(m), -0.5) << "and backed up at the end";
@@ -8961,6 +9013,101 @@ TEST(AriadneOneWorld, AClientRunsTheJoltVehicleItDrivesAsTheWorldDoes) {
     EXPECT_LT(c->worst_z, 0.02) << "the ride height";
     EXPECT_LT(c->worst_tilt, 0.05) << "the body's pitch and roll";
   }
+}
+
+// The same on the dynamicboat plant (OW5j): the client's model is the relay's boat plant in a
+// world of its own made as the relay's is, on the same document's statics and water, so it keeps
+// to the relay's launch, its height and attitude afloat included, through throttle, a turn,
+// astern and reverse on the lake.
+TEST(AriadneOneWorld, AClientRunsTheBoatItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kBoatDrivable, "dynamicboat", run, false, false, "launch", -25.0, 2.0);
+  EXPECT_EQ(run.drive.plant, "dynamicboat");
+  // A launch's propeller astern is slow to stop it: 2 s astern and 2 s reversing take it from
+  // 3.1 m/s to under 1 (a car would be backing up by then).
+  EXPECT_LT(run.end_speed, 1.5) << "astern slowed it";
+  EXPECT_LT(run.worst, 0.02) << "within a sample's 4 ticks";
+  EXPECT_LT(run.worst_yaw, 0.005);
+  EXPECT_LT(run.worst_z, 0.02) << "afloat at the relay's height";
+  EXPECT_LT(run.worst_tilt, 0.05) << "the hull's pitch and roll";
+}
+
+// The water a client's boat floats on (OW5j): the replica of the relay's document carries its
+// world's water (the water node's field) with the statics, and the holon has it from client_pump.
+// A world without water of its own over the grid's lake gets the still water the relay adds for
+// its boats (boat_still_water); one with it, none.
+TEST(AriadneOneWorld, AClientsReplicaHasTheRelaysWater) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5j_water";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "lake.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << "meta: { name: lake, min_libcvc: \"0.0.0\" }" << kBoatDrivable;
+  }
+  cvc::app app;
+  register_world_block(app);
+  const std::string room = "lake";
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  world_replica world;
+  for (int i = 0; i < 5 && !world.ready(); ++i)
+    world.pump(app, room);
+  ASSERT_TRUE(world.ready()) << world.status();
+  ASSERT_EQ(world.water().size(), 1u) << "the water node's field";
+  EXPECT_EQ(world.water()[0].kind, cvc::physics::field_kind::fluid);
+  // The same document's world, as the replica builds it: its grid's lake under the water node.
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.vehicles.clear();
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> mine = SceneWorld::from_scene(app, r.scene, "mine", "", &warnings);
+  ASSERT_NE(mine, nullptr);
+  mine->sync(&warnings);
+  std::shared_ptr<const cvc::nav::world_grid> grid;
+  std::shared_ptr<const cvc::height_field> terrain;
+  mine->vehicle_ground(grid, terrain);
+  ASSERT_NE(grid, nullptr);
+  ASSERT_TRUE(grid->has_water());
+  EXPECT_FALSE(cvc::ariadne::boat_still_water(app, *grid, mine->world()).has_value())
+      << "the world has its own water there";
+  cvc::physics::world dry;
+  const std::optional<cvc::physics::field> still = cvc::ariadne::boat_still_water(app, *grid, dry);
+  ASSERT_TRUE(still.has_value()) << "a world without water over the lake";
+  dry.add_field(*still);
+  EXPECT_DOUBLE_EQ(dry.water_at({0.0, 0.0, -2.0}).density, 1000.0) << "under the level";
+  EXPECT_FALSE(dry.water_at({0.0, 0.0, -0.5}).wet) << "over it";
+
+  // The holon has it with the statics.
+  holon client(holon_role::client, room_holon_config());
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {60.0, 0.0, 1.0};
+  write_pose(app, room, "ann", feet, 100);
+  client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  EXPECT_TRUE(client.statics_stamp().same(world.stamp()));
+  vehicle_archetype launch;
+  launch.id = "launch";
+  launch.plant = "dynamicboat";
+  launch.preset = "launch";
+  const cvc::physics::vehicle_desc d = vehicle_desc_of(launch);
+  cvc::ariadne::dynamic_drive k;
+  k.plant = "dynamicboat";
+  k.preset = "launch";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_steer = d.max_steer;
+  k.vmax = d.max_speed;
+  k.tick_steps = 12;
+  EXPECT_TRUE(client.predict_vehicle("ann", k)) << "a boat's model, on that water";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }
 
 TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {

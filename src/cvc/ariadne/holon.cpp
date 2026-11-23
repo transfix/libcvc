@@ -490,12 +490,15 @@ std::vector<holon::entity> holon::entities() const {
   return out;
 }
 
-void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
+void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp,
+                        const std::vector<cvc::physics::field> &water) {
   _statics = stamp;
   _statics_list = statics;
+  _water = water;
   if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
-  // A jolt vehicle's model runs on the statics (OW5i): its world again, the vehicle where it is.
+  // A jolt vehicle's or a boat's model runs on the statics (OW5i, OW5j): its world again, the
+  // vehicle where it is.
   for (auto &[pid, p] : _participants) {
     if (!p.vdyn || !p.vdyn->jolt())
       continue;
@@ -515,6 +518,7 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
 jolt_vehicle_world holon::jolt_world() const {
   jolt_vehicle_world jw;
   jw.statics = _statics_list;
+  jw.water = _water;
   jw.gravity = _applied.physics.gravity;
   return jw;
 }
@@ -663,10 +667,11 @@ void holon::scene_step() {
   update_rides();
 }
 
-void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
+void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision,
+                        const std::vector<cvc::physics::field> &water) {
   section_stamp s;
   s.rev = revision;
-  set_statics(statics, s);
+  set_statics(statics, s, water);
 }
 
 std::uint64_t holon::left_tick(const std::string &pid) const {
@@ -1481,10 +1486,11 @@ bool holon::predict_vehicle(const std::string &pid, const dynamic_drive &drive) 
     return true;
   std::shared_ptr<dynamic_vehicle_model> model;
   try {
-    const jolt_vehicle_world jw = jolt_world(); // a jolt vehicle's statics and gravity (OW5i)
+    // A jolt vehicle's or a boat's statics, water and gravity (OW5i, OW5j).
+    const jolt_vehicle_world jw = jolt_world();
     model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt(), _vground, &jw);
   } catch (const std::exception &) {
-    return false; // a preset this build does not know, or a jolt vehicle without Jolt
+    return false; // a preset this build does not know, Jolt not in it, a boat without water
   }
   // As the kinematic plant's: on from where it is, or where it stands until a sample places it.
   const cvc::physics::body_state now = state(pid);
@@ -1508,7 +1514,7 @@ void holon::set_vehicle_ground(std::function<double(double, double)> ground,
   // Each model on the new ground, its vehicle's state kept (a dynamic4w model's heights are from
   // the relay's datum on any ground).
   for (auto &[pid, p] : _participants) {
-    if (!p.vdyn || p.vdyn->jolt()) // a jolt vehicle drives on the statics
+    if (!p.vdyn || p.vdyn->jolt()) // a jolt vehicle or a boat goes on the statics
       continue;
     try {
       p.vdyn =

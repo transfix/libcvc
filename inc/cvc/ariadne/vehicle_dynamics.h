@@ -23,6 +23,8 @@
 #include <cvc/physics/body.h>
 #include <cvc/physics/dyn_4w_plant.h>
 #include <cvc/physics/dyn_bike_plant.h>
+#include <cvc/physics/dyn_boat_plant.h>
+#include <cvc/physics/field.h>
 #include <cvc/physics/world.h>
 #include <functional>
 #include <memory>
@@ -56,16 +58,28 @@ namespace ariadne {
 // relay's statics (the replica's: OW5c, each body on its surface, OW5h) and that vehicle alone,
 // and keeps the whole of that world (world::save) as the vehicle's state, so a sample restores
 // what was predicted for its tick and replays from there.
+//
+// A `dynamicboat` boat (OW5j) is a boat on the relay's water (dyn_boat_plant: its hull a body the
+// water's field floats and drags, its driver turning the navigator's command into a throttle and
+// a rudder every step). A client runs it the same way, in a Jolt world of its own with the
+// relay's statics and its water (the replica's: the water node's field, or the still water the
+// relay adds for its boats, boat_still_water), and its state is that world and the driver's memory
+// (dyn_boat_plant::memory), which the world's save does not hold.
 
-// A jolt vehicle as its model keeps it: its world, saved (world::save) at the end of the step.
+// A jolt vehicle or a boat as its model keeps it: its world, saved (world::save) at the end of
+// the step; a boat's driver memory too. A boat not yet on the water (no sample has put it there)
+// has no world.
 struct jolt_vehicle_saved {
   std::shared_ptr<const std::vector<std::uint8_t>> world;
+  cvc::physics::dyn_boat_plant::memory boat;
 };
 
-// The world a jolt vehicle's model runs it in: the relay's statics, as the replica has them, and
-// its gravity. No statics: flat ground at the drive's height.
+// The world a jolt vehicle's or a boat's model runs it in: the relay's statics and water, as the
+// replica has them, and its gravity. No statics: a jolt vehicle on flat ground at the drive's
+// height. A boat needs the water.
 struct jolt_vehicle_world {
   std::vector<avatar_static> statics;
+  std::vector<cvc::physics::field> water;
   cvc::physics::vec3 gravity{0.0, 0.0, -9.80665};
 };
 
@@ -73,7 +87,7 @@ struct jolt_vehicle_world {
 struct dynamic_vehicle {
   // The model as its plant keeps it: the rear axle (world m), the heading, the body twist, the
   // actuators, the driver, the command it holds; on dynamic4w also the suspension's heave, roll
-  // and pitch; on jolt its world.
+  // and pitch; on jolt and dynamicboat its world.
   std::variant<cvc::physics::dyn_bike_saved, cvc::physics::dyn_4w_saved, jolt_vehicle_saved> model;
   // The chassis box: its centre and yaw ([x, y, z, yaw]) and its velocity, as the world's step
   // leaves the body it puts where the substep starts. On the dynamic plant the height is the one
@@ -81,7 +95,7 @@ struct dynamic_vehicle {
   // carried a step at its heave rate, and the box leans with the body's pitch and roll (rad, as
   // the model measures them: + lowers the nose, + lifts the left side; 0 on the dynamic plant).
   // On jolt the box is the chassis body (its origin, as the relay's pose stream has it), leaning
-  // as it does.
+  // as it does; on dynamicboat the hull's.
   std::array<double, 4> box{};
   double pitch = 0.0, roll = 0.0;
   double vx = 0.0, vy = 0.0, wz = 0.0;
@@ -90,15 +104,16 @@ struct dynamic_vehicle {
 };
 
 // Runs one: its plant with that vehicle alone, without a world (it touches nothing), one model
-// substep each physics step; a jolt vehicle in a world of its own (above).
+// substep each physics step; a jolt vehicle or a boat in a world of its own (above).
 class dynamic_vehicle_model {
 public:
   // Throws std::invalid_argument for a drive that is not valid() or a preset that is not one.
   // GROUND (world metres at x, y) is the ground it drives on; empty: flat, at drive.ground. A
   // dynamic4w model measures its heights from drive.ground either way, as the relay's plant does.
-  // WORLD: a jolt vehicle's statics and gravity (ignored on the other plants); null: flat ground at
-  // drive.ground and standard gravity. Throws cvc::unsupported_exception for a jolt vehicle in a
-  // build without Jolt.
+  // WORLD: a jolt vehicle's or a boat's statics, water and gravity (ignored on the other plants);
+  // null: flat ground at drive.ground and standard gravity. Throws cvc::unsupported_exception for a
+  // jolt vehicle or a boat in a build without Jolt, and std::invalid_argument for a boat without
+  // water.
   using ground_fn = std::function<double(double, double)>;
   dynamic_vehicle_model(const dynamic_drive &drive, double fixed_dt, ground_fn ground = {},
                         const jolt_vehicle_world *world = nullptr);
@@ -108,7 +123,7 @@ public:
 
   const dynamic_drive &drive() const { return _drive; }
   double fixed_dt() const { return _dt; }
-  // Whether it drives on a ground it was given (else flat); a jolt model, on statics.
+  // Whether it drives on a ground it was given (else flat); a jolt model or a boat's, on statics.
   bool on_ground() const { return static_cast<bool>(_ground) || _jolt_statics; }
 
   // The vehicle whose chassis is at CHASSIS (its centre, heading and velocity, as the pose
@@ -118,6 +133,9 @@ public:
   // its suspension settled on the ground under it). The command is LIKE's, else none. On jolt,
   // LIKE's world, its chassis put at CHASSIS's position, heading and horizontal velocity (its
   // pitch, roll, vertical speed and spin LIKE's); without one the vehicle as it was added, at rest.
+  // On dynamicboat the same with the hull, the driver's memory LIKE's. A boat goes on the water at
+  // the first CHASSIS over water deep enough for it (dyn_boat_plant::attach); until then it has no
+  // world, and its steps leave it where it is.
   dynamic_vehicle at(const cvc::physics::body_state &chassis, std::uint64_t tick,
                      const dynamic_vehicle *like = nullptr) const;
   // One physics step ending on clock tick TICK: the navigator's tick first when it falls due (the
@@ -132,6 +150,9 @@ public:
   // A jolt vehicle's world (its statics and the vehicle), and the vehicle in it.
   const avatar_world *jolt() const { return _jolt.get(); }
   cvc::physics::vehicle_id jolt_vehicle() const { return _jveh; }
+  // A boat's world (jolt(): its statics and water) and its plant, once it is on the water (at()).
+  bool is_boat() const { return _drive.plant == "dynamicboat"; }
+  const cvc::physics::dyn_boat_plant *boat() const { return _boat.get(); }
 
 private:
   dynamic_vehicle at_bike(const cvc::physics::body_state &chassis,
@@ -143,6 +164,10 @@ private:
   void step_bike(dynamic_vehicle &v, bool tick);
   void step_four(dynamic_vehicle &v, bool tick);
   void step_jolt(dynamic_vehicle &v, bool tick);
+  void step_boat(dynamic_vehicle &v, bool tick);
+  // A boat's plant with its boat on the water at CHASSIS (attach), unless it has one; false where
+  // there is no water deep enough for it.
+  bool ensure_boat(const cvc::physics::body_state &chassis) const;
   // The world as V holds it (restored unless it is the one the world was last left at), and V
   // from the world's chassis after a step or a placement (its saved world, box, attitude, twist).
   void load_jolt(const dynamic_vehicle &v) const;
@@ -156,14 +181,17 @@ private:
   std::unique_ptr<cvc::physics::dyn_bike_plant> _bike;
   std::unique_ptr<cvc::physics::dyn_4w_plant> _four;
   // jolt: its world, the vehicle and its chassis, its description, the world as the vehicle was
-  // added (at() without a like), and the saved world the world was last left at.
+  // added (at() without a like), and the saved world the world was last left at. dynamicboat: the
+  // same world with the water, the boat's description and plant, and its hull as the chassis.
   std::unique_ptr<avatar_world> _jolt;
   bool _jolt_statics = false;
   cvc::physics::vehicle_id _jveh;
-  cvc::physics::body_id _jchassis;
+  mutable cvc::physics::body_id _jchassis;
+  cvc::physics::dyn_boat_desc _bdesc;
+  mutable std::unique_ptr<cvc::physics::dyn_boat_plant> _boat;
   cvc::physics::vehicle_desc _jdesc;
   double _jrear = 0.0;
-  std::shared_ptr<const std::vector<std::uint8_t>> _jadded;
+  mutable std::shared_ptr<const std::vector<std::uint8_t>> _jadded;
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jlast;
 };
 

@@ -23,13 +23,16 @@
 #include <cstring>
 #include <cvc/ariadne/avatar_sim.h>
 #include <cvc/ariadne/holon.h>
-#include <cvc/ariadne/section.h>     // section_stamp: the rules tests
+#include <cvc/ariadne/section.h> // section_stamp: the rules tests
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/vehicle_kinematics.h>
-#include <cvc/ariadne/world_rules.h> // world_rules: the rules tests
+#include <cvc/ariadne/world_rules.h>    // world_rules: the rules tests
+#include <cvc/ariadne/world_vehicles.h> // vehicle_desc_of: a boat's numbers
+#include <cvc/core/app.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/body.h>
 #include <cvc/physics/types.h>
+#include <cvc/volume/volume.h> // a lake for the boat
 #include <gtest/gtest.h>
 #include <limits>
 #include <type_traits>
@@ -1776,12 +1779,18 @@ void relay_step(cvc::ariadne::dynamic_vehicle &v, cvc::ariadne::dynamic_vehicle_
 // with it and nothing is corrected, the yaw rate and steering the samples do not carry included.
 // A push it cannot know is corrected at the next sample, and it agrees again from there.
 namespace {
-void predicted_and_reconciled(const cvc::ariadne::dynamic_drive &k) {
+// WORLD: the statics and water the client's holon has, and the relay's model runs on (a boat's);
+// START_Z: the vehicle's height where it starts; DROVE: how far it goes at least (m).
+void predicted_and_reconciled(const cvc::ariadne::dynamic_drive &k,
+                              const cvc::ariadne::jolt_vehicle_world *world = nullptr,
+                              double start_z = 1.2, double drove = 20.0) {
   holon server(holon_role::server);
   server.add_participant("A");
   EXPECT_FALSE(server.predict_vehicle("A", k)) << "the server runs the world's vehicle";
   holon client(holon_role::client);
   client.add_participant("A", true);
+  if (world)
+    client.set_statics(world->statics, 1, world->water);
   EXPECT_FALSE(client.predict_vehicle("A", cvc::ariadne::dynamic_drive{})) << "no numbers";
   cvc::ariadne::dynamic_drive unknown = k;
   unknown.preset = "zeppelin";
@@ -1793,9 +1802,9 @@ void predicted_and_reconciled(const cvc::ariadne::dynamic_drive &k) {
   EXPECT_FALSE(client.predicted_vehicle("A", not_kinematic));
 
   const double dt = client.clock().fixed_dt();
-  cvc::ariadne::dynamic_vehicle_model truth(k, dt);
+  cvc::ariadne::dynamic_vehicle_model truth(k, dt, {}, world);
   body_state start;
-  start.position = vec3{-40.0, 0.0, 1.2};
+  start.position = vec3{-40.0, 0.0, start_z};
   cvc::ariadne::dynamic_vehicle relay = truth.at(start, 1000);
   client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(relay), 1000);
   ASSERT_EQ(client.tick(), 1000u) << "the first sample sets the clock";
@@ -1832,7 +1841,7 @@ void predicted_and_reconciled(const cvc::ariadne::dynamic_drive &k) {
   EXPECT_LT(worst, 1e-9) << "the same steps";
   EXPECT_EQ(corrected, 0.0) << "nothing to correct";
   EXPECT_GT(spin, 0.1) << "it turned";
-  EXPECT_GT(std::hypot(relay.box[0] + 40.0, relay.box[1]), 20.0) << "it drove";
+  EXPECT_GT(std::hypot(relay.box[0] + 40.0, relay.box[1]), drove) << "it drove";
 
   // A push the client cannot know: the relay's vehicle 1.5 m to its left.
   if (std::holds_alternative<cvc::ariadne::jolt_vehicle_saved>(relay.model)) {
@@ -1898,7 +1907,7 @@ TEST(HolonVehicleTest, TheFourWheelVehicleWeDriveIsPredictedAndReconciled) {
     EXPECT_THROW(bike.step(v, 1), std::invalid_argument) << "a vehicle of the other plant";
   }
   cvc::ariadne::dynamic_drive other = k;
-  other.plant = "dynamicboat";
+  other.plant = "dynamicraft";
   EXPECT_FALSE(other.valid()) << "not a plant a client runs";
   predicted_and_reconciled(k);
 }
@@ -1928,4 +1937,74 @@ TEST(HolonVehicleTest, TheJoltVehicleWeDriveIsPredictedAndReconciled) {
     EXPECT_THROW(m.step(other, 1), std::invalid_argument) << "and the other way";
   }
   predicted_and_reconciled(k);
+}
+
+// The same on the dynamicboat plant (OW5j): its model is the relay's boat plant in a world of the
+// client's own with the water (here a still lake 20 m deep over everything), and a sample takes
+// the whole of that world as predicted for its tick, the driver's memory with it. Without water
+// it is not predicted.
+TEST(HolonVehicleTest, TheBoatWeDriveIsPredictedAndReconciled) {
+  cvc::ariadne::vehicle_archetype a;
+  a.id = "launch";
+  a.plant = "dynamicboat";
+  a.preset = "launch";
+  const cvc::physics::vehicle_desc d = cvc::ariadne::vehicle_desc_of(a);
+  cvc::ariadne::dynamic_drive k;
+  k.plant = "dynamicboat";
+  k.preset = "launch";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_accel = d.max_accel;
+  k.max_decel = d.max_decel;
+  k.max_steer = d.max_steer;
+  k.lock = d.max_steer;
+  k.vmax = d.max_speed;
+  k.a_hold = d.max_decel;
+  k.tick_steps = 12;
+  k.phase = 3;
+  ASSERT_TRUE(k.valid());
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  EXPECT_THROW(cvc::ariadne::dynamic_vehicle_model(k, 1.0 / 120.0), std::invalid_argument)
+      << "a boat needs water";
+  {
+    holon client(holon_role::client);
+    client.add_participant("A", true);
+    EXPECT_FALSE(client.predict_vehicle("A", k)) << "no water yet";
+  }
+  cvc::app app;
+  auto lake =
+      std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                    cvc::bounding_box(-500.0, -500.0, -20.0, 500.0, 500.0, 0.0));
+  lake->fill(1000.0);
+  cvc::physics::field water;
+  water.kind = cvc::physics::field_kind::fluid;
+  water.volume = lake;
+  water.drag_coefficient = 1.0;
+  water.damping = 1.0e4;
+  cvc::ariadne::jolt_vehicle_world world;
+  world.water.push_back(water);
+  {
+    cvc::ariadne::dynamic_vehicle_model m(k, 1.0 / 120.0, {}, &world);
+    EXPECT_TRUE(m.is_boat());
+    EXPECT_EQ(m.boat(), nullptr) << "on the water at its first sample";
+    body_state dry;
+    dry.position = vec3{900.0, 0.0, 0.0}; // past the lake
+    const cvc::ariadne::dynamic_vehicle off = m.at(dry, 0);
+    EXPECT_EQ(m.boat(), nullptr) << "no water there";
+    cvc::ariadne::dynamic_vehicle still = off;
+    m.step(still, 1);
+    EXPECT_EQ(still.box, off.box) << "it waits for a sample on the water";
+    body_state afloat;
+    cvc::ariadne::dynamic_vehicle v = m.at(afloat, 0);
+    ASSERT_NE(m.boat(), nullptr);
+    const auto *saved = std::get_if<cvc::ariadne::jolt_vehicle_saved>(&v.model);
+    ASSERT_NE(saved, nullptr);
+    EXPECT_NE(saved->world, nullptr);
+    cvc::ariadne::dynamic_vehicle_model bike(humvee_dynamics(), 1.0 / 120.0);
+    EXPECT_THROW(bike.step(v, 1), std::invalid_argument) << "a vehicle of the other plant";
+    cvc::ariadne::dynamic_vehicle wheeled = bike.at(afloat, 0);
+    EXPECT_THROW(m.step(wheeled, 1), std::invalid_argument) << "and the other way";
+  }
+  predicted_and_reconciled(k, &world, 0.0, 8.0); // a launch: 10 m in the 5 s
 }

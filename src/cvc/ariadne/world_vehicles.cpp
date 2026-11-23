@@ -1294,31 +1294,10 @@ struct WorldVehicles::impl {
   // ground, added once per grid and world (it needs the app for its volume; without one the boats
   // find no water and are refused).
   void ensure_water() {
-    if (still_water.valid() || !grid || !grid->has_water() || !app)
+    if (still_water.valid() || !grid || !app)
       return;
-    const double h = grid->cell();
-    for (std::size_t i = 0; i < grid->water_depth.size(); ++i)
-      if (grid->water_depth[i] > 0.5) {
-        const double x = grid->min_x + static_cast<double>(i % grid->cols) * h,
-                     y = grid->min_y + static_cast<double>(i / grid->cols) * h;
-        if (world->water_at({x, y, grid->water_level - 0.25}).density > 0.0)
-          return; // the world has water there
-        break;
-      }
-    double lowest = grid->water_level;
-    for (const float z : grid->height)
-      lowest = std::min(lowest, static_cast<double>(z));
-    auto box = std::make_shared<cvc::volume>(*app, cvc::dimension(2, 2, 2), cvc::Float,
-                                             cvc::bounding_box(grid->min_x, grid->min_y,
-                                                               lowest - 1.0, grid->max_x,
-                                                               grid->max_y, grid->water_level));
-    box->fill(1000.0); // kg/m^3
-    ph::field f;
-    f.kind = ph::field_kind::fluid;
-    f.volume = box;
-    f.drag_coefficient = 1.0;
-    f.damping = 1.0e4;
-    still_water = world->add_field(f);
+    if (const std::optional<ph::field> f = boat_still_water(*app, *grid, *world))
+      still_water = world->add_field(*f);
   }
   void drop_still_water() {
     if (still_water.valid())
@@ -4061,7 +4040,7 @@ bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
     cvc::nav::sim_world::plant_plan plan;
     if (!f || i < 0 ||
         !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four) ||
-          (f->plant == "jolt" && f->jolt)))
+          (f->plant == "jolt" && f->jolt) || (f->plant == "dynamicboat" && f->boat)))
       return false;
     if (!f->sim->plant_plan_of(i, plan))
       return false;
@@ -4097,6 +4076,35 @@ double WorldVehicles::ground_height(double x, double y) const { return _impl->gr
 double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
                              double x, double y) {
   return ground_at(grid, terrain, x, y);
+}
+
+std::optional<ph::field> boat_still_water(cvc::app &app, const nav::world_grid &grid,
+                                          const ph::world &world) {
+  if (!grid.has_water())
+    return std::nullopt;
+  const double h = grid.cell();
+  for (std::size_t i = 0; i < grid.water_depth.size(); ++i)
+    if (grid.water_depth[i] > 0.5) {
+      const double x = grid.min_x + static_cast<double>(i % grid.cols) * h,
+                   y = grid.min_y + static_cast<double>(i / grid.cols) * h;
+      if (world.water_at({x, y, grid.water_level - 0.25}).density > 0.0)
+        return std::nullopt; // the world has water there
+      break;
+    }
+  double lowest = grid.water_level;
+  for (const float z : grid.height)
+    lowest = std::min(lowest, static_cast<double>(z));
+  auto box =
+      std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                    cvc::bounding_box(grid.min_x, grid.min_y, lowest - 1.0,
+                                                      grid.max_x, grid.max_y, grid.water_level));
+  box->fill(1000.0); // kg/m^3
+  ph::field f;
+  f.kind = ph::field_kind::fluid;
+  f.volume = box;
+  f.drag_coefficient = 1.0;
+  f.damping = 1.0e4;
+  return f;
 }
 
 void WorldVehicles::set_tick(double seconds) {

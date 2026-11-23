@@ -349,6 +349,10 @@ public:
   bool ready() const { return _ready; }
   const std::vector<avatar_static> &statics() const { return _statics; }
   const section_stamp &stamp() const { return _stamp; }
+  // The water with them (OW5j), which a boat's model floats on: the fluid fields its world has
+  // (a water node's), else the still water the relay adds for its boats over the world's grid
+  // (boat_still_water). It changes with the statics, under their stamp.
+  const std::vector<cvc::physics::field> &water() const { return _water; }
   // What it did with the source last: what it built, or why not.
   const std::string &status() const { return _status; }
   // The world it built (null when not ready).
@@ -361,7 +365,7 @@ public:
   std::uint64_t ground_revision() const { return _ground_rev; }
 
 private:
-  void build_statics();
+  void build_statics(cvc::app &app);
   void follow(cvc::app &app, const std::string &room);
   section_stamp _source_stamp;
   section_stamp _on_stamp; // the room_world_on followed
@@ -375,6 +379,7 @@ private:
   bool _ready = false;
   std::map<std::string, std::uint64_t> _taken; // node -> the colliders' revision taken
   std::vector<avatar_static> _statics;
+  std::vector<cvc::physics::field> _water;
   section_stamp _stamp;
   std::string _status;
 };

@@ -83,6 +83,29 @@ dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double 
     throw std::invalid_argument("dynamic_vehicle_model: not a dynamic drive to run");
   if (!(fixed_dt > 0.0) || !std::isfinite(fixed_dt))
     throw std::invalid_argument("dynamic_vehicle_model: the step must be finite and > 0");
+  if (drive.plant == "dynamicboat") {
+    // A world as the relay's (above), with its statics and its water; the boat goes on the water
+    // at the first sample over it (ensure_boat).
+    if (!world || world->water.empty())
+      throw std::invalid_argument("dynamic_vehicle_model: a boat needs the world's water");
+    vehicle_archetype a;
+    a.id = "driven";
+    a.plant = drive.plant;
+    a.preset = drive.preset;
+    _bdesc = boat_desc_of(a, drive.mass, drive.max_speed); // WorldVehicles' boat for its spawn
+    ph::world_config cfg;
+    cfg.fixed_dt = fixed_dt;
+    cfg.contacts = ph::contact_reporting::none;
+    cfg.gravity = world->gravity;
+    _jolt = std::make_unique<avatar_world>(cfg, avatar_body{});
+    if (!world->statics.empty()) {
+      _jolt->set_statics(world->statics);
+      _jolt_statics = true;
+    }
+    for (const ph::field &f : world->water)
+      _jolt->world().add_field(f);
+    return;
+  }
   // The world's vehicle: its preset with the numbers it was given (vehicle_desc_of).
   vehicle_archetype a;
   a.id = "driven";
@@ -164,6 +187,13 @@ double dynamic_vehicle_model::speed(const dynamic_vehicle &v) {
 dynamic_vehicle dynamic_vehicle_model::at(const ph::body_state &chassis, std::uint64_t tick,
                                           const dynamic_vehicle *like) const {
   (void)tick;
+  if (is_boat() && !ensure_boat(chassis)) {
+    // Not on the water yet: where the sample has it, without a world, until one puts it there.
+    dynamic_vehicle v;
+    v.model = jolt_vehicle_saved{};
+    v.box = {chassis.position.x, chassis.position.y, chassis.position.z, yaw_of(chassis.rotation)};
+    return v;
+  }
   if (_jolt)
     return at_jolt(chassis, like);
   return _four ? at_four(chassis, like) : at_bike(chassis, like);
@@ -176,7 +206,35 @@ void dynamic_vehicle_model::load_jolt(const dynamic_vehicle &v) const {
   if (s->world != _jlast) {
     _jolt->world().restore(*s->world);
     _jlast = s->world;
+    if (_boat)
+      _boat->resume(0, s->boat); // its driver as it was then
   }
+}
+
+bool dynamic_vehicle_model::ensure_boat(const ph::body_state &chassis) const {
+  if (_boat)
+    return true;
+  // The relay's boat fleet's plant (WorldVehicles: the world steps it, its driver on), here
+  // stepping its own world one step a tick: the driver acts on each world step either way.
+  ph::dyn_boat_plant_options o;
+  o.physics = &_jolt->world();
+  auto plant = std::make_unique<ph::dyn_boat_plant>(std::vector<ph::dyn_boat_desc>{_bdesc}, o);
+  cvc::world_units::normalized_frame si; // metres: the commands go in SI
+  si.scale = 1.0;
+  cvc::nav::plant_state start;
+  start.x = static_cast<float>(chassis.position.x);
+  start.y = static_cast<float>(chassis.position.y);
+  start.heading = static_cast<float>(yaw_of(chassis.rotation));
+  try {
+    plant->attach(1, &start, si, _dt);
+  } catch (const std::exception &) {
+    return false; // no water there deep enough for it
+  }
+  _boat = std::move(plant);
+  _jchassis = _boat->hull(0);
+  _jadded = std::make_shared<const std::vector<std::uint8_t>>(_jolt->world().save());
+  _jlast = _jadded;
+  return true;
 }
 
 void dynamic_vehicle_model::keep_jolt(dynamic_vehicle &v) const {
@@ -184,7 +242,7 @@ void dynamic_vehicle_model::keep_jolt(dynamic_vehicle &v) const {
   const std::shared_ptr<const std::vector<std::uint8_t>> saved =
       std::make_shared<const std::vector<std::uint8_t>>(w.save());
   _jlast = saved;
-  v.model = jolt_vehicle_saved{saved};
+  v.model = jolt_vehicle_saved{saved, _boat ? _boat->remember(0) : ph::dyn_boat_plant::memory{}};
   const ph::body_state s = w.state(_jchassis);
   const ph::quat &q = s.rotation;
   v.box = {s.position.x, s.position.y, s.position.z, yaw_of(q)};
@@ -214,7 +272,8 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis,
   dynamic_vehicle v;
   ph::world &w = _jolt->world();
   bool was = false;
-  if (like && std::holds_alternative<jolt_vehicle_saved>(like->model)) {
+  const jolt_vehicle_saved *ls = like ? std::get_if<jolt_vehicle_saved>(&like->model) : nullptr;
+  if (ls && ls->world) {
     try {
       load_jolt(*like); // its world as predicted for the tick: the wheels, the powertrain, ...
       v.steer_cmd = like->steer_cmd;
@@ -227,6 +286,8 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis,
   if (!was) {
     w.restore(*_jadded); // the vehicle as it was added, at rest, its command none
     _jlast = _jadded;
+    if (_boat)
+      _boat->resume(0, {});
   }
   // The chassis where the sample has it: its position, heading and horizontal velocity. A driver's
   // pose carries its heading alone, so the pitch and roll (and the vertical speed and the spin)
@@ -351,7 +412,9 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
 
 void dynamic_vehicle_model::step(dynamic_vehicle &v, std::uint64_t tick) {
   const bool nav_tick = into_tick(_drive, tick) == 0;
-  if (_jolt)
+  if (is_boat())
+    step_boat(v, nav_tick);
+  else if (_jolt)
     step_jolt(v, nav_tick);
   else if (_four)
     step_four(v, nav_tick);
@@ -379,6 +442,23 @@ void dynamic_vehicle_model::step_jolt(dynamic_vehicle &v, bool tick) {
     w.drive(_jveh, c);
   }
   w.step();
+  keep_jolt(v);
+}
+
+void dynamic_vehicle_model::step_boat(dynamic_vehicle &v, bool tick) {
+  const jolt_vehicle_saved *s = std::get_if<jolt_vehicle_saved>(&v.model);
+  if (!s)
+    throw std::invalid_argument("dynamic_vehicle_model::step: a vehicle of the other plant");
+  if (!s->world || !_boat)
+    return; // not on the water yet: it stays where it is until a sample puts it there
+  load_jolt(v);
+  if (tick) {
+    // The navigator's tick: its hold at the plant's speed, then the command to the driver.
+    float steer = 0.0f, accel = 0.0f;
+    held(_drive, _dt, v.steer_cmd, v.accel_cmd, _boat->state(0).speed, steer, accel);
+    _boat->command(0, steer, accel);
+  }
+  _boat->advance(); // the driver's controls, one world step, the books
   keep_jolt(v);
 }
 

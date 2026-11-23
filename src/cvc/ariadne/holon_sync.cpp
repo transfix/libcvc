@@ -31,8 +31,10 @@
 #include <cvc/core/app.h>
 #include <cvc/core/sim_tick.h> // the room's rate (on_room_clock)
 #include <cvc/physics/types.h> // vec3, quat
+#include <cvc/physics/world.h> // the replica world's water (snapshot)
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -458,7 +460,7 @@ void sync_statics(holon &h, cvc::app &app, const std::string &room,
       h.set_vehicle_ground(world->ground(), world->ground_revision()); // OW5g
     if (world->ready()) {
       if (!world->stamp().same(h.statics_stamp()))
-        h.set_statics(world->statics(), world->stamp());
+        h.set_statics(world->statics(), world->stamp(), world->water());
       return;
     }
   }
@@ -844,6 +846,7 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
     _nodes.clear();
     _taken.clear();
     _statics.clear();
+    _water.clear();
     _ready = false;
     conference::room_world_source src;
     if (!conference::read_room_world_source(app, room, src) || src.uri.empty()) {
@@ -899,7 +902,7 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
   if (pending && !_ready)
     return;
   if (changed)
-    build_statics();
+    build_statics(app);
   _ready = true;
   refresh_ground();
 }
@@ -923,8 +926,9 @@ std::function<double(double, double)> world_replica::ground() const {
   return [g, t](double x, double y) { return vehicle_ground_height(g.get(), t.get(), x, y); };
 }
 
-void world_replica::build_statics() {
+void world_replica::build_statics(cvc::app &app) {
   _statics.clear();
+  _water.clear();
   _taken.clear();
   _built_on = _world->world_on();
   // What is in its physics world now: a scene's worlds are on one at a time (SceneWorld::world_on),
@@ -956,6 +960,17 @@ void world_replica::build_statics() {
       _taken[id] = rev;
     }
   }
+  // The water (OW5j): its world's fluid fields, else the still water the relay's boats float on.
+  for (const cvc::physics::field_snapshot &f : _world->world().snapshot().fields)
+    if (f.desc.kind == cvc::physics::field_kind::fluid)
+      _water.push_back(f.desc);
+  std::shared_ptr<const cvc::nav::world_grid> grid;
+  std::shared_ptr<const cvc::height_field> terrain;
+  _world->vehicle_ground(grid, terrain);
+  if (grid)
+    if (const std::optional<cvc::physics::field> still =
+            boat_still_water(app, *grid, _world->world()))
+      _water.push_back(*still);
   ++_stamp.rev;
 }
 
