@@ -211,6 +211,14 @@ public:
   // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
   void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
   void end_item_group() override;
+  // §5.28 right-click menus: the Menu key or Shift+F10 opens the one around the focused widget
+  // (with nothing focused, the document's), a right-click the one under the pointer. It is a
+  // bordered list hanging under the focus or from the pointer, worked as a dropdown is (Up, Down,
+  // Enter, Esc); hosted, in its window's cells.
+  void begin_context_area(const char *id, ContextMenuOver over) override;
+  void end_context_area() override;
+  bool begin_context_menu(const char *id, ContextMenuOver over, ContextMenuOpen &opened) override;
+  void end_context_menu() override;
   // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
   // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
   bool set_clipboard(cvc::app &app, const std::string &text) override;

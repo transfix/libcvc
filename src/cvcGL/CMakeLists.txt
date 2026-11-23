@@ -1089,6 +1089,13 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# Right-click menus (§5.28): a right-click opens the innermost menu under the pointer (a group's,
+# else its window's, else the document's over no window), a right-drag none, a long press on a
+# touch screen when the finger lifts, the Menu key at the pointer; an item runs with the menu's
+# event. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_context_menu test/cvcgl_imgui_context_menu.cpp)
+target_link_libraries(cvcgl_imgui_context_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
 # A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
 # on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
 # Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.

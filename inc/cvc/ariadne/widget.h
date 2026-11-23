@@ -626,7 +626,24 @@ struct Widget {
   Value props;
 
   std::vector<Widget> children;
+
+  // §5.28 `context_menu:` the menu a right-click, a long press or the Menu key opens over this
+  // window, group or viewport (on the document's root: over the main view). `context_items` are
+  // its items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
+  // `contributes: context_menus:` adds to (a menu without one takes items from no one).
+  // `context_menu` says it has one, so an id with no items of its own yet still counts.
+  bool context_menu = false;
+  std::string context_menu_id;
+  std::vector<Widget> context_items;
 };
+
+// §5.28 `w` with a right-click menu of `items` (named `id`, "" for none).
+inline Widget with_context_menu(Widget w, std::vector<Widget> items, std::string id = {}) {
+  w.context_menu = true;
+  w.context_menu_id = std::move(id);
+  w.context_items = std::move(items);
+  return w;
+}
 
 // ---------------------------------------------------------------------------
 // Builder helpers — ergonomic programmatic tree construction for the P0 slice

@@ -3339,3 +3339,140 @@ TEST(AriadneFtxui, RichTextALinkInTheLinesCutAwayIsNoStop) {
   EXPECT_EQ(val(t.app, "after"), "1");
   EXPECT_EQ(val(t.app, "opened"), "");
 }
+
+// ---- §5.28 right-click menus -------------------------------------------------------------------
+
+namespace {
+// Drain until `key` holds `want` (a menu item's program runs on the action lane).
+bool drain_until(Term &t, const std::string &key, const std::string &want) {
+  for (int i = 0; i < 200 && val(t.app, key) != want; ++i)
+    t.rt.drain();
+  return val(t.app, key) == want;
+}
+// An item that notes the menu's event: what it was opened over, that widget's id, and how.
+Widget noting_item(const std::string &label, const std::string &tag) {
+  return menu_action(label, "(begin (state-set \"" + tag +
+                                ".on\" (get-attr event \"on\"))"
+                                " (state-set \"" +
+                                tag +
+                                ".id\" (get-attr event \"id\"))"
+                                " (state-set \"" +
+                                tag + ".via\" (get-attr event \"via\")))");
+}
+} // namespace
+
+// Shift+F10 opens the menu of the area around the focused widget, hanging under it; Enter runs its
+// first item with the menu's event and closes it, and the focus goes back where it was. A widget in
+// no area, in a window without a menu, opens nothing.
+TEST(AriadneFtxui, ShiftF10OpensTheMenuAroundTheFocus) {
+  REQUIRE_FTXUI();
+  Widget card = group({checkbox("A", "a")});
+  card.id = "card";
+  card = with_context_menu(card, {noting_item("Open card", "got"),
+                                  menu_action("Close card", "(state-set \"closed\" \"1\")")});
+  Term t(group({window("W", {card, checkbox("B", "b")})}));
+  EXPECT_TRUE(t.be.capabilities().context_menu);
+  EXPECT_FALSE(t.shows("Open card")) << t.screen;
+  ASSERT_TRUE(t.key("Tab")); // A
+  ASSERT_TRUE(t.key("F10", true));
+  t.draw();
+  ASSERT_TRUE(t.shows("Open card")) << t.screen;
+  EXPECT_TRUE(t.shows("Close card")) << t.screen;
+  int ax = 0, ay = 0, mx = 0, my = 0;
+  ASSERT_TRUE(find_cell(t.screen, "[ ] A", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "Open card", mx, my)) << t.screen;
+  EXPECT_GT(my, ay) << "it hangs under the focused widget\n" << t.screen;
+  ASSERT_TRUE(t.key("Return")); // its first item has the focus
+  ASSERT_TRUE(drain_until(t, "got.on", "group"));
+  EXPECT_EQ(val(t.app, "got.id"), "card");
+  EXPECT_EQ(val(t.app, "got.via"), "key");
+  t.draw();
+  EXPECT_FALSE(t.shows("Open card")) << "the item that ran closed it\n" << t.screen;
+  EXPECT_EQ(val(t.app, "a"), "0") << "Enter went to the menu, not the checkbox";
+  t.type(" "); // the focus is back on A
+  EXPECT_EQ(val(t.app, "a"), "1");
+
+  ASSERT_TRUE(t.key("Tab")); // B: in the window, outside the card
+  t.key("F10", true);
+  t.draw();
+  EXPECT_FALSE(t.shows("Open card")) << "B's window has no menu\n" << t.screen;
+}
+
+// The Menu key opens a window's menu from anywhere in it; Down and Enter run the second item, and
+// Esc closes it with nothing run.
+TEST(AriadneFtxui, TheMenuKeyOpensTheWindowsMenu) {
+  REQUIRE_FTXUI();
+  Widget w = window("Tools", {checkbox("A", "a")});
+  w = with_context_menu(
+      w, {menu_action("First", "(state-set \"pick\" \"first\")"), noting_item("Second", "got")});
+  Term t(group({w}));
+  ASSERT_TRUE(t.key("Tab"));
+  ASSERT_TRUE(t.key("Menu"));
+  t.draw();
+  ASSERT_TRUE(t.shows("First")) << t.screen;
+  t.key("Down");
+  t.key("Return");
+  ASSERT_TRUE(drain_until(t, "got.on", "window"));
+  EXPECT_EQ(val(t.app, "got.id"), "Tools") << "a window without an id: its title";
+  EXPECT_EQ(val(t.app, "pick"), "");
+
+  t.key("Menu");
+  t.draw();
+  ASSERT_TRUE(t.shows("First")) << t.screen;
+  t.key("Escape");
+  t.draw();
+  EXPECT_FALSE(t.shows("First")) << t.screen;
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "pick"), "");
+}
+
+// A right-click opens the menu under the pointer (the item there's area, else its window's, else
+// the document's over no window); a left click on an item runs it.
+TEST(AriadneFtxui, ARightClickOpensTheMenuUnderThePointer) {
+  REQUIRE_FTXUI();
+  Widget card = group({text("card text")});
+  card.id = "card";
+  card = with_context_menu(card, {noting_item("Open card", "card")});
+  Widget w = window("W", {card});
+  w.has_pos = true;
+  w.pos_x = 8.0f;  // a column in
+  w.pos_y = 16.0f; // a row down
+  Widget root = group({w});
+  root = with_context_menu(root, {noting_item("Spawn here", "main")}, "scene");
+  Term t(root);
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "card text", x, y)) << t.screen;
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x + 2, y, 3));
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x + 2, y, 3));
+  t.draw();
+  ASSERT_TRUE(t.shows("Open card")) << t.screen;
+  EXPECT_FALSE(t.shows("Spawn here")) << t.screen;
+  ASSERT_TRUE(t.click("Open card"));
+  ASSERT_TRUE(drain_until(t, "card.on", "group"));
+  EXPECT_EQ(val(t.app, "card.via"), "pointer");
+  EXPECT_FALSE(t.shows("Open card")) << t.screen;
+
+  // Over no window: the document's own menu, over the main view.
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, 70, 20, 3));
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, 70, 20, 3));
+  t.draw();
+  ASSERT_TRUE(t.shows("Spawn here")) << t.screen;
+  ASSERT_TRUE(t.click("Spawn here"));
+  ASSERT_TRUE(drain_until(t, "main.on", "main"));
+  EXPECT_EQ(val(t.app, "main.id"), "");
+}
+
+// With nothing focused, Shift+F10 opens the document's menu, at the top left.
+TEST(AriadneFtxui, ShiftF10WithNothingFocusedOpensTheDocumentsMenu) {
+  REQUIRE_FTXUI();
+  Widget root = group({text("just text")});
+  root = with_context_menu(root, {noting_item("New scene", "got")}, "scene");
+  Term t(root);
+  ASSERT_TRUE(t.key("F10", true));
+  t.draw();
+  ASSERT_TRUE(t.shows("New scene")) << t.screen;
+  ASSERT_TRUE(t.key("Return"));
+  ASSERT_TRUE(drain_until(t, "got.on", "main"));
+  EXPECT_EQ(val(t.app, "got.via"), "key");
+}

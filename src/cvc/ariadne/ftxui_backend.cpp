@@ -823,6 +823,7 @@ struct FtxuiBackend::Impl {
     std::string win;   // owning window id; "" = the root layer
     std::string menu;  // owning dropdown; "" = none
     std::string group; // the item group (begin_item_group) it is inside, innermost; "" = none
+    std::string area;  // §5.28 the context area (begin_context_area) it is in, innermost; "" none
     bool focusable = false;
     // §5.20 a rich text: where its links are (its link k is the item `<id>/k`), as last drawn.
     std::shared_ptr<RichHits> rich;
@@ -839,6 +840,11 @@ struct FtxuiBackend::Impl {
     std::set<std::string> maximizable;                          // ... with a maximize marker
     std::string menu_popup;                                     // dropdown drawn, if any
     std::string combo_popup;                                    // combo list drawn, if any
+    // §5.28 right-click menus: each window's own (its context area's key), the document's over
+    // the main view, and the one drawn open ("ctx|<key>", as open_menu names it).
+    std::map<std::string, std::string> window_menus;
+    std::string main_menu;
+    std::string ctx_popup;
     int combo_n = 0;
     bool has_menubar = false;
     // The bar so far this walk (§5.22): a document's second bar continues it, after its menus and
@@ -893,6 +899,8 @@ struct FtxuiBackend::Impl {
   bool in_tray_menu = false;
   int hosted_depth = 0;                 // hosted: the submenus the items being emitted are in
   std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
+  std::vector<std::string> ctx_areas;   // §5.28 the context areas open in the walk, innermost last
+  std::string area_now() const { return ctx_areas.empty() ? std::string() : ctx_areas.back(); }
   // The last item group closed, and whether this walk's press or key fired it (item_clicked).
   std::string group_hit_id;
   bool group_hit = false;
@@ -981,6 +989,13 @@ struct FtxuiBackend::Impl {
   std::set<std::string> hover_groups, press_groups;
   std::string open_menu;
   std::string focus_before_menu;
+  // §5.28 the right-click menu open_menu names ("ctx|<area key>"): how it was opened and whether
+  // the core has been told (ContextMenuOpen::now), the cell it hangs from, and where it was asked
+  // for, in px from its window's (the screen's) top left.
+  std::string ctx_via;
+  bool ctx_new = false;
+  int ctx_col = 0, ctx_row = 0;
+  float ctx_px = 0.0f, ctx_py = 0.0f;
   std::string open_combo;
   int combo_hi = 0;
   std::string drag_win;
@@ -1148,6 +1163,7 @@ struct FtxuiBackend::Impl {
     it.win = wins.empty() ? std::string() : wins.back();
     it.menu = cur_menu;
     it.group = item_groups.empty() ? std::string() : item_groups.back();
+    it.area = area_now();
     it.focusable = focusable && !is_disabled();
     if (!text_colors.empty())
       el = el | fx::color(text_colors.back());
@@ -1530,6 +1546,100 @@ struct FtxuiBackend::Impl {
     focused = focus_before_menu;
   }
 
+  // ---- §5.28 right-click menus -----------------------------------------------------------------
+
+  // A context area's key: the core's id under the push_id path, so a repeated group's are apart.
+  std::string ctx_key(const char *id) const {
+    std::string key;
+    for (const std::string &s : ids) {
+      key += s;
+      key += '/';
+    }
+    return key + (id ? id : "");
+  }
+  static bool is_ctx_menu(const std::string &menu) { return menu.rfind("ctx|", 0) == 0; }
+
+  // Open the menu of context area `area`, asked for `via` the pointer or a key, hanging from cell
+  // (col, row); (px, py) is where it was asked for, as the core hears it. The focus goes to its
+  // first item once it is drawn (settle) and back where it was when it closes.
+  void open_context(const std::string &area, const char *via, int col, int row, float px,
+                    float py) {
+    open_combo.clear();
+    if (open_menu.empty())
+      focus_before_menu = focused;
+    open_menu = "ctx|" + area;
+    focused.clear();
+    ctx_via = via;
+    ctx_new = true;
+    ctx_col = col;
+    ctx_row = row;
+    ctx_px = px;
+    ctx_py = py;
+  }
+
+  // The Menu key or Shift+F10: the menu of the innermost area around the focused widget; with no
+  // area around it, its window's (none: nothing opens), or with nothing focused, the window the
+  // input is for (hosted) or the document's over the main view. It hangs under the focused widget.
+  bool open_key_context() {
+    const Item *it = focused.empty() ? nullptr : find_item(last, focused);
+    std::string area = it ? it->area : std::string();
+    const std::string win = it ? it->win : (opt.hosted ? host_window : std::string());
+    if (area.empty() && !win.empty()) {
+      const auto w = last.window_menus.find(win);
+      if (w != last.window_menus.end())
+        area = w->second;
+    } else if (area.empty()) {
+      area = last.main_menu;
+    }
+    if (area.empty())
+      return false;
+    int col = 0, row = top_row();
+    if (it) {
+      const auto b = boxes.find(it->id);
+      if (b != boxes.end()) {
+        col = b->second.x_min;
+        row = b->second.y_max + 1;
+      }
+    } else if (!win.empty() && !opt.hosted) {
+      const auto b = boxes.find("win|" + win);
+      if (b != boxes.end()) {
+        col = b->second.x_min + 1;
+        row = b->second.y_min + 1;
+      }
+    }
+    open_context(area, "key", col, row, 0.0f, 0.0f);
+    return true;
+  }
+
+  // A right-click at (x, y): the menu of the innermost area under the pointer (the item there's),
+  // else the window's there, else, over no window, the document's. It hangs from the pointer, and
+  // the core hears where in px from the window's top left (the screen's).
+  bool open_pointer_context(int x, int y) {
+    const std::string win = opt.hosted ? host_window : window_at(x, y);
+    const Item *it = item_at(x, y, win, "");
+    std::string area = it ? it->area : std::string();
+    if (area.empty() && !win.empty()) {
+      const auto w = shown.window_menus.find(win);
+      if (w != shown.window_menus.end())
+        area = w->second;
+    } else if (area.empty()) {
+      area = shown.main_menu;
+    }
+    if (area.empty())
+      return false;
+    int ox = 0, oy = 0;
+    if (!opt.hosted && !win.empty()) {
+      const auto b = boxes.find("win|" + win);
+      if (b != boxes.end()) {
+        ox = b->second.x_min + 1; // inside its border
+        oy = b->second.y_min + 1;
+      }
+    }
+    open_context(area, "pointer", x, y, static_cast<float>((x - ox) * opt.cell_px_w),
+                 static_cast<float>((y - oy) * opt.cell_px_h));
+    return true;
+  }
+
   std::string window_at(int x, int y) const {
     std::string best;
     long best_z = -1;
@@ -1611,6 +1721,13 @@ struct FtxuiBackend::Impl {
       route_combo_key(e);
       return;
     }
+    // §5.28 the Menu key or Shift+F10: the focus's right-click menu (without one, Shift+F10 is
+    // F10, the menu bar's).
+    if (e.kind == TermEvent::Kind::Key && ((e.key == "F10" && e.shift) || e.key == "Menu") &&
+        open_key_context()) {
+      use();
+      return;
+    }
     if (e.key == "F10" && !last.menu_titles.empty()) {
       open_menu_at(last.menu_titles.front());
       use();
@@ -1630,7 +1747,7 @@ struct FtxuiBackend::Impl {
 
   void route_menu_key(const TermEvent &e) {
     const std::vector<std::string> &titles = last.menu_titles;
-    if (e.key == "Escape" || e.key == "F10" || e.key == "Tab") {
+    if (e.key == "Escape" || e.key == "F10" || e.key == "Tab" || e.key == "Menu") {
       close_menu();
     } else if (e.key == "Left" || e.key == "Right") {
       const auto at = std::find(titles.begin(), titles.end(), open_menu);
@@ -1734,6 +1851,11 @@ struct FtxuiBackend::Impl {
     case TermEvent::Mouse::Press:
       break;
     }
+    // §5.28 the right button opens the right-click menu under the pointer, where there is one.
+    if (e.button == 3 && open_pointer_context(e.x, e.y)) {
+      consumed = true;
+      return;
+    }
     if (e.button != 1)
       return; // only the left button drives widgets; the rest go to the document's on_pointer
     consumed = true;
@@ -1745,7 +1867,8 @@ struct FtxuiBackend::Impl {
     if (!open_menu.empty()) {
       const auto dd = boxes.find("menud|" + open_menu);
       if (shown.menu_popup == open_menu && dd != boxes.end() && inside(dd->second, x, y)) {
-        if (const Item *it = item_at(x, y, "", open_menu)) {
+        // A hosted right-click menu is its window's (§5.28); every other is on the screen's top.
+        if (const Item *it = item_at(x, y, opt.hosted ? host_window : "", open_menu)) {
           focused = it->id;
           press_id = it->id;
         }
@@ -1933,9 +2056,10 @@ struct FtxuiBackend::Impl {
       menu_close_req = false;
     }
     if (!open_menu.empty()) {
-      if (std::find(walk.menu_titles.begin(), walk.menu_titles.end(), open_menu) ==
-          walk.menu_titles.end()) {
-        close_menu(); // its menu is gone
+      if (is_ctx_menu(open_menu) ? walk.ctx_popup != open_menu
+                                 : std::find(walk.menu_titles.begin(), walk.menu_titles.end(),
+                                             open_menu) == walk.menu_titles.end()) {
+        close_menu(); // its menu is gone (a right-click menu's area was not drawn, §5.28)
       } else {
         const std::vector<std::string> &v = walk.menu_items[open_menu];
         if (!v.empty() && std::find(v.begin(), v.end(), focused) == v.end())
@@ -1977,6 +2101,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.badge = true;                      // on the line under the picture
   c.rich_text = true;                  // a paragraph; Tab reaches each link, Enter activates it
   c.button_selected = true;            // [>label<], bold
+  c.context_menu = true;               // §5.28 the Menu key, Shift+F10, a right-click
   return c;
 }
 
@@ -1997,6 +2122,7 @@ void FtxuiBackend::begin_frame() {
   m.tooltip.clear();
   m.last_item.clear();
   m.item_groups.clear();
+  m.ctx_areas.clear();
   m.group_hit_id.clear();
   m.have_geom = false;
   m.have_tracks = false;
@@ -2101,7 +2227,7 @@ bool FtxuiBackend::begin_menu(const char *label) {
   m.add(fx::text(std::string(label) + " ▸") | fx::bold);
   Impl::Frame f;
   f.type = Impl::Frame::Type::InlineMenu;
-  if (m.opt.hosted && !m.cur_menu.empty()) {
+  if (m.opt.hosted && !m.cur_menu.empty() && !Impl::is_ctx_menu(m.cur_menu)) {
     HostedMenuItem sub;
     sub.label = label;
     sub.submenu = true;
@@ -2283,7 +2409,7 @@ bool FtxuiBackend::menu_item_action(const char *label) {
   m.leaf(id, true, el);
   if (hit && !m.cur_menu.empty())
     m.menu_close_req = true;
-  if (m.opt.hosted && !m.cur_menu.empty())
+  if (m.opt.hosted && !m.cur_menu.empty() && !Impl::is_ctx_menu(m.cur_menu))
     m.hosted_add(HostedMenuItem{id, label, false, false, false});
   return hit;
 }
@@ -2303,9 +2429,78 @@ BoolEdit FtxuiBackend::menu_item_toggle(const char *label, bool current) {
   if (m.has_focus(id))
     el = el | fx::inverted;
   m.leaf(id, true, el);
-  if (m.opt.hosted && !m.cur_menu.empty())
+  if (m.opt.hosted && !m.cur_menu.empty() && !Impl::is_ctx_menu(m.cur_menu))
     m.hosted_add(HostedMenuItem{id, label, true, e.value, false});
   return e;
+}
+
+// ---- right-click menus (§5.28)
+// --------------------------------------------------------------------------
+
+void FtxuiBackend::begin_context_area(const char *id, ContextMenuOver over) {
+  Impl &m = *m_;
+  const std::string key = m.ctx_key(id);
+  m.ctx_areas.push_back(key);
+  if (over == ContextMenuOver::Window && !m.wins.empty())
+    m.walk.window_menus[m.wins.back()] = key;
+}
+
+void FtxuiBackend::end_context_area() {
+  Impl &m = *m_;
+  if (!m.ctx_areas.empty())
+    m.ctx_areas.pop_back();
+}
+
+bool FtxuiBackend::begin_context_menu(const char *id, ContextMenuOver over,
+                                      ContextMenuOpen &opened) {
+  Impl &m = *m_;
+  const std::string key = m.ctx_key(id);
+  if (over == ContextMenuOver::Main)
+    m.walk.main_menu = key;
+  const std::string mid = "ctx|" + key;
+  if (m.open_menu != mid || !m.cur_menu.empty())
+    return false;
+  if (m.ctx_new) {
+    m.ctx_new = false;
+    opened.now = true;
+    opened.via = m.ctx_via;
+    opened.x = m.ctx_px;
+    opened.y = m.ctx_py;
+  }
+  // Its items are a dropdown's: Up / Down, Enter, Esc (route_menu_key), each closing it when it
+  // runs. Off the hosted desktop the list is on the screen's top layer, outside any window.
+  Impl::Frame f;
+  f.type = Impl::Frame::Type::Menu;
+  f.id = mid;
+  m.stack.push_back(std::move(f));
+  m.cur_menu = mid;
+  if (!m.opt.hosted)
+    m.wins.push_back(std::string());
+  return true;
+}
+
+void FtxuiBackend::end_context_menu() {
+  Impl &m = *m_;
+  if (m.stack.size() < 2)
+    return;
+  Impl::Frame f = m.pop();
+  if (!m.opt.hosted && !m.wins.empty())
+    m.wins.pop_back();
+  m.cur_menu.clear();
+  const int rows = static_cast<int>(f.items.size()) + 2; // its border
+  fx::Element dd = (f.items.empty() ? fx::text(" (empty) ") : fx::vbox(std::move(f.items))) |
+                   fx::border | fx::reflect(m.boxes["menud|" + f.id]) | fx::clear_under;
+  // Hosted: in its window's cells, as a combo's list is.
+  const std::string win = m.wins.empty() ? std::string() : m.wins.back();
+  const auto bh = m.body_h.find(win);
+  const int room = m.opt.hosted && bh != m.body_h.end() ? bh->second : m.term_h;
+  int y = m.ctx_row;
+  if (y + rows > room)
+    y = std::max(0, room - rows); // no room below: as low as it fits
+  const int x = std::clamp(m.ctx_col, 0, std::max(0, m.term_w - 4));
+  (m.opt.hosted ? m.win_popups[win] : m.popups).push_back(place(isolated(std::move(dd)), x, y));
+  m.walk.menu_popup = f.id;
+  m.walk.ctx_popup = f.id;
 }
 
 // ---- windows
@@ -2987,6 +3182,7 @@ void FtxuiBackend::end_item_group() {
   it.win = m.wins.empty() ? std::string() : m.wins.back();
   it.menu = m.cur_menu;
   it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+  it.area = m.area_now();
   it.focusable = f.focusable;
   m.add(el | fx::reflect(m.boxes[gid]));
   m.walk.items.push_back(std::move(it));
@@ -3099,6 +3295,7 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
     it.win = m.wins.empty() ? std::string() : m.wins.back();
     it.menu = m.cur_menu;
     it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+    it.area = m.area_now();
     it.focusable = !m.is_disabled();
     if (it.focusable) {
       if (m.focus_next && m.cur_menu.empty()) {
@@ -3137,7 +3334,7 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
 
 void FtxuiBackend::separator() {
   Impl &m = *m_;
-  if (m.opt.hosted && !m.cur_menu.empty())
+  if (m.opt.hosted && !m.cur_menu.empty() && !Impl::is_ctx_menu(m.cur_menu))
     m.hosted_add(HostedMenuItem{"", "", false, false, true});
   m.add(fx::separator());
 }
@@ -4492,6 +4689,16 @@ bool translate(fx::Event e, TermEvent &out) {
     out = TermEvent::key_event("Return", false, false, true);
     return true;
   }
+  // §5.28 the keys that open a right-click menu: Shift+F10 (xterm's modified F10, which tmux sends
+  // for S-F10) and the Menu key (xterm's CSI 29 ~).
+  if (in == "\x1b[21;2~") {
+    out = TermEvent::key_event("F10", true);
+    return true;
+  }
+  if (in == "\x1b[29~") {
+    out = TermEvent::key_event("Menu");
+    return true;
+  }
   // Shift-Return, where the terminal tells it apart: the kitty keyboard protocol, xterm's
   // modifyOtherKeys.
   if (in == "\x1b[13;2u" || in == "\x1b[27;2;13~") {
@@ -4777,6 +4984,12 @@ bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
+void FtxuiBackend::begin_context_area(const char *, ContextMenuOver) {}
+void FtxuiBackend::end_context_area() {}
+bool FtxuiBackend::begin_context_menu(const char *, ContextMenuOver, ContextMenuOpen &) {
+  return false;
+}
+void FtxuiBackend::end_context_menu() {}
 bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 std::string FtxuiBackend::take_clipboard() { return {}; }
 FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }

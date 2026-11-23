@@ -107,7 +107,8 @@ bool is_builtin_block(const std::string &k) {
          k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
          k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
          k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
-         k == "scenes" || k == "clock" || k == "menu_collapse" || k == "notifications";
+         k == "scenes" || k == "clock" || k == "menu_collapse" || k == "notifications" ||
+         k == "context_menu";
 }
 // The parser `app` has for block `key`, or none.
 AriBlockParser find_ari_block(cvc::app &app, const std::string &key) {
@@ -178,6 +179,7 @@ const char *const kAriSchema = R"ARISCHEMA({
     "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+    "context_menu": {"$ref": "#/$defs/context_menu"},
     "requires": {
       "type": "array",
       "items": {
@@ -279,7 +281,8 @@ const char *const kAriSchema = R"ARISCHEMA({
         "on_remove": {"type": "string"},
         "rows": {"type": "number"},
         "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-        "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
+        "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
+        "context_menu": {"$ref": "#/$defs/context_menu"}
       },
       "if": {
         "anyOf": [
@@ -289,6 +292,15 @@ const char *const kAriSchema = R"ARISCHEMA({
       },
       "then": {"$ref": "#/$defs/tf_editor"},
       "else": {"properties": {"default": {"type": "string"}}}
+    },
+    "context_menu": {
+      "type": ["array", "object"],
+      "items": {"$ref": "#/$defs/widget"},
+      "properties": {
+        "id": {"type": "string"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
+      },
+      "additionalProperties": false
     },
     "tf_editor": {
       "properties": {
@@ -528,7 +540,8 @@ inline bool known_widget_key(const std::string &k) {
          k == "on_click" || k == "on_hover" || k == "on_drag" || k == "on_drag_start" ||
          k == "on_drag_end" || k == "on_hover_end" || k == "hover" || k == "children" ||
          k == "items" || k == "id" || k == "visible_when" || k == "enabled_when" ||
-         k == "disabled_when" || k == "tooltip" || k == "repeat" || k == "autofocus";
+         k == "disabled_when" || k == "tooltip" || k == "repeat" || k == "autofocus" ||
+         k == "context_menu";
 }
 
 // keys: (keys.h) -- each entry a rebindable action: its label, its default key(s), its on:.
@@ -680,6 +693,37 @@ std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
     for (const YAML::Node &item : seq)
       out.push_back(parse_widget(ctx, item));
   return out;
+}
+
+// §5.28 `context_menu:` onto `w`: a list of items (as a menu's `items:`), or `{ id, items }`,
+// whose `id` names the menu for `contributes: context_menus:`. `where` prefixes a warning.
+void parse_context_menu(Ctx &ctx, const YAML::Node &n, Widget &w, const std::string &where) {
+  if (n.IsSequence()) {
+    w.context_menu = true;
+    w.context_items = parse_seq(ctx, n);
+    return;
+  }
+  if (!n.IsMap()) {
+    ctx.warn("ari: " + where +
+             "context_menu: is a list of items or { id: <name>, items: [...] } "
+             "— ignored");
+    return;
+  }
+  for (const auto &kv : n)
+    if (kv.first.IsScalar() && kv.first.Scalar() != "id" && kv.first.Scalar() != "items")
+      ctx.warn("ari: " + where + "context_menu: has no key '" + kv.first.Scalar() +
+               "' (it takes id: and items:) — ignored");
+  const YAML::Node id = n["id"];
+  if (id && !id.IsScalar())
+    ctx.warn("ari: " + where + "context_menu: id: is a name — ignored");
+  else if (id)
+    w.context_menu_id = id.Scalar();
+  const YAML::Node items = n["items"];
+  if (items && !items.IsSequence())
+    ctx.warn("ari: " + where + "context_menu: items: is a list — ignored");
+  else if (items)
+    w.context_items = parse_seq(ctx, items);
+  w.context_menu = true;
 }
 
 std::string widget_type(const YAML::Node &n, std::string &label) {
@@ -1730,6 +1774,17 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       else if (h != "none")
         ctx.warn("ari: hover: '" + h + "' is not highlight or none — ignored");
     }
+    // §5.28 a right-click menu over a window, a group or a viewport (a scene view: any custom
+    // widget is one item, and a viewport adds its pick to the menu's event).
+    if (has(n, "context_menu")) {
+      if (w.kind == Kind::Window || w.kind == Kind::Group || w.kind == Kind::Custom)
+        parse_context_menu(ctx, n["context_menu"], w,
+                           "'" + (w.id.empty() ? w.label : w.id) + "': ");
+      else
+        ctx.warn("ari: '" + (w.id.empty() ? w.label : w.id) +
+                 "': context_menu: goes on a window, a group, a viewport or the document — "
+                 "ignored here");
+    }
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.
@@ -2346,6 +2401,12 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
                ": is ignored — only the outermost document receives input and signals; pass "
                "what the module needs through a link: hole");
+  // §5.28 the main view is the outermost document's: a module's top-level context_menu: has
+  // nothing to open over (its windows, groups and viewports keep theirs).
+  if (frag.IsMap() && frag["context_menu"])
+    ctx.warn("ari: load '" + uri +
+             "': the fragment's top-level context_menu: is ignored — the main view is the "
+             "outermost document's; put the menu on one of its windows or groups");
   // Only the outermost document takes arguments (doc_args.h); a module reaches them through a hole.
   if (frag.IsMap() && frag["args"])
     ctx.warn("ari: load '" + uri +
@@ -4247,6 +4308,8 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   parse_own_functions(ctx, doc, ""); // §6.6, BEFORE the body: a load: grants out of them
   r.root = parse_document(ctx, doc);
+  if (doc.IsMap() && doc["context_menu"]) // §5.28 over the main view: the document root's
+    parse_context_menu(ctx, doc["context_menu"], r.root, "the document's ");
   r.functions = ctx.functions;
   r.root.functions = make_function_scope(ctx.functions);
   if (doc.IsMap()) {

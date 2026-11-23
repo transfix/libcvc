@@ -76,8 +76,8 @@ it is 4.12's golden: applications that travel as links in posts.
    icons join the tray (§5.25), and that is all. It cannot put an item in the parent's File
    menu, a page in its Settings window, or an item in a right-click menu, and it cannot change
    the parent's settings except through a `link:` hole the parent wrote for it by name. Ariadne
-   has no right-click menus at all yet: ImGui's are used only inside two native widgets (the
-   text view's Copy, the transfer function editor).
+   had no right-click menus at all: ImGui's were used only inside two native widgets (the text
+   view's Copy, the transfer function editor). SH8 added them (ARIADNE.md §5.28).
 5. **One main view, one world clock.** An `AriRuntime` has one main view and one `SceneAdapter`,
    and `AppRuntime::load()` clears the last document's scene before realizing the next. A scene's
    world follows `cvc::app::world_clock()`, one per app (`AppRuntime::restart_world` resets it).
@@ -483,6 +483,9 @@ their own:
 - A new `requires:` token, `ui.context_menu`, says whether the backend opens them. ImGui opens
   them on a right-click (`BeginPopupContextItem`, as the text view's Copy uses
   `BeginPopupContextWindow`), FTXUI and tvision on the key.
+- Built in SH8 as ARIADNE.md §5.28. ImGui's popup opens as `BeginPopupContextItem`'s does, except
+  that a right-drag (a pan in a view, the main view's camera) opens nothing; the terminals also
+  open the menu under a right-click. `contributes:` (SH9) is not built: the `id` is kept.
 
 ### 4.8 Changing the shell's settings: `shares:` and `access.settings`
 

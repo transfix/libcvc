@@ -13019,3 +13019,287 @@ TEST(AriadneComponents, AudioBuffersDrawsARowPerPerson) {
   EXPECT_EQ(be.charts[1].series[0].y, (std::vector<double>{100, 0, 40}));
   EXPECT_EQ(be.charts[1].series[1].line, ChartLine::Dashed);
 }
+
+// ---- §5.28 right-click menus (context_menu:) -------------------------------------------------
+
+namespace {
+// A backend whose right-click menus open when a test asks: `open_over` opens the `open_nth`
+// (0-based) menu of that kind ("item", "window" or "main") asked on the next walk, reporting `via`
+// and (x, y) as the place it was opened; it stays open until an item runs. `click` is an item
+// label that reports a click while a menu is open.
+struct MenuBackend : MockBackend {
+  bool caps_menu = true;
+  Capabilities capabilities() const override {
+    Capabilities c = MockBackend::capabilities();
+    c.context_menu = caps_menu;
+    return c;
+  }
+  std::string open_over;
+  int open_nth = 0;
+  std::string via = "pointer";
+  float x = 0.0f, y = 0.0f;
+  std::string click;
+  std::string shown;            // the open menu's id
+  int shown_n = -1;             // ... and which of the menus asked in a walk it is
+  std::vector<std::string> ids; // the menus asked this walk, in walk order
+  std::vector<int> kind_of;     // each one's ContextMenuOver, parallel to ids
+  int areas = 0;                // context areas open (balanced)
+  bool in_menu = false;
+  void begin_frame() override {
+    MockBackend::begin_frame();
+    ids.clear();
+    kind_of.clear();
+  }
+  void begin_context_area(const char *id, ContextMenuOver over) override {
+    ++areas;
+    rec(std::string("ctx_area:") + id + (over == ContextMenuOver::Window ? ":window" : ":item"));
+  }
+  void end_context_area() override {
+    --areas;
+    rec("ctx_area_end");
+  }
+  bool begin_context_menu(const char *id, ContextMenuOver over, ContextMenuOpen &o) override {
+    static const char *const kinds[] = {"item", "window", "main"};
+    const int n = static_cast<int>(ids.size());
+    int nth_of_kind = 0;
+    for (int k : kind_of)
+      nth_of_kind += k == static_cast<int>(over) ? 1 : 0;
+    ids.push_back(id);
+    kind_of.push_back(static_cast<int>(over));
+    if (!open_over.empty() && open_over == kinds[static_cast<int>(over)] &&
+        nth_of_kind == open_nth) {
+      open_over.clear();
+      shown = id;
+      shown_n = n;
+      o.now = true;
+      o.via = via;
+      o.x = x;
+      o.y = y;
+    }
+    if (shown != id || shown_n != n)
+      return false;
+    in_menu = true;
+    rec(std::string("ctx_menu:") + id);
+    return true;
+  }
+  void end_context_menu() override {
+    in_menu = false;
+    rec("ctx_menu_end");
+  }
+  bool menu_item_action(const char *l) override {
+    MockBackend::menu_item_action(l);
+    if (!in_menu || click != l)
+      return false;
+    click.clear();
+    shown.clear(); // an item that runs closes its menu
+    shown_n = -1;
+    return true;
+  }
+};
+
+std::string ctx_val(cvc::app &app, const std::string &key) {
+  return cvc::state::instance(app)(key).value();
+}
+} // namespace
+
+// An item of a group's right-click menu runs with the menu's `event`: what it was opened over and
+// that widget's id, the menu's id, how and where, taken when it opened and kept while it stays
+// open. Over a widget that is no scene view the pick's fields are there, empty.
+TEST(AriadneRuntime, ARightClickMenusItemRunsWithItsEvent) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MenuBackend be;
+  rt.set_backend(&be);
+  Widget card = group({text("a card")});
+  card.id = "card";
+  card = with_context_menu(
+      card,
+      {menu_action("Open", "(begin (state-set \"on\" (get-attr event \"on\"))"
+                           " (state-set \"id\" (get-attr event \"id\"))"
+                           " (state-set \"menu\" (get-attr event \"menu\"))"
+                           " (state-set \"via\" (get-attr event \"via\"))"
+                           " (state-set \"at\" (if (and (= (get-attr event \"px\") 12.0)"
+                           " (= (get-attr event \"py\") 5.0)) \"12,5\" \"elsewhere\"))"
+                           " (state-set \"hit\" (get-attr event \"hit\"))"
+                           " (state-set \"node\" (get-attr event \"node\"))"
+                           " (state-set \"ntags\" (length (get-attr event \"tags\"))))"),
+       separator(), menu_action("Close", "(state-set \"closed\" \"1\")")},
+      "card_menu");
+  rt.set_root(group({window("W", {card, button("Go", "go")})}));
+  rt.render();
+  ASSERT_EQ(be.ids.size(), 1u) << "the group's menu is asked, once";
+  EXPECT_EQ(be.areas, 0) << "its area is balanced";
+  EXPECT_TRUE(be.saw("ctx_area:ctx:card:item"));
+  EXPECT_FALSE(be.saw("menu_action:Open")) << "a menu that is not open draws no items";
+  // Its area brackets the group: the card's text is drawn inside it, the button after it.
+  const auto at = [&](const std::string &s) {
+    return std::find(be.log.begin(), be.log.end(), s) - be.log.begin();
+  };
+  EXPECT_LT(at("ctx_area:ctx:card:item"), at("text_line:a card"));
+  EXPECT_LT(at("text_line:a card"), at("ctx_area_end"));
+  EXPECT_LT(at("ctx_area_end"), at("button:Go"));
+
+  be.open_over = "item";
+  be.x = 12.0f;
+  be.y = 5.0f;
+  be.log.clear();
+  rt.render(); // it opens: the core takes its event now
+  EXPECT_TRUE(be.saw("menu_action:Open"));
+  EXPECT_TRUE(be.saw("separator"));
+  EXPECT_TRUE(be.saw("menu_action:Close"));
+  be.via = "key"; // a later walk's report does not change the event taken when it opened
+  be.x = be.y = 0.0f;
+  be.click = "Open";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.on") == "group"; }));
+  EXPECT_EQ(ctx_val(app, "ui.id"), "card");
+  EXPECT_EQ(ctx_val(app, "ui.menu"), "card_menu");
+  EXPECT_EQ(ctx_val(app, "ui.via"), "pointer");
+  EXPECT_EQ(ctx_val(app, "ui.at"), "12,5");
+  EXPECT_EQ(ctx_val(app, "ui.hit"), "0") << "no scene view under it: no hit";
+  EXPECT_EQ(ctx_val(app, "ui.node"), "");
+  EXPECT_EQ(ctx_val(app, "ui.ntags"), "0");
+  be.log.clear();
+  rt.render();
+  EXPECT_FALSE(be.saw("menu_action:Open")) << "the item that ran closed it";
+}
+
+// Over a scene view (a viewport), the menu's event carries the pick at the place it opened,
+// taken once, and the node's tags. An item's visible_when: reads it, so each item shows only over
+// the nodes it acts on, and a menu opened over another node shows other items.
+TEST(AriadneRuntime, ARightClickMenuOverAViewportGetsThePickAndItsVisibleWhenReadsIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MenuBackend be;
+  rt.set_backend(&be);
+  Widget flatten = menu_action("Flatten", "(begin (state-set \"node\" (get-attr event \"node\"))"
+                                          " (state-set \"tag\" (nth (get-attr event \"tags\") 1))"
+                                          " (state-set \"x\" (get-attr event \"x\"))"
+                                          " (state-set \"on\" (get-attr event \"on\"))"
+                                          " (state-set \"view\" (get-attr event \"view\")))");
+  flatten.visible_when = "(= (get-attr event \"node\") \"terrain\")";
+  Widget sink = menu_action("Sink", "(state-set \"sunk\" (get-attr event \"node\"))");
+  sink.visible_when = "(= (get-attr event \"node\") \"boat\")";
+  Widget center = menu_action("Center here", "(state-set \"centered\" \"1\")");
+  center.visible_when = "(= (get-attr event \"hit\") \"1\")";
+  Widget view;
+  view.kind = Kind::Custom;
+  view.custom_type = "viewport";
+  view.id = "map";
+  view = with_context_menu(view, {flatten, sink, center});
+  int picks = 0;
+  std::string node = "terrain";
+  be.custom_ret.handled = true;
+  be.custom_ret.context_pick = [&] {
+    ++picks;
+    return std::vector<std::pair<std::string, std::string>>{
+        {"x", "1.5"},           {"y", "2"},      {"z", "0"},  {"hit", "1"}, {"node", node},
+        {"tags", "ground sim"}, {"view", "map"}, {"mods", ""}};
+  };
+  rt.set_root(group({window("Map", {view})}));
+  rt.render();
+  EXPECT_TRUE(be.saw("custom_widget:viewport="));
+  EXPECT_EQ(picks, 0) << "no pick until a menu opens";
+
+  be.open_over = "item";
+  be.log.clear();
+  rt.render();
+  EXPECT_EQ(picks, 1) << "the pick is taken as it opens";
+  EXPECT_TRUE(be.saw("menu_action:Flatten"));
+  EXPECT_TRUE(be.saw("menu_action:Center here"));
+  EXPECT_FALSE(be.saw("menu_action:Sink")) << "Sink is for boats";
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  be.log.clear();
+  rt.render(); // still open: the same event, no second pick
+  EXPECT_EQ(picks, 1);
+  EXPECT_TRUE(be.saw("menu_action:Flatten"));
+  be.click = "Flatten";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.node") == "terrain"; }));
+  EXPECT_EQ(ctx_val(app, "ui.tag"), "sim") << "tags is a list of the node's tags";
+  EXPECT_EQ(ctx_val(app, "ui.x"), "1.5");
+  EXPECT_EQ(ctx_val(app, "ui.on"), "viewport");
+  EXPECT_EQ(ctx_val(app, "ui.view"), "map");
+
+  // Opened again over a boat: its visible_when: is worked out against this menu's event, not the
+  // last one's.
+  node = "boat";
+  be.open_over = "item";
+  be.log.clear();
+  rt.render();
+  EXPECT_EQ(picks, 2);
+  EXPECT_TRUE(be.saw("menu_action:Sink"));
+  EXPECT_FALSE(be.saw("menu_action:Flatten"));
+  be.click = "Sink";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.sunk") == "boat"; }));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The document's own menu opens over the main view, after the walk, with the host's pick of the
+// main scene. A repeated group's menus are one per instance, each item acting on its row.
+TEST(AriadneRuntime, TheDocumentsMenuIsTheMainViewsAndARepeatedGroupsMenuActsOnItsRow) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MenuBackend be;
+  rt.set_backend(&be);
+  cvc::state::instance(app)("ui.rows").value("3");
+  Widget row = group({text("a row")});
+  row.repeat = "(int (state-get \"rows\"))";
+  row = with_context_menu(row, {menu_action("Pick", "(state-set \"picked\" \"{i}\")")});
+  Widget root = group({window("W", {row})});
+  root = with_context_menu(
+      root,
+      {menu_action("Spawn here", "(begin (state-set \"on\" (get-attr event \"on\"))"
+                                 " (state-set \"view\" (get-attr event \"view\"))"
+                                 " (state-set \"node\" (get-attr event \"node\"))"
+                                 " (state-set \"menu\" (get-attr event \"menu\")))")},
+      "scene");
+  int picks = 0;
+  rt.set_main_view_pick([&] {
+    ++picks;
+    return std::vector<std::pair<std::string, std::string>>{
+        {"node", "ground"}, {"hit", "1"}, {"view", "main"}};
+  });
+  rt.set_root(std::move(root));
+  rt.render();
+  ASSERT_EQ(be.ids.size(), 4u) << "three rows' menus and the main view's";
+  EXPECT_EQ(be.ids.back(), "ctx:main") << "the main view's is asked after every window";
+  EXPECT_EQ(be.kind_of.back(), static_cast<int>(ContextMenuOver::Main));
+  EXPECT_EQ(picks, 0);
+
+  be.open_over = "main";
+  rt.render();
+  EXPECT_EQ(picks, 1);
+  be.click = "Spawn here";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.on") == "main"; }));
+  EXPECT_EQ(ctx_val(app, "ui.view"), "main");
+  EXPECT_EQ(ctx_val(app, "ui.node"), "ground");
+  EXPECT_EQ(ctx_val(app, "ui.menu"), "scene");
+
+  be.open_over = "item";
+  be.open_nth = 2; // the third row's
+  rt.render();
+  be.click = "Pick";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.picked") == "2"; }));
+}
+
+// ui.context_menu: whether the backend opens right-click menus.
+TEST(AriadneRuntime, UiContextMenuSaysWhetherTheBackendOpensRightClickMenus) {
+  cvc::app app;
+  {
+    Runtime rt(app, "");
+    MenuBackend be;
+    rt.set_backend(&be);
+    EXPECT_TRUE(rt.has("ui.context_menu"));
+    EXPECT_TRUE(rt.host_facts().caps.context_menu);
+  }
+  {
+    Runtime rt(app, "");
+    MockBackend be; // the Backend default: no right-click menus
+    rt.set_backend(&be);
+    EXPECT_FALSE(rt.has("ui.context_menu"));
+  }
+}

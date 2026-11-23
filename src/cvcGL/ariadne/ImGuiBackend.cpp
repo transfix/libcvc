@@ -198,6 +198,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.rich_text = true;
   c.button_icon = true;
   c.button_selected = true;
+  c.context_menu = true;
   return c;
 }
 
@@ -2795,6 +2796,7 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
 }
 
 void ImGuiBackend::begin_frame() {
+  m_contextClaimed = false; // §5.28 this frame's request to open a right-click menu is untaken
   if (!m_fileDialog)
     return;
   const std::shared_ptr<FileDialog> d = m_fileDialog;
@@ -2914,6 +2916,109 @@ void ImGuiBackend::end_item_group() {
     f->dl->AddRectFilled(mn, mx, ImGui::GetColorU32(col), ImGui::GetStyle().FrameRounding);
   }
   f->split.Merge(f->dl);
+#endif
+}
+
+void ImGuiBackend::begin_context_area(const char *id, cvc::ariadne::ContextMenuOver over) {
+  (void)id;
+#ifdef CVC_ENABLE_IMGUI
+  const bool item = over == cvc::ariadne::ContextMenuOver::Item;
+  m_contextAreas.push_back(item);
+  if (item)
+    ImGui::BeginGroup();
+#else
+  (void)over;
+#endif
+}
+
+void ImGuiBackend::end_context_area() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_contextAreas.empty())
+    return;
+  const bool item = m_contextAreas.back();
+  m_contextAreas.pop_back();
+  if (!item)
+    return;
+  // The group makes the area one rect for the menu; the item drawn last inside it stays the last
+  // item, so the core's on_click, on_hover and tooltip after it still see the widget's own.
+  ImGuiContext &g = *ImGui::GetCurrentContext();
+  const ImGuiLastItemData inner = g.LastItemData;
+  ImGui::EndGroup();
+  const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+  m_contextRect[0] = mn.x;
+  m_contextRect[1] = mn.y;
+  m_contextRect[2] = mx.x;
+  m_contextRect[3] = mx.y;
+  g.LastItemData = inner;
+#endif
+}
+
+bool ImGuiBackend::begin_context_menu(const char *id, cvc::ariadne::ContextMenuOver over,
+                                      cvc::ariadne::ContextMenuOpen &opened) {
+#ifdef CVC_ENABLE_IMGUI
+  using cvc::ariadne::ContextMenuOver;
+  const ImGuiID pid = ImGui::GetID(id);
+  const ImGuiIO &io = ImGui::GetIO();
+  if (!m_contextClaimed) {
+    // Asked for this frame: a right-click released where it went down (a right-drag pans a view
+    // or turns the main view's camera, so it opens nothing), a touch screen's long press when the
+    // finger lifts (opening while it is down would let the lift pick the item under it), or the
+    // Menu key or Shift+F10 at the pointer.
+    constexpr float kLongPress = 0.5f; // seconds
+    const float slop2 = io.MouseDragThreshold * io.MouseDragThreshold;
+    const char *via = nullptr;
+    if (io.MouseReleased[ImGuiMouseButton_Right] &&
+        io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] <= slop2)
+      via = "pointer";
+    else if (io.MouseSource == ImGuiMouseSource_TouchScreen &&
+             io.MouseReleased[ImGuiMouseButton_Left] &&
+             io.MouseDownDurationPrev[ImGuiMouseButton_Left] >= kLongPress &&
+             io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] <= slop2)
+      via = "touch";
+    else if (ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
+             (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false)))
+      via = "key";
+    // Over this menu's area, and no window above it (a popup open there included).
+    constexpr ImGuiHoveredFlags kWin =
+        ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem;
+    bool over_it = false;
+    ImVec2 origin(0.0f, 0.0f);
+    if (via && over == ContextMenuOver::Item) {
+      origin = ImVec2(m_contextRect[0], m_contextRect[1]);
+      over_it = ImGui::IsWindowHovered(kWin) &&
+                ImGui::IsMouseHoveringRect(origin, ImVec2(m_contextRect[2], m_contextRect[3]));
+    } else if (via && over == ContextMenuOver::Window) {
+      origin = ImGui::GetCurrentWindow()->InnerRect.Min;
+      over_it = ImGui::IsWindowHovered(kWin);
+    } else if (via) { // the main view: wherever no window is
+      over_it = !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow |
+                                        ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+                                        ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+    }
+    if (over_it) {
+      m_contextClaimed = true; // the innermost area asked first: the outer ones open nothing
+      ImGui::OpenPopupEx(pid);
+      opened.now = true;
+      opened.via = via;
+      if (std::strcmp(via, "key") != 0) {
+        opened.x = io.MousePos.x - origin.x;
+        opened.y = io.MousePos.y - origin.y;
+      }
+    }
+  }
+  return ImGui::BeginPopupEx(pid, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
+                                      ImGuiWindowFlags_NoSavedSettings);
+#else
+  (void)id;
+  (void)over;
+  (void)opened;
+  return false;
+#endif
+}
+
+void ImGuiBackend::end_context_menu() {
+#ifdef CVC_ENABLE_IMGUI
+  ImGui::EndPopup();
 #endif
 }
 

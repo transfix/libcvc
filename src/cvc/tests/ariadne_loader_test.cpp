@@ -7414,3 +7414,138 @@ TEST(AriadneFunctions, GrantsChainThroughNestedMounts) {
   ASSERT_TRUE(inner && inner->functions);
   EXPECT_EQ(names_of(inner->functions->defs), (std::vector<std::string>{"double"}));
 }
+
+// §5.28 context_menu: on a window, a group, a viewport and the document's top level: its items as a
+// menu's, its id kept for contributes: (SH9), a list or { id, items }.
+TEST(AriadneLoader, ContextMenusParseOnWindowsGroupsViewportsAndTheDocument) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  register_known_widget_type(app, "viewport"); // cvcGL's, which this test has not got
+  const LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+context_menu:
+  id: scene
+  items:
+    - { menu_item: Spawn here, on: (state-set "spawned" "1") }
+windows:
+  - window: Map
+    id: map
+    context_menu:
+      - { menu_item: Reset view, on: (state-set "reset" "1") }
+      - separator
+      - menu: More
+        items:
+          - { menu_item: Close, on: (state-set "closed" "1") }
+    children:
+      - group:
+        id: card
+        context_menu: { id: card_menu, items: [{ menu_item: Open, on: open }] }
+        children: [ "a card" ]
+      - type: viewport
+        view: overview
+        context_menu:
+          - menu_item: Flatten
+            visible_when: (= (get-attr event "node") "terrain")
+            on: (state-set "flat" (get-attr event "node"))
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  // The document's own, over the main view: named, so contributes: can add to it later.
+  EXPECT_TRUE(r.root.context_menu);
+  EXPECT_EQ(r.root.context_menu_id, "scene");
+  ASSERT_EQ(r.root.context_items.size(), 1u);
+  EXPECT_EQ(r.root.context_items[0].kind, Kind::MenuItemAction);
+  EXPECT_EQ(r.root.context_items[0].label, "Spawn here");
+  // A window's, as a list: no id, so it takes items from no one.
+  const Widget *map = find(r.root, Kind::Window, "Map");
+  ASSERT_NE(map, nullptr);
+  EXPECT_TRUE(map->context_menu);
+  EXPECT_TRUE(map->context_menu_id.empty());
+  ASSERT_EQ(map->context_items.size(), 3u);
+  EXPECT_EQ(map->context_items[1].kind, Kind::Separator);
+  EXPECT_EQ(map->context_items[2].kind, Kind::Menu);
+  ASSERT_EQ(map->context_items[2].children.size(), 1u);
+  EXPECT_EQ(map->context_items[2].children[0].label, "Close");
+  // Its items are not its children: the window's body is the group and the viewport.
+  EXPECT_EQ(find(*map, Kind::MenuItemAction, "Reset view"), nullptr);
+  // A group's, as { id, items }.
+  const Widget *card = nullptr;
+  for (const Widget &c : map->children)
+    if (c.kind == Kind::Group && c.id == "card")
+      card = &c;
+  ASSERT_NE(card, nullptr);
+  EXPECT_TRUE(card->context_menu);
+  EXPECT_EQ(card->context_menu_id, "card_menu");
+  ASSERT_EQ(card->context_items.size(), 1u);
+  EXPECT_EQ(card->context_items[0].on, "open");
+  // A viewport's, its items' visible_when kept; the key does not reach the widget's props.
+  const Widget *view = find(*map, Kind::Custom);
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(view->custom_type, "viewport");
+  EXPECT_TRUE(view->context_menu);
+  EXPECT_FALSE(view->props.has("context_menu"));
+  ASSERT_EQ(view->context_items.size(), 1u);
+  EXPECT_EQ(view->context_items[0].visible_when, "(= (get-attr event \"node\") \"terrain\")");
+  // A document without one has none.
+  const LoadResult plain =
+      fresh_load("meta: { min_libcvc: \"0.0.0\" }\nwindows: [{ window: W }]\n");
+  ASSERT_TRUE(plain.ok) << plain.error;
+  EXPECT_FALSE(plain.root.context_menu);
+}
+
+TEST(AriadneLoader, AContextMenuInTheWrongPlaceOrShapeWarns) {
+  SKIP_WITHOUT_YAML();
+  const auto warned = [](const LoadResult &r, const std::string &what) {
+    for (const std::string &w : r.warnings)
+      if (w.find(what) != std::string::npos)
+        return true;
+    return false;
+  };
+  // On a button: menus go on a window, a group, a viewport or the document.
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: W
+    children:
+      - button: Go
+        on: go
+        context_menu: [{ menu_item: X, on: x }]
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(warned(r, "context_menu: goes on a window, a group, a viewport or the document"));
+  EXPECT_FALSE(find(r.root, Kind::Button, "Go")->context_menu);
+  // A map with a key it does not take, a scalar, an id that is not a name.
+  r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+windows:
+  - window: A
+    context_menu: { id: a, items: [], title: nope }
+  - window: B
+    context_menu: just text
+  - window: C
+    context_menu: { id: [x], items: [{ menu_item: X, on: x }] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(warned(r, "context_menu: has no key 'title'"));
+  EXPECT_TRUE(warned(r, "context_menu: is a list of items or { id: <name>, items: [...] }"));
+  EXPECT_TRUE(warned(r, "context_menu: id: is a name"));
+  EXPECT_TRUE(find(r.root, Kind::Window, "A")->context_menu); // its id still names it
+  EXPECT_EQ(find(r.root, Kind::Window, "A")->context_menu_id, "a");
+  EXPECT_FALSE(find(r.root, Kind::Window, "B")->context_menu);
+  EXPECT_EQ(find(r.root, Kind::Window, "C")->context_items.size(), 1u);
+  // A loaded document's top-level menu: the main view is the outermost document's.
+  const std::string frag = write_temp_ari("ctx_fragment.ari", R"(
+meta: { min_libcvc: "0.0.0" }
+context_menu: [{ menu_item: Mine, on: mine }]
+windows:
+  - window: Inner
+    context_menu: [{ menu_item: Kept, on: kept }]
+)");
+  r = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nroot:\n  - load: " + frag + "\n    as: inner\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(warned(r, "the fragment's top-level context_menu: is ignored"));
+  EXPECT_FALSE(r.root.context_menu);
+  const Widget *inner = find(r.root, Kind::Window, "Inner");
+  ASSERT_NE(inner, nullptr);
+  EXPECT_TRUE(inner->context_menu) << "its windows keep theirs";
+}

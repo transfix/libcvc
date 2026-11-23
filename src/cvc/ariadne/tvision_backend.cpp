@@ -165,6 +165,7 @@ bool key_event(const KeyDownEvent &k, TermEvent &out) {
     const char *name;
     bool shift, ctrl;
   };
+  // Shift+F10 opens the focus's right-click menu (§5.28); F10 itself is the desktop's menu bar.
   static const Named kNamed[] = {
       {kbTab, "Tab", false, false},        {kbShiftTab, "Tab", true, false},
       {kbEnter, "Return", false, false},   {kbEsc, "Escape", false, false},
@@ -179,7 +180,7 @@ bool key_event(const KeyDownEvent &k, TermEvent &out) {
       {kbF4, "F4", false, false},          {kbF5, "F5", false, false},
       {kbF7, "F7", false, false},          {kbF8, "F8", false, false},
       {kbF9, "F9", false, false},          {kbF11, "F11", false, false},
-      {kbF12, "F12", false, false},
+      {kbF12, "F12", false, false},        {kbShiftF10, "F10", true, false},
   };
   for (const Named &n : kNamed)
     if (k.keyCode == n.code) {

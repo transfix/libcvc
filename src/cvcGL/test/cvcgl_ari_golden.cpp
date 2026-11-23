@@ -110,6 +110,9 @@ const GoldenCase kCases[] = {
      {{1, 22.0f, 10.0f, -1, false}, {2, 22.0f, 10.0f, 0, true}, {3, 22.0f, 10.0f, 0, false}}},
     // Rest over the "Reset" button: its tooltip shows (no hover delay on the backend's tooltips).
     {"widgets", {{1, 52.0f, 391.0f, -1, false}}}, // under the Windows menu bar (§5.9)
+    // Right-click the card (button 1, ImGui's right): its menu opens on the release and stays open.
+    {"context_menu",
+     {{1, 60.0f, 109.0f, -1, false}, {2, 60.0f, 109.0f, 1, true}, {3, 60.0f, 109.0f, 1, false}}},
 };
 
 const GoldenCase *findCase(const std::string &name) {

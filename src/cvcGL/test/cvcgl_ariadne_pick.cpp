@@ -56,6 +56,10 @@ windows:
         refresh_hz: 2
         width: 400
         height: 320
+        context_menu:
+          - menu_item: Inspect
+            visible_when: (= (get-attr event "node") "crate")
+            on: (begin (state-set "inspected" (get-attr event "node")) (state-set "inspected_tags" (string.join (get-attr event "tags") ",")) (state-set "inspected_view" (get-attr event "view")))
   - window: Orbit
     id: orbit_window
     pos: [500, 20]
@@ -75,9 +79,14 @@ windows:
 
 init: (state-set "axis" "y")
 
+context_menu:
+  - menu_item: Here
+    on: (begin (state-set "main_on" (get-attr event "on")) (state-set "main_view" (get-attr event "view")) (state-set "main_hit" (get-attr event "hit")))
+
 scene:
   nodes:
     - node: crate
+      tags: [cargo, heavy]
       source: { box: { size: [2, 2, 2] } }
       transform: { position: [-6, 0, 0] }
     - node: post
@@ -216,6 +225,8 @@ int main() {
   check(val(app, key + ".phase") == "down", "a press writes phase down", val(app, key + ".phase"));
   check(val(app, key + ".hit") == "1" && val(app, key + ".node") == "crate", "with the crate hit",
         val(app, key + ".node"));
+  check(val(app, key + ".tags") == "cargo heavy", "and the node's tags",
+        val(app, key + ".tags")); // §5.28
   check(!val(app, key + ".x").empty() && val(app, key + ".button") == "1",
         "the point and the button");
   check(val(app, "pick.picked") == "crate" && val(app, "pick.picked_phase") == "down",
@@ -342,6 +353,65 @@ int main() {
           "the default pick key is the module's: includes.panel.viewers.inner_slice.pick",
           val(app, mod + ".viewers.inner_slice.pick.phase"));
     check(val(app, "pick.viewers.inner_slice.pick.seq").empty(), "not the document's");
+    io.AddMousePosEvent(-1.0f, -1.0f);
+    rt.step(kDt);
+  }
+
+  // §5.28 a right-click on the pick view over the crate opens its menu with the pick in `event`
+  // (node, tags, view), so the item for crates shows; a right-click (ImGui's button 1) neither
+  // picks nor turns the camera. Its item sits just inside the popup, which opens at the pointer.
+  {
+    const std::string pickSeq = val(app, key + ".seq");
+    picker.camera().getPose(eye, focal, up);
+    io.AddMousePosEvent(mx, my);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(1, true);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(1, false);
+    rt.step(kDt);
+    rt.step(kDt);
+    io.AddMousePosEvent(mx + 20.0f, my + 15.0f); // the popup's first item
+    rt.step(kDt);
+    io.AddMouseButtonEvent(0, true);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(0, false);
+    rt.step(kDt);
+    rt.step(kDt);
+    check(val(app, "pick.inspected") == "crate", "a right-click menu over the crate: Inspect ran",
+          val(app, "pick.inspected"));
+    check(val(app, "pick.inspected_tags") == "cargo,heavy", "with the node's tags as a list",
+          val(app, "pick.inspected_tags"));
+    check(val(app, "pick.inspected_view") == "picker", "and the view",
+          val(app, "pick.inspected_view"));
+    check(val(app, key + ".seq") == pickSeq, "the right-click wrote no pick",
+          val(app, key + ".seq"));
+    picker.camera().getPose(eye2, focal, up);
+    check(std::fabs(eye2[0] - eye[0]) + std::fabs(eye2[1] - eye[1]) + std::fabs(eye2[2] - eye[2]) <
+              1e-9,
+          "nor turned the camera");
+    // Over no window: the document's own menu, over the main view, with the main view's pick. Below
+    // the Orbit window and right of the Module window no window is, and the main view draws
+    // nothing there (its two boxes are a strip across the middle): a miss.
+    const float bx = 700.0f, by = 580.0f;
+    io.AddMousePosEvent(bx, by);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(1, true);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(1, false);
+    rt.step(kDt);
+    rt.step(kDt);
+    io.AddMousePosEvent(bx + 20.0f, by + 15.0f); // the popup's first item
+    rt.step(kDt);
+    io.AddMouseButtonEvent(0, true);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(0, false);
+    rt.step(kDt);
+    rt.step(kDt);
+    check(val(app, "pick.main_on") == "main", "the document's menu opens over no window",
+          val(app, "pick.main_on"));
+    check(val(app, "pick.main_view") == "main" && val(app, "pick.main_hit") == "0",
+          "with the main view's pick: a miss there",
+          val(app, "pick.main_view") + " " + val(app, "pick.main_hit"));
     io.AddMousePosEvent(-1.0f, -1.0f);
     rt.step(kDt);
   }

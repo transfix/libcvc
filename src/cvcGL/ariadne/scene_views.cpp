@@ -589,6 +589,21 @@ slices_on(const RealizedScene &rs, int axis) {
   return out;
 }
 
+#ifdef CVC_ENABLE_IMGUI
+// The modifier keys held, as a pick's `mods` field: shift, ctrl, alt, super, comma-separated.
+std::string pointer_mods() {
+  const ImGuiIO &io = ImGui::GetIO();
+  std::string mods;
+  for (const auto &[on, name] : {std::pair<bool, const char *>{io.KeyShift, "shift"},
+                                 {io.KeyCtrl, "ctrl"},
+                                 {io.KeyAlt, "alt"},
+                                 {io.KeySuper, "super"}})
+    if (on)
+      mods += (mods.empty() ? "" : ",") + std::string(name);
+  return mods;
+}
+#endif
+
 // The world ray through display point (x, y) of `ren`: the near plane's point and the direction to
 // the far plane's.
 bool display_ray(vtkRenderer *ren, double x, double y, double origin[3], double dir[3]) {
@@ -913,6 +928,14 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
     if (t.second.volume)
       node_of.emplace(t.second.volume.GetPointer(), it->second);
   }
+  return pick_props(ren, x, y, node_of, slot.realized, hit);
+}
+
+bool SceneViews::pick_props(vtkRenderer *ren, double x, double y,
+                            const std::unordered_map<vtkProp *, std::string> &node_of,
+                            const RealizedScene *realized, PickHit &hit) const {
+  double origin[3], dir[3];
+  const bool ray = display_ray(ren, x, y, origin, dir);
   // A real geometry hit test, as SceneRenderer::pickWorld: a miss over empty space is a miss.
   vtkNew<vtkCellPicker> picker;
   picker->SetTolerance(0.0005);
@@ -936,8 +959,8 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
       hit.node = n->second;
   }
   // On a volume_slice node: the point on its plane exactly, and the voxel there.
-  if (ray && !hit.node.empty() && slot.realized)
-    for (const RealizedScene::TaggedNode &t : slot.realized->nodes)
+  if (ray && !hit.node.empty() && realized)
+    for (const RealizedScene::TaggedNode &t : realized->nodes)
       if (t.id == hit.node)
         if (auto s = std::dynamic_pointer_cast<VolumeSliceNode>(t.node.lock())) {
           PickHit h;
@@ -962,13 +985,21 @@ std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v
   const double y = (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y;
   PickHit hit;
   pick_at(v, x, y, hit);
-  std::string mods;
-  for (const auto &[on, name] : {std::pair<bool, const char *>{io.KeyShift, "shift"},
-                                 {io.KeyCtrl, "ctrl"},
-                                 {io.KeyAlt, "alt"},
-                                 {io.KeySuper, "super"}})
-    if (on)
-      mods += (mods.empty() ? "" : ",") + std::string(name);
+  std::vector<std::pair<std::string, std::string>> f = hit_fields(hit, v.scene);
+  f.emplace_back("button", std::string(phase) == "hover" ? "0" : "1");
+  f.emplace_back("mods", pointer_mods());
+  f.emplace_back("phase", phase);
+  f.emplace_back("view", v.name);
+  f.emplace_back("seq", std::to_string(++seq));
+  return f;
+#else
+  (void)v, (void)phase, (void)seq;
+  return {};
+#endif
+}
+
+std::vector<std::pair<std::string, std::string>>
+SceneViews::hit_fields(const PickHit &hit, const std::string &scene) const {
   const auto num = [](double d) {
     char b[64];
     std::snprintf(b, sizeof b, "%.9g", d);
@@ -977,6 +1008,16 @@ std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v
   const bool at = hit.hit || hit.plane; // a slice view reports the plane's point past its edge
   const auto ijk = [&hit](int c) { return hit.voxel ? std::to_string(hit.ijk[c]) : std::string(); };
   const char *axes[] = {"x", "y", "z"};
+  // §5.28 the node's own tags:, so a right-click menu's items can show over the nodes they act on.
+  std::string tags;
+  SceneSlot slot;
+  if (!hit.node.empty() && scenes_ && scenes_(scene, slot) && slot.realized)
+    for (const RealizedScene::TaggedNode &t : slot.realized->nodes)
+      if (t.id == hit.node) {
+        for (const std::string &tag : t.tags)
+          tags += (tags.empty() ? "" : " ") + tag;
+        break;
+      }
   return {{"x", at ? num(hit.world[0]) : ""},
           {"y", at ? num(hit.world[1]) : ""},
           {"z", at ? num(hit.world[2]) : ""},
@@ -987,13 +1028,36 @@ std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v
           {"k", ijk(2)},
           {"value", hit.voxel ? num(hit.value) : ""},
           {"axis", hit.plane && hit.axis >= 0 && hit.axis < 3 ? axes[hit.axis] : ""},
-          {"button", std::string(phase) == "hover" ? "0" : "1"},
-          {"mods", mods},
-          {"phase", phase},
-          {"view", v.name},
-          {"seq", std::to_string(++seq)}};
+          {"tags", tags}};
+}
+
+std::vector<std::pair<std::string, std::string>> SceneViews::main_pick_fields() const {
+#ifdef CVC_ENABLE_IMGUI
+  vtkRenderer *ren = view_->renderer();
+  SceneSlot slot;
+  if (!ren || !scenes_ || !scenes_("", slot))
+    return {};
+  // The main scene's nodes, less what main_view: leaves out of the main view.
+  std::unordered_map<vtkProp *, std::string> node_of;
+  if (slot.realized)
+    for (const RealizedScene::TaggedNode &t : slot.realized->nodes) {
+      std::unordered_set<vtkProp *> own;
+      collect(t.node.lock(), own, false);
+      for (vtkProp *p : own)
+        if (std::find(main_hidden_.begin(), main_hidden_.end(), static_cast<void *>(p)) ==
+            main_hidden_.end())
+          node_of.emplace(p, t.id);
+    }
+  const ImGuiIO &io = ImGui::GetIO();
+  PickHit hit;
+  pick_props(ren, io.MousePos.x * io.DisplayFramebufferScale.x,
+             (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y, node_of,
+             slot.realized, hit);
+  std::vector<std::pair<std::string, std::string>> f = hit_fields(hit, "");
+  f.emplace_back("view", "main");
+  f.emplace_back("mods", pointer_mods());
+  return f;
 #else
-  (void)v, (void)phase, (void)seq;
   return {};
 #endif
 }
@@ -1634,6 +1698,18 @@ void SceneViews::register_widget() {
           --v->settle;
           v->vp->invalidate();
         }
+        // §5.28 a right-click menu over it gets the pick at the pointer, taken as it opens.
+        if (w.context_menu)
+          edit.context_pick = [this, v] {
+            const ImGuiIO &io = ImGui::GetIO();
+            PickHit hit;
+            pick_at(*v, io.MousePos.x * io.DisplayFramebufferScale.x,
+                    (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y, hit);
+            std::vector<std::pair<std::string, std::string>> f = hit_fields(hit, v->scene);
+            f.emplace_back("view", v->name);
+            f.emplace_back("mods", pointer_mods());
+            return f;
+          };
         return edit;
       });
 #endif

@@ -60,8 +60,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+class vtkProp;
+class vtkRenderer;
 
 namespace cvc {
 namespace ariadne {
@@ -149,6 +153,12 @@ public:
     return scenes_ && scenes_(scene, out);
   }
 
+  // §5.28 the main view's pick at the pointer, for the document's right-click menu
+  // (Runtime::set_main_view_pick): what a viewport's pick writes (x, y, z, hit, node, i, j, k,
+  // value, axis, tags, view "main", mods), against the main scene's nodes as the main view draws
+  // them (main_view: hides some). Empty where there is no ImGui.
+  std::vector<std::pair<std::string, std::string>> main_pick_fields() const;
+
 private:
   struct View;
   struct Camera; // a named camera (scene: cameras:) and its controller
@@ -168,10 +178,20 @@ private:
   // A pointer: view's pick at the pointer as it moves with no button down: written under its
   // pointer key with phase "hover" (no on_pick).
   void pointer(View &v);
-  // The keys a pick at the pointer writes (x, y, z, hit, node, i, j, k, value, axis, button,
-  // mods, phase, view, seq), `seq` counted by `seq`.
+  // The keys a pick at the pointer writes (x, y, z, hit, node, i, j, k, value, axis, tags,
+  // button, mods, phase, view, seq), `seq` counted by `seq`.
   std::vector<std::pair<std::string, std::string>> pick_fields(View &v, const char *phase,
                                                                long &seq) const;
+  // A cell pick at (x, y) in `ren`'s display coordinates against the props `node_of` names, each
+  // by its node's id, and on a volume_slice node of `realized` its voxel. pick_at's, and the main
+  // view's.
+  bool pick_props(vtkRenderer *ren, double x, double y,
+                  const std::unordered_map<vtkProp *, std::string> &node_of,
+                  const RealizedScene *realized, PickHit &hit) const;
+  // §5.28 a hit's fields (x, y, z, hit, node, i, j, k, value, axis, tags: the node's own tags in
+  // scene `scene`, space-separated), as a pick writes them.
+  std::vector<std::pair<std::string, std::string>> hit_fields(const PickHit &hit,
+                                                              const std::string &scene) const;
 
   SceneRenderer *view_;
   ImGuiBackend *backend_;
