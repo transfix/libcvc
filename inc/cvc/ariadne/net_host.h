@@ -12,9 +12,11 @@
 //   - builds the host's credential store (cvc/net/credentials.h): in memory, or in the
 //     --credential-store file natively, its names bound as the policy files' credential lines say,
 //     holding for this run the tokens --credential-env reads from the environment;
-//   - registers the http verbs (net_intrinsics.h) and the http(s) URI handler (uri_http.h) with
-//     both, so (http-get ...), (http-request ...), (fetch "https://...") and an import: of an
-//     https URL are all checked;
+//   - registers the http verbs (net_intrinsics.h) and the http(s) URI handler with both, so
+//     (http-get ...), (http-request ...), (fetch "https://...") and an import: of an https URL are
+//     all checked. The handler is the app's HTTP cache (uri_http_cache.h), unless the config turns
+//     it off: imports, (fetch ...) and the host's own GETs for pictures and native video and audio
+//     (media.h) are kept in it, within its budget, and served from it while fresh;
 //   - makes the capability tokens net, net.auth and net.auth.persist hold (requires.h), so a
 //     document's requires: fails clearly where its launcher did not turn the network on;
 //   - turns on sign-in with OAuth 2.0 / OpenID Connect providers (oidc_host.h): the oidc-* verbs
@@ -54,6 +56,11 @@ struct NetHostConfig {
   // Not a flag: a WebSocket transport the ws-* verbs connect through (NetAccess::ws), a test's or
   // a host's own. Null: the compiled backend.
   std::shared_ptr<cvc::net::WsConnector> ws;
+  // Not a flag: read http(s) URIs, pictures and native media through the app's HTTP cache
+  // (register_cached_http_uri_handler, uri_http_cache.h; its policy keys under
+  // sys.net.http_cache.policy turn it off at run time too). false: the plain handler
+  // (register_http_uri_handler), every read a request.
+  bool http_cache = true;
 };
 
 // Turn the network on for documents run in `app`, as `config` says. Call once at setup, before
@@ -67,8 +74,9 @@ struct NetHostConfig {
 std::string enable_net(cvc::app &app, const NetHostConfig &config);
 
 // Turn `app`'s off again: programs built afterwards get no http verbs, a call to one bound earlier
-// raises an error, the app's http(s) URI handlers are unregistered and the capability tokens stop
-// holding. Credentials kept in a file stay there.
+// raises an error, the app's http(s) URI handlers (the cache's or the plain ones) are unregistered
+// and the capability tokens stop holding. Credentials kept in a file stay there, and so does what
+// the cache holds under sys.net.http_cache (clear_http_cache empties it).
 void disable_net(cvc::app &app);
 
 // What enable_net turned on, for (has? "net"), `ari info` and the like.

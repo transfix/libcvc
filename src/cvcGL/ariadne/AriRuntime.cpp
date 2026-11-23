@@ -154,8 +154,15 @@ public:
       if (l.rig.empty()) // a rig's lights belong to (and leave with) its StageLighting
         lights_.push_back(l.id);
     const cvc::bounding_box bb = view_->scene().computeGraphicsBounds();
-    if (!bb.isNull())
+    if (!bb.isNull()) {
       cam_->frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+      // `cameras:` names one `main`: where the main view starts, as a viewport's camera does.
+      for (const ari::SceneCamera &c : scene.cameras)
+        if (c.id == "main") {
+          const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+          frame_scene_camera(*cam_, b, c, sg);
+        }
+    }
     // The scene's background (a view property): a solid colour, or a top-to-bottom gradient set on
     // the renderer (SceneRenderer exposes only a flat setBackground).
     apply_background(view_->renderer(), scene);

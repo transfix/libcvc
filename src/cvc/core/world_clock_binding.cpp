@@ -15,6 +15,8 @@
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock_binding.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
+#include <map>
 #include <utility>
 
 namespace cvc {
@@ -32,11 +34,12 @@ std::string trim_lower(const std::string &s) {
 // Read through a transparent link to its target, the way a bound widget reads
 // (cvc/ariadne/bind.h read_effective): a mounted scope's hole is a transparent
 // link, and a control written through it lands on the target.
-std::string read_raw(cvc::app &ctx, const std::string &path) {
-  if (path.empty()) // a lane that is off reads as unset
+// A key's value, seen through a transparent link at its node ("" for a lane that is off).
+std::string read_raw(cvc::state_key *k) {
+  if (!k) // a lane that is off reads as unset
     return std::string();
   try {
-    cvc::state &s = cvc::state::instance(ctx)(path);
+    cvc::state &s = k->get();
     if (s.isLink() && s.linkMode() == cvc::state::link_mode::transparent) {
       const cvc::state::link_resolution lr = s.resolveLink();
       if (lr.kind == cvc::state::link_resolution_kind::resolved && lr.target)
@@ -48,22 +51,20 @@ std::string read_raw(cvc::app &ctx, const std::string &path) {
   }
 }
 
-// Never throws into a frame: a read-only or unwritable key keeps its value, and
-// a lane that is off (empty path) is not written.
-template <class T> void write_val(cvc::app &ctx, const std::string &path, const T &v) {
-  if (path.empty())
+template <class T> void write_val(cvc::state_key *k, const T &v) {
+  if (!k)
     return;
   try {
-    cvc::state::instance(ctx)(path).value(v);
+    k->get().value(v);
   } catch (const std::exception &) {
   }
 }
 
-void write_str(cvc::app &ctx, const std::string &path, const std::string &v) {
-  if (path.empty())
+void write_str(cvc::state_key *k, const std::string &v) {
+  if (!k)
     return;
   try {
-    cvc::state::instance(ctx)(path).value(v);
+    k->get().value(v);
   } catch (const std::exception &) {
   }
 }
@@ -120,13 +121,29 @@ world_clock_keys world_clock_keys::under(const std::string &prefix) {
   return k;
 }
 
+struct world_clock_binding::kept_keys {
+  std::map<std::string, cvc::state_key> by_path;
+};
+
 world_clock_binding::world_clock_binding(cvc::app &ctx, cvc::world_clock &clock, std::string prefix)
-    : _ctx(ctx), _clock(clock), _prefix(std::move(prefix)),
-      _keys(world_clock_keys::under(_prefix)) {}
+    : _ctx(ctx), _clock(clock), _prefix(std::move(prefix)), _keys(world_clock_keys::under(_prefix)),
+      _kept(std::make_unique<kept_keys>()) {}
 
 world_clock_binding::world_clock_binding(cvc::app &ctx, cvc::world_clock &clock,
                                          world_clock_keys keys)
-    : _ctx(ctx), _clock(clock), _keys(std::move(keys)) {}
+    : _ctx(ctx), _clock(clock), _keys(std::move(keys)), _kept(std::make_unique<kept_keys>()) {}
+
+world_clock_binding::~world_clock_binding() = default;
+
+// Under _mutex, as every caller (seed, pull_locked, push_locked) holds it.
+cvc::state_key *world_clock_binding::kept(const std::string &path) {
+  if (path.empty())
+    return nullptr;
+  auto it = _kept->by_path.find(path);
+  if (it == _kept->by_path.end())
+    it = _kept->by_path.emplace(path, cvc::state_key(_ctx, path)).first;
+  return &it->second;
+}
 
 std::string world_clock_binding::key(const std::string &name) const {
   const std::pair<const char *, const std::string *> table[] = {
@@ -188,20 +205,20 @@ void world_clock_binding::seed() {
   _paused = (m == cvc::world_clock::mode::paused);
   _requested = _paused ? cvc::world_clock::mode::live : m;
 
-  if (read_raw(_ctx, _keys.speed).empty())
-    write_val(_ctx, _keys.speed, _clock.scale());
-  if (read_raw(_ctx, _keys.paused).empty())
-    write_val(_ctx, _keys.paused, _paused ? 1 : 0);
-  if (read_raw(_ctx, _keys.mode).empty())
-    write_str(_ctx, _keys.mode, mode_name(_requested));
-  if (read_raw(_ctx, _keys.lockstep_steps).empty())
-    write_val(_ctx, _keys.lockstep_steps, _clock.lockstep_steps());
-  if (read_raw(_ctx, _keys.step).empty())
-    write_val(_ctx, _keys.step, 0);
+  if (read_raw(kept(_keys.speed)).empty())
+    write_val(kept(_keys.speed), _clock.scale());
+  if (read_raw(kept(_keys.paused)).empty())
+    write_val(kept(_keys.paused), _paused ? 1 : 0);
+  if (read_raw(kept(_keys.mode)).empty())
+    write_str(kept(_keys.mode), mode_name(_requested));
+  if (read_raw(kept(_keys.lockstep_steps)).empty())
+    write_val(kept(_keys.lockstep_steps), _clock.lockstep_steps());
+  if (read_raw(kept(_keys.step)).empty())
+    write_val(kept(_keys.step), 0);
 
   // Requests made before the binding existed are not replayed as a burst.
   long long seen = 0;
-  if (parse_num(read_raw(_ctx, _keys.step), seen))
+  if (parse_num(read_raw(kept(_keys.step)), seen))
     _step_seen = seen;
 }
 
@@ -225,23 +242,23 @@ void world_clock_binding::pull_locked() {
     seed();
 
   double speed = 0.0;
-  if (parse_num(read_raw(_ctx, _keys.speed), speed))
+  if (parse_num(read_raw(kept(_keys.speed)), speed))
     _clock.set_scale(speed); // the clock clamps a negative or non-finite speed to 0
 
   bool paused = false;
-  if (parse_bool(read_raw(_ctx, _keys.paused), paused))
+  if (parse_bool(read_raw(kept(_keys.paused)), paused))
     _paused = paused;
 
   cvc::world_clock::mode requested = _requested;
-  if (parse_mode(read_raw(_ctx, _keys.mode), requested))
+  if (parse_mode(read_raw(kept(_keys.mode)), requested))
     _requested = requested;
 
   int lockstep = 0;
-  if (parse_num(read_raw(_ctx, _keys.lockstep_steps), lockstep))
+  if (parse_num(read_raw(kept(_keys.lockstep_steps)), lockstep))
     _clock.set_lockstep_steps(lockstep);
 
   long long step = 0;
-  if (parse_num(read_raw(_ctx, _keys.step), step)) {
+  if (parse_num(read_raw(kept(_keys.step)), step)) {
     if (step > _step_seen)
       _pending_steps += static_cast<std::uint64_t>(step - _step_seen);
     _step_seen = step; // a counter reset (step went down) requests nothing
@@ -260,11 +277,11 @@ void world_clock_binding::push() {
 }
 
 void world_clock_binding::push_locked() {
-  write_val(_ctx, _keys.time, _clock.t());
-  write_val(_ctx, _keys.tick, _clock.tick());
-  write_val(_ctx, _keys.fixed_dt, _clock.fixed_dt());
-  write_val(_ctx, _keys.realized_speed, _clock.realized_scale());
-  write_val(_ctx, _keys.dropped, _clock.total_dropped());
+  write_val(kept(_keys.time), _clock.t());
+  write_val(kept(_keys.tick), _clock.tick());
+  write_val(kept(_keys.fixed_dt), _clock.fixed_dt());
+  write_val(kept(_keys.realized_speed), _clock.realized_scale());
+  write_val(kept(_keys.dropped), _clock.total_dropped());
 }
 
 cvc::world_clock::step_result world_clock_binding::drive(double wall_dt) {

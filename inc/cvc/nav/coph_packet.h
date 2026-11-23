@@ -93,6 +93,9 @@ struct coph_packet {
   std::vector<coph_vec2> support_points; // those readings' positions, first occurrences in order
   std::string uncertainty;
   std::vector<std::string> acknowledged_sources;
+  // A MazePacket's (MazeLearner.export): its geometry schema and reports. A car's learner sends
+  // CooperativeLearner's packet, without them (maze false): json() then has neither key.
+  bool maze = true;
   std::int64_t geometry_schema = 1;
   std::vector<coph_geometry_report> geometry;
 

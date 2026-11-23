@@ -296,6 +296,7 @@ void substitute_index_in(Widget &out, const std::string &idx) {
   // than all N instances sharing one, which would violate repeat's per-instance-state contract.
   if (!out.scope.empty())
     out.scope += "." + idx;
+  replace_in(out.app_name_bind, kTok, idx); // §5.25 and its name: (slots.{i}.name)
   // §12: and its parent-scope holes are {i}-substituted too, so an instance can grant a
   // per-instance target (link: { slot: fleet.{i} }) — mirroring the bind/on substitution above.
   for (LinkHole &h : out.links) {
@@ -2256,6 +2257,17 @@ struct Runtime::Impl {
   // whose address holds until the next reconcile; an inner one is copied per frame).
   const Widget *emitting_repeat_ = nullptr;
   int emitting_instance_ = -1;
+  // §12 a repeated mount's instances, made once from its template (in `root`, whose address holds
+  // until the next reconcile, which clears them) rather than copied each frame: an instance is a
+  // whole loaded document, and its copy each frame cost as much as drawing it.
+  std::map<std::pair<const Widget *, int>, Widget> mount_instances_;
+  // §5.25 a mount's `name:`, worked out in the current scope: a key's value, or an expression's;
+  // "" when it has none or it comes out empty.
+  std::string mount_name_of(const std::string &spec) {
+    if (spec.empty())
+      return {};
+    return is_expr(spec) ? eval_text(spec) : read_string(app, resolve(spec));
+  }
   void ensure_mount_tick(const std::string &sub_prefix, const Widget &w);
   // On a reconcile: stop every mount tick the new tree does not have at the same sub-prefix with
   // the same program (a repeated mount's restart at their next frame).
@@ -2377,6 +2389,7 @@ struct Runtime::Impl {
     // §5.24 the tray's bell: the document's `notifications:` and whether `- bell` places it.
     int bell_setting = -1;
     bool bell_placed = false;
+    bool bell_always = false; // `notifications: always`: shown with an empty feed too
     // §5.25 the loaded documents with a menubar of their own, in tree order: each is one menu of
     // the outer bar, its bar is not drawn where it is, and its tray icons join the outer tray.
     struct App {
@@ -2389,6 +2402,9 @@ struct Runtime::Impl {
       // instances are worked out each frame (plan_frame_apps), one application each.
       const Widget *repeat = nullptr;
       std::string parent_scope;
+      // The load: node's `name:` (Widget::app_name_bind), worked out each frame in parent_scope:
+      // when not empty, the application's name (an instance's, `{i}` filled in).
+      std::string name_bind;
     };
     std::vector<App> apps;
   };
@@ -2476,6 +2492,7 @@ struct Runtime::Impl {
     std::string tip;
   };
   Backend::TrayIcon tray_spec(const Widget &w);
+  std::string tray_picture(const Widget &w);
   std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
   void emit_tray(const std::vector<TrayEntry> &icons);
   void emit_tray_items(const TrayEntry &icon); // a tray menu's items: its children, or the bell's
@@ -2782,10 +2799,12 @@ void Runtime::Impl::emit_container(const Widget &w) {
       run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
     if (!w.tick_script.empty())
       ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
-    if (!w.app_name.empty())
-      mount_names[sub_prefix] = w.app_name; // §5.25 the loaded document's name
-    else
-      mount_names[sub_prefix] = w.scope.substr(w.scope.rfind('.') + 1);
+    // §5.25 the application's name, as its menu has it: the mount's name:, else the loaded
+    // document's, else its mount id (worked out here, in the parent's scope).
+    std::string name = mount_name_of(w.app_name_bind);
+    if (name.empty())
+      name = !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1);
+    mount_names[sub_prefix] = std::move(name);
     if (w.functions)
       mount_functions[sub_prefix] = w.functions->prelude;
     scope_stack.push_back(sub_prefix);
@@ -2925,10 +2944,20 @@ void Runtime::Impl::each_instance(const Widget &w,
       break;
     }
     ++frame_instances;
-    Widget inst = substitute_index(w, i);
-    inst.repeat.clear(); // the instance renders once
     if (outermost)
       emitting_instance_ = i;
+    if (outermost && !w.scope.empty()) { // a repeated mount: its instance, made once
+      auto it = mount_instances_.find({&w, i});
+      if (it == mount_instances_.end()) {
+        Widget inst = substitute_index(w, i);
+        inst.repeat.clear();
+        it = mount_instances_.emplace(std::make_pair(&w, i), std::move(inst)).first;
+      }
+      f(it->second, i);
+      continue;
+    }
+    Widget inst = substitute_index(w, i);
+    inst.repeat.clear(); // the instance renders once
     f(inst, i);
   }
 }
@@ -3759,7 +3788,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
     const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
+    b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
     CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+    b.set_custom_scope(std::string());
     if (!e.handled)
       b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
     else if (e.committed && !w.bind.empty())
@@ -4833,6 +4864,7 @@ void Runtime::Impl::render() {
     root = std::move(pending);
     pending = Widget{};
     has_pending = false;
+    mount_instances_.clear(); // §12 made from the old tree's templates
     plan_windows_menu(); // §5.9: which windows the built-in Windows menu lists
     // §12: tear down the OLD tree's parent-scope holes before the new tree re-wires its own, so a
     // fragment re-mounted at the same sub-prefix cannot inherit a grant the new manifest omits
@@ -4943,6 +4975,7 @@ void Runtime::Impl::plan_windows_menu() {
   // `mount`: the innermost mount `w` is in, null in the document's own tree.
   const Widget *mount = nullptr;
   std::string mount_scope;
+  std::string mount_parent; // the scope the innermost mount sits in, where its name: is read
   std::function<void(const Widget &, const std::string &, bool)> walk =
       [&](const Widget &w, const std::string &scope, bool in_menubar) {
         if (!w.repeat.empty()) {
@@ -4972,6 +5005,7 @@ void Runtime::Impl::plan_windows_menu() {
               a.functions = w.functions.get();
               a.repeat = &w;
               a.parent_scope = scope;
+              a.name_bind = w.app_name_bind;
               p.apps.push_back(std::move(a));
             }
           }
@@ -4980,20 +5014,25 @@ void Runtime::Impl::plan_windows_menu() {
         const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
         const Widget *const outer_mount = mount;
         const std::string outer_scope = mount_scope;
+        const std::string outer_parent = mount_parent;
         if (!w.scope.empty()) {
           mount = &w;
           mount_scope = inner;
+          mount_parent = scope;
         }
         struct Restore {
           const Widget *&m;
           std::string &s;
+          std::string &pa;
           const Widget *pm;
           std::string ps;
+          std::string ppa;
           ~Restore() {
             m = pm;
             s = ps;
+            pa = ppa;
           }
-        } restore{mount, mount_scope, outer_mount, outer_scope};
+        } restore{mount, mount_scope, mount_parent, outer_mount, outer_scope, outer_parent};
         switch (w.kind) {
         case Kind::Menubar:
           in_menubar = true;
@@ -5009,6 +5048,8 @@ void Runtime::Impl::plan_windows_menu() {
                                                 : mount->scope.substr(mount->scope.rfind('.') + 1);
               a.scope = mount_scope;
               a.functions = mount->functions.get();
+              a.parent_scope = mount_parent;
+              a.name_bind = mount->app_name_bind;
               p.apps.push_back(std::move(a));
             }
             break;
@@ -5032,8 +5073,10 @@ void Runtime::Impl::plan_windows_menu() {
             p.clock_setting = w.bdef ? 1 : 0;
           else if (w.tray_bell && in_menubar)
             p.bell_placed = true;
-          else if (w.tray_bell)
+          else if (w.tray_bell) {
             p.bell_setting = w.bdef ? 1 : 0;
+            p.bell_always = w.bell_always;
+          }
           break;
         case Kind::WindowsMenu:
           if (mount) // a loaded document's Windows menu is the outer document's
@@ -5172,7 +5215,49 @@ Backend::TrayIcon Runtime::Impl::tray_spec(const Widget &w) {
   const std::string tone = is_expr(w.tone) ? eval_text(w.tone) : w.tone;
   t.tone = tone == "error" ? 2 : tone == "warn" ? 1 : 0;
   t.menu = !w.children.empty();
+  t.picture = tray_picture(w);
   return t;
+}
+
+// §5.22 a tray icon's `icon:`: the published name of its picture, round and a little over the
+// bar's height (64 px, sharp on a phone's dense screen), or "" while it loads, if it fails, in a
+// terminal, or with none. A video URL (an avatar can be one) plays as a decorative video: silent,
+// looping, by itself; an animated GIF or WebP moves, as an image:'s does.
+std::string Runtime::Impl::tray_picture(const Widget &w) {
+  if (w.button_icon.empty() || backend->capabilities().terminal)
+    return std::string();
+  const std::string icon = is_expr(w.button_icon) ? eval_text(w.button_icon) : w.button_icon;
+  if (icon.empty())
+    return std::string();
+  if (!media::is_uri(icon))
+    return icon; // a host-published picture
+  constexpr int kPx = 64;
+  if (media::is_video_uri(icon)) {
+    media::PlayerSource ps;
+    ps.uri = icon;
+    ps.auth = w.media_auth;
+    ps.video = true;
+    ps.frame_w = ps.frame_h = kPx;
+    ps.loop = ps.muted = true;
+    ps.audio = false;
+    PlayerSlot &p = player_slot("tray#" + icon, ps);
+    if (p.player && !p.autoplay_done && p.state == media::PlayerState::Ready) {
+      p.autoplay_done = true;
+      p.player->play();
+    }
+    if (player_frame(p, kPx, kPx, ImageFit::Cover, ImageShape::Circle, steady_seconds()))
+      return p.frame_name;
+    return std::string();
+  }
+  media::ImageRequest rq;
+  rq.uri = icon;
+  rq.auth = w.media_auth;
+  rq.w = rq.h = kPx;
+  rq.fit = media::Fit::Cover;
+  rq.shape = media::Shape::Circle;
+  media::ImageView v;
+  const std::string name = media_picture(rq, v);
+  return v.status == media::Status::Ready ? name : std::string();
 }
 
 namespace {
@@ -5210,9 +5295,31 @@ bool path_under(const std::string &path, const std::string &scope) {
 void Runtime::Impl::plan_frame_apps() {
   frame_apps.clear();
   frame_app_bars.clear();
+  // Each application's name once: a second one a name: gives again is told apart by a number
+  // ("tx.wtf 2"), as two menus of one title would be one menu to a terminal's bar.
+  const auto unique = [&](std::string name) {
+    const auto taken = [&](const std::string &n) {
+      for (const WindowsMenuPlan::App &o : frame_apps)
+        if (o.name == n)
+          return true;
+      return false;
+    };
+    if (!taken(name))
+      return name;
+    for (int k = 2;; ++k)
+      if (const std::string n = name + " " + std::to_string(k); !taken(n))
+        return n;
+  };
   for (const WindowsMenuPlan::App &a : windows_menu.apps) {
     if (!a.repeat) {
-      frame_apps.push_back(a);
+      WindowsMenuPlan::App app_ = a;
+      if (!a.name_bind.empty()) { // §5.25 the mount's name:, read in the scope it sits in
+        const ScopedTo in(*this, a.parent_scope, nullptr);
+        if (std::string n = mount_name_of(a.name_bind); !n.empty())
+          app_.name = std::move(n);
+      }
+      app_.name = unique(std::move(app_.name));
+      frame_apps.push_back(std::move(app_));
       continue;
     }
     int n = 0;
@@ -5223,7 +5330,14 @@ void Runtime::Impl::plan_frame_apps() {
     for (int i = 0; i < n; ++i) {
       WindowsMenuPlan::App inst = a;
       inst.scope = resolve_bind(a.parent_scope, a.repeat->scope + "." + std::to_string(i));
-      inst.name = a.name + " " + std::to_string(i + 1);
+      std::string name;
+      if (!a.name_bind.empty()) { // this instance's name:, {i} filled in
+        std::string spec = a.name_bind;
+        replace_in(spec, kIndexToken, std::to_string(i));
+        const ScopedTo in(*this, a.parent_scope, nullptr);
+        name = mount_name_of(spec);
+      }
+      inst.name = unique(name.empty() ? a.name + " " + std::to_string(i + 1) : std::move(name));
       frame_app_bars.push_back(substitute_index(*a.bar, i));
       inst.bar = &frame_app_bars.back();
       inst.repeat = nullptr;
@@ -5741,10 +5855,11 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
     c.spec.tooltip = c.tip;
     return c;
   };
-  // §5.24 the bell: while the feed has entries; its badge the unread, its tone the worst of them.
+  // §5.24 the bell: while the feed has entries (always, for `notifications: always`); its badge the
+  // unread, its tone the worst of them.
   const cvc::notify_summary feed = cvc::notify_status(app);
   // The clock and the bell are the document's first bar's (a second bar of its own has neither).
-  const bool bell_on = !first_bar_drawn && feed.count > 0 &&
+  const bool bell_on = !first_bar_drawn && (feed.count > 0 || windows_menu.bell_always) &&
                        read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default()) != 0;
   const auto bell_icon = [&](const Widget *at) {
     Icon c;

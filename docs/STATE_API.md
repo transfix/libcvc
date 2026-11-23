@@ -47,6 +47,7 @@
   - [Property Methods](#property-methods)
   - [Tree Navigation](#tree-navigation)
   - [Pinned Lookups](#pinned-lookups)
+  - [Paths Kept Resolved](#paths-kept-resolved)
   - [Futures Methods](#futures-methods)
   - [Serialization Methods](#serialization-methods)
 - [Usage Examples](#usage-examples)
@@ -1780,6 +1781,43 @@ h->value("x");                            // a.b stays alive for h's lifetime
   which a `destroyed()` slot that walks the parent needs. It derives from the vector, so a caller
   can pass one as `pins`; `link_resolution::target_pins` and `intrinsics_context::root_pins` are
   `pin_vector`s, and the structs holding them stay aggregates.
+
+### Paths Kept Resolved
+
+Every lookup by path walks from the app's root: the root through the app's data map under a named
+mutex, then a lock and a map search per segment. A reader or writer of the same keys every frame
+(a world's telemetry, a scene's bound values) keeps them resolved instead.
+
+```cpp
+// The shape of this node's tree: a count shared by all of its nodes. It moves when a node is made
+// in the tree or taken out of it (removeChild, sweepExpired, reset(false)), or a link in it is
+// set, cleared, or changes its mode or writability. Value and data writes never move it.
+std::uint64_t structureEpoch() const;
+
+// <cvc/state/state_key.h>: a path resolved once and walked again only after the epoch moved.
+// physical (the default): find() as findDescendant, get() as operator().
+cvc::state_key k(ctx, "physics.stats.tick");
+// through_links: find() as findThroughLinks, get() as childThroughLinks.
+cvc::state_key b(ctx, "ui.show", cvc::state_key::view::through_links);
+k.get().value(std::to_string(tick)); // made when absent, like operator()
+if (cvc::state *s = b.find())        // nullptr while the path has no node
+  show = s->value() == "1";
+```
+
+- **What the epoch promises.** While it holds still, every path resolves to the node it resolved
+  to before, through links or not: a path gets a node, loses one or resolves elsewhere only by a
+  node being made or taken out, or a link changing. A cached miss is therefore as good as a cached
+  hit. A subtree taken out keeps counting with the tree it left.
+- **A key pins what it resolved**: the node and every hop to it, in `pin_vector`s, as the pinned
+  walks do, and it lets the node go before its ancestors. A node taken out of the tree is let go at
+  the key's next look, which walks the path again; a write after that lands where a reader looks.
+- **One owner's.** A key is not for use from two threads at once; the nodes it hands out are as
+  thread-safe as any. A tree whose shape changes every frame (a node made each frame) makes every
+  key walk again each frame: no slower than a lookup by path.
+- cvc::ariadne's `bind_key(ctx, path)` makes a through-links key for a bind path, and `read_or`,
+  `read_bool_or` and `write` take one. Scene `visible:`, `opacity:`, clip `offset:`, `repeat:`
+  counts, ribbons' and links' sources and bound numbers, the scene clock's keys, a SceneWorld's
+  `physics.stats.*` and its vehicles' `entities.*` and pose keys are all kept this way.
 
 ### Futures Methods
 

@@ -25,8 +25,10 @@
 #include <cvc/state/state.h>   // isValidStateName, SEPARATOR
 #include <initializer_list>
 #include <limits>
+#include <locale>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -203,11 +205,21 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
       }
     } else if (key == "look") {
       if (!val.is_map())
-        return at + " look: expects a map (box:, file:, asset:, model:, data:, fit:, scale:, yaw:, "
-                    "z:, wheel:, wheelbase:, track:)";
-      bool fit_given = false;
+        return at + " look: expects a map (box:, file:, asset:, model:, data:, chassis:, wheel:, "
+                    "rig:, fit:, scale:, yaw:, z:)";
+      bool fit_given = false, rig_given = false;
       for (const auto &[k, x] : val.entries) {
-        if (k == "box") {
+        if (k == "chassis" || k == "wheel") {
+          (k == "chassis" ? v.look.chassis : v.look.wheel) = x.as_string();
+        } else if (k == "rig") {
+          rig_given = true;
+          if (x.is_map()) {
+            if (!parse_vehicle_rig(x, v.look.rig, &why))
+              return at + " look: rig: " + why;
+          } else {
+            v.look.rig_file = x.as_string();
+          }
+        } else if (k == "box") {
           v.look.kind = "box";
         } else if (k == "file" || k == "asset") {
           v.look.kind = k;
@@ -227,31 +239,27 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
           if (!number(x, at + " look: " + k + ":", n, why))
             return why;
           (k == "scale" ? v.look.scale : k == "yaw" ? v.look.yaw : v.look.z) = n;
-        } else if (k == "wheel") {
-          v.look.wheel = x.as_string();
-        } else if (k == "wheelbase" || k == "track") {
-          double n = 0.0;
-          if (!number(x, at + " look: " + k + ":", n, why))
-            return why;
-          (k == "wheelbase" ? v.look.wheelbase : v.look.track) = n;
         } else {
           warn(warnings, at + " look: unknown key '" + k + "', ignored");
         }
       }
-      // `data: NAME` with `file: FILE`: the file inside a data: entry's package, a model fitted to
-      // the chassis unless `fit: false`.
-      if (!v.look.data.empty()) {
+      // A parted look: the chassis, the wheel and the rig, all three, in place of one model; on
+      // disk, or with `data: NAME` in that entry's package. Fitted to the vehicle always.
+      if (!v.look.chassis.empty() || !v.look.wheel.empty() || rig_given) {
+        if (v.look.chassis.empty() || v.look.wheel.empty() ||
+            (v.look.rig_file.empty() && v.look.rig.hubs.empty()))
+          return at + " look: a parted look needs chassis:, wheel: and rig:";
+        if (!v.look.kind.empty())
+          return at + " look: chassis:, wheel: and rig: are a model in parts; drop " +
+                 (v.look.kind == "box" ? std::string("box") : v.look.kind) + ":";
+        v.look.kind = v.look.data.empty() ? "file" : "data";
+        v.look.fit = true;
+      } else if (!v.look.data.empty()) {
+        // `data: NAME` with `file: FILE`: the file inside a data: entry's package, a model fitted
+        // to the chassis unless `fit: false`.
         if (v.look.kind != "file" || v.look.path.empty())
           return at + " look: data: needs file: (the model's file in the package)";
         v.look.kind = "data";
-        if (!fit_given)
-          v.look.fit = true;
-      }
-      // `wheel: WHEEL`: a wheeled look, the look's mesh its chassis, fitted to the vehicle's wheels
-      // unless `fit: false`.
-      if (!v.look.wheel.empty()) {
-        if (v.look.kind.empty() || v.look.kind == "box")
-          return at + " look: wheel: needs the chassis's mesh (file:, asset:, model: or data:)";
         if (!fit_given)
           v.look.fit = true;
       }
@@ -722,6 +730,110 @@ std::string parse_controllers(const Value &v, std::vector<avatar_controller> &ou
 
 } // namespace
 
+bool parse_vehicle_rig(const Value &v, vehicle_rig &out, std::string *why) {
+  const auto fail = [&](const std::string &w) {
+    if (why)
+      *why = w;
+    return false;
+  };
+  if (!v.is_map())
+    return fail("expects a map (radius:, hubs:, steer:, mirror:, up:)");
+  vehicle_rig r;
+  const Value *hubs = v.find("hubs");
+  const Value *list = hubs && hubs->is_map() ? hubs->find("xyz") : hubs;
+  std::vector<std::string> names; // hubs: order:, for steer:
+  if (hubs && hubs->is_map())
+    if (const Value *order = hubs->find("order"); order && order->is_seq())
+      for (const Value &n : order->items)
+        names.push_back(n.as_string());
+  if (!list || !list->is_seq() || list->items.empty())
+    return fail("hubs: expects a list of hubs, each [x, y, z]");
+  for (const Value &h : list->items) {
+    std::array<double, 3> p{};
+    bool ok = h.is_seq() && h.items.size() == 3;
+    for (std::size_t k = 0; ok && k < 3; ++k) {
+      p[k] = h.items[k].as_double(std::numeric_limits<double>::quiet_NaN());
+      ok = std::isfinite(p[k]);
+    }
+    if (!ok)
+      return fail("hubs: each hub is [x, y, z], three numbers");
+    r.hubs.push_back(p);
+  }
+  const Value *radius = v.find("radius");
+  if (!radius)
+    if (const Value *w = v.find("wheel"); w && w->is_map())
+      radius = w->find("radius");
+  if (radius) {
+    r.radius = radius->as_double(std::numeric_limits<double>::quiet_NaN());
+    if (!finite_positive(r.radius))
+      return fail("radius: must be a number > 0");
+  }
+  if (const Value *m = v.find("mirror")) {
+    r.mirror = m->as_string();
+    if (r.mirror != "turn" && r.mirror != "reflect" && r.mirror != "none")
+      return fail("mirror: '" + r.mirror + "' is not one of turn, reflect, none");
+  }
+  if (const Value *u = v.find("up")) {
+    const std::string up = u->as_string();
+    if (up != "z" && up != "y")
+      return fail("up: '" + up + "' is not z or y");
+    r.y_up = up == "y";
+  }
+  r.steers.assign(r.hubs.size(), false);
+  if (const Value *s = v.find("steer")) {
+    if (!s->is_seq())
+      return fail("steer: expects a list of hubs, by index or by name");
+    for (const Value &e : s->items) {
+      const std::string name = e.as_string();
+      std::size_t k = r.hubs.size();
+      for (std::size_t i = 0; i < names.size() && i < r.hubs.size(); ++i)
+        if (names[i] == name)
+          k = i;
+      if (k == r.hubs.size()) {
+        const double d = e.as_double(-1.0);
+        if (d >= 0.0 && d == std::floor(d) && d < static_cast<double>(r.hubs.size()))
+          k = static_cast<std::size_t>(d);
+      }
+      if (k == r.hubs.size())
+        return fail("steer: '" + name + "' names no hub");
+      r.steers[k] = true;
+    }
+  } else { // the front axle's: the hubs farthest forward (x; z in glTF's frame)
+    const int fwd = r.y_up ? 2 : 0;
+    double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+    for (const std::array<double, 3> &h : r.hubs) {
+      lo = std::min(lo, h[fwd]);
+      hi = std::max(hi, h[fwd]);
+    }
+    if (hi > lo)
+      for (std::size_t i = 0; i < r.hubs.size(); ++i)
+        r.steers[i] = r.hubs[i][fwd] >= hi - 0.05 * (hi - lo);
+  }
+  out = std::move(r);
+  return true;
+}
+
+std::string vehicle_rig_text(const vehicle_rig &r) {
+  std::ostringstream o;
+  o.imbue(std::locale::classic());
+  o.precision(17);
+  o << "{";
+  if (r.radius > 0.0)
+    o << "radius: " << r.radius << ", ";
+  o << "hubs: [";
+  for (std::size_t i = 0; i < r.hubs.size(); ++i)
+    o << (i ? ", [" : "[") << r.hubs[i][0] << ", " << r.hubs[i][1] << ", " << r.hubs[i][2] << "]";
+  o << "], steer: [";
+  bool first = true;
+  for (std::size_t i = 0; i < r.steers.size(); ++i)
+    if (r.steers[i]) {
+      o << (first ? "" : ", ") << i;
+      first = false;
+    }
+  o << "], mirror: " << r.mirror << ", up: " << (r.y_up ? "y" : "z") << "}";
+  return o.str();
+}
+
 double avatar_controller::param(const std::string &name, double def) const {
   const auto it = params.find(name);
   return it == params.end() ? def : it->second;
@@ -942,14 +1054,10 @@ std::string check_world_rules(const world_rules &r) {
       if (k == "max_speed" ? !finite_nonnegative(x) : !finite_positive(x))
         return at + ": vehicle: " + k + " must be " +
                (k == "max_speed" ? "zero or more" : "positive");
-    if (!v.look.kind.empty() && v.look.kind != "box" && v.look.path.empty())
+    if (!v.look.kind.empty() && v.look.kind != "box" && v.look.path.empty() && !v.look.parted())
       return at + ": look: " + v.look.kind + " names nothing";
     if (!finite_positive(v.look.scale) || !std::isfinite(v.look.yaw) || !std::isfinite(v.look.z))
       return at + ": look: scale must be positive, yaw and z finite";
-    if (!finite_nonnegative(v.look.wheelbase) || !finite_nonnegative(v.look.track))
-      return at + ": look: wheelbase and track must be zero (the vehicle's) or more";
-    if (!v.look.wheel.empty() && (v.look.kind.empty() || v.look.kind == "box"))
-      return at + ": look: wheel: needs the chassis's mesh (file:, asset:, model: or data:)";
     for (const auto &[k, lohi] : v.ranges)
       if (!finite_positive(lohi.first) || !std::isfinite(lohi.second) || lohi.second < lohi.first)
         return at + ": ranges: " + k + " must be [lo, hi] with 0 < lo <= hi";
