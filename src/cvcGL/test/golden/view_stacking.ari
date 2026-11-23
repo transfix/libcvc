@@ -1,0 +1,58 @@
+# view_stacking.ari — golden: viewport views stack with the windows (docs/ARIADNE.md §5.18). Each view
+# draws into a texture of its own that its window shows as an image, so:
+#   - Cover, a plain window in front of Under's window, covers part of Under's view;
+#   - Over's window, in front of the plain window Behind, shows its view over Behind;
+#   - Clipped's window is too short for its view and cuts it off at the bottom: the picture keeps
+#     its size and aspect, and the window's scroll bar shows.
+# ImGui puts a window that appears in front of those before it, so each later window is in front of
+# the one it overlaps. One scene, a box and a ball, seen from a named camera by all three views.
+
+meta:
+  name: golden view stacking
+  min_libcvc: 4.0.6
+
+windows:
+  - window: Under
+    id: under
+    pos: [20, 40]
+    size: [320, 280]
+    children:
+      - { type: viewport, view: under, camera: look, clear_color: [0.36, 0.12, 0.34], chrome: false, shadows: false, input: false, width: 280, height: 210 }
+  - window: Cover
+    id: cover
+    pos: [200, 150]
+    size: [260, 200]
+    children:
+      - text: "in front of Under's view"
+  - window: Behind
+    id: behind
+    pos: [500, 40]
+    size: [260, 280]
+    children:
+      - text: "behind Over's window"
+  - window: Over
+    id: over
+    pos: [620, 150]
+    size: [320, 280]
+    children:
+      - { type: viewport, view: over, camera: look, clear_color: [0.10, 0.30, 0.36], chrome: false, shadows: false, input: false, width: 280, height: 210 }
+  - window: Clipped
+    id: clipped
+    pos: [20, 450]
+    size: [320, 200]
+    children:
+      - { type: viewport, view: clipped, camera: look, clear_color: [0.20, 0.20, 0.25], chrome: false, shadows: false, input: false, width: 280, height: 240 }
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  cameras:
+    - camera: look
+      azimuth: 30
+      elevation: 25
+      zoom: 0.7
+  nodes:
+    - { node: box, type: geometry, source: { box: { size: [2, 2, 2] } }, material: { color: [0.95, 0.85, 0.1] } }
+    - { node: ball, type: geometry, source: { sphere: 0.8 }, transform: { position: [2.5, 0, 0] }, material: { color: [0.1, 0.3, 0.9] } }
+  lights:
+    - rig: three_point

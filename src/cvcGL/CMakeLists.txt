@@ -1227,6 +1227,20 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
 endif()
 
+# A `viewport` widget's view drawn into a texture and shown as an image in its window (§5.18): a
+# window in front covers it, its window in front of another shows it, its first frame is drawn, a
+# clipped and a scrolled view show the matching part of the same picture, picks land through the
+# scroll. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_view_stacking test/cvcgl_ariadne_view_stacking.cpp)
+  target_link_libraries(cvcgl_ariadne_view_stacking PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_view_stacking COMMAND cvcgl_ariadne_view_stacking)
+  # Not a test: what a frame of a document costs offscreen, CPU and GPU, run by hand
+  # (cvcgl_ari_frame_bench doc.ari ...).
+  add_executable(cvcgl_ari_frame_bench test/cvcgl_ari_frame_bench.cpp)
+  target_link_libraries(cvcgl_ari_frame_bench PRIVATE cvcGL)
+endif()
+
 # Computed colours (docs/ARIADNE.md §5.26) in ImGui's pixels: grid cells filled from a palette in
 # state, a text red past a threshold, a coloured button and radio. Offscreen; skips where nothing
 # rasterises unless CVC_REQUIRE_RENDER=1.
@@ -1713,6 +1727,7 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
+                        cvcgl_ariadne_view_stacking cvcgl_ari_frame_bench
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
                         cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)

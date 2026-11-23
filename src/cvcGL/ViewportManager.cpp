@@ -594,10 +594,13 @@ ViewportManager::~ViewportManager() {
     m_impl->unitCapObserver = 0;
     // Detach every scene BEFORE the window dies: the scenes hold actors that
     // belong to these renderers, and tearing the window down under them is how
-    // offscreen backends crash at exit (see SceneRenderer::close).
+    // offscreen backends crash at exit (see SceneRenderer::close). The viewports'
+    // own GL objects (a texture, a throttled one's last pixels) go while the
+    // context is still there.
     for (auto &v : m_impl->viewports) {
       if (!v->isMirror())
         v->scene().setRenderer(nullptr);
+      v->releaseGraphics();
     }
     // Cut the router's back-pointer and detach it before the interactor dies, so
     // no late event dereferences a half-destroyed manager.
@@ -703,6 +706,11 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   vp->setLayer(layer);
   vp->setMirrorSource(src->renderer());
   vp->setMirrorLive(liveSync); // false => primed once here, never re-synced
+  // Drawn into a texture (Viewport::setTextureSize), it re-syncs as the render reaches it, on the
+  // renders it draws: a widget that shows it during the frame finds it current.
+  Viewport *raw = vp.get();
+  if (liveSync)
+    vp->setBeforeDraw([raw] { syncMirrorProps(*raw); });
   m_impl->window->AddRenderer(vp->renderer());
   vp->camera().setRenderWindow(m_impl->window); // pan scaling + Fly capture (not attach)
 
@@ -742,6 +750,7 @@ void ViewportManager::removeViewport(const std::string &name) {
     vp->scene().setRenderer(nullptr);
     m_impl->attachedScenes.erase(&vp->scene());
   }
+  vp->releaseGraphics();
   m_impl->window->RemoveRenderer(vp->renderer());
 
   // Drop any router state that points at it, so a live drag / hover does not
@@ -785,8 +794,12 @@ void ViewportManager::render() {
   // mirror too, then draw it with the mirror's own camera. A FROZEN mirror
   // (mirrorLive() == false) keeps its add-time snapshot and is skipped here, and
   // so is a throttled one (Viewport::setRefreshHz) showing its last pixels this
-  // frame: it re-syncs on the frame it draws.
+  // frame: it re-syncs on the frame it draws. A viewport drawn into a texture
+  // decides, and re-syncs, as the window's render reaches it (after a UI walk
+  // inside that render has shown, hidden or sized it).
   for (auto &v : m_impl->viewports) {
+    if (v->textured())
+      continue;
     const bool draws = v->beginRender();
     if ((draws || !v->visible()) && v->isMirror() && v->mirrorLive())
       syncMirrorProps(*v);
@@ -809,8 +822,15 @@ Viewport *ViewportManager::viewportAt(int x, int y) const {
   for (const auto &v : m_impl->viewports) {
     if (!v->visible() || !v->inputEnabled())
       continue;
-    if (!v->renderer()->IsInViewport(x, y))
+    if (v->textured()) { // shown where its region is; its renderer draws at its texture's rect
+      double r[4];
+      v->region(r);
+      const int *ws = m_impl->window->GetSize();
+      if (x < r[0] * ws[0] || x >= r[2] * ws[0] || y < r[1] * ws[1] || y >= r[3] * ws[1])
+        continue;
+    } else if (!v->renderer()->IsInViewport(x, y)) {
       continue;
+    }
     // Descending layer, later-added wins on a tie: iterate in add order and take
     // any hit whose layer >= the best so far (so the last max-layer hit wins).
     if (!best || v->layer() >= bestLayer) {

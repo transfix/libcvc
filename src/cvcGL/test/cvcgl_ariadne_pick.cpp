@@ -143,13 +143,15 @@ int main() {
   double r[4];
   picker.region(r);
   // The view frames both boxes: the crate's centre on screen (VTK display coordinates, and ImGui's
-  // with y down), and the view's centre, between the two, where nothing is.
+  // with y down), and the view's centre, between the two, where nothing is. The view's renderer
+  // draws into its texture, so its display point is a texel, shown in the window at its region.
   vtkRenderer *ren = picker.renderer();
   ren->SetWorldPoint(-6.0, 0.0, 0.0, 1.0);
   ren->WorldToDisplay();
-  double d[3];
+  double d[3], onScreen[2];
   ren->GetDisplayPoint(d);
-  const double cx = d[0], cy = d[1];
+  picker.rendererToWindow(d[0], d[1], onScreen);
+  const double cx = onScreen[0], cy = onScreen[1];
   const float mx = static_cast<float>(cx), my = static_cast<float>(kHeight - cy);
   const double gx = 0.5 * (r[0] + r[2]) * kWidth, gy = 0.5 * (r[1] + r[3]) * kHeight;
 

@@ -29,10 +29,10 @@
 // slices face the main camera, draws slices swept for a view's own camera (VolSliceNode::viewProp);
 // a volren node, raycast for the main view and composited into its pixels, is in no view. A
 // `type: volume` node takes an opacity override.
-// The widget reserves its rect in the window,
-// cuts it out of the window's background (ImGuiBackend::cut_window_background) and puts the
-// viewport there, so the view sits where the widget is, scrolls and moves with its window, and is
-// hidden on any frame the widget is not drawn (a closed or collapsed window, another tab).
+// The view draws into a texture of its own, the widget's size (Viewport::setTextureSize), and the
+// widget draws that texture as an image in its window, so the window stacks, clips and scrolls the
+// view as it does any of its content: a window in front covers it, and it covers a window behind.
+// It is hidden on any frame the widget is not drawn (a closed or collapsed window, another tab).
 // Dragging in it orbits its camera (the middle or right button pans), the wheel zooms, and a
 // double-click puts the camera back where azimuth: / elevation: / zoom: start it. In mode: slice
 // (CameraController::Mode::Slice) it looks straight down one axis: drags pan, the wheel zooms
@@ -82,8 +82,8 @@ struct SceneSlot {
   SceneGraph *sg = nullptr;                // its graph
   const RealizedScene *realized = nullptr; // its nodes and named cameras (null: none realized)
   std::string source;                      // the viewport its views mirror
-  bool anchor = false; // `source` is the scene's own, never shown: the views draw a pixel of it
-                       // under one of them so its shadow maps are baked
+  bool anchor = false; // `source` is the scene's own, never shown: while one of its views shows it
+                       // draws a pixel into a texture of its own, so its shadow maps are baked
 };
 
 class SceneViews {
@@ -130,9 +130,10 @@ public:
     double value = 0.0;
     int axis = -1; // with plane: the axis the slice looks down (0 x, 1 y, 2 z)
   };
-  // Pick in view `view` at (x, y) in VTK display coordinates (framebuffer pixels from the lower
-  // left), against what the view drew last frame: what an `input: pick` viewport's left button
-  // does, for tests and hosts. False for a miss or no such view.
+  // Pick in view `view` at (x, y) in VTK display coordinates of the window (framebuffer pixels from
+  // the lower left; the view's texture is shown at its region), against what the view drew last
+  // frame: what an `input: pick` viewport's left button does, for tests and hosts. False for a
+  // miss or no such view.
   bool pick(const std::string &view, double x, double y, PickHit &hit) const;
 
   // The scene a viewport would show for `scene` ("" the main one), as the constructor's lookup
@@ -150,6 +151,13 @@ private:
   void main_view_end();   // ... and its EndEvent: put it back
   void bind_camera(View &v, const std::string &name); // "" its own, "main", or a named camera
   CameraController &controller(View &v);              // what a drag in v moves
+  // A view's frame: what it leaves out and restyles, its shadows, its camera framed once it has
+  // something to show and moved by dt. update() runs it for every view; the widget runs it for a
+  // view made in this frame's walk, so its first frame shows it.
+  void prepare(View &v, double dt);
+  // A named camera framed on its whole scene, the first time a shown view draws from it; `whole`
+  // is that scene's bounds (false when it has none).
+  bool frame_named(Camera &c, double whole[6]);
   bool pick_at(View &v, double x, double y, PickHit &hit) const;
   // An input: pick view's pick at the pointer, in `phase` (down, drag, up): written under its
   // pick key, and its on_pick raised through `edit`.
