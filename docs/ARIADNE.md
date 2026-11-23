@@ -4466,8 +4466,20 @@ second `vtkVolume` with its own property and its own mapper, which uploads the v
 time: a GPU volume mapper keeps one set of transfer-function tables, for the property it last drew.
 A `volslice` node's slices face the camera they were swept for. A view from a camera of its own
 draws slices of its own, swept for its camera, over the node's shaders, textures and transfer
-function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own. A `volren` node's
-picture is raycast for the main view and composited into its pixels, so it is in the main view only.
+function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own.
+A `volren` node draws in every view, `camera: main` ones too. Its picture is raycast for one camera
+at one size, so each view raycasts the volume for its own camera at its own size times
+`volren.resolution_scale` (`VolRenNode::viewProp`), and draws it on a quad of its own, depth-tested
+against what the view draws with that camera's near and far. A view raycasts again only when its
+camera or size, the node's transform or clip planes, or the node's settings change (every frame it
+draws, with `volren.continuous`), never while it is hidden, and no more often than it draws, so a
+view with `refresh_hz` raycasts at most that many times a second. Each view that shows the node
+costs a raycast of its own at its raster: a 360 x 270 view at the default scale of 0.5 casts
+180 x 135 rays each time, beside the main view's. The jobs share the node's raycaster and take turns
+on its worker thread, so views add latency rather than threads; on CUDA they share the device and
+the volume uploaded to it once, and a volume's shadow maps are built once for all of them. A view
+draws the scene without the volume until its first raycast lands. A `volren` node takes no
+`override:` yet.
 `examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
 one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
 
@@ -4555,8 +4567,8 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A `volren` node is in the main view only. A `volslice` node takes `transform` but no restyling;
-  a `type: volume` node takes `opacity` and `transform`.
+- A `volren` node takes no restyling: no `override:` entry applies to it. A `volslice` node takes
+  `transform` but no restyling; a `type: volume` node takes `opacity` and `transform`.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
 - A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
