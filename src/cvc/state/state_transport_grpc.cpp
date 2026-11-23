@@ -286,9 +286,11 @@ std::vector<state_transport::snapshot_entry> read_snapshot_entries(const pb::Sna
 }
 
 // The registry's verdict on sending `path` to a connection whose peer is `pid`; nullptr (a peer
-// that has not identified yet) gets everything. A refusal is counted against the peer.
-bool registry_allows(state_peer_registry &peers, const std::string *pid, const std::string &path) {
-  if (pid == nullptr || peers.should_deliver(*pid, path))
+// that has not identified yet) gets everything. SUBTREE: for a delete or reset, which reaches the
+// paths below it too (state_peer_registry::should_deliver). A refusal is counted against the peer.
+bool registry_allows(state_peer_registry &peers, const std::string *pid, const std::string &path,
+                     bool subtree = false) {
+  if (pid == nullptr || peers.should_deliver(*pid, path, subtree))
     return true;
   peers.note_delivery_filtered(*pid);
   return false;
@@ -1041,8 +1043,9 @@ state_transport::publish_stats state_transport_grpc::publish(const state_mutatio
       local_peers.push_back(s);
     }
   }
+  const bool subtree = is_subtree_op(m.op);
   for (auto *peer : local_peers) {
-    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path, subtree)) {
       _peers.note_delivery_filtered(peer->local_node_id());
       continue;
     }
@@ -1071,7 +1074,7 @@ state_transport::publish_stats state_transport_grpc::publish(const state_mutatio
     if (!c || !c->alive.load() || !c->can_write())
       continue;
     const std::string *pid = c->peer_id();
-    if (!registry_allows(_peers, pid, m.path))
+    if (!registry_allows(_peers, pid, m.path, subtree))
       continue;
     if (c->write_mutation(frame, m)) {
       _sent_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1194,13 +1197,19 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
       peers.push_back(s);
     }
   }
+  bool buried = false;
   for (auto *peer : peers) {
     auto r = peer->ingest_remote(m);
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
+    buried = buried || r.buried;
   }
   const bool relay = _relay.load(std::memory_order_relaxed);
   if (!relay && !_bridge)
+    return;
+  // Older than a delete this relay applied (state_cluster_shard::ingest_result::buried): the
+  // relay's tree does not have it, so neither may the peers it would reach.
+  if (buried)
     return;
   // The interest gate withholds the frame from the relay fan AND the bridge alike.
   if (!relay_admits(m, peers)) {
@@ -1222,7 +1231,7 @@ void state_transport_grpc::on_inbound_mutation(const state_mutation &m, connecti
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
-      if (!registry_allows(_peers, c->peer_id(), m.path))
+      if (!registry_allows(_peers, c->peer_id(), m.path, is_subtree_op(m.op)))
         continue;
       if (c->write_mutation(frame, m))
         _sent_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1892,7 +1901,7 @@ void state_transport_grpc::send_backfill_locked(connection &c,
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
-      if (view != nullptr && !view->deliver(m.path))
+      if (view != nullptr && !view->deliver(m.path, is_subtree_op(m.op)))
         continue;
       pb::Frame f;
       encode_mutation(m, f.mutable_mutation());
@@ -1917,20 +1926,37 @@ void state_transport_grpc::send_snapshot_locked(connection &c,
   // Without the admission hold this goes out before the peer's Hello, so there is no identity to
   // look up in the registry and it is unfiltered: the receiver keeps only what its own interest
   // takes. With it, release_admissions passes the peer's rule as `view`.
+  //
+  // A peer back from a dropped link may still hold subtrees deleted while it was away, which a
+  // snapshot cannot say. Without a backfill (which replays the deletes with the rest of the
+  // journal), the deletes the shard remembers whose subtree is still gone follow the snapshot.
+  const bool repeat_deletes = !_backfill_on_connect.load(std::memory_order_acquire);
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
     const auto snap = s->snapshot();
-    if (snap.empty())
+    if (!snap.empty()) {
+      pb::Frame f;
+      auto *rsp = f.mutable_snapshot_response();
+      rsp->set_request_id(0);
+      rsp->set_final(true);
+      fill_snapshot_response(rsp, snap, view);
+      if (!c.write_locked(f))
+        return; // stream died mid-snapshot; the reader will reap it
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!repeat_deletes)
       continue;
-    pb::Frame f;
-    auto *rsp = f.mutable_snapshot_response();
-    rsp->set_request_id(0);
-    rsp->set_final(true);
-    fill_snapshot_response(rsp, snap, view);
-    if (!c.write_locked(f))
-      return; // stream died mid-snapshot; the reader will reap it
-    _sent_frames.fetch_add(1, std::memory_order_relaxed);
+    for (const state_mutation &d : missed_deletes(s->tombstones(), snap)) {
+      if (view != nullptr && !view->deliver(d.path, true))
+        continue;
+      pb::Frame f;
+      encode_mutation(d, f.mutable_mutation());
+      if (!c.write_locked(f))
+        return;
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _deletes_repeated.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }
 

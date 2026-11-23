@@ -17,12 +17,95 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_data_hydrator.h>
 #include <cvc/state/state_distributed_admin.h>
+#include <cvc/state/state_hybrid_time.h>
 #include <cvc/state/state_sync_adapter.h>
+#include <map>
+#include <set>
 #include <thread>
 #include <unordered_set>
 #include <utility>
 
 namespace cvc {
+
+namespace {
+
+// One tombstone: the delete that left it (file-local, so the tables below export nothing).
+struct tomb {
+  state_mutation del;
+};
+
+// A tombstone's place in age order: its time, then its path.
+struct tomb_age {
+  std::uint64_t hlc = 0;
+  std::string path;
+  bool operator<(const tomb_age &o) const noexcept {
+    return hlc != o.hlc ? hlc < o.hlc : path < o.path;
+  }
+};
+
+} // namespace
+
+// The tombstones, by path and by age. A tombstone's time is its delete's hlc_time (packed: wall
+// milliseconds above 16 logical bits), which is also what its ttl is measured in.
+struct state_sync_adapter::tombstone_table {
+  mutable std::mutex mu;
+  std::size_t max_entries = 4096;
+  std::uint64_t ttl_ms = 10 * 60 * 1000;
+  std::map<std::string, tomb> by_path;
+  std::set<tomb_age> by_age;
+
+  std::map<std::string, tomb>::iterator erase(std::map<std::string, tomb>::iterator it) {
+    by_age.erase(tomb_age{it->second.del.hlc_time, it->first});
+    return by_path.erase(it);
+  }
+
+  // Whether a tombstone at or above KEY (normalized) is at least as late as HLC.
+  bool covers(const std::string &key, std::uint64_t hlc) const {
+    for (std::size_t dot = key.find(state::SEPARATOR[0]);;
+         dot = key.find(state::SEPARATOR[0], dot + 1)) {
+      const auto it = by_path.find(dot == std::string::npos ? key : key.substr(0, dot));
+      if (it != by_path.end() && it->second.del.hlc_time >= hlc)
+        return true;
+      if (dot == std::string::npos)
+        return false;
+    }
+  }
+
+  void record(const std::string &key, const state_mutation &m) {
+    if (covers(key, m.hlc_time))
+      return; // a delete as late as this one already took the subtree
+    // This delete takes what is below it: the older tombstones there are covered by its own.
+    const std::string below = key + state::SEPARATOR;
+    for (auto it = by_path.lower_bound(below);
+         it != by_path.end() && it->first.compare(0, below.size(), below) == 0;)
+      it = it->second.del.hlc_time <= m.hlc_time ? erase(it) : std::next(it);
+    const auto at = by_path.find(key);
+    if (at != by_path.end())
+      erase(at);
+    tomb t;
+    t.del = m;
+    t.del.path = key;
+    by_path.emplace(key, std::move(t));
+    by_age.insert(tomb_age{m.hlc_time, key});
+    prune();
+  }
+
+  // Past the cap, or older than the ttl before the newest: the oldest go.
+  void prune() {
+    if (by_age.empty())
+      return;
+    const std::uint64_t newest_ms = by_age.rbegin()->hlc >> 16;
+    while (!by_age.empty() &&
+           (by_path.size() > max_entries || (by_age.begin()->hlc >> 16) + ttl_ms < newest_ms)) {
+      const auto it = by_path.find(by_age.begin()->path);
+      if (it == by_path.end()) {
+        by_age.erase(by_age.begin());
+        continue;
+      }
+      erase(it);
+    }
+  }
+};
 
 // The app's suppressed threads, shared by every adapter on the app. A thread with a depth is
 // either (a) applying a remote mutation to the app or (b) inside a suppression_scope on it. In
@@ -79,7 +162,8 @@ state_sync_adapter::suppression_scope::~suppression_scope() { _adapter._suppress
 state_sync_adapter::state_sync_adapter(app &ctx, std::string root_path, std::string local_node_id)
     : _ctx(ctx), _suppression(ctx.slot<suppression>()), _root_path(std::move(root_path)),
       _local_node_id(std::move(local_node_id)), _journal(_local_node_id), _router(),
-      _attached(false), _local_count(0), _remote_count(0) {}
+      _tombstones(std::make_unique<tombstone_table>()), _attached(false), _local_count(0),
+      _remote_count(0) {}
 
 state_sync_adapter::~state_sync_adapter() { detach(); }
 
@@ -149,6 +233,46 @@ state_sync_adapter::subscriptions_for_path(const std::string &path) const {
   return merged;
 }
 
+bool state_sync_adapter::buried(const state_mutation &m) const {
+  if (m.hlc_time == 0 || m.op == state_mutation_op::delete_subtree ||
+      m.op == state_mutation_op::delegate_subtree || m.op == state_mutation_op::revoke_delegation)
+    return false;
+  std::lock_guard<std::mutex> lk(_tombstones->mu);
+  if (_tombstones->by_path.empty())
+    return false;
+  return _tombstones->covers(state::normalize_path(m.path), m.hlc_time);
+}
+
+std::vector<state_mutation> state_sync_adapter::tombstones() const {
+  std::lock_guard<std::mutex> lk(_tombstones->mu);
+  std::vector<state_mutation> out;
+  out.reserve(_tombstones->by_age.size());
+  for (const tomb_age &a : _tombstones->by_age) {
+    const auto it = _tombstones->by_path.find(a.path);
+    if (it != _tombstones->by_path.end())
+      out.push_back(it->second.del);
+  }
+  return out;
+}
+
+void state_sync_adapter::set_tombstone_limits(std::size_t max_entries,
+                                              std::chrono::milliseconds ttl) {
+  std::lock_guard<std::mutex> lk(_tombstones->mu);
+  _tombstones->max_entries = max_entries;
+  _tombstones->ttl_ms = ttl.count() > 0 ? static_cast<std::uint64_t>(ttl.count()) : 0;
+  _tombstones->prune();
+}
+
+void state_sync_adapter::bury(const state_mutation &m) {
+  if (m.hlc_time == 0)
+    return;
+  const std::string key = state::normalize_path(m.path);
+  if (key.empty())
+    return;
+  std::lock_guard<std::mutex> lk(_tombstones->mu);
+  _tombstones->record(key, m);
+}
+
 bool state_sync_adapter::current_thread_suppressed() const noexcept {
   return _suppression.current();
 }
@@ -212,17 +336,20 @@ void state_sync_adapter::attach_node(state &s, const std::string &full_path) {
   }
 }
 
-void state_sync_adapter::drop_subtree(const std::string &full_path) {
+bool state_sync_adapter::drop_subtree(const std::string &full_path) {
+  bool observed = false;
   for (auto it = _connections.begin(); it != _connections.end();) {
     const std::string &p = it->first;
     if (p.compare(0, full_path.size(), full_path) == 0 &&
         (p.size() == full_path.size() || p[full_path.size()] == state::SEPARATOR[0])) {
       it->second.disconnect_all();
       it = _connections.erase(it);
+      observed = true;
     } else {
       ++it;
     }
   }
+  return observed;
 }
 
 // The slots run on the writing thread and re-walk from the root by path with raw, creating lookups
@@ -322,28 +449,37 @@ state_sync_adapter::connection_set state_sync_adapter::connect_node(state &node,
   // touch() first, as set_replicated does). A remote apply's is not: it is suppressed, as above.
   // Nothing is journaled for a node with no content (created on the way to another, or a touch).
   //
-  // childChanged fires for a removal too (state::removeChild: a (state-delete), or a relay's
-  // retraction): a child that is gone is never made again, and the slots on its subtree go with
-  // it, so a node made at that path later is attached afresh.
+  // childChanged fires for a removal too (state::removeChild: a (state-delete), a relay's
+  // retraction or a remote delete): a child that is gone is never made again, and the slots on
+  // its subtree go with it, so a node made at that path later is attached afresh. A local removal
+  // is journaled as one delete_subtree (see Deletes in the header): the removal's childChanged
+  // fires on every observed ancestor, and only the first finds the subtree's observers.
   cs.child_changed = node.childChanged.connect([this, path_copy](const std::string &child_name) {
     if (!_attached)
       return;
     std::string child_full = join_path(path_copy, child_name);
+    bool removed = false;
     {
       std::lock_guard<std::mutex> lk(_mutex);
       if (!_attached)
         return;
       state *child = state::instance(_ctx).findDescendant(child_full);
       if (child == nullptr) {
-        drop_subtree(child_full);
-        return;
+        removed = drop_subtree(child_full);
+        if (!removed)
+          return;
+      } else {
+        if (_connections.find(child_full) != _connections.end())
+          return;
+        attach_node(*child, child_full);
       }
-      if (_connections.find(child_full) != _connections.end())
-        return;
-      attach_node(*child, child_full);
     }
     if (current_thread_suppressed())
       return;
+    if (removed) {
+      journal_delete(child_full);
+      return;
+    }
     state &child = state::instance(_ctx)(child_full);
     if (!child.value().empty())
       journal_value(child_full);
@@ -362,6 +498,18 @@ void state_sync_adapter::journal_value(const std::string &path) {
   m.string_value = n.value();
   m.type_name = n.valueTypeName();
   state_mutation appended = _journal.append(m);
+  _local_count.fetch_add(1, std::memory_order_relaxed);
+  dispatch_local(appended);
+}
+
+void state_sync_adapter::journal_delete(const std::string &path) {
+  state_mutation m;
+  m.path = path;
+  m.op = state_mutation_op::delete_subtree;
+  if (_clock)
+    m.hlc_time = _clock->now().packed(); // the delete's own time, for its tombstones
+  state_mutation appended = _journal.append(m);
+  bury(appended);
   _local_count.fetch_add(1, std::memory_order_relaxed);
   dispatch_local(appended);
 }
@@ -409,9 +557,10 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
   // signal does not feed back into the journal.
   suppression_guard guard(_suppression);
 
-  // A delete takes the subtree out of this tree: a relay's retraction of what a read scope no
-  // longer lets this peer read (state_transport::read_scope_retraction), which nothing journals.
-  // The node is looked up, never made, and the root is never deleted.
+  // A delete takes the subtree out of this tree: a peer's removal (journal_delete), a relay's
+  // repeat of one this peer missed, or its retraction of what a read scope no longer lets this
+  // peer read (state_transport::read_scope_retraction). The node is looked up, never made, and the
+  // root is never deleted. A timed one leaves a tombstone.
   if (m.op == state_mutation_op::delete_subtree) {
     const std::string key = state::normalize_path(m.path);
     if (!key.empty()) {
@@ -422,6 +571,7 @@ bool state_sync_adapter::apply_remote(const state_mutation &m) {
       else if (state *parent = root.findDescendant(key.substr(0, dot)))
         parent->removeChild(key.substr(dot + 1));
     }
+    bury(m);
     _remote_count.fetch_add(1, std::memory_order_relaxed);
     on_remote_applied_func cb;
     {

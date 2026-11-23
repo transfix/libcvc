@@ -92,11 +92,20 @@ bool relay_owned(const std::vector<std::string> &rest) {
   return rest[0] == "streams" && rest.size() >= 3 && rest[2] == "ready";
 }
 
+// Whether deleting REST (a path below a participant) would take a key the relay writes there with
+// it: an ancestor of profile.name, net.relay or a stream's ready flag.
+bool holds_relay_key(const std::vector<std::string> &rest) {
+  if (rest.size() == 1)
+    return rest[0] == "profile" || rest[0] == "net" || rest[0] == "streams";
+  return rest.size() == 2 && rest[0] == "streams";
+}
+
 } // namespace
 
 room_write_gate::room_write_gate(std::string room) : _room(std::move(room)) {}
 
-bool room_write_gate::own_path(const std::string &pid, const std::string &path) const {
+bool room_write_gate::below_participant(const std::string &pid, const std::string &path,
+                                        std::vector<std::string> &rest) const {
   // One identifier segment: a node id like "bob.pose" would otherwise own bob's pose. And not a
   // bridged user's ('_' first, room_intrinsics.h): the relay writes those, for its program.
   if (!cvc::state::isValidStateName(pid) || pid[0] == '_')
@@ -108,11 +117,22 @@ bool room_write_gate::own_path(const std::string &pid, const std::string &path) 
   for (std::size_t i = 0; i < own.size(); ++i)
     if (segs[i] != own[i])
       return false;
-  return !relay_owned(std::vector<std::string>(segs.begin() + own.size(), segs.end()));
+  rest.assign(segs.begin() + own.size(), segs.end());
+  return true;
+}
+
+bool room_write_gate::own_path(const std::string &pid, const std::string &path) const {
+  std::vector<std::string> rest;
+  return below_participant(pid, path, rest) && !relay_owned(rest);
 }
 
 bool room_write_gate::may_write(const std::string &pid, const std::string &path,
                                 cvc::state_mutation_op op) const {
+  if (op == cvc::state_mutation_op::delete_subtree) {
+    std::vector<std::string> rest;
+    return below_participant(pid, path, rest) && !rest.empty() && !relay_owned(rest) &&
+           !holds_relay_key(rest);
+  }
   return op_allowed(op) && own_path(pid, path);
 }
 
