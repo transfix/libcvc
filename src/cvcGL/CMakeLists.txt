@@ -1142,6 +1142,12 @@ add_test(NAME cvcgl_imgui_fonts COMMAND cvcgl_imgui_fonts)
 add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
 target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The context menus (§5.28): Cut, Copy, Paste and Select all on a field, Copy and Select text... on
+# a text, Copy line on a text view, a notification's whole message, a touch screen's long press.
+# ImGui's own clipboard; no window, no GL.
+add_executable(cvcgl_imgui_context_menu test/cvcgl_imgui_context_menu.cpp)
+target_link_libraries(cvcgl_imgui_context_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
 # The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
 # and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
 add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)

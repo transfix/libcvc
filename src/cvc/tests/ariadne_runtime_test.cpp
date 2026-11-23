@@ -7879,6 +7879,43 @@ TEST(AriadneRuntime, ProgramsAndWarningsPostToTheFeedFromTheirDocument) {
 
 // §5.24 `notifications: false` keeps the bell out of the tray whatever the feed holds; `- bell`
 // places it among the tray's icons.
+// §5.28 a notification's context menu copies its whole message: the core hands the backend the
+// entry's text (next_item_copy) before the bell's one-line entry and the Notifications window's.
+TEST(AriadneRuntime, ANotificationsEntryCopiesItsWholeMessage) {
+  struct CopyBackend : TrayBackend {
+    void next_item_copy(const std::string &t) override { rec("copy:" + t); }
+  };
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  CopyBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  cvc::notification n;
+  n.text = "build failed\nstep 3: link error";
+  cvc::notify(app, n);
+  mb.open = "\xF0\x9F\x94\x94";
+  rt.render();
+  const auto at = [&](const std::string &prefix) {
+    for (std::size_t i = 0; i < mb.log.size(); ++i)
+      if (mb.log[i].rfind(prefix, 0) == 0)
+        return static_cast<int>(i);
+    return -1;
+  };
+  const int copy = at("copy:" + n.text), entry = at("menu_action:\xE2\x80\xA2 build failed  ");
+  ASSERT_GE(copy, 0) << mb.dump();
+  EXPECT_EQ(copy + 1, entry) << "just before the entry\n" << mb.dump();
+  EXPECT_LT(at("copy:"), at("menu_action:Mark all read")) << "the bell's own items copy nothing";
+  EXPECT_EQ(at("copy:"), copy) << "one entry, one copy";
+  // The Notifications window: the same, before the entry's line.
+  mb.open.clear();
+  cvc::state::instance(app)("ui.demo.tree._notifications.open").value("1");
+  mb.log.clear();
+  rt.render();
+  const int wcopy = at("copy:" + n.text), line = at("text_line:\xE2\x80\xA2 build failed  ");
+  ASSERT_GE(wcopy, 0) << mb.dump();
+  EXPECT_EQ(wcopy + 1, line) << mb.dump();
+}
+
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
   {
     cvc::app app;

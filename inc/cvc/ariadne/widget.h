@@ -426,6 +426,9 @@ struct Widget {
   bool resizable = true;
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
+  // Text: what Copy in its context menu puts on the clipboard (§5.28), when not what it shows. The
+  // core sets it on the lines it builds itself (the Notifications window: each entry's message).
+  std::string copy;
 
   // §G? Text COLOUR (severity styling). A Kind::Text (literal OR bound) may carry a fixed RGB
   // tint; the walker then emits the *_colored backend leaf instead of the plain one. Backends

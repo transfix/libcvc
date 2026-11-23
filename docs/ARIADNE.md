@@ -3974,6 +3974,9 @@ back (a window reopened) keeps its place.
   holds where libcvc has this. `ariadne_ftxui_test`'s `MessageFieldLiveDraftAndACompletion` and
   `cvcgl_imgui_chat_widgets` type into one.
 
+Both have the context menu of §5.28. On a `text_view:` it is Copy line (the message under the
+pointer), Copy all and Select text...; on a `message_input:`, Cut, Copy, Paste and Select all.
+
 ### 5.16 Conference chat: the chat verbs and the chat component
 
 In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
@@ -4896,7 +4899,8 @@ menubar:
   the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
-  window with every entry (`tree._notifications.open`; its X closes it).
+  window with every entry (`tree._notifications.open`; its X closes it). A right-click on an entry,
+  in the menu or the window, offers Copy, which copies its whole message (§5.28).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
   - A document's top-level `notifications: true|false` overrides the host.
@@ -5112,6 +5116,89 @@ current one to look pressed:
 `ariadne_loader_test`'s `ButtonIconAndSelectedParse` checks the keys; `ariadne_ftxui_test`'s
 `SelectedButtonIsMarked` the terminal's look; `cvcgl_imgui_group_click` taps a selected
 button with a picture through ImGui's own input.
+
+### 5.28 Copy, cut and paste: the context menu
+
+Text in every host has a context menu, with nothing in the document asking for it. A right-click
+opens it. So does a long press on a touch screen (half a second, the finger still), and Shift+F10
+or the Menu key on the focused widget in a terminal. What it offers depends on what is under the
+pointer:
+
+| Under the pointer | The menu |
+|---|---|
+| A field: `input_text:`, `message_input:` | Cut, Copy, Paste, Select all |
+| A text: `text:`, a bound value, a rich text (§5.20) | Copy, Select text... |
+| A `text_view:` (a chat log, a console) | Copy line, Copy all, Select text... |
+| A notification: the bell's entry, a Notifications window line (§5.24) | Copy |
+
+- **Cut and Copy** take the selection, or the whole text when nothing is selected. A `password:`
+  field has neither.
+- **Paste** puts the clipboard's text at the cursor, over the selection. A one-line field drops
+  the text's line breaks. A multi-line `message_input:` keeps them, as LF.
+- **Copy on a value** (a bound `text:` with a label) copies the value, not "label: value".
+- **Copy line** copies the line under the pointer: in a chat log, the message it is on.
+- **Copy on a notification** copies the whole message, every line of it, not the one line its
+  entry shows.
+- **Select text...** shows the text in a read-only field in a window of its own. Select a part
+  of it there (drag, Shift with the arrows, Ctrl+A or its Select all), then copy it with its
+  Copy, its context menu or Ctrl+C. This is how to copy part of a long message.
+
+On a touch screen the menu opens under the finger. It takes no tap until the finger has lifted,
+so the lift that ends the long press picks nothing.
+
+How each host does it:
+
+- **ImGui, natively** (`arigl`, cvcGL apps): the system clipboard. That is SDL's under cvcGL's
+  window, Wayland included. Under VTK's own window it is the platform's: Win32 through ImGui,
+  NSPasteboard, or an X11 selection. Ctrl+X, Ctrl+C, Ctrl+V and Ctrl+A work in a field as they
+  always did (Cmd on a Mac). The menu edits through the field's own callback, so ImGui's undo
+  (Ctrl+Z) takes back a Cut or a Paste.
+- **The arigl-web page**: the browser's own menu stays off the canvas.
+  - Copy is `navigator.clipboard.writeText`.
+  - Paste is `navigator.clipboard.readText()`, which answers later; the text goes into the field
+    when it does. Chrome asks the user once for the permission. Firefox and Safari show their own
+    Paste button by the pointer each time, which the user clicks.
+  - Safari allows these calls only inside the click itself, and ImGui sees a click a frame after
+    the browser does. So the page makes the call in the pointer release over the menu item
+    (`cvc::gl::clipboard::arm`).
+  - When the browser refuses (the permission denied, its prompt dismissed, an `http://` page),
+    the field takes the focus and a note under it says to press Ctrl+V. Ctrl+V works as it always
+    did, through the page's `paste` event.
+- **FTXUI** (`ari`):
+  - Copy is an OSC 52 escape, as `(clipboard-set)`'s is (§10.7).
+  - Paste asks the terminal for the clipboard with an OSC 52 read
+    (`ESC ] 52 ; c ; ? ESC \`), and the answer is typed into the field. xterm with
+    `allowWindowOps` answers, and foot, kitty and iTerm2 do once the user allows it. Most
+    terminals stay silent, so after 3 seconds the tooltip line says to use the terminal's own
+    paste (Ctrl+Shift+V, Shift+Insert or its menu). That paste types into the focused field as
+    it always did.
+  - A field selects with Shift and the arrows, Home and End. Typing replaces the selection.
+  - For part of a text, use the terminal's own selection. The program has the mouse, so that is
+    Shift+drag in most terminals.
+- **The ari.html page** (xterm.js): it answers the OSC 52 read with
+  `navigator.clipboard.readText()`, as above. While the program has the mouse, a right-click is
+  the program's, not the browser's menu.
+- **tvision** (`ari run --backend tvision`): Copy and Paste use tvision's `TClipboard`. That is
+  the system clipboard on Windows. On Unix it is `wl-copy`, `xsel` or `xclip` when there is a
+  display, else OSC 52. A Paste arrives as a paste of keys into the focused field. The bell's
+  menu is tvision's own menu, which has no context menu, so copy a notification from the
+  Notifications window (Show all...).
+
+For a backend: the core calls `Backend::next_item_copy(TEXT)` just before an item whose Copy is
+not the text it shows (a notification's entry), and the item after it copies what it shows again.
+Each backend draws its own menus. `ImGuiBackend::context_item_drawn` reports each item's rect, for
+a test.
+
+The tests:
+
+- `cvcgl_imgui_context_menu`: ImGui on a bare context, driven by the mouse and the keys.
+- `ariadne_ftxui_test`'s `ARightClickOnATextOffersCopy`, `AFieldsMenuCutsCopiesAndPastes`,
+  `ATextViewsMenuCopiesALineOrAll`, `ANotificationsEntryCopiesItsWholeMessage` and
+  `APasteWithNoTerminalToAskSaysHowToPaste`.
+- `ariadne_term_graphics_test`'s `Osc52ReadsAndItsAnswer`.
+- `ariadne_runtime_test`'s `ANotificationsEntryCopiesItsWholeMessage`.
+- In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs`, which runs arigl-web in headless
+  Chrome, grants it the clipboard and right-clicks through the page's own input.
 
 ## 6. Composition: include / import / load
 
@@ -7600,6 +7687,8 @@ screen view. The backend answers them, so they work the same in every host built
   only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
 - `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
   `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
+- The user copies and pastes with the context menu every host has on text (§5.28), with nothing
+  in the document. Its Paste reads the clipboard; a document's programs cannot.
 
 ### 10.8 Picking and sending files: `file-pick` and `http-upload`
 

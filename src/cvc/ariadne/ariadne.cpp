@@ -3185,6 +3185,8 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::Text:
+    if (!w.copy.empty()) // §5.28 its context menu's Copy
+      b.next_item_copy(w.copy);
     if (w.has_runs) { // §5.20 rich text: styled runs and links in a paragraph
       emit_rich_text(w, label, inner_click);
       break;
@@ -5381,6 +5383,7 @@ void Runtime::Impl::emit_bell_items() {
         notify_line(*it, it->source.empty() ? notify_source(it->path) : it->source,
                     b.unicode_glyphs(), "%H:%M");
     b.push_id(("##notify." + std::to_string(it->id)).c_str());
+    b.next_item_copy(it->text); // §5.28 a right-click copies the whole message
     if (b.menu_item_action(line.c_str()))
       queued_events.push_back(
           {kNotifyEvent + std::string("open:") + std::to_string(it->id), prefix});
@@ -5414,10 +5417,12 @@ void Runtime::Impl::emit_notify_window() {
     const std::vector<cvc::notification_entry> all = cvc::notifications(app);
     if (all.empty())
       kids.push_back(text("No notifications."));
-    for (auto it = all.rbegin(); it != all.rend(); ++it)
+    for (auto it = all.rbegin(); it != all.rend(); ++it) {
       kids.push_back(
           text(notify_line(*it, it->source.empty() ? notify_source(it->path) : it->source,
                            backend->unicode_glyphs(), "%d %b %H:%M:%S")));
+      kids.back().copy = it->text; // §5.28 a right-click copies the whole message
+    }
     Widget w = window("Notifications", std::move(kids));
     w.id = kNotifyWindowId;
     w.closable = true;

@@ -87,6 +87,18 @@ std::string base64_encode(const unsigned char *data, std::size_t n);
 // it is the user's own terminal that does.
 std::string osc52_copy(const std::string &text);
 
+// Standard base64 back to bytes; false on anything that is not (whitespace is skipped).
+bool base64_decode(const std::string &b64, std::string &out);
+
+// OSC 52 the other way (§5.28 a context menu's Paste): ask the terminal for the clipboard's text
+// (ESC ] 52 ; c ; ? ESC \). A terminal that allows it answers with the same escape carrying the
+// text in base64 (xterm with allowWindowOps, foot, kitty and iTerm2 after asking the user, the
+// ari.html page); most stay silent.
+std::string osc52_query();
+// The text of such an answer (ESC ] 52 ; <selection> ; base64, ended by BEL or ESC \): false when
+// `seq` is not one, or carries no text.
+bool osc52_reply(const std::string &seq, std::string &text);
+
 // Transmit w x h RGB8 pixels (row-major, top-left origin; `stride` bytes per row, 0 = w * 3) as
 // image `id` and create its virtual placement of cols x rows cells, for Unicode placeholders to
 // show (a=T, U=1, f=24, q=2: the terminal sends no reply). The base64 payload is split into chunks
