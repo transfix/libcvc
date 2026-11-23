@@ -4311,6 +4311,15 @@ windows:
 | `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
+**Where its keys resolve.** `pick:` (and its default), `pointer:` and `axis: { bind }` resolve as
+`bind:` does: in the scope the widget sits in, the document's prefix or a `load:`ed module's
+`includes.<as>` (§6.3), and a leading `/` means the root. So a module's view writes its picks
+inside the module's sandbox, where the module's own widgets and programs read them. A view of a
+`scenes:` entry (below) keeps them under that scene's `scenes.<id>` in that scope. The view's
+camera is not one of these: it stays under the scene's own prefix (`<prefix>.viewers.<view>.camera`,
+or `<prefix>.scenes.<id>.viewers.<view>.camera`) wherever the widget sits, one camera per view
+name. (`cvcgl_ariadne_pick`.)
+
 **Picking.** In an `input: pick` view, the left button picks what the view draws: a press, each
 move while it is held, and the release. Each pick tests the scene's nodes as this view draws them
 (an override's restyled copy counts as its node; the grid, axes and bounds never do). It writes,

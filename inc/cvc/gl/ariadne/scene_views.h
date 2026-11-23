@@ -150,6 +150,9 @@ private:
   void main_view_end();   // ... and its EndEvent: put it back
   void bind_camera(View &v, const std::string &name); // "" its own, "main", or a named camera
   CameraController &controller(View &v);              // what a drag in v moves
+  // Where the keys of the viewport being drawn (pick:, pointer:, axis: { bind }) resolve, for a
+  // view of `sg`: the scope its widget sits in, as its bind: (Backend::custom_scope).
+  std::string key_scope(const SceneGraph &sg) const;
   bool pick_at(View &v, double x, double y, PickHit &hit) const;
   // An input: pick view's pick at the pointer, in `phase` (down, drag, up): written under its
   // pick key, and its on_pick raised through `edit`.

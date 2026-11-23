@@ -303,8 +303,10 @@ struct MockBackend : Backend {
     return draw_image_ret;
   }
   CustomEdit custom_ret{}; // programmable return for the escape path
+  std::vector<std::string> custom_scopes; // custom_scope() during each custom_widget call
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
     rec(std::string("custom_widget:") + type + "=" + current);
+    custom_scopes.push_back(custom_scope());
     return custom_ret;
   }
   void set_image(const std::string &name, const cvc::image &) override { rec("set_image:" + name); }
@@ -3137,6 +3139,29 @@ TEST(AriadneMountScope, BindsResolveAtSubPrefix) {
   // The bind resolved under the mount's sub-prefix, NOT the document prefix.
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.on").value(), "1");
   EXPECT_NE(cvc::state::instance(app)("ui.demo.on").value(), "1");
+}
+
+// A backend's custom widget handler sees the scope the widget's bind: resolves against
+// (Backend::custom_scope): the document's prefix, or the mount's sub-prefix around it, so keys of
+// its own (a viewport's pick:) can resolve there too. Empty outside the call.
+TEST(AriadneMountScope, CustomWidgetSeesItsScope) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget probe;
+  probe.kind = Kind::Custom;
+  probe.custom_type = "probe";
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.rf";
+  mount.children = {probe};
+  rt.set_root(group({probe, mount}));
+  rt.render();
+  ASSERT_EQ(mb.custom_scopes.size(), 2u);
+  EXPECT_EQ(mb.custom_scopes[0], "ui.demo");
+  EXPECT_EQ(mb.custom_scopes[1], "ui.demo.includes.rf");
+  EXPECT_TRUE(mb.custom_scope().empty());
 }
 
 TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
