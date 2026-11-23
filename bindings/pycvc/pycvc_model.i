@@ -52,6 +52,18 @@
 %ignore cvc::model::extents_metres; // opaque bounding_box return; re-exposed as a 6-tuple below
 %ignore cvc::model::mesh::geom;
 
+// The node tree (model::nodes, instances(), placed() and the transform helpers) is not wrapped
+// yet: its nested structs and boost::array transforms need proxies of their own. merged() and
+// extents() already place every mesh by it.
+%ignore cvc::model::node;
+%ignore cvc::model::instance;
+%ignore cvc::model::nodes;
+%ignore cvc::model::instances;
+%ignore cvc::model::placed;
+%ignore cvc::model::identity_transform;
+%ignore cvc::model::is_identity;
+%ignore cvc::model::compose;
+
 // material: boost::array + by-value image members don't marshal cleanly; exposed
 // via the renamed-%extend trick below.
 %ignore cvc::material::base_color;

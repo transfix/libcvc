@@ -90,12 +90,18 @@ struct volume_grid_params {
   std::int64_t slice_z = -1;
 };
 
+// What draws the volume in the 3D view beside the planes: nothing (the planes alone), VTK's GPU
+// mapper, libcvc's raycaster or view-aligned texture slices (cvc::gl::VolumeRenderNode's kinds).
+enum class grid_render { none, vtk, volren, volslice };
+BOOST_DESCRIBE_ENUM(grid_render, none, vtk, volren, volslice)
+
 // How the slices and their overlays draw: the keys under <node>.grid.display.
 struct volume_grid_display_params {
   double point_scale = 1.0; // every class's radius times this, for drawing and for picking
   bool show_points = true;
   bool crosshairs = true; // where the other two planes cross each slice
   bool grey = false;      // the slices in grey, not through the transfer function
+  grid_render render = grid_render::none; // the volume in the 3D view, through the same TF
 };
 
 // Where the grid's data are: the keys under <node>.grid.source. Each path is a state key whose
@@ -139,6 +145,9 @@ struct param_table<volume_grid_display_params> : param_fields<volume_grid_displa
       field("show_points", &P::show_points, doc("draw the point classes on the slices")),
       field("crosshairs", &P::crosshairs, doc("draw where the other two planes cross each slice")),
       field("grey", &P::grey, doc("draw the slices in grey, not through the transfer function")),
+      field("render", &P::render,
+            doc("what draws the volume in the 3D view, through the same transfer function: none "
+                "(the planes alone), vtk, volren or volslice")),
   };
 };
 

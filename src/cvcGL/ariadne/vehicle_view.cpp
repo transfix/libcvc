@@ -79,6 +79,14 @@ vehicle_shape shape_of(const cvc::physics::vehicle_desc &d) {
   s.wheelbase = d.wheelbase();
   s.track = d.track();
   s.wheel_radius = d.axles.empty() ? 0.4 : d.axles.front().wheel_radius;
+  if (!d.axles.empty()) {
+    double lo = d.axles.front().x, hi = lo;
+    for (const cvc::physics::axle_desc &a : d.axles) {
+      lo = std::min(lo, a.x);
+      hi = std::max(hi, a.x);
+    }
+    s.axle_x = 0.5 * (lo + hi);
+  }
   return s;
 }
 
@@ -110,12 +118,21 @@ struct fitted_model {
   cvc::image texture;
 };
 
+// A wheeled look made ready to draw (fitted_wheels): its chassis about the ground under its chassis
+// box's centre, and its wheel about its hub, a left one and a right one.
+struct fitted_wheeled {
+  fitted_model chassis, left, right;
+};
+
 } // namespace
 
-// The models a realized scene has fitted, by file and length (null: it could not be read). The
-// scene's own (RealizedScene::vehicle_models), on its render thread.
+// The models a realized scene has fitted, by file and length (null: it could not be read); a
+// wheeled look's meshes as read, by file, and fitted, by both files and the fit. The scene's own
+// (RealizedScene::vehicle_models), on its render thread.
 struct vehicle_model_cache {
   std::map<std::string, std::shared_ptr<const fitted_model>> models;
+  std::map<std::string, std::shared_ptr<const fitted_model>> meshes;
+  std::map<std::string, std::shared_ptr<const fitted_wheeled>> wheeled;
 };
 
 cvc::geometry fit_vehicle_geometry(cvc::geometry g, double length, const vehicle_fit_axes &axes) {
@@ -416,19 +433,234 @@ std::shared_ptr<const fitted_model> fitted(cvc::app &app, vehicle_model_cache &c
   return nullptr;
 }
 
+// Whether a look is a wheeled one (vehicle_look: a chassis's mesh and one wheel's), drawn by
+// attach_model.
+bool wheeled_look(const ari::vehicle_look &look) {
+  return !look.wheel.empty() && (look.kind == "file" || look.kind == "data");
+}
+
 // Whether a look is drawn as a fitted model (attach_model), not as a mesh node or boxes.
 bool fitted_look(const ari::vehicle_look &look) {
-  return (look.kind == "file" && look.fit) || look.kind == "data";
+  return wheeled_look(look) || (look.kind == "file" && look.fit) || look.kind == "data";
+}
+
+// A wheeled look's mesh `file` as read, in the file's own frame, with its first base-colour
+// texture: the file, or with a data look the file in its package (null and `pending` while the
+// package loads; when it cannot load, a local install of the file by its name). Null when it
+// cannot be read or has no triangles (a warning says why). Read once.
+std::shared_ptr<const fitted_model> read_mesh(cvc::app &app, vehicle_model_cache &cache,
+                                              const ari::vehicle_look &look,
+                                              const std::string &file,
+                                              std::vector<std::string> *warnings, bool &pending) {
+  namespace fs = std::filesystem;
+  pending = false;
+  const bool data = look.kind == "data";
+  const std::string key =
+      data ? "data|" + look.uri + "|" + look.subpath + "|" + file : "file|" + file;
+  if (auto it = cache.meshes.find(key); it != cache.meshes.end())
+    return it->second;
+  const std::string what =
+      data ? look.uri + (look.subpath.empty() ? "" : "/" + look.subpath) + "/" + file
+           : "'" + file + "'";
+  std::shared_ptr<const fitted_model> out;
+  try {
+    cvc::model m;
+    if (!data) {
+      m = cvc::read_model(app, file);
+    } else {
+      const std::string node = data_node_of(app, look);
+      const std::string status = ari::data_status(app, node);
+      if (status == "ready") {
+        ari::DataBytes bytes = ari::data_file(app, node, file);
+        if (!bytes) // the file by its name anywhere in the package
+          for (const std::string &f : ari::data_files(app, node))
+            if (fs::path(f).filename() == fs::path(file).filename()) {
+              bytes = ari::data_file(app, node, f);
+              break;
+            }
+        if (!bytes)
+          throw std::runtime_error("the package has no " + file);
+        m = cvc::read_model_from_memory(app, bytes->data(), bytes->size(),
+                                        fs::path(file).extension().string());
+      } else if (status == "error") {
+        const std::string local = ari::find_vehicle_model(file);
+        if (local.empty()) {
+          const std::string error = get(cvc::state::instance(app), node + ".error");
+          throw std::runtime_error(
+              (error.empty() ? std::string("its package did not load") : error) +
+              ", and it is not installed here");
+        }
+        m = cvc::read_model(app, local);
+      } else {
+        pending = true; // idle, fetching, unpacking or decoding
+        return nullptr;
+      }
+    }
+    auto f = std::make_shared<fitted_model>();
+    f->geometry = m.merged();
+    if (f->geometry.num_tris() == 0)
+      throw std::runtime_error("it has no triangles");
+    for (const auto &mat : m.materials)
+      if (mat.has_base_color_texture()) {
+        f->texture = mat.base_color_texture;
+        break;
+      }
+    out = f;
+  } catch (const std::exception &e) {
+    if (warnings)
+      warnings->push_back("ari: model " + what + ": " + e.what() + "; drawn as its box");
+  }
+  cache.meshes[key] = out;
+  return out;
+}
+
+// `g` scaled by `s` on each axis, turned half a turn about z when `turn`, then moved by `at`; its
+// normals scaled inversely and made unit again. A rotation and a scale, never a mirror.
+cvc::geometry scaled(cvc::geometry g, const std::array<double, 3> &s, bool turn,
+                     const std::array<double, 3> &at) {
+  const double t = turn ? -1.0 : 1.0;
+  const auto pts = g.const_points();
+  auto &moved = g.points();
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    moved[i][0] = t * s[0] * pts[i][0] + at[0];
+    moved[i][1] = t * s[1] * pts[i][1] + at[1];
+    moved[i][2] = s[2] * pts[i][2] + at[2];
+  }
+  const auto nn = g.const_normals();
+  if (nn.size() == pts.size()) {
+    auto &turned = g.normals();
+    for (std::size_t i = 0; i < nn.size(); ++i) {
+      const double n[3] = {t * nn[i][0] / s[0], t * nn[i][1] / s[1], nn[i][2] / s[2]};
+      const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+      for (int k = 0; k < 3; ++k)
+        turned[i][k] = len > 0.0 ? n[k] / len : n[k];
+    }
+  }
+  return g;
+}
+
+// A wheeled look made ready to draw on a vehicle of shape `s` (vehicle_look): its chassis, its
+// origin moved to the vehicle's axles' middle; with `fit` scaled on each axis so its axles, track
+// and wheel radius (half the wheel mesh's height) are the vehicle's (an axis the vehicle's wheels
+// do not spread along takes the wheel's scale); and its wheel, with `fit` scaled alike on every
+// axis to the vehicle's wheel radius, a left one and a right one (turned half a turn about z).
+// Null while a mesh's package loads (`pending`) or when a mesh cannot be read or the wheel has no
+// height (a warning says why). Made once per look and shape.
+std::shared_ptr<const fitted_wheeled>
+fitted_wheels(cvc::app &app, vehicle_model_cache &cache, const ari::vehicle_look &look,
+              const vehicle_shape &s, std::vector<std::string> *warnings, bool &pending) {
+  bool chassis_pending = false, wheel_pending = false;
+  const std::shared_ptr<const fitted_model> chassis =
+      read_mesh(app, cache, look, look.path, warnings, chassis_pending);
+  const std::shared_ptr<const fitted_model> wheel =
+      read_mesh(app, cache, look, look.wheel, warnings, wheel_pending);
+  pending = chassis_pending || wheel_pending;
+  if (!chassis || !wheel)
+    return nullptr;
+  const std::string key = look.kind + "|" + look.uri + "|" + look.subpath + "|" + look.path + "|" +
+                          look.wheel + "|" + std::to_string(look.wheelbase) + " " +
+                          std::to_string(look.track) + " " + (look.fit ? "fit" : "as is") + "|" +
+                          std::to_string(s.wheelbase) + " " + std::to_string(s.track) + " " +
+                          std::to_string(s.wheel_radius) + " " + std::to_string(s.axle_x);
+  if (auto it = cache.wheeled.find(key); it != cache.wheeled.end())
+    return it->second;
+  double lo = 1e300, hi = -1e300;
+  for (const auto &v : wheel->geometry.const_points()) {
+    lo = std::min(lo, static_cast<double>(v[2]));
+    hi = std::max(hi, static_cast<double>(v[2]));
+  }
+  const double radius = 0.5 * (hi - lo); // the wheel mesh's
+  if (!(radius > 1e-9)) {
+    if (warnings)
+      warnings->push_back("ari: model '" + look.wheel +
+                          "': the wheel has no height; drawn as its box");
+    cache.wheeled[key] = nullptr;
+    return nullptr;
+  }
+  std::array<double, 3> sc{1.0, 1.0, 1.0};
+  double ws = 1.0;
+  if (look.fit && s.wheel_radius > 0.0) {
+    ws = s.wheel_radius / radius;
+    const double wheelbase = look.wheelbase > 0.0 ? look.wheelbase : s.wheelbase;
+    const double track = look.track > 0.0 ? look.track : s.track;
+    sc = {s.wheelbase > 0.0 && wheelbase > 0.0 ? s.wheelbase / wheelbase : ws,
+          s.track > 0.0 && track > 0.0 ? s.track / track : ws, ws};
+  }
+  auto f = std::make_shared<fitted_wheeled>();
+  f->chassis.geometry = scaled(chassis->geometry, sc, false, {s.axle_x, 0.0, 0.0});
+  f->chassis.texture = chassis->texture;
+  f->left.geometry = scaled(wheel->geometry, {ws, ws, ws}, false, {0.0, 0.0, 0.0});
+  f->right.geometry = scaled(wheel->geometry, {ws, ws, ws}, true, {0.0, 0.0, 0.0});
+  f->left.texture = f->right.texture = wheel->texture;
+  cache.wheeled[key] = f;
+  return f;
+}
+
+// A shape's four wheels at rest, as WorldVehicles::wheels orders them (front to back, each axle's
+// left wheel first): their hubs its wheel radius over the ground `base_z`.
+std::vector<ari::entity_wheel> rest_wheels(const vehicle_shape &s, double base_z) {
+  std::vector<ari::entity_wheel> out;
+  for (const double x : {s.axle_x + 0.5 * s.wheelbase, s.axle_x - 0.5 * s.wheelbase})
+    for (const double y : {0.5 * s.track, -0.5 * s.track}) {
+      ari::entity_wheel w;
+      w.x = x;
+      w.y = y;
+      w.z = base_z + s.wheel_radius;
+      out.push_back(w);
+    }
+  return out;
+}
+
+// A wheel's node where `w` has it, in its chassis box's frame: at its centre, turned about its own
+// upright by its steer and rolled about its axle by its spin (Rz(steer) Ry(spin)): the per-frame
+// pose path (change-detected, published rather than written).
+void pose_wheel(GraphicsNode &node, const ari::entity_wheel &w) {
+  const double c = std::cos(w.steer), sn = std::sin(w.steer);
+  if (w.spin == 0.0) {
+    const double m[16] = {c,   -sn, 0.0, w.x, sn,  c,   0.0, w.y,
+                          0.0, 0.0, 1.0, w.z, 0.0, 0.0, 0.0, 1.0};
+    node.setPoseMatrix(m);
+  } else {
+    const double cs = std::cos(w.spin), ss = std::sin(w.spin);
+    const double m[16] = {c * cs, -sn, c * ss, w.x, sn * cs, c,   sn * ss, w.y,
+                          -ss,    0.0, cs,     w.z, 0.0,     0.0, 0.0,     1.0};
+    node.setPoseMatrix(m);
+  }
+}
+
+// A mesh's node made up as a look's part: its texture, else `color`.
+void dress(GeometryNode &node, const fitted_model &m, const float color[3]) {
+  if (!m.texture.empty()) {
+    node.setUseSingleColor(false);
+    node.setTexture(m.texture, false);
+  } else {
+    node.setUseSingleColor(true);
+    node.setColor(color[0], color[1], color[2]);
+  }
+  node.setAmbient(0.3);
+  node.setDiffuse(0.8);
 }
 
 // The fitted model under `group`: its base `base_z` below the group's origin (the ground under a
-// chassis), turned and lifted as the look says. False when it cannot be read.
+// chassis), turned and lifted as the look says. A wheeled look's chassis is placed so, and its
+// wheels go beside it as `group`'s <name>_tyre<k>, one at each of `wheels` (the plant's, as
+// WorldVehicles::wheels has them; null or empty: the shape's four at rest), a right one (y < 0)
+// the wheel turned half a turn, in a tyre's dark grey where the wheel has no texture. False when
+// it cannot be read.
 bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                   const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
-                  double base_z, const float color[3], std::vector<std::string> *warnings) {
+                  double base_z, const float color[3], const std::vector<ari::entity_wheel> *wheels,
+                  std::vector<std::string> *warnings) {
   bool pending = false;
-  std::shared_ptr<const fitted_model> m =
-      fitted(app, cache, look, model_fit::vehicle(s.length), warnings, pending);
+  std::shared_ptr<const fitted_wheeled> parts;
+  std::shared_ptr<const fitted_model> m;
+  if (wheeled_look(look)) {
+    parts = fitted_wheels(app, cache, look, s, warnings, pending);
+    if (parts)
+      m = std::shared_ptr<const fitted_model>(parts, &parts->chassis);
+  } else {
+    m = fitted(app, cache, look, model_fit::vehicle(s.length), warnings, pending);
+  }
   if (!m)
     return false;
   std::shared_ptr<GeometryNode> node = group.createChild<GeometryNode>(id, m->geometry);
@@ -437,15 +669,21 @@ bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
   node->setPosition(0.0, 0.0, base_z + look.z);
   node->setRotation(0.0, 0.0, look.yaw);
   node->setScale(look.scale, look.scale, look.scale);
-  if (!m->texture.empty()) {
-    node->setUseSingleColor(false);
-    node->setTexture(m->texture, false);
-  } else {
-    node->setUseSingleColor(true);
-    node->setColor(color[0], color[1], color[2]);
+  dress(*node, *m, color);
+  if (!parts)
+    return true;
+  static const float tyre[3] = {0.07f, 0.07f, 0.08f};
+  const std::vector<ari::entity_wheel> at =
+      wheels && !wheels->empty() ? *wheels : rest_wheels(s, base_z);
+  for (std::size_t k = 0; k < at.size(); ++k) {
+    const fitted_model &w = at[k].y < 0.0 ? parts->right : parts->left;
+    std::shared_ptr<GeometryNode> t =
+        group.createChild<GeometryNode>(group.getName() + "_tyre" + std::to_string(k), w.geometry);
+    if (!t)
+      continue;
+    dress(*t, w, tyre);
+    pose_wheel(*t, at[k]);
   }
-  node->setAmbient(0.3);
-  node->setDiffuse(0.8);
   return true;
 }
 
@@ -459,6 +697,14 @@ vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cac
                                          const ari::vehicle_look &look, double length,
                                          std::vector<std::string> *warnings) {
   bool pending = false;
+  if (wheeled_look(look)) { // both of its meshes
+    bool wheel_pending = false;
+    const bool chassis = read_mesh(app, cache, look, look.path, warnings, pending) != nullptr;
+    const bool wheel = read_mesh(app, cache, look, look.wheel, warnings, wheel_pending) != nullptr;
+    return chassis && wheel           ? vehicle_model_status::ready
+           : pending || wheel_pending ? vehicle_model_status::pending
+                                      : vehicle_model_status::failed;
+  }
   const std::shared_ptr<const fitted_model> m =
       fitted(app, cache, look, model_fit::vehicle(length), warnings, pending);
   return m ? vehicle_model_status::ready
@@ -548,7 +794,7 @@ bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNod
                           const std::string &id, const ari::vehicle_look &look,
                           const vehicle_shape &shape, double base_z, const float color[3],
                           std::vector<std::string> *warnings) {
-  return attach_model(app, cache, group, id, look, shape, base_z, color, warnings);
+  return attach_model(app, cache, group, id, look, shape, base_z, color, nullptr, warnings);
 }
 
 ari::SceneNode vehicle_scene_node(const std::string &id, const ari::vehicle_look &look,
@@ -742,9 +988,11 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     std::shared_ptr<GraphicsNode> node = sg.getGraphics(id);
     if (!node)
       continue;
+    // A wheeled look's wheels go where the plant has them (pose_vehicle_wheels moves them on).
+    const std::vector<ari::entity_wheel> wheels = v->wheels(e.id);
     if (fitted_look(a->look) &&
         !attach_model(sg.appContext(), *models, *node, id + "_mesh", a->look, shape, base_z,
-                      e.spec.color.data(), warnings)) {
+                      e.spec.color.data(), &wheels, warnings)) {
       if (vehicle_model_state(sg.appContext(), *models, a->look, shape.length) ==
           vehicle_model_status::pending)
         r.vehicle_models_pending = true;
@@ -784,14 +1032,24 @@ void pose_vehicle_wheels(RealizedScene &r) {
   SceneGraph &sg = *r.sg;
   for (const auto &[node, chassis] : r.vehicle_markers) {
     const std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
-    const std::shared_ptr<GraphicsNode> first =
-        group ? group->findChildByName(node + "_wheel0") : nullptr;
-    if (!first) // a mesh look
+    if (!group)
+      continue;
+    const std::shared_ptr<GraphicsNode> first = group->findChildByName(node + "_wheel0");
+    const std::shared_ptr<GraphicsNode> tyre =
+        first ? nullptr : group->findChildByName(node + "_tyre0");
+    if (!first && !tyre) // a one-piece model
       continue;
     const std::uint64_t id = std::stoull(node.substr(std::string("vehicle_").size()));
     const std::vector<ari::entity_wheel> wheels = v->wheels(id);
     if (wheels.empty())
       continue;
+    if (tyre) { // a wheeled look's: one for each of the plant's wheels, in its order
+      for (std::size_t k = 0; k < wheels.size(); ++k)
+        if (const std::shared_ptr<GraphicsNode> w =
+                k == 0 ? tyre : group->findChildByName(node + "_tyre" + std::to_string(k)))
+          pose_wheel(*w, wheels[k]);
+      continue;
+    }
     // The look's four (front left, front right, rear left, rear right) each take the plant's wheel
     // nearest it.
     for (int k = 0; k < 4; ++k) {
@@ -805,22 +1063,8 @@ void pose_vehicle_wheels(RealizedScene &r) {
         if ((e.x >= 0.0) == (sx > 0.0) && (e.y >= 0.0) == (sy > 0.0) &&
             (!best || std::fabs(e.x) > std::fabs(best->x)))
           best = &e;
-      if (!best)
-        continue;
-      // Turned about its own upright by its steer, at its centre, and rolled about its axle by its
-      // spin (Rz(steer) Ry(spin)): the per-frame pose path (change-detected, published rather
-      // than written).
-      const double c = std::cos(best->steer), sn = std::sin(best->steer);
-      if (best->spin == 0.0) {
-        const double m[16] = {c,   -sn, 0.0, best->x, sn,  c,   0.0, best->y,
-                              0.0, 0.0, 1.0, best->z, 0.0, 0.0, 0.0, 1.0};
-        w->setPoseMatrix(m);
-      } else {
-        const double cs = std::cos(best->spin), ss = std::sin(best->spin);
-        const double m[16] = {c * cs, -sn, c * ss, best->x, sn * cs, c,   sn * ss, best->y,
-                              -ss,    0.0, cs,     best->z, 0.0,     0.0, 0.0,     1.0};
-        w->setPoseMatrix(m);
-      }
+      if (best)
+        pose_wheel(*w, *best);
     }
   }
 }
@@ -907,8 +1151,9 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
     const std::string sig = sel + "|" + get(st, a + "length") + "|" + get(st, a + "width") + "|" +
                             get(st, a + "height") + "|" + get(st, a + "look.kind") + "|" +
                             get(st, a + "look.path") + "|" + get(st, a + "look.uri") + "|" +
-                            get(st, a + "look.fit") + "|" + get(st, root + ".spawn.color") + "|" +
-                            get(st, root + ".spawn.color2");
+                            get(st, a + "look.fit") + "|" + get(st, a + "look.wheel") + "|" +
+                            get(st, a + "look.wheelbase") + "|" + get(st, a + "look.track") + "|" +
+                            get(st, root + ".spawn.color") + "|" + get(st, root + ".spawn.color2");
     if (sig != *last) {
       *last = sig;
       if (graph->getGraphics(drawn))
@@ -930,6 +1175,9 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         look.yaw = num(get(st, a + "look.yaw"), 0.0);
         look.z = num(get(st, a + "look.z"), 0.0);
         look.fit = get(st, a + "look.fit") == "1";
+        look.wheel = get(st, a + "look.wheel");
+        look.wheelbase = num(get(st, a + "look.wheelbase"), 0.0);
+        look.track = num(get(st, a + "look.track"), 0.0);
         float c1[3] = {0.85f, 0.7f, 0.2f}, c2[3] = {0.12f, 0.12f, 0.14f};
         rgb(get(st, root + ".spawn.color"), c1);
         rgb(get(st, root + ".spawn.color2"), c2);
@@ -947,7 +1195,8 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         realize_scene(*graph, one, prefix, nullptr);
         if (model)
           if (std::shared_ptr<GraphicsNode> g = graph->getGraphics(drawn))
-            if (!attach_model(app, *models, *g, drawn + "_mesh", look, s, 0.0, c1, nullptr)) {
+            if (!attach_model(app, *models, *g, drawn + "_mesh", look, s, 0.0, c1, nullptr,
+                              nullptr)) {
               if (vehicle_model_state(app, *models, look, s.length) ==
                   vehicle_model_status::pending)
                 *loading = std::make_pair(look, s.length);

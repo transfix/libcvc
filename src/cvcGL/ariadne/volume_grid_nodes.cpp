@@ -13,6 +13,7 @@
 #include "volume_grid_contour_props.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
@@ -21,6 +22,7 @@
 #include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
 #include <cvc/gl/VolumeGridSegmentation.h>
+#include <cvc/gl/VolumeRenderNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/gl/ariadne/node_data.h>
 #include <cvc/gl/ariadne/scene_realize.h>
@@ -33,6 +35,7 @@
 #include <cvc/volume/volume_grid.h>
 #include <cvc/volume/volume_grid_segment.h>
 #include <cvc/volume/volume_slice.h>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -86,6 +89,54 @@ NodeDataSource grid_volume_source(SceneGraph &sg, const RealizedScene &out, cons
   }
   return {};
 }
+
+// The grid's transfer-function binding, one for its model at a time. While nothing draws the
+// volume in the 3D view it is the planes' (volume_slice: they read the model themselves, and the
+// binding keeps <tf>.range and the overlays on the volume); with display.render set it is that
+// renderer's, bound to the grid's model (tf_binding_options::model_key), so the planes and the
+// volume colour through one transfer function. Made again whenever the renderer is replaced or
+// handed a new volume (VolumeRenderNode::rendererVersion).
+struct grid_tf {
+  tf_binding_options opt;
+  std::shared_ptr<tf_binding> binding;
+  std::uint64_t bound = std::numeric_limits<std::uint64_t>::max();
+
+  void tick(const std::shared_ptr<VolumeGridNode> &g, std::vector<std::string> *warnings) {
+    const std::shared_ptr<VolumeRenderNode> v = g->volumeRender();
+    const std::uint64_t version = v ? v->rendererVersion() : 0;
+    if (!binding || version != bound) {
+      bound = version;
+      binding.reset(); // the old binding stops before the new one owns the key
+      std::shared_ptr<GraphicsNode> node = v ? v->renderer() : nullptr;
+      tf_target target = tf_target::volume_slice;
+      if (node)
+        switch (v->rendererKind()) {
+        case VolumeRenderNode::kind::vtk:
+          target = tf_target::volume;
+          break;
+        case VolumeRenderNode::kind::volren:
+          target = tf_target::volren;
+          break;
+        case VolumeRenderNode::kind::volslice:
+          target = tf_target::volslice;
+          break;
+        default:
+          node.reset();
+          break;
+        }
+      tf_binding_options o = opt;
+      if (node)
+        o.model_key = g->stateName("transfer_function");
+      else
+        node = g;
+      const std::shared_ptr<const cvc::volume> now = g->histogramVolume();
+      binding = make_transfer_function(node, target, now ? *now : cvc::volume(g->app()),
+                                       std::move(o), warnings);
+    }
+    if (binding)
+      binding->tick();
+  }
+};
 
 // The props that seed <node>.grid.*.
 void seed_keys(VolumeGridNode &g, const ari::SceneNode &n, const NodeDataSource &volume,
@@ -235,13 +286,18 @@ std::shared_ptr<GraphicsNode> realize_volume_grid(SceneGraph &sg, const ari::Sce
     const std::shared_ptr<VolumeGridNode> node = weak.lock();
     return node ? node->histogramVolume() : nullptr;
   };
-  const std::shared_ptr<const cvc::volume> now = g->histogramVolume();
-  attach_transfer_function(out, g, tf_target::volume_slice, now ? *now : cvc::volume(app), opt,
-                           warnings);
+  auto tf = std::make_shared<grid_tf>();
+  tf->opt = std::move(opt);
+  tf->tick(g, warnings);
 
-  out.custom_ticks.push_back([weak](vtkRenderer *) {
-    if (std::shared_ptr<VolumeGridNode> node = weak.lock())
-      node->tick();
+  out.custom_ticks.push_back([weak, tf](vtkRenderer *) {
+    const std::shared_ptr<VolumeGridNode> node = weak.lock();
+    if (!node) {
+      tf->binding.reset();
+      return;
+    }
+    node->tick();
+    tf->tick(node, nullptr); // after the node's tick: a renderer it made is bound this frame
   });
   // While a segmentation runs (or a request waits for its volume), the scene has work in flight.
   out.pending_work.push_back([weak]() {

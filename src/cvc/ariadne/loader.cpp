@@ -1735,7 +1735,9 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.
-  if (!w.repeat.empty() && any_descendant_repeats(w))
+  // A repeated mount is not nested: the module's repeats are its own, at its instance's
+  // sub-prefix, so its {i} never needed the outer one.
+  if (!w.repeat.empty() && w.scope.empty() && any_descendant_repeats(w))
     ctx.warn("ari: nested 'repeat' is not supported (a single {i} index) — the inner repeat "
              "cannot see the outer index");
   return w;
@@ -2313,6 +2315,10 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   if (frag.IsMap() && frag["meta"] && frag["meta"].IsMap() && frag["meta"]["name"] &&
       frag["meta"]["name"].IsScalar() && !frag["meta"]["name"].Scalar().empty())
     wrapper.app_name = frag["meta"]["name"].Scalar();
+  // ... and the mount's own name for it, worked out each frame in the loader's scope (a key or an
+  // expression; `{i}` its instance under repeat:), which names it when not empty.
+  if (has(n, "name"))
+    wrapper.app_name_bind = str(n, "name");
   wrapper.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
   // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is

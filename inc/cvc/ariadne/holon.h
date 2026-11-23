@@ -20,7 +20,8 @@
 #include <cstdint>
 #include <cvc/ariadne/avatar_physics.h>
 #include <cvc/ariadne/avatar_sim.h>
-#include <cvc/ariadne/section.h>     // section_stamp
+#include <cvc/ariadne/section.h> // section_stamp
+#include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/vehicle_kinematics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
 #include <cvc/core/clock_driver.h>
@@ -30,6 +31,7 @@
 #include <cvc/physics/flow_velocity.h>
 #include <cvc/physics/pose_tracker.h>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -494,9 +496,25 @@ public:
   // peer or an unknown pid, or for a DRIVE that is not valid(). A host stops it by registering the
   // participant again (client_pump does when the relay lets it out).
   bool predict_vehicle(const std::string &pid, const kinematic_drive &drive);
-  // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now.
+  // The same for a vehicle on the dynamic, dynamic4w or jolt plant (OW5d, OW5e, OW5i,
+  // room_entity::dynamics): each quantum one step of its model (dynamic_vehicle_model: the relay's
+  // dyn_bike_plant or dyn_4w_plant without a world; a Jolt vehicle in a world of its own with the
+  // statics, set_statics, and the physics rules' gravity), and a sample it is not within
+  // reconcile_tol of starts it again from the sample, with the yaw rate, steering and driver (on
+  // jolt, the whole of its world) it had predicted for that tick (dynamic_vehicle_model::at). New
+  // statics rebuild a jolt model, its vehicle placed again where it is, at rest.
+  bool predict_vehicle(const std::string &pid, const dynamic_drive &drive);
+  // The ground a dynamic plant's vehicle is predicted on (OW5g): the ground the relay's vehicles
+  // drive on, as this client has it (world_replica::ground: the same document's grid and terrain);
+  // empty: flat. REVISION names it (a new one rebuilds each predicted model on it, its state
+  // kept); 0 is none. client_pump sets it from its world_replica.
+  void set_vehicle_ground(std::function<double(double, double)> ground, std::uint64_t revision);
+  std::uint64_t vehicle_ground_revision() const { return _vground_rev; }
+  // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now (false for the
+  // other plant's).
   bool predicts_vehicle(const std::string &pid) const;
   bool predicted_vehicle(const std::string &pid, kinematic_vehicle &out) const;
+  bool predicted_vehicle(const std::string &pid, dynamic_vehicle &out) const;
 
 private:
   struct participant {
@@ -584,10 +602,15 @@ private:
     bool vehicle_placed = false;
     kinematic_drive vdrive;
     kinematic_vehicle vnow, vprev;
+    // On a dynamic plant: its model (null: the kinematic plant's numbers above), and the model's
+    // vehicle now and before the last quantum.
+    std::shared_ptr<dynamic_vehicle_model> vdyn;
+    dynamic_vehicle dnow, dprev;
     struct vlogged {
       std::uint64_t tick = 0;
       avatar_intent in;
       kinematic_vehicle after;
+      dynamic_vehicle dafter;
     };
     std::deque<vlogged> vlog;
     bool acked = false;
@@ -613,6 +636,12 @@ private:
   void vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick);
   void vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
                          std::uint64_t server_tick);
+  void dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
+                         std::uint64_t server_tick);
+  // The world a jolt vehicle is predicted in: the statics and the gravity (OW5i).
+  jolt_vehicle_world jolt_world() const;
+  // CLIENT: the predicted vehicle's chassis now, and before the last quantum.
+  static cvc::physics::body_state vehicle_body(const participant &p, bool before = false);
   // CLIENT physics: re-run the logged steps of the local avatar from FIRST on (the one before it,
   // if any, is where they start) under the rules in force at each; the jump is a correction.
   void replay_log(const std::string &pid, participant &p, std::size_t first);
@@ -650,6 +679,9 @@ private:
   cvc::world_clock _clock; // declared before _driver: _driver references it
   cvc::clock_driver _driver;
   std::map<std::string, participant> _participants;
+  // The ground dynamic plants' vehicles are predicted on (set_vehicle_ground), and its revision.
+  std::function<double(double, double)> _vground;
+  std::uint64_t _vground_rev = 0;
   // CLIENT: pid -> the newest tick seen before it left (remove_participant), until a sample of it
   // is applied; at most kMaxLeft of them (a client sees a fresh pid per launch of every peer).
   std::map<std::string, std::uint64_t> _left;

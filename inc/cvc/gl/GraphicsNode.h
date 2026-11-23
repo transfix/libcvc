@@ -434,7 +434,6 @@ protected:
   // (the dashboard, a script) differs from what we published and still applies.
   std::string m_echoPosition, m_echoRotation, m_echoScale, m_echoMatrix;
   vtkSmartPointer<vtkTransform> m_worldXf;
-  vtkSmartPointer<vtkTransform> m_vtkTransform; // VTK transform wrapper for m_transform
   std::vector<std::shared_ptr<GraphicsNode>> m_graphicsChildren;
   GraphicsNode *m_parent; // Weak pointer to parent for world transform calculation
   std::map<std::string, std::any> m_metadata;

@@ -672,6 +672,10 @@ struct ConferenceSession {
   // The room's entities (the vehicles the relay's document runs; room_entities.h), played out from
   // the same pose snapshots by a holon of their own, and drawn by room_view.
   std::unique_ptr<cvc::ariadne::entity_playout> entities_;
+  // The relay's world built from the same document, when this client holds it (OW5c): the statics
+  // our walk is predicted against.
+  cvc::ariadne::world_replica world_replica_;
+  std::string world_status_;
   std::unique_ptr<gla::room_view> room_view_;
   // The Avatar window's model: our avatar's settings, energy budget and ledger, with their recent
   // history, published to the document as self.avatar.* (avatar_panel.h).
@@ -1571,7 +1575,12 @@ struct ConferenceSession {
     // predict meets the vehicles we see (ARIADNE_WORLDS.md section 18.5).
     if (entities_)
       entities_->pump(*app_, room_, f.wall_dt);
-    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get());
+    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get(),
+                              &world_replica_);
+    if (world_replica_.status() != world_status_) {
+      world_status_ = world_replica_.status();
+      std::fprintf(stderr, "arigl: room: world document: %s\n", world_status_.c_str());
+    }
     // The vehicle we drive is drawn where we predict it (section 18.5, OW5b), not a round trip
     // behind our keys where its samples put it.
     if (entities_) {
