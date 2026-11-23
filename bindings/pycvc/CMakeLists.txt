@@ -356,6 +356,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_gym:test_pycvc_gym.py
              pycvc_ariadne_harness:test_pycvc_ariadne_harness.py
              pycvc_ariadne_bridge:test_pycvc_ariadne_bridge.py
+             pycvc_net:test_pycvc_net.py
              pycvc_world_entities:test_pycvc_world_entities.py
              pycvc_world_poses:test_pycvc_world_poses.py
              pycvc_state_exec:test_pycvc_state_exec.py

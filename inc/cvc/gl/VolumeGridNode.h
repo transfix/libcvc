@@ -55,6 +55,11 @@
 //                  a cvc::point_classes (as those hold it), which replace the classes (an undo
 //                  step) each time they change; the session's a cvc::volume_grid_session, applied
 //                  each time it changes
+//   grid.volumes   published: the volumes grid.source.volume may name, one per line, as it names
+//                  them: each output of the document's data: entries that holds a volume
+//                  (data.<name>.<output>), then the key it names now when that is not one of them.
+//                  Empty while grid.source.volume names none (a host that calls setSource). The
+//                  panel's Source combo picks from it, writing grid.source.volume
 //   grid.classes   the point classes' metadata as rows a list: binds: the count, then <i>.name,
 //                  <i>.color ("r,g,b"), <i>.radius, <i>.variable, <i>.timestep, <i>.points (the
 //                  point count, written); grid.classes.current, the class a click adds to (-1
@@ -182,6 +187,7 @@ private:
              const std::string &label, int var, int time);
   bool follow(const char *which, cvc::followed_key &f, boost::any &payload);
   void followSources();
+  void publishVolumes();
   void adoptPoints(const boost::any &payload, const std::string &from);
   void applySession(const cvc::volume_grid_session &s, const std::string &from);
   void publishSession();
@@ -208,6 +214,7 @@ private:
   std::string m_scope;
   cvc::followed_key m_followVolume, m_followPoints, m_followSession;
   std::string m_waitingFor; // the status last said the node is waiting for a volume here
+  std::string m_volumesSignature; // what grid.volumes was last made from (the entries, their revs)
   bool m_seeded = false;    // the parameter keys have their defaults
   std::string m_sessionSignature;
   std::array<std::shared_ptr<VolumeSliceNode>, 3> m_slices;

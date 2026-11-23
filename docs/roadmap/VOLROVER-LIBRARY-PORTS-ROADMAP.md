@@ -887,7 +887,11 @@ outside the unit count, and the slowest 4,096-unit step was 0.4–0.8 ms at 20k�
 and `init.cpp` differ from the copies in TightCocone, PocketTunnel and Curation by 10–25 lines
 each. Port them once, as an internal `cvc::cocone` module on `tet_complex`. A later TightCocone
 port (surface reconstruction from points) and PocketTunnel then reuse it, rather than vendoring a
-fifth copy.
+fifth copy. *Built:* the core is `src/cvc/geometry/cocone/` (`cocone.h`, `datastruct.*`,
+`stepping.h`, `init`, `util`, `tcocone`, `rcocone`), lifted out of `skeleton/` when PocketTunnel came
+to use it (TexMol T5). The skeleton's own stages are in `skeleton/` (`skeleton_stages.h`),
+PocketTunnel's in `pocket_tunnel/`. PocketTunnel's copies of `init.cpp` and `tcocone.cpp` were this
+code; its `util.cpp` added only `cell_volume`, now in the core.
 
 **API sketch** (`inc/cvc/geometry/skeleton.h`)
 
@@ -1385,6 +1389,13 @@ their units and ranges as properties. Bulk data is on the data channel:
   decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
   Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane
   (which disk shows depends on draw order); the slice views show them all.
+- **Which volume** (after Joe on 2026-11-21: with several volumes loaded, how does the grid pick
+  one?): the node publishes `grid.volumes`, the outputs of the document's `data:` entries that
+  hold a volume, and the key `grid.source.volume` names when it is elsewhere; the Probe tab's
+  Source combo picks from it and writes `grid.source.volume`, which the grid follows. The demo
+  holds a coarser bunny beside the fine one. Not offered: volumes at keys outside `data:` that the
+  grid does not name (a filter's output a document points at with `source: { state }` shows while
+  named), and a scene-wide "current volume" that every node follows.
 - **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
   and `axis` on a pick; a slider's `range: key`.
 - **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and
@@ -1828,6 +1839,8 @@ not as follow-ups.
   `utility.h`'s XML-RPC helpers, and the `__system.xmlrpc` keys.
 - **Skeletonization's helix-specific strand window and its `#if 0` helix block.** The window
   becomes an off-by-default parameter. The block fits better with a SecondaryStructures port.
+  *(T5 ported SecondaryStructures, which picks helices by the same (2, 3) window on its U2
+  widths: `cvc::find_secondary_structures`, TEXMOL-F2DOCK-ARISRV-ROADMAP.md §2.6.)*
 
 ---
 
