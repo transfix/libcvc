@@ -204,7 +204,7 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
     } else if (key == "look") {
       if (!val.is_map())
         return at + " look: expects a map (box:, file:, asset:, model:, data:, fit:, scale:, yaw:, "
-                    "z:, wheel:, wheelbase:, track:)";
+                    "z:)";
       bool fit_given = false;
       for (const auto &[k, x] : val.entries) {
         if (k == "box") {
@@ -227,13 +227,6 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
           if (!number(x, at + " look: " + k + ":", n, why))
             return why;
           (k == "scale" ? v.look.scale : k == "yaw" ? v.look.yaw : v.look.z) = n;
-        } else if (k == "wheel") {
-          v.look.wheel = x.as_string();
-        } else if (k == "wheelbase" || k == "track") {
-          double n = 0.0;
-          if (!number(x, at + " look: " + k + ":", n, why))
-            return why;
-          (k == "wheelbase" ? v.look.wheelbase : v.look.track) = n;
         } else {
           warn(warnings, at + " look: unknown key '" + k + "', ignored");
         }
@@ -244,14 +237,6 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
         if (v.look.kind != "file" || v.look.path.empty())
           return at + " look: data: needs file: (the model's file in the package)";
         v.look.kind = "data";
-        if (!fit_given)
-          v.look.fit = true;
-      }
-      // `wheel: WHEEL`: a wheeled look, the look's mesh its chassis, fitted to the vehicle's wheels
-      // unless `fit: false`.
-      if (!v.look.wheel.empty()) {
-        if (v.look.kind.empty() || v.look.kind == "box")
-          return at + " look: wheel: needs the chassis's mesh (file:, asset:, model: or data:)";
         if (!fit_given)
           v.look.fit = true;
       }
@@ -946,10 +931,6 @@ std::string check_world_rules(const world_rules &r) {
       return at + ": look: " + v.look.kind + " names nothing";
     if (!finite_positive(v.look.scale) || !std::isfinite(v.look.yaw) || !std::isfinite(v.look.z))
       return at + ": look: scale must be positive, yaw and z finite";
-    if (!finite_nonnegative(v.look.wheelbase) || !finite_nonnegative(v.look.track))
-      return at + ": look: wheelbase and track must be zero (the vehicle's) or more";
-    if (!v.look.wheel.empty() && (v.look.kind.empty() || v.look.kind == "box"))
-      return at + ": look: wheel: needs the chassis's mesh (file:, asset:, model: or data:)";
     for (const auto &[k, lohi] : v.ranges)
       if (!finite_positive(lohi.first) || !std::isfinite(lohi.second) || lohi.second < lohi.first)
         return at + ": ranges: " + k + " must be [lo, hi] with 0 < lo <= hi";

@@ -616,12 +616,10 @@ its own world document.
     remove the entities too), and a thread-safe `WorldVehicles::set_pose` / `set_poses` (pycvc
     `WorldEntities.set_pose`, `set_poses` from numpy). Timed poses are drawn between the last
     two, a tick behind; a jump is taken at once. The box look's wheels steer by the pose's steer
-    and roll at its speed, and so do a wheeled look's (built 2026-11-22: `look: { file: CHASSIS,
-    wheel: WHEEL, wheelbase:, track: }`, a chassis mesh and one wheel's, each wheel drawn on its
-    own where `WorldVehicles::wheels` has it; ARIADNE.md, "Wheeled looks"). A scripted track is
-    followed exactly, and its state hash is pinned headless, drawn and under `arigl snapshot`
-    (`physics.hash`: 1 publishes `physics.stats.hash`). A drawn world now spawns `world:
-    vehicles: start:` too, as a headless one does.
+    and roll at its speed. A scripted track is followed exactly, and its state hash is pinned
+    headless, drawn and under `arigl snapshot` (`physics.hash`: 1 publishes
+    `physics.stats.hash`). A drawn world now spawns `world: vehicles: start:` too, as a headless
+    one does.
   - The runtime is `WorldVehicles` ([world_vehicles.h](../../inc/cvc/ariadne/world_vehicles.h)),
     one per `SceneWorld`, with nothing process-wide: a relay that runs a world per room (RM1,
     WD3) runs one per room, and each room's panels name its keys by their root (`world_source`'s
