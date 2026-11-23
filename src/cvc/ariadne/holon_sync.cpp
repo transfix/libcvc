@@ -25,6 +25,7 @@
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/core/app.h>
+#include <cvc/core/sim_tick.h> // the room's rate (on_room_clock)
 #include <cvc/physics/types.h> // vec3, quat
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
@@ -288,14 +289,60 @@ void serve_drive(holon &h, cvc::app &app, const std::string &room, const std::st
     set_replicated(app, driving, std::to_string(static_cast<unsigned long long>(now)));
 }
 
+void request_archetype(cvc::app &app, const std::string &room, const std::string &pid,
+                       const std::string &archetype) {
+  set_replicated(app, leaf(room, pid, {"avatar", "archetype"}), archetype);
+}
+
+std::string read_requested_archetype(cvc::app &app, const std::string &room,
+                                     const std::string &pid) {
+  cvc::state *n = app.root().findDescendant(leaf(room, pid, {"avatar", "archetype"}));
+  return n ? n->value() : std::string();
+}
+
+archetype_status read_archetype_status(cvc::app &app, const std::string &room,
+                                       const std::string &pid) {
+  // "<archetype>:ok" or "<archetype>:refused: <why>"
+  archetype_status out;
+  cvc::state *n = app.root().findDescendant(leaf(room, pid, {"archetype_status"}));
+  if (!n || n->value().empty())
+    return out;
+  const std::string v = n->value();
+  const std::size_t colon = v.find(':');
+  if (colon == std::string::npos)
+    return out;
+  out.answered = true;
+  out.archetype = v.substr(0, colon);
+  const std::string rest = v.substr(colon + 1);
+  out.ok = rest == "ok";
+  const std::string refused = "refused: ";
+  if (rest.compare(0, refused.size(), refused) == 0)
+    out.why = rest.substr(refused.size());
+  return out;
+}
+
+void serve_archetype(holon &h, cvc::app &app, const std::string &room, const std::string &pid) {
+  const std::string want = read_requested_archetype(app, room, pid);
+  const archetype_status st = read_archetype_status(app, room, pid);
+  if (st.answered && st.archetype == want)
+    return; // ruled on already (a refusal waits for a new ask)
+  std::string why;
+  const bool ok = h.set_archetype(pid, want, &why);
+  // Said when it was asked for, refused, or made a vehicle: a person who never asked writes
+  // nothing.
+  if (!want.empty() || !ok || h.embodies(pid) != 0)
+    set_replicated(app, leaf(room, pid, {"archetype_status"}),
+                   want + (ok ? std::string(":ok") : ":refused: " + why));
+}
+
 std::uint64_t drive_target(const entity_playout &entities, const cvc::physics::vec3 &feet,
                            double facing, double *out_gap) {
   std::uint64_t best = 0;
   double best_score = 1e300, best_gap = 0.0;
   for (const conference::room_entity &e : entities.entities()) {
     cvc::physics::pose at;
-    if (!e.drivable || !entities.pose(e.id, at))
-      continue;
+    if (!e.drivable || !e.avatar.empty() || !entities.pose(e.id, at))
+      continue; // someone's body is not a ride
     // Its feet to the chassis box, in the vehicle's frame, in plan (holon::get_in's rule).
     const cvc::physics::quat &q = at.rotation;
     const double yaw =
@@ -337,6 +384,20 @@ holon_config room_holon_config() {
   holon_config cfg;
   cfg.physics = true; // the rest is the room's: its rules sections (sync_rules)
   return cfg;
+}
+
+holon_config room_holon_config(double hz) {
+  return hz > 0.0 ? holon_config_at(room_holon_config(), hz) : room_holon_config();
+}
+
+holon_config room_holon_config(cvc::app &app, const std::string &room) {
+  return room_holon_config(conference::read_room_clock(app, room));
+}
+
+bool on_room_clock(const holon &h, cvc::app &app, const std::string &room) {
+  const double hz = conference::read_room_clock(app, room);
+  const double quantum = cvc::sim_quantum(hz > 0.0 ? hz : cvc::kSimRateDefault);
+  return std::fabs(h.clock().fixed_dt() - quantum) < 1e-12;
 }
 
 std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) {
@@ -480,9 +541,12 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   for (const std::string &pid : h.participants())
     if (!present.count(pid))
       h.remove_participant(pid);
-  // Getting in and out of the world's vehicles (section 18.6).
-  for (const conference::room_participant &p : roster)
+  // Each one's archetype (a vehicle is its body), then getting in and out of the world's vehicles
+  // (section 18.6).
+  for (const conference::room_participant &p : roster) {
+    serve_archetype(h, app, room, p.pid);
     serve_drive(h, app, room, p.pid);
+  }
   // One authoritative frame.
   h.advance(wall_dt);
   // Publish each participant's authoritative pose (these are local writes on the
@@ -502,8 +566,30 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
     write_reserve(h, app, room, p.pid, 5 * heartbeat);
 }
 
+namespace {
+// client_pump's ENTITIES: each one shown that SELF_PID does not drive or embody, held where it is
+// shown; the rest released.
+void hold_entities(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
+                   const entity_playout *entities) {
+  std::set<std::uint64_t> keep;
+  if (entities && h.physics()) {
+    const std::uint64_t driving = read_driving(app, room, self_pid);
+    for (const conference::room_entity &e : entities->entities()) {
+      if (e.id == driving || e.driver == self_pid || e.avatar == self_pid)
+        continue;
+      cvc::physics::body_state at;
+      if (entities->state(e.id, at) && h.hold_entity(e.id, e.size, at))
+        keep.insert(e.id);
+    }
+  }
+  for (std::uint64_t id : h.held_entities())
+    if (!keep.count(id))
+      h.release_entity(id);
+}
+} // namespace
+
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                 double wall_dt) {
+                 double wall_dt, const entity_playout *entities) {
   sync_statics(h, app, room);
   sync_rules(h, app, room);
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
@@ -525,18 +611,28 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
       have = false;
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
-    // Driving, our pose is the vehicle's, played out as a peer's; out, predicted again.
-    if (p.pid == self_pid && h.has_participant(p.pid)) {
-      const bool riding = read_driving(app, room, p.pid) != 0;
-      if (riding == h.is_local(p.pid)) {
+    // Driving, our pose is the vehicle's: predicted when the room's entities say how it runs (the
+    // kinematic plant, section 18.5, OW5b), else played out as a peer's; out, the walker again.
+    const conference::room_entity *ride = nullptr;
+    bool local = p.pid == self_pid;
+    if (p.pid == self_pid) {
+      const std::uint64_t driving = read_driving(app, room, p.pid);
+      ride = driving != 0 && entities ? entities->find(driving) : nullptr;
+      if (ride && !ride->drive.valid())
+        ride = nullptr;
+      local = driving == 0 || ride;
+      if (h.has_participant(p.pid) && (local != h.is_local(p.pid) ||
+                                       (local && (ride != nullptr) != h.predicts_vehicle(p.pid)))) {
         const cvc::physics::body_state now = h.state(p.pid);
         h.remove_participant(p.pid);
-        h.add_participant(p.pid, /*local=*/!riding, now, /*pose_known=*/true);
+        h.add_participant(p.pid, local, now, /*pose_known=*/true);
       }
     }
     if (!h.has_participant(p.pid))
-      h.add_participant(p.pid, /*local=*/p.pid == self_pid, have ? s : cvc::physics::body_state{},
+      h.add_participant(p.pid, local, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);
+    if (ride)
+      h.predict_vehicle(p.pid, ride->drive); // a no-op while its numbers stay the same
     if (p.pid == self_pid) {
       // The server's reserve before the pose: a reconcile trims the log the reserve is checked
       // against.
@@ -551,6 +647,7 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
   for (const std::string &pid : h.participants())
     if (!present.count(pid))
       h.remove_participant(pid);
+  hold_entities(h, app, room, self_pid, entities);
   h.advance(wall_dt);
 }
 
@@ -646,7 +743,22 @@ bool entity_playout::pose(std::uint64_t id, cvc::physics::pose &out) const {
   const std::string pid = conference::entity_pid(id);
   if (!_holon->has_participant(pid))
     return false;
-  out = _holon->display_pose(pid);
+  out = id != 0 && id == _predicted ? _predicted_at : _holon->display_pose(pid);
+  return true;
+}
+
+void entity_playout::show_predicted(std::uint64_t id, const cvc::physics::pose &at) {
+  _predicted = id;
+  _predicted_at = at;
+}
+
+bool entity_playout::state(std::uint64_t id, cvc::physics::body_state &out) const {
+  cvc::physics::pose shown;
+  if (!pose(id, shown))
+    return false;
+  out = _holon->state(conference::entity_pid(id));
+  out.position = shown.position;
+  out.rotation = shown.rotation;
   return true;
 }
 

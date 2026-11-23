@@ -54,6 +54,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/mol/molecule.h>
 #include <cvc/state/state.h>
 #include <filesystem>
 #include <memory>
@@ -507,6 +508,91 @@ int main() {
               describe(ea) + " | " + describe(eb) + ")");
       chk(starts(a.get(a.sk + ".status"), "done: ") && starts(b.get(b.sk + ".status"), "done: "),
           "each app's keys are its own");
+    }
+  }
+
+  // ---- a molecule: PDB entry 1GRL (a GroEL subunit) as a surface, then its skeleton ----
+  // A .pdb source is the isosurface of its heavy atoms' blur map (cvc::mol::blur). At the skeleton
+  // lab's settings, a low-resolution map (blobbiness -0.2, 2 Å, isovalue 10), the skeleton's
+  // strands run along the helices: a helix's C-alpha lies near a strand far more often than a
+  // coil's.
+  {
+    cvc::app ma;
+    cvc::gl::ariadne::register_cvcgl_extensions(ma);
+    const fs::path molDir = fs::path(CVC_REPO_DIR) / "examples" / "data" / "molecules";
+    Value mp;
+    mp.kind = Value::Kind::Map;
+    for (const auto &kv :
+         std::vector<std::pair<std::string, std::string>>{{"blobbiness", "-0.2"},
+                                                          {"resolution", "2"},
+                                                          {"isovalue", "10"},
+                                                          {"target_faces", "4000"}})
+      mp.entries.emplace_back(kv.first, scalar(kv.second));
+    Lab lab(ma, "mol", molDir, "1grl.pdb", mp);
+    const std::size_t surface_tris =
+        lab.mesh && lab.mesh->getGeometry() ? lab.mesh->getGeometry()->const_tris().size() : 0;
+    chk(surface_tris > 10000, "a .pdb source realizes the molecule's surface (" +
+                                  std::to_string(surface_tris) + " triangles)");
+    if (lab.mesh) {
+      const std::string ops = lab.ops, sk = lab.sk;
+      chk(num(ma, ops + ".source.blobbiness") == -0.2 && num(ma, ops + ".source.resolution") == 2 &&
+              num(ma, ops + ".source.isovalue") == 10 && lab.get(ops + ".source.hydrogens") == "0",
+          "source.blobbiness / resolution / isovalue / hydrogens are seeded from the props");
+      lab.set(ops + ".request", "decimate skeleton");
+      chk(lab.settle(), "the decimate and the skeleton settle");
+      chk(starts(lab.get(sk + ".status"), "done: "),
+          "the skeleton ran: " + lab.get(sk + ".status"));
+      const auto strands = lab.part("strands");
+      std::size_t helix = 0, helix_near = 0, coil = 0, coil_near = 0;
+      if (strands && !strands->const_lines().empty()) {
+        cvc::mol::molecule_read_params rp;
+        rp.hydrogens = false;
+        const cvc::mol::molecule m =
+            cvc::mol::read_molecule(ma, (molDir / "1grl.pdb").string(), rp);
+        const auto &P = strands->const_points();
+        for (const cvc::mol::atom &at : m.atoms) {
+          if (at.name != "CA")
+            continue;
+          const double c[3] = {at.x, at.y, at.z};
+          double best = 1e30;
+          for (const auto &l : strands->const_lines()) {
+            const auto &a = P[l[0]], &b = P[l[1]];
+            double ab[3], ap[3], l2 = 0, t = 0;
+            for (int k = 0; k < 3; ++k) {
+              ab[k] = b[k] - a[k];
+              ap[k] = c[k] - a[k];
+              l2 += ab[k] * ab[k];
+              t += ap[k] * ab[k];
+            }
+            t = l2 > 0 ? std::clamp(t / l2, 0.0, 1.0) : 0.0;
+            double d2 = 0;
+            for (int k = 0; k < 3; ++k)
+              d2 += (ap[k] - t * ab[k]) * (ap[k] - t * ab[k]);
+            best = std::min(best, d2);
+          }
+          const int si = m.structure_of(at);
+          if (si < 0) {
+            ++coil;
+            coil_near += best < 9.0;
+          } else if (m.structures[static_cast<std::size_t>(si)].type ==
+                     cvc::mol::secondary_structure::kind::helix) {
+            ++helix;
+            helix_near += best < 9.0;
+          }
+        }
+      }
+      const double hf = helix ? double(helix_near) / double(helix) : 0.0;
+      const double cf = coil ? double(coil_near) / double(coil) : 1.0;
+      chk(helix > 200 && coil > 200 && hf > 2.0 * cf,
+          "1GRL's strands follow its helices: " + std::to_string(helix_near) + " of " +
+              std::to_string(helix) + " helix C-alphas within 3 Å of a strand, " +
+              std::to_string(coil_near) + " of " + std::to_string(coil) + " coil ones");
+      // An isovalue above the density's peak: the load says so and keeps the surface.
+      lab.set(ops + ".source.isovalue", "1e6");
+      lab.set(ops + ".request", "load");
+      chk(lab.settle(), "the load settles");
+      chk(has(lab.get(ops + ".status"), "is empty: its density peaks at"),
+          "an isovalue above the peak is reported: " + lab.get(ops + ".status"));
     }
   }
 

@@ -38,7 +38,9 @@
 #include <cvc/state/state_transport_inproc.h>
 #include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1086,6 +1088,139 @@ TEST(HolonSyncTest, RoomStaticsComeFromTheRoomScene) {
   EXPECT_TRUE(cvc::ariadne::room_holon_config().physics);
 }
 
+// A room's rate (ARIADNE_WORLDS.md section 18.9). holon_config_at keeps each window's time: at
+// 60 Hz each is half the ticks, the catch-up too, and none is less than one. The relay's clock
+// section carries the rate: a holon built from the room runs at it, one built before the section
+// came is off the room's clock (its host builds it again), and a room with none, or with a value
+// that is no rate, runs at 120 Hz.
+TEST(HolonSyncTest, ARoomsRateIsItsClockSection) {
+  using cvc::ariadne::holon_config;
+  using cvc::ariadne::holon_config_at;
+  namespace rc = cvc::ariadne::conference;
+  const holon_config base = cvc::ariadne::room_holon_config();
+  const holon_config at60 = holon_config_at(base, 60.0);
+  EXPECT_EQ(at60.clock.fixed_dt, 1.0 / 60.0);
+  EXPECT_EQ(at60.clock.max_steps_per_advance, 30) << "0.5 s of catch-up";
+  EXPECT_EQ(at60.max_skew_ticks, 30u);
+  EXPECT_EQ(at60.stale_reading_ticks, 600u);
+  EXPECT_EQ(at60.lead_slack_behind_ticks, 3u);
+  EXPECT_EQ(at60.lead_slack_ahead_ticks, 12u);
+  EXPECT_EQ(at60.max_peer_span_ticks, 15u);
+  EXPECT_EQ(at60.peer_max_delay_ticks, 24u);
+  EXPECT_EQ(at60.peer_interval_ticks, 1u) << "the relay's 60 Hz room step";
+  EXPECT_EQ(at60.peer_max_extrapolate_ticks, 12u);
+  EXPECT_EQ(at60.max_intent_lead_ticks, 120u);
+  EXPECT_TRUE(at60.physics) << "the rest is the config's";
+  EXPECT_EQ(holon_config_at(base, 10.0).lead_slack_behind_ticks, 1u) << "half a tick: one";
+  EXPECT_EQ(holon_config_at(base, 240.0).max_skew_ticks, 120u);
+  const holon_config same = holon_config_at(base, 120.0);
+  EXPECT_EQ(same.clock.fixed_dt, base.clock.fixed_dt);
+  EXPECT_EQ(same.max_skew_ticks, base.max_skew_ticks);
+  EXPECT_EQ(same.clock.max_steps_per_advance, base.clock.max_steps_per_advance);
+  EXPECT_THROW(holon_config_at(base, 59.5), std::invalid_argument);
+  EXPECT_THROW(holon_config_at(base, 0.0), std::invalid_argument);
+  EXPECT_EQ(cvc::ariadne::room_holon_config(0.0).clock.fixed_dt, base.clock.fixed_dt);
+
+  cvc::app app;
+  const std::string room = "plaza";
+  EXPECT_EQ(rc::read_room_clock(app, room), 0.0);
+  EXPECT_FALSE(rc::room_clock_stamp(app, room).written());
+  holon early(holon_role::client, cvc::ariadne::room_holon_config(app, room));
+  EXPECT_EQ(early.clock().fixed_dt(), 1.0 / 120.0) << "no clock section: 120 Hz";
+  EXPECT_TRUE(cvc::ariadne::on_room_clock(early, app, room));
+
+  const cvc::ariadne::section_stamp s = rc::write_room_clock(app, room, 60.0);
+  ASSERT_TRUE(s.written());
+  EXPECT_TRUE(rc::room_clock_stamp(app, room).same(s));
+  EXPECT_EQ(rc::read_room_clock(app, room), 60.0);
+  EXPECT_FALSE(cvc::ariadne::on_room_clock(early, app, room)) << "built before the section came";
+  holon client(holon_role::client, cvc::ariadne::room_holon_config(app, room));
+  EXPECT_EQ(client.clock().fixed_dt(), 1.0 / 60.0);
+  EXPECT_EQ(client.clock().current_config().max_steps_per_advance, 30);
+  EXPECT_TRUE(cvc::ariadne::on_room_clock(client, app, room));
+
+  // The relay restarted at 120 Hz: a new run's section, and the 60 Hz holon is off the clock.
+  const cvc::ariadne::section_stamp again = rc::write_room_clock(app, room, 120.0, s.epoch + 1);
+  EXPECT_FALSE(again.same(s));
+  EXPECT_FALSE(cvc::ariadne::on_room_clock(client, app, room));
+  EXPECT_TRUE(cvc::ariadne::on_room_clock(early, app, room));
+  // A value that is no rate (a corrupt or hostile tree) reads as none.
+  app.root()(rc::room_clock_path(room) + cvc::state::SEPARATOR + "hz").value(std::string("1000"));
+  EXPECT_EQ(rc::read_room_clock(app, room), 0.0);
+  EXPECT_TRUE(cvc::ariadne::on_room_clock(early, app, room));
+}
+
+// A room at 60 Hz end to end (section 18.9): the relay's holon runs at the rate it publishes; a
+// client whose holon was built before the clock section came is off the room's clock, so it builds
+// it again from the room, as a host does (arigl's follow_room_clock). Then it predicts its own
+// walk and its peer plays it out as at 120 Hz, and every holon counts the relay's ticks.
+TEST(HolonSyncTest, ARoomAt60HzIsFollowedByItsClients) {
+  using cvc::ariadne::holon_config;
+  namespace rc = cvc::ariadne::conference;
+  cvc::app server_app, a_app, b_app;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard ss(server_app, "conf", "server");
+  cvc::state_cluster_shard as(a_app, "conf", "A");
+  cvc::state_cluster_shard bs(b_app, "conf", "B");
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    s->attach();
+    tp.register_shard(s);
+  }
+  const std::string room = "r";
+  // A host's holon at its room's rate: the kinematic avatars of these tests, at the room's clock.
+  const auto room_config = [&](cvc::app &app) {
+    const double hz = rc::read_room_clock(app, room);
+    return hz > 0.0 ? cvc::ariadne::holon_config_at(holon_config{}, hz) : holon_config{};
+  };
+  auto a = std::make_unique<holon>(holon_role::client, room_config(a_app)); // before the section
+  EXPECT_EQ(a->clock().fixed_dt(), 1.0 / 120.0);
+
+  rc::write_room_clock(server_app, room, 60.0); // the relay, at start-up
+  cvc::ariadne::conference::room_join(a_app, room, "A");
+  cvc::ariadne::conference::room_join(b_app, room, "B");
+  tp.pump_all();
+  holon server(holon_role::server, cvc::ariadne::holon_config_at(holon_config{}, 60.0));
+  ASSERT_EQ(rc::read_room_clock(a_app, room), 60.0) << "the section reached the client";
+  ASSERT_FALSE(cvc::ariadne::on_room_clock(*a, a_app, room));
+  a = std::make_unique<holon>(holon_role::client, room_config(a_app));
+  ASSERT_TRUE(cvc::ariadne::on_room_clock(*a, a_app, room));
+  holon b(holon_role::client, room_config(b_app));
+  ASSERT_TRUE(cvc::ariadne::on_room_clock(b, b_app, room));
+
+  const double dt = server.clock().fixed_dt();
+  ASSERT_EQ(dt, 1.0 / 60.0);
+  constexpr int kServerEvery = 12; // the relay's 200 ms pass at 60 Hz
+  cvc::ariadne::client_pump(*a, a_app, room, "A", dt);
+  cvc::ariadne::propose_intent(*a, a_app, room, "A", avatar_intent{vec3{2.0, 0.0, 0.0}});
+  tp.pump_all();
+  double last_peer_x = -1.0;
+  for (int frame = 1; frame <= 10 * kServerEvery; ++frame) {
+    if (frame % kServerEvery == 0)
+      cvc::ariadne::server_pump(server, server_app, room, kServerEvery * dt);
+    tp.pump_all();
+    cvc::ariadne::client_pump(*a, a_app, room, "A", dt);
+    cvc::ariadne::client_pump(b, b_app, room, "B", dt);
+    ASSERT_TRUE(b.has_participant("A"));
+    const double peer_x = b.display_pose("A").position.x;
+    EXPECT_GE(peer_x, last_peer_x) << "frame " << frame << ": B never sees A step back";
+    last_peer_x = peer_x;
+  }
+  EXPECT_EQ(server.tick(), 120u) << "two seconds at 60 Hz";
+  const double server_x = server.state("A").position.x;
+  EXPECT_GT(server_x, 3.9) << "2 m/s for 2 s, no dropped quanta";
+  EXPECT_NEAR(a->display_pose("A").position.x, server_x, 2.0 * kServerEvery * dt + 1e-9);
+  EXPECT_NEAR(last_peer_x, server_x, 2.0 * (kServerEvery + 2) * dt + 1e-9);
+  for (const holon *h : {static_cast<const holon *>(a.get()), static_cast<const holon *>(&b)}) {
+    const std::uint64_t gap =
+        h->tick() > server.tick() ? h->tick() - server.tick() : server.tick() - h->tick();
+    EXPECT_LE(gap, static_cast<std::uint64_t>(kServerEvery)) << "the relay's ticks";
+  }
+  for (cvc::state_cluster_shard *s : {&ss, &as, &bs}) {
+    tp.unregister_shard(s);
+    s->detach();
+  }
+}
+
 // The drive axes and the jump on the wire (section 18.6): a participant's intent carries them,
 // shares for the drive axes ("nan" for none), and the jump held or not.
 TEST(HolonSyncTest, TheDriveAxesAndTheJumpRideTheIntent) {
@@ -1387,4 +1522,130 @@ TEST(HolonSyncTest, TheDriveTargetIsTheNearestDrivableVehicleInReach) {
   EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{0.0, 0.0, 0.0}, 3.14159265, &gap), 2u)
       << "turned round, the other";
   EXPECT_EQ(cvc::ariadne::drive_target(playout, vec3{40.0, 40.0, 0.0}, 0.0), 0u) << "none in reach";
+}
+
+// The same world on a client (section 18.5, OW5): with the room's entities, client_pump holds each
+// vehicle it shows in the holon's world where it is shown -- not one we drive, nor the one that is
+// our body -- and lets go of one the room no longer lists.
+TEST(HolonSyncTest, TheClientPumpHoldsTheVehiclesWeShow) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::seed_default_scene(app, room);
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{-6.0, 5.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  const auto vehicle = [](std::uint64_t id) {
+    conf::room_entity e;
+    e.id = id;
+    e.archetype = "humvee";
+    e.size = {4.5, 2.0, 1.5};
+    return e;
+  };
+  conf::room_entity driven = vehicle(2), body = vehicle(3);
+  driven.driver = "ann";
+  body.avatar = "ann";
+  conf::write_room_entities(app, room, {vehicle(1), driven, body});
+  cvc::ariadne::entity_playout playout;
+  for (std::uint64_t id : {1, 2, 3}) {
+    body_state s;
+    s.position = vec3{4.0 * static_cast<double>(id), 0.0, 0.75};
+    s.linear_velocity = vec3{1.0, 0.0, 0.0};
+    ASSERT_TRUE(playout.apply(conf::entity_pid(id), s, 100));
+  }
+  holon client(holon_role::client, cvc::ariadne::room_holon_config());
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{1})
+      << "not the one ann drives, nor the one that is ann";
+  body_state box;
+  ASSERT_TRUE(client.held_entity_state(1, box));
+  EXPECT_NEAR(box.position.x, 4.0, 0.2) << "where the playout shows it";
+
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_TRUE(client.held_entities().empty()) << "no entities given: none held";
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{1});
+  conf::write_room_entities(app, room, {driven, body}); // the room's vehicle 1 is gone
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.held_entities().empty()) << "gone from the room, let go";
+}
+
+// The vehicle we drive, predicted (section 18.5, OW5b): with the room's entities saying how it
+// runs (the kinematic plant's numbers, room_entity::drive), client_pump keeps us local and the
+// holon predicts it; a vehicle on another plant is played out as before; out, the walker again.
+TEST(HolonSyncTest, TheClientPumpPredictsTheVehicleWeDrive) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  conf::room_entity kinematic, jolt;
+  kinematic.id = 5;
+  kinematic.plant = "kinematic";
+  kinematic.drive.wheelbase = 3.3;
+  kinematic.drive.lock = 0.45;
+  kinematic.drive.vmax = 9.0;
+  kinematic.drive.a_max = 2.4;
+  kinematic.drive.rear_x = -1.65;
+  kinematic.drive.tick_steps = 7;
+  kinematic.drive.nsub = 5;
+  kinematic.drive.phase = 2;
+  jolt.id = 6;
+  jolt.plant = "jolt";
+  conf::write_room_entities(app, room, {kinematic, jolt});
+  {
+    const std::vector<conf::room_entity> back = conf::read_room_entities(app, room);
+    ASSERT_EQ(back.size(), 2u);
+    EXPECT_EQ(back[0].drive, kinematic.drive) << "the numbers round-trip";
+    EXPECT_FALSE(back[1].drive.valid());
+  }
+  cvc::ariadne::entity_playout playout;
+  playout.pump(app, room, 1.0 / 60.0);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann"));
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "walking";
+
+  cvc::state &driving = app.root()(conf::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("5"));
+  body_state car;
+  car.position = vec3{4.0, 2.0, 1.2};
+  car.linear_velocity = vec3{3.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", car, 200);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann")) << "driving a vehicle we can run: still ours";
+  EXPECT_TRUE(client.predicts_vehicle("ann"));
+  EXPECT_NEAR(client.state("ann").position.x, 4.0, 0.2) << "placed by the vehicle's pose";
+  const double x0 = client.state("ann").position.x;
+  for (int i = 0; i < 30; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_GT(client.state("ann").position.x, x0 + 0.5) << "and run on from there";
+  // The host draws it where it is predicted (arigl), not where its samples put it.
+  playout.apply(conf::entity_pid(5), car, 200);
+  playout.pump(app, room, 1.0 / 60.0);
+  playout.show_predicted(5, client.display_pose("ann"));
+  cvc::physics::pose drawn;
+  ASSERT_TRUE(playout.pose(5, drawn));
+  EXPECT_DOUBLE_EQ(drawn.position.x, client.display_pose("ann").position.x);
+  playout.show_predicted(0, cvc::physics::pose{});
+  ASSERT_TRUE(playout.pose(5, drawn));
+  EXPECT_LT(drawn.position.x, client.display_pose("ann").position.x - 0.3) << "its samples'";
+
+  driving.value(std::string("6"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_FALSE(client.is_local("ann")) << "one on another plant: played out";
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0);
+  EXPECT_FALSE(client.is_local("ann")) << "no entities: played out";
+
+  driving.value(std::string("0"));
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.is_local("ann"));
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "out: the walker again";
 }

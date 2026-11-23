@@ -33,8 +33,10 @@
 // types (forest_trees / …) and, on a CVC_ENABLE_LIBIGL build, the geometry-processing and
 // finite-element node types (mesh_lab / fe_lab, mesh_nodes.h), the lines drawn from data
 // (ribbon / draped_link, ribbon_nodes.h), the axis-aligned slice (volume_slice,
-// volume_slice_nodes.h), VolumeGridRover's grid (volume_grid, volume_grid_nodes.h) and the
-// contour tiler (contour_lab, contour_lab_nodes.h), all on the app it is given: a
+// volume_slice_nodes.h), VolumeGridRover's grid (volume_grid, volume_grid_nodes.h) with its
+// contours' intrinsics (grid-contours.*, cvc/volume/volume_grid_contour_intrinsics.h), the
+// contour tiler (contour_lab, contour_lab_nodes.h), the sdf data generator and the
+// volume.filter intrinsics (cvc/volume/volume_filter_intrinsics.h), all on the app it is given: a
 // second app has none of them until it is set up too. ariadne_hello and AriRuntime (so pycvc
 // hosts) both call it.
 

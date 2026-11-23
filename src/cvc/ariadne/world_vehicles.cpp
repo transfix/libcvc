@@ -45,6 +45,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -586,6 +587,10 @@ static ph::vehicle_desc boat_stand_in(const ph::dyn_boat_desc &b) {
   return d;
 }
 
+double stand_height(const ph::vehicle_desc &d) {
+  return d.half_extents.z + (d.axles.empty() ? 0.4 : d.axles.front().wheel_radius);
+}
+
 ph::vehicle_desc vehicle_desc_of(const vehicle_archetype &a, double mass, double max_speed) {
   if (vehicle_plant_floats(a.plant))
     return boat_stand_in(boat_desc_of(a, mass, max_speed));
@@ -783,12 +788,18 @@ struct WorldVehicles::impl {
   // Every fleet's navigator config: the largest and fastest vehicle any archetype may be (each
   // vehicle on a plant plans with its own envelope and size, nav_plant's plan_with_vehicle).
   cvc::nav::sim_world::config cfg;
-  double tick = cvc::kSimTick; // the navigator's tick asked for (s; set_tick)
+  double tick = 0.0; // the navigator's tick asked for (s; set_tick); 0: the world's (cvc::sim_tick)
   bool ready = false;      // cfg is the grid's
   bool stepping = false;   // before_step() began a step that after_step() ends
   bool posing = false;     // and moved the `pose` entities in it
   int every = 1;           // physics steps per nav tick
   std::uint64_t steps = 0; // physics steps since the navigator was built
+  // The clock tick the step being taken ends on (before_step(clock_tick)), and the clock ticks the
+  // navigator ticks on (tick % every), once it has ticked on one.
+  bool have_clock = false;
+  std::uint64_t clock_tick = 0;
+  bool have_phase = false;
+  std::uint64_t phase = 0;
   std::uint64_t draws = 0; // goals drawn (each draw's seed)
   bool wander = true;      // nav@1 draws another goal at each one it reaches
   bool avoid = true;       // vehicles steer around each other (set_avoid)
@@ -823,9 +834,40 @@ struct WorldVehicles::impl {
     // A tick has run since its navigator began capturing its drive (drive_tel): plants() reads
     // the drive's telemetry.
     bool tel_fresh = false;
+    // kinematic: vehicles came or went since kinematics() last ran. It runs once, before the
+    // navigator next steps (only its step reads them), not at each: placing n is then linear.
+    bool kin_stale = false;
+  };
+  // A navigator's key, "<plant>" or a named fleet's "<plant>/<fleet>" (fleet_group::key), as its
+  // parts: fleets is searched by it without building the string. fleet_of() runs for each vehicle
+  // many times a tick.
+  struct nav_ref {
+    std::string_view plant, fleet;
+    bool named = false; // a named fleet's: "<plant>/<fleet>"
+  };
+  // Key `k` against `r`'s string, ordered as std::string orders them.
+  static int compare_key(std::string_view k, const nav_ref &r) {
+    const std::string_view parts[3] = {r.plant,
+                                       r.named ? std::string_view("/") : std::string_view(),
+                                       r.named ? r.fleet : std::string_view()};
+    for (const std::string_view p : parts) {
+      const std::size_t n = std::min(k.size(), p.size());
+      if (const int c = k.compare(0, n, p, 0, n); c != 0)
+        return c;
+      if (n < p.size())
+        return -1; // `k` is a prefix of `r`'s string
+      k.remove_prefix(n);
+    }
+    return k.empty() ? 0 : 1;
+  }
+  struct nav_less {
+    using is_transparent = void;
+    bool operator()(const std::string &a, const std::string &b) const { return a < b; }
+    bool operator()(const std::string &a, const nav_ref &b) const { return compare_key(a, b) < 0; }
+    bool operator()(const nav_ref &a, const std::string &b) const { return compare_key(b, a) > 0; }
   };
   // By plant, made as entities need them; a named fleet's own by "<plant>/<fleet>".
-  std::map<std::string, std::unique_ptr<fleet>> fleets;
+  std::map<std::string, std::unique_ptr<fleet>, nav_less> fleets;
 
   struct entity {
     std::uint64_t id = 0;
@@ -903,7 +945,7 @@ struct WorldVehicles::impl {
     std::string base_plant, seen_plant;
     std::string metric = "policy", seen_metric;
     bool summary() const { return start.keys != "all"; }
-    std::string key(const std::string &plant) const { return plant + "/" + start.fleet; }
+    std::string key(const std::string &plant) const { return plant + "/" + start.fleet; } // nav_ref
   };
   std::vector<fleet_group> groups;
   std::vector<vehicle_start> starts; // every entry spawn_starts was given, in order (starts())
@@ -953,10 +995,10 @@ struct WorldVehicles::impl {
   }
 
   // The navigator key of an entity's: its plant's, or its fleet's own.
-  std::string nav_key(const entity &e) const {
-    return e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size()
-               ? groups[static_cast<std::size_t>(e.group)].key(e.plant)
-               : e.plant;
+  nav_ref nav_key(const entity &e) const {
+    if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size())
+      return {e.plant, groups[static_cast<std::size_t>(e.group)].start.fleet, true};
+    return {e.plant, {}, false};
   }
   fleet *fleet_of(const entity &e) const {
     if (e.posed) // a `pose` entity is no plant's
@@ -1064,8 +1106,7 @@ struct WorldVehicles::impl {
                  ry = o[2 * i + 1] / kScale + grid->center_y();
     const double rear = rear_axle_x(d);
     const double cx = rx - rear * std::cos(h), cy = ry - rear * std::sin(h);
-    const double wheel = d.axles.empty() ? 0.4 : d.axles.front().wheel_radius;
-    return {cx, cy, ground_height(cx, cy) + d.half_extents.z + wheel, h};
+    return {cx, cy, ground_height(cx, cy) + stand_height(d), h};
   }
   static double rear_axle_x(const ph::vehicle_desc &d) {
     double rear = 0.0;
@@ -1342,7 +1383,7 @@ struct WorldVehicles::impl {
     f->sim->remove_agent(e.agent);
     e.agent = 0;
     if (f->plant == "kinematic")
-      kinematics(*f);
+      f->kin_stale = true;
   }
 
   // Each entity's intent keys: a change (from what they read last) is a new intent.
@@ -1482,13 +1523,16 @@ struct WorldVehicles::impl {
     if (!grid)
       return;
     sdf = cvc::nav::signed_distance(*grid);
-    // The tick in whole physics steps: exactly, on the simulation clock's quantum (sim_tick.h);
-    // the nearest whole number of a step that does not divide it, with a note in the status.
+    // The tick in whole physics steps: by default the world's (cvc::sim_tick of its step, the
+    // whole number of steps nearest the policies' 0.06 s: 7 at 120 Hz, 4 at 60); one asked for
+    // (set_tick) exactly on the simulation clock's quantum (sim_tick.h), else the nearest whole
+    // number of a step that does not divide it, with a note in the status.
     const double fixed_dt = world->config().fixed_dt;
-    every = std::max(1, static_cast<int>(std::lround(tick / fixed_dt)));
+    const double want = tick > 0.0 ? tick : cvc::sim_tick(fixed_dt);
+    every = std::max(1, static_cast<int>(std::lround(want / fixed_dt)));
     const double dt = every * fixed_dt;
-    if (std::fabs(dt - tick) > 1e-9)
-      status = "the tick " + std::to_string(tick) + " s is not a whole number of the physics " +
+    if (std::fabs(dt - want) > 1e-9)
+      status = "the tick " + std::to_string(want) + " s is not a whole number of the physics " +
                "world's " + std::to_string(fixed_dt) + " s steps; it is " + std::to_string(dt) +
                " s";
     // The largest and fastest vehicle any archetype may be (each vehicle on a plant plans with
@@ -1672,7 +1716,7 @@ struct WorldVehicles::impl {
         f.boxes.insert(f.boxes.begin() + i, world->add_body(b));
         f.from.insert(f.from.begin() + i, at);
         f.to.insert(f.to.begin() + i, at);
-        kinematics(f);
+        f.kin_stale = true;
       }
     } catch (const std::exception &ex) {
       if (made && e.agent)
@@ -1688,8 +1732,7 @@ struct WorldVehicles::impl {
 
   // Where a chassis's centre stands at (x, y) on the ground, as a kinematic box does.
   double stand_z(const entity &e, double x, double y) const {
-    const double wheel = e.desc.axles.empty() ? 0.4 : e.desc.axles.front().wheel_radius;
-    return ground_height(x, y) + e.desc.half_extents.z + wheel;
+    return ground_height(x, y) + stand_height(e.desc);
   }
 
   // A pose given to `e`, from now: where it moves to over the steps from `now` (the world tick
@@ -2616,6 +2659,13 @@ struct WorldVehicles::impl {
   // obstacles are its footprint on the grid, and another kinematic box an overlap; info() and
   // entities() see to those.)
   void count_contacts() {
+    // The events first: a step with none that counts (a kinematic fleet's steps, its boxes
+    // meeting none) looks no vehicle up.
+    const std::vector<ph::contact_event> events = world->contacts();
+    if (std::all_of(events.begin(), events.end(), [](const ph::contact_event &ev) {
+          return ev.type == ph::contact_event::kind::removed;
+        }))
+      return;
     std::map<std::uint64_t, entity *> by_chassis;
     for (entity &e : ents)
       if (pose p; where(e, p) && p.chassis.valid())
@@ -2626,7 +2676,7 @@ struct WorldVehicles::impl {
       const auto it = by_chassis.find(b.value);
       return it == by_chassis.end() ? nullptr : it->second;
     };
-    for (const ph::contact_event &ev : world->contacts()) {
+    for (const ph::contact_event &ev : events) {
       if (ev.type == ph::contact_event::kind::removed)
         continue;
       entity *a = of(ev.body_a), *b = of(ev.body_b);
@@ -2676,6 +2726,10 @@ struct WorldVehicles::impl {
     for (auto &[name, f] : fleets) {
       if (f->sim->size() == 0)
         continue;
+      if (f->kin_stale) { // the vehicles that came or went since its last step
+        kinematics(*f);
+        f->kin_stale = false;
+      }
       apply_intents(*f, now);
       // A command a gym gave for this tick, in place of the intent's or the controller's (once).
       for (entity &e : ents) {
@@ -3165,36 +3219,55 @@ struct WorldVehicles::impl {
             ", wheelbase " + fixed(st.wheelbase, 2) + " m, " + a->plant);
   }
 
-  void publish_entities() {
-    publish_groups();
-    if (ekey.empty() || !root())
-      return;
-    // A summary fleet's vehicles have keys only when vehicles.watch names them (a camera's, a
-    // panel's: ids joined by ',') or they have an intent.
+  // A summary fleet's vehicles have keys and a stats line of their own only when vehicles.watch
+  // names them (a camera's, a panel's: ids joined by ',') or they have an intent: those ids.
+  std::set<std::uint64_t> keyed_ids() const {
     std::set<std::uint64_t> keyed;
     bool quiet_fleets = false;
     for (const fleet_group &g : groups)
       quiet_fleets = quiet_fleets || g.summary();
-    if (quiet_fleets) {
-      std::stringstream in(get("watch"));
-      for (std::string part; std::getline(in, part, ',');) {
-        char *end = nullptr;
-        const unsigned long long v = std::strtoull(part.c_str(), &end, 10);
-        if (end && end != part.c_str())
-          keyed.insert(v);
-      }
-      std::lock_guard<std::mutex> lock(mu);
-      for (const auto &[id, it] : intents)
-        keyed.insert(id);
+    if (!quiet_fleets)
+      return keyed;
+    std::stringstream in(get("watch"));
+    for (std::string part; std::getline(in, part, ',');) {
+      char *end = nullptr;
+      const unsigned long long v = std::strtoull(part.c_str(), &end, 10);
+      if (end && end != part.c_str())
+        keyed.insert(v);
     }
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto &[id, it] : intents)
+      keyed.insert(id);
+    return keyed;
+  }
+  // A summary fleet's vehicle that nothing names (keyed_ids) and no intent steers: its fleet's
+  // count stands for it.
+  bool quiet(const entity &e, const std::set<std::uint64_t> &keyed) const {
+    return e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
+           groups[static_cast<std::size_t>(e.group)].summary() && !keyed.count(e.id) &&
+           e.applied == entity_intent{};
+  }
+  // The line each summary fleet's quiet vehicles share, after the others' (`quiet` counts them).
+  std::string quiet_lines(const std::vector<int> &quiet) const {
+    std::string out;
+    for (std::size_t gi = 0; gi < groups.size(); ++gi)
+      if (quiet[gi])
+        out += (out.empty() ? "" : "\n") + std::string("fleet ") + groups[gi].start.fleet + "  " +
+               std::to_string(quiet[gi]) + " " + groups[gi].start.archetype + " (keys: summary)";
+    return out;
+  }
+
+  void publish_entities() {
+    publish_groups();
+    if (ekey.empty() || !root())
+      return;
+    const std::set<std::uint64_t> keyed = keyed_ids();
     std::set<std::string> now;
     std::string ids, summary;
-    std::vector<int> quiet(groups.size(), 0);
+    std::vector<int> quiet_count(groups.size(), 0);
     for (const entity &e : ents) {
-      if (e.group >= 0 && static_cast<std::size_t>(e.group) < groups.size() &&
-          groups[static_cast<std::size_t>(e.group)].summary() && !keyed.count(e.id) &&
-          e.applied == entity_intent{}) {
-        ++quiet[static_cast<std::size_t>(e.group)];
+      if (quiet(e, keyed)) {
+        ++quiet_count[static_cast<std::size_t>(e.group)];
         continue;
       }
       const entity_info in = info(e);
@@ -3236,11 +3309,8 @@ struct WorldVehicles::impl {
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
     }
-    for (std::size_t gi = 0; gi < groups.size(); ++gi)
-      if (quiet[gi])
-        summary += (summary.empty() ? "" : "\n") + std::string("fleet ") + groups[gi].start.fleet +
-                   "  " + std::to_string(quiet[gi]) + " " + groups[gi].start.archetype +
-                   " (keys: summary)";
+    if (const std::string q = quiet_lines(quiet_count); !q.empty())
+      summary += (summary.empty() ? "" : "\n") + q;
     cvc::state *r = root();
     for (const std::string &id : published)
       if (!now.count(id))
@@ -3794,10 +3864,25 @@ void WorldVehicles::before_step() {
   }
   if (!d.ready)
     return;
-  if (d.steps++ % static_cast<std::uint64_t>(d.every) == 0)
+  if (d.steps++ % static_cast<std::uint64_t>(d.every) == 0) {
     d.navigator_tick();
+    if (d.have_clock) {
+      const std::uint64_t phase = d.clock_tick % static_cast<std::uint64_t>(d.every);
+      if (!d.have_phase || phase != d.phase) {
+        d.phase = phase;
+        d.have_phase = true;
+        ++d.rev; // the room's entities carry it (kinematics)
+      }
+    }
+  }
   d.before_world_step();
   d.stepping = true;
+}
+
+void WorldVehicles::before_step(std::uint64_t clock_tick) {
+  _impl->have_clock = true;
+  _impl->clock_tick = clock_tick;
+  before_step();
 }
 
 void WorldVehicles::after_step() {
@@ -3934,12 +4019,46 @@ double WorldVehicles::tick_seconds() const {
 
 int WorldVehicles::steps_per_tick() const { return _impl->ready ? _impl->every : 0; }
 
+bool WorldVehicles::kinematics(std::uint64_t id, kinematic_drive &out) const {
+  const impl &d = *_impl;
+  if (!d.ready || !d.have_phase)
+    return false;
+  for (const impl::entity &e : d.ents) {
+    if (e.id != id)
+      continue;
+    const impl::fleet *f = d.fleet_of(e);
+    if (!f || f->plant != "kinematic" || d.index(e) < 0)
+      return false;
+    // As kinematics() and the navigator's config give them to nav (in metres here).
+    kinematic_drive k;
+    k.wheelbase = e.desc.wheelbase();
+    k.lock = d.cfg.veh.delta_max;
+    k.vmax = e.desc.max_speed > 0.0 ? e.desc.max_speed : 30.0;
+    k.a_max = 0.8 * e.desc.max_accel;
+    k.allow_reverse = d.cfg.veh.allow_reverse;
+    k.rear_x = impl::rear_axle_x(e.desc);
+    k.tick_steps = d.every;
+    k.nsub = std::max(1, d.cfg.veh.nsub);
+    k.phase = d.phase;
+    k.max_steer = e.desc.max_steer;
+    k.max_accel = e.desc.max_accel;
+    k.max_decel = e.desc.max_decel;
+    out = k;
+    return true;
+  }
+  return false;
+}
+
 void WorldVehicles::set_tick(double seconds) {
   if (!(seconds > 0.0) || !std::isfinite(seconds))
     throw std::invalid_argument("WorldVehicles::set_tick: the tick must be finite and > 0");
   _impl->tick = seconds;
 }
-double WorldVehicles::tick() const { return _impl->tick; }
+double WorldVehicles::tick() const {
+  if (_impl->tick > 0.0)
+    return _impl->tick;
+  return _impl->world ? cvc::sim_tick(_impl->world->config().fixed_dt) : cvc::kSimTick;
+}
 
 std::shared_ptr<const nav::world_grid> WorldVehicles::grid() const { return _impl->grid; }
 
@@ -4179,9 +4298,17 @@ std::uint64_t WorldVehicles::revision() const { return _impl->rev; }
 const std::string &WorldVehicles::status() const { return _impl->status; }
 
 std::string WorldVehicles::stats_lines() const {
+  const impl &d = *_impl;
+  // A summary fleet's quiet vehicles share its line, as in entities.summary.
+  const std::set<std::uint64_t> keyed = d.keyed_ids();
+  std::vector<int> quiet(d.groups.size(), 0);
   std::string out;
-  for (const impl::entity &e : _impl->ents) {
-    const entity_info in = _impl->info(e);
+  for (const impl::entity &e : d.ents) {
+    if (d.quiet(e, keyed)) {
+      ++quiet[static_cast<std::size_t>(e.group)];
+      continue;
+    }
+    const entity_info in = d.info(e);
     out +=
         (out.empty() ? "" : "\n") + std::to_string(e.id) + "  " + e.spec.name + "  " + e.plant +
         "  " +
@@ -4189,6 +4316,8 @@ std::string WorldVehicles::stats_lines() const {
                          fixed(in.energy_wh, 1) + " Wh  " + fixed(in.wheel_load / 1000.0, 1) + " kN"
                    : std::string("waiting"));
   }
+  if (const std::string q = d.quiet_lines(quiet); !q.empty())
+    out += (out.empty() ? "" : "\n") + q;
   return out;
 }
 
