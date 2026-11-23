@@ -170,6 +170,7 @@ struct Bound {
   bool literal = true;
   double value = 0.0; // the literal, or the default while the key holds no number
   std::string path;   // an absolute state path
+  mutable cvc::state_key key; // `path`, kept resolved between frames
 
   static Bound of(const Value *v, double dflt, const std::string &prefix) {
     Bound b;
@@ -189,7 +190,7 @@ struct Bound {
   double read(cvc::app &app) const {
     if (literal)
       return value;
-    const double x = cvc::ariadne::read_or<double>(app, path, value);
+    const double x = cvc::ariadne::read_or<double>(cvc::ariadne::kept_key(key, app, path), value);
     return std::isfinite(x) ? x : value;
   }
 };
@@ -331,7 +332,7 @@ private:
   }
 
   bool poll_state(std::size_t &same) {
-    cvc::state *found = cvc::ariadne::read_node(_app, _path);
+    cvc::state *found = cvc::ariadne::kept_key(_key, _app, _path).find();
     if (!found) {
       if (_floats.empty())
         return false;
@@ -498,6 +499,7 @@ private:
   bool _literal_done = false;
   // state
   std::string _path;
+  cvc::state_key _key;               // `_path`, kept resolved between polls
   const cvc::state *_node = nullptr; // the node the counter listens to (compared only)
   std::shared_ptr<std::atomic<std::uint64_t>> _writes =
       std::make_shared<std::atomic<std::uint64_t>>(0);
