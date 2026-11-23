@@ -141,7 +141,7 @@ SceneClock resolved_clock(const Scene &scene) {
 
 } // namespace
 
-TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
+TEST(AriadneSceneWorld, LocalMatrixIsScaleThenRotationThenPosition) {
   SceneNode n;
   n.has_transform = true;
   n.rotation[2] = 90.0; // about z: +x goes to +y
@@ -149,10 +149,11 @@ TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
   n.position[0] = 5.0;
   double m[16];
   scene_node_local_matrix(n, m);
-  // Rz(90) = [[0,-1,0],[1,0,0],[0,0,1]], row 0 scaled by 2.
+  // Rz(90) = [[0,-1,0],[1,0,0],[0,0,1]], column 0 scaled by 2: the node's own x is stretched, then
+  // turned onto +y.
   EXPECT_NEAR(m[0], 0.0, 1e-12);
-  EXPECT_NEAR(m[1], -2.0, 1e-12);
-  EXPECT_NEAR(m[4], 1.0, 1e-12);
+  EXPECT_NEAR(m[1], -1.0, 1e-12);
+  EXPECT_NEAR(m[4], 2.0, 1e-12);
   EXPECT_NEAR(m[5], 0.0, 1e-12);
   EXPECT_NEAR(m[10], 1.0, 1e-12);
   EXPECT_NEAR(m[3], 5.0, 1e-12);
@@ -160,6 +161,58 @@ TEST(AriadneSceneWorld, LocalMatrixIsRotationThenRowScaleThenPosition) {
   scene_node_local_matrix(plain, m);
   for (int k = 0; k < 16; ++k)
     EXPECT_EQ(m[k], (k % 5 == 0) ? 1.0 : 0.0);
+}
+
+// The rotation is about the parent's x, then y, then z: Rz Ry Rx.
+TEST(AriadneSceneWorld, LocalMatrixTurnsAboutXThenYThenZ) {
+  SceneNode n;
+  n.has_transform = true;
+  n.rotation[0] = 90.0; // +y to +z
+  n.rotation[2] = 90.0; // then +x to +y
+  double m[16];
+  scene_node_local_matrix(n, m);
+  // +x: x leaves it alone, z takes it to +y. +y: x takes it to +z, z leaves it.
+  EXPECT_NEAR(m[0], 0.0, 1e-12); // column 0, the image of +x: (0, 1, 0)
+  EXPECT_NEAR(m[4], 1.0, 1e-12);
+  EXPECT_NEAR(m[8], 0.0, 1e-12);
+  EXPECT_NEAR(m[1], 0.0, 1e-12); // column 1, the image of +y: (0, 0, 1)
+  EXPECT_NEAR(m[5], 0.0, 1e-12);
+  EXPECT_NEAR(m[9], 1.0, 1e-12);
+}
+
+// A turned node scaled along its own axes is a rigid body like any other: its box is the node's
+// box stretched along the node's x, the body turned as the node is, and nothing is skewed.
+TEST(AriadneSceneWorld, ATurnedNodesScaleIsAlongItsOwnAxes) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  nodes:
+    - node: beam
+      source: { box: { size: [1, 1, 1] } }
+      transform: { position: [0, 0, 5], rotation: [0, 0, 30], scale: [4, 1, 0.5] }
+      body: { mass: 10 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_FALSE(any_contains(warnings, "skewed"));
+  ASSERT_EQ(w->bodies().size(), 1u);
+  const SceneWorldBody &b = w->bodies().front();
+  ASSERT_TRUE(b.desc);
+  const auto *box = std::get_if<cvc::physics::box>(&b.desc->shape);
+  ASSERT_NE(box, nullptr);
+  EXPECT_NEAR(box->half_extents.x, 2.0, 1e-9);
+  EXPECT_NEAR(box->half_extents.y, 0.5, 1e-9);
+  EXPECT_NEAR(box->half_extents.z, 0.25, 1e-9);
+  // 30 degrees about z, to the engine's precision (it keeps a body's rotation in floats).
+  const cvc::physics::quat q = w->world().state(b.id).rotation;
+  EXPECT_NEAR(std::fabs(q.w), std::cos(15.0 * 3.141592653589793 / 180.0), 1e-6);
+  EXPECT_NEAR(std::fabs(q.z), std::sin(15.0 * 3.141592653589793 / 180.0), 1e-6);
+  EXPECT_NEAR(q.x, 0.0, 1e-6);
+  EXPECT_NEAR(q.y, 0.0, 1e-6);
 }
 
 TEST(AriadneSceneWorld, BuildsTheBodiesFromTheSceneAlone) {

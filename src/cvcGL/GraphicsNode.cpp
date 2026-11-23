@@ -115,6 +115,7 @@ GraphicsNode::~GraphicsNode() {
 void GraphicsNode::setTransform(vtkMatrix4x4 *matrix) {
   if (matrix) {
     m_transform->DeepCopy(matrix);
+    m_rotationScaleStale.store(true, std::memory_order_relaxed);
 
     // Update state tree (matrix in row-major format)
     // Full double precision so the transform round-trips exactly through the
@@ -143,6 +144,7 @@ void GraphicsNode::setTransform(const double matrix[16]) {
       m_transform->SetElement(i, j, matrix[i * 4 + j]);
     }
   }
+  m_rotationScaleStale.store(true, std::memory_order_relaxed);
 
   // Update state tree (matrix in row-major format)
   std::ostringstream oss;
@@ -285,6 +287,7 @@ void GraphicsNode::applyPoseMatrix(const double matrix[16]) {
     return;
   }
   m_transform->DeepCopy(matrix);
+  m_rotationScaleStale.store(true, std::memory_order_relaxed);
   publishPoseMatrix(matrix);
   updateTransform(); // one cascade, one transformChanged
 }
@@ -366,79 +369,103 @@ void GraphicsNode::setPosition(double x, double y, double z) {
   updateTransform();
 }
 
+// The local matrix's upper 3x3 from the node's rotation and scale: Rz Ry Rx S, as vtkTransform
+// builds it (pre-multiplying), so a point is scaled along the node's own axes and then turned.
+// The translation is left as it is.
+void GraphicsNode::composeRotationAndScale() {
+  vtkSmartPointer<vtkTransform> t = vtkSmartPointer<vtkTransform>::New();
+  t->RotateZ(m_rotationDeg[2]);
+  t->RotateY(m_rotationDeg[1]);
+  t->RotateX(m_rotationDeg[0]);
+  t->Scale(m_scale);
+  vtkMatrix4x4 *m = t->GetMatrix();
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      m_transform->SetElement(i, j, m->GetElement(i, j));
+}
+
+// The rotation and scale of a matrix written whole: each column's length is its scale, the last
+// made negative when the matrix mirrors, and the rotation is what dividing them out leaves, read
+// back as Rz Ry Rx. A column of length 0 leaves no rotation to read, so the last one is kept. A
+// skew (a matrix no rotation and scale make) is not kept.
+void GraphicsNode::readBackRotationAndScale() {
+  double a[3][3];
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      a[i][j] = m_transform->GetElement(i, j);
+  double s[3];
+  for (int j = 0; j < 3; ++j)
+    s[j] = std::sqrt(a[0][j] * a[0][j] + a[1][j] * a[1][j] + a[2][j] * a[2][j]);
+  const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+                     a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                     a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+  if (det < 0.0)
+    s[2] = -s[2];
+  if (s[0] != 0.0 && s[1] != 0.0 && s[2] != 0.0) {
+    double r[3][3];
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j)
+        r[i][j] = a[i][j] / s[j];
+    // R = Rz(z) Ry(y) Rx(x): r[2][0] is -sin y, r[1][0] / r[0][0] tan z, r[2][1] / r[2][2] tan x.
+    constexpr double kDeg = 180.0 / 3.141592653589793;
+    const double cy = std::hypot(r[0][0], r[1][0]);
+    m_rotationDeg[1] = std::atan2(-r[2][0], cy) * kDeg;
+    if (cy > 1e-9) {
+      m_rotationDeg[0] = std::atan2(r[2][1], r[2][2]) * kDeg;
+      m_rotationDeg[2] = std::atan2(r[1][0], r[0][0]) * kDeg;
+    } else { // pitched straight up or down: turns about z and about x are one, all put in x
+      m_rotationDeg[0] = std::atan2(-r[1][2], r[1][1]) * kDeg;
+      m_rotationDeg[2] = 0.0;
+    }
+  }
+  std::copy(s, s + 3, m_scale);
+}
+
+void GraphicsNode::applyRotation(double x, double y, double z) {
+  if (m_rotationScaleStale.exchange(false, std::memory_order_relaxed))
+    readBackRotationAndScale();
+  m_rotationDeg[0] = x;
+  m_rotationDeg[1] = y;
+  m_rotationDeg[2] = z;
+  composeRotationAndScale();
+  updateTransform();
+}
+
+void GraphicsNode::applyScale(double x, double y, double z) {
+  if (m_rotationScaleStale.exchange(false, std::memory_order_relaxed))
+    readBackRotationAndScale();
+  m_scale[0] = x;
+  m_scale[1] = y;
+  m_scale[2] = z;
+  composeRotationAndScale();
+  updateTransform();
+}
+
 void GraphicsNode::setRotation(double x, double y, double z) {
-  // Create transform with rotation
-  vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
-  transform->Identity();
-  transform->RotateZ(z);
-  transform->RotateY(y);
-  transform->RotateX(x);
-
-  // Preserve current translation
-  double tx = m_transform->GetElement(0, 3);
-  double ty = m_transform->GetElement(1, 3);
-  double tz = m_transform->GetElement(2, 3);
-
-  m_transform->DeepCopy(transform->GetMatrix());
-  m_transform->SetElement(0, 3, tx);
-  m_transform->SetElement(1, 3, ty);
-  m_transform->SetElement(2, 3, tz);
-
   // Update state tree
   std::ostringstream oss;
   oss << std::setprecision(17); // exact round-trip through the state tree
   oss << x << "," << y << "," << z;
   getState("rotation").value(oss.str());
 
-  updateTransform();
+  applyRotation(x, y, z);
 }
 
 void GraphicsNode::setScale(double x, double y, double z) {
-  // Get current translation
-  double tx = m_transform->GetElement(0, 3);
-  double ty = m_transform->GetElement(1, 3);
-  double tz = m_transform->GetElement(2, 3);
-
-  // Extract rotation part (normalize the 3x3 upper-left)
-  vtkSmartPointer<vtkMatrix4x4> rotation = vtkSmartPointer<vtkMatrix4x4>::New();
-  for (int i = 0; i < 3; ++i) {
-    double len = 0.0;
-    for (int j = 0; j < 3; ++j) {
-      double val = m_transform->GetElement(i, j);
-      len += val * val;
-    }
-    len = std::sqrt(len);
-    if (len > 0.0) {
-      for (int j = 0; j < 3; ++j) {
-        rotation->SetElement(i, j, m_transform->GetElement(i, j) / len);
-      }
-    }
-  }
-
-  // Apply new scale to rotation
-  for (int i = 0; i < 3; ++i) {
-    double scale = (i == 0) ? x : (i == 1) ? y : z;
-    for (int j = 0; j < 3; ++j) {
-      m_transform->SetElement(i, j, rotation->GetElement(i, j) * scale);
-    }
-  }
-
-  // Restore translation
-  m_transform->SetElement(0, 3, tx);
-  m_transform->SetElement(1, 3, ty);
-  m_transform->SetElement(2, 3, tz);
-
   // Update state tree
   std::ostringstream oss;
   oss << std::setprecision(17); // exact round-trip through the state tree
   oss << x << "," << y << "," << z;
   getState("scale").value(oss.str());
 
-  updateTransform();
+  applyScale(x, y, z);
 }
 
 void GraphicsNode::resetTransform() {
   m_transform->Identity();
+  std::fill(m_rotationDeg, m_rotationDeg + 3, 0.0);
+  std::fill(m_scale, m_scale + 3, 1.0);
+  m_rotationScaleStale.store(false, std::memory_order_relaxed);
 
   // Update state tree to identity
   getState("position").value(std::string("0.0,0.0,0.0"));
@@ -759,26 +786,8 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
         std::istringstream iss(rotStr);
         double rx, ry, rz;
         char comma;
-        if (iss >> rx >> comma >> ry >> comma >> rz) {
-          // Create transform with rotation
-          vtkSmartPointer<vtkTransform> transform = vtkSmartPointer<vtkTransform>::New();
-          transform->Identity();
-          transform->RotateZ(rz);
-          transform->RotateY(ry);
-          transform->RotateX(rx);
-
-          // Preserve current translation
-          double tx = m_transform->GetElement(0, 3);
-          double ty = m_transform->GetElement(1, 3);
-          double tz = m_transform->GetElement(2, 3);
-
-          m_transform->DeepCopy(transform->GetMatrix());
-          m_transform->SetElement(0, 3, tx);
-          m_transform->SetElement(1, 3, ty);
-          m_transform->SetElement(2, 3, tz);
-
-          updateTransform();
-        }
+        if (iss >> rx >> comma >> ry >> comma >> rz)
+          applyRotation(rx, ry, rz); // keeps the scale, as setRotation does
       } catch (const boost::bad_lexical_cast &) {
       }
     } else if (childState == "scale") {
@@ -787,43 +796,8 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
         std::istringstream iss(scaleStr);
         double sx, sy, sz;
         char comma;
-        if (iss >> sx >> comma >> sy >> comma >> sz) {
-          // Get current translation
-          double tx = m_transform->GetElement(0, 3);
-          double ty = m_transform->GetElement(1, 3);
-          double tz = m_transform->GetElement(2, 3);
-
-          // Extract rotation part (normalize the 3x3 upper-left)
-          vtkSmartPointer<vtkMatrix4x4> rotation = vtkSmartPointer<vtkMatrix4x4>::New();
-          for (int i = 0; i < 3; ++i) {
-            double len = 0.0;
-            for (int j = 0; j < 3; ++j) {
-              double val = m_transform->GetElement(i, j);
-              len += val * val;
-            }
-            len = std::sqrt(len);
-            if (len > 0.0) {
-              for (int j = 0; j < 3; ++j) {
-                rotation->SetElement(i, j, m_transform->GetElement(i, j) / len);
-              }
-            }
-          }
-
-          // Apply new scale to rotation
-          for (int i = 0; i < 3; ++i) {
-            double scale = (i == 0) ? sx : (i == 1) ? sy : sz;
-            for (int j = 0; j < 3; ++j) {
-              m_transform->SetElement(i, j, rotation->GetElement(i, j) * scale);
-            }
-          }
-
-          // Restore translation
-          m_transform->SetElement(0, 3, tx);
-          m_transform->SetElement(1, 3, ty);
-          m_transform->SetElement(2, 3, tz);
-
-          updateTransform();
-        }
+        if (iss >> sx >> comma >> sy >> comma >> sz)
+          applyScale(sx, sy, sz); // keeps the rotation, as setScale does
       } catch (const boost::bad_lexical_cast &) {
       }
     } else if (childState == "matrix") {
@@ -847,6 +821,7 @@ void GraphicsNode::handleStateChanged(const std::string &childState) {
             m_transform->SetElement(i, j, values[i * 4 + j]);
           }
         }
+        m_rotationScaleStale.store(true, std::memory_order_relaxed);
         // A pose this node published before the write must not land on top
         // of it at the next flush.
         supersedePublishedMatrix();
