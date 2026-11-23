@@ -1370,6 +1370,15 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
+      - name: The page's loader in headless Chrome (no wasm build)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # arigl-web.js downloading the module it starts, with a stand-in module: a download that
+          # breaks off is fetched again past the cache, and one that keeps breaking names itself.
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_download.mjs --chrome "$chrome"
+
       - name: Install the recipe's wasm deps, and xterm.js for ari's pages
         if: steps.paths.outputs.run == 'true'
         run: |

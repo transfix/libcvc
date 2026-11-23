@@ -6442,8 +6442,10 @@ they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
 document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
 the extra data files to fetch; both pages read the same file. The URL can only add document
-arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
-terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+arguments. A download that breaks off (the module, its Python zip, the document or a file it
+names) is fetched twice more past the browser's cache (`cache: 'reload'`); one that still breaks
+fails the load with its name and how much of it arrived. A failed load shows what the runtime
+printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is

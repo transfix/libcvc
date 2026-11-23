@@ -14,16 +14,29 @@
 // clang-format off: JavaScript bodies
 // One GET through the page's fetch(), awaited under Asyncify. The reply (or the error's text)
 // waits in the module until ariadne_fetch_take copies it out, so nothing here allocates in wasm.
-// cache: 'no-cache' revalidates, so a redeployed document is not served stale.
+// cache: 'no-cache' revalidates, so a redeployed document is not served stale. A fetch that fails
+// or whose body breaks off is asked again past the browser's cache, cache: 'reload', twice more,
+// as arigl-web.js does for the module: a dropped connection, or a partial copy of a compressed
+// file that Firefox keeps after a cut-off load and fails to resume on every load after it. Any
+// reply the server gives (a 404 too) is returned as it came.
 EM_ASYNC_JS(int, ariadne_fetch_begin, (const char *url), {
-  try {
-    const r = await fetch(UTF8ToString(url), {credentials : 'same-origin', cache : 'no-cache'});
-    Module.__ariadneFetched = new Uint8Array(await r.arrayBuffer());
-    return r.status;
-  } catch (e) {
-    Module.__ariadneFetched = new TextEncoder().encode(String((e && e.message) || e));
-    return -1;
+  const u = UTF8ToString(url);
+  let last = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt)
+      await new Promise(done => setTimeout(done, 500 * attempt));
+    try {
+      const mode = attempt ? 'reload' : 'no-cache';
+      const r = await fetch(u, {credentials : 'same-origin', cache : mode});
+      Module.__ariadneFetched = new Uint8Array(await r.arrayBuffer());
+      return r.status;
+    } catch (e) {
+      last = e;
+    }
   }
+  Module.__ariadneFetched =
+      new TextEncoder().encode(String((last && last.message) || last) + ' (3 tries)');
+  return -1;
 });
 EM_JS(int, ariadne_fetch_size, (), { return Module.__ariadneFetched ? Module.__ariadneFetched.length : 0; });
 EM_JS(void, ariadne_fetch_take, (char *dst), {
