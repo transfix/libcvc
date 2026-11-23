@@ -2157,6 +2157,38 @@ scene:
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
     name is used (`find_vehicle_model`), else the box.
+  - **Wheeled looks: wheels that turn.** A one-piece model (the Humvee's `Humvee.glb` is one
+    mesh with its wheels in it) cannot spin or steer its wheels. A wheeled look is a model in two
+    parts: the look's mesh is the chassis without its wheels, and `wheel:` names one wheel's mesh:
+
+    ```yaml
+    look:
+      file: vehicles/humvee/chassis.glb   # the chassis, without its wheels
+      wheel: vehicles/humvee/wheel.glb    # one wheel: the left front
+      wheelbase: 3.228                    # the model's own (m): front hubs to rear
+      track: 1.8743                       # and left hubs to right
+    ```
+
+    Both files are in the vehicle's frame, as they are written (metres; x forward, y left, z up;
+    no axis is turned): the chassis's origin midway between its axles, on its centre line, on the
+    ground under its tyres; the wheel's origin its hub, its axle along y, its outer face toward
+    +y. The wheel is drawn once for each of the vehicle's wheels (`<node>_tyre<k>`, in
+    `WorldVehicles::wheels`' order), where its plant has it: at its hub, turned by its steer,
+    rolled about its axle by its spin, on its suspension or the ground under it. A `pose` entity's
+    wheels roll at its pose's `speed`, its front ones turn by its `steer`, and each sits on the
+    grid's ground under it. A right wheel is the wheel turned half a turn about its upright, so its
+    outer face is out on both sides. The look is fitted unless `fit: false`: the chassis is
+    scaled on each axis so that its axles (`wheelbase:`), its track (`track:`) and its wheel
+    radius (half the wheel mesh's height) are the vehicle's, its origin at the vehicle's axles'
+    middle, and the wheel is scaled alike on every axis to the vehicle's wheel radius. Without
+    `wheelbase:` or `track:` the model's are taken to be the vehicle's. With `fit: false` both
+    are drawn at their own size, the wheels at the vehicle's hubs. `scale:`, `yaw:` and `z:`
+    place the chassis as they place any model. The wheel is found as the mesh is: `file:` (beside
+    the document), `model:` (both by name), `asset:` (both document assets), or with `data:` two
+    files in the same package. The chassis is drawn in the entity's colour and the wheel in a
+    tyre's dark grey, unless a mesh has a texture. When either mesh cannot be read, the vehicle is
+    its box, with a warning. A one-piece `model:` or `file:` look is drawn as before, its wheels
+    still.
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
