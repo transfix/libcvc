@@ -6,7 +6,8 @@
 #
 # The app holds the volume: the document's data: block makes the bunny's signed distance field
 # (cvcGL's sdf generator), and the grid shows that volume, not a copy, and follows it: Data >
-# Coarser and Finer make it again at another size, and the planes redraw on the new one. The
+# Coarser and Finer make it again at another size, and the planes redraw on the new one. The app
+# holds a second, coarser volume too, and the Probe tab's Source combo switches between them. The
 # panel's Save and Load write and read point classes and sessions through the app (data-save,
 # data-load), beside this document.
 #
@@ -73,11 +74,15 @@ menubar:
             (json-encode (dict "mesh" "stanford.bunny" "dim" 64
                                "fit" (dict "height" 100 "up" "y"))))
 
-# The data the grid shows: the bunny's signed distance field, made and held by the app.
+# The data the grid shows: the bunny's signed distance field, made and held by the app, and a
+# coarser one beside it. The Probe tab's Source combo picks which of the two the grid shows.
 data:
   bunny:
     generate: sdf
     params: { mesh: stanford.bunny, dim: 64, fit: { height: 100, up: y } }
+  bunny_coarse:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 24, fit: { height: 100, up: y } }
 
 windows:
   - include: volume_grid

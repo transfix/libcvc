@@ -685,6 +685,17 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
   const auto relative = [](const std::string &p) {
     return fs::path(p).is_relative() && p.find("://") == std::string::npos;
   };
+  // A file asset's file, its base_dir applied; "" when the document has no such file asset.
+  const auto asset_file = [&](const std::string &id) {
+    for (const SceneAsset &a : assets)
+      if (a.id == id && !a.source.source_file.empty()) {
+        std::string f = a.source.source_file;
+        if (!a.source.base_dir.empty() && relative(f))
+          f = (fs::path(a.source.base_dir) / f).string();
+        return f;
+      }
+    return std::string();
+  };
   for (vehicle_archetype &v : archetypes) {
     vehicle_look &look = v.look;
     if (look.kind.empty()) { // the default: a preset's model, when it is installed
@@ -702,31 +713,32 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
     }
     if (look.kind == "model") {
       const std::string model = find_vehicle_model(look.path);
-      if (model.empty()) {
-        warn("world: vehicles: " + v.id + ": look: model '" + look.path +
-             "' is not installed (cvcpkg install vehicle-" + look.path +
-             "); it is drawn as its box");
+      // A wheeled model's wheel is a model by name too.
+      const std::string wheel = look.wheel.empty() ? std::string() : find_vehicle_model(look.wheel);
+      if (model.empty() || (!look.wheel.empty() && wheel.empty())) {
+        const std::string missing = model.empty() ? look.path : look.wheel;
+        warn("world: vehicles: " + v.id + ": look: model '" + missing +
+             "' is not installed (cvcpkg install vehicle-" + missing + "); it is drawn as its box");
         look = vehicle_look{};
         look.kind = "box";
       } else {
         look.kind = "file";
         look.path = model;
+        look.wheel = wheel;
         look.fit = true;
       }
       continue;
     }
     if (look.kind == "asset") {
-      const SceneAsset *asset = nullptr;
-      for (const SceneAsset &a : assets)
-        if (a.id == look.path)
-          asset = &a;
-      if (asset && !asset->source.source_file.empty()) {
+      const std::string file = asset_file(look.path);
+      const std::string wheel = look.wheel.empty() ? std::string() : asset_file(look.wheel);
+      if (!file.empty() && (look.wheel.empty() || !wheel.empty())) {
         look.kind = "file";
-        look.path = asset->source.source_file;
-        if (!asset->source.base_dir.empty() && relative(look.path))
-          look.path = (fs::path(asset->source.base_dir) / look.path).string();
+        look.path = file;
+        look.wheel = wheel;
       } else {
-        warn("world: vehicles: " + v.id + ": look: no file asset '" + look.path +
+        warn("world: vehicles: " + v.id + ": look: no file asset '" +
+             (file.empty() ? look.path : look.wheel) +
              "' in the document's assets:; it is drawn as its box");
         look = vehicle_look{};
         look.kind = "box";
@@ -751,8 +763,12 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
       }
       continue;
     }
-    if (look.kind == "file" && !doc_dir.empty() && relative(look.path))
-      look.path = (fs::path(doc_dir) / look.path).string();
+    if (look.kind == "file" && !doc_dir.empty()) {
+      if (relative(look.path))
+        look.path = (fs::path(doc_dir) / look.path).string();
+      if (!look.wheel.empty() && relative(look.wheel))
+        look.wheel = (fs::path(doc_dir) / look.wheel).string();
+    }
   }
 }
 
@@ -3219,6 +3235,9 @@ struct WorldVehicles::impl {
       put(at + "look.yaw", num(a.look.yaw));
       put(at + "look.z", num(a.look.z));
       put(at + "look.fit", a.look.fit ? "1" : "0");
+      put(at + "look.wheel", a.look.wheel);
+      put(at + "look.wheelbase", num(a.look.wheelbase));
+      put(at + "look.track", num(a.look.track));
       for (const char *r : {"mass", "max_speed"}) {
         const auto it = a.ranges.find(r);
         const double fallback = std::string(r) == "mass" ? d.mass : d.max_speed;
@@ -4157,6 +4176,56 @@ bool WorldVehicles::kinematics(std::uint64_t id, kinematic_drive &out) const {
     return true;
   }
   return false;
+}
+
+bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
+  const impl &d = *_impl;
+  if (!d.ready || !d.have_phase)
+    return false;
+  for (const impl::entity &e : d.ents) {
+    if (e.id != id)
+      continue;
+    const impl::fleet *f = d.fleet_of(e);
+    const int i = d.index(e);
+    cvc::nav::sim_world::plant_plan plan;
+    if (!f || i < 0 ||
+        !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four) ||
+          (f->plant == "jolt" && f->jolt)))
+      return false;
+    if (!f->sim->plant_plan_of(i, plan))
+      return false;
+    const vehicle_archetype *a = d.find(e.spec.archetype);
+    if (!a)
+      return false;
+    dynamic_drive k;
+    k.plant = f->plant;
+    k.preset = a->preset;
+    k.mass = e.desc.mass;
+    k.max_speed = e.desc.max_speed;
+    k.max_accel = e.desc.max_accel;
+    k.max_decel = e.desc.max_decel;
+    k.max_steer = e.desc.max_steer;
+    // As sim_world holds an override's command on a plant (in metres here).
+    k.lock = d.cfg.veh.delta_max;
+    if (plan.max_steer > 0.0f)
+      k.lock = std::min(k.lock, static_cast<double>(plan.max_steer));
+    k.vmax = plan.vmax / kScale;
+    k.a_hold = (plan.a_brake > 0.0f ? plan.a_brake : plan.a_max) / kScale;
+    k.tick_steps = d.every;
+    k.phase = d.phase;
+    if (f->four)
+      k.ground = f->four->ground_reference();
+    out = k;
+    return true;
+  }
+  return false;
+}
+
+double WorldVehicles::ground_height(double x, double y) const { return _impl->ground_height(x, y); }
+
+double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
+                             double x, double y) {
+  return ground_at(grid, terrain, x, y);
 }
 
 void WorldVehicles::set_tick(double seconds) {

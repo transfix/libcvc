@@ -5,7 +5,7 @@ recipe:
   # convention (<name>-cp311-cuda). CUDA stays cp311-only for now — no
   # cp312/cp313 CUDA columns.
   name: pycvc-gl-cp311-cuda
-  upstream_version: "4.0.5"
+  upstream_version: "4.0.6"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts
   # revisions OF an upstream version, so a version bump restarts it.
   cvc_revision: 1
@@ -74,9 +74,9 @@ depends:
   build:
     # The GPU libcvc SDK + the single (variant-invariant) cvcGL + Python + numpy + VTK.
     - name: libcvc-cuda
-      version: "==4.0.5"
+      version: "==4.0.6"
     - name: cvcgl
-      version: "==4.0.5"
+      version: "==4.0.6"
     - name: python311
     - name: numpy-cp311
     - name: vtk
@@ -87,11 +87,11 @@ depends:
     # The core `import pycvc` module, GPU build, so the whole stack is CUDA-
     # consistent (pycvc-cp311-cuda, not the CPU pycvc-cp311).
     - name: pycvc-cp311-cuda
-      version: "==4.0.5"
+      version: "==4.0.6"
     - name: libcvc-cuda
-      version: "==4.0.5"
+      version: "==4.0.6"
     - name: cvcgl
-      version: "==4.0.5"
+      version: "==4.0.6"
     - name: python311
     - name: numpy-cp311
     - name: vtk

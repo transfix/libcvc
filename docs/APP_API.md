@@ -172,6 +172,18 @@ of data, each a `cvc::file_handler_registry` (`<cvc/core/file_handler_registry.h
 | `app.model_handlers()` | `read_model(app, file)`, `write_model(app, model, file)` | Assimp |
 | `app.image_handlers()` | `read_image(app, file)`, `write_image(app, img, file)`, `image::load` / `save` | stb, ImageMagick |
 
+A model a file reads (`cvc::model`, `<cvc/model/model.h>`) keeps the file's scene graph
+in `model::nodes`: each node's name, its transform relative to its parent (row-major
+4x4), the meshes it draws and its children. `model::instances()` lists every drawn copy
+of a mesh with its transform into the model's space, and `merged()`, `extents()`, the
+flattening geometry handler and `lod::partition_model` place each copy by it. So a glTF,
+FBX or DAE file that positions its meshes through node transforms reads as it was
+authored, and a mesh several nodes draw appears once for each; a mirroring transform
+rewinds the copy's triangles. A model without nodes (one built in code) draws each mesh
+once, as it is. The model stays in the file's own axes and units: assimp's turn of a
+Z-up Collada or FBX file to Y-up, and its Collada unit scaling, are off, and readers turn
+a model themselves (a glTF file is +Y up). `write_model` writes the tree back.
+
 The constructor registers the built-in handlers once, in this app only: two
 apps never see each other's handlers, and making an app changes no other app's
 tables (there is no process-wide table; VOLROVER-LIBRARY-PORTS-ROADMAP.md 1.3).

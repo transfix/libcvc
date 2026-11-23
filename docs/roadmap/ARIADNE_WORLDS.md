@@ -616,10 +616,12 @@ its own world document.
     remove the entities too), and a thread-safe `WorldVehicles::set_pose` / `set_poses` (pycvc
     `WorldEntities.set_pose`, `set_poses` from numpy). Timed poses are drawn between the last
     two, a tick behind; a jump is taken at once. The box look's wheels steer by the pose's steer
-    and roll at its speed. A scripted track is followed exactly, and its state hash is pinned
-    headless, drawn and under `arigl snapshot` (`physics.hash`: 1 publishes
-    `physics.stats.hash`). A drawn world now spawns `world: vehicles: start:` too, as a headless
-    one does.
+    and roll at its speed, and so do a wheeled look's (built 2026-11-22: `look: { file: CHASSIS,
+    wheel: WHEEL, wheelbase:, track: }`, a chassis mesh and one wheel's, each wheel drawn on its
+    own where `WorldVehicles::wheels` has it; ARIADNE.md, "Wheeled looks"). A scripted track is
+    followed exactly, and its state hash is pinned headless, drawn and under `arigl snapshot`
+    (`physics.hash`: 1 publishes `physics.stats.hash`). A drawn world now spawns `world:
+    vehicles: start:` too, as a headless one does.
   - The runtime is `WorldVehicles` ([world_vehicles.h](../../inc/cvc/ariadne/world_vehicles.h)),
     one per `SceneWorld`, with nothing process-wide: a relay that runs a world per room (RM1,
     WD3) runs one per room, and each room's panels name its keys by their root (`world_source`'s
@@ -1060,10 +1062,112 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   show_predicted`). The model stays within 0.05 mm of the relay's Humvee over 9 s of throttle, a
   turn, the brake and reverse (`AriadneOneWorld`); the holon predicts it with nothing to correct,
   and a 1.5 m push the client cannot know is corrected at the next sample (`HolonVehicleTest`).
-- **Still to come:** the other plants predicted (`dynamic` and `dynamic4w` are deterministic models
-  too; `jolt` needs the vehicle in the client's world; a boat needs the water), played out until
-  then; OW5c, the client's statics from the document's bodies (meshes, terrain, a generated
-  world's buildings), not only the plane, boxes and spheres the room scene carries.
+- **As built (OW5c, the statics from the document):** the room names the document the relay runs
+  (`room_world_source`: `conf.rooms.<room>.world_source.{uri, sha256}`, the URI it was named by and
+  the SHA-256 of its bytes; arisrv writes it beside the room scene, none for a C++ twin). A client
+  that resolves the same URI to a file with the same hash (a stock world it ships with, the first
+  place section 12 looks) builds that document's world as the relay does (`world_replica`:
+  `SceneWorld::from_scene`, its vehicles left to the room's entities, its keys under a prefix of its
+  own), and its holon's statics are that world's: each static body as the world made it (a mesh's
+  triangles, a terrain's field; `avatar_static::kind::body`) and the colliders a node makes at run
+  time, as each becomes ready (a generated world's terrain, buildings and edge walls;
+  `kind::geometry`, through `add_world_geometry`). Only what is in the world now counts (a scene's
+  worlds are on one at a time). `client_pump(..., world)` takes them once the replica is ready,
+  and the room scene's plane, boxes and spheres until then or when the document is another; arigl
+  passes one and logs what it did. A client on a 1 m dome of terrain stands on it (z 0.99) where
+  the room scene's statics put it on the slab below (z 0); on a generated world it stands at
+  z 1.23 where the relay's ground is at 1.22 (`AriadneOneWorld`).
+- **As built (OW5d, the dynamic plant):** the vehicle a participant drives (or is) on the `dynamic`
+  plant is predicted too. That plant is dyn_bike_plant, the dynamic single-track model (tires,
+  load transfer, actuator lag, the driver that turns nav's acceleration into a drive force), one
+  model substep around each world step; its vehicle is its archetype's preset with five numbers
+  (`vehicle_desc_of`), so the room's entities carry those, the navigator's hold on a command (the
+  fleet's steering lock, the top speed and the braking a tick's acceleration is held to:
+  `sim_world::plant_plan_of`) and the ticks it ticks on (`vehicle_drive.h`'s `dynamic_drive`,
+  `WorldVehicles::dynamics`, `room_entity::dynamics`). A client builds the same plant with that
+  vehicle alone and no world, one substep a physics step (`vehicle_dynamics.h`'s
+  `dynamic_vehicle_model`), and steps it as the relay's world does, the box put where each substep
+  starts and carried a step along at the model's velocity; `dyn_bike_plant::save` and `restore`
+  keep and put back its state (the model's, the wheels', the driver's, the command), so the holon
+  logs it by tick and replays from a sample as for the kinematic plant. The pose stream carries no
+  yaw rate, steering angle or driver; a sample takes them from what was predicted for its tick
+  (`dynamic_vehicle_model::at`). The client's model stays within 0.007 mm and 0.002 mrad of the relay's Humvee over 9 s of throttle, a turn, the brake and reverse (`AriadneOneWorld`); the holon predicts it with nothing to correct while it turns at up to 0.68 rad/s, and a 1.5 m push is corrected at the next sample, after which it agrees exactly (`HolonVehicleTest`).
+- **As built (OW5e, the dynamic4w plant):** the four-wheel plant is predicted the same way.
+  dyn_4w_plant is four contact patches, each corner's spring and damper, Ackermann steering and
+  the same driver, its heights measured from the ground under its first vehicle's start. The
+  room's entities carry the plant and that height with the rest (`dynamic_drive::plant`,
+  `dynamic_drive::ground`), and the client's `dynamic_vehicle_model` builds whichever plant the
+  vehicle runs on, the four-wheel one alone on flat ground at that height (`dyn_4w_plant::save`,
+  `restore`, `box_pose`; a `dynamic_vehicle` holds either plant's state). The box rides at the
+  model's height and leans with its pitch and roll, which the client draws. A driver's pose
+  carries its heading alone, so a sample takes the suspension (heave, roll, pitch and their rates)
+  from what was predicted for its tick, as it takes the yaw rate. The client's model stays within
+  0.007 mm and 0.025 mrad of the relay's Humvee on dynamic4w over the same 9 s, its box within
+  0.5 mm of the relay's height and 0.7 mrad of its chassis's attitude (`AriadneOneWorld`); the
+  holon predicts it with nothing to correct, and corrects a 1.5 m push exactly (`HolonVehicleTest`).
+- **Still to come:** a boat predicted (it needs the water), played out until then. A wall or
+  another vehicle is the relay's correction (a client's dynamic model touches nothing; a jolt
+  model touches only the statics). For the statics: a document the client does not ship with fetched as a world pack
+  (section 12).
+- **As built (OW5f, the relay's world followed):** the relay publishes what its document has on
+  (`room_world_on`: `conf.rooms.<room>.world_on`, `publish_world_on`, written when it changes):
+  the scene's world that is on, and the params each generated_world node of it (of the scene,
+  without worlds) made its world from, its DEM file as its key names it. A client's replica of the
+  document follows it: it turns on the same world (`SceneWorld::set_world`) and makes the same
+  generated worlds (`SceneWorld::follow_generated`: the node's keys take the params, a new preset
+  first so it does not quick-set the counts over them, and a new world is asked for), and builds
+  its statics again from the world on. A client on the relay's slab stands on the dome once the
+  relay switches to it (z 0.99), and after a Regenerate with another seed and preset its ground is
+  the relay's new ground (z -3.963 where it was 8.803; `AriadneOneWorld`). The params no key holds
+  (the cell, the terrain's and the raster's caps) stay the document's, which are the relay's;
+  a DEM file the client cannot resolve makes its world from the default generators, as the relay
+  would.
+- **As built (OW5g, the world's ground under the prediction):** the relay's vehicles drive on the
+  world on's ground: its terrain where its node makes one (a generated world's), else its first
+  node's navigator grid between samples (`vehicle_ground_height`, now public). A client building the
+  same document has both (`SceneWorld::vehicle_ground`: the same grid from the world block's cell
+  and half, the same terrain), so its replica hands that ground to the holon
+  (`world_replica::ground`, a revision more each time its grid or terrain changes; `client_pump`
+  calls `holon::set_vehicle_ground`, which rebuilds each predicted model on it, its state kept),
+  and the dynamic plants' models drive on it: the slope's grade in the driver and the model, the
+  bike's box on the ground and leaning with it (`dyn_bike_plant::box_pose`), the four wheels on
+  the ground under each (a sample at rest settles its suspension there). The four-wheel model
+  measures its heights from the relay's datum (`dyn_4w_plant_options::reference`, opt-in, unset
+  by default), so its heave is the relay's on any ground. Over a 3 m dome the client's model stays
+  within 0.5 mm (bike) and 0.6 mm (four wheels) of the relay's vehicle over 9 s as it climbs
+  0.7-0.8 m, where on flat ground it strays 3.2 and 4.6 m (`AriadneOneWorld`). The driver's hold
+  on a slope is not in the pose stream: a vehicle first predicted while parked on a slope starts
+  from a fresh driver, and the relay's samples correct the difference.
+- **As built (OW5h, the relay's surfaces):** a static body's material is the document's
+  (`physics: { materials: ... }`, a body's `material:`), and its id is the world's own, so a
+  client's statics used to take the default surface. The replica's statics now carry each body's
+  material by value (`avatar_static::material`, read from its world), and the client's avatar
+  world adds each distinct one once and puts the body on it: an ice rink is ice on the client too
+  (friction 0.05, restitution 0.1), a rubber track rubber, a plain slab the default
+  (`AriadneOneWorld`). A generated world's items carry their own surface classes already. The
+  rain's friction (a weather node's, which moves the surfaces' friction with the wetness) is the
+  relay's alone: a client's surfaces stay dry.
+- **As built (OW5i, the jolt plant):** the vehicle a participant drives on the `jolt` plant is
+  predicted too. That plant is a Jolt vehicle in the relay's world (nav_plant): the engine's
+  wheels, suspension, powertrain and driver, the navigator's command given to `world::drive`. The
+  room's entities carry it as they carry the dynamic plants (`dynamic_drive::plant` `jolt`,
+  `WorldVehicles::dynamics`). A client's `dynamic_vehicle_model` runs it in a Jolt world of its
+  own, made as the relay's scene world is (its step, gravity and solver settings), with the
+  holon's statics (the replica's, each body on its surface: OW5c, OW5h) and that vehicle alone
+  (an `avatar_world` made from a `world_config`). The whole of that world, saved each step
+  (`world::save`, whose Jolt state holds the vehicle's wheels, gearbox and driver), is the
+  vehicle's state (`jolt_vehicle_saved`): the holon logs it by tick, and a sample restores what was
+  predicted for its tick, puts the chassis at the sample's position, heading and horizontal
+  velocity (its pitch, roll and spin the predicted ones), and replays from there. New statics
+  rebuild the model's world, the vehicle placed again where it is. Found: the gearbox, clutch
+  and engine are not in the pose stream, and they matter. The relay's Humvee pulls away about half
+  a second after a fresh model would (the navigator's hold before the driver got in is left in its
+  powertrain), so running the model open loop from a sample strays metres. With the relay's
+  sample every 4 ticks, as the holon takes them, each sample finds the model within 3 mm and
+  0.6 mrad of the relay's vehicle on flat ground, and 5 mm and 1.7 mrad climbing the 3 m dome;
+  its ride height is within 3-5 mm, and its pitch and roll within 0.02 rad (a sample does not
+  carry them; `AriadneOneWorld`). Two models on the same statics agree exactly, and a 1.5 m push
+  is corrected at the next sample (`HolonVehicleTest`).
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1146,7 +1250,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
