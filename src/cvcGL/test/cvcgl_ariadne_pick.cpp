@@ -294,7 +294,10 @@ int main() {
     ir->SetWorldPoint(-6.0, 0.0, 0.0, 1.0);
     ir->WorldToDisplay();
     ir->GetDisplayPoint(d);
-    const float ix = static_cast<float>(d[0]), iy = static_cast<float>(kHeight - d[1]);
+    double onWindow[2]; // the view draws into its texture, which the window shows at its region
+    inner.rendererToWindow(d[0], d[1], onWindow);
+    const float ix = static_cast<float>(onWindow[0]),
+                iy = static_cast<float>(kHeight - onWindow[1]);
     const std::string docSeq = val(app, key + ".seq");
     io.AddMousePosEvent(ix, iy);
     rt.step(kDt);
