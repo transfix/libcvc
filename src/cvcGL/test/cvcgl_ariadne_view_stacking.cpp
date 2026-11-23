@@ -11,7 +11,10 @@
 //     picture, which keeps its size (three views of one named camera, the same size);
 //   - a view's texture is the widget's size, and nothing else of it reaches the window;
 //   - a pick in the scrolled view, at a place on screen, lands where the same pick in the full view
-//     lands (SceneViews::pick maps the window's pixels to the view's texture).
+//     lands (SceneViews::pick maps the window's pixels to the view's texture);
+//   - the main view looks the same with a view as without it, outside the view's window: each
+//     renderer draws with its own lights (VTK's UpdateLightingUniformsEveryRender, where the VTK
+//     has it; without it this is reported, not checked).
 // Skips (rc 0) where nothing rasterises, unless CVC_REQUIRE_RENDER=1.
 #include "streaming_test_util.h"
 
@@ -35,6 +38,9 @@
 #include <string>
 #include <vector>
 #include <vtkRenderer.h>
+#ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
+#include <vtkOpenGLRenderer.h>
+#endif
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #include <imgui_internal.h> // the windows' rects and their order
@@ -130,6 +136,71 @@ scene:
 )";
 
 // A rect in the window's pixels, y down (ImGui's).
+// A see-through shell around a box, and a window whose view shows the box alone (show: [inner])
+// from a camera of its own. The main view draws the same box with the same shader program, and
+// VTK keeps a program's light uniforms with only the time they were set, so the main view could
+// draw with the view's lights. kLightsAloneDoc is the same scene with no window.
+const char *kLightsDoc = R"(meta:
+  name: view lights
+  min_libcvc: 3.7.0
+
+windows:
+  - window: Inner
+    id: inner_window
+    pos: [16, 16]
+    size: [300, 260]
+    children:
+      - type: viewport
+        view: inner
+        show: [inner]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        zoom: 0.6
+        width: 280
+        height: 210
+
+scene:
+  chrome: false
+  nodes:
+    - node: shell
+      type: geometry
+      tags: [surface]
+      source: { sphere: 3.0 }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9, opacity: 0.3 }
+    - node: core
+      type: geometry
+      tags: [inner]
+      source: { box: { size: [1.0, 1.0, 1.0] } }
+      transform: { position: [0.8, 0.5, 0.0] }
+      material: { color: [0.9, 0.7, 0.1] }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
+)";
+
+const char *kLightsAloneDoc = R"(meta:
+  name: view lights, no view
+  min_libcvc: 3.7.0
+
+scene:
+  chrome: false
+  nodes:
+    - node: shell
+      type: geometry
+      tags: [surface]
+      source: { sphere: 3.0 }
+      material: { color: [0.85, 0.82, 0.88], ambient: 0.22, diffuse: 0.9, opacity: 0.3 }
+    - node: core
+      type: geometry
+      tags: [inner]
+      source: { box: { size: [1.0, 1.0, 1.0] } }
+      transform: { position: [0.8, 0.5, 0.0] }
+      material: { color: [0.9, 0.7, 0.1] }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
+)";
+
 struct Rect {
   double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
   bool empty() const { return !(x1 > x0) || !(y1 > y0); }
@@ -242,8 +313,11 @@ int main() {
   const fs::path dir = fs::temp_directory_path() / "cvcgl_ariadne_view_stacking";
   fs::create_directories(dir);
   const fs::path stackDoc = dir / "stack.ari", scrollDoc = dir / "scroll.ari";
+  const fs::path lightsDoc = dir / "lights.ari", lightsAloneDoc = dir / "lights_alone.ari";
   std::ofstream(stackDoc) << kStackDoc;
   std::ofstream(scrollDoc) << kScrollDoc;
+  std::ofstream(lightsDoc) << kLightsDoc;
+  std::ofstream(lightsAloneDoc) << kLightsAloneDoc;
   const int magenta[3] = {230, 26, 204}, cyan[3] = {26, 204, 230};
 
   // ── stacking, and the first frame ─────────────────────────────────────────────────────────────
@@ -451,6 +525,58 @@ int main() {
           "a pick in the scrolled view lands where it does in the full view",
           inScrolled.node + " " + std::to_string(dist));
     h.view->close();
+  }
+
+  // ── the main view's lights ────────────────────────────────────────────────────────────────────
+  // The main view, right of the Inner window, with the window's view and without it.
+  {
+    auto run = [&](const fs::path &doc, const char *prefix, bool hasView) {
+      Host h(prefix);
+      cvc::gl::ariadne::AriRuntime rt(*h.view, *h.cam, *h.ui);
+      for (const std::string &w : rt.load(doc.string()))
+        check(false, "the lights documents load without warnings", w);
+      for (int frame = 0; frame < 6; ++frame)
+        rt.step(kDt);
+      cvcgl_test::Frame f = cvcgl_test::grab(*h.view);
+      cvc::gl::ViewportManager &vm = h.view->viewportManager();
+      if (hasView)
+        check(vm.hasViewport("inner"), "the lights document's view exists");
+#ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
+      // Every renderer of the window sends its own lights, the main view's and the view's.
+      std::vector<vtkRenderer *> renderers{h.view->renderer()};
+      if (hasView && vm.hasViewport("inner"))
+        renderers.push_back(vm.viewport("inner").renderer());
+      for (vtkRenderer *r : renderers) {
+        auto *gl = vtkOpenGLRenderer::SafeDownCast(r);
+        check(gl && gl->GetUpdateLightingUniformsEveryRender(),
+              "each renderer sends its own lights every render");
+      }
+#endif
+      h.view->close();
+      return f;
+    };
+    const cvcgl_test::Frame withView = run(lightsDoc, "lights", true);
+    const cvcgl_test::Frame alone = run(lightsAloneDoc, "lights_alone", false);
+    long differ = 0, seen = 0;
+    if (withView.w == alone.w && withView.h == alone.h)
+      for (int y = 30; y < kHeight; ++y)
+        for (int x = 330; x < kWidth; ++x) { // right of the Inner window (16..316)
+          const unsigned char *a = px(withView, x, y), *b = px(alone, x, y);
+          ++seen;
+          differ +=
+              std::abs(a[0] - b[0]) > 8 || std::abs(a[1] - b[1]) > 8 || std::abs(a[2] - b[2]) > 8
+                  ? 1
+                  : 0;
+        }
+#ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
+    check(seen > 0 && differ <= 50,
+          "the main view looks the same with a view as without it (each draws with its own lights)",
+          std::to_string(differ) + " of " + std::to_string(seen) + " px differ by more than 8");
+#else
+    std::printf("  note: this VTK has no UpdateLightingUniformsEveryRender, so the main view can "
+                "draw with the view's lights: %ld of %ld px differ by more than 8 (not checked)\n",
+                differ, seen);
+#endif
   }
   return cvcgl_test::finish("cvcgl_ariadne_view_stacking");
 #endif

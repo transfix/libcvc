@@ -25,6 +25,7 @@
 #include <vtkOpenGLFramebufferObject.h>
 #include <vtkOpenGLQuadHelper.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLRenderer.h>
 #include <vtkOpenGLShaderCache.h>
 #include <vtkOpenGLState.h>
 #include <vtkRenderer.h>
@@ -480,6 +481,15 @@ Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraSt
   m_impl->cameraStatePath = cameraStatePath;
   m_impl->managed = managed;
   m_impl->renderer = vtkSmartPointer<vtkRenderer>::New();
+#ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
+  // The window's renderers share its shader programs, and VTK keeps a program's light uniforms with
+  // only the time they were set: a renderer whose lights are older than that draws with the
+  // renderer's that set them, the main view with a view's (they draw the same props). Every
+  // renderer sends its own lights to each program it draws with, once a render; one left out could
+  // still draw with another's.
+  if (auto *gl = vtkOpenGLRenderer::SafeDownCast(m_impl->renderer))
+    gl->UpdateLightingUniformsEveryRenderOn();
+#endif
   m_impl->renderer->SetViewport(m_impl->region[0], m_impl->region[1], m_impl->region[2],
                                 m_impl->region[3]);
   m_impl->renderer->SetLayer(m_impl->layer);

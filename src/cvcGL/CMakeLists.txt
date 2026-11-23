@@ -141,6 +141,37 @@ else()
   message(STATUS "cvcGL: VTK has no FinishEveryRender; volume renders keep VTK's glFinish")
 endif()
 
+# The renderers of a window share its shader programs, and VTK keeps a program's light uniforms
+# with only the time they were set, not whose lights they are, so one renderer can draw with
+# another's lights: the main view with a view's (docs/ARIADNE.md §5.18). cvcpkg's VTK
+# (vtk 9.5.0+cvc.7, written for upstream, cy-pca/cvcpkg#636) adds an opt-in
+# vtkOpenGLRenderer::UpdateLightingUniformsEveryRender, which Viewport turns on for every renderer
+# it makes. Compile-only and run at every configure, as the check above.
+unset(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER CACHE)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingOpenGL2)
+set(CMAKE_REQUIRED_QUIET ON)
+set(_cvc_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles("
+#include <vtkNew.h>
+#include <vtkOpenGLRenderer.h>
+int main() {
+  vtkNew<vtkOpenGLRenderer> r;
+  r->UpdateLightingUniformsEveryRenderOn();
+  return r->GetUpdateLightingUniformsEveryRender() ? 0 : 1;
+}" CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_cvc_try_compile_target_type}")
+unset(_cvc_try_compile_target_type)
+cmake_pop_check_state()
+if(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER)
+  target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER=1)
+  message(STATUS "cvcGL: VTK has UpdateLightingUniformsEveryRender; every Viewport turns it on")
+else()
+  message(STATUS "cvcGL: VTK has no UpdateLightingUniformsEveryRender; a view can light the main "
+                 "view's props with its own lights")
+endif()
+
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
@@ -1234,6 +1265,10 @@ endif()
 if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_view_stacking test/cvcgl_ariadne_view_stacking.cpp)
   target_link_libraries(cvcgl_ariadne_view_stacking PRIVATE cvcGL)
+  if(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER) # its lights check holds only then
+    target_compile_definitions(cvcgl_ariadne_view_stacking
+                               PRIVATE CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER=1)
+  endif()
   add_test(NAME cvcgl_ariadne_view_stacking COMMAND cvcgl_ariadne_view_stacking)
   # Not a test: what a frame of a document costs offscreen, CPU and GPU, run by hand
   # (cvcgl_ari_frame_bench doc.ari ...).
