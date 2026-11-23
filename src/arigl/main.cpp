@@ -506,12 +506,15 @@ ari::MouseControls camera_mouse(const cvc::gl::CameraController &cam, bool touch
   ari::MouseControls m;
   if (!touch) {
     m.look = at + "mouse_look";
-    m.note = room ? "Mouse look: the mouse aims and W walks where you aim. Click the scene to\n"
-                    "start, Esc to get the mouse back. Drag to look: click the floor to face it."
+    m.note = room ? "Mouse look: the mouse aims and W walks where you aim, through your own eyes\n"
+                    "or over your shoulder. Click the scene to start, Esc to get the mouse back.\n"
+                    "Drag to look: click the floor to face it."
                   : "Mouse look: the mouse aims the camera where it stands, W/S move along the\n"
                     "aim, A/D strafe, Space/Ctrl rise and sink. Click the scene to start, Esc to\n"
                     "get the mouse back.";
   }
+  if (room && !touch) // mouse look at our own eyes, or over our shoulder (section 18.6)
+    m.first_person = at + "first_person";
   if (room) { // in drag to look (a touch screen's only look)
     m.steer = at + "primary_drag_steers";
     m.steer_label = touch ? "Drag the floor to face it (two fingers look around)"
@@ -752,6 +755,12 @@ struct ConferenceSession {
   static constexpr double kAimAhead = 4.0;  // and ahead of us: the crosshair's point (m)
   static constexpr double kAimEaseS = 0.2;  // the pivot's easing as mouse look turns on and off
   double aim_blend_ = 0.0;                  // 0 = the pivot on us, 1 = over the shoulder, ahead
+  // First person under mouse look: the eyes a share of the body's height up, the camera this far
+  // behind them (m); whether it is on, and the orbit's distance to go back to.
+  static constexpr double kEyeShare = 0.92;
+  static constexpr double kEyeBehind = 0.05;
+  bool first_person_ = false;
+  double third_distance_ = 0.0;
   // Drag to look: a drag on the floor steers us (CameraController::setPrimaryDragSteers). We face
   // the point under the pointer each time it moves; not nearer our feet than kSteerDeadZone, where
   // the direction swings wildly.
@@ -1360,8 +1369,9 @@ struct ConferenceSession {
     if (!active || !driver_ || !app_)
       return;
     holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client,
-                                                   cvc::ariadne::room_holon_config());
-    entities_ = std::make_unique<cvc::ariadne::entity_playout>(cvc::ariadne::room_holon_config());
+                                                   cvc::ariadne::room_holon_config(*app_, room_));
+    entities_ = std::make_unique<cvc::ariadne::entity_playout>(
+        cvc::ariadne::room_holon_config(*app_, room_));
     set_lead(0.06); // until the first round trip is measured (net_step)
     room_view_ =
         std::make_unique<gla::room_view>(view, *app_, room_, pid_, view.scene().getStatePrefix());
@@ -1378,7 +1388,9 @@ struct ConferenceSession {
     cam_ = &cam;
     cam.setPrimaryDragSteers(true); // the right button, or two fingers, turns the view
     cam.setOrbitKeys(false);        // in Orbit the movement keys walk our avatar (controls_)
-    cam.setMouseLookOrbits(true);   // mouse look is third person: the camera turns about us
+    cam.setMouseLookOrbits(true);   // mouse look turns the camera about us (or our eyes)
+    // Mouse look is first person until the Controls window says otherwise (section 18.6).
+    cvc::ariadne::read_or_seed<int>(*app_, cam.stateName("settings.first_person"), 1);
     view_ = &view;
     // Peers' names over their markers: a scene annotation, so it shows with the panels hidden too
     // and sits under the document's windows.
@@ -1390,9 +1402,30 @@ struct ConferenceSession {
                                 [this](const cvc::clock_driver::clock_frame &f) { step_room(f); });
   }
 
+  // Our holon at the room's rate (ARIADNE_WORLDS.md section 18.9). The relay publishes the rate
+  // its world runs at (conf.rooms.<room>.clock), and a holon cannot change its quantum in place
+  // (every tick would mean another time), so ours is built again at it: when the room's tree
+  // first brings a rate other than the 120 Hz it was built at, or a relay restarts at another.
+  // The roster puts everyone back in it at the next pump, and the stream's next entries their
+  // poses; our lead is kept in seconds.
+  void follow_room_clock() {
+    if (cvc::ariadne::on_room_clock(*holon_, *app_, room_))
+      return;
+    const double lead_s = static_cast<double>(holon_->lead_ticks()) * holon_->clock().fixed_dt();
+    const cvc::ariadne::holon_config cfg = cvc::ariadne::room_holon_config(*app_, room_);
+    holon_ = std::make_unique<cvc::ariadne::holon>(cvc::ariadne::holon_role::client, cfg);
+    entities_ = std::make_unique<cvc::ariadne::entity_playout>(cfg);
+    holon_->set_lead_ticks(static_cast<std::uint64_t>(std::ceil(lead_s / cfg.clock.fixed_dt)));
+    proposed_tick_ = 0; // a stamp on the old clock
+    logged_realigns_ = 0;
+    std::fprintf(stderr, "arigl: room: the relay runs the world at %.0f Hz; our holon follows\n",
+                 1.0 / cfg.clock.fixed_dt);
+  }
+
   void step_room(const cvc::clock_driver::clock_frame &f) {
     if (!holon_ || !room_view_ || !cam_)
       return;
+    follow_room_clock();
     const bool look =
         cam_->mouseLookEnabled() && cam_->mode() == cvc::gl::CameraController::Mode::Orbit;
     // A click on the scene (not one the UI took) turns us to face the ground point under it, and
@@ -1565,9 +1598,20 @@ struct ConferenceSession {
       cvc::ariadne::apply_pose_snapshot(*holon_, pose_decoder_, snap, entities_.get());
     for (const auto &[tick, samples] : lane_samples) // decoded (and acked) on the pose lane
       cvc::ariadne::apply_pose_samples(*holon_, samples, tick, entities_.get());
-    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt);
+    // The entities first: client_pump holds each where it is shown this frame, so the walk we
+    // predict meets the vehicles we see (ARIADNE_WORLDS.md section 18.5).
     if (entities_)
       entities_->pump(*app_, room_, f.wall_dt);
+    cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get());
+    // The vehicle we drive is drawn where we predict it (section 18.5, OW5b), not a round trip
+    // behind our keys where its samples put it.
+    if (entities_) {
+      const std::uint64_t driving = cvc::ariadne::read_driving(*app_, room_, pid_);
+      if (driving != 0 && holon_->predicts_vehicle(pid_))
+        entities_->show_predicted(driving, holon_->display_pose(pid_));
+      else
+        entities_->show_predicted(0, cvc::physics::pose{});
+    }
     avatar_panel_.update(*holon_, *app_, room_, pid_, f.wall_dt);
     if (avatar_panel_.sampled())
       avatar_panel_.publish(*app_, prefix_);
@@ -1611,11 +1655,28 @@ struct ConferenceSession {
                     (1.0 - std::exp(-std::max(0.0, f.wall_dt) / kAimEaseS));
       if (std::fabs(aim_blend_ - (look ? 1.0 : 0.0)) < 1e-3)
         aim_blend_ = look ? 1.0 : 0.0;
-      const double ahead = aim_blend_ * std::min(kAimAhead, cam_->orbitDistance() / 3.0);
-      const double side = aim_blend_ * kShoulder;
+      // First person (the Controls window's, on by default): walking under mouse look, the camera
+      // is at our eyes, a hair behind them, and we are hidden. The orbit's distance comes back as
+      // it was when it ends.
+      const bool first_person =
+          look && driving == 0 &&
+          cvc::ariadne::read_or<int>(*app_, cam_->stateName("settings.first_person"), 1) != 0;
+      if (first_person != first_person_) {
+        first_person_ = first_person;
+        cvc::state &dist = app_->root()(cam_->stateName("orbit.distance"));
+        if (first_person) {
+          third_distance_ = cam_->orbitDistance();
+          dist.value(kEyeBehind);
+        } else if (third_distance_ > kEyeBehind) {
+          dist.value(third_distance_);
+        }
+      }
+      const double over = first_person ? 0.0 : aim_blend_;
+      const double ahead = over * std::min(kAimAhead, cam_->orbitDistance() / 3.0);
+      const double side = over * kShoulder;
       const double fx = std::cos(facing_yaw_), fy = std::sin(facing_yaw_); // right is (fy, -fx)
-      double c[3] = {p[0] + ahead * fx + side * fy, p[1] + ahead * fy - side * fx,
-                     p[2] + kEyeHeight};
+      const double rise = first_person ? kEyeShare * holon_->body().height : kEyeHeight;
+      double c[3] = {p[0] + ahead * fx + side * fy, p[1] + ahead * fy - side * fx, p[2] + rise};
       if (std::fabs(c[0] - orbit_center_[0]) + std::fabs(c[1] - orbit_center_[1]) +
               std::fabs(c[2] - orbit_center_[2]) >
           1e-4) {
@@ -1646,8 +1707,9 @@ struct ConferenceSession {
           az.value(std::strtod(az.value().c_str(), nullptr) + off * k * 180.0 / kPi);
         }
       }
-      room_view_->set_self_visible(std::hypot(eye[0] - p[0], eye[1] - p[1]) >= kInsideRadius ||
-                                   eye[2] >= p[2] + kInsideTop);
+      room_view_->set_self_visible(!first_person &&
+                                   (std::hypot(eye[0] - p[0], eye[1] - p[1]) >= kInsideRadius ||
+                                    eye[2] >= p[2] + kInsideTop));
     }
   }
 
@@ -1664,7 +1726,9 @@ struct ConferenceSession {
     if (driving == 0 && self && entities_)
       target = cvc::ariadne::drive_target(*entities_, cvc::physics::vec3{self[0], self[1], self[2]},
                                           facing_yaw_);
-    if (controls_.fired("interact")) {
+    // A vehicle that is our body (our archetype's, section 18.6): there is no getting out of it.
+    const bool embodied = ride && ride->avatar == pid_;
+    if (controls_.fired("interact") && !embodied) {
       if (driving != 0)
         cvc::ariadne::request_drive(*app_, room_, pid_, 0);
       else if (target != 0)
@@ -1698,7 +1762,7 @@ struct ConferenceSession {
           key + "  Drive " + what, progress,
           cvc::physics::vec3{at.position.x, at.position.y,
                              at.position.z + 0.5 * (e ? e->size[2] : 1.0) + kPromptAbove});
-    } else if (driving != 0 && progress > 0.0 && self) {
+    } else if (driving != 0 && !embodied && progress > 0.0 && self) {
       const double roof = ride ? 0.5 * ride->size[2] : 1.0;
       room_view_->set_prompt(key + "  Get out", progress,
                              cvc::physics::vec3{self[0], self[1], self[2] + roof + kPromptAbove});

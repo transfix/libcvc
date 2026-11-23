@@ -20,9 +20,14 @@ scheduler in slices with progress for the UI, interactive on one thread (§1 ite
   atoms and radii, its grid, and its densities to 1e-5 (most voxels bit for bit: TexMol sums a
   sheet's strands together). Not in it: the hydrophobicity and electrostatic densities, colour,
   the multilevel blur, the surfaces (T1 part 2).
-- **Next, for the skeleton demo** (Joe, 2026-11-21: skeletonization was meant for molecular data
-  too): a mesh_lab that builds its surface from a PDB (the blur's isosurface) and a skeleton demo
-  on 1GRL, whose strands and sheets should follow its 19 helices and 11 strands.
+- **The skeleton demo on a molecule** (2026-11-21; Joe: skeletonization was meant for molecular
+  data too): mesh_lab reads a molecule file (`.pdb`, `.ent`, `.pqr`, `.xyzr`) as its heavy atoms'
+  blur map's isosurface (`source.blobbiness`, `source.resolution`, `source.isovalue`,
+  `source.hydrogens`), and the skeleton lab shows 1GRL. At blobbiness -0.2 on a 2 Å grid,
+  isovalue 10, decimated to 4,000 triangles, the skeleton's strands run along the helices: 81 of
+  243 helix C-alphas lie within 3 Å of a strand, 22 of 232 coil ones (`cvcgl_mesh_skeleton`
+  checks the ratio stays above 2). At TexMol's default blobbiness the surface is the atoms' own
+  and the skeleton finds no strands; sheets follow the beta strands only weakly.
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital
@@ -228,7 +233,7 @@ intrinsics, a job kind, and Ariadne components, wasm included.
 | **Pocket** | 0.15k | UT LGPL-2.1 | Pockets by morphological closing on signed distance fields | Rewritten on `cvc::sdf` and `cvc::iso`, about 60 lines, with no file round trips (today every step goes through a file, `Pocket.cpp:47-74`) |
 | **Docking analysis:** **InterfaceStats**, **MolecularCharacteristics**, and the filters **fast-clash**, **fast-hydro** (pseudo-Gsol), **fast-LJ**, **fast-resCont** | 11.8k | UT LGPL-2.1, plus files with no header; `ElementInformation.h` is UT GPL in TexMol (TexMol#7 relicenses it) | CAPRI criteria; interface area, volume, gap, planarity and circularity; residue contacts; per-molecule statistics; the octree filters and scores | **F2Dock carries its own copies of the same filters.** Port them once, as `cvc::mol` filters that `libf2dock` and the analysis both use (§3.2). pthreads become the app's pool; 39 `exit()`s become exceptions. The element table waits on cyconv's D13 |
 | **F2DockClient's Qt-free core** | about 6.5k | UT LGPL-2.1 | The docking, rerank, F2D-generation and quad-generation parameter structs, the `.inp` writers, and the `.out` result parser (`summaryResults.cpp`), so legacy results and inputs load into arimol | The XML-RPC transport, the Qt dialogs and the "Nagger" polling thread stay behind; the job service replaces them (§5). Fix on the way: `dockControl.cpp:416` checks the wrong pointer; `return NULL` into `std::string` (`f2dockMasterControl.cpp:269-281`) |
-| **PocketTunnel** | 5.0k | UT LGPL-2.1 | Pockets, tunnels and voids by stable manifolds, with surface curation | Needs the VolumeRover plan's `cvc::cocone` core on Qhull (its cocone files are the copies that plan merges). `exit()`s and `debug_output/` writes go |
+| **PocketTunnel** | 5.0k | UT LGPL-2.1 | Pockets, tunnels and voids by stable manifolds, with surface curation | Needs the VolumeRover plan's `cvc::cocone` core on Qhull (its cocone files are the copies that plan merges). `exit()`s and `debug_output/` writes go. *Built (T5, first part):* `cvc::pocket_tunnel` (`cvc/geometry/pocket_tunnel.h`), a `result_job` stepper with a parameter table, on the cocone core lifted to `src/cvc/geometry/cocone`; it lists every cluster with its kind, mouths and volume, which the legacy code only printed. Its own stages match the legacy library's exactly given the same Tight Cocone marking, on four synthetic surfaces and on PDB 1GRL's blurred surface; Tight Cocone's greedy peeling follows the cells' order, which in the legacy code is their addresses, so end to end a cell or two by the surface can differ (`tools/volrover-goldens/README.md`). The CLI, pycvc, intrinsics, `mesh_lab` and a molecule demo follow |
 | **SecondaryStructures** | 9.0k | **no licence header** (UT to confirm) | Helices and sheets from a volume's isosurface, via the cocone medial axis | On the same cocone core; it is the "SecondaryStructures port" the VolumeRover plan leaves Skeletonization's helix window to. `MainWindow.cpp:2267,2276` keep dangling `c_str()` pointers; its `.rawc` and `.off` writes go |
 | **Curvatures**, **ColorSurfaceByFunction** | 1.1k | UT LGPL-2.1 | Analytic curvature of a sum-of-Gaussians surface (not libcvc's mesh fit); Coulomb colouring of surface vertices | Small; they sit beside `mesh_ops` |
 
@@ -740,7 +745,7 @@ Sizes: S is a PR or two, M a few, L a short series, XL a longer one.
 | T2 SES and pockets | M | HLevelSet; Pocket rebuilt on `cvc::sdf` and `cvc::iso`; `mol.hls` / `mol.pockets` | T1 |
 | T3 Docking analysis | M | InterfaceStats, MolecularCharacteristics, and the `cvc::mol` filters (clash, pseudo-Gsol, LJ, residue contacts) shared with F2Dock, with an A/B against `libf2dock`'s copies | M0, the D13 rulings |
 | T4 Docking inputs and results | S | F2DockClient's Qt-free parameter structs, `.inp` writers and `.out` parser, so legacy jobs load into arimol | M0 |
-| T5 Tunnels and secondary structure | M | PocketTunnel and SecondaryStructures on the cocone core | VolumeRover P1, UT on SecondaryStructures' licence |
+| T5 Tunnels and secondary structure | M | PocketTunnel and SecondaryStructures on the cocone core (PocketTunnel's core, tests and legacy A/B built) | VolumeRover P1, UT on SecondaryStructures' licence |
 | T6 Small pieces | S | Curvatures, ColorSurfaceByFunction, the DX volume reader | T1 |
 | F0 F2Dock fixes | S–M | §3.2 F0, in transfix/F2Dock | — |
 | F1 `libf2dock` | L | §3.2 F1, with `dock_stepper` sliced within a rotation (T7 natively and under node, single-threaded included) | F0 |

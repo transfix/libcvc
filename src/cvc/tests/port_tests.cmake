@@ -16,6 +16,7 @@ set(CVC_PORT_TESTS
   tet_complex_test
   skeleton_test
   skeleton_intrinsics_test
+  pocket_tunnel_test
   contour_stack_test
   point_classes_test
   molecule_test
@@ -32,6 +33,9 @@ set(CVC_PORT_TESTS
   volume_slice_test
   tabs_list_test
   volume_grid_test
+  volume_filter_test
+  volume_grid_contours_test
+  volume_grid_contour_intrinsics_test
 )
 
 # One port test: cvc and googletest, and under Emscripten what node needs to run it (as
@@ -60,6 +64,10 @@ target_link_libraries(tet_complex_test PRIVATE cvc_permissive_geometry)
 # skeleton_test compares the port with the legacy library's goldens (tools/volrover-goldens): the
 # committed inputs and goldens are read from the source tree.
 target_compile_definitions(skeleton_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# pocket_tunnel_test compares the PocketTunnel port with the legacy library's goldens the same way.
+target_compile_definitions(pocket_tunnel_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 
 # segmentation_test compares the GenSeg port with the legacy library's goldens the same way, and

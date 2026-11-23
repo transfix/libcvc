@@ -218,6 +218,19 @@ public:
   // avatar has no mass (a no-op).
   void set_mass(const std::string &pid, double kg);
 
+  // OBSTACLES (ARIADNE_WORLDS.md section 18.5, OW5): a box the host holds where it shows something
+  // this world does not simulate -- a client's view of the room's vehicles. Each is a kinematic
+  // body, HALF_EXTENTS about its centre: it moves only as the host moves it, and pushes what it
+  // meets as it goes. The first hold of KEY (or one with other extents) creates it at CENTRE; a
+  // later one moves it there by the end of the next step. Kept through set_statics (re-created
+  // after the avatars), set_body and move_to; release() takes them out with the avatars.
+  void hold_obstacle(std::uint64_t key, const cvc::physics::vec3 &half_extents,
+                     const cvc::physics::pose &centre);
+  void remove_obstacle(std::uint64_t key);
+  bool has_obstacle(std::uint64_t key) const;
+  // Its centre now. Throws std::out_of_range for an unknown key.
+  cvc::physics::body_state obstacle_state(std::uint64_t key) const;
+
   // One step of the world. Not in a shared world (its owner steps it): std::logic_error.
   void step();
 
@@ -255,6 +268,13 @@ private:
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
   std::map<std::string, avatar> _avatars;
+  struct obstacle {
+    std::uint32_t id = 0; // cvc::physics::body_id value
+    cvc::physics::vec3 half_extents;
+  };
+  std::map<std::uint64_t, obstacle> _obstacles;
+  std::uint32_t create_obstacle(const cvc::physics::vec3 &half_extents,
+                                const cvc::physics::body_state &centre);
   std::uint32_t _wind_field = 0xffffffffu; // the wind's flow field (none)
 };
 

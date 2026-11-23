@@ -297,7 +297,7 @@ namespace {
 
 bool any_mouse_rows(const MouseControls &m) {
   return !m.look.empty() || !m.steer.empty() || !m.sensitivity.empty() || !m.invert_y.empty() ||
-         !m.invert_x.empty() || !m.distance.empty();
+         !m.invert_x.empty() || !m.distance.empty() || !m.first_person.empty();
 }
 
 // The Controls window: the host's pointer settings, then every key binding, with its keys and a
@@ -311,6 +311,8 @@ Widget keys_window(const std::vector<KeyBinding> &bindings, const MouseControls 
       look.values = {"0", "1"};
       kids.push_back(std::move(look));
     }
+    if (!mouse.first_person.empty())
+      kids.push_back(checkbox("Mouse look in first person", mouse.first_person));
     if (!mouse.steer.empty())
       kids.push_back(checkbox(mouse.steer_label, mouse.steer));
     if (!mouse.sensitivity.empty())
@@ -719,9 +721,10 @@ void AppRuntime::ensure_intrinsics() {
         // The (data-*) verbs (data.h), for programs in this runtime's app: (data-load NAME URI [AS
         // [PATH]]) points the document's data.NAME at a request and starts it (the scene's nodes
         // bound to NAME follow when it is ready), (data-generate NAME GENERATOR [PARAMS]) points
-        // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-status
-        // NAME), (data-files NAME), (data-file NAME PATH) (its bytes, or nil) and (data-save PATH
-        // FILE [AS]) (what a state key's data channel holds, written beside the document or, in a
+        // it at a made dataset (PARAMS a JSON object; data.h), (data-reload NAME), (data-put NAME
+        // ITEM VALUE) (a data object as the dataset's output ITEM, its rev up), (data-status NAME),
+        // (data-files NAME), (data-file NAME PATH) (its bytes, or nil) and (data-save PATH FILE
+        // [AS]) (what a state key's data channel holds, written beside the document or, in a
         // browser, downloaded: data_save). The store first: it is reset when this runtime dies,
         // and only then is `app` still ours.
         std::shared_ptr<DataStore> store;
@@ -803,6 +806,27 @@ void AppRuntime::ensure_intrinsics() {
         se::builtins::register_fn(
             env, "data-reload", [live, name, entry](std::span<const se::value_t> a) -> se::value_t {
               return se::value_t(live("data-reload")->reload(entry(name(a, "data-reload"))));
+            });
+        // (data-put NAME ITEM VALUE): VALUE, a data object (a volume.filter's result), becomes the
+        // dataset NAME's output ITEM and its rev goes up (DataStore::set_output), so every node
+        // viewing NAME follows it. Returns the store path.
+        se::builtins::register_fn(
+            env, "data-put",
+            [live, text, name, entry](std::span<const se::value_t> a) -> se::value_t {
+              if (a.size() != 3)
+                throw se::dsl_error("TypeError", "data-put: expected NAME ITEM VALUE, got " +
+                                                     std::to_string(a.size()) + " args");
+              const se::data_object_ptr *obj = std::get_if<se::data_object_ptr>(&a[2].v);
+              if (!obj || !*obj)
+                throw se::dsl_error("TypeError",
+                                    "data-put: VALUE is a data object, not " + a[2].type_name());
+              try {
+                return se::value_t(live("data-put")
+                                       ->set_output(entry(name(a, "data-put")),
+                                                    text(a, 1, "data-put"), (*obj)->payload));
+              } catch (const std::invalid_argument &e) {
+                throw se::dsl_error("ValueError", e.what());
+              }
             });
         se::builtins::register_fn(
             env, "data-save",

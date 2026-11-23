@@ -16,6 +16,7 @@
 #ifndef __CVC_CORE_SIM_TICK_H__
 #define __CVC_CORE_SIM_TICK_H__
 
+#include <algorithm>
 #include <cmath>
 #include <cvc/core/world_clock.h>
 #include <stdexcept>
@@ -60,26 +61,64 @@ inline int whole_steps(double span, double step) {
   return static_cast<int>(k);
 }
 
-// A simulation host's clock: the suite quantum, real time at `scale` (world seconds per wall
-// second), and a catch-up of at most kSimCatchup of world time a frame at 1x, growing with the
-// speed.
-inline world_clock::config sim_clock_config(double scale = 1.0) {
+// ----------------
+// A world's rate (ARIADNE_WORLDS.md section 18.9)
+// ----------------
+// 120 Hz is the default, not a law: a world that needs less (bandwidth, a relay's CPU) runs at a
+// rate of its own, a whole number of ticks a second from kSimRateMin to kSimRateMax (a scene's
+// `clock: { hz }`, arisrv --sim-hz). Its quantum is 1/hz, a physics step is one quantum, and the
+// navigator's tick is the whole number of quanta nearest kSimTrainedTick (sim_tick_quanta: 7 at
+// 120 Hz, 4 at 60, 2 at 30), so the shipped policies see the step they were trained at as nearly as
+// the rate allows.
+inline constexpr double kSimRateDefault = 120.0;
+inline constexpr double kSimRateMin = 10.0;
+inline constexpr double kSimRateMax = 240.0;
+inline constexpr double kSimTrainedTick = 0.06; // the navigator's step the policies were trained at
+
+// Whether HZ is a world's rate: a whole number from kSimRateMin to kSimRateMax.
+inline bool sim_rate_valid(double hz) {
+  return std::isfinite(hz) && hz >= kSimRateMin && hz <= kSimRateMax && hz == std::floor(hz);
+}
+
+// The quantum of a world at HZ ticks a second (kSimQuantum at the default 120).
+inline double sim_quantum(double hz) { return hz == kSimRateDefault ? kSimQuantum : 1.0 / hz; }
+
+// The navigator's tick in quanta of QUANTUM: the whole number nearest kSimTrainedTick, at least one
+// (kSimTickQuanta at kSimQuantum).
+inline int sim_tick_quanta(double quantum) {
+  if (std::fabs(quantum - kSimQuantum) < 1e-15)
+    return kSimTickQuanta;
+  return std::max(1, static_cast<int>(std::lround(kSimTrainedTick / quantum)));
+}
+
+// The navigator's tick (s) on a clock of QUANTUM: sim_tick_quanta of them (kSimTick at
+// kSimQuantum).
+inline double sim_tick(double quantum) {
+  if (std::fabs(quantum - kSimQuantum) < 1e-15)
+    return kSimTick;
+  return sim_tick_quanta(quantum) * quantum;
+}
+
+// A simulation host's clock: QUANTUM (the suite's by default), real time at `scale` (world seconds
+// per wall second), and a catch-up of at most kSimCatchup of world time a frame at 1x, growing with
+// the speed.
+inline world_clock::config sim_clock_config(double scale = 1.0, double quantum = kSimQuantum) {
   world_clock::config c;
-  c.fixed_dt = kSimQuantum;
+  c.fixed_dt = quantum;
   c.scale = scale;
-  c.max_steps_per_advance = static_cast<int>(std::lround(kSimCatchup / kSimQuantum));
+  c.max_steps_per_advance = std::max(1, static_cast<int>(std::lround(kSimCatchup / quantum)));
   c.cap_scales_with_rate = true;
   return c;
 }
 
-// Put `clock` on sim_clock_config (the quantum and the catch-up), keeping its speed, unless it has
-// ticked (a quantum changes what every tick means, so a running clock is left as it is). True when
-// it is at the suite quantum afterwards.
-inline bool adopt_sim_clock(world_clock &clock) {
-  const bool at_quantum = std::fabs(clock.fixed_dt() - kSimQuantum) < 1e-12;
+// Put `clock` on sim_clock_config at QUANTUM (the suite's by default), keeping its speed, unless it
+// has ticked (a quantum changes what every tick means, so a running clock is left as it is). True
+// when it is at QUANTUM afterwards.
+inline bool adopt_sim_clock(world_clock &clock, double quantum = kSimQuantum) {
+  const bool at_quantum = std::fabs(clock.fixed_dt() - quantum) < 1e-12;
   if (clock.tick() != 0)
     return at_quantum;
-  clock.configure(sim_clock_config(clock.current_config().scale));
+  clock.configure(sim_clock_config(clock.current_config().scale, quantum));
   return true;
 }
 

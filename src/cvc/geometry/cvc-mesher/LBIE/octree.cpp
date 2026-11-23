@@ -2653,6 +2653,10 @@ int Octree::is_eflag_on(int x, int y, int z, int level, int e)
 		break;
 	}
 	
+	// An edge on the volume's far boundary is stored in a cell outside the grid (-1 from
+	// xyz2octcell, so idx is -3 to -1), and 1<<(idx%8) would shift by a negative count. No flag is
+	// kept for it; is_min_edge() never makes a quad for it, since is_refined() is 1 outside.
+	if (idx < 0) return 0;
 	if (ebit[idx/8]&(1<<(idx%8))) return 1;
 	else return 0;
 	
@@ -2700,6 +2704,7 @@ void Octree::eflag_on(int x, int y, int z, int level, int e)
 		break;
 	}
 	
+	if (idx < 0) return; // outside the grid: see is_eflag_on()
 	ebit[idx/8]|=(1<<(idx%8));
 	
 }

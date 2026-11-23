@@ -29,6 +29,7 @@
 #ifndef CVC_VOLUME_VOLUME_SLICE_H
 #define CVC_VOLUME_VOLUME_SLICE_H
 
+#include <boost/any.hpp>
 #include <boost/describe/enum.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -172,6 +173,21 @@ private:
   std::deque<cached> _cache; // newest first
   std::size_t _reads = 0;
 };
+
+// A volume as a state key's data channel holds one (docs/roadmap/DATA_FROM_STATE_TREE.md): a
+// std::shared_ptr<const volume> (a data: entry's), a std::shared_ptr<volume>, a volume, or a
+// std::shared_ptr<slice_source> (a host's large file read plane by plane), as such or as the
+// payload of a data object a program stored there (state-data-set: a DSL volume.filter's result,
+// say). `src` is then the slices to cut, and `vol` the volume itself: the very object the key's
+// pointer holds (a slice_source's in memory, kept by the source; null for a file read plane by
+// plane), or for a plain volume a new handle on its voxels. False, leaving both alone, when `d`
+// holds none of them or a null pointer.
+bool volume_payload(const boost::any &d, std::shared_ptr<slice_source> &src,
+                    std::shared_ptr<const volume> &vol);
+
+// The object a volume payload's pointer holds, or null (a plain volume): what tells a new payload
+// from the same one written again (cvc::followed_key's pointee).
+const void *volume_payload_pointee(const boost::any &d);
 
 // How a slice node draws (§1.5): one key per field under <node>.slice.
 struct volume_slice_params {

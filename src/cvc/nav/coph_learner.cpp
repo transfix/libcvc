@@ -590,6 +590,15 @@ coph_network coph_crossing_network() {
   return n;
 }
 
+bool coph_corridor_clear(const coph_vec2 &a, const coph_vec2 &b, const coph_network &network,
+                         double margin) {
+  return corridor_clear(a, b, network, margin);
+}
+
+double coph_slab_sweep(const coph_vec2 &a, const coph_vec2 &b, const coph_shape &slab) {
+  return slab_sweep(a, b, slab);
+}
+
 bool coph_is_validation(const std::string &uid) {
   const std::size_t colon = uid.rfind(':');
   const std::string last = colon == std::string::npos ? uid : uid.substr(colon + 1);
@@ -837,6 +846,7 @@ coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph
     ctx.blocked_edges = out.blocked;
     out.target = q;
     out.no_route = true;
+    out.changed = true;
     out.reason = "maze_no_route";
     return out;
   }
@@ -868,9 +878,11 @@ coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph
   if (!corridor_clear(q, target, net) || !obstacle_clear(q, target, obstacles)) {
     out.target = q;
     out.no_route = true;
+    out.changed = true;
     out.reason = "unsafe_connector";
     return out;
   }
+  out.changed = ids != ctx.route_nodes || out.blocked != ctx.blocked_edges;
   ctx.target = target;
   ctx.route_nodes = ids;
   ctx.blocked_edges = out.blocked;
@@ -891,6 +903,7 @@ coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> 
   out.meta.route_reason = route.reason;
   out.meta.route_nodes = route.nodes;
   out.meta.waypoint = route.target;
+  out.meta.route_changed = route.changed;
   coph_field_view f;
   f.centers = s.centers;
   f.weights = s.weights;
@@ -900,6 +913,7 @@ coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> 
       coph_command<T>(x, route.target, policy, f, coph_shaping_for(f, cfg), cfg.force_limit);
   const coph_vec2_of<T> &nominal = cmd.applied;
   out.applied = nominal;
+  out.meta.proposed = values<T>(cmd.proposed);
   out.meta.reason = "nominal";
   projection<T> candidate;
   if (!atlas.overflow && !route.no_route)

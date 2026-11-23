@@ -32,6 +32,9 @@
 
 namespace cvc {
 class app;
+namespace net {
+class net_engine;
+} // namespace net
 namespace ariadne {
 class AppRuntime;
 
@@ -75,6 +78,9 @@ struct HostHandles {
   // A server host's: where Python's writes queue for the relay, and the relay's events for the
   // loop. With it, Python never writes the tree itself.
   ServerLink *server = nullptr;
+  // A server host's connection engine (host.net), made on first call; the host owns it and keeps
+  // it past the loan. Null: the host has none.
+  std::function<cvc::net::net_engine *()> net;
   // A GL host's: cvc::gl::ariadne::AriRuntime, SceneRenderer, CameraController, ImGuiOverlay.
   void *ari_runtime = nullptr;
   void *view = nullptr;

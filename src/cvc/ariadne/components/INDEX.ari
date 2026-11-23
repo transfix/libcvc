@@ -262,6 +262,29 @@ catalog:
     binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
     for: "the same console without a window, to embed in a document's own window"
     args: { id: py_console }
+  - component: conference
+    file: conference.ari
+    unit: conference
+    binds: "<prefix>.conf.self, cam_token, cam.sel, mic.sel, cam_on, mic_on, name_error, self.video_in, <prefix>.tree.{id}.*"
+    for: "the conference app's My Camera window: your name (refused when taken), your camera, the camera and mic pickers and their on/off"
+    args: { id: mycam, title: My Camera }
+    verbs: [room-join, room-roster, stream-open, stream-capture-camera, stream-capture-audio, stream-set-muted]
+    note: "imports room_users.ari, chat.ari and audio_buffers.ari; call (conference-step) from on_tick for the whole app, or its pieces (conference-join, conference-media-open, conference-name-step, conference-devices-step, conference-avatar-step) for some of it"
+  - component: conference_avatar
+    file: conference.ari
+    unit: conference_avatar
+    binds: "<prefix>.avatar.* (the pickers), self.avatar.* (the host's avatar_panel)"
+    for: "the conference app's Avatar window: Colour and Wear from the relay's catalog, the Body (a person, or a vehicle you drive as your body, where the world offers one), your energy budget, ledger and history"
+    args: { id: myavatar, title: Avatar }
+    verbs: [room-set-avatar, room-set-archetype, plot]
+    note: "call (conference-avatar-step) from on_tick, after (conference-join)"
+  - component: conference_peers
+    file: conference.ari
+    unit: conference_peers
+    binds: "<prefix>.{rows}.{i}.{name,cam,video_off} (room_users' rows), <prefix>.tree.cam_<i>.*"
+    for: "a camera window per other participant, titled by their name, repeated over {rows}.count"
+    args: { rows: peer, title: Peer }
+    note: "room_users' (room-users-step ROWS ROOM CHAT) fills the rows it shows"
   - component: audio_buffers
     file: audio_buffers.ari
     unit: audio_buffers
@@ -296,9 +319,9 @@ catalog:
     file: volume_grid.ari
     unit: volume_grid
     binds: "<prefix>.graphics.root.children.{node}.grid.* (view, tool, slice.*, display.*, source.*, classes.*, pick.*, pointer.*, cursor.*, request, status) and .transfer_function; <prefix>.viewers.{id}_*.camera"
-    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), sessions and the transfer function, over a volume the app holds"
+    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), contours per object (linear or spline; draw, close, move, select, delete, save, load) tiled into surfaces in the 3D view, sessions and the transfer function, over a volume the app holds"
     args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }   # defaults
-    note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views) and volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"
+    note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views), volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) and volume_grid_contours_tab (the Contours tab) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"
   - component: http_cache
     file: http_cache.ari
     unit: http_cache
