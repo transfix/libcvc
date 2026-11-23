@@ -131,8 +131,10 @@ public:
   // no yaw rate, steering angle, drive lag or driver, nor the suspension's state: they are LIKE's
   // (the model as it was predicted for that tick, on the same plant), else at rest (on dynamic4w,
   // its suspension settled on the ground under it). The command is LIKE's, else none. On jolt,
-  // LIKE's world, its chassis put at CHASSIS's position, heading and horizontal velocity (its
-  // pitch, roll, vertical speed and spin LIKE's); without one the vehicle as it was added, at rest.
+  // LIKE's world, its chassis put at CHASSIS's position, heading and horizontal velocity, and at
+  // its pitch, roll and vertical speed when CHASSIS carries them (the relay's chassis's attitude,
+  // OW5m; a turn about z alone leaves them LIKE's), its spin LIKE's; without LIKE the vehicle as
+  // it was added, at rest.
   // On dynamicboat the same with the hull, the driver's memory LIKE's. A boat goes on the water at
   // the first CHASSIS over water deep enough for it (dyn_boat_plant::attach); until then it has no
   // world, and its steps leave it where it is. Its world's field time is TICK x fixed_dt, the
