@@ -24,11 +24,16 @@
 #include <cvc/ariadne/conference/room_scene.h>      // read_scene_objects, scene_stamp
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
+#include <cvc/ariadne/loader.h>         // load_file: the world document
+#include <cvc/ariadne/scene_world.h>    // world_replica's world
+#include <cvc/ariadne/uri.h>            // resolve
+#include <cvc/ariadne/world_vehicles.h> // vehicle_ground_height
 #include <cvc/core/app.h>
 #include <cvc/core/sim_tick.h> // the room's rate (on_room_clock)
 #include <cvc/physics/types.h> // vec3, quat
 #include <cvc/state/state.h>   // cvc::state, SEPARATOR, findDescendant
 #include <initializer_list>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -442,9 +447,21 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) 
 namespace {
 // Physics: reload the statics when the room scene changed (its stamp moved: a new revision, or a
 // restarted relay's revision 1 under a new epoch).
-void sync_statics(holon &h, cvc::app &app, const std::string &room) {
+void sync_statics(holon &h, cvc::app &app, const std::string &room,
+                  world_replica *world = nullptr) {
   if (!h.physics())
     return;
+  // The world document's statics, once this client holds the relay's document (OW5c).
+  if (world) {
+    world->pump(app, room);
+    if (world->ground_revision() != h.vehicle_ground_revision())
+      h.set_vehicle_ground(world->ground(), world->ground_revision()); // OW5g
+    if (world->ready()) {
+      if (!world->stamp().same(h.statics_stamp()))
+        h.set_statics(world->statics(), world->stamp());
+      return;
+    }
+  }
   const section_stamp s = conference::scene_stamp(app, room);
   if (s.written() && !s.same(h.statics_stamp()))
     h.set_statics(room_statics(app, room), s);
@@ -589,8 +606,8 @@ void hold_entities(holon &h, cvc::app &app, const std::string &room, const std::
 } // namespace
 
 void client_pump(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
-                 double wall_dt, const entity_playout *entities) {
-  sync_statics(h, app, room);
+                 double wall_dt, const entity_playout *entities, world_replica *world) {
+  sync_statics(h, app, room, world);
   sync_rules(h, app, room);
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
   std::set<std::string> present;
@@ -612,13 +629,14 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     // A participant the roster lists before its pose has replicated is registered pose-less: no
     // body and no marker at the placeholder origin until its first sample (holon::pose_known).
     // Driving, our pose is the vehicle's: predicted when the room's entities say how it runs (the
-    // kinematic plant, section 18.5, OW5b), else played out as a peer's; out, the walker again.
+    // kinematic plant, section 18.5, OW5b; the dynamic plants, OW5d and OW5e), else played out as a
+    // peer's; out, the walker again.
     const conference::room_entity *ride = nullptr;
     bool local = p.pid == self_pid;
     if (p.pid == self_pid) {
       const std::uint64_t driving = read_driving(app, room, p.pid);
       ride = driving != 0 && entities ? entities->find(driving) : nullptr;
-      if (ride && !ride->drive.valid())
+      if (ride && !ride->drive.valid() && !ride->dynamics.valid())
         ride = nullptr;
       local = driving == 0 || ride;
       if (h.has_participant(p.pid) && (local != h.is_local(p.pid) ||
@@ -631,8 +649,10 @@ void client_pump(holon &h, cvc::app &app, const std::string &room, const std::st
     if (!h.has_participant(p.pid))
       h.add_participant(p.pid, local, have ? s : cvc::physics::body_state{},
                         /*pose_known=*/have);
-    if (ride)
+    if (ride && ride->drive.valid())
       h.predict_vehicle(p.pid, ride->drive); // a no-op while its numbers stay the same
+    else if (ride)
+      h.predict_vehicle(p.pid, ride->dynamics); // a dynamic plant's (OW5d, OW5e)
     if (p.pid == self_pid) {
       // The server's reserve before the pose: a reconcile trims the log the reserve is checked
       // against.
@@ -760,6 +780,183 @@ bool entity_playout::state(std::uint64_t id, cvc::physics::body_state &out) cons
   out.position = shown.position;
   out.rotation = shown.rotation;
   return true;
+}
+
+world_replica::world_replica() {
+  // Its own epoch, so its stamps are never the room scene's (holon::set_statics takes either).
+  std::random_device rd;
+  do
+    _stamp.epoch = ((static_cast<std::uint64_t>(rd()) << 21) ^ rd()) & ((1ull << 53) - 1);
+  while (_stamp.epoch == 0);
+}
+
+world_replica::~world_replica() = default;
+
+conference::room_world_on world_on_of(const SceneWorld &world) {
+  conference::room_world_on on;
+  on.world = world.world_on();
+  // The world on's nodes; a scene without worlds has every node on.
+  for (const std::string &node :
+       on.world.empty() ? world.generated_nodes() : world.world_nodes(on.world)) {
+    conference::room_generated_world g;
+    g.node = node;
+    if (world.generated_params(node, g.params))
+      on.generated.push_back(std::move(g));
+  }
+  return on;
+}
+
+bool publish_world_on(cvc::app &app, const std::string &room, const SceneWorld &world) {
+  const conference::room_world_on now = world_on_of(world);
+  conference::room_world_on had;
+  if (conference::read_room_world_on(app, room, had) && had == now)
+    return false;
+  conference::write_room_world_on(app, room, now);
+  return true;
+}
+
+void world_replica::follow(cvc::app &app, const std::string &room) {
+  const section_stamp s = conference::room_world_on_stamp(app, room);
+  if (s.same(_on_stamp))
+    return;
+  _on_stamp = s;
+  conference::room_world_on on;
+  if (!conference::read_room_world_on(app, room, on))
+    return;
+  std::vector<std::string> warnings;
+  if (!on.world.empty() && on.world != _world->world_on())
+    _world->set_world(on.world, &warnings);
+  for (const conference::room_generated_world &g : on.generated)
+    _world->follow_generated(g.node, g.params, &warnings);
+}
+
+void world_replica::pump(cvc::app &app, const std::string &room) {
+  const section_stamp s = conference::room_world_source_stamp(app, room);
+  if (!s.same(_source_stamp)) {
+    _source_stamp = s;
+    _on_stamp = section_stamp{}; // a new world follows what the relay has on afresh
+    _built_on.clear();
+    _ground_grid.reset();
+    _ground_terrain.reset();
+    if (_ground_rev)
+      ++_ground_rev; // none now
+    _world.reset();
+    _nodes.clear();
+    _taken.clear();
+    _statics.clear();
+    _ready = false;
+    conference::room_world_source src;
+    if (!conference::read_room_world_source(app, room, src) || src.uri.empty()) {
+      _status = "the room names no world document";
+    } else {
+      const UriResult found = resolve(app, src.uri);
+      if (!found.ok || found.canonical.empty()) {
+        _status = src.uri + ": not here" + (found.error.empty() ? "" : " (" + found.error + ")");
+      } else if (conference::file_sha256(found.canonical) != src.sha256 || src.sha256.empty()) {
+        _status = src.uri + ": not the relay's document (its SHA-256 differs)";
+      } else {
+        LoadResult r = load_file(app, found.canonical);
+        if (!r.ok) {
+          _status = src.uri + ": " + r.error;
+        } else {
+          // Its static world alone: the vehicles are the relay's to run (the room's entities).
+          r.scene.vehicles.clear();
+          std::vector<std::string> warnings;
+          // Its keys (the world switch, a dataset's) under a prefix of its own, apart from the
+          // client's document.
+          _world = SceneWorld::from_scene(app, r.scene, "world_replica", "", &warnings);
+          _status = src.uri + (_world ? ": built" : ": its world could not be made");
+          const std::function<void(const std::vector<SceneNode> &)> ids =
+              [&](const std::vector<SceneNode> &nodes) {
+                for (const SceneNode &n : nodes) {
+                  if (!n.id.empty())
+                    _nodes.push_back(n.id);
+                  ids(n.children);
+                }
+              };
+          ids(r.scene.nodes);
+        }
+      }
+    }
+  }
+  if (!_world)
+    return;
+  follow(app, room); // the relay's world on, and its generated worlds' params
+  std::vector<std::string> warnings;
+  _world->sync(&warnings); // a generated world's colliders, as they become ready
+  // Ready once every generated world has its colliders (its terrain is the ground); the statics
+  // again whenever the world on or a node's colliders change.
+  bool pending = false, changed = !_ready || _world->world_on() != _built_on;
+  for (const std::string &id : _nodes) {
+    std::uint64_t rev = 0;
+    const bool has = _world->world_geometry(id, &rev) != nullptr;
+    if (!has && _world->generated_world(id))
+      pending = true;
+    const auto it = _taken.find(id);
+    if (has && (it == _taken.end() || it->second != rev))
+      changed = true;
+  }
+  if (pending && !_ready)
+    return;
+  if (changed)
+    build_statics();
+  _ready = true;
+  refresh_ground();
+}
+
+void world_replica::refresh_ground() {
+  std::shared_ptr<const cvc::nav::world_grid> g;
+  std::shared_ptr<const cvc::height_field> t;
+  _world->vehicle_ground(g, t);
+  if (g == _ground_grid && t == _ground_terrain)
+    return;
+  _ground_grid = std::move(g);
+  _ground_terrain = std::move(t);
+  ++_ground_rev;
+}
+
+std::function<double(double, double)> world_replica::ground() const {
+  if (!_ground_grid && !_ground_terrain)
+    return {};
+  std::shared_ptr<const cvc::nav::world_grid> g = _ground_grid;
+  std::shared_ptr<const cvc::height_field> t = _ground_terrain;
+  return [g, t](double x, double y) { return vehicle_ground_height(g.get(), t.get(), x, y); };
+}
+
+void world_replica::build_statics() {
+  _statics.clear();
+  _taken.clear();
+  _built_on = _world->world_on();
+  // What is in its physics world now: a scene's worlds are on one at a time (SceneWorld::world_on),
+  // and the others' bodies are out.
+  const auto in_world = [this](const SceneWorldBody &b) {
+    for (const cvc::physics::body_id id : _world->bodies_of(b.node))
+      if (id.value == b.id.value)
+        return true;
+    return false;
+  };
+  for (const SceneWorldBody &b : _world->bodies())
+    if (!b.moves && b.desc && in_world(b)) {
+      avatar_static s;
+      s.type = avatar_static::kind::body;
+      s.body = b.desc;
+      // Its surface as the relay's world has it (OW5h): the document's material, by value.
+      s.material = std::make_shared<const cvc::physics::material>(
+          _world->world().get_material(b.desc->material));
+      _statics.push_back(std::move(s));
+    }
+  for (const std::string &id : _nodes) {
+    std::uint64_t rev = 0;
+    std::shared_ptr<const cvc::world::world_geometry> g = _world->world_geometry(id, &rev);
+    if (g && !_world->bodies_of(id).empty()) {
+      avatar_static s;
+      s.type = avatar_static::kind::geometry;
+      s.geometry = std::move(g);
+      _statics.push_back(std::move(s));
+      _taken[id] = rev;
+    }
+  }
+  ++_stamp.rev;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

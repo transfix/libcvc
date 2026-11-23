@@ -407,6 +407,39 @@ cvc::nav::plant_limits dyn_bike_plant::limits(int i) const {
   return l;
 }
 
+void dyn_bike_plant::box_pose(int i, vec3 &position, quat &rotation) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  chassis_pose(a, a.s, position, rotation);
+}
+
+dyn_bike_saved dyn_bike_plant::save(int i) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  dyn_bike_saved s;
+  s.body = a.s;
+  s.wheels[0] = a.om[0];
+  s.wheels[1] = a.om[1];
+  s.driver = a.driver;
+  s.steer_cmd = a.steer_cmd;
+  s.accel_cmd = a.accel_cmd;
+  return s;
+}
+
+void dyn_bike_plant::restore(int i, const dyn_bike_saved &s) {
+  agent &a = _agents.at(static_cast<std::size_t>(i));
+  a.s = s.body;
+  a.om[0] = s.wheels[0];
+  a.om[1] = s.wheels[1];
+  a.driver = s.driver;
+  a.steer_cmd = s.steer_cmd;
+  a.accel_cmd = s.accel_cmd;
+  if (_chassis->on()) {
+    vec3 pos;
+    quat rot;
+    chassis_pose(a, a.s, pos, rot);
+    _chassis->put(i, pos, rot, {}, {});
+  }
+}
+
 void dyn_bike_plant::command(int i, float steer, float accel) {
   agent &a = _agents.at(static_cast<std::size_t>(i));
   const double lock = a.desc.max_steer;

@@ -1148,6 +1148,233 @@ scene:
   CHECK(near(model_z("vehicle_2"), -stand, 1e-9));
 }
 
+// A `pose` entity drawn with a wheeled look (look: { file: CHASSIS, wheel: WHEEL }): its chassis
+// fitted to the vehicle's wheels on each axis (wheelbase: and track: the model's own, the wheel
+// radius half the wheel mesh's height), hanging the stand height below its chassis as a model
+// does; and a wheel node for each of the vehicle's wheels, each where WorldVehicles::wheels has
+// it: at its hub, rolled at the pose's speed, the front ones turned by its steer and the rear ones
+// not. A right wheel is the left one turned half a turn. The same look in a vehicle preview
+// (attach_vehicle_model) stands its four wheels at rest on the ground; a wheel that cannot be read
+// leaves it unready (the box look then), with a warning.
+void test_vehicle_pose_wheeled_look() {
+  std::printf("test_vehicle_pose_wheeled_look\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ariadne_wheeled_look";
+  fs::create_directories(dir, ec);
+  const auto box_obj = [](const fs::path &p, const std::array<double, 3> &lo,
+                          const std::array<double, 3> &hi) {
+    std::ofstream out(p);
+    for (int k = 0; k < 8; ++k)
+      out << "v " << (k & 1 ? hi[0] : lo[0]) << " " << (k & 2 ? hi[1] : lo[1]) << " "
+          << (k & 4 ? hi[2] : lo[2]) << "\n";
+    const int f[12][3] = {{1, 3, 4}, {1, 4, 2}, {5, 6, 8}, {5, 8, 7}, {1, 2, 6}, {1, 6, 5},
+                          {3, 7, 8}, {3, 8, 4}, {1, 5, 7}, {1, 7, 3}, {2, 4, 8}, {2, 8, 6}};
+    for (const auto &t : f)
+      out << "f " << t[0] << " " << t[1] << " " << t[2] << "\n";
+  };
+  // The model's chassis, in the vehicle's frame: 4 m long and 2 m wide, its floor 0.6 m over the
+  // ground under its tyres; its axles 3 m apart and its track 2 m (wheelbase:, track:). Its wheel:
+  // 1 m across (a 0.5 m radius), its hub at its origin, its outer face 0.2 m out and its inner
+  // 0.1 m in.
+  const fs::path chassis = dir / "chassis.obj", wheel = dir / "wheel.obj";
+  box_obj(chassis, {-2.0, -1.0, 0.6}, {2.0, 1.0, 1.8});
+  box_obj(wheel, {-0.5, -0.1, -0.5}, {0.5, 0.2, 0.5});
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        controllers: [pose]
+        look: { file: ")" +
+                          chassis.generic_string() + R"(", wheel: ")" + wheel.generic_string() +
+                          R"(", wheelbase: 3, track: 2 }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+  cvc::app app;
+  cvc::ariadne::register_world_block(app);
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  CHECK(cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules).empty());
+  r.scene.vehicles = rules.vehicles;
+  CHECK(rules.vehicles.size() == 1 && rules.vehicles[0].look.fit);
+  if (rules.vehicles.size() != 1)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->vehicles() != nullptr);
+  if (!out.world || !out.world->vehicles())
+    return;
+  // At 6 m/s and 0.2 rad of steer, no z (it stands on the ground under it).
+  cvc::state &st = cvc::state::instance(app);
+  st("vehicles.spawn.controller").value("pose");
+  st("vehicles.spawn.request").value("1");
+  const auto pose = [&](double x) {
+    st("entities.1.pose.x").value(std::to_string(x));
+    st("entities.1.pose.y").value("0");
+    st("entities.1.pose.heading").value("0");
+    st("entities.1.pose.speed").value("6");
+    st("entities.1.pose.steer").value("0.2");
+  };
+  for (int i = 0; i < 10; ++i) {
+    if (i >= 1)
+      pose(-10.0 + 0.1 * i);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+  std::shared_ptr<cvc::gl::GraphicsNode> node = sg.getGraphics("vehicle_1");
+  CHECK(node != nullptr);
+  if (!node)
+    return;
+  CHECK(node->findChildByName("vehicle_1_wheel0") == nullptr); // not the box look
+  // The chassis: x scaled by 3.3 / 3 (the Humvee's wheelbase over the model's), y by 1.82 / 2 (its
+  // track), z by 0.47 / 0.5 (its wheel radius over the model's); its ground the stand height below
+  // the chassis box's centre, as a model's base is.
+  auto body = std::dynamic_pointer_cast<GeometryNode>(node->findChildByName("vehicle_1_mesh"));
+  CHECK(body && body->getGeometry());
+  if (!body || !body->getGeometry())
+    return;
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &p : body->getGeometry()->const_points())
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], static_cast<double>(p[k]));
+      hi[k] = std::max(hi[k], static_cast<double>(p[k]));
+    }
+  CHECK(near(lo[0], -2.2, 1e-6) && near(hi[0], 2.2, 1e-6));
+  CHECK(near(lo[1], -0.91, 1e-6) && near(hi[1], 0.91, 1e-6));
+  CHECK(near(lo[2], 0.6 * 0.94, 1e-6) && near(hi[2], 1.8 * 0.94, 1e-6));
+  const double stand = cvc::ariadne::stand_height(cvc::ariadne::vehicle_desc_of(rules.vehicles[0]));
+  CHECK(near(body->getTransform()->GetElement(2, 3), -stand, 1e-9));
+  // A wheel for each of the Humvee's four, where its plant has it.
+  const std::vector<cvc::ariadne::entity_wheel> w1 = out.world->vehicles()->wheels(1);
+  CHECK(w1.size() == 4);
+  if (w1.size() != 4)
+    return;
+  CHECK(node->findChildByName("vehicle_1_tyre4") == nullptr);
+  const auto tyre = [&](int k) {
+    return std::dynamic_pointer_cast<GeometryNode>(
+        node->findChildByName("vehicle_1_tyre" + std::to_string(k)));
+  };
+  for (int k = 0; k < 4; ++k) {
+    const std::shared_ptr<GeometryNode> t = tyre(k);
+    CHECK(t != nullptr);
+    if (!t)
+      return;
+    const cvc::ariadne::entity_wheel &w = w1[static_cast<std::size_t>(k)];
+    const vtkMatrix4x4 *m = t->getTransform();
+    CHECK(near(m->GetElement(0, 3), w.x, 1e-9));
+    CHECK(near(m->GetElement(1, 3), w.y, 1e-9));
+    CHECK(near(m->GetElement(2, 3), w.z, 1e-9));
+    // On the ground under it (the square's top, z 0, the chassis stand-height over it).
+    CHECK(near(w.z, -stand + 0.47, 1e-6));
+    // Rz(steer) Ry(spin): rolled at the pose's speed, the front ones steered and the rear not.
+    CHECK(w.spin != 0.0);
+    CHECK(near(w.steer, k < 2 ? 0.2 : 0.0, 1e-12));
+    CHECK(near(m->GetElement(2, 0), -std::sin(w.spin), 1e-6));
+    CHECK(near(m->GetElement(1, 0), std::sin(w.steer) * std::cos(w.spin), 1e-6));
+    CHECK(near(m->GetElement(0, 1), -std::sin(w.steer), 1e-6));
+    // Its mesh: the wheel at the Humvee's radius (0.47 m), the outer face out on either side.
+    double ylo = 1e30, yhi = -1e30, zlo = 1e30, zhi = -1e30;
+    for (const auto &p : t->getGeometry()->const_points()) {
+      ylo = std::min(ylo, static_cast<double>(p[1]));
+      yhi = std::max(yhi, static_cast<double>(p[1]));
+      zlo = std::min(zlo, static_cast<double>(p[2]));
+      zhi = std::max(zhi, static_cast<double>(p[2]));
+    }
+    CHECK(near(zlo, -0.47, 1e-6) && near(zhi, 0.47, 1e-6));
+    const double out_face = 0.2 * 0.94, in_face = 0.1 * 0.94;
+    CHECK(w.y > 0.0 ? near(yhi, out_face, 1e-6) && near(ylo, -in_face, 1e-6)
+                    : near(ylo, -out_face, 1e-6) && near(yhi, in_face, 1e-6));
+  }
+  // It rolls on: a frame later each wheel has turned further, at the pose's 6 m/s.
+  const double before = w1[0].spin;
+  pose(-8.0);
+  ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  const std::vector<cvc::ariadne::entity_wheel> w2 = out.world->vehicles()->wheels(1);
+  CHECK(w2.size() == 4 && w2[0].spin != before);
+  if (w2.size() == 4)
+    CHECK(near(tyre(0)->getTransform()->GetElement(2, 0), -std::sin(w2[0].spin), 1e-6));
+
+  // The same look in a preview: the shape's four wheels at rest on the ground under it.
+  const std::shared_ptr<ari::vehicle_model_cache> cache = ari::make_vehicle_model_cache();
+  std::shared_ptr<cvc::gl::GraphicsNode> preview = sg.addGraphics("preview");
+  ari::vehicle_shape shape;
+  const float tan[3] = {0.8f, 0.7f, 0.5f};
+  CHECK(ari::vehicle_model_state(app, *cache, rules.vehicles[0].look, shape.length) ==
+        ari::vehicle_model_status::ready);
+  CHECK(ari::attach_vehicle_model(app, *cache, *preview, "preview_mesh", rules.vehicles[0].look,
+                                  shape, 0.0, tan));
+  sg.processEvents();
+  for (int k = 0; k < 4; ++k) {
+    std::shared_ptr<cvc::gl::GraphicsNode> t =
+        preview->findChildByName("preview_tyre" + std::to_string(k));
+    CHECK(t != nullptr);
+    if (!t)
+      continue;
+    const vtkMatrix4x4 *m = t->getTransform();
+    CHECK(near(m->GetElement(0, 3), (k < 2 ? 0.5 : -0.5) * shape.wheelbase, 1e-9));
+    CHECK(near(m->GetElement(1, 3), (k % 2 == 0 ? 0.5 : -0.5) * shape.track, 1e-9));
+    CHECK(near(m->GetElement(2, 3), shape.wheel_radius, 1e-9));
+  }
+  // A wheel that cannot be read: not ready, and a warning names it.
+  cvc::ariadne::vehicle_look lost = rules.vehicles[0].look;
+  lost.wheel = (dir / "no_such_wheel.obj").generic_string();
+  std::vector<std::string> why;
+  CHECK(ari::vehicle_model_state(app, *cache, lost, shape.length, &why) ==
+        ari::vehicle_model_status::failed);
+  std::shared_ptr<cvc::gl::GraphicsNode> none = sg.addGraphics("none");
+  CHECK(!ari::attach_vehicle_model(app, *cache, *none, "none_mesh", lost, shape, 0.0, tan));
+  bool named = false;
+  for (const std::string &w : why)
+    named = named || w.find("no_such_wheel.obj") != std::string::npos;
+  CHECK(named);
+  // Both meshes from a data: package (a data look): ready once it has loaded, the wheel found by
+  // its name anywhere in the package.
+  const fs::path pkg = dir / "pkg";
+  fs::create_directories(pkg / "rigs", ec);
+  fs::copy_file(chassis, pkg / "rigs" / "chassis.obj", fs::copy_options::overwrite_existing, ec);
+  fs::copy_file(wheel, pkg / "rigs" / "wheel.obj", fs::copy_options::overwrite_existing, ec);
+  cvc::ariadne::vehicle_look packaged = rules.vehicles[0].look;
+  packaged.kind = "data";
+  packaged.uri = pkg.generic_string();
+  packaged.path = "rigs/chassis.obj";
+  packaged.wheel = "wheel.obj";
+  cvc::ariadne::DataSpec spec;
+  spec.uri = packaged.uri;
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
+  ari::vehicle_model_state(app, *cache, packaged, shape.length); // starts its load
+  CHECK(store->wait(store->load(spec), 30.0));
+  CHECK(ari::vehicle_model_state(app, *cache, packaged, shape.length) ==
+        ari::vehicle_model_status::ready);
+  std::shared_ptr<cvc::gl::GraphicsNode> from_data = sg.addGraphics("from_data");
+  CHECK(ari::attach_vehicle_model(app, *cache, *from_data, "from_data_mesh", packaged, shape, 0.0,
+                                  tan));
+  CHECK(from_data->findChildByName("from_data_mesh") != nullptr);
+  CHECK(from_data->findChildByName("from_data_tyre3") != nullptr);
+  fs::remove_all(dir, ec);
+}
+
 // Every plant in a scene world (L2b): a Jolt Humvee, the dynamic single track, the dynamic four
 // wheels and the kinematic bicycle, spawned on the keys and run by nav@1 on a hill, reach the same
 // state headless and drawn, bit for bit; and the drawn four-wheeler's wheels are posed where its
@@ -1983,6 +2210,7 @@ int main() {
   test_vehicle_intents_headless_and_drawn();
   test_vehicle_poses_headless_and_drawn();
   test_vehicle_pose_model_base();
+  test_vehicle_pose_wheeled_look();
   test_every_plant_headless_and_drawn();
   test_boats_drawn();
   test_fit_vehicle_geometry();

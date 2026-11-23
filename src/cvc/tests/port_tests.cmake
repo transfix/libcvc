@@ -17,6 +17,7 @@ set(CVC_PORT_TESTS
   skeleton_test
   skeleton_intrinsics_test
   pocket_tunnel_test
+  secondary_structures_test
   contour_stack_test
   point_classes_test
   molecule_test
@@ -68,6 +69,11 @@ target_compile_definitions(skeleton_test PRIVATE
 
 # pocket_tunnel_test compares the PocketTunnel port with the legacy library's goldens the same way.
 target_compile_definitions(pocket_tunnel_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# secondary_structures_test compares the SecondaryStructures port with the legacy library's goldens
+# the same way.
+target_compile_definitions(secondary_structures_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 
 # segmentation_test compares the GenSeg port with the legacy library's goldens the same way, and

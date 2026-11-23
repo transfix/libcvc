@@ -1951,6 +1951,12 @@ A camera focus spends the maps on a sphere `lead` radii ahead of the focal point
 `ground` node's heightfield; `tick_scene` re-aims it every frame, and the maps re-bake once it has
 moved a fiftieth of its radius. Past it the scene is lit unshadowed.
 
+Between bakes (`update_interval` over 1) the maps hold every caster where it stood at the last bake.
+A caster that has moved since, such as a body on the water or a vehicle, is shaded as it stood
+then. So it never shadows itself where it has moved behind its baked surface; before, a bobbing
+crate flashed at the bake cadence. The shadows it throws, and the shade it receives, catch up at
+the next bake.
+
 **Physics.** A scene-level `physics:` block declares a rigid-body world
 (`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
 
@@ -2159,6 +2165,38 @@ scene:
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
     name is used (`find_vehicle_model`), else the box.
+  - **Wheeled looks: wheels that turn.** A one-piece model (the Humvee's `Humvee.glb` is one
+    mesh with its wheels in it) cannot spin or steer its wheels. A wheeled look is a model in two
+    parts: the look's mesh is the chassis without its wheels, and `wheel:` names one wheel's mesh:
+
+    ```yaml
+    look:
+      file: vehicles/humvee/chassis.glb   # the chassis, without its wheels
+      wheel: vehicles/humvee/wheel.glb    # one wheel: the left front
+      wheelbase: 3.228                    # the model's own (m): front hubs to rear
+      track: 1.8743                       # and left hubs to right
+    ```
+
+    Both files are in the vehicle's frame, as they are written (metres; x forward, y left, z up;
+    no axis is turned): the chassis's origin midway between its axles, on its centre line, on the
+    ground under its tyres; the wheel's origin its hub, its axle along y, its outer face toward
+    +y. The wheel is drawn once for each of the vehicle's wheels (`<node>_tyre<k>`, in
+    `WorldVehicles::wheels`' order), where its plant has it: at its hub, turned by its steer,
+    rolled about its axle by its spin, on its suspension or the ground under it. A `pose` entity's
+    wheels roll at its pose's `speed`, its front ones turn by its `steer`, and each sits on the
+    grid's ground under it. A right wheel is the wheel turned half a turn about its upright, so its
+    outer face is out on both sides. The look is fitted unless `fit: false`: the chassis is
+    scaled on each axis so that its axles (`wheelbase:`), its track (`track:`) and its wheel
+    radius (half the wheel mesh's height) are the vehicle's, its origin at the vehicle's axles'
+    middle, and the wheel is scaled alike on every axis to the vehicle's wheel radius. Without
+    `wheelbase:` or `track:` the model's are taken to be the vehicle's. With `fit: false` both
+    are drawn at their own size, the wheels at the vehicle's hubs. `scale:`, `yaw:` and `z:`
+    place the chassis as they place any model. The wheel is found as the mesh is: `file:` (beside
+    the document), `model:` (both by name), `asset:` (both document assets), or with `data:` two
+    files in the same package. The chassis is drawn in the entity's colour and the wheel in a
+    tyre's dark grey, unless a mesh has a texture. When either mesh cannot be read, the vehicle is
+    its box, with a warning. A one-piece `model:` or `file:` look is drawn as before, its wheels
+    still.
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
@@ -2861,6 +2899,7 @@ seeds its key only while the key is empty:
 |---|---|
 | `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
 | `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
+| `volumes` | published: the volumes `source.volume` may name, one per line, as it names them: each output of the document's `data:` entries that holds a volume (`data.<name>.<output>`), then the key `source.volume` names when it is not one of them; empty while it names none (a host that calls `setSource`). The component's Source combo picks from it, writing `source.volume` |
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
@@ -4198,6 +4237,20 @@ transfer function is seeded once its first volume arrives, since its `isosurface
 that volume's range.
 [`volume_shared.ari`](../examples/ariadne/documents/volume_shared.ari) shows the bunny in a volren
 and a grid, and smooths it with `volume.filter`.
+
+**Region and water (`region:`, `water_level:`).** On a data node with `body:` (and on a
+`generated_world` node, for `region:`), two props shape the world the physics and the navigator
+get from the dataset, which itself stays whole (ARIADNE_WORLDS §18.8):
+- `region: [min_x, min_y, max_x, max_y]` (world metres) cuts the dataset's world once: the terrain
+  to the samples that cover it, each mesh to the faces whose centre is inside. The bodies, the
+  walls at the world's edge (now the region's) and the navigator's grid (`scene.world.grid.*`) all
+  follow the one cut. The drawing is not cut.
+- `water_level: <m>` is the node's one water knob: below it the world gets a still-water field
+  (1000 kg/m^3, from under the lowest ground up to the level; a vehicle in it wades, floats or
+  sinks by its own physics), and the navigator's grid has its water at the same level. Without
+  it the dataset's own level stands (a version 2 bundle's `water_level`, a made world's
+  `water_level_m`); a version 1 bundle such as Austin has none, so no water. A scene `water` node
+  over the node runs the water instead.
 
 `tint: satellite` colours each vertex of what it drew other than the terrain (a city's buildings) by
 the dataset's aerial image under it, over a grey floor so shaded facades still read (0.3 + 0.7 of the
@@ -7934,7 +7987,9 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
   every frame, so a remote session is better off with half-blocks (`--graphics color`).
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
-  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
+  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A
+  loaded document's `scene:`, `scenes:`, `data:`, `assets:` and `keys:` are dropped. The shell
+  design ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md)) proposes keeping them.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).

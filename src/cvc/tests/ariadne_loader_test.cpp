@@ -6857,6 +6857,17 @@ windows:
     for (const std::string &k : keys)
       if (k.find("{i}") == std::string::npos)
         EXPECT_EQ(k.find('{'), std::string::npos) << k;
+    // The Source combo: picks from the volumes the node offers, writing the key it follows; the
+    // text in its place while the node offers none.
+    const Widget *source = find(*windows[i], Kind::Combo, "Source");
+    ASSERT_NE(source, nullptr) << g;
+    EXPECT_EQ(source->bind, g + "source.volume");
+    EXPECT_NE(source->options_expr.find(g + "volumes"), std::string::npos) << source->options_expr;
+    EXPECT_NE(source->visible_when.find(g + "volumes"), std::string::npos);
+    const Widget *said = find(*windows[i], Kind::Text, "Source");
+    ASSERT_NE(said, nullptr) << g;
+    EXPECT_EQ(said->bind, g + "info.source");
+    EXPECT_NE(said->visible_when.find(g + "volumes"), std::string::npos);
   }
   // The views: their names, axes, picks, pointer and the grid they show.
   std::vector<const Widget *> custom;
