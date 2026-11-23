@@ -218,10 +218,37 @@ public:
   void invalidateShadowBake();
 
   // How many times the shadow maps have been baked since shadows were last turned
-  // on (0 with them off). A bake re-renders every caster from every casting
-  // light, so a scene where nothing moves should add none per frame: for the
-  // tests, and for telling a frame's cost apart.
+  // on (0 with them off). A bake redraws the maps from every casting light, so a
+  // scene where nothing moves should add none per frame: for the tests, and for
+  // telling a frame's cost apart.
   std::uint64_t shadowBakes() const;
+
+  // Bake the static casters apart from the moving ones (on by default). Most of a scene holds
+  // still while a few casters move -- a city's buildings and terrain, and its vehicles -- and a
+  // bake used to redraw them all. With this on, the static casters are drawn into maps of their
+  // own, and a bake where only moving casters changed copies those maps and draws just the
+  // moving casters over them: the same maps, so a vehicle's shadow follows it in the frame it
+  // moves, for the cost of its own draws and a copy on the GPU. A caster is moving from the bake
+  // it first changes in (moves, deforms, is restyled) or appears in, until it has held still for
+  // 60 due frames; whatever makes the static maps stale (a light, the shadow focus, a static
+  // caster changing or going) bakes everything and sorts the casters again. It needs a second
+  // map and depth buffer per casting light, at the shadow resolution, made the first time both
+  // kinds of caster are there. Off, every change redraws every caster. Takes effect at the next
+  // change.
+  void setShadowStaticCache(bool on);
+  bool shadowStaticCache() const { return m_shadowStaticCache; }
+
+  // The bakes since shadows were last turned on: `bakes` is shadowBakes(), `whole` those that
+  // drew every caster (the rest drew only the moving ones, over the static maps); and, at the
+  // last bake, the casters in the static maps and the moving casters drawn over them (both 0
+  // when it drew every caster straight into the maps). All 0 with shadows off.
+  struct shadow_bake_stats {
+    std::uint64_t bakes = 0;
+    std::uint64_t whole = 0;
+    std::size_t static_casters = 0;
+    std::size_t moving_casters = 0;
+  };
+  shadow_bake_stats shadowBakeStats() const;
 
   // Shadow-map texture resolution (pixels per side). VTK defaults to a low 256,
   // which aliases thin casters (a forest of trunks/needles shows torn, "inverted"
@@ -542,6 +569,7 @@ private:
   bool m_shadowsEnabled = false;
   int m_shadowInterval = 1;                             // re-bake every N frames
   int m_shadowResolution = 1024;                        // shadow-map pixels per side
+  bool m_shadowStaticCache = true;                      // setShadowStaticCache
 
   // setShadowFocus (a radius of 0: the whole scene) and setShadowSoftness (texels).
   double m_shadowFocus[3] = {0.0, 0.0, 0.0};

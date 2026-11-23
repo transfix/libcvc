@@ -1371,6 +1371,14 @@ add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
+# SceneGraph::setShadowStaticCache: while only some casters move, a bake draws just those over a
+# copy of the static casters' maps. A scene with the cache and one without, the same changes to
+# both every frame: the same pictures byte for byte (a moving caster's shadow in the frame it
+# moved, a building's shadow on it), and which bakes were whole. Renders; skips without GL.
+add_executable(cvcgl_shadow_static_cache test/cvcgl_shadow_static_cache.cpp)
+target_link_libraries(cvcgl_shadow_static_cache PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_static_cache COMMAND cvcgl_shadow_static_cache)
+
 # Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
 # at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while
 # a caster moves (two a caster a frame without), and frames identical to pass programs off --
