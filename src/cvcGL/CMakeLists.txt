@@ -751,6 +751,13 @@ add_executable(cvcgl_pose_matrix test/cvcgl_pose_matrix.cpp)
 target_link_libraries(cvcgl_pose_matrix PRIVATE cvcGL)
 add_test(NAME cvcgl_pose_matrix COMMAND cvcgl_pose_matrix)
 
+# A GraphicsNode's rotation and scale: T Rz Ry Rx S, the matrix the physics world and a view
+# entry's transform: make; a rotation keeps the scale (0 and mirrors included) and a scale the
+# rotation, after a whole matrix too; the rotation and scale keys do the same. Headless.
+add_executable(cvcgl_node_transform test/cvcgl_node_transform.cpp)
+target_link_libraries(cvcgl_node_transform PRIVATE cvcGL)
+add_test(NAME cvcgl_node_transform COMMAND cvcgl_node_transform)
+
 # physics_scene_binding: a cvc::physics world's bodies drawn between its last two
 # states (setPoseMatrix per node, a pose sink per merged-mesh group). Headless.
 add_executable(cvcgl_physics_scene_binding test/cvcgl_physics_scene_binding.cpp)

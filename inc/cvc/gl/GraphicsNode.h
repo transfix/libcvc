@@ -124,7 +124,12 @@ public:
   // thread only, like the hierarchy itself.
   const GraphicsNode *getParentNode() const { return m_parent; }
 
-  // Convenience transform methods
+  // Convenience transform methods. The local matrix they make is translation x Rz(z) Ry(y) Rx(x) x
+  // scale: a point is scaled along the node's own axes, turned (degrees, about x, then y, then z
+  // of the parent's axes), then moved, as glTF, USD and X3D place a node. Each keeps the others:
+  // a rotation keeps the scale (0 or below 0 included), a scale keeps the rotation. After a whole
+  // matrix (setTransform, setPoseMatrix, the "matrix" key), they keep the scale and rotation read
+  // back from it: each column's length, the last negative when it mirrors.
   void setPosition(double x, double y, double z);
   void setRotation(double x, double y, double z); // Euler angles in degrees
   void setScale(double x, double y, double z);
@@ -466,6 +471,19 @@ protected:
   virtual void handleStateChanged(const std::string &childState) override;
 
 private:
+  // The rotation and scale setRotation and setScale (or the "rotation" and "scale" keys) last
+  // set, which composeRotationAndScale() makes the local matrix's upper 3x3 from. A whole matrix
+  // written over them marks them stale, and the next setRotation or setScale reads them back from
+  // it first (readBackRotationAndScale), so a per-frame pose pays nothing for them.
+  void applyRotation(double x, double y, double z);
+  void applyScale(double x, double y, double z);
+  void composeRotationAndScale();
+  void readBackRotationAndScale();
+  double m_rotationDeg[3] = {0.0, 0.0, 0.0};
+  double m_scale[3] = {1.0, 1.0, 1.0};
+  // Atomic because setTransform may be called on any thread (as m_matrixPublished below).
+  std::atomic<bool> m_rotationScaleStale{false};
+
   // setPoseMatrix plumbing. applyPoseMatrix runs on the owner thread only; the
   // mailbox below hands a pose made on another thread to it.
   void applyPoseMatrix(const double matrix[16]);
