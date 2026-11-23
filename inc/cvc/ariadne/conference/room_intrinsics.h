@@ -27,8 +27,10 @@
 //                                           participant dicts { "pid" "name" }, in pid order —
 //                                           every PRESENT participant in the room tree, local and
 //                                           (once replicated) remote.
-//   (room-leave ROOM)                       Mark me left (presence.joined = 0, a soft leave) + drop
-//                                           the handle. Returns { "ok" #t/#f }.
+//   (room-leave ROOM)                       Mark me left (presence.joined = 0) + drop the handle.
+//                                           A relay removes my participant subtree once I have
+//                                           been away its grace (room_departures). Returns
+//                                           { "ok" #t/#f }.
 //
 // and the chat verbs (room_chat.h; CHANNEL is "" for the room or a peer's pid): (chat-post ROOM
 // TEXT [TO]), (chat-info ROOM [CHANNEL]), (chat-messages ROOM [CHANNEL [AFTER]]), (chat-more ROOM
@@ -43,18 +45,24 @@
 // app.root(); replication is transparent). A client writes its own participant subtree directly
 // and the pid is the local cluster node id (self-insert, no allocation). A relay with bound writes
 // (room_write_gate, arisrv's default) holds each connection to the pid of its Hello and takes from
-// it only writes inside that participant, outside the relay's own keys there. Admission with a
-// credential, pid allocation, roster authority and presence reaping are Phase 2 (§5d, §5f). The
-// media wiring (room-publish/-subscribe over the gRPC bridge/relay) is a later slice.
+// it only writes inside that participant, outside the relay's own keys there. The relay removes a
+// departed participant's subtree once it has been away a grace (room_departures, arisrv
+// --leave-grace-s). Admission with a credential, pid allocation and roster authority are Phase 2
+// (§5d, §5f). The media wiring (room-publish/-subscribe over the gRPC bridge/relay) is a later
+// slice.
 //
 // OWNERSHIP: the join handle is owned by the CALLING DOCUMENT's se::document_scope (reached via
 // ictx.document), keyed by its token, exactly like (stream-open). It lives until (room-leave) or
-// document teardown, when the Runtime clear()s the scope and the room table removes any participant
-// subtree the author left joined (while the app + its state tree are still alive). Opening requires
-// a document scope, so the verbs run on the action/resident lanes, not the load-time init: lane.
+// document teardown, when the Runtime clear()s the scope and the room table marks left any
+// participant the author left joined (while the app + its state tree are still alive). Opening
+// requires a document scope, so the verbs run on the action/resident lanes, not the load-time
+// init: lane.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -88,11 +96,43 @@ std::string room_participant_path(const std::string &room_id, const std::string 
 std::string room_join(cvc::app &app, const std::string &room_id, const std::string &pid,
                       const std::string &name = std::string());
 
-// Mark PID absent in ROOM-ID (a SOFT leave: presence.joined = "0"). This is a value update, so it
-// replicates and converges cross-node — unlike a hard subtree delete, which a peer that still holds
-// the participant resurrects on the next sync. The participant node lingers (present = false) until
-// reaping; actual removal + presence/heartbeat reaping is Phase 2 (§5d). A no-op if never joined.
+// Mark PID absent in ROOM-ID: presence.joined = "0", so the roster drops it at once. What it
+// published stays (its streams, avatar, device), so a participant back on the same pid (a client
+// that reconnected) takes it up again by joining. On a relay, room_departures removes the
+// subtree (room_remove) once the participant has been away the grace. A no-op if never joined.
 void room_leave(cvc::app &app, const std::string &room_id, const std::string &pid);
+
+// Remove PID's participant subtree from ROOM-ID. The removal replicates as one delete, which every
+// peer applies, and its tombstone buries what PID wrote before it (state_sync_adapter.h). For the
+// relay, the subtree's writer of last resort; a participant's own delete of its node is refused by
+// room_write_gate. False when there was none.
+bool room_remove(cvc::app &app, const std::string &room_id, const std::string &pid);
+
+// A relay's departed participants (arisrv). Each one is marked left (room_leave) when its
+// connection ends and noted here, and removed from the room tree (room_remove) once it has been
+// away GRACE. One that comes back first, joined again or holding a connection, is kept. Owned by
+// the relay's loop; not thread-safe.
+class room_departures {
+public:
+  using clock = std::chrono::steady_clock;
+  explicit room_departures(clock::duration grace) : _grace(grace) {}
+
+  // PID's connection ended at NOW (a later departure restarts its wait).
+  void left(const std::string &pid, clock::time_point now) { _left[pid] = now; }
+  // Whether any participant's wait is over at NOW.
+  bool due(clock::time_point now) const;
+  // At NOW: remove from ROOM-ID each participant whose wait is over and that is still away (not
+  // present, and not in CONNECTED, the pids that hold a connection); forget one that came back.
+  // The removed pids, in pid order.
+  std::vector<std::string> reap(cvc::app &app, const std::string &room_id,
+                                const std::set<std::string> &connected, clock::time_point now);
+  std::size_t waiting() const { return _left.size(); }
+  clock::duration grace() const { return _grace; }
+
+private:
+  clock::duration _grace;
+  std::map<std::string, clock::time_point> _left;
+};
 
 // Read the current roster of ROOM-ID directly from the shared room tree — the PRESENT participants
 // (presence.joined == "1") and each one's profile. Usable standalone — no document scope needed —
@@ -123,8 +163,8 @@ std::vector<room_participant> room_roster(cvc::app &app, const std::string &room
 // share a pid, and the pid is a state name, which is what a chat channel is keyed by. It begins
 // with '_', and a relay with bound writes takes no write from a participant whose pid does
 // (room_write_gate), so none can join as one.
-// Leaving is soft, as a participant's is: present = "0", the node kept, and a user who comes back
-// takes the same node again.
+// A user who leaves is removed (one delete, as room_remove's), and one who comes back is written
+// anew: the relay is their only writer, so nothing of theirs is lost.
 
 struct room_bridged_user {
   std::string pid;    // bridged_pid(via, uid)
@@ -157,7 +197,7 @@ bool room_bridge_presence(cvc::app &app, const std::string &room_id, const std::
                           const std::string &uid, const std::string &name,
                           const std::string &detail, std::string &why,
                           const bridge_limits &limits = {});
-// UID on VIA left ROOM-ID. False when it was not present.
+// UID on VIA left ROOM-ID: its node is removed. False when it was not present.
 bool room_bridge_absent(cvc::app &app, const std::string &room_id, const std::string &via,
                         const std::string &uid);
 // The bridged users present in ROOM-ID, in pid order, as this app's tree holds them.

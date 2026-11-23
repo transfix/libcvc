@@ -49,7 +49,7 @@
 #include <cvc/ariadne/conference/room_calls.h> // room-call: clients' calls, run in arisrvx's Python
 #include <cvc/ariadne/conference/room_chat.h>  // room chat and direct messages
 #include <cvc/ariadne/conference/room_entities.h>   // room_entity_relay (the document's vehicles)
-#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave, room_departures
 #include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
@@ -233,6 +233,9 @@ int main(int argc, char **argv) {
   //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
+  //   --leave-grace-s N          remove a departed participant's subtree from the room tree once
+  //                              it has been away N s without coming back (default 300; 0 = as
+  //                              its connection ends). Until then it is only marked left
   //   --scene default|large      the world the room starts in: cvc://worlds/default.ari (the 20 m
   //                              room) or cvc://worlds/large.ari (a 100 m plane of LOD meshes).
   //                              A --doc whose document has a scene: is the world instead
@@ -401,7 +404,7 @@ int main(int argc, char **argv) {
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
-              admissionHoldArg = "2000";
+              admissionHoldArg = "2000", leaveGraceArg = "300";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
   std::string simHzArg;                        // --sim-hz ("": the world's)
@@ -467,6 +470,8 @@ int main(int argc, char **argv) {
       mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
+    else if (!std::strcmp(a, "--leave-grace-s"))
+      leaveGraceArg = next("");
     else if (!std::strcmp(a, "--scene")) {
       scene = next("default");
       sceneFlag = true;
@@ -578,11 +583,13 @@ int main(int argc, char **argv) {
       (!avatarEmptyArg.empty() &&
        !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"})))
     return 2;
-  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000;
+  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000,
+       leaveGraceS = 300;
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
       !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
-      !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
+      !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs) ||
+      !check_count("--leave-grace-s", leaveGraceArg, leaveGraceS))
     return 2;
   long viewerKbps = 0, callResultMax = 0, clientsMax = 0, clientLogMax = 0;
   if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps) ||
@@ -1221,12 +1228,15 @@ int main(int argc, char **argv) {
 #endif
 
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
-  // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
-  // ghosts. Both transports report the departed node id the same way, on their own threads, so the
-  // id is only queued here; the main loop below applies room_leave (where every other room-tree
-  // write happens) and the retraction rides the normal pump + relay forwarding to the others.
+  // tab closes -- mark it left so the roster and the avatar holon drop it at once, and remove its
+  // subtree from the room tree once it has been away --leave-grace-s (room_departures), so the tree
+  // does not keep a ghost of everyone who ever joined. A client back in time (a reconnect keeps its
+  // pid) finds what it published still there. Both transports report the departed node id the same
+  // way, on their own threads, so the id is only queued here; the main loop below applies it (where
+  // every other room-tree write happens), and the writes ride the normal pump + relay forwarding.
   std::mutex departed_mu;
   std::vector<std::string> departed;
+  cvc::ariadne::conference::room_departures departures{std::chrono::seconds(leaveGraceS)};
   const auto on_departed = [&](const std::string &node_id) {
     std::lock_guard<std::mutex> lk(departed_mu);
     departed.push_back(node_id);
@@ -2289,10 +2299,27 @@ int main(int argc, char **argv) {
         shaper.forget_publisher(nid);
         if (laneRelay)
           laneRelay->forget(nid);
+        departures.left(nid, std::chrono::steady_clock::now());
         std::printf("[arisrv] participant left: %s\n", nid.c_str());
       }
       if (!gone.empty())
         std::fflush(stdout);
+    }
+    // A departed participant still away after the grace goes from the room tree: one delete, which
+    // every client applies. One holding a connection again is kept.
+    if (const auto t = std::chrono::steady_clock::now(); departures.due(t)) {
+      std::set<std::string> connected;
+      for (const cvc::state_link_report &r : state_tp.link_reports())
+        if (r.holds_id)
+          connected.insert(r.remote_node_id);
+#if CVC_ENABLE_WS
+      for (const cvc::state_link_report &r : ws_tp.link_reports())
+        if (r.holds_id)
+          connected.insert(r.remote_node_id);
+#endif
+      for (const std::string &pid : departures.reap(app, room, connected, t))
+        std::printf("[arisrv] participant removed: %s\n", pid.c_str());
+      std::fflush(stdout);
     }
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
     // Advance the authoritative avatar holon and write each participant's pose, then fan them out

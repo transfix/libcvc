@@ -146,7 +146,7 @@ These hide the transport/bridge/relay behind a room abstraction; a conferencing 
 | Verb | Effect |
 |---|---|
 | `(room-join SERVER-ENDPOINT ROOM-ID [profile]) → room` | join the room's state cluster, create the local bridge/transport, publish my participant subtree, get the roster + chat channels. Mode (sfu/mesh) comes from the server. |
-| `(room-leave room)` | stop my servings/subscriptions, remove my participant subtree, drop the bridge. |
+| `(room-leave room)` | stop my servings/subscriptions, mark me left (`presence.joined` 0), drop the bridge. A relay removes my participant subtree once my connection has been gone `--leave-grace-s`. |
 | `(room-publish room {kind token})` | advertise an open local stream (camera/audio) into the room; in SFU mode `serve`/`pull` it to the relay, in mesh mode make it available for peers to pull. |
 | `(room-unpublish room kind)` | stop advertising it. |
 | `(room-subscribe room PID KIND) → proxy-token` | open a proxy for participant `PID`'s stream; wire the inbound frames (from relay in SFU, from the peer in mesh). Feed the token to `stream_view` / `stream-play-audio`. |
@@ -690,6 +690,7 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
 | `--media-delay-ms N` | 100 | gRPC delay drop (video past N ms of queue, poses 2N, audio 4N); 0 = off. Not an S7 switch |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
+| `--leave-grace-s N` | 300 | remove a departed participant's subtree from the room tree once it has been away N s (`room_departures`); 0 = as its connection ends. Not an S7 switch |
 | `--scene default\|large` | default | the room's world, `cvc://worlds/<name>.ari` (a `--doc` with a `scene:` is the world instead, WD1); not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
 | `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
@@ -711,8 +712,8 @@ client's audio-clock staleness and its `voice.talking` leaf. The A/B "before" is
 avatar at its first pose (arigl frames the camera there); less control-plane traffic while walking (the
 `ui.docs` echo gone, poses single-journaled, others' intents and departed ghosts' poses withheld);
 joins that no longer replay the relay's whole journal (admit snapshot, no backfill), with relay journal
-and drain cost flat — a join still grows with the soft-left ghosts' subtrees the room tree keeps until
-Phase-2 reaping, as in S6; and a peer's video that keeps running when its mic is cut. It will **not** show tiering, pose
+and drain cost flat — a join carries only the ghosts of those who left in the last `--leave-grace-s`
+(below); and a peer's video that keeps running when its mic is cut. It will **not** show tiering, pose
 pushes, thumbnails, audio rolloff or LOD — every pair is inner, and the plane (2 triangles) and box (12)
 are far below the 4096-triangle LOD minimum. Media is unchanged, apart from the gRPC stall drop for a
 receiver whose writes are stuck. `arisrv --scene large` (hall) is the demo for all of those.
@@ -857,7 +858,14 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   clamp) and a grid-hash AOI broad phase for N > ~200 → **H3**, on S7's registry filter.
 * Admission-scoped bootstrap as access control (a pid bound to its connection, a scope grant) → **§5e
   items 1–2**. The *delivery* half, a filtered admit snapshot, landed with the admission hold above.
-  Hard reaping of departed subtrees → **Phase 2 / §5e item 4**.
+  Hard reaping of departed subtrees — **LANDED** (2026-11-23): a departed participant is marked
+  left at once (`presence.joined` 0: the roster, the holon and the area of interest drop it) and
+  its subtree is removed from the room tree once it has been away `--leave-grace-s` (default 300)
+  without coming back, as one delete every client applies (`room_departures`, `room_remove`; deletes
+  replicate since transfix/libcvc#1473). A client back in time (a reconnect keeps its pid) finds
+  what it published still there. One back later comes back as a new joiner, without what it
+  published once (its stream descriptors, its avatar), and a document that left the room but
+  keeps its connection is only marked left. Heartbeats (a silent connection) stay §5e item 4.
 * A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
   panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
   refresh) → **Phase 7**.

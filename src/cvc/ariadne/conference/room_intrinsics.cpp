@@ -114,9 +114,8 @@ std::string handle_token(const se::value_t &v) {
 
 // -------- per-DOCUMENT owned room table (model B, mirroring stream_intrinsics' stream_table)
 // ------ The join handle lives in the calling document's se::document_scope, so ownership follows
-// the document's lifetime: a room joined here is retracted on (room-leave) or at document teardown,
-// when ~room_table removes each still-joined participant subtree while the app + state tree are
-// alive.
+// the document's lifetime: a room joined here is left on (room-leave) or at document teardown,
+// when ~room_table marks each still-joined participant left while the app + state tree are alive.
 constexpr const char *kRoomSlot = "cvc.ariadne.room";
 struct room_handle {
   std::string room_id;
@@ -266,11 +265,46 @@ std::string room_join(cvc::app &app, const std::string &room_id, const std::stri
 }
 
 void room_leave(cvc::app &app, const std::string &room_id, const std::string &pid) {
-  // Soft leave: flip presence.joined to "0" (a replicating value update) rather than deleting the
-  // subtree — a delete is resurrected by any peer that still holds the participant. The node
-  // lingers (present = false) until Phase-2 reaping; room_roster filters it out.
+  // presence.joined to "0": room_roster filters it out at once, and the rest stays for a
+  // participant back on the same pid. A relay removes the subtree later (room_departures).
   const std::string sp = room_participant_path(room_id, pid);
   set_replicated(app, join_path({sp.c_str(), "presence", "joined"}), "0");
+}
+
+bool room_remove(cvc::app &app, const std::string &room_id, const std::string &pid) {
+  cvc::state *parts = app.root().findDescendant(participants_path(room_id));
+  return parts && parts->removeChild(pid);
+}
+
+bool room_departures::due(clock::time_point now) const {
+  for (const auto &kv : _left)
+    if (now - kv.second >= _grace)
+      return true;
+  return false;
+}
+
+std::vector<std::string> room_departures::reap(cvc::app &app, const std::string &room_id,
+                                               const std::set<std::string> &connected,
+                                               clock::time_point now) {
+  std::vector<std::string> out;
+  for (auto it = _left.begin(); it != _left.end();) {
+    const std::string &pid = it->first;
+    const std::string joined =
+        join_path({room_participant_path(room_id, pid).c_str(), "presence", "joined"});
+    cvc::state *pr = app.root().findDescendant(joined);
+    if (connected.count(pid) || (pr && pr->value() == "1")) {
+      it = _left.erase(it); // back: its next departure starts a new wait
+      continue;
+    }
+    if (now - it->second < _grace) {
+      ++it;
+      continue;
+    }
+    if (room_remove(app, room_id, pid))
+      out.push_back(pid);
+    it = _left.erase(it);
+  }
+  return out;
 }
 
 std::vector<room_participant> room_roster(cvc::app &app, const std::string &room_id) {
@@ -484,7 +518,8 @@ bool room_bridge_absent(cvc::app &app, const std::string &room_id, const std::st
       bridge_users_path(room_id) + cvc::state::SEPARATOR + pid + cvc::state::SEPARATOR + "present";
   if (tree_leaf(app, present_path) != "1")
     return false;
-  set_replicated(app, present_path, "0");
+  if (cvc::state *users = app.root().findDescendant(bridge_users_path(room_id)))
+    users->removeChild(pid);
   const std::uint64_t count = bridge_count(app, room_id);
   set_bridge_count(app, room_id, count > 0 ? count - 1 : 0);
   bump_bridge_rev(app, room_id);
