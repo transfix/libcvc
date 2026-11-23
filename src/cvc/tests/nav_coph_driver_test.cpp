@@ -247,28 +247,31 @@ TEST(CophDriver, TwoCarsCrossTheField) {
 // A car heading straight at the block senses it only within CoPH's sensor radius (1.25 m at s = 1).
 // The car cannot follow CoPH's point mass around it at once: its steer lock gives it a turning
 // radius of about 0.74 m, and at low speed it takes almost none of the lateral force (§3.3.2).
-// Whatever it then manages, the guard keeps it off the block. This test reports where it ends.
+// Whatever it then manages, the guard keeps it off the block. The run ends when the car arrives,
+// after it has stood still for 6 s (100 ticks), or after 1500 ticks; the test reports where it
+// ends.
 TEST(CophDriver, ABlockSensedLateIsNeverHit) {
   const field f(true);
   sim_world sim = make(f, {{17.0, 6.1, 3.14159265, 3.0, 6.1}});
   coph_driver drive(sim, driver_config());
   drive.attach(0);
   double closest = 1e9;
-  int ticks = 0;
-  for (; ticks < 1500 && !drive.done(0); ++ticks) {
+  int ticks = 0, still = 0;
+  for (; ticks < 1500 && !drive.done(0) && still < 100; ++ticks) {
     drive.apply();
     sim.step();
     const frame fr = snap(sim);
     const double dx = std::max(std::fabs(fr.pos[0] - 10.0) - 0.5, 0.0);
     const double dy = std::max(std::fabs(fr.pos[1] - 6.1) - 0.5, 0.0);
     closest = std::min(closest, std::sqrt(dx * dx + dy * dy));
+    still = std::fabs(fr.speed[0]) < 1e-3 ? still + 1 : 0;
   }
   const frame fr = snap(sim);
   const coph_control_meta &last = drive.fleet()->controls(0).back().meta;
   std::printf("the car %s after %d ticks at (%.2f, %.2f), %.2f m from the block at its closest; "
               "its last control: %s (%s); allocation residual %.3f\n",
-              drive.done(0) ? "arrived" : "stopped", ticks, fr.pos[0], fr.pos[1], closest,
-              last.reason.c_str(), last.route_reason.c_str(),
+              drive.done(0) ? "arrived" : (still >= 100 ? "stood still" : "was still moving"),
+              ticks, fr.pos[0], fr.pos[1], closest, last.reason.c_str(), last.route_reason.c_str(),
               drive.account(0).allocation_residual());
   EXPECT_GT(closest, 0.1); // its body (0.25 m radius) stays off the block
 }
