@@ -28,6 +28,7 @@
 #include <cvc/physics/world.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -128,22 +129,28 @@ public:
 
   // The vehicle whose chassis is at CHASSIS (its centre, heading and velocity, as the pose
   // stream carries it) at the end of the step ending on clock tick TICK. The pose stream carries
-  // no yaw rate, steering angle, drive lag or driver, nor the suspension's rates: they are LIKE's
-  // (the model as it was predicted for that tick, on the same plant), else at rest (on dynamic4w,
-  // its suspension settled on the ground under it). On dynamic4w the suspension's pitch, roll and
-  // heave are CHASSIS's when it carries a pitch or roll (the relay's box, OW5m; its heave from the
-  // box's height), else LIKE's (OW5n). The command is LIKE's, else none. On jolt,
+  // no drive lag or driver: they are LIKE's (the model as it was predicted for that tick, on the
+  // same plant), else at rest (on dynamic4w, its suspension settled on the ground under it). With
+  // STEER (the sample carries its angular velocity and steering angle, pose_sample::steer, OW5n)
+  // the dynamic plants take the steering angle from it and the yaw rate (and on dynamic4w the roll
+  // and pitch rates) from CHASSIS's angular velocity; without, they are LIKE's, else none. On
+  // dynamic4w the suspension's pitch, roll and heave are CHASSIS's when it carries a pitch or roll
+  // (the relay's box, OW5m; its heave from the box's height), else LIKE's; its heave rate is
+  // LIKE's (the pose's vertical speed is the box's after the relay's step under gravity). The
+  // command is LIKE's, else none. On jolt,
   // LIKE's world, its chassis put at CHASSIS's position, heading and horizontal velocity, and at
   // its pitch, roll and vertical speed when CHASSIS carries them (the relay's chassis's attitude,
   // OW5m; a turn about z alone leaves them LIKE's), its spin LIKE's; without LIKE the vehicle as
-  // it was added, at rest.
+  // it was added, at rest; its spin CHASSIS's angular velocity with STEER (its steering is its
+  // wheels', which follow the command).
   // On dynamicboat the same with the hull, the driver's memory LIKE's. A boat goes on the water at
   // the first CHASSIS over water deep enough for it (dyn_boat_plant::attach); until then it has no
   // world, and its steps leave it where it is. Its world's field time is TICK x fixed_dt, the
   // relay's at that tick (SceneWorld::follow anchors it to the clock), and a step adds fixed_dt,
   // so the boat rides the same waves as the relay's (OW5l).
   dynamic_vehicle at(const cvc::physics::body_state &chassis, std::uint64_t tick,
-                     const dynamic_vehicle *like = nullptr) const;
+                     const dynamic_vehicle *like = nullptr,
+                     std::optional<double> steer = std::nullopt) const;
   // One physics step ending on clock tick TICK: the navigator's tick first when it falls due (the
   // command held, then given to the plant), then the model's substep and the box a step along.
   void step(dynamic_vehicle &v, std::uint64_t tick);
@@ -161,12 +168,12 @@ public:
   const cvc::physics::dyn_boat_plant *boat() const { return _boat.get(); }
 
 private:
-  dynamic_vehicle at_bike(const cvc::physics::body_state &chassis,
-                          const dynamic_vehicle *like) const;
-  dynamic_vehicle at_four(const cvc::physics::body_state &chassis,
-                          const dynamic_vehicle *like) const;
+  dynamic_vehicle at_bike(const cvc::physics::body_state &chassis, const dynamic_vehicle *like,
+                          std::optional<double> steer) const;
+  dynamic_vehicle at_four(const cvc::physics::body_state &chassis, const dynamic_vehicle *like,
+                          std::optional<double> steer) const;
   dynamic_vehicle at_jolt(const cvc::physics::body_state &chassis, std::uint64_t tick,
-                          const dynamic_vehicle *like) const;
+                          const dynamic_vehicle *like, std::optional<double> steer) const;
   void step_bike(dynamic_vehicle &v, bool tick);
   void step_four(dynamic_vehicle &v, bool tick);
   void step_jolt(dynamic_vehicle &v, bool tick);

@@ -229,6 +229,7 @@ bool holon::set_driver(const std::string &pid, std::uint64_t id, std::string *wh
   v->set_driver(id, pid);
   p.drives = id;
   p.ride = ride_of(e, _scene);
+  p.ride_steer = e.steer;
   // The envelope its drive axes are shares of (avatar_intent).
   p.envelope = drive_envelope{};
   for (const vehicle_archetype &a : v->archetypes())
@@ -457,6 +458,7 @@ void holon::update_rides() {
     for (const entity_info &e : all)
       if (e.id == p.drives) {
         p.ride = ride_of(e, _scene);
+        p.ride_steer = e.steer;
         break;
       }
   }
@@ -627,6 +629,7 @@ void holon::scene_step() {
       for (const entity_info &e : all)
         if (e.id == p.drives) {
           p.ride = ride_of(e, _scene);
+          p.ride_steer = e.steer;
           break;
         }
       const double yaw = heading_of(p.ride.rotation);
@@ -1036,7 +1039,7 @@ void holon::read_clock(std::uint64_t server_tick) {
 }
 
 void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
-                                std::uint64_t server_tick) {
+                                std::uint64_t server_tick, std::optional<double> steer) {
   if (_role != holon_role::client)
     return; // the server IS the authority; nothing to apply
   auto it = _participants.find(pid);
@@ -1059,7 +1062,7 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
 
   participant &p = it->second;
   if (p.local && p.vehicle) {
-    vehicle_reconcile(p, auth, server_tick);
+    vehicle_reconcile(p, auth, server_tick, steer);
   } else if (p.local && _world) {
     world_reconcile(pid, p, auth, server_tick);
   } else if (p.local) {
@@ -1615,13 +1618,13 @@ void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t 
 }
 
 void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
-                              std::uint64_t server_tick) {
+                              std::uint64_t server_tick, std::optional<double> steer) {
   if (p.acked && server_tick <= p.last_acked)
     return;
   p.acked = true;
   p.last_acked = server_tick;
   if (p.vdyn) {
-    dynamic_reconcile(p, auth, server_tick);
+    dynamic_reconcile(p, auth, server_tick, steer);
     return;
   }
   const double dt = _clock.fixed_dt();
@@ -1678,11 +1681,12 @@ void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &au
 }
 
 void holon::dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
-                              std::uint64_t server_tick) {
+                              std::uint64_t server_tick, std::optional<double> steer) {
   const double tol2 = _cfg.reconcile_tol * _cfg.reconcile_tol;
   dynamic_vehicle_model &m = *p.vdyn;
   // The input in force at the sample's tick, and the model as predicted for it: what the pose
-  // stream does not carry (the yaw rate, the steering, the driver) comes from there.
+  // stream does not carry (the driver; the spin and the steering from a relay before OW5n) comes
+  // from there.
   avatar_intent at = p.intent;
   const dynamic_vehicle *like = p.vehicle_placed ? &p.dnow : nullptr;
   for (const participant::vlogged &e : p.vlog)
@@ -1699,7 +1703,7 @@ void holon::dynamic_reconcile(participant &p, const cvc::physics::body_state &au
     }
   const cvc::physics::vec3 before = dynamic_vehicle_state(p.dnow).position;
   // From the sample, with the command it left for the next tick...
-  dynamic_vehicle v = m.at(auth, server_tick, like);
+  dynamic_vehicle v = m.at(auth, server_tick, like, steer);
   command_vehicle(v, m.drive(), at, m.fixed_dt());
   while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
     p.vlog.pop_front();
@@ -1754,6 +1758,11 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
   if (p.local)
     return p.predicted.state();
   return p.newest;
+}
+
+double holon::steer(const std::string &pid) const {
+  const participant &p = _participants.at(pid);
+  return p.drives != 0 ? p.ride_steer : 0.0;
 }
 
 cvc::physics::pose holon::display_pose(const std::string &pid) const {

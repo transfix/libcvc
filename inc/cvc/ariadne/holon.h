@@ -34,6 +34,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -424,8 +425,12 @@ public:
   // the pose stream's samples are current, and seeking back to it, then forward again
   // at the next, would drop the local avatar's logged inputs twice. One more than
   // holon_config::stale_reading_ticks older is a restarted relay: a reading.
+  //
+  // STEER: the sample carries its angular velocity and steering angle (pose_sample::steer, OW5n):
+  // the vehicle the local participant drives takes them at reconcile (dynamic_vehicle_model::at).
+  // Unset (an older relay), auth's angular velocity is not known and the model's are kept.
   void apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
-                           std::uint64_t server_tick);
+                           std::uint64_t server_tick, std::optional<double> steer = std::nullopt);
 
   // CLIENT: how many times apply_authoritative has re-aligned the replica's clock (each seek also
   // drops the local avatar's unacknowledged inputs: a visible jump). The first sample after
@@ -449,6 +454,10 @@ public:
   // client-local avatar's current prediction, or a peer's newest sample. Throws
   // std::out_of_range for an unknown pid.
   cvc::physics::body_state state(const std::string &pid) const;
+  // SERVER: the steering angle (rad, + left) of the vehicle a participant drives, with state()'s
+  // pose for the pose stream (OW5n); 0 for one on foot. Throws std::out_of_range for an unknown
+  // pid.
+  double steer(const std::string &pid) const;
 
   // A participant's DISPLAY pose this frame: predicted for the local avatar (between its last two
   // quanta), the integrated pose on a server, and for a peer its path through its samples.
@@ -534,6 +543,7 @@ private:
     cvc::physics::body_state parked_feet;
     double parked_reserve = 0.0;
     cvc::physics::body_state ride;
+    double ride_steer = 0.0; // its vehicle's steering angle (rad, + left), with ride
     // SERVER with a world attached: its feet after the last step, where it goes back in if the
     // world is replaced.
     cvc::physics::body_state last_feet;
@@ -639,9 +649,9 @@ private:
   // navigator's next tick); and reconciled to a sample.
   void vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick);
   void vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
-                         std::uint64_t server_tick);
+                         std::uint64_t server_tick, std::optional<double> steer);
   void dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
-                         std::uint64_t server_tick);
+                         std::uint64_t server_tick, std::optional<double> steer);
   // The world a jolt vehicle or a boat is predicted in: the statics, the water and the gravity
   // (OW5i, OW5j).
   jolt_vehicle_world jolt_world() const;

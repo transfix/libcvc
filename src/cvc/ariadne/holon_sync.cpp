@@ -692,7 +692,7 @@ std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples
       continue;
     }
     if (h.has_participant(s.pid)) {
-      h.apply_authoritative(s.pid, s.state, server_tick);
+      h.apply_authoritative(s.pid, s.state, server_tick, s.steer);
       ++applied;
     }
   }

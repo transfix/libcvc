@@ -303,9 +303,11 @@ struct entity_info {
 
 // An entity's pose for the pose stream: its chassis's centre, heading and horizontal velocity, and
 // when its chassis is a body in WORLD (a jolt vehicle's, a boat's hull, a dynamic plant's box)
-// that body's attitude and vertical speed too, so a client draws it pitched and rolled as it is
-// and a driver's model takes them from the sample (OW5m). Without one, a turn about z alone. The
-// relay's room entities (conference::entity_pose_subjects) and a driver's pose (holon) alike.
+// that body's attitude, vertical speed and angular velocity too, so a client draws it pitched and
+// rolled as it is and a driver's model takes them from the sample (OW5m; the angular velocity
+// OW5n). Without one, a turn about z alone, not turning. The relay's room entities
+// (conference::entity_pose_subjects) and a driver's pose (holon) alike; entity_info::steer is the
+// steering angle that goes with it.
 physics::body_state entity_ride(const entity_info &e, const physics::world *world);
 
 // The navigator's drive on an entity's last tick, as a twin replays it: the coefficients its

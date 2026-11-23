@@ -9023,13 +9023,31 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   }
   cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, own_world ? &jw : nullptr);
   EXPECT_EQ(model.on_ground(), on_ground || own_world);
-  cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
+  // The relay's sample of its driver as the client gets it: through the pose stream (quantized),
+  // with its vehicle's angular velocity and steering angle (OW5n).
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    s.steer = h.steer("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0); // an entry even when still
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    EXPECT_EQ(got.size(), 1u);
+    return got.empty() ? pose_sample{} : got.front();
+  };
+  pose_sample now = sample();
+  EXPECT_TRUE(now.steer.has_value()) << "the stream carries the steering";
+  cvc::ariadne::dynamic_vehicle m = model.at(now.state, h.tick(), nullptr, now.steer);
   std::unique_ptr<cvc::ariadne::dynamic_vehicle_model> off;
   cvc::ariadne::dynamic_vehicle mo;
   if (skew != 0) {
     off = std::make_unique<cvc::ariadne::dynamic_vehicle_model>(k, dt, ground,
                                                                 own_world ? &jw : nullptr);
-    mo = off->at(h.state("ann"), h.tick() + skew);
+    mo = off->at(now.state, h.tick() + skew, nullptr, now.steer);
   }
   double phase_z = 0.0;
   const auto axes = [](int step) {
@@ -9065,9 +9083,10 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     if (step < join)
       continue;
     if (step == join && join > 0) { // the client starts here, from the vehicle as the relay has it
-      m = model.at(h.state("ann"), h.tick());
+      now = sample();
+      m = model.at(now.state, h.tick(), nullptr, now.steer);
       if (off)
-        mo = off->at(h.state("ann"), h.tick() + skew);
+        mo = off->at(now.state, h.tick() + skew, nullptr, now.steer);
       continue;
     }
     for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
@@ -9131,9 +9150,10 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
       phase_z = std::max(phase_z, std::fabs(cvc::ariadne::dynamic_vehicle_state(mo).position.z -
                                             relay.position.z));
     if (sampled && h.tick() % 4 == 0) {
-      m = model.at(relay, h.tick(), &m);
+      now = sample();
+      m = model.at(now.state, h.tick(), &m, now.steer);
       if (off)
-        mo = off->at(relay, h.tick() + skew, &mo);
+        mo = off->at(now.state, h.tick() + skew, &mo, now.steer);
     }
   }
   const cvc::physics::body_state end = h.state("ann");
@@ -9298,17 +9318,18 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheRelaysWaves) {
   drive_as_the_world_does(kBoatDrivable, "dynamicboat", still, false, false, "launch", -25.0, 2.0,
                           7.0);
   drive_as_the_world_does(kBoatWaves, "dynamicboat", waves, false, false, "launch", -25.0, 2.0, 7.0,
-                          60);
+                          120);
   std::printf(
       "  the relay's launch heaved %.3f m on still water, %.3f m on the waves; a model "
-      "reading the waves half a second off is %.3f m off its height; from the second second, "
+      "reading the waves a second off is %.3f m off its height; from the second second, "
       "%.4f rad of heading and %.4f of attitude at worst (%.4f in the first); the driver's pose "
       "%.2g rad from the hull's attitude\n",
       still.heave, waves.heave, waves.phase_z, waves.settled_yaw, waves.settled_tilt,
       waves.worst_tilt, waves.ride_gap);
   EXPECT_GT(waves.heave, 2.0 * still.heave + 0.1) << "the waves move it";
-  // Each sample puts the hull at the relay's height and attitude, so a model reading the waves
-  // half a second off has only 4 ticks to drift from them; it still drifts 2.5 x as far.
+  // Each sample puts the hull at the relay's height, attitude and spin (OW5m, OW5n), so a model
+  // reading the waves a second off has only 4 ticks to drift from them; it still drifts 2.5 x as
+  // far (half a second off drifts only 2.3 x: 8 mm).
   EXPECT_GT(waves.phase_z, 2.5 * waves.worst_z) << "on the relay's waves, not others";
   for (const client_run *c : {&still, &waves}) {
     EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the hull's attitude";
@@ -9409,13 +9430,13 @@ TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
 
 // A client that starts predicting a four-wheel vehicle the relay is already driving (OW5n): on
 // flat ground and on the relay's dome, mid-turn (2.5 s in, steering at half lock) and while it
-// accelerates (1 s in), with the relay's samples every 4 ticks. The relay's pose carries the
-// chassis's attitude (OW5m), so the model's suspension starts from its pitch, roll and heave and is
-// put back on them at each sample, not settled at rest. Before, it was 94 to 98 mrad and up to
-// 10 mm off joining mid-turn, 10 mrad and 1.8 mm joining at 1 s.
-// What is left joining mid-turn is the steering: the pose stream carries no steering angle, so
-// the model's front wheels start straight and reach the relay's over half a second (the steering
-// rate), its roll rate straying meanwhile; a sample puts the attitude back, not the rate.
+// accelerates (1 s in), with the relay's samples every 4 ticks through the pose stream. The pose
+// carries the chassis's attitude (OW5m), its angular velocity and the plant's steering angle
+// (OW5n), so the model starts from the relay's suspension, spin and front wheels and is put back
+// on them at each sample, not settled at rest with its wheels straight. Before, it was 94 to
+// 98 mrad of attitude, 10.5 mrad of heading and up to 10 mm of height off joining mid-turn; with
+// the attitude alone (no spin or steering), 24 to 25 mrad and 10.4 mrad: its wheels started
+// straight, and its roll rate strayed while they turned to the relay's.
 TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
   REQUIRE_YAML();
   if (!jolt())
@@ -9426,9 +9447,9 @@ TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
     bool on_ground;
     int join;
     double tilt, z; // the worst gaps allowed (rad, m)
-  } runs[] = {{kDynamic4wDrivable, false, 300, 0.03, 0.001},
-              {hill.c_str(), true, 300, 0.03, 0.002},
-              {hill.c_str(), true, 120, 0.002, 0.001}};
+  } runs[] = {{kDynamic4wDrivable, false, 300, 0.002, 0.002},
+              {hill.c_str(), true, 300, 0.002, 0.003},
+              {hill.c_str(), true, 120, 0.002, 0.002}};
   cvc::ariadne::dynamic_drive drive;
   for (const auto &c : runs) {
     SCOPED_TRACE(std::string(c.on_ground ? "on the dome" : "on flat ground") +
@@ -9439,7 +9460,8 @@ TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
     EXPECT_LT(run.ride_gap, 1e-6) << "the pose is the chassis's attitude";
     EXPECT_LT(run.worst_tilt, c.tilt);
     EXPECT_LT(run.settled_tilt, 0.002) << "a second on";
-    EXPECT_LT(run.worst_z, c.z);
+    EXPECT_LT(run.worst_z, c.z) << "height, the pose stream's millimetres";
+    EXPECT_LT(run.worst_yaw, 0.001) << "the heading, with the relay's yaw rate";
     EXPECT_LT(run.worst, 0.005);
     drive = run.drive;
   }
@@ -9461,4 +9483,25 @@ TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
   const cvc::ariadne::dynamic_vehicle kept = model.at(s, 0, &rolled);
   EXPECT_NEAR(kept.roll, 0.1, 1e-9) << "the model's roll";
   EXPECT_NEAR(kept.box[3], 0.4, 1e-9);
+
+  // A sample that carries its angular velocity and steering angle (OW5n) puts the model's front
+  // wheels and its yaw, roll and pitch rates on them: the box spins as the plant puts it,
+  // (c phid - s thd, s phid + c thd, r) at heading psi. One that does not keeps LIKE's.
+  const auto body_of = [](const cvc::ariadne::dynamic_vehicle &dv) {
+    return std::get<cvc::physics::dyn_4w_saved>(dv.model).body;
+  };
+  const double c = std::cos(0.4), sn = std::sin(0.4), phid = 0.3, thd = -0.1;
+  s.angular_velocity = {c * phid - sn * thd, sn * phid + c * thd, 0.25};
+  const cvc::ariadne::dynamic_vehicle spun = model.at(s, 0, &kept, 0.2);
+  EXPECT_NEAR(body_of(spun).delta, 0.2, 1e-12);
+  EXPECT_NEAR(body_of(spun).r, 0.25, 1e-12);
+  EXPECT_NEAR(spun.wz, 0.25, 1e-12);
+  EXPECT_NEAR(body_of(spun).phid, phid, 1e-12);
+  EXPECT_NEAR(body_of(spun).thd, thd, 1e-12);
+  const cvc::ariadne::dynamic_vehicle unspun = model.at(s, 0, &spun);
+  EXPECT_NEAR(body_of(unspun).delta, 0.2, 1e-12) << "LIKE's";
+  EXPECT_NEAR(body_of(unspun).r, 0.25, 1e-12) << "LIKE's";
+  const cvc::ariadne::dynamic_vehicle fresh = model.at(s, 0);
+  EXPECT_EQ(body_of(fresh).delta, 0.0) << "none known: straight";
+  EXPECT_EQ(body_of(fresh).r, 0.0);
 }

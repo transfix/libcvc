@@ -185,7 +185,8 @@ double dynamic_vehicle_model::speed(const dynamic_vehicle &v) {
 }
 
 dynamic_vehicle dynamic_vehicle_model::at(const ph::body_state &chassis, std::uint64_t tick,
-                                          const dynamic_vehicle *like) const {
+                                          const dynamic_vehicle *like,
+                                          std::optional<double> steer) const {
   if (is_boat() && !ensure_boat(chassis)) {
     // Not on the water yet: where the sample has it, without a world, until one puts it there.
     dynamic_vehicle v;
@@ -194,8 +195,8 @@ dynamic_vehicle dynamic_vehicle_model::at(const ph::body_state &chassis, std::ui
     return v;
   }
   if (_jolt)
-    return at_jolt(chassis, tick, like);
-  return _four ? at_four(chassis, like) : at_bike(chassis, like);
+    return at_jolt(chassis, tick, like, steer);
+  return _four ? at_four(chassis, like, steer) : at_bike(chassis, like, steer);
 }
 
 void dynamic_vehicle_model::load_jolt(const dynamic_vehicle &v) const {
@@ -267,7 +268,8 @@ double dynamic_vehicle_model::jolt_speed() const {
 }
 
 dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, std::uint64_t tick,
-                                               const dynamic_vehicle *like) const {
+                                               const dynamic_vehicle *like,
+                                               std::optional<double> steer) const {
   dynamic_vehicle v;
   ph::world &w = _jolt->world();
   bool was = false;
@@ -294,7 +296,7 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
   // The chassis where the sample has it: its position, heading and horizontal velocity, and its
   // pitch, roll and vertical speed when the sample carries them (the relay's chassis's, OW5m); a
   // sample with a heading alone (a turn about z, an older relay's) leaves those the predicted ones.
-  // The spin is always the predicted one: the pose stream does not carry it.
+  // The spin is the sample's when it carries it (STEER, OW5n), else the predicted one.
   ph::body_state s = w.state(_jchassis);
   double pitch = 0.0, roll = 0.0;
   if (was) {
@@ -316,13 +318,16 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
   }
   s.linear_velocity.x = chassis.linear_velocity.x;
   s.linear_velocity.y = chassis.linear_velocity.y;
+  if (steer)
+    s.angular_velocity = chassis.angular_velocity;
   w.set_state(_jchassis, s);
   keep_jolt(v);
   return v;
 }
 
 dynamic_vehicle dynamic_vehicle_model::at_bike(const ph::body_state &chassis,
-                                               const dynamic_vehicle *like) const {
+                                               const dynamic_vehicle *like,
+                                               std::optional<double> steer) const {
   const ph::dyn_bike_saved *was = like ? std::get_if<ph::dyn_bike_saved>(&like->model) : nullptr;
   dynamic_vehicle v;
   ph::dyn_bike_saved m;
@@ -346,7 +351,10 @@ dynamic_vehicle dynamic_vehicle_model::at_bike(const ph::body_state &chassis,
   m.body.x = chassis.position.x + rear_x * c;
   m.body.y = chassis.position.y + rear_x * s;
   m.body.psi = psi;
-  const double r = was ? was->body.r : 0.0;
+  // The yaw rate and the steering angle: the sample's when it carries them (OW5n), else LIKE's.
+  const double r = steer ? chassis.angular_velocity.z : was ? was->body.r : 0.0;
+  if (steer)
+    m.body.delta = *steer;
   m.body.r = r;
   const double vgx = chassis.linear_velocity.x + r * off * s,
                vgy = chassis.linear_velocity.y - r * off * c;
@@ -361,7 +369,8 @@ dynamic_vehicle dynamic_vehicle_model::at_bike(const ph::body_state &chassis,
 }
 
 dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
-                                               const dynamic_vehicle *like) const {
+                                               const dynamic_vehicle *like,
+                                               std::optional<double> steer) const {
   const ph::dyn_4w_saved *was = like ? std::get_if<ph::dyn_4w_saved>(&like->model) : nullptr;
   dynamic_vehicle v;
   ph::dyn_4w_saved m;
@@ -417,7 +426,16 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
   m.body.x = chassis.position.x + d.x - lr * c;
   m.body.y = chassis.position.y + d.y - lr * s;
   m.body.psi = psi;
-  const double r = was ? was->body.r : 0.0;
+  // The yaw, roll and pitch rates and the steering angle: the sample's when it carries them (the
+  // relay's box's angular velocity, its plant's steering; OW5n), else LIKE's. The box spins as
+  // the plant puts it: (c phid - s thd, s phid + c thd, r).
+  const ph::vec3 &om = chassis.angular_velocity;
+  const double r = steer ? om.z : was ? was->body.r : 0.0;
+  if (steer) {
+    m.body.delta = *steer;
+    m.body.phid = c * om.x + s * om.y;
+    m.body.thd = -s * om.x + c * om.y;
+  }
   m.body.r = r;
   const double vgx = chassis.linear_velocity.x + r * off * s,
                vgy = chassis.linear_velocity.y - r * off * c;

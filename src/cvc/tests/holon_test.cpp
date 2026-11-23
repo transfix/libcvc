@@ -35,6 +35,7 @@
 #include <cvc/volume/volume.h> // a lake for the boat
 #include <gtest/gtest.h>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <vector>
 
@@ -1910,6 +1911,48 @@ TEST(HolonVehicleTest, TheFourWheelVehicleWeDriveIsPredictedAndReconciled) {
   other.plant = "dynamicraft";
   EXPECT_FALSE(other.valid()) << "not a plant a client runs";
   predicted_and_reconciled(k);
+}
+
+// A sample that carries its vehicle's angular velocity and steering angle (pose_sample::steer,
+// OW5n) places the model with them: a client that gets into a vehicle already turning starts with
+// its front wheels and yaw rate, not straight and still. One from a relay before it (no steering)
+// places it straight.
+TEST(HolonVehicleTest, ASampleCarriesTheSteeringToTheModel) {
+  for (const char *plant : {"dynamic", "dynamic4w"}) {
+    SCOPED_TRACE(plant);
+    cvc::ariadne::dynamic_drive k = humvee_dynamics();
+    k.plant = plant;
+    k.ground = 0.0;
+    body_state s;
+    s.position = vec3{-40.0, 0.0, 1.2};
+    s.linear_velocity = vec3{6.0, 0.0, 0.0};
+    s.angular_velocity = vec3{0.0, 0.0, 0.3};
+    const auto placed = [&](std::optional<double> steer, double &delta, double &r) {
+      holon client(holon_role::client);
+      client.add_participant("A", true);
+      ASSERT_TRUE(client.predict_vehicle("A", k));
+      client.apply_authoritative("A", s, 1000, steer);
+      ASSERT_EQ(client.tick(), 1000u) << "placed at the sample's tick, no steps since";
+      cvc::ariadne::dynamic_vehicle now;
+      ASSERT_TRUE(client.predicted_vehicle("A", now));
+      std::visit(
+          [&](const auto &m) {
+            if constexpr (!std::is_same_v<std::decay_t<decltype(m)>,
+                                          cvc::ariadne::jolt_vehicle_saved>) {
+              delta = m.body.delta;
+              r = m.body.r;
+            }
+          },
+          now.model);
+    };
+    double delta = -1.0, r = -1.0;
+    placed(0.15, delta, r);
+    EXPECT_NEAR(delta, 0.15, 1e-12) << "the relay's steering";
+    EXPECT_NEAR(r, 0.3, 1e-12) << "and yaw rate";
+    placed(std::nullopt, delta, r);
+    EXPECT_EQ(delta, 0.0) << "an older relay's: straight";
+    EXPECT_EQ(r, 0.0);
+  }
 }
 
 // The same on the jolt plant (OW5i): its model is a Jolt vehicle in a world of the client's own

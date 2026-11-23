@@ -4321,6 +4321,7 @@ ph::body_state entity_ride(const entity_info &e, const ph::world *world) {
     const ph::body_state b = world->state(e.chassis);
     s.rotation = b.rotation;
     s.linear_velocity.z = b.linear_velocity.z;
+    s.angular_velocity = b.angular_velocity;
   }
   return s;
 }

@@ -1033,22 +1033,25 @@ cvc::pose_snapshot sample_poses() {
   a.x = 4000, a.y = -2500, a.z = 1;
   a.vx = 3000, a.vy = -1, a.vz = 0;
   a.qw = 32767, a.qx = 0, a.qy = -5, a.qz = 12;
+  a.wx = -120, a.wy = 45, a.wz = 350, a.steer = -123456; // OW5n
   cvc::pose_entry b;
   b.slot = 4;
   b.x = 67, b.y = -66;
   s.entries = {a, b};
   s.gone = {1, 2};
+  s.carries = cvc::pose_snapshot::kCarriesMotion;
   return s;
 }
 bool same_poses(const cvc::pose_snapshot &a, const cvc::pose_snapshot &b) {
   if (a.server_tick != b.server_tick || a.seq != b.seq || a.base_seq != b.base_seq ||
-      a.gone != b.gone || a.entries.size() != b.entries.size())
+      a.gone != b.gone || a.carries != b.carries || a.entries.size() != b.entries.size())
     return false;
   for (std::size_t i = 0; i < a.entries.size(); ++i) {
     const cvc::pose_entry &x = a.entries[i], &y = b.entries[i];
     if (x.slot != y.slot || x.pid != y.pid || x.x != y.x || x.y != y.y || x.z != y.z ||
         x.vx != y.vx || x.vy != y.vy || x.vz != y.vz || x.qw != y.qw || x.qx != y.qx ||
-        x.qy != y.qy || x.qz != y.qz)
+        x.qy != y.qy || x.qz != y.qz || x.wx != y.wx || x.wy != y.wy || x.wz != y.wz ||
+        x.steer != y.steer)
       return false;
   }
   return true;
