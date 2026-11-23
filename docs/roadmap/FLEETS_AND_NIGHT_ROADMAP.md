@@ -393,6 +393,14 @@ with six steps a tick, are in brackets.
     every tick (3.3 ms at 2000).
   - Alternating with the code before: 31.8 ms at 2000 (40.5 before) and 9.5 at 800 (12.4).
     FL1a's were 35.5 and 10.9.
+- **A placed vehicle keeps its fleet and its index in that fleet's navigator** (2026-11-22). A
+  tick at 2000 vehicles with summary keys looked a vehicle's fleet up 28,000 times, 14 a vehicle,
+  each a search of the fleets by the key's parts (about twice FL1a's plain find), and searched the
+  navigator's ids for its index about as often. The fleet is now set and cleared with the
+  vehicle's navigator id, and the index is kept until an agent comes or goes. Timed in one process,
+  on a machine busy enough that a whole tick's A/B was lost in its noise: a search took 124 to
+  141 ns and the kept fleet 3 to 6 ns; an index 102 to 122 ns, and kept 5 to 8 ns. Debug builds
+  check both against a search.
 
 **Order.** FL0, FL1, FL2, then FL3, which completes #1358's rework. NL1 and NL2 can run beside
 FL1 and FL2. NL3 and NL4 come after FL2, and NL5 any time after NL1. FL4 goes with WD3's next
