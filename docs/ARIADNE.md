@@ -4198,6 +4198,20 @@ that volume's range.
 [`volume_shared.ari`](../examples/ariadne/documents/volume_shared.ari) shows the bunny in a volren
 and a grid, and smooths it with `volume.filter`.
 
+**Region and water (`region:`, `water_level:`).** On a data node with `body:` (and on a
+`generated_world` node, for `region:`), two props shape the world the physics and the navigator
+get from the dataset, which itself stays whole (ARIADNE_WORLDS §18.8):
+- `region: [min_x, min_y, max_x, max_y]` (world metres) cuts the dataset's world once: the terrain
+  to the samples that cover it, each mesh to the faces whose centre is inside. The bodies, the
+  walls at the world's edge (now the region's) and the navigator's grid (`scene.world.grid.*`) all
+  follow the one cut. The drawing is not cut.
+- `water_level: <m>` is the node's one water knob: below it the world gets a still-water field
+  (1000 kg/m^3, from under the lowest ground up to the level; a vehicle in it wades, floats or
+  sinks by its own physics), and the navigator's grid has its water at the same level. Without
+  it the dataset's own level stands (a version 2 bundle's `water_level`, a made world's
+  `water_level_m`); a version 1 bundle such as Austin has none, so no water. A scene `water` node
+  over the node runs the water instead.
+
 `tint: satellite` colours each vertex of what it drew other than the terrain (a city's buildings) by
 the dataset's aerial image under it, over a grey floor so shaded facades still read (0.3 + 0.7 of the
 photo), as the nav demos tinted Austin.
