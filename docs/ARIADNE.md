@@ -4699,6 +4699,53 @@ scene:
     - { node: post, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] } }
 ```
 
+**Prototypes.** `prototypes:` names whole nodes, their children, materials and the rest, that a node
+in any of the document's scenes stands in for with `use: <name>`, as VRML/X3D's DEF/USE and USD's
+prototypes do. Assets share a mesh; a prototype shares a node tree.
+
+```yaml
+prototypes:
+  streetlamp:
+    type: group
+    args: { switch: lamps.on }            # defaults for the {name} tokens below
+    children:
+      - node: pole
+        source: { box: { size: [0.2, 0.2, 5] } }
+        transform: { position: [0, 0, 2.5] }
+        material: { color: [0.25, 0.25, 0.27] }
+      - node: lamp
+        source: { sphere: 0.4 }
+        transform: { position: [0, 0, 5.2] }
+        material: { color: [1.0, 0.9, 0.6] }
+        visible: "{switch}"               # quoted: an unquoted {switch} is a YAML map
+scene:
+  nodes:
+    - { node: lamp_a, use: streetlamp, transform: { position: [0, 0, 0] } }
+    - node: lamp_b
+      use: streetlamp
+      args: { switch: lamps.north }       # its own switch
+      transform: { position: [12, 0, 0], rotation: [0, 0, 90] }
+      tags: [north]
+```
+
+- **The instance** is the prototype's node with the using node's keys over it. Each key the
+  using node gives replaces the prototype's: its id, `transform:`, `tags:`, `visible:`, `repeat:`,
+  a `source:` of its own. `material:` is the exception, merged key by key, so `material: { color }`
+  recolours an instance and keeps the rest; and `children:` it gives come after the prototype's.
+- **Args.** `{name}` tokens in the prototype's values are filled in from its own `args:` (the
+  defaults), then the using node's `args:`, as a unit's are (§6.1). An arg is a string, so it
+  fills in a value, not a list or a map. A token neither gives stays as written, so a `{i}`
+  reaches `repeat:`: `use:` on a `repeat:` node makes a copy of the instance per index.
+- **Shared meshes.** Each part of a prototype that draws a file, a URI or a primitive is read and
+  fitted once for all its instances, and drawn from one set of GPU buffers, as an asset's nodes
+  are. Not shared: a part whose source or fit has a `{name}` token (each instance may differ), and
+  a part with a `body:` or a `world:` (physics takes a primitive's shape from its source).
+- **Each instance is its own node**, with its own state under its id (`graphics.root.children.lamp_a`,
+  and its parts under it), its own transform, material and tags, so a script moves or recolours
+  one instance and not the others.
+- **Nesting.** A prototype's nodes may `use:` other prototypes. A prototype within itself, at any
+  depth, is not expanded, with a warning, and so is a name no prototype has.
+
 **Scenes.** `scenes:` declares scenes of their own beside the document's `scene:`. Each entry takes
 the keys `scene:` does: nodes, lights, shadows, background, chrome, cameras. A viewport shows one
 with `scene: <id>`, from its own camera or a named camera that scene declares. Each scene is a

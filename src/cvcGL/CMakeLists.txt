@@ -1035,6 +1035,13 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
 endif()
 
+# A node's use: of a prototypes: entry, realized with no window: each instance its own node tree
+# at its own transform, every mesh part read once for all instances (in the scene, repeat: copies
+# and a scenes: entry) and drawn from one set of VTK arrays, an arg in a source read per instance.
+add_executable(cvcgl_ariadne_prototypes test/cvcgl_ariadne_prototypes.cpp)
+target_link_libraries(cvcgl_ariadne_prototypes PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_prototypes COMMAND cvcgl_ariadne_prototypes)
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1758,6 +1765,7 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_prototypes
+                        cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
                         cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)
