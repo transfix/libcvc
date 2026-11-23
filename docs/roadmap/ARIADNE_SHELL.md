@@ -76,9 +76,11 @@ The first user is one arigl window that can open every libcvc example document.
 6. **A `(ps)` row does not say whose process it is.** It holds `pid`, `name`, `status`,
    `priority`, `uid` and `steps`. Nothing in it names the document or mount the process runs
    for, though the Runtime knows each action's scope.
-7. **Views are drawn under the UI, and `volren` only in the main view** (§5.18). A window behind
-   a view's window still draws over the view, and a `volren` node is left out of every view but
-   the main one. Scene windows need both fixed (4.4).
+7. **Views are drawn under the UI, `volren` only in the main view, and volumes barely restyle**
+   (§5.18). A window behind a view's window still draws over the view. A `volren` node is left
+   out of every view but the main one. A view can scale a `type: volume` node's opacity, at the
+   cost of uploading the volume again, and cannot restyle a `volslice` node at all. Scene windows
+   need all three fixed (4.4).
 8. **Mounts share their document's frame budget.** In group 0 that is the app's; under
    `isolate_documents` it is the document's group's 200000 steps and 0.1 s (§2.5). Every open
    application competes for it.
@@ -209,7 +211,7 @@ nothing else: the SceneGraph, its world and its bodies stay as they are.
 - One scene in the main view, never two: the outermost document's `scene:` is not drawn under
   the front application's. When `front:` is empty or absent, the main view draws the outermost
   document's own `scene:`, as today.
-- **How to draw it** is for a spike in SH5. Since a scene window is its scene's own renderer,
+- **How to draw it** is for a spike in SH6. Since a scene window is its scene's own renderer,
   the natural way is the same here: the main view draws the front scene's SceneGraph from its own
   renderer, into the window's frame instead of a texture, with the main camera controller pointed
   at the front scene's camera keys. The other way is for the main viewport to mirror the front
@@ -274,8 +276,41 @@ camera. Two changes do:
   jobs share the device. Its quad's depth test works in a view's texture as it does in the main
   view's frame.
 
-What remains is restyling: a view cannot restyle a `volslice` or `volren` node (colour, opacity),
-only move it. That is a smaller limit, apart from this design.
+**Restyling volumes in views (SH5).** A view's `override:` (§5.18) restyles a mesh in that view
+only. For volumes it does much less today: a `type: volume` node takes `opacity` and `transform`,
+a `volslice` node `transform` alone, and a `volren` node is not in the view at all. With several
+applications' scenes, thumbnails and second angles on one volume, a view must be able to show it
+its own way. An override entry that covers a volume node, of any of the three kinds, takes:
+
+| Field | On a volume |
+|---|---|
+| `transfer_function` | the view's own transfer function: `preset:` and the `cvc::tf::model` keys, as a volume node's `transfer_function:` takes them (§5.4), or `{ bind: <path> }` to a model in state, so a `tf_editor` can drive one view's look |
+| `color` | every colour point replaced by this colour, the opacity kept: the volume in one hue |
+| `opacity` | every opacity point scaled, as `type: volume` does today |
+| `transform` | as today |
+
+They apply in that order: the view's transfer function (the node's when the entry sets none),
+then `color`, then `opacity`. `drawstyle`, `line_width` and `point_size` mean nothing to a
+volume, and a view warns once and ignores them. The main view and every other view keep the
+node's own look. How each kind does it:
+
+- **`volren`.** Each view already has its own raycast (above), so its job takes the node's
+  `volume_settings` with the view's transfer function, colour and opacity applied, and raycasts
+  again when the override changes. The volume is the node's; nothing is copied.
+- **`volslice`.** A view's actor (`viewProp`) binds a transfer-function texture of its own, built
+  from the view's look, and keeps sharing the node's volume texture, the large one. The uniforms
+  that differ per view become the view's: the alpha exponent, and the eye and view direction a
+  sample shader reads, which a view prop takes from the node's own renderer today
+  (`VolSliceNode.h`). So a custom sample shader that lights the volume lights it right in every
+  view, restyled or not.
+- **`type: volume`.** Today a restyled view gets a second `vtkVolume` with a second
+  `vtkSmartVolumeMapper`, which uploads the whole volume to the GPU again, because a GPU volume
+  mapper keeps one set of transfer-function tables, for the property it last drew. With several
+  restyled views of a large volume that is not acceptable either. The fix is in VTK, patched in
+  cvcpkg's recipe, upstream-ready and opt-in: the GPU raycast mapper keeps its
+  transfer-function tables per volume property, so one mapper, and one upload of the volume,
+  draws every view's property. `color` and `transfer_function` then come with no more cost than
+  `opacity`.
 
 ### 4.5 Asks and grants
 
@@ -351,9 +386,9 @@ root:
   one, the shell passes signals on to the applications holding `delegate.signals`: an interrupt
   (Ctrl-C, SIGINT) to the application that has the focus, and a request to end (SIGTERM, SIGHUP)
   to every one, so each can save, before the shell quits. With one, the shell's handler passes a
-  signal on itself with `(app-signal AS NAME)`. The terminal loop's force-quit on three Ctrl-Cs within two
-  seconds (§5.3) stays, so no application can trap the user there; a GL window's close button
-  stays the shell's.
+  signal on itself with `(app-signal AS NAME)`. The terminal loop's force-quit on three Ctrl-Cs
+  within two seconds (§5.3) stays, so no application can trap the user there; a GL window's close
+  button stays the shell's.
 - **The command line** needs no token, since the parent chooses what to pass. A `load:` takes
   `argv: [...]`, a `mounts:` entry `shell.apps.<as>.argv`. The mounted document's `args:` is
   parsed against it as a top-level document's is (§5.6), and `argv` and `args.*` are published
@@ -475,8 +510,9 @@ groups (threaded execution Stage 3).
 
 ## 5. Phases
 
-Each phase is one PR with tests. SH0, SH2, SH4 and SH7 do not depend on the others and can go
-first or in parallel. SH3's scene windows need SH2: they do not ship drawn under the UI.
+Each phase is one PR with tests. SH0, SH2, SH4 and SH8 do not depend on the others and can go
+first or in parallel; SH5 builds on SH4 for `volren`. SH3's scene windows need SH2: they do not
+ship drawn under the UI.
 
 | Phase | Content | Tests |
 |---|---|---|
@@ -485,11 +521,12 @@ first or in parallel. SH3's scene windows need SH2: they do not ship drawn under
 | SH2 | Views drawn into textures (4.4): every `viewport` renders into a texture of its own and draws it as an image in its window; no background hole. A cvcGL change every view gains from | goldens of a window over a view and a view's window over another window, each stacking right; a scrolled and a clipped view; the first frame drawn; picks still land |
 | SH3 | Scenes of mounted documents, for `load:` and `mounts:`: `realize_mount`, `clear_mount`, `viewport scene: { mount }`; the scene window (`view: window`), its scene's own renderer into a texture; `background: hold \| run` | loader: a fragment's scene is parsed; AriRuntime: two mounts' scenes realized apart, binds resolve under the sub-prefix; a held world is not stepped while its window is closed; a golden of two applications' scene windows overlapping, one with a `volren` node |
 | SH4 | `volren` in every view (4.4): a raycast per renderer that shows the node, each with its own camera, picture, depth map and quad | `cvcgl_ariadne` goldens of one `volren` node in the main view and two viewports from other cameras, depth-tested against geometry in each; a view that does not change does not raycast again |
-| SH5 | `view: main` and `front:`: the main view draws the front application's scene; switching between window and main view; Settings follow the focused scene | switch to the main view and back, camera and world kept; the one in the main view goes back to its window when another takes it; golden |
-| SH6 | Asks and grants (4.5): the tokens in `requires:`, `grants:` on `load:` and `mounts:`, the default; keys, pointer and signals to granted applications; `argv:` (4.6) | loader and runtime: a required token not granted refuses the mount; a key reaches only the focused granted application, and none while a parent's field has the keyboard; SIGTERM reaches every granted application; `argv` parsed, a bad one refused with the usage posted; one document's `ari test` alone and mounted |
-| SH7 | Right-click menus (4.7): `context_menu:`, its `id:`, the `event` dict and the pick over a view, `ui.context_menu`; ImGui, FTXUI and tvision | runtime: an item runs with its `event`; an ImGui golden of an open menu; a tmux run on FTXUI |
-| SH8 | `contributes:` (menus, right-click menus, Settings pages) with their tokens; `shares:` and `access.settings`; `grants: { ask }` and Permissions... | an item added to File runs in the application's scope; a withdrawn token takes its items away at the next frame; `access.settings` writes the shell's key and `access.settings.read` cannot; a document alone adds the same items to its own menus |
-| SH9 | `arigl --shell [catalog]` opens `shell.ari` on the examples catalog | an arigl smoke test that opens three examples and switches between them |
+| SH5 | Restyling volumes in views (4.4): `transfer_function`, `color` and `opacity` overrides on `volren`, `volslice` and `type: volume` nodes; a `volslice` view prop's own transfer-function texture and per-view uniforms; the VTK patch (cvcpkg recipe, opt-in) that keeps a GPU volume mapper's transfer-function tables per property | goldens of each kind in the main view and in three views (another preset, one colour, half opacity), the main view unchanged; a `type: volume` node restyled in two views uploads its volume once; a `volslice` sample shader lit right in a view |
+| SH6 | `view: main` and `front:`: the main view draws the front application's scene; switching between window and main view; Settings follow the focused scene | switch to the main view and back, camera and world kept; the one in the main view goes back to its window when another takes it; golden |
+| SH7 | Asks and grants (4.5): the tokens in `requires:`, `grants:` on `load:` and `mounts:`, the default; keys, pointer and signals to granted applications; `argv:` (4.6) | loader and runtime: a required token not granted refuses the mount; a key reaches only the focused granted application, and none while a parent's field has the keyboard; SIGTERM reaches every granted application; `argv` parsed, a bad one refused with the usage posted; one document's `ari test` alone and mounted |
+| SH8 | Right-click menus (4.7): `context_menu:`, its `id:`, the `event` dict and the pick over a view, `ui.context_menu`; ImGui, FTXUI and tvision | runtime: an item runs with its `event`; an ImGui golden of an open menu; a tmux run on FTXUI |
+| SH9 | `contributes:` (menus, right-click menus, Settings pages) with their tokens; `shares:` and `access.settings`; `grants: { ask }` and Permissions... | an item added to File runs in the application's scope; a withdrawn token takes its items away at the next frame; `access.settings` writes the shell's key and `access.settings.read` cannot; a document alone adds the same items to its own menus |
+| SH10 | `arigl --shell [catalog]` opens `shell.ari` on the examples catalog | an arigl smoke test that opens three examples and switches between them |
 
 The closed `.ari` schema (transfix/libcvc#1464, open) learns the new keys (`mounts:`, `front:`,
 `grants:`, `argv:`, `contributes:`, `shares:`, `context_menu:`) in the phase that adds each.
