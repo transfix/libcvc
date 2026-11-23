@@ -17,6 +17,8 @@
 #include <cvc/ariadne/media_player.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
+#include <cvc/ariadne/uri.h>
+#include <cvc/ariadne/uri_http_cache.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
@@ -773,6 +775,110 @@ TEST(MediaWidget, BindNamesAUrlPerItemAndAPlainNameStillWorks) {
   for (const auto &r : srv.requests())
     targets.insert(r.target);
   EXPECT_EQ(targets, (std::set<std::string>{"/0.png", "/1.png"}));
+}
+
+// The host's GET for a picture (fetch_bytes, which a native video's download uses too) goes
+// through the app's HTTP cache that enable_net registers: fetched twice, it is one request. One
+// with auth: never does, and the allowlist still holds.
+TEST(MediaWidget, APictureFetchedTwiceComesFromTheHttpCache) {
+  const std::string png = encode(checker(8, 8), "png");
+  LocalHttpServer srv([&](const LocalHttpServer::Request &req) -> LocalHttpServer::Reply {
+    if (req.target == "/missing.png")
+      return {404, {}, "missing"};
+    if (req.target == "/private.png" && req.header("Authorization") != "Bearer " + kToken)
+      return {401, {}, "{}"};
+    return {200, {"Content-Type: image/png", "Cache-Control: max-age=300"}, png};
+  });
+  LocalHttpServer other([&](const LocalHttpServer::Request &) -> LocalHttpServer::Reply {
+    return {200, {"Cache-Control: max-age=300"}, png};
+  });
+  const auto hits_of = [&](const std::string &target) {
+    int n = 0;
+    for (const LocalHttpServer::Request &r : srv.requests())
+      n += r.target == target;
+    return n;
+  };
+  cvc::app app;
+  NetHostConfig cfg;
+  cfg.enabled = true;
+  cfg.allow = {srv.origin()};
+  ASSERT_EQ(enable_net(app, cfg), "");
+  ASSERT_TRUE(has_http_cache(app)) << "enable_net registers the cache";
+  const std::optional<NetAccess> access = net_host_access(app);
+  ASSERT_TRUE(access && access->credentials);
+  const auto origin = cvc::net::parse_origin(srv.origin());
+  ASSERT_TRUE(origin);
+  access->credentials->bind("media", {*origin});
+  std::string why;
+  ASSERT_TRUE(access->credentials->provide("media", kToken, &why)) << why;
+
+  for (int i = 0; i < 2; ++i) {
+    const media::FetchResult r = media::fetch_bytes(app, srv.url("/a.png"), "");
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(r.bytes, png);
+  }
+  EXPECT_EQ(hits_of("/a.png"), 1) << "the second fetch must be served from the cache";
+  const HttpCacheStats s = http_cache_stats(app);
+  EXPECT_EQ(s.hits, 1u);
+  EXPECT_EQ(s.misses, 1u);
+  EXPECT_EQ(s.entries, 1u);
+  EXPECT_GE(s.bytes, png.size());
+
+  // auth: names a credential: every fetch is a request with it, and nothing is kept.
+  for (int i = 0; i < 2; ++i) {
+    const media::FetchResult r = media::fetch_bytes(app, srv.url("/private.png"), "media");
+    ASSERT_TRUE(r.ok) << r.error;
+  }
+  EXPECT_EQ(hits_of("/private.png"), 2);
+  EXPECT_EQ(http_cache_stats(app).entries, 1u) << "a credentialed reply is never kept";
+
+  // A failure says so on host_get's terms, and is not kept either.
+  for (int i = 0; i < 2; ++i)
+    EXPECT_EQ(media::fetch_bytes(app, srv.url("/missing.png"), "").error, "http 404");
+  EXPECT_EQ(hits_of("/missing.png"), 2);
+
+  // The allowlist holds: refused before any request.
+  const media::FetchResult denied = media::fetch_bytes(app, other.url("/b.png"), "");
+  EXPECT_FALSE(denied.ok);
+  EXPECT_NE(denied.error.find("not an origin this host allows"), std::string::npos) << denied.error;
+  EXPECT_TRUE(other.requests().empty());
+
+  // Two runtimes on the app draw the same picture: the second one's ImageCache, which starts
+  // empty, decodes it from the HTTP cache.
+  const std::string doc = "windows:\n"
+                          "  - window: W\n"
+                          "    children:\n"
+                          "      - image: pic\n"
+                          "        src: " +
+                          srv.url("/w.png") +
+                          "\n"
+                          "        size: [8, 8]\n"
+                          "        status: s\n";
+  for (int i = 0; i < 2; ++i) {
+    cvc::state::instance(app)("s").value(std::string());
+    LoadResult lr = load_string(app, doc);
+    ASSERT_TRUE(lr.ok) << lr.error;
+    Runtime rt(app);
+    ImageBackend b;
+    rt.set_backend(&b);
+    rt.set_root(std::move(lr.root));
+    ASSERT_TRUE(settle([&] { rt.render(); },
+                       [&] {
+                         const std::string st = read_state(app, "s");
+                         return !st.empty() && st != "loading";
+                       }));
+    EXPECT_EQ(read_state(app, "s"), "ready") << read_state(app, "s.error");
+  }
+  EXPECT_EQ(hits_of("/w.png"), 1) << "the second runtime's picture came from the HTTP cache";
+
+  // Off (policy.enabled 0), each fetch is a request; disable_net takes the cache away.
+  cvc::state::instance(app)("sys.net.http_cache.policy.enabled").value(std::string("0"));
+  ASSERT_TRUE(media::fetch_bytes(app, srv.url("/a.png"), "").ok);
+  EXPECT_EQ(hits_of("/a.png"), 2);
+  disable_net(app);
+  EXPECT_FALSE(has_http_cache(app));
+  EXPECT_FALSE(has_uri_handler(app, "http"));
+  EXPECT_FALSE(has_uri_async_handler(app, "http"));
 }
 
 TEST(MediaWidget, WithTheNetworkOffAnHttpImageSaysSo) {

@@ -550,6 +550,13 @@ pool.close()
 - Top-level definitions persist per pooled `Exec` from one program to the next; with
   `fresh_env=True` each program gets a fresh scope over the natives instead.
 - `register_fn` and `register_async_fn` register on every pooled `Exec`, as `Exec`'s do.
+- Between rounds, a batch with nothing to pump waits once for all its pooled `Exec`s: a post to
+  any of them (a kernel's result, a message, a lock grant) or `close()` ends the wait at once;
+  otherwise it lasts until the earliest timer, call timeout or charge, frame (1 ms for a program
+  awaiting the next frame) or idle limit among them, at most 50 ms. `stats()` returns the pool's
+  counters since it was made, as a dict: `batch_waits`, the batch waits, and
+  `batch_wait_timeouts`, those that ran out with work posted meanwhile (0 unless a post's wake was
+  lost).
 - `run_all` releases the GIL for the whole batch: pure-DSL programs run in parallel, and a
   registered Python function takes the GIL for its call, so such calls serialize on it.
 - One call at a time: `run_all`, `register_fn` or `register_async_fn` while another is in progress

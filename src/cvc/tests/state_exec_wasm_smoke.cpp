@@ -5,11 +5,13 @@
 // an async scheduler attached to the app's lock manager as pycvc's Exec attaches
 // (threaded_host_attach()): where there are no threads, auto mode makes that manager single and the
 // attach is accepted. Then the app's exec_pool at threads 0, the only size without threads
-// (threaded execution's Stage 1a): its pump_all pumps two groups inline, on this thread. It prints
-// STATE_EXEC_WASM_OK and returns 0, or prints what failed and returns 1. Built only with
+// (threaded execution's Stage 1a): its pump_all pumps two groups inline, on this thread. Then a
+// group attached to an app's pool at threads 0 (Stage 2a's continuous mode), which only its
+// attaching thread can pump, driven by pump_host and wait_for_work until its program ends. It
+// prints STATE_EXEC_WASM_OK and returns 0, or prints what failed and returns 1. Built only with
 // CVC_BUILD_STATE_EXEC_WASM_SMOKE (it runs natively too, where threads are compiled in: there the
 // single manager refuses that attach, naming state_exec.locks.threading, and the sections run on a
-// same-thread attach; the pool is asked for 0 workers, so it has none there either).
+// same-thread attach; the pools are asked for 0 workers, so they have none there either).
 
 #include <chrono>
 #include <cstdint>
@@ -201,11 +203,77 @@ bool run_exec_pool() {
   return ok;
 }
 
+// The app's exec_pool at threads 0 in continuous mode (S2.md section 5; exec_pool.h): a group
+// attached by this thread is one only this thread pumps (no worker exists here: threads_compiled_in
+// is false, and the pool has none natively either), in pump_host, with wait_for_work while nothing
+// is queued, in pumps of 200 steps until its program ends. It is read only under its token
+// (with_group), every pump ran on this thread (host_pumps, no worker pump), and it detaches.
+bool run_continuous() {
+  const char *kind = "continuous";
+  bool ok = true;
+  cvc::app app;
+  cvc::pool_options po;
+  po.pump_steps = 200;
+  po.pump_seconds = std::numeric_limits<double>::infinity();
+  cvc::exec_pool &pool = app.exec_pool(po);
+  ok &= expect(pool.threads() == 0, kind,
+               "the pool has " + std::to_string(pool.threads()) + " workers, not 0");
+  se::exec_group::options o;
+  o.name = "wasm.c";
+  o.app = &app;
+  se::exec_group g(std::move(o));
+  const int pid = g.execute(
+      std::string("(begin (set s 0) (set i 0) (while (< i 100) (begin (set s (+ s i)) (set i (+ i "
+                  "1)))) s)"));
+  // Detached however this ends, before the group goes.
+  struct attachment {
+    cvc::exec_pool &pool;
+    se::exec_group &g;
+    attachment(cvc::exec_pool &p, se::exec_group &group) : pool(p), g(group) { pool.attach(g); }
+    ~attachment() {
+      if (pool.attached(g))
+        pool.detach(g);
+    }
+  };
+  const cvc::pool_stats s0 = pool.stats();
+  bool done = false;
+  std::string got;
+  {
+    const attachment attached(pool, g);
+    for (int turn = 0; turn < 10000 && !done; ++turn) {
+      if (!pool.pump_host(std::numeric_limits<double>::infinity()))
+        pool.wait_for_work(0.01);
+      pool.with_group(g, [&] {
+        const auto info = g.sched().get_process_info(pid);
+        done = info && se::is_finished(info->status);
+      });
+    }
+    pool.with_group(g, [&] {
+      const auto r = g.sched().get_result(pid);
+      got = r ? se::to_string(*r) : std::string("<no result>");
+    });
+    pool.detach(g);
+    ok &= expect(!pool.attached(g), kind, "the group is still attached after detach");
+  }
+  const cvc::pool_stats s1 = pool.stats();
+  const std::uint64_t pumps = s1.pumps - s0.pumps, here = s1.host_pumps - s0.host_pumps;
+  ok &= expect(done, kind, "the attached group's program did not end");
+  ok &= expect(got == "4950", kind, "the attached group returned " + got);
+  ok &= expect(s1.worker_pumps == s0.worker_pumps, kind, "a worker pumped the group");
+  ok &= expect(here >= 2, kind,
+               std::to_string(here) + " pumps on this thread, not several of 200 steps");
+  ok &= expect(here == pumps, kind,
+               std::to_string(pumps - here) + " of " + std::to_string(pumps) +
+                   " pumps ran off this thread");
+  return ok;
+}
+
 } // namespace
 
 int main() {
   try {
-    const bool ok = run(true) && run(false) && run_on_app_manager() && run_exec_pool();
+    const bool ok =
+        run(true) && run(false) && run_on_app_manager() && run_exec_pool() && run_continuous();
     if (!ok)
       return 1;
     std::printf("STATE_EXEC_WASM_OK\n");

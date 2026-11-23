@@ -18,7 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <cvc/ariadne/media.h> // fetch_bytes: the host's network policy and credentials
+#include <cvc/ariadne/media.h> // fetch_bytes: the host's network policy, credentials and cache
 #include <cvc/media/playback/audio_output.h>
 #include <cvc/media/player.h>
 #include <deque>
@@ -287,7 +287,9 @@ private:
     return sh_.quit;
   }
 
-  // The decode thread.
+  // The decode thread. The whole file is fetched first: an http(s) one without auth: through the
+  // app's HTTP cache (fetch_bytes), so playing it again does not download it again while it is
+  // fresh.
   void run() {
     am::FetchResult fetched;
     if (src_.app)

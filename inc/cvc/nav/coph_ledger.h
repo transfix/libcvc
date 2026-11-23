@@ -158,6 +158,9 @@ public:
 
   const coph_config &config() const { return cfg_; }
   const coph_vec2 &goal() const { return goal_; }
+  // The goal new stages take from now on (a car's sliding local goal, D12); kept stages keep
+  // theirs.
+  void set_goal(const coph_vec2 &goal) { goal_ = goal; }
   // The kept stages, oldest first; the last is the current stage. At most cfg.previous + 1.
   const std::vector<coph_stage> &stages() const { return stages_; }
   const coph_stage &current() const { return stages_.back(); }

@@ -794,7 +794,7 @@ state_transport::publish_stats state_transport_ipc::publish(const state_mutation
     }
   }
   for (auto *peer : local_peers) {
-    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path, is_subtree_op(m.op))) {
       _peers.note_delivery_filtered(peer->local_node_id());
       continue;
     }
@@ -822,7 +822,8 @@ state_transport::publish_stats state_transport_ipc::publish(const state_mutation
   for (auto &c : conns) {
     if (!c || !c->alive.load())
       continue;
-    if (!c->remote_node_id.empty() && !_peers.should_deliver(c->remote_node_id, m.path)) {
+    if (!c->remote_node_id.empty() &&
+        !_peers.should_deliver(c->remote_node_id, m.path, is_subtree_op(m.op))) {
       _peers.note_delivery_filtered(c->remote_node_id);
       continue;
     }

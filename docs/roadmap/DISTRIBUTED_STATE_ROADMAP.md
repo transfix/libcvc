@@ -202,6 +202,20 @@ mistake for finished:
   `apply_remote`'s blob branch (the session wires it on join). See Phase 10 below for the full chain
   and the residual deferred items (WebSocket late-joiner blob hydration, the async hydrator install
   guard, the legacy oversized-`value()` resolver).
+- **Deletes replicate — LANDED** (2026-11-22). `state_sync_adapter` journals a node's removal
+  (`removeChild`: `(state-delete)`, `(state-set-tree)` dropping children, a list row, a world's
+  departed entity) as one `delete_subtree`, timed by the shard's clock, and every transport fans
+  it out like a write (`state_peer_registry::should_deliver(.., subtree)`: a delete above a
+  subscription reaches it). A delete applied, local or remote, leaves a tombstone (path + time,
+  10 min, at most 4096), and `ingest_remote` buries a remote write at or below one that is no
+  later than it (`ingest_result::buried`), which a relay does not forward. A WS relay's
+  `broadcast_snapshot` sends a delete for each held subtree that left the tree, and a relay that
+  does not backfill repeats its tombstones after a joiner's admit snapshot
+  (`state_transport::missed_deletes`). A participant may delete inside its own subtree
+  (`room_write_gate`). Still open: `state::reset(false)` drops children silently, so it
+  replicates nothing; a subtree deleted and made again while a peer was away keeps whatever that
+  peer holds below it of the old one; and the conference still leaves softly
+  (`presence.joined=0`).
 - **Backpressure and slow-peer isolation are `inproc`-only.** The bounded
   outbox, drop policies and quarantine live in `state_transport_inproc`; the
   IPC and gRPC transports publish synchronously with no bounded queue. (The

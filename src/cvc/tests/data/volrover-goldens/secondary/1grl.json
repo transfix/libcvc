@@ -1,0 +1,37 @@
+{
+  "library": "SecondaryStructures",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "1grl",
+  "input": "tools/volrover-goldens/inputs/secondary/1grl.pts",
+  "input_sha256": "bab819cd69024197bb4781d18952945a7bb80051978c8410790bae9f3ce8c532",
+  "points": 9581,
+  "made_from": "PDB entry 1GRL (examples/data/molecules/1grl.pdb, a GroEL subunit): the vertices of the isosurface at 12 of its heavy atoms' blur map (cvc::mol::blur, blobbiness -0.3, a 2 \u00c5 grid; cvc::iso, DUALLIB), each coordinate rounded to a multiple of 1/64 \u00c5 (so its decimal is exact). secondary_structures_test's The1GRLInputIsItsBlurMapsIsosurface makes it again (libcvc master d04c070d, transfix/libcvc#1428's blur); make_inputs.py leaves this case as it is.",
+  "parameters": {},
+  "counts": {
+    "skeleton_points": 67192,
+    "skeleton_edges": 9983,
+    "polygons": 2810,
+    "components": 69,
+    "runs": 34,
+    "helices": 22,
+    "helices_drawn": 20,
+    "sheets_drawn": 2,
+    "sheet_candidates": 10,
+    "sheet_polygons": 227,
+    "debug_files": [
+      "outputTexMol.00.ax",
+      "outputTexMol.U1",
+      "outputTexMol.U2",
+      "outputTexMol.ax",
+      "outputTexMol.curve",
+      "outputTexMol.skel",
+      "outputTexMol.surf",
+      "temp.off",
+      "tempN.off",
+      "test"
+    ]
+  },
+  "ss_sha256": "509a758e8eabeb34c33460a865fbcb1610b85a08f94ebb6d11389badc222d944",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Linux x86_64, Linux-7.0.0-1014-aws-x86_64-with-glibc2.39, Python 3.12.3"
+}

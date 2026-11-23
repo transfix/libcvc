@@ -312,6 +312,124 @@ def test_po01_raw_call_while_another_thread_pumps():
     assert spins > 100, spins
 
 
+# ── run_all's batch wait (S2-Q6) ───────────────────────────────────────
+
+
+def test_bw01_a_post_is_consumed_before_a_sleeper_wakes():
+    # S2a.8 (S2-Q6): between rounds run_all waits once for the whole batch, until the earliest of
+    # its groups' deadlines or a post to any of them. Pooled Exec 0's program is the sleeper: a
+    # timed wait (await g 20) on a Python async function's future, whose kernel finishes only once
+    # the test has seen "posted". Pooled Exec 1's starts a Python async function whose kernel waits
+    # for a Python thread, and awaits it. Once the batch is waiting (stats()'s batch_waits), the
+    # thread lets that kernel finish: its completion, a post to group 1, ends the batch wait, and
+    # program 1 resumes and notes "posted" while the sleeper still sleeps, which then wakes and
+    # notes "sleeper" (an order, which no load can change). No wait timed out with the post
+    # pending (batch_wait_timeouts 0): a wait that missed it would run out at its deadline with
+    # the post queued, and be counted. Nothing here races the clock; 20 s only bounds a hang.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=2, size=2, prefix="bw01pool")
+    gate = threading.Event()
+    woken = threading.Event()
+    started = threading.Event()
+    seen = []
+
+    def note(x):
+        seen.append(x)
+        if x == "posted":
+            woken.set()  # the sleeper's kernel may finish now
+        return x
+
+    def opener():
+        assert started.wait(WAIT), "program 1 never started its call"
+        end = time.monotonic() + WAIT
+        while pool.stats()["batch_waits"] < 1:
+            assert time.monotonic() < end, "the batch never waited"
+            time.sleep(0.001)
+        gate.set()
+
+    try:
+        pool.register_async_fn("bw01gate", lambda: gate.wait(6 * WAIT) and 7)
+        pool.register_async_fn("bw01wake", lambda: woken.wait(6 * WAIT) and 8)
+        pool.register_fn("bw01started", lambda: started.set() or True)
+        pool.register_fn("bw01note", note)
+        t, out = _in_thread("bw01-open", opener)
+        try:
+            t0 = time.monotonic()
+            res = pool.run_all([
+                f'(begin (set g (bw01wake-async)) (set w (await g {2 * WAIT})) (bw01note "sleeper") '
+                "w)",
+                '(begin (set f (bw01gate-async)) (bw01started) (set v (await f)) (bw01note "posted") '
+                "v)",
+            ])
+            took = time.monotonic() - t0
+        finally:
+            gate.set()
+            woken.set()
+            _join(t)
+        assert "error" not in out, out
+        stats = pool.stats()
+        print(f"  run_all took {took:.4f} s; notes {seen}; {stats}")
+        assert res == ["8", "7"], res
+        assert seen == ["posted", "sleeper"], seen
+        assert stats["batch_waits"] >= 1, stats
+        assert stats["batch_wait_timeouts"] == 0, stats
+    finally:
+        gate.set()
+        woken.set()
+        pool.close()
+
+
+# --- Stage 2a continuous pool (td 8.3, 8.11) ---
+
+
+def _stat(stats, name):
+    """A counter of ExecPool.stats(): a dict's entry, or an attribute."""
+    return stats[name] if isinstance(stats, dict) else getattr(stats, name)
+
+
+def test_ra01_a_post_ends_the_batch_wait():
+    # RA-1 (S2.md section 4; S2-Q6): run_all with every pooled group parked on msg-recv, each
+    # pooled Exec's program receiving a Python async function's future, whose kernel waits for an
+    # event. Once both programs have parked and the batch has waited a while, a Python thread sets
+    # the event: the kernels' completions are posts to the pooled groups, which end the batch wait
+    # at once (its notifier, not a timeout). ExecPool.stats()'s batch_wait_timeouts (batch waits
+    # that timed out with work posted meanwhile) stays 0, and the batch did wait (batch_waits).
+    # The time from the post to run_all's return is printed.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=2, size=2, prefix="ra01pool", idle_timeout=60.0)
+    gate = threading.Event()
+    parked = threading.Semaphore(0)
+    box = {}
+
+    def opener():
+        for _ in range(2):
+            assert parked.acquire(timeout=WAIT), "a program never reached its msg-recv"
+        time.sleep(0.05)  # the batch waits meanwhile
+        box["t"] = time.monotonic()
+        gate.set()
+
+    try:
+        pool.register_async_fn("ra01gate", lambda: gate.wait(6 * WAIT) and 7)
+        pool.register_fn("ra01parked", lambda: parked.release() or True)
+        t, out = _in_thread("ra01-open", opener)
+        try:
+            res = pool.run_all(["(begin (ra01parked) (msg-recv (ra01gate-async)))"] * 2)
+            ended = time.monotonic()
+        finally:
+            gate.set()
+            _join(t)
+        assert "error" not in out, out
+        print(f"  run_all returned {ended - box['t']:.4f} s after the post")
+        assert res == ["7", "7"], res
+        stats = pool.stats()
+        print(f"  ExecPool.stats(): {stats}")
+        assert _stat(stats, "batch_waits") >= 1, stats
+        assert _stat(stats, "batch_wait_timeouts") == 0, stats
+    finally:
+        gate.set()
+        pool.close()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

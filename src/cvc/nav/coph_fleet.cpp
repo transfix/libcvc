@@ -138,13 +138,17 @@ std::vector<std::optional<coph_vec2>> coph_fleet::boundary(long long tick, doubl
     if (!running[i])
       continue;
     coph_agent &a = agents_[i];
+    if (in[i].goal)
+      a.set_goal(*in[i].goal);
     if (held_[i]) {
       const held &h = *held_[i];
-      const coph_transition tr{tick - 1, now, h.x, h.u, in[i].x, h.version};
+      const coph_transition tr{tick - 1, now,      h.x, in[i].u_used ? *in[i].u_used : h.u,
+                               in[i].x,  h.version};
       x_[i] = in[i].x;
       a.observe(in[i].observation, in[i].obstacles, &tr);
       hit_[i] = in[i].hit;
-      success_[i] = distance({x_[i][0], x_[i][1]}, a.state().goal) < 0.25;
+      success_[i] =
+          in[i].arrived ? *in[i].arrived : distance({x_[i][0], x_[i][1]}, a.state().goal) < 0.25;
       done_[i] = hit_[i] || success_[i] || tick >= cfg.steps;
       if (!done_[i])
         a.advance(x_[i]);
