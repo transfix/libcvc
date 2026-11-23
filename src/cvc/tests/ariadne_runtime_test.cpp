@@ -8105,6 +8105,54 @@ TEST(AriadneRuntime, ARepeatedLoadedDocumentIsAnApplicationPerInstance) {
   EXPECT_FALSE(mb.toggle_shown["Camera 2"]);
 }
 
+// §5.25 a mount's name: names its application, worked out each frame in the loader's scope: one
+// instance each with {i} filled in, and a name given twice told apart by a number. An instance
+// with no name keeps "<name> N".
+TEST(AriadneRuntime, AMountsNameNamesEachInstancesApplication) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget m = fe_lab_mount();
+  m.repeat = "(int 3)";
+  m.scope = "includes.cam";
+  m.app_name = "Camera";
+  m.app_name_bind = "slots.{i}.name";
+  cvc::state &st = cvc::state::instance(app);
+  st("ui.demo.slots.0.name").value(std::string("tx.wtf"));
+  st("ui.demo.slots.1.name").value(std::string("tx.wtf"));
+  rt.set_root(group({menubar({menu("File", {})}), m}));
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:tx.wtf"), log_index(mb, "begin_menu:tx.wtf 2")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:Camera 3")) << "no name: its number\n" << mb.dump();
+  st("ui.demo.slots.0.name").value(std::string("ncviz.com"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:ncviz.com"), log_index(mb, "begin_menu:tx.wtf")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:tx.wtf 2")) << "a name once is told apart by nothing";
+  mb.pick = "Quit tx.wtf";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:ncviz.com")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:tx.wtf")) << "the second instance quit by its name";
+  EXPECT_EQ(mb.times("begin_window:FE(closable)"), 2) << "the first's and the third's windows";
+
+  // A mount that isn't repeated takes its name: the same way, as an expression too.
+  cvc::app app2;
+  Runtime rt2(app2, "ui.demo");
+  TrayBackend mb2;
+  rt2.set_backend(&mb2);
+  Widget one = fe_lab_mount();
+  one.app_name_bind = "(string.join (list \"Lab\" (state-get \"lab.n\")) \" \")";
+  cvc::state::instance(app2)("ui.demo.lab.n").value(std::string("7"));
+  rt2.set_root(group({menubar({menu("File", {})}), one}));
+  rt2.render();
+  EXPECT_TRUE(mb2.saw("begin_menu:Lab 7")) << mb2.dump();
+}
+
 // A document with two bars of its own: one clock and one bell, in the first; the loaded documents'
 // menus once, in the first too.
 TEST(AriadneRuntime, TwoBarsOfADocumentShareOneClockAndBell) {

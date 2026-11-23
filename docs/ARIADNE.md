@@ -5007,7 +5007,27 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   state keys (`tree.<id>.*`) are the mount's own, as before.
 - **A repeated mount** (`repeat:`) is an application per instance, named "<name> 1", "<name> 2"
   and so on, each in its instance's scope (`includes.<as>.<i>`). Each can be quit and restarted on
-  its own. How many there are is worked out each frame, as the repeat's count is.
+  its own. How many there are is worked out each frame, as the repeat's count is. An instance is
+  made once from its template, not copied each frame: it is a whole loaded document.
+- **A name of the loader's** (`name:` on the `load:`, libcvc 4.0.7) names the application instead,
+  worked out each frame in the loader's scope: a state key, or an expression on the read lane
+  (`'(string.join (list "Lab" (state-get "lab.n")) " ")'`), with `{i}` the instance under
+  `repeat:`. An empty value leaves the name above. A name two applications both come to is told
+  apart by a number: "tx.wtf", "tx.wtf 2". Its notifications go by it too. nicotina's main.ari
+  opens a copy of its client per site and names each by its site:
+
+  ```yaml
+  windows:
+    - load: nicotina.ari
+      as: nicotina
+      repeat: (int (state-get "slots.n"))
+      name: slots.{i}.ui.name          # the site's host, which the copy writes
+      link:
+        ui: {to: "slots.{i}.ui", mode: rw}
+  ```
+
+  A repeated mount isn't a nested repeat: the module's own `repeat:`s use their `{i}` at its
+  instance's sub-prefix, so the loader doesn't warn about them.
 - **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
   each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and a
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
