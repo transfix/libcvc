@@ -87,14 +87,17 @@ std::string val(cvc::app &app, const std::string &path) {
   return cvc::state::instance(app)(path).value();
 }
 
-// World point -> VTK display coordinates in `ren`.
-void to_display(vtkRenderer *ren, double x, double y, double z, double &dx, double &dy) {
+// World point -> the window's VTK display coordinates where view `vp` shows it: its renderer draws
+// into its texture, which the window shows at its region.
+void to_display(cvc::gl::Viewport &vp, double x, double y, double z, double &dx, double &dy) {
+  vtkRenderer *ren = vp.renderer();
   ren->SetWorldPoint(x, y, z, 1.0);
   ren->WorldToDisplay();
-  double d[3];
+  double d[3], w[2];
   ren->GetDisplayPoint(d);
-  dx = d[0];
-  dy = d[1];
+  vp.rendererToWindow(d[0], d[1], w);
+  dx = w[0];
+  dy = w[1];
 }
 
 std::shared_ptr<const cvc::point_classes> points_of(cvc::app &app, const std::string &path) {
@@ -201,10 +204,10 @@ int main() {
 
   ImGui::SetCurrentContext(ui.imguiContext());
   ImGuiIO &io = ImGui::GetIO();
-  vtkRenderer *ren = slice.renderer();
+  cvc::gl::Viewport *onView = &slice; // the view `at` projects through
   const auto at = [&](double x, double y, double z) {
     double dx = 0.0, dy = 0.0;
-    to_display(ren, x, y, z, dx, dy);
+    to_display(*onView, x, y, z, dx, dy);
     return ImVec2(static_cast<float>(dx), static_cast<float>(kHeight - dy));
   };
 
@@ -269,7 +272,7 @@ int main() {
   check(xz.camera().mode() == cvc::gl::CameraController::Mode::Slice &&
             xz.camera().sliceAxis() == 1,
         "grid b's XZ view looks down y");
-  ren = xz.renderer();
+  onView = &xz;
   click(at(3.0, 2.0, 2.0));
   auto pb = points_of(app, kb + ".points");
   pa = points_of(app, ka + ".points");
