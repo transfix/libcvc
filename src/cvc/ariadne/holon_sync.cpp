@@ -592,9 +592,14 @@ namespace {
 void hold_entities(holon &h, cvc::app &app, const std::string &room, const std::string &self_pid,
                    const entity_playout *entities) {
   std::set<std::uint64_t> keep;
+  std::set<std::string> aboard; // the peers a vehicle shown carries (OW5p: their pose is its)
   if (entities && h.physics()) {
     const std::uint64_t driving = read_driving(app, room, self_pid);
     for (const conference::room_entity &e : entities->entities()) {
+      if (!e.driver.empty())
+        aboard.insert(e.driver);
+      if (!e.avatar.empty())
+        aboard.insert(e.avatar);
       if (e.id == driving || e.driver == self_pid || e.avatar == self_pid)
         continue;
       cvc::physics::body_state at;
@@ -608,6 +613,9 @@ void hold_entities(holon &h, cvc::app &app, const std::string &room, const std::
   for (std::uint64_t id : h.held_entities())
     if (!keep.count(id))
       h.release_entity(id);
+  for (const std::string &pid : h.participants())
+    if (pid != self_pid)
+      h.set_aboard(pid, aboard.count(pid) != 0);
 }
 } // namespace
 

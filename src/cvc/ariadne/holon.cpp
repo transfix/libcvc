@@ -141,6 +141,7 @@ void holon::add_participant(const std::string &pid, bool local,
   p.predicted = predicted_avatar(start);
   p.newest = start;
   p.spawn = start;
+  p.obstacle_key = _next_obstacle_key++;
   _participants[pid] = p;
   // In the world: the server simulates everyone, a client its own avatar; a client's peers are
   // kinematic, held where they are shown -- once there is somewhere to show them (a peer whose
@@ -558,7 +559,33 @@ std::vector<vehicle_obstacle> holon::held_obstacles() const {
         e.at.position + e.at.linear_velocity * (static_cast<double>(e.steps) * _clock.fixed_dt());
     out.push_back(o);
   }
+  // The peers' avatars (OW5p), as the walker's world holds them (world_step_client): where each is
+  // shown, its box upright over its feet, moving at its newest sample's velocity. On the relay an
+  // avatar is a frictionless box of the avatar body's mass that a car shoves; so is this one.
+  if (_role != holon_role::client || !_world)
+    return out;
+  const avatar_body &body = _applied.avatar().body;
+  for (const auto &[pid, p] : _participants) {
+    if (p.local || p.aboard || !_world->has_avatar(pid))
+      continue;
+    const cvc::physics::pose feet = display_pose(pid);
+    vehicle_obstacle o;
+    o.key = p.obstacle_key;
+    o.half_extents = cvc::physics::vec3{0.5 * body.width, 0.5 * body.width, 0.5 * body.height};
+    o.mass = body.mass;
+    o.at.position = feet.position + cvc::physics::vec3{0.0, 0.0, 0.5 * body.height};
+    o.at.rotation = feet.rotation;
+    if (all_finite(p.newest.linear_velocity))
+      o.at.linear_velocity = p.newest.linear_velocity;
+    out.push_back(o);
+  }
   return out;
+}
+
+void holon::set_aboard(const std::string &pid, bool aboard) {
+  auto it = _participants.find(pid);
+  if (it != _participants.end())
+    it->second.aboard = aboard;
 }
 
 bool holon::attach_world(SceneWorld *world, std::string *why) {

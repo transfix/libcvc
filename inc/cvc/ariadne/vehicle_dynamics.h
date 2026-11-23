@@ -93,7 +93,9 @@ struct jolt_vehicle_world {
 // end of the coming step (its centre and rotation) and its velocity. MASS 0: kinematic, a vehicle
 // nothing pushes on the relay either (the kinematic plant's box). MASS > 0 (kg): a body of that
 // mass, put where it is shown before each step, so the chassis shoves it as the relay's shoves
-// that vehicle (a jolt vehicle, a dynamic plant's box).
+// that vehicle (a jolt vehicle, a dynamic plant's box) or avatar (OW5p). Its surface is
+// frictionless: an avatar's box slides so on the relay (avatar_world's material), and a vehicle
+// shoved along rolls on its wheels.
 struct vehicle_obstacle {
   std::uint64_t key = 0;
   cvc::physics::vec3 half_extents;
@@ -233,6 +235,7 @@ private:
   mutable std::unique_ptr<cvc::physics::dyn_boat_plant> _boat;
   cvc::physics::vehicle_desc _jdesc;
   double _jrear = 0.0;
+  mutable double _jreach = 5.0; // m: the chassis's reach in plan from its centre (OW5p)
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jadded;
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jlast;
   // The room's vehicles' boxes (hold_obstacles): the body, its half extents, and the vehicle it
@@ -243,6 +246,7 @@ private:
     double mass = 0.0;
     std::uint64_t key = 0;
     bool held = false;
+    int loose = 0; // steps a box with a mass has been left where the chassis knocked it (OW5p)
   };
   std::vector<obstacle_box> _boxes;
   void add_obstacle_room(const jolt_vehicle_world *world);

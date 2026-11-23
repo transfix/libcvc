@@ -55,6 +55,7 @@
 #include <cvc/world/surface.h>
 #include <cvc/world/weather.h>
 #include <cvc/world/world_geometry.h>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -9231,11 +9232,14 @@ struct ram_run {
 // The relay's driver at full throttle straight at a parked vehicle of PLANT 30 m ahead, and the
 // client's jolt model of the car, corrected by the relay's samples every 4 ticks through the pose
 // stream. HOLD: the model holds the parked vehicle's box where the relay has it (OW5o); else it
-// meets only the statics.
-void ram_parked(const std::string &plant, bool hold, ram_run &out) {
+// meets only the statics. PLANT "avatar": in its place a participant standing there, held as
+// holon::held_obstacles holds a peer (OW5p). DELAY: the box is where the relay had it that many
+// ticks before (a playout's delay; 0, where it is).
+void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0) {
+  const bool avatar = plant == "avatar";
   cvc::app app;
   register_world_block(app);
-  const std::string doc = ram_drivable(plant);
+  const std::string doc = ram_drivable(avatar ? "kinematic" : plant);
   LoadResult r = load_string(app, doc);
   ASSERT_TRUE(r.ok) << r.error;
   {
@@ -9251,13 +9255,18 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out) {
   WorldVehicles &v = *w->vehicles();
   w->sync(&warnings);
   const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
-  const std::uint64_t parked = spawn_kind(v, "parked", -10.0, 0.0);
+  const std::uint64_t parked = avatar ? 0 : spawn_kind(v, "parked", -10.0, 0.0);
   holon h(holon_role::server, one_world_holon());
   std::string why;
   ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
   cvc::physics::body_state feet;
   feet.position = {-40.0, 3.0, 0.0};
   h.add_participant("ann", false, feet);
+  if (avatar) {
+    cvc::physics::body_state stands;
+    stands.position = {-10.0, 0.0, 0.0};
+    h.add_participant("bob", false, stands);
+  }
   for (int i = 0; i < 30; ++i)
     h.advance(1.0 / 60.0);
   ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
@@ -9275,14 +9284,31 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out) {
       size = e.size;
       mass = e.dynamics.valid() ? e.dynamics.mass : 0.0;
     }
+  const cvc::ariadne::avatar_body body = h.rules().avatar().body;
+  if (avatar) { // as holon::held_obstacles holds a peer
+    size = {body.width, body.width, body.height};
+    mass = body.mass;
+  }
   ASSERT_GT(size[0], 0.0);
   const cvc::physics::vec3 half{0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
   const auto parked_now = [&]() {
+    if (avatar) { // its box's centre, over its feet
+      cvc::physics::body_state s = h.state("bob");
+      s.position.z += 0.5 * body.height;
+      return s;
+    }
     for (const pose_subject &e : conference::entity_pose_subjects(v))
       if (e.pid == conference::entity_pid(parked))
         return e.state;
     ADD_FAILURE() << "the parked vehicle is in the stream";
     return cvc::physics::body_state{};
+  };
+  std::deque<cvc::physics::body_state> seen; // the relay's, the newest last
+  const auto shown_now = [&]() {
+    seen.push_back(parked_now());
+    while (seen.size() > static_cast<std::size_t>(delay) + 1)
+      seen.pop_front();
+    return seen.front();
   };
   const cvc::physics::vec3 parked_start = parked_now().position;
 
@@ -9331,8 +9357,9 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out) {
   for (int step = 0; step < 720; ++step) {
     h.set_intent("ann", in);
     const std::uint64_t before = h.tick();
-    // Where the client shows the parked vehicle: where the relay has it now, at its velocity.
-    const cvc::physics::body_state shown = parked_now();
+    // Where the client shows the parked vehicle: where the relay has it now (or DELAY ticks
+    // before), at its velocity.
+    const cvc::physics::body_state shown = shown_now();
     h.advance(dt);
     for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
       if (hold) {
@@ -9387,6 +9414,38 @@ TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsVehicles) {
     EXPECT_LT(held.stopped_at, -10.0 + 2.0) << "the relay's car met the parked vehicle";
     EXPECT_LT(held.worst, 0.01) << "holding its box, the model meets it as the relay's car does";
     EXPECT_GT(through.worst, 3.0 * held.worst) << "without, it drives into it between samples";
+  }
+}
+
+// The room's avatars in a client's jolt model (OW5p): the relay's driver runs down a participant
+// standing in its way. The model holds the avatar as holon::held_obstacles holds a peer, a
+// frictionless box of the avatar body's mass where it is shown, so the client's car is slowed by
+// it as the relay's is; without it, the car drives through the avatar between samples. Shown a
+// playout's delay (12 ticks) behind the relay, the avatar it knocks is left where the knock sent
+// it rather than put back where it stood; so is the parked jolt Humvee OW5o's test shoves.
+TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsAvatars) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  struct ram_case {
+    const char *what;
+    int delay;
+    double within; // m: the most the model may be off at a sample, holding it
+  };
+  for (const ram_case c :
+       {ram_case{"avatar", 0, 0.005}, ram_case{"avatar", 12, 0.005}, ram_case{"jolt", 12, 0.012}}) {
+    SCOPED_TRACE(std::string(c.what) + " " + std::to_string(c.delay));
+    ram_run held, through;
+    ram_parked(c.what, true, held, c.delay);
+    ram_parked(c.what, false, through, c.delay);
+    std::printf("  OW5P %s, shown %d ticks behind: relay's car got to x %.2f, moved it %.3f m; the "
+                "model %.4f m off at a sample holding its box (%.0f kg), %.4f m without\n",
+                c.what, c.delay, held.stopped_at, held.parked_moved, held.worst, held.mass,
+                through.worst);
+    EXPECT_EQ(held.held, 1u);
+    EXPECT_GT(held.parked_moved, 1.0) << "the relay's car knocked it";
+    EXPECT_LT(held.worst, c.within) << "the model meets it as the relay's car does";
+    EXPECT_LT(held.worst, through.worst);
   }
 }
 

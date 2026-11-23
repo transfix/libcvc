@@ -2018,6 +2018,71 @@ TEST(HolonVehicleTest, TheJoltCarWeDriveMeetsTheRoomsVehicles) {
   EXPECT_EQ(rebuilds[0], 0u);
 }
 
+// The room's avatars in the jolt car we drive (OW5p): a peer stands 15 m ahead, and the car the
+// client predicts at full throttle knocks it aside, slowed a little by its 70 kg, as the relay's
+// car would be. Aboard a vehicle (set_aboard) its pose is the vehicle's, so the car does not meet
+// it; nor does it with no peer there. The peer was there when the model was made, so it has room.
+TEST(HolonVehicleTest, TheJoltCarWeDriveMeetsTheRoomsAvatars) {
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::ariadne::dynamic_drive k = humvee_dynamics();
+  k.plant = "jolt";
+  k.ground = 0.0;
+  body_state stands;
+  stands.position = vec3{-25.0, 0.0, 0.0};
+  enum { none, peer, aboard };
+  double reached[3] = {0.0, 0.0, 0.0};
+  std::uint64_t rebuilds[3] = {0, 0, 0};
+  for (int run : {none, peer, aboard}) {
+    holon client(holon_role::client, physics_config());
+    if (!client.physics())
+      GTEST_SKIP() << "no Jolt backend in this build";
+    cvc::ariadne::avatar_static floor; // a 200 m floor, its top at z = 0
+    floor.center = vec3{0.0, 0.0, -0.1};
+    floor.half_extents = vec3{100.0, 100.0, 0.1};
+    client.set_statics({floor}, 1);
+    client.add_participant("A", true);
+    if (run != none)
+      client.add_participant("B", false, stands);
+    if (run == aboard)
+      client.set_aboard("B", true);
+    ASSERT_TRUE(client.predict_vehicle("A", k));
+    const double dt = client.clock().fixed_dt();
+    cvc::ariadne::dynamic_vehicle_model truth(k, dt);
+    body_state start;
+    start.position = vec3{-40.0, 0.0, 1.2};
+    client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(truth.at(start, 1000)),
+                               1000);
+    const std::vector<cvc::ariadne::vehicle_obstacle> held = client.held_obstacles();
+    if (run == peer) {
+      ASSERT_EQ(held.size(), 1u);
+      EXPECT_NEAR(held[0].mass, 70.0, 1e-9);
+      EXPECT_NEAR(held[0].half_extents.x, 0.25, 1e-9);
+      EXPECT_NEAR(held[0].half_extents.z, 0.85, 1e-9);
+      EXPECT_NEAR(held[0].at.position.z, 0.85, 1e-9) << "its box over its feet";
+    } else {
+      EXPECT_TRUE(held.empty());
+    }
+    avatar_intent in;
+    in.throttle = 1.0;
+    in.steer = 0.0;
+    in.brake = 0.0;
+    for (int step = 0; step < 480; ++step) {
+      client.set_intent("A", in);
+      client.advance(dt);
+    }
+    reached[run] = client.state("A").position.x;
+    rebuilds[run] = client.vehicle_rebuilds();
+  }
+  std::printf("  the jolt car we drive got to x %.3f past a peer at -25, %.3f with none, %.3f with "
+              "it aboard\n",
+              reached[peer], reached[none], reached[aboard]);
+  EXPECT_GT(reached[peer], -25.0 + 2.0) << "on past it: 70 kg does not stop a Humvee";
+  EXPECT_LT(reached[peer], reached[none] - 0.01) << "but slowed by it";
+  EXPECT_EQ(reached[aboard], reached[none]) << "aboard, the car meets the vehicle, not it";
+  EXPECT_EQ(rebuilds[peer], 0u) << "it had room";
+}
+
 TEST(HolonVehicleTest, TheJoltVehicleWeDriveIsPredictedAndReconciled) {
   cvc::ariadne::dynamic_drive k = humvee_dynamics();
   k.plant = "jolt";

@@ -18,6 +18,7 @@
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_vehicles.h>
+#include <optional>
 #include <stdexcept>
 
 namespace cvc {
@@ -144,6 +145,7 @@ dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double 
     }
     add_obstacle_room(world);
     _jdesc = desc;
+    _jreach = std::hypot(desc.half_extents.x, desc.half_extents.y);
     for (const ph::axle_desc &ax : desc.axles) // the rearmost unsteered axle (nav_plant's)
       if (!ax.steered && (_jrear == 0.0 || ax.x < _jrear))
         _jrear = ax.x;
@@ -234,6 +236,8 @@ bool dynamic_vehicle_model::ensure_boat(const ph::body_state &chassis) const {
   }
   _boat = std::move(plant);
   _jchassis = _boat->hull(0);
+  if (_bdesc.length_overall > 0.0)
+    _jreach = 0.5 * _bdesc.length_overall;
   _jadded = std::make_shared<const std::vector<std::uint8_t>>(_jolt->world().save());
   _jlast = _jadded;
   return true;
@@ -243,15 +247,20 @@ namespace {
 // Where a box no vehicle holds waits: far under the world, each apart (kinematic boxes meet
 // nothing that does not move, and nothing moves there).
 ph::vec3 parked_at(std::size_t i) { return {60.0 * static_cast<double>(i), 0.0, -10000.0}; }
-bool same_size(const ph::vec3 &a, double ma, const ph::vec3 &b, double mb) {
+// A box of the pool fits an obstacle of the same size and mass.
+template <class Box> bool fits(const Box &box, const vehicle_obstacle &o) {
+  const ph::vec3 &a = box.half, &b = o.half_extents;
   return std::fabs(a.x - b.x) < 1e-6 && std::fabs(a.y - b.y) < 1e-6 &&
-         std::fabs(a.z - b.z) < 1e-6 && std::fabs(ma - mb) < 1e-6;
+         std::fabs(a.z - b.z) < 1e-6 && std::fabs(box.mass - o.mass) < 1e-6;
 }
 } // namespace
 
 void dynamic_vehicle_model::add_obstacle_room(const jolt_vehicle_world *world) {
   if (!world)
     return;
+  // A box with a mass slides (OW5p): frictionless, as avatar_world makes an avatar's; made only
+  // when one needs it, so a world without one keeps the materials it had.
+  std::optional<ph::material_id> slick;
   for (const vehicle_obstacle &o : world->obstacle_room) {
     const ph::vec3 &half = o.half_extents;
     if (!(half.x > 0.0 && half.y > 0.0 && half.z > 0.0) || !std::isfinite(half.x + half.y + half.z))
@@ -263,6 +272,16 @@ void dynamic_vehicle_model::add_obstacle_room(const jolt_vehicle_world *world) {
     b.mass = o.mass;
     b.shape = ph::box{half};
     b.position = parked_at(_boxes.size());
+    if (o.mass > 0.0) {
+      if (!slick) {
+        ph::material m;
+        m.name = "avatar";
+        m.friction = 0.0f;
+        m.restitution = 0.0f;
+        slick = _jolt->world().add_material(m);
+      }
+      b.material = *slick;
+    }
     obstacle_box box;
     box.id = _jolt->world().add_body(b);
     box.half = half;
@@ -291,7 +310,7 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
   for (std::size_t i = 0; i < obstacles.size(); ++i)
     for (std::size_t j = 0; j < _boxes.size(); ++j)
       if (!taken[j] && _boxes[j].held && _boxes[j].key == obstacles[i].key &&
-          same_size(_boxes[j].half, _boxes[j].mass, obstacles[i].half_extents, obstacles[i].mass)) {
+          fits(_boxes[j], obstacles[i])) {
         slot[i] = static_cast<int>(j);
         taken[j] = true;
         break;
@@ -300,8 +319,7 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
     if (slot[i] >= 0)
       continue;
     for (std::size_t j = 0; j < _boxes.size(); ++j)
-      if (!taken[j] &&
-          same_size(_boxes[j].half, _boxes[j].mass, obstacles[i].half_extents, obstacles[i].mass)) {
+      if (!taken[j] && fits(_boxes[j], obstacles[i])) {
         slot[i] = static_cast<int>(j);
         taken[j] = true;
         break;
@@ -311,6 +329,7 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
   }
   load_jolt(v);
   ph::world &w = _jolt->world();
+  const ph::body_state chassis = w.state(_jchassis);
   for (std::size_t i = 0; i < obstacles.size(); ++i) {
     obstacle_box &b = _boxes[static_cast<std::size_t>(slot[i])];
     const ph::body_state &at = obstacles[i].at;
@@ -320,15 +339,36 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
     // one a replay's saved world had elsewhere): put there, a step back along its velocity, so it
     // does not sweep through the world to get there. A box with a mass is put where it is shown
     // before every step, moving as it does: the step shoves it, and the next puts it where the
-    // relay's shove left it.
+    // relay's shove left it. But one the last step knocked off where it was shown (OW5p) is left
+    // to the world from there until where it is shown catches up with it: it is shown a playout's
+    // delay behind the relay, so until then it is shown where it stood before the knock, and put
+    // back there it would be knocked again every step. Clear of the chassis, it is put where it is
+    // shown again after a second whatever; within reach of it (still being pushed), never.
     if (b.mass > 0.0) {
-      ph::body_state put;
-      put.position = at.position - at.linear_velocity * _dt;
-      put.rotation = at.rotation;
-      put.linear_velocity = at.linear_velocity;
-      put.angular_velocity = at.angular_velocity;
-      put.active = true;
-      w.set_state(b.id, put);
+      constexpr double kKnocked = 0.1;  // m off where it was shown
+      constexpr double kKnockedV = 0.5; // m/s off how it was shown moving
+      const int most_loose = static_cast<int>(std::lround(1.0 / _dt));
+      const ph::vec3 put_at = at.position - at.linear_velocity * _dt;
+      const ph::vec3 off = now.position - put_at;
+      const ph::vec3 dv = now.linear_velocity - at.linear_velocity;
+      const ph::vec3 to = now.position - chassis.position;
+      const double reach = _jreach + std::hypot(b.half.x, b.half.y) + 0.5;
+      const bool in_reach = to.x * to.x + to.y * to.y < reach * reach;
+      const bool knocked =
+          b.held && b.key == obstacles[i].key && (in_reach || b.loose < most_loose) &&
+          (ph::dot(off, off) > kKnocked * kKnocked || ph::dot(dv, dv) > kKnockedV * kKnockedV);
+      if (knocked) {
+        ++b.loose;
+      } else {
+        b.loose = 0;
+        ph::body_state put;
+        put.position = put_at;
+        put.rotation = at.rotation;
+        put.linear_velocity = at.linear_velocity;
+        put.angular_velocity = at.angular_velocity;
+        put.active = true;
+        w.set_state(b.id, put);
+      }
     } else if (b.held && b.key == obstacles[i].key && ph::dot(d, d) < 4.0) {
       w.move_kinematic(b.id, at.position, at.rotation);
     } else {
@@ -357,6 +397,7 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
       w.set_state(b.id, put);
     }
     b.held = false;
+    b.loose = 0;
   }
   return true;
 }

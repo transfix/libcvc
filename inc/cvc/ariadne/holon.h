@@ -500,7 +500,14 @@ public:
   // The entities held as the vehicle the local participant drives meets them (OW5o): a jolt or
   // boat model holds their boxes in its world (dynamic_vehicle_model::hold_obstacles), each where
   // it is at the end of the coming step. How many times a model was made again for room for more.
+  // With them, the peers' avatars (OW5p): each peer the walker's world holds, as a frictionless
+  // box of the avatar body's size and mass where it is shown, so the car shoves it as the relay's
+  // shoves that avatar -- but not one aboard a vehicle (set_aboard), whose pose is the vehicle's.
   std::vector<vehicle_obstacle> held_obstacles() const;
+  // CLIENT: peer PID rides a vehicle the room shows (drives it, or is it): its pose is that
+  // vehicle's, so the car the local participant drives meets the vehicle, not an avatar there
+  // (held_obstacles). holon_sync's client_pump sets it from the room's entities.
+  void set_aboard(const std::string &pid, bool aboard);
   std::uint64_t vehicle_rebuilds() const { return _vehicle_rebuilds; }
 
   // THE VEHICLE IT DRIVES, PREDICTED (section 18.5, OW5b). CLIENT: the local avatar PID drives (or
@@ -557,6 +564,10 @@ private:
     cvc::physics::body_state last_feet;
     // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
     bool pose_known = true;
+    // CLIENT peer: aboard a vehicle the room shows (set_aboard), and the key its avatar's box has
+    // in the car the local participant drives (held_obstacles; apart from the entities' ids).
+    bool aboard = false;
+    std::uint64_t obstacle_key = 0;
     avatar_sim sim;       // server authoritative integrator
     avatar_intent intent; // latest intent (server input / client-local input)
     // SERVER: stamped intents waiting for their tick (queue_intent), in tick order.
@@ -653,6 +664,7 @@ private:
   };
   std::map<std::uint64_t, held> _held;
   std::uint64_t _vehicle_rebuilds = 0; // models made again for room for the room's vehicles
+  std::uint64_t _next_obstacle_key = std::uint64_t{1} << 63; // a peer's avatar box's (OW5p)
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
   // CLIENT: the predicted vehicle one quantum at TICK on IN (its step, then the command for the
