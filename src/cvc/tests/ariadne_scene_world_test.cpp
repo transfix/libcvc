@@ -3324,6 +3324,20 @@ TEST(AriadneWorldVehicles, TheWorldBlockTakesPosesAndThePoseController) {
       parse_poses(text + "\nbad 1 2\n2 1 2 nan 0 0 0 0 0 nan;3 inf 0 0 0 0 0 0 0 nan", back));
   ASSERT_EQ(back.size(), 3u) << "the good ones, the bad two left";
   EXPECT_EQ(back[2].first, "2");
+  // Numbers read as std::stod reads them, in any spelling: a sign, an exponent, hex, separators;
+  // one out of range (or not a number) makes its record bad.
+  EXPECT_TRUE(parse_poses("p +1.5 -2e1 nan 0x10 0 0 0.25 0 nan\r\n", back));
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_EQ(back[0].first, "p");
+  EXPECT_EQ(back[0].second.x, 1.5);
+  EXPECT_EQ(back[0].second.y, -20.0);
+  EXPECT_EQ(back[0].second.heading, 16.0);
+  EXPECT_EQ(back[0].second.speed, 0.25);
+  EXPECT_TRUE(parse_poses("q,1,2,nan,0,0,0,0,0,nan;;", back));
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_EQ(back[0].second.y, 2.0);
+  EXPECT_FALSE(parse_poses("r 1e400 0 nan 0 0 0 0 0 nan\ns 1 0 nan 0 0 0 0 0x nan", back));
+  EXPECT_TRUE(back.empty());
 }
 
 // Poses on the keys, each frame, with no plant integrating the entity: it is exactly where they
