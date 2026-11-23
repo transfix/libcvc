@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/ariadne/vehicle_drive.h>      // dynamic_drive
 #include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h>        // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
@@ -34,6 +35,7 @@
 
 namespace cvc {
 class app;
+class height_field;
 namespace physics {
 class world;
 class flow_velocity;
@@ -568,6 +570,15 @@ public:
   // ticked on a step with a clock tick (before_step(clock_tick)). The phase it reports changes
   // only when the navigator is built again; revision() moves when it does.
   bool kinematics(std::uint64_t id, kinematic_drive &out) const;
+  // Entity `id` on a dynamic plant as a client runs it (OW5d, OW5e; vehicle_dynamics.h): the
+  // plant, its vehicle (its archetype's preset and the numbers the world gave it), the navigator's
+  // hold on a command (sim_world::plant_plan_of, in SI), the clock ticks the navigator ticks on,
+  // and on dynamic4w the height its vehicles ride from. False as kinematics() is, for one on
+  // neither the `dynamic` nor the `dynamic4w` plant.
+  bool dynamics(std::uint64_t id, dynamic_drive &out) const;
+  // The ground the vehicles drive on (m) at (x, y): vehicle_ground_height of the world's grid and
+  // terrain.
+  double ground_height(double x, double y) const;
   // The navigator's tick to use (s). By default the world's: cvc::sim_tick of its physics step
   // (cvc/core/sim_tick.h), kSimTick (7/120 s) at the default 120 Hz, 4/60 s at 60 Hz. It takes
   // effect when the navigator is next built (a new grid, a restart: WorldGym::reset), held to the
@@ -647,6 +658,13 @@ private:
   struct impl;
   std::unique_ptr<impl> _impl;
 };
+
+// The ground a vehicle drives on at (x, y), in world metres: the world's terrain where it has one
+// (the physics collider's own heights), else the navigator's grid's heights between its samples,
+// else 0. WorldVehicles' plants drive on it; a client running one of its vehicles drives on the
+// same (OW5g: SceneWorld::vehicle_ground gives the two).
+double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
+                             double x, double y);
 
 } // namespace ariadne
 } // namespace cvc

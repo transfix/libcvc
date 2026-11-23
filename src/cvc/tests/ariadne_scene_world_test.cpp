@@ -16,6 +16,7 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
+#include <cvc/ariadne/conference/room_scene.h> // room_world_source
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>
@@ -29,6 +30,7 @@
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
+#include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_gym.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_spawns.h>
@@ -8331,4 +8333,816 @@ TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
   EXPECT_GT(top, 5.0) << "it drove";
   EXPECT_LT(m.speed, -0.5) << "and backed up at the end";
   EXPECT_LT(worst, 0.01) << "step for step";
+}
+
+namespace {
+// A world whose ground the room scene cannot carry: a 1 m dome of terrain (a heightfield) over a
+// flat slab, which it can.
+const char *kDomeWorld = R"(meta: { name: dome, min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: slab
+      source: { box: { size: [40, 40, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: dome
+      source:
+        heightfield:
+          size: 20
+          resolution: 41
+          layers:
+            - { kind: dome, amplitude: 1.0, radius: 6 }
+      body: static
+)";
+
+// Where a client standing at the dome's top settles after 3 s, with a world_replica or without.
+struct dome_stand {
+  bool ready = false;
+  std::string status;
+  double z = 0.0;
+};
+dome_stand stand_on_dome(const std::string &doc, const conference::room_world_source &source,
+                         bool replica) {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc);
+  EXPECT_TRUE(r.ok) << r.error;
+  const std::string room = "dome";
+  conference::write_room_world(app, room, conference::room_world_from_scene(r.scene));
+  conference::write_room_world_source(app, room, source);
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {0.0, 0.0, 2.5};
+  write_pose(app, room, "ann", feet, 100);
+  holon client(holon_role::client, room_holon_config());
+  world_replica world;
+  for (int i = 0; i < 180; ++i)
+    client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, replica ? &world : nullptr);
+  dome_stand out;
+  out.ready = world.ready();
+  out.status = world.status();
+  out.z = client.state("ann").position.z;
+  return out;
+}
+} // namespace
+
+// The same world on a client (ARIADNE_WORLDS.md section 18.5, OW5c): the room names the document
+// the relay runs (room_world_source), and a client holding the same document (the same SHA-256)
+// builds its statics from it (world_replica): it stands on the terrain the room scene could not
+// carry, as the relay's avatar does. Without it, or with another document under that name, the
+// statics are the room scene's, and the walk stands on the slab under it.
+TEST(AriadneOneWorld, AClientBuildsTheWorldFromTheRelaysDocument) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5c_world_replica";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "dome.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << kDomeWorld;
+  }
+  const conference::room_world_source source{doc.string(), conference::file_sha256(doc.string())};
+  ASSERT_EQ(source.sha256.size(), 64u);
+  {
+    cvc::app app;
+    conference::write_room_world_source(app, "dome", source);
+    conference::room_world_source back;
+    ASSERT_TRUE(conference::read_room_world_source(app, "dome", back));
+    EXPECT_EQ(back, source) << "round-trips";
+  }
+
+  const dome_stand built = stand_on_dome(doc.string(), source, true);
+  const dome_stand scene = stand_on_dome(doc.string(), source, false);
+  conference::room_world_source other = source;
+  other.sha256[0] = other.sha256[0] == '0' ? '1' : '0';
+  const dome_stand differs = stand_on_dome(doc.string(), other, true);
+  std::printf("  on the dome's top: from the document z %.2f (%s); from the room scene z %.2f; "
+              "another document z %.2f (%s)\n",
+              built.z, built.status.c_str(), scene.z, differs.z, differs.status.c_str());
+  EXPECT_TRUE(built.ready);
+  EXPECT_NEAR(built.z, 1.0, 0.1) << "on the terrain, as the relay's avatar stands";
+  EXPECT_NEAR(scene.z, 0.0, 0.1) << "the room scene has the slab alone";
+  EXPECT_FALSE(differs.ready);
+  EXPECT_NE(differs.status.find("SHA-256"), std::string::npos) << differs.status;
+  EXPECT_NEAR(differs.z, 0.0, 0.1) << "not the relay's document: the room scene's statics";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A generated world's ground and buildings (OW5c): the colliders its node makes at run time come
+// to the client's statics through the replica (avatar_static::geometry), so a client standing on
+// it stands where the relay's world has its ground, not in the air or under it.
+TEST(AriadneOneWorld, AClientStandsOnTheRelaysGeneratedWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5c_generated";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "land.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << R"(meta: { name: land, min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+      body: {}
+)";
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  const std::string room = "land";
+  conference::write_room_world(app, room, conference::room_world_from_scene(r.scene));
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  // The relay's world, as a server builds it: its ground under the spawn point.
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> relay = SceneWorld::from_scene(app, r.scene, "relay", "", &warnings);
+  ASSERT_NE(relay, nullptr);
+  relay->sync(&warnings);
+  const std::optional<cvc::physics::ray_hit> hit =
+      relay->world().raycast({3.0, -4.0, 200.0}, {3.0, -4.0, -200.0});
+  ASSERT_TRUE(hit.has_value());
+  const double ground = hit->point.z;
+
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {3.0, -4.0, ground + 1.5};
+  write_pose(app, room, "ann", feet, 100);
+  holon client(holon_role::client, room_holon_config());
+  world_replica world;
+  for (int i = 0; i < 180; ++i)
+    client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  std::size_t geometries = 0;
+  for (const cvc::ariadne::avatar_static &s : world.statics())
+    geometries += s.type == cvc::ariadne::avatar_static::kind::geometry;
+  std::printf("  on the generated world: the relay's ground at z %.2f, the client stands at "
+              "z %.2f (%zu statics, %zu of them a node's colliders; %s)\n",
+              ground, client.state("ann").position.z, world.statics().size(), geometries,
+              world.status().c_str());
+  EXPECT_TRUE(world.ready());
+  EXPECT_EQ(geometries, 1u) << "the land's colliders";
+  EXPECT_NEAR(client.state("ann").position.z, ground, 0.15) << "on the relay's ground";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// The relay's surfaces on the client (ARIADNE_WORLDS.md section 18.5, OW5h): a static body's
+// material is the document's, and the replica's statics carry it by value
+// (avatar_static::material), so the client's world has the relay's ice where the relay has it, and
+// its default surface where the relay has that, not the default everywhere.
+TEST(AriadneOneWorld, AClientsStaticsHaveTheRelaysSurfaces) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5h_materials";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "rink.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << R"(meta: { name: rink, min_libcvc: "0.0.0" }
+scene:
+  physics: { materials: { ice: { friction: 0.05, restitution: 0.1 }, rubber: { friction: 1.6 } } }
+  nodes:
+    - node: rink
+      source: { box: { size: [10, 10, 1] } }
+      transform: { position: [-6, 0, -0.5] }
+      body: { motion: static, material: ice }
+    - node: track
+      source: { box: { size: [10, 10, 1] } }
+      transform: { position: [6, 0, -0.5] }
+      body: { motion: static, material: rubber }
+    - node: path
+      source: { box: { size: [2, 10, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  const std::string room = "rink";
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  world_replica world;
+  for (int i = 0; i < 3; ++i)
+    world.pump(app, room);
+  ASSERT_TRUE(world.ready()) << world.status();
+  std::size_t carried = 0;
+  for (const cvc::ariadne::avatar_static &st : world.statics())
+    carried += st.type == cvc::ariadne::avatar_static::kind::body && st.material != nullptr;
+  EXPECT_EQ(carried, 3u) << "each body's surface, the default's included";
+
+  // The client's world from those statics, as the holon makes it.
+  cvc::ariadne::avatar_world client(1.0 / 120.0, cvc::ariadne::avatar_body{});
+  client.set_statics(world.statics());
+  client.set_statics(world.statics()); // again: each surface added once
+  const auto surface = [&client](double x) {
+    const std::optional<cvc::physics::ray_hit> h =
+        client.world().raycast({x, 0.0, 5.0}, {x, 0.0, -5.0});
+    EXPECT_TRUE(h.has_value()) << x;
+    return h ? client.world().get_material(h->material) : cvc::physics::material{};
+  };
+  const cvc::physics::material ice = surface(-6.0), rubber = surface(6.0), plain = surface(0.0);
+  std::printf("  the client's surfaces: the rink '%s' friction %.2f restitution %.2f, the track "
+              "'%s' friction %.2f, the path friction %.2f (%zu materials in its world)\n",
+              ice.name.c_str(), ice.friction, ice.restitution, rubber.name.c_str(), rubber.friction,
+              plain.friction, client.world().material_count());
+  EXPECT_EQ(ice.name, "ice");
+  EXPECT_FLOAT_EQ(ice.friction, 0.05f);
+  EXPECT_FLOAT_EQ(ice.restitution, 0.1f);
+  EXPECT_EQ(rubber.name, "rubber");
+  EXPECT_FLOAT_EQ(rubber.friction, 1.6f);
+  EXPECT_FLOAT_EQ(plain.friction, cvc::physics::material{}.friction) << "the default where it is";
+  const std::size_t materials = client.world().material_count();
+  client.set_statics(world.statics());
+  EXPECT_EQ(client.world().material_count(), materials) << "not added again";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+namespace {
+// Two worlds in one document: a flat slab, and a 1 m dome of terrain on its own.
+const char *kTwoWorlds = R"(meta: { name: two, min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  world: { source: flat }
+  nodes:
+    - node: slab
+      world: flat
+      source: { box: { size: [40, 40, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: dome
+      world: dome
+      source:
+        heightfield:
+          size: 20
+          resolution: 41
+          layers:
+            - { kind: dome, amplitude: 1.0, radius: 6 }
+      body: static
+)";
+} // namespace
+
+// What the relay has on (ARIADNE_WORLDS.md section 18.5, OW5f): the relay publishes its document's
+// world on (room_world_on, publish_world_on), and a client's replica of the document turns on the
+// same one, so after the relay switches from the slab to the dome the client stands on the dome,
+// as the relay's avatar does, not on the slab that is gone from the relay's world.
+TEST(AriadneOneWorld, AClientFollowsTheRelaysWorldSwitch) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5f_switch";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "two.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << kTwoWorlds;
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  const std::string room = "two";
+  conference::write_room_world(app, room, conference::room_world_from_scene(r.scene));
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> relay = SceneWorld::from_scene(app, r.scene, "relay", "", &warnings);
+  ASSERT_NE(relay, nullptr);
+  ASSERT_EQ(relay->world_on(), "flat");
+  EXPECT_EQ(relay->world_nodes("dome"), std::vector<std::string>{"dome"});
+  EXPECT_TRUE(relay->world_nodes("moon").empty());
+  EXPECT_TRUE(publish_world_on(app, room, *relay)) << "the first call writes";
+  EXPECT_FALSE(publish_world_on(app, room, *relay)) << "and nothing changed since";
+
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {0.0, 0.0, 2.5};
+  write_pose(app, room, "ann", feet, 100);
+  holon client(holon_role::client, room_holon_config());
+  world_replica world;
+  for (int i = 0; i < 180; ++i)
+    client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  ASSERT_TRUE(world.ready()) << world.status();
+  const double on_slab = client.state("ann").position.z;
+
+  ASSERT_TRUE(relay->set_world("dome", &warnings));
+  EXPECT_TRUE(publish_world_on(app, room, *relay)) << "the switch";
+  conference::room_world_on on;
+  ASSERT_TRUE(conference::read_room_world_on(app, room, on));
+  EXPECT_EQ(on.world, "dome");
+  EXPECT_TRUE(on.generated.empty()) << "no generated world in it";
+  write_pose(app, room, "ann", feet, 200); // the relay put ann back above the top
+  for (int i = 0; i < 180; ++i)
+    client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  ASSERT_NE(world.world(), nullptr);
+  const double on_dome = client.state("ann").position.z;
+  std::printf("  the relay's world on: the slab, the client stands at z %.2f; switched to the "
+              "dome, z %.2f (the replica has '%s' on)\n",
+              on_slab, on_dome, world.world()->world_on().c_str());
+  EXPECT_NEAR(on_slab, 0.0, 0.1) << "on the slab";
+  EXPECT_EQ(world.world()->world_on(), "dome") << "the replica followed";
+  EXPECT_NEAR(on_dome, 1.0, 0.1) << "on the dome, as the relay's avatar stands";
+  // The ground the relay's vehicles would drive on, handed to the holon (OW5g).
+  EXPECT_GT(world.ground_revision(), 0u);
+  EXPECT_EQ(client.vehicle_ground_revision(), world.ground_revision()) << "client_pump gave it";
+  ASSERT_TRUE(static_cast<bool>(world.ground()));
+  EXPECT_NEAR(world.ground()(0.0, 0.0), 1.0, 0.05) << "the dome's top";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A Regenerate on the relay (OW5f): the params each generated world of the world on was made from
+// go with what it has on, and the client's replica makes the same world from them, a new preset
+// included, so its ground is the relay's new ground to the millimetre where the old one was not.
+TEST(AriadneOneWorld, AClientFollowsTheRelaysRegeneratedWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5f_regenerate";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "land.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << R"(meta: { name: land, min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+      body: {}
+)";
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  const std::string room = "land";
+  conference::write_room_world(app, room, conference::room_world_from_scene(r.scene));
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> relay = SceneWorld::from_scene(app, r.scene, "relay", "", &warnings);
+  ASSERT_NE(relay, nullptr);
+  relay->sync(&warnings);
+  publish_world_on(app, room, *relay);
+  world_replica world;
+  for (int i = 0; i < 3; ++i)
+    world.pump(app, room);
+  ASSERT_TRUE(world.ready()) << world.status();
+
+  // The relay's world made again, from another seed and preset (as its panel would ask).
+  cvc::world::generated_world_params was;
+  ASSERT_TRUE(relay->generated_params("land", was));
+  cvc::world::generated_world_params want = was;
+  want.seed = 9;
+  want.preset = was.preset == 1 ? 2 : 1;
+  cvc::world::apply_world_preset(want);
+  want.trees = 6;
+  want.rocks = 3;
+  want.buildings = 6;
+  ASSERT_TRUE(relay->follow_generated("land", want, &warnings));
+  EXPECT_FALSE(relay->follow_generated("nowhere", want, &warnings)) << "no such node";
+  relay->sync(&warnings);
+  cvc::world::generated_world_params made;
+  ASSERT_TRUE(relay->generated_params("land", made));
+  ASSERT_EQ(generated_world_signature(made), generated_world_signature(want))
+      << "the relay made it";
+  EXPECT_FALSE(relay->follow_generated("land", want, &warnings)) << "already its world";
+
+  // Where the ground moved most, of a few points.
+  const auto ground = [](const SceneWorld &w, double x, double y) {
+    const std::optional<cvc::physics::ray_hit> h = w.world().raycast({x, y, 400.0}, {x, y, -400.0});
+    return h ? h->point.z : std::nan("");
+  };
+  double x = 0.0, y = 0.0, moved = -1.0, before = 0.0;
+  for (int k = 0; k < 25; ++k) {
+    const double px = -80.0 + 40.0 * (k % 5), py = -80.0 + 40.0 * (k / 5);
+    const double a = ground(*world.world(), px, py), b = ground(*relay, px, py);
+    if (std::isfinite(a) && std::isfinite(b) && std::fabs(a - b) > moved) {
+      moved = std::fabs(a - b);
+      x = px;
+      y = py;
+      before = a;
+    }
+  }
+  ASSERT_GT(moved, 0.5) << "the new world's ground is elsewhere";
+
+  EXPECT_TRUE(publish_world_on(app, room, *relay));
+  conference::room_world_on on;
+  ASSERT_TRUE(conference::read_room_world_on(app, room, on));
+  ASSERT_EQ(on.generated.size(), 1u);
+  EXPECT_EQ(on.generated[0].node, "land");
+  EXPECT_EQ(generated_world_signature(on.generated[0].params), generated_world_signature(want))
+      << "the params round-trip";
+  for (int i = 0; i < 3; ++i)
+    world.pump(app, room);
+  cvc::world::generated_world_params followed;
+  ASSERT_TRUE(world.world()->generated_params("land", followed));
+  const double after = ground(*world.world(), x, y), relay_ground = ground(*relay, x, y);
+  std::printf("  regenerated (seed 9, preset %d): at (%.0f, %.0f) the relay's ground is at z %.3f; "
+              "the client's was at z %.3f, now z %.3f\n",
+              want.preset, x, y, relay_ground, before, after);
+  EXPECT_EQ(generated_world_signature(followed), generated_world_signature(want));
+  EXPECT_NEAR(after, relay_ground, 1e-3) << "the same world";
+  std::size_t geometries = 0;
+  for (const cvc::ariadne::avatar_static &st : world.statics())
+    geometries += st.type == cvc::ariadne::avatar_static::kind::geometry;
+  EXPECT_EQ(geometries, 1u) << "the statics are the new world's colliders";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+namespace {
+// kKinematicDrivable's square, its Humvee on the dynamic plant.
+const char *kDynamicDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: dynamic
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// A 3 m dome of terrain 28 m east of where the Humvee starts (level there), on PLANT.
+std::string hill_drivable(const std::string &plant) {
+  return R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: )" +
+         plant + R"(
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: hill, cell: 2 }
+  nodes:
+    - node: hill
+      world: hill
+      source:
+        heightfield:
+          size: 160
+          resolution: 161
+          layers:
+            - { kind: dome, amplitude: 3.0, radius: 7 }
+      transform: { position: [-16, 0, 0] }
+      body: static
+)";
+}
+
+// The same on the dynamic4w plant.
+const char *kDynamic4wDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: dynamic4w
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The same on the jolt plant (OW5i): a Jolt vehicle in the world, its wheels, suspension and
+// powertrain the engine's.
+const char *kJoltDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: jolt
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+
+// The command the relay sets after a step for a driver's next navigator tick (holon's drive).
+void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic_drive &k,
+                   const avatar_intent &in, double dt) {
+  holon::drive_envelope env;
+  env.max_steer = k.max_steer;
+  env.max_accel = k.max_accel;
+  env.max_decel = k.max_decel;
+  const double speed = m.vx * std::cos(m.box[3]) + m.vy * std::sin(m.box[3]);
+  const holon::drive_cmd c =
+      holon::drive_command(in, env, speed, static_cast<double>(k.tick_steps) * dt);
+  m.steer_cmd = c.steer;
+  m.accel_cmd = c.accel;
+}
+
+// On the dynamic plant (ARIADNE_WORLDS.md section 18.5, OW5d): the room's entities carry
+// the vehicle (its preset and numbers), the navigator's hold and its ticks
+// (WorldVehicles::dynamics), and the client's model of it (dynamic_vehicle_model: the relay's
+// dyn_bike_plant alone, without a world) stepped on the same drive axes stays on the relay's
+// vehicle, tires, actuator lag and driver and all, through throttle, a turn, the brake and reverse.
+// What drive_as_the_world_does found, for a plant's own checks.
+struct client_run {
+  double worst = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0, climb = 0.0;
+  double end_speed = 0.0; // the model's, at the end
+  cvc::ariadne::dynamic_drive drive;
+};
+
+// A drivable Humvee on PLANT in DOC's world, driven through throttle, a turn, the brake and
+// reverse, against the client's model of it on the same drive axes. ON_GROUND: the model drives on
+// the world's ground as a client building the same document has it (SceneWorld::vehicle_ground),
+// else flat; CHECK: the model must keep to the relay's vehicle.
+void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result,
+                             bool on_ground = false, bool check = true) {
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i) // the driver's command set, the navigator ticked on a clock tick
+    h.advance(dt);
+
+  cvc::ariadne::kinematic_drive not_kinematic;
+  EXPECT_FALSE(v.kinematics(id, not_kinematic)) << "not the kinematic plant";
+  cvc::ariadne::dynamic_drive k;
+  ASSERT_TRUE(v.dynamics(id, k));
+  EXPECT_TRUE(k.valid());
+  EXPECT_EQ(k.preset, "humvee");
+  EXPECT_EQ(k.plant, plant);
+  EXPECT_EQ(k.tick_steps, v.steps_per_tick());
+  bool carried = false;
+  for (const conference::room_entity &e : conference::room_entities_of(v))
+    if (e.id == id) {
+      carried = true;
+      EXPECT_EQ(e.dynamics, k) << "the room's entities carry it";
+      EXPECT_FALSE(e.drive.valid());
+    }
+  EXPECT_TRUE(carried);
+
+  // From where the relay has it, at rest, on the same drive axes at each tick.
+  cvc::ariadne::dynamic_vehicle_model::ground_fn ground;
+  std::unique_ptr<SceneWorld> mine; // the client's world from the same document
+  if (on_ground) {
+    Scene copy = r.scene;
+    copy.vehicles.clear();
+    mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+    EXPECT_NE(mine, nullptr);
+    if (mine) {
+      mine->sync(&warnings);
+      std::shared_ptr<const cvc::nav::world_grid> g;
+      std::shared_ptr<const cvc::height_field> t;
+      mine->vehicle_ground(g, t);
+      EXPECT_TRUE(g || t) << "the world's ground";
+      ground = [g, t](double x, double y) {
+        return cvc::ariadne::vehicle_ground_height(g.get(), t.get(), x, y);
+      };
+      EXPECT_NEAR(ground(-12.0, 3.0), v.ground_height(-12.0, 3.0), 1e-9) << "the relay's ground";
+    }
+  }
+  // A jolt vehicle's model runs in a world of the client's own with the client's statics: each
+  // static body of the same document's world, on its surface (world_replica's statics).
+  cvc::ariadne::jolt_vehicle_world jw;
+  if (plant == "jolt") {
+    Scene copy = r.scene;
+    copy.vehicles.clear();
+    mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+    ASSERT_NE(mine, nullptr);
+    mine->sync(&warnings);
+    for (const SceneWorldBody &b : mine->bodies())
+      if (!b.moves && b.desc) {
+        cvc::ariadne::avatar_static s;
+        s.type = cvc::ariadne::avatar_static::kind::body;
+        s.body = b.desc;
+        s.material = std::make_shared<const cvc::physics::material>(
+            mine->world().get_material(b.desc->material));
+        jw.statics.push_back(std::move(s));
+      }
+    jw.gravity = mine->world().config().gravity;
+    EXPECT_FALSE(jw.statics.empty()) << "the document's ground";
+  }
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, plant == "jolt" ? &jw : nullptr);
+  EXPECT_EQ(model.on_ground(), on_ground || plant == "jolt");
+  cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
+  const auto axes = [](int step) {
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = 0.0;
+    in.brake = 0.0;
+    if (step < 240) {
+      in.throttle = 1.0;
+    } else if (step < 480) {
+      in.throttle = 1.0;
+      in.steer = 0.5;
+    } else if (step < 600) {
+      in.throttle = 0.5;
+      in.steer = -1.0;
+    } else if (step < 840) {
+      in.brake = 1.0;
+    } else {
+      in.throttle = -1.0;
+    }
+    return in;
+  };
+  double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
+  const cvc::physics::vec3 start = h.state("ann").position;
+  const bool sampled = plant == "jolt";
+  double climb = 0.0;
+  for (int step = 0; step < 1080; ++step) {
+    const avatar_intent in = axes(step);
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      model.step(m, t);
+      command_after(m, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    worst = std::max(worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
+    const double yaw = 2.0 * std::atan2(relay.rotation.z, relay.rotation.w);
+    worst_yaw = std::max(worst_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
+    top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
+    // The box's height and attitude, which on dynamic4w are the suspension's. The driver's pose
+    // carries the heading alone (holon's ride), so the attitude is the chassis body's.
+    const cvc::physics::body_state mine = cvc::ariadne::dynamic_vehicle_state(m);
+    worst_z = std::max(worst_z, std::fabs(mine.position.z - relay.position.z));
+    cvc::physics::quat body = relay.rotation;
+    for (const entity_info &e : v.entities())
+      if (e.id == id && e.chassis.valid())
+        body = w->world().state(e.chassis).rotation;
+    const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
+                               mine.rotation.y * body.y + mine.rotation.z * body.z);
+    worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
+    climb = std::max(climb, relay.position.z - start.z);
+    // A jolt vehicle's gear, clutch and engine are not in the pose stream, so its model is
+    // corrected by the relay's samples as the holon corrects it: every 4 ticks the sample, the rest
+    // of its world as predicted for that tick. What is measured is the gap a sample finds.
+    if (sampled && h.tick() % 4 == 0)
+      m = model.at(relay, h.tick(), &m);
+  }
+  const cvc::physics::body_state end = h.state("ann");
+  std::printf("  the %s model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s; "
+              "height %.6f m, attitude %.6f rad (top %.2f m/s, %.1f m from the start, speed at "
+              "the end %.2f m/s; climbed %.2f m, %s)\n",
+              plant.c_str(), worst, worst_yaw, worst_z, worst_tilt, top,
+              std::hypot(end.position.x - start.x, end.position.y - start.y),
+              cvc::ariadne::dynamic_vehicle_model::speed(m), climb,
+              sampled     ? "on the client's statics, the relay's sample every 4 ticks"
+              : on_ground ? "on the world's ground"
+                          : "on flat ground");
+  result.worst = worst;
+  result.worst_yaw = worst_yaw;
+  result.worst_z = worst_z;
+  result.worst_tilt = worst_tilt;
+  result.climb = climb;
+  result.end_speed = cvc::ariadne::dynamic_vehicle_model::speed(m);
+  result.drive = k;
+  EXPECT_GT(top, 5.0) << "it drove";
+  if (!check)
+    return;
+  EXPECT_LT(cvc::ariadne::dynamic_vehicle_model::speed(m), -0.5) << "and backed up at the end";
+  EXPECT_LT(worst, 0.01) << "step for step";
+  EXPECT_LT(worst_yaw, 0.002);
+  result.worst_z = worst_z;
+  result.worst_tilt = worst_tilt;
+}
+} // namespace
+
+TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kDynamicDrivable, "dynamic", run);
+  EXPECT_EQ(run.drive.ground, 0.0) << "the box sits on the ground under it";
+}
+
+// The same on the dynamic4w plant (OW5e): the client's model is the relay's dyn_4w_plant alone,
+// four wheels on their suspension, its flat ground at the plant's reference height, so the box's
+// height and attitude follow the relay's too.
+// Over a hill (OW5g): the client's model drives on the world's ground as the relay's vehicles do
+// (SceneWorld::vehicle_ground of the same document: the terrain node's grid), on either dynamic
+// plant, so it climbs the dome with the relay's vehicle. On flat ground it would not.
+TEST(AriadneOneWorld, AClientDrivesOverTheRelaysHill) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *plant : {"dynamic", "dynamic4w"}) {
+    const std::string doc = hill_drivable(plant);
+    client_run ground, flat;
+    drive_as_the_world_does(doc.c_str(), plant, ground, true);
+    drive_as_the_world_does(doc.c_str(), plant, flat, false, false);
+    EXPECT_GT(ground.climb, 0.5) << plant << ": up the hill";
+    EXPECT_LT(ground.worst_z, 0.01) << plant << ": the ride height on the slope";
+    EXPECT_LT(ground.worst_tilt, 0.01) << plant << ": leaning with it";
+    EXPECT_GT(flat.worst, 10.0 * ground.worst + 0.01) << plant << ": flat ground strays";
+  }
+}
+
+// The same on the jolt plant (OW5i): the client's model is a Jolt vehicle in a world of its own
+// made as the relay's is, on the same document's statics, so it keeps to the relay's vehicle,
+// its height and attitude on its suspension included, on the square and over the hill.
+TEST(AriadneOneWorld, AClientRunsTheJoltVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  // Its gear, clutch and engine are not in the pose stream (the relay's vehicle pulls away half a
+  // second after its model would, the navigator's hold before the driver got in left in its
+  // powertrain), so the model takes the relay's sample every 4 ticks as the holon does, and what
+  // is checked is the gap a sample finds: millimetres, where the plant's own drift between samples
+  // is what is left. The attitude is the chassis's on its suspension, which a sample does not
+  // carry.
+  client_run run, over;
+  drive_as_the_world_does(kJoltDrivable, "jolt", run, false, false);
+  const std::string hill = hill_drivable("jolt");
+  drive_as_the_world_does(hill.c_str(), "jolt", over, false, false);
+  EXPECT_EQ(run.drive.plant, "jolt");
+  EXPECT_GT(over.climb, 0.5) << "up the hill, on the client's statics";
+  for (const client_run *c : {&run, &over}) {
+    EXPECT_LT(c->end_speed, -0.5) << "and backed up at the end";
+    EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
+    EXPECT_LT(c->worst_yaw, 0.005);
+    EXPECT_LT(c->worst_z, 0.02) << "the ride height";
+    EXPECT_LT(c->worst_tilt, 0.05) << "the body's pitch and roll";
+  }
+}
+
+TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kDynamic4wDrivable, "dynamic4w", run);
+  EXPECT_NEAR(run.drive.ground, 0.0, 1e-6) << "the square's top";
+  EXPECT_LT(run.worst_z, 0.01) << "the ride height";
+  EXPECT_LT(run.worst_tilt, 0.01) << "the body's pitch and roll";
 }

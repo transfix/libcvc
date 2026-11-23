@@ -90,12 +90,12 @@ units:
       - type: combo
         label: "Camera"
         bind: cam.sel
-        options: (string.split (state-get "cam.devices") "\n")
+        options: (if (is-null (state-get "cam.devices")) (list) (string.split (state-get "cam.devices") "\n"))
         visible_when: (not (= (state-get "cam_synthetic") "1"))
       - type: combo
         label: "Mic"
         bind: mic.sel
-        options: (string.split (state-get "mic.devices") "\n")
+        options: (if (is-null (state-get "mic.devices")) (list) (string.split (state-get "mic.devices") "\n"))
         visible_when: (not (= (state-get "cam_synthetic") "1"))
       - separator
       # Camera/mic on-off: stream-set-muted blanks the producer at the source (black video / silence)

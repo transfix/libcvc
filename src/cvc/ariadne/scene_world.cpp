@@ -1270,15 +1270,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
     std::shared_ptr<const cvc::nav::world_grid> g;
     std::shared_ptr<const cvc::world::world_geometry> made; // its roads, for the spawn points
     std::vector<ph::body_id> ground = d.ground_bodies();
-    if (const impl::world_def *w = d.find_world(d.on)) {
-      const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
-      for (const std::string &node : w->nodes) {
-        if (!g)
-          g = grid(node, cell, d.grid_half, nullptr);
-        if (!made)
-          made = world_geometry(node);
-      }
-    }
+    ground_of_world_on(g, made);
     if (g != d.ground_grid || !d.ground_given) {
       d.ground_grid = g;
       d.ground_given = true;
@@ -1560,6 +1552,99 @@ bool SceneWorld::regenerate_world(double seed) {
     asked = true;
   }
   return asked;
+}
+
+std::vector<std::string> SceneWorld::world_nodes(const std::string &name) const {
+  const impl::world_def *w = _impl->find_world(name);
+  return w ? w->nodes : std::vector<std::string>{};
+}
+
+void SceneWorld::ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> &g,
+                                    std::shared_ptr<const cvc::world::world_geometry> &made) {
+  impl &d = *_impl;
+  g.reset();
+  made.reset();
+  if (const impl::world_def *w = d.find_world(d.on)) {
+    const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
+    for (const std::string &node : w->nodes) {
+      if (!g)
+        g = grid(node, cell, d.grid_half, nullptr);
+      if (!made)
+        made = world_geometry(node);
+    }
+  }
+}
+
+void SceneWorld::vehicle_ground(std::shared_ptr<const cvc::nav::world_grid> &grid,
+                                std::shared_ptr<const cvc::height_field> &terrain) {
+  std::shared_ptr<const cvc::world::world_geometry> made;
+  ground_of_world_on(grid, made);
+  terrain = made ? made->terrain() : nullptr;
+}
+
+std::vector<std::string> SceneWorld::generated_nodes() const {
+  std::vector<std::string> out;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : _impl->generated)
+    out.push_back(g->node());
+  return out;
+}
+
+bool SceneWorld::generated_params(const std::string &node,
+                                  cvc::world::generated_world_params &out) const {
+  const impl &d = *_impl;
+  if (!d.app)
+    return false;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : d.generated) {
+    if (g->node() != node)
+      continue;
+    const std::shared_ptr<const cvc::world::generated_world> w = g->world();
+    if (!w)
+      return false;
+    out = w->params;
+    out.terrain_file = read_or<std::string>(*d.app, g->keys().terrain_file, std::string());
+    return true;
+  }
+  return false;
+}
+
+bool SceneWorld::follow_generated(const std::string &node,
+                                  const cvc::world::generated_world_params &params,
+                                  std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  if (!d.app)
+    return false;
+  for (const std::unique_ptr<GeneratedWorldRuntime> &g : d.generated) {
+    if (g->node() != node)
+      continue;
+    cvc::world::generated_world_params now;
+    if (generated_params(node, now) &&
+        generated_world_signature(now) == generated_world_signature(params))
+      return false;
+    cvc::app &app = *d.app;
+    const GeneratedWorldKeys &k = g->keys();
+    // A new preset quick-sets the counts, relief and water level when the keys are next read: let
+    // it, then set them as asked.
+    if (read_or<double>(app, k.preset, -1.0) != double(params.preset)) {
+      write<double>(app, k.preset, double(params.preset));
+      g->tick(warnings);
+    }
+    write<double>(app, k.seed, double(params.seed));
+    write<double>(app, k.half, params.half_m);
+    write<double>(app, k.trees, double(params.trees));
+    write<double>(app, k.rocks, double(params.rocks));
+    write<double>(app, k.buildings, double(params.buildings));
+    write<double>(app, k.tree_gen, double(params.tree_gen));
+    write<double>(app, k.amp, params.amp_m);
+    write<double>(app, k.water_level, params.water_level_m);
+    write<double>(app, k.ontology, double(params.ontology));
+    write<double>(app, k.edge, double(params.edge));
+    write<std::string>(app, k.terrain_gen, params.terrain);
+    write<std::string>(app, k.city, params.city);
+    write<std::string>(app, k.terrain_file, params.terrain_file);
+    write<std::string>(app, k.request, "regenerate");
+    return true;
+  }
+  return false;
 }
 
 bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *warnings) {

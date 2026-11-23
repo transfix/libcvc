@@ -1943,6 +1943,12 @@ A camera focus spends the maps on a sphere `lead` radii ahead of the focal point
 `ground` node's heightfield; `tick_scene` re-aims it every frame, and the maps re-bake once it has
 moved a fiftieth of its radius. Past it the scene is lit unshadowed.
 
+Between bakes (`update_interval` over 1) the maps hold every caster where it stood at the last bake.
+A caster that has moved since, such as a body on the water or a vehicle, is shaded as it stood
+then. So it never shadows itself where it has moved behind its baked surface; before, a bobbing
+crate flashed at the bake cadence. The shadows it throws, and the shade it receives, catch up at
+the next bake.
+
 **Physics.** A scene-level `physics:` block declares a rigid-body world
 (`cvc::physics::world`), and a geometry node's `body:` gives it a body there:
 
@@ -2853,6 +2859,7 @@ seeds its key only while the key is empty:
 |---|---|
 | `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
 | `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
+| `volumes` | published: the volumes `source.volume` may name, one per line, as it names them: each output of the document's `data:` entries that holds a volume (`data.<name>.<output>`), then the key `source.volume` names when it is not one of them; empty while it names none (a host that calls `setSource`). The component's Source combo picks from it, writing `source.volume` |
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
@@ -7949,7 +7956,9 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
   every frame, so a remote session is better off with half-blocks (`--graphics color`).
 - **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
-  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)).
+  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A
+  loaded document's `scene:`, `scenes:`, `data:`, `assets:` and `keys:` are dropped. The shell
+  design ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md)) proposes keeping them.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).

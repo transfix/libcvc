@@ -4082,6 +4082,56 @@ bool WorldVehicles::kinematics(std::uint64_t id, kinematic_drive &out) const {
   return false;
 }
 
+bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
+  const impl &d = *_impl;
+  if (!d.ready || !d.have_phase)
+    return false;
+  for (const impl::entity &e : d.ents) {
+    if (e.id != id)
+      continue;
+    const impl::fleet *f = d.fleet_of(e);
+    const int i = d.index(e);
+    cvc::nav::sim_world::plant_plan plan;
+    if (!f || i < 0 ||
+        !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four) ||
+          (f->plant == "jolt" && f->jolt)))
+      return false;
+    if (!f->sim->plant_plan_of(i, plan))
+      return false;
+    const vehicle_archetype *a = d.find(e.spec.archetype);
+    if (!a)
+      return false;
+    dynamic_drive k;
+    k.plant = f->plant;
+    k.preset = a->preset;
+    k.mass = e.desc.mass;
+    k.max_speed = e.desc.max_speed;
+    k.max_accel = e.desc.max_accel;
+    k.max_decel = e.desc.max_decel;
+    k.max_steer = e.desc.max_steer;
+    // As sim_world holds an override's command on a plant (in metres here).
+    k.lock = d.cfg.veh.delta_max;
+    if (plan.max_steer > 0.0f)
+      k.lock = std::min(k.lock, static_cast<double>(plan.max_steer));
+    k.vmax = plan.vmax / kScale;
+    k.a_hold = (plan.a_brake > 0.0f ? plan.a_brake : plan.a_max) / kScale;
+    k.tick_steps = d.every;
+    k.phase = d.phase;
+    if (f->four)
+      k.ground = f->four->ground_reference();
+    out = k;
+    return true;
+  }
+  return false;
+}
+
+double WorldVehicles::ground_height(double x, double y) const { return _impl->ground_height(x, y); }
+
+double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
+                             double x, double y) {
+  return ground_at(grid, terrain, x, y);
+}
+
 void WorldVehicles::set_tick(double seconds) {
   if (!(seconds > 0.0) || !std::isfinite(seconds))
     throw std::invalid_argument("WorldVehicles::set_tick: the tick must be finite and > 0");
