@@ -1219,6 +1219,36 @@ south-west to north-east), a body on it collides with the same triangles, and a 
 standing on it (`ground:` in `forest_trees`, `wave_sea`, `cloud_sky`) samples the triangle under
 each point.
 
+**Transforms.** A node's `transform: { position, rotation, scale }` places it in its parent's
+frame (the scene's, for a top-level node). Each key is optional:
+
+```yaml
+- node: crate
+  source: { box: 1 }
+  transform: { position: [4, 0, 0.5], rotation: [0, 0, 30], scale: 2 }
+```
+
+- `position` is `[x, y, z]`, in the parent's units.
+- `rotation` is `[rx, ry, rz]` in degrees, about the parent's axes and applied in that order: x
+  first, then y, then z. As a matrix on column vectors it is R = Rz(rz) Ry(ry) Rx(rx). Read the
+  other way, it is a turn of rz about z, then ry about the turned y, then rx about the twice-turned
+  x: the heading, pitch and roll of a vehicle's `pose` (below), in degrees here rather than
+  radians. A positive angle turns counter-clockwise seen from the axis's positive end, so
+  `rotation: [0, 0, 90]` takes +x to +y.
+- `scale` is one number (uniform) or `[sx, sy, sz]`. It applies along the parent's axes after the
+  rotation: a point p of the node lands at position + S R p. A uniform scale is the same in either
+  order. A non-uniform scale on a turned node stretches along the parent's axes, not the node's
+  own. A view entry's `transform:` (§5.18), glTF, USD and X3D stretch along the node's own axes
+  instead (position + R S p). To stretch a shape along its own axes and then turn it, scale a
+  child node and turn its parent.
+
+A running scene keeps each node's pose in keys under its path (`graphics.root.children.<node>`
+for a top-level one): `position`, `rotation` and `scale` as comma-separated numbers, in the units
+and order above, and `matrix`, the whole transform as 16 numbers, row-major. A program, a script
+or a host moves a node by writing them. Writing `rotation` sets the scale back to 1, so write
+`scale` after it. Writing `matrix` sets the pose exactly, so an outside simulation or an importer
+can give any orientation without Euler angles (a vehicle's `pose` takes the same `matrix`).
+
 **Repeated nodes.** `repeat:` on a node makes it a template, drawn as copies beside one another,
 as a widget's `repeat:` draws its instances (§6.5). A pool of markers sized by a list in state is
 one node:
@@ -4387,7 +4417,9 @@ An entry with `mode: replace` starts over from the node's own look: the entries 
 apply to the nodes it covers (`"*"`'s included), and the ones after it add to it as usual.
 
 An entry's `transform: { position, rotation, scale }` moves, turns and scales what it covers in
-that view, spelled as a node's `transform:` is (rotation in degrees; `scale` one number or three).
+that view, spelled as a node's `transform:` is (§5.4, Transforms: rotation in degrees, x then y
+then z; `scale` one number or three). Its scale, unlike a node's, stretches along the node's own
+axes before the rotation (position + R S p).
 It applies in the frame of the node the entry names, so `pack: { transform: { scale: 2 } }` draws
 the group `pack` twice its size about its own origin, children and all. A tag entry applies in each
 tagged node's frame, and `"*"` in world space. Transforms from several entries compose in order.
