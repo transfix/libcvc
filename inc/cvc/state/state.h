@@ -25,6 +25,7 @@
 #ifndef __CVC_STATE_H__
 #define __CVC_STATE_H__
 
+#include <atomic>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/chrono.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
@@ -36,6 +37,7 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
@@ -269,6 +271,18 @@ public:
 
   boost::posix_time::ptime lastMod();
 
+  // This node's revision: a count that moves each time its value or data changes, as
+  // valueChanged or dataChanged fires (a write of the same value fires nothing and leaves it). A
+  // reader that keeps the count it last read can tell, without copying the value or connecting a
+  // slot, whether the node was written since.
+  std::uint64_t revision() const { return _revision.load(std::memory_order_acquire); }
+
+  // The revision of this node's tree's shape: a count, shared by every node of the tree, that
+  // moves each time a node anywhere in the tree is added or removed, or a link is made, moved,
+  // cleared, or has its mode or writability changed. A value or data write leaves it alone. A
+  // lookup made earlier (cvc::state_key) still names what a new walk would find while it stands.
+  std::uint64_t shapeRevision() const { return _shape->load(std::memory_order_acquire); }
+
   std::string value();
   std::string valueTypeName();
   // Set the value's declared type name directly, WITHOUT changing the value or emitting a change
@@ -365,6 +379,7 @@ public:
       _value = str_value;
       _lastMod = boost::posix_time::microsec_clock::universal_time();
       _initialized = true;
+      _revision.fetch_add(1, std::memory_order_release);
       // Notify any threads waiting for value
       _valueCondition.notify_all();
     }
@@ -978,8 +993,16 @@ protected:
 
   static state_ptr instancePtr(app &ctx);
 
+  // revision(): moved, under _mutex, with each change of the value or data.
+  std::atomic<std::uint64_t> _revision{0};
+  // shapeRevision(): the tree's count, made by the root and shared by each child from its parent.
+  std::shared_ptr<std::atomic<std::uint64_t>> _shape;
+  // The tree changed shape (a child added or removed, a link changed).
+  void reshaped() const { _shape->fetch_add(1, std::memory_order_acq_rel); }
+
 private:
   friend class state_subtree_cursor; // snapshots a node's value and children under its lock
+  friend class state_key;            // holds a lookup while the tree's shape stands
 
   state(const state &);
 

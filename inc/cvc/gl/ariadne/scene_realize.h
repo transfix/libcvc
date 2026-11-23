@@ -31,6 +31,7 @@
 #include <cvc/gl/StageLighting.h>         // RealizedScene owns any StageLighting rigs
 #include <cvc/gl/physics_scene_binding.h> // RealizedScene draws its bodies through one
 #include <cvc/physics/world.h>            // RealizedScene::physics, the scene's world
+#include <cvc/state/state_key.h>          // the bindings' held lookups
 #include <functional>
 #include <map>
 #include <memory>
@@ -83,6 +84,12 @@ struct SceneDataBinding {
   // material: { texture: { stream } }: the terrain's live texture, bound again with each drawing
   // and ticked by tick_scene.
   std::shared_ptr<LiveTextureBinding> texture;
+  std::uint64_t draws = 0; // how many times it was drawn (sync_scene_data)
+  // sync_scene_data's lookups, held from frame to frame: the dataset's node, and its store's
+  // status and rev (under `store`, the node's name when the dataset's lookup last walked).
+  cvc::state_key data_key, status_key, rev_key;
+  std::uint64_t data_walks = ~std::uint64_t(0);
+  std::string store;
 };
 
 // A node whose material: { opacity: <path> } (or { bind, default }) follows state. tick_scene
@@ -94,6 +101,11 @@ struct SceneOpacityBinding {
   double fallback = 1.0;            // the opacity while the key is unset (or not a number)
   std::weak_ptr<GraphicsNode> node; // the node
   int data = -1;                    // a source: { data } node: its entry in data_nodes
+  // The key's lookup, held from frame to frame, and the opacity last applied (with the data
+  // node's drawing it went on): an unchanged opacity is not applied again.
+  cvc::state_key key;
+  double applied = -1.0;
+  std::uint64_t applied_draws = 0;
 };
 
 // Opt-in realize behaviour. The defaults are the four-argument realize_scene, exactly.

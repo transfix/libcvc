@@ -32,8 +32,7 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
     : SceneNode(ctx, statePath), m_name(name), m_transform(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldMatrix(vtkSmartPointer<vtkMatrix4x4>::New()),
       m_worldInverse(vtkSmartPointer<vtkMatrix4x4>::New()),
-      m_worldXf(vtkSmartPointer<vtkTransform>::New()),
-      m_vtkTransform(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
+      m_worldXf(vtkSmartPointer<vtkTransform>::New()), m_parent(nullptr), m_showBBox(false),
       m_bboxNode(std::make_shared<BBoxNode>(ctx)), m_showLabel(false), m_labelText(name),
       m_labelSize(14), m_labelActor(vtkSmartPointer<vtkActor2D>::New()), m_clipChildren(false),
       m_clipPlanes(vtkSmartPointer<vtkPlaneCollection>::New()) {
@@ -50,7 +49,6 @@ GraphicsNode::GraphicsNode(cvc::app &ctx, const std::string &statePath, const st
     m_pathScale = getState("scale").fullName();
     m_pathMatrix = getState("matrix").fullName();
   }
-  m_vtkTransform->SetMatrix(m_transform);
 
   // Initialize label color to white
   m_labelColor[0] = m_labelColor[1] = m_labelColor[2] = 1.0;
@@ -574,10 +572,6 @@ void GraphicsNode::updateTransform(bool isRoot) {
   // The cached inverse is now stale; recompute it lazily on the next query
   // rather than paying an Invert() here on every node of every pose cascade.
   m_worldInverseDirty = true;
-
-  // Update VTK transform wrapper
-  m_vtkTransform->SetMatrix(m_transform);
-  m_vtkTransform->Modified();
 
   // Apply to VTK prop (subclasses override this)
   applyTransformToVTK();

@@ -75,6 +75,7 @@ struct SceneRepeatBinding {
   cvc::ariadne::SceneNode spec; // the template, as declared
   cvc::ariadne::SceneRepeatCount source;
   std::string key; // Kind::key: the count's state path, resolved
+  cvc::state_key count_key; // its lookup, held from frame to frame
   bool top_level = true;
   std::weak_ptr<GraphicsNode> parent; // the copies' parent, below the top level
   struct Copy {
@@ -1142,8 +1143,10 @@ int repeat_count(RealizedScene &out, SceneRepeatBinding &b, std::vector<std::str
   case Kind::literal:
     return b.source.literal;
   case Kind::key:
-    if (out.app)
-      n = count_of(cvc::ariadne::read_or<std::string>(*out.app, b.key, std::string()));
+    if (out.app) {
+      b.count_key.set_path(b.key);
+      n = count_of(cvc::ariadne::read_or<std::string>(*out.app, b.count_key, std::string()));
+    }
     break;
   case Kind::expression:
     if (!out.options.count) {
@@ -2144,12 +2147,24 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
 void sync_scene_opacity(RealizedScene &realized) {
   if (!realized.app)
     return;
-  for (const SceneOpacityBinding &b : realized.opacity) {
+  for (SceneOpacityBinding &b : realized.opacity) {
     const std::shared_ptr<GraphicsNode> node = b.node.lock();
     if (!node)
       continue;
-    double a = cvc::ariadne::read_or<double>(*realized.app, b.source, b.fallback);
+    b.key.set_path(b.source);
+    double a = cvc::ariadne::read_or<double>(*realized.app, b.key, b.fallback);
     a = std::isfinite(a) ? std::clamp(a, 0.0, 1.0) : b.fallback;
+    // Applied already, to what is drawn now (a data node's drawing, an LOD ladder's rungs, the
+    // ones built after the realize too): nothing to write.
+    std::uint64_t draws = b.data >= 0 && b.data < static_cast<int>(realized.data_nodes.size())
+                              ? realized.data_nodes[b.data].draws
+                              : 0;
+    if (auto *lod = dynamic_cast<LodGraphicsNode *>(node.get()))
+      draws += static_cast<std::uint64_t>(lod->rungCount()) << 32;
+    if (a == b.applied && draws == b.applied_draws)
+      continue;
+    b.applied = a;
+    b.applied_draws = draws;
     // GeometryNode::setOpacity writes the node's opacity key, which an unchanged value leaves be.
     auto set = [a](GraphicsNode *g) {
       if (auto *mesh = dynamic_cast<GeometryNode *>(g))
@@ -2168,22 +2183,32 @@ void sync_scene_opacity(RealizedScene &realized) {
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings) {
   if (!realized.app || realized.data_nodes.empty())
     return 0;
-  cvc::state &root = cvc::state::instance(*realized.app);
+  cvc::app &app = *realized.app;
   int rebuilt = 0;
   for (SceneDataBinding &b : realized.data_nodes) {
-    cvc::state *node = root.findThroughLinks(b.path);
+    // The lookups are held from frame to frame; the store's name is the node's when its lookup
+    // last walked.
+    b.data_key.set_path(b.path);
+    cvc::state *node = b.data_key.read(app);
     if (!node)
       continue;
-    const std::string store = node->fullName();
-    cvc::state *status = root.findDescendant(store + cvc::state::SEPARATOR + "status");
+    if (b.data_key.walks() != b.data_walks) {
+      b.store = node->fullName();
+      b.status_key.set_path(b.store + cvc::state::SEPARATOR + "status");
+      b.rev_key.set_path(b.store + cvc::state::SEPARATOR + "rev");
+      b.data_walks = b.data_key.walks();
+    }
+    const std::string &store = b.store;
+    cvc::state *status = b.status_key.find(app);
     if (!status || status->value() != "ready")
       continue;
-    cvc::state *rev = root.findDescendant(store + cvc::state::SEPARATOR + "rev");
+    cvc::state *rev = b.rev_key.find(app);
     const std::string r = rev ? rev->value() : std::string();
     if (store == b.drawn_target && r == b.drawn_rev)
       continue;
     b.drawn_target = store; // first: a dataset that cannot be drawn is not retried every frame
     b.drawn_rev = r;
+    ++b.draws;
     double bounds[6];
     const bool drew = draw_dataset(realized, b, store, warnings, bounds);
     ++rebuilt;
@@ -2193,7 +2218,7 @@ int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings)
       req.precision(17);
       for (int k = 0; k < 6; ++k)
         req << (k ? " " : "") << bounds[k];
-      root(b.frame_key).value(req.str());
+      cvc::state::instance(app)(b.frame_key).value(req.str());
       b.framed = true;
     }
   }

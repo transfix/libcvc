@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <exception>
 #include <iomanip>
 #include <sstream>
@@ -100,6 +101,22 @@ template <typename T> T read_or(cvc::app &ctx, const std::string &path, const T 
   }
 }
 
+// read_or through a held lookup (cvc::state_key): a binding that reads its key every frame walks
+// the path only after the tree changed shape. The same read as read_or(ctx, key.path(), def).
+template <typename T> T read_or(cvc::app &ctx, cvc::state_key &key, const T &def) {
+  try {
+    cvc::state *eff = key.read(ctx);
+    if (!eff)
+      return def;
+    const std::string v = eff->value();
+    if (v.empty())
+      return def;
+    return boost::lexical_cast<T>(v);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+
 // Interpret a state string as a BOOLEAN 0/1, tolerantly. cvc::state backs a bool as an int
 // ("1"/"0"), but state_exec renders a bool as "true"/"false" — so an `init:`/action `(state-set
 // "flag" "true")` or a bool computed in a program would otherwise be UNREADABLE by an int-backed
@@ -154,6 +171,19 @@ inline int read_bool_or(cvc::app &ctx, const std::string &path, int def) {
   }
 }
 
+// read_bool_or through a held lookup (cvc::state_key).
+inline int read_bool_or(cvc::app &ctx, cvc::state_key &key, int def) {
+  try {
+    cvc::state *eff = key.read(ctx);
+    const std::string v = eff ? eff->value() : std::string();
+    if (v.empty())
+      return def;
+    return to_bool_int(v, def);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+
 // Write a state value; swallows read-only / unwritable (never throws into a frame).
 // A write equal to the current value is a no-op inside cvc::state (equality guard),
 // so re-writing every frame fires observers only on an actual change.
@@ -173,6 +203,14 @@ template <typename T> void write(cvc::app &ctx, const std::string &path, const T
   }
 }
 
+// write through a held lookup (cvc::state_key).
+template <typename T> void write(cvc::app &ctx, cvc::state_key &key, const T &v) {
+  try {
+    key.write(ctx).value(v);
+  } catch (const std::exception &) {
+  }
+}
+
 // One scene-node visibility binding (§9): mirror `source_path` (the resolved
 // `visible: <path>` bind) into `target_path` (the node's own `<node>.visible` key).
 // Both are absolute state paths resolved once, at realize time — no VTK node pointer
@@ -183,6 +221,12 @@ struct SceneVisibilityBinding {
   std::string source_path;     // resolved bind path some widget layer OWNS (+ seeds)
   std::string target_path;     // the node's `<node-state-path>.visible` key
   bool default_visible = true; // fallback ONLY while the source has no value yet
+  // The two paths' lookups, held from frame to frame (walked again when the tree changes shape),
+  // and what the binding last read and wrote: a frame in which neither node was written since
+  // reads and writes nothing.
+  mutable cvc::state_key source, target;
+  mutable bool mirrored = false; // the stamps below are from a mirror
+  mutable std::uint64_t source_walks = 0, source_seen = 0, target_walks = 0, target_seen = 0;
 };
 
 // Poll every visibility binding once and mirror source -> node `.visible`. Reads and
@@ -193,11 +237,32 @@ struct SceneVisibilityBinding {
 // written into the shared source key. Reading as int matches the 0/1 encoding the
 // widgets use; the write to the node key no-ops unless the value actually changed.
 // Call from the owner/render thread so the node's setVisible runs inline the frame.
+//
+// Each binding holds its two lookups (cvc::state_key) and the nodes' revisions as it last left
+// them, so a frame in which neither key was written (nor the tree changed shape) costs two
+// revision reads: no path walked, no value copied or written.
 inline void sync_scene_visibility(cvc::app &app,
                                   const std::vector<SceneVisibilityBinding> &bindings) {
   for (const SceneVisibilityBinding &b : bindings) {
-    const int v = read_bool_or(app, b.source_path, b.default_visible ? 1 : 0); // visible = a bool
-    write<int>(app, b.target_path, v);
+    b.source.set_path(b.source_path);
+    b.target.set_path(b.target_path);
+    try {
+      const cvc::state *src = b.source.read(app);
+      cvc::state &dst = b.target.write(app);
+      const std::uint64_t src_rev = src ? src->revision() : 0;
+      if (b.mirrored && b.source.walks() == b.source_walks && src_rev == b.source_seen &&
+          b.target.walks() == b.target_walks && dst.revision() == b.target_seen)
+        continue; // the same two nodes, neither written since this binding last mirrored them
+      const int v = read_bool_or(app, b.source, b.default_visible ? 1 : 0); // visible = a bool
+      dst.value(v);
+      b.mirrored = true;
+      b.source_walks = b.source.walks();
+      b.source_seen = src_rev;
+      b.target_walks = b.target.walks();
+      b.target_seen = dst.revision();
+    } catch (const std::exception &) {
+      b.mirrored = false; // read-only or unwritable: tried again next frame
+    }
   }
 }
 
@@ -217,6 +282,9 @@ struct SceneClipBinding {
   std::string target_path; // the node's `<node-state-path>.clip_planes` key
   std::vector<Plane> planes;
   std::string last; // the planes last written, so an unchanged frame writes nothing
+  // The lookups, held from frame to frame: the target's, and each plane's offset source's.
+  cvc::state_key target;
+  std::vector<cvc::state_key> offsets;
 };
 
 // The `clip_planes` encoding of `planes` with their offsets as given (`offsets[i]` for plane i):
@@ -242,17 +310,20 @@ inline std::string clip_planes_csv(const std::vector<SceneClipBinding::Plane> &p
 // its planes inline.
 inline void sync_scene_clip(cvc::app &app, std::vector<SceneClipBinding> &bindings) {
   for (SceneClipBinding &b : bindings) {
+    b.offsets.resize(b.planes.size());
     std::vector<double> offsets(b.planes.size());
     for (std::size_t i = 0; i < b.planes.size(); ++i) {
       const SceneClipBinding::Plane &p = b.planes[i];
+      b.offsets[i].set_path(p.offset_source);
       const double v =
-          p.offset_source.empty() ? p.offset : read_or<double>(app, p.offset_source, p.offset);
+          p.offset_source.empty() ? p.offset : read_or<double>(app, b.offsets[i], p.offset);
       offsets[i] = std::isfinite(v) ? v : p.offset;
     }
     std::string csv = clip_planes_csv(b.planes, offsets);
     if (csv == b.last)
       continue;
-    write<std::string>(app, b.target_path, csv);
+    b.target.set_path(b.target_path);
+    write<std::string>(app, b.target, csv);
     b.last = std::move(csv);
   }
 }

@@ -11,6 +11,8 @@
 // The world half of a scene, with no renderer (scene_world.h). The body rules were cvcGL's
 // realize_physics; cvcGL now builds its world here too.
 
+#include "published_key.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -35,6 +37,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/world_geometry.h>
 #include <deque>
@@ -319,7 +322,21 @@ struct SceneWorld::impl {
   std::string refused;     // a source key's value that names no world, warned about once
   std::string enabled_key; // <stats_key>.enabled, or ""
   std::string hash_key;    // <stats_key>.hash, or "": "1" publishes the state hash
+  std::string rate_key;    // <stats_key>.telemetry_hz, or "": the telemetry's rate (world seconds)
   std::deque<double> step_history;
+  std::deque<std::string> step_text; // step_history as the history line writes it
+  // The telemetry's keys, held from frame to frame (published_key): what each frame that steps
+  // writes, and the lines written at the telemetry rate.
+  struct telemetry {
+    published_key tick, time, step_ms, bodies, active_bodies, contact_events, saturated, hash;
+    published_key step_ms_history, nodes, vehicles;
+  } out;
+  cvc::state_key enabled_in, hash_in, rate_in; // the keys read each frame
+  // The telemetry's period (telemetry_due) it was last written in at the rate, and the world tick
+  // it was last written at in full (at the rate, or where the world stopped).
+  std::uint64_t telemetry_period = std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t telemetry_tick = std::numeric_limits<std::uint64_t>::max();
+  double followed_at = std::numeric_limits<double>::quiet_NaN(); // the clock at the last follow
   // The vehicles (bind_vehicles), on the grid `ground_grid` of the world on.
   std::unique_ptr<WorldVehicles> vehicles;
   std::shared_ptr<const cvc::nav::world_grid> ground_grid;
@@ -420,14 +437,106 @@ struct SceneWorld::impl {
       bodies.push_back(b);
     }
   }
-  bool stepping() const {
+  bool stepping() {
     if (enabled_key.empty() || !app)
       return true;
-    cvc::state *k = cvc::state::instance(*app).findDescendant(enabled_key);
+    enabled_in.set_path(enabled_key);
+    cvc::state *k = enabled_in.find(*app);
     if (!k)
       return true;
     const std::string v = k->value();
     return !(v == "0" || v == "false");
+  }
+
+  // Whether this frame's steps crossed into a new period of the telemetry rate (`<stats>.
+  // telemetry_hz`, kSceneTelemetryHz while it is unset or not a number >= 0; 0: every frame): a
+  // period is round(1 / (rate x fixed_dt)) steps, counted from tick 0, so the lines are written at
+  // the same ticks at any frame rate.
+  bool telemetry_due() {
+    double hz = kSceneTelemetryHz;
+    if (!rate_key.empty() && app) {
+      rate_in.set_path(rate_key);
+      const double v = read_or<double>(*app, rate_in, kSceneTelemetryHz);
+      if (std::isfinite(v) && v >= 0.0)
+        hz = v;
+    }
+    if (hz <= 0.0)
+      return true;
+    const double steps = std::round(1.0 / (hz * world->config().fixed_dt));
+    const std::uint64_t every = steps >= 1.0 ? static_cast<std::uint64_t>(steps) : 1;
+    const std::uint64_t period = world->tick() / every;
+    if (period == telemetry_period)
+      return false;
+    telemetry_period = period;
+    return true;
+  }
+
+  // The telemetry: what each frame that steps writes, and with `lines` the rest (its lines, at the
+  // telemetry rate). Each key holds its lookup and what it last wrote, so a frame walks no paths
+  // and writes only what changed.
+  void publish_stats(bool lines) {
+    if (stats.empty() || !app)
+      return;
+    if (out.tick.path().empty()) {
+      const auto at = [&](const char *leaf) { return stats + "." + leaf; };
+      out.tick.set_path(at("tick"));
+      out.time.set_path(at("time"));
+      out.step_ms.set_path(at("step_ms"));
+      out.bodies.set_path(at("bodies"));
+      out.active_bodies.set_path(at("active_bodies"));
+      out.contact_events.set_path(at("contact_events"));
+      out.saturated.set_path(at("saturated"));
+      out.hash.set_path(at("hash"));
+      out.step_ms_history.set_path(at("step_ms_history"));
+      out.nodes.set_path(at("nodes"));
+      out.vehicles.set_path(at("vehicles"));
+    }
+    cvc::app &a = *app;
+    out.tick.integer(a, static_cast<long long>(world->tick()));
+    out.time.number(a, world->time(), 17);
+    out.step_ms.number(a, last.step_ms, 17);
+    out.bodies.integer(a, static_cast<long long>(world->body_count()));
+    out.active_bodies.integer(a, static_cast<long long>(last.active_bodies));
+    out.contact_events.integer(a, static_cast<long long>(last.contacts));
+    out.saturated.text(a, last.saturated ? "true" : "false");
+    // The world's state hash (physics::world::state_hash, 16 hex digits), while <stats_key>.hash
+    // is 1: it saves the whole world, so a test or a check asks for it.
+    if (!hash_key.empty()) {
+      hash_in.set_path(hash_key);
+      if (cvc::state *h = hash_in.find(a); h && h->value() == "1") {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%016llx",
+                      static_cast<unsigned long long>(world->state_hash()));
+        out.hash.text(a, buf);
+      }
+    }
+    if (!lines)
+      return;
+    std::string history;
+    for (const std::string &ms : step_text)
+      history += (history.empty() ? "" : ",") + ms;
+    out.step_ms_history.text(a, history);
+    // A line per node with bodies, in the order they were made: its bodies and the ones awake.
+    std::vector<std::string> order;
+    std::map<std::string, std::pair<std::size_t, std::size_t>> per;
+    for (const SceneWorldBody &b : bodies) {
+      auto it = per.find(b.node);
+      if (it == per.end()) {
+        order.push_back(b.node);
+        it = per.emplace(b.node, std::make_pair(std::size_t(0), std::size_t(0))).first;
+      }
+      ++it->second.first;
+      if (b.moves && world->state(b.id).active)
+        ++it->second.second;
+    }
+    std::string nodes;
+    for (const std::string &node : order)
+      nodes += (nodes.empty() ? "" : "\n") + node + "  " + std::to_string(per[node].first) + "  " +
+               std::to_string(per[node].second);
+    out.nodes.text(a, nodes);
+    // A line per vehicle: its speed, power, energy and the wheels' load.
+    if (vehicles)
+      out.vehicles.text(a, vehicles->stats_lines());
   }
 
   // grid()'s last grid per node, and what it was made from.
@@ -655,9 +764,13 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     out->_impl->stats = stats_key + ".stats";
     out->_impl->enabled_key = stats_key + ".enabled";
     out->_impl->hash_key = stats_key + ".hash";
+    out->_impl->rate_key = stats_key + ".telemetry_hz";
     cvc::state &enabled = cvc::state::instance(app)(out->_impl->enabled_key);
     if (enabled.value().empty())
       enabled.value("1");
+    cvc::state &rate = cvc::state::instance(app)(out->_impl->rate_key);
+    if (rate.value().empty())
+      rate.value(num(kSceneTelemetryHz));
   }
   try {
     out->_impl->world = std::make_unique<ph::world>(cfg);
@@ -911,6 +1024,8 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
+  d.step_text.clear();
+  d.telemetry_period = std::numeric_limits<std::uint64_t>::max(); // the restarted world's at once
   d.wind_field = ph::field_id{}; // the wind's field went with the old world: sync adds it again
   d.wind_applied.reset();
   d.wake_period = std::numeric_limits<std::uint64_t>::max();
@@ -1663,7 +1778,18 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   }
   const std::uint64_t last_tick = d.follower->last_tick();
   const std::uint64_t n = d.follower->take(clock);
-  if (n > 0 && !d.stepping())
+  // A world that stops (physics off, or the clock held where it was) shows the telemetry of where
+  // it stopped: what the rate left unwritten since, written once.
+  const bool held = clock.t() == d.followed_at;
+  d.followed_at = clock.t();
+  const bool off = n > 0 && !d.stepping();
+  if ((off || (n == 0 && held)) && d.telemetry_tick != d.world->tick()) {
+    if (d.vehicles)
+      d.vehicles->publish(true);
+    d.publish_stats(true);
+    d.telemetry_tick = d.world->tick();
+  }
+  if (off)
     return 0; // physics off: the steps due are let go, and the world holds still
   // The clock tick each step ends on, for the work keyed to the clock rather than to how many
   // steps a frame took (the rain's friction): the first tick a step falls due on after the last,
@@ -1717,16 +1843,23 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (after_each)
       after_each(tick);
     d.step_history.push_back(d.last.step_ms);
-    if (d.step_history.size() > 120)
+    d.step_text.push_back(num(d.last.step_ms));
+    if (d.step_history.size() > 120) {
       d.step_history.pop_front();
+      d.step_text.pop_front();
+    }
     // A view draws between the last two ticks, not the first and the last of a batch.
     if (after_step && i + 1 >= n)
       after_step();
   }
   if (n > 0) {
-    publish_stats();
-    if (d.vehicles)
-      d.vehicles->publish();
+    // What changes every step at the telemetry rate (telemetry_due), the rest each frame; the
+    // vehicles' list (a spawn, a removal) at once, with the lines that list them.
+    const bool due = d.telemetry_due();
+    const bool listed = d.vehicles && d.vehicles->publish(due);
+    d.publish_stats(due || listed);
+    if (due)
+      d.telemetry_tick = d.world->tick();
     for (const auto &b : d.boats)
       b->publish();
     for (const auto &wf : d.weathers)
@@ -1735,56 +1868,7 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   return n;
 }
 
-void SceneWorld::publish_stats() {
-  impl &d = *_impl;
-  if (d.stats.empty() || !d.app)
-    return;
-  cvc::state &root = cvc::state::instance(*d.app);
-  const auto put = [&](const char *leaf, const std::string &v) {
-    root(d.stats + "." + leaf).value(v);
-  };
-  put("tick", std::to_string(d.world->tick()));
-  put("time", num(d.world->time()));
-  put("step_ms", num(d.last.step_ms));
-  put("bodies", std::to_string(d.world->body_count()));
-  put("active_bodies", std::to_string(d.last.active_bodies));
-  put("contact_events", std::to_string(d.last.contacts));
-  put("saturated", d.last.saturated ? "true" : "false");
-  std::string history;
-  for (const double ms : d.step_history)
-    history += (history.empty() ? "" : ",") + num(ms);
-  put("step_ms_history", history);
-  // A line per node with bodies, in the order they were made: its bodies and the ones awake.
-  std::vector<std::string> order;
-  std::map<std::string, std::pair<std::size_t, std::size_t>> per;
-  for (const SceneWorldBody &b : d.bodies) {
-    auto it = per.find(b.node);
-    if (it == per.end()) {
-      order.push_back(b.node);
-      it = per.emplace(b.node, std::make_pair(std::size_t(0), std::size_t(0))).first;
-    }
-    ++it->second.first;
-    if (b.moves && d.world->state(b.id).active)
-      ++it->second.second;
-  }
-  std::string nodes;
-  for (const std::string &node : order)
-    nodes += (nodes.empty() ? "" : "\n") + node + "  " + std::to_string(per[node].first) + "  " +
-             std::to_string(per[node].second);
-  put("nodes", nodes);
-  // A line per vehicle: its speed, power, energy and the wheels' load.
-  if (d.vehicles)
-    put("vehicles", d.vehicles->stats_lines());
-  // The world's state hash (physics::world::state_hash, 16 hex digits), while <stats_key>.hash is
-  // 1: it saves the whole world, so a test or a check asks for it.
-  if (!d.hash_key.empty())
-    if (cvc::state *h = root.findDescendant(d.hash_key); h && h->value() == "1") {
-      char buf[24];
-      std::snprintf(buf, sizeof(buf), "%016llx",
-                    static_cast<unsigned long long>(d.world->state_hash()));
-      put("hash", buf);
-    }
-}
+void SceneWorld::publish_stats() { _impl->publish_stats(true); }
 
 } // namespace ariadne
 } // namespace cvc

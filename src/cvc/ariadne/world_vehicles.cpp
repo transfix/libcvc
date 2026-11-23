@@ -13,6 +13,8 @@
   Lesser General Public License for more details.
 */
 
+#include "published_key.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -37,10 +39,12 @@
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <cvc/volume/volume.h>
 #include <cvc/world/world_geometry.h>
 #include <exception>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -912,6 +916,10 @@ struct WorldVehicles::impl {
     // was spawned from; and its last record in each packed value (its own table's, the poses
     // table's).
     std::array<std::string, 4> seen_pose;
+    // Those four bases' `pose` nodes' lookups, held from step to step (paths set once:
+    // pose_paths); a base with no path is not read.
+    std::array<cvc::state_key, 4> pose_base;
+    bool pose_paths = false;
     std::array<entity_pose, 2> seen_packed;
     std::array<bool, 2> have_packed{false, false};
     std::string table_key; // the poses table's entry it was spawned from ("" none)
@@ -958,6 +966,34 @@ struct WorldVehicles::impl {
   std::uint64_t rev = 0;
   std::string status;
   std::set<std::string> published; // the entity ids with keys
+  // Each listed entity's keys (publish_entities), held, by id; the list's; and the list and rev as
+  // they were last written.
+  struct entity_keys {
+    published_key placed, x, y, z, yaw, speed, power_kw, energy_wh, wh_per_km, distance, wheel_load,
+        aero_force, gear, steer, accel, by;
+    void set_paths(const std::string &at) {
+      placed.set_path(at + "placed");
+      x.set_path(at + "x");
+      y.set_path(at + "y");
+      z.set_path(at + "z");
+      yaw.set_path(at + "yaw");
+      speed.set_path(at + "speed");
+      power_kw.set_path(at + "power_kw");
+      energy_wh.set_path(at + "energy_wh");
+      wh_per_km.set_path(at + "wh_per_km");
+      distance.set_path(at + "distance");
+      wheel_load.set_path(at + "wheel_load");
+      aero_force.set_path(at + "aero_force");
+      gear.set_path(at + "gear");
+      steer.set_path(at + "command.steer");
+      accel.set_path(at + "command.accel");
+      by.set_path(at + "command.by");
+    }
+  };
+  std::map<std::uint64_t, entity_keys> entity_out;
+  published_key ids_out, count_out, summary_out, rev_out;
+  std::string listed_ids;
+  std::uint64_t listed_rev = std::numeric_limits<std::uint64_t>::max();
 
   // The request keys as last seen (a change is a request).
   std::string seen_spawn, seen_remove, seen_clear, seen_sel;
@@ -976,6 +1012,18 @@ struct WorldVehicles::impl {
   std::string pkey;            // the poses table (world: vehicles: poses:), "" none
   double pose_jump = 20.0;     // m: a pose farther from the last is taken at once
   std::string seen_own_packed, seen_table_packed; // the packed values as last read
+  // And their lookups, held from step to step, with the key's walks and the node's revision at the
+  // last read: a value not written since is not read again.
+  struct packed_in {
+    cvc::state_key key;
+    std::uint64_t walks = ~std::uint64_t(0), rev = 0;
+  };
+  packed_in own_packed, table_packed;
+  // sync_pose_table's last scan: the entries' keys it read (held, with their revisions then), the
+  // tree's shape before it and the entities' rev after it.
+  std::vector<std::pair<cvc::state::state_ptr, std::uint64_t>> table_read;
+  bool table_scanned = false;
+  std::uint64_t table_shape = 0, table_rev = 0;
   // The table's entries a spawn refused, by key: what they asked for then (not asked again until
   // it changes).
   std::map<std::string, std::string> table_refused;
@@ -1869,11 +1917,16 @@ struct WorldVehicles::impl {
   // A packed value's records (pack_poses) under `table`.poses, read when it changed: each record
   // that changed is a new pose for the entity it names (by id in the entities' own table, by
   // posed_by_key in the poses table).
-  void read_packed(cvc::state &r, const std::string &table, std::string &seen, std::size_t slot,
-                   std::uint64_t now) {
+  void read_packed(cvc::state &r, const std::string &table, std::string &seen, packed_in &in,
+                   std::size_t slot, std::uint64_t now) {
     if (table.empty())
       return;
-    cvc::state *n = r.findDescendant(table + cvc::state::SEPARATOR + "poses");
+    in.key.set_path(table + cvc::state::SEPARATOR + "poses");
+    cvc::state *n = in.key.find(r);
+    if (n && in.key.walks() == in.walks && n->revision() == in.rev)
+      return; // not written since
+    in.walks = n ? in.key.walks() : ~std::uint64_t(0);
+    in.rev = n ? n->revision() : 0;
     std::string text = n ? n->value() : std::string();
     if (text == seen)
       return;
@@ -1906,21 +1959,27 @@ struct WorldVehicles::impl {
     for (entity &e : ents) {
       if (!e.posed)
         continue;
-      const std::string id = std::to_string(e.id);
-      const auto in_table = [&](const std::string &key) {
-        return pkey.empty() || key.empty() ? std::string() : pkey + cvc::state::SEPARATOR + key;
-      };
-      const bool by_name = cvc::state::isValidStateName(e.spec.name) && e.spec.name != id;
-      const bool by_entry =
-          !e.table_key.empty() && e.table_key != id && (!by_name || e.table_key != e.spec.name);
-      const std::string bases[4] = {ekey.empty() ? std::string()
-                                                 : ekey + cvc::state::SEPARATOR + id,
-                                    in_table(id), by_name ? in_table(e.spec.name) : std::string(),
-                                    by_entry ? in_table(e.table_key) : std::string()};
+      if (!e.pose_paths) { // its four bases: its own, and the table's by id, by name, by entry
+        const std::string id = std::to_string(e.id);
+        const auto in_table = [&](const std::string &key) {
+          return pkey.empty() || key.empty() ? std::string() : pkey + cvc::state::SEPARATOR + key;
+        };
+        const bool by_name = cvc::state::isValidStateName(e.spec.name) && e.spec.name != id;
+        const bool by_entry =
+            !e.table_key.empty() && e.table_key != id && (!by_name || e.table_key != e.spec.name);
+        const std::string bases[4] = {ekey.empty() ? std::string()
+                                                   : ekey + cvc::state::SEPARATOR + id,
+                                      in_table(id), by_name ? in_table(e.spec.name) : std::string(),
+                                      by_entry ? in_table(e.table_key) : std::string()};
+        for (std::size_t k = 0; k < 4; ++k)
+          e.pose_base[k].set_path(bases[k].empty() ? std::string()
+                                                   : bases[k] + cvc::state::SEPARATOR + "pose");
+        e.pose_paths = true;
+      }
       for (std::size_t k = 0; k < 4; ++k) {
-        if (bases[k].empty())
+        if (e.pose_base[k].path().empty())
           continue;
-        cvc::state *base = r->findDescendant(bases[k] + cvc::state::SEPARATOR + "pose");
+        cvc::state *base = e.pose_base[k].find(*r);
         std::array<std::string, kPoseKeys> v;
         std::string sig;
         if (base)
@@ -1937,8 +1996,8 @@ struct WorldVehicles::impl {
           take_pose(e, p, now);
       }
     }
-    read_packed(*r, ekey, seen_own_packed, 0, now);
-    read_packed(*r, pkey, seen_table_packed, 1, now);
+    read_packed(*r, ekey, seen_own_packed, own_packed, 0, now);
+    read_packed(*r, pkey, seen_table_packed, table_packed, 1, now);
   }
 
   // Before each physics step: the poses given since the last (the keys, the packed values, then
@@ -1981,6 +2040,15 @@ struct WorldVehicles::impl {
     cvc::state *r = root();
     if (!r || pkey.empty())
       return;
+    // Nothing to do while the table asks for what it asked at the last scan: no entry's keys
+    // written since, no entry added or removed (the tree's shape), and the entities as that scan
+    // left them (rev: a removal elsewhere is spawned again).
+    if (table_scanned && r->shapeRevision() == table_shape && rev == table_rev &&
+        std::all_of(table_read.begin(), table_read.end(),
+                    [](const auto &l) { return l.first->revision() == l.second; }))
+      return;
+    const std::uint64_t shape = r->shapeRevision();
+    table_read.clear();
     std::map<std::string, entity_spec> want;
     std::map<std::string, std::string> asked; // each entry's request, as text
     if (cvc::state *t = r->findDescendant(pkey))
@@ -1989,8 +2057,11 @@ struct WorldVehicles::impl {
           continue;
         cvc::state *c = t->findDescendant(key);
         const auto leaf = [&](const char *name) {
-          cvc::state *l = c ? c->findDescendant(name) : nullptr;
-          return l ? l->value() : std::string();
+          const cvc::state::state_ptr l = c ? c->findDescendantShared(name) : nullptr;
+          if (!l)
+            return std::string();
+          table_read.emplace_back(l, l->revision()); // before the value: a write between is seen
+          return l->value();
         };
         entity_spec s;
         s.archetype = leaf("archetype");
@@ -2041,6 +2112,9 @@ struct WorldVehicles::impl {
       made->table_key = key;
       made->table_ask = asked[key];
     }
+    table_scanned = true;
+    table_shape = shape;
+    table_rev = rev;
   }
 
   // Every entity out of the navigators (its vehicle out of the world, unless the world is gone).
@@ -2474,15 +2548,15 @@ struct WorldVehicles::impl {
     for (std::size_t gi = 0; gi < groups.size(); ++gi) {
       fleet_group &g = groups[gi];
       const std::string at = "fleets." + g.start.fleet + ".";
-      if (const std::string r = get(at + "restart.request"); r != g.seen_restart) {
+      if (const std::string r = got(at + "restart.request"); r != g.seen_restart) {
         g.seen_restart = r;
         restart_group(gi, false);
       }
-      if (const std::string r = get(at + "reseed.request"); r != g.seen_reseed) {
+      if (const std::string r = got(at + "reseed.request"); r != g.seen_reseed) {
         g.seen_reseed = r;
         restart_group(gi, true);
       }
-      if (const std::string p = get(at + "policy"); p != g.seen_policy) {
+      if (const std::string p = got(at + "policy"); p != g.seen_policy) {
         g.seen_policy = p;
         if (p != g.policy) {
           g.policy = p;
@@ -2491,7 +2565,7 @@ struct WorldVehicles::impl {
         }
       }
       poll_policy(gi);
-      const std::string s = get(at + "sense"), b = get(at + "belief");
+      const std::string s = got(at + "sense"), b = got(at + "belief");
       if (s != g.seen_sense || b != g.seen_belief) {
         g.seen_sense = s;
         g.seen_belief = b;
@@ -2506,7 +2580,7 @@ struct WorldVehicles::impl {
         }
       }
       // Its plants: its vehicles leave their navigators and start at rest on the new ones.
-      if (const std::string p = get(at + "plant"); p != g.seen_plant) {
+      if (const std::string p = got(at + "plant"); p != g.seen_plant) {
         g.seen_plant = p;
         fleet_plants want;
         const int teams = g.laid_out ? static_cast<int>(g.rally.size()) : g.start.rally;
@@ -2517,7 +2591,7 @@ struct WorldVehicles::impl {
           rebuild_navigators(gi);
         }
       }
-      if (const std::string m = get(at + "metric"); m != g.seen_metric) {
+      if (const std::string m = got(at + "metric"); m != g.seen_metric) {
         g.seen_metric = m;
         if (fleet_metric_known(m) && m != g.metric) {
           g.metric = m;
@@ -2525,8 +2599,8 @@ struct WorldVehicles::impl {
         }
       }
       for (std::size_t t = 0; t < g.rally.size() && t < g.seen_rally.size(); ++t) {
-        const std::string xs = get(at + "rally." + std::to_string(t) + ".x"),
-                          ys = get(at + "rally." + std::to_string(t) + ".y");
+        const std::string xs = got(at + "rally." + std::to_string(t) + ".x"),
+                          ys = got(at + "rally." + std::to_string(t) + ".y");
         if (xs + "|" + ys == g.seen_rally[t])
           continue;
         g.seen_rally[t] = xs + "|" + ys;
@@ -2542,13 +2616,15 @@ struct WorldVehicles::impl {
 
   // Each fleet's poses (poses()) and its counts: vehicles.fleets.names, and
   // vehicles.fleets.<name>.{count, placed, arrived, teams, status, seed, tick, bounds, ...}.
-  void publish_groups() {
+  // `with_keys`: the fleets' keys too (the world's telemetry rate, or the entities changed); the
+  // poses every frame, which the views draw.
+  void publish_groups(bool with_keys) {
     if (groups.empty()) {
       if (std::atomic_load(&book))
         std::atomic_store(&book, std::shared_ptr<const pose_book>());
       return;
     }
-    const bool keys = !vkey.empty() && root();
+    const bool keys = with_keys && !vkey.empty() && root();
     auto next = std::make_shared<pose_book>();
     const std::uint64_t tick = world->tick();
     std::string names;
@@ -3016,6 +3092,18 @@ struct WorldVehicles::impl {
     cvc::state *k = r->findDescendant(vkey + cvc::state::SEPARATOR + leaf);
     return k ? k->value() : std::string();
   }
+  // get() for the keys poll() reads each frame: their lookups held from frame to frame (the
+  // stepping thread's, as poll() is).
+  std::map<std::string, cvc::state_key, std::less<>> polled;
+  std::string got(const std::string &leaf) {
+    if (!app || vkey.empty())
+      return std::string();
+    auto it = polled.find(leaf);
+    if (it == polled.end())
+      it = polled.emplace(leaf, cvc::state_key(vkey + cvc::state::SEPARATOR + leaf)).first;
+    cvc::state *k = it->second.find(*app);
+    return k ? k->value() : std::string();
+  }
   void put(const std::string &key, const std::string &value) {
     if (cvc::state *r = root())
       (*r)(key).value(value);
@@ -3257,23 +3345,40 @@ struct WorldVehicles::impl {
     return out;
   }
 
-  void publish_entities() {
-    publish_groups();
+  // The entities' keys. Each listed entity's identity once, when it is listed; the rest of its keys
+  // (placed, its pose, speed and books, and the command it took) then, and after that when
+  // `telemetry` says (the world's telemetry rate) or the entities changed (rev). The list (ids,
+  // count, summary, rev) when it changed, and at the rate (the summary has the speeds). Each key
+  // holds its lookup and what it last wrote (published_key): only what changed is written. True
+  // when the listed entities (ids) changed.
+  bool publish_entities(bool telemetry) {
+    const bool moved = rev != listed_rev; // spawned, placed, removed, ...
+    publish_groups(telemetry || moved);
     if (ekey.empty() || !root())
-      return;
+      return false;
     const std::set<std::uint64_t> keyed = keyed_ids();
-    std::set<std::string> now;
-    std::string ids, summary;
+    std::string ids;
+    std::vector<const entity *> listed;
     std::vector<int> quiet_count(groups.size(), 0);
     for (const entity &e : ents) {
       if (quiet(e, keyed)) {
         ++quiet_count[static_cast<std::size_t>(e.group)];
         continue;
       }
+      listed.push_back(&e);
+      ids += (ids.empty() ? "" : ",") + std::to_string(e.id);
+    }
+    const bool relisted = ids != listed_ids;
+    if (!telemetry && !moved && !relisted)
+      return false; // nothing that is written between the rate's frames changed
+    cvc::app &a = *app;
+    std::set<std::string> now;
+    std::string summary;
+    for (const entity *ep : listed) {
+      const entity &e = *ep;
       const entity_info in = info(e);
       const std::string id = std::to_string(e.id);
       now.insert(id);
-      ids += (ids.empty() ? "" : ",") + id;
       const std::string at = ekey + "." + id + ".";
       if (!published.count(id)) { // the identity once; the pose and telemetry every publish
         put(at + "archetype", e.spec.archetype);
@@ -3288,23 +3393,27 @@ struct WorldVehicles::impl {
         put(at + "max_speed", num(e.desc.max_speed));
         for (const auto &[k, v] : e.spec.metadata)
           put(at + "metadata." + k, v);
+        entity_out.erase(e.id); // its keys were made again: written again
       }
-      put(at + "placed", in.placed ? "1" : "0");
-      put(at + "x", num(in.x));
-      put(at + "y", num(in.y));
-      put(at + "z", num(in.z));
-      put(at + "yaw", num(in.yaw));
-      put(at + "speed", num(in.speed));
-      put(at + "power_kw", num(in.power_kw));
-      put(at + "energy_wh", num(in.energy_wh));
-      put(at + "wh_per_km", num(in.wh_per_km));
-      put(at + "distance", num(in.distance));
-      put(at + "wheel_load", num(in.wheel_load));
-      put(at + "aero_force", num(in.aero_force));
-      put(at + "gear", std::to_string(in.gear));
-      put(at + "command.steer", num(in.command_steer));
-      put(at + "command.accel", num(in.command_accel));
-      put(at + "command.by", e.command_by);
+      entity_keys &k = entity_out[e.id];
+      if (k.placed.path().empty())
+        k.set_paths(at);
+      k.placed.text(a, in.placed ? "1" : "0");
+      k.x.number(a, in.x);
+      k.y.number(a, in.y);
+      k.z.number(a, in.z);
+      k.yaw.number(a, in.yaw);
+      k.speed.number(a, in.speed);
+      k.power_kw.number(a, in.power_kw);
+      k.energy_wh.number(a, in.energy_wh);
+      k.wh_per_km.number(a, in.wh_per_km);
+      k.distance.number(a, in.distance);
+      k.wheel_load.number(a, in.wheel_load);
+      k.aero_force.number(a, in.aero_force);
+      k.gear.integer(a, in.gear);
+      k.steer.number(a, in.command_steer);
+      k.accel.number(a, in.command_accel);
+      k.by.text(a, e.command_by);
       summary += (summary.empty() ? "" : "\n") + id + "  " + e.spec.name + "  " + e.spec.archetype +
                  "  " + e.spec.controller + "  " +
                  (in.placed ? fixed(in.speed, 1) + " m/s" : std::string("waiting"));
@@ -3313,14 +3422,25 @@ struct WorldVehicles::impl {
       summary += (summary.empty() ? "" : "\n") + q;
     cvc::state *r = root();
     for (const std::string &id : published)
-      if (!now.count(id))
+      if (!now.count(id)) {
         if (cvc::state *t = r->findDescendant(ekey))
           t->removeChild(id);
+        entity_out.erase(std::stoull(id));
+      }
     published = now;
-    put(ekey + ".ids", ids);
-    put(ekey + ".count", std::to_string(ents.size()));
-    put(ekey + ".summary", summary);
-    put(ekey + ".rev", std::to_string(rev));
+    if (ids_out.path().empty()) {
+      ids_out.set_path(ekey + ".ids");
+      count_out.set_path(ekey + ".count");
+      summary_out.set_path(ekey + ".summary");
+      rev_out.set_path(ekey + ".rev");
+    }
+    ids_out.text(a, ids);
+    count_out.integer(a, static_cast<long long>(ents.size()));
+    summary_out.text(a, summary);
+    rev_out.integer(a, static_cast<long long>(rev)); // last: a watcher of rev sees the rest written
+    listed_ids = std::move(ids);
+    listed_rev = rev;
+    return relisted;
   }
 };
 
@@ -3358,7 +3478,7 @@ WorldVehicles::WorldVehicles(cvc::app *app, ph::world &world,
     d.put(d.vkey + ".status", d.status);
     d.publish_selection();
   }
-  d.publish_entities();
+  d.publish_entities(true);
 }
 
 WorldVehicles::~WorldVehicles() {
@@ -3691,7 +3811,12 @@ bool WorldVehicles::pose(std::uint64_t id, entity_pose &out) const {
   return false;
 }
 
-void WorldVehicles::set_poses_key(std::string key) { _impl->pkey = std::move(key); }
+void WorldVehicles::set_poses_key(std::string key) {
+  _impl->pkey = std::move(key);
+  _impl->table_scanned = false;
+  for (impl::entity &e : _impl->ents)
+    e.pose_paths = false; // their table's bases move with it
+}
 const std::string &WorldVehicles::poses_key() const { return _impl->pkey; }
 
 void WorldVehicles::set_pose_jump(double metres) {
@@ -3715,26 +3840,26 @@ void WorldVehicles::poll() {
   d.sync_pose_table(*this);
   if (!d.root() || d.vkey.empty())
     return;
-  const std::string sel = d.get("selected") + "|" + d.get("spawn.mass") + "|" +
-                          d.get("spawn.mass_t") + "|" + d.get("spawn.max_speed") + "|" +
-                          d.get("spawn.max_speed_t");
+  const std::string sel = d.got("selected") + "|" + d.got("spawn.mass") + "|" +
+                          d.got("spawn.mass_t") + "|" + d.got("spawn.max_speed") + "|" +
+                          d.got("spawn.max_speed_t");
   if (sel != d.seen_sel) {
     d.seen_sel = sel;
     d.publish_selection();
   }
-  if (const std::string m = d.get("sense"); (m == "known" || m == "fog") && m != d.sense)
+  if (const std::string m = d.got("sense"); (m == "known" || m == "fog") && m != d.sense)
     set_sense(m);
   d.poll_groups();
-  if (const std::string a = d.get("avoid"); a == "0" || a == "1")
+  if (const std::string a = d.got("avoid"); a == "0" || a == "1")
     if ((a == "1") != d.avoid)
       set_avoid(a == "1");
-  if (const std::string r = d.get("spawn.request"); r != d.seen_spawn) {
+  if (const std::string r = d.got("spawn.request"); r != d.seen_spawn) {
     d.seen_spawn = r;
     // spawn.count of them (1 when empty or not a number), each at a free point of its own when
     // spawn.at names none; the first refusal stops the rest.
     int count = 1;
     try {
-      if (const std::string c = d.get("spawn.count"); !c.empty())
+      if (const std::string c = d.got("spawn.count"); !c.empty())
         count = std::clamp(std::stoi(c), 1, kMaxSpawnCount);
     } catch (const std::exception &) {
     }
@@ -3759,16 +3884,16 @@ void WorldVehicles::poll() {
     d.put(d.vkey + ".spawn.status", status);
     d.put(d.vkey + ".spawn.last", std::to_string(id));
   }
-  if (const std::string r = d.get("remove.request"); r != d.seen_remove) {
+  if (const std::string r = d.got("remove.request"); r != d.seen_remove) {
     d.seen_remove = r;
     try {
-      const std::string id = d.get("remove.id");
+      const std::string id = d.got("remove.id");
       if (!id.empty())
         despawn(std::stoull(id));
     } catch (const std::exception &) {
     }
   }
-  if (const std::string r = d.get("clear.request"); r != d.seen_clear) {
+  if (const std::string r = d.got("clear.request"); r != d.seen_clear) {
     d.seen_clear = r;
     clear();
   }
@@ -3894,7 +4019,8 @@ void WorldVehicles::after_step() {
   d.stepping = d.posing = false;
 }
 
-void WorldVehicles::publish() { _impl->publish_entities(); }
+void WorldVehicles::publish() { _impl->publish_entities(true); }
+bool WorldVehicles::publish(bool telemetry) { return _impl->publish_entities(telemetry); }
 
 void WorldVehicles::reseed(std::uint64_t seed) {
   impl &d = *_impl;

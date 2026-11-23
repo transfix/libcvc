@@ -14,7 +14,6 @@
 #include <array>
 #include <atomic>
 #include <boost/any.hpp>
-#include <boost/signals2/connection.hpp>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -36,6 +35,7 @@
 #include <cvc/gl/ariadne/ribbon_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <functional>
 #include <limits>
 #include <map>
@@ -170,6 +170,11 @@ struct Bound {
   bool literal = true;
   double value = 0.0; // the literal, or the default while the key holds no number
   std::string path;   // an absolute state path
+  // Its lookup, held from frame to frame, and the number last read with the key's walks and the
+  // node's revision then: an unwritten key is not read again.
+  cvc::state_key key;
+  double last = 0.0;
+  std::uint64_t walks = ~std::uint64_t(0), seen = 0;
 
   static Bound of(const Value *v, double dflt, const std::string &prefix) {
     Bound b;
@@ -186,11 +191,22 @@ struct Bound {
     }
     return b;
   }
-  double read(cvc::app &app) const {
+  double read(cvc::app &app) {
     if (literal)
       return value;
-    const double x = cvc::ariadne::read_or<double>(app, path, value);
-    return std::isfinite(x) ? x : value;
+    key.set_path(path);
+    const cvc::state *n = nullptr;
+    try {
+      n = key.read(app);
+    } catch (const std::exception &) {
+    }
+    if (n && key.walks() == walks && n->revision() == seen)
+      return last;
+    const double x = cvc::ariadne::read_or<double>(app, key, value);
+    last = std::isfinite(x) ? x : value;
+    walks = n ? key.walks() : ~std::uint64_t(0); // an absent key is looked for each time
+    seen = n ? n->revision() : 0;
+    return last;
   }
 };
 
@@ -256,7 +272,7 @@ public:
   }
   void set_state(const std::string &path) {
     _kind = Kind::state;
-    _path = path;
+    _key.set_path(path);
   }
   // `token` is a stream's token (the key (stream-open) returns), or its id: opened by the
   // document (its scope, `prefix`) or at the root.
@@ -331,32 +347,25 @@ private:
   }
 
   bool poll_state(std::size_t &same) {
-    cvc::state *found = cvc::ariadne::read_node(_app, _path);
+    // The key's lookup is held (walked again when the tree changes shape), through links as a
+    // read is.
+    cvc::state *found = _key.read(_app);
     if (!found) {
+      _walks = ~std::uint64_t(0);
       if (_floats.empty())
         return false;
       _floats.clear();
       _text.clear();
-      _node = nullptr;
-      _on_value.disconnect();
-      _on_data.disconnect();
       same = 0;
       return true;
     }
-    cvc::state &node = cvc::ariadne::read_effective(*found);
-    // Writes are counted by the node's own change signals: a timestamp would not do, since two
-    // writes can share one tick of the clock (Windows' is coarse).
-    if (&node != _node || !_on_value.connected() || !_on_data.connected()) {
-      std::shared_ptr<std::atomic<std::uint64_t>> writes = _writes;
-      _on_value = node.valueChanged.connect([writes]() { ++*writes; });
-      _on_data = node.dataChanged.connect([writes]() { ++*writes; });
-      _node = &node;
-      _seen = ~std::uint64_t(0); // a node seen for the first time is read
-    }
-    const std::uint64_t writes = _writes->load();
-    if (writes == _seen)
+    cvc::state &node = *found;
+    // Writes are counted by the node's revision (a timestamp would not do: two writes can share
+    // one tick of the clock, Windows' is coarse). A node seen for the first time is read.
+    if (_key.walks() == _walks && node.revision() == _seen)
       return false; // not written since the last read: the per-frame fast path
-    _seen = writes;
+    _walks = _key.walks();
+    _seen = node.revision();
     std::vector<float> next;
     const boost::any d = node.data();
     if (!d.empty() && floats_of(d, next)) {
@@ -497,12 +506,9 @@ private:
   std::vector<float> _pending;
   bool _literal_done = false;
   // state
-  std::string _path;
-  const cvc::state *_node = nullptr; // the node the counter listens to (compared only)
-  std::shared_ptr<std::atomic<std::uint64_t>> _writes =
-      std::make_shared<std::atomic<std::uint64_t>>(0);
-  std::uint64_t _seen = ~std::uint64_t(0);
-  boost::signals2::scoped_connection _on_value, _on_data;
+  cvc::state_key _key;
+  std::uint64_t _walks = ~std::uint64_t(0); // the key's walks at the last read
+  std::uint64_t _seen = 0;                  // and the node's revision then
   std::string _text;
   // stream
   std::vector<std::string> _tokens; // what to look the stream up by, in turn

@@ -111,7 +111,8 @@ void root_defaults(app &ctx, state &root) {
 // 01/12/2014 -- Joe R. -- Removing notifyXmlRpc.
 state::state(app &ctx, const std::string &n, const state *p)
     : _ctx(ctx), _name(n), _parent(p), _lastMod(boost::posix_time::min_date_time), _hidden(false),
-      _readOnly(false), _initialized(false) {
+      _readOnly(false), _initialized(false),
+      _shape(p ? p->_shape : std::make_shared<std::atomic<std::uint64_t>>(0)) {
   // Child changes reach the ancestors through emitChildChanged(), not a slot per node.
 }
 
@@ -581,50 +582,38 @@ state &state::value(const std::string &v, bool setValueType) {
   // Phase 8: writes through a writable transparent link route to the
   // resolved target. Opaque links and non-writable transparent links
   // accept writes on the link node itself (the historical default).
-  {
-    link_mode mode_snapshot;
-    bool writable_snapshot;
-    bool is_link_snapshot;
-    {
-      boost::mutex::scoped_lock lock(_mutex);
-      is_link_snapshot = !_linkTarget.empty();
-      mode_snapshot = _linkMode;
-      writable_snapshot = _linkWritable;
-    }
-    if (is_link_snapshot && mode_snapshot == link_mode::transparent && writable_snapshot) {
-      link_resolution r = resolveLink();
-      if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
-        r.target->value(v, setValueType);
-        return *this;
-      }
-      throw read_only_error(boost::str(
-          boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
-    }
-  }
-
-  // Check if this state is read-only
+  // The link check, the read-only check, the compare and the store are one hold of the lock: a
+  // write of the value the node already holds (a frame's republish) takes it once.
+  bool route = false;
   {
     boost::mutex::scoped_lock lock(_mutex);
-    if (_readOnly) {
-      throw read_only_error(
-          boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
+    route = !_linkTarget.empty() && _linkMode == link_mode::transparent && _linkWritable;
+    if (!route) {
+      if (_readOnly)
+        throw read_only_error(
+            boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
+      if (_value == v)
+        return *this; // do nothing if equal
+      _value = v;
+      _lastMod = boost::posix_time::microsec_clock::universal_time();
+      _initialized = true;
+      _revision.fetch_add(1, std::memory_order_release);
+
+      if (setValueType)
+        _valueTypeName = std::string("std::string");
+
+      // Notify any threads waiting for value
+      _valueCondition.notify_all();
     }
   }
-
-  if (value() == v)
-    return *this; // do nothing if equal
-
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    _value = v;
-    _lastMod = boost::posix_time::microsec_clock::universal_time();
-    _initialized = true;
-
-    if (setValueType)
-      _valueTypeName = std::string("std::string");
-
-    // Notify any threads waiting for value
-    _valueCondition.notify_all();
+  if (route) {
+    link_resolution r = resolveLink();
+    if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
+      r.target->value(v, setValueType);
+      return *this;
+    }
+    throw read_only_error(boost::str(
+        boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
   }
 
   valueChanged();
@@ -685,6 +674,7 @@ state::atomicUpdate(const std::function<bool(const std::string &old, std::string
       target->_lastMod = boost::posix_time::microsec_clock::universal_time();
       target->_initialized = true;
       target->_valueTypeName = std::string("std::string");
+      target->_revision.fetch_add(1, std::memory_order_release);
       target->_valueCondition.notify_all();
       changed = true;
     }
@@ -738,6 +728,7 @@ void state::touch() {
   {
     boost::mutex::scoped_lock lock(_mutex);
     _lastMod = boost::posix_time::microsec_clock::universal_time();
+    _revision.fetch_add(1, std::memory_order_release); // its signals fire as for a change
   }
   valueChanged();
   dataChanged();
@@ -765,6 +756,7 @@ void state::reset(bool resetChildren, bool fireCallbacks) {
     n._properties.clear();
     n._hidden = false;
     n._initialized = false;
+    n._revision.fetch_add(1, std::memory_order_release);
   };
 
   if (!resetChildren) {
@@ -792,6 +784,8 @@ void state::reset(bool resetChildren, bool fireCallbacks) {
       clear(*this);
       doomed.swap(_children);
     }
+    if (!doomed.empty())
+      reshaped();
     doomed.clear();
     if (fireCallbacks)
       touch();
@@ -1135,6 +1129,7 @@ state &state::data(const boost::any &d) {
     _data = d;
     _lastMod = boost::posix_time::microsec_clock::universal_time();
     _initialized = true;
+    _revision.fetch_add(1, std::memory_order_release);
 
     // Notify any threads waiting for data
     _dataCondition.notify_all();
@@ -1313,6 +1308,7 @@ state &state::operator()(const std::string &childname) {
         cur->_children[key] = child;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
+        cur->reshaped();
       }
     }
     held = std::move(child);
@@ -1353,6 +1349,7 @@ state::state_ptr state::sharedChild(const state_ptr &self, const std::string &ch
         cur->_children[key] = next;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
+        cur->reshaped();
       }
     }
     if (pins)
@@ -1394,6 +1391,7 @@ state &state::linkTo(const std::string &target_path) {
     }
   }
   if (changed) {
+    reshaped();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1414,6 +1412,7 @@ bool state::clearLink() {
     _linkWritable = false;
   }
   if (was_link) {
+    reshaped();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1437,6 +1436,7 @@ state &state::linkTo(const std::string &target_path, link_mode mode) {
     }
   }
   if (changed) {
+    reshaped();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1460,6 +1460,7 @@ state &state::setLinkMode(link_mode mode) {
     }
   }
   if (changed) {
+    reshaped();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1483,6 +1484,7 @@ state &state::setLinkWritable(bool writable) {
     }
   }
   if (changed) {
+    reshaped();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1655,6 +1657,7 @@ state::state_ptr state::childThroughLinksShared(const std::string &path, bool re
         cur->_children[key] = child;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
+        cur->reshaped();
       }
     }
     cur = holds.push(std::move(child));
@@ -2038,6 +2041,7 @@ bool state::removeChild(const std::string &name) {
     _children.erase(it);
     _lastMod = boost::posix_time::microsec_clock::universal_time();
   }
+  reshaped();
   emitChildChanged(name);
   return true;
 }
@@ -2118,6 +2122,7 @@ std::size_t state::sweepExpired() {
         if (it->second->isExpired()) {
           to_remove.push_back(std::make_pair(it->first, it->second));
           n._children.erase(it++);
+          n.reshaped();
         } else {
           ++it;
         }

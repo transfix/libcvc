@@ -152,6 +152,40 @@ TEST(AriadneBind, SyncIsIdempotentAcrossFrames) {
   EXPECT_EQ(sval(app, "nc.visible"), "1");
 }
 
+// A binding holds its lookups and skips a frame in which neither key was written: every change of
+// the source still reaches the node, a write to the node's key is put back, and a key removed and
+// made again is found again.
+TEST(AriadneBind, SyncFollowsEveryChangeWhileItSkipsTheFramesWithout) {
+  cvc::app app;
+  cvc::state &root = cvc::state::instance(app);
+  root("s.vis").value(1);
+  std::vector<SceneVisibilityBinding> binds = {{"s.vis", "n.visible", false}};
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "1");
+  const std::uint64_t written = root("n.visible").revision();
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(root("n.visible").revision(), written) << "nothing changed: nothing written";
+
+  root("s.vis").value("false");
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "0");
+
+  root("n.visible").value("1"); // something else writes the node's key
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "0") << "the source's value, again";
+
+  root.findDescendant("s")->removeChild("vis"); // the source goes: the node's default
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "0");
+  root("s.vis").value(1); // and comes back
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "1");
+
+  root.removeChild("n"); // the node's key goes: made again
+  sync_scene_visibility(app, binds);
+  EXPECT_EQ(sval(app, "n.visible"), "1");
+}
+
 // Regression (review §9 inc2): the scene `visible:` bind is a FOLLOWER — sync must
 // NOT seed the source key, so it can never pre-empt the widget that owns it.
 TEST(AriadneBind, SyncDoesNotSeedTheSource) {

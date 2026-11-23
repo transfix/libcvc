@@ -93,6 +93,7 @@ endif()
 add_executable(state_blob_transport_integration_test state_blob_transport_integration_test.cpp)
 add_executable(state_distributed_delegation_integration_test state_distributed_delegation_integration_test.cpp)
 add_executable(state_link_test state_link_test.cpp)
+add_executable(state_key_test state_key_test.cpp)
 add_executable(state_send_message_test state_send_message_test.cpp)
 add_executable(stream_test stream_test.cpp)
 add_executable(stream_raster_test stream_raster_test.cpp)
@@ -492,6 +493,7 @@ set(TEST_TARGETS
   state_blob_transport_integration_test
   state_distributed_delegation_integration_test
   state_link_test
+  state_key_test
   state_send_message_test
   stream_test
   stream_raster_test
@@ -1950,6 +1952,13 @@ target_link_libraries(state_distributed_delegation_integration_test
 )
 
 target_link_libraries(state_link_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_key_test
   PRIVATE
     cvc
     GTest::gtest
@@ -3582,6 +3591,7 @@ endif()
 cvc_discover_tests(state_blob_transport_integration_test)
 cvc_discover_tests(state_distributed_delegation_integration_test)
 cvc_discover_tests(state_link_test)
+cvc_discover_tests(state_key_test)
 cvc_discover_tests(state_send_message_test)
 cvc_discover_tests(stream_test)
 cvc_discover_tests(stream_raster_test)
