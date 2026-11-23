@@ -669,17 +669,6 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
   const auto relative = [](const std::string &p) {
     return fs::path(p).is_relative() && p.find("://") == std::string::npos;
   };
-  // A file asset's file, its base_dir applied; "" when the document has no such file asset.
-  const auto asset_file = [&](const std::string &id) {
-    for (const SceneAsset &a : assets)
-      if (a.id == id && !a.source.source_file.empty()) {
-        std::string f = a.source.source_file;
-        if (!a.source.base_dir.empty() && relative(f))
-          f = (fs::path(a.source.base_dir) / f).string();
-        return f;
-      }
-    return std::string();
-  };
   for (vehicle_archetype &v : archetypes) {
     vehicle_look &look = v.look;
     if (look.kind.empty()) { // the default: a preset's model, when it is installed
@@ -697,32 +686,31 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
     }
     if (look.kind == "model") {
       const std::string model = find_vehicle_model(look.path);
-      // A wheeled model's wheel is a model by name too.
-      const std::string wheel = look.wheel.empty() ? std::string() : find_vehicle_model(look.wheel);
-      if (model.empty() || (!look.wheel.empty() && wheel.empty())) {
-        const std::string missing = model.empty() ? look.path : look.wheel;
-        warn("world: vehicles: " + v.id + ": look: model '" + missing +
-             "' is not installed (cvcpkg install vehicle-" + missing + "); it is drawn as its box");
+      if (model.empty()) {
+        warn("world: vehicles: " + v.id + ": look: model '" + look.path +
+             "' is not installed (cvcpkg install vehicle-" + look.path +
+             "); it is drawn as its box");
         look = vehicle_look{};
         look.kind = "box";
       } else {
         look.kind = "file";
         look.path = model;
-        look.wheel = wheel;
         look.fit = true;
       }
       continue;
     }
     if (look.kind == "asset") {
-      const std::string file = asset_file(look.path);
-      const std::string wheel = look.wheel.empty() ? std::string() : asset_file(look.wheel);
-      if (!file.empty() && (look.wheel.empty() || !wheel.empty())) {
+      const SceneAsset *asset = nullptr;
+      for (const SceneAsset &a : assets)
+        if (a.id == look.path)
+          asset = &a;
+      if (asset && !asset->source.source_file.empty()) {
         look.kind = "file";
-        look.path = file;
-        look.wheel = wheel;
+        look.path = asset->source.source_file;
+        if (!asset->source.base_dir.empty() && relative(look.path))
+          look.path = (fs::path(asset->source.base_dir) / look.path).string();
       } else {
-        warn("world: vehicles: " + v.id + ": look: no file asset '" +
-             (file.empty() ? look.path : look.wheel) +
+        warn("world: vehicles: " + v.id + ": look: no file asset '" + look.path +
              "' in the document's assets:; it is drawn as its box");
         look = vehicle_look{};
         look.kind = "box";
@@ -747,12 +735,23 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
       }
       continue;
     }
-    if (look.kind == "file" && !doc_dir.empty()) {
-      if (relative(look.path))
-        look.path = (fs::path(doc_dir) / look.path).string();
-      if (!look.wheel.empty() && relative(look.wheel))
-        look.wheel = (fs::path(doc_dir) / look.wheel).string();
+    if (look.kind == "file" && look.parted()) { // its parts beside the document, else installed
+      for (std::string *part : {&look.chassis, &look.wheel, &look.rig_file}) {
+        if (part->empty() || !relative(*part))
+          continue;
+        std::error_code ec;
+        const fs::path beside = fs::path(doc_dir) / *part;
+        const std::string installed =
+            !doc_dir.empty() && fs::is_regular_file(beside, ec) ? "" : find_vehicle_model(*part);
+        if (!installed.empty())
+          *part = installed;
+        else if (!doc_dir.empty())
+          *part = beside.string();
+      }
+      continue;
     }
+    if (look.kind == "file" && !doc_dir.empty() && relative(look.path))
+      look.path = (fs::path(doc_dir) / look.path).string();
   }
 }
 
@@ -1041,6 +1040,14 @@ struct WorldVehicles::impl {
   };
   static double yaw_of(const ph::quat &q) {
     return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  }
+  // A dynamic or kinematic plant's vehicle's speed along its heading (m/s).
+  static double plant_speed(const fleet &f, int i) {
+    if (f.bike)
+      return f.bike->body(i).vx;
+    if (f.four)
+      return f.four->body(i).vx;
+    return f.sim->speeds_normalized()[i] / kScale;
   }
   pose pose_of(const fleet &f, int i) const {
     pose p;
@@ -2667,6 +2674,13 @@ struct WorldVehicles::impl {
       else if (f->boat)
         f->boat->after_world_step();
     }
+    // The wheels of the plants that keep no rotation of their own roll at the chassis's speed
+    // (a Jolt wheel has its own; a boat has none).
+    const double dt = world->config().fixed_dt;
+    for (entity &e : ents)
+      if (const fleet *f = fleet_of(e); f && f->sim && e.agent && !f->jolt && !f->boat)
+        if (const int i = f->sim->index_of(e.agent); i >= 0)
+          e.rolled += plant_speed(*f, i) * dt;
     count_contacts();
   }
 
@@ -2969,16 +2983,26 @@ struct WorldVehicles::impl {
                       v.y + c.w * t.y + (u.z * t.x - u.x * t.z),
                       v.z + c.w * t.z + (u.x * t.y - u.y * t.x)};
     };
+    const ph::vehicle_desc &d = e.desc;
     if (f && f->four) {
+      std::size_t k = 0;
       for (const ph::dyn_4w_plant::wheel_pose &w : f->four->wheels(i)) {
         const ph::vec3 l = local(w.center);
-        out.push_back({l.x, l.y, l.z, w.steer, w.down});
+        entity_wheel ew{l.x, l.y, l.z, w.steer, w.down};
+        if (k / 2 < d.axles.size()) { // front left, front right, rear left, rear right
+          const ph::axle_desc &ax = d.axles[k / 2 < 1 ? 0 : d.axles.size() - 1];
+          ew.radius = ax.wheel_radius;
+          ew.steered = ax.steered;
+          if (ax.wheel_radius > 0.0)
+            ew.spin = std::remainder(e.rolled / ax.wheel_radius, 2.0 * kPi);
+        }
+        out.push_back(ew);
+        ++k;
       }
       return out;
     }
     // The other plants: each axle's two wheels at the desc's offsets; a Jolt wheel where its
     // contact puts it, the others on the ground under them, steered as the plant steers.
-    const ph::vehicle_desc &d = e.desc;
     double steer = 0.0;
     std::vector<ph::wheel_state> jolt;
     if (!f) { // a `pose` entity: its pose's steer
@@ -2998,13 +3022,16 @@ struct WorldVehicles::impl {
         w.x = ax.x;
         w.y = side * ax.half_track;
         w.steer = ax.steered ? steer : 0.0;
-        if (e.posed && ax.wheel_radius > 0.0) // rolled at its pose's speed
+        w.radius = ax.wheel_radius;
+        w.steered = ax.steered;
+        if (ax.wheel_radius > 0.0) // rolled at its chassis's speed (a pose's, a plant's)
           w.spin = std::remainder(e.rolled / ax.wheel_radius, 2.0 * kPi);
         const ph::vec3 at{p.position.x + w.x * cy - w.y * sy, p.position.y + w.x * sy + w.y * cy,
                           0.0};
         if (k < jolt.size()) {
           const ph::wheel_state &js = jolt[k];
           w.steer = js.steer;
+          w.spin = std::remainder(js.rotation, 2.0 * kPi); // its own, slip and all
           w.down = js.contact;
           if (js.contact) {
             const ph::vec3 l = local(
@@ -3127,9 +3154,11 @@ struct WorldVehicles::impl {
       put(at + "look.yaw", num(a.look.yaw));
       put(at + "look.z", num(a.look.z));
       put(at + "look.fit", a.look.fit ? "1" : "0");
+      put(at + "look.chassis", a.look.chassis);
       put(at + "look.wheel", a.look.wheel);
-      put(at + "look.wheelbase", num(a.look.wheelbase));
-      put(at + "look.track", num(a.look.track));
+      put(at + "look.rig", a.look.rig_file.empty() && !a.look.rig.hubs.empty()
+                               ? vehicle_rig_text(a.look.rig)
+                               : a.look.rig_file); // its file, or an inline rig's text
       for (const char *r : {"mass", "max_speed"}) {
         const auto it = a.ranges.find(r);
         const double fallback = std::string(r) == "mass" ? d.mass : d.max_speed;
