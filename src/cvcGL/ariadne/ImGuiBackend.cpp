@@ -1224,6 +1224,24 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
 #endif
 }
 
+#ifdef CVC_ENABLE_IMGUI
+// The width a flowing row keeps for the cell just ended (the last item, its group), for next
+// frame's wrap; `kept` is what it kept last frame. One that ran past the line's end has the width
+// it took. One that reached the end filled it: a widget as wide as the line's room (a field, a
+// list) stretches to whatever is left, so beside other cells it keeps 0 and never moves down a
+// line for its width (a scroll bar coming in would send a side panel below the views). At the
+// start of a line it keeps what it had: it went there because it ran past the end beside the
+// others, and on a line of its own it fills that line, a width that says nothing of whether it
+// would fit back beside them (it would come back, run past, and go down again, frame after frame).
+static float flow_cell_width(float flow_left, float flow_right, float kept) {
+  const float left = ImGui::GetItemRectMin().x;
+  const float right = ImGui::GetItemRectMax().x;
+  if (right >= flow_right - 1.0f && right <= flow_right + 1.0f)
+    return left <= flow_left + 1.0f ? kept : 0.0f;
+  return ImGui::GetItemRectSize().x;
+}
+#endif
+
 void ImGuiBackend::grid_next_cell() {
 #ifdef CVC_ENABLE_IMGUI
   if (m_grids.empty())
@@ -1234,9 +1252,10 @@ void ImGuiBackend::grid_next_cell() {
       ImGui::EndGroup();
       ImGuiStorage *store = ImGui::GetStateStorage();
       const auto key = [&](int i) { return ImHashData(&i, sizeof i, g.flow_key); };
-      store->SetFloat(key(g.cell - 1), ImGui::GetItemRectSize().x);
+      store->SetFloat(key(g.cell - 1), flow_cell_width(g.flow_left, g.flow_right,
+                                                       store->GetFloat(key(g.cell - 1), 0.0f)));
       // The next cell on this line (after the one just ended), unless last frame's width of it
-      // would run past the room: then it starts the next line.
+      // would run past the room: then it starts the next line. One that filled the line (0) stays.
       const float next = store->GetFloat(key(g.cell), 0.0f);
       const float x1 = ImGui::GetItemRectMax().x;
       if (!(next > 0.0f && x1 + ImGui::GetStyle().ItemSpacing.x + next > g.flow_right))
@@ -1297,8 +1316,9 @@ void ImGuiBackend::end_grid() {
     if (g.cell > 0) {
       ImGui::EndGroup();
       int last = g.cell - 1; // its width, for next frame's wrap (grid_next_cell)
-      ImGui::GetStateStorage()->SetFloat(ImHashData(&last, sizeof last, g.flow_key),
-                                         ImGui::GetItemRectSize().x);
+      ImGuiStorage *store = ImGui::GetStateStorage();
+      const ImGuiID k = ImHashData(&last, sizeof last, g.flow_key);
+      store->SetFloat(k, flow_cell_width(g.flow_left, g.flow_right, store->GetFloat(k, 0.0f)));
     }
   } else if (g.split) {
     if (g.cell > 0)
@@ -1392,15 +1412,27 @@ float ImGuiBackend::line_room() const {
   const bool fitting =
       (win->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 || win->AutoFitFramesX > 0;
   if (fitting && !ImGui::GetCurrentTable()) {
-    // Such a window is as wide as its widest line, so its own width says nothing. Its room is
-    // the widest it can be, the view less ImGui's safe-area padding each side, wherever it
-    // opened: one opened near the view's right edge is moved in, not wrapped there
-    // (cvcgl_imgui_view_shrink).
+    // Such a window is as wide as its widest line, so its own width says nothing.
     const ImGuiViewport *vp = ImGui::GetMainViewport();
     const ImGuiStyle &style = ImGui::GetStyle();
-    room = vp->WorkSize.x - 2.0f * style.DisplaySafeAreaPadding.x -
-           (ImGui::GetCursorScreenPos().x - win->Pos.x) - style.WindowPadding.x -
-           style.ScrollbarSize;
+    const float x = ImGui::GetCursorScreenPos().x;
+    if (win->Flags & ImGuiWindowFlags_ChildWindow) {
+      // A child (a panel's region that fits its widgets) stays where its parent put it: its
+      // room runs to its parent's right edge, or the view's where the parent fits too.
+      const ImGuiWindow *parent = win->ParentWindow;
+      const bool parent_fits = parent == nullptr ||
+                               (parent->Flags & ImGuiWindowFlags_AlwaysAutoResize) != 0 ||
+                               parent->AutoFitFramesX > 0;
+      const float right = parent_fits ? vp->WorkPos.x + vp->WorkSize.x - style.ScrollbarSize
+                                      : parent->WorkRect.Max.x;
+      room = right - x - style.WindowPadding.x;
+    } else {
+      // A window's room is the widest it can be, the view less ImGui's safe-area padding each
+      // side, wherever it opened: one opened near the view's right edge is moved in, not wrapped
+      // there (cvcgl_imgui_view_shrink).
+      room = vp->WorkSize.x - 2.0f * style.DisplaySafeAreaPadding.x - (x - win->Pos.x) -
+             style.WindowPadding.x - style.ScrollbarSize;
+    }
   }
   return room;
 #else
@@ -1667,12 +1699,17 @@ cvc::ariadne::RichTextEvent ImGuiBackend::rich_text(const std::vector<ariadne::T
 #endif
 }
 void ImGuiBackend::separator() { ui::Separator(); }
+#ifdef CVC_ENABLE_IMGUI
+void reserve_label_width(const char *label, bool in_row); // below, with the sliders
+#endif
 void ImGuiBackend::progress_bar(const char *label, float fraction, const std::string &overlay) {
 #ifdef CVC_ENABLE_IMGUI
   // The bar fills the line but leaves the label's width, as the sliders do; the label (up to any
   // "##") follows it.
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
   const bool labelled = label && end != label;
+  if (labelled) // past the line's room it shrinks, as a slider does (a side panel's Tiling bar)
+    reserve_label_width(label, in_flow_row());
   const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
   ImGui::ProgressBar(fraction, ImVec2(width, 0.f), overlay.empty() ? nullptr : overlay.c_str());
   if (labelled) {
@@ -1690,6 +1727,8 @@ void ImGuiBackend::plot_lines(const char *label, const std::vector<float> &value
   // shows the value under the mouse; FLT_MAX for a range fits it to the values.
   const char *end = label ? ImGui::FindRenderedTextEnd(label) : label;
   const bool labelled = label && end != label;
+  if (labelled)
+    reserve_label_width(label, in_flow_row());
   const float width = labelled ? ImGui::CalcItemWidth() : -FLT_MIN;
   const float a = lo < hi ? static_cast<float>(lo) : FLT_MAX;
   const float z = lo < hi ? static_cast<float>(hi) : FLT_MAX;

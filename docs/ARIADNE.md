@@ -3275,7 +3275,8 @@ How each backend does it:
   `layout: {kind: horizontal}` row with no `col_widths` puts its cells side by side, each at its
   natural width, as the terminal backends do; a cell that would run past the line's room goes to
   the next line, as a word in a paragraph does (from the width the cell had the frame before, so
-  a row settles in a frame). One with `col_widths` is an ImGui table with a column per entry.
+  a row settles in a frame). A cell whose widgets stretch to the line's end (a side panel's
+  progress bar) stays on its line and takes what is left. One with `col_widths` is an ImGui table with a column per entry.
   `borders` and `resizable` need that table, so a row using them needs `col_widths` as well;
   without it the table has one column.
 - **Nothing runs past a narrow window (ImGui).** The line's room is the window's (a table cell's),
