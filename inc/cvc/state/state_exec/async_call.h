@@ -77,9 +77,12 @@ using async_work_marshal = std::function<async_work(std::span<const value_t> arg
 
 /// Where an async function's kernel runs (docs/STATE_EXEC_EXCEPTIONS.md 3.5).
 enum class executor_kind {
-  /// The app's background task pool (app::submitPooled: its persistent workers), in the order
-  /// of its priorities, FIFO within one: for every kernel, CPU-bound or blocking. A host without
-  /// an app runs it inline.
+  /// The app's kernel pools (app::trySubmitKernel; docs/STATE_EXEC_THREADED.md 4.9), in the order
+  /// of their priorities, FIFO within one. Until the app's exec pool has workers, that is the
+  /// background task pool's persistent workers (app::submitPooled's), for every kernel, CPU-bound
+  /// or blocking. From then on the pools are split: background_cpu, max(1, cores - exec workers)
+  /// workers of its own, runs every kernel but an io call's, which stays on the background task
+  /// pool (background_io; async_options::io). A host without an app runs it inline.
   background,
   /// A named async_lane the host was given (async_host::add_lane): work that must stay on one
   /// thread.
@@ -111,7 +114,9 @@ struct async_options {
   /// An I/O call: the kernel waits on something outside the program (a network transfer), and
   /// its wall time and CPU are the host's, as a system call's are, so the call is charged its
   /// one step and no run time or CPU (docs/STATE_EXEC_EXCEPTIONS.md 3.8). Its own timeout, not
-  /// the process's budget, bounds it. Off by default.
+  /// the process's budget, bounds it. Once the app's exec pool has workers, its kernel runs on
+  /// background_io, the background task pool, and not on background_cpu with the CPU-bound
+  /// kernels (executor_kind::background). Off by default.
   bool io = false;
 };
 

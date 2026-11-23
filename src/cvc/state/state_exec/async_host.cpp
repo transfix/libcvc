@@ -684,7 +684,7 @@ struct async_host::kernel_task {
   std::shared_ptr<async_call> call;
   async_kernel kernel;
   std::shared_ptr<shared_state> state;
-  // The lane's name (its key in the host's lanes_), or null for the app's background pool. A lane
+  // The lane's name (its key in the host's lanes_), or null for the app's kernel pools. A lane
   // runs every job it accepts (stop() drains its queue), so it destroys this task unrun only as
   // its submit() refuses it, inside async_host::submit, while the name is there.
   const std::string *lane;
@@ -723,7 +723,7 @@ struct async_host::kernel_task {
   }
 
   // Not run: the call raises RuntimeError, naming the lane that refused it, or why the app's
-  // background pool didn't run it (`why`: cvc::app::kPoolStopped or kPoolNoWorker).
+  // kernel pools didn't run it (`why`: cvc::app::kPoolStopped or kPoolNoWorker).
   void drop(const char *why) noexcept {
     armed = false;
     const std::string &name = call->function_name();
@@ -757,16 +757,19 @@ void async_host::submit(const std::shared_ptr<async_call> &call, async_kernel ke
   state_->add(call, true);
   try {
     // The executor runs, then destroys, this task; nothing else holds the kernel once it is
-    // queued. Refused, it is destroyed unrun before submit() or trySubmitPooled() returns, and
+    // queued. Refused, it is destroyed unrun before submit() or trySubmitKernel() returns, and
     // ends the call itself (kernel_task).
     std::function<void()> task(
         kernel_task(app_, fanout_pool(), call, std::move(kernel), state_, lane_name));
     kernel = nullptr; // a moved-from std::function may keep a copy of a small callable
     if (lane) {
       lane->submit(std::move(task));
-    } else if (app_->trySubmitPooled(task, opts.priority) == cvc::app::PoolSubmit::no_worker) {
-      // An anonymous task on the background pool's persistent workers (no thread, no key), but
-      // no worker could be started for it and the pool has none (thread resources exhausted):
+    } else if (app_->trySubmitKernel(task, opts.priority, opts.io) ==
+               cvc::app::PoolSubmit::no_worker) {
+      // An anonymous task on the app's kernel pools' persistent workers (no thread, no key):
+      // background_cpu once the app's exec pool has workers, unless it is an io call's, else the
+      // background pool (app::trySubmitKernel; td 4.9, S2-Q11). No worker could be started for it
+      // and the pool has none (thread resources exhausted):
       // the call fails now, as it did when each kernel got a thread of its own and creating that
       // failed, rather than its kernel waiting for a later submission to start a worker (and
       // ~app's shutdown of this host waiting for it). Interruption is held off, as the pool

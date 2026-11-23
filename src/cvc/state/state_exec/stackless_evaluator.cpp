@@ -265,6 +265,30 @@ void set_result(exec_context &ctx, evaluator_state &state, value_t &&result) {
     ctx.data->release(std::move(old));
 }
 
+// evaluator_state::native_site for a call site (S2a.7): the head symbol's own characters while
+// something besides the call's frame holds its form (the program, a closure's body, an enclosing
+// form), so they outlive the step; copied into the state when only the frame does (a macro's
+// expansion, an eval'd list), since popping the frame frees them.
+const char *call_site(evaluator_state &state, const list_ptr &form, const symbol &head) {
+  if (form.use_count() > 1)
+    return head.name.c_str();
+  state.native_site_copy = head.name;
+  return state.native_site_copy.c_str();
+}
+
+// A step that raised unwinds frames, which may free the form native_site points into: it is
+// copied into the state first.
+void keep_native_site(evaluator_state &state) noexcept {
+  if (!state.native_site || state.native_site == state.native_site_copy.c_str())
+    return;
+  try {
+    state.native_site_copy = state.native_site;
+    state.native_site = state.native_site_copy.c_str();
+  } catch (...) {
+    state.native_site = "native"; // out of memory: no name
+  }
+}
+
 // Pop the top frame with the value `v`, which goes to the frame below (or is the state's result).
 // It is taken before the top frame goes, since it may be in that frame, or in a scope only that
 // frame holds; the frame's parts are then freed as pop_frame frees them, and for the last frame
@@ -821,6 +845,7 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
                       std::string(call->who) + ": not a function: " + call->fn->type_name());
     value_t value;
     await_slot parked(cx);
+    state.native_site = "native"; // a function the job called: no call site at hand (S2a.7)
     {
       native_call_scope scope(data);
       value = (*fn)(call_args(call->args, &cx));
@@ -866,6 +891,7 @@ bool stackless_evaluator::step_data(evaluator_state &state) {
   if (work->then) {
     native_call_scope call(data); // `then` may end in another job, or park
     await_slot parked(cx);
+    state.native_site = "native"; // the job's native call finishing (S2a.7)
     result = work->then(std::move(result));
     if (parked.request) {
       if (data)
@@ -924,6 +950,7 @@ void stackless_evaluator::set_cycle_registry(cycle_registry *r) noexcept {
 bool stackless_evaluator::step(evaluator_state &state) { return step(state, context()); }
 
 bool stackless_evaluator::step(evaluator_state &state, exec_context &ctx) {
+  state.native_site = nullptr; // this step's native, if it applies one (S2a.7)
   detail::check_not_in_async_kernel(ctx, "stackless_evaluator::step");
   check_interrupted();
   // The context of this step, for everything below (a nested step, a generator's, in the same
@@ -968,7 +995,8 @@ bool stackless_evaluator::step(evaluator_state &state, exec_context &ctx) {
     if (state.reading || is_uncatchable(e) ||
         (state.data_work && state.data_work->what == pending_data_work::kind::heap_measure))
       throw;
-    data.take_deferred(); // work the failed call left goes with it
+    keep_native_site(state); // fail_step pops the frames that may hold its name
+    data.take_deferred();    // work the failed call left goes with it
     fail_step(state, e);
     done = state.done;
   }
@@ -1602,7 +1630,8 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
   auto &evaled = frame.results;
 
   // Determine the function
-  auto *head_sym = std::get_if<symbol>(&(*std::get<list_ptr>(frame.expr.v))[0].v);
+  const list_ptr &form = std::get<list_ptr>(frame.expr.v);
+  auto *head_sym = std::get_if<symbol>(&(*form)[0].v);
   if (!head_sym)
     throw dsl_error("TypeError", "apply: no function head");
 
@@ -1611,7 +1640,7 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
     throw dsl_error("NameError", "apply: undefined function: " + head_sym->name);
 
   if (auto *fn = std::get_if<native_fn>(&func_val->v)) {
-    apply_native(state, frame, *fn, evaled);
+    apply_native(state, frame, *fn, evaled, call_site(state, form, *head_sym));
     return;
   }
   if (auto *cp = std::get_if<closure_ptr>(&func_val->v)) {
@@ -1622,7 +1651,9 @@ void stackless_evaluator::step_apply(evaluator_state &state, eval_frame &frame) 
 }
 
 void stackless_evaluator::apply_native(evaluator_state &state, eval_frame &frame,
-                                       const native_fn &fn, std::span<const value_t> args) {
+                                       const native_fn &fn, std::span<const value_t> args,
+                                       const char *site) {
+  state.native_site = site; // one store: the long-step monitor names it (S2a.7)
   exec_context &cx = ctx();
   detail::data_step_scope *data = cx.data;
   value_t result;
@@ -2242,7 +2273,7 @@ void stackless_evaluator::lock_acquire(evaluator_state &state, std::size_t fi, c
   const native_fn wait_native = [&ops, &token](call_args a) {
     return detail::lock_wait_call(ops, a, &token);
   };
-  apply_native(state, state.stack.back(), wait_native, state.stack.back().results);
+  apply_native(state, state.stack.back(), wait_native, state.stack.back().results, "with-lock");
 }
 
 void stackless_evaluator::lock_body_begins(evaluator_state &state, std::size_t fi) {
@@ -2361,7 +2392,7 @@ void stackless_evaluator::resume_lock_wait(evaluator_state &state) {
   const native_fn wait_native = [&ops, &token](call_args a) {
     return detail::lock_wait_call(ops, a, &token);
   };
-  apply_native(state, state.stack.back(), wait_native, state.stack.back().results);
+  apply_native(state, state.stack.back(), wait_native, state.stack.back().results, "with-lock");
 }
 
 void stackless_evaluator::step_lock_body(evaluator_state &state, eval_frame &frame) {
@@ -2486,7 +2517,7 @@ void stackless_evaluator::step_super_args(evaluator_state &state, eval_frame &fr
             for (size_t i = 1; i < frame.results.size(); ++i)
               call_args.push_back(frame.results[i]);
             const native_fn method = *fn; // it may change the class dict under `v`
-            apply_native(state, frame, method, call_args);
+            apply_native(state, frame, method, call_args, "super");
             return;
           }
           if (auto *cp = std::get_if<closure_ptr>(&v.v)) {

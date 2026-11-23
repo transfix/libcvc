@@ -3836,6 +3836,11 @@ if(_cvc_bench_python)
     add_test(NAME state_exec_bench_tool_test
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/bench/test_state_exec_bench.py")
+    # The continuous pool's state-word model (tools/locks_model/test_state_word.py; S2a PL-1):
+    # its quick suite and checks of its explorer, about 30 s, standard library only.
+    add_test(NAME state_exec_state_word_model_test
+             COMMAND "${_cvc_bench_python}" -I
+                     "${PROJECT_SOURCE_DIR}/tools/locks_model/test_state_word.py")
   endif()
 endif()
 # The deterministic bench gates (state_exec_bench_gates.cmake): 0 steps and 0 allocations per

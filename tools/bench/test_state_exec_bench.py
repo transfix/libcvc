@@ -136,6 +136,20 @@ class KeyOf(unittest.TestCase):
                          seb.key_of(rec("limits.ariadne", {"n": 150, "driver": "spin",
                                                            "slice_steps": 1})))
 
+    def test_stage2a_pump_and_shape_match_records_without_them(self):
+        # Stage 2a gave mt.groups a pump key (fork_join by default, Stage 1's pump_all rounds) and
+        # a shape key (even by default): a base binary's point matches pump=fork_join shape=even.
+        old = rec("mt.groups", {"t": 8, "groups": 8, "prog": "fib", "runs": 5})
+        new = rec("mt.groups", dict(old["params"], pump="fork_join", shape="even"))
+        self.assertEqual(seb.key_of(old), seb.key_of(new))
+        self.assertEqual(seb.param(old, "pump"), "fork_join")
+        self.assertEqual(seb.param(old, "shape"), "even")
+        cont = rec("mt.groups", dict(old["params"], pump="continuous", shape="even"))
+        self.assertIn("pump=continuous", seb.key_of(cont)[2])
+        uneven = rec("mt.groups", dict(old["params"], pump="fork_join", shape="uneven"))
+        self.assertIn("shape=uneven", seb.key_of(uneven)[2])
+        self.assertNotEqual(seb.key_of(cont), seb.key_of(old))
+
 
 class ParsePair(unittest.TestCase):
     def test_parses(self):
@@ -238,6 +252,27 @@ class Compare(unittest.TestCase):
         self.assertEqual(quiet(seb.compare, base, same, ["wall_ns"], 3.0)["pins"], 0)
         unknown = reps("sched.single.fib", {"n": 20}, [100, 100])  # no pin_cpu: not compared
         self.assertEqual(quiet(seb.compare, base, unknown, ["wall_ns"], 3.0)["pins"], 0)
+
+    def test_pair_pump_compares_the_modes_in_one_run(self):
+        # Stage 2a: continuous mode takes the same steps as fork-join (a pump's budget changes
+        # where a run stops, not how many steps a program takes), compared in one run.
+        def point(pump, steps):
+            return reps("mt.groups", {"t": 2, "groups": 2, "prog": "fib", "runs": 1,
+                                      "pump": pump, "shape": "even"}, [steps], metric="steps_total")
+        run = point("fork_join", 1771) + point("continuous", 1771)
+        res = quiet(seb.compare, run, run, ["steps_total"], 0.0, pair=("pump", "fork_join",
+                                                                        "continuous"))
+        self.assertEqual((res["changed"], res["failed"], res["unpaired"]), (0, 0, 0))
+        off = point("fork_join", 1771) + point("continuous", 1772)
+        res = quiet(seb.compare, off, off, ["steps_total"], 0.0, pair=("pump", "fork_join",
+                                                                        "continuous"))
+        self.assertEqual(res["changed"], 1)
+        # A base binary's records (no pump key) are its fork_join side.
+        old = reps("mt.groups", {"t": 2, "groups": 2, "prog": "fib", "runs": 1}, [1771],
+                   metric="steps_total")
+        res = quiet(seb.compare, old, point("continuous", 1771), ["steps_total"], 0.0,
+                    pair=("pump", "fork_join", "continuous"))
+        self.assertEqual((res["changed"], res["failed"], res["unpaired"]), (0, 0, 0))
 
     def test_of_ceiling_is_better_higher(self):
         def point(value):
@@ -572,6 +607,87 @@ class Gate(unittest.TestCase):
                               point(8, "cycle", [0.5, 0.5, 0.5]), *gate)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.gate(eight + point(16, "fib", [0.85, 0.85, 0.85]), *gate)[0], 1)
+
+    # Stage 2a's gates (S2.md section 6): mt.groups at pump=continuous, fib at t=8, at least 0.9
+    # of mt.independent's speedup; shape=uneven is recorded, never gated (GATE_GUARDS' applies).
+    @staticmethod
+    def groups_point(pump, values, groups=8, shape=None, prog="fib", t=8):
+        params = {"t": t, "groups": groups, "prog": prog, "runs": 5, "pump": pump}
+        if shape is not None:
+            params["shape"] = shape
+        out = []
+        for i, v in enumerate(values):
+            r = rec("mt.groups", dict(params), rep=i, wall_ns=1)
+            r["extra"] = {"of_ceiling": v, "speedup": 7.0 * v, "effective_threads": 8}
+            out.append(r)
+        return out
+
+    GROUPS_GATE = ["--scenario", "mt.groups", "--where", "pump=continuous", "--where", "t=8",
+                   "--where", "prog=fib", "--metric", "extra.of_ceiling", "--min", "0.9",
+                   "--max-noise", "10"]
+
+    def test_groups_continuous_gate_judges_even_groups(self):
+        p = self.groups_point
+        run = (p("continuous", [0.95, 0.94, 0.96]) + p("continuous", [0.92, 0.93, 0.92], 16) +
+               p("fork_join", [0.5, 0.5, 0.5]) + p("continuous", [0.3, 0.3, 0.3], prog="cycle"))
+        code, out = self.gate(run, *self.GROUPS_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("PASS"), 2, out)
+        self.assertEqual(self.gate(run + p("continuous", [0.85, 0.85, 0.85], 32, "even"),
+                                   *self.GROUPS_GATE)[0], 1)
+        # Uneven groups are n/a, whatever their ratio: the heavy group bounds it.
+        code, out = self.gate(run + p("continuous", [0.2, 0.2, 0.2], 8, "uneven"),
+                              *self.GROUPS_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertIn("n/a (shape=uneven: recorded, not gated)", out)
+        # A gate on uneven points alone judged nothing: it fails.
+        code, out = self.gate(p("continuous", [0.95, 0.95], 8, "uneven"), *self.GROUPS_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("every point is n/a", out)
+        # Stage 1's gate, now --where pump=fork_join, still takes a base binary's records.
+        old = p("fork_join", [0.95, 0.95, 0.95])
+        for r in old:
+            del r["params"]["pump"]
+        stage1 = ["--scenario", "mt.groups", "--where", "pump=fork_join", "--where", "t=8",
+                  "--where", "prog=fib", "--metric", "extra.of_ceiling", "--min", "0.9"]
+        code, out = self.gate(old + p("continuous", [0.5, 0.5, 0.5]), *stage1)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("PASS"), 1, out)
+
+    # mt.groups.move: under 5 us a move, judged where force_move added moves (extra.moves).
+    @staticmethod
+    def move_point(t, values, moves=400):
+        out = []
+        for i, v in enumerate(values):
+            r = rec("mt.groups.move", {"t": t, "groups": 16, "prog": "fib", "runs": 5,
+                                       "steps": 2000}, rep=i, wall_ns=1)
+            r["extra"] = {"ns_per_move": v, "moves_off": 100, "moves_on": 100 + (moves or 0)}
+            if moves is not None:
+                r["extra"]["moves"] = moves
+            out.append(r)
+        return out
+
+    MOVE_GATE = ["--scenario", "mt.groups.move", "--metric", "extra.ns_per_move", "--max", "5000"]
+
+    def test_groups_move_gate_needs_moves(self):
+        p = self.move_point
+        run = p(2, [1200, 1300, 1250]) + p(8, [2500, 2600, 2400])
+        code, out = self.gate(run, *self.MOVE_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("PASS"), 2, out)
+        self.assertEqual(self.gate(run + p(4, [6000, 6100, 5900]), *self.MOVE_GATE)[0], 1)
+        # force_move added no move: there is no cost to judge, and the point fails as vacuous.
+        code, out = self.gate(run + p(4, [0, 0, 0], moves=0), *self.MOVE_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: extra.moves 0 below 1", out)
+        code, out = self.gate(run + p(4, [10, 10], moves=None), *self.MOVE_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: no extra.moves", out)
+        # The other metrics of the scenario take no guard.
+        recs = p(4, [0, 0], moves=0)
+        code, out = self.gate(recs, "--scenario", "mt.groups.move", "--metric", "extra.moves_on",
+                              "--min", "1")
+        self.assertEqual(code, 0, out)
 
     # Stage 1b's gate: mt.ariadne_docs' small frames wake no helper (GATE_GUARDS). A point's
     # records, as the bench writes them: extra.isolated and extra.any_groups default to every

@@ -14,7 +14,9 @@
 #     links TSan's into each executable, so clang-tsan preloads clang's shared one;
 #   - every state_exec_bench run in SAN_BENCH, one a line: a scenario and its --size options. It
 #     runs once (--reps 1 --warmup 0, --timeout 900 a rep), named after the scenario, with its
-#     JSON records in san-logs/<scenario>.jsonl. The bench takes no --gtest_filter.
+#     JSON records in san-logs/<scenario>.jsonl. The bench takes no --gtest_filter. A scenario
+#     named on two lines is an error (its second run's log would replace the first's): give one
+#     line several values instead (--size pump=fork_join,continuous).
 # Each run's output goes to san-logs/<name>.log, and a table of the runs to the job summary.
 # SAN_REQUIRED (ci.yml's matrix `required`) names, one per line as `<run>: <text>`, lines a run's
 # log must contain: the cases the job is there for, which must not drop out unseen.
@@ -164,8 +166,15 @@ done
 
 # A run whose points were all skipped exits 0: SAN_REQUIRED names the points' lines. The list is
 # read on fd 3, so nothing the runs read from stdin takes its lines.
+declare -A bench_seen=()
 while read -r scenario sizes <&3; do
   [ -n "$scenario" ] || continue
+  if [ -n "${bench_seen[$scenario]+set}" ]; then
+    failed=1
+    echo "::error::SAN_BENCH names $scenario twice; give one line all its sizes"
+    continue
+  fi
+  bench_seen[$scenario]=1
   # shellcheck disable=SC2086 # the --size options, split
   run_one "$scenario" "$bin/state_exec_bench" --scenario "$scenario" $sizes --reps 1 \
     --warmup 0 --timeout 900 --json "san-logs/$scenario.jsonl"
