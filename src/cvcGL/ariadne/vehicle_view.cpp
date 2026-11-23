@@ -725,8 +725,9 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
 bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                   const std::string &id, const ari::vehicle_look &look, const vehicle_shape &s,
                   double base_z, const float color[3], std::vector<std::string> *warnings) {
-  if (look.parted()) // its wheels at rest
-    return attach_parts(app, cache, group, id, look, s, base_z, color, nullptr, warnings);
+  if (look.parted()) // its parts named after the group (id_chassis, id_wheel<k>), at rest
+    return attach_parts(app, cache, group, group.getName(), look, s, base_z, color, nullptr,
+                        warnings);
   bool pending = false;
   std::shared_ptr<const fitted_model> m =
       fitted(app, cache, look, model_fit::vehicle(s.length), warnings, pending);

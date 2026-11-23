@@ -616,7 +616,10 @@ its own world document.
     remove the entities too), and a thread-safe `WorldVehicles::set_pose` / `set_poses` (pycvc
     `WorldEntities.set_pose`, `set_poses` from numpy). Timed poses are drawn between the last
     two, a tick behind; a jump is taken at once. The box look's wheels steer by the pose's steer
-    and roll at its speed. A scripted track is followed exactly, and its state hash is pinned
+    and roll at its speed, and so do a parted look's (built 2026-11-22: `look: { chassis:,
+    wheel:, rig: }`, a chassis mesh, one wheel's and a rig, each wheel drawn on its own where
+    `WorldVehicles::wheels` has it; ARIADNE.md, "A model in parts"). Every plant's wheels roll
+    too. A scripted track is followed exactly, and its state hash is pinned
     headless, drawn and under `arigl snapshot` (`physics.hash`: 1 publishes
     `physics.stats.hash`). A drawn world now spawns `world: vehicles: start:` too, as a headless
     one does.

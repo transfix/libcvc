@@ -103,8 +103,10 @@ vehicle_model_status vehicle_model_state(cvc::app &app, vehicle_model_cache &cac
 // A fitted file look (`look.kind` file, `look.fit`) or a data look under `group` as node `id`: the
 // model scaled to the chassis's length, its base `base_z` below the group's origin (the ground
 // under the chassis's centre, negative), turned and lifted by the look's yaw and z, in `color` when
-// it has no texture. False when the model is not ready (vehicle_model_state says whether it is
-// still loading or failed; a failure's warning says why); draw the box look then.
+// it has no texture. A parted look's parts go under `group` as attach_parted_model puts them,
+// named after the group (not `id`), their wheels at rest. False when the model is not ready
+// (vehicle_model_state says whether it is still loading or failed; a failure's warning says
+// why); draw the box look then.
 bool attach_vehicle_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group,
                           const std::string &id, const cvc::ariadne::vehicle_look &look,
                           const vehicle_shape &shape, double base_z, const float color[3],

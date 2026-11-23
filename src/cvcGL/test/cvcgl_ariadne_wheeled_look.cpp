@@ -175,9 +175,14 @@ scene:
       source: { box: { size: [120, 120, 1] } }
       transform: { position: [0, 0, -0.5] }
       body: static
+    - node: shown
+      type: vehicle_preview
+      spin: 0
+      transform: { position: [0, 40, 0] }
 )";
   cvc::app app;
   cvc::ariadne::register_world_block(app);
+  ari::register_vehicle_preview_node(app);
   cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
   check(r.ok, "the document loads", r.error);
   if (!r.ok)
@@ -306,6 +311,23 @@ scene:
   const std::array<double, 16> after = matrix_of(*drawn->second[0].node.lock());
   check(near(after[8], -std::sin(v.wheels(1)[0].spin), 1e-9), "and its node with it");
 
+  // The vehicle_preview draws the selected archetype from the catalog's keys: its parts, each
+  // wheel at its fitted hub, at rest.
+  const std::shared_ptr<cvc::gl::GraphicsNode> shown = sg.getGraphics("shown__vehicle");
+  check(shown && shown->findChildByName("shown__vehicle_chassis"),
+        "the preview draws the parted look's chassis");
+  for (std::size_t k = 0; shown && k < 4; ++k) {
+    const std::shared_ptr<cvc::gl::GraphicsNode> w =
+        shown->findChildByName("shown__vehicle_wheel" + std::to_string(k));
+    check(w != nullptr, "the preview's wheel " + std::to_string(k));
+    if (!w)
+      continue;
+    const std::array<double, 16> m = matrix_of(*w);
+    check(near(m[3], drawn->second[k].x - axle_x, 1e-6) && near(m[7], drawn->second[k].y, 1e-6) &&
+              near(m[11], r0, 1e-6) && near(m[0], 1.0, 1e-12),
+          "the preview's wheel " + std::to_string(k) + " at its hub, a radius up, at rest");
+  }
+
   // mirror: reflect: the right wheel is the mesh mirrored, not turned.
   st("vehicles.selected").value("mirrored");
   st("vehicles.spawn.request").value("2");
@@ -428,6 +450,18 @@ void test_parts_from_a_package(const fixture &f) {
                                  yellow, &wheels),
         "drawn from the package");
   check(wheels.size() == 4, "with its four wheels");
+  // A wheel that cannot be read (a file look): failed, and the warning names it.
+  cvc::ariadne::vehicle_look unread = parted_look(f);
+  unread.wheel = (f.dir / "no_such_wheel.obj").generic_string();
+  why.clear();
+  check(ari::parted_model_state(app, *cache, unread, &why) == ari::vehicle_model_status::failed,
+        "an unreadable wheel: failed");
+  check(!why.empty() && why.front().find("no_such_wheel.obj") != std::string::npos,
+        "the warning names the wheel", why.empty() ? "" : why.front());
+  std::shared_ptr<cvc::gl::GraphicsNode> none = sg.addGraphics("none");
+  check(!ari::attach_vehicle_model(app, *cache, *none, "none_mesh", unread, ari::vehicle_shape{},
+                                   0.0, yellow),
+        "and it is not drawn (the box look then)");
   // A package that is not there: failed, and why.
   cvc::ariadne::vehicle_look lost = look;
   lost.uri = (f.dir / "no_such_pkg").generic_string();
