@@ -29,6 +29,10 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/skeleton.h
   ../../inc/cvc/geometry/skeleton_params.h
   ../../inc/cvc/geometry/skeleton_intrinsics.h
+  ../../inc/cvc/geometry/pocket_tunnel.h
+  ../../inc/cvc/geometry/pocket_tunnel_params.h
+  ../../inc/cvc/geometry/secondary_structures.h
+  ../../inc/cvc/geometry/secondary_structures_params.h
   ../../inc/cvc/geometry/tiler.h
   ../../inc/cvc/geometry/tiler_params.h
   ../../inc/cvc/geometry/tiler_intrinsics.h
@@ -197,6 +201,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/volume/resize_stepper.h
   ../../inc/cvc/volume/volume_slice.h
   ../../inc/cvc/volume/volume_grid.h
+  ../../inc/cvc/volume/volume_grid_contours.h
+  ../../inc/cvc/volume/volume_grid_contour_intrinsics.h
   ../../inc/cvc/tf/model.h
   ../../inc/cvc/tf/vinay.h
   ../../inc/cvc/tf/overlays.h
@@ -326,16 +332,20 @@ set(SOURCE_FILES
   geometry/fem.cpp
   geometry/tet_complex.cpp
   geometry/exact_predicates.cpp
-  geometry/skeleton/datastruct.cpp
-  geometry/skeleton/init.cpp
-  geometry/skeleton/util.cpp
-  geometry/skeleton/tcocone.cpp
-  geometry/skeleton/rcocone.cpp
+  geometry/cocone/datastruct.cpp
+  geometry/cocone/init.cpp
+  geometry/cocone/util.cpp
+  geometry/cocone/tcocone.cpp
+  geometry/cocone/rcocone.cpp
   geometry/skeleton/medax.cpp
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
   geometry/skeleton/skeleton.cpp
   geometry/skeleton/skeleton_intrinsics.cpp
+  geometry/pocket_tunnel/pocket_tunnel.cpp
+  geometry/secondary/secondary_axis.cpp
+  geometry/secondary/secondary_select.cpp
+  geometry/secondary/secondary_structures.cpp
   geometry/tiler/tile_contours.cpp
   geometry/tiler/tiler_intrinsics.cpp
   geometry/sliced_ldlt.cpp
@@ -494,6 +504,8 @@ set(SOURCE_FILES
   volume/resize_stepper.cpp
   volume/volume_slice.cpp
   volume/volume_grid.cpp
+  volume/volume_grid_contours.cpp
+  volume/volume_grid_contour_intrinsics.cpp
   volume/mesh_contour_tree.cpp
   tf/model.cpp
   tf/vinay.cpp

@@ -5,7 +5,9 @@ Run once; the files it writes are committed, so the goldens never depend on how 
 rounds a Gaussian or a sine. Each GenSeg case is inputs/genseg/<case>.raw (float32, little-endian,
 x fastest) and <case>.json (its dimensions, thresholds and seeds); each SegMed case is
 inputs/segmed/<case>.raw and <case>.json (its dimensions and tlow); each Skeletonization case is
-inputs/skeleton/<case>.pts (a point a line) and <case>.json. Pure Python, no numpy.
+inputs/skeleton/<case>.pts (a point a line) and <case>.json; each PocketTunnel case is
+inputs/pockettunnel/<case>.pts and <case>.json; each SecondaryStructures case is
+inputs/secondary/<case>.pts and <case>.json. Pure Python, no numpy.
 
     python3 tools/volrover-goldens/make_inputs.py                  # every library
     python3 tools/volrover-goldens/make_inputs.py --only skeleton  # one library
@@ -14,6 +16,7 @@ inputs/skeleton/<case>.pts (a point a line) and <case>.json. Pure Python, no num
                                                                    # committed)
     python3 tools/volrover-goldens/make_inputs.py --only segmed    # SegMed's cases
     python3 tools/volrover-goldens/make_inputs.py --only tiler     # ContourTiler's series
+    python3 tools/volrover-goldens/make_inputs.py --only secondary # SecondaryStructures' cases
 """
 
 import json
@@ -288,6 +291,239 @@ def write_skeleton_inputs():
         print("wrote", name, len(pts), "points")
 
 
+# ---- PocketTunnel: point clouds sampled from a ball with chambers and necks cut out ----
+# Each case is inputs/pockettunnel/<case>.pts (float-exact, as the skeleton's) and <case>.json. A
+# solid ball of radius R has spherical chambers inside it, each joined to the outside by
+# cylindrical necks narrower than the chamber: a chamber's centre is then a maximum of the distance
+# to the surface, and its stable manifold is a pocket with one neck, a tunnel with two, and an
+# enclosed cavity with none. The points are on the solid's boundary: the outer sphere outside every
+# neck, each chamber's sphere outside its necks, and each neck's wall between its chamber and the
+# outer sphere.
+
+GOLDEN = math.pi * (3.0 - math.sqrt(5.0))
+
+
+def _norm(v):
+    n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def _basis(d):
+    """Two unit vectors orthogonal to d and each other."""
+    a = (1.0, 0.0, 0.0) if abs(d[0]) < 0.9 else (0.0, 1.0, 0.0)
+    u = _norm((d[1] * a[2] - d[2] * a[1], d[2] * a[0] - d[0] * a[2], d[0] * a[1] - d[1] * a[0]))
+    w = (d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0])
+    return u, w
+
+
+def sphere_points(c, r, h, rnd):
+    """A jittered Fibonacci sample of a sphere, spacing about h."""
+    n = max(8, int(round(4 * math.pi * r * r / (h * h))))
+    pts = []
+    for i in range(n):
+        z = 1.0 - 2.0 * (i + 0.5) / n
+        s = math.sqrt(max(0.0, 1.0 - z * z))
+        ph = i * GOLDEN
+        p = (s * math.cos(ph), s * math.sin(ph), z)
+        j = tuple(0.12 * h / r * (2 * next(rnd) - 1) for _ in range(3))
+        p = _norm((p[0] + j[0], p[1] + j[1], p[2] + j[2]))
+        pts.append((c[0] + r * p[0], c[1] + r * p[1], c[2] + r * p[2]))
+    return pts
+
+
+def chambered_ball(R, chambers, h_outer, h_inner, seed):
+    """chambers: [(centre, radius, [neck directions], neck radius)]."""
+    rnd = lcg(seed)
+    necks = []  # (chamber index, start, direction, radius)
+    for ci, (c, rc, dirs, rn) in enumerate(chambers):
+        for d in dirs:
+            necks.append((ci, c, _norm(d), rn))
+
+    def in_neck(p, k, margin=1e-9):
+        _, c, d, rn = necks[k]
+        q = (p[0] - c[0], p[1] - c[1], p[2] - c[2])
+        t = q[0] * d[0] + q[1] * d[1] + q[2] * d[2]
+        if t <= 0:
+            return False
+        e = (q[0] - t * d[0], q[1] - t * d[1], q[2] - t * d[2])
+        return e[0] * e[0] + e[1] * e[1] + e[2] * e[2] < (rn - margin) ** 2
+
+    def in_chamber(p, ci, margin=1e-9):
+        c, rc = chambers[ci][0], chambers[ci][1]
+        return (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 + (p[2] - c[2]) ** 2 < (rc - margin) ** 2
+
+    def in_ball(p):
+        return p[0] * p[0] + p[1] * p[1] + p[2] * p[2] < R * R
+
+    pts = []
+    for p in sphere_points((0.0, 0.0, 0.0), R, h_outer, rnd):
+        if not any(in_neck(p, k) for k in range(len(necks))):
+            pts.append(p)
+    for ci, (c, rc, _, _) in enumerate(chambers):
+        for p in sphere_points(c, rc, h_inner, rnd):
+            if any(in_neck(p, k) for k in range(len(necks)) if necks[k][0] == ci):
+                continue
+            if any(in_chamber(p, o) for o in range(len(chambers)) if o != ci) or not in_ball(p):
+                continue
+            pts.append(p)
+    for k, (ci, c, d, rn) in enumerate(necks):
+        u, w = _basis(d)
+        nring = max(6, int(round(2 * math.pi * rn / h_inner)))
+        t = 0.0
+        while t < R + h_inner:
+            for j in range(nring):
+                a = 2 * math.pi * (j + 0.3 * (next(rnd) - 0.5)) / nring
+                tt = t + 0.3 * h_inner * (next(rnd) - 0.5)
+                p = tuple(c[i] + tt * d[i] + rn * (math.cos(a) * u[i] + math.sin(a) * w[i])
+                          for i in range(3))
+                if in_ball(p) and not in_chamber(p, ci):
+                    pts.append(p)
+            t += h_inner
+    return pts
+
+
+POCKETTUNNEL_CASES = {
+    # one chamber with one neck: a pocket
+    "pocket": lambda: chambered_ball(3.0, [((0.0, 0.0, 0.7), 1.4, [(0, 0, 1)], 0.55)],
+                                     0.3, 0.2, 21),
+    # one chamber with two necks: a tunnel
+    "tunnel": lambda: chambered_ball(3.0, [((0.0, 0.0, 0.0), 1.4, [(0, 0, 1), (0, 0, -1)], 0.55)],
+                                     0.3, 0.2, 22),
+    # one chamber with no neck: a cavity, which Tight Cocone marks inside the surface
+    "cavity": lambda: chambered_ball(3.0, [((0.2, -0.1, 0.1), 1.4, [], 0.55)], 0.3, 0.2, 23),
+    # a tunnel bent through a chamber, a pocket, and a second pocket off a shared ball
+    "three_chambers": lambda: chambered_ball(
+        4.0, [((-1.5, 0.3, 0.0), 1.2, [(-0.2, 1, 0.1), (0.1, -0.3, -1)], 0.5),
+              ((1.7, -0.4, 0.6), 1.1, [(1, 0.2, 0.4)], 0.45),
+              ((0.6, 1.2, -1.8), 0.9, [(0.1, 0.3, -1)], 0.4)], 0.32, 0.2, 24),
+}
+
+
+# inputs/pockettunnel/1grl.pts, a protein's surface (PDB 1GRL's blur map's isosurface), needs libcvc
+# to make, so this script leaves it alone: src/cvc/tests/pocket_tunnel_test.cpp's OnAProtein makes
+# it again, checks it, and writes it with CVC_POCKETTUNNEL_WRITE_1GRL=<path>.
+
+
+def write_pockettunnel_inputs():
+    out_dir = os.path.join(HERE, "inputs", "pockettunnel")
+    os.makedirs(out_dir, exist_ok=True)
+    for name, make in POCKETTUNNEL_CASES.items():
+        pts = [tuple(f32(v) for v in p) for p in make()]
+        with open(os.path.join(out_dir, name + ".pts"), "w", newline="\n") as f:
+            for p in pts:
+                f.write("%.17g %.17g %.17g\n" % p)
+        meta = {
+            "library": "PocketTunnel",
+            "points": len(pts),
+            "parameters": {"num_pockets": 3, "num_tunnels": 3},
+            "made_by": "tools/volrover-goldens/make_inputs.py",
+        }
+        with open(os.path.join(out_dir, name + ".json"), "w", newline="\n") as f:
+            json.dump(meta, f, indent=2)
+            f.write("\n")
+        print("wrote", name, len(pts), "points")
+
+
+# SecondaryStructures' cases are surfaces sampled as points, inputs/secondary/<case>.pts (as the
+# skeleton's), with the sizes of a protein's density map in Å: a helix's density is a tube about
+# 2.5 Å in radius, a sheet's a slab about 2.5 Å thick (the legacy width windows are 2 to 3).
+def frame(d):
+    """An orthonormal frame (u, v) around the unit direction d."""
+    u = (1.0, 0.0, 0.0) if abs(d[0]) < 0.9 else (0.0, 1.0, 0.0)
+    dd = sum(u[k] * d[k] for k in range(3))
+    u = tuple(u[k] - dd * d[k] for k in range(3))
+    ul = math.sqrt(sum(x * x for x in u))
+    u = tuple(x / ul for x in u)
+    v = (d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0])
+    return u, v
+
+
+def tube(origin, direction, length, r, h, rnd):
+    """A capsule of radius r from `origin` along `direction`, sampled about every h, jittered."""
+    dl = math.sqrt(sum(x * x for x in direction))
+    d = tuple(x / dl for x in direction)
+    u, v = frame(d)
+    pts = []
+
+    def put(t, a, rr):
+        pts.append(tuple(origin[k] + t * d[k] + rr * (math.cos(a) * u[k] + math.sin(a) * v[k])
+                         for k in range(3)))
+
+    nring = max(8, int(round(2 * math.pi * r / h)))
+    nalong = max(2, int(round(length / h)))
+    for i in range(nalong + 1):
+        jx = 0.3 * (next(rnd) - 0.5) if 0 < i < nalong else 0.0
+        for k in range(nring):
+            put(length * (i + jx) / nalong, 2 * math.pi * (k + 0.3 * (next(rnd) - 0.5)) / nring, r)
+    ncap = max(2, int(round(math.pi * r / 2 / h)))
+    for side in (0, 1):
+        for i in range(1, ncap + 1):
+            t = (math.pi / 2) * (i + 0.1 * (next(rnd) - 0.5)) / (ncap + 0.5)
+            nr = max(1, int(round(nring * math.cos(t))))
+            for k in range(nr):
+                a = 2 * math.pi * (k + 0.3 * (next(rnd) - 0.5)) / nr
+                put(-r * math.sin(t) if side == 0 else length + r * math.sin(t), a,
+                    r * math.cos(t))
+    return pts
+
+
+def slab(origin, a, b, c, h, rnd):
+    """A closed box a x b x c at `origin`, its faces sampled every h, jittered in and off them."""
+    na, nb, nc = int(round(a / h)), int(round(b / h)), int(round(c / h))
+    pts = []
+    for i in range(na + 1):
+        for j in range(nb + 1):
+            for k in range(nc + 1):
+                if 0 < i < na and 0 < j < nb and 0 < k < nc:
+                    continue
+                p = [a * i / na, b * j / nb, c * k / nc]
+                for q, n, s in ((0, na, a / na), (1, nb, b / nb), (2, nc, c / nc)):
+                    idx = (i, j, k)[q]
+                    on_face = idx == 0 or idx == n
+                    p[q] += (0.04 if on_face else 0.4) * s * (next(rnd) - 0.5)
+                pts.append(tuple(origin[q] + p[q] for q in range(3)))
+    return pts
+
+
+def helices_and_sheet():
+    rnd = lcg(31)
+    pts = []
+    pts += tube((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 20.0, 2.5, 0.8, rnd)
+    pts += tube((0.0, 12.0, 2.0), (0.8, 0.0, 0.6), 18.0, 2.5, 0.8, rnd)
+    pts += tube((-4.0, -12.0, 6.0), (0.3, 0.5, 0.81), 16.0, 2.5, 0.8, rnd)
+    pts += slab((-4.0, 22.0, -2.0), 20.0, 14.0, 2.5, 0.8, rnd)
+    return pts
+
+
+SECONDARY_CASES = {
+    "helices_and_sheet": dict(points=helices_and_sheet,
+                              made_from="three capsules of radius 2.5 (16 to 20 long, at three "
+                                        "angles) and a 20 x 14 x 2.5 slab, sampled every 0.8 "
+                                        "and jittered (make_inputs.py)"),
+}
+
+
+def write_secondary_inputs():
+    out_dir = os.path.join(HERE, "inputs", "secondary")
+    os.makedirs(out_dir, exist_ok=True)
+    for name, c in SECONDARY_CASES.items():
+        pts = [tuple(f32(v) for v in p) for p in c["points"]()]
+        with open(os.path.join(out_dir, name + ".pts"), "w", newline="\n") as f:
+            for p in pts:
+                f.write("%.17g %.17g %.17g\n" % p)
+        meta = {
+            "library": "SecondaryStructures",
+            "points": len(pts),
+            "made_from": c["made_from"],
+            "parameters": {},
+            "made_by": "tools/volrover-goldens/make_inputs.py",
+        }
+        with open(os.path.join(out_dir, name + ".json"), "w", newline="\n") as f:
+            json.dump(meta, f, indent=2)
+            f.write("\n")
+        print("wrote", name, len(pts), "points")
+
+
 # ContourTiler's cases are Reconstruct series: inputs/tiler/<case>/<case>.ser and its sections
 # <case>.<n>, every trace closed, counterclockwise (the legacy curation requires it) and in an
 # identity transform, with coordinates multiples of 2^-8 (so they are exact in decimal, and the
@@ -399,7 +635,9 @@ def write_tiler_inputs():
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--only", choices=["genseg", "segmed", "skeleton", "tiler"],
+    ap.add_argument("--only",
+                    choices=["genseg", "segmed", "skeleton", "secondary", "tiler",
+                             "pockettunnel"],
                     help="write only one library's inputs (the others stay as committed)")
     ap.add_argument("--case", action="append",
                     help="write only this GenSeg case (repeatable; the others stay as committed)")
@@ -410,7 +648,11 @@ def main():
         write_skeleton_inputs()
     if args.only in (None, "segmed"):
         write_segmed_inputs()
-    if args.only in ("skeleton", "segmed", "tiler"):
+    if args.only in (None, "pockettunnel"):
+        write_pockettunnel_inputs()
+    if args.only in (None, "secondary"):
+        write_secondary_inputs()
+    if args.only in ("skeleton", "segmed", "secondary", "tiler", "pockettunnel"):
         return
     out_dir = os.path.join(HERE, "inputs", "genseg")
     os.makedirs(out_dir, exist_ok=True)

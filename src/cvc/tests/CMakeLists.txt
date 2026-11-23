@@ -3349,7 +3349,14 @@ cvc_discover_tests(nav_coph_test)
 cvc_discover_tests(nav_coph_model_test)
 cvc_discover_tests(nav_coph_learner_test)
 cvc_discover_tests(nav_coph_exchange_test)
-cvc_discover_tests(nav_coph_fleet_test)
+# The fleet's long run (CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun: the crossing until
+# both agents are at their goals, about 780 ticks each) takes about 4 s in Release and 70 s in a
+# Debug job, mostly in the learner's updates, and a PR's Debug ctest gives a test without a TIMEOUT
+# of its own 300 s (ci.yml), which a slow runner misses: it timed out on all three tries on
+# transfix/libcvc#1452's run 45049798289, where this executable's other cases ran 4.2-4.7 times
+# slower than usual. Its own budget, as the segmentation action test has, so a slow box fails on a
+# real hang only.
+cvc_discover_tests(nav_coph_fleet_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(nav_material_deploy_test)
 cvc_discover_tests(nav_material_raster_test)
 cvc_discover_tests(nav_coef_energy_test)

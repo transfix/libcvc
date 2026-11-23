@@ -269,7 +269,7 @@ def test_params_tables():
     assert grid.child("view").value() == "zy"
     assert grid.child("slice.x").value() == "3" and grid.child("slice.y").value() == "-1"
     assert grid.child("slice.z").property("unit") == "voxel"
-    assert grid.child("tool").property("choices") == "navigate,points,probe"
+    assert grid.child("tool").property("choices") == "navigate,points,probe,contours"
     back = pycvc.volume_grid_params.from_state(grid)
     assert back.view == pycvc.grid_view_zy and back.tool == pycvc.grid_tool_navigate
     assert back.slice_z == 40 and back.to_dict() == p.to_dict()

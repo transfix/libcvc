@@ -1,12 +1,16 @@
 # volume_grid.ari — a REUSABLE Ariadne component: VolumeGridRover for a `type: volume_grid` node
 # (cvc::gl::VolumeGridNode, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4). Slice views down the
-# volume's axes with a 3D view beside them, the tool (navigate / points / probe), and a side panel:
-# the probe and the planes, the point classes, and the transfer function. Every control binds a key
-# the node owns (graphics.root.children.<node>.grid.*, VolumeGridNode.h), and the views write their
-# picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO host C++.
+# volume's axes with a 3D view beside them, the tool (navigate / points / probe / contours), and a
+# side panel: the probe and the planes, the point classes, the contours and their tiled surfaces,
+# and the transfer function. Every control binds a key the node owns
+# (graphics.root.children.<node>.grid.*, VolumeGridNode.h and VolumeGridContours.h), and the views
+# write their picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO
+# host C++.
 #
 # The grid reads no file: it shows the volume the app holds (the node's source: { data: <name> },
-# a data: entry the document loads), and follows it as it changes. The panel's Save and Load go
+# a data: entry the document loads), and follows it as it changes. With more than one volume
+# loaded, the Probe tab's Source combo picks which: it lists the document's data: entries that
+# hold a volume (the node's grid.volumes) and writes grid.source.volume. The panel's Save and Load go
 # through the app too: Save writes what the node publishes (grid.points, grid.session) with
 # (data-save ...), beside the document or, in a browser, as a download; Load loads the file as
 # the dataset <node>_points or <node>_session with (data-load ...) and points the node's
@@ -16,6 +20,13 @@
 #     click                 mark a point of the current class, or unmark the one under the pointer
 #     drag                  select the points in a rubber band (Shift adds, Ctrl or Alt takes away)
 #     Shift+Ctrl drag       move the selection
+#   With the Contours tool:
+#     click                 a point of the current object's curve on this plane (at the end being
+#                           drawn, else at the nearer end of its open curve here, else a new curve)
+#     click the first point close the curve (three points or more)
+#     Shift+click           start another curve
+#     drag a point          move it (the selection, when the point is in it)
+#     drag elsewhere        select control points in a rubber band (Shift adds, Ctrl or Alt takes away)
 #   With Navigate, a click moves the other two planes to the voxel. The middle or right button pans,
 #   the wheel zooms about the pointer. The probe follows the pointer in every tool.
 #
@@ -30,6 +41,11 @@
 #   volume_grid_views   the views alone (a group: for a document that lays out its own windows)
 #   volume_grid_tools   the tool and the side panel alone (a group); its tabs end in a
 #                       `slot: tabs`, so an include adds tabs of its own (`slots: { tabs: [...] }`)
+#   volume_grid_contours_tab
+#                       the Contours tab alone (a group with `tab: Contours`): the objects (name,
+#                       colour, linear or spline, samples, shown), the curve being drawn, the edits,
+#                       how they draw, Tile with its progress and Stop, the surfaces' look, and the
+#                       contours saved and loaded through the app
 #
 # Args (every one has a default, so a bare include works):
 #   node       the volume_grid node's id (default grid)
@@ -51,12 +67,19 @@
 #           type: volume_grid
 #           source: { data: head }        # and the grid shows it
 #           classes: [ { name: membrane, color: [1, 0.2, 0.2], radius: 2 } ]
+#           objects: [ { name: axon, color: [0.2, 0.8, 0.3], interpolation: spline } ]
 #
 # Two grids: give each include its node and id; each view shows its own grid alone (show: [node]).
 # Keyboard: a document binds keys to requests (`keys:`), as examples/ariadne/documents/volume_grid.ari
-# does: PageUp / PageDown write `step 1` / `step -1`, Delete `delete_selected`.
+# does: PageUp / PageDown write `step 1` / `step -1`, Delete `delete_selected` (the contours' selected
+# points under the Contours tool).
 #
-# (P9 adds a Segmentation tab, P10 a Contours tab and a Tile button.)
+# Contours: Tile runs the contour tiler on the closed curves (a sliced task, its keys under
+# grid.tile) and puts a surface per object in the 3D view in the object's colour. Save writes the z
+# planes' closed curves (grid.contours) through the app as .cvcc, .contour or .pcd; Load loads a
+# contour file (.ser, .contour, .cvcc, ...) as the dataset <node>_contours and points the node's
+# grid.contour.source at it, so its polygons become closed curves on the grid's planes. A session
+# keeps every curve as drawn, open ones and splines included.
 
 import:
   - cvc://components/transfer_function.ari
@@ -228,9 +251,9 @@ units:
     children:
       - radio_row: Tool
         bind: graphics.root.children.{node}.grid.tool
-        options: [Navigate, Points, Probe]
-        values: [navigate, points, probe]
-        tooltip: "what a click in a slice view does: move the other planes there, mark and select points, or only read the voxel"
+        options: [Navigate, Points, Probe, Contours]
+        values: [navigate, points, probe, contours]
+        tooltip: "what a click in a slice view does: move the other planes there, mark and select points, only read the voxel, or draw the current object's curves"
       - type: tabs
         id: "{id}_panel"
         children:
@@ -288,8 +311,14 @@ units:
                     bind: graphics.root.children.{node}.grid.info.min
                   - text: Max
                     bind: graphics.root.children.{node}.grid.info.max
+              - combo: Source
+                bind: graphics.root.children.{node}.grid.source.volume
+                options: (string.split (state-get "graphics.root.children.{node}.grid.volumes") "\n")
+                visible_when: (!= (or (state-get "graphics.root.children.{node}.grid.volumes") "") "")
+                tooltip: "the state key the volume is at: the app holds it (a data: entry, a program, a filter) and the grid follows it. Pick another of the document's volumes to show it"
               - text: Source
                 bind: graphics.root.children.{node}.grid.info.source
+                visible_when: (= (or (state-get "graphics.root.children.{node}.grid.volumes") "") "")
                 tooltip: "the state key the volume is at: the app holds it (a data: entry, a program, a filter) and the grid follows it"
               - separator
               - input_text: Session
@@ -373,6 +402,9 @@ units:
                   - button: Load
                     on: (begin (data-load "{node}_points" (state-get "graphics.root.children.{node}.grid.files.classes") "point_classes") (data-reload "{node}_points") (state-set "graphics.root.children.{node}.grid.source.points" "data.{node}_points.classes"))
                     tooltip: "the app loads the file as data.{node}_points, and its classes replace the grid's"
+          - include: volume_grid_contours_tab
+            tab: Contours                   # a tab's title is read where it is listed
+            args: { node: "{node}", id: "{id}" }
           - type: group
             tab: Transfer function
             children:
@@ -381,3 +413,159 @@ units:
           - slot: tabs
       - text: Status
         bind: graphics.root.children.{node}.grid.status
+
+  volume_grid_contours_tab:
+    args: { node: grid, id: volume_grid }
+    type: group
+    id: "{id}_contours"
+    tab: Contours
+    children:
+      - list: Objects
+        bind: graphics.root.children.{node}.grid.objects
+        add: true
+        remove: true
+        new_item: { name: "object {n}", interpolation: linear, samples: "5", visible: "1" }
+        rows: 4
+        tooltip: "the object a click draws (with the Contours tool); Add and Remove edit the objects (Undo puts them back)"
+      # Two short rows an object (the colour editor is wide): its name and colour; then how its curves
+      # draw, a spline's samples, whether it shows, and how many curves it has.
+      - type: group
+        id: "{id}_object_{i}"
+        repeat: (int (state-get "graphics.root.children.{node}.grid.objects"))
+        children:
+          - type: group
+            id: "{id}_object_{i}_a"
+            layout: { kind: grid, col_widths: [110, 250] }
+            children:
+              - input_text: "##oname{i}"
+                bind: graphics.root.children.{node}.grid.objects.{i}.name
+              - color: "##ocolour{i}"
+                bind: graphics.root.children.{node}.grid.objects.{i}.color
+          - type: group
+            id: "{id}_object_{i}_b"
+            layout: { kind: grid, col_widths: [96, 110, 30, 100] }
+            children:
+              - combo: "##ointerp{i}"
+                bind: graphics.root.children.{node}.grid.objects.{i}.interpolation
+                options: [linear, spline]
+                values: [linear, spline]
+                tooltip: "straight between the control points, or a spline through them"
+              - slider_int: "##osamples{i}"
+                bind: graphics.root.children.{node}.grid.objects.{i}.samples
+                lo: 1
+                hi: 16
+                tooltip: "points per span of a spline"
+              - checkbox: "##oshow{i}"
+                bind: graphics.root.children.{node}.grid.objects.{i}.visible
+                tooltip: "show its curves and surface"
+              - text: curves
+                bind: graphics.root.children.{node}.grid.objects.{i}.curves
+      - text: Drawing
+        bind: graphics.root.children.{node}.grid.contour.active
+        tooltip: "the curve the next click extends"
+      - text: Contours
+        bind: graphics.root.children.{node}.grid.contour.info
+      - type: group
+        id: "{id}_curve_edits"
+        layout: { kind: horizontal }
+        children:
+          - button: Close
+            on: (state-set "graphics.root.children.{node}.grid.request" "close_curve")
+            tooltip: "close the curve being drawn (or click its first point)"
+          - button: New curve
+            on: (state-set "graphics.root.children.{node}.grid.request" "new_curve")
+            tooltip: "the next click starts a new curve"
+          - button: Delete curve
+            on: (state-set "graphics.root.children.{node}.grid.request" "delete_curve")
+            tooltip: "delete the curve being drawn, or the curves of the selected points"
+          - button: Clear
+            on: (state-set "graphics.root.children.{node}.grid.request" "clear_object")
+            tooltip: "delete every curve of the current object"
+      - type: group
+        id: "{id}_point_edits"
+        layout: { kind: horizontal }
+        children:
+          - text: Selected
+            bind: graphics.root.children.{node}.grid.contour.selected
+          - button: Delete points
+            on: (begin (state-set "graphics.root.children.{node}.grid.tool" "contours") (state-set "graphics.root.children.{node}.grid.request" "delete_selected"))
+            tooltip: "delete the selected control points"
+          - button: Undo
+            on: (begin (state-set "graphics.root.children.{node}.grid.tool" "contours") (state-set "graphics.root.children.{node}.grid.request" "undo"))
+      - type: group
+        id: "{id}_contour_view"
+        layout: { kind: horizontal }
+        children:
+          - checkbox: Curves
+            bind: graphics.root.children.{node}.grid.contour.show
+          - checkbox: Points
+            bind: graphics.root.children.{node}.grid.contour.control_points
+          - checkbox: In 3D
+            bind: graphics.root.children.{node}.grid.contour.show_3d
+          - checkbox: Snap
+            bind: graphics.root.children.{node}.grid.contour.snap
+            tooltip: "put new and moved points on voxel centres"
+      - slider_float: Point size
+        bind: graphics.root.children.{node}.grid.contour.point_size
+        range: key
+        lo: 0.1
+        hi: 10.0
+        fmt: "%.1f"
+        tooltip: "a control point's radius in voxels; a click takes a point within 1.5 times it"
+      - separator
+      - type: group
+        id: "{id}_tile"
+        layout: { kind: horizontal }
+        children:
+          - button: Tile
+            on: (state-set "graphics.root.children.{node}.grid.request" "tile")
+            disabled_when: (= (state-get "graphics.root.children.{node}.grid.tile.busy") "1")
+            tooltip: "tile each object's closed curves into a surface in the 3D view"
+          - button: Stop
+            on: (state-set "graphics.root.children.{node}.grid.request" "stop_tile")
+            enabled_when: (= (state-get "graphics.root.children.{node}.grid.tile.stoppable") "1")
+            tooltip: "end the tile at its next step, keeping the surfaces the grid had"
+          - checkbox: Auto
+            bind: graphics.root.children.{node}.grid.contour.auto_tile
+            tooltip: "tile each time the contours are replaced (loaded, a session, a program)"
+      - progress: Tiling
+        bind: graphics.root.children.{node}.grid.tile.progress
+        hi: 100
+        overlay: graphics.root.children.{node}.grid.tile.phase
+      - text: Tile
+        bind: graphics.root.children.{node}.grid.tile.status
+        tooltip: "what the last tile made (grid.tile.warnings.<i>: what it skipped)"
+      - slider_float: Curation distance
+        bind: graphics.root.children.{node}.grid.tile.curation_delta
+        lo: 0.0
+        hi: 0.5
+        fmt: "%.4f"
+        tooltip: "the least distance kept between curves of one plane, in object units (0: no curation); less than the slice spacing; ctrl-click to type"
+      - type: group
+        id: "{id}_surface_view"
+        layout: { kind: horizontal }
+        children:
+          - checkbox: Surfaces
+            bind: graphics.root.children.{node}.grid.contour.show_surfaces
+          - checkbox: Close ends
+            bind: graphics.root.children.{node}.grid.tile.cap_ends
+            tooltip: "cap every object beyond its first and last curve"
+      - slider_float: Surface opacity
+        bind: graphics.root.children.{node}.grid.contour.surface_opacity
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - separator
+      - input_text: Contours file
+        bind: graphics.root.children.{node}.grid.files.contours
+        tooltip: "a contour file: .cvcc (libcvc's), .contour (ctr2suf) or .pcd to save; .ser, .contour, .cvcc and the others to load"
+      - type: group
+        id: "{id}_contour_files"
+        layout: { kind: horizontal }
+        children:
+          - button: Save
+            on: (data-save "graphics.root.children.{node}.grid.contours" (state-get "graphics.root.children.{node}.grid.files.contours") "contours")
+            tooltip: "the app writes the z planes' closed curves (grid.contours): beside the document, or in a browser as a download"
+          - button: Load
+            on: (begin (data-load "{node}_contours" (state-get "graphics.root.children.{node}.grid.files.contours") "contours") (data-reload "{node}_contours") (state-set "graphics.root.children.{node}.grid.contour.source" "data.{node}_contours.contours"))
+            tooltip: "the app loads the file as data.{node}_contours, and its polygons become the grid's curves"
