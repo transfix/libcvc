@@ -172,21 +172,9 @@ void holon::remove_participant(const std::string &pid) {
 }
 
 namespace {
-// An entity's pose for the pose stream: its chassis's centre, heading and horizontal velocity, and
-// when its chassis is a body in SCENE's world (a jolt vehicle's, a boat's hull, a dynamic plant's
-// box) that body's attitude and vertical speed too, so a client draws it pitched and rolled as it
-// is and a driver's model takes them from the sample (OW5m). Without one, a turn about z alone.
+// A driver's pose and the entities' (entity_ride), in SCENE's world when there is one.
 cvc::physics::body_state ride_of(const entity_info &e, const SceneWorld *scene) {
-  cvc::physics::body_state s;
-  s.position = {e.x, e.y, e.z};
-  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
-  s.linear_velocity = {e.vx, e.vy, 0.0};
-  if (scene && e.chassis.valid() && scene->world().contains(e.chassis)) {
-    const cvc::physics::body_state b = scene->world().state(e.chassis);
-    s.rotation = b.rotation;
-    s.linear_velocity.z = b.linear_velocity.z;
-  }
-  return s;
+  return entity_ride(e, scene ? &scene->world() : nullptr);
 }
 
 // The heading of a rotation (about z, from x), whatever its pitch and roll.

@@ -4310,6 +4310,21 @@ navigator_params WorldVehicles::navigator() const {
 
 const std::vector<float> &WorldVehicles::sdf() const { return _impl->sdf; }
 
+const ph::world &WorldVehicles::world() const { return *_impl->world; }
+
+ph::body_state entity_ride(const entity_info &e, const ph::world *world) {
+  ph::body_state s;
+  s.position = {e.x, e.y, e.z};
+  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
+  s.linear_velocity = {e.vx, e.vy, 0.0};
+  if (world && e.chassis.valid() && world->contains(e.chassis)) {
+    const ph::body_state b = world->state(e.chassis);
+    s.rotation = b.rotation;
+    s.linear_velocity.z = b.linear_velocity.z;
+  }
+  return s;
+}
+
 std::vector<entity_info> WorldVehicles::entities() const {
   const impl &d = *_impl;
   std::vector<entity_info> out;

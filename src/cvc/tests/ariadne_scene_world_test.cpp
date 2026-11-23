@@ -8891,6 +8891,9 @@ struct client_run {
   // The worst angle between the driver's pose (the relay's ride) and its vehicle's chassis body:
   // the pose carries the chassis's attitude (OW5m).
   double ride_gap = 0.0;
+  // The same for the vehicle's own entry in the relay's stream of the room's entities
+  // (conference::entity_pose_subjects), which every client draws it by.
+  double entity_gap = 0.0;
   cvc::ariadne::dynamic_drive drive;
 };
 
@@ -9050,7 +9053,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     return in;
   };
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
-  double settled_yaw = 0.0, settled_tilt = 0.0, ride_gap = 0.0;
+  double settled_yaw = 0.0, settled_tilt = 0.0, ride_gap = 0.0, entity_gap = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
   const bool sampled = own_world || sampled_too;
   double climb = 0.0, lowest = start.z, highest = start.z;
@@ -9090,16 +9093,25 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     for (const entity_info &e : v.entities())
       if (e.id == id && e.chassis.valid())
         body = w->world().state(e.chassis).rotation;
-    {
-      // Its angle from the chassis's, the dot product over both norms (a float quaternion's norm is
-      // 1 only to 1e-7, which acos would read as 1 mrad).
-      const double na = std::sqrt(rq.w * rq.w + rq.x * rq.x + rq.y * rq.y + rq.z * rq.z);
+    // An angle from the chassis's, the dot product over both norms (a float quaternion's norm is 1
+    // only to 1e-7, which acos would read as 1 mrad).
+    const auto from_body = [&body](const cvc::physics::quat &a) {
+      const double na = std::sqrt(a.w * a.w + a.x * a.x + a.y * a.y + a.z * a.z);
       const double nb =
           std::sqrt(body.w * body.w + body.x * body.x + body.y * body.y + body.z * body.z);
       const double d =
-          std::fabs(rq.w * body.w + rq.x * body.x + rq.y * body.y + rq.z * body.z) / (na * nb);
-      ride_gap = std::max(ride_gap, 2.0 * std::acos(std::min(1.0, d)));
-    }
+          std::fabs(a.w * body.w + a.x * body.x + a.y * body.y + a.z * body.z) / (na * nb);
+      return 2.0 * std::acos(std::min(1.0, d));
+    };
+    ride_gap = std::max(ride_gap, from_body(rq));
+    bool listed = false;
+    for (const pose_subject &e : conference::entity_pose_subjects(v))
+      if (e.pid == conference::entity_pid(id)) {
+        listed = true;
+        entity_gap = std::max(entity_gap, from_body(e.state.rotation));
+      }
+    if (!listed)
+      entity_gap = 10.0; // not in the stream at all
     const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
@@ -9144,6 +9156,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   result.settled_yaw = settled_yaw;
   result.settled_tilt = settled_tilt;
   result.ride_gap = ride_gap;
+  result.entity_gap = entity_gap;
   result.end_speed = cvc::ariadne::dynamic_vehicle_model::speed(m);
   result.drive = k;
   EXPECT_GT(top, top_at_least) << "it drove";
@@ -9209,6 +9222,7 @@ TEST(AriadneOneWorld, AClientRunsTheJoltVehicleItDrivesAsTheWorldDoes) {
   EXPECT_GT(over.climb, 0.5) << "up the hill, on the client's statics";
   for (const client_run *c : {&run, &over}) {
     EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the chassis's attitude";
+    EXPECT_LT(c->entity_gap, 1e-6) << "and so is the room's entity's, which clients draw";
     EXPECT_LT(c->end_speed, -0.5) << "and backed up at the end";
     EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
     EXPECT_LT(c->worst_yaw, 0.005);
@@ -9298,6 +9312,7 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheRelaysWaves) {
   EXPECT_GT(waves.phase_z, 2.5 * waves.worst_z) << "on the relay's waves, not others";
   for (const client_run *c : {&still, &waves}) {
     EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the hull's attitude";
+    EXPECT_LT(c->entity_gap, 1e-6) << "and so is the room's entity's, which clients draw";
     EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
     EXPECT_LT(c->worst_z, 0.02) << "afloat at the relay's height";
     EXPECT_LT(c->worst_yaw, 0.01);

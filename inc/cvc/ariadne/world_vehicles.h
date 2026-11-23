@@ -301,6 +301,13 @@ struct entity_info {
   bool posed = false;
 };
 
+// An entity's pose for the pose stream: its chassis's centre, heading and horizontal velocity, and
+// when its chassis is a body in WORLD (a jolt vehicle's, a boat's hull, a dynamic plant's box)
+// that body's attitude and vertical speed too, so a client draws it pitched and rolled as it is
+// and a driver's model takes them from the sample (OW5m). Without one, a turn about z alone. The
+// relay's room entities (conference::entity_pose_subjects) and a driver's pose (holon) alike.
+physics::body_state entity_ride(const entity_info &e, const physics::world *world);
+
 // The navigator's drive on an entity's last tick, as a twin replays it: the coefficients its
 // policy gave (alpha, the walls' barrier; beta, the goal's pull; gamma, the damping), the point it
 // steered for (its carrot, world metres) and the external force it summed (m/s^2, world x and y:
@@ -606,6 +613,8 @@ public:
   const std::vector<float> &sdf() const;
 
   std::vector<entity_info> entities() const;
+  // The physics world its entities are in.
+  const physics::world &world() const;
   // Entity `id`'s wheels as drawn (entity_wheel), as of the last step: a view poses each one.
   // Empty for an id that is not a placed entity.
   std::vector<entity_wheel> wheels(std::uint64_t id) const;

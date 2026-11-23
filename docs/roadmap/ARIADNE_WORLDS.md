@@ -1216,8 +1216,9 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   the relay's storms change on the clock's periods (a weather node) is not followed yet.
 - **As built (OW5m, a vehicle's attitude in its pose):** the pose stream carries an entity's
   chassis's attitude and vertical speed when its chassis is a body in the relay's world (a jolt
-  vehicle's, a boat's hull, a dynamic plant's box), for the vehicles the room's entities list and
-  for a driver's pose alike (holon's `ride_of`); before, a turn about z alone. So a client draws
+  vehicle's, a boat's hull, a dynamic plant's box), for the room's entities the relay streams
+  (`conference::entity_pose_subjects`, which every client draws them by) and for a driver's pose
+  alike (`entity_ride`); before, a turn about z alone. So a client draws
   the room's vehicles pitched and rolled as they are, and a jolt or boat model takes its chassis's
   pitch, roll and vertical speed from each sample (`dynamic_vehicle_model::at`), its spin still the
   predicted one (the stream does not carry it). A sample with a heading alone, an older relay's,
