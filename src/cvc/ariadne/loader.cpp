@@ -161,7 +161,7 @@ const char *const kAriSchema = R"ARISCHEMA({
     "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
     "windows_menu": {"type": ["boolean", "string"]},
     "clock":    {"type": "boolean"},
-    "notifications": {"type": "boolean"},
+    "notifications": {"enum": [true, false, "always"]},
     "menu_collapse": {"enum": [true, false, "auto", "never", "always"]},
     "keys": {
       "type": "object",
@@ -941,6 +941,10 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     Widget w = tray_icon(label, str(n, "badge"), action(n),
                          has(n, "items") ? parse_seq(ctx, n["items"]) : std::vector<Widget>{});
     w.tone = str(n, "tone");
+    // §5.22 `icon:` a picture in place of the glyph (a URI, a published image, or an expression),
+    // round, the bar's height: the glyph shows until it is ready.
+    w.button_icon = str(n, "icon");
+    w.media_auth = str(n, "auth");
     return w;
   }
   if (type == "menu_item") {
@@ -1729,7 +1733,9 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
   }
   // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
   // reference the outer index. Surface it rather than let it silently alias state.
-  if (!w.repeat.empty() && any_descendant_repeats(w))
+  // A repeated mount is not nested: the module's repeats are its own, at its instance's
+  // sub-prefix, so its {i} never needed the outer one.
+  if (!w.repeat.empty() && w.scope.empty() && any_descendant_repeats(w))
     ctx.warn("ari: nested 'repeat' is not supported (a single {i} index) — the inner repeat "
              "cannot see the outer index");
   return w;
@@ -2307,6 +2313,10 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   if (frag.IsMap() && frag["meta"] && frag["meta"].IsMap() && frag["meta"]["name"] &&
       frag["meta"]["name"].IsScalar() && !frag["meta"]["name"].Scalar().empty())
     wrapper.app_name = frag["meta"]["name"].Scalar();
+  // ... and the mount's own name for it, worked out each frame in the loader's scope (a key or an
+  // expression; `{i}` its instance under repeat:), which names it when not empty.
+  if (has(n, "name"))
+    wrapper.app_name_bind = str(n, "name");
   wrapper.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
   // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is
@@ -2472,9 +2482,18 @@ Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
     // §5.22: `clock: true|false` shows the tray's clock or not, whatever the host's default.
     if (doc["clock"].IsDefined())
       roots.push_back(tray_clock(flag(doc, "clock")));
-    // §5.24: `notifications: true|false` shows the tray's bell or not, whatever the host's default.
-    if (doc["notifications"].IsDefined())
-      roots.push_back(tray_bell(flag(doc, "notifications")));
+    // §5.24: `notifications: true|false` shows the tray's bell or not, whatever the host's default;
+    // `always` shows it with an empty feed too.
+    if (doc["notifications"].IsDefined()) {
+      const YAML::Node nv = doc["notifications"];
+      if (nv.IsScalar() && nv.Scalar() == "always") {
+        Widget bell = tray_bell(true);
+        bell.bell_always = true;
+        roots.push_back(std::move(bell));
+      } else {
+        roots.push_back(tray_bell(flag(doc, "notifications")));
+      }
+    }
   } else {
     ctx.warn("ari: document root is neither a map nor a sequence — nothing to load");
   }
@@ -3528,6 +3547,7 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       cam.has_elevation = static_cast<bool>(c["elevation"]);
       cam.elevation = num(c, "elevation", 0.0);
       cam.zoom = num(c, "zoom", 1.0);
+      read_scene_camera_viewpoint(to_value(c), cam); // position, target, up, fov, near, far, ...
       sc.cameras.push_back(cam);
     }
   const YAML::Node sh = s["shadows"];
@@ -4418,6 +4438,17 @@ LoadResult load_file(cvc::app &app, const std::string &path) {
   }
 }
 
+bool parse_value(const std::string &text, Value &out, std::string *why) {
+  try {
+    out = to_value(YAML::Load(text));
+    return true;
+  } catch (const std::exception &e) {
+    if (why)
+      *why = e.what();
+    return false;
+  }
+}
+
 bool have_yaml() { return true; }
 
 #else // !CVC_ARIADNE_HAVE_YAML — stub: the rest of Ariadne still builds/runs.
@@ -4433,6 +4464,11 @@ LoadResult unavailable() {
 
 LoadResult load_string(cvc::app &, const std::string &) { return unavailable(); }
 LoadResult load_file(cvc::app &, const std::string &) { return unavailable(); }
+bool parse_value(const std::string &, Value &, std::string *why) {
+  if (why)
+    *why = "libcvc was built without yaml-cpp";
+  return false;
+}
 bool have_yaml() { return false; }
 
 #endif

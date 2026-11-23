@@ -1163,6 +1163,35 @@ windows:
   EXPECT_TRUE(warned);
 }
 
+// §5.22 a tray icon's picture (an avatar), and §5.24 `notifications: always`.
+TEST(AriadneLoader, TrayIconPictureAndBellAlways) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+notifications: always
+menubar:
+  - tray_icon: user
+    icon: (state-get "me.avatar_url")
+    auth: site
+    on: profile
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *you = find(r.root, Kind::TrayIcon, "user");
+  ASSERT_NE(you, nullptr);
+  EXPECT_EQ(you->button_icon, "(state-get \"me.avatar_url\")");
+  EXPECT_EQ(you->media_auth, "site");
+  // The document's bell setting, outside the bar: on, and shown with an empty feed.
+  const Widget *bell = nullptr;
+  for (const Widget &c : r.root.children)
+    if (c.kind == Kind::TrayIcon && c.tray_bell)
+      bell = &c;
+  ASSERT_NE(bell, nullptr);
+  EXPECT_TRUE(bell->bdef);
+  EXPECT_TRUE(bell->bell_always);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("notifications"), std::string::npos) << w;
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {
@@ -2775,6 +2804,54 @@ scenes:
   for (const std::string &w : r.warnings)
     warned = warned || w.find("no `scene:` name") != std::string::npos;
   EXPECT_TRUE(warned);
+}
+
+// §5.18 a camera's authored viewpoint: position, target, up, fov, near, far, orthographic, height;
+// a camera without them keeps the defaults, and a malformed vector or an fov out of range is left
+// out rather than half read.
+TEST(AriadneScene, CameraViewpoints) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  cameras:
+    - camera: main
+      position: [12, -9, 7.5]
+      target: [1, 1, 0]
+      up: [0, 1, 0]
+      fov: 35
+      near: 0.25
+      far: 400
+    - { camera: plan, orthographic: true, height: 16, target: [0, 0, 0] }
+    - { camera: rig, azimuth: -30 }
+    - { camera: bad, position: [1, two, 3], target: [1, 2], up: [0, 0, 0], fov: 200 }
+  nodes: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.cameras.size(), 4u);
+  const SceneCamera &m = r.scene.cameras[0];
+  EXPECT_EQ(m.id, "main");
+  EXPECT_TRUE(m.has_position && m.has_target && m.has_up);
+  EXPECT_DOUBLE_EQ(m.position[2], 7.5);
+  EXPECT_DOUBLE_EQ(m.target[0], 1.0);
+  EXPECT_DOUBLE_EQ(m.up[1], 1.0);
+  EXPECT_DOUBLE_EQ(m.fov, 35.0);
+  EXPECT_DOUBLE_EQ(m.near_clip, 0.25);
+  EXPECT_DOUBLE_EQ(m.far_clip, 400.0);
+  EXPECT_FALSE(m.orthographic);
+  const SceneCamera &p = r.scene.cameras[1];
+  EXPECT_TRUE(p.orthographic);
+  EXPECT_DOUBLE_EQ(p.height, 16.0);
+  EXPECT_FALSE(p.has_position);
+  EXPECT_TRUE(p.has_target);
+  const SceneCamera &g = r.scene.cameras[2];
+  EXPECT_FALSE(g.has_position || g.has_target || g.has_up || g.orthographic);
+  EXPECT_DOUBLE_EQ(g.fov, 0.0);
+  EXPECT_DOUBLE_EQ(g.near_clip, 0.0);
+  EXPECT_DOUBLE_EQ(g.up[2], 1.0);
+  const SceneCamera &b = r.scene.cameras[3];
+  EXPECT_FALSE(b.has_position || b.has_target || b.has_up);
+  EXPECT_DOUBLE_EQ(b.fov, 0.0);
 }
 
 // §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's
@@ -5523,6 +5600,33 @@ root:
   EXPECT_EQ(other->app_name, "other");
 }
 
+// §5.25 a load:'s own name: (a key or an expression, `{i}` its instance) is kept for the Runtime
+// to work out; and a repeated mount whose module repeats widgets of its own is not a nested
+// repeat (the module's {i} is its own), so it loads without that warning.
+TEST(AriadneMount, ALoadsNameIsKeptAndARepeatedMountIsNotANestedRepeat) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("site_app.ari", "meta: { name: Site, min_libcvc: \"3.4.0\" }\n"
+                                 "menubar:\n  - menu_item: Home\n    on: (state-set \"h\" 1)\n"
+                                 "root:\n  - type: group\n    repeat: (int 2)\n"
+                                 "    children: [ { text: \"row {i}\" } ]\n");
+  const std::string main = write_temp_ari("main_named_sites.ari", R"(
+meta: { min_libcvc: "3.4.0" }
+root:
+  - load: site_app.ari
+    as: site
+    repeat: (int 2)
+    name: slots.{i}.name
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *site = find_scope(r.root, "includes.site");
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->app_name, "Site");
+  EXPECT_EQ(site->app_name_bind, "slots.{i}.name");
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("nested 'repeat'"), std::string::npos) << w;
+}
+
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
   SKIP_WITHOUT_YAML();
   write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");
@@ -7051,6 +7155,31 @@ TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
   EXPECT_EQ(r.scene.nodes[1].source_data, "bunny");
   EXPECT_NE(find(r.root, Kind::Window, "Filter"), nullptr);
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// The volume_render demo: one volume_render node on a data: entry, a Renderer combo bound to its
+// renderer key, and the transfer function editor on its model.
+TEST(AriadneComponents, VolumeRenderDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_render.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  // cvcGL registers the sdf generator (the volume, data.bunny), not this test.
+  for (const std::string &w : r.warnings)
+    EXPECT_NE(w.find("generate: sdf is not a generator this build has"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_render");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  const Widget *renderer = find(r.root, Kind::Combo, "Renderer");
+  ASSERT_NE(renderer, nullptr);
+  EXPECT_EQ(renderer->bind, "graphics.root.children.bunny.renderer");
 }
 
 // A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.

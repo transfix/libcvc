@@ -52,8 +52,10 @@ namespace nav {
 // mass in the exact flow at the world's damping; a step hits when the motion comes within 0.12 of
 // an obstacle (a door's slab_sweep, or a disk's surface) or leaves the corridors
 // (maze_geometry.corridor_clear, margin 0.12). The sensor reads the risk at the 21 lattice points
-// x + sensor_radius (a, b), a, b in linspace(-1, 1, 5), a^2 + b^2 <= 1: base_risk plus the noise,
+// x + sensor_radius (a, b), a, b in linspace(-1, 1, 5), a^2 + b^2 <= 1: the risk plus the noise,
 // at least 0.001, with uid '<world seed>:<tick>:<j>'; it sees the obstacles within sensor_radius.
+// With an empty network and risk patches it is CooperativeWorld's open field, where the cars'
+// learners run (GRL-SNAM's G13): no corridor bounds it.
 struct coph_crossing_world_config {
   coph_config cfg;
   double damping = 0.85;
@@ -61,6 +63,9 @@ struct coph_crossing_world_config {
   coph_network network = coph_crossing_network();
   std::vector<long long> seeds; // each agent's world seed (its readings' uid prefix)
   double base_risk = 0.02;
+  // Risk patches (x, y, sx, sy, amplitude): each adds amplitude exp(-((qx - x)^2 / sx^2 + (qy -
+  // y)^2 / sy^2) / 2) to base_risk (CooperativeWorld.risk_truth).
+  std::vector<std::array<double, 5>> patches;
   // The sensor noise of reading j at a tick; none when unset.
   std::function<double(int agent, long long tick, int j)> noise;
 };
@@ -86,8 +91,9 @@ private:
   coph_crossing_world_config cfg_;
 };
 
-// Where an export's bootstrap indices come from (D8): the exporting agent and its state. Unset,
-// the fleet draws them from its own seeded std::mt19937.
+// Where an export's bootstrap indices come from (D8): the exporting agent and its state, asked only
+// for an export that makes a packet (coph_can_export). Unset, the fleet draws them from its own
+// seeded std::mt19937.
 using coph_draw_source =
     std::function<std::array<coph_draws, 2>(const coph_agent &agent, const coph_state &x)>;
 
@@ -118,6 +124,12 @@ public:
     bool hit = false;
     coph_observation observation;
     std::vector<coph_shape> obstacles;
+    // A vehicle's: the force its plant took over the held step (D5), which the transition carries
+    // in place of the held force; whether its world says it arrived, in place of the goal radius;
+    // and a new goal, taken before it observes (D12's sliding local goal).
+    std::optional<coph_vec2> u_used;
+    std::optional<bool> arrived;
+    std::optional<coph_vec2> goal;
   };
   // One boundary at `tick`, time `now` (the runner's clock, (tick dt_us) / 1e6 with dt_us =
   // round(dt 1e6)); one input per agent, read only for agents still running. Returns each agent's

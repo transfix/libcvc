@@ -86,6 +86,7 @@ struct shore_layer_params {
   double period_spread = 0.06;      // their periods: T, T (1 + s), T (1 - s), T (1 + 2s), ...
   double breaker_index = 0.78;      // H <= gamma d (McCowan)
   double exposure_power = 1.0;      // max(0, -n . swell)^p near the shore
+  double lee_exposure = 0.0;        // the least exposure: the swell diffracted round to a lee shore
   double shadow_wavelengths = 2.0;  // the shadow fades to the open swell this far from shore
   double reflect_wavelengths = 2.0; // a reflected train fades over this far offshore
   double steepness = 0.5;           // Gerstner steepness in deep water, rising to 1 at breaking

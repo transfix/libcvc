@@ -111,6 +111,7 @@ state_cluster_shard::state_cluster_shard(app &ctx, std::string cluster_id,
   _codecs->register_builtin_codecs();
   register_volume_geometry_codecs(ctx, *_codecs);
   _adapter->set_codec_registry(_codecs.get()); // so node data() payloads replicate
+  _adapter->set_clock(&_clock);                // so a local delete carries its own time
   _message_bus = std::make_unique<state_message_bus>();
   _write_policy = std::make_unique<state_write_policy>();
 }
@@ -313,6 +314,17 @@ state_cluster_shard::ingest_result state_cluster_shard::ingest_remote(const stat
       _ctr_remote_rejected.fetch_add(1, std::memory_order_relaxed);
       return r;
     }
+  }
+
+  // A write older than a delete at or above its path (a tombstone): its writer had not seen the
+  // delete, so it must not bring the subtree back. Seen, so a repeat is a duplicate; not applied.
+  if (_adapter->buried(m)) {
+    (void)_replica->seen(m.origin_node_id, m.sequence, /*record*/ true);
+    _replica->observe_remote(m.origin_node_id, m.sequence);
+    _clock.update(hybrid_time::from_packed(m.hlc_time)); // buried() implies a timed one
+    _ctr_remote_buried.fetch_add(1, std::memory_order_relaxed);
+    r.buried = true;
+    return r;
   }
 
   // Conflict resolution: when enabled, compare against the last
@@ -808,6 +820,14 @@ state_cluster_shard::snapshot(const std::string &path_prefix) const {
     result.push_back(std::move(e));
   });
   return result;
+}
+
+std::vector<state_mutation> state_cluster_shard::tombstones() const {
+  std::vector<state_mutation> out = _adapter->tombstones();
+  for (state_mutation &m : out)
+    if (m.cluster_id.empty())
+      m.cluster_id = _cluster_id;
+  return out;
 }
 
 void state_cluster_shard::ingest_snapshot_entry(const snapshot_entry &e) {

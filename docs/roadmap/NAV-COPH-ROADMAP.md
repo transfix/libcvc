@@ -459,6 +459,50 @@ demos' runner with two `CrossingLearner` agents for 60 ticks of the crossing, co
 - **Next, part 2:** the vehicle driver below and the `plant_ledger` items (D11), with the
   byte-unchanged runs without a fleet.
 
+**Landed in part 2a: the cars' learner.** A car carries T4's `CarLearner`, not G12's
+`CrossingLearner`, so part 2 starts with it. It is tested against G13 by `nav_coph_cars_test`
+(GRL-SNAM's `grl_snam.tools.coph_golden_cars`, CVC-Lab/GRL-SNAM#203).
+- **What a car's learner is.** A bare `CooperativeLearner` (on `Learner`) whose stages advance by
+  MazeLearner's rule, which C1's ledger already follows. A car's world has no surveyed network,
+  so it routes with the profile's own planner, and its packets carry no maze or terrain layers.
+- **What landed.**
+  - `coph_profile_route` and `coph_edge_clear` port `navigation.route` without a maze graph: A*
+    through the sensor footprints on a 0.1 m grid, with risk-priced edges.
+  - `coph_control` takes it, and drops the guard's corridor checks, when the learner's network
+    is empty.
+  - Each kept stage keeps its entry context, from which the replay starts.
+  - `coph_agent` with an empty network runs only the cooperative layers. Its packet's JSON has
+    no geometry keys (`coph_packet::maze`).
+  - `coph_crossing_world` with no network and risk patches is `CooperativeWorld`'s open field.
+- **Results on Windows.** Every decision matches, including each planned route and every
+  delivery; positions agree within 5.6e-16, against an allowance of 1e-6. G1 to G12 are unchanged.
+- **Next, part 2b:** the vehicle driver below and the `plant_ledger` items.
+
+**Landed in part 2b: the vehicle driver.** `inc/cvc/nav/coph_driver.h`, tested by
+`nav_coph_driver_test` (C++ only: the learner is G13's and the allocation G11's).
+- **What it does.** `coph_driver` attaches to a `sim_world`'s agents. It runs every attached car's
+  learner in one `coph_fleet`, with three hooks the fleet gained:
+  - the transition carries the mean force the car took (D5);
+  - the sim's `reached` ends a car's run;
+  - a goal update slides the local goal (D12).
+
+  It reads the risk from the material plane and the obstacles from `visible_obstacles`, and
+  drives through `override_command` every tick.
+- **Results on Windows.**
+  - With nothing attached, a 400-tick run is byte-unchanged.
+  - Two RoboRacer-sized cars (s = 1) pass each other across a 20 m field and both arrive in
+    29.1 s, with packets between them. Their allocation residuals are 0.11 and 0.20.
+  - Each ledger's residual, about 1.1, says how far a kinematic car is from CoPH's damped point
+    mass: the car keeps its speed with no drag, while the learner's damping books heat.
+  - A car driving head-on at a 1 m block senses it 1.25 m away. It cannot turn as CoPH's point
+    mass would (a 0.74 m turning radius, and almost no lateral force at low speed). It stops
+    0.21 m short, where the router finds no clear start, and never touches the block. Turning
+    that stop into a way round is the allocation research §3.3.2 leaves open.
+- **Next, part 2c:** the `plant_ledger` items (D11). They need their own table, printed only with
+  CoPH attached, because adding rows to the plant table changes every run's output (the
+  `.cvcrun` columns, the panels, pycvc's item list and cvcGL's publish tests). sim_world's stats
+  collector also needs a public hook for the driver's terms.
+
 `coph_fleet` lives outside `sim_world`, as `route_follower` does (D10). Before each `step()`, it:
 - reads each attached agent's pose, heading and speed;
 - scales them (§3.3.1);
@@ -497,6 +541,7 @@ in the file.
 | G10 | assimilate | packets, plus expired, over-cap and malformed cases: the receiver's weights after one update, and acceptance | acceptance BIT; weights 1e-9 |
 | G11 | allocation | 60 `(u, ψ, v, L, δ_max, a_max)` cases, including `v` = 0, reverse and the lock: steer, accel, `e` | FLOAT64 1e-12 |
 | G12 | episode | 2 crossing agents, 60 ticks, communication on: per-update versions and accept bits, positions | decisions BIT; positions 1e-6 |
+| G13 | cars | 2 of the cars controller's learners (T4's `CarLearner`), 120 ticks on an open field, communication on: the profile's router (each plan), updates, deliveries, positions | decisions BIT; positions 1e-6 |
 
 **C++-only tests:** byte-unchanged runs without a fleet; the channel's delay, drop and duplicate
 statistics; refusal of out-of-profile configs; and the ledger's residual staying at round-off over

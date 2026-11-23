@@ -553,7 +553,26 @@ struct SceneCamera {
   bool has_azimuth = false, has_elevation = false;
   double azimuth = 0.0, elevation = 0.0; // where an orbit starts, degrees
   double zoom = 1.0;                     // on the framed distance (2: twice as close)
+  // An authored viewpoint (§5.18, Cameras): where the eye is and what it looks at, in world
+  // coordinates. Either one alone is taken with the framed pose's other; both together replace
+  // azimuth, elevation and zoom.
+  bool has_position = false, has_target = false;
+  double position[3] = {0.0, 0.0, 0.0};
+  double target[3] = {0.0, 0.0, 0.0};
+  bool has_up = false;
+  double up[3] = {0.0, 0.0, 1.0}; // the world's up axis the camera turns about (+z)
+  double fov = 0.0;               // vertical field of view, degrees (0: the camera's own, 30)
+  double near_clip = 0.0;         // a fixed near and far clipping distance (0: fitted)
+  double far_clip = 0.0;
+  bool orthographic = false; // parallel projection in orbit, fly and track
+  double height = 0.0;       // orthographic: how tall the view is at the target (0: framed)
 };
+
+// A camera's viewpoint keys, shared by `scene: cameras:` entries and a viewport's own camera:
+// `position` and `target` ([x, y, z], world coordinates), `up` ([x, y, z], not all 0), `fov`
+// (degrees, 0 to 180), `near` and `far` (distances), `orthographic` and `height`, read from the
+// map `v` into `cam`. A key `v` lacks, or a malformed vector, leaves `cam`'s as it is.
+void read_scene_camera_viewpoint(const Value &v, SceneCamera &cam);
 
 // A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the
 // document's scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its

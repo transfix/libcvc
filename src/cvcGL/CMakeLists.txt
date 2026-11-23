@@ -751,6 +751,13 @@ add_executable(cvcgl_pose_matrix test/cvcgl_pose_matrix.cpp)
 target_link_libraries(cvcgl_pose_matrix PRIVATE cvcGL)
 add_test(NAME cvcgl_pose_matrix COMMAND cvcgl_pose_matrix)
 
+# A GraphicsNode's rotation and scale: T Rz Ry Rx S, the matrix the physics world and a view
+# entry's transform: make; a rotation keeps the scale (0 and mirrors included) and a scale the
+# rotation, after a whole matrix too; the rotation and scale keys do the same. Headless.
+add_executable(cvcgl_node_transform test/cvcgl_node_transform.cpp)
+target_link_libraries(cvcgl_node_transform PRIVATE cvcGL)
+add_test(NAME cvcgl_node_transform COMMAND cvcgl_node_transform)
+
 # physics_scene_binding: a cvc::physics world's bodies drawn between its last two
 # states (setPoseMatrix per node, a pose sink per merged-mesh group). Headless.
 add_executable(cvcgl_physics_scene_binding test/cvcgl_physics_scene_binding.cpp)
@@ -963,6 +970,12 @@ add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
 target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+# An authored viewpoint and lens: lookAt(eye, target) in Orbit and Fly, orthographic projection in
+# the 3-D modes (the wheel still zooms; Map takes over and gives it back), a fixed clipping range,
+# and a new controller as before. Bare vtkCamera.
+add_executable(cvcgl_camera_viewpoint test/cvcgl_camera_viewpoint.cpp)
+target_link_libraries(cvcgl_camera_viewpoint PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_viewpoint COMMAND cvcgl_camera_viewpoint)
 # Slice mode: a parallel view down one axis with VolumeGridRover's screen axes, its state keys,
 # its pan, and the wheel zooming about the pointer. Headless.
 add_executable(cvcgl_camera_slice test/cvcgl_camera_slice.cpp)
@@ -1254,6 +1267,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_node_pick COMMAND cvcgl_ariadne_node_pick)
 endif()
 
+# Authored viewpoints: a scene camera's position:, target:, fov:, near:, far: and orthographic:
+# with height:, on the main view (a `cameras:` entry named main), a named camera and a viewport's
+# own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_viewpoints test/cvcgl_ariadne_viewpoints.cpp)
+  target_link_libraries(cvcgl_ariadne_viewpoints PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_viewpoints COMMAND cvcgl_ariadne_viewpoints)
+endif()
+
 # A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,
 # picks that name the voxel and its value, the wheel zooming about the pointer. Offscreen; skips
 # where nothing rasterises unless CVC_REQUIRE_RENDER=1.
@@ -1303,6 +1325,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_shared_volume COMMAND cvcgl_ariadne_shared_volume)
 endif()
 
+# The volume_render node (VolumeRenderNode.h, volume_render_nodes.h) and the volume_grid's 3D volume
+# (grid.display.render): the renderer (VTK's mapper, volren, volslice, none) switched by its key,
+# one transfer-function model bound to whichever draws, the volume followed at its source's key
+# (state, data, another node's), two apps (T6); offscreen, each renderer draws the volume (skips
+# where nothing rasterises unless CVC_REQUIRE_RENDER=1).
+add_executable(cvcgl_volume_render test/cvcgl_volume_render.cpp)
+target_link_libraries(cvcgl_volume_render PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_render COMMAND cvcgl_volume_render)
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
@@ -1351,6 +1382,13 @@ add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
 target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
 
+# A world vehicle's parted look (vehicle_view.h; docs/ARIADNE.md, "A model in parts"): a chassis,
+# a wheel and a rig, each wheel posed from its vehicle's speed and steer, headless; then the pixels
+# of a wheel's spin and steer, offscreen.
+add_executable(cvcgl_ariadne_wheeled_look test/cvcgl_ariadne_wheeled_look.cpp)
+target_link_libraries(cvcgl_ariadne_wheeled_look PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_wheeled_look COMMAND cvcgl_ariadne_wheeled_look)
+
 # material: { opacity } on Ariadne scene nodes (docs/ARIADNE.md §5.4): literal and bound, on a mesh,
 # a LOD ladder's rungs and a data node's drawing, and the see-through pixels in the main view.
 add_executable(cvcgl_ariadne_opacity test/cvcgl_ariadne_opacity.cpp)
@@ -1379,6 +1417,14 @@ add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
+
+# Between bakes (an update interval over 1) a caster that moved is shaded as it stood at the last
+# bake: lowered or tilted, its sunlit top is as bright as under fresh maps, and the props that did
+# not move draw the same. Before, it shadowed itself where it had moved behind its baked surface,
+# and a bobbing body flashed at the bake cadence. Renders; skips without GL.
+add_executable(cvcgl_shadow_bake_pose test/cvcgl_shadow_bake_pose.cpp)
+target_link_libraries(cvcgl_shadow_bake_pose PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_bake_pose COMMAND cvcgl_shadow_bake_pose)
 
 # Under shadows each caster is drawn by the bake and by the shadow pass, and VTK rebuilt its shader
 # at every switch; LowMemoryPolyDataMapper now keeps one per pass set. Pins no shader builds while

@@ -60,6 +60,12 @@ struct state_mutation {
 
 std::string to_string(state_mutation_op op);
 
+// Whether `op` changes the nodes below its path, not just the node at it: a delete takes the
+// subtree out, a reset clears it. A peer that may read anything below the path must be sent one.
+inline bool is_subtree_op(state_mutation_op op) noexcept {
+  return op == state_mutation_op::delete_subtree || op == state_mutation_op::reset_node;
+}
+
 class state_change_journal {
 public:
   explicit state_change_journal(const std::string &local_node_id = std::string());

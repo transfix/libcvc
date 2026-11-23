@@ -31,6 +31,7 @@
 #include <cvc/state/state_transport_ws.h>
 #include <future>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -315,11 +316,6 @@ struct held_entry {
   std::uint64_t digest = 0;
   std::uint64_t round = 0;
 };
-
-// A mutation that can change nodes below its path, not just the node at it.
-bool touches_subtree(state_mutation_op op) {
-  return op == state_mutation_op::reset_node || op == state_mutation_op::delete_subtree;
-}
 
 } // namespace
 
@@ -667,7 +663,7 @@ public:
   // known, so the next broadcast sends it whatever the tree holds there.
   void forget(const state_mutation &m) {
     std::lock_guard<std::mutex> lk(held_mu);
-    if (!touches_subtree(m.op)) {
+    if (!is_subtree_op(m.op)) {
       held.erase(m.path);
       return;
     }
@@ -1454,8 +1450,9 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
       local_peers.push_back(s);
     }
   }
+  const bool subtree = is_subtree_op(m.op);
   for (auto *peer : local_peers) {
-    if (!_peers.should_deliver(peer->local_node_id(), m.path)) {
+    if (!_peers.should_deliver(peer->local_node_id(), m.path, subtree)) {
       _peers.note_delivery_filtered(peer->local_node_id());
       continue;
     }
@@ -1485,7 +1482,7 @@ state_transport::publish_stats state_transport_ws::publish(const state_mutation 
     if (!c || !c->alive.load() || !c->can_write())
       continue;
     const std::string *pid = c->peer_id();
-    if (pid && !_peers.should_deliver(*pid, m.path)) {
+    if (pid && !_peers.should_deliver(*pid, m.path, subtree)) {
       _peers.note_delivery_filtered(*pid);
       continue;
     }
@@ -1774,10 +1771,12 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
       peers.push_back(s);
     }
   }
+  bool buried = false;
   for (auto *peer : peers) {
     auto r = peer->ingest_remote(m);
     if (r.applied)
       _delivered.fetch_add(1, std::memory_order_relaxed);
+    buried = buried || r.buried;
   }
   // The origin wrote this path itself, so what it holds there is no longer what it was last sent:
   // the next broadcast re-sends the tree's value, which also corrects a write this relay rejected.
@@ -1786,6 +1785,10 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
   const bool relay = _relay.load(std::memory_order_relaxed);
   if (!relay && _bridge == nullptr)
     return; // a leaf: applied locally, never re-sent
+  // Older than a delete this relay applied (state_cluster_shard::ingest_result::buried): the
+  // relay's tree does not have it, so neither may the peers it would reach.
+  if (buried)
+    return;
   // Interest gate (opt-in): re-fan only what some local same-cluster shard admits -- its interest
   // set covers the path, or it is a delegation op, which ingest always takes. When every client
   // enforces the relay's interest, a withheld frame is one no client would apply. Asked after
@@ -1811,7 +1814,8 @@ void state_transport_ws::on_inbound_mutation(const state_mutation &m, connection
     for (auto &c : conns) {
       if (!c || c.get() == origin || !c->alive.load() || !c->can_write())
         continue;
-      if (const std::string *pid = c->peer_id(); pid && !_peers.should_deliver(*pid, m.path)) {
+      if (const std::string *pid = c->peer_id();
+          pid && !_peers.should_deliver(*pid, m.path, is_subtree_op(m.op))) {
         _peers.note_delivery_filtered(*pid);
         continue;
       }
@@ -2342,7 +2346,7 @@ void state_transport_ws::send_backfill_locked(connection &c,
     if (s == nullptr)
       continue;
     for (const auto &m : s->replay_local()) {
-      if (view != nullptr && !view->deliver(m.path))
+      if (view != nullptr && !view->deliver(m.path, is_subtree_op(m.op)))
         continue;
       pb::Frame f;
       encode_mutation(m, f.mutable_mutation());
@@ -2365,23 +2369,41 @@ void state_transport_ws::send_snapshot_locked(connection &c,
   // goes out before the peer's Hello, so there is no identity to look a registry entry up by and
   // it is unfiltered; with it, release_admissions passes the peer's rule as `view`. What it
   // carried is recorded as the peer's starting point, so the first broadcast is a diff.
+  //
+  // A peer back from a dropped link may still hold subtrees deleted while it was away, which a
+  // snapshot cannot say. Without a backfill (which replays the deletes with the rest of the
+  // journal), the deletes the shard remembers whose subtree is still gone follow the snapshot.
   const std::uint64_t round = _broadcast_round.load(std::memory_order_relaxed);
+  const bool repeat_deletes = !_backfill_on_connect.load(std::memory_order_acquire);
   for (auto *s : shards) {
     if (s == nullptr)
       continue;
     const auto snap = s->snapshot();
-    if (snap.empty())
+    if (!snap.empty()) {
+      pb::Frame f;
+      fill_snapshot_response(f.mutable_snapshot_response(), snap, view);
+      if (!c.write_locked(f))
+        return; // stream died mid-snapshot; the reader will reap it
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      // Only what the view let through: an entry it withheld must still go out once the rule
+      // allows.
+      std::lock_guard<std::mutex> hk(c.held_mu);
+      for (const auto &e : snap)
+        if (view == nullptr || view->deliver(e.path))
+          c.held[e.path] = held_entry{entry_digest(e).value(), round};
+    }
+    if (!repeat_deletes)
       continue;
-    pb::Frame f;
-    fill_snapshot_response(f.mutable_snapshot_response(), snap, view);
-    if (!c.write_locked(f))
-      return; // stream died mid-snapshot; the reader will reap it
-    _sent_frames.fetch_add(1, std::memory_order_relaxed);
-    // Only what the view let through: an entry it withheld must still go out once the rule allows.
-    std::lock_guard<std::mutex> hk(c.held_mu);
-    for (const auto &e : snap)
-      if (view == nullptr || view->deliver(e.path))
-        c.held[e.path] = held_entry{entry_digest(e).value(), round};
+    for (const state_mutation &d : missed_deletes(s->tombstones(), snap)) {
+      if (view != nullptr && !view->deliver(d.path, true))
+        continue;
+      pb::Frame f;
+      encode_mutation(d, f.mutable_mutation());
+      if (!c.write_locked(f))
+        return;
+      _sent_frames.fetch_add(1, std::memory_order_relaxed);
+      _deletes_repeated.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 }
 
@@ -2419,6 +2441,24 @@ std::size_t state_transport_ws::broadcast_snapshot() {
   }
   if (snaps.empty())
     return 0;
+  state_cluster_shard *first_shard = nullptr; // the deletes' origin (tree_removal)
+  for (auto *s : shards)
+    if (s != nullptr && first_shard == nullptr)
+      first_shard = s;
+  // Every path the tree has now, sorted, made the first time a connection holds a path this round
+  // did not deliver: whether that path left the tree, or only the peer's view.
+  std::vector<std::string_view> tree_paths;
+  bool tree_paths_made = false;
+  const auto in_tree = [&](const std::string &path) {
+    if (!tree_paths_made) {
+      tree_paths_made = true;
+      for (const auto &ss : snaps)
+        for (const auto &e : ss.entries)
+          tree_paths.emplace_back(e.path);
+      std::sort(tree_paths.begin(), tree_paths.end());
+    }
+    return std::binary_search(tree_paths.begin(), tree_paths.end(), std::string_view(path));
+  };
   const std::uint64_t round = _broadcast_round.fetch_add(1, std::memory_order_relaxed) + 1;
   std::vector<std::shared_ptr<connection>> conns;
   {
@@ -2467,9 +2507,13 @@ std::size_t state_transport_ws::broadcast_snapshot() {
     view.scope = c->read_scope();  // under write_mu: refresh_read_scope swaps it there
     std::vector<pb::Frame> frames; // one per shard with anything for this peer
     std::size_t n = 0;
+    std::vector<std::string> gone; // held paths that left the tree, sorted
     {
       std::lock_guard<std::mutex> hk(c->held_mu);
       if (c->full_refresh.exchange(false, std::memory_order_relaxed)) {
+        for (const auto &kv : c->held) // what it was sent and the tree lost still goes
+          if (first_shard != nullptr && !in_tree(kv.first))
+            gone.push_back(kv.first);
         c->held.clear();
         ++refreshed;
       }
@@ -2500,9 +2544,34 @@ std::size_t state_transport_ws::broadcast_snapshot() {
         }
       }
       // A path this round did not deliver left the tree or the peer's view: drop it, so it is sent
-      // again if it comes back.
-      for (auto it = c->held.begin(); it != c->held.end();)
-        it = it->second.round == round ? std::next(it) : c->held.erase(it);
+      // again if it comes back. One that left the tree is also taken from the peer, below.
+      for (auto it = c->held.begin(); it != c->held.end();) {
+        if (it->second.round == round) {
+          ++it;
+          continue;
+        }
+        if (first_shard != nullptr && !in_tree(it->first))
+          gone.push_back(it->first);
+        it = c->held.erase(it);
+      }
+    }
+    // One delete per removed subtree: its top (a path below another gone one goes with it, and
+    // sorts right after it).
+    std::sort(gone.begin(), gone.end());
+    std::vector<state_mutation> removals;
+    const std::string *top = nullptr;
+    for (const std::string &p : gone) {
+      if (top != nullptr && p.size() > top->size() && p.compare(0, top->size(), *top) == 0 &&
+          p[top->size()] == '.')
+        continue;
+      top = &p;
+      state_mutation m = tree_removal(*first_shard, p);
+      if (c->reads(m))
+        removals.push_back(std::move(m));
+    }
+    for (const state_mutation &m : removals) {
+      frames.emplace_back();
+      encode_mutation(m, frames.back().mutable_mutation());
     }
     bool ok = true;
     for (const auto &f : frames) {
@@ -2522,6 +2591,7 @@ std::size_t state_transport_ws::broadcast_snapshot() {
       entries += n;
       _sent_frames.fetch_add(frames.size(), std::memory_order_relaxed);
       _broadcast_entries.fetch_add(n, std::memory_order_relaxed);
+      _broadcast_deletes.fetch_add(removals.size(), std::memory_order_relaxed);
     }
   }
   if (dbg)

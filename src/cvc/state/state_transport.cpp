@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport.h>
+#include <string_view>
 #include <unordered_set>
 
 namespace cvc {
@@ -74,13 +75,44 @@ state_mutation state_transport::read_scope_retraction(state_cluster_shard &shard
   return m;
 }
 
+std::vector<state_mutation>
+state_transport::missed_deletes(const std::vector<state_mutation> &tombstones,
+                                const std::vector<snapshot_entry> &tree) {
+  std::vector<state_mutation> out;
+  if (tombstones.empty())
+    return out;
+  std::vector<std::string_view> paths;
+  paths.reserve(tree.size());
+  for (const auto &e : tree)
+    paths.emplace_back(e.path);
+  std::sort(paths.begin(), paths.end());
+  for (const state_mutation &d : tombstones) {
+    // The subtree is back when the tree has its root, or a node below it.
+    const std::string below = d.path + '.';
+    const auto it = std::lower_bound(paths.begin(), paths.end(), std::string_view(below));
+    const bool back = std::binary_search(paths.begin(), paths.end(), std::string_view(d.path)) ||
+                      (it != paths.end() && it->compare(0, below.size(), below) == 0);
+    if (!back)
+      out.push_back(d);
+  }
+  return out;
+}
+
+state_mutation state_transport::tree_removal(state_cluster_shard &shard, const std::string &path) {
+  state_mutation m;
+  m.cluster_id = shard.cluster_id();
+  m.origin_node_id = shard.local_node_id() + "#sync";
+  m.sequence = shard.clock().now().packed();
+  m.path = path;
+  m.op = state_mutation_op::delete_subtree;
+  return m;
+}
+
 bool state_transport::read_scope_delivers(const state_delivery_filter *scope,
                                           const state_mutation &m) noexcept {
   if (scope == nullptr || scope->deliver(m.path))
     return true;
-  const bool subtree =
-      m.op == state_mutation_op::delete_subtree || m.op == state_mutation_op::reset_node;
-  return subtree && scope->delivers_below(m.path);
+  return is_subtree_op(m.op) && scope->delivers_below(m.path);
 }
 
 } // namespace cvc
