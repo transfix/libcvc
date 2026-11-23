@@ -390,17 +390,30 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
     m.steer_cmd = m.accel_cmd = 0.0;
   }
   // The box's horizontal pose and twist back into the model, as the plant takes a world's after a
-  // collision (heave, roll, pitch and the actuators stay the model's): the centre of gravity from
-  // the box's centre, the rear axle behind it. The box leans with the model's pitch and roll: a
-  // driver's pose carries its heading alone.
+  // collision: the centre of gravity from the box's centre, the rear axle behind it. When the
+  // sample carries the chassis's pitch and roll (the relay's box, OW5m), the suspension takes them
+  // and its heave from the box's height; else the box leans with the model's (a turn about z
+  // alone: a relay that sends the heading only). The rates of heave, roll and pitch stay the
+  // model's: the pose stream does not carry the latter two, and its vertical speed is the box's
+  // after the relay's step under gravity, not the suspension's.
   const ph::dyn_4w_plant &pl = *_four;
   const double rear_x = pl.rear_axle(0);
   const double lr = pl.params(0).lr;
   const double off = -rear_x - lr;
   const double psi = yaw_of(chassis.rotation);
   const double c = std::cos(psi), s = std::sin(psi);
-  const ph::vec3 d =
-      rotate(attitude(psi, m.body.th, m.body.phi), {rear_x + lr, 0.0, pl.desc(0).center_of_mass.z});
+  const ph::vec3 to_cg{rear_x + lr, 0.0, pl.desc(0).center_of_mass.z};
+  const ph::quat &q = chassis.rotation;
+  const double qn = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  if ((q.x != 0.0 || q.y != 0.0) && qn > 0.0) {
+    const ph::quat u{q.w / qn, q.x / qn, q.y / qn, q.z / qn};
+    m.body.th = std::asin(std::max(-1.0, std::min(1.0, 2.0 * (u.w * u.y - u.z * u.x))));
+    m.body.phi = std::atan2(2.0 * (u.w * u.x + u.y * u.z), 1.0 - 2.0 * (u.x * u.x + u.y * u.y));
+    // The centre of gravity's height over the plant's datum (dyn_4w_plant::box_pose inverted).
+    const ph::vec3 lever = rotate(attitude(psi, m.body.th, m.body.phi), to_cg);
+    m.body.z = chassis.position.z + lever.z - pl.ground_reference() - pl.params(0).h;
+  }
+  const ph::vec3 d = rotate(attitude(psi, m.body.th, m.body.phi), to_cg);
   m.body.x = chassis.position.x + d.x - lr * c;
   m.body.y = chassis.position.y + d.y - lr * s;
   m.body.psi = psi;

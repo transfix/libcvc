@@ -128,9 +128,11 @@ public:
 
   // The vehicle whose chassis is at CHASSIS (its centre, heading and velocity, as the pose
   // stream carries it) at the end of the step ending on clock tick TICK. The pose stream carries
-  // no yaw rate, steering angle, drive lag or driver, nor the suspension's state: they are LIKE's
+  // no yaw rate, steering angle, drive lag or driver, nor the suspension's rates: they are LIKE's
   // (the model as it was predicted for that tick, on the same plant), else at rest (on dynamic4w,
-  // its suspension settled on the ground under it). The command is LIKE's, else none. On jolt,
+  // its suspension settled on the ground under it). On dynamic4w the suspension's pitch, roll and
+  // heave are CHASSIS's when it carries a pitch or roll (the relay's box, OW5m; its heave from the
+  // box's height), else LIKE's (OW5n). The command is LIKE's, else none. On jolt,
   // LIKE's world, its chassis put at CHASSIS's position, heading and horizontal velocity, and at
   // its pitch, roll and vertical speed when CHASSIS carries them (the relay's chassis's attitude,
   // OW5m; a turn about z alone leaves them LIKE's), its spin LIKE's; without LIKE the vehicle as

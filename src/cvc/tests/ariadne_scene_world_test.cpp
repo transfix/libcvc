@@ -8901,11 +8901,15 @@ struct client_run {
 // the same name), spawned at (X, 0) heading +x; TOP: the speed it reaches at least (m/s).
 // RELAY_RAN: the seconds the relay's holon ran before its world was attached (its clock that far
 // on, the world's own field time not). SKEW: also run a second model whose samples name a tick
-// SKEW ticks later (its water read that far off), for client_run::phase_z.
+// SKEW ticks later (its water read that far off), for client_run::phase_z. SAMPLED: correct the
+// model by the relay's samples every 4 ticks on any plant (a jolt or boat model always is). JOIN:
+// the step at which the client starts its model, from the relay's vehicle as it is then (the
+// relay driving it alone before); the gaps are measured from there, the settled ones a second on.
 void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result,
                              bool on_ground = false, bool check = true,
                              const std::string &archetype = "humvee", double x = -40.0,
-                             double top_at_least = 5.0, double relay_ran = 0.0, int skew = 0) {
+                             double top_at_least = 5.0, double relay_ran = 0.0, int skew = 0,
+                             bool sampled_too = false, int join = 0) {
   cvc::app app;
   register_world_block(app);
   LoadResult r = load_string(app, doc);
@@ -9048,13 +9052,21 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
   double settled_yaw = 0.0, settled_tilt = 0.0, ride_gap = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
-  const bool sampled = own_world;
+  const bool sampled = own_world || sampled_too;
   double climb = 0.0, lowest = start.z, highest = start.z;
   for (int step = 0; step < 1080; ++step) {
     const avatar_intent in = axes(step);
     h.set_intent("ann", in);
     const std::uint64_t before = h.tick();
     h.advance(dt);
+    if (step < join)
+      continue;
+    if (step == join && join > 0) { // the client starts here, from the vehicle as the relay has it
+      m = model.at(h.state("ann"), h.tick());
+      if (off)
+        mo = off->at(h.state("ann"), h.tick() + skew);
+      continue;
+    }
     for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
       model.step(m, t);
       command_after(m, k, in, dt);
@@ -9091,7 +9103,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
-    if (step >= 120) {
+    if (step >= join + 120) {
       settled_yaw =
           std::max(settled_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
       settled_tilt = std::max(settled_tilt, 2.0 * std::acos(std::min(1.0, q)));
@@ -9378,4 +9390,60 @@ TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
   EXPECT_NEAR(run.drive.ground, 0.0, 1e-6) << "the square's top";
   EXPECT_LT(run.worst_z, 0.01) << "the ride height";
   EXPECT_LT(run.worst_tilt, 0.01) << "the body's pitch and roll";
+}
+
+// A client that starts predicting a four-wheel vehicle the relay is already driving (OW5n): on
+// flat ground and on the relay's dome, mid-turn (2.5 s in, steering at half lock) and while it
+// accelerates (1 s in), with the relay's samples every 4 ticks. The relay's pose carries the
+// chassis's attitude (OW5m), so the model's suspension starts from its pitch, roll and heave and is
+// put back on them at each sample, not settled at rest. Before, it was 94 to 98 mrad and up to
+// 10 mm off joining mid-turn, 10 mrad and 1.8 mm joining at 1 s.
+// What is left joining mid-turn is the steering: the pose stream carries no steering angle, so
+// the model's front wheels start straight and reach the relay's over half a second (the steering
+// rate), its roll rate straying meanwhile; a sample puts the attitude back, not the rate.
+TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string hill = hill_drivable("dynamic4w");
+  struct {
+    const char *doc;
+    bool on_ground;
+    int join;
+    double tilt, z; // the worst gaps allowed (rad, m)
+  } runs[] = {{kDynamic4wDrivable, false, 300, 0.03, 0.001},
+              {hill.c_str(), true, 300, 0.03, 0.002},
+              {hill.c_str(), true, 120, 0.002, 0.001}};
+  cvc::ariadne::dynamic_drive drive;
+  for (const auto &c : runs) {
+    SCOPED_TRACE(std::string(c.on_ground ? "on the dome" : "on flat ground") +
+                 ", joining at step " + std::to_string(c.join));
+    client_run run;
+    drive_as_the_world_does(c.doc, "dynamic4w", run, c.on_ground, false, "humvee", -40.0, 5.0, 0.0,
+                            0, true, c.join);
+    EXPECT_LT(run.ride_gap, 1e-6) << "the pose is the chassis's attitude";
+    EXPECT_LT(run.worst_tilt, c.tilt);
+    EXPECT_LT(run.settled_tilt, 0.002) << "a second on";
+    EXPECT_LT(run.worst_z, c.z);
+    EXPECT_LT(run.worst, 0.005);
+    drive = run.drive;
+  }
+
+  // A rolled sample puts the model's suspension on its roll; a heading-only one (a relay before
+  // OW5m) leaves the roll LIKE's.
+  cvc::ariadne::dynamic_vehicle_model model(drive, 1.0 / 120.0);
+  cvc::physics::body_state s;
+  s.rotation = {std::cos(0.2), 0.0, 0.0, std::sin(0.2)}; // heading 0.4
+  const cvc::ariadne::dynamic_vehicle level = model.at(s, 0);
+  EXPECT_NEAR(level.roll, 0.0, 0.01) << "settled at rest";
+  const double h = 0.05; // a roll of 0.1 about x, then the heading
+  s.rotation = {std::cos(0.2) * std::cos(h), std::cos(0.2) * std::sin(h),
+                std::sin(0.2) * std::sin(h), std::sin(0.2) * std::cos(h)};
+  const cvc::ariadne::dynamic_vehicle rolled = model.at(s, 0, &level);
+  EXPECT_NEAR(rolled.roll, 0.1, 1e-9);
+  EXPECT_NEAR(rolled.box[3], 0.4, 1e-9);
+  s.rotation = {std::cos(0.2), 0.0, 0.0, std::sin(0.2)};
+  const cvc::ariadne::dynamic_vehicle kept = model.at(s, 0, &rolled);
+  EXPECT_NEAR(kept.roll, 0.1, 1e-9) << "the model's roll";
+  EXPECT_NEAR(kept.box[3], 0.4, 1e-9);
 }
