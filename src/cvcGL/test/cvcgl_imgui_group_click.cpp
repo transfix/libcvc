@@ -248,6 +248,34 @@ int main() {
     Session always(feed);
     chk(always.be.maximized, "maximized: true starts maximized anywhere");
   }
+
+  // §5.8 a narrow window (a phone's): a horizontal row's cells flow onto the next line, and a
+  // line of text wider than the window wraps, so nothing runs past its right edge.
+  {
+    std::vector<ari::Widget> cells;
+    for (const char *name : {"One", "Two", "Three", "Four", "Five", "Six"})
+      cells.push_back(ari::button(name, "(state-set \"x\" \"1\")"));
+    ari::Widget row = ari::group(std::move(cells));
+    row.layout.kind = ari::LayoutKind::Horizontal;
+    const std::string line = "a line of text a good deal wider than the narrow window it is in";
+    ari::Widget narrow = ari::window("Narrow", {row, ari::text(line), ari::text("short")});
+    narrow.size.w = {ari::Unit::Px, 200.0f};
+    narrow.size.h = {ari::Unit::Px, 400.0f};
+    narrow.has_pos = true;
+    narrow.pos_x = narrow.pos_y = 20.0f;
+    Session n(narrow);
+    const float right = 20.0f + 200.0f; // the window's right edge
+    chk(n.be.at["Six"].min.y > n.be.at["One"].min.y, "the row's last cell went to a later line");
+    bool inside = true;
+    for (const char *name : {"One", "Two", "Three", "Four", "Five", "Six"})
+      inside = inside && n.be.at[name].max.x <= right;
+    chk(inside, "every cell of the row is inside the window");
+    const RecordingBackend::Rect t = n.be.at[line];
+    chk(t.max.y - t.min.y > 1.5f * ImGui::GetTextLineHeight(), "the long line wrapped");
+    chk(t.max.x <= right, "and stays inside the window");
+    const RecordingBackend::Rect s2 = n.be.at["short"];
+    chk(s2.max.y - s2.min.y < 1.5f * ImGui::GetTextLineHeight(), "a line that fits is one line");
+  }
   std::printf("%s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 #endif

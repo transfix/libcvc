@@ -13,6 +13,7 @@
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
 #include <cvc/ariadne/uri.h>           // register_cvc_uri_handler
+#include <cvc/ariadne/uri_http_cache.h> // clear_http_cache (http_cache.clear)
 #include <cvc/ariadne/world_rules.h>    // the world: block's vehicles
 #include <cvc/ariadne/world_vehicles.h> // resolve_vehicle_looks
 #include <cvc/core/app.h>
@@ -60,6 +61,8 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
   // sim_transport.ari's Step and Restart, for every host; a host's own handler replaces these.
   rt_.on("sim.step", [this] { step_world(1); });
   rt_.on("sim.restart", [this] { restart_world(); });
+  // http_cache.ari's Clear: a document's programs cannot write the app-root clear key.
+  rt_.on("http_cache.clear", [this] { clear_http_cache(app_); });
 }
 
 void AppRuntime::step_world(std::uint64_t n) {
@@ -270,6 +273,24 @@ void AppRuntime::set_host_keys(std::vector<KeyBinding> keys) {
 void AppRuntime::set_host_mouse(MouseControls mouse) {
   hostMouse_ = std::move(mouse);
   keysWindow_ = true;
+}
+
+void AppRuntime::set_host_windows(std::vector<Widget> windows) {
+  hostWindows_ = std::move(windows);
+}
+
+void AppRuntime::add_host_windows(Widget &root) const {
+  for (const Widget &w : hostWindows_) {
+    const std::string id = w.id.empty() ? w.label : w.id;
+    const bool taken =
+        std::any_of(root.children.begin(), root.children.end(), [&](const Widget &c) {
+          return c.kind == Kind::Window && (c.id.empty() ? c.label : c.id) == id;
+        });
+    if (taken)
+      continue; // the document has its own (it imported the same component)
+    read_or_seed<int>(app_, resolve_bind(prefix_, "tree." + id + ".open"), 0); // closed until asked
+    root.children.push_back(w);
+  }
 }
 
 namespace {
@@ -1283,6 +1304,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     rt_.set_media_base(ec ? std::string() : abs.parent_path().string());
   }
   add_host_menus(lr.root, hostMenus_);
+  add_host_windows(lr.root);
   add_keys(lr.root, std::move(lr.keys));
   { // what the isolation rules read beside the tree and the lanes: init: and tests:, run elsewhere
     std::vector<std::string> elsewhere = {lr.init_script};
@@ -1302,6 +1324,7 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
 
 void AppRuntime::set_root(Widget root) {
   add_host_menus(root, hostMenus_);
+  add_host_windows(root);
   seed_keys({}, /*new_document=*/false);
   add_keys(root, {});
   rt_.set_root(std::move(root));

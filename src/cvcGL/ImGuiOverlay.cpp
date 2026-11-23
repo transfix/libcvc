@@ -37,6 +37,14 @@ EM_JS(int, cvcgl_is_touch_device, (), {
           (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)) ? 1 : 0;
 });
 
+// How far up from the page's bottom the show/hide button reaches, in CSS pixels (0: no button), as
+// the CSS variable --cvcgl-toggle-clear on the page's root: arigl-web.css stacks its Fullscreen
+// button above it, so the two never share the corner (a tap there went to Fullscreen).
+EM_JS(void, cvcgl_toggle_clearance, (double css_px), {
+  if (typeof document !== 'undefined' && document.documentElement)
+    document.documentElement.style.setProperty('--cvcgl-toggle-clear', css_px + 'px');
+});
+
 // Device pixels per CSS pixel: what VTK multiplies the canvas's CSS size by.
 EM_JS(double, cvcgl_device_pixel_ratio, (), {
   var r = globalThis.devicePixelRatio;
@@ -53,7 +61,10 @@ EM_JS(double, cvcgl_device_pixel_ratio, (), {
 // sends keyCode 229 for most keys, composes words (Android), and replaces them (autocorrect,
 // suggestions). Each change is compared with the last: Backspaces for what went, then what came.
 // The field starts as two spaces so a Backspace always has something to delete (a keyboard sends
-// nothing for a Backspace in an empty field), and is reset to them when it runs short or long.
+// nothing for a Backspace in an empty field), and is reset to them when it runs short. Never while
+// it runs long: a keyboard tracks the field's text itself, and one changed under it mid-message
+// (Samsung Keyboard) deletes or repeats what it thinks is there. The message's own length (a
+// chat's max_length) bounds it, and Enter and the field's closing reset it.
 //
 // iOS raises the keyboard only for a focus made inside a user gesture. The interactor turns a
 // touch into a press that ImGui takes at the next frame, so by the time the finger lifts the field
@@ -117,7 +128,7 @@ EM_JS(void, cvcgl_ime_install, (const char *sel), {
       st.q.push(cp == 10 || cp == 13 ? -2 : cp);
     });
     st.last = cur;
-    if (!st.composing && (cur.length < SENT.length || cur.length > 64))
+    if (!st.composing && cur.length < SENT.length)
       reset();
   }
   // Focus the input. Already focused with the keyboard up (a tap that moved the caret): leave it.
@@ -568,8 +579,9 @@ struct ImGuiOverlay::Impl {
   TouchScroll touchScroll;              // touch mode: a finger's drag scrolls, a fling glides
   bool panelsOpen = true;               // the floating toggle drives this
   bool showToggle = true;               // draw the floating show/hide button
+  float publishedClear = -1.0f;         // the button's reach last told the page (CSS px)
   bool sizedOnce = false;               // first frame with a real DisplaySize
-  bool phoneHides = true; // a phone's view starts with the panels hidden (setPhoneHidesPanels)
+  bool phoneHides = false; // a phone's view starts with the panels hidden (setPhoneHidesPanels)
   bool phoneHid = false;  // ... and they are hidden for that, not by the user's choice
   std::unique_ptr<UiSettings> settings; // the state mirror
   bool applyingState = false;           // re-entry guard
@@ -652,15 +664,14 @@ struct ImGuiOverlay::Impl {
       touchScroll.beginFrame();
     else
       touchScroll.reset();
-    // On a SMALL viewport (a phone), start with the panels hidden. Finger-sized
-    // widgets on a 400px-wide screen would otherwise bury the scene the moment
-    // it loads — the UI has to be reachable, not permanently in the way. The
-    // toggle button is always there to bring it back. Decided once, on the
-    // first frame that has a real size, so a later resize does not fight the
-    // user's own choice. In logical pixels: a phone's canvas is ~1200 device
-    // pixels across. Under 500 on the short side, either way up: phones are
-    // 360-430, and a laptop's browser canvas can be under 600 (577 on a
-    // 1366 x 768 screen), whose panels should start open.
+    // On a SMALL viewport (a phone), a host may start with the panels hidden
+    // (setPhoneHidesPanels(true)), so a scene is not buried the moment it
+    // loads; the toggle button brings them back. Off by default: the panels
+    // show on a phone as anywhere else. Decided once, on the first frame that
+    // has a real size, so a later resize does not fight the user's own choice.
+    // In logical pixels: a phone's canvas is ~1200 device pixels across. Under
+    // 500 on the short side, either way up: phones are 360-430, and a laptop's
+    // browser canvas can be under 600 (577 on a 1366 x 768 screen).
     if (!sizedOnce && io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
       sizedOnce = true;
       const float shortSide =
@@ -677,6 +688,7 @@ struct ImGuiOverlay::Impl {
       drawLookCue(cam->pointerCapture());
     // The toggle is drawn FIRST so it is always reachable, even when the panels
     // it hides would have covered this corner.
+    float clear = 0.0f; // what the button takes of the bottom-right corner, in logical pixels
     if (showToggle) {
       const float d = 34.0f * (appliedScale > 0.0f ? appliedScale : 1.0f);
       const bool was = panelsOpen;
@@ -685,7 +697,15 @@ struct ImGuiOverlay::Impl {
         phoneHid = false; // the user's now
         syncSettings();   // the button is a setting change like any other
       }
+      // Its margin (floatingCircleToggle's) and its height.
+      clear = (ImGui::GetFontSize() * 0.75f + d) / (pixelRatio > 0.0f ? pixelRatio : 1.0f);
     }
+#ifdef __EMSCRIPTEN__
+    if (clear < publishedClear - 0.5f || clear > publishedClear + 0.5f) {
+      cvcgl_toggle_clearance(clear);
+      publishedClear = clear;
+    }
+#endif
     if (draw && panelsOpen)
       draw();
   }
@@ -1051,10 +1071,18 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   pio.Platform_SetImeDataFn = [](ImGuiContext *ctx, ImGuiViewport *, ImGuiPlatformImeData *d) {
     // A password field (input_text with password: true): the hidden input is one too, so the
     // phone's keyboard neither suggests nor learns what is typed in it.
-    const bool password = ctx && ctx->ActiveId != 0 && ctx->InputTextState.ID == ctx->ActiveId &&
-                          (ctx->InputTextState.Flags & ImGuiInputTextFlags_Password) != 0;
-    cvcgl_ime_set(kCanvas, d->WantTextInput || d->WantVisible ? 1 : 0, d->InputPos.x, d->InputPos.y,
-                  d->InputLineHeight, password ? 1 : 0);
+    const bool editing = ctx && ctx->ActiveId != 0 && ctx->InputTextState.ID == ctx->ActiveId &&
+                         (ctx->InputTextState.Flags & ImGuiInputTextFlags_ReadOnly) == 0;
+    const bool password =
+        editing && (ctx->InputTextState.Flags & ImGuiInputTextFlags_Password) != 0;
+    // The keyboard is wanted while a field is being edited, whatever this frame's flags say.
+    // ImGui sets WantVisible only on a frame that draws the field's caret, and a word-wrapped field
+    // whose width changes draws none for a frame (it re-centres the caret): a chat box growing a
+    // line, or its window's scroll bar coming or going. Closing the keyboard for that frame blurred
+    // the hidden input under a phone's keyboard mid-word, and it lost or replayed the word: Samsung
+    // Keyboard erased the message, Gboard doubled the word's start.
+    cvcgl_ime_set(kCanvas, d->WantTextInput || d->WantVisible || editing ? 1 : 0, d->InputPos.x,
+                  d->InputPos.y, d->InputLineHeight, password ? 1 : 0);
   };
 #endif
 

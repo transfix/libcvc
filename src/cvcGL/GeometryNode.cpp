@@ -153,6 +153,11 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
   if (auto *lowMemory = LowMemoryPolyDataMapper::SafeDownCast(m_mapper))
     lowMemory->setApp(ctx);
   m_mapper->SetInputData(m_polyData);
+  // The mapper's input is this node's own polydata, changed in place, with no pipeline above it,
+  // so the mapper need not update one before each draw or bounds query (vtkMapper::Static). The
+  // camera's clipping-range fit asks every actor for its bounds each frame anything moved, and
+  // those updates were most of its cost.
+  m_mapper->StaticOn();
   m_actor->SetMapper(m_mapper);
 
   // Set default material properties

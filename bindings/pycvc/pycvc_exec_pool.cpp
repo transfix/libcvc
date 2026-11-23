@@ -10,6 +10,7 @@
 #include "pycvc_exec.h"
 
 #include <condition_variable>
+#include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h>
 #include <cvc/state/state_exec/async_scheduler.h> // kernel_runs_here
@@ -56,15 +57,16 @@ struct ExecPool::ExecPoolImpl {
   // its kernels finish).
   std::vector<std::unique_ptr<Exec>> execs;
 
-  // A run_all batch or a registration in progress (`busy`, on thread `user`), and close()'s
-  // request to the batch (`closing`). Under `m`, which a thread takes with the GIL held or
-  // without it, but never waits for the GIL while it holds: the GIL comes first.
+  // A run_all batch or a registration in progress (`busy`, on thread `user`), under `m`, which a
+  // thread takes with the GIL held or without it, but never waits for the GIL while it holds: the
+  // GIL comes first. close()'s request to the batch, the batch wait and stats()'s counters are
+  // `batch`'s (S2a.8), atomics and a wakeup.
   std::mutex m;
   std::condition_variable idle_cv;
   bool closed = false;
   bool busy = false;
   std::thread::id user;
-  std::atomic<bool> closing{false};
+  batch_control batch;
 
   // Claim the pool for `what` (run_all, register_*): it is open and nothing else uses it. The
   // GIL is held.
@@ -164,7 +166,7 @@ PyObject *ExecPool::run_all(PyObject *programs) {
       PyThreadState *ts;
       ~gil_back() { PyEval_RestoreThread(ts); }
     } restore{ts};
-    out = Exec::run_batch(*p.pool, execs, sources, p.fresh_env, p.closing);
+    out = Exec::run_batch(*p.pool, execs, sources, p.fresh_env, p.batch);
   }
   // The first failing program's error, in program order, once every program has ended.
   for (Exec::batch_outcome &o : out)
@@ -203,6 +205,25 @@ void ExecPool::register_async_fn(const std::string &name, PyObject *callable, bo
 
 unsigned ExecPool::threads() const { return impl_->pool->threads(); }
 
+PyObject *ExecPool::stats() const {
+  const batch_control &b = impl_->batch;
+  PyObject *d = PyDict_New();
+  if (d == nullptr)
+    return nullptr;
+  const auto put = [d](const char *key, std::uint64_t v) {
+    PyObject *o = PyLong_FromUnsignedLongLong(v);
+    const bool ok = o != nullptr && PyDict_SetItemString(d, key, o) == 0;
+    Py_XDECREF(o);
+    return ok;
+  };
+  if (!put("batch_waits", b.waits.load(std::memory_order_relaxed)) ||
+      !put("batch_wait_timeouts", b.wait_timeouts.load(std::memory_order_relaxed))) {
+    Py_DECREF(d);
+    return nullptr;
+  }
+  return d;
+}
+
 void ExecPool::close() {
   ExecPoolImpl &p = *impl_;
   std::vector<std::unique_ptr<Exec>> gone;
@@ -218,9 +239,11 @@ void ExecPool::close() {
         inside = inside || e->group().pumping_here() || e->group().sched().kernel_runs_here();
       if (inside)
         throw std::runtime_error("pycvc.ExecPool.close: called from inside its run_all");
-      // A batch on another thread: what it runs is killed, and close() waits for it with the GIL
-      // released, the mutex unlocked before the GIL is taken back.
-      p.closing.store(true, std::memory_order_release);
+      // A batch on another thread: what it runs is killed (a batch waiting between rounds is woken
+      // for it), and close() waits for it with the GIL released, the mutex unlocked before the GIL
+      // is taken back.
+      p.batch.closing.store(true, std::memory_order_release);
+      p.batch.wake.notify();
       struct gil_released_until_unlocked {
         std::unique_lock<std::mutex> &lock;
         PyThreadState *ts = PyEval_SaveThread();

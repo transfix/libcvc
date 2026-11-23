@@ -65,6 +65,15 @@ windows:
         view: orbit
         width: 400
         height: 320
+  - window: Module
+    id: module_window
+    pos: [20, 430]
+    size: [440, 280]
+    children:
+      - load: panel.ari
+        as: panel
+
+init: (state-set "axis" "y")
 
 scene:
   nodes:
@@ -74,6 +83,27 @@ scene:
     - node: post
       source: { box: { size: [1, 1, 1] } }
       transform: { position: [6, 0, 0] }
+)";
+
+// A load:ed module's views: their pick:, pointer: and axis: { bind } keys resolve in the module's
+// scope (pick.includes.panel), as their bind: would, and the default pick key too; the document's
+// `axis` (y) is not the module's (x).
+const char *kPanel = R"(init: (state-set "axis" "x")
+root:
+  - type: viewport
+    view: inner
+    input: pick
+    pick: hits
+    pointer: probe
+    width: 400
+    height: 110
+  - type: viewport
+    view: inner_slice
+    mode: slice
+    axis: { bind: axis }
+    input: pick
+    width: 400
+    height: 110
 )";
 
 std::string val(cvc::app &app, const std::string &path) {
@@ -92,6 +122,7 @@ int main() {
   fs::create_directories(dir);
   const fs::path doc = dir / "pick.ari";
   std::ofstream(doc) << kDoc;
+  std::ofstream(dir / "panel.ari") << kPanel;
 
   cvc::app app;
   app.properties("system.log_verbosity", "0");
@@ -249,6 +280,70 @@ int main() {
     check(std::fabs(eye2[0] - eye[0]) + std::fabs(eye2[1] - eye[1]) > 1e-6,
           "a view without input: pick still orbits");
     check(val(app, "pick.viewers.orbit.pick.seq").empty(), "and writes no pick");
+    io.AddMousePosEvent(-1.0f, -1.0f);
+    rt.step(kDt);
+  }
+
+  // A view in a load:ed module writes inside the module's sandbox (pick.includes.panel), where its
+  // bind: would resolve, never under the document's keys.
+  const std::string mod = "pick.includes.panel";
+  check(vm.hasViewport("inner") && vm.hasViewport("inner_slice"), "the module's viewports exist");
+  if (vm.hasViewport("inner")) {
+    cvc::gl::Viewport &inner = vm.viewport("inner");
+    vtkRenderer *ir = inner.renderer();
+    ir->SetWorldPoint(-6.0, 0.0, 0.0, 1.0);
+    ir->WorldToDisplay();
+    ir->GetDisplayPoint(d);
+    const float ix = static_cast<float>(d[0]), iy = static_cast<float>(kHeight - d[1]);
+    const std::string docSeq = val(app, key + ".seq");
+    io.AddMousePosEvent(ix, iy);
+    rt.step(kDt);
+    rt.step(kDt);
+    check(val(app, mod + ".probe.phase") == "hover" && val(app, mod + ".probe.node") == "crate",
+          "pointer: probe follows the pointer under the module's prefix",
+          val(app, mod + ".probe.phase") + " " + val(app, mod + ".probe.node"));
+    check(val(app, "pick.probe.phase").empty(), "not under the document's");
+    io.AddMouseButtonEvent(0, true);
+    rt.step(kDt);
+    rt.step(kDt);
+    check(val(app, mod + ".hits.phase") == "down" && val(app, mod + ".hits.node") == "crate",
+          "pick: hits lands at includes.panel.hits",
+          val(app, mod + ".hits.phase") + " " + val(app, mod + ".hits.node"));
+    io.AddMouseButtonEvent(0, false);
+    rt.step(kDt);
+    rt.step(kDt);
+    check(val(app, mod + ".hits.phase") == "up", "and its release there");
+    check(val(app, key + ".seq") == docSeq, "the document's hits are not written",
+          val(app, key + ".seq"));
+    io.AddMousePosEvent(-1.0f, -1.0f);
+    rt.step(kDt);
+  }
+  if (vm.hasViewport("inner_slice")) {
+    // axis: { bind: axis } reads the module's axis (x), not the document's (y); the camera is the
+    // view's own, under the scene's prefix (pick.viewers.inner_slice.camera), as any view's.
+    cvc::gl::Viewport &slice = vm.viewport("inner_slice");
+    check(slice.camera().mode() == cvc::gl::CameraController::Mode::Slice &&
+              slice.camera().sliceAxis() == 0,
+          "axis: { bind: axis } reads includes.panel.axis: down x",
+          std::to_string(slice.camera().sliceAxis()));
+    check(val(app, "pick.viewers.inner_slice.camera.slice.axis") == "x",
+          "its camera keeps its pose under the scene's viewers.inner_slice.camera",
+          val(app, "pick.viewers.inner_slice.camera.slice.axis"));
+    double s[4];
+    slice.region(s);
+    const float sx = static_cast<float>(0.5 * (s[0] + s[2]) * kWidth);
+    const float sy = static_cast<float>(kHeight - 0.5 * (s[1] + s[3]) * kHeight);
+    io.AddMousePosEvent(sx, sy);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(0, true);
+    rt.step(kDt);
+    io.AddMouseButtonEvent(0, false);
+    rt.step(kDt);
+    rt.step(kDt);
+    check(val(app, mod + ".viewers.inner_slice.pick.phase") == "up",
+          "the default pick key is the module's: includes.panel.viewers.inner_slice.pick",
+          val(app, mod + ".viewers.inner_slice.pick.phase"));
+    check(val(app, "pick.viewers.inner_slice.pick.seq").empty(), "not the document's");
     io.AddMousePosEvent(-1.0f, -1.0f);
     rt.step(kDt);
   }

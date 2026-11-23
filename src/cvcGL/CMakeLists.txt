@@ -782,6 +782,13 @@ add_executable(cvcgl_pose_matrix test/cvcgl_pose_matrix.cpp)
 target_link_libraries(cvcgl_pose_matrix PRIVATE cvcGL)
 add_test(NAME cvcgl_pose_matrix COMMAND cvcgl_pose_matrix)
 
+# A GraphicsNode's rotation and scale: T Rz Ry Rx S, the matrix the physics world and a view
+# entry's transform: make; a rotation keeps the scale (0 and mirrors included) and a scale the
+# rotation, after a whole matrix too; the rotation and scale keys do the same. Headless.
+add_executable(cvcgl_node_transform test/cvcgl_node_transform.cpp)
+target_link_libraries(cvcgl_node_transform PRIVATE cvcGL)
+add_test(NAME cvcgl_node_transform COMMAND cvcgl_node_transform)
+
 # physics_scene_binding: a cvc::physics world's bodies drawn between its last two
 # states (setPoseMatrix per node, a pose sink per merged-mesh group). Headless.
 add_executable(cvcgl_physics_scene_binding test/cvcgl_physics_scene_binding.cpp)
@@ -994,6 +1001,12 @@ add_test(NAME cvcgl_camera_idle COMMAND cvcgl_camera_idle)
 add_executable(cvcgl_camera_map test/cvcgl_camera_map.cpp)
 target_link_libraries(cvcgl_camera_map PRIVATE cvcGL)
 add_test(NAME cvcgl_camera_map COMMAND cvcgl_camera_map)
+# An authored viewpoint and lens: lookAt(eye, target) in Orbit and Fly, orthographic projection in
+# the 3-D modes (the wheel still zooms; Map takes over and gives it back), a fixed clipping range,
+# and a new controller as before. Bare vtkCamera.
+add_executable(cvcgl_camera_viewpoint test/cvcgl_camera_viewpoint.cpp)
+target_link_libraries(cvcgl_camera_viewpoint PRIVATE cvcGL)
+add_test(NAME cvcgl_camera_viewpoint COMMAND cvcgl_camera_viewpoint)
 # Slice mode: a parallel view down one axis with VolumeGridRover's screen axes, its state keys,
 # its pan, and the wheel zooming about the pointer. Headless.
 add_executable(cvcgl_camera_slice test/cvcgl_camera_slice.cpp)
@@ -1294,6 +1307,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
+# Authored viewpoints: a scene camera's position:, target:, fov:, near:, far: and orthographic:
+# with height:, on the main view (a `cameras:` entry named main), a named camera and a viewport's
+# own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_viewpoints test/cvcgl_ariadne_viewpoints.cpp)
+  target_link_libraries(cvcgl_ariadne_viewpoints PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_viewpoints COMMAND cvcgl_ariadne_viewpoints)
+endif()
+
 # A viewport in mode: slice: its axis bound to a key, the other axes' volume_slice nodes left out,
 # picks that name the voxel and its value, the wheel zooming about the pointer. Offscreen; skips
 # where nothing rasterises unless CVC_REQUIRE_RENDER=1.
@@ -1343,6 +1365,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_shared_volume COMMAND cvcgl_ariadne_shared_volume)
 endif()
 
+# The volume_render node (VolumeRenderNode.h, volume_render_nodes.h) and the volume_grid's 3D volume
+# (grid.display.render): the renderer (VTK's mapper, volren, volslice, none) switched by its key,
+# one transfer-function model bound to whichever draws, the volume followed at its source's key
+# (state, data, another node's), two apps (T6); offscreen, each renderer draws the volume (skips
+# where nothing rasterises unless CVC_REQUIRE_RENDER=1).
+add_executable(cvcgl_volume_render test/cvcgl_volume_render.cpp)
+target_link_libraries(cvcgl_volume_render PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_render COMMAND cvcgl_volume_render)
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
@@ -1375,6 +1406,13 @@ add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
 
+# The Ariadne runtime frame's cost (GlSceneAdapter's sync_visibility + tick_scene) on a scene shaped
+# like demo3-ari: 12 pose vehicles, their ribbons, links and bound visible:s. Headless; it prints a
+# BENCH line and checks what the frame publishes. The dynamics need Jolt.
+add_executable(cvcgl_ariadne_frame test/cvcgl_ariadne_frame.cpp)
+target_link_libraries(cvcgl_ariadne_frame PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_frame COMMAND cvcgl_ariadne_frame)
+
 # Scene node labels (scene_labels.h, LabelLayer.h): label: from a document, drawn for real -- the
 # fade and cull rule, the text over its backdrop and edge, depth order, bound text, scale and
 # focus, views, and entity_labels: on a world entity.
@@ -1390,6 +1428,13 @@ endif()
 add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
 target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
+
+# A world vehicle's parted look (vehicle_view.h; docs/ARIADNE.md, "A model in parts"): a chassis,
+# a wheel and a rig, each wheel posed from its vehicle's speed and steer, headless; then the pixels
+# of a wheel's spin and steer, offscreen.
+add_executable(cvcgl_ariadne_wheeled_look test/cvcgl_ariadne_wheeled_look.cpp)
+target_link_libraries(cvcgl_ariadne_wheeled_look PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_wheeled_look COMMAND cvcgl_ariadne_wheeled_look)
 
 # material: { opacity } on Ariadne scene nodes (docs/ARIADNE.md §5.4): literal and bound, on a mesh,
 # a LOD ladder's rungs and a data node's drawing, and the see-through pixels in the main view.
@@ -1703,7 +1748,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_frame cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters

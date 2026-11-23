@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <cvc/state/state_object.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/dimension.h>
@@ -5674,6 +5675,124 @@ TEST(StatePathWalkBenchmark, LookupCost) {
   time_us("findDescendant (7 segments, messy spelling)",
           [&] { hits += root.findDescendant(messy) == want; });
   EXPECT_EQ(hits, static_cast<std::size_t>(6 * (kWarm + kN)));
+}
+
+// ── structureEpoch and state_key: paths kept resolved ────────────────────────────────────────────
+
+using StateStructureEpoch = StateTestFixture;
+
+// The tree's shape moves when a node is made or taken out, or a link changes; never on a write.
+TEST_F(StateStructureEpoch, MovesOnShapeChangesNotOnWrites) {
+  state &root = state::instance(ctx);
+  root("a.b").value("1");
+  const std::uint64_t e0 = root.structureEpoch();
+  EXPECT_EQ(root("a.b").structureEpoch(), e0) << "one count for every node of the tree";
+  root("a.b").value("2");
+  root("a.b").value(3.5);
+  root("a.b").data(std::string("payload"));
+  root("a.b"); // get, not made
+  EXPECT_EQ(root.structureEpoch(), e0);
+  root("a.c");
+  const std::uint64_t e1 = root.structureEpoch();
+  EXPECT_GT(e1, e0) << "made";
+  EXPECT_TRUE(root("a").removeChild("c"));
+  const std::uint64_t e2 = root.structureEpoch();
+  EXPECT_GT(e2, e1) << "taken out";
+  EXPECT_FALSE(root("a").removeChild("c"));
+  EXPECT_EQ(root.structureEpoch(), e2) << "nothing taken out";
+  state &l = root("l");
+  const std::uint64_t e3 = root.structureEpoch();
+  l.linkTo("a", state::link_mode::transparent);
+  const std::uint64_t e4 = root.structureEpoch();
+  EXPECT_GT(e4, e3) << "link set";
+  l.setLinkWritable(true);
+  const std::uint64_t e5 = root.structureEpoch();
+  EXPECT_GT(e5, e4) << "writability";
+  l.setLinkMode(state::link_mode::opaque);
+  const std::uint64_t e6 = root.structureEpoch();
+  EXPECT_GT(e6, e5) << "mode";
+  l.clearLink();
+  const std::uint64_t e7 = root.structureEpoch();
+  EXPECT_GT(e7, e6) << "cleared";
+  l.clearLink();
+  EXPECT_EQ(root.structureEpoch(), e7) << "nothing to clear";
+  root("x.y.z");
+  root("x").reset(false); // drops its children
+  EXPECT_GT(root.structureEpoch(), e7);
+}
+
+TEST_F(StateStructureEpoch, MovesWhenAnExpiredNodeIsSwept) {
+  state &root = state::instance(ctx);
+  root("tmp.v").value("1");
+  root("tmp.v").expireAt(boost::posix_time::microsec_clock::universal_time() -
+                         boost::posix_time::seconds(1));
+  const std::uint64_t e0 = root.structureEpoch();
+  EXPECT_EQ(root.sweepExpired(), 1u);
+  EXPECT_GT(root.structureEpoch(), e0);
+}
+
+// A key finds its node once and keeps it; a node taken out and made again is found again.
+TEST_F(StateStructureEpoch, AKeyFollowsItsPathAcrossRemovalAndRemaking) {
+  state &root = state::instance(ctx);
+  state_key k(ctx, "w.stats.tick");
+  EXPECT_EQ(k.find(), nullptr) << "no node yet";
+  state &made = k.get();
+  made.value("1");
+  EXPECT_EQ(&made, root.findDescendant("w.stats.tick"));
+  EXPECT_EQ(k.find(), &made) << "a miss is kept only until a node is made";
+  EXPECT_EQ(&k.get(), &made);
+  EXPECT_TRUE(root("w").removeChild("stats"));
+  EXPECT_EQ(k.find(), nullptr) << "taken out: let go";
+  k.get().value("2"); // made again, where a reader looks
+  ASSERT_NE(root.findDescendant("w.stats.tick"), nullptr);
+  EXPECT_EQ(root.findDescendant("w.stats.tick")->value(), "2");
+  EXPECT_EQ(k.find(), root.findDescendant("w.stats.tick"));
+}
+
+// The through_links view reads as findThroughLinks and writes as childThroughLinks, and follows
+// a link that is set, moved or cleared.
+TEST_F(StateStructureEpoch, AThroughLinksKeyFollowsTheLink) {
+  state &root = state::instance(ctx);
+  root("a.on").value("1");
+  root("b.on").value("0");
+  root("m.on").value("own");
+  state_key k(ctx, "m.on", state_key::view::through_links);
+  ASSERT_NE(k.find(), nullptr);
+  EXPECT_EQ(k.find()->value(), "own");
+  root("m").linkTo("a", state::link_mode::transparent);
+  ASSERT_NE(k.find(), nullptr);
+  EXPECT_EQ(k.find()->value(), "1");
+  root("m").linkTo("b", state::link_mode::transparent);
+  EXPECT_EQ(k.find()->value(), "0");
+  // A read-only hole keeps a write local; a writable one writes its target.
+  k.get().value("local");
+  EXPECT_EQ(root("b.on").value(), "0");
+  EXPECT_EQ(root.findDescendant("m.on")->value(), "local");
+  root("m").setLinkWritable(true);
+  k.get().value("target");
+  EXPECT_EQ(root("b.on").value(), "target");
+  root("m").clearLink();
+  EXPECT_EQ(k.find()->value(), "local");
+  // A broken link resolves once its target is made (a node made moves the epoch).
+  root("n").linkTo("later", state::link_mode::transparent);
+  state_key late(ctx, "n.on", state_key::view::through_links);
+  EXPECT_EQ(late.find(), nullptr);
+  root("later.on").value("yes");
+  ASSERT_NE(late.find(), nullptr);
+  EXPECT_EQ(late.find()->value(), "yes");
+}
+
+// A key pins what it resolved: a subtree taken out while a key holds it is still safe to read.
+TEST_F(StateStructureEpoch, AKeyPinsWhatItResolved) {
+  state &root = state::instance(ctx);
+  state_key k(ctx, "p.q.r");
+  k.get().value("held");
+  state::state_ptr held = root.findDescendantShared("p.q.r");
+  EXPECT_TRUE(root.removeChild("p"));
+  EXPECT_EQ(held->value(), "held");
+  EXPECT_GE(held.use_count(), 2) << "the key's pin and ours";
+  EXPECT_EQ(k.find(), nullptr);
+  EXPECT_EQ(held.use_count(), 1) << "the key let go at its next look";
 }
 
 // Main function to handle custom flags

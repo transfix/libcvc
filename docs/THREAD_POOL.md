@@ -35,6 +35,19 @@ For the full per-method reference, see
   calls, `compute_async`): no thread is created per task, and however
   many are submitted, `threads()` does not grow and no two of them
   share a key or cancel each other.
+- **state_exec's kernels split off once the exec pool has workers.**
+  When the app's `exec_pool()` is built with workers (threaded
+  execution's S2a, `docs/STATE_EXEC_THREADED.md` 4.9), the async
+  kernels other than I/O calls' (`async_options::io`) move to a second
+  pool of the app's, `background_cpu`, sized max(1, cores - exec
+  workers), so they and the exec workers fill the cores without
+  oversubscribing them. This pool, called `background_io` then, keeps
+  its size and runs everything else: I/O calls' kernels,
+  `compute_async`'s jobs and every other task. `setThreadPoolSize`,
+  `getThreadPoolSize` and the active and pending counts are this
+  pool's alone from then on; `backgroundCpuPoolSize()` is the other's
+  size. `wait()` and the app's destructor interrupt and wait for both.
+  At `state_exec.threads` 0 there is one pool, as before.
 - **Cooperative interruption.** Tasks honor
   `boost::this_thread::interruption_point()` and shut down cleanly when
   interrupted (`threads(key)->interrupt()` for a keyed one; `wait()` and
@@ -197,6 +210,12 @@ unsigned int max_concurrent = app.getThreadPoolSize();
 unsigned int running        = app.getActiveThreadCount();
 unsigned int queued         = app.getPendingThreadCount();
 ```
+
+Once the app's exec pool has workers and state_exec's kernels have
+split off (above), these are `background_io`'s numbers: the CPU-bound
+async kernels on `background_cpu` are not counted, and
+`setThreadPoolSize` no longer bounds them (`app.backgroundCpuPoolSize()`
+is that pool's size).
 
 ## When to Use the Pool vs. `startThread`
 

@@ -15,6 +15,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h>
 #include <cvc/core/async_task.h>
+#include <cvc/core/exec_pool.h>
 #include <cvc/core/thread_pool.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
@@ -24,6 +25,7 @@
 #include <cvc/state/state_exec/exceptions.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/intrinsics.h>
+#include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/scheduler.h>
 #include <cvc/state/state_exec/stackless_evaluator.h>
 #include <cvc/state/state_exec/state_value_codec.h>
@@ -272,6 +274,13 @@ struct stoppable_app : cvc::app {
     };
   }
   void stop_pool() { stopThreadPool(); }
+  // background_cpu (S2a.6) as ~app stops it: closed, its workers joined.
+  void stop_cpu_pool() {
+    std::vector<cvc::thread_ptr> workers = closeCpuKernelPool();
+    joinPoolWorkers(workers);
+  }
+  // The mutex that guards the app's exec pool and its build (app.h), for a test holding it.
+  boost::mutex &exec_pool_mutex() { return _execPoolMutex; }
 };
 
 // One engine's world: the app (its background pool and compute pool), a scheduler, the host
@@ -2599,4 +2608,214 @@ TEST(AsyncCalls, AFutureOfAGoneSchedulerRaisesAtItsAddress) {
     EXPECT_EQ(show(*r), kForeignFutureError);
     EXPECT_EQ(b.get_process_info(pid)->async_steps, 0u);
   }
+}
+
+// --- the kernel pools: background_cpu and background_io (S2a.6; td 4.9, S2-Q11) ---
+
+namespace {
+
+// app::kernelPoolHere as a number: 0 none, 1 the background pool, 2 background_cpu.
+int64_t pool_code(cvc::app::kernel_pool k) { return static_cast<int64_t>(k); }
+
+// (pool-plain) and (pool-io): the kernel pool their kernel ran on (pool_code); pool-io is an io
+// call (async_options::io). (pool-hold): a plain kernel that waits, at an interruption point,
+// until `release` is set or its call is cancelled; it marks p.started and then p.ended.
+void register_pool_probes(world &w, std::atomic<bool> &release) {
+  const async_marshal where = [&w](std::span<const value_t>) -> async_kernel {
+    return [&w](async_call &) -> value_t { return value_t(pool_code(w.app.kernelPoolHere())); };
+  };
+  register_async_fn(w.env, *w.host, "pool-plain", where);
+  async_options io;
+  io.io = true;
+  register_async_fn(w.env, *w.host, "pool-io", where, io);
+  register_async_fn(w.env, *w.host, "pool-hold",
+                    [&w, &release](std::span<const value_t>) -> async_kernel {
+                      return [&w, &release](async_call &call) -> value_t {
+                        w.p.started = true;
+                        struct ended {
+                          probe &p;
+                          ~ended() { ++p.ended; }
+                        } mark{w.p};
+                        while (!release.load() && !call.cancelled())
+                          boost::this_thread::sleep_for(boost::chrono::milliseconds(1));
+                        return value_t(pool_code(w.app.kernelPoolHere()));
+                      };
+                    });
+}
+
+// The cores background_cpu is sized from (app.cpp: the background pool's own count).
+unsigned cores() {
+  const unsigned n = boost::thread::hardware_concurrency();
+  return n > 0 ? n : 4;
+}
+
+// A pool of `n` exec workers for `w`'s app (S1-Q1 makes its lock manager shared), and the
+// workers it has.
+unsigned give_exec_workers(world &w, unsigned n) {
+  cvc::pool_options o;
+  o.threads = n;
+  return w.app.exec_pool(o).threads();
+}
+
+} // namespace
+
+TEST(KernelPools, AtThreadsZeroAnIoCallAndAPlainOneShareTheOnePool) {
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  const unsigned pool_size = w.app.getThreadPoolSize();
+  // No exec pool, then one built without workers: the background pool runs both, as before.
+  EXPECT_EQ(run(w, "(list (pool-plain) (pool-io))").value, "(1 1)");
+  EXPECT_EQ(give_exec_workers(w, 0), 0u);
+  EXPECT_EQ(run(w, "(list (pool-plain) (pool-io))").value, "(1 1)");
+  EXPECT_EQ(w.app.backgroundCpuPoolSize(), 0u); // never started
+  EXPECT_EQ(w.app.getThreadPoolSize(), pool_size);
+  EXPECT_EQ(w.app.kernelPoolHere(), cvc::app::kernel_pool::none); // the test's own thread
+}
+
+TEST(KernelPools, WithExecWorkersAnIoCallStaysAndAPlainOneRunsOnBackgroundCpu) {
+  if (!threads_compiled_in)
+    GTEST_SKIP() << "a build without threads has no exec workers";
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  const unsigned pool_size = w.app.getThreadPoolSize();
+  const unsigned workers = give_exec_workers(w, 2);
+  ASSERT_GT(workers, 0u);
+  EXPECT_EQ(run(w, "(list (pool-plain) (pool-io))").value, "(2 1)");
+  // background_cpu: the cores less the exec workers (at least 1); background_io keeps its size.
+  EXPECT_EQ(w.app.backgroundCpuPoolSize(), cores() > workers ? cores() - workers : 1u);
+  EXPECT_EQ(w.app.getThreadPoolSize(), pool_size);
+  // compute_async's blocking job stays on the background pool (background_io).
+  std::promise<int64_t> where;
+  w.app.compute_async(
+      1, [](int) {}, [&where, &w] { where.set_value(pool_code(w.app.kernelPoolHere())); });
+  std::future<int64_t> got = where.get_future();
+  ASSERT_EQ(got.wait_for(15s), std::future_status::ready);
+  EXPECT_EQ(got.get(), 1);
+}
+
+TEST(KernelPools, BackgroundCpuHasAtLeastOneWorker) {
+  if (!threads_compiled_in)
+    GTEST_SKIP() << "a build without threads has no exec workers";
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  // As many exec workers as the pool allows (hardware_concurrency() - 1 at most).
+  const unsigned workers = give_exec_workers(w, cores());
+  ASSERT_GT(workers, 0u);
+  EXPECT_EQ(run(w, "(pool-plain)").value, "2");
+  EXPECT_GE(w.app.backgroundCpuPoolSize(), 1u);
+  EXPECT_EQ(w.app.backgroundCpuPoolSize(), cores() > workers ? cores() - workers : 1u);
+}
+
+TEST(KernelPools, AnIoCallIsntQueuedBehindAPlainKernelOnceSplit) {
+  // A background pool of one: at threads 0 an io call waits behind a held plain kernel; split,
+  // the plain kernel holds a background_cpu worker and the io call runs meanwhile.
+  if (!threads_compiled_in)
+    GTEST_SKIP() << "a build without threads has no exec workers";
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  w.app.setThreadPoolSize(1);
+  ASSERT_GT(give_exec_workers(w, 2), 0u);
+  const int held = w.submit("(pool-hold)");
+  ASSERT_TRUE(w.pump([&] { return w.p.started.load(); }));
+  const int io = w.submit("(pool-io)");
+  EXPECT_TRUE(w.pump([&] { return w.finished(io); })) << "the io call waited for the plain one";
+  EXPECT_FALSE(w.finished(held));
+  EXPECT_EQ(show(*w.result(io)), "1");
+  release = true;
+  w.run_to_end(held);
+  EXPECT_EQ(show(*w.result(held)), "2");
+}
+
+TEST(KernelPools, WaitForThreadsInterruptsABackgroundCpuKernel) {
+  if (!threads_compiled_in)
+    GTEST_SKIP() << "a build without threads has no exec workers";
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  ASSERT_GT(give_exec_workers(w, 2), 0u);
+  const int pid = w.submit("(pool-hold)");
+  ASSERT_TRUE(w.pump([&] { return w.p.started.load(); }));
+  w.app.wait(); // interrupts the kernel at its sleep, and waits for it
+  EXPECT_EQ(w.p.ended.load(), 1);
+  w.run_to_end(pid);
+  EXPECT_TRUE(w.exit_exception(pid).has_value()) << "the interrupted kernel's call raised";
+}
+
+TEST(KernelPools, ACallOnceBackgroundCpuHasStoppedRaisesAndLeavesTheHost) {
+  if (!threads_compiled_in)
+    GTEST_SKIP() << "a build without threads has no exec workers";
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  ASSERT_GT(give_exec_workers(w, 2), 0u);
+  EXPECT_EQ(run(w, "(pool-plain)").value, "2");
+  w.app.stop_cpu_pool(); // as ~app does, the background pool left running
+  const outcome o = run(w, "(pool-plain)");
+  EXPECT_TRUE(o.raised);
+  EXPECT_EQ(o.cls, "RuntimeError");
+  EXPECT_NE(o.message.find(cvc::app::kPoolStopped), std::string::npos) << o.message;
+  EXPECT_EQ(run(w, "(pool-io)").value, "1"); // an io call still runs
+  w.host->wait_idle();
+  EXPECT_EQ(w.host->in_flight(), 0u);
+}
+
+TEST(KernelPools, BeforeAnyExecPoolAKernelTakesNoPoolLock) {
+  // R2's S-m13: with no exec pool, whether the pools split is one atomic load, not
+  // _execPoolMutex. Another thread holds that mutex until the kernel has run (or 5 s pass): the
+  // kernel runs meanwhile.
+  std::atomic<bool> release{false};
+  world w(async_sched);
+  register_pool_probes(w, release);
+  std::atomic<bool> held{false}, ran_while_held{false};
+  std::thread holder([&] {
+    boost::mutex::scoped_lock lock(w.app.exec_pool_mutex());
+    held = true;
+    const auto until = clock_type::now() + 5s;
+    while (w.p.ended.load() == 0 && clock_type::now() < until)
+      std::this_thread::sleep_for(1ms);
+    ran_while_held = w.p.ended.load() > 0;
+  });
+  while (!held.load())
+    std::this_thread::yield();
+  release = true; // (pool-hold) returns at once
+  const int pid = w.submit("(pool-hold)");
+  w.run_to_end(pid);
+  holder.join();
+  EXPECT_TRUE(ran_while_held.load()) << "the submission waited for _execPoolMutex";
+  EXPECT_EQ(show(*w.result(pid)), "1"); // the background pool, as before
+  EXPECT_EQ(w.app.backgroundCpuPoolSize(), 0u);
+}
+
+// --- group 0's long-step sink (S2a.7, S2-Q11) ---
+
+// app::exec_scheduler() installs a sink that logs a long step through the app; the monitor
+// (async_scheduler.cpp) catches the step.
+TEST(LongStepSink, Group0LogsALongStepThroughTheApp) {
+  cvc::app app;
+  const std::string log_key("long_step_log");
+  app.data(log_key, std::string());
+  app.properties("system.log_output", log_key);
+  app.root()("state_exec.long_step_ms").value("5"); // before group 0 reads its settings
+  async_scheduler &sched = app.exec_scheduler();
+  environment_ptr env = builtins::make_default_environment();
+  builtins::register_fn(env, "probe-nap", [](std::span<const value_t>) -> value_t {
+    std::this_thread::sleep_for(30ms);
+    return value_t(int64_t{1});
+  });
+  execute_options opts;
+  opts.env = env;
+  const int pid = sched.execute(std::string("(probe-nap)"), opts);
+  const auto start = clock_type::now();
+  while (seconds_since(start) < 15.0 && !is_finished(sched.get_process_info(pid)->status)) {
+    sched.drain_ingress();
+    sched.sync_run(100000, 0.02);
+  }
+  ASSERT_TRUE(is_finished(sched.get_process_info(pid)->status));
+  EXPECT_GE(sched.long_steps(), 1u);
+  const std::string log = app.data<std::string>(log_key);
+  EXPECT_NE(log.find("long step: probe-nap took "), std::string::npos) << log;
 }

@@ -231,7 +231,8 @@ TEST(ServerDocumentTest, PublishesThroughItsHolesAndKeepsItsOwnState) {
 
 // The documented way to take entries out of a published namespace: rewrite their parent with
 // state-set-tree, which replaces the subtree through the hole. (state-delete walks the physical
-// path, ARIADNE.md 7.4, so it does not reach through.)
+// path, ARIADNE.md 7.4, so it does not reach through.) The entry it drops goes out as a delete, so
+// clients lose it too.
 TEST(ServerDocumentTest, SetTreeThroughTheHoleRemovesEntries) {
   if (!ari::AppRuntime::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
@@ -243,11 +244,20 @@ init: |
   (state-set-tree "echo.jobs" (dict "a" 3))
 )");
   cvc::app app;
+  cvc::state_cluster_shard shard(app, "conf", "server");
   ari::ServerDocument doc(app, kRoom);
   ASSERT_EQ(doc.read(path), "");
+  doc.scope(shard);
+  shard.attach();
   doc.load(path);
   EXPECT_EQ(value_at(app, "echo.jobs.a"), "3");
   EXPECT_EQ(value_at(app, "echo.jobs.b"), "<absent>");
+  std::vector<std::string> deletes;
+  for (const cvc::state_mutation &m : shard.drain_local())
+    if (m.op == cvc::state_mutation_op::delete_subtree)
+      deletes.push_back(m.path);
+  EXPECT_EQ(deletes, (std::vector<std::string>{"echo.jobs.b"}));
+  shard.detach();
 }
 
 // The relay was set up (its shard scoped) for the server: block it read. A document whose block

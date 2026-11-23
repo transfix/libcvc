@@ -509,14 +509,20 @@ bool same_overrides(const std::vector<std::pair<std::string, Look>> &a,
 bool same_start(const ari::SceneCamera &a, const ari::SceneCamera &b) {
   return a.mode == b.mode && a.track == b.track && a.has_azimuth == b.has_azimuth &&
          a.azimuth == b.azimuth && a.has_elevation == b.has_elevation &&
-         a.elevation == b.elevation && a.zoom == b.zoom;
+         a.elevation == b.elevation && a.zoom == b.zoom && a.has_position == b.has_position &&
+         std::equal(a.position, a.position + 3, b.position) && a.has_target == b.has_target &&
+         std::equal(a.target, a.target + 3, b.target) && a.has_up == b.has_up &&
+         std::equal(a.up, a.up + 3, b.up) && a.fov == b.fov && a.near_clip == b.near_clip &&
+         a.far_clip == b.far_clip && a.orthographic == b.orthographic && a.height == b.height;
 }
 
 // Frame `cam` on the bounds b as `s` says: a top-down map, or an orbit (then fly or track) that
 // starts at s's azimuth / elevation / zoom, set through the camera's own state keys (what a drag
-// changes).
+// changes), or at its authored viewpoint (position, target), with its lens (fov, near, far,
+// orthographic, height) and up axis.
 void frame_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
                   SceneGraph &sg, int slice_axis = 2) {
+  cam.setClipRange(s.near_clip, s.far_clip); // 0, 0: fitted, as before
   if (s.mode == "slice") {
     cam.setSliceAxis(slice_axis);
     cam.frameSlice(b[0], b[2], b[4], b[1], b[3], b[5]);
@@ -528,6 +534,12 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
     cam.frameMap(0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), hh, hw);
     return;
   }
+  // The up axis and the lens before the pose, which is taken about that axis.
+  if (s.has_up)
+    cam.setUpAxis(s.up[0], s.up[1], s.up[2]);
+  if (s.fov > 0.0)
+    cam.setFieldOfView(s.fov);
+  cam.setOrthographic(s.orthographic);
   cam.frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
   cam.setMode(CameraController::Mode::Orbit); // from a map, say
   if (s.has_azimuth)
@@ -536,6 +548,25 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
     cam.getState("orbit.elevation").value(s.elevation);
   if (s.zoom > 0.0 && s.zoom != 1.0)
     cam.getState("orbit.distance").value(cam.orbitDistance() / s.zoom);
+  // An authored viewpoint. Both: exactly that. A target alone: the framed view, moved to look at
+  // it from the same angle and distance. A position alone: from there at what the view framed.
+  if (s.has_position || s.has_target) {
+    double e[3], f[3], u[3];
+    cam.getPose(e, f, u);
+    double eye[3], target[3];
+    for (int i = 0; i < 3; ++i) {
+      target[i] = s.has_target ? s.target[i] : f[i];
+      eye[i] = s.has_position ? s.position[i] : target[i] + (e[i] - f[i]);
+    }
+    cam.lookAt(eye, target);
+  }
+  // Orthographic, `height` tall at the target: the orbit's distance that makes it so (the view's
+  // half-height is that distance times tan(fov / 2); 30 degrees is VTK's own field of view).
+  if (s.orthographic && s.height > 0.0) {
+    const double fov = cam.fieldOfView() > 0.0 ? cam.fieldOfView() : 30.0;
+    cam.getState("orbit.distance")
+        .value(0.5 * s.height / std::tan(0.5 * fov * 3.14159265358979 / 180.0));
+  }
   if (s.mode == "fly") {
     cam.setMode(CameraController::Mode::Fly);
   } else if (s.mode == "track" && !s.track.empty()) {
@@ -689,6 +720,11 @@ bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
 }
 
 } // namespace
+
+void frame_scene_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
+                        SceneGraph &sg) {
+  frame_camera(cam, b, s, sg);
+}
 
 // A named camera: its own vtkCamera, which every viewport bound to it draws from, and the
 // controller a drag in any of them moves. The controller reads its aspect from the first viewport
@@ -1009,6 +1045,24 @@ CameraController &SceneViews::controller(View &v) {
   return v.vp->camera();
 }
 
+// A viewport's keys resolve as its bind: does, in the scope its widget sits in: the document's
+// prefix, or a load:ed module's <prefix>.includes.<as> (§6.3), so a module's view writes its picks
+// inside its sandbox. A view of a scenes: entry keeps them under that scene's scenes.<id> in that
+// scope, as it always has at the document's. The camera does not follow: it is the viewport's own
+// (<scene prefix>.viewers.<view>.camera, beside the viewer's other keys), one per view name.
+std::string SceneViews::key_scope(const SceneGraph &sg) const {
+  const std::string &own = sg.getStatePrefix();
+  const std::string &doc = view_->scene().getStatePrefix(); // the document's (AriRuntime's prefix)
+  const std::string &scope = backend_->custom_scope();
+  if (scope.empty() || scope == doc)
+    return own; // not in a mount (or drawn outside the walk): the scene's prefix, as always
+  const std::string sep = cvc::state::SEPARATOR;
+  if (own.size() > doc.size() + sep.size() && own.compare(0, doc.size(), doc) == 0 &&
+      own.compare(doc.size(), sep.size(), sep) == 0)
+    return scope + own.substr(doc.size()); // <scope>.scenes.<id>
+  return scope;
+}
+
 SceneViews::View *SceneViews::view_for(const std::string &name, const std::string &scene) {
   ViewportManager &vm = view_->viewportManager();
   auto it = views_.find(name);
@@ -1175,7 +1229,9 @@ void SceneViews::update(double dt) {
     double whole[6];
     const bool bounded = frame_named(c, whole);
     c.ctl->update(dt);
-    if (c.driver && c.driver->GetActiveCamera() == c.cam && bounded)
+    double clip_near = 0.0, clip_far = 0.0; // near: and far: fix them instead
+    if (c.driver && c.driver->GetActiveCamera() == c.cam && bounded &&
+        !c.ctl->clipRange(clip_near, clip_far))
       c.driver->ResetCameraClippingRange(whole);
     c.used = false;
   }
@@ -1382,14 +1438,14 @@ void SceneViews::register_widget() {
         if (v->pick) {
           SceneSlot slot;
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
-            v->pick_key = ari::resolve_bind(slot.sg->getStatePrefix(),
+            v->pick_key = ari::resolve_bind(key_scope(*slot.sg),
                                             w.props.str("pick", "viewers." + name + ".pick"));
         }
         v->pointer_key.clear();
         if (w.props.has("pointer")) {
           SceneSlot slot;
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
-            v->pointer_key = ari::resolve_bind(slot.sg->getStatePrefix(), w.props.str("pointer"));
+            v->pointer_key = ari::resolve_bind(key_scope(*slot.sg), w.props.str("pointer"));
         }
         // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
         // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
@@ -1409,6 +1465,7 @@ void SceneViews::register_widget() {
         start.has_elevation = w.props.has("elevation");
         start.elevation = w.props.num("elevation", 0.0);
         start.zoom = w.props.num("zoom", 1.0);
+        ari::read_scene_camera_viewpoint(w.props, start); // position, target, up, fov, ...
         if (!same_start(start, v->start)) {
           v->start = start;
           v->framed = false;
@@ -1423,7 +1480,7 @@ void SceneViews::register_widget() {
             if (a->is_map()) {
               SceneSlot slot;
               if (a->has("bind") && scenes_ && scenes_(v->scene, slot) && slot.sg) {
-                v->axis_key = ari::resolve_bind(slot.sg->getStatePrefix(), a->str("bind"));
+                v->axis_key = ari::resolve_bind(key_scope(*slot.sg), a->str("bind"));
                 axis_text = ari::read_or<std::string>(slot.sg->appContext(), v->axis_key, "");
               }
             } else {
@@ -1521,11 +1578,12 @@ void SceneViews::register_widget() {
           prepare(*v, 0.0);
           auto it = cameras_.find(v->scene + "|" + v->camera);
           if (it != cameras_.end() && !it->second->framed) {
-            double bounds[6];
+            double bounds[6], clip_near = 0.0, clip_far = 0.0; // near: and far: fix them
             if (frame_named(*it->second, bounds) && it->second->driver &&
                 it->second->driver->GetActiveCamera() == it->second->cam) {
               it->second->ctl->update(0.0);
-              it->second->driver->ResetCameraClippingRange(bounds);
+              if (!it->second->ctl->clipRange(clip_near, clip_far))
+                it->second->driver->ResetCameraClippingRange(bounds);
             }
           }
         }

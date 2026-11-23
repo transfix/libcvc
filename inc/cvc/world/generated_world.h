@@ -140,15 +140,21 @@ struct generated_world_params {
 
 // The shore edge's band: how far in from the world's edge the coast starts (metres, 20 % of the
 // half-size, between 50 and 300 m), and the sea floor at the edge (as deep as the island preset's
-// shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the sea
-// floor rises to the waterline by 25 % of the band, the beach climbs world_beach_slope to 50 %, and
-// the ground eases back to the relief's own by the band's end. Its edge is a rounded square
+// shelf: water_level_m less 30 % of the relief, at least 6 m). Measured in from the edge, the coast
+// is a beach's profile: the sea floor shelves up by 15 % of the band to the foot of a surf zone
+// that rises at world_surf_slope to the waterline at 45 % (a swell shoals and breaks across it),
+// a beach face climbs world_beach_face_slope to a berm world_berm_m up (at most 20 % of the band
+// wide; the swash runs up it), the backshore goes on at world_beach_slope to 70 %, and the ground
+// eases back to the relief's own by the band's end. Its edge is a rounded square
 // (|x|^r + |y|^r = half^r, r = world_shore_roundness), so the corners curve away into the sea, and
 // the coastline wanders: it lies up to 35 % of the band further in, by a smooth wobble the seed
 // sets (bays and headlands).
 double world_shore_band_m(const generated_world_params &p);
 double world_shore_floor_m(const generated_world_params &p);
-constexpr double world_beach_slope = 0.02;    // 1 in 50
+constexpr double world_surf_slope = 1.0 / 12.0;       // the surf zone, under the water
+constexpr double world_beach_face_slope = 1.0 / 10.0; // the beach face, above it
+constexpr double world_berm_m = 1.5;                  // the berm: the face's top over the waterline
+constexpr double world_beach_slope = 0.02;            // the backshore, 1 in 50
 constexpr double world_shore_roundness = 4.0; // the corners: 2 a circle, larger nearer a square
 
 // A lane of the generated city's streets: the widest vehicle driven on them, the Humvee (2.18 m
@@ -210,6 +216,9 @@ std::vector<std::string> city_generator_names(cvc::app &app);
 struct generated_world {
   generated_world_params params;
   std::shared_ptr<const world_model> model;
+  // The surface table when there is no model (a world read from a bundle, world_from_bundle):
+  // geometry()'s, so its items name the same surfaces. Null: the model's, else the built-in one.
+  const surface_registry *surfaces = nullptr;
   grid_spec grid;
   raster_out raster; // the material / risk / occupancy / height raster, asphalt included
 
@@ -296,11 +305,57 @@ generated_world_params generated_world_params_from_json(const std::string &text)
 generated_world_params generated_world_params_from_json(const std::string &text,
                                                         const generated_world_params &base);
 
-// The world as bundle files (city_bundle_bytes): geometry()'s items and the needles (render
-// only), the water level, and the generator ("generated_world", `generator_version`, the seed and
-// params). Throws as city_bundle_bytes does.
+// A world's painted ground: RGB texels, rows south first (paint_surface's), width x height.
+struct world_ground {
+  int width = 0, height = 0;
+  std::vector<unsigned char> rgb;
+  bool empty() const { return rgb.empty(); }
+};
+// The size of the ground a bundle holds (ground.png): paint_surface in the material colours,
+// world_ground_size texels a side.
+constexpr int world_ground_size = 2048;
+
+// The world as bundle files (city_bundle_bytes), everything the renderer draws:
+//   - geometry()'s items, the needles, and the props' coarser rungs (props_r1, props_r2), the last
+//     three render only;
+//   - props.json, the props' cells (prop_cells): the cell size and, per cell, its bounds and its
+//     run of triangles (lines, for the needles) in each prop mesh;
+//   - streets.json, the street network the roads were extruded from (nodes, segments, widths and
+//     classes) and the city's counts;
+//   - ground.png, the painted ground, north at the top: `ground` when given, else paint_surface
+//     in the material colours at world_ground_size;
+//   - the water level, and the generator ("generated_world", `generator_version`, the seed and
+//     params).
+// Throws as city_bundle_bytes does.
 city_bundle_files generated_world_bundle(cvc::app &ctx, const generated_world &w,
-                                         const std::string &generator_version);
+                                         const std::string &generator_version,
+                                         const world_ground *ground = nullptr);
+
+// A world as the renderer draws it, from a bundle of any version (ARIADNE_WORLDS section 18.8,
+// "one renderer"): the world, and its ground.
+struct bundle_world {
+  std::shared_ptr<generated_world> world;
+  world_ground ground; // ground.png, else satellite.png; empty when it has neither
+};
+// The world in a loaded bundle `b` (load_city_bundle), its other files read through `read`:
+//   - the terrain and every mesh item: buildings, roads, props, foliage, needles, props_r1 and
+//     props_r2 by name; any other mesh item is drawn with the buildings, its placement applied;
+//   - the props' cells (props.json; their runs of points are the ones their faces use), the
+//     streets and the city's counts (streets.json);
+//   - the params: the generator's for a generated world, else a world over the terrain's extent
+//     with walls where the bundle has edge_walls; the water level is the manifest's, and a world
+//     with none has no water;
+//   - rebuilt from the stored terrain, not stored: the bodies of water and the shore grid, the
+//     ground under the water's columns, and the terrain's render LOD chunks and their water.
+// No model and no raster: the ground is the stored one, not repainted. Written again with
+// generated_world_bundle and its ground, a generated world's bundle gives the same bytes and hash.
+// Throws std::runtime_error for a bundle with no terrain, or a props.json, streets.json or
+// ground.png that is malformed or does not fit the meshes.
+bundle_world world_from_bundle(cvc::app &ctx, const city_bundle &b, const city_bundle_reader &read);
+
+// The bodies of water at `level` over terrain t's samples, every water_bodies_stride()-th one a
+// side (generated_world::water, which the builder makes this way).
+water_bodies terrain_water_bodies(const cvc::height_field &t, double level);
 
 // One cell's run of a prop mesh (generated_world::prop_cell) as a mesh of its own: its points,
 // colours and triangles or lines, the indices rebased.
@@ -399,6 +454,14 @@ std::vector<unsigned char> paint_water(const generated_world &w, int size = 2048
 // the world's edge out reach_m further, in the deep water's colour (water_colour of the depth at
 // the edge), its normals up. Empty for any other edge.
 cvc::geometry outer_sea(const generated_world &w, double reach_m = 6000.0);
+
+// The rock under a floating world, for the wall and none edges: a mesh hung from the terrain
+// mesh's rim (its top ring is the rim's own samples, so the two meet), falling as a sheer cliff and
+// then narrowing to a rounded, ragged cone and a point about half the world's half-size further
+// down, its faces outward, coloured soil at the cut edge and banded rock below. Seen from beneath,
+// the world is a chunk of ground hanging in the air. Drawing only: nothing collides with it. Empty
+// for a shore edge, whose sea hides the world's underside.
+cvc::geometry world_underside(const generated_world &w);
 
 // The dirt verge along the streets: how much of the light dirt (0..1) the ground at (x, y) takes,
 // from_edge_m past a road's pavement, painted over texels texel_m wide. About half the road length

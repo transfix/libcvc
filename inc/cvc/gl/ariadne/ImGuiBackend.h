@@ -281,11 +281,22 @@ private:
     std::vector<unsigned int> pane_keys;
     float split_long_axis = 0.0f; // split mode: the seam's cross length
     int color_pushes = 0;         // table border-colour style pushes to pop
+    // flow mode: the ImGui-storage key its cells' widths (last frame's) hang off, the screen x of
+    // its left edge and of the right edge past which a cell goes to the next line.
+    unsigned int flow_key = 0;
+    float flow_left = 0.0f;
+    float flow_right = 0.0f;
   };
   std::vector<GridState> m_grids;
   // Whether the next widget is a cell of a horizontal row with no col_widths (its cells side by
   // side): a slider there leaves the cells after it their room.
   bool in_flow_row() const { return !m_grids.empty() && m_grids.back().flow; }
+  // The room left on the current line, in screen px: to the line's right edge (a window's, a
+  // table cell's); in a window whose width fits its content, to the view's right edge instead, so
+  // a phone's narrow window wraps what would run past it (as rich_text does).
+  float line_room() const;
+  // A line of text that wraps at a word where it is wider than line_room(); rgb tints it.
+  void fitted_text(const char *text, const float *rgb);
 
   // §11.4 geometry persistence. The core seeds the NEXT window / grid before begin_* and reads the
   // current geometry back after. m_pendingSeed / m_pendingTracks are consumed by the next
