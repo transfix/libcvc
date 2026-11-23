@@ -135,7 +135,9 @@ public:
   // pitch, roll, vertical speed and spin LIKE's); without one the vehicle as it was added, at rest.
   // On dynamicboat the same with the hull, the driver's memory LIKE's. A boat goes on the water at
   // the first CHASSIS over water deep enough for it (dyn_boat_plant::attach); until then it has no
-  // world, and its steps leave it where it is.
+  // world, and its steps leave it where it is. Its world's field time is TICK x fixed_dt, the
+  // relay's at that tick (SceneWorld::follow anchors it to the clock), and a step adds fixed_dt,
+  // so the boat rides the same waves as the relay's (OW5l).
   dynamic_vehicle at(const cvc::physics::body_state &chassis, std::uint64_t tick,
                      const dynamic_vehicle *like = nullptr) const;
   // One physics step ending on clock tick TICK: the navigator's tick first when it falls due (the
@@ -159,7 +161,7 @@ private:
                           const dynamic_vehicle *like) const;
   dynamic_vehicle at_four(const cvc::physics::body_state &chassis,
                           const dynamic_vehicle *like) const;
-  dynamic_vehicle at_jolt(const cvc::physics::body_state &chassis,
+  dynamic_vehicle at_jolt(const cvc::physics::body_state &chassis, std::uint64_t tick,
                           const dynamic_vehicle *like) const;
   void step_bike(dynamic_vehicle &v, bool tick);
   void step_four(dynamic_vehicle &v, bool tick);

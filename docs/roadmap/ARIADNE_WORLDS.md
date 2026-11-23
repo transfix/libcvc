@@ -1116,8 +1116,9 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   0.5 mm of the relay's height and 0.7 mrad of its chassis's attitude (`AriadneOneWorld`); the
   holon predicts it with nothing to correct, and corrects a 1.5 m push exactly (`HolonVehicleTest`).
 - **Still to come:** a wall or another vehicle is the relay's correction (a client's dynamic
-  model touches nothing; a jolt or boat model touches only the statics and the water). A sea's
-  waves under a predicted boat (OW5j predicts it on still water). For the statics: a document the
+  model touches nothing; a jolt or boat model touches only the statics and the water). A sea the
+  relay's storms change (OW5l predicts a boat on its document's sea, a weather node's keyframes
+  not followed), and a predicted boat's attitude from its first sample. For the statics: a document the
   client does not ship with, from a pack it was pointed at (OW5k: a directory), or fetched from
   the relay (section 12).
 - **As built (OW5f, the relay's world followed):** the relay publishes what its document has on
@@ -1196,8 +1197,22 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   0.8 mm and 0.08 mrad of the relay's launch on a still lake, afloat within 0.03 mm of its height
   and 5 mrad of its pitch and roll (`AriadneOneWorld`). Two models on the same water agree
   exactly, and a 1.5 m push is corrected at the next sample (`HolonVehicleTest`). A sea's waves
-  are not checked: the model reads its water at its own world's field time, which is not tied to
-  the relay's.
+  came with OW5l.
+- **As built (OW5l, a sea's waves):** the relay's world reads its water's waves at the clock's
+  time: `SceneWorld::follow` sets the world's field time to the clock's at its first call, as
+  `world::follow` does, so the step ending on tick T reads the sea at T x fixed_dt however long the
+  holon ran before the world was attached. (Before, the field time counted from the world's own
+  first step, so a world attached late floated its bodies on other waves than the drawn sea, which
+  is drawn at the clock's time.) A client's boat model sets its world's field time to the sample's
+  tick x fixed_dt (`dynamic_vehicle_model::at`; the holon passes the server's tick), and each step
+  adds fixed_dt, so it reads the same waves at the same tick. On a lake with a 14 m/s wind sea
+  that heaves the relay's launch 0.71 m, each sample finds the model within 2.2 mm of it and
+  6.4 mm of its height; a model reading the waves half a second off is 171 mm off its height
+  (`AriadneOneWorld`). A model starts at rest, level, where the relay's hull may already be
+  pitching on a wave (the driver's pose carries its heading alone), so its attitude is up to
+  145 mrad off in the first second; the same waves bring it within 23 mrad of the hull's pitch and
+  roll, and 1.4 mrad of its heading, from then on. The replica's water is its document's: a sea
+  the relay's storms change on the clock's periods (a weather node) is not followed yet.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1280,7 +1295,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |

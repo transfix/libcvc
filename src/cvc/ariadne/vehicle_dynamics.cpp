@@ -186,7 +186,6 @@ double dynamic_vehicle_model::speed(const dynamic_vehicle &v) {
 
 dynamic_vehicle dynamic_vehicle_model::at(const ph::body_state &chassis, std::uint64_t tick,
                                           const dynamic_vehicle *like) const {
-  (void)tick;
   if (is_boat() && !ensure_boat(chassis)) {
     // Not on the water yet: where the sample has it, without a world, until one puts it there.
     dynamic_vehicle v;
@@ -195,7 +194,7 @@ dynamic_vehicle dynamic_vehicle_model::at(const ph::body_state &chassis, std::ui
     return v;
   }
   if (_jolt)
-    return at_jolt(chassis, like);
+    return at_jolt(chassis, tick, like);
   return _four ? at_four(chassis, like) : at_bike(chassis, like);
 }
 
@@ -267,7 +266,7 @@ double dynamic_vehicle_model::jolt_speed() const {
   return v.x * fwd.x + v.y * fwd.y + v.z * fwd.z;
 }
 
-dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis,
+dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, std::uint64_t tick,
                                                const dynamic_vehicle *like) const {
   dynamic_vehicle v;
   ph::world &w = _jolt->world();
@@ -289,6 +288,9 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis,
     if (_boat)
       _boat->resume(0, {});
   }
+  // The relay's field time at the tick (SceneWorld::follow anchors it to the clock): a boat reads
+  // its water's waves there, as the relay's does, and each step adds fixed_dt (OW5l).
+  w.set_field_time(static_cast<double>(tick) * _dt);
   // The chassis where the sample has it: its position, heading and horizontal velocity. A driver's
   // pose carries its heading alone, so the pitch and roll (and the vertical speed and the spin)
   // are the predicted ones.
