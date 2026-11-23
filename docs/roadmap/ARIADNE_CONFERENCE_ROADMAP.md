@@ -146,7 +146,7 @@ These hide the transport/bridge/relay behind a room abstraction; a conferencing 
 | Verb | Effect |
 |---|---|
 | `(room-join SERVER-ENDPOINT ROOM-ID [profile]) → room` | join the room's state cluster, create the local bridge/transport, publish my participant subtree, get the roster + chat channels. Mode (sfu/mesh) comes from the server. |
-| `(room-leave room)` | stop my servings/subscriptions, mark me left (`presence.joined` 0), drop the bridge. A relay removes my participant subtree once my connection has been gone `--leave-grace-s`. |
+| `(room-leave room)` | stop my servings/subscriptions, mark me left (`presence.joined` 0), drop the bridge. A relay removes my participant subtree once I have been away `--leave-grace-s`, connected or not; a later `(room-join)` from the same document writes again what I had published. |
 | `(room-publish room {kind token})` | advertise an open local stream (camera/audio) into the room; in SFU mode `serve`/`pull` it to the relay, in mesh mode make it available for peers to pull. |
 | `(room-unpublish room kind)` | stop advertising it. |
 | `(room-subscribe room PID KIND) → proxy-token` | open a proxy for participant `PID`'s stream; wire the inbound frames (from relay in SFU, from the peer in mesh). Feed the token to `stream_view` / `stream-play-audio`. |
@@ -285,7 +285,9 @@ grants for the *client-local* document sandbox.
    a filter (one that never joins) is still bootstrapped with everything once the hold times out.*
 3. **Server-mediated write path** — the intent channel + validator + sole-writer discipline (§5d).
 4. **Roster primitive** — immediate-children enumeration, `pid` allocation, presence/heartbeat reaping
-   of participant subtrees (drive `expireAt`).
+   of participant subtrees (drive `expireAt`). *Reaping landed (2026-11-23, §5h): a departed
+   participant's subtree goes after `--leave-grace-s`, and a silent connection is closed after
+   `--idle-timeout-s` (the link probe is the heartbeat).*
 5. **(Later) distributed write-policy / bridged grants** — to make the *mesh* / trusted-native case
    safe without a central writer.
 
@@ -690,7 +692,8 @@ false)` is the old drain-and-publish exactly); arisrv and arigl turn them on.
 | `--media-stall-ms N` | 40 | gRPC stall drop; 0 = off |
 | `--media-delay-ms N` | 100 | gRPC delay drop (video past N ms of queue, poses 2N, audio 4N); 0 = off. Not an S7 switch |
 | `--admission-hold-ms N` | 2000 (only with an AOI) | hold a joiner's bootstrap for its filter, at most N ms; 0 = off (the admit snapshot goes out unfiltered, before Hello) |
-| `--leave-grace-s N` | 300 | remove a departed participant's subtree from the room tree once it has been away N s (`room_departures`); 0 = as its connection ends. Not an S7 switch |
+| `--leave-grace-s N` | the `--doc`'s `server: leave_grace_s:`, else 300 | remove a departed participant's subtree from the room tree once it has been away N s without joining again (`room_departures`), connected or not; 0 = as its connection ends. Not an S7 switch |
+| `--idle-timeout-s N` | 10 | close a connection (gRPC or WebSocket) that has sent nothing for N s, as a dropped one closes, so its participant departs (`state_transport::reap_idle`); 0 = never. Not an S7 switch |
 | `--scene default\|large` | default | the room's world, `cvc://worlds/<name>.ari` (a `--doc` with a `scene:` is the world instead, WD1); not an S7 switch (honoured under `--s7 off`) |
 | `--bind-writes on\|off` | on | bound writes (below): each client writes only its own participant, as itself; off takes any client's writes. Not an S7 switch |
 | `--room-token-file PATH` / `CVC_ARISRV_ROOM_TOKEN` | unset (an open room) | admit only clients that present the room token (§5f). Not an S7 switch |
@@ -749,8 +752,8 @@ an S7 switch) installs one `room_write_gate` on both transports.
   closes. A second connection claiming a held pid is refused until then, and its close is not that
   participant leaving. A holder silent for 6 s (three missed link probes; a live client answers
   every Ping) is taken over by the next claim. A dropped network leaves the old stream open on the
-  relay, gRPC's especially, which has no idle reaper, and the reconnect must not wait on it. The
-  displaced connection's close is not a departure either.
+  relay until its idle reaper closes it (`--idle-timeout-s`, 10 s), and the reconnect must not
+  wait on it. The displaced connection's close is not a departure either.
 - **Origin:** every mutation, message and media frame must name the connection's pid as its origin,
   and a gRPC heartbeat must name it as its node. A SnapshotResponse from a client is never applied.
 - **The relay's own ids** (its transport's and its shards') are never a client's: a connection
@@ -863,9 +866,23 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   its subtree is removed from the room tree once it has been away `--leave-grace-s` (default 300)
   without coming back, as one delete every client applies (`room_departures`, `room_remove`; deletes
   replicate since transfix/libcvc#1473). A client back in time (a reconnect keeps its pid) finds
-  what it published still there. One back later comes back as a new joiner, without what it
-  published once (its stream descriptors, its avatar), and a document that left the room but
-  keeps its connection is only marked left. Heartbeats (a silent connection) stay §5e item 4.
+  what it published still there, and one whose connection is back has the whole grace from then
+  to join again. The grace is per room: the server document's `server: leave_grace_s:`, which
+  `--leave-grace-s` overrides.
+  - **Back after the grace.** arigl keeps what it published under its node (`room_own_state`:
+    its avatar choice, voice and video flags, a client program's keys; not the relay's keys, its
+    intent or its net readings) before it redials, and writes it again while it rejoins
+    (`room_reassert`); a document's `(room-join)` does the same after its own `(room-leave)`.
+    The relay forgets the streams it relayed for a removed participant, so a stream published
+    again is relayed afresh and marked ready again.
+  - **Left but connected.** A participant marked left that keeps its connection (a document's
+    `(room-leave)`) is removed after the grace too.
+  - **Silent connections.** Every link is probed each 2 s, and `state_transport::reap_idle`
+    closes one silent for `--idle-timeout-s` (10 s) on both transports, so a peer gone without
+    closing (a crash behind NAT, a suspended phone) departs like one that closed. arigl and
+    `relay_session` do the same for their link to the relay, so they dial again.
+  - **Scene objects, lights and avatar options** the relay drops are removed from the tree (a
+    delete each), not marked `present = 0`.
 * A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
   panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
   refresh) → **Phase 7**.

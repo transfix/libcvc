@@ -6864,6 +6864,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **`server: leave_grace_s:`** is how long the relay keeps a departed participant's subtree in the
+  room tree, in whole seconds (default 300; 0 removes it as its connection ends). One that joins
+  again in time finds what it published still there. `arisrv --leave-grace-s` overrides it.
 - **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
   where every client is sent them; a subscribing client's node wears it with
   `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").

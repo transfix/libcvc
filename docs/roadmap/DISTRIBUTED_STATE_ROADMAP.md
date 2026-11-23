@@ -215,7 +215,8 @@ mistake for finished:
   (`room_write_gate`). Still open: `state::reset(false)` drops children silently, so it
   replicates nothing; a subtree deleted and made again while a peer was away keeps whatever that
   peer holds below it of the old one. The conference relay now removes a departed participant's
-  subtree after a grace (`room_departures`, arisrv `--leave-grace-s`).
+  subtree after a grace (`room_departures`, arisrv `--leave-grace-s`), and the scene objects,
+  lights and avatar options it drops.
 - **Backpressure and slow-peer isolation are `inproc`-only.** The bounded
   outbox, drop policies and quarantine live in `state_transport_inproc`; the
   IPC and gRPC transports publish synchronously with no bounded queue. (The

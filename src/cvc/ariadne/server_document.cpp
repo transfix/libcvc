@@ -158,6 +158,14 @@ std::string parse_server_block(const Value &content, ServerBlock &out,
         return "server: " + key + ": " + why;
       continue;
     }
+    if (key == "leave_grace_s") {
+      const double n = v.is_scalar() ? v.as_double(-1.0) : -1.0;
+      if (!(n >= 0.0) || n != static_cast<double>(static_cast<long>(n)))
+        return "server: leave_grace_s: expects a whole number of seconds, 0 or more, got '" +
+               (v.is_scalar() ? v.scalar : std::string()) + "'";
+      out.leave_grace_s = static_cast<long>(n);
+      continue;
+    }
     if (key != "publish") {
       if (warnings)
         warnings->push_back("server: unknown key '" + key + "', ignored");

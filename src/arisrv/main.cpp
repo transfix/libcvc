@@ -234,8 +234,15 @@ int main(int argc, char **argv) {
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
   //   --leave-grace-s N          remove a departed participant's subtree from the room tree once
-  //                              it has been away N s without coming back (default 300; 0 = as
-  //                              its connection ends). Until then it is only marked left
+  //                              it has been away N s without joining again (default: the --doc
+  //                              document's server: leave_grace_s:, else 300; 0 = as its
+  //                              connection ends). Until then it is only marked left. A
+  //                              participant marked left that keeps its connection (a document's
+  //                              (room-leave)) is removed after N s too
+  //   --idle-timeout-s N         close a connection that has sent nothing for N s, as a dropped one
+  //                              closes, so its participant departs (default 10; 0 = never). Every
+  //                              link is probed each 2 s, so only a peer gone without closing (a
+  //                              crash behind NAT, a suspended phone) is silent that long
   //   --scene default|large      the world the room starts in: cvc://worlds/default.ari (the 20 m
   //                              room) or cvc://worlds/large.ari (a 100 m plane of LOD meshes).
   //                              A --doc whose document has a scene: is the world instead
@@ -404,11 +411,12 @@ int main(int argc, char **argv) {
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
-              admissionHoldArg = "2000", leaveGraceArg = "300";
+              admissionHoldArg = "2000", leaveGraceArg, idleTimeoutArg = "10";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
   std::string simHzArg;                        // --sim-hz ("": the world's)
   bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
+  bool leaveGraceFlag = false; // --leave-grace-s was given (it overrides the document's)
   std::string docPath;
   std::string docUri; // --doc as given (a cvc:// URI before it resolves to a file)
   bool docFlag = false;                                       // --doc was given (even with no path)
@@ -470,8 +478,11 @@ int main(int argc, char **argv) {
       mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
-    else if (!std::strcmp(a, "--leave-grace-s"))
+    else if (!std::strcmp(a, "--leave-grace-s")) {
       leaveGraceArg = next("");
+      leaveGraceFlag = true;
+    } else if (!std::strcmp(a, "--idle-timeout-s"))
+      idleTimeoutArg = next("");
     else if (!std::strcmp(a, "--scene")) {
       scene = next("default");
       sceneFlag = true;
@@ -584,12 +595,13 @@ int main(int argc, char **argv) {
        !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"})))
     return 2;
   long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000,
-       leaveGraceS = 300;
+       leaveGraceS = -1, idleTimeoutS = 10; // leaveGraceS -1: the document's, else 300
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
       !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
       !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs) ||
-      !check_count("--leave-grace-s", leaveGraceArg, leaveGraceS))
+      (leaveGraceFlag && !check_count("--leave-grace-s", leaveGraceArg, leaveGraceS)) ||
+      !check_count("--idle-timeout-s", idleTimeoutArg, idleTimeoutS))
     return 2;
   long viewerKbps = 0, callResultMax = 0, clientsMax = 0, clientLogMax = 0;
   if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps) ||
@@ -1236,7 +1248,12 @@ int main(int argc, char **argv) {
   // every other room-tree write happens), and the writes ride the normal pump + relay forwarding.
   std::mutex departed_mu;
   std::vector<std::string> departed;
+  // The grace: --leave-grace-s, else the document's server: leave_grace_s:, else 5 minutes.
+  if (leaveGraceS < 0)
+    leaveGraceS =
+        serverDoc && serverDoc->block().leave_grace_s >= 0 ? serverDoc->block().leave_grace_s : 300;
   cvc::ariadne::conference::room_departures departures{std::chrono::seconds(leaveGraceS)};
+  auto nextReap = std::chrono::steady_clock::now(); // departures.reap, about once a second
   const auto on_departed = [&](const std::string &node_id) {
     std::lock_guard<std::mutex> lk(departed_mu);
     departed.push_back(node_id);
@@ -2264,13 +2281,19 @@ int main(int argc, char **argv) {
     return !signals.stop_requested();
   };
   while (relay_running()) {
+    // Reap ghosts (~every second): a peer gone without closing its connection (a tab that
+    // navigated or reloaded away, a crash behind NAT, a suspended phone) sends nothing more, while
+    // a live one answers the 2 s probe at least; reap_idle closes such a connection after
+    // --idle-timeout-s, so its on-close retraction fires and it departs like any other.
+    const bool reapTick = ++reapticks % 5 == 0;
+    if (reapTick && idleTimeoutS > 0)
+      state_tp.reap_idle(std::chrono::seconds(idleTimeoutS));
 #if CVC_ENABLE_WS
-    // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
-    // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its
-    // on-close retraction fires and the roster does not accumulate ghosts. A live client streams
-    // continuously.
-    if (++reapticks % 5 == 0) {
-      ws_tp.reap_idle(std::chrono::seconds(10));
+    if (reapTick) {
+      if (idleTimeoutS > 0)
+        ws_tp.reap_idle(std::chrono::seconds(idleTimeoutS));
+      else
+        ws_tp.reap_idle(std::chrono::hours(24 * 365)); // only its sweep of finished readers
       // Re-broadcast the room/scene snapshot to every client (~1s). A client-to-client live re-fan
       // is single-shot with no retry, so a join that races an already-connected peer's socket is
       // otherwise lost for good (an established client never sees a later joiner). This idempotent
@@ -2306,8 +2329,9 @@ int main(int argc, char **argv) {
         std::fflush(stdout);
     }
     // A departed participant still away after the grace goes from the room tree: one delete, which
-    // every client applies. One holding a connection again is kept.
-    if (const auto t = std::chrono::steady_clock::now(); departures.due(t)) {
+    // every client applies. One whose connection is back has the whole grace to join again.
+    if (const auto t = std::chrono::steady_clock::now(); t >= nextReap) {
+      nextReap = t + std::chrono::seconds(1);
       std::set<std::string> connected;
       for (const cvc::state_link_report &r : state_tp.link_reports())
         if (r.holds_id)
@@ -2317,9 +2341,15 @@ int main(int argc, char **argv) {
         if (r.holds_id)
           connected.insert(r.remote_node_id);
 #endif
-      for (const std::string &pid : departures.reap(app, room, connected, t))
+      for (const std::string &pid : departures.reap(app, room, connected, t)) {
+        // Its streams went with it: one it publishes again after a rejoin is relayed afresh
+        // (room_relay_tick marks it ready again).
+        for (auto it = relayed.lower_bound(pid + "/");
+             it != relayed.end() && it->rfind(pid + "/", 0) == 0;)
+          it = relayed.erase(it);
         std::printf("[arisrv] participant removed: %s\n", pid.c_str());
-      std::fflush(stdout);
+        std::fflush(stdout);
+      }
     }
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
     // Advance the authoritative avatar holon and write each participant's pose, then fan them out

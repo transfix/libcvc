@@ -22,6 +22,7 @@
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_net.h> // the roster entries carry each link's quality
 #include <cvc/ariadne/conference/room_rules.h> // room-avatar: the policy (stamina)
+#include <cvc/ariadne/conference/room_write_gate.h> // room_own_state: the relay's keys
 #include <cvc/ariadne/holon_sync.h>          // write_intent (room-set-intent verb)
 #include <cvc/core/app.h>                    // app.root()
 #include <cvc/state/state.h>               // cvc::state, SEPARATOR, findDescendant, children, value
@@ -159,6 +160,23 @@ struct room_table {
     std::lock_guard<std::mutex> lk(mu);
     by_token.erase(token);
   }
+  // What a participant this document took out with (room-leave) had published (room_own_state),
+  // by its token: a relay removes the node after its grace, so a later (room-join) here writes it
+  // again (room_reassert).
+  std::unordered_map<std::string, room_own_leaves> left_own;
+  void keep_own(const std::string &token, room_own_leaves own) {
+    std::lock_guard<std::mutex> lk(mu);
+    left_own[token] = std::move(own);
+  }
+  room_own_leaves take_own(const std::string &token) {
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = left_own.find(token);
+    if (it == left_own.end())
+      return {};
+    room_own_leaves out = std::move(it->second);
+    left_own.erase(it);
+    return out;
+  }
   // ROOM's avatar catalog, for the avatar verbs a document calls every tick (conference_roster.ari
   // calls room-avatar-options twice and room-avatar once). A whole read walks every option's nodes
   // (a few hundred), so it reads one leaf, the catalog's revision, and the catalog again only when
@@ -276,27 +294,45 @@ bool room_remove(cvc::app &app, const std::string &room_id, const std::string &p
   return parts && parts->removeChild(pid);
 }
 
-bool room_departures::due(clock::time_point now) const {
-  for (const auto &kv : _left)
-    if (now - kv.second >= _grace)
-      return true;
-  return false;
+namespace {
+// PID's presence.joined in ROOM-ID: "1", "0", or "" when it has none.
+std::string joined_of(cvc::app &app, const std::string &room_id, const std::string &pid) {
+  cvc::state *pr = app.root().findDescendant(
+      join_path({room_participant_path(room_id, pid).c_str(), "presence", "joined"}));
+  return pr ? pr->value() : std::string();
 }
+} // namespace
 
 std::vector<std::string> room_departures::reap(cvc::app &app, const std::string &room_id,
                                                const std::set<std::string> &connected,
                                                clock::time_point now) {
+  // One marked left that holds a connection: a document's (room-leave), which closes nothing.
+  // children() is a deep walk by full path (room_roster's note): the pids are one segment down.
+  if (cvc::state *parts = app.root().findDescendant(participants_path(room_id))) {
+    const std::string prefix = participants_path(room_id) + cvc::state::SEPARATOR;
+    for (const std::string &full : parts->children()) {
+      if (full.rfind(prefix, 0) != 0 ||
+          full.find(cvc::state::SEPARATOR, prefix.size()) != std::string::npos)
+        continue;
+      const std::string pid = full.substr(prefix.size());
+      if (!_left.count(pid) && joined_of(app, room_id, pid) == "0")
+        _left[pid] = away{now, connected.count(pid) > 0};
+    }
+  }
   std::vector<std::string> out;
   for (auto it = _left.begin(); it != _left.end();) {
     const std::string &pid = it->first;
-    const std::string joined =
-        join_path({room_participant_path(room_id, pid).c_str(), "presence", "joined"});
-    cvc::state *pr = app.root().findDescendant(joined);
-    if (connected.count(pid) || (pr && pr->value() == "1")) {
+    if (joined_of(app, room_id, pid) == "1") {
       it = _left.erase(it); // back: its next departure starts a new wait
       continue;
     }
-    if (now - it->second < _grace) {
+    away &a = it->second;
+    if (connected.count(pid) != 0 && !a.connected) {
+      a = away{now, true}; // reconnected but not joined yet: the whole grace to do it
+      ++it;
+      continue;
+    }
+    if (now - a.since < _grace) {
       ++it;
       continue;
     }
@@ -305,6 +341,43 @@ std::vector<std::string> room_departures::reap(cvc::app &app, const std::string 
     it = _left.erase(it);
   }
   return out;
+}
+
+room_own_leaves room_own_state(cvc::app &app, const std::string &room_id, const std::string &pid) {
+  room_own_leaves out;
+  cvc::state *node = app.root().findDescendant(room_participant_path(room_id, pid));
+  if (!node)
+    return out;
+  const room_write_gate gate(room_id);
+  const std::string prefix = room_participant_path(room_id, pid) + cvc::state::SEPARATOR;
+  for (const std::string &full : node->children()) { // the whole subtree, by full path
+    if (full.rfind(prefix, 0) != 0 ||
+        !gate.may_write(pid, full, cvc::state_mutation_op::set_value)) // not the relay's
+      continue;
+    const std::string rel = full.substr(prefix.size());
+    const std::string top = rel.substr(0, rel.find(cvc::state::SEPARATOR));
+    if (top == "presence" || top == "net" || top == "intent" || top == "drive")
+      continue;
+    cvc::state *c = app.root().findDescendant(full);
+    if (c && !c->value().empty())
+      out.emplace(rel, c->value());
+  }
+  return out;
+}
+
+std::size_t room_reassert(cvc::app &app, const std::string &room_id, const std::string &pid,
+                          const room_own_leaves &own) {
+  const std::string base = room_participant_path(room_id, pid);
+  std::size_t n = 0;
+  for (const auto &[rel, v] : own) {
+    const std::string full = base + cvc::state::SEPARATOR + rel;
+    cvc::state *c = app.root().findDescendant(full);
+    if (c && !c->value().empty() && c->value() != v)
+      continue; // written anew since: that write went out
+    set_replicated(app, full, v);
+    ++n;
+  }
+  return n;
 }
 
 std::vector<room_participant> room_roster(cvc::app &app, const std::string &room_id) {
@@ -602,6 +675,8 @@ void register_room_intrinsics(cvc::app &app) {
             return err("room-join: node id contains a path separator");
 
           const std::string sp = room_join(app, room_id, pid, name);
+          // Back after a (room-leave): what it published then, which a relay may have removed.
+          room_reassert(app, room_id, pid, tbl->take_own(sp));
           auto rh = std::make_unique<room_handle>();
           rh->room_id = room_id;
           rh->self_pid = pid;
@@ -730,6 +805,8 @@ void register_room_intrinsics(cvc::app &app) {
                                 room_handle *rh = tbl->find(token);
                                 if (!rh)
                                   return se::make_dict({{"ok", se::value_t(false)}});
+                                tbl->keep_own(token,
+                                              room_own_state(app, rh->room_id, rh->self_pid));
                                 room_leave(app, rh->room_id, rh->self_pid);
                                 tbl->erase(token);
                                 return se::make_dict({{"ok", se::value_t(true)}});
