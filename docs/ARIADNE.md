@@ -3820,12 +3820,13 @@ this for every one.
   Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
   host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
   the open windows grow or shrink with it. It holds for the run.
-- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels of a
-  document with a `scene:` start hidden, and a round button in the bottom-right corner shows and
-  hides them all (the menu bar too), so the scene is never buried. A document with no scene (a
-  feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
-  arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
-  its corner. A window collapses to its title bar with the arrow at the title's left (or a double
+- **Hiding windows.** A document's panels start shown on a phone as anywhere else, and a round
+  button in the bottom-right corner hides and shows them all (the menu bar too), so the scene can
+  be had whole. A host may start them hidden on a view whose short side is under 500 logical
+  pixels (`ImGuiOverlay::setPhoneHidesPanels(true)`); arigl's `AriRuntime::load` does not. The
+  button stays above every window, even one dragged over its corner. A page's Fullscreen button
+  (arigl-web's `fullscreen_button`) sits above it: cvcGL tells the page how far up the button
+  reaches (the CSS variable `--cvcgl-toggle-clear`). A window collapses to its title bar with the arrow at the title's left (or a double
   tap on the title, which on a phone collapses rather than maximizes), closes with its X unless
   it is `closable: false`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
@@ -6091,8 +6092,8 @@ it (meshes, markers, paths, fields), and `host.frame_bounds(lo, hi)` aims the ca
 **Modes.** `"window"` needs a display. `"offscreen"` renders into an offscreen window: a capture,
 or CI on a software GL (VTK picks GLX, EGL or OSMesa at run time; the ImGui overlay needs GLX, so
 CI runs it under Xvfb, see `pycvc-linux` in ci.yml). Its scene and UI clocks step by each frame's
-`dt`, so its frames are reproducible. A view whose shorter side is under 700 logical pixels
-starts with the windows hidden, as on a phone (§5.14), so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
+`dt`, so its frames are reproducible. A small view lays its windows out as on a phone (§5.14),
+so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
 `AppRuntime` with no backend and no scene. The document's `init:`, residents, actions, host calls
 and state all run, but nothing is drawn, so a computed `bind:` is never evaluated, a `scene:` is
 dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
