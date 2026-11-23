@@ -2890,7 +2890,7 @@ seeds its key only while the key is empty:
 | key | meaning |
 |---|---|
 | `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
-| `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
+| `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`, and `render`: what draws the volume in the 3D view) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
 | `volumes` | published: the volumes `source.volume` may name, one per line, as it names them: each output of the document's `data:` entries that holds a volume (`data.<name>.<output>`), then the key `source.volume` names when it is not one of them; empty while it names none (a host that calls `setSource`). The component's Source combo picks from it, writing `source.volume` |
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
@@ -2920,9 +2920,13 @@ voxel. Every edit is one undo step. The planes are the node's children `slice_xy
 view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
 overlays draw its points as disks of their radius in voxels, the selection's rings, the crosshairs
 where the other planes cross it (each in the colour of the axis it runs along) and a rubber band
-being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is the group for what the 3D view alone
-shows: the contours' curves and tiled surfaces, and later phases'. Until the first volume arrives
-the planes and that group are hidden,
+being dragged. `<id>_surfaces` (tags `<id>`, `surfaces`) is the group for what the 3D view shows
+beyond the planes, which the slice views hide: the volume itself, drawn by the renderer
+`display.render` picks (`none` by default; `vtk`, `volren` or `volslice`, a
+[`VolumeRenderNode`](../inc/cvc/gl/VolumeRenderNode.h) as `volume_render` below has, through the
+grid's transfer function, so one `tf_editor` colours the planes and the volume; the component's
+Transfer function tab picks it), the contours' curves and tiled surfaces, and later phases'.
+Until the first volume arrives the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
@@ -2956,6 +2960,36 @@ editing is core libcvc ([`volume_grid_contours.h`](../inc/cvc/volume/volume_grid
 pycvc (`volume_grid_contours_test`, `volume_grid_contour_intrinsics_test`,
 `cvcgl_volume_grid_contours`, `test_pycvc_volume_grid_contours.py`).
 `examples/ariadne/documents/volume_grid_contours.ari` is the demo.
+
+**`type: volume_render`** ([`volume_render_nodes.h`](../inc/cvc/gl/ariadne/volume_render_nodes.h),
+[`VolumeRenderNode.h`](../inc/cvc/gl/VolumeRenderNode.h)) is one volume the app holds, drawn by the
+renderer a key picks, switchable while the document runs:
+
+```yaml
+data:
+  head: { generate: sdf, params: { mesh: stanford.bunny, dim: 64, fit: { height: 100 } } }
+scene:
+  nodes:
+    - node: head
+      type: volume_render
+      source: { data: head }         # or { state: <key> }, or { node: <id>, key: <key> }
+      renderer: volren               # vtk (the default), volren, volslice or none
+      transfer_function: { preset: grayscale }
+```
+
+`vtk` is VTK's GPU mapper (the `volume` type's), `volren` libcvc's raycaster (shading,
+isosurfaces, shadows) and `volslice` view-aligned texture slices; `none` draws nothing. Writing
+`<node>.renderer` swaps the renderer on the next frame: each is a child named for its kind, so its
+own settings stay under `<node>.children.<kind>` (where `volren_controls` and `volslice_controls`
+bind) and a renderer switched back to finds them as it left them. `<node>.transfer_function` is
+one model bound to whichever renderer draws (`tf_binding_options::model_key`), so an edit carries
+over a switch; with `none` the model keeps its range and overlays. The node reads no file:
+`source:` resolves into `<node>.source.volume` as `volren`'s does (node_data.h: `{ node: <id> }`
+follows a `volume_grid` realized before it by its `grid.volume`, else that node's `volume`), the renderers draw
+the volume as it is held (its voxels shared), and a new volume at the key is drawn by the renderer
+drawing then. Keys: `renderer`, `status` (what draws, or what the node waits for),
+`source.volume`, `source.status`; data channel `volume`. Test: `cvcgl_volume_render`. The built-in
+`volume`, `volren` and `volslice` types each keep their one renderer.
 
 #### Lines from data: `type: ribbon` and `type: draped_link`
 

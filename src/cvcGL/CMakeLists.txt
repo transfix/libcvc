@@ -1294,6 +1294,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_shared_volume COMMAND cvcgl_ariadne_shared_volume)
 endif()
 
+# The volume_render node (VolumeRenderNode.h, volume_render_nodes.h) and the volume_grid's 3D volume
+# (grid.display.render): the renderer (VTK's mapper, volren, volslice, none) switched by its key,
+# one transfer-function model bound to whichever draws, the volume followed at its source's key
+# (state, data, another node's), two apps (T6); offscreen, each renderer draws the volume (skips
+# where nothing rasterises unless CVC_REQUIRE_RENDER=1).
+add_executable(cvcgl_volume_render test/cvcgl_volume_render.cpp)
+target_link_libraries(cvcgl_volume_render PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_render COMMAND cvcgl_volume_render)
+
 # The volume_grid component over two grids in one document (switch and quad layouts), through
 # AriRuntime and the mouse: the views follow grid.view, the pointer fills the probe, clicks mark and
 # unmark, a drag selects, and each grid's views edit that grid alone. Offscreen; skips where nothing
