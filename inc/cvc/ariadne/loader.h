@@ -209,6 +209,11 @@ LoadResult load_string(cvc::app &app, const std::string &yaml);
 // Parse a .ari document from a file path, against `app`'s registries. Never throws.
 LoadResult load_file(cvc::app &app, const std::string &path);
 
+// A YAML text (JSON is YAML too) as a Value, as a document's own maps are read: false, and why,
+// when it does not parse or this build has no YAML. Never throws. A vehicle rig's file is read
+// with it (vehicle_rig).
+bool parse_value(const std::string &text, Value &out, std::string *why = nullptr);
+
 // §12.5 hot-reload: poll whether any of `sources` (e.g. LoadResult::sources) has changed on disk
 // since the last call. `stamps` is caller-owned state carried across calls (path -> last mtime);
 // pass the same map each poll. SEED it with LoadResult::source_stamps right after a load, so a

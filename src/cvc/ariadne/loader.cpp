@@ -4685,6 +4685,17 @@ ValidationResult validate_file(cvc::app &app, const std::string &path) {
   return validate_node(app, doc, path);
 }
 
+bool parse_value(const std::string &text, Value &out, std::string *why) {
+  try {
+    out = to_value(YAML::Load(text));
+    return true;
+  } catch (const std::exception &e) {
+    if (why)
+      *why = e.what();
+    return false;
+  }
+}
+
 bool have_yaml() { return true; }
 
 #else // !CVC_ARIADNE_HAVE_YAML — stub: the rest of Ariadne still builds/runs.
@@ -4709,6 +4720,11 @@ ValidationResult validate_file(cvc::app &, const std::string &) {
   ValidationResult v;
   v.error = unavailable().error;
   return v;
+}
+bool parse_value(const std::string &, Value &, std::string *why) {
+  if (why)
+    *why = "libcvc was built without yaml-cpp";
+  return false;
 }
 bool have_yaml() { return false; }
 
