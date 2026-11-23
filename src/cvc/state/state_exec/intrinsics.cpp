@@ -879,10 +879,13 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
   opts.uid = ctx->uid;
   // A child keeps its parent's owner (design 7.2; td 5 item 6), so a host's kill_owner reaps it.
   const process_ptr &running = ctx->sched->current_process();
-  if (running)
+  if (running) {
     opts.owner = running->owner;
-  else if (ctx->proc)
+    opts.owner_root = running->owner_root;
+  } else if (ctx->proc) {
     opts.owner = ctx->proc->owner;
+    opts.owner_root = ctx->proc->owner_root;
+  }
   // Its parent, and its priority and floor (design 7.2). A host's spawn, with no process
   // stepping, is unchecked, as a host's calls are.
   opts.parent_pid = ctx->sched->current_pid();
@@ -1162,6 +1165,8 @@ value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
     entries.emplace_back("priority", value_t(static_cast<int64_t>(pi.priority)));
     entries.emplace_back("uid", value_t(pi.uid));
     entries.emplace_back("steps", value_t(static_cast<int64_t>(pi.step_count)));
+    // Whose it is: its chroot relative to its owner's root (docs/roadmap/ARIADNE_SHELL.md 4.10).
+    entries.emplace_back("scope", value_t(pi.scope));
     result.push_back(make_dict(std::move(entries)));
   }
   return make_list(std::move(result));
@@ -1198,6 +1203,7 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   entries.emplace_back("priority", value_t(static_cast<int64_t>(info->priority)));
   entries.emplace_back("uid", value_t(info->uid));
   entries.emplace_back("gid", value_t(info->gid));
+  entries.emplace_back("scope", value_t(info->scope));
   entries.emplace_back("steps", value_t(static_cast<int64_t>(info->step_count)));
   append_budget_usage(entries, *info);
   entries.emplace_back("elapsed_time", value_t(info->elapsed_time));

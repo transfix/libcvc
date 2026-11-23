@@ -573,7 +573,8 @@ struct Widget {
   std::string on_change;
 
   // §5.25 a mount's application name: the loaded document's meta.name ("" leaves it to the mount
-  // id). Its menubar becomes one menu of the outer bar under this name.
+  // id). Its menubar becomes one menu of the outer bar under this name. On a document's root, the
+  // document's own meta.name, which the Runtime mirrors to ariadne.name.
   std::string app_name;
 
   // §12 module mount (load:): when non-empty, this widget is a MOUNT POINT — a relative

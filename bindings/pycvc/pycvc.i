@@ -3890,6 +3890,8 @@ struct execute_options {
   std::string gid;
   std::string root_path;
   std::string owner;
+  // The root the owner's scopes are written from: process_info.scope is root_path relative to it.
+  std::string owner_root;
   unsigned long long max_steps;
   double max_time;
   double max_step_time;
@@ -3966,6 +3968,9 @@ struct process_info {
   int priority;
   std::string uid;
   std::string gid;
+  // Whose it is: its chroot relative to its owner's root ("" for a document's own programs,
+  // "includes.<as>" for a loaded document's; docs/roadmap/ARIADNE_SHELL.md 4.10).
+  std::string scope;
   unsigned long long step_count;
   double elapsed_time;
   unsigned long long current_memory;
@@ -4070,6 +4075,7 @@ struct process {
   std::string gid;
   std::string root_path;
   std::string owner;
+  std::string owner_root;
   bool awaiting_frame;
   unsigned long long max_steps;
   double max_time;

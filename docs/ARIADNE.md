@@ -5013,10 +5013,26 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
   their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
   it is drawn in an application's scope.
+- **Mirrored in the state tree:** the Runtime writes the list under the document's prefix, as the
+  feed mirrors itself to `notify.*` (§5.24), for a Processes window or a launcher to read:
+  `ariadne.apps.<key>.name`, `.scope` (its prefix from the document's: `includes.fe_lab`) and
+  `.running` (1, or 0 while it is quit), and `ariadne.name`, the document's own `meta.name`.
+  `<key>` is the scope without its `includes` segments, joined by `_`: `fe_lab`, a repeated
+  mount's `cam_0`, a nested mount's `outer_inner`. It is written as the list changes, Quit and
+  reopening included; an application gone from the tree is taken out (`mirror_apps`).
+- **Whose a process is:** every process the Runtime starts records its context's chroot and the
+  document's prefix, so `(ps)` and `(inspect)` give it a `scope` from the document's prefix: `""`
+  for the document's own `on_tick:`, actions and tests, `includes.fe_lab` for the application's,
+  the children they spawn included (STATE_EXEC_DEVELOPER_GUIDE.md, "Whose a process is").
+  `components/processes.ari` lists them by application (§6.5). With its chroot recorded, an
+  action's async calls post their progress under its chroot, as
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) 3.10 says they do.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
-  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
-  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
-  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart`,
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`,
+  `TheApplicationsAreMirroredUnderTheDocumentsPrefix`, `ProcessRowsSayWhoseTheyAre` and
+  `ProcessesListsByApplicationAndKillsARow`, the loader's `ALoadedDocumentIsNamedByItsMeta`, and
+  `ari test src/ari/tests/processes_component.ari` (ctest `ari_processes_component`) check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
 
 ### 5.26 Colours from state: `color:` and `background: { color: }`
@@ -5342,6 +5358,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 

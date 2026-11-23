@@ -340,6 +340,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  proc.owner_root = opts.owner_root;
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
@@ -382,6 +383,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  proc.owner_root = opts.owner_root;
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
@@ -1996,6 +1998,7 @@ int async_scheduler::fork(int pid) {
   child->gid = parent.gid;
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
+  child->owner_root = parent.owner_root;
   child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
   child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;
@@ -2283,6 +2286,7 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.priority = proc.priority;
   info.uid = proc.uid;
   info.gid = proc.gid;
+  info.scope = process_scope(proc.root_path, proc.owner_root);
   info.step_count = proc.step_count();
   fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();

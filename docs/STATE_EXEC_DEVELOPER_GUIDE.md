@@ -1381,11 +1381,11 @@ Programs can manage other processes using DSL intrinsics:
 (self-pid)      ;; => 1
 (self-uid)      ;; => "alice"
 
-;; List all processes
+;; List all processes: pid, name, status, priority, uid, steps and scope
 (ps)            ;; => list of dicts [{pid: 1, name: "...", status: "running", ...}, ...]
 
 ;; Inspect a specific process
-(inspect 2)     ;; => dict with full process_info
+(inspect 2)     ;; => dict with full process_info, scope included
 
 ;; Control other processes
 (pause 2)
@@ -1416,6 +1416,20 @@ as Ariadne's action and resident lanes, gives each context a placeholder process
 rule those readers reported 0 there, so a loop bounded by `(time-elapsed)` never ended, and a
 watch was registered for pid 0 and never fired. `memory-usage` reads the context's tracker,
 which such a host keeps per program.
+
+**Whose a process is: `scope`.** Every `(ps)` and `(inspect)` row, and `process_info::scope`,
+says which part of its owner a process runs in: its chroot (`execute_options::root_path`)
+relative to its owner's root (`execute_options::owner_root`), written by `process_scope`. A
+chroot equal to the owner's root is `""`, one under it is the rest of the path, one outside it is
+written whole after a `/`, and with no owner root the scope is the chroot itself. A plain host
+gives neither, so its rows' scope is `""`. An Ariadne Runtime gives each process it starts its
+context's chroot and the document's prefix as the owner's root, so a document's own programs
+are `""` and a loaded document's are `includes.<as>` (`includes.<as>.<i>` for a repeated mount):
+a Processes view names each row's application from it (docs/roadmap/ARIADNE_SHELL.md 4.10,
+`components/processes.ari`). A spawned or forked child keeps its parent's owner root and
+chroot, so it has its parent's scope. The cluster's process rows (`exec_coordinator`'s
+`serialize_process_info`) carry it, and a migrated process keeps its owner root
+(`state_value_codec`).
 
 **What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
 a document's processes with `kill_owner` reaps its children too. Its environment depends on the

@@ -4227,6 +4227,9 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   parse_own_functions(ctx, doc, ""); // §6.6, BEFORE the body: a load: grants out of them
   r.root = parse_document(ctx, doc);
+  // Its own name, as a mount's is its loaded document's (§5.25): the Runtime mirrors it to
+  // ariadne.name, which names the document's own rows in a Processes view.
+  r.root.app_name = r.meta.name;
   r.functions = ctx.functions;
   r.root.functions = make_function_scope(ctx.functions);
   if (doc.IsMap()) {
