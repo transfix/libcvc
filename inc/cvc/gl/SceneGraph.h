@@ -225,26 +225,26 @@ public:
 
   // Bake the static casters apart from the moving ones (on by default). Most of a scene holds
   // still while a few casters move -- a city's buildings and terrain, and its vehicles -- and a
-  // bake used to redraw them all. With this on, the static casters are drawn into maps of their
-  // own, and a bake where only moving casters changed copies those maps and draws just the
-  // moving casters over them -- only where they are now and were at the last bake: the same maps,
-  // so a vehicle's shadow follows it in the frame it moves, for the cost of its own draws and a
-  // copy on the GPU of the texels it touches. A caster is moving from the bake
-  // it first changes in (moves, deforms, is restyled) or appears in, until it has held still for
-  // 60 due frames; whatever makes the static maps stale (a light, the shadow focus, a static
-  // caster changing or going) bakes everything and sorts the casters again. It needs a second
-  // map and depth buffer per casting light, at the shadow resolution, made the first time both
-  // kinds of caster are there. Off, every change redraws every caster. Takes effect at the next
-  // change.
+  // bake used to redraw them all. With this on, a bake where only moving casters changed leaves
+  // the static casters in the maps and redraws just the moving ones: it puts back the static
+  // casters' texels it kept aside where the moving casters were, keeps aside those where they are
+  // now, and draws them there. The same maps, so a vehicle's shadow follows it in the frame it
+  // moves, for the cost of its own draws and a copy on the GPU of the texels it touches. A caster
+  // is moving from the bake it first changes in (moves, deforms, is restyled) or appears in, until
+  // it has held still for 60 due frames; whatever makes the static casters' depth stale (a light,
+  // the shadow focus, a static caster changing or going) bakes everything and sorts the casters
+  // again. It needs a second map and depth buffer per casting light, at the shadow resolution,
+  // made the first time both kinds of caster are there (and with several casting lights, a depth
+  // buffer each). Off, every change redraws every caster. Takes effect at the next change.
   void setShadowStaticCache(bool on);
   bool shadowStaticCache() const { return m_shadowStaticCache; }
 
   // The bakes since shadows were last turned on: `bakes` is shadowBakes(), `whole` those that
   // drew every caster (the rest drew only the moving ones, over the static maps); and, at the
-  // last bake, the casters in the static maps and the moving casters drawn over them (both 0
-  // when it drew every caster straight into the maps), and the share of the maps' texels it
-  // copied and drew into (1 for a whole bake; a bake of the moving casters redraws only what they
-  // cover now and covered before). All 0 with shadows off.
+  // last bake, the static casters and the moving ones drawn over them (both 0 when it drew every
+  // caster in one pass, caching nothing), and the share of the maps' texels it drew or copied
+  // (over 1 for a whole bake with moving casters: all of it, and what it kept aside; a bake of the
+  // moving casters only what they cover now and covered before). All 0 with shadows off.
   struct shadow_bake_stats {
     std::uint64_t bakes = 0;
     std::uint64_t whole = 0;

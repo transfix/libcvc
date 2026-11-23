@@ -1253,16 +1253,16 @@ vtkStandardNewMacro(ShadowCasterFilterPass);
 // city, a frame where vehicles moved used to re-draw every building and the terrain into the maps
 // as well, and that was the bake's whole cost. Each caster is sorted by what it has done: one
 // that changed (moved, deformed, restyled) within the last kStaticAfter checks, or joined since
-// the last whole bake, is moving; the rest are static. A whole bake draws the static casters into
-// maps of their own (colour and depth), copies those into the maps the lookup reads, and draws the
-// moving casters over them, depth-tested: the maps hold what one draw of every caster would. While
-// only moving casters change, a bake is just that copy and the moving casters, and only over the
-// texels they cover now or covered at the last bake (their bounds through the light's camera): the
-// rest of each map holds the static casters alone already. Whatever makes the
-// static maps stale -- a light, the focus, a static caster changing, joining the static set or
-// leaving it, a moving one leaving the bounds the light cameras were fitted to -- makes a whole
-// bake, which sorts the casters again. The static maps cost a second map and depth buffer per
-// casting light, made the first time both kinds of caster are there.
+// the last whole bake, is moving; the rest are static. A whole bake draws the static casters,
+// keeps aside their colour and depth where the moving casters are about to be drawn (their
+// bounds through the light's camera), and draws the moving casters over them, depth-tested: the
+// maps hold what one draw of every caster would. While only moving casters change, a bake puts
+// back the texels it kept aside, keeps aside those under the moving casters' new places, and
+// draws them there: a few small copies and the moving casters' draws, never the static ones.
+// Whatever makes the static casters' depth stale -- a light, the focus, a static caster changing,
+// joining the static set or leaving it, a moving one leaving the bounds the light cameras were
+// fitted to -- makes a whole bake, which sorts the casters again. The saved texels cost a second
+// map and depth buffer per casting light, made the first time both kinds of caster are there.
 class StridedShadowBaker : public vtkShadowMapBakerPass {
 public:
   static StridedShadowBaker *New();
@@ -1289,7 +1289,8 @@ public:
   // GL objects made by a bake: the FBO and the shadow maps, the static ones too. None before the
   // first bake (or after a release), when the window may have no context yet.
   bool HoldsGLObjects() const {
-    return this->FrameBufferObject != nullptr || this->ShadowMaps != nullptr || !m_static.empty();
+    return this->FrameBufferObject != nullptr || this->ShadowMaps != nullptr || !m_static.empty() ||
+           !m_live.empty();
   }
 
   // VTK's release, and the static maps'. With the maps gone, the next Render() bakes new ones
@@ -1587,11 +1588,14 @@ protected:
       this->LightCameras->resize(numberOfShadowLights);
     }
     if (still)
-      releaseStatic(context, numberOfShadowLights); // a light fewer: its static map
+      releaseStatic(context, numberOfShadowLights); // a light fewer: its saved map
     else if (!movingOnly && !CacheStatic)
       releaseStatic(context, 0); // the cache switched off
-    if (still)
+    if (still) {
       m_static.resize(numberOfShadowLights);
+      if (numberOfShadowLights <= 1)
+        releaseLive(context); // one light: it draws through the baker's own framebuffer
+    }
     r->SetAutomaticLightCreation(false);
     r->UpdateLightsGeometryToFollowCamera();
 
@@ -1644,7 +1648,16 @@ protected:
     r->SetAutomaticLightCreation(autoLight);
   }
 
-  // Free the static maps from light `from` on, against w (current); with them all, none is valid.
+  // Free the per-light framebuffers (liveFramebuffer) against w (current).
+  void releaseLive(vtkWindow *w) {
+    for (auto &f : m_live)
+      if (f)
+        f->ReleaseGraphicsResources(w);
+    m_live.clear();
+  }
+
+  // Free the saved maps from light `from` on, against w (current); with them all, none is valid,
+  // and the per-light framebuffers go too.
   void releaseStatic(vtkWindow *w, std::size_t from) {
     for (std::size_t i = from; i < m_static.size(); ++i) {
       if (m_static[i].fbo)
@@ -1654,16 +1667,17 @@ protected:
     }
     if (from < m_static.size())
       m_static.resize(from);
-    if (from == 0)
+    if (from == 0) {
       m_staticValid = false;
+      releaseLive(w);
+    }
   }
 
-  // What a drawLayer() draws into each casting light's map: every caster into the map the lookup
-  // reads (All) or into the static map (Static), each light's camera fitted to the scene first and
-  // the map cleared; or, into the map the lookup reads with the cameras as they are, the moving
-  // casters over a copy of the static map, colour and depth: all of it (OverStatic, a whole
-  // bake's second half), or only the texels the moving casters cover now or covered at the last
-  // bake (Moving): everywhere else the map already holds the static casters alone.
+  // What a drawLayer() draws into each casting light's map, the one the lookup reads: every caster
+  // (All), or the static ones (Static, a whole bake's first half), each light's camera fitted to
+  // the scene first and the map cleared; or, with the cameras as they are, the moving casters over
+  // it (see drawLayer's save-under): right after the static ones (OverStatic), or in place of the
+  // last bake's moving casters (Moving).
   enum class Layer { All, Static, OverStatic, Moving };
 
   // Texels [x0, x1) x [y0, y1) of a map.
@@ -1768,6 +1782,66 @@ protected:
     return map;
   }
 
+  // `fbo` bound to draw into `map`, res x res, its completeness checked once per map.
+  static void bindForBake(ShadowBakeFramebuffer *fbo, vtkTextureObject *map, int res) {
+    fbo->Bind(); // the buffers below are set on the bound framebuffer
+    fbo->AddColorAttachment(0, map);
+    fbo->ActivateBuffer(0);
+    fbo->Resize(res, res);
+    fbo->startBake(res, res, map);
+  }
+
+  // The framebuffer light i's map is drawn through for the cache: the baker's own while one light
+  // casts (only it writes that depth buffer), else one of its own per light.
+  ShadowBakeFramebuffer *liveFramebuffer(std::size_t i, vtkOpenGLRenderWindow *context, int res) {
+    if (this->ShadowMaps->size() <= 1)
+      return ShadowBakeFramebuffer::SafeDownCast(this->FrameBufferObject);
+    if (m_live.size() != this->ShadowMaps->size())
+      m_live.resize(this->ShadowMaps->size());
+    vtkSmartPointer<ShadowBakeFramebuffer> &f = m_live[i];
+    if (!f) {
+      f = vtkSmartPointer<ShadowBakeFramebuffer>::New();
+      f->SetContext(context);
+      f->Resize(res, res);
+      f->Bind();
+      f->AddDepthAttachment();
+    }
+    return f;
+  }
+
+  // The framebuffer of light i's saved map (the save-under's), made the first time it is needed.
+  ShadowBakeFramebuffer *savedFramebuffer(std::size_t i, vtkOpenGLRenderWindow *context, int res) {
+    StaticMap &st = m_static[i];
+    if (!st.map)
+      st.map = newMap(context, this->Resolution);
+    if (!st.fbo) {
+      st.fbo = vtkSmartPointer<ShadowBakeFramebuffer>::New();
+      st.fbo->SetContext(context);
+      st.fbo->Resize(res, res);
+      st.fbo->Bind();
+      st.fbo->AddDepthAttachment();
+      bindForBake(st.fbo, st.map, res);
+    }
+    return st.fbo;
+  }
+
+  // The colour and depth of `rects`, from one res x res framebuffer to the other.
+  void copyRects(ShadowBakeFramebuffer *from, ShadowBakeFramebuffer *to,
+                 const std::vector<TexelRect> &rects) {
+    if (rects.empty())
+      return;
+    from->Bind(GL_READ_FRAMEBUFFER);
+    from->ActivateReadBuffer(0);
+    to->Bind(GL_DRAW_FRAMEBUFFER);
+    to->ActivateDrawBuffer(0);
+    for (const TexelRect &c : rects) {
+      const int ext[4] = {c.x0, c.x1, c.y0, c.y1};
+      vtkOpenGLFramebufferObject::Blit(ext, ext, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                                       GL_NEAREST);
+      m_drawnTexels += static_cast<double>(c.x1 - c.x0) * (c.y1 - c.y0);
+    }
+  }
+
   // bake()'s loop over the casting lights, drawing `props` (see Layer). Between bake()'s
   // framebuffer push and pop.
   void drawLayer(vtkOpenGLRenderer *r, const std::vector<vtkProp *> &props, Layer layer,
@@ -1808,65 +1882,36 @@ protected:
           aimAtFocus(l, bb, lightCamera);
       }
       r->SetActiveCamera(lightCamera);
+      // Every layer draws into the map the lookup reads; the cache's through a framebuffer whose
+      // depth this light alone writes, as its moving casters are drawn against it bake after bake.
       vtkTextureObject *map = live;
-      vtkOpenGLFramebufferObject *target = this->FrameBufferObject;
-      if (layer == Layer::Static) {
-        StaticMap &st = m_static[i];
-        if (!st.map)
-          st.map = newMap(context, this->Resolution);
-        if (!st.fbo) {
-          st.fbo = vtkSmartPointer<ShadowBakeFramebuffer>::New();
-          st.fbo->SetContext(context);
-          st.fbo->Resize(res, res);
-          st.fbo->Bind();
-          st.fbo->AddDepthAttachment();
-        }
-        map = st.map;
-        target = st.fbo;
-      }
-      target->Bind(); // the buffers below are set on the bound framebuffer
-      target->AddColorAttachment(0, map);
-      target->ActivateBuffer(0);
-      target->Resize(res, res);
-      if (auto *fbo = ShadowBakeFramebuffer::SafeDownCast(target))
-        fbo->startBake(res, res, map);
-      else
-        target->StartNonOrtho(res, res);
-      // Where the moving casters are drawn: all the map in a whole bake; else what they cover now
-      // and what they covered at the last bake, the rest of the map holding the static casters
-      // alone already. `rect` bounds it all, for the draws' scissor.
-      std::vector<TexelRect> copies(1, TexelRect{0, 0, res, res});
-      TexelRect rect = copies[0];
+      ShadowBakeFramebuffer *target =
+          layer == Layer::All ? ShadowBakeFramebuffer::SafeDownCast(this->FrameBufferObject)
+                              : liveFramebuffer(i, context, res);
+      bindForBake(target, map, res);
+      TexelRect rect{0, 0, res, res};
       if (over) {
+        // Save-under: the static casters' colour and depth where the moving casters are about to
+        // be drawn are kept aside first (the saved map), and put back before the next bake of the
+        // moving casters draws them elsewhere. Outside those texels the map holds the static
+        // casters alone, as the whole bake drew them, so a bake of the moving casters copies only
+        // what they cover now and covered then, and a whole bake costs no more than drawing them
+        // all.
+        ShadowBakeFramebuffer *saved = savedFramebuffer(i, context, res);
         if (m_movingRects.size() != this->ShadowMaps->size())
-          m_movingRects.assign(this->ShadowMaps->size(), copies);
+          m_movingRects.assign(this->ShadowMaps->size(), std::vector<TexelRect>());
         std::vector<TexelRect> now;
         footprints(lightCamera, props, res, now);
-        if (layer == Layer::Moving) {
-          copies = m_movingRects[i];
-          copies.insert(copies.end(), now.begin(), now.end());
-          mergeRects(copies);
-          rect = TexelRect{};
-          for (const TexelRect &c : copies)
-            rect |= c;
-        }
         mergeRects(now);
+        if (layer == Layer::Moving)
+          copyRects(saved, target, m_movingRects[i]); // where they were: the static casters
+        copyRects(target, saved, now);                // where they will be: kept aside
         m_movingRects[i] = now;
-        // The static casters' colour and depth there, into the map and the depth buffer the
-        // moving casters are drawn over: copies on the GPU in place of the static casters' draws.
-        if (!copies.empty()) {
-          ShadowBakeFramebuffer *from = m_static[i].fbo;
-          from->Bind(GL_READ_FRAMEBUFFER);
-          from->ActivateReadBuffer(0);
-          for (const TexelRect &c : copies) {
-            const int ext[4] = {c.x0, c.x1, c.y0, c.y1};
-            vtkOpenGLFramebufferObject::Blit(ext, ext, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
-                                             GL_NEAREST);
-            m_drawnTexels += static_cast<double>(c.x1 - c.x0) * (c.y1 - c.y0);
-          }
-          target->Bind();
-        }
-      } else if (layer == Layer::All) {
+        rect = TexelRect{};
+        for (const TexelRect &c : now)
+          rect |= c;
+        bindForBake(target, map, res);
+      } else {
         m_drawnTexels += static_cast<double>(res) * res;
       }
       s2.SetFrameBuffer(target);
@@ -2129,15 +2174,17 @@ private:
   std::uint64_t m_checks = 0; // scan()s made
   CasterSet m_staticSet, m_movingSet;
   bool m_staticValid = false;
-  // Per casting light, the static casters' map and the framebuffer (with its own depth buffer)
-  // they were drawn into, copied from by each bake of the moving casters.
+  // Per casting light, the saved map: the static casters' colour and depth under the moving
+  // casters (drawLayer's save-under), in a framebuffer with its own depth buffer.
   struct StaticMap {
     vtkSmartPointer<vtkTextureObject> map;
     vtkSmartPointer<ShadowBakeFramebuffer> fbo;
   };
   std::vector<StaticMap> m_static;
-  // Per casting light, the texels the moving casters were drawn into at the last bake.
+  // Per casting light, the texels the moving casters were drawn into at the last bake, saved.
   std::vector<std::vector<TexelRect>> m_movingRects;
+  // With several casting lights, each one's framebuffer for the cache (liveFramebuffer).
+  std::vector<vtkSmartPointer<ShadowBakeFramebuffer>> m_live;
   double m_drawnTexels = 0.0; // texels a bake drew into the maps the lookup reads (MapShare)
   // casterGeometryChanged's cache: per mapper, its MTime when its input was
   // last looked up, and that input (weak: the mapper owns it).

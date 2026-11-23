@@ -21,7 +21,8 @@
 //   C. moving casters that stop: once most have held still a while, a whole bake makes them
 //      static, and the one still moving is drawn alone;
 //   D. the cache off: every bake is whole, nothing is cached;
-//   E. interval 2: the vehicle's bakes stride as before, cached or not.
+//   E. interval 2: the vehicle's bakes stride as before, cached or not;
+//   F. a spot casting as well as the sun: the same pictures, the bakes of the moving casters alone.
 // On Apple's GL (frames a few bytes apart from identical GL calls with shadows on, see
 // cvcgl_shadow_casters) the pictures must agree within a small step instead. Renders for real and
 // skips where nothing rasterises (fatal under CVC_REQUIRE_RENDER=1).
@@ -423,6 +424,32 @@ int main() {
           std::to_string(f1.bakes - f0.bakes) + " reference), none whole cached");
   chk(sameE == 12,
       "the same pictures, stale frames included (" + std::to_string(sameE) + " of 12)");
+
+  std::printf("F. two casting lights\n");
+  // A spot as well as the sun: each light's map keeps its own depth for the moving casters to be
+  // drawn against (one framebuffer each).
+  for (World *w : {&cached, &ref}) {
+    w->sg.setShadowUpdateInterval(1);
+    w->sg.addSpotLight(-12, -10, 20, 0, 3, 0, 35.0, 1.0, 1.0, 1.0, 0.6);
+  }
+  for (int i = 0; i < 3; ++i) { // the new light's whole bake, then the vehicle sorted again
+    cached.vehicle->setPosition(-2.0 + 0.2 * i, 0.0, 0.0);
+    ref.vehicle->setPosition(-2.0 + 0.2 * i, 0.0, 0.0);
+    both();
+  }
+  const cvc::gl::SceneGraph::shadow_bake_stats g0 = cached.sg.shadowBakeStats();
+  int sameF = 0;
+  for (int i = 0; i < 12; ++i) {
+    cached.vehicle->setPosition(-1.4 + 0.25 * i, 0.0, 0.0);
+    ref.vehicle->setPosition(-1.4 + 0.25 * i, 0.0, 0.0);
+    sameF += both() ? 1 : 0;
+  }
+  const cvc::gl::SceneGraph::shadow_bake_stats g1 = cached.sg.shadowBakeStats();
+  chk(sameF == 12,
+      "the reference's picture under both lights (" + std::to_string(sameF) + " of 12)");
+  chk(g1.bakes - g0.bakes == 12 && g1.whole == g0.whole,
+      "12 bakes of the moving casters, none whole (" + std::to_string(g1.bakes - g0.bakes) +
+          " bakes, " + std::to_string(g1.whole - g0.whole) + " whole)");
 
   std::printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "PASSED", fails, fails == 1 ? "" : "s");
   return fails ? 1 : 0;
