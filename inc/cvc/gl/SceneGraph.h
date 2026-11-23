@@ -227,8 +227,9 @@ public:
   // still while a few casters move -- a city's buildings and terrain, and its vehicles -- and a
   // bake used to redraw them all. With this on, the static casters are drawn into maps of their
   // own, and a bake where only moving casters changed copies those maps and draws just the
-  // moving casters over them: the same maps, so a vehicle's shadow follows it in the frame it
-  // moves, for the cost of its own draws and a copy on the GPU. A caster is moving from the bake
+  // moving casters over them -- only where they are now and were at the last bake: the same maps,
+  // so a vehicle's shadow follows it in the frame it moves, for the cost of its own draws and a
+  // copy on the GPU of the texels it touches. A caster is moving from the bake
   // it first changes in (moves, deforms, is restyled) or appears in, until it has held still for
   // 60 due frames; whatever makes the static maps stale (a light, the shadow focus, a static
   // caster changing or going) bakes everything and sorts the casters again. It needs a second
@@ -241,12 +242,15 @@ public:
   // The bakes since shadows were last turned on: `bakes` is shadowBakes(), `whole` those that
   // drew every caster (the rest drew only the moving ones, over the static maps); and, at the
   // last bake, the casters in the static maps and the moving casters drawn over them (both 0
-  // when it drew every caster straight into the maps). All 0 with shadows off.
+  // when it drew every caster straight into the maps), and the share of the maps' texels it
+  // copied and drew into (1 for a whole bake; a bake of the moving casters redraws only what they
+  // cover now and covered before). All 0 with shadows off.
   struct shadow_bake_stats {
     std::uint64_t bakes = 0;
     std::uint64_t whole = 0;
     std::size_t static_casters = 0;
     std::size_t moving_casters = 0;
+    double map_share = 0.0;
   };
   shadow_bake_stats shadowBakeStats() const;
 

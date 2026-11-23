@@ -12,10 +12,12 @@
 //   A. a vehicle drives through a building's shadow: every frame the cached scene's picture is
 //      the reference's, byte for byte -- so its shadow follows it in the frame it moves, and the
 //      building still shades it -- and the picture is not the previous frame's (the shadow did
-//      move); after the first bakes every bake draws only the vehicle (shadowBakeStats);
+//      move); after the first bakes every bake draws only the vehicle, over only the texels it
+//      covers and covered (shadowBakeStats);
 //   B. a static caster moving, going and coming back, a light turning, the focus moving, a
-//      caster joining: the same pictures; each but the joining one is a whole bake (the static
-//      maps re-made), the joining caster is drawn with the moving ones;
+//      caster joining, the moving one going and coming back: the same pictures; a whole bake
+//      (the static maps re-made) for each change to the static casters, the light, the focus or
+//      the bounds, and the moving casters alone for the rest;
 //   C. moving casters that stop: once most have held still a while, a whole bake makes them
 //      static, and the one still moving is drawn alone;
 //   D. the cache off: every bake is whole, nothing is cached;
@@ -298,6 +300,9 @@ int main() {
       "after the first bakes, one bake a frame and none whole: " +
           std::to_string(s1.bakes - s0.bakes) + " bakes, " + std::to_string(s1.whole - s0.whole) +
           " whole");
+  chk(s1.map_share > 0.0 && s1.map_share < 0.02,
+      "and only where it is and was: " + std::to_string(100.0 * s1.map_share) +
+          "% of the map copied and drawn into");
   chk(s1.moving_casters == 1 && s1.static_casters >= 7,
       "the vehicle drawn over the static casters, the 7 or more (" +
           std::to_string(s1.moving_casters) + " moving, " + std::to_string(s1.static_casters) +
@@ -325,6 +330,8 @@ int main() {
   // Back in view it reaches above everything else, past the bounds the light's camera was
   // fitted to without it: a whole bake.
   step("and shown", true, [](World &w) { w.tower->setVisible(true); });
+  step("the vehicle hidden", false, [](World &w) { w.vehicle->setVisible(false); });
+  step("and shown", false, [](World &w) { w.vehicle->setVisible(true); });
   step("a car hidden", true, [](World &w) { w.cars[0]->setVisible(false); });
   // Back in view it is new to the casters and inside the bounds: drawn with the moving ones,
   // over the static maps as they are.

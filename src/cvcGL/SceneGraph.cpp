@@ -1177,8 +1177,10 @@ public:
   vtkSmartPointer<vtkRenderPass> Delegate; // VTK's camera -> lights -> opaque sequence
   cvc::app *App = nullptr; // the scene's: whose props cast (GraphicsNode::propCastsShadow)
   // Draw over what the framebuffer holds instead of clearing it first (StridedShadowBaker's
-  // moving casters, over the static casters' depth).
+  // moving casters, over the static casters' depth), only inside Scissor (x, y, width, height)
+  // when its width is not negative.
   bool Preserve = false;
+  int Scissor[4] = {0, 0, -1, -1};
 
   void Render(const vtkRenderState *s) override {
     this->NumberOfRenderedProps = 0;
@@ -1211,7 +1213,10 @@ public:
       vtkOpenGLState::ScopedglEnableDisable stsaver(ostate, GL_SCISSOR_TEST);
       ostate->vtkglViewport(0, 0, size[0], size[1]);
       ostate->vtkglEnable(GL_SCISSOR_TEST);
-      ostate->vtkglScissor(0, 0, size[0], size[1]);
+      if (Scissor[2] >= 0)
+        ostate->vtkglScissor(Scissor[0], Scissor[1], Scissor[2], Scissor[3]);
+      else
+        ostate->vtkglScissor(0, 0, size[0], size[1]);
       camera->GetDelegatePass()->Render(&casters);
       this->NumberOfRenderedProps = camera->GetDelegatePass()->GetNumberOfRenderedProps();
       return;
@@ -1250,7 +1255,9 @@ vtkStandardNewMacro(ShadowCasterFilterPass);
 // the last whole bake, is moving; the rest are static. A whole bake draws the static casters into
 // maps of their own (colour and depth), copies those into the maps the lookup reads, and draws the
 // moving casters over them, depth-tested: the maps hold what one draw of every caster would. While
-// only moving casters change, a bake is just that copy and the moving casters. Whatever makes the
+// only moving casters change, a bake is just that copy and the moving casters, and only over the
+// texels they cover now or covered at the last bake (their bounds through the light's camera): the
+// rest of each map holds the static casters alone already. Whatever makes the
 // static maps stale -- a light, the focus, a static caster changing, joining the static set or
 // leaving it, a moving one leaving the bounds the light cameras were fitted to -- makes a whole
 // bake, which sorts the casters again. The static maps cost a second map and depth buffer per
@@ -1276,6 +1283,7 @@ public:
   std::uint64_t WholeBakes = 0;
   std::size_t StaticCasters = 0;
   std::size_t MovingCasters = 0;
+  double MapShare = 0.0; // of the maps' texels, the share the last bake drew into
 
   // GL objects made by a bake: the FBO and the shadow maps, the static ones too. None before the
   // first bake (or after a release), when the window may have no context yet.
@@ -1351,6 +1359,7 @@ public:
       sortCasters(sc, still, moved);
       const bool layered = cache && !still.empty() && !moved.empty();
       // Bakes if anything at all changed; resizes ShadowMaps.
+      m_drawnTexels = 0.0;
       bake(s, layered ? &still : nullptr, layered ? &moved : nullptr);
       m_bakedCasters = casters;
       ForceNext = false;
@@ -1358,12 +1367,15 @@ public:
         ++Bakes;
         ++WholeBakes;
         noteBake(still, moved, layered);
+        noteShare(casters);
         std::copy(Focus, Focus + 3, m_bakedFocus);
         m_bakedFocusRadius = FocusRadius;
       }
     } else if (redraw) {
+      m_drawnTexels = 0.0;
       bake(s, nullptr, &sc.movingProps, /*movingOnly=*/true);
       ++Bakes;
+      noteShare(casters);
       m_movingSet = sc.movingSet;
       MovingCasters = sc.movingSet.count;
       m_lastBake.Modified();
@@ -1614,7 +1626,7 @@ protected:
     }
 
     if (movingOnly) {
-      drawLayer(r, *moving, Layer::OverStatic, cached);
+      drawLayer(r, *moving, Layer::Moving, cached);
     } else if (still) {
       drawLayer(r, *still, Layer::Static, cached);
       drawLayer(r, *moving, Layer::OverStatic, cached);
@@ -1647,9 +1659,61 @@ protected:
 
   // What a drawLayer() draws into each casting light's map: every caster into the map the lookup
   // reads (All) or into the static map (Static), each light's camera fitted to the scene first and
-  // the map cleared; or (OverStatic) over a copy of the static map, colour and depth, into the
-  // map the lookup reads, with the cameras as they are.
-  enum class Layer { All, Static, OverStatic };
+  // the map cleared; or, into the map the lookup reads with the cameras as they are, the moving
+  // casters over a copy of the static map, colour and depth: all of it (OverStatic, a whole
+  // bake's second half), or only the texels the moving casters cover now or covered at the last
+  // bake (Moving): everywhere else the map already holds the static casters alone.
+  enum class Layer { All, Static, OverStatic, Moving };
+
+  // Texels [x0, x1) x [y0, y1) of a map.
+  struct TexelRect {
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    bool empty() const { return x1 <= x0 || y1 <= y0; }
+    TexelRect &operator|=(const TexelRect &o) {
+      if (o.empty())
+        return *this;
+      if (empty())
+        return *this = o;
+      x0 = std::min(x0, o.x0);
+      y0 = std::min(y0, o.y0);
+      x1 = std::max(x1, o.x1);
+      y1 = std::max(y1, o.y1);
+      return *this;
+    }
+  };
+
+  // The texels of a res x res map drawn through `cam` that the props' bounds cover, two texels
+  // wider all round; the whole map where a bound cannot be projected (a corner behind a spot's
+  // eye, a prop without bounds). Pinned at aspect 1, as ShadowCasterFilterPass draws.
+  static TexelRect footprint(vtkCamera *cam, const std::vector<vtkProp *> &props, int res) {
+    const TexelRect whole{0, 0, res, res};
+    vtkMatrix4x4 *m = cam->GetCompositeProjectionTransformMatrix(1.0, -1.0, 1.0);
+    double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
+    for (vtkProp *p : props) {
+      const double *b = p->GetBounds();
+      if (!b || b[0] > b[1])
+        return whole;
+      for (int c = 0; c < 8; ++c) {
+        const double in[4] = {b[c & 1], b[2 + ((c >> 1) & 1)], b[4 + ((c >> 2) & 1)], 1.0};
+        double out[4];
+        m->MultiplyPoint(in, out);
+        if (!(out[3] > 1e-12))
+          return whole;
+        for (int k = 0; k < 2; ++k) {
+          const double t = (0.5 * out[k] / out[3] + 0.5) * res;
+          lo[k] = std::min(lo[k], t);
+          hi[k] = std::max(hi[k], t);
+        }
+      }
+    }
+    if (props.empty())
+      return TexelRect{};
+    auto clamp = [res](double v) {
+      return static_cast<int>(std::max(0.0, std::min(static_cast<double>(res), v)));
+    };
+    return TexelRect{clamp(std::floor(lo[0]) - 2.0), clamp(std::floor(lo[1]) - 2.0),
+                     clamp(std::ceil(hi[0]) + 2.0), clamp(std::ceil(hi[1]) + 2.0)};
+  }
 
   // One map per casting light, as bake() reads them: R32F, NEAREST, clamped.
   static vtkSmartPointer<vtkTextureObject> newMap(vtkOpenGLRenderWindow *context,
@@ -1702,7 +1766,8 @@ protected:
         (*this->LightCameras)[i] = lightCamera;
         lightCamera->Delete();
       }
-      if (layer != Layer::OverStatic) {
+      const bool over = layer == Layer::OverStatic || layer == Layer::Moving;
+      if (!over) {
         double *bb = m_bakedBounds;
         this->BuildCameraLight(l, bb, lightCamera);
         if (FocusRadius > 0.0)
@@ -1733,26 +1798,52 @@ protected:
         fbo->startBake(res, res, map);
       else
         target->StartNonOrtho(res, res);
-      if (layer == Layer::OverStatic) {
-        // The static casters' colour and depth, into the map and the depth buffer the moving
-        // casters are drawn over: one copy on the GPU in place of the static casters' draws.
-        ShadowBakeFramebuffer *from = m_static[i].fbo;
-        from->Bind(GL_READ_FRAMEBUFFER);
-        from->ActivateReadBuffer(0);
-        const int ext[4] = {0, res, 0, res};
-        vtkOpenGLFramebufferObject::Blit(ext, ext, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
-                                         GL_NEAREST);
-        target->Bind();
+      TexelRect rect{0, 0, res, res};
+      if (over) {
+        // Where the moving casters are drawn: all the map in a whole bake; else what they cover
+        // now and what they covered at the last bake, the rest of the map holding the static
+        // casters alone already.
+        if (m_movingRects.size() != this->ShadowMaps->size())
+          m_movingRects.assign(this->ShadowMaps->size(), rect);
+        const TexelRect now = footprint(lightCamera, props, res);
+        if (layer == Layer::Moving) {
+          rect = m_movingRects[i];
+          rect |= now;
+        }
+        m_movingRects[i] = now;
+        // The static casters' colour and depth there, into the map and the depth buffer the
+        // moving casters are drawn over: one copy on the GPU in place of the static casters'
+        // draws.
+        if (!rect.empty()) {
+          ShadowBakeFramebuffer *from = m_static[i].fbo;
+          from->Bind(GL_READ_FRAMEBUFFER);
+          from->ActivateReadBuffer(0);
+          const int ext[4] = {rect.x0, rect.x1, rect.y0, rect.y1};
+          vtkOpenGLFramebufferObject::Blit(ext, ext, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                                           GL_NEAREST);
+          target->Bind();
+        }
+        m_drawnTexels +=
+            static_cast<double>(rect.x1 - rect.x0) * (rect.y1 - rect.y0) * !rect.empty();
+      } else if (layer == Layer::All) {
+        m_drawnTexels += static_cast<double>(res) * res;
       }
       s2.SetFrameBuffer(target);
       ostate->vtkglDepthMask(GL_TRUE);
       ostate->vtkglEnable(GL_DEPTH_TEST);
-      if (filter)
-        filter->Preserve = layer == Layer::OverStatic;
-      this->OpaqueSequence->Render(&s2);
-      if (filter)
+      if (filter) {
+        filter->Preserve = over;
+        const int sc[4] = {rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0};
+        std::copy(sc, sc + 4, filter->Scissor);
+      }
+      if (!rect.empty()) {
+        this->OpaqueSequence->Render(&s2);
+        this->NumberOfRenderedProps += this->OpaqueSequence->GetNumberOfRenderedProps();
+      }
+      if (filter) {
         filter->Preserve = false;
-      this->NumberOfRenderedProps += this->OpaqueSequence->GetNumberOfRenderedProps();
+        filter->Scissor[2] = -1;
+      }
       if (this->CompositeZPass)
         this->CompositeZPass->Render(&s2);
       r->SetActiveCamera(realCamera);
@@ -1943,6 +2034,12 @@ protected:
     return input && input->GetMTime() > t;
   }
 
+  // MapShare after a bake into `lights` maps.
+  void noteShare(std::size_t lights) {
+    const double res = static_cast<double>(this->Resolution);
+    MapShare = lights ? m_drawnTexels / (res * res * static_cast<double>(lights)) : 0.0;
+  }
+
   // A whole bake made: the layers it drew (`layered`: the static ones into the static maps) are
   // the layers from now on, and the casters no longer drawn are forgotten.
   void noteBake(const std::vector<vtkProp *> &still, const std::vector<vtkProp *> &moving,
@@ -1995,6 +2092,9 @@ private:
     vtkSmartPointer<ShadowBakeFramebuffer> fbo;
   };
   std::vector<StaticMap> m_static;
+  // Per casting light, the texels the moving casters were drawn into at the last bake.
+  std::vector<TexelRect> m_movingRects;
+  double m_drawnTexels = 0.0; // texels a bake drew into the maps the lookup reads (MapShare)
   // casterGeometryChanged's cache: per mapper, its MTime when its input was
   // last looked up, and that input (weak: the mapper owns it).
   struct MapperInput {
@@ -2274,6 +2374,7 @@ SceneGraph::shadow_bake_stats SceneGraph::shadowBakeStats() const {
     st.whole = b->WholeBakes;
     st.static_casters = b->StaticCasters;
     st.moving_casters = b->MovingCasters;
+    st.map_share = b->MapShare;
   }
   return st;
 }
