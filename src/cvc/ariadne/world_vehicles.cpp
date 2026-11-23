@@ -946,6 +946,11 @@ struct WorldVehicles::impl {
     std::array<std::string, 4> seen_pose;
     std::array<entity_pose, 2> seen_packed;
     std::array<bool, 2> have_packed{false, false};
+    // read_pose_keys' four bases' `pose` nodes (its own, the table's by id, by name, by entry),
+    // kept resolved from step to step, and the name, table entry and table they were made for.
+    std::array<cvc::state_key, 4> pose_keys;
+    std::string pose_name, pose_entry, pose_table;
+    bool pose_paths = false;
     std::string table_key; // the poses table's entry it was spawned from ("" none)
     std::string table_ask; // and what that entry asked for (sync_pose_table)
   };
@@ -2028,21 +2033,33 @@ struct WorldVehicles::impl {
     for (entity &e : ents) {
       if (!e.posed)
         continue;
-      const std::string id = std::to_string(e.id);
-      const auto in_table = [&](const std::string &key) {
-        return pkey.empty() || key.empty() ? std::string() : pkey + cvc::state::SEPARATOR + key;
-      };
-      const bool by_name = cvc::state::isValidStateName(e.spec.name) && e.spec.name != id;
-      const bool by_entry =
-          !e.table_key.empty() && e.table_key != id && (!by_name || e.table_key != e.spec.name);
-      const std::string bases[4] = {ekey.empty() ? std::string()
-                                                 : ekey + cvc::state::SEPARATOR + id,
-                                    in_table(id), by_name ? in_table(e.spec.name) : std::string(),
-                                    by_entry ? in_table(e.table_key) : std::string()};
+      // The bases' paths, made again only when the name, the table entry or the table changed.
+      if (!e.pose_paths || e.pose_name != e.spec.name || e.pose_entry != e.table_key ||
+          e.pose_table != pkey) {
+        const std::string id = std::to_string(e.id);
+        const auto in_table = [&](const std::string &key) {
+          return pkey.empty() || key.empty() ? std::string() : pkey + cvc::state::SEPARATOR + key;
+        };
+        const bool by_name = cvc::state::isValidStateName(e.spec.name) && e.spec.name != id;
+        const bool by_entry =
+            !e.table_key.empty() && e.table_key != id && (!by_name || e.table_key != e.spec.name);
+        const std::string bases[4] = {ekey.empty() ? std::string()
+                                                   : ekey + cvc::state::SEPARATOR + id,
+                                      in_table(id), by_name ? in_table(e.spec.name) : std::string(),
+                                      by_entry ? in_table(e.table_key) : std::string()};
+        for (std::size_t k = 0; k < 4; ++k)
+          e.pose_keys[k] = bases[k].empty()
+                               ? cvc::state_key()
+                               : cvc::state_key(*app, bases[k] + cvc::state::SEPARATOR + "pose");
+        e.pose_name = e.spec.name;
+        e.pose_entry = e.table_key;
+        e.pose_table = pkey;
+        e.pose_paths = true;
+      }
       for (std::size_t k = 0; k < 4; ++k) {
-        if (bases[k].empty())
+        if (!e.pose_keys[k].bound())
           continue;
-        cvc::state *base = find_key(bases[k] + cvc::state::SEPARATOR + "pose");
+        cvc::state *base = e.pose_keys[k].find();
         std::array<std::string, kPoseKeys> v;
         std::string sig;
         if (base)
