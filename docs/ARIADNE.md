@@ -1598,7 +1598,9 @@ turns it off, and `weather.wetness` publishes the wetness it last applied.
 `ground:` any height-field node) as the GPU FFT sea of OCEAN-AND-WEATHER-ROADMAP.md (§11.2, O15):
 three wave cascades for the wind (`wind_speed`, `wind_dir`, `fetch`), and a swell
 (`swell_height` m, 0 for none; `swell_period`, `swell_dir`) carried by the shore layer, which
-refracts it over the bottom, shoals it, and breaks it on the beaches that face it. Both follow the
+refracts it over the bottom, shoals it, and breaks it on the beaches that face it; a quarter of it
+reaches a lee shore, as diffraction carries it round an island, so no beach the swell can reach
+is dead calm. Both follow the
 coast: a shore grid over the ground (still-water depth, distance to the shore, normal). Each cascade
 fades out as the water shoals, over half its peak wavelength and at most `shore_fade` metres of
 depth, and no point moves sideways more than 0.8 of the way to the shore. A grid `near` metres each
@@ -2023,7 +2025,13 @@ scene:
   touching one has hit an obstacle. That is the node's `edge: wall`, the default; `edge: shore`
   lines the world with a beach instead, the ground falling under the sea over a band at the rim
   (20 % of `half`, 50-300 m), its corners rounded and its coastline wandering, with the sea drawn
-  on past the world, and no walls; `edge: none` leaves the edge open. It is live too: `world.edge`
+  on past the world, and no walls; `edge: none` leaves the edge open. The shore's band is a
+  beach's profile: the sea floor shelves up to a 1 in 12 surf zone, so a water node's swell
+  shoals and breaks across it, then a 1 in 10 beach face rises to a sand berm 1.5 m up, so its
+  swash runs well up the beach on every side (to windward most); the streets keep behind it.
+  A world with walls or none hangs over a rock: under its rim a cliff falls into a ragged cone
+  about half of `half` deep (`world::world_underside`, drawing only), so seen from beneath it is
+  a chunk of ground floating in the air. It is live too: `world.edge`
   (0 wall, 1 shore, 2 none), the World panel's Edge, which Regenerate applies. A data node's world
   always has the walls. The
   world is made in core libcvc ([`scene_generated_world.h`](../inc/cvc/ariadne/scene_generated_world.h)),

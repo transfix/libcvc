@@ -266,6 +266,7 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
     const double nx = g.normal_x[i], ny = g.normal_y[i];
     if (nx != 0.0 || ny != 0.0)
       e = det::pow(std::max(0.0, -(nx * ux + ny * uy)), p.exposure_power);
+    e = std::max(e, std::clamp(p.lee_exposure, 0.0, 1.0));
     e += (1.0 - e) * smoothstep(0.0, p.shadow_wavelengths * lambda, shore);
     double A = L.deep_amplitude * shoaling(L.omega, d) * e;
     // A set's crest is the trains' amplitudes summed: sqrt(N) A. Its height may not pass gamma d.
@@ -275,8 +276,23 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
       A = cap;
     }
     L.amplitude[i] = float(A);
-    // The surf zone's mean slope, from the waterline to here, and its reflection.
-    const double tanBeta = d / std::max(shore, 0.5 * g.cell);
+    // The surf zone's mean slope, from the waterline to here, and its reflection. The grid's
+    // shore distance is a cell's: half a cell at the last wet cell however near the waterline it
+    // lies, so beside a dry cell the slope across the waterline, (d - its depth) / cell, is the
+    // truer one where it is steeper.
+    double tanBeta = d / std::max(shore, 0.5 * g.cell);
+    {
+      const int r = int(i / std::size_t(C)), c = int(i % std::size_t(C));
+      const int nb[4][2] = {{r, c - 1}, {r, c + 1}, {r - 1, c}, {r + 1, c}};
+      for (const auto &q : nb) {
+        if (q[0] < 0 || q[1] < 0 || q[0] >= R || q[1] >= C)
+          continue;
+        const std::size_t j = std::size_t(q[0]) * C + q[1];
+        const double dj = g.depth[j];
+        if (!wet[j] && std::isfinite(dj))
+          tanBeta = std::max(tanBeta, (d - dj) / g.cell);
+      }
+    }
     const double xi = iribarren(tanBeta, s.hs_m, T);
     const double Kr = reflection_coefficient(xi);
     L.reflection[i] = float(Kr);
@@ -328,6 +344,33 @@ shore_layer shore_layer::build(const shore_grid &g, const shore_swell &s,
       has.swap(next);
       if (!grew)
         break;
+    }
+    // The rings step where the coast runs across the grid (a cell beside two wet ones takes their
+    // mean, the next one cell's), and the swash's front, drawn from them, would step too: a few
+    // passes of a 3 x 3 mean over the carried cells, among themselves, even them out.
+    for (int pass = 0; pass < 2; ++pass) {
+      std::vector<float> ph(L.phase), ru(L.runup);
+      for (int r = 0; r < R; ++r)
+        for (int c = 0; c < C; ++c) {
+          const std::size_t i = std::size_t(r) * C + c;
+          if (!has[i] || known[i])
+            continue;
+          double sp = 0.0, sr = 0.0;
+          int m = 0;
+          for (int rr = std::max(0, r - 1); rr <= std::min(R - 1, r + 1); ++rr)
+            for (int cc = std::max(0, c - 1); cc <= std::min(C - 1, c + 1); ++cc) {
+              const std::size_t j = std::size_t(rr) * C + cc;
+              if (has[j] && !known[j]) {
+                sp += L.phase[j];
+                sr += L.runup[j];
+                ++m;
+              }
+            }
+          ph[i] = float(sp / m);
+          ru[i] = float(sr / m);
+        }
+      L.phase.swap(ph);
+      L.runup.swap(ru);
     }
   }
   return L;
