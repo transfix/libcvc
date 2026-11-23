@@ -4418,6 +4418,7 @@ windows:
 | `chrome` | `false` leaves out the scene's grid, axes and bounding box. Defaults to `true`. |
 | `clear_color` | `[r, g, b]` in 0..1, what the view clears to (one colour, never the scene's gradient). Defaults to the main view's background. (`background:` on a widget is the §5.12 backdrop key.) |
 | `azimuth`, `elevation`, `zoom` | Where its own orbit camera starts once the view is framed: the orbit's azimuth and elevation in degrees, and a zoom factor on the framed distance (2 is twice as close). |
+| `position`, `target`, `up`, `fov`, `near`, `far`, `orthographic`, `height` | Its own camera's authored viewpoint and lens, as a named camera's (Cameras, below). |
 | `override` | Per-view restyling, and moving, turning or scaling, below. |
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
@@ -4557,7 +4558,7 @@ one layer, and a clay model. `viewer_grid.ari` is four independent cameras on on
 
 **Cameras.** A view's camera is its own unless it names one. `scene: cameras:` declares named
 cameras, each at `<prefix>.viewers.<id>.camera`, with the same `mode`, `track`, `azimuth`,
-`elevation` and `zoom` keys. Every viewport with `camera: <id>` draws from that camera, so a drag,
+`elevation` and `zoom` keys, and the viewpoint keys below. Every viewport with `camera: <id>` draws from that camera, so a drag,
 the wheel or a double-click in any of them moves all of them, whatever each one shows or restyles.
 `camera: main` follows the main view's camera, and moves it.
 
@@ -4578,6 +4579,47 @@ windows:
 A named camera is framed on the whole scene the first time a view shows it, and its near and far
 planes span the whole scene. Named cameras and views share the `viewers.*` names, so give them
 different ones.
+
+**Authored viewpoints.** A camera can also say exactly where it looks from, and with what lens. A
+named camera, a viewport's own camera and the main view take these keys. The main view takes them
+from a `cameras:` entry named `main`. That entry is not a named camera of its own: `camera: main`
+on a viewport still follows the main view, which now starts there.
+
+```yaml
+scene:
+  cameras:
+    - camera: main               # where the main view starts
+      position: [12, -9, 7]
+      target: [1, 1, 0]
+      fov: 35
+      near: 0.25
+      far: 400
+    - camera: plan
+      orthographic: true
+      position: [5, -20, 30]
+      target: [0, 0, 0]
+      height: 16                 # the view is 16 tall at the target
+```
+
+- **`position` and `target`**, `[x, y, z]` in world coordinates: the eye and the point it looks at.
+  Together they replace `azimuth`, `elevation` and `zoom`. A `target` alone turns the framed view
+  to look at it, from the same angle and distance, so `azimuth`, `elevation` and `zoom` still
+  apply. A `position` alone looks from there at what the view framed. The pose is the orbit's own,
+  so a drag or the wheel goes on from it; the orbit's elevation stays within 89 degrees, so a
+  camera straight above its target sits just off vertical. With `mode: fly` the eye stands at
+  `position` facing `target`.
+- **`up`**, `[x, y, z]`: the world's up axis the camera turns about (`+z` by default; the scene is
+  z-up).
+- **`fov`**: the vertical field of view in degrees (VTK's 30 when unset).
+- **`near` and `far`**: fixed clipping distances. Unset, they are fitted to what the view draws
+  every frame.
+- **`orthographic: true`**: a parallel projection in `orbit`, `fly` and `track`, as tall at the
+  target as the field of view is, so the wheel still zooms it. `height` sets that height at the
+  start; the eye slides along its line of sight to make it so, which a parallel view does not
+  show. `map` and `slice` are parallel anyway.
+
+`mode: map` and `mode: slice` take `near` and `far` but frame themselves otherwise.
+(`cvcgl_ariadne_viewpoints`, `cvcgl_camera_viewpoint`.)
 
 **Shadows.** When the scene casts shadows (`shadows: { enabled: true }`), every view draws them. A
 view does not bake shadow maps of its own: it reads the ones the main view bakes

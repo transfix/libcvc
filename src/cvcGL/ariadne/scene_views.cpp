@@ -508,14 +508,20 @@ bool same_overrides(const std::vector<std::pair<std::string, Look>> &a,
 bool same_start(const ari::SceneCamera &a, const ari::SceneCamera &b) {
   return a.mode == b.mode && a.track == b.track && a.has_azimuth == b.has_azimuth &&
          a.azimuth == b.azimuth && a.has_elevation == b.has_elevation &&
-         a.elevation == b.elevation && a.zoom == b.zoom;
+         a.elevation == b.elevation && a.zoom == b.zoom && a.has_position == b.has_position &&
+         std::equal(a.position, a.position + 3, b.position) && a.has_target == b.has_target &&
+         std::equal(a.target, a.target + 3, b.target) && a.has_up == b.has_up &&
+         std::equal(a.up, a.up + 3, b.up) && a.fov == b.fov && a.near_clip == b.near_clip &&
+         a.far_clip == b.far_clip && a.orthographic == b.orthographic && a.height == b.height;
 }
 
 // Frame `cam` on the bounds b as `s` says: a top-down map, or an orbit (then fly or track) that
 // starts at s's azimuth / elevation / zoom, set through the camera's own state keys (what a drag
-// changes).
+// changes), or at its authored viewpoint (position, target), with its lens (fov, near, far,
+// orthographic, height) and up axis.
 void frame_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
                   SceneGraph &sg, int slice_axis = 2) {
+  cam.setClipRange(s.near_clip, s.far_clip); // 0, 0: fitted, as before
   if (s.mode == "slice") {
     cam.setSliceAxis(slice_axis);
     cam.frameSlice(b[0], b[2], b[4], b[1], b[3], b[5]);
@@ -527,6 +533,12 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
     cam.frameMap(0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), hh, hw);
     return;
   }
+  // The up axis and the lens before the pose, which is taken about that axis.
+  if (s.has_up)
+    cam.setUpAxis(s.up[0], s.up[1], s.up[2]);
+  if (s.fov > 0.0)
+    cam.setFieldOfView(s.fov);
+  cam.setOrthographic(s.orthographic);
   cam.frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
   cam.setMode(CameraController::Mode::Orbit); // from a map, say
   if (s.has_azimuth)
@@ -535,6 +547,25 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
     cam.getState("orbit.elevation").value(s.elevation);
   if (s.zoom > 0.0 && s.zoom != 1.0)
     cam.getState("orbit.distance").value(cam.orbitDistance() / s.zoom);
+  // An authored viewpoint. Both: exactly that. A target alone: the framed view, moved to look at
+  // it from the same angle and distance. A position alone: from there at what the view framed.
+  if (s.has_position || s.has_target) {
+    double e[3], f[3], u[3];
+    cam.getPose(e, f, u);
+    double eye[3], target[3];
+    for (int i = 0; i < 3; ++i) {
+      target[i] = s.has_target ? s.target[i] : f[i];
+      eye[i] = s.has_position ? s.position[i] : target[i] + (e[i] - f[i]);
+    }
+    cam.lookAt(eye, target);
+  }
+  // Orthographic, `height` tall at the target: the orbit's distance that makes it so (the view's
+  // half-height is that distance times tan(fov / 2); 30 degrees is VTK's own field of view).
+  if (s.orthographic && s.height > 0.0) {
+    const double fov = cam.fieldOfView() > 0.0 ? cam.fieldOfView() : 30.0;
+    cam.getState("orbit.distance")
+        .value(0.5 * s.height / std::tan(0.5 * fov * 3.14159265358979 / 180.0));
+  }
   if (s.mode == "fly") {
     cam.setMode(CameraController::Mode::Fly);
   } else if (s.mode == "track" && !s.track.empty()) {
@@ -688,6 +719,11 @@ bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
 }
 
 } // namespace
+
+void frame_scene_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
+                        SceneGraph &sg) {
+  frame_camera(cam, b, s, sg);
+}
 
 // A named camera: its own vtkCamera, which every viewport bound to it draws from, and the
 // controller a drag in any of them moves. The controller reads its aspect from the first viewport
@@ -1325,7 +1361,9 @@ void SceneViews::update(double dt) {
       c.framed = true;
     }
     c.ctl->update(dt);
-    if (c.driver && c.driver->GetActiveCamera() == c.cam && valid_bounds(whole))
+    double clip_near = 0.0, clip_far = 0.0; // near: and far: fix them instead
+    if (c.driver && c.driver->GetActiveCamera() == c.cam && valid_bounds(whole) &&
+        !c.ctl->clipRange(clip_near, clip_far))
       c.driver->ResetCameraClippingRange(whole);
     c.used = false;
   }
@@ -1398,6 +1436,7 @@ void SceneViews::register_widget() {
         start.has_elevation = w.props.has("elevation");
         start.elevation = w.props.num("elevation", 0.0);
         start.zoom = w.props.num("zoom", 1.0);
+        ari::read_scene_camera_viewpoint(w.props, start); // position, target, up, fov, ...
         if (!same_start(start, v->start)) {
           v->start = start;
           v->framed = false;

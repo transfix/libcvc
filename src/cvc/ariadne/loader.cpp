@@ -3546,6 +3546,7 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       cam.has_elevation = static_cast<bool>(c["elevation"]);
       cam.elevation = num(c, "elevation", 0.0);
       cam.zoom = num(c, "zoom", 1.0);
+      read_scene_camera_viewpoint(to_value(c), cam); // position, target, up, fov, near, far, ...
       sc.cameras.push_back(cam);
     }
   const YAML::Node sh = s["shadows"];
