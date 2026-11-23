@@ -214,6 +214,12 @@ const Mistake kMistakes[] = {
      "scene:\n  nodes:\n    - node: v\n      type: volren\n      volren:\n        "
      "transfer_function: {colour: []}\n",
      "/scene/nodes/0/volren/transfer_function", "unknown key 'colour'", 6, 29},
+    {"a colour picker's fmt not in the list",
+     "windows:\n  - window: W\n    children:\n      - color: C\n        bind: c\n        "
+     "fmt: cmyk\n",
+     "/windows/0/children/0/fmt", "'cmyk' is not one of the values this key takes", 6, 14},
+    {"a bell that is neither a flag nor always", "notifications: sometimes\n", "/notifications",
+     "'sometimes' is not any of the forms this key takes", 1, 16},
 };
 
 const char *const kValid[] = {
@@ -245,6 +251,15 @@ const char *const kValid[] = {
     "server:\nworld:\nroot:\n  - text: hi\n",
     "wasm: {module: guest.wat, export: [echo]}\nrelay: {url: grpc://localhost:50051}\n"
     "server: {}\nworld: {}\n",
+    // keys the loader took after the schema was written: a bell shown always, a tray icon's
+    // picture, a colour picker's hex field, a loaded application's name, the world's lag
+    "notifications: always\nmenubar:\n  - tray_icon: T\n    icon: https://example.com/t.png\n"
+    "    auth: secret\n",
+    "windows:\n  - window: W\n    children:\n      - color: C\n        bind: c\n        fmt: "
+    "hex\n",
+    "root:\n  - load: cvc://components/conference.ari\n    as: site\n    name: (state-get "
+    "\"site_name\")\n",
+    "scene:\n  clock: {hz: 60, max_lag: 0.5}\n",
 };
 } // namespace
 

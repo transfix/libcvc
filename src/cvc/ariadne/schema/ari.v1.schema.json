@@ -42,7 +42,7 @@
           "description": "false turns the built-in Windows menu off; a string renames it."
         },
         "clock": {"$ref": "#/$defs/flag", "description": "Show the tray's clock or not."},
-        "notifications": {"$ref": "#/$defs/flag", "description": "Show the tray's bell or not."},
+        "notifications": {"anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["always"]}], "description": "Show the tray's bell or not; always shows it with an empty feed too."},
         "scene": {"$ref": "#/$defs/scene"},
         "scenes": {"type": "array", "items": {"$ref": "#/$defs/scene_entry"}},
         "assets": {
@@ -628,7 +628,9 @@
           "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
         },
         "items": {"$ref": "#/$defs/widget_list"},
-        "tone": {"$ref": "#/$defs/string"}
+        "tone": {"$ref": "#/$defs/string"},
+        "icon": {"$ref": "#/$defs/string", "description": "A picture in place of the glyph: a URI, a published image, or an expression."},
+        "auth": {"$ref": "#/$defs/string", "description": "Credentials for an icon by URL."}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -1286,6 +1288,7 @@
         },
         "default": {"$ref": "#/$defs/string"},
         "def": {"$ref": "#/$defs/string"},
+        "fmt": {"enum": ["rgb", "hex"], "description": "The picker's fields: one per channel (rgb, the default) or a #rrggbb field beside them (hex)."},
         "on": {
           "$ref": "#/$defs/program",
           "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
@@ -1476,6 +1479,7 @@
         "load": {"$ref": "#/$defs/string"},
         "args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
         "as": {"$ref": "#/$defs/scalar"},
+        "name": {"$ref": "#/$defs/string", "description": "A state key or an expression, worked out each frame ({i} its instance under repeat:), that names the application instead when not empty."},
         "functions": {
           "$ref": "#/$defs/strings",
           "description": "The functions it grants the module: names, or \"*\"."
@@ -2518,7 +2522,8 @@
             "paused_key": {"$ref": "#/$defs/string"},
             "time_key": {"$ref": "#/$defs/string"},
             "tick_key": {"$ref": "#/$defs/string"},
-            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."}
+            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."},
+            "max_lag": {"type": "number", "exclusiveMinimum": 0, "maximum": 10, "description": "How far the world may fall behind its clock (s of world time at 1x, at least one tick): past it the clock lets the time go. Without it the host's catch-up (0.25 s)."}
           },
           "patternProperties": {"^x-": true},
           "additionalProperties": false
@@ -2651,7 +2656,8 @@
             "paused_key": {"$ref": "#/$defs/string"},
             "time_key": {"$ref": "#/$defs/string"},
             "tick_key": {"$ref": "#/$defs/string"},
-            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."}
+            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."},
+            "max_lag": {"type": "number", "exclusiveMinimum": 0, "maximum": 10, "description": "How far the world may fall behind its clock (s of world time at 1x, at least one tick): past it the clock lets the time go. Without it the host's catch-up (0.25 s)."}
           },
           "patternProperties": {"^x-": true},
           "additionalProperties": false
