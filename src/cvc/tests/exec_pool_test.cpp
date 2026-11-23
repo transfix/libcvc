@@ -2255,6 +2255,7 @@ TEST(ExecPoolContinuous, AWithGroupInsideADetachOfTheSameGroupDoesNotWaitForItsP
       provider_affinity::host_proxied);
   execute_options ea;
   ea.env = environment::extend(env);
+  const std::weak_ptr<environment> program_env = ea.env;
   w->g->execute(
       std::string("(begin (gate) (set gen (generator (lambda () (yield (body))))) (next gen))"),
       ea);
@@ -2288,9 +2289,14 @@ TEST(ExecPoolContinuous, AWithGroupInsideADetachOfTheSameGroupDoesNotWaitForItsP
   t.join();
   EXPECT_EQ(outcome->load(), 2) << "with_group on the detaching thread did not take the token at "
                                    "once (and throw, A's worker holding it)";
+  // The program's generator closes a cycle through its environment, which the group's registry
+  // frees at the group's end only if nothing outside holds it then (heap.h): let go first.
+  ea.env.reset();
+  env.reset();
   b->reset();
   w->g.reset();
   delete w;
+  EXPECT_TRUE(program_env.expired()) << "the program's environment outlived its group";
 }
 
 // C-m5 (adopted with K-1): a with_group that raced a detach (it saw the group attached, then waited

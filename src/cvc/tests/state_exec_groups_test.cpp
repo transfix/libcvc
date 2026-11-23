@@ -2614,11 +2614,17 @@ TEST(Groups, CT04_CallerOnlyGroupsStayOnTheirThread) {
 // kill cancels the kernel and its host waits for it. After a warm-up batch (the kernel pool's
 // threads), the process's thread count stays flat (at most 4 more) and its handles too (at most
 // 64 + 1 per 50 groups more), every kernel ended, and no group is left (detail::live_groups) or
-// attached. ASan in CI checks for leaks.
+// attached. ASan in CI checks for leaks. The kernels wait on something outside the program, so
+// they are io calls (async_options::io), on background_io, sized here to a batch and two: on
+// background_cpu, max(1, cores - exec workers) (one thread on a 4-core runner), one kernel of a
+// batch would start.
 TEST(Groups, ST03_GroupChurnWithKernelsInFlight) {
   const int total = under_sanitizer() ? 300 : kDebugBuild ? 500 : 10000;
   constexpr int kBatch = 8;
   s2a_app w(4, 2000);
+  w.app.setThreadPoolSize(kBatch + 2);
+  async_options io_call;
+  io_call.io = true;
   std::atomic<int> started{0}, ended{0};
   int made = 0;
   const auto churn = [&](int n) -> bool {
@@ -2628,10 +2634,12 @@ TEST(Groups, ST03_GroupChurnWithKernelsInFlight) {
       for (int k = 0; k < kBatch; ++k) {
         batch.push_back(std::make_unique<s2a_group>(w.app, w.tree, "st03g" + std::to_string(k)));
         s2a_group &gw = *batch.back();
-        register_async_fn(gw.env, gw.g().host(), "st03-wait",
-                          [&](std::span<const value_t>) -> async_kernel {
-                            return s2a_kernel_until_cancelled(started, ended);
-                          });
+        register_async_fn(
+            gw.env, gw.g().host(), "st03-wait",
+            [&](std::span<const value_t>) -> async_kernel {
+              return s2a_kernel_until_cancelled(started, ended);
+            },
+            io_call);
         gw.submit("(begin (st03-wait) \"never\")");
         w.pool.attach(gw.g());
         ++made;

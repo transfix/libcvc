@@ -132,16 +132,16 @@ struct attachment {
   std::uint64_t seq = 0;       // creation order: the deterministic rotation, and ties
   std::uint64_t serial = 0;    // never reused: tells this record from a later one at its address
   // The facts beside the state word (exec_group.h's transitions):
-  bool queued = false;    // in the ready queue, a next slot or its host's ready list
-  bool host_held = false; // a host thread holds its token (with_group, a host body)
-  std::thread::id holder; // that thread
-  bool deferred = false;  // popped while host_held: queued again at the hold's end
-  bool handed = false;    // host_held was set for `holder` by a release, not yet taken up
-  bool failed = false;    // on its host's failed list
-  bool reported = false;  // that failure reported by wait_for_work, until taken (K-3)
+  bool queued = false;          // in the ready queue, a next slot or its host's ready list
+  bool host_held = false;       // a host thread holds its token (with_group, a host body)
+  std::thread::id holder;       // that thread
+  bool deferred = false;        // popped while host_held: queued again at the hold's end
+  bool handed = false;          // host_held was set for `holder` by a release, not yet taken up
+  bool failed = false;          // on its host's failed list
+  bool reported = false;        // that failure reported by wait_for_work, until taken (K-3)
   bool rethrow_pending = false; // a worker's pump exception waits on its host queue (K-8)
-  std::thread::id detacher; // the thread finishing its detach, once detaching is set
-  bool blocked = false;   // its worker waits for a host body it queued (run_on_host_waiting)
+  std::thread::id detacher;     // the thread finishing its detach, once detaching is set
+  bool blocked = false;         // its worker waits for a host body it queued (run_on_host_waiting)
   clock_type::time_point blocked_since{};
   std::thread::id body_runner; // the thread running that waiting body now, under the worker's token
   clock_type::time_point queued_at{}; // onto the ready queue last (CVC_EXEC_FORCE_MOVE's fallback)
@@ -186,10 +186,10 @@ struct host_thread {
   std::vector<attachment *> failed;
   std::vector<timer_entry> timers; // a heap, earliest first
   unsigned attached = 0;
-  bool in_callback = false;   // it runs a host entry now (in_pool_callback)
-  double vmin = 0.0;          // its ready list's virtual-time floor
-  std::uint64_t last_seq = 0; // the deterministic rotation's last group
-  unsigned servicing = 0;     // inside pump_host, wait_for_work or a host wait now (S-M3)
+  bool in_callback = false;            // it runs a host entry now (in_pool_callback)
+  double vmin = 0.0;                   // its ready list's virtual-time floor
+  std::uint64_t last_seq = 0;          // the deterministic rotation's last group
+  unsigned servicing = 0;              // inside pump_host, wait_for_work or a host wait now (S-M3)
   std::vector<attachment *> handed;    // holds a release handed to it, not yet taken up
   std::vector<attachment *> frame_due; // deterministic mode: due at the next pump_host pass
   attachment *pumping = nullptr;       // the caller-pumped group it pumps now (pump_host; K-2)
@@ -2535,7 +2535,7 @@ bool exec_pool::wait_for_work(double seconds) {
     release_host_if_idle(p); // a record left idle (K-10): nothing can come for it
     host_thread *h = host_of(p, std::this_thread::get_id());
     if (!h)
-      return false; // nothing attached here: no work can come for pump_host
+      return false;              // nothing attached here: no work can come for pump_host
     const idle_release after{p}; // K-10, once in_pool is over
     const servicing_scope in_pool(p, h);
     for (;;) {
