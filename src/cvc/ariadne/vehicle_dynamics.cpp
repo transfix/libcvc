@@ -291,9 +291,10 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
   // The relay's field time at the tick (SceneWorld::follow anchors it to the clock): a boat reads
   // its water's waves there, as the relay's does, and each step adds fixed_dt (OW5l).
   w.set_field_time(static_cast<double>(tick) * _dt);
-  // The chassis where the sample has it: its position, heading and horizontal velocity. A driver's
-  // pose carries its heading alone, so the pitch and roll (and the vertical speed and the spin)
-  // are the predicted ones.
+  // The chassis where the sample has it: its position, heading and horizontal velocity, and its
+  // pitch, roll and vertical speed when the sample carries them (the relay's chassis's, OW5m); a
+  // sample with a heading alone (a turn about z, an older relay's) leaves those the predicted ones.
+  // The spin is always the predicted one: the pose stream does not carry it.
   ph::body_state s = w.state(_jchassis);
   double pitch = 0.0, roll = 0.0;
   if (was) {
@@ -305,7 +306,14 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
     s.angular_velocity = {};
   }
   s.position = chassis.position;
-  s.rotation = attitude(yaw_of(chassis.rotation), pitch, roll);
+  const ph::quat &q = chassis.rotation;
+  const double qn = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+  if ((q.x != 0.0 || q.y != 0.0) && qn > 0.0) {
+    s.rotation = {q.w / qn, q.x / qn, q.y / qn, q.z / qn};
+    s.linear_velocity.z = chassis.linear_velocity.z;
+  } else {
+    s.rotation = attitude(yaw_of(q), pitch, roll);
+  }
   s.linear_velocity.x = chassis.linear_velocity.x;
   s.linear_velocity.y = chassis.linear_velocity.y;
   w.set_state(_jchassis, s);

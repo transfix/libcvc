@@ -8888,6 +8888,9 @@ struct client_run {
   // worst_yaw and worst_tilt from the second second on: once a model that started at rest (level,
   // where the relay's hull may be riding a wave) has settled on the vehicle's attitude.
   double settled_yaw = 0.0, settled_tilt = 0.0;
+  // The worst angle between the driver's pose (the relay's ride) and its vehicle's chassis body:
+  // the pose carries the chassis's attitude (OW5m).
+  double ride_gap = 0.0;
   cvc::ariadne::dynamic_drive drive;
 };
 
@@ -9043,7 +9046,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     return in;
   };
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
-  double settled_yaw = 0.0, settled_tilt = 0.0;
+  double settled_yaw = 0.0, settled_tilt = 0.0, ride_gap = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
   const bool sampled = own_world;
   double climb = 0.0, lowest = start.z, highest = start.z;
@@ -9062,7 +9065,9 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     }
     const cvc::physics::body_state relay = h.state("ann");
     worst = std::max(worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
-    const double yaw = 2.0 * std::atan2(relay.rotation.z, relay.rotation.w);
+    const cvc::physics::quat &rq = relay.rotation;
+    const double yaw =
+        std::atan2(2.0 * (rq.w * rq.z + rq.x * rq.y), 1.0 - 2.0 * (rq.y * rq.y + rq.z * rq.z));
     worst_yaw = std::max(worst_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
     top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
     // The box's height and attitude, which on dynamic4w are the suspension's. The driver's pose
@@ -9073,6 +9078,16 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     for (const entity_info &e : v.entities())
       if (e.id == id && e.chassis.valid())
         body = w->world().state(e.chassis).rotation;
+    {
+      // Its angle from the chassis's, the dot product over both norms (a float quaternion's norm is
+      // 1 only to 1e-7, which acos would read as 1 mrad).
+      const double na = std::sqrt(rq.w * rq.w + rq.x * rq.x + rq.y * rq.y + rq.z * rq.z);
+      const double nb =
+          std::sqrt(body.w * body.w + body.x * body.x + body.y * body.y + body.z * body.z);
+      const double d =
+          std::fabs(rq.w * body.w + rq.x * body.x + rq.y * body.y + rq.z * body.z) / (na * nb);
+      ride_gap = std::max(ride_gap, 2.0 * std::acos(std::min(1.0, d)));
+    }
     const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
@@ -9116,6 +9131,7 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   result.phase_z = phase_z;
   result.settled_yaw = settled_yaw;
   result.settled_tilt = settled_tilt;
+  result.ride_gap = ride_gap;
   result.end_speed = cvc::ariadne::dynamic_vehicle_model::speed(m);
   result.drive = k;
   EXPECT_GT(top, top_at_least) << "it drove";
@@ -9180,6 +9196,7 @@ TEST(AriadneOneWorld, AClientRunsTheJoltVehicleItDrivesAsTheWorldDoes) {
   EXPECT_EQ(run.drive.plant, "jolt");
   EXPECT_GT(over.climb, 0.5) << "up the hill, on the client's statics";
   for (const client_run *c : {&run, &over}) {
+    EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the chassis's attitude";
     EXPECT_LT(c->end_speed, -0.5) << "and backed up at the end";
     EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
     EXPECT_LT(c->worst_yaw, 0.005);
@@ -9245,7 +9262,8 @@ scene:
 // The same boat on a lake with waves (OW5l). The relay reads its water's waves at the clock's time
 // (SceneWorld::follow anchors its world's field time there), and the client's model reads them at
 // the sample's tick's time, so the client's boat rides the relay's waves, here with the relay's
-// holon 7 s on before its world was attached.
+// holon 7 s on before its world was attached. The driver's pose carries the hull's attitude and
+// vertical speed (OW5m), so the model takes them from each sample, from the first.
 TEST(AriadneOneWorld, AClientsBoatRidesTheRelaysWaves) {
   REQUIRE_YAML();
   if (!jolt())
@@ -9258,21 +9276,22 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheRelaysWaves) {
   std::printf(
       "  the relay's launch heaved %.3f m on still water, %.3f m on the waves; a model "
       "reading the waves half a second off is %.3f m off its height; from the second second, "
-      "%.4f rad of heading and %.4f of attitude at worst (%.4f in the first)\n",
+      "%.4f rad of heading and %.4f of attitude at worst (%.4f in the first); the driver's pose "
+      "%.2g rad from the hull's attitude\n",
       still.heave, waves.heave, waves.phase_z, waves.settled_yaw, waves.settled_tilt,
-      waves.worst_tilt);
+      waves.worst_tilt, waves.ride_gap);
   EXPECT_GT(waves.heave, 2.0 * still.heave + 0.1) << "the waves move it";
-  EXPECT_GT(waves.phase_z, 5.0 * waves.worst_z) << "on the relay's waves, not others";
+  // Each sample puts the hull at the relay's height and attitude, so a model reading the waves
+  // half a second off has only 4 ticks to drift from them; it still drifts 2.5 x as far.
+  EXPECT_GT(waves.phase_z, 2.5 * waves.worst_z) << "on the relay's waves, not others";
   for (const client_run *c : {&still, &waves}) {
+    EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the hull's attitude";
     EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
     EXPECT_LT(c->worst_z, 0.02) << "afloat at the relay's height";
-    // A model starts at rest, level, where the relay's hull may already be pitching on a wave (a
-    // driver's pose carries its heading alone); the same waves bring it to the hull's attitude
-    // within a second.
-    EXPECT_LT(c->settled_yaw, 0.005) << "from the second second";
-    EXPECT_LT(c->settled_tilt, 0.05) << "the hull's pitch and roll, from the second second";
+    EXPECT_LT(c->worst_yaw, 0.01);
+    EXPECT_LT(c->worst_tilt, 0.02) << "the hull's pitch and roll, from the first sample";
+    EXPECT_LT(c->settled_tilt, 0.01) << "from the second second";
   }
-  EXPECT_LT(still.worst_tilt, 0.05) << "on still water from the start";
 }
 
 // The water a client's boat floats on (OW5j): the replica of the relay's document carries its
