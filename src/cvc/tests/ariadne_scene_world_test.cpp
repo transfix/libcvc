@@ -9190,6 +9190,206 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
 }
 } // namespace
 
+namespace {
+// A drivable jolt Humvee and a parked vehicle of PLANT in its way (OW5o), on the square.
+std::string ram_drivable(const std::string &plant) {
+  return std::string(R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: jolt
+        controllers: [nav@1, none, external]
+        drivable: true
+      parked:
+        vehicle: humvee
+        plant: )") +
+         plant + R"(
+        controllers: [external]
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+}
+
+// What ram_parked found.
+struct ram_run {
+  double worst = 0.0;        // the model's worst gap from the relay's vehicle at a sample (m)
+  double stopped_at = -1e9;  // the furthest the relay's vehicle got along x (m)
+  double parked_moved = 0.0; // how far the relay pushed the parked vehicle (m)
+  std::size_t held = 0;      // the boxes the model held at the end
+  double mass = 0.0;         // the parked vehicle's, as the room carries it (0: kinematic)
+};
+
+// The relay's driver at full throttle straight at a parked vehicle of PLANT 30 m ahead, and the
+// client's jolt model of the car, corrected by the relay's samples every 4 ticks through the pose
+// stream. HOLD: the model holds the parked vehicle's box where the relay has it (OW5o); else it
+// meets only the statics.
+void ram_parked(const std::string &plant, bool hold, ram_run &out) {
+  cvc::app app;
+  register_world_block(app);
+  const std::string doc = ram_drivable(plant);
+  LoadResult r = load_string(app, doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  const std::uint64_t parked = spawn_kind(v, "parked", -10.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i)
+    h.advance(dt);
+  cvc::ariadne::dynamic_drive k;
+  ASSERT_TRUE(v.dynamics(id, k));
+
+  // The parked vehicle as the room carries it: its box's size, and its pose in the relay's stream.
+  std::array<double, 3> size{};
+  double mass = 0.0; // as holon_sync holds it: its model's mass when the relay can push it
+  for (const conference::room_entity &e : conference::room_entities_of(v))
+    if (e.id == parked) {
+      size = e.size;
+      mass = e.dynamics.valid() ? e.dynamics.mass : 0.0;
+    }
+  ASSERT_GT(size[0], 0.0);
+  const cvc::physics::vec3 half{0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
+  const auto parked_now = [&]() {
+    for (const pose_subject &e : conference::entity_pose_subjects(v))
+      if (e.pid == conference::entity_pid(parked))
+        return e.state;
+    ADD_FAILURE() << "the parked vehicle is in the stream";
+    return cvc::physics::body_state{};
+  };
+  const cvc::physics::vec3 parked_start = parked_now().position;
+
+  // The client's model on the client's statics, with room for the parked vehicle's box.
+  Scene copy = r.scene;
+  copy.vehicles.clear();
+  std::unique_ptr<SceneWorld> mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+  ASSERT_NE(mine, nullptr);
+  mine->sync(&warnings);
+  cvc::ariadne::jolt_vehicle_world jw;
+  for (const SceneWorldBody &b : mine->bodies())
+    if (!b.moves && b.desc) {
+      cvc::ariadne::avatar_static s;
+      s.type = cvc::ariadne::avatar_static::kind::body;
+      s.body = b.desc;
+      s.material = std::make_shared<const cvc::physics::material>(
+          mine->world().get_material(b.desc->material));
+      jw.statics.push_back(std::move(s));
+    }
+  jw.gravity = mine->world().config().gravity;
+  cvc::ariadne::vehicle_obstacle room;
+  room.half_extents = half;
+  room.mass = mass;
+  jw.obstacle_room = {room, room};
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, {}, &jw);
+  EXPECT_EQ(model.obstacle_room(), 2u);
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    s.steer = h.steer("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0);
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    return got.empty() ? pose_sample{} : got.front();
+  };
+  pose_sample now = sample();
+  cvc::ariadne::dynamic_vehicle m = model.at(now.state, h.tick(), nullptr, now.steer);
+  avatar_intent in;
+  in.throttle = 1.0;
+  in.steer = 0.0;
+  in.brake = 0.0;
+  for (int step = 0; step < 720; ++step) {
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    // Where the client shows the parked vehicle: where the relay has it now, at its velocity.
+    const cvc::physics::body_state shown = parked_now();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      if (hold) {
+        cvc::ariadne::vehicle_obstacle o;
+        o.key = parked;
+        o.half_extents = half;
+        o.mass = mass;
+        o.at = shown;
+        o.at.position =
+            shown.position + shown.linear_velocity * (static_cast<double>(t - before) * dt);
+        EXPECT_TRUE(model.hold_obstacles(m, {o}));
+      }
+      model.step(m, t);
+      command_after(m, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    out.stopped_at = std::max(out.stopped_at, relay.position.x);
+    if (h.tick() % 4 == 0) {
+      out.worst =
+          std::max(out.worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
+      now = sample();
+      m = model.at(now.state, h.tick(), &m, now.steer);
+    }
+  }
+  const cvc::physics::vec3 d = parked_now().position - parked_start;
+  out.parked_moved = std::sqrt(cvc::physics::dot(d, d));
+  out.held = model.obstacles_held();
+  out.mass = mass;
+}
+} // namespace
+
+// The room's vehicles in a client's jolt model (OW5o): the relay's driver rams a parked vehicle.
+// The client shows it, and its model holds its box where it is shown, so the client's car meets it
+// as the relay's does; without the box it drives on into it between samples, each sample pulling
+// it back. A kinematic-plant vehicle is a kinematic box on the relay too, so the client's box is
+// what the relay's car meets. A parked jolt vehicle is a body of its own mass there, shoved by the
+// car; the client's box does not move but as the samples of its pose move it.
+TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsVehicles) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *plant : {"kinematic", "jolt"}) {
+    SCOPED_TRACE(plant);
+    ram_run held, through;
+    ram_parked(plant, true, held);
+    ram_parked(plant, false, through);
+    std::printf("  OW5O %s: relay's car got to x %.2f, pushed the parked one %.3f m; the model "
+                "%.4f m off at a sample holding its box (mass %.0f kg), %.4f m without\n",
+                plant, held.stopped_at, held.parked_moved, held.worst, held.mass, through.worst);
+    EXPECT_EQ(held.held, 1u);
+    EXPECT_EQ(through.held, 0u);
+    EXPECT_LT(held.stopped_at, -10.0 + 2.0) << "the relay's car met the parked vehicle";
+    EXPECT_LT(held.worst, 0.01) << "holding its box, the model meets it as the relay's car does";
+    EXPECT_GT(through.worst, 3.0 * held.worst) << "without, it drives into it between samples";
+  }
+}
+
 TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
   REQUIRE_YAML();
   if (!jolt())
