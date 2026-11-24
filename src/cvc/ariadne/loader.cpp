@@ -103,10 +103,10 @@ struct block_table {
 };
 // The top-level keys the loader reads itself (builtin_ari_blocks).
 constexpr const char *kBuiltinBlocks[] = {
-    "meta",      "menubar", "windows",      "overlays",      "root",         "children",
-    "scene",     "customs", "init",         "on_tick",       "on_key",       "on_pointer",
-    "on_signal", "units",   "import",       "channels",      "lint",         "args",
-    "requires",  "keys",    "windows_menu", "tests",         "functions",    "data",
+    "meta",      "menubar", "windows",      "overlays",      "root",          "children",
+    "scene",     "customs", "init",         "on_tick",       "on_key",        "on_pointer",
+    "on_signal", "units",   "import",       "channels",      "lint",          "args",
+    "requires",  "keys",    "windows_menu", "tests",         "functions",     "data",
     "assets",    "scenes",  "clock",        "menu_collapse", "notifications", "prototypes"};
 bool is_builtin_block(const std::string &k) {
   for (const char *b : kBuiltinBlocks)
