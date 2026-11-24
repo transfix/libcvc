@@ -43,6 +43,7 @@
 #include <cvc/gl/state_publisher.h>       // a copy's published pose lands before it goes
 #include <cvc/gl/world_geometry_nodes.h>  // a dataset's world_geometry, drawn
 #include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
+#include <cvc/model/model.h>              // a clip: track poses its node's model
 #include <cvc/physics/world.h>            // physics: the scene's rigid-body world
 #include <cvc/physics/world_geometry.h>   // ... and its bodies (a data node's body:)
 #include <cvc/state/state.h>
@@ -117,6 +118,14 @@ struct SceneAnimationBinding {
     std::string state_path;
     cvc::state_key state_key;
     std::string written;
+    // A clip: track: the model its node draws, the clip, and the node's fit:; what it posed last
+    // (the points the nodes take, flattened); whether it has said why a node was not posed.
+    std::shared_ptr<const cvc::model> model;
+    int clip = -1;
+    bool fitted = false;
+    cvc::ariadne::SceneFit fit;
+    std::vector<double> xyz, normal_xyz;
+    std::set<const GraphicsNode *> refused;
   };
   std::vector<Target> targets; // one per track
 };
@@ -1900,12 +1909,64 @@ bool truthy(std::string s) {
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
+// A clip: track at `time`: its node's model posed that far into its clip, fitted as the node's
+// mesh was, and drawn by every node the track names. A node whose mesh is not the model's (another
+// vertex count: a LOD ladder, a model: in its place) is left as it is, said once.
+void pose_clip_track(RealizedScene &r, const cvc::ariadne::SceneAnimationTrack &tr,
+                     SceneAnimationBinding::Target &tg, double time) {
+  if (!tg.model || tg.clip < 0)
+    return;
+  bool stale = tg.found_among != r.nodes.size();
+  for (const std::weak_ptr<GraphicsNode> &w : tg.nodes)
+    stale = stale || w.expired();
+  if (stale) {
+    tg.nodes = animated_nodes(r, tr.node);
+    tg.found_among = r.nodes.size();
+  }
+  cvc::geometry::points_t points;
+  cvc::geometry::normals_t normals;
+  tg.model->posed(tg.clip, time, points, normals);
+  if (tg.fitted) {
+    cvc::ariadne::apply_scene_fit(tg.fit, points, normals, tg.xyz, tg.normal_xyz);
+  } else {
+    tg.xyz.resize(points.size() * 3);
+    for (std::size_t i = 0; i < points.size(); ++i)
+      for (int a = 0; a < 3; ++a)
+        tg.xyz[3 * i + a] = points[i][a];
+    tg.normal_xyz.resize(normals.size() * 3);
+    for (std::size_t i = 0; i < normals.size(); ++i)
+      for (int a = 0; a < 3; ++a)
+        tg.normal_xyz[3 * i + a] = normals[i][a];
+  }
+  for (const std::weak_ptr<GraphicsNode> &w : tg.nodes) {
+    const std::shared_ptr<GraphicsNode> n = w.lock();
+    auto *mesh = dynamic_cast<GeometryNode *>(n.get());
+    const cvc::geometry *g =
+        mesh && !dynamic_cast<LodGraphicsNode *>(n.get()) ? mesh->getGeometry() : nullptr;
+    if (!g || g->num_points() * 3 != tg.xyz.size()) {
+      if (n && tg.refused.insert(n.get()).second && r.app)
+        r.app->log(1, "ari: scene node '" + tr.node + "': its mesh is not its model's (" +
+                          std::to_string(g ? g->num_points() : 0) + " points, the model " +
+                          std::to_string(tg.xyz.size() / 3) + "): clip '" + tr.clip +
+                          "' does not pose it\n");
+      continue;
+    }
+    mesh->updateVertices(tg.xyz);
+    if (!tg.normal_xyz.empty() && g->const_normals().size() * 3 == tg.normal_xyz.size())
+      mesh->updateNormals(tg.normal_xyz);
+  }
+}
+
 // Set what each track moves to its value at the playhead.
 void apply_animation(RealizedScene &r, SceneAnimationBinding &b) {
   std::vector<double> v;
   for (std::size_t i = 0; i < b.anim.tracks.size() && i < b.targets.size(); ++i) {
     const cvc::ariadne::SceneAnimationTrack &tr = b.anim.tracks[i];
     SceneAnimationBinding::Target &tg = b.targets[i];
+    if (!tr.clip.empty()) {
+      pose_clip_track(r, tr, tg, b.head.time);
+      continue;
+    }
     cvc::ariadne::sample_track(tr, b.head.time, v);
     if (v.empty())
       continue;
@@ -1956,6 +2017,54 @@ bool declares_node(const std::vector<cvc::ariadne::SceneNode> &nodes, const std:
   return false;
 }
 
+// The node a path names as the document declares it: its last segment's id, at any depth.
+const cvc::ariadne::SceneNode *declared_node(const std::vector<cvc::ariadne::SceneNode> &nodes,
+                                             const std::string &id) {
+  for (const cvc::ariadne::SceneNode &n : nodes) {
+    if (n.id == id)
+      return &n;
+    if (const cvc::ariadne::SceneNode *c = declared_node(n.children, id))
+      return c;
+  }
+  return nullptr;
+}
+
+// A clip: track's model (read from the file its node's source: names), its clip and the node's
+// fit:. False, with a warning, when there is no such node, model or clip.
+bool bind_clip(cvc::app &app, const cvc::ariadne::Scene &scene, const std::string &animation,
+               const cvc::ariadne::SceneAnimationTrack &tr, SceneAnimationBinding::Target &tg,
+               std::vector<std::string> *warnings) {
+  const std::string at = "ari: scene animation '" + animation + "': clip '" + tr.clip + "'";
+  const std::size_t slash = tr.node.rfind('/');
+  const cvc::ariadne::SceneNode *n =
+      declared_node(scene.nodes, slash == std::string::npos ? tr.node : tr.node.substr(slash + 1));
+  if (!n)
+    return false; // said: no node to move
+  auto model = std::make_shared<cvc::model>();
+  std::vector<std::string> why;
+  if (!cvc::ariadne::read_scene_node_model(app, *n, *model, &why)) {
+    for (const std::string &w : why) // its own warning, under this one's "ari: "
+      warn(warnings, at + ": " + (w.rfind("ari: ", 0) == 0 ? w.substr(5) : w));
+    return false;
+  }
+  tg.clip = model->find_clip(tr.clip);
+  if (tg.clip < 0) {
+    std::string names;
+    for (const cvc::model::clip &c : model->clips)
+      names += (names.empty() ? "" : ", ") + (c.name.empty() ? std::string("(unnamed)") : c.name);
+    warn(warnings, at + ": node '" + n->id + "''s model has no such clip" +
+                       (names.empty() ? std::string(" (it has none)") : " (it has " + names + ")"));
+    return false;
+  }
+  if (n->has_fit) { // posed points take the fit the node's mesh was drawn with
+    tg.fit = cvc::ariadne::scene_fit(model->merged(), cvc::ariadne::fit_up_axis(*n), n->fit_flip,
+                                     n->fit_height);
+    tg.fitted = true;
+  }
+  tg.model = std::move(model);
+  return true;
+}
+
 // The scene's animations, bound to the keys under `bind_prefix` and set at their start: a scene
 // with any runs on the scene clock (tick_scene drives it, as for `clock: {}`).
 void realize_animations(RealizedScene &out, const cvc::ariadne::Scene &scene,
@@ -1973,13 +2082,18 @@ void realize_animations(RealizedScene &out, const cvc::ariadne::Scene &scene,
     b->head.playing = a.autoplay;
     b->last_world = out.app->world_clock().t(); // the first frame moves it by that frame's step
     b->targets.resize(a.tracks.size());
+    double clips_end = 0.0;
     for (std::size_t i = 0; i < a.tracks.size(); ++i) {
       const cvc::ariadne::SceneAnimationTrack &tr = a.tracks[i];
       if (!tr.state.empty())
         b->targets[i].state_path = cvc::ariadne::resolve_bind(bind_prefix, tr.state);
       else if (!declares_node(scene.nodes, tr.node.substr(0, tr.node.find('/'))))
         warn(warnings, "ari: scene animation '" + a.id + "': no node '" + tr.node + "' to move");
+      if (!tr.clip.empty() && bind_clip(*out.app, scene, a.id, tr, b->targets[i], warnings))
+        clips_end = std::max(clips_end, b->targets[i].model->clips[b->targets[i].clip].duration);
     }
+    if (!(b->anim.duration > 0.0) && clips_end > b->anim.length())
+      b->anim.duration = clips_end; // as long as its longest clip
     cvc::ariadne::write<std::string>(cvc::ariadne::kept_key(b->speed_key, *out.app, b->speed_path),
                                      animation_text({a.speed}));
     publish_animation(*out.app, *b);

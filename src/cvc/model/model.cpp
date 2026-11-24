@@ -497,8 +497,8 @@ int model::find_clip(const std::string &name) const {
   for (std::size_t i = 0; i < clips.size(); ++i)
     if (clips[i].name == name)
       return static_cast<int>(i);
-  if (!name.empty() && std::all_of(name.begin(), name.end(),
-                                   [](unsigned char c) { return std::isdigit(c) != 0; })) {
+  if (!name.empty() &&
+      std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) {
     const unsigned long i = std::stoul(name);
     if (i < clips.size())
       return static_cast<int>(i);
@@ -539,8 +539,7 @@ std::vector<model::transform_t> model::local_transforms(int c, double t) const {
   return out;
 }
 
-void model::posed(int c, double t, geometry::points_t &points,
-                  geometry::normals_t &normals) const {
+void model::posed(int c, double t, geometry::points_t &points, geometry::normals_t &normals) const {
   const std::vector<transform_t> locals = local_transforms(c, t);
   const std::vector<instance> drawn = walk_instances(*this, locals);
   const std::vector<transform_t> globals = node_globals(*this, locals);
@@ -596,7 +595,8 @@ void model::posed(int c, double t, geometry::points_t &points,
           continue; // no influences: where it is
         const double src[3] = {p[v][0], p[v][1], p[v][2]};
         double acc[3] = {0, 0, 0}, nacc[3] = {0, 0, 0};
-        const double nsrc[3] = {has_n ? n[v][0] : 0.0, has_n ? n[v][1] : 0.0, has_n ? n[v][2] : 0.0};
+        const double nsrc[3] = {has_n ? n[v][0] : 0.0, has_n ? n[v][1] : 0.0,
+                                has_n ? n[v][2] : 0.0};
         for (boost::uint32_t k = f0; k < f1 && k < me.bones.influences.size(); ++k) {
           const auto [b, w] = me.bones.influences[k];
           if (b < 0 || b >= static_cast<int>(skin_mats.size()))

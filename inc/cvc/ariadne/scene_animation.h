@@ -30,6 +30,11 @@ struct SceneAnimationTrack {
   // state: <path>, resolved as a bind is: the track writes its value there (a number, or numbers
   // joined by commas). Empty for a node track.
   std::string state;
+  // clip: <name or number>, with node: — the node's model (the file its source: names) drawn posed
+  // that many seconds into its clip as the animation's time: the file's own animation, its skins
+  // and morph targets (cvc::model::posed). Such a track has no keys; an animation with no
+  // duration: lasts as long as its longest clip, once the scene knows it.
+  std::string clip;
   // Between keyframes: a straight line (linear), the earlier key's value until the next (step), or
   // a curve through every key that eases in and out at the first and last (smooth: a cubic Hermite
   // spline with Catmull-Rom tangents, flat at the ends).

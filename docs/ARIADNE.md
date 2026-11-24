@@ -1344,6 +1344,20 @@ scene:
     (a curve through every key, easing in and out at the first and last). Rotation interpolates
     each angle on its own, so `[0, 0, 0]` to `[0, 0, 360]` is a whole turn.
   - Before its first key a track holds the first value, after its last the last.
+- **A model's own clip.** `{ node: robot, clip: walk }` plays a clip of the model the node
+  draws, the glTF, FBX or Collada file its `source:` names: at the animation's time `t` the node
+  draws the model posed `t` seconds into the clip. That is the file's own animation: its nodes'
+  translation, rotation and scale keys, its skins (each vertex following its bones) and its morph
+  targets' weights.
+  - `clip:` is the clip's name, or its number (`"0"` the first).
+  - An animation with no `duration:` lasts as long as its longest clip. `loop:`, `speed:`, the
+    keys and a script's seek and pause work as for any track.
+  - The model is posed on the CPU each frame and its points are written into the node's mesh in
+    place, the node's `fit:` kept. Normals follow, from the file's own.
+  - A clip the model does not have, or a node with no model file, warns at realize, naming the
+    clips the model has.
+  - The node's mesh must be its file's: a node drawn as an LOD ladder, or with a `model:` in place
+    of its own geometry, is left as it is, with a note in the log.
 - **An animation** runs as long as its latest key (`duration:` sets it longer), then stops
   (`loop: false`), starts over (`true`) or turns back (`pingpong`). `speed:` is seconds of
   animation a second of the clock; below 0 it plays backwards. `autoplay: false` waits.

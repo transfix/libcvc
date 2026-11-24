@@ -25,6 +25,7 @@
 namespace cvc {
 
 class height_field;
+struct model;
 
 namespace ariadne {
 
@@ -50,6 +51,18 @@ std::shared_ptr<cvc::height_field> make_height_field(cvc::app &app, const SceneH
 // turn about x when `flip`, centre it in XY, sit its base on z = 0 and scale its tallest extent to
 // `height`. Returns a fresh geometry (points, normals, colours, tris).
 cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float height);
+// That placement as numbers: the turn to +z, then each point p made (p - (cx, cy, z0)) * scale.
+struct SceneFit {
+  char up = 'z';
+  bool flip = false;
+  double cx = 0.0, cy = 0.0, z0 = 0.0, scale = 1.0;
+};
+// The placement fit_to_ground gives `raw`.
+SceneFit scene_fit(const cvc::geometry &raw, char up, bool flip, float height);
+// `points` (and `normals`) placed by `fit`, flattened x, y, z (normals turned only).
+void apply_scene_fit(const SceneFit &fit, const cvc::geometry::points_t &points,
+                     const cvc::geometry::normals_t &normals, std::vector<double> &xyz,
+                     std::vector<double> &normal_xyz);
 // That rotation alone: points and normals turned, everything else copied.
 cvc::geometry turn_up(const cvc::geometry &raw, char up, bool flip);
 void turn_up_point(char up, bool flip, const double in[3], double out[3]);
@@ -63,6 +76,12 @@ char fit_up_axis(const SceneNode &node);
 bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &node, cvc::geometry &geom,
                               std::shared_ptr<const cvc::height_field> &field,
                               std::vector<std::string> *warnings);
+
+// The model a node's `source:` file / URI holds (ctx's model handlers), its node tree, clips, skins
+// and morph targets with it: what read_scene_node_geometry draws as model::merged(), fitted. Warns,
+// naming the node, and returns false for a node with no file or one no handler reads.
+bool read_scene_node_model(cvc::app &ctx, const SceneNode &node, cvc::model &model,
+                           std::vector<std::string> *warnings);
 
 // A node's local transform (`transform: { position, rotation, scale }`) as a row-major 4x4:
 // T * Rz * Ry * Rx * S, so a point is scaled along the node's own axes, turned (degrees, about the

@@ -2462,6 +2462,7 @@
         "key": {"enum": ["position", "rotation", "scale", "color", "opacity", "visible"]},
         "state": {"$ref": "#/$defs/string", "description": "A state key, resolved as a bind is."},
         "interpolation": {"enum": ["linear", "step", "smooth"]},
+        "clip": {"$ref": "#/$defs/scalar", "description": "With node:, the clip (a name, or its number) of the model the node draws, played as the animation's time."},
         "keys": {
           "type": "array",
           "items": {

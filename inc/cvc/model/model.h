@@ -108,8 +108,8 @@ struct model {
     geometry geom;
     int material = -1; // index into model::materials, or -1 for none
     std::string name;
-    skin bones;                       // empty: not skinned
-    std::vector<morph_target> morphs; // its blend shapes
+    skin bones;                        // empty: not skinned
+    std::vector<morph_target> morphs;  // its blend shapes
     std::vector<double> morph_weights; // their weights at rest (missing ones 0)
   };
 

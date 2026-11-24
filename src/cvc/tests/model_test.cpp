@@ -769,8 +769,8 @@ struct gltf_bin {
     bin.append(static_cast<const char *>(p), bytes);
     views += std::string(n ? "," : "") + "{\"buffer\": 0, \"byteOffset\": " + std::to_string(off) +
              ", \"byteLength\": " + std::to_string(bytes) + "}";
-    accessors += std::string(n ? "," : "") + "{\"bufferView\": " + std::to_string(n) + ", " + meta +
-                 "}";
+    accessors +=
+        std::string(n ? "," : "") + "{\"bufferView\": " + std::to_string(n) + ", " + meta + "}";
     return n++;
   }
   std::string tail() {
@@ -798,19 +798,28 @@ std::string clip_gltf() {
   const float turn[8] = {0, 0, 0, 1, 0, 0, static_cast<float>(kHalf), static_cast<float>(kHalf)};
   const float jump[6] = {0, 0, 0, 0, 0, 5};
   const float weights[2] = {0, 1};
-  const int a_pos = b.add(pos, sizeof pos,
-                          R"("componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0])");
-  const int a_idx = b.add(idx, sizeof idx, R"("componentType": 5123, "count": 3, "type": "SCALAR")");
-  const int a_lift = b.add(lift, sizeof lift,
-                           R"("componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [0, 0, 1])");
-  const int a_t2 = b.add(t2, sizeof t2,
-                         R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [2])");
-  const int a_slide = b.add(slide, sizeof slide, R"("componentType": 5126, "count": 2, "type": "VEC3")");
-  const int a_t1 = b.add(t1, sizeof t1,
-                         R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1])");
-  const int a_turn = b.add(turn, sizeof turn, R"("componentType": 5126, "count": 2, "type": "VEC4")");
-  const int a_jump = b.add(jump, sizeof jump, R"("componentType": 5126, "count": 2, "type": "VEC3")");
-  const int a_w = b.add(weights, sizeof weights, R"("componentType": 5126, "count": 2, "type": "SCALAR")");
+  const int a_pos = b.add(
+      pos, sizeof pos,
+      R"("componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0])");
+  const int a_idx =
+      b.add(idx, sizeof idx, R"("componentType": 5123, "count": 3, "type": "SCALAR")");
+  const int a_lift = b.add(
+      lift, sizeof lift,
+      R"("componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [0, 0, 1])");
+  const int a_t2 =
+      b.add(t2, sizeof t2,
+            R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [2])");
+  const int a_slide =
+      b.add(slide, sizeof slide, R"("componentType": 5126, "count": 2, "type": "VEC3")");
+  const int a_t1 =
+      b.add(t1, sizeof t1,
+            R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1])");
+  const int a_turn =
+      b.add(turn, sizeof turn, R"("componentType": 5126, "count": 2, "type": "VEC4")");
+  const int a_jump =
+      b.add(jump, sizeof jump, R"("componentType": 5126, "count": 2, "type": "VEC3")");
+  const int a_w =
+      b.add(weights, sizeof weights, R"("componentType": 5126, "count": 2, "type": "SCALAR")");
   const auto s = [](int v) { return std::to_string(v); };
   return R"({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
  "nodes": [
@@ -822,8 +831,9 @@ std::string clip_gltf() {
  "meshes": [
   {"name": "tri", "primitives": [{"attributes": {"POSITION": )" +
          s(a_pos) + R"(}, "indices": )" + s(a_idx) + R"(}]},
-  {"name": "blob", "weights": [0.25], "primitives": [{"attributes": {"POSITION": )" + s(a_pos) +
-         R"(}, "indices": )" + s(a_idx) + R"(, "targets": [{"POSITION": )" + s(a_lift) + R"(}]}]}],
+  {"name": "blob", "weights": [0.25], "primitives": [{"attributes": {"POSITION": )" +
+         s(a_pos) + R"(}, "indices": )" + s(a_idx) + R"(, "targets": [{"POSITION": )" + s(a_lift) +
+         R"(}]}]}],
  "animations": [{"name": "act",
   "channels": [{"sampler": 0, "target": {"node": 1, "path": "translation"}},
                {"sampler": 1, "target": {"node": 2, "path": "rotation"}},
@@ -854,15 +864,21 @@ std::string skin_gltf() {
                          1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1}; // j1 one up
   const float t1[2] = {0, 1};
   const float turn[8] = {0, 0, 0, 1, 0, 0, static_cast<float>(kHalf), static_cast<float>(kHalf)};
-  const int a_pos = b.add(pos, sizeof pos,
-                          R"("componentType": 5126, "count": 4, "type": "VEC3", "min": [0, 0, 0], "max": [1, 2, 0])");
-  const int a_idx = b.add(idx, sizeof idx, R"("componentType": 5123, "count": 6, "type": "SCALAR")");
-  const int a_j = b.add(joints, sizeof joints, R"("componentType": 5121, "count": 4, "type": "VEC4")");
-  const int a_w = b.add(weights, sizeof weights, R"("componentType": 5126, "count": 4, "type": "VEC4")");
+  const int a_pos = b.add(
+      pos, sizeof pos,
+      R"("componentType": 5126, "count": 4, "type": "VEC3", "min": [0, 0, 0], "max": [1, 2, 0])");
+  const int a_idx =
+      b.add(idx, sizeof idx, R"("componentType": 5123, "count": 6, "type": "SCALAR")");
+  const int a_j =
+      b.add(joints, sizeof joints, R"("componentType": 5121, "count": 4, "type": "VEC4")");
+  const int a_w =
+      b.add(weights, sizeof weights, R"("componentType": 5126, "count": 4, "type": "VEC4")");
   const int a_ibm = b.add(ibm, sizeof ibm, R"("componentType": 5126, "count": 2, "type": "MAT4")");
-  const int a_t1 = b.add(t1, sizeof t1,
-                         R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1])");
-  const int a_turn = b.add(turn, sizeof turn, R"("componentType": 5126, "count": 2, "type": "VEC4")");
+  const int a_t1 =
+      b.add(t1, sizeof t1,
+            R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1])");
+  const int a_turn =
+      b.add(turn, sizeof turn, R"("componentType": 5126, "count": 2, "type": "VEC4")");
   const auto s = [](int v) { return std::to_string(v); };
   return R"({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
  "nodes": [
@@ -872,9 +888,9 @@ std::string skin_gltf() {
   {"name": "bar", "mesh": 0, "skin": 0}],
  "skins": [{"joints": [1, 2], "inverseBindMatrices": )" +
          s(a_ibm) + R"(, "skeleton": 1}],
- "meshes": [{"name": "bar", "primitives": [{"attributes": {"POSITION": )" + s(a_pos) +
-         R"(, "JOINTS_0": )" + s(a_j) + R"(, "WEIGHTS_0": )" + s(a_w) + R"(}, "indices": )" +
-         s(a_idx) + R"(}]}],
+ "meshes": [{"name": "bar", "primitives": [{"attributes": {"POSITION": )" +
+         s(a_pos) + R"(, "JOINTS_0": )" + s(a_j) + R"(, "WEIGHTS_0": )" + s(a_w) +
+         R"(}, "indices": )" + s(a_idx) + R"(}]}],
  "animations": [{"name": "bend",
   "channels": [{"sampler": 0, "target": {"node": 2, "path": "rotation"}}],
   "samplers": [{"input": )" +
@@ -938,8 +954,8 @@ TEST(ModelClips, PosedMovesNodesAndBlendsMorphs) {
   ASSERT_EQ(m.clips.size(), 1u);
   const geometry rest = m.posed(-1, 0.0);
   EXPECT_EQ(rest.num_points(), m.merged().num_points());
-  EXPECT_TRUE(has_point(rest, 0, 10, 0));    // stepper as authored
-  EXPECT_TRUE(has_point(rest, 0, 1, 0.25));  // the blob at its rest weight
+  EXPECT_TRUE(has_point(rest, 0, 10, 0));   // stepper as authored
+  EXPECT_TRUE(has_point(rest, 0, 1, 0.25)); // the blob at its rest weight
   EXPECT_FALSE(has_point(rest, 0, 1, 1.0));
 
   const geometry one = m.posed(0, 1.0);
@@ -951,11 +967,11 @@ TEST(ModelClips, PosedMovesNodesAndBlendsMorphs) {
   EXPECT_TRUE(has_point(one, 0, 1, 1)); // the blob at weight 1
 
   const geometry half = m.posed(0, 0.5);
-  EXPECT_TRUE(has_point(half, 1, 0, 0));        // mover a quarter of the way
+  EXPECT_TRUE(has_point(half, 1, 0, 0));         // mover a quarter of the way
   EXPECT_TRUE(has_point(half, kHalf, kHalf, 0)); // spinner 45 degrees (slerp)
-  EXPECT_TRUE(has_point(half, 0, 0, 0));        // stepper still at its first key (step)
-  EXPECT_FALSE(has_point(half, 0, 10, 0));      // which replaced the authored translation
-  EXPECT_TRUE(has_point(half, 0, 1, 0.5));      // the blob at weight 0.5
+  EXPECT_TRUE(has_point(half, 0, 0, 0));         // stepper still at its first key (step)
+  EXPECT_FALSE(has_point(half, 0, 10, 0));       // which replaced the authored translation
+  EXPECT_TRUE(has_point(half, 0, 1, 0.5));       // the blob at weight 0.5
 
   const geometry after = m.posed(0, 9.0); // past the end: the last keys
   EXPECT_TRUE(has_point(after, 4, 0, 0));

@@ -483,9 +483,9 @@ void read_morphs(const aiMesh *am, model::mesh &mm) {
     if (a->HasNormals() && am->HasNormals() && a->mNumVertices == nv) {
       mt.normal_deltas.reserve(nv);
       for (unsigned int v = 0; v < nv; ++v)
-        mt.normal_deltas.push_back({{a->mNormals[v].x - am->mNormals[v].x,
-                                     a->mNormals[v].y - am->mNormals[v].y,
-                                     a->mNormals[v].z - am->mNormals[v].z}});
+        mt.normal_deltas.push_back(
+            {{a->mNormals[v].x - am->mNormals[v].x, a->mNormals[v].y - am->mNormals[v].y,
+              a->mNormals[v].z - am->mNormals[v].z}});
     }
     mm.morphs.push_back(std::move(mt));
     mm.morph_weights.push_back(a->mWeight);
