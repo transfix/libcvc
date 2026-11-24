@@ -52,9 +52,6 @@ std::optional<unsigned> optional_count(PyObject *o, long long min, const char *w
 struct ExecPool::ExecPoolImpl {
   std::shared_ptr<cvc::app> app; // keeps the app (and its pool) alive
   cvc::exec_pool *pool = nullptr;
-  // Group 0, the app's exec scheduler: the home of the pooled programs' keys outside their chroots
-  // (S2b, exec_router.h's homes), which run_all drains. The app's, alive while `app` is.
-  cvc::state_exec::async_scheduler *group0 = nullptr;
   bool fresh_env = false;
   // The pooled Execs; empty once closed. Destroyed with the GIL held (~Exec releases it while
   // its kernels finish).
@@ -127,9 +124,6 @@ ExecPool::ExecPool(const std::shared_ptr<cvc::app> &app, PyObject *threads, PyOb
   for (unsigned i = 0; i < n; ++i)
     impl->execs.push_back(std::unique_ptr<Exec>(
         new Exec(Exec::pooled_tag{}, app, prefix + "." + std::to_string(i), idle_timeout)));
-  // Built now, on this thread, after the pooled Execs (their lock manager's mode is chosen), rather
-  // than by the first routed key inside a pump on a worker (exec_router::home_of builds it).
-  impl->group0 = &app->exec_scheduler();
   impl_ = std::move(impl);
 }
 
@@ -172,7 +166,7 @@ PyObject *ExecPool::run_all(PyObject *programs) {
       PyThreadState *ts;
       ~gil_back() { PyEval_RestoreThread(ts); }
     } restore{ts};
-    out = Exec::run_batch(*p.pool, execs, sources, p.fresh_env, p.batch, p.group0);
+    out = Exec::run_batch(*p.pool, execs, sources, p.fresh_env, p.batch, *p.app);
   }
   // The first failing program's error, in program order, once every program has ended.
   for (Exec::batch_outcome &o : out)

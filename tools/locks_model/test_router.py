@@ -75,7 +75,9 @@ class Explorer(unittest.TestCase):
         s[rt.HOMES] = tuple(homes)
         s[rt.PROCS] = ((1, rt.DONE, 0, 0), (0, rt.WL, 1, 0), (0, rt.WR, 1, 0))
         s[rt.MSGS] = ((rt.M_SENT, (), 0, 0, rt.F_ASSIGNED),)
-        s[rt.SENT] = ((), (), (), (), (0,))
+        sent = [()] * rt.NG
+        sent[rt.S] = (0,)
+        s[rt.SENT] = tuple(sent)
         ing = list(s[rt.ING])
         ing[rt.H] = (('Q', 0, 0),)
         s[rt.ING] = tuple(ing)
@@ -90,7 +92,8 @@ class Explorer(unittest.TestCase):
         # so every fair schedule reaches an idle state, and the idle checks are the liveness check
         for procs, opts, amend in (('H:s,R1:t,R2:t', dict(kills=1), rt.ALL),
                                    ('S:s,H:r,R1:t', dict(rdie=1, throws=1, choice=1), ()),
-                                   ('S:s,R1:t', dict(islands=1), rt.BUT('router-on-groups'))):
+                                   ('S:s,R1:t', dict(islands=1), rt.BUT('island-rule')),
+                                   ('X:p,R1:t,R2:t', dict(islands=1, rdie=1), rt.ALL)):
             m = rt.Model(rt.make_config(procs, opts, amend))
             succ = {}
             todo = [m.initial()]
@@ -123,6 +126,24 @@ class Explorer(unittest.TestCase):
                     else:
                         colour[v] = 2
                         stack.pop()
+
+    def test_an_islands_own_messages_die_with_it(self):
+        # S2b.0a: an island homes nothing for another group, so its teardown forwards none of its
+        # own keys' messages; they die with it, counted, as a Stage 1 group's do (not `lost`)
+        m = rt.Model(rt.make_config('R1:s', dict(islands=1, rdie=1), rt.ALL))
+        s = m.initial()
+        for label in (('td', rt.H), ('td', rt.H), ('td', rt.H), ('step', 0)):
+            s = m.successors(s, label)[0][1]   # H closes, unregisters, kills; R1 sends locally
+        self.assertFalse(s[rt.REG])
+        self.assertEqual(s[rt.HOMES][rt.R1][2], (0,))
+        notes = []
+        s = m.apply(s, ('td', rt.R1), (), notes).freeze()
+        self.assertIn('die with it', ' '.join(notes))
+        self.assertEqual(s[rt.ING][rt.G0], ())   # nothing forwarded
+        while s[rt.TDR][0] != rt.TD_DONE:
+            s = m.successors(s, ('td', rt.R1))[0][1]
+        self.assertTrue(m.idle(s))
+        self.assertEqual(m.idle_check(s), [])
 
     def test_a_poster_waits_on_a_closed_home(self):
         # rehome-order: H closed and still registered; R1's subscribe waits for the unregister

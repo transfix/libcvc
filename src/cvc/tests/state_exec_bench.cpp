@@ -4784,6 +4784,317 @@ void flood_groups(cvc::exec_pool &pool, const std::vector<se::exec_group *> &gs,
     out.steps += gs[k]->sched().get_stats().total_steps - steps0[k];
 }
 
+// ---------------------------------------------------------------------------------------------
+// mt.cross_group_msg: messages between groups through the app's router (threaded Stage 2b;
+// docs/STATE_EXEC_THREADED.md 4.6, 6.3; S2.md section 6).
+// ---------------------------------------------------------------------------------------------
+
+// The send time a message carries: msg-send's envelope's payload, the decimal text bench-now gave
+// (msg-send sends text or bytes), or a host post's integer; 0 when it carries neither.
+int64_t sent_ns_of(const se::value_t &v) {
+  if (const auto *n = std::get_if<int64_t>(&v.v))
+    return *n;
+  if (const auto *d = std::get_if<se::dict_ptr>(&v.v); d && *d)
+    for (const auto &[key, x] : **d)
+      if (key == "payload")
+        if (const auto *s = std::get_if<std::string>(&x.v))
+          return std::strtoll(s->c_str(), nullptr, 10);
+  return 0;
+}
+
+// A point's groups, each over a base env of its own with the app tree's intrinsics, in a context
+// of its own as mt.state_tree's (msg-send and msg-recv among them), and two natives: (bench-now),
+// the time as decimal text, and (bench-lat msg), which records the time since `msg` was sent (the
+// bench's latency method: post to the receiver's step) in its group's vector, appended by the
+// group's pumps under its token and read by the host under it too. With `prefixes` (span=cross)
+// each group is the home of the keys under its name (exec_group::options::channel_prefixes), so the
+// router is on; without, no prefix is registered and the router stays off (RT-1's fast path). With
+// `round_receipts` (pattern=broadcast: k), `progress` is notified at every k-th receipt, a round's
+// last, so a host waiting to start the next round wakes then.
+struct cg_world {
+  struct shared {
+    std::atomic<int64_t> receipts{0}; // every group's timed receipts
+    std::atomic<int64_t> bad{0};      // receipts whose message carried no send time
+    int64_t round_receipts = 0;
+    se::detail::wakeup progress;
+  };
+  std::vector<std::string> names;
+  const std::unique_ptr<shared> sh = std::make_unique<shared>();
+  std::vector<std::vector<int64_t>> lat; // per group: its receipts' latencies, ns
+  std::deque<se::intrinsics_context> ctx;
+  std::vector<se::environment_ptr> envs;
+  std::vector<std::unique_ptr<se::exec_group>> owned; // after what their natives use: goes first
+  std::vector<se::exec_group *> gs;
+  cg_world(cvc::app &app, const std::vector<std::string> &group_names, bool prefixes,
+           int64_t round_receipts)
+      : names(group_names), lat(group_names.size()) {
+    sh->round_receipts = round_receipts;
+    for (std::size_t g = 0; g < names.size(); ++g) {
+      se::intrinsics_context &c = ctx.emplace_back();
+      c.root = &cvc::state::instance(app);
+      c.proc = se::make_process();
+      c.proc->pid = 0;
+      c.pid = 0;
+      c.uid = "bench";
+      c.cluster_id = "local";
+      c.node_id = "local";
+      envs.push_back(se::environment::extend(se::frozen_builtins(app)));
+      se::register_intrinsics(envs[g], &c);
+      se::builtins::register_fn(envs[g], "bench-now",
+                                [](std::span<const se::value_t>) -> se::value_t {
+                                  return se::value_t(std::to_string(now_ns()));
+                                });
+      se::builtins::register_fn(
+          envs[g], "bench-lat",
+          [log = &lat[g], s = sh.get()](std::span<const se::value_t> a) -> se::value_t {
+            const int64_t t = now_ns();
+            const int64_t sent = a.empty() ? 0 : sent_ns_of(a[0]);
+            if (sent <= 0)
+              s->bad.fetch_add(1);
+            log->push_back(t - sent);
+            const int64_t n = s->receipts.fetch_add(1) + 1;
+            if (s->round_receipts > 0 && n % s->round_receipts == 0)
+              s->progress.notify();
+            return se::value_t(int64_t(0));
+          });
+      se::exec_group::options o;
+      o.name = names[g];
+      o.app = &app;
+      o.base = envs[g];
+      if (prefixes)
+        o.channel_prefixes = {names[g]};
+      owned.push_back(std::make_unique<se::exec_group>(std::move(o)));
+      gs.push_back(owned.back().get());
+      c.sched = &gs.back()->sched();
+    }
+  }
+  cg_world(const cg_world &) = delete;
+  cg_world &operator=(const cg_world &) = delete;
+};
+
+// One program of a point: the group it runs in, its AST, what it must return.
+struct cg_prog {
+  std::size_t group = 0;
+  se::value_t ast;
+  std::string expect;
+};
+
+// pattern=broadcast's rounds, which the host starts (run_cg): round r's go is posted to the
+// sender's group once every receiving group has had r rounds and has its receivers waiting again.
+struct cg_gate {
+  std::size_t sender = 0; // the group the go is posted to
+  std::string go_key;
+  std::vector<std::size_t> receivers; // the receiving programs
+  int64_t rounds = 0, k = 0;          // k: receivers
+  int64_t next = 0;                   // the round whose go is next
+};
+
+// span=cross's probe, before the reps: a msg-send in `from` on `key`, homed at `to`, must reach
+// `to`'s pending FIFO (S2b.4's send). S2b.0's stubs leave it in `from`'s, where the point's
+// receivers would wait for their messages until --timeout: this fails the point at once instead.
+// It takes its message back, so the reps begin with every FIFO empty. Unattached groups, pumped
+// by pump_all. Returns why it failed, or "".
+std::string cg_probe(cvc::exec_pool &pool, se::exec_group &from, se::exec_group &to,
+                     const std::string &key, double timeout) {
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  const auto none = std::chrono::steady_clock::time_point::max();
+  const auto run = [&](se::exec_group &g, const std::string &src,
+                       const std::vector<se::exec_group *> &round) -> std::string {
+    const int pid = g.execute(src);
+    for (;;) {
+      if (!pool.pump_all(round, kGroupSlice, none).empty())
+        return "a C++ exception escaped a pump";
+      const std::optional<se::process_info> info = g.sched().get_process_info(pid);
+      if (info && !se::is_finished(info->status) && clk::now() <= deadline)
+        continue;
+      std::string why;
+      if (!info)
+        why = "pid " + std::to_string(pid) + " vanished";
+      else if (!se::is_finished(info->status))
+        why = "timeout";
+      else if (info->status != se::process_status::terminated)
+        why = std::string(se::to_string(info->status)) + ": " + info->exit_error.value_or("");
+      if (info && !se::is_finished(info->status))
+        g.sched().kill(pid);
+      g.sched().reap(pid);
+      return why;
+    }
+  };
+  std::string why = run(from, "(begin (msg-send \"" + key + "\" \"probe\") 1)", {&from, &to});
+  if (!why.empty())
+    return "the routing probe's send: " + why;
+  const std::vector<se::exec_group *> home{&to};
+  pool.pump_all(home, kGroupSlice, none); // what from's last pump posted to it
+  const std::size_t at_home = to.sched().pending_message_count(key);
+  if (at_home != 1)
+    return "a msg-send to " + key + " in " + from.opts().name + " left " + std::to_string(at_home) +
+           " messages, not 1, at its home " + to.opts().name +
+           " (routing off: S2b.0's stubs, before S2b.1's and S2b.4's router)";
+  why = run(to, "(begin (msg-recv \"" + key + "\") 1)", {&to});
+  return why.empty() ? "" : "the routing probe's receive: " + why;
+}
+
+// mt.cross_group_msg's run: `progs` submitted at once, each to its group, and driven until every
+// one has ended, each checked and reaped (S1.md section 0, item 13's reads, as run_groups' and
+// run_attached's). fork_join: pool.pump_all rounds of every group (kGroupSlice); continuous: the
+// groups attached by this thread, which runs pump_host and, with nothing to do, wait_for_work,
+// submitting, reading and reaping only under with_group. With `gate` (pattern=broadcast) the host
+// starts each round, posting its go to the sender's group once every receiver has had the rounds
+// before it and waits again: its receive was posted then (for a key homed elsewhere, a subscribe
+// to the home, which comes before the go in that group's ordered ingress), so the round's send
+// finds every receiver waiting. Meanwhile a continuous host waits on w.sh->progress, notified at
+// a round's last receipt, for 1 ms at most. Returns the time from the first submit to the last
+// program's end (the meter, when given, brackets it).
+int64_t run_cg(cvc::exec_pool &pool, cg_world &w, const std::vector<cg_prog> &progs,
+               bool continuous, cg_gate *gate, double timeout, meter *m, groups_out &out) {
+  constexpr double kHostSlice = 1e-3; // pump_host's time
+  constexpr double kIdleBeat = 0.1;   // a wait that ends early when there is work
+  const std::vector<se::exec_group *> &gs = w.gs;
+  const std::size_t n = progs.size();
+  std::vector<int> pid(n, -1);
+  std::vector<uint64_t> steps0(gs.size());
+  std::vector<std::size_t> live;
+  for (std::size_t i = 0; i < n; ++i)
+    live.push_back(i);
+  // Set by a program's on_complete (continuous), cleared when it is read. Shared with the
+  // callbacks: a deferred one that a read beat to it runs at the detach, after this returns.
+  const auto ended = std::make_shared<std::vector<std::atomic<bool>>>(n);
+  // Run `fn` under group g's token: this thread holds it between pump_all rounds; with_group's
+  // for an attached group.
+  const auto under = [&](std::size_t g, const std::function<void()> &fn) {
+    if (continuous)
+      pool.with_group(*gs[g], fn);
+    else
+      fn();
+  };
+  for (std::size_t g = 0; g < gs.size(); ++g)
+    under(g, [&] { steps0[g] = gs[g]->sched().get_stats().total_steps; });
+  const auto deadline = clk::now() + std::chrono::duration<double>(timeout);
+  // pattern=broadcast: post the next round's go once each receiving group has had that many
+  // rounds per receiver and has every receiver waiting (the receipts' count first, read without a
+  // token, so the groups are visited only once a round can be over).
+  const auto gate_turn = [&] {
+    if (!gate || gate->next >= gate->rounds || w.sh->receipts.load() < gate->next * gate->k ||
+        !out.error.empty())
+      return;
+    for (std::size_t g = 0; g < gs.size(); ++g) {
+      int64_t here = 0;
+      for (std::size_t i : gate->receivers)
+        here += progs[i].group == g;
+      if (!here)
+        continue;
+      bool ready = true;
+      under(g, [&] {
+        ready = int64_t(w.lat[g].size()) == gate->next * here;
+        for (std::size_t i : gate->receivers)
+          if (ready && progs[i].group == g) {
+            const std::optional<se::process_info> info = gs[g]->sched().get_process_info(pid[i]);
+            ready = info && info->status == se::process_status::waiting;
+          }
+      });
+      if (!ready)
+        return;
+    }
+    if (!gs[gate->sender]->sched().post_message(gate->go_key, se::value_t(gate->next)))
+      out.error = "the go of round " + istr(gate->next) + " was refused";
+    ++gate->next;
+  };
+  if (m)
+    m->begin();
+  const int64_t t0 = now_ns();
+  for (std::size_t g = 0; g < gs.size(); ++g)
+    under(g, [&] {
+      for (std::size_t i = 0; i < n; ++i) {
+        if (progs[i].group != g)
+          continue;
+        se::execute_options opts;
+        if (continuous)
+          opts.on_complete = [ended, i](se::value_t) { (*ended)[i].store(true); };
+        pid[i] = gs[g]->execute(progs[i].ast, opts);
+      }
+    });
+  auto last_read = clk::now();
+  while (!live.empty() && out.error.empty()) {
+    bool did = true;
+    if (continuous) {
+      did = pool.pump_host(kHostSlice);
+      for (se::exec_group *g : pool.take_failed())
+        if (out.error.empty())
+          out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    } else {
+      for (se::exec_group *g :
+           pool.pump_all(gs, kGroupSlice, std::chrono::steady_clock::time_point::max()))
+        if (out.error.empty())
+          out.error = g->opts().name + " failed: a C++ exception escaped its pump";
+    }
+    ++out.rounds;
+    gate_turn();
+    // Continuous: a program that fails calls no on_complete, so every live one is read when a
+    // wait found nothing, and at least every kIdleBeat while the host starts rounds (whose visits
+    // wake the groups they read, so pump_host may never find nothing).
+    const bool gating = gate && gate->next < gate->rounds;
+    bool poll = false;
+    if (continuous && !did && out.error.empty()) {
+      if (gating) {
+        w.sh->progress.wait_until(clk::now() + std::chrono::milliseconds(1));
+      } else if (!pool.wait_for_work(kIdleBeat)) {
+        poll = true;
+        ++out.idle_waits;
+      }
+    }
+    if (continuous && gating && clk::now() - last_read > std::chrono::duration<double>(kIdleBeat))
+      poll = true;
+    if (poll)
+      last_read = clk::now();
+    std::size_t kept = 0;
+    for (std::size_t i : live) {
+      if (continuous && !(*ended)[i].exchange(false) && !poll) {
+        live[kept++] = i;
+        continue;
+      }
+      const std::size_t g = progs[i].group;
+      bool running = false;
+      under(g, [&] {
+        se::async_scheduler &s = gs[g]->sched();
+        const std::optional<se::process_info> info = s.get_process_info(pid[i]);
+        if (info && !se::is_finished(info->status)) {
+          running = true;
+          return;
+        }
+        std::string why;
+        if (!info)
+          why = ": pid " + std::to_string(pid[i]) + " vanished";
+        else if (info->status != se::process_status::terminated)
+          why = std::string(": ") + se::to_string(info->status) + ": " +
+                info->exit_error.value_or("");
+        else if (const std::optional<se::value_t> r = s.get_result(pid[i]);
+                 !r || se::to_string(*r) != progs[i].expect)
+          why = " returned " + (r ? se::to_string(*r) : std::string("nothing")) + ", expected " +
+                progs[i].expect;
+        if (!why.empty() && out.error.empty())
+          out.error = gs[g]->opts().name + "'s program " + istr(int64_t(i)) + why;
+        s.reap(pid[i]);
+      });
+      if (running)
+        live[kept++] = i;
+    }
+    live.resize(kept);
+    if (!live.empty() && out.error.empty() && clk::now() > deadline)
+      out.error = "timeout: " + istr(int64_t(live.size())) + " programs still running";
+  }
+  const int64_t wall = now_ns() - t0;
+  if (m)
+    m->end();
+  for (std::size_t i : live)
+    under(progs[i].group, [&] {
+      gs[progs[i].group]->sched().kill(pid[i]);
+      gs[progs[i].group]->sched().reap(pid[i]);
+    });
+  for (std::size_t g = 0; g < gs.size(); ++g)
+    under(g, [&] { out.steps += gs[g]->sched().get_stats().total_steps - steps0[g]; });
+  return wall;
+}
+
 // An .ari document written for a point (AppRuntime loads files only), removed when it ends.
 struct temp_ari {
   std::filesystem::path path;
@@ -7168,6 +7479,224 @@ std::vector<scenario> make_scenarios() {
             .i("wall_off_ns", sides[0].wall)
             .i("wall_on_ns", sides[1].wall)
             .i("effective_threads", steady->threads());
+      });
+    };
+    all.push_back(std::move(sc));
+  }
+
+  // mt.cross_group_msg: messages between groups through the app's router, against the same
+  // programs in one group (td 6.3, threaded Stage 2b; S2.md section 6).
+  {
+    scenario sc;
+    sc.name = "mt.cross_group_msg";
+    sc.what =
+        "msg-send and msg-recv between exec_groups on the app's exec_pool (t, pump and their "
+        "drivers as mt.groups'), m rounds of: pattern=pingpong, k pairs of processes trading a "
+        "ping and a pong; pattern=fanout, one sender sending to k receivers, each on a key of "
+        "its own, and taking their k acks; pattern=broadcast, one send on a key k receivers wait "
+        "on, the host starting each round once every receiver waits again. span=cross puts each "
+        "process in a group of its own, every key homed at its receiver's group (channel "
+        "prefixes: the router is on; a broadcast's receivers wait on the sender's key, so each "
+        "copy is a remote delivery); span=one runs the same programs in one group with no "
+        "prefix (the router off, RT-1's fast path), so their steps_total must be equal. "
+        "extra.ns_per_msg (the region over the timed receipts), extra.wake_p50_ns and "
+        "extra.wake_p99_ns (the time from a send to its receiver's step: latency_ns has every "
+        "percentile), the router's and the ingress's counters, the pool's. Stage 2b's gate: "
+        "wake_p50 under 50 us across groups, one pair's pingpong (td 6.3; the sanitizer jobs)";
+    sc.executors = {"async"};
+    sc.sizes = {{"pattern", {"pingpong", "fanout", "broadcast"}},
+                {"span", {"one", "cross"}},
+                {"t", {"1", "2", "4"}},
+                {"k", {"1", "2", "4", "8"}},
+                {"m", {"200"}},
+                {"pump", {"fork_join", "continuous"}}};
+    sc.smoke = {{"pattern", {"pingpong", "fanout", "broadcast"}},
+                {"span", {"one", "cross"}},
+                {"t", {"1", "2"}},
+                {"k", {"2"}},
+                {"m", {"10"}},
+                {"pump", {"fork_join", "continuous"}}};
+    sc.spawns_threads = true;
+    sc.accept = [](const std::string &exec, const point_ctx &pc) {
+      const std::string pattern = pc.s("pattern"), span = pc.s("span");
+      const std::string pump = pc.s("pump", "fork_join");
+      std::string why;
+      if (pattern != "pingpong" && pattern != "fanout" && pattern != "broadcast")
+        why = "pattern=" + pattern + " is not pingpong, fanout or broadcast";
+      else if (span != "one" && span != "cross")
+        why = "span=" + span + " is not one or cross";
+      else if (pump != "fork_join" && pump != "continuous")
+        why = "pump=" + pump + " is not fork_join or continuous";
+      if (why.empty())
+        return true;
+      std::printf("  %-28s %-9s %-34s skipped: %s\n", pc.sc.name.c_str(), exec.c_str(),
+                  params_text(pc.params).c_str(), why.c_str());
+      return false;
+    };
+    sc.run = [](point_ctx &pc) {
+      const std::string pattern = pc.s("pattern");
+      const bool cross = pc.s("span") == "cross";
+      const bool continuous = pc.s("pump", "fork_join") == "continuous";
+      const int64_t nt = std::max<int64_t>(1, pc.i("t")), k = std::max<int64_t>(1, pc.i("k"));
+      const int64_t mm = std::max<int64_t>(1, pc.i("m"));
+      // The programs, each in its group of span=cross, where a group is the home of the keys
+      // under its name; span=one runs them all in one group. Every receive is timed.
+      std::vector<std::string> names;
+      std::vector<std::pair<std::size_t, std::string>> srcs; // (group, program)
+      std::vector<std::size_t> receivers;                    // broadcast: its receiving programs
+      const std::string p = "bench.cg.";
+      const auto q = [](const std::string &key) { return "\"" + key + "\""; };
+      int64_t timed = 0; // the timed receipts a rep must have
+      if (pattern == "pingpong") {
+        for (int64_t j = 0; j < k; ++j) {
+          const std::string a = p + "a" + istr(j), b = p + "b" + istr(j);
+          const std::string ping = q(b + ".ping"), pong = q(a + ".pong");
+          names.push_back(a);
+          srcs.push_back(
+              {names.size() - 1,
+               loop_src(mm, "",
+                        "(msg-send " + ping + " (bench-now)) (bench-lat (msg-recv " + pong + "))",
+                        "i")});
+          names.push_back(b);
+          srcs.push_back({names.size() - 1, loop_src(mm, "",
+                                                     "(bench-lat (msg-recv " + ping +
+                                                         ")) (msg-send " + pong + " (bench-now))",
+                                                     "i")});
+        }
+        timed = 2 * k * mm;
+      } else if (pattern == "fanout") {
+        names.push_back(p + "s");
+        const std::string ack = q(p + "s.ack");
+        std::string sends;
+        for (int64_t j = 0; j < k; ++j)
+          sends += "(msg-send " + q(p + "r" + istr(j) + ".in") + " (bench-now)) ";
+        srcs.push_back(
+            {0, loop_src(mm, "",
+                         sends + "(set a 0) (while (< a " + istr(k) +
+                             ") (begin (bench-lat (msg-recv " + ack + ")) (set a (+ a 1))))",
+                         "i")});
+        for (int64_t j = 0; j < k; ++j) {
+          names.push_back(p + "r" + istr(j));
+          srcs.push_back(
+              {names.size() - 1, loop_src(mm, "",
+                                          "(bench-lat (msg-recv " + q(p + "r" + istr(j) + ".in") +
+                                              ")) (msg-send " + ack + " (bench-now))",
+                                          "i")});
+        }
+        timed = 2 * k * mm;
+      } else {
+        // Round i's key is the sender's p.s.bc.<i>, so a receiver's wait names its round.
+        names.push_back(p + "s");
+        const std::string bc = "(str-concat " + q(p + "s.bc.") + " (str i))";
+        srcs.push_back(
+            {0,
+             loop_src(mm, "", "(msg-recv " + q(p + "s.go") + ") (msg-send " + bc + " (bench-now))",
+                      "i")});
+        for (int64_t j = 0; j < k; ++j) {
+          names.push_back(p + "r" + istr(j));
+          receivers.push_back(srcs.size());
+          srcs.push_back(
+              {names.size() - 1, loop_src(mm, "", "(bench-lat (msg-recv " + bc + "))", "i")});
+        }
+        timed = k * mm;
+      }
+      auto app = make_app();
+      pool_point pp(*app, pool_workers_for(nt, continuous), pc);
+      cg_world w(*app, cross ? names : std::vector<std::string>{"bench.cg"}, cross,
+                 pattern == "broadcast" ? k : 0);
+      std::vector<cg_prog> progs;
+      for (const auto &[g, src] : srcs)
+        progs.push_back({cross ? g : 0, se::parse(src), istr(mm)});
+      cg_gate gate;
+      gate.go_key = p + "s.go";
+      gate.receivers = receivers;
+      gate.rounds = mm;
+      gate.k = k;
+      // The router is on across groups and off in one (RT-1); then, across groups, a send must
+      // reach its key's home, which S2b.0's stubs do not do.
+      se::exec_router &router = app->exec_router();
+      std::string setup_error;
+      if (router.active() != cross)
+        setup_error = cross ? "the router is off though every group registered a prefix"
+                            : "the router is on with one group and no prefix (RT-1)";
+      else if (cross)
+        setup_error = cg_probe(pp.pool, *w.gs[0], *w.gs[1], w.names[1] + ".probe", pc.cfg.timeout);
+      std::optional<attached_groups> attached; // continuous: for the point, by this thread
+      if (continuous)
+        attached.emplace(pp.pool, w.gs);
+      // The groups' ingress counters, summed.
+      const auto ingress = [&] {
+        se::async_scheduler::ingress_stats sum;
+        for (se::exec_group *g : w.gs) {
+          const se::async_scheduler::ingress_stats s = g->sched().ingress_counters();
+          sum.requeued += s.requeued;
+          sum.stale_dropped += s.stale_dropped;
+          sum.ingress_refused += s.ingress_refused;
+          sum.pending_dropped += s.pending_dropped;
+        }
+        return sum;
+      };
+      pc.reps([&](meter &m, rep_out &o) {
+        m.widen = false; // the workers keep their CPUs (Linux)
+        if (!setup_error.empty()) {
+          o.fail(setup_error);
+          return;
+        }
+        for (std::vector<int64_t> &v : w.lat) {
+          v.clear();
+          v.reserve(std::size_t(timed));
+        }
+        w.sh->receipts.store(0);
+        w.sh->bad.store(0);
+        gate.next = 0;
+        const se::async_scheduler::ingress_stats i0 = ingress();
+        const uint64_t consulted0 = router.consulted();
+        groups_out out;
+        const cvc::pool_stats s0 = pp.pool.stats();
+        run_cg(pp.pool, w, progs, continuous, pattern == "broadcast" ? &gate : nullptr,
+               pc.cfg.timeout, &m, out);
+        const cvc::pool_stats s1 = pp.pool.stats();
+        const uint64_t consulted = router.consulted() - consulted0;
+        const se::async_scheduler::ingress_stats i1 = ingress();
+        if (!out.error.empty())
+          o.fail(out.error);
+        std::vector<int64_t> lats;
+        for (const std::vector<int64_t> &v : w.lat)
+          lats.insert(lats.end(), v.begin(), v.end());
+        std::sort(lats.begin(), lats.end());
+        if (o.ok && int64_t(lats.size()) != timed)
+          o.fail("timed " + istr(int64_t(lats.size())) + " receipts, not " + istr(timed));
+        if (o.ok && w.sh->bad.load() > 0)
+          o.fail(istr(w.sh->bad.load()) + " receipts carried no send time");
+        if (o.ok && !cross && consulted > 0)
+          o.fail("RT-1: one group with no prefix consulted the router " + istr(int64_t(consulted)) +
+                 " times");
+        o.iterations = mm;
+        o.programs = int64_t(progs.size());
+        o.steps_total = out.steps;
+        const double wall = double(m.wall());
+        o.extra.d("ns_per_msg", lats.empty() ? 0.0 : wall / double(lats.size()))
+            .i("wake_p50_ns", lats.empty() ? 0 : pct_at(lats, 0.50))
+            .i("wake_p99_ns", lats.empty() ? 0 : pct_at(lats, 0.99))
+            .i("receipts", int64_t(lats.size()))
+            .i("groups", int64_t(w.gs.size()))
+            .i("router_active", router.active() ? 1 : 0)
+            .i("router_consulted", int64_t(consulted))
+            .i("requeued", int64_t(i1.requeued - i0.requeued))
+            .i("stale_dropped", int64_t(i1.stale_dropped - i0.stale_dropped))
+            .i("ingress_refused", int64_t(i1.ingress_refused - i0.ingress_refused))
+            .i("pending_dropped", int64_t(i1.pending_dropped - i0.pending_dropped))
+            .i("pumps", int64_t(s1.pumps - s0.pumps))
+            .i("worker_pumps", int64_t(s1.worker_pumps - s0.worker_pumps))
+            .i("helper_wakes", int64_t(s1.helper_wakes - s0.helper_wakes))
+            .i("effective_threads", s1.effective_threads)
+            .i("rounds", int64_t(out.rounds))
+            .i("idle_waits", int64_t(out.idle_waits));
+        if (pattern == "broadcast")
+          o.extra.i("go_posts", gate.next);
+        if (continuous)
+          stage2_extras(o.extra, s0, s1);
+        o.latency_ns = std::move(lats);
       });
     };
     all.push_back(std::move(sc));

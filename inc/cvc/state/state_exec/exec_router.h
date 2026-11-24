@@ -19,7 +19,9 @@
  *   only on keys a group with a prefix homes (give one a prefix: channel_prefixes). When a prefix's
  *   home goes, its keys come home to group 0 for groups with prefixes and to each island itself;
  *   an island's waits parked at the dying home are rehomed to group 0 and served there, while its
- *   later waits on those keys are its own (a documented gap).
+ *   later waits on those keys are its own (a documented gap). An island homes nothing for another
+ *   group, so its teardown forwards none of its own keys' messages: they die with it, counted, as a
+ *   Stage 1 group's do.
  * - **When the router is on** (active()): while a group other than group 0 has a registered
  *   prefix, or a remote-waiter record exists at some home. Off, no scheduler consults it (RT-1):
  *   messaging is today's, one scheduler at a time.

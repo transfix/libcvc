@@ -47,7 +47,9 @@ the same exit statuses. A scenario in GATE_GUARDS has its gate judge only points
 it: mt.ariadne_docs' points with documents outside `any` groups of their own fail as vacuous,
 points that can wake no helper are n/a (a gate with nothing but n/a fails), and the run's heavy
 points must show a worker pumping (the control); mt.groups' speedup gates judge even groups only
-(shape=uneven is n/a), and mt.groups.move's points where force_move added no move fail as vacuous.
+(shape=uneven is n/a), and mt.groups.move's points where force_move added no move fail as vacuous;
+mt.cross_group_msg's wake gate judges one pair's pingpong across groups only (other points are n/a),
+and its points that timed no receipt fail as vacuous.
 
 Standard library only.
 """
@@ -424,6 +426,11 @@ def parse_pair(text):
 # mt.groups.move's move cost (S2a: under 5 us a move): a point where force_move added no move
 # (extra.moves 0: no other worker to move to, or CVC_EXEC_FORCE_MOVE set for both pools) has no
 # cost to judge, and fails as vacuous.
+# mt.cross_group_msg's wake latency (S2b: p50 under 50 us across groups): judged on one pair's
+# pingpong across two groups (pattern=pingpong span=cross k=1); one group's points (the router
+# off), fan-out, broadcast and several pairs (whose receipts queue behind the others' on t
+# threads) are recorded, not gated. A point that timed no receipt has no latency to judge, and
+# fails as vacuous.
 GATE_GUARDS = {
     "mt.ariadne_docs": {
         "metrics": ("extra.helper_wakes", "extra.wakes_per_frame", "extra.worker_pumps"),
@@ -438,6 +445,11 @@ GATE_GUARDS = {
     "mt.groups.move": {
         "metrics": ("extra.ns_per_move",),
         "vacuous": (("extra.moves", 1),),
+    },
+    "mt.cross_group_msg": {
+        "metrics": ("extra.wake_p50_ns",),
+        "applies": {"pattern": "pingpong", "span": "cross", "k": "1"},
+        "vacuous": (("extra.receipts", 1),),
     },
 }
 

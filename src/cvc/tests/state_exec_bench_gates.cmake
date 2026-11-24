@@ -16,7 +16,12 @@
 #   - mt.groups at its smoke sizes, continuous against fork-join (Stage 2a): attached groups,
 #     pumped whenever they have work in pumps of the pool's budget, take the same steps as groups
 #     pumped by pump_all rounds, on the caller (t=1) and on workers (t=2), for even and uneven
-#     groups.
+#     groups;
+#   - mt.cross_group_msg at its smoke sizes, across groups against one group (Stage 2b): the same
+#     programs exchanging messages through the router (pingpong, fan-out and broadcast between
+#     groups with channel prefixes) take the steps they take in one group with the router off, in
+#     both pump modes. Until the router routes (S2b.0's stubs) its cross-group points fail their
+#     routing probe, and so does this gate.
 #
 # Run by CTest as
 #   cmake -DBENCH=<state_exec_bench> -DPYTHON=<python3> -DRUNNER=<tools/bench/state_exec_bench.py>
@@ -37,7 +42,9 @@ set(LOCKS_RUN "${WORK_DIR}/lock_uncontended.jsonl")
 set(SCHED_RUN "${WORK_DIR}/sched_single.jsonl")
 set(SLICE_RUN "${WORK_DIR}/sched_single_slice.jsonl")
 set(GROUPS_RUN "${WORK_DIR}/mt_groups.jsonl")
-file(REMOVE "${LOCKS_RUN}" "${SCHED_RUN}" "${SLICE_RUN}" "${GROUPS_RUN}") # --json appends
+set(CROSS_RUN "${WORK_DIR}/mt_cross_group_msg.jsonl")
+# --json appends.
+file(REMOVE "${LOCKS_RUN}" "${SCHED_RUN}" "${SLICE_RUN}" "${GROUPS_RUN}" "${CROSS_RUN}")
 
 set(failed "")
 
@@ -68,6 +75,11 @@ gate_step("state_exec_bench sched.single.* slice_steps=256"
 gate_step("state_exec_bench mt.groups pump=fork_join,continuous"
   "${BENCH}" --scenario mt.groups --smoke --size t=1,2 --size pump=fork_join,continuous
   --size shape=even,uneven --reps 1 --warmup 0 --json "${GROUPS_RUN}")
+# Stage 2b: mt.cross_group_msg in one group and across groups, in both pump modes, at its smoke
+# sizes.
+gate_step("state_exec_bench mt.cross_group_msg span=one,cross"
+  "${BENCH}" --scenario mt.cross_group_msg --smoke --size span=one,cross --size t=1,2
+  --size pump=fork_join,continuous --reps 1 --warmup 0 --json "${CROSS_RUN}")
 
 # 0 steps and 0 allocations per uncontended lock, for a one-form body (design 8.8, 11.2).
 foreach(metric extra.steps_per_lock extra.allocs_per_lock)
@@ -105,6 +117,13 @@ endforeach()
 gate_step("compare mt.groups pump=fork_join:continuous steps_total unchanged"
   "${PYTHON}" -I "${RUNNER}" compare "${GROUPS_RUN}" "${GROUPS_RUN}"
   --pair pump=fork_join:continuous --metric steps_total --threshold 0 --fail-on-change)
+
+# Across groups, the programs take the steps they take in one group, point by point (paired on
+# span: a cross-group point that failed its checks, routing off included, fails the pin): a
+# routed send or receive takes the steps a local one does.
+gate_step("compare mt.cross_group_msg span=one:cross steps_total unchanged"
+  "${PYTHON}" -I "${RUNNER}" compare "${CROSS_RUN}" "${CROSS_RUN}"
+  --pair span=one:cross --metric steps_total --threshold 0 --fail-on-change)
 
 if(failed)
   message(FATAL_ERROR "state_exec_bench_gates failed:${failed}")
