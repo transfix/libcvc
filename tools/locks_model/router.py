@@ -89,7 +89,9 @@ parked at H rehomed to G0).
   record), so a deterministic schedule has one outcome;
 - `island-rule`: a group with no prefix keeps every key no other group's prefix covers in its own
   scheduler, router on or off (S2b.0a's answer to the finding that its messaging changed home as
-  the router turned on and off); its teardown forwards its own pending messages as a home's;
+  the router turned on and off); it homes nothing for another group, so its teardown forwards
+  none of its own pending messages: they die with it, counted, as a Stage 1 group's do (expected,
+  not `lost`);
 - `adopt`: a teardown forwards each broadcast tracker it holds (an `adopt` entry: value, id,
   copies outstanding, taken), which the new home takes over, so the copies' late answers find it
   (it needs rehome-order's wait and unique-ids);
@@ -146,7 +148,7 @@ STATUS = ('runs', 'waits locally', 'waits remotely', 'done', 'dead')
 # a message: (status, W, receipts in W, receipts outside W, flags); W is None until the send is
 # first applied at a home, then the waits it found there (empty: it went pending, one taker)
 M_UNSENT, M_SENT, M_REFUSED = 0, 1, 2
-F_ASSIGNED, F_DROPPED, F_REQUEUED, F_ORPHAN, F_RDROP, F_LATE = 1, 2, 4, 8, 16, 32
+F_ASSIGNED, F_DROPPED, F_REQUEUED, F_ORPHAN, F_RDROP, F_LATE, F_DIED = 1, 2, 4, 8, 16, 32, 64
 # a home's state for the key: (local waiters, records, pending FIFO, trackers, next id); a record
 # is (group, pid, seq, timed), a tracker (id, message, copies outstanding, taken)
 EMPTY_HOME = ((), (), (), (), 1)
@@ -369,7 +371,7 @@ class Work(object):
         if not fl & F_ASSIGNED:
             self.set_msg(m, (st, w, rin, rout, fl | F_ASSIGNED))
             for m2 in order[:i]:
-                if not self.msg(m2)[4] & (F_ASSIGNED | F_DROPPED):
+                if not self.msg(m2)[4] & (F_ASSIGNED | F_DROPPED | F_DIED):
                     raise Violation('fifo', '%s is handed out before %s, sent earlier by %s'
                                     % (mname(m), mname(m2), GROUPS[g]))
         else:
@@ -730,12 +732,13 @@ class Work(object):
             self.set_home(g, EMPTY_HOME)
         elif self.home(g) != EMPTY_HOME:
             # an island's own FIFO and waiters (islands): its waiters are its processes, killed
-            # next; with island-rule its pending messages go on as a home's do, else they die
-            if 'island-rule' in self.am:
-                pend = [('home', ('S', m, True)) for m in self.home(g)[2]]
-            elif self.home(g)[2]:
-                self.note('%s drops its own FIFO (today\'s path while the router was off)'
-                          % GROUPS[g])
+            # next; it homes nothing for another group, so its own pending messages die with it,
+            # counted (destroy_dropped), as a Stage 1 group's do (S2b.0a)
+            for m in self.home(g)[2]:
+                self.flag(m, F_DIED)
+            if self.home(g)[2]:
+                self.note("%s's own pending %s die with it (destroy_dropped)"
+                          % (GROUPS[g], ', '.join(mname(m) for m in self.home(g)[2])))
             self.set_home(g, EMPTY_HOME)
         # an adopt goes before every queued entry, so a late answer finds its tracker
         if 'forward-pending-first' in self.am:
@@ -931,7 +934,8 @@ class Model(object):
                 continue
             got = rin + rout
             inf = pend_all.count(m)
-            if got == 0 and inf == 0 and (not fl & F_DROPPED or fl & F_RDROP):
+            if got == 0 and inf == 0 and not fl & F_DIED and (not fl & F_DROPPED or
+                                                              fl & F_RDROP):
                 out.append(('lost', '%s was sent and is neither received nor pending%s'
                             % (mname(m), ' (a rehomed message a full FIFO dropped)'
                                if fl & F_RDROP else '')))

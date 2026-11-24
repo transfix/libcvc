@@ -237,7 +237,7 @@ public:
     std::chrono::steady_clock::time_point next_deadline =
         std::chrono::steady_clock::time_point::max();
     std::optional<int> best_runnable;
-    int processes = 0;
+    int processes = 0;           ///< its live processes (not ended ones awaiting their reap)
     std::uint64_t publishes = 0; ///< run loops that published so far
   };
   published_summary published() const noexcept;

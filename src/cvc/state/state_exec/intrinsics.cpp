@@ -953,25 +953,37 @@ value_t intrinsic_self_uid(intrinsics_context *ctx, std::span<const value_t> arg
   return value_t(ctx->uid);
 }
 
+namespace {
+// Whose a control intrinsic's call is (S2-Q8, exec_router.h's owner rule): the stepping process's
+// owner, else the context's own process's, else "" (a host's context): "" sees and controls every
+// process of its scheduler, as before, and nothing in another group.
+std::string acting_owner(const intrinsics_context *ctx) {
+  const process *p = running_process(ctx);
+  return p ? p->owner : std::string();
+}
+} // namespace
+
+// kill, pause and resume under the owner rule (scheduler_base::control_as): another owner's pid is
+// unknown; a pid in another group of the caller's owner is posted there, #t for "requested".
 value_t intrinsic_kill(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "kill");
   require_sched(ctx, "kill");
   int pid = static_cast<int>(as_int(args[0], "kill"));
-  return value_t(ctx->sched->kill(pid));
+  return value_t(ctx->sched->control_as(acting_owner(ctx), pid, control_cmd::kind::kill));
 }
 
 value_t intrinsic_pause(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "pause");
   require_sched(ctx, "pause");
   int pid = static_cast<int>(as_int(args[0], "pause"));
-  return value_t(ctx->sched->pause(pid));
+  return value_t(ctx->sched->control_as(acting_owner(ctx), pid, control_cmd::kind::pause));
 }
 
 value_t intrinsic_resume(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "resume");
   require_sched(ctx, "resume");
   int pid = static_cast<int>(as_int(args[0], "resume"));
-  return value_t(ctx->sched->resume(pid));
+  return value_t(ctx->sched->control_as(acting_owner(ctx), pid, control_cmd::kind::resume));
 }
 
 value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -1154,9 +1166,13 @@ value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "ps");
   require_sched(ctx, "ps");
   auto procs = ctx->sched->list_processes();
+  // The owner rule (S2-Q8): an owned caller lists only its owner's processes.
+  const std::string owner = acting_owner(ctx);
   std::vector<value_t> result;
   result.reserve(procs.size());
   for (auto &pi : procs) {
+    if (!owner.empty() && pi.owner != owner)
+      continue;
     // Each process → dict with key fields
     std::vector<std::pair<std::string, value_t>> entries;
     entries.emplace_back("pid", value_t(static_cast<int64_t>(pi.pid)));
@@ -1195,6 +1211,9 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   int pid = static_cast<int>(as_int(args[0], "inspect"));
   auto info = ctx->sched->get_process_info(pid);
   if (!info)
+    return nil_value();
+  // The owner rule (S2-Q8): another owner's process is unknown to an owned caller.
+  if (const std::string owner = acting_owner(ctx); !owner.empty() && info->owner != owner)
     return nil_value();
   std::vector<std::pair<std::string, value_t>> entries;
   entries.emplace_back("pid", value_t(static_cast<int64_t>(info->pid)));
