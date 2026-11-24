@@ -3891,6 +3891,8 @@ struct execute_options {
   std::string gid;
   std::string root_path;
   std::string owner;
+  // The root the owner's scopes are written from: process_info.scope is root_path relative to it.
+  std::string owner_root;
   unsigned long long max_steps;
   double max_time;
   double max_step_time;
@@ -3967,6 +3969,9 @@ struct process_info {
   int priority;
   std::string uid;
   std::string gid;
+  // Whose it is: its chroot relative to its owner's root ("" for a document's own programs,
+  // "includes.<as>" for a loaded document's; docs/roadmap/ARIADNE_SHELL.md 4.10).
+  std::string scope;
   unsigned long long step_count;
   double elapsed_time;
   unsigned long long current_memory;
@@ -4071,6 +4076,7 @@ struct process {
   std::string gid;
   std::string root_path;
   std::string owner;
+  std::string owner_root;
   bool awaiting_frame;
   unsigned long long max_steps;
   double max_time;
@@ -4841,8 +4847,8 @@ def register_intrinsics(env, ctx):
 // pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
 // idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
 // exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
-// raises ValueError. run_all, register_fn, register_async_fn and close() are methods; threads is
-// a read-only property.
+// raises ValueError. run_all, register_fn, register_async_fn, stats() (a dict of run_all's batch
+// wait counters, S2a.8) and close() are methods; threads is a read-only property.
 %feature("kwargs") pycvc::ExecPool::ExecPool;
 %feature("kwargs") pycvc::ExecPool::register_async_fn;
 %exception pycvc::ExecPool::ExecPool {

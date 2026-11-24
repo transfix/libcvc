@@ -238,18 +238,17 @@ public:
   // and restores your panels, so the UI never has to sit on the scene when you
   // just want to look at it. On by default, and on a device with no keyboard it
   // is the only practical way to get the UI back, so it stays above the windows
-  // even when one is dragged over its corner. The panels start hidden when the
-  // view's short side is under 500 logical pixels (a phone), so a 3D scene is not
-  // buried, unless setPhoneHidesPanels(false).
+  // even when one is dragged over its corner. The panels start shown, on a phone
+  // too; setPhoneHidesPanels(true) starts them hidden where the view's short side
+  // is under 500 logical pixels, for a host that wants its scene first.
   void setToggleButtonEnabled(bool on);
   bool toggleButtonEnabled() const;
   // Whether the panels (your draw callback) are currently shown. The button
   // flips this; you may drive it yourself as well.
   void setPanelsOpen(bool on);
   bool panelsOpen() const;
-  // Whether a phone's view starts with the panels hidden (on by default). A UI-only document has
-  // no scene for its panels to bury, so AriRuntime turns it off for a document without one.
-  // Turned off after the first frame hid them, it shows them again, unless the user (or
+  // Whether a phone's view starts with the panels hidden (off by default: they show, as anywhere
+  // else). Turned off after the first frame hid them, it shows them again, unless the user (or
   // setPanelsOpen) has chosen since.
   void setPhoneHidesPanels(bool on);
   bool phoneHidesPanels() const;

@@ -71,6 +71,7 @@ struct process {
   std::string root_path;       // Chroot path (empty = full tree)
   std::string owner;           // Owner-scope tag (e.g. an Ariadne document/Runtime); "" = unowned.
                                // Lets a host reap a whole process group on teardown (kill_owner).
+  std::string owner_root;      // The owner's root: its scope is root_path relative to it (ps)
   bool awaiting_frame = false; // (await expr) parked this process until the next frame boundary;
                                // re-readied by async_scheduler::wake_awaiting() once per pump.
 

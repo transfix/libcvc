@@ -25,6 +25,7 @@
 #ifndef __CVC_STATE_H__
 #define __CVC_STATE_H__
 
+#include <atomic>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/chrono.hpp>
 #include <boost/date_time/posix_time/posix_time_types.hpp>
@@ -36,6 +37,7 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/thread/condition_variable.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/core/namespace.h>
@@ -738,6 +740,15 @@ public:
   // is the one whose value/data/children a read should see. nullptr when a segment is absent.
   state *findThroughLinks(const std::string &path, std::size_t hop_budget = 64);
 
+  // The shape of this node's tree: a count, shared by all of its nodes, that moves whenever a node
+  // is made in the tree or taken out of it (removeChild, sweepExpired, reset(false)), or a link in
+  // it is set, cleared, or changes its mode or writability. Value and data writes never move it,
+  // so while it holds still a path resolves to the node it resolved to before, through links or
+  // not. A cache of resolved paths (cvc::state_key) compares it with the count it resolved at and
+  // walks the path again only when it moved. A subtree taken out keeps counting with the tree it
+  // left.
+  std::uint64_t structureEpoch() const { return _structure->load(std::memory_order_acquire); }
+
   // childThroughLinks is the WRITE view, create-or-get like operator(): an interior hop on a
   // WRITABLE transparent link continues at its target (a write that cannot be resolved throws
   // read_only_error, as value(v) does), and one on a non-writable transparent link continues at the
@@ -961,6 +972,10 @@ protected:
   bool _hidden;
   bool _readOnly;
   child_map _children;
+
+  // The tree's structureEpoch(): one count for all of its nodes, made by the root.
+  std::shared_ptr<std::atomic<std::uint64_t>> _structure;
+  void structureChanged() { _structure->fetch_add(1, std::memory_order_acq_rel); }
 
   // Phase 8: empty when this node is not a link.
   std::string _linkTarget;

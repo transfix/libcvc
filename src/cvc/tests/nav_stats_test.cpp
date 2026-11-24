@@ -15,6 +15,7 @@
 #include <cvc/nav/nav_stats.h>
 #include <cvc/nav/plant_ledger.h>
 #include <gtest/gtest.h>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -1086,4 +1087,86 @@ TEST(NavStats, PlantLedgerItemsAreAllInTheJson) {
   EXPECT_FALSE(std::isnan(s.mean_tilt_max_deg));
   const std::string sj = s.to_json();
   EXPECT_NE(sj.find("\"mean_ltr_max\":null,\"mean_lift_s\":null,"), std::string::npos) << sj;
+}
+
+// The CoPH ledger (D11 of docs/roadmap/NAV-COPH-ROADMAP.md): a coph_driver's terms, tick by tick.
+// Vehicle 0 is CoPH's, with a CoPH step on every other tick; vehicle 1 is not. Vehicle 0's record
+// sums its terms, takes the largest step |residual| and sqrt(sum e2 / sum u2); the JSON carries
+// its CoPH items and the episode's, and none of vehicle 1's. A run fed no terms has no CoPH key:
+// its record is the fed one's less those keys, byte for byte.
+TEST(NavStats, CophLedger) {
+  const auto run = [](bool fed) {
+    nav_stats_collector c;
+    const float start[4] = {0, 0, 0, 5}, goal[4] = {50, 0, 50, 5};
+    c.begin_episode(2, 0.25, start, goal, {}, "ledger", 1, "");
+    for (int k = 0; k < 4; ++k) {
+      coph_sample cs[2];
+      cs[0].attached = 1;
+      cs[0].e2 = 0.25;
+      cs[0].u2 = 1.0;
+      if (k % 2 == 1) {
+        cs[0].step = 1;
+        cs[0].work = 1.0;
+        cs[0].heat = 0.5;
+        cs[0].kinetic_change = 0.25 + k;
+        cs[0].residual = cs[0].kinetic_change - cs[0].work + cs[0].heat;
+        cs[0].shaping_jumps = 0.125;
+        cs[0].unallocated_work = -0.5;
+        cs[0].risk_cost = 0.0625;
+      }
+      nav_samplers smp;
+      if (fed)
+        smp.coph = cs;
+      const float pos[4] = {(float)(k + 1), 0, (float)(k + 1), 5};
+      const float head[2] = {0, 0}, spd[2] = {4, 4};
+      const int mode[2] = {0, 0};
+      const std::uint8_t rch[2] = {0, 0};
+      c.step(pos, head, spd, mode, rch, smp);
+    }
+    return c.finish();
+  };
+  const episode_nav_stats e = run(true), off = run(false);
+  const veh_nav_stats &v = e.per_vehicle[0], &u = e.per_vehicle[1];
+  EXPECT_TRUE(v.coph_tracked);
+  EXPECT_EQ(v.coph_steps, 2);
+  EXPECT_EQ(v.coph_work, 2.0);
+  EXPECT_EQ(v.coph_heat, 1.0);
+  EXPECT_EQ(v.coph_kinetic_change, 4.5);
+  EXPECT_EQ(v.coph_residual, 3.5); // 0.75 + 2.75
+  EXPECT_EQ(v.coph_residual_max, 2.75);
+  EXPECT_EQ(v.coph_shaping_jumps, 0.25);
+  EXPECT_EQ(v.coph_unallocated_work, -1.0);
+  EXPECT_EQ(v.coph_risk_cost, 0.125);
+  EXPECT_EQ(v.coph_allocation_residual, 0.5); // sqrt(1 / 4)
+  EXPECT_FALSE(u.coph_tracked);
+  EXPECT_EQ(u.coph_steps, 0);
+  EXPECT_TRUE(e.coph_tracked);
+  EXPECT_EQ(e.coph_vehicles, 1);
+  EXPECT_EQ(e.total_coph_work, 2.0);
+  EXPECT_EQ(e.total_coph_heat, 1.0);
+  EXPECT_EQ(e.total_coph_unallocated_work, -1.0);
+  EXPECT_EQ(e.coph_residual_max, 2.75);
+  for (const plant_ledger_item &it : plant_ledger_coph_vehicle()) {
+    EXPECT_EQ(it.from, plant_ledger_item::source::coph) << it.key;
+    EXPECT_TRUE(plant_ledger_applies(it, v)) << it.key;
+    EXPECT_FALSE(plant_ledger_applies(it, u)) << it.key;
+    EXPECT_FALSE(plant_ledger_applies(it, off.per_vehicle[0])) << it.key;
+  }
+  for (const plant_ledger_item &it : plant_ledger_coph_episode()) {
+    EXPECT_TRUE(plant_ledger_applies(it, e)) << it.key;
+    EXPECT_FALSE(plant_ledger_applies(it, off)) << it.key;
+  }
+  const std::string j = e.to_json();
+  EXPECT_NE(j.find("\"coph_vehicles\":1,\"total_coph_work\":2,\"total_coph_heat\":1,"),
+            std::string::npos)
+      << j;
+  EXPECT_NE(j.find("\"coph_steps\":2,\"coph_work\":2,\"coph_heat\":1,\"coph_kinetic_change\":4.5,"
+                   "\"coph_residual\":3.5,\"coph_residual_max\":2.75,"),
+            std::string::npos)
+      << j;
+  EXPECT_NE(j.find("\"coph_allocation_residual\":0.5}"), std::string::npos) << j;
+  EXPECT_EQ(j.find("coph_steps"), j.rfind("coph_steps")); // vehicle 0's only
+  const std::string k = off.to_json();
+  EXPECT_EQ(k.find("coph"), std::string::npos) << k;
+  EXPECT_EQ(std::regex_replace(j, std::regex(",\"(total_)?coph_[a-z_]+\":[^,}\\]]+"), ""), k);
 }

@@ -28,6 +28,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
 12. [Golden-image tests](#12-golden-image-tests)
 13. [Testing a document: `quit`, `assert` and `ari test`](#13-testing-a-document-quit-assert-and-ari-test)
+14. [Validating a document: the `.ari` schema and `ari validate`](#14-validating-a-document-the-ari-schema-and-ari-validate)
 
 ---
 
@@ -945,6 +946,11 @@ An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `loa
 `cvc::state` and never runs the DSL. The host runs the scripts (§9). This separation is
 why the same `LoadResult` can be driven by different hosts.
 
+The structure a document may have, every key and the values it takes, is the `.ari` schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)).
+The loader stays lenient, loading what it understands, but a build with the validator checks
+every document against the schema as it loads and warns about each place that breaks it (§14).
+
 ### 5.1 Top-level keys
 
 The built-in top-level keys (`is_builtin_block`,
@@ -962,9 +968,11 @@ the tray's bell or not (§5.24). `assets:` and
 `scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
-`register_ari_block`, or — if none is registered — **silently ignored**. This is
-deliberate forward-compatibility: a document authored for a newer build still loads the
-parts an older build understands.
+`register_ari_block`, or, if none is registered, ignored: a document authored for a newer build
+still loads the parts an older build understands. It is not silent, though: the schema check
+(§14) warns about a key that is neither the schema's nor a registered block, unless the
+document declares the block in `customs:` (`- block: <name>`). The blocks the scripting hosts
+and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in the schema.
 
 ### 5.2 `meta:` and the `min_libcvc` gate
 
@@ -1275,7 +1283,7 @@ scene:
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
   its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
-  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  bound offsets, its `on_pick:`, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -1298,6 +1306,21 @@ and `TerminalScene`) counts an expression on the document's read lane
 (`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
+
+**Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
+handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
+descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the
+viewport's `on_pick:` does, and runs in the document's scope. The press's drags and release run
+it too, wherever they land (§5.18, Picking):
+
+```yaml
+scene:
+  nodes:
+    - node: crate_{i}
+      repeat: 4
+      source: { box: 1 }
+      on_pick: (if (= (get-attr event "phase") "down") (state-set "selected" "crate_{i}"))
+```
 
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
@@ -2197,38 +2220,70 @@ scene:
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
     name is used (`find_vehicle_model`), else the box.
-  - **Wheeled looks: wheels that turn.** A one-piece model (the Humvee's `Humvee.glb` is one
-    mesh with its wheels in it) cannot spin or steer its wheels. A wheeled look is a model in two
-    parts: the look's mesh is the chassis without its wheels, and `wheel:` names one wheel's mesh:
+  - **A model in parts.** A one-piece model is one mesh: its wheels are in it and cannot turn. A
+    parted look is the chassis without its wheels, one wheel, and a rig that says where the
+    wheels go, so each wheel is drawn on its own and rolls and steers as the vehicle drives:
 
     ```yaml
-    look:
-      file: vehicles/humvee/chassis.glb   # the chassis, without its wheels
-      wheel: vehicles/humvee/wheel.glb    # one wheel: the left front
-      wheelbase: 3.228                    # the model's own (m): front hubs to rear
-      track: 1.8743                       # and left hubs to right
+    world:
+      vehicles:
+        archetypes:
+          rover:
+            vehicle: humvee
+            controllers: [pose]
+            look: { chassis: rover/chassis.glb, wheel: rover/wheel.glb, rig: rover/rig.json }
+          inline:
+            look:
+              chassis: rover/chassis.glb
+              wheel: rover/wheel.glb
+              rig:
+                radius: 0.47       # the wheel mesh's; none: half its size across its axle
+                hubs: [[1.6, 0.94, 0.48], [1.6, -0.94, 0.48], [-1.6, 0.94, 0.48], [-1.6, -0.94, 0.48]]
+                steer: [0, 1]      # the hubs that steer; none given: the front axle's
+                mirror: turn       # the right wheels: turn (the default), reflect or none
+          packaged:              # the three in a data: entry's package
+            look: { data: parts, chassis: chassis.glb, wheel: wheel.glb, rig: rig.json }
     ```
 
-    Both files are in the vehicle's frame, as they are written (metres; x forward, y left, z up;
-    no axis is turned): the chassis's origin midway between its axles, on its centre line, on the
-    ground under its tyres; the wheel's origin its hub, its axle along y, its outer face toward
-    +y. The wheel is drawn once for each of the vehicle's wheels (`<node>_tyre<k>`, in
-    `WorldVehicles::wheels`' order), where its plant has it: at its hub, turned by its steer,
-    rolled about its axle by its spin, on its suspension or the ground under it. A `pose` entity's
-    wheels roll at its pose's `speed`, its front ones turn by its `steer`, and each sits on the
-    grid's ground under it. A right wheel is the wheel turned half a turn about its upright, so its
-    outer face is out on both sides. The look is fitted unless `fit: false`: the chassis is
-    scaled on each axis so that its axles (`wheelbase:`), its track (`track:`) and its wheel
-    radius (half the wheel mesh's height) are the vehicle's, its origin at the vehicle's axles'
-    middle, and the wheel is scaled alike on every axis to the vehicle's wheel radius. Without
-    `wheelbase:` or `track:` the model's are taken to be the vehicle's. With `fit: false` both
-    are drawn at their own size, the wheels at the vehicle's hubs. `scale:`, `yaw:` and `z:`
-    place the chassis as they place any model. The wheel is found as the mesh is: `file:` (beside
-    the document), `model:` (both by name), `asset:` (both document assets), or with `data:` two
-    files in the same package. The chassis is drawn in the entity's colour and the wheel in a
-    tyre's dark grey, unless a mesh has a texture. When either mesh cannot be read, the vehicle is
-    its box, with a warning. A one-piece `model:` or `file:` look is drawn as before, its wheels
-    still.
+    - **The parts.** All three in one frame: metres, x forward, y left, z up (`up: y` in the rig
+      for glTF's own: +y up, +z forward, +x left). The wheel mesh is the left wheel, its axle along
+      y and its outside toward +y; it is taken about its middle (its bounds' centre), wherever its
+      file has it. Files sit beside the document, else where the vehicle models are installed
+      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package such as
+      vehicle-humvee can ship them; with `data:`, they are files in that entry's package, loaded as
+      a one-piece data look is (the box until it loads).
+    - **The rig** (`cvc::ariadne::vehicle_rig`), inline or a file of a map, YAML or JSON:
+      `radius:` (or `wheel: { radius: }`), `hubs:` (a list of `[x, y, z]`, or a map whose `xyz:`
+      lists them and whose `order:` names them, so `steer:` may name them), `steer:` (by index or
+      name), `mirror:` and `up:`. Any other key is ignored, so a rig file keeps its provenance
+      beside it (`source:`, `frame:`, `size:`). How the right wheels (y < 0) are drawn: `turn`, the
+      mesh turned half a turn about its upright; `reflect`, the mesh mirrored across its xz plane
+      (for a tread that must run the same way); `none`, as the mesh is.
+    - **The fit.** The rig is fitted to the vehicle on each axis on its own: along x its axles on
+      the vehicle's (its wheelbase over the rig's), across y its track, up z its wheels the
+      vehicle's size (the vehicle's wheel radius over the rig's); its ground, its hubs' mean
+      height less its radius, on the ground under the chassis. Each wheel is the mesh scaled to the
+      vehicle's wheel radius, alike on every axis, at its hub. `scale:`, `yaw:` and `z:` do not
+      apply to a parted look.
+    - **The wheels' motion.** Each frame each wheel is posed from its vehicle's wheels as its
+      plant or its poses have them (`WorldVehicles::wheels`, `parted_wheel_poses` in
+      `vehicle_view.h`): at its hub; at the height of the plant's wheel nearest it on its side (a
+      Jolt wheel on its suspension, a dynamic4w's on the ground under it, a pose entity's on the
+      ground under it); rolled by that wheel's spin; and, when the rig steers it, turned by the
+      steer of the plant's steered wheel nearest it: a Jolt vehicle's and a dynamic4w's own angle
+      for each wheel, a pose entity's its pose's steer. A wheel's spin is the way its chassis has
+      gone over its radius, integrated each physics step, on every plant and for a pose entity
+      (its pose's speed); a Jolt wheel's is its own rotation, slip and all. So a `pose` entity's
+      wheels turn as fast as its host's `speed` says, and steer as its `steer` says: a host
+      passes both with each pose (`entity_pose`, the pose keys or the packed poses).
+    - **Nodes.** The entity's group `vehicle_<id>` holds `vehicle_<id>_chassis` and
+      `vehicle_<id>_wheel<k>` (a group posed each frame, its mesh `vehicle_<id>_wheel<k>_mesh`
+      under it), the wheels in the rig's order. The catalog publishes the parts too:
+      `<vehicles>.archetypes.<id>.look.chassis`, `.look.wheel` and `.look.rig` (the rig's file, or
+      an inline rig's text, `vehicle_rig_text`), so a `vehicle_preview` draws them, at rest.
+    - **Later.** Each wheel's own suspension travel for a `pose` entity: today its wheels stand on
+      the ground under them, so on uneven ground the hubs follow the ground, not a simulated
+      suspension. That needs per-wheel state in `entity_pose` (and the packed poses).
   - **Entities.** A spawn (`WorldVehicles::spawn`, or the keys below) is an entity with an id,
     an identity (a name, a team, two colours, key/value metadata), a controller and its
     settings. `nav@1` drives it from goal to goal across the world's grid (the scene's
@@ -2438,7 +2493,9 @@ scene:
     bodies are. The box look poses each wheel where its plant has it
     (`WorldVehicles::wheels`): a Jolt wheel on its suspension, a dynamic4w wheel on the ground
     under it, the front ones steered (Ackermann's on a dynamic4w); a pose entity's on the ground
-    under it, steered by its pose's steer and rolled at its speed. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
+    under it, steered by its pose's steer; every one rolled at its speed (a Jolt wheel by its own
+    rotation). A parted look's wheels move the same way (above); a one-piece model's wheels are
+    the mesh's and do not move. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
@@ -3981,12 +4038,13 @@ this for every one.
   Controls window offers it as **UI size** (75% to 200%), under *Display* above the keys, for any
   host that calls `AppRuntime::set_host_ui_size`. A new size takes effect at the next frame, and
   the open windows grow or shrink with it. It holds for the run.
-- **Hiding windows.** On a view whose short side is under 500 logical pixels the panels of a
-  document with a `scene:` start hidden, and a round button in the bottom-right corner shows and
-  hides them all (the menu bar too), so the scene is never buried. A document with no scene (a
-  feed, a form) is all panels, so they start shown (`ImGuiOverlay::setPhoneHidesPanels`, which
-  arigl's `AriRuntime::load` sets). The button stays above every window, even one dragged over
-  its corner. A window collapses to its title bar with the arrow at the title's left (or a double
+- **Hiding windows.** A document's panels start shown on a phone as anywhere else, and a round
+  button in the bottom-right corner hides and shows them all (the menu bar too), so the scene can
+  be had whole. A host may start them hidden on a view whose short side is under 500 logical
+  pixels (`ImGuiOverlay::setPhoneHidesPanels(true)`); arigl's `AriRuntime::load` does not. The
+  button stays above every window, even one dragged over its corner. A page's Fullscreen button
+  (arigl-web's `fullscreen_button`) sits above it: cvcGL tells the page how far up the button
+  reaches (the CSS variable `--cvcgl-toggle-clear`). A window collapses to its title bar with the arrow at the title's left (or a double
   tap on the title, which on a phone collapses rather than maximizes), closes with its X unless
   it is `closable: false`, and comes back from the View or
   Windows menu (§5.9). On a touch screen a window moves by its title bar only, so a finger that
@@ -4462,7 +4520,7 @@ windows:
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
-| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. The picked node's own `on_pick:` (below) runs as well. |
 | `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
@@ -4493,6 +4551,25 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**A node's own `on_pick:`.** A node can carry an `on_pick:` (§5.4), so the scene says what a
+click on each thing does and the view need not sort picks by node:
+
+- **Which node's.** A press runs the `on_pick:` of the node it hits or, when that node has none,
+  of its nearest ancestor that has one: a group's handler covers its children, and a child's own
+  replaces it. A press that hits no such node runs none. In a slice view a press past the
+  volume's edge lands on the plane, not on the node.
+- **The press is the node's.** The node a press lands on keeps it: its `on_pick:` runs again on
+  each `drag` and on the `up`, wherever they land, with the same fields. `node` and `hit` say what
+  is under the pointer then, and `x`, `y` and `z` where, so a program can drag what it picked.
+- **Scope.** It runs in the document's scope, as `on_key:` does (§6.3): its keys resolve against
+  the document's prefix and it calls the document's functions, wherever the viewport sits, a
+  `load:`ed module's included.
+- **With the view's.** The view's own `on_pick:` runs too, in the view's scope. The two are
+  separate programs, so neither waits for the other: do not count on which runs first.
+  `SceneViews::pick` reports the node's in `PickHit::on_pick`.
+
+(`cvcgl_ariadne_node_pick`.)
 
 **Slice views.** `mode: slice` is a parallel view straight down one axis with no rotation
 (`CameraController::Mode::Slice`): the plane a `volume_slice` node (§5.4) lies in, with the
@@ -4599,8 +4676,20 @@ second `vtkVolume` with its own property and its own mapper, which uploads the v
 time: a GPU volume mapper keeps one set of transfer-function tables, for the property it last drew.
 A `volslice` node's slices face the camera they were swept for. A view from a camera of its own
 draws slices of its own, swept for its camera, over the node's shaders, textures and transfer
-function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own. A `volren` node's
-picture is raycast for the main view and composited into its pixels, so it is in the main view only.
+function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own.
+A `volren` node draws in every view, `camera: main` ones too. Its picture is raycast for one camera
+at one size, so each view raycasts the volume for its own camera at its own size times
+`volren.resolution_scale` (`VolRenNode::viewProp`), and draws it on a quad of its own, depth-tested
+against what the view draws with that camera's near and far. A view raycasts again only when its
+camera or size, the node's transform or clip planes, or the node's settings change (every frame it
+draws, with `volren.continuous`), never while it is hidden, and no more often than it draws, so a
+view with `refresh_hz` raycasts at most that many times a second. Each view that shows the node
+costs a raycast of its own at its raster: a 360 x 270 view at the default scale of 0.5 casts
+180 x 135 rays each time, beside the main view's. The jobs share the node's raycaster and take turns
+on its worker thread, so views add latency rather than threads; on CUDA they share the device and
+the volume uploaded to it once, and a volume's shadow maps are built once for all of them. A view
+draws the scene without the volume until its first raycast lands. A `volren` node takes no
+`override:` yet.
 `examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
 one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
 
@@ -4729,8 +4818,8 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A `volren` node is in the main view only. A `volslice` node takes `transform` but no restyling;
-  a `type: volume` node takes `opacity` and `transform`.
+- A `volren` node takes no restyling: no `override:` entry applies to it. A `volslice` node takes
+  `transform` but no restyling; a `type: volume` node takes `opacity` and `transform`.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
 - A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
@@ -5214,10 +5303,27 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
   their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
   it is drawn in an application's scope.
+- **Mirrored in the state tree:** the Runtime writes the list under the document's prefix, as the
+  feed mirrors itself to `notify.*` (§5.24), for a Processes window or a launcher to read:
+  `ariadne.apps.<key>.name` (as the menu names it, a loader's `name:` included), `.scope` (its
+  prefix from the document's: `includes.fe_lab`) and `.running` (1, or 0 while it is quit), and
+  `ariadne.name`, the document's own `meta.name`.
+  `<key>` is the scope without its `includes` segments, joined by `_`: `fe_lab`, a repeated
+  mount's `cam_0`, a nested mount's `outer_inner`. It is written as the list changes, Quit and
+  reopening included; an application gone from the tree is taken out (`mirror_apps`).
+- **Whose a process is:** every process the Runtime starts records its context's chroot and the
+  document's prefix, so `(ps)` and `(inspect)` give it a `scope` from the document's prefix: `""`
+  for the document's own `on_tick:`, actions and tests, `includes.fe_lab` for the application's,
+  the children they spawn included (STATE_EXEC_DEVELOPER_GUIDE.md, "Whose a process is").
+  `components/processes.ari` lists them by application (§6.5). With its chroot recorded, an
+  action's async calls post their progress under its chroot, as
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) 3.10 says they do.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
-  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
-  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
-  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart`,
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`,
+  `TheApplicationsAreMirroredUnderTheDocumentsPrefix`, `ProcessRowsSayWhoseTheyAre` and
+  `ProcessesListsByApplicationAndKillsARow`, the loader's `ALoadedDocumentIsNamedByItsMeta`, and
+  `ari test src/ari/tests/processes_component.ari` (ctest `ari_processes_component`) check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
 
 ### 5.26 Colours from state: `color:` and `background: { color: }`
@@ -5549,6 +5655,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -6358,8 +6465,8 @@ it (meshes, markers, paths, fields), and `host.frame_bounds(lo, hi)` aims the ca
 **Modes.** `"window"` needs a display. `"offscreen"` renders into an offscreen window: a capture,
 or CI on a software GL (VTK picks GLX, EGL or OSMesa at run time; the ImGui overlay needs GLX, so
 CI runs it under Xvfb, see `pycvc-linux` in ci.yml). Its scene and UI clocks step by each frame's
-`dt`, so its frames are reproducible. A view whose shorter side is under 700 logical pixels
-starts with the windows hidden, as on a phone (§5.14), so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
+`dt`, so its frames are reproducible. A small view lays its windows out as on a phone (§5.14),
+so captures use 1024 x 768 or more. `"headless"` has no GL at all: a `pycvc.AriApp`, an
 `AppRuntime` with no backend and no scene. The document's `init:`, residents, actions, host calls
 and state all run, but nothing is drawn, so a computed `bind:` is never evaluated, a `scene:` is
 dropped with a warning, and a document that `requires: gl.scene` does not load. Tests and CI use
@@ -6441,8 +6548,10 @@ they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
 document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
 the extra data files to fetch; both pages read the same file. The URL can only add document
-arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
-terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+arguments. A download that breaks off (the module, its Python zip, the document or a file it
+names) is fetched twice more past the browser's cache (`cache: 'reload'`); one that still breaks
+fails the load with its name and how much of it arrived. A failed load shows what the runtime
+printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is
@@ -8495,3 +8604,115 @@ Interactive behaviour, keys and both terminal backends are tested by driving `ar
 as `src/ari/tests/run_in_tmux_test.sh` (transfix/libcvc#883) does. Scripted input for `snapshot` and `test`, and file
 descriptors as state channels, are on the agenda (transfix/libcvc#894).
 
+---
+
+## 14. Validating a document: the `.ari` schema and `ari validate`
+
+### 14.1 The schema
+
+The `.ari` schema is a JSON Schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)):
+every top-level block, every built-in widget type and scene node, and the keys and values each
+takes, each described. It is the definition of a document's structure; where this guide and the
+schema disagree, the schema (with the loader beside it) is right. The library carries it
+compiled in (`cvc::ariadne::ari_schema_json()`; `ari schema` prints it), and an install puts it
+at `share/libcvc/ariadne/schema/ari.v1.schema.json`, so an editor can check a document as it is
+written. With the YAML language server (VS Code's YAML extension), a modeline does it:
+
+```yaml
+# yaml-language-server: $schema=../../src/cvc/ariadne/schema/ari.v1.schema.json
+```
+
+What the schema holds a document to:
+
+- **Every map is closed.** A key it does not list is an error: a misspelt key (`bnd:`), a
+  misspelt widget type (`slider_itn:`), a key on the wrong widget (a `commit:` on a button), a
+  misspelt block (`widnows:`). Three things stay open: a key that starts with `x-`, anywhere,
+  which is the author's or a tool's own; a custom widget's keys (`type: gauge`) and a custom
+  scene node's (`type: forest_trees`), which are their handler's; and a top-level block an app
+  registered (`register_ari_block`) or the document declares in `customs:`.
+- **Every value has its type**: a number where the loader reads one, one of the values an enum
+  key takes (`commit: live | release`), a colour in one of the forms §5.26 lists, `[x, y, z]`
+  for a position.
+- **A widget's type is its first type key**, in the loader's order
+  (`builtin_widget_types()`): a `progress:` with an `overlay:` caption is a progress. Two type
+  keys that are not such a pair are an error: in `{button: Go, text: x}` the text wins, and the
+  `button:` is an unknown key.
+- **What it cannot see**: inside a program (`on:`, `init:`, `visible_when:`, ...) it checks
+  only that it is text, and a `bind:` the same; a custom type's own keys not at all. The loader
+  and the runtime check the rest (a program that does not parse, a state key no one writes).
+
+Flags take every spelling the loader reads (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+A value written in YAML as `1.5` is a number, and `"1.5"` too: the schema types scalars as the
+loader reads them, not by their quotes.
+
+### 14.2 When a document is checked
+
+A build with the validator (json-schema-validator over nlohmann-json; `have_jsonschema()`,
+`ari info`'s *json_schema*) checks every document it loads:
+
+- the document itself, before anything else reads it;
+- each library it `import:`s, and each fragment it `load:`s (after the mount's `args:`);
+- each `include:` expansion, as a widget, after its args are substituted and its slots filled.
+  A problem there is reported in the unit's own file and line, with the context
+  `include <unit>`.
+
+Each problem is a warning, `ari: schema: <file>:<line>:<column>: <context>: <pointer>:
+<message>`, and a `SchemaIssue` in `LoadResult::schema_issues`. The load goes on: the loader is
+lenient, and a host decides how strict to be. `ari test` fails a document that warns, so a
+tested document is a valid one.
+
+`validate_string(app, yaml)` and `validate_file(app, path)` check a document without loading
+it: its structure, and each of its own `units:` instantiated with the args it declares (a
+`{name}` token only an include site fills is not checked). They resolve nothing.
+
+A build without the validator checks nothing: `validate_*` say so (`checked` is false) and
+loads report no schema issues. CI's libcvc lanes fail when their configure did not find it.
+
+### 14.3 `ari validate`
+
+```
+ari validate [--structural-only] [--strict] [--json] doc.ari...
+ari validate -              # a document on stdin
+ari schema                  # print the schema
+```
+
+`ari validate` checks each document: its structure and units (`validate_file`), then a load
+without running anything (no `init:`, no frame, no network), which checks what the load reaches
+and lists the loader's own warnings. Each problem is a line of its own, file first, as a
+compiler writes them:
+
+```
+doc.ari:11:5: /windows/0: unknown key 'closeable'
+doc.ari:14:9: /windows/0/children/0: unknown key 'bnd'
+doc.ari:16:13: /windows/0/children/0/hi: 'fast' is the wrong type here
+doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or write state
+```
+
+- `--structural-only`: the document and its units alone, nothing resolved (no imports, no
+  fragments): what an editor or a pre-commit hook wants.
+- `--strict`: a loader warning fails the document too.
+- `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
+  column, context, pointer, message), its load error and its warnings.
+
+The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
+the `cvc://` component library, `--component-path`). A document for arigl may name widget types
+`ari` does not have (`viewport`); the load warns about them, and the document is still valid.
+The exit code is 0 when every document is valid, 1 for a schema problem, 2 when a load fails
+(or warns, with `--strict`) or on a usage error, 3 when the YAML does not parse, and 4 when this
+`ari` was built without the validator.
+
+### 14.4 Changing the schema
+
+A key the loader reads goes in the schema in the same change: the test that every shipped
+document is valid (`ariadne_schema_test`'s `EveryShippedDocumentIsValid`) fails until it does.
+The schema keeps to what json-schema-validator implements (draft 7's keywords: no
+`unevaluatedProperties`, no `prefixItems`, no assertion beside a `$ref`), which
+`KeepsToWhatTheValidatorImplements` checks. A map whose every value has a schema (`keys:`,
+`data:`, ...) says so with `patternProperties: {"^.*$": ...}`, never a schema-valued
+`additionalProperties`: the validator reports an error in such a value as one message at the
+map, with no pointer into the value. `additionalProperties` is only ever `false`, closing a map.
+A widget type's schema, `w_<type>`, lists its own
+keys and takes the shared ones by the one pattern every type carries
+(`EveryWidgetTakesTheSharedKeys`); a new widget type also needs its link in `short_widget`, in
+the loader's order, and its entry in `typed_widget` (`EveryBuiltinWidgetTypeHasItsSchema`).

@@ -337,3 +337,10 @@ catalog:
     args: { title: Network cache, id: http_cache }   # defaults
     verbs: [http_cache.clear]
     note: "arigl puts it in every document, opened from Settings > Network cache...; Clear is the bare action http_cache.clear, which AppRuntime handles (uri_http_cache.h: clear_http_cache)"
+  - component: processes
+    file: processes.ari
+    unit: processes
+    binds: "<prefix>.{rows}.* rows (count, total, more, at, every, max, <i>.{pid,scope,app,name,status,steps,waits,memory}); reads <prefix>.ariadne.apps.* and <prefix>.ariadne.name (the Runtime's mirror)"
+    for: "the document's running DSL programs, a row each: the application each belongs to (from its (ps) scope), pid, name, status, steps, what it waits on, memory, and a Kill button (docs/roadmap/ARIADNE_SHELL.md 4.10)"
+    args: { id: processes, title: Processes, rows: processes }   # defaults
+    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button"

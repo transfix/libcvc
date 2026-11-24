@@ -24,12 +24,14 @@
 #ifndef CVC_STATE_EXEC_PROCESS_TABLE_H
 #define CVC_STATE_EXEC_PROCESS_TABLE_H
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/state/state_exec/process.h>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -110,6 +112,10 @@ public:
   bool preempted() const noexcept { return preempted_; }
 
   std::size_t runnable_count() const { return queued_; }
+  /// Stage 2 (S2a, S2-Q4, S2-Q13): the best (lowest) effective priority among the ready and
+  /// running processes, the run-queue level a pick would take (0 for every process under round
+  /// robin, whose one level is 0); nullopt when none is runnable. O(levels).
+  std::optional<int> best_runnable() const;
   /// The round-robin pick (round_robin, and priority_rr within the best priority): the
   /// `rr_index`-th (mod the count) of the runnable processes in pid order; rr_index becomes the
   /// next index. nullptr when none is runnable.
@@ -228,6 +234,15 @@ private:
   std::vector<process *> watchers_;
 };
 
+/// Stage 2 (S2a, S2-Q2): what wakeup::notify() calls instead of signalling while one is
+/// installed (wakeup::set_notifier), with the `ctx` it was installed with. It runs on the posting
+/// thread, under the wakeup's notifier lock and often under the poster's own lock (an ingress
+/// mutex, a lock port's mu_), so it must not block for long, throw, post to any scheduler, or
+/// take a lock its installer holds while it posts. The lock order is: the host's state, then an
+/// ingress mutex or a port's mu_, then the notifier lock, then the pool's ready-queue mutex; the
+/// pool never posts, installs or clears a notifier while it holds that mutex.
+using wake_notifier = void (*)(void *ctx) noexcept;
+
 /// A wakeup a thread can block on until another thread notifies it or a time comes, the time
 /// kept to well under a millisecond (Windows: a high-resolution waitable timer where there is
 /// one, since a timed wait on a condition variable there lasts whole ~15.6 ms timer ticks).
@@ -238,8 +253,20 @@ public:
   ~wakeup();
   wakeup(const wakeup &) = delete;
   wakeup &operator=(const wakeup &) = delete;
-  /// Any thread: wake a wait_until() in progress, or the next one.
+  /// Any thread: wake a wait_until() in progress, or the next one. While a notifier is installed
+  /// (set_notifier), it calls the notifier instead, under the notifier lock, and signals nothing.
   void notify();
+  /// Stage 2 (S2a, S2-Q2): install `fn(ctx)` as this wakeup's notifier (nullptr clears it, and
+  /// notify() signals again). It is set under the wakeup's own small lock, which notify() holds
+  /// while it calls the notifier, so this returns once no call of the old notifier runs, and none
+  /// starts after: the old `ctx` may be freed then. Any thread, never from inside a notifier. An
+  /// exec_pool installs one at attach and clears it at detach; ExecPool.run_all installs one on
+  /// each pooled group for its batch (S2-Q6).
+  void set_notifier(wake_notifier fn, void *ctx);
+  /// Whether a notifier is installed (one acquire load; any thread).
+  bool has_notifier() const noexcept {
+    return notifier_.load(std::memory_order_acquire) != nullptr;
+  }
   /// Block until notify() (true; the notification is consumed) or `t` (false). It never returns
   /// false before `t` on the steady clock, whatever the OS wait it uses does (a timer may fire
   /// early): it reads the clock and waits the rest. A `precise` wait (the schedulers ask for one
@@ -254,6 +281,11 @@ public:
 private:
   struct impl;
   std::unique_ptr<impl> impl_;
+  // The notifier (set_notifier): written, and called by notify(), under notifier_mu_;
+  // has_notifier() reads notifier_ alone.
+  std::mutex notifier_mu_;
+  std::atomic<wake_notifier> notifier_{nullptr};
+  void *notifier_ctx_ = nullptr;
 };
 
 /// Counts the changes under a state tree's root (its childChanged and valueChanged signals,

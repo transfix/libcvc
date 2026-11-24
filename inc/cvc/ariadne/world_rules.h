@@ -16,6 +16,7 @@
 #ifndef __CVC_ARIADNE_WORLD_RULES_H__
 #define __CVC_ARIADNE_WORLD_RULES_H__
 
+#include <array>
 #include <cvc/ariadne/avatar_physics.h> // avatar_body, avatar_energy_policy
 #include <cvc/physics/types.h>
 #include <map>
@@ -102,19 +103,44 @@ struct avatar_policy {
 // length, standing on the ground under the chassis. With no look:, a humvee is drawn as the
 // Humvee model when it is installed, and as its box otherwise.
 //
-// A wheeled look (`wheel:`) is a model in two parts, so that its wheels turn: the look's mesh is
-// the chassis without its wheels, and `wheel` is one wheel, drawn once for each of the vehicle's
-// wheels where its plant or its poses have it (WorldVehicles::wheels): rolled, steered, and on
-// its suspension or the ground under it. Both are in the vehicle's frame, as the files have them
-// (metres; x forward, y left, z up): the chassis's origin midway between its axles, on its centre
-// line, on the ground under its tyres; the wheel's its hub, its axle along y, its outer face
-// toward +y (a left wheel; a right one is it turned half a turn about z). `wheelbase` and `track`
-// are the model's own (m: its front and rear hubs' spread, its left and right hubs'; 0, the
-// vehicle's). With `fit` (a wheeled look's default) the chassis is scaled on each axis so that
-// its axles, track and wheel radius (half the wheel mesh's height) are the vehicle's, and the
-// wheel alike on every axis to the vehicle's wheel radius; without, both are drawn at their own
-// size. `wheel` is found as the mesh is: a file beside the document, an asset's id, a model's
-// name, or with data: a file in the same package.
+// A parted look (`chassis:`, `wheel:`, `rig:`) is a model in parts: the chassis's mesh without its
+// wheels, one wheel's mesh, and the rig that says where the wheels go (vehicle_rig). Each wheel is
+// drawn on its own at its hub, turned by its steer and rolled by its spin, so its wheels turn as
+// the vehicle drives. With `data: NAME` the three are files in that data: entry's package.
+//
+// A parted look's rig (`rig:`, a map inline or a file of one: YAML, or JSON, which is YAML too):
+// where its model's wheels are, in the frame its chassis and wheel files share (metres; x forward,
+// y left, z up; with `up: y`, glTF's: +y up, +z forward, +x left).
+//
+//   radius   the wheel mesh's radius (or `wheel: { radius: }`); none: half the wheel mesh's larger
+//            extent across its axle
+//   hubs     each wheel's hub, [x, y, z]; or a map whose `xyz:` lists them and whose `order:`
+//            names them (for steer:)
+//   steer    the hubs that steer, by index or by name; none given: the front axle's (the hubs
+//            whose x is within 5% of the hubs' length of the largest; with one axle, none)
+//   mirror   how the wheel mesh (a left wheel, its outside toward +y) is drawn on the right (hubs
+//            with y < 0): turn (half a turn about its upright, the default), reflect (mirrored
+//            across its xz plane) or none (as it is)
+//   up       z (the default) or y
+//
+// Any other key is ignored (a rig file's provenance: source:, frame:, size:, ...).
+struct vehicle_rig {
+  double radius = 0.0; // 0: from the wheel mesh
+  std::vector<std::array<double, 3>> hubs;
+  std::vector<bool> steers; // per hub (the front axle's when steer: is not given)
+  std::string mirror = "turn";
+  bool y_up = false;
+  bool operator==(const vehicle_rig &) const = default;
+};
+
+// A rig from its map: false, and why, when it is not one (no hubs, a hub that is not three
+// numbers, a steer that names no hub, a mirror or up it does not know, a radius not > 0).
+bool parse_vehicle_rig(const Value &v, vehicle_rig &out, std::string *why = nullptr);
+// A rig as a map's text, on one line in braces (YAML's flow style: parse_value and
+// parse_vehicle_rig read it back, numbers to 17 digits): a catalog's look.rig key carries an
+// inline rig so.
+std::string vehicle_rig_text(const vehicle_rig &rig);
+
 struct vehicle_look {
   std::string kind; // box, file, asset, model or data; "" the default (above)
   std::string path; // the file, the asset's id, the model's name, or (data) the file in the package
@@ -125,8 +151,12 @@ struct vehicle_look {
   std::string data, uri, subpath;
   double scale = 1.0, yaw = 0.0, z = 0.0;
   bool fit = false;
-  std::string wheel;                   // a wheeled look's wheel (above); "" none
-  double wheelbase = 0.0, track = 0.0; // a wheeled look's model's own; 0 the vehicle's
+  // A parted look (kind file, or data with `data:`; `path` unused): the chassis's file and the
+  // wheel's, and its rig, given inline (`rig`) or read from `rig_file` (in the package, for a data
+  // look) when the view draws it. Fitted to the vehicle always: scale, yaw and z do not apply.
+  std::string chassis, wheel, rig_file;
+  vehicle_rig rig;
+  bool parted() const { return !chassis.empty(); }
   bool operator==(const vehicle_look &) const = default;
 };
 

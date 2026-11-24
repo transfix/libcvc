@@ -124,7 +124,7 @@ scene:
           std::abs(bg[2] - 0.4) < 1e-6,
       "the host's background is back (no gradient from a)");
   chk(sg.shadowsEnabled() == shadows_before, "shadows are as the host had them");
-  chk(ui.phoneHidesPanels(), "a document with a scene: a phone starts with its panels hidden");
+  chk(!ui.phoneHidesPanels(), "a document with a scene: a phone starts with its panels shown");
 
   std::printf("== load c: a UI with no scene ==\n");
   rt.load(write_doc("cvcgl_ari_switch_c.ari", "meta: {min_libcvc: 3.0.0}\n"
@@ -134,7 +134,7 @@ scene:
                                               "      - text: a post\n"));
   rt.step(1.0 / 30.0);
   chk(!rt.realized(), "c has no scene");
-  chk(!ui.phoneHidesPanels(), "so a phone starts with its panels shown");
+  chk(!ui.phoneHidesPanels(), "and one without: shown too");
 
   // Adaptive quality (scene_quality.h, O21): the loop runs on the frames' wall time, never on the
   // fixed clock (a capture's frames stay as asked for), and publishes quality.* under the prefix.

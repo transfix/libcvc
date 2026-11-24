@@ -1258,6 +1258,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
+# A node's own on_pick: (its nearest ancestor's when it has none) run by a press that lands on it,
+# and by that press's drags and release wherever they land, in the document's scope, beside the
+# view's own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_node_pick test/cvcgl_ariadne_node_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_node_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_node_pick COMMAND cvcgl_ariadne_node_pick)
+endif()
+
 # Authored viewpoints: a scene camera's position:, target:, fov:, near:, far: and orthographic:
 # with height:, on the main view (a `cameras:` entry named main), a named camera and a viewport's
 # own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
@@ -1369,6 +1378,13 @@ add_executable(cvcgl_ariadne_physics test/cvcgl_ariadne_physics.cpp)
 target_link_libraries(cvcgl_ariadne_physics PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_physics COMMAND cvcgl_ariadne_physics)
 
+# The Ariadne runtime frame's cost (GlSceneAdapter's sync_visibility + tick_scene) on a scene shaped
+# like demo3-ari: 12 pose vehicles, their ribbons, links and bound visible:s. Headless; it prints a
+# BENCH line and checks what the frame publishes. The dynamics need Jolt.
+add_executable(cvcgl_ariadne_frame test/cvcgl_ariadne_frame.cpp)
+target_link_libraries(cvcgl_ariadne_frame PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_frame COMMAND cvcgl_ariadne_frame)
+
 # Scene node labels (scene_labels.h, LabelLayer.h): label: from a document, drawn for real -- the
 # fade and cull rule, the text over its backdrop and edge, depth order, bound text, scale and
 # focus, views, and entity_labels: on a world entity.
@@ -1384,6 +1400,13 @@ endif()
 add_executable(cvcgl_ariadne_data test/cvcgl_ariadne_data.cpp)
 target_link_libraries(cvcgl_ariadne_data PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_data COMMAND cvcgl_ariadne_data)
+
+# A world vehicle's parted look (vehicle_view.h; docs/ARIADNE.md, "A model in parts"): a chassis,
+# a wheel and a rig, each wheel posed from its vehicle's speed and steer, headless; then the pixels
+# of a wheel's spin and steer, offscreen.
+add_executable(cvcgl_ariadne_wheeled_look test/cvcgl_ariadne_wheeled_look.cpp)
+target_link_libraries(cvcgl_ariadne_wheeled_look PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_wheeled_look COMMAND cvcgl_ariadne_wheeled_look)
 
 # material: { opacity } on Ariadne scene nodes (docs/ARIADNE.md §5.4): literal and bound, on a mesh,
 # a LOD ladder's rungs and a data node's drawing, and the see-through pixels in the main view.
@@ -1697,7 +1720,7 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_data
+  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_frame cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters

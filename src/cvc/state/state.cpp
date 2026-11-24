@@ -113,6 +113,7 @@ state::state(app &ctx, const std::string &n, const state *p)
     : _ctx(ctx), _name(n), _parent(p), _lastMod(boost::posix_time::min_date_time), _hidden(false),
       _readOnly(false), _initialized(false) {
   // Child changes reach the ancestors through emitChildChanged(), not a slot per node.
+  _structure = p ? p->_structure : std::make_shared<std::atomic<std::uint64_t>>(0);
 }
 
 // -------------
@@ -578,40 +579,39 @@ std::vector<std::string> state::values(bool unique) {
 state &state::value(const std::string &v, bool setValueType) {
   boost::this_thread::interruption_point();
 
+  // One hold of the lock reads all the write depends on: whether it routes through a link, whether
+  // the node is read-only, and whether `v` is its value already (a publisher's every-frame write
+  // of an unchanged value then costs one lock and no copy).
+  bool route = false, read_only = false, equal = false;
+  {
+    boost::mutex::scoped_lock lock(_mutex);
+    route = !_linkTarget.empty() && _linkMode == link_mode::transparent && _linkWritable;
+    if (!route) {
+      read_only = _readOnly;
+      equal = _value == v;
+    }
+  }
+
   // Phase 8: writes through a writable transparent link route to the
   // resolved target. Opaque links and non-writable transparent links
   // accept writes on the link node itself (the historical default).
-  {
-    link_mode mode_snapshot;
-    bool writable_snapshot;
-    bool is_link_snapshot;
-    {
-      boost::mutex::scoped_lock lock(_mutex);
-      is_link_snapshot = !_linkTarget.empty();
-      mode_snapshot = _linkMode;
-      writable_snapshot = _linkWritable;
+  if (route) {
+    link_resolution r = resolveLink();
+    if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
+      r.target->value(v, setValueType);
+      return *this;
     }
-    if (is_link_snapshot && mode_snapshot == link_mode::transparent && writable_snapshot) {
-      link_resolution r = resolveLink();
-      if (r.kind == link_resolution_kind::resolved && r.target != nullptr && r.target != this) {
-        r.target->value(v, setValueType);
-        return *this;
-      }
-      throw read_only_error(boost::str(
-          boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
-    }
+    throw read_only_error(boost::str(
+        boost::format("Cannot write through unresolvable transparent link: %1%") % fullName()));
   }
 
   // Check if this state is read-only
-  {
-    boost::mutex::scoped_lock lock(_mutex);
-    if (_readOnly) {
-      throw read_only_error(
-          boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
-    }
+  if (read_only) {
+    throw read_only_error(
+        boost::str(boost::format("Cannot modify read-only state: %1%") % fullName()));
   }
 
-  if (value() == v)
+  if (equal)
     return *this; // do nothing if equal
 
   {
@@ -792,6 +792,8 @@ void state::reset(bool resetChildren, bool fireCallbacks) {
       clear(*this);
       doomed.swap(_children);
     }
+    if (!doomed.empty())
+      structureChanged();
     doomed.clear();
     if (fireCallbacks)
       touch();
@@ -1313,6 +1315,7 @@ state &state::operator()(const std::string &childname) {
         cur->_children[key] = child;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
+        cur->structureChanged();
       }
     }
     held = std::move(child);
@@ -1353,6 +1356,7 @@ state::state_ptr state::sharedChild(const state_ptr &self, const std::string &ch
         cur->_children[key] = next;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
+        cur->structureChanged();
       }
     }
     if (pins)
@@ -1394,6 +1398,7 @@ state &state::linkTo(const std::string &target_path) {
     }
   }
   if (changed) {
+    structureChanged();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1402,7 +1407,7 @@ state &state::linkTo(const std::string &target_path) {
 }
 
 bool state::clearLink() {
-  bool was_link = false;
+  bool was_link = false, reshaped = false;
   {
     boost::mutex::scoped_lock lock(_mutex);
     was_link = !_linkTarget.empty();
@@ -1410,9 +1415,12 @@ bool state::clearLink() {
       _linkTarget.clear();
       _lastMod = boost::posix_time::microsec_clock::universal_time();
     }
+    reshaped = was_link || _linkMode != link_mode::opaque || _linkWritable;
     _linkMode = link_mode::opaque;
     _linkWritable = false;
   }
+  if (reshaped)
+    structureChanged();
   if (was_link) {
     linkChanged();
     if (parent())
@@ -1437,6 +1445,7 @@ state &state::linkTo(const std::string &target_path, link_mode mode) {
     }
   }
   if (changed) {
+    structureChanged();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1460,6 +1469,7 @@ state &state::setLinkMode(link_mode mode) {
     }
   }
   if (changed) {
+    structureChanged();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1483,6 +1493,7 @@ state &state::setLinkWritable(bool writable) {
     }
   }
   if (changed) {
+    structureChanged();
     linkChanged();
     if (parent())
       parent()->emitChildChanged(name());
@@ -1655,6 +1666,7 @@ state::state_ptr state::childThroughLinksShared(const std::string &path, bool re
         cur->_children[key] = child;
         cur->_lastMod = boost::posix_time::microsec_clock::universal_time();
         cur->_initialized = true;
+        cur->structureChanged();
       }
     }
     cur = holds.push(std::move(child));
@@ -2038,6 +2050,7 @@ bool state::removeChild(const std::string &name) {
     _children.erase(it);
     _lastMod = boost::posix_time::microsec_clock::universal_time();
   }
+  structureChanged();
   emitChildChanged(name);
   return true;
 }
@@ -2123,6 +2136,8 @@ std::size_t state::sweepExpired() {
         }
       }
     }
+    if (!to_remove.empty())
+      n.structureChanged();
 
     // Fire `expiring` while the node is still alive, then drop our reference so the dtor (and
     // `destroyed`) fires next, then notify the parent chain that the child set changed.

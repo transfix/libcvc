@@ -60,6 +60,13 @@ public:
   // The app pool's worker count, the real one (in Python, the read-only property `threads`).
   unsigned threads() const;
 
+  // The pool's run_all counters since it was made, as a dict (S2a.8, S2-Q6): "batch_waits", the
+  // times a batch with nothing to pump waited between rounds (once for all its pooled Execs, until
+  // a post to one of them, close(), or the earliest of their deadlines), and
+  // "batch_wait_timeouts", those of them that ran out with work posted meanwhile, whose wake never
+  // came (0 while the batch wakeup works). Any thread.
+  PyObject *stats() const;
+
   // Kill what is still running, wait for its kernels and a batch in progress (with the GIL
   // released), and destroy the pooled Execs. Idempotent; afterwards run_all and register_* raise
   // RuntimeError. From inside its own batch (a function a program calls) it raises RuntimeError.

@@ -1167,6 +1167,11 @@ void sim_world::step(int num_threads) {
     }
     // A plant that measures its vehicles feeds the plant ledger.
     st_smp_.plant = plant_samples();
+    // A coph_driver feeds the CoPH ledger (feed_coph), for this step only.
+    if (st_coph_fed_)
+      st_coph_.resize(n_);
+    st_smp_.coph = st_coph_fed_ ? st_coph_.data() : nullptr;
+    st_coph_fed_ = false;
     stats_->step(st_pos_.data(), st_head_.data(), st_spd_.data(), st_mode_.data(),
                  st_reached_.data(), st_smp_);
   }
@@ -1968,6 +1973,13 @@ episode_nav_stats sim_world::nav_stats() const {
     throw std::runtime_error(
         "cvc::nav::sim_world::nav_stats: not armed (call begin_nav_stats first)");
   return stats_->finish();
+}
+
+void sim_world::feed_coph(std::span<const coph_sample> samples) {
+  if (!stats_)
+    return; // nav_stats is not armed: the run is untouched
+  st_coph_.assign(samples.begin(), samples.end());
+  st_coph_fed_ = true;
 }
 
 void sim_world::set_vehicle_radii(const float *rr, const float *body_rr, int n) {
