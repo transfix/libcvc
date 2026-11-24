@@ -2,10 +2,10 @@
 # (cvc::gl::VolumeGridNode, docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4). Slice views down the
 # volume's axes with a 3D view beside them, the tool (navigate / points / probe / contours), and a
 # side panel: the probe and the planes, the point classes, the contours and their tiled surfaces,
-# and the transfer function. Every control binds a key the node owns
-# (graphics.root.children.<node>.grid.*, VolumeGridNode.h and VolumeGridContours.h), and the views
-# write their picks and the pointer to the node's grid.pick and grid.pointer, so it runs with NO
-# host C++.
+# the transfer function and the segmentation (its Segmentation tab, volume_grid_segmentation.ari).
+# Every control binds a key the node owns (graphics.root.children.<node>.grid.*, VolumeGridNode.h
+# and VolumeGridContours.h), and the views write their picks and the pointer to the node's
+# grid.pick and grid.pointer, so it runs with NO host C++.
 #
 # The grid reads no file: it shows the volume the app holds (the node's source: { data: <name> },
 # a data: entry the document loads), and follows it as it changes. With more than one volume
@@ -74,6 +74,10 @@
 # does: PageUp / PageDown write `step 1` / `step -1`, Delete `delete_selected` (the contours' selected
 # points under the Contours tool).
 #
+# The Segmentation tab (volume_grid_segmentation.ari) segments the volume from the shown point
+# classes (the grid's `segment` request): the labels draw on the slices, each class's surface in the
+# 3D view. Stop ends a segmentation and a tile alike.
+#
 # Contours: Tile runs the contour tiler on the closed curves (a sliced task, its keys under
 # grid.tile) and puts a surface per object in the 3D view in the object's colour. Save writes the z
 # planes' closed curves (grid.contours) through the app as .cvcc, .contour or .pcd; Load loads a
@@ -83,6 +87,7 @@
 
 import:
   - cvc://components/transfer_function.ari
+  - cvc://components/volume_grid_segmentation.ari
 
 units:
   volume_grid:
@@ -357,6 +362,7 @@ units:
                     bind: graphics.root.children.{node}.grid.classes.{i}.name
                   - color: "##colour{i}"
                     bind: graphics.root.children.{node}.grid.classes.{i}.color
+                    fmt: hex
                   - slider_float: "##radius{i}"
                     bind: graphics.root.children.{node}.grid.classes.{i}.radius
                     lo: 0.5
@@ -418,6 +424,9 @@ units:
                 tooltip: "what draws the volume now, or what it waits for"
               - include: transfer_function_editor
                 args: { node: "{node}", id: "{id}_tf", label: Colours }
+          - include: volume_grid_segmentation_tab
+            tab: Segmentation
+            args: { node: "{node}", id: "{id}" }
           - slot: tabs
       - text: Status
         bind: graphics.root.children.{node}.grid.status

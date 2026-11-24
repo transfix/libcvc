@@ -8,6 +8,7 @@
 // it. Every realized node is a cvc::state_object, so a node IS a state subtree and
 // each prop a reactive state key (§9.1) — this struct just says what to create.
 
+#include <cvc/ariadne/scene_animation.h> // SceneAnimation (animations:)
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/tf/model.h>
@@ -531,6 +532,15 @@ struct SceneClock {
   // follow (room_clock). A clock that has already ticked at another quantum keeps it, with a
   // warning.
   double hz = 0.0;
+  // How far the world may fall behind its clock (s of world time at 1x, growing with the speed),
+  // from one quantum to cvc::kSimCatchupMax: past it the clock lets the time go rather than run it
+  // late, and the world runs slower than its speed. On the frame's thread it is the catch-up one
+  // frame may run (the clock's stall guard: a stall's time past it is dropped, sim.dropped); on a
+  // world stepped on a thread of its own (world_worker, arigl --world-thread), how far it may
+  // trail the clock before the clock waits for it. 0, the default: the clock keeps the catch-up
+  // its host gave it (cvc::kSimCatchup, 0.25 s, for a scene with vehicles or a rate), and a worker
+  // allows cvc::kSimCatchup.
+  double max_lag = 0.0;
 };
 
 // Where the shadow maps are spent (cvc::gl::SceneGraph::setShadowFocus). Unfocused, each light's
@@ -620,6 +630,9 @@ struct Scene {
   // entity's label (cvc::gl::ariadne::apply_entity_label). Empty: none.
   Value entity_labels;
   std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
+  // animations: [...] — keyframed tracks over the scene clock (scene_animation.h); a scene with any
+  // runs on the scene clock, as `clock: {}` would make it.
+  std::vector<SceneAnimation> animations;
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   SceneWorldSpec world; // world: {...} — which of the nodes' worlds is on (see SceneWorldSpec)
@@ -667,7 +680,7 @@ struct Scene {
   float environment_ground[3] = {0.20f, 0.19f, 0.18f};
   bool any() const {
     return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background ||
-           clock.present || physics.present;
+           clock.present || physics.present || !animations.empty();
   }
 };
 
