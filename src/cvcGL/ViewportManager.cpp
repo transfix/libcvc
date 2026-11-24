@@ -275,6 +275,19 @@ struct ViewportManager::Impl {
       throw std::runtime_error("ViewportManager: window is closed");
   }
 
+  // The size a host asks for: VTK's pixels, except SDL's window on a scaled Windows display, where
+  // it is the display's logical pixels and the window that times the display's scale
+  // (SdlGLRenderWindow::SetLogicalSize). frameWidth()/frameHeight() say the pixels it got.
+  void sizeWindow(int width, int height) {
+#ifdef CVC_ENABLE_SDL
+    if (auto *sdl = SdlGLRenderWindow::SafeDownCast(window)) {
+      sdl->SetLogicalSize(width, height);
+      return;
+    }
+#endif
+    window->SetSize(width, height);
+  }
+
   int highestLayer() const {
     int m = 0;
     for (const auto &v : viewports)
@@ -471,7 +484,7 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
 #ifdef CVC_ENABLE_SDL
   if (!offscreen && sdl_window_enabled()) {
     auto sdlWin = vtkSmartPointer<SdlGLRenderWindow>::New();
-    sdlWin->SetSize(width, height);
+    sdlWin->SetLogicalSize(width, height); // on Windows, times the display's scale once made
     sdlWin->SetWindowName("cvcGL");
     auto sdlIren = vtkSmartPointer<SdlRenderWindowInteractor>::New();
     sdlIren->SetRenderWindow(sdlWin);
@@ -488,7 +501,7 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   if (!m_impl->window)
     m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
   m_impl->window->SetOffScreenRendering(offscreen ? 1 : 0);
-  m_impl->window->SetSize(width, height);
+  m_impl->sizeWindow(width, height);
   m_impl->window->SetNumberOfLayers(1);
   if (const char *units = std::getenv("CVCGL_TEXTURE_UNITS"))
     limitTextureUnits(std::atoi(units));
@@ -965,7 +978,7 @@ void ViewportManager::resize(int width, int height) {
   m_impl->requireOpen();
   if (width < 1 || height < 1)
     throw std::invalid_argument("ViewportManager::resize: width and height must be >= 1");
-  m_impl->window->SetSize(width, height);
+  m_impl->sizeWindow(width, height);
 }
 
 void ViewportManager::resetCamera() {
