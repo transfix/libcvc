@@ -83,6 +83,23 @@ The shipped controller heads for the goal, keeps a spacing from the other cars, 
 anything blocked along its rays, slows into turns, for the goal and for what is ahead, and backs
 out when wedged. It is a starting point, not a planner: in a city it can stall in a dead end.
 
+### CoPH, natively
+
+`--controller coph` (or the Run panel's Controller: CoPH) drives every car with libcvc's CoPH
+fleet ([NAV-COPH-ROADMAP.md](roadmap/NAV-COPH-ROADMAP.md)) in place of your controller. Each car
+carries an online learner of its navigation energy, and the cars share what they learn as
+packets. It runs in C++ (`pycvc.NavCophDriver`, the twin of GRL-SNAM's cars controller), with
+no torch.
+- CoPH steps on its own cadence, 0.12 √s s, and holds its force between steps.
+- Each tick, each car's plant takes that force allocated to a steer and an acceleration.
+- `s`, the Froude scale, is CoPH's length in metres. By default it is the car's length over a
+  RoboRacer's (`Cars.coph_froude()`): 1 for a RoboRacer, about 9 for a Humvee. `--coph-scale`
+  sets it.
+- The coefficient plots show each car's account: the allocation residual (the share of CoPH's
+  force the car could not take), the work, the risk cost and the CoPH steps.
+- A car that reaches its goal brakes and stays. Its learner's run is over, so it takes no new
+  goal (Known limits).
+
 ## The world
 
 `run.world` (the Run window's World combo, or `--world`) picks one:
@@ -277,7 +294,7 @@ The knobs, with the values a Humvee run starts from:
 | `nav.ttl_s` | s | 0 .. 60 | 4 | How long an obstacle added at run time stays on the map |
 
 The template's own keys: `run.world`, `run.uri`, `run.data_path`, `run.crop` (m), `run.cars`,
-`run.controller` (`yours`, `navigator`), `run.ticks` (in a live window, the speed: world seconds
+`run.controller` (`yours`, `navigator`, `coph`), `run.ticks` (in a live window, the speed: world seconds
 per wall second, the cars stepping the ticks world time has passed on a clock at the 0.01 s
 quantum, catching up at most 0.25 s a frame; headless or with `--frames`, ticks per frame),
 `run.regoal`,
@@ -291,7 +308,7 @@ Settings, World, Rasters, the coefficient plots and Run's world choice are units
 a window of your own in its place in your copy of `cars.ari`.
 
 - **Run**: the world (and a city's URI), the vehicle, the number of cars, the controller (yours,
-  or libcvc's navigator as a baseline), ticks per frame, a new goal on arrival, pause, the camera
+  libcvc's navigator as a baseline, or CoPH's fleet), ticks per frame, a new goal on arrival, pause, the camera
   and the chosen car. New goals and Reset are document buttons that call back into Python
   (`host.on`).
 - **Settings**: a `settings:` editor ([ARIADNE.md](ARIADNE.md) §4) over `nav.reach_tol`,
@@ -326,6 +343,7 @@ python my_cars/cars.py --headless --frames 1200 --log run.npz
 python my_cars/cars.py --headless --frames 1200 --world generated --set world.seed=4 \
     --vehicle roboracer --set nav_plant.latency=0.2 --log run.csv
 python my_cars/cars.py --headless --frames 600 --controller navigator --min-arrivals 3
+python my_cars/cars.py --headless --frames 1500 --world flat --vehicle roboracer --controller coph
 ```
 
 `--headless` runs the same controller, cars and document state with no window and no GL.
@@ -367,6 +385,8 @@ while s.t < 60.0:
 log.save("run.npz")
 ```
 
+`Cars(..., coph={"froude": 1.0})` with `step_coph()` has CoPH's fleet drive the cars, and
+`cars.coph_coeffs()` reads each car's account.
 `C.world_from_data(app, "<prefix>.data.city")` reads a city from an app's data store.
 `C.flat_world(unit)` gives a flat square. `Cars(..., navigator=True)` with `step_navigator()`
 runs libcvc's navigator. `nav_weights=` gives it a `.cvcnav` policy and `scale=` the frame
@@ -476,6 +496,9 @@ are built this way.
 - **One shared steering lock and wheelbase on the bicycle.** With a mixed list of presets, nav's
   bicycle (for the navigator) uses one wheelbase and lock: the mean wheelbase and the smallest
   lock. Each vehicle on a plant has its own.
+- **CoPH's cars take no new goal after they arrive, and run only on `Cars`.** A CoPH car that
+  reached its goal brakes and stays, whatever `run.regoal` says, because its learner's run ended
+  there. `--controller coph` drives the template's own worlds, not `--gym` or `--world-doc`.
 - **The navigator is tuned for its policy's bodies.** As a baseline on vehicles it often does
   worse than a controller made for them. GRL-SNAM's docs/PLANTS.md says why.
 - **The template hides the unused world itself.** Before transfix/libcvc#1037, a scene node's
