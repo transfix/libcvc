@@ -1548,27 +1548,31 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
       result.status == cvc::state::send_message_result::status_kind::delivered ? "delivered"
                                                                                : "error";
 
-  // Return value to the SENDER: {status, path} — unchanged contract (callers/tests rely on this).
-  std::vector<std::pair<std::string, value_t>> ret_entries;
-  ret_entries.emplace_back("status", value_t(status_str));
-  ret_entries.emplace_back("path", value_t(result.resolved_path));
-  auto ret = make_dict(std::move(ret_entries));
-
   // Deliver an ENVELOPE to receivers on this channel: {status, path, content_type, payload}. The
   // payload keeps the ORIGINAL value type — a string stays a string, bytes stay bytes — so a
   // (msg-recv) on this channel gets the actual binary/text data (not just the {status,path} ack it
   // used to get). The SCHEDULER key is chroot-scoped (resolve_channel); the state-side sendMessage
   // above stays on the raw path — the two buses are independent, as before.
+  bool refused = false;
   if (ctx->sched) {
     std::vector<std::pair<std::string, value_t>> env_entries;
     env_entries.emplace_back("status", value_t(status_str));
     env_entries.emplace_back("path", value_t(result.resolved_path));
     env_entries.emplace_back("content_type", value_t(content_type));
     env_entries.emplace_back("payload", args[1]); // original value_t — binary preserved
-    ctx->sched->deliver_to_receivers(resolve_channel(ctx, path), make_dict(std::move(env_entries)));
+    // -1: the key's home, in another group, refused it at its ingress cap (S2-Q10).
+    refused = ctx->sched->deliver_to_receivers(resolve_channel(ctx, path),
+                                               make_dict(std::move(env_entries))) == -1;
   }
 
-  return ret;
+  // Return value to the SENDER: {status, path} — unchanged contract (callers/tests rely on this),
+  // and {status "error", path, reason "ingress full"} when the home refused it (S2-Q10, MS-10).
+  std::vector<std::pair<std::string, value_t>> ret_entries;
+  ret_entries.emplace_back("status", value_t(refused ? std::string("error") : status_str));
+  ret_entries.emplace_back("path", value_t(result.resolved_path));
+  if (refused)
+    ret_entries.emplace_back("reason", value_t(std::string("ingress full")));
+  return make_dict(std::move(ret_entries));
 }
 
 value_t intrinsic_msg_recv(intrinsics_context *ctx, call_args args) {
