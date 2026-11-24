@@ -1099,7 +1099,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   bind_live_texture(sg, n, node, bind_prefix, out, warnings); // material: { texture: { stream } }
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node});              // added once every node exists (realize_physics)
-  out.nodes.push_back({n.id, n.tags, node});
+  out.nodes.push_back({n.id, n.tags, node, true, n.on_pick});
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
@@ -1590,11 +1590,19 @@ void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
     return;
   g.setUseSingleColor(n.use_single_color);
   g.setColor(n.color[0], n.color[1], n.color[2]);
-  g.setAmbient(n.ambient);
-  g.setDiffuse(n.diffuse);
-  if (n.has_specular) {
-    g.setSpecular(n.specular);
-    g.setSpecularPower(n.specular_power);
+  if (n.has_pbr) { // physically based: the Phong keys do not apply
+    g.setMetallic(n.pbr_metallic);
+    g.setRoughness(n.pbr_roughness);
+    g.setEmissive(n.pbr_emissive[0], n.pbr_emissive[1], n.pbr_emissive[2]);
+    g.setCoat(n.pbr_coat, n.pbr_coat_roughness);
+    g.setPBR(true);
+  } else {
+    g.setAmbient(n.ambient);
+    g.setDiffuse(n.diffuse);
+    if (n.has_specular) {
+      g.setSpecular(n.specular);
+      g.setSpecularPower(n.specular_power);
+    }
   }
   if (n.has_opacity) // see-through below 1, even when forced opaque (GeometryNode::setForceOpaque)
     g.setOpacity(n.opacity);
@@ -1790,6 +1798,16 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
 
 } // namespace
 
+namespace {
+// Whether a node, at any depth, has a pbr: material.
+bool scene_has_pbr(const std::vector<cvc::ariadne::SceneNode> &nodes) {
+  for (const cvc::ariadne::SceneNode &n : nodes)
+    if ((n.has_material && n.has_pbr) || scene_has_pbr(n.children))
+      return true;
+  return false;
+}
+} // namespace
+
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
   return realize_scene(sg, scene, bind_prefix, warnings, RealizeOptions());
@@ -1916,6 +1934,21 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   }
   if (scene.has_chrome) // strip/show the SceneGraph diagnostic chrome (grid/axis/bbox)
     sg.setDiagnosticChromeVisible(scene.chrome_visible);
+  // The light from all round, for the pbr: materials: the scene's environment:, or the default
+  // one when it has a pbr: node and no environment: (environment: false lights them with the
+  // lights alone).
+  if (scene.environment_off) {
+    sg.setImageBasedLighting(false);
+  } else if (scene.has_environment || scene_has_pbr(scene.nodes)) {
+    double sky[3], horizon[3], ground[3];
+    for (int c = 0; c < 3; ++c) {
+      sky[c] = scene.environment_sky[c];
+      horizon[c] = scene.environment_horizon[c];
+      ground[c] = scene.environment_ground[c];
+    }
+    sg.setEnvironment(sky, horizon, ground);
+    sg.setImageBasedLighting(true);
+  }
   return out;
 }
 

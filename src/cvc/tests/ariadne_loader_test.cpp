@@ -71,6 +71,27 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
   return false;
 }
 
+// The loader's own warnings: every one but the schema's ("ari: schema: ...", which a build with
+// the validator adds for the same mistakes; has_schema_issue checks those).
+std::vector<std::string> loader_warnings(const LoadResult &r) {
+  std::vector<std::string> out;
+  for (const std::string &w : r.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      out.push_back(w);
+  return out;
+}
+
+// Whether the schema check reported the value at `pointer` (true without the validator, which
+// checks nothing).
+bool has_schema_issue(const LoadResult &r, const std::string &pointer) {
+  if (!have_jsonschema())
+    return true;
+  for (const SchemaIssue &i : r.schema_issues)
+    if (i.pointer == pointer)
+      return true;
+  return false;
+}
+
 // First widget in the tree whose mount scope equals `scope` (§12 load: wrapper).
 const Widget *find_scope(const Widget &w, const std::string &scope) {
   if (w.scope == scope)
@@ -780,10 +801,12 @@ windows:
   ASSERT_EQ(win->children.size(), 5u);
   EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
   EXPECT_EQ(win->children[3].label, "");
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
             std::string::npos)
-      << r.warnings[0];
+      << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/4/glyphs"));
 }
 
 // text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
@@ -848,10 +871,13 @@ windows:
   EXPECT_TRUE(odd->multiline) << "multi-line by default";
   EXPECT_EQ(odd->max_lines, 4);
   EXPECT_EQ(odd->send, "") << "no send button by default";
-  ASSERT_EQ(r.warnings.size(), 2u);
-  EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
-      << r.warnings[0];
-  EXPECT_NE(r.warnings[1].find("max_lines must be >= 1"), std::string::npos) << r.warnings[1];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 2u);
+  EXPECT_NE(warnings[0].find("message_input 'Odd' has no on:"), std::string::npos) << warnings[0];
+  EXPECT_NE(warnings[1].find("max_lines must be >= 1"), std::string::npos) << warnings[1];
+  // The schema says so too, and that a message_input has no height: (a text_view's).
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3/max_lines"));
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3"));
 }
 
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
@@ -1886,6 +1912,101 @@ scene:
   EXPECT_TRUE(b->fit_up_y);
 }
 
+// material: { pbr: ... } and the scene's environment: (gap item 5): every key read, defaults kept,
+// a bad value clamped or left out with a warning, and the Phong keys beside pbr: warned about.
+TEST(AriadneScene, PbrMaterialAndEnvironment) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  environment: { sky: [0.6, 0.7, 0.9], ground: [0.1, 0.1, 0.1] }
+  nodes:
+    - node: car
+      source: { box: 1 }
+      material:
+        color: [0.8, 0.1, 0.1]
+        pbr: { metallic: 0.9, roughness: 0.3, emissive: [1, 0.5, 0], coat: { strength: 1, roughness: 0.1 } }
+    - node: plain
+      source: { box: 1 }
+      material: { pbr: true }
+    - node: off
+      source: { box: 1 }
+      material: { pbr: false, specular: 0.5 }
+    - node: bad
+      source: { box: 1 }
+      material: { specular: 0.5, pbr: { metallic: 1.5, roughness: x, emissive: [1, 2], coat: 0.4 } }
+    - node: phong
+      source: { box: 1 }
+      material: { color: [1, 1, 1] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *car = find_scene_node(r.scene.nodes, "car");
+  ASSERT_NE(car, nullptr);
+  EXPECT_TRUE(car->has_pbr);
+  EXPECT_FLOAT_EQ(car->pbr_metallic, 0.9f);
+  EXPECT_FLOAT_EQ(car->pbr_roughness, 0.3f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[0], 1.0f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[1], 0.5f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[2], 0.0f);
+  EXPECT_FLOAT_EQ(car->pbr_coat, 1.0f);
+  EXPECT_FLOAT_EQ(car->pbr_coat_roughness, 0.1f);
+  EXPECT_FLOAT_EQ(car->color[0], 0.8f); // still the base colour
+
+  const SceneNode *plain = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->has_pbr);
+  EXPECT_FLOAT_EQ(plain->pbr_metallic, 0.0f);
+  EXPECT_FLOAT_EQ(plain->pbr_roughness, 0.5f);
+  EXPECT_FLOAT_EQ(plain->pbr_emissive[0], 0.0f);
+  EXPECT_FLOAT_EQ(plain->pbr_coat, 0.0f);
+
+  const SceneNode *off = find_scene_node(r.scene.nodes, "off");
+  ASSERT_NE(off, nullptr);
+  EXPECT_FALSE(off->has_pbr);
+  EXPECT_TRUE(off->has_specular);
+  EXPECT_FALSE(has_warning(r, "'off': material.pbr shades it physically"));
+
+  const SceneNode *bad = find_scene_node(r.scene.nodes, "bad");
+  ASSERT_NE(bad, nullptr);
+  EXPECT_TRUE(bad->has_pbr);
+  EXPECT_FLOAT_EQ(bad->pbr_metallic, 1.0f);    // clamped
+  EXPECT_FLOAT_EQ(bad->pbr_roughness, 0.5f);   // not a number: the default
+  EXPECT_FLOAT_EQ(bad->pbr_emissive[0], 0.0f); // two channels: not used
+  EXPECT_FLOAT_EQ(bad->pbr_coat, 0.4f);
+  EXPECT_FLOAT_EQ(bad->pbr_coat_roughness, 0.0f);
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.metallic is 0..1, not 1.5"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.roughness is a number 0..1"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.emissive is a colour"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr shades it physically"));
+
+  const SceneNode *phong = find_scene_node(r.scene.nodes, "phong");
+  ASSERT_NE(phong, nullptr);
+  EXPECT_FALSE(phong->has_pbr);
+
+  EXPECT_TRUE(r.scene.has_environment);
+  EXPECT_FALSE(r.scene.environment_off);
+  EXPECT_FLOAT_EQ(r.scene.environment_sky[2], 0.9f);
+  EXPECT_FLOAT_EQ(r.scene.environment_horizon[0], 0.42f); // unset: the default
+  EXPECT_FLOAT_EQ(r.scene.environment_ground[1], 0.1f);
+
+  for (const char *spelling : {"false", "none", "true", "[1, 2]"}) {
+    LoadResult e = fresh_load(std::string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  environment: )") + spelling +
+                              R"(
+  nodes:
+    - node: n
+      source: { box: 1 }
+)");
+    ASSERT_TRUE(e.ok) << e.error;
+    const std::string s = spelling;
+    EXPECT_EQ(e.scene.has_environment, s != "[1, 2]") << s;
+    EXPECT_EQ(e.scene.environment_off, s == "false" || s == "none") << s;
+    EXPECT_EQ(has_warning(e, "scene environment is"), s == "[1, 2]") << s;
+  }
+}
+
 // A volren/volslice volume declared as the signed distance field of a MESH:
 // source: { sdf: { mesh: <uri>, dim: N } } — no pre-baked volume asset.
 TEST(AriadneScene, VolumeSdfMeshSource) {
@@ -2486,6 +2607,7 @@ scene:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.scene.clock.hz, 60.0);
+  EXPECT_TRUE(r.schema_issues.empty()) << "the schema takes hz too";
   for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
     LoadResult b = fresh_load(
         std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
@@ -2495,6 +2617,7 @@ scene:
     for (const std::string &w : b.warnings)
       warned = warned || w.find("clock: hz") != std::string::npos;
     EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+    EXPECT_TRUE(has_schema_issue(b, "/scene/clock/hz")) << bad;
   }
 }
 
@@ -3044,6 +3167,36 @@ scene:
   ASSERT_EQ(r.scene.nodes.size(), 1u);
   EXPECT_EQ(r.scene.nodes[0].material_texture_stream, "fog.tile{i}");
   EXPECT_EQ(scene_node_instance(r.scene.nodes[0], 2).material_texture_stream, "fog.tile2");
+}
+
+// A node's on_pick: is its own (not a custom type's prop), at any depth, and a copy's names it.
+TEST(AriadneScene, OnPickParsedOntoNodeAndCopies) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: shelf
+      on_pick: shelf_clicked
+      children:
+        - node: jar
+          source: { box: 1 }
+    - node: crate_{i}
+      repeat: 3
+      source: { box: 1 }
+      on_pick: (state-set "selected" "crate_{i}")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    ADD_FAILURE() << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  EXPECT_EQ(r.scene.nodes[0].on_pick, "shelf_clicked");
+  EXPECT_EQ(r.scene.nodes[0].props.find("on_pick"), nullptr);
+  ASSERT_EQ(r.scene.nodes[0].children.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].children[0].on_pick, "");
+  EXPECT_EQ(r.scene.nodes[1].on_pick, "(state-set \"selected\" \"crate_{i}\")");
+  EXPECT_EQ(scene_node_instance(r.scene.nodes[1], 2).on_pick,
+            "(state-set \"selected\" \"crate_2\")");
 }
 
 // A copy has no body and no world (both are built once from the declared nodes), and a nested
@@ -6270,15 +6423,11 @@ TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
                           "windows: []\n";
   const LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
-  bool flagged = false;
-  for (const std::string &w : r.warnings) {
-    if (w.find("schema:") == std::string::npos)
-      continue;
-    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
-    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
-    flagged = flagged || w.find("'neither'") != std::string::npos;
+  for (const SchemaIssue &i : r.schema_issues) {
+    EXPECT_EQ(i.pointer.rfind("/data/made", 0), std::string::npos) << i.text();
+    EXPECT_EQ(i.pointer.rfind("/data/fetched", 0), std::string::npos) << i.text();
   }
-  EXPECT_TRUE(flagged);
+  EXPECT_TRUE(has_schema_issue(r, "/data/neither"));
 }
 
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
@@ -6511,11 +6660,11 @@ windows:
         default: {a: 1}
 )");
   ASSERT_TRUE(bad.ok) << bad.error;
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/default"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/height"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/interactive_updates"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/layers"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/1/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/height"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/interactive_updates"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/layers"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/1/default"));
 }
 
 // id: names any widget (not only a window), so a backend / the core can key per-instance state.
@@ -7172,8 +7321,10 @@ windows:
         range: data
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("range: 'data'"), std::string::npos) << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/2/range"));
   const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
   const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
   const Widget *odd = find(r.root, Kind::SliderInt, "Odd");

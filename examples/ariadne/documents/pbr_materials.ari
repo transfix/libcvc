@@ -1,0 +1,99 @@
+# pbr_materials.ari — physically based materials (docs/ARIADNE.md §5.4, "Physically based
+# materials"): `material: { pbr: { metallic, roughness, emissive, coat } }` on geometry nodes, lit
+# by the sun and by the scene's `environment:` from all round.
+#
+# Two rows of spheres, rough to the right: red paint (a dielectric) in front, gold behind. Then a
+# box of coated car paint, a lamp that glows whether lit or not, and a Phong sphere of the same
+# red to compare with.
+#
+#   arigl pbr_materials.ari
+#   arigl pbr_materials.ari --offscreen --frames 10 --png pbr_materials.png
+
+meta:
+  name: PBR materials (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.6
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+scene:
+  chrome: false
+  background: { top: [0.32, 0.36, 0.44], bottom: [0.08, 0.08, 0.10] }
+  environment:                     # the light from all round, which the metals reflect
+    sky: [0.55, 0.62, 0.75]
+    horizon: [0.45, 0.45, 0.45]
+    ground: [0.16, 0.14, 0.12]
+  shadows: { enabled: true, resolution: 2048 }
+  cameras:
+    - camera: main
+      position: [0, -15, 7]
+      target: [0, 1, 0.8]
+      fov: 35
+  lights:
+    - light: sun
+      azimuth: 210
+      elevation: 50
+      intensity: 1.0
+  nodes:
+    - node: ground
+      source: { plane: { size: 30 } }
+      material: { color: [0.55, 0.55, 0.52], pbr: { roughness: 0.9 } }
+
+    - node: paint_0
+      source: { sphere: 0.8 }
+      transform: { position: [-4, 0, 0.8] }
+      material: { color: [0.75, 0.08, 0.06], pbr: { roughness: 0.05 } }
+    - node: paint_1
+      source: { sphere: 0.8 }
+      transform: { position: [-2, 0, 0.8] }
+      material: { color: [0.75, 0.08, 0.06], pbr: { roughness: 0.25 } }
+    - node: paint_2
+      source: { sphere: 0.8 }
+      transform: { position: [0, 0, 0.8] }
+      material: { color: [0.75, 0.08, 0.06], pbr: { roughness: 0.5 } }
+    - node: paint_3
+      source: { sphere: 0.8 }
+      transform: { position: [2, 0, 0.8] }
+      material: { color: [0.75, 0.08, 0.06], pbr: { roughness: 0.75 } }
+    - node: paint_4
+      source: { sphere: 0.8 }
+      transform: { position: [4, 0, 0.8] }
+      material: { color: [0.75, 0.08, 0.06], pbr: { roughness: 1.0 } }
+
+    - node: gold_0
+      source: { sphere: 0.8 }
+      transform: { position: [-4, 2.5, 0.8] }
+      material: { color: [1.0, 0.78, 0.34], pbr: { metallic: 1, roughness: 0.05 } }
+    - node: gold_1
+      source: { sphere: 0.8 }
+      transform: { position: [-2, 2.5, 0.8] }
+      material: { color: [1.0, 0.78, 0.34], pbr: { metallic: 1, roughness: 0.25 } }
+    - node: gold_2
+      source: { sphere: 0.8 }
+      transform: { position: [0, 2.5, 0.8] }
+      material: { color: [1.0, 0.78, 0.34], pbr: { metallic: 1, roughness: 0.5 } }
+    - node: gold_3
+      source: { sphere: 0.8 }
+      transform: { position: [2, 2.5, 0.8] }
+      material: { color: [1.0, 0.78, 0.34], pbr: { metallic: 1, roughness: 0.75 } }
+    - node: gold_4
+      source: { sphere: 0.8 }
+      transform: { position: [4, 2.5, 0.8] }
+      material: { color: [1.0, 0.78, 0.34], pbr: { metallic: 1, roughness: 1.0 } }
+
+    - node: car_paint
+      source: { box: { size: [1.6, 1.6, 1.6] } }
+      transform: { position: [-3, 5.5, 0.8], rotation: [0, 0, 30] }
+      material:
+        color: [0.05, 0.16, 0.45]
+        pbr: { metallic: 0.5, roughness: 0.45, coat: { strength: 1, roughness: 0.03 } }
+    - node: lamp
+      source: { sphere: 0.6 }
+      transform: { position: [0, 5.5, 0.6] }
+      material: { color: [0, 0, 0], pbr: { roughness: 1, emissive: [1.0, 0.8, 0.45] } }
+      casts_shadow: false
+    - node: phong
+      source: { sphere: 0.8 }
+      transform: { position: [3, 5.5, 0.8] }
+      material: { color: [0.75, 0.08, 0.06], ambient: 0.2, diffuse: 0.8, specular: 0.3, specular_power: 30 }

@@ -528,6 +528,19 @@ missing document is an error. A name built from a unit's arguments (`load: "{pan
 cannot be known ahead, so it is a warning: list such files, and data files a scene reads,
 in the config's `preload`.
 
+**A download that breaks off.** Each fetch, the page's own (the module's `.wasm`, ariglx-web's
+`python312.zip`) and arigl's (the document, the files it names, the `preload`), asks with
+`cache: 'no-cache'`, so a cached copy is only revalidated. A fetch that fails or whose body
+breaks off is asked twice more, half a second and a second later, with `cache: 'reload'`: past
+the browser's cache, and replacing what is there. That covers a dropped connection, and a
+partial copy Firefox keeps after a cut-off load: it resumes the copy with a range request, and
+on GitHub Pages that body can break on every load after ("Error in input stream") until the
+copy is gone. A server's refusal (a 404) is not asked
+again. The page's error then names the file and how much of it arrived:
+`Could not start: downloading ariglx.wasm broke off after 23.6 MB, 3 tries (Error in input
+stream)`. [`arigl_web_download.mjs`](../src/arigl/web/test/arigl_web_download.mjs) checks the
+page's side with a stand-in module; the smoke test's `/apps/flaky/` checks arigl's.
+
 **The config** is `ariadne.config.json` beside the page (a 404 means the defaults), or
 `window.ARIADNE_CONFIG` set by a script ahead of `arigl-web.js`. `ari.html` reads the same file:
 

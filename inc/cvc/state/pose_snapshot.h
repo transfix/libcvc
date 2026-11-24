@@ -24,15 +24,17 @@ namespace cvc {
 // sync. Not shard state: never journaled, relayed or bridged.
 //
 // Units: position in millimetres, velocity in mm/s, rotation as a unit quaternion's components
-// times 32767. Every number in an entry is the difference from what the connection was last sent
-// for the slot; a slot's first entry carries its pid and its absolute values (ariadne/pose_stream.h
-// has the rules).
+// times 32767, angular velocity in mrad/s, a vehicle's steering angle in microradians. Every number
+// in an entry is the difference from what the connection was last sent for the slot; a slot's
+// first entry carries its pid and its absolute values (ariadne/pose_stream.h has the rules).
 struct pose_entry {
   std::uint32_t slot = 0;
   std::string pid; // on the slot's first entry only
   std::int32_t x = 0, y = 0, z = 0;
   std::int32_t vx = 0, vy = 0, vz = 0;
   std::int32_t qw = 0, qx = 0, qy = 0, qz = 0;
+  std::int32_t wx = 0, wy = 0, wz = 0; // with pose_snapshot::kCarriesMotion
+  std::int32_t steer = 0;
 };
 
 struct pose_snapshot {
@@ -41,6 +43,10 @@ struct pose_snapshot {
   std::uint32_t base_seq = 0;    // the snapshot the entries are differences from
   std::vector<pose_entry> entries;
   std::vector<std::uint32_t> gone; // slots that left
+  // What the entries carry beyond the pose: kCarriesMotion, their angular velocity and steering
+  // angle (OW5n). A relay before it sends neither, which reads as 0 here: not carried.
+  static constexpr std::uint32_t kCarriesMotion = 1;
+  std::uint32_t carries = 0;
 };
 
 } // namespace cvc
