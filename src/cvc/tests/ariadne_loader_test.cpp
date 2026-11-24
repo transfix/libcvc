@@ -1912,6 +1912,143 @@ scene:
   EXPECT_TRUE(b->fit_up_y);
 }
 
+// scene: animations: (gap item 7): each animation's keys and tracks, keyframes put in time order,
+// and a bad track left out with a warning.
+TEST(AriadneScene, AnimationsParsed) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: door, source: { box: 1 } }
+  animations:
+    - animation: swing
+      loop: pingpong
+      autoplay: false
+      speed: 0.5
+      duration: 4
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[2, [0, 0, 90]], [0, [0, 0, 0]]]
+        - { state: door.angle, interpolation: step, keys: [[0, 0], [2, 90]] }
+        - { node: door, key: wobble, keys: [[0, 1]] }
+        - { node: door, key: position, keys: [[0, [1, 2]]] }
+        - { node: door, state: x, key: scale, keys: [[0, [1, 1, 1]]] }
+        - { state: a.b, keys: [[0, 1], [1, [1, 2]]] }
+    - { animation: spin, loop: true, tracks: [{ node: door, key: opacity, keys: [[0, 1], [1, 0]] }] }
+    - { animation: "bad.id", tracks: [] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.animations.size(), 2u);
+  const SceneAnimation &s = r.scene.animations[0];
+  EXPECT_EQ(s.id, "swing");
+  EXPECT_EQ(s.loop, SceneAnimation::loop_mode::pingpong);
+  EXPECT_FALSE(s.autoplay);
+  EXPECT_DOUBLE_EQ(s.speed, 0.5);
+  EXPECT_DOUBLE_EQ(s.length(), 4.0); // its duration, not its last key's 2
+  ASSERT_EQ(s.tracks.size(), 2u);    // four bad tracks left out
+  const SceneAnimationTrack &rot = s.tracks[0];
+  EXPECT_EQ(rot.node, "door");
+  EXPECT_EQ(rot.key, "rotation");
+  EXPECT_EQ(rot.interpolation, SceneAnimationTrack::interp::smooth);
+  ASSERT_EQ(rot.times.size(), 2u);
+  EXPECT_DOUBLE_EQ(rot.times[0], 0.0); // in time order
+  EXPECT_DOUBLE_EQ(rot.values[1][2], 90.0);
+  EXPECT_EQ(s.tracks[1].state, "door.angle");
+  EXPECT_EQ(s.tracks[1].interpolation, SceneAnimationTrack::interp::step);
+  EXPECT_TRUE(has_warning(r, "track 2: a node's key: is position, rotation"));
+  EXPECT_TRUE(has_warning(r, "track 3: keys: is a list of [seconds, value] with the value 3"));
+  EXPECT_TRUE(has_warning(r, "track 4: names a node: (with a key:) or a state:, one of them"));
+  EXPECT_TRUE(has_warning(r, "track 5: keys: is a list of [seconds, value] with the value one"));
+  const SceneAnimation &spin = r.scene.animations[1];
+  EXPECT_EQ(spin.loop, SceneAnimation::loop_mode::loop);
+  EXPECT_TRUE(spin.autoplay);
+  EXPECT_DOUBLE_EQ(spin.length(), 1.0);
+  EXPECT_TRUE(has_warning(r, "scene animation 'bad.id': its animation: name is a key segment"));
+}
+
+// sample_track: the first value before the first key, the last after the last; linear, step and
+// smooth between (smooth flat at the ends, so a two-key track eases in and out).
+TEST(AriadneScene, AnimationTrackSampling) {
+  SceneAnimationTrack tr;
+  tr.times = {1.0, 3.0, 5.0};
+  tr.values = {{0.0, 10.0}, {4.0, 10.0}, {0.0, 20.0}};
+  std::vector<double> v;
+  sample_track(tr, 0.0, v);
+  ASSERT_EQ(v.size(), 2u);
+  EXPECT_DOUBLE_EQ(v[0], 0.0);
+  sample_track(tr, 9.0, v);
+  EXPECT_DOUBLE_EQ(v[1], 20.0);
+  sample_track(tr, 2.0, v);
+  EXPECT_DOUBLE_EQ(v[0], 2.0); // halfway, linear
+  sample_track(tr, 4.5, v);
+  EXPECT_DOUBLE_EQ(v[1], 17.5);
+  tr.interpolation = SceneAnimationTrack::interp::step;
+  sample_track(tr, 2.9, v);
+  EXPECT_DOUBLE_EQ(v[0], 0.0);
+  sample_track(tr, 3.0, v);
+  EXPECT_DOUBLE_EQ(v[0], 4.0);
+  tr.interpolation = SceneAnimationTrack::interp::smooth;
+  sample_track(tr, 3.0, v); // through every key
+  EXPECT_DOUBLE_EQ(v[0], 4.0);
+  sample_track(tr, 2.0, v); // eases out of the first key: 0 tangent at 1, (0 - 0) / 4 at 3
+  EXPECT_DOUBLE_EQ(v[0], 2.0);
+  SceneAnimationTrack two;
+  two.interpolation = SceneAnimationTrack::interp::smooth;
+  two.times = {0.0, 1.0};
+  two.values = {{0.0}, {1.0}};
+  sample_track(two, 0.25, v);
+  EXPECT_NEAR(v[0], 0.15625, 1e-12); // smoothstep: 3u^2 - 2u^3
+  SceneAnimationTrack none;
+  sample_track(none, 1.0, v);
+  EXPECT_TRUE(v.empty());
+}
+
+// advance_animation: once stops at either end, loop wraps, pingpong turns back; a paused or
+// zero-length animation holds.
+TEST(AriadneScene, AnimationPlayback) {
+  SceneAnimation a;
+  a.duration = 2.0;
+  SceneAnimationPlayhead h;
+  advance_animation(a, 1.0, 0.5, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.5);
+  advance_animation(a, 1.0, 5.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 2.0);
+  EXPECT_FALSE(h.playing); // once: stopped at the end
+  advance_animation(a, 1.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 2.0); // and holds while stopped
+  h.playing = true;
+  advance_animation(a, -2.0, 0.5, h); // backwards
+  EXPECT_DOUBLE_EQ(h.time, 1.0);
+  advance_animation(a, -2.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.0);
+  EXPECT_FALSE(h.playing);
+
+  a.loop = SceneAnimation::loop_mode::loop;
+  h = SceneAnimationPlayhead{};
+  advance_animation(a, 1.0, 5.5, h);
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+  EXPECT_TRUE(h.playing);
+  advance_animation(a, -1.0, 2.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+
+  a.loop = SceneAnimation::loop_mode::pingpong;
+  h = SceneAnimationPlayhead{};
+  advance_animation(a, 1.0, 2.5, h); // there, and half a second back
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+  EXPECT_FALSE(h.forward);
+  advance_animation(a, 1.0, 2.0, h); // back to 0, and half a second out again
+  EXPECT_DOUBLE_EQ(h.time, 0.5);
+  EXPECT_TRUE(h.forward);
+
+  SceneAnimation empty;
+  h = SceneAnimationPlayhead{};
+  advance_animation(empty, 1.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.0);
+}
+
 // material: { pbr: ... } and the scene's environment: (gap item 5): every key read, defaults kept,
 // a bad value clamped or left out with a warning, and the Phong keys beside pbr: warned about.
 TEST(AriadneScene, PbrMaterialAndEnvironment) {

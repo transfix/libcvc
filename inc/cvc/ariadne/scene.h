@@ -8,6 +8,7 @@
 // it. Every realized node is a cvc::state_object, so a node IS a state subtree and
 // each prop a reactive state key (§9.1) — this struct just says what to create.
 
+#include <cvc/ariadne/scene_animation.h> // SceneAnimation (animations:)
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h> // vehicle_archetype
 #include <cvc/tf/model.h>
@@ -629,6 +630,9 @@ struct Scene {
   // entity's label (cvc::gl::ariadne::apply_entity_label). Empty: none.
   Value entity_labels;
   std::vector<SceneCamera> cameras; // cameras: [...] — named cameras viewports bind
+  // animations: [...] — keyframed tracks over the scene clock (scene_animation.h); a scene with any
+  // runs on the scene clock, as `clock: {}` would make it.
+  std::vector<SceneAnimation> animations;
   SceneClock clock; // §9 time: the simulation clock (clock.present gates it) — see SceneClock
   ScenePhysics physics; // physics: {...} — the world the nodes' bodies live in (see SceneBody)
   SceneWorldSpec world; // world: {...} — which of the nodes' worlds is on (see SceneWorldSpec)
@@ -676,7 +680,7 @@ struct Scene {
   float environment_ground[3] = {0.20f, 0.19f, 0.18f};
   bool any() const {
     return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background ||
-           clock.present || physics.present;
+           clock.present || physics.present || !animations.empty();
   }
 };
 

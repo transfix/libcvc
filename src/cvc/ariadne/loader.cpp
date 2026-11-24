@@ -3820,6 +3820,138 @@ void stamp_base_dir(std::vector<SceneNode> &nodes, const std::string &dir) {
   }
 }
 
+// A YAML scalar as a finite number: false (and `out` untouched) otherwise.
+bool finite_num(const YAML::Node &v, double &out) {
+  if (!v || !v.IsScalar())
+    return false;
+  try {
+    const double d = v.as<double>();
+    if (!std::isfinite(d))
+      return false;
+    out = d;
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// One keyframe's value: a number, or a list of numbers.
+bool keyframe_value(const YAML::Node &v, std::vector<double> &out) {
+  out.clear();
+  double d = 0.0;
+  if (finite_num(v, d)) {
+    out.push_back(d);
+    return true;
+  }
+  if (!v.IsSequence() || v.size() == 0)
+    return false;
+  for (const YAML::Node &e : v) {
+    if (!finite_num(e, d))
+      return false;
+    out.push_back(d);
+  }
+  return true;
+}
+
+// scene: animations: [{ animation: <id>, loop, autoplay, speed, duration, tracks: [{ node, key |
+// state, interpolation, keys: [[t, value], ...] }] }] (scene_animation.h). A track that names
+// neither or both of node: and state:, a node key no track can move, or keyframes of mixed width is
+// left out with a warning; keyframes are put in time order.
+std::vector<SceneAnimation> parse_scene_animations(Ctx &ctx, const YAML::Node &list) {
+  std::vector<SceneAnimation> out;
+  if (!list.IsSequence()) {
+    ctx.warn("ari: scene animations: must be a list of { animation: <id>, tracks } — ignored");
+    return out;
+  }
+  for (const YAML::Node &a : list) {
+    if (!a.IsMap())
+      continue;
+    SceneAnimation an;
+    an.id = str(a, "animation", str(a, "id"));
+    if (an.id.empty() || an.id.find_first_of(". /") != std::string::npos) {
+      ctx.warn("ari: scene animation '" + an.id +
+               "': its animation: name is a key segment (no '.', '/' or space) — ignored");
+      continue;
+    }
+    const std::string at = "ari: scene animation '" + an.id + "'";
+    if (const YAML::Node lp = a["loop"]) {
+      if (lp.IsScalar() && lp.Scalar() == "pingpong")
+        an.loop = SceneAnimation::loop_mode::pingpong;
+      else if (flag(a, "loop", false) == flag(a, "loop", true)) // a boolean spelling
+        an.loop =
+            flag(a, "loop") ? SceneAnimation::loop_mode::loop : SceneAnimation::loop_mode::once;
+      else
+        ctx.warn(at + ": loop: is true, false or pingpong — once");
+    }
+    an.autoplay = flag(a, "autoplay", true);
+    if (a["speed"] && !finite_num(a["speed"], an.speed))
+      ctx.warn(at + ": speed: is a number — 1");
+    if (a["duration"] && (!finite_num(a["duration"], an.duration) || an.duration < 0.0)) {
+      ctx.warn(at + ": duration: is a number of seconds, 0 or more — its last keyframe's time");
+      an.duration = 0.0;
+    }
+    const YAML::Node tracks = a["tracks"];
+    for (std::size_t ti = 0; tracks && tracks.IsSequence() && ti < tracks.size(); ++ti) {
+      const YAML::Node tn = tracks[ti];
+      if (!tn.IsMap())
+        continue;
+      SceneAnimationTrack tr;
+      tr.node = str(tn, "node");
+      tr.state = str(tn, "state");
+      tr.key = str(tn, "key");
+      const std::string tat = at + " track " + std::to_string(ti);
+      if (tr.node.empty() == tr.state.empty()) {
+        ctx.warn(tat + ": names a node: (with a key:) or a state:, one of them — left out");
+        continue;
+      }
+      const int width = tr.node.empty() ? 0 : node_key_width(tr.key);
+      if (!tr.node.empty() && width == 0) {
+        ctx.warn(tat + ": a node's key: is position, rotation, scale, color, opacity or visible, " +
+                 "not '" + tr.key + "' — left out");
+        continue;
+      }
+      const std::string ip = str(tn, "interpolation", "linear");
+      if (ip == "step")
+        tr.interpolation = SceneAnimationTrack::interp::step;
+      else if (ip == "smooth")
+        tr.interpolation = SceneAnimationTrack::interp::smooth;
+      else if (ip != "linear")
+        ctx.warn(tat + ": interpolation: is linear, step or smooth — linear");
+      std::vector<std::pair<double, std::vector<double>>> keys;
+      bool ok = true;
+      const YAML::Node kn = tn["keys"];
+      for (std::size_t k = 0; kn && kn.IsSequence() && k < kn.size() && ok; ++k) {
+        const YAML::Node pair = kn[k];
+        double time = 0.0;
+        std::vector<double> value;
+        ok = pair.IsSequence() && pair.size() == 2 && finite_num(pair[0], time) && time >= 0.0 &&
+             keyframe_value(pair[1], value) &&
+             (width ? static_cast<int>(value.size()) == width
+                    : keys.empty() || value.size() == keys.front().second.size());
+        if (ok)
+          keys.emplace_back(time, std::move(value));
+      }
+      if (!ok || keys.empty()) {
+        ctx.warn(tat + ": keys: is a list of [seconds, value] with the value " +
+                 (width ? std::to_string(width) + " number(s) wide" : std::string("one width")) +
+                 " — left out");
+        continue;
+      }
+      std::stable_sort(keys.begin(), keys.end(),
+                       [](const auto &x, const auto &y) { return x.first < y.first; });
+      for (auto &[time, value] : keys) {
+        tr.times.push_back(time);
+        tr.values.push_back(std::move(value));
+      }
+      an.tracks.push_back(std::move(tr));
+    }
+    if (an.tracks.empty())
+      ctx.warn(at + ": has no track that moves anything");
+    out.push_back(std::move(an));
+  }
+  return out;
+}
+
 Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   Scene sc;
   if (!s || !s.IsMap())
@@ -3904,6 +4036,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       }
     }
   }
+  if (const YAML::Node an = s["animations"]) // keyframed tracks over the scene clock
+    sc.animations = parse_scene_animations(ctx, an);
   if (s["chrome"]) { // scene-level: the diagnostic grid/axis/bounding-box chrome
     sc.has_chrome = true;
     sc.chrome_visible = flag(s, "chrome", true);
