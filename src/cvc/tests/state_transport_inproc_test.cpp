@@ -508,6 +508,95 @@ TEST(StateTransportInprocPhase5, PeerSubscriptionsFilterDelivery) {
   t.unregister_shard(&sB);
 }
 
+// A node removed on one shard goes on its peers: the removal is journaled as one delete,
+// published like a write and applied there, never journaled again (nothing comes back).
+TEST(StateTransportInprocTest, ARemovalReachesThePeers) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+
+  cvc::state::instance(aA)("w.vehicles.v1.x").value(std::string("1"));
+  cvc::state::instance(aA)("w.vehicles.v2.x").value(std::string("2"));
+  t.pump_all();
+  ASSERT_NE(cvc::state::instance(aB).findDescendant("w.vehicles.v1.x"), nullptr);
+
+  ASSERT_TRUE(cvc::state::instance(aA)("w.vehicles").removeChild("v1"));
+  EXPECT_EQ(t.pump_all(), 1u);
+  EXPECT_EQ(cvc::state::instance(aB).findDescendant("w.vehicles.v1"), nullptr);
+  EXPECT_EQ(cvc::state::instance(aB)("w.vehicles.v2.x").value(), "2");
+  EXPECT_EQ(t.pump_all(), 0u) << "B journaled nothing for the delete it applied";
+  ASSERT_EQ(sB.tombstones().size(), 1u);
+  EXPECT_EQ(sB.tombstones()[0].path, "w.vehicles.v1");
+  EXPECT_EQ(sB.tombstones()[0].cluster_id, "C");
+}
+
+// A delete at a node above a peer's subscription reaches it (it takes what the peer holds there);
+// a value written at that node does not.
+TEST(StateTransportInprocPhase5, ADeleteAboveASubscriptionIsDelivered) {
+  cvc::app appA, appB;
+  cvc::state_cluster_shard sA(appA, "c", "A");
+  cvc::state_cluster_shard sB(appB, "c", "B");
+  sA.attach();
+  sB.attach();
+  cvc::state_transport_inproc t;
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+  t.peers().add_peer("B", "c", "", {"alpha.x"});
+
+  t.publish(make_mut("A", "c", 1, "alpha.x.leaf"));
+  ASSERT_NE(cvc::state::instance(appB).findDescendant("alpha.x.leaf"), nullptr);
+  t.publish(make_mut("A", "c", 2, "alpha"));
+  EXPECT_EQ(sB.total_remote_applied(), 1u) << "a value above the subscription is filtered";
+  cvc::state_mutation del = make_mut("A", "c", 3, "alpha");
+  del.op = cvc::state_mutation_op::delete_subtree;
+  t.publish(del);
+  EXPECT_EQ(cvc::state::instance(appB).findDescendant("alpha"), nullptr);
+  del.sequence = 4;
+  del.path = "beta";
+  t.publish(del);
+  EXPECT_EQ(sB.total_remote_applied(), 2u) << "a delete beside it is filtered";
+}
+
+// A write older than a delete the shard applied does not bring the subtree back, and a relay
+// would not forward it (ingest_result::buried); a write made after the delete makes it again.
+TEST(StateTransportInprocTest, AWriteOlderThanADeleteIsBuried) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc t;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sA.attach();
+  sB.attach();
+  t.register_shard(&sA);
+  t.register_shard(&sB);
+  cvc::state::instance(aA)("w.p1.x").value(std::string("1"));
+  t.pump_all();
+  ASSERT_TRUE(cvc::state::instance(aA)("w").removeChild("p1"));
+  t.pump_all();
+  ASSERT_EQ(sB.tombstones().size(), 1u);
+  const std::uint64_t deleted_at = sB.tombstones()[0].hlc_time;
+  ASSERT_NE(deleted_at, 0u);
+
+  cvc::state_mutation stale = make_mut("Z", "C", 1, "w.p1.x");
+  stale.hlc_time = deleted_at - 1;
+  auto r = sB.ingest_remote(stale);
+  EXPECT_TRUE(r.buried);
+  EXPECT_FALSE(r.applied);
+  EXPECT_EQ(cvc::state::instance(aB).findDescendant("w.p1"), nullptr);
+  EXPECT_EQ(sB.total_remote_buried(), 1u);
+  EXPECT_TRUE(sB.ingest_remote(stale).duplicate) << "recorded as seen";
+
+  cvc::state_mutation fresh = make_mut("Z", "C", 2, "w.p1.x");
+  fresh.hlc_time = deleted_at + 1;
+  r = sB.ingest_remote(fresh);
+  EXPECT_TRUE(r.applied);
+  EXPECT_EQ(cvc::state::instance(aB)("w.p1.x").value(), "v");
+}
+
 TEST(StateTransportInprocPhase5, UnregisteredPeerDeliversAll) {
   cvc::app appA, appB;
   cvc::state_cluster_shard sA(appA, "c", "A");

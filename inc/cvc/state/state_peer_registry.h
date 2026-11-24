@@ -120,6 +120,9 @@ public:
     std::shared_ptr<const state_delivery_filter> scope;
     // Same answer as should_deliver() at the moment the view was taken, and the scope's.
     bool deliver(const std::string &path) const noexcept;
+    // The same for a mutation at `path`; with SUBTREE (a delete or a reset, which reaches the
+    // nodes below it), also when the rule may deliver a path below it (should_deliver's form).
+    bool deliver(const std::string &path, bool subtree) const noexcept;
     // True when this view can deny anything (known with prefixes or a filter, or scoped).
     bool filtered() const noexcept;
     // True when the registry's part can (known with prefixes or a filter): the peer has a rule.
@@ -160,6 +163,11 @@ public:
   // subscriptions for an active connection should still deliver —
   // this is the back-compat default).
   bool should_deliver(const std::string &node_id, const std::string &path) const;
+  // The same for a mutation at `path`. With SUBTREE (a delete or a reset, which takes or clears
+  // the nodes below `path` too) it also passes when the peer may be delivered a path below it: a
+  // subscription prefix at or below `path`, and a filter whose delivers_below(path) holds. A peer
+  // subscribed to `a.b` is so told of a delete at `a`.
+  bool should_deliver(const std::string &node_id, const std::string &path, bool subtree) const;
 
   // Heartbeat: update last_seen_ns to `now_ns` (caller-provided
   // steady_clock-relative timestamp).

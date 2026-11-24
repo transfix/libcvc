@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/scene.h>
@@ -35,6 +36,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/volume/volume.h> // a data node's still water
 #include <cvc/world/generated_world.h>
 #include <cvc/world/world_geometry.h>
 #include <deque>
@@ -186,6 +188,62 @@ std::string data_path(const std::string &bind_prefix, const SceneNode &n) {
                                        : std::string(kDataRoot) + "." + n.source_data);
 }
 
+// The still water over a world's terrain at `level` (ARIADNE_WORLDS 18.8): w with a fluid field
+// named "water" (1000 kg/m^3) over the terrain's extent, from 1 m under its lowest ground (a wheel
+// on the deepest bed is in it) up to the level, inertial so its damping holds only heave (a wading
+// vehicle still drives through it; transfix/libcvc#1348). w itself when no ground is under the
+// level, it has no terrain, or it has water already.
+std::shared_ptr<const cvc::world::world_geometry>
+with_still_water(cvc::app &app, std::shared_ptr<const cvc::world::world_geometry> w, double level) {
+  if (!w || !std::isfinite(level) || w->find_volume("water") || w->find("water"))
+    return w;
+  const std::shared_ptr<const cvc::height_field> t = w->terrain();
+  if (!t)
+    return w;
+  double lowest = level;
+  for (const float z : t->heights())
+    lowest = std::min(lowest, static_cast<double>(z));
+  if (!(lowest < level))
+    return w;
+  auto box = std::make_shared<cvc::volume>(
+      app, cvc::dimension(2, 2, 2), cvc::Float,
+      cvc::bounding_box(t->x0(), t->y0(), lowest - 1.0, t->max_x(), t->max_y(), level));
+  box->fill(1000.0); // kg/m^3
+  cvc::world::volume_item water;
+  water.name = "water";
+  water.field.kind = ph::field_kind::fluid;
+  water.field.volume = box;
+  water.field.drag_coefficient = 1.0;
+  water.field.damping = 1.0e4;
+  water.field.inertial = true;
+  auto out = std::make_shared<cvc::world::world_geometry>(*w);
+  out->add_volume(std::move(water));
+  return out;
+}
+
+// A node's region: [min_x, min_y, max_x, max_y] in world metres (ARIADNE_WORLDS 18.8), the cut its
+// dataset's world takes before the physics and the navigator see it. None when it has no region:
+// (or a bad one, which warns).
+std::optional<cvc::world::world_rect> node_region(const SceneNode &n,
+                                                  std::vector<std::string> *warnings) {
+  const Value *v = n.props.find("region");
+  if (!v)
+    return std::nullopt;
+  if (v->is_seq() && v->items.size() == 4) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    cvc::world::world_rect r;
+    r.min_x = v->items[0].as_double(nan);
+    r.min_y = v->items[1].as_double(nan);
+    r.max_x = v->items[2].as_double(nan);
+    r.max_y = v->items[3].as_double(nan);
+    if (r.valid())
+      return r;
+  }
+  warn(warnings, "ari: scene node '" + n.id +
+                     "': region: is [min_x, min_y, max_x, max_y], each max past its min; ignored");
+  return std::nullopt;
+}
+
 const char *const kDataNeedsPhysics =
     "body: needs the scene's physics: block for a dataset's bodies";
 
@@ -297,6 +355,14 @@ struct SceneWorld::impl {
     std::string item;          // a data node's source: { item }
     std::string data_path;     // a data node's dataset, or empty
     std::string target, rev;   // the store node and its rev last taken
+    // The node's region: its dataset's world cut to it (crop_world_geometry), so the bodies, the
+    // edge walls and the grid follow one cut.
+    std::optional<cvc::world::world_rect> region;
+    // A data node's water_level: (NaN: none): the still water over its ground, else its dataset's.
+    double water_level = std::numeric_limits<double>::quiet_NaN();
+    // A data node (not a generated_world node, whose water its own water node runs): its world
+    // gets a still-water field at that level.
+    bool still_water = false;
   };
   std::vector<tracked> tracked_nodes;
   std::vector<std::unique_ptr<GeneratedWorldRuntime>> generated; // run here (from_scene)
@@ -467,6 +533,9 @@ struct SceneWorld::impl {
       if (ground == id)
         if (const auto it = water_levels.find(water); it != water_levels.end())
           return it->second;
+    for (const tracked &t : tracked_nodes) // a data node's: the level its still water has
+      if (t.node == id && t.still_water)
+        return dataset_water_level(t);
     if (gw && gw->water.wet_cells() > 0)
       return gw->water.params.level_m;
     return std::numeric_limits<double>::quiet_NaN();
@@ -520,7 +589,7 @@ struct SceneWorld::impl {
   // Swap node t's bodies for its colliders' current geometry.
   // A data node's dataset, when it is ready and new (its first load, a reload, a replacement, a
   // generated world's Regenerate): its colliders, a revision on. False when there is nothing new.
-  bool take_dataset(tracked &t) {
+  bool take_dataset(tracked &t, std::vector<std::string> *warnings) {
     if (t.data_path.empty() || !app)
       return false;
     cvc::state &root = cvc::state::instance(*app);
@@ -538,8 +607,45 @@ struct SceneWorld::impl {
     t.target = store;
     t.rev = r;
     t.colliders->geometry = dataset_colliders(root, store, t.item, t.node);
+    if (t.region && t.colliders->geometry)
+      try {
+        t.colliders->geometry = std::make_shared<const cvc::world::world_geometry>(
+            cvc::world::crop_world_geometry(*t.colliders->geometry, *t.region));
+      } catch (const std::exception &e) {
+        warn(warnings,
+             "ari: scene node '" + t.node + "': region: " + e.what() + "; the whole world is used");
+      }
+    // A data node's still water (its water_level:, else its dataset's), unless a water node runs
+    // the water over it.
+    if (t.still_water && !water_ground_of(t.node))
+      t.colliders->geometry = with_still_water(*app, t.colliders->geometry, dataset_water_level(t));
     ++t.colliders->revision;
     return true;
+  }
+
+  // Whether a scene water node stands on node `id` (its world: or ground:).
+  bool water_ground_of(const std::string &id) const {
+    for (const auto &[water, ground] : water_ground)
+      if (ground == id)
+        return true;
+    return false;
+  }
+
+  // A data node's water level: its water_level:, else its dataset's (a version 2 bundle's
+  // manifest, a made world's); NaN for none.
+  double dataset_water_level(const tracked &t) const {
+    if (std::isfinite(t.water_level))
+      return t.water_level;
+    if (app && !t.target.empty())
+      if (cvc::state *s = cvc::state::instance(*app).findDescendant(
+              t.target + cvc::state::SEPARATOR + "water_level");
+          s && !s->value().empty()) {
+        char *end = nullptr;
+        const double level = std::strtod(s->value().c_str(), &end);
+        if (end && *end == '\0' && std::isfinite(level))
+          return level;
+      }
+    return std::numeric_limits<double>::quiet_NaN();
   }
 
   void apply(tracked &t, std::vector<std::string> *w) {
@@ -700,6 +806,13 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
       t.node = n.id;
       t.item = n.source_item;
       t.data_path = p.data_path;
+      if (!p.data_path.empty()) {
+        t.region = node_region(n, warnings);
+        if (n.type != "generated_world") { // a generated world's water_level is its generator's
+          t.water_level = n.props.num("water_level", t.water_level);
+          t.still_water = true;
+        }
+      }
       t.colliders = p.colliders ? p.colliders : std::make_shared<SceneColliders>();
       out->_impl->tracked_nodes.push_back(std::move(t));
       impl::entry e;
@@ -707,7 +820,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
       out->_impl->entries.push_back(std::move(e));
       // A generated world's colliders now; a dataset's now too when it is already ready (a
       // generated world's, which its node put before the world was built), else at a sync.
-      out->_impl->take_dataset(out->_impl->tracked_nodes.back());
+      out->_impl->take_dataset(out->_impl->tracked_nodes.back(), warnings);
       if (out->_impl->tracked_nodes.back().colliders->revision > 0)
         out->_impl->apply(out->_impl->tracked_nodes.back(), warnings);
       continue;
@@ -1238,7 +1351,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
     w->tick();
   for (impl::tracked &t : d.tracked_nodes) {
-    d.take_dataset(t); // a dataset that is ready and new: its colliders
+    d.take_dataset(t, warnings); // a dataset that is ready and new: its colliders
     // A change timed on the clock goes in at its step (follow), unless that step has gone by.
     const std::uint64_t at = t.colliders->from_tick;
     const bool due = at == 0 || !d.follower || d.follower->last_tick() > at;

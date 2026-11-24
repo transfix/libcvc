@@ -20,11 +20,24 @@ GenSeg (src/Segmentation/GenSeg) first. Its goldens per case:
   <case>.json         the case, the volrover sha, the platform, each class's voxel count and the
                       files' SHA-256
 
+PocketTunnel (src/PocketTunnel), per case:
+  <case>.ptv.txt      what pockettunnel_driver.cpp writes: the clusters outside the surface, the
+                      returned geometry (points, colours, triangles), each triangle's cluster,
+                      and Tight Cocone's marking (the outside cells, the cocone facets); --check
+                      compares it by content (a point by its coordinates, volumes to within
+                      1e-9), not byte for byte
+  <case>.json         the case, the volrover sha, the platform, the counts and the SHA-256
+
 SegMed (src/Segmentation/SegMed), the paper's critical points, per case:
   <case>.critical.txt the legacy GVF_Compute's critical list, "x y z" a line, in its order
   <case>.field.f32    the diffused field gvfflow() leaves (x, y, z float32 little-endian per
                       voxel, x fastest); --check compares it to within 1e-6, not byte for byte
   <case>.json         the case, the volrover sha, the platform, the count and the SHA-256
+
+SecondaryStructures (src/SecondaryStructures), per case:
+  <case>.ss.txt       what secondary_driver.cpp writes: the skeleton's counts and widths, the
+                      candidate runs, the helix axes and the sheets' polygons
+  <case>.json         the case, the volrover sha, the platform, the counts and the SHA-256
 
     python3 tools/volrover-goldens/make_goldens.py            # write the goldens
     python3 tools/volrover-goldens/make_goldens.py --check    # CI: they must not change
@@ -51,11 +64,14 @@ SPARSE = {
     "genseg": ["src/Segmentation/GenSeg", "inc/Segmentation/GenSeg", "LICENSE", "COPYING"],
     "segmed": ["src/Segmentation/SegMed", "inc/Segmentation/SegMed", "LICENSE", "COPYING"],
     "skeleton": ["src/Skeletonization", "inc/Skeletonization", "LICENSE", "COPYING"],
+    "secondary": ["src/SecondaryStructures", "inc/SecondaryStructures", "LICENSE", "COPYING"],
     "tiler": ["src/ContourTiler", "inc/ContourTiler", "LICENSE", "COPYING"],
+    "pockettunnel": ["src/PocketTunnel", "inc/PocketTunnel", "LICENSE", "COPYING"],
 }
 # The executable each library's legacy build makes (CMakeLists.txt).
 TARGETS = {"genseg": "genseg_legacy", "segmed": "segmed_legacy", "skeleton": "skeleton_legacy",
-           "tiler": "tiler_legacy"}
+           "secondary": "secondary_legacy", "tiler": "tiler_legacy",
+           "pockettunnel": "pockettunnel_legacy"}
 # The largest difference --check allows between a made and a committed SegMed field: the legacy
 # code's exp() is the platform's expf, which may round a last bit differently.
 FIELD_TOLERANCE = 1e-6
@@ -260,6 +276,36 @@ def skeleton_case(exe, inputs_dir, case, out_dir):
                   "debug_files": debug}
 
 
+def secondary_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy SecondaryStructures on inputs/secondary/<case>.pts; write <case>.ss.txt
+    (what secondary_driver.cpp writes) and return the case's metadata and its counts. It runs in a
+    scratch directory: the legacy code writes debug files to the current one."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    args = ["%s=%s" % (k, v) for k, v in sorted(meta.get("parameters", {}).items())]
+    with tempfile.TemporaryDirectory(prefix="secondary-") as tmp:
+        shutil.copy(os.path.join(inputs_dir, case + ".pts"), os.path.join(tmp, "in.pts"))
+        run([exe, "in.pts", "out.txt"] + args, cwd=tmp, quiet=True)
+        with open(os.path.join(tmp, "out.txt"), "rb") as f:
+            text = f.read().replace(b"\r\n", b"\n")
+        debug = sorted(n for n in os.listdir(tmp) if n not in ("in.pts", "out.txt"))
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, case + ".ss.txt"), "wb") as f:
+        f.write(text)
+    kinds = {}
+    head = []
+    for line in text.decode().splitlines():
+        kinds[line[0]] = kinds.get(line[0], 0) + 1
+        if line[0] == "N":
+            head = [int(x) for x in line.split()[1:]]
+    nv, ne, nf, comps, helices, drawn, sheets, sheet_candidates = head
+    return meta, {"skeleton_points": nv, "skeleton_edges": ne, "polygons": nf,
+                  "components": comps, "runs": kinds.get("R", 0), "helices": helices,
+                  "helices_drawn": drawn, "sheets_drawn": sheets,
+                  "sheet_candidates": sheet_candidates, "sheet_polygons": kinds.get("P", 0),
+                  "debug_files": debug}
+
+
 # How far --check lets a remade tiler golden's coordinates be from the committed one's: the
 # legacy ContourTiler runs on CGAL::Cartesian<double> (inexact predicates and constructions), and
 # its untiled-region fill interpolates, so the platform's floating point can move the last bits.
@@ -333,6 +379,93 @@ def tiler_case(exe, inputs_dir, case, out_dir):
     return meta, counts
 
 
+def pockettunnel_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy PocketTunnel on inputs/pockettunnel/<case>.pts; write <case>.ptv.txt (what
+    pockettunnel_driver.cpp writes) and return the case's metadata and its counts."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    args = ["%s=%s" % (k, v) for k, v in sorted(meta.get("parameters", {}).items())]
+    with tempfile.TemporaryDirectory(prefix="pockettunnel-") as tmp:
+        shutil.copy(os.path.join(inputs_dir, case + ".pts"), os.path.join(tmp, "in.pts"))
+        run([exe, "in.pts", "out.txt"] + args, cwd=tmp, quiet=True)
+        with open(os.path.join(tmp, "out.txt"), "rb") as f:
+            text = f.read().replace(b"\r\n", b"\n")
+        debug = sorted(n for n in os.listdir(tmp) if n not in ("in.pts", "out.txt"))
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, case + ".ptv.txt"), "wb") as f:
+        f.write(text)
+    ptv = read_ptv(os.path.join(out_dir, case + ".ptv.txt"))
+    kinds = [k for k, _, _, _, _ in ptv["features"]]
+    return meta, {"pockets": kinds.count("P"), "tunnels": kinds.count("T"),
+                  "voids": kinds.count("V"), "points": len(ptv["points"]),
+                  "triangles": len(ptv["triangles"]), "debug_files": debug}
+
+
+# How far --check lets a remade PocketTunnel golden's cluster volumes be from the committed ones',
+# relative: they are sums of many cells' volumes in doubles.
+PTV_TOLERANCE = 1e-9
+
+
+def read_ptv(path):
+    """A pockettunnel_driver.cpp output: features (kind, mouths, volume, cells, maxima), points
+    ((x, y, z), (r, g, b)), triangles ((a, b, c), feature, surface), outside cells and cocone
+    facets (vertex indices)."""
+    features, points, triangles, outside, cocone = [], [], [], [], []
+    with open(path) as f:
+        for line in f:
+            w = line.split()
+            if not w:
+                continue
+            if w[0] == "F":
+                features.append((w[1], int(w[2]), float(w[3]), int(w[4]), int(w[5])))
+            elif w[0] == "V":
+                points.append((tuple(float(v) for v in w[1:4]), tuple(float(v) for v in w[4:7])))
+            elif w[0] == "T":
+                triangles.append(((int(w[1]), int(w[2]), int(w[3])), int(w[4]), int(w[5])))
+            elif w[0] == "O":
+                outside.append(tuple(int(v) for v in w[1:5]))
+            elif w[0] == "K":
+                cocone.append(tuple(int(v) for v in w[1:4]))
+    return {"features": features, "points": points, "triangles": triangles, "outside": outside,
+            "cocone": cocone}
+
+
+def ptv_problems(made, kept):
+    """What differs between two PocketTunnel goldens, by content: the clusters in order (volumes
+    to within PTV_TOLERANCE), each point's colour by its coordinates, and the triangles by their
+    corners' coordinates (each rotated to start at its least corner) with their cluster and
+    class."""
+    a, b = read_ptv(made), read_ptv(kept)
+    out = []
+    if len(a["features"]) != len(b["features"]):
+        return ["%d clusters, not %d" % (len(a["features"]), len(b["features"]))]
+    for k, (x, y) in enumerate(zip(a["features"], b["features"])):
+        if x[0] != y[0] or x[1] != y[1] or x[3] != y[3] or x[4] != y[4] or \
+                abs(x[2] - y[2]) > PTV_TOLERANCE * max(1.0, abs(y[2])):
+            out.append("cluster %d: %s, not %s" % (k, x, y))
+    if dict(a["points"]) != dict(b["points"]):
+        out.append("the points or their colours differ")
+
+    def tris(g):
+        pts = [p for p, _ in g["points"]]
+        res = []
+        for (i, j, k), feat, surf in g["triangles"]:
+            c = [pts[i], pts[j], pts[k]]
+            m = c.index(min(c))
+            res.append((tuple(c[m:] + c[:m]), feat, surf))
+        return sorted(res)
+    if tris(a) != tris(b):
+        out.append("the triangles differ")
+
+    def marking(g, key, n):
+        pts = [p for p, _ in g["points"]]
+        return sorted(tuple(sorted(pts[i] for i in c)) for c in g[key])
+    if marking(a, "outside", 4) != marking(b, "outside", 4) or \
+            marking(a, "cocone", 3) != marking(b, "cocone", 3):
+        out.append("Tight Cocone's marking differs")
+    return out
+
+
 def describe_platform():
     return "%s %s, %s, Python %s" % (platform.system(), platform.machine(),
                                     platform.platform(terse=True), platform.python_version())
@@ -347,9 +480,9 @@ def main():
                                                    "volrover-goldens"))
     ap.add_argument("--check", action="store_true",
                     help="make the goldens in a scratch directory and compare them with --out")
-    ap.add_argument("--libs", default="genseg,segmed,skeleton,tiler",
-                    help="the libraries, comma-separated (genseg, segmed, skeleton, tiler; skeleton "
-                         "and tiler need CGAL)")
+    ap.add_argument("--libs", default="genseg,segmed,skeleton,secondary,tiler,pockettunnel",
+                    help="the libraries, comma-separated (genseg, segmed, skeleton, secondary, "
+                         "tiler, pockettunnel; all but genseg and segmed need CGAL)")
     args = ap.parse_args()
 
     sha = pinned_sha()
@@ -454,6 +587,35 @@ def main():
                   "strips" % (case, counts["polyline_segments"], counts["stars"],
                               counts["polygons"], counts["helix_strips"]))
 
+    if "secondary" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "secondary")
+        out_dir = os.path.join(target, "secondary")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, counts = secondary_case(exes["secondary"], inputs_dir, case, out_dir)
+            golden = {
+                "library": "SecondaryStructures",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/secondary/%s.pts" % case,
+                "input_sha256": sha256(os.path.join(inputs_dir, case + ".pts")),
+                "points": meta["points"],
+                "made_from": meta["made_from"],
+                "parameters": meta.get("parameters", {}),
+                "counts": counts,
+                "ss_sha256": sha256(os.path.join(out_dir, case + ".ss.txt")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            compared.append(("secondary", case + ".ss.txt"))
+            print("SecondaryStructures %s: %d helices (%d drawn), %d of %d sheet candidates drawn "
+                  "(%d polygons), %d polygons in %d components" %
+                  (case, counts["helices"], counts["helices_drawn"], counts["sheets_drawn"],
+                   counts["sheet_candidates"], counts["sheet_polygons"], counts["polygons"],
+                   counts["components"]))
+
     if "tiler" in libs:
         inputs_dir = os.path.join(HERE, "inputs", "tiler")
         out_dir = os.path.join(target, "tiler")
@@ -484,6 +646,33 @@ def main():
             print("ContourTiler %s: %s" % (case, ", ".join(
                 "%s %d triangles" % (c, n["triangles"]) for c, n in sorted(counts.items()))))
 
+    near_ptv = []  # (library dir, file name) pairs --check compares by content (ptv_problems)
+    if "pockettunnel" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "pockettunnel")
+        out_dir = os.path.join(target, "pockettunnel")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, counts = pockettunnel_case(exes["pockettunnel"], inputs_dir, case, out_dir)
+            golden = {
+                "library": "PocketTunnel",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/pockettunnel/%s.pts" % case,
+                "input_sha256": sha256(os.path.join(inputs_dir, case + ".pts")),
+                "points": meta["points"],
+                "parameters": meta.get("parameters", {}),
+                "counts": counts,
+                "ptv_sha256": sha256(os.path.join(out_dir, case + ".ptv.txt")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            near_ptv.append(("pockettunnel", case + ".ptv.txt"))
+            print("PocketTunnel %s: %d pockets, %d tunnels, %d voids; %d triangles shown" %
+                  (case, counts["pockets"], counts["tunnels"], counts["voids"],
+                   counts["triangles"]))
+
     if args.check:
         bad = []
         for lib_dir, name in compared:
@@ -513,12 +702,19 @@ def main():
                 if d > TILES_TOLERANCE:
                     bad.append("%s/%s: differs from the committed golden by %g" %
                                (lib_dir, name, d))
+        for lib_dir, name in near_ptv:
+            made = os.path.join(target, lib_dir, name)
+            kept = os.path.join(args.out, lib_dir, name)
+            if not os.path.exists(kept):
+                bad.append("%s/%s: not committed" % (lib_dir, name))
+            else:
+                bad += ["%s/%s: %s" % (lib_dir, name, p) for p in ptv_problems(made, kept)]
         if bad:
             print("\n".join(bad))
             print("The made goldens are in", target)
             return 1
-        print("the goldens match (%d files: %s)" % (len(compared) + len(near) + len(near_tiles),
-                                                    ", ".join(libs)))
+        print("the goldens match (%d files: %s)" % (len(compared) + len(near) + len(near_tiles) +
+                                                    len(near_ptv), ", ".join(libs)))
     return 0
 
 if __name__ == "__main__":

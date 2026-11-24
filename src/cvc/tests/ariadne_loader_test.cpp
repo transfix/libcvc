@@ -1163,6 +1163,35 @@ windows:
   EXPECT_TRUE(warned);
 }
 
+// §5.22 a tray icon's picture (an avatar), and §5.24 `notifications: always`.
+TEST(AriadneLoader, TrayIconPictureAndBellAlways) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+notifications: always
+menubar:
+  - tray_icon: user
+    icon: (state-get "me.avatar_url")
+    auth: site
+    on: profile
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *you = find(r.root, Kind::TrayIcon, "user");
+  ASSERT_NE(you, nullptr);
+  EXPECT_EQ(you->button_icon, "(state-get \"me.avatar_url\")");
+  EXPECT_EQ(you->media_auth, "site");
+  // The document's bell setting, outside the bar: on, and shown with an empty feed.
+  const Widget *bell = nullptr;
+  for (const Widget &c : r.root.children)
+    if (c.kind == Kind::TrayIcon && c.tray_bell)
+      bell = &c;
+  ASSERT_NE(bell, nullptr);
+  EXPECT_TRUE(bell->bdef);
+  EXPECT_TRUE(bell->bell_always);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("notifications"), std::string::npos) << w;
+}
+
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
 // own key, not its `layout:`'s (which makes a split's panes or a table's columns resizable).
 TEST(AriadneLoader, ResizableWindow) {
@@ -2775,6 +2804,54 @@ scenes:
   for (const std::string &w : r.warnings)
     warned = warned || w.find("no `scene:` name") != std::string::npos;
   EXPECT_TRUE(warned);
+}
+
+// §5.18 a camera's authored viewpoint: position, target, up, fov, near, far, orthographic, height;
+// a camera without them keeps the defaults, and a malformed vector or an fov out of range is left
+// out rather than half read.
+TEST(AriadneScene, CameraViewpoints) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  cameras:
+    - camera: main
+      position: [12, -9, 7.5]
+      target: [1, 1, 0]
+      up: [0, 1, 0]
+      fov: 35
+      near: 0.25
+      far: 400
+    - { camera: plan, orthographic: true, height: 16, target: [0, 0, 0] }
+    - { camera: rig, azimuth: -30 }
+    - { camera: bad, position: [1, two, 3], target: [1, 2], up: [0, 0, 0], fov: 200 }
+  nodes: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.cameras.size(), 4u);
+  const SceneCamera &m = r.scene.cameras[0];
+  EXPECT_EQ(m.id, "main");
+  EXPECT_TRUE(m.has_position && m.has_target && m.has_up);
+  EXPECT_DOUBLE_EQ(m.position[2], 7.5);
+  EXPECT_DOUBLE_EQ(m.target[0], 1.0);
+  EXPECT_DOUBLE_EQ(m.up[1], 1.0);
+  EXPECT_DOUBLE_EQ(m.fov, 35.0);
+  EXPECT_DOUBLE_EQ(m.near_clip, 0.25);
+  EXPECT_DOUBLE_EQ(m.far_clip, 400.0);
+  EXPECT_FALSE(m.orthographic);
+  const SceneCamera &p = r.scene.cameras[1];
+  EXPECT_TRUE(p.orthographic);
+  EXPECT_DOUBLE_EQ(p.height, 16.0);
+  EXPECT_FALSE(p.has_position);
+  EXPECT_TRUE(p.has_target);
+  const SceneCamera &g = r.scene.cameras[2];
+  EXPECT_FALSE(g.has_position || g.has_target || g.has_up || g.orthographic);
+  EXPECT_DOUBLE_EQ(g.fov, 0.0);
+  EXPECT_DOUBLE_EQ(g.near_clip, 0.0);
+  EXPECT_DOUBLE_EQ(g.up[2], 1.0);
+  const SceneCamera &b = r.scene.cameras[3];
+  EXPECT_FALSE(b.has_position || b.has_target || b.has_up);
+  EXPECT_DOUBLE_EQ(b.fov, 0.0);
 }
 
 // §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's
@@ -5493,6 +5570,33 @@ root:
   EXPECT_EQ(other->app_name, "other");
 }
 
+// §5.25 a load:'s own name: (a key or an expression, `{i}` its instance) is kept for the Runtime
+// to work out; and a repeated mount whose module repeats widgets of its own is not a nested
+// repeat (the module's {i} is its own), so it loads without that warning.
+TEST(AriadneMount, ALoadsNameIsKeptAndARepeatedMountIsNotANestedRepeat) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("site_app.ari", "meta: { name: Site, min_libcvc: \"3.4.0\" }\n"
+                                 "menubar:\n  - menu_item: Home\n    on: (state-set \"h\" 1)\n"
+                                 "root:\n  - type: group\n    repeat: (int 2)\n"
+                                 "    children: [ { text: \"row {i}\" } ]\n");
+  const std::string main = write_temp_ari("main_named_sites.ari", R"(
+meta: { min_libcvc: "3.4.0" }
+root:
+  - load: site_app.ari
+    as: site
+    repeat: (int 2)
+    name: slots.{i}.name
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *site = find_scope(r.root, "includes.site");
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->app_name, "Site");
+  EXPECT_EQ(site->app_name_bind, "slots.{i}.name");
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("nested 'repeat'"), std::string::npos) << w;
+}
+
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
   SKIP_WITHOUT_YAML();
   write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");
@@ -6833,6 +6937,17 @@ windows:
     for (const std::string &k : keys)
       if (k.find("{i}") == std::string::npos)
         EXPECT_EQ(k.find('{'), std::string::npos) << k;
+    // The Source combo: picks from the volumes the node offers, writing the key it follows; the
+    // text in its place while the node offers none.
+    const Widget *source = find(*windows[i], Kind::Combo, "Source");
+    ASSERT_NE(source, nullptr) << g;
+    EXPECT_EQ(source->bind, g + "source.volume");
+    EXPECT_NE(source->options_expr.find(g + "volumes"), std::string::npos) << source->options_expr;
+    EXPECT_NE(source->visible_when.find(g + "volumes"), std::string::npos);
+    const Widget *said = find(*windows[i], Kind::Text, "Source");
+    ASSERT_NE(said, nullptr) << g;
+    EXPECT_EQ(said->bind, g + "info.source");
+    EXPECT_NE(said->visible_when.find(g + "volumes"), std::string::npos);
   }
   // The views: their names, axes, picks, pointer and the grid they show.
   std::vector<const Widget *> custom;
@@ -6895,6 +7010,96 @@ TEST(AriadneComponents, VolumeGridDemoLoadsClean) {
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
+// volume_grid.ari's Contours tab (P10): a tab titled Contours in the tools' panel, every control
+// on its node's grid.objects / grid.contour.* / grid.tile.* keys, the tool's radio with Contours,
+// and the tab alone as a unit; the contours demo loads clean.
+TEST(AriadneComponents, VolumeGridContoursTabDrivesItsNodesKeys) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_string(app, R"(
+meta: { min_libcvc: "0.0.0" }
+import: cvc://components/volume_grid.ari
+windows:
+  - include: volume_grid
+    args: { node: skull, id: skull_grid }
+  - window: Own
+    children:
+      - include: volume_grid_contours_tab
+        args: { node: skull, id: own }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<const Widget *> windows;
+  collect(r.root, Kind::Window, windows);
+  ASSERT_EQ(windows.size(), 2u);
+  std::vector<const Widget *> all_tabs;
+  collect(*windows[0], Kind::Tabs, all_tabs);
+  bool titled = false; // the panel's (the view switch is a tabs: too)
+  for (const Widget *t : all_tabs)
+    titled = titled || std::find(t->tab_titles.begin(), t->tab_titles.end(), "Contours") !=
+                           t->tab_titles.end();
+  EXPECT_TRUE(titled) << "the panel has a tab titled Contours";
+  for (const Widget *w : windows) {
+    std::vector<std::string> keys;
+    collect_key_strings(*w, keys);
+    const std::string g = "graphics.root.children.skull.grid.";
+    for (const char *want : {"objects",
+                             "objects.{i}.name",
+                             "objects.{i}.color",
+                             "objects.{i}.interpolation",
+                             "objects.{i}.samples",
+                             "objects.{i}.visible",
+                             "objects.{i}.curves",
+                             "contour.active",
+                             "contour.info",
+                             "contour.selected",
+                             "contour.show",
+                             "contour.control_points",
+                             "contour.show_3d",
+                             "contour.snap",
+                             "contour.point_size",
+                             "contour.auto_tile",
+                             "contour.show_surfaces",
+                             "contour.surface_opacity",
+                             "tile.progress",
+                             "tile.phase",
+                             "tile.status",
+                             "tile.curation_delta",
+                             "tile.cap_ends",
+                             "files.contours"})
+      EXPECT_NE(std::find(keys.begin(), keys.end(), g + want), keys.end())
+          << w->label << ": " << g + want;
+    for (const std::string &k : keys)
+      if (k.find("{i}") == std::string::npos)
+        EXPECT_EQ(k.find('{'), std::string::npos) << k;
+  }
+  std::vector<const Widget *> radios;
+  collect(*windows[0], Kind::Radio, radios);
+  bool contours = false;
+  for (const Widget *w : radios)
+    if (w->bind == "graphics.root.children.skull.grid.tool")
+      contours = std::find(w->values.begin(), w->values.end(), "contours") != w->values.end();
+  EXPECT_TRUE(contours) << "the tool radio offers contours";
+
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_grid_contours.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app demo_app;
+  ASSERT_TRUE(register_source_components(demo_app));
+  LoadResult d = load_file(demo_app, doc.string());
+  ASSERT_TRUE(d.ok) << d.error;
+  for (const std::string &w : d.warnings)
+    EXPECT_TRUE(w.find("'viewport' has no registered handler") != std::string::npos ||
+                w.find("generate: sdf is not a generator this build has") != std::string::npos)
+        << w;
+  ASSERT_EQ(d.scene.nodes.size(), 1u);
+  EXPECT_EQ(d.scene.nodes[0].type, "volume_grid");
+  EXPECT_NE(d.scene.nodes[0].props.find("objects"), nullptr);
+}
+
 // The shared-volume demo (docs/roadmap/DATA_FROM_STATE_TREE.md, D1): a volren and a volume_grid
 // over one data: entry, and a Filter window.
 TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
@@ -6920,6 +7125,31 @@ TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
   EXPECT_EQ(r.scene.nodes[1].source_data, "bunny");
   EXPECT_NE(find(r.root, Kind::Window, "Filter"), nullptr);
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// The volume_render demo: one volume_render node on a data: entry, a Renderer combo bound to its
+// renderer key, and the transfer function editor on its model.
+TEST(AriadneComponents, VolumeRenderDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_render.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  // cvcGL registers the sdf generator (the volume, data.bunny), not this test.
+  for (const std::string &w : r.warnings)
+    EXPECT_NE(w.find("generate: sdf is not a generator this build has"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_render");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  const Widget *renderer = find(r.root, Kind::Combo, "Renderer");
+  ASSERT_NE(renderer, nullptr);
+  EXPECT_EQ(renderer->bind, "graphics.root.children.bunny.renderer");
 }
 
 // A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.

@@ -381,8 +381,12 @@ projection<T> project(const coph_vec2_of<T> &raw, const coph_state_of<T> &x,
   return {candidates[best], count};
 }
 
-// guarded_control's guard: the step under u, at each damping, stays in the corridor (with room to
-// stop), clear of every shape in the geometry store, and under 1 m/s.
+// Whether the atlas has a surveyed network (the maze router, and the corridor in the guard); a
+// car's learner has none.
+bool maze(const coph_atlas &atlas) { return atlas.network && !atlas.network->nodes.empty(); }
+
+// guarded_control's guard: the step under u, at each damping, stays in the corridor (on a network,
+// with room to stop), clear of every shape in the geometry store, and under 1 m/s.
 bool guard(const coph_state &x, const coph_vec2 &u, double damping, const coph_atlas &atlas,
            int &guard_steps) {
   const coph_config &cfg = *atlas.cfg;
@@ -392,11 +396,13 @@ bool guard(const coph_state &x, const coph_vec2 &u, double damping, const coph_a
     ++guard_steps;
     const coph_vec2 a{x[0], x[1]}, b{y[0], y[1]}, vel{y[2], y[3]};
     const double stopping = (vel[0] * vel[0] + vel[1] * vel[1]) / (2 * cfg.force_limit);
-    valid = corridor_clear(a, b, *atlas.network) && valid;
     const double speed = norm2(vel[0], vel[1]);
-    const coph_vec2 endpoint{b[0] + vel[0] / (speed + 1e-20) * stopping,
-                             b[1] + vel[1] / (speed + 1e-20) * stopping};
-    valid = corridor_clear(b, endpoint, *atlas.network) && valid;
+    if (maze(atlas)) {
+      valid = corridor_clear(a, b, *atlas.network) && valid;
+      const coph_vec2 endpoint{b[0] + vel[0] / (speed + 1e-20) * stopping,
+                               b[1] + vel[1] / (speed + 1e-20) * stopping};
+      valid = corridor_clear(b, endpoint, *atlas.network) && valid;
+    }
     const double clear = kAgentRadius + cfg.safety_margin;
     for (const coph_shape &o : atlas.geometry) {
       if (o.slab) {
@@ -478,7 +484,7 @@ coph_replay_result replay_on(coph_learner_state &s, const coph_atlas &atlas,
     int index = i;
     T cost(0.0);
     std::vector<coph_state> path{st.entry};
-    coph_route_context ctx = entry_context(s);
+    coph_route_context ctx = maze(atlas) ? entry_context(s) : st.entry_navigation;
     if (!st.supported({st.entry[0], st.entry[1]}, cfg)) {
       out.eligibility.push_back({st.id, false, "unsupported_entry"});
       continue;
@@ -765,6 +771,12 @@ coph_atlas coph_freeze(const coph_learner_state &s,
       if (std::find(f.support.begin(), f.support.end(), r.q) == f.support.end())
         f.support.push_back(r.q);
     }
+    for (const auto &e : s.entry_navigation)
+      if (e.first == st.id)
+        f.entry_navigation = e.second;
+    for (const coph_footprint &fp : st.footprints)
+      if (std::find(atlas.footprints.begin(), atlas.footprints.end(), fp) == atlas.footprints.end())
+        atlas.footprints.push_back(fp);
     atlas.stages.push_back(std::move(f));
   }
   return atlas;
@@ -891,6 +903,367 @@ coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph
   return out;
 }
 
+// navigation.edge_clear.
+bool coph_edge_clear(const coph_vec2 &a, const coph_vec2 &b, const std::vector<coph_shape> &shapes,
+                     const std::vector<coph_footprint> &footprints, double margin) {
+  const double v0 = b[0] - a[0], v1 = b[1] - a[1], vv = v0 * v0 + v1 * v1;
+  for (const coph_shape &o : shapes) {
+    const double t = clip(((o.x - a[0]) * v0 + (o.y - a[1]) * v1) / (vv + 1e-20), 0.0, 1.0);
+    if (norm2(a[0] + t * v0 - o.x, a[1] + t * v1 - o.y) <= o.r + margin + 1e-9)
+      return false;
+  }
+  if (footprints.empty())
+    return false;
+  if (vv < 1e-18) {
+    for (const coph_footprint &f : footprints)
+      if (sq(f.x - a[0]) + sq(f.y - a[1]) <= f.radius * f.radius)
+        return true;
+    return false;
+  }
+  std::vector<std::pair<double, double>> intervals;
+  for (const coph_footprint &f : footprints) {
+    const double dx = f.x - a[0], dy = f.y - a[1];
+    const double t = (dx * v0 + dy * v1) / vv;
+    const double perp = (dx * dx + dy * dy) - t * t * vv;
+    if (!(perp <= f.radius * f.radius))
+      continue;
+    const double d = std::sqrt(std::max(0.0, f.radius * f.radius - perp) / vv);
+    intervals.push_back({std::max(0.0, t - d), std::min(1.0, t + d)});
+  }
+  std::sort(intervals.begin(), intervals.end());
+  double end = 0.0;
+  for (const auto &[lo, hi] : intervals) {
+    if (hi < 0 || lo > 1)
+      continue;
+    if (lo > end + 1e-9)
+      return false;
+    end = std::max(end, hi);
+    if (end >= 1 - 1e-9)
+      return true;
+  }
+  return false;
+}
+
+namespace {
+
+const coph_shape &disk_only(const coph_shape &o) {
+  if (o.slab)
+    throw std::invalid_argument("coph: the profile's router takes disks only");
+  return o;
+}
+
+double apart(const coph_vec2 &a, const coph_vec2 &b) { return norm2(a[0] - b[0], a[1] - b[1]); }
+
+// navigation.route's plan: A* on the 0.1 m grid. Sets path, reason and expansions.
+void profile_plan(const coph_vec2 &q, const coph_atlas &atlas, std::vector<coph_vec2> &path,
+                  std::string &reason, int &expansions) {
+  const coph_config &cfg = *atlas.cfg;
+  const coph_vec2 &goal = atlas.goal;
+  const std::vector<coph_shape> &obstacles = atlas.geometry;
+  const double margin = kAgentRadius + cfg.safety_margin;
+  const double spacing = 0.1;
+  double lo0 = kInf, lo1 = kInf, hi0 = -kInf, hi1 = -kInf;
+  for (const coph_frozen_stage &st : atlas.stages) {
+    lo0 = std::min(lo0, st.center[0]);
+    lo1 = std::min(lo1, st.center[1]);
+    hi0 = std::max(hi0, st.center[0]);
+    hi1 = std::max(hi1, st.center[1]);
+  }
+  lo0 -= cfg.stage_width / 2;
+  lo1 -= cfg.stage_height / 2;
+  hi0 += cfg.stage_width / 2;
+  hi1 += cfg.stage_height / 2;
+  const long long l0 = static_cast<long long>(std::ceil(lo0 / spacing));
+  const long long l1 = static_cast<long long>(std::ceil(lo1 / spacing));
+  const long long u0 = static_cast<long long>(std::floor(hi0 / spacing));
+  const long long u1 = static_cast<long long>(std::floor(hi1 / spacing));
+  // The free grid points, in order of (i, j).
+  std::vector<std::array<long long, 2>> nodes;
+  std::vector<coph_vec2> points;
+  for (long long i = l0; i <= u0; ++i)
+    for (long long j = l1; j <= u1; ++j) {
+      const coph_vec2 p{static_cast<double>(i) * spacing, static_cast<double>(j) * spacing};
+      bool free = false;
+      for (const coph_footprint &f : atlas.footprints) {
+        const double r = std::max(0.0, f.radius - 0.075);
+        free = free || sq(p[0] - f.x) + sq(p[1] - f.y) <= r * r;
+      }
+      for (const coph_shape &shape : obstacles) {
+        const coph_shape &o = disk_only(shape);
+        free = free &&
+               sq(p[0] - o.x) + sq(p[1] - o.y) > sq(o.r + kAgentRadius + cfg.safety_margin + 0.075);
+      }
+      if (free) {
+        nodes.push_back({i, j});
+        points.push_back(p);
+      }
+    }
+  const int n = static_cast<int>(points.size());
+  if (n == 0) {
+    path.clear();
+    reason = "no_observed_free_cells";
+    return;
+  }
+  // Each point's risk from the newest stage whose box and support hold it; 1 where none does.
+  std::vector<double> values(n, 1.0);
+  std::vector<bool> unassigned(n, true);
+  for (auto it = atlas.stages.rbegin(); it != atlas.stages.rend(); ++it) {
+    const coph_frozen_stage &st = *it;
+    if (st.support.empty())
+      continue;
+    coph_field_view f;
+    f.centers = st.centers;
+    f.weights = st.weights;
+    f.width = cfg.rbf_width;
+    std::vector<int> ids;
+    for (int k = 0; k < n; ++k) {
+      if (!unassigned[k] || !(std::fabs(points[k][0] - st.center[0]) <= cfg.stage_width / 2) ||
+          !(std::fabs(points[k][1] - st.center[1]) <= cfg.stage_height / 2))
+        continue;
+      double nearest = kInf;
+      for (const coph_vec2 &sp : st.support)
+        nearest = std::min(nearest, sq(points[k][0] - sp[0]) + sq(points[k][1] - sp[1]));
+      if (nearest <= kSupportRadius * kSupportRadius)
+        ids.push_back(k);
+    }
+    for (int k : ids) {
+      values[k] = coph_risk<double>(points[k], f);
+      unassigned[k] = false;
+    }
+  }
+  const long long w1 = u1 - l1 + 1;
+  std::vector<int> lookup(static_cast<std::size_t>((u0 - l0 + 1) * w1), -1);
+  auto slot = [&](long long i, long long j) -> int {
+    if (i < l0 || i > u0 || j < l1 || j > u1)
+      return -1;
+    return lookup[static_cast<std::size_t>((i - l0) * w1 + (j - l1))];
+  };
+  for (int k = 0; k < n; ++k)
+    lookup[static_cast<std::size_t>((nodes[k][0] - l0) * w1 + (nodes[k][1] - l1))] = k;
+  // Python's key (|p - to|, (i, j)).
+  auto closer = [&](const coph_vec2 &to, int a, int b) {
+    const double da = apart(points[a], to), db = apart(points[b], to);
+    return da != db ? da < db : nodes[a] < nodes[b];
+  };
+  std::vector<int> starts(n);
+  for (int k = 0; k < n; ++k)
+    starts[k] = k;
+  std::sort(starts.begin(), starts.end(), [&](int a, int b) { return closer(q, a, b); });
+  int source = -1;
+  for (int k = 0; k < std::min(n, 16); ++k)
+    if (coph_edge_clear(q, points[starts[k]], obstacles, atlas.footprints, margin)) {
+      source = starts[k];
+      break;
+    }
+  if (source < 0) {
+    path.clear();
+    reason = "no_start_connector";
+    return;
+  }
+  int destination = 0;
+  for (int k = 1; k < n; ++k)
+    if (closer(goal, k, destination))
+      destination = k;
+  // The graph: each node's edges in the order of the offsets.
+  static constexpr int kOffsets[8][2] = {{-1, -1}, {-1, 0}, {-1, 1}, {0, -1},
+                                         {0, 1},   {1, -1}, {1, 0},  {1, 1}};
+  std::vector<std::vector<std::pair<int, double>>> adjacency(n);
+  for (const auto &off : kOffsets) {
+    const double d0 = static_cast<double>(off[0]) * spacing;
+    const double d1 = static_cast<double>(off[1]) * spacing;
+    const double dd = d0 * d0 + d1 * d1;
+    const double length = std::sqrt(dd);
+    for (int k = 0; k < n; ++k) {
+      const int j = slot(nodes[k][0] + off[0], nodes[k][1] + off[1]);
+      if (j < 0)
+        continue;
+      if (off[0] && off[1] &&
+          (slot(nodes[k][0] + off[0], nodes[k][1]) < 0 ||
+           slot(nodes[k][0], nodes[k][1] + off[1]) < 0))
+        continue;
+      bool keep = true;
+      for (const coph_shape &o : obstacles) {
+        const double t =
+            clip(((o.x - points[k][0]) * d0 + (o.y - points[k][1]) * d1) / dd, 0.0, 1.0);
+        keep = keep && norm2(points[k][0] + t * d0 - o.x, points[k][1] + t * d1 - o.y) >
+                           o.r + kAgentRadius + cfg.safety_margin;
+      }
+      if (keep)
+        adjacency[k].push_back({j, length * (1.0 + 4.0 * (values[k] + values[j]) / 2.0)});
+    }
+  }
+  std::vector<double> goal_distances(n), heuristic(n);
+  for (int k = 0; k < n; ++k) {
+    goal_distances[k] = apart(points[k], goal);
+    heuristic[k] = apart(points[k], points[destination]);
+  }
+  std::vector<bool> nearest(n, false);
+  int nearest_left = 0;
+  for (int k = 0; k < n; ++k)
+    if (goal_distances[k] <= goal_distances[destination] + 1e-12) {
+      nearest[k] = true;
+      ++nearest_left;
+    }
+  std::vector<double> distances(n, kInf);
+  std::vector<int> parents(n, -1);
+  std::vector<bool> visited(n, false);
+  std::vector<int> order; // the visited nodes
+  using entry = std::pair<double, int>;
+  std::priority_queue<entry, std::vector<entry>, std::greater<entry>> queue;
+  distances[source] = 0.0;
+  queue.push({apart(points[source], points[destination]), source});
+  expansions = 0;
+  while (!queue.empty() && expansions < cfg.route_expansion_cap) {
+    const int i = queue.top().second;
+    queue.pop();
+    if (visited[i])
+      continue;
+    visited[i] = true;
+    order.push_back(i);
+    ++expansions;
+    if (nearest[i] && --nearest_left == 0)
+      break;
+    for (const auto &[j, edge_cost] : adjacency[i]) {
+      const double cost = distances[i] + edge_cost;
+      if (cost < distances[j] - 1e-12) {
+        distances[j] = cost;
+        parents[j] = i;
+        queue.push({cost + heuristic[j], j});
+      }
+    }
+  }
+  if (order.empty()) {
+    path.clear();
+    reason = "no_route";
+    return;
+  }
+  double closest = kInf;
+  for (int i : order)
+    closest = std::min(closest, goal_distances[i]);
+  int dest = -1;
+  for (int i : order)
+    if (goal_distances[i] <= closest + 1e-12 &&
+        (dest < 0 || distances[i] < distances[dest] ||
+         (distances[i] == distances[dest] && nodes[i] < nodes[dest])))
+      dest = i;
+  std::vector<int> ids{dest};
+  while (ids.back() != source)
+    ids.push_back(parents[ids.back()]);
+  path.clear();
+  for (auto it = ids.rbegin(); it != ids.rend(); ++it)
+    path.push_back(points[*it]);
+  if (coph_edge_clear(path.back(), goal, obstacles, atlas.footprints, margin) &&
+      apart(points[dest], goal) < 0.2)
+    path.push_back(goal);
+  reason = apart(path.back(), goal) < 0.01 ? "goal_route" : "frontier_route";
+}
+
+} // namespace
+
+coph_route coph_profile_route(const coph_vec2 &q, const coph_atlas &atlas, coph_route_context &ctx,
+                              int step) {
+  const coph_config &cfg = *atlas.cfg;
+  const coph_vec2 &goal = atlas.goal;
+  const std::vector<coph_shape> &obstacles = atlas.geometry;
+  const double margin = kAgentRadius + cfg.safety_margin;
+  std::vector<coph_vec2> path = ctx.path;
+  const coph_vec2 old = ctx.target ? *ctx.target : goal;
+  coph_route out;
+  if (cfg.shaping_mode == "progress") {
+    std::vector<std::array<double, 3>> history = ctx.progress_history;
+    if (!history.empty() && step <= history.back()[0])
+      history.clear();
+    history.push_back({static_cast<double>(step), q[0], q[1]});
+    if (history.size() > 17)
+      history.erase(history.begin(), history.end() - 17);
+    if (history.size() == 17 && step - history[0][0] == 16) {
+      const coph_vec2 prior{history[0][1], history[0][2]};
+      const double progress = apart(prior, old) - apart(q, old);
+      out.stagnation = apart(q, prior) < 0.05 && progress < 0.05 && apart(q, goal) > 0.25 &&
+                       step - ctx.last_stagnation >= cfg.update_every;
+    }
+    ctx.progress_history = history;
+    if (out.stagnation)
+      ctx.last_stagnation = step;
+  }
+  int cursor = ctx.cursor;
+  const int size = static_cast<int>(path.size());
+  if (!path.empty())
+    while (cursor < size - 1 && apart(q, path[cursor]) < 0.2)
+      ++cursor;
+  double from_path = 1e9;
+  for (const coph_vec2 &p : path)
+    from_path = std::min(from_path, apart(q, p));
+  bool stale =
+      out.stagnation || path.empty() || step - ctx.planned_at >= cfg.update_every ||
+      from_path > 0.25 ||
+      !coph_edge_clear(q, path.empty() ? q : path[cursor], obstacles, atlas.footprints, margin);
+  // A newly sensed disk invalidates any remaining route edge at once.
+  if (!path.empty() && !obstacles.empty()) {
+    std::vector<coph_vec2> pts{q};
+    pts.insert(pts.end(), path.begin() + cursor, path.end());
+    for (const coph_shape &shape : obstacles) {
+      const coph_shape &o = disk_only(shape);
+      bool hit = false;
+      for (std::size_t k = 0; k + 1 < pts.size() && !hit; ++k) {
+        const double d0 = pts[k + 1][0] - pts[k][0], d1 = pts[k + 1][1] - pts[k][1];
+        const double t =
+            clip(((o.x - pts[k][0]) * d0 + (o.y - pts[k][1]) * d1) / ((d0 * d0 + d1 * d1) + 1e-20),
+                 0.0, 1.0);
+        hit = norm2(pts[k][0] + t * d0 - o.x, pts[k][1] + t * d1 - o.y) <=
+              o.r + kAgentRadius + cfg.safety_margin;
+      }
+      if (hit) {
+        stale = true;
+        break;
+      }
+    }
+  }
+  std::string reason = "cached";
+  if (stale) {
+    profile_plan(q, atlas, path, reason, out.expansions);
+    cursor = 0;
+    for (int k = 0; k < static_cast<int>(path.size()); ++k) {
+      if (apart(path[k], q) <= 1.0 &&
+          coph_edge_clear(q, path[k], obstacles, atlas.footprints, margin))
+        cursor = k;
+      else if (k > cursor)
+        break;
+    }
+    ctx.path = path;
+    ctx.cursor = cursor;
+    ctx.planned_at = step;
+  } else if (!path.empty() && cursor != ctx.cursor) {
+    for (int k = cursor; k < static_cast<int>(path.size()); ++k) {
+      if (apart(path[k], q) <= 1.0 &&
+          coph_edge_clear(q, path[k], obstacles, atlas.footprints, margin))
+        cursor = k;
+      else
+        break;
+    }
+  }
+  coph_vec2 target = path.empty() ? q : path[cursor];
+  if (cfg.shaping_mode == "progress" && apart(q, goal) <= 1.0 &&
+      coph_edge_clear(q, goal, obstacles, atlas.footprints, margin)) {
+    target = goal;
+    path = {goal};
+    cursor = 0;
+    reason = "direct_goal";
+    ctx.path = path;
+  }
+  if (!path.empty() && cursor == static_cast<int>(path.size()) - 1 && apart(q, target) < 0.2 &&
+      apart(q, goal) > 0.25)
+    ctx.planned_at = -10000;
+  ctx.target = target;
+  ctx.cursor = cursor;
+  out.target = target;
+  out.reason = reason;
+  out.changed = stale;
+  out.no_route = path.empty();
+  out.path = path;
+  return out;
+}
+
 template <class T>
 coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> &x, int index,
                                 const coph_vec2_of<T> &policy, double damping,
@@ -899,11 +1272,16 @@ coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> 
   const coph_frozen_stage &s = atlas.stages[index];
   coph_control_of<T> out;
   const coph_vec2 q{coph_value(x[0]), coph_value(x[1])};
-  const coph_route route = coph_maze_route(q, atlas.goal, *atlas.network, ctx, step);
+  const bool on_network = maze(atlas);
+  const coph_route route = on_network ? coph_maze_route(q, atlas.goal, *atlas.network, ctx, step)
+                                      : coph_profile_route(q, atlas, ctx, step);
   out.meta.route_reason = route.reason;
   out.meta.route_nodes = route.nodes;
   out.meta.waypoint = route.target;
   out.meta.route_changed = route.changed;
+  out.meta.route_expansions = route.expansions;
+  out.meta.route = route.path;
+  out.meta.stagnation = route.stagnation;
   coph_field_view f;
   f.centers = s.centers;
   f.weights = s.weights;
@@ -917,7 +1295,7 @@ coph_control_of<T> coph_control(const coph_atlas &atlas, const coph_state_of<T> 
   out.meta.reason = "nominal";
   projection<T> candidate;
   if (!atlas.overflow && !route.no_route)
-    candidate = project<T>(cmd.proposed, x, atlas.geometry, damping, cfg, true);
+    candidate = project<T>(cmd.proposed, x, atlas.geometry, damping, cfg, on_network);
   out.meta.projection_candidates = candidate.count;
   const coph_state xv = values<T>(x);
   if (candidate.point &&
@@ -1014,7 +1392,7 @@ coph_replay_plan coph_prepare(coph_learner_state &s, const coph_atlas &atlas, do
     coph_state x = st.entry;
     int index = i;
     std::optional<int> target;
-    coph_route_context ctx = entry_context(s);
+    coph_route_context ctx = maze(atlas) ? entry_context(s) : st.entry_navigation;
     try {
       bool finished = false;
       for (int step = 0; step < cfg.boundary_max_steps; ++step) {

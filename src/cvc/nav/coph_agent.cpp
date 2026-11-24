@@ -112,6 +112,8 @@ void coph_agent::observe(const coph_observation &observation,
   ledger_.set_geometry(kept);
   sync_stages();
   coph_expire(s_);
+  if (car())
+    return; // a car's learner is CooperativeLearner on Learner
 
   // TerrainLearner.observe: route evidence that expired goes; the terrain anchors refresh.
   auto &e = s_.exchange;
@@ -151,7 +153,23 @@ bool coph_agent::advance(const coph_state &x) {
   if (!ledger_.advance(x, s_.version))
     return false;
   sync_stages();
-  refresh_geometry();
+  if (!car()) {
+    refresh_geometry();
+    return true;
+  }
+  // Learner.advance: the new stage's entry context is the live one, due to replan; the kept
+  // stages keep theirs.
+  coph_route_context entry = navigation_;
+  entry.planned_at = -10000;
+  s_.entry_navigation.push_back({s_.stages.back().id, std::move(entry)});
+  auto &en = s_.entry_navigation;
+  en.erase(std::remove_if(en.begin(), en.end(),
+                          [&](const auto &e) {
+                            return std::none_of(
+                                s_.stages.begin(), s_.stages.end(),
+                                [&](const coph_stage &st) { return st.id == e.first; });
+                          }),
+           en.end());
   return true;
 }
 
@@ -202,6 +220,8 @@ coph_update_report coph_agent::update(const coph_state &x) {
     ledger_.commit(weights, s_.version);
   }
   s_.counterfactual_steps += diagnostic();
+  if (car())
+    return rep;
 
   // TerrainLearner.update: the learner's own anchors from the committed fields, at up to 80 of
   // each stage's fitting positions, one per 0.2 m cell.
@@ -272,6 +292,8 @@ coph_packet_event coph_agent::assimilate(const coph_packet &m) {
       fresh.push_back(o.shape);
   }
   const coph_packet_event ev = coph_assimilate(s_, m);
+  if (car())
+    return ev;
   ledger_.set_geometry(s_.geometry);
   s_.stages = ledger_.stages();
   if (ev.reason == "eligible")

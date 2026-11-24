@@ -120,10 +120,12 @@ void raster_rows(const world_model &wm, const grid_spec &g, raster_out &out, int
   const terrain_source &ground = wm.terrain();
   const double sea = ground.sea_level_m();
   const double amp = ground.relief_m();
+  const bool beach = ground.has_mask(terrain_mask::beach);
   r0 = std::max(0, r0);
   r1 = std::min(g.rows, r1);
 
   // ── Layer 0: derived predicates (each cell independent -> thread-invariant) ──
+  // A generator's beach mask makes its dry ground sand however high (a shore edge's berm).
 #ifdef CVC_USING_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -136,6 +138,8 @@ void raster_rows(const world_model &wm, const grid_spec &g, raster_out &out, int
       const std::size_t i = std::size_t(r) * cols + c;
       out.height[i] = float(h);
       out.klass[i] = derived_class(h, sl, sea, amp);
+      if (beach && h >= sea && ground.mask(terrain_mask::beach, x, y) > 0.5)
+        out.klass[i] = 5; // sand
     }
   }
 }

@@ -35,15 +35,21 @@
 // the grid's own <node>.transfer_function, so one tf_editor drives all three; each holds two
 // overlay children, `points` (the classes' points on that plane, as disks of their radius in
 // voxels, unlit) and `lines` (the selection's rings, the crosshairs where the other two planes
-// cross it, and a rubber band being dragged). `surfaces` is an empty group for what later phases
-// put in the 3D view (P9's segmented classes, P10's tiled contours).
+// cross it, and a rubber band being dragged), then the contours' two (VolumeGridContours).
+// `surfaces` is the group for what the 3D view shows beyond the planes, which the slice views
+// hide: `volume`, a VolumeRenderNode drawing the volume by the renderer grid.display.render picks
+// (none by default), the contours' curves and their tiled surfaces (VolumeGridContours), and P9's
+// segmented classes.
 //
 // KEYS, under the node's state path (all strings, as everywhere on the tree):
 //   grid.view, grid.tool, grid.slice.{x,y,z}   cvc::volume_grid_params: the switch's view, what a
 //                  click does, the three planes (-1 the middle, written back as its number; a
 //                  plane past the last is drawn as the last and written back). Each slice key's
 //                  "max" property is its last plane's number, so a slider takes its range from it
-//   grid.display.* cvc::volume_grid_display_params: point_scale, show_points, crosshairs, grey
+//   grid.display.* cvc::volume_grid_display_params: point_scale, show_points, crosshairs, grey,
+//                  render (none | vtk | volren | volslice: what draws the volume in the 3D view,
+//                  through the grid's transfer function; a file read plane by plane has no whole
+//                  volume to draw)
 //   grid.source.*  cvc::volume_grid_source_params: volume, points and session, the state keys
 //                  the node follows (relative to its scope, setScope; a leading '/' is the
 //                  root's), and var and time, the variable and timestep the volume holds. The
@@ -53,6 +59,11 @@
 //                  a cvc::point_classes (as those hold it), which replace the classes (an undo
 //                  step) each time they change; the session's a cvc::volume_grid_session, applied
 //                  each time it changes
+//   grid.volumes   published: the volumes grid.source.volume may name, one per line, as it names
+//                  them: each output of the document's data: entries that holds a volume
+//                  (data.<name>.<output>), then the key it names now when that is not one of them.
+//                  Empty while grid.source.volume names none (a host that calls setSource). The
+//                  panel's Source combo picks from it, writing grid.source.volume
 //   grid.classes   the point classes' metadata as rows a list: binds: the count, then <i>.name,
 //                  <i>.color ("r,g,b"), <i>.radius, <i>.variable, <i>.timestep, <i>.points (the
 //                  point count, written); grid.classes.current, the class a click adds to (-1
@@ -65,7 +76,10 @@
 //   grid.selection.count  published: how many points are selected
 //   grid.request   one command, consumed (written back as ""): delete_selected | select_all |
 //                  select_none | undo | step <n> (the shown view's plane, n planes on; Left /
-//                  Right step 1 and PageUp / PageDown 5 in the legacy)
+//                  Right step 1 and PageUp / PageDown 5 in the legacy), and the contours'
+//                  (VolumeGridContours.h: tile, close_curve, ...; with the contours tool the
+//                  first four act on the contours)
+//   grid.objects, grid.contour.*, grid.tile.*   the contours' (VolumeGridContours.h)
 //   grid.busy, stoppable, progress, phase, status, stats.work_ms   the §1.9 job keys
 //                  (cvc/core/job_keys.h); status says what the last request or gesture did
 //   grid.info.{dims,min,max,span,source}  published: the volume's (source: the key it is at)
@@ -75,7 +89,8 @@
 // points as a point_classes), grid.session (std::shared_ptr<const cvc::volume_grid_session>: the
 // session as it stands, kept current) and grid.volume (the std::shared_ptr<const cvc::volume> the
 // planes cut: the very pointer grid.source.volume held, while the volume is in memory; empty for
-// a slice_source read plane by plane).
+// a slice_source read plane by plane), and the contours' (grid.curves, grid.contours,
+// grid.surfaces.<object>: VolumeGridContours.h).
 #ifndef CVC_GL_VOLUMEGRIDNODE_H
 #define CVC_GL_VOLUMEGRIDNODE_H
 
@@ -97,6 +112,8 @@ class volume;
 namespace gl {
 
 class GeometryNode;
+class VolumeGridContours;
+class VolumeRenderNode;
 class VolumeSliceNode;
 
 class VolumeGridNode : public NullGraphicNode {
@@ -132,6 +149,8 @@ public:
   // The plane looking down `a`, and the surfaces group; null before ensureChildren.
   std::shared_ptr<VolumeSliceNode> slice(cvc::slice_axis a) const;
   std::shared_ptr<NullGraphicNode> surfaces() const { return m_surfaces; }
+  // The volume in the 3D view (in the surfaces group); null before ensureChildren.
+  std::shared_ptr<VolumeRenderNode> volumeRender() const { return m_volumeRender; }
   // The overlay children of the plane looking down `a` ("points" and "lines").
   std::shared_ptr<GeometryNode> pointsOverlay(cvc::slice_axis a) const;
   std::shared_ptr<GeometryNode> linesOverlay(cvc::slice_axis a) const;
@@ -147,6 +166,10 @@ public:
   // next tick).
   cvc::point_class_editor &editor() { return m_editor; }
   const cvc::point_class_editor &editor() const { return m_editor; }
+
+  // The contours: their editor, overlays, surfaces and tile job (VolumeGridContours.h).
+  VolumeGridContours &contours() { return *m_contours; }
+  const VolumeGridContours &contours() const { return *m_contours; }
 
   // Apply what changed since the last call: the keys, picks, the pointer, requests, rows and the
   // data channel; then redraw the overlays if they changed and tick the planes. Call once per frame
@@ -164,6 +187,7 @@ private:
              const std::string &label, int var, int time);
   bool follow(const char *which, cvc::followed_key &f, boost::any &payload);
   void followSources();
+  void publishVolumes();
   void adoptPoints(const boost::any &payload, const std::string &from);
   void applySession(const cvc::volume_grid_session &s, const std::string &from);
   void publishSession();
@@ -190,13 +214,16 @@ private:
   std::string m_scope;
   cvc::followed_key m_followVolume, m_followPoints, m_followSession;
   std::string m_waitingFor; // the status last said the node is waiting for a volume here
+  std::string m_volumesSignature; // what grid.volumes was last made from (the entries, their revs)
   bool m_seeded = false;    // the parameter keys have their defaults
   std::string m_sessionSignature;
   std::array<std::shared_ptr<VolumeSliceNode>, 3> m_slices;
   std::array<std::shared_ptr<GeometryNode>, 3> m_points, m_lines;
   std::shared_ptr<NullGraphicNode> m_surfaces;
+  std::shared_ptr<VolumeRenderNode> m_volumeRender;
   cvc::point_class_editor m_editor;
   cvc::point_class_gestures m_gestures;
+  std::unique_ptr<VolumeGridContours> m_contours;
   cvc::volume_grid_params m_params;
   cvc::volume_grid_display_params m_display;
   std::array<std::int64_t, 3> m_index{0, 0, 0}; // the planes drawn
