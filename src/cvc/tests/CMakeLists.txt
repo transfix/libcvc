@@ -3872,6 +3872,11 @@ if(_cvc_bench_python)
     add_test(NAME state_exec_state_word_model_test
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/locks_model/test_state_word.py")
+    # The router protocol's model (tools/locks_model/test_router.py; S2b, S2-Q15): its quick
+    # suite and checks of its explorer, about 25 s, standard library only.
+    add_test(NAME state_exec_router_model_test
+             COMMAND "${_cvc_bench_python}" -I
+                     "${PROJECT_SOURCE_DIR}/tools/locks_model/test_router.py")
   endif()
 endif()
 # The deterministic bench gates (state_exec_bench_gates.cmake): 0 steps and 0 allocations per

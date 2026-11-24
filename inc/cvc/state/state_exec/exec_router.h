@@ -4,13 +4,22 @@
  * group each channel key is homed at, the group each pid is in, and the handle a group is posted
  * to by. One of each per app (app::exec_router()), beside its pid source.
  *
- * The rules S2b.0 freezes (S2.md S2-Q7..S2-Q10; change them only through the lead):
+ * The rules S2b.0 freezes (S2.md S2-Q7..S2-Q10; change them only through the lead), as amended from
+ * the router model's findings (tools/locks_model/router.py; S2b.0a):
  *
  * - **Homes.** A resolved channel key's home is the group that registered the longest prefix
  *   covering it (the key itself, or the prefix followed by '.'), else group 0, the app scheduler,
  *   which registers "" when app::exec_scheduler() builds it (a key homed at an unbuilt group 0
  *   builds it). A '#' key is never routed: it stays in the group that resolves it. Registering a
  *   prefix moves no waiter or message already parked on a key under it.
+ * - **Islands.** A group that registered no prefix (a Stage 1 host's own group: has_prefix() is
+ *   false) keeps every key no other group's prefix covers in its own scheduler, router on or off,
+ *   as today; only a key under another group's prefix is routed from it. So a plain group's own
+ *   messaging never changes home as the router turns on and off. Two plain groups exchange messages
+ *   only on keys a group with a prefix homes (give one a prefix: channel_prefixes). When a prefix's
+ *   home goes, its keys come home to group 0 for groups with prefixes and to each island itself;
+ *   an island's waits parked at the dying home are rehomed to group 0 and served there, while its
+ *   later waits on those keys are its own (a documented gap).
  * - **When the router is on** (active()): while a group other than group 0 has a registered
  *   prefix, or a remote-waiter record exists at some home. Off, no scheduler consults it (RT-1):
  *   messaging is today's, one scheduler at a time.
@@ -19,7 +28,9 @@
  *   before it in a drain, and settled async calls after it. A drain that throws puts back what it
  *   had not applied, ahead of later posts (S0.7); the entry that threw is not put back (it may
  *   have half happened) and is counted (throw_dropped): a command still gets done(false), and only
- *   a deliver that did not patch its frame goes back to its home as a requeue.
+ *   a deliver that did not patch its frame goes back to its home as a stale one does (a requeue,
+ *   or dropped when requeue_if_stale is false), with a subscribe for its wait (the same seq): the
+ *   process still waits, and its record was used.
  * - **The protocol** (td 4.6, route_entry's kinds). msg-send in S on a key homed at H != S posts
  *   `send` to H; H applies it as a local msg-send there: each current waiter gets it, a local one
  *   at once, a remote one by a `deliver` to its group (one envelope copy per receiving group);
@@ -27,27 +38,38 @@
  *   with a new recv_seq and posts `subscribe`; H answers from its pending FIFO with a `deliver`,
  *   or records a remote waiter. R applies a `deliver` by pid and seq (async_scheduler::deliver_to);
  *   a stale one (the process no longer waits with that seq) goes back to H as a `requeue`, which H
- *   gives to the next waiter, else puts at the front of the FIFO, past its cap. A timed-out, killed
- *   or reaped remote wait posts `unsubscribe`.
+ *   gives to the next waiter (the earliest local waiter, else the earliest record), else puts at
+ *   the front of the FIFO, past its cap. A deliver that the receiving group's closed handle refuses
+ *   is stale at once: H applies it as that requeue (or drops it when requeue_if_stale is false). A
+ *   timed-out, killed or reaped remote wait posts `unsubscribe`.
  * - **Broadcasts.** A send that a local waiter at H took sends its remote copies with
  *   requeue_if_stale false (a stale one is dropped, counted). One that reached no local waiter and
  *   one remote waiter is untracked (broadcast 0, a stale copy requeued). One that reached no local
- *   waiter and k >= 2 remote waiters is tracked at H by an id: each copy answers `taken` or
- *   `requeue`; if every copy comes back stale H queues it once, and a stale copy of one already
- *   taken is dropped. So nothing is lost and nothing is delivered twice. A requeue or taken naming
- *   an id its home does not track (the home was torn down meanwhile) is applied as untracked.
+ *   waiter and k >= 2 remote waiters is tracked at H by an id unique in the app
+ *   (exec_router::new_broadcast_id): each copy answers `taken` or `requeue`; if every copy comes
+ *   back stale H applies it once as a requeue, and a stale copy of one already taken is dropped. A
+ *   home torn down with copies outstanding forwards its tracker (`adopt`), which the new home takes
+ *   over, so the copies' late answers find it. So nothing is lost and nothing is delivered twice. A
+ *   requeue or taken naming an id its home does not track is applied as untracked.
  * - **The cap** (state_exec.groups.ingress_cap, default 65536, 0: none). Only `send` entries and a
  *   host's post_message count; past the cap they are refused (msg-send's {status "error", reason
  *   "ingress full"}; post_message returns false). Controls, deliver, requeue, subscribe,
- *   unsubscribe, taken, rehomed messages, completions and lock posts never count.
+ *   unsubscribe, taken, adopt, uncapped sends (rehomed messages), completions and lock posts never
+ *   count. An uncapped send that finds no waiter joins the pending FIFO past max_pending_messages:
+ *   a message a home accepted is never dropped by its move.
  * - **Teardown and rehoming.** A group's teardown, holding its token after the lock port's close
- *   and before the kills (async_scheduler::leave_router), unregisters its prefixes, closes its
- *   handle (posts through it are refused from then on: a poster re-resolves the home and posts
- *   again), then sends what it holds to the keys' new homes: its queued router entries (a deliver
- *   as a requeue to its home), its remote-waiter records (as subscribes with the same seq) and the
- *   pending messages of the keys it homed (as uncapped sends, in FIFO order). Its kills then post
- *   unsubscribes for its processes' remote waits. Group 0's teardown (~app) drops, and counts,
- *   whatever is still posted to it.
+ *   and before the kills (async_scheduler::leave_router): (1) closes its handle: a post through it
+ *   is refused from then on, and its poster re-resolves the home (home_of) and posts again, waiting
+ *   (yielding) while the home is still this group; (2) sends what it holds to the keys' new homes,
+ *   resolved without it or any other closed group (exec_router::new_home_of), in the order it took
+ *   them: the pending messages of the keys it homed (uncapped sends, FIFO order), its remote-waiter
+ *   records (subscribes with the same seq), its broadcast trackers (adopt), then its queued
+ *   messages and router entries in queue order (a host post of a key it homed and a send as
+ *   uncapped sends; a deliver as a stale one: a requeue to its home, or dropped when
+ *   requeue_if_stale is false; the rest as they are); a '#' key's message dies with it, counted;
+ *   (3) only then unregisters its prefixes, which ends the posters' wait. The forward waits on
+ *   nothing, so the wait is bounded. Its kills then post unsubscribes for its processes' remote
+ *   waits. Group 0's teardown (~app) drops, and counts, whatever is still posted to it.
  * - **Host posts.** async_scheduler::post_message on a key homed elsewhere (router on) forwards
  *   it to the home as a send. exec_pool::post_message posts to the key's home.
  * - **The owner rule** (S2-Q7, S2-Q8; scheduler_base::control_as). Locally, a caller with owner ""
@@ -162,6 +184,9 @@ struct route_entry {
     requeue,
     /// key, broadcast: a tracked broadcast copy reached its waiter.
     taken,
+    /// key, value, broadcast, outstanding, taken: a tracker its home's teardown forwards (S2b.0a);
+    /// the new home tracks the broadcast from there, so its copies' late answers find it.
+    adopt,
   };
   kind what = kind::send;
   std::string key;
@@ -176,8 +201,12 @@ struct route_entry {
   /// deliver: a stale copy goes back as a requeue; false when a local waiter at the home took the
   /// message, so a stale copy is dropped.
   bool requeue_if_stale = true;
-  /// send: never refused, never counted (a rehomed message).
+  /// send: never refused, never counted, and past max_pending_messages when it finds no waiter (a
+  /// rehomed message).
   bool uncapped = false;
+  /// adopt: the copies that have not answered yet, and whether one was taken.
+  std::uint32_t outstanding = 0;
+  bool taken = false;
 };
 } // namespace detail
 
@@ -233,6 +262,14 @@ public:
   /// not yet). Uncached: each scheduler caches its lookups, a capped map checked against epoch().
   /// Counted in consulted(). Not for a '#' key (never routed).
   group_ref home_of(std::string_view key) const;
+  /// home_of, with every closed group's prefixes left out: where a teardown forwards what it holds
+  /// (exec_router.h, "Teardown and rehoming"). Not counted in consulted().
+  group_ref new_home_of(std::string_view key) const;
+  /// Whether `group` registered a prefix (group 0's "" counts): a group that did not is an island
+  /// (the header's rule), whose keys no other group's prefix covers stay its own.
+  bool has_prefix(const group_ref &group) const;
+  /// A tracked broadcast's id, unique in the app (never 0).
+  std::uint64_t new_broadcast_id() noexcept;
   /// Whether the router is on (the header's rule): two atomic loads.
   bool active() const noexcept;
   /// Moves at every registration and unregistration: a scheduler's cache of homes is stale once it

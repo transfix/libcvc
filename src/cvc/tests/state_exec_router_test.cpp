@@ -53,6 +53,38 @@ TEST(RouterInterfaces, TheLongestRegisteredPrefixIsTheHome) {
   EXPECT_TRUE(router.home_of("other").is_group0());              // group 0, built for it
 }
 
+// S2b.0a: a teardown's forward skips closed homes; a plain group is an island; broadcast ids are
+// unique in the app.
+TEST(RouterInterfaces, ATeardownForwardsPastClosedHomes) {
+  cvc::app app;
+  se::exec_router &router = app.exec_router();
+  se::exec_group::options a;
+  a.name = "a";
+  a.app = &app;
+  a.channel_prefixes = {"docs.a"};
+  se::exec_group ga(a);
+  se::exec_group::options ab;
+  ab.name = "ab";
+  ab.app = &app;
+  ab.channel_prefixes = {"docs.a.b"};
+  se::exec_group gab(ab);
+  se::exec_group::options plain;
+  plain.name = "plain";
+  plain.app = &app;
+  se::exec_group gp(plain);
+  EXPECT_TRUE(router.has_prefix(ga.route()));
+  EXPECT_FALSE(router.has_prefix(gp.route())); // an island
+  EXPECT_TRUE(router.has_prefix(router.home_of("other")));
+  gab.route().close();                                  // as its teardown's first step does
+  EXPECT_EQ(router.home_of("docs.a.b.c"), gab.route()); // posters wait for the unregister
+  EXPECT_EQ(router.new_home_of("docs.a.b.c"), ga.route());
+  ga.route().close();
+  EXPECT_TRUE(router.new_home_of("docs.a.b.c").is_group0());
+  const std::uint64_t b1 = router.new_broadcast_id();
+  EXPECT_NE(b1, 0u);
+  EXPECT_NE(router.new_broadcast_id(), b1);
+}
+
 } // namespace
 
 // --- Stage 2b router and control across groups (td 8.4, S2.md 4) ---
