@@ -65,13 +65,8 @@ struct material {
 // ---- Change History ----
 // 2024 -- Joe R. -- Creation (Phase-3 model surface).
 // 2026 -- Joe R. -- The file's node tree (nodes, instances(), placed()).
+// 2026 -- Joe R. -- Its clips, skins and morph targets (clips, posed()).
 struct model {
-  struct mesh {
-    geometry geom;
-    int material = -1; // index into model::materials, or -1 for none
-    std::string name;
-  };
-
   // A 4x4 affine transform, row-major: element (r, c) is [r * 4 + c], so the
   // translation is [3], [7], [11] and the last row is 0 0 0 1. It maps a point p
   // (a column) to M p.
@@ -80,6 +75,43 @@ struct model {
   static bool is_identity(const transform_t &t);
   // a * b: b applied first.
   static transform_t compose(const transform_t &a, const transform_t &b);
+
+  // A bone of a skin: the node it follows, and the matrix from the mesh's space
+  // into that node's at the rest (bind) pose: glTF's inverse bind matrix,
+  // assimp's offset matrix.
+  struct bone {
+    int node = -1; // index into nodes
+    transform_t offset = identity_transform();
+  };
+
+  // How a skinned mesh's vertices follow its bones: vertex v is moved by
+  // influences[first[v]] .. influences[first[v + 1] - 1], each a bone (an index
+  // into bones) and its weight; a vertex's weights sum to 1, and a vertex with
+  // none stays where it is. A skinned mesh is placed by its bones, not by the
+  // node that draws it (glTF's rule).
+  struct skin {
+    std::vector<bone> bones;
+    std::vector<boost::uint32_t> first; // one per vertex, and one past the last
+    std::vector<std::pair<int, double>> influences;
+    bool empty() const { return bones.empty(); }
+  };
+
+  // A morph target (a blend shape): how far each vertex moves at weight 1, and
+  // how its normal changes (empty: it does not).
+  struct morph_target {
+    std::string name;
+    geometry::points_t position_deltas; // one per point of the mesh
+    geometry::normals_t normal_deltas;  // none, or one per point
+  };
+
+  struct mesh {
+    geometry geom;
+    int material = -1; // index into model::materials, or -1 for none
+    std::string name;
+    skin bones;                       // empty: not skinned
+    std::vector<morph_target> morphs; // its blend shapes
+    std::vector<double> morph_weights; // their weights at rest (missing ones 0)
+  };
 
   // A node of the file's scene graph: its name, its transform relative to its
   // parent, the meshes it draws (indices into meshes) and its children (indices
@@ -174,6 +206,78 @@ struct model {
   bounding_box extents_metres() const;
 
   boost::uint64_t num_meshes() const { return meshes.size(); }
+
+  // ---------------
+  // model::clip
+  // ---------------
+  // Purpose:
+  //   A clip (glTF's animation, an FBX take): channels that set nodes' translation,
+  //   rotation and scale, and the morph weights of the meshes a node draws, over
+  //   time in seconds. Between keys a channel is linear (rotation: spherical), or
+  //   holds the earlier key (step); before its first key it holds the first, after
+  //   its last the last. A channel's node keeps what the channel does not set
+  //   (a rotation channel alone keeps the node's authored translation and scale).
+  struct clip {
+    std::string name;
+    double duration = 0.0; // seconds
+    struct vec3_keys {
+      std::vector<double> t;
+      std::vector<boost::array<double, 3>> v;
+      bool step = false;
+    };
+    struct quat_keys {
+      std::vector<double> t;
+      std::vector<boost::array<double, 4>> q; // w, x, y, z
+      bool step = false;
+    };
+    struct node_channel {
+      int node = -1; // index into nodes
+      vec3_keys position, scale;
+      quat_keys rotation;
+    };
+    // The morph weights of every mesh node `node` draws, a vector per key (one
+    // weight per morph target).
+    struct weights_channel {
+      int node = -1;
+      std::vector<double> t;
+      std::vector<std::vector<double>> weights;
+      bool step = false;
+    };
+    std::vector<node_channel> nodes;
+    std::vector<weights_channel> weights;
+  };
+  std::vector<clip> clips;
+
+  // The clip named `name`, else the one it numbers ("0" the first); -1 for none.
+  int find_clip(const std::string &name) const;
+
+  // ---------------------------
+  // model::local_transforms
+  // ---------------------------
+  // Purpose:
+  //   Each node's transform relative to its parent at `t` seconds into clip `c`:
+  //   what the clip's channels set (composed T R S with the authored parts it
+  //   does not), the authored transform for every other node. A `c` out of range
+  //   gives every node's authored transform (the rest pose).
+  std::vector<transform_t> local_transforms(int c, double t) const;
+
+  // ---------------
+  // model::posed
+  // ---------------
+  // Purpose:
+  //   merged()'s points and normals with the model posed at `t` seconds into clip
+  //   `c` (out of range: the rest pose), in merged()'s order: each mesh's morph
+  //   targets blended by the clip's weights (else its rest weights), then a
+  //   skinned mesh placed by its bones (each weighted bone's node transform times
+  //   its offset), any other by its node's animated transform. Faces, colours and
+  //   texture coordinates are merged()'s. A skinned mesh is placed by its bones at
+  //   rest too, where merged() places it by its node (the same in a file whose
+  //   skinned mesh's node sits at the origin, as glTF asks).
+  void posed(int c, double t, geometry::points_t &points, geometry::normals_t &normals) const;
+  geometry posed(int c, double t) const;
+
+  // Whether a clip moves anything, or a mesh has a skin or morph targets.
+  bool animated() const;
 };
 
 } // namespace cvc

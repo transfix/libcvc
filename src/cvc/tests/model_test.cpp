@@ -753,4 +753,260 @@ TEST(ModelNodes, AZUpColladaFileKeepsItsAxesAndUnits) {
   EXPECT_TRUE(has_point(g, 1, 3, 3));
 }
 
+// ── clips, skins and morph targets (posed) ──────────────────────────────────
+
+namespace {
+
+// A glTF buffer built view by view: each add() pads to 4 bytes, appends the bytes, and makes a
+// bufferView and an accessor over them (`meta`: the accessor's other keys).
+struct gltf_bin {
+  std::string bin, views, accessors;
+  int n = 0;
+  int add(const void *p, std::size_t bytes, const std::string &meta) {
+    while (bin.size() % 4)
+      bin.push_back('\0');
+    const std::size_t off = bin.size();
+    bin.append(static_cast<const char *>(p), bytes);
+    views += std::string(n ? "," : "") + "{\"buffer\": 0, \"byteOffset\": " + std::to_string(off) +
+             ", \"byteLength\": " + std::to_string(bytes) + "}";
+    accessors += std::string(n ? "," : "") + "{\"bufferView\": " + std::to_string(n) + ", " + meta +
+                 "}";
+    return n++;
+  }
+  std::string tail() {
+    while (bin.size() % 4)
+      bin.push_back('\0');
+    return "\"bufferViews\": [" + views + "], \"accessors\": [" + accessors +
+           "], \"buffers\": [{\"byteLength\": " + std::to_string(bin.size()) +
+           ", \"uri\": \"data:application/octet-stream;base64," + base64(bin) + "\"}]";
+  }
+};
+
+const double kHalf = 0.70710678118654752; // sin and cos of 45 degrees
+
+// One clip, "act", over four nodes under a root, each drawing a triangle (0,0,0) (1,0,0) (0,1,0):
+// `mover` slides from 0 to (4,0,0) over 2 s; `spinner` turns a quarter about z over 1 s; `stepper`
+// (authored at (0,10,0)) jumps to (0,0,5) at 1 s (STEP); `blobber` draws a mesh whose one morph
+// target lifts its third point 1 along z, at rest weight 0.25, its weight going 0 to 1 over 1 s.
+std::string clip_gltf() {
+  gltf_bin b;
+  const float pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+  const unsigned short idx[3] = {0, 1, 2};
+  const float lift[9] = {0, 0, 0, 0, 0, 0, 0, 0, 1};
+  const float t2[2] = {0, 2}, t1[2] = {0, 1};
+  const float slide[6] = {0, 0, 0, 4, 0, 0};
+  const float turn[8] = {0, 0, 0, 1, 0, 0, static_cast<float>(kHalf), static_cast<float>(kHalf)};
+  const float jump[6] = {0, 0, 0, 0, 0, 5};
+  const float weights[2] = {0, 1};
+  const int a_pos = b.add(pos, sizeof pos,
+                          R"("componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0])");
+  const int a_idx = b.add(idx, sizeof idx, R"("componentType": 5123, "count": 3, "type": "SCALAR")");
+  const int a_lift = b.add(lift, sizeof lift,
+                           R"("componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [0, 0, 1])");
+  const int a_t2 = b.add(t2, sizeof t2,
+                         R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [2])");
+  const int a_slide = b.add(slide, sizeof slide, R"("componentType": 5126, "count": 2, "type": "VEC3")");
+  const int a_t1 = b.add(t1, sizeof t1,
+                         R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1])");
+  const int a_turn = b.add(turn, sizeof turn, R"("componentType": 5126, "count": 2, "type": "VEC4")");
+  const int a_jump = b.add(jump, sizeof jump, R"("componentType": 5126, "count": 2, "type": "VEC3")");
+  const int a_w = b.add(weights, sizeof weights, R"("componentType": 5126, "count": 2, "type": "SCALAR")");
+  const auto s = [](int v) { return std::to_string(v); };
+  return R"({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+ "nodes": [
+  {"name": "root", "children": [1, 2, 3, 4]},
+  {"name": "mover", "mesh": 0},
+  {"name": "spinner", "mesh": 0},
+  {"name": "stepper", "translation": [0, 10, 0], "mesh": 0},
+  {"name": "blobber", "mesh": 1}],
+ "meshes": [
+  {"name": "tri", "primitives": [{"attributes": {"POSITION": )" +
+         s(a_pos) + R"(}, "indices": )" + s(a_idx) + R"(}]},
+  {"name": "blob", "weights": [0.25], "primitives": [{"attributes": {"POSITION": )" + s(a_pos) +
+         R"(}, "indices": )" + s(a_idx) + R"(, "targets": [{"POSITION": )" + s(a_lift) + R"(}]}]}],
+ "animations": [{"name": "act",
+  "channels": [{"sampler": 0, "target": {"node": 1, "path": "translation"}},
+               {"sampler": 1, "target": {"node": 2, "path": "rotation"}},
+               {"sampler": 2, "target": {"node": 3, "path": "translation"}},
+               {"sampler": 3, "target": {"node": 4, "path": "weights"}}],
+  "samplers": [{"input": )" +
+         s(a_t2) + R"(, "output": )" + s(a_slide) + R"(},
+               {"input": )" +
+         s(a_t1) + R"(, "output": )" + s(a_turn) + R"(},
+               {"input": )" +
+         s(a_t1) + R"(, "output": )" + s(a_jump) + R"(, "interpolation": "STEP"},
+               {"input": )" +
+         s(a_t1) + R"(, "output": )" + s(a_w) + R"(}]}],
+ )" + b.tail() +
+         "}";
+}
+
+// A bar of two triangles, (0,0,0) (1,0,0) at its foot on joint j0 and (0,2,0) (1,2,0) at its head
+// on joint j1, j1 one up j0. The clip "bend" turns j1 a quarter about z over 1 s, so the head
+// swings about (0,1,0).
+std::string skin_gltf() {
+  gltf_bin b;
+  const float pos[12] = {0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 2, 0};
+  const unsigned short idx[6] = {0, 1, 2, 1, 3, 2};
+  const unsigned char joints[16] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+  const float weights[16] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+  const float ibm[32] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0,  0, 1,  // j0 at the origin
+                         1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1}; // j1 one up
+  const float t1[2] = {0, 1};
+  const float turn[8] = {0, 0, 0, 1, 0, 0, static_cast<float>(kHalf), static_cast<float>(kHalf)};
+  const int a_pos = b.add(pos, sizeof pos,
+                          R"("componentType": 5126, "count": 4, "type": "VEC3", "min": [0, 0, 0], "max": [1, 2, 0])");
+  const int a_idx = b.add(idx, sizeof idx, R"("componentType": 5123, "count": 6, "type": "SCALAR")");
+  const int a_j = b.add(joints, sizeof joints, R"("componentType": 5121, "count": 4, "type": "VEC4")");
+  const int a_w = b.add(weights, sizeof weights, R"("componentType": 5126, "count": 4, "type": "VEC4")");
+  const int a_ibm = b.add(ibm, sizeof ibm, R"("componentType": 5126, "count": 2, "type": "MAT4")");
+  const int a_t1 = b.add(t1, sizeof t1,
+                         R"("componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1])");
+  const int a_turn = b.add(turn, sizeof turn, R"("componentType": 5126, "count": 2, "type": "VEC4")");
+  const auto s = [](int v) { return std::to_string(v); };
+  return R"({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+ "nodes": [
+  {"name": "root", "children": [1, 3]},
+  {"name": "j0", "children": [2]},
+  {"name": "j1", "translation": [0, 1, 0]},
+  {"name": "bar", "mesh": 0, "skin": 0}],
+ "skins": [{"joints": [1, 2], "inverseBindMatrices": )" +
+         s(a_ibm) + R"(, "skeleton": 1}],
+ "meshes": [{"name": "bar", "primitives": [{"attributes": {"POSITION": )" + s(a_pos) +
+         R"(, "JOINTS_0": )" + s(a_j) + R"(, "WEIGHTS_0": )" + s(a_w) + R"(}, "indices": )" +
+         s(a_idx) + R"(}]}],
+ "animations": [{"name": "bend",
+  "channels": [{"sampler": 0, "target": {"node": 2, "path": "rotation"}}],
+  "samplers": [{"input": )" +
+         s(a_t1) + R"(, "output": )" + s(a_turn) + R"(}]}],
+ )" + b.tail() +
+         "}";
+}
+
+model read_exact(cvc::app &app, const std::string &text) {
+  cvc::model_read_options exact;
+  exact.exact = true;
+  return cvc::read_model_from_memory(app, text.data(), text.size(), "gltf", exact);
+}
+
+int node_index(const model &m, const std::string &name) {
+  for (std::size_t i = 0; i < m.nodes.size(); ++i)
+    if (m.nodes[i].name == name)
+      return static_cast<int>(i);
+  return -1;
+}
+
+} // namespace
+
+// A glTF animation reads as a clip: its channels' nodes and keys in seconds, a STEP sampler's step,
+// and a mesh's morph target as the difference from its positions with its rest weight.
+TEST(ModelClips, AGltfAnimationReadsAsAClip) {
+  cvc::app app;
+  const model m = read_exact(app, clip_gltf());
+  ASSERT_EQ(m.clips.size(), 1u);
+  EXPECT_EQ(m.clips[0].name, "act");
+  EXPECT_NEAR(m.clips[0].duration, 2.0, 1e-9);
+  EXPECT_EQ(m.find_clip("act"), 0);
+  EXPECT_EQ(m.find_clip("0"), 0);
+  EXPECT_EQ(m.find_clip("1"), -1);
+  EXPECT_EQ(m.find_clip("walk"), -1);
+  EXPECT_TRUE(m.animated());
+  bool stepped = false;
+  for (const model::clip::node_channel &ch : m.clips[0].nodes)
+    if (ch.node == node_index(m, "stepper"))
+      stepped = ch.position.step;
+  EXPECT_TRUE(stepped);
+  int blob = -1;
+  for (std::size_t i = 0; i < m.meshes.size(); ++i)
+    if (!m.meshes[i].morphs.empty())
+      blob = static_cast<int>(i);
+  ASSERT_GE(blob, 0);
+  const model::mesh &me = m.meshes[blob];
+  ASSERT_EQ(me.morphs.size(), 1u);
+  ASSERT_EQ(me.morph_weights.size(), 1u);
+  EXPECT_NEAR(me.morph_weights[0], 0.25, 1e-6);
+  ASSERT_EQ(me.morphs[0].position_deltas.size(), 3u);
+  EXPECT_NEAR(me.morphs[0].position_deltas[2][2], 1.0, 1e-6);
+  EXPECT_NEAR(me.morphs[0].position_deltas[0][2], 0.0, 1e-6);
+}
+
+// posed: channels move their nodes (linear, spherical, step), the rest stay, and morph weights
+// blend; the rest pose is the authored transforms with the rest weights.
+TEST(ModelClips, PosedMovesNodesAndBlendsMorphs) {
+  cvc::app app;
+  const model m = read_exact(app, clip_gltf());
+  ASSERT_EQ(m.clips.size(), 1u);
+  const geometry rest = m.posed(-1, 0.0);
+  EXPECT_EQ(rest.num_points(), m.merged().num_points());
+  EXPECT_TRUE(has_point(rest, 0, 10, 0));    // stepper as authored
+  EXPECT_TRUE(has_point(rest, 0, 1, 0.25));  // the blob at its rest weight
+  EXPECT_FALSE(has_point(rest, 0, 1, 1.0));
+
+  const geometry one = m.posed(0, 1.0);
+  EXPECT_TRUE(has_point(one, 2, 0, 0)); // mover halfway
+  EXPECT_TRUE(has_point(one, 3, 0, 0));
+  EXPECT_TRUE(has_point(one, 0, 1, 0)); // spinner a quarter turned: (1,0,0) to (0,1,0)
+  EXPECT_TRUE(has_point(one, -1, 0, 0));
+  EXPECT_TRUE(has_point(one, 0, 0, 5)); // stepper at its second key
+  EXPECT_TRUE(has_point(one, 0, 1, 1)); // the blob at weight 1
+
+  const geometry half = m.posed(0, 0.5);
+  EXPECT_TRUE(has_point(half, 1, 0, 0));        // mover a quarter of the way
+  EXPECT_TRUE(has_point(half, kHalf, kHalf, 0)); // spinner 45 degrees (slerp)
+  EXPECT_TRUE(has_point(half, 0, 0, 0));        // stepper still at its first key (step)
+  EXPECT_FALSE(has_point(half, 0, 10, 0));      // which replaced the authored translation
+  EXPECT_TRUE(has_point(half, 0, 1, 0.5));      // the blob at weight 0.5
+
+  const geometry after = m.posed(0, 9.0); // past the end: the last keys
+  EXPECT_TRUE(has_point(after, 4, 0, 0));
+  const std::vector<model::transform_t> local = m.local_transforms(0, 1.0);
+  EXPECT_NEAR(local[node_index(m, "mover")][3], 2.0, 1e-9);
+  EXPECT_NEAR(local[node_index(m, "stepper")][11], 5.0, 1e-9);
+}
+
+// A skin reads as bones on the joint nodes with their offsets and each vertex's influences, and
+// posing moves the vertices with their bones.
+TEST(ModelClips, ASkinnedMeshFollowsItsBones) {
+  cvc::app app;
+  const model m = read_exact(app, skin_gltf());
+  int bar = -1;
+  for (std::size_t i = 0; i < m.meshes.size(); ++i)
+    if (!m.meshes[i].bones.empty())
+      bar = static_cast<int>(i);
+  ASSERT_GE(bar, 0);
+  const model::skin &sk = m.meshes[bar].bones;
+  ASSERT_EQ(sk.bones.size(), 2u);
+  std::vector<std::string> bone_nodes;
+  for (const model::bone &bn : sk.bones)
+    bone_nodes.push_back(bn.node >= 0 ? m.nodes[bn.node].name : "?");
+  EXPECT_NE(std::find(bone_nodes.begin(), bone_nodes.end(), "j0"), bone_nodes.end());
+  EXPECT_NE(std::find(bone_nodes.begin(), bone_nodes.end(), "j1"), bone_nodes.end());
+  ASSERT_EQ(sk.first.size(), m.meshes[bar].geom.num_points() + 1);
+  EXPECT_EQ(sk.influences.size(), 4u); // one bone a vertex
+
+  const geometry rest = m.posed(-1, 0.0);
+  EXPECT_TRUE(has_point(rest, 0, 2, 0)); // the bind pose
+  EXPECT_TRUE(has_point(rest, 1, 2, 0));
+  const geometry bent = m.posed(m.find_clip("bend"), 1.0);
+  EXPECT_TRUE(has_point(bent, 0, 0, 0)); // the foot stays
+  EXPECT_TRUE(has_point(bent, 1, 0, 0));
+  EXPECT_TRUE(has_point(bent, -1, 1, 0)); // the head swung a quarter about (0,1,0)
+  EXPECT_TRUE(has_point(bent, -1, 2, 0));
+  const geometry half = m.posed(m.find_clip("bend"), 0.5);
+  EXPECT_TRUE(has_point(half, -kHalf, 1 + kHalf, 0));
+}
+
+// A model with no clips poses as it is: posed() is merged()'s points.
+TEST(ModelClips, AModelWithoutClipsPosesAsMerged) {
+  cvc::app app;
+  const model m = read_exact(app, three_node_gltf());
+  EXPECT_FALSE(m.animated());
+  EXPECT_EQ(m.find_clip("0"), -1);
+  const geometry merged = m.merged(), posed = m.posed(0, 1.0);
+  ASSERT_EQ(merged.num_points(), posed.num_points());
+  for (std::size_t i = 0; i < merged.num_points(); ++i)
+    for (int a = 0; a < 3; ++a)
+      EXPECT_NEAR(merged.const_points()[i][a], posed.const_points()[i][a], 1e-9);
+}
+
 #endif // CVC_ENABLE_ASSIMP
