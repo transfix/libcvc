@@ -89,8 +89,12 @@ bool exec_router::post_control(int pid, control_cmd cmd) {
 }
 
 std::optional<published_process> exec_router::info(int pid) const {
-  (void)pid;
-  return std::nullopt;
+  const std::optional<directory_entry> e = directory_.find(pid);
+  if (!e)
+    return std::nullopt;
+  std::optional<published_process> row;
+  e->group.visit([&](async_scheduler &s) { row = s.published_info(pid); });
+  return row;
 }
 
 // --- async_scheduler: the owner rule (S2b.5) ---
@@ -101,15 +105,174 @@ bool async_scheduler::control_as(const std::string &caller_owner, int pid, contr
 
 // --- async_scheduler: published info (S2b.3; S2-Q9) ---
 
-void async_scheduler::publish_info() {}
+namespace {
+constexpr auto kCounterRefresh = std::chrono::milliseconds(100); // S2-Q9's counter lag
 
-async_scheduler::published_summary async_scheduler::published() const noexcept { return {}; }
+const published_process *row_of(const std::vector<published_process> &rows, int pid) {
+  const auto it = std::lower_bound(rows.begin(), rows.end(), pid,
+                                   [](const published_process &r, int p) { return r.pid < p; });
+  return it != rows.end() && it->pid == pid ? &*it : nullptr;
+}
+
+bool holds_locks(const process &p) { return p.locks && !p.locks->holds.empty(); }
+
+// `shown` is `key` as a row shows it: absolute, with a leading '/'.
+bool same_key(const std::string &shown, const std::string &key) {
+  return shown.size() == key.size() + 1 && shown[0] == '/' &&
+         shown.compare(1, key.size(), key) == 0;
+}
+
+// Whether a process's lock holds differ from its row's. A hold taken or dropped without a wait
+// changes no status, so it does not move the table's generation, and lock_home's paths are
+// frozen (L1's speed work): the publisher compares the mirrors with the rows instead. Only the
+// holders' keys are compared; a row that showed holds of a process that now has none is found by
+// count (every holder's row matched, so the counts differ).
+bool holds_moved(const detail::process_table &procs, const std::vector<published_process> &rows) {
+  std::size_t holders = 0;
+  for (const auto &[pid, p] : procs.all()) {
+    if (!holds_locks(*p))
+      continue;
+    ++holders;
+    const published_process *row = row_of(rows, pid);
+    if (!row)
+      return true;
+    std::size_t i = 0;
+    for (const detail::mhold &h : p->locks->holds)
+      for (const detail::lock_node *n : h.keys) {
+        if (i >= row->locks_held.size() || !same_key(row->locks_held[i], n->key))
+          return true;
+        ++i;
+      }
+    if (i != row->locks_held.size())
+      return true;
+  }
+  const auto shown = static_cast<std::size_t>(std::count_if(
+      rows.begin(), rows.end(), [](const published_process &r) { return !r.locks_held.empty(); }));
+  return shown != holders;
+}
+} // namespace
+
+void async_scheduler::publish_info() {
+  if (!router_)
+    return;
+  // The summary: the run report when this run loop computed it (a wake notifier is installed),
+  // else the table's own.
+  bool runnable = false;
+  std::optional<int> best;
+  clock::time_point next = clock::time_point::max();
+  if (wakeup_->has_notifier()) {
+    runnable = run_report_.runnable;
+    best = run_report_.best_runnable;
+    next = run_report_.next_deadline;
+  } else {
+    runnable = has_runnable();
+    best = procs_.best_runnable();
+    if (procs_.timed_count() > 0)
+      next = procs_.next_timer().value_or(clock::time_point::max());
+  }
+
+  // The rows: rebuilt when the generation moved (or a hold did), else their counters refreshed at
+  // most every 100 ms. The end of the run loop's last step is "now" when there was one.
+  const clock::time_point now = chain_valid_ ? chain_now_ : clock::now();
+  const std::uint64_t generation = procs_.generation();
+  const bool rebuild = generation != pub_generation_ || (home_ && holds_moved(procs_, pub_rows_));
+  try {
+    if (rebuild) {
+      std::vector<published_process> rows;
+      rows.reserve(procs_.size());
+      int live = 0;
+      for (const auto &[pid, pp] : procs_.all()) {
+        const process &p = *pp;
+        if (!is_finished(p.status))
+          ++live;
+        published_process &r = rows.emplace_back();
+        r.pid = p.pid;
+        r.name = p.name;
+        r.owner = p.owner;
+        r.uid = p.uid;
+        r.scope = process_scope(p.root_path, p.owner_root);
+        r.parent_pid = p.parent_pid;
+        r.status = p.status;
+        r.base_priority = p.priority;
+        // As get-priority and inspect report it: under round_robin the base (design 7.1).
+        r.effective_priority =
+            policy_ == scheduling_policy::round_robin ? p.priority : p.effective_priority();
+        r.floor = detail::floor_of(p);
+        if (holds_locks(p))
+          for (const detail::mhold &h : p.locks->holds)
+            for (const detail::lock_node *n : h.keys)
+              r.locks_held.push_back("/" + n->key);
+        // process_info::waiting_on, as make_info reads it.
+        if (p.status == process_status::waiting) {
+          if (p.lock_waiting)
+            r.waits_on = "lock /" + detail::lock_home::waiting_key(p);
+          else if (p.recv_path)
+            r.waits_on = "msg " + *p.recv_path;
+          else if (p.wake_time)
+            r.waits_on = "sleep";
+          else if (p.awaiting_frame)
+            r.waits_on = "frame";
+        }
+        r.steps = p.step_count();
+        r.run_seconds = p.elapsed_time(now);
+        r.memory = mem_tracker_.current_bytes(p.pid);
+      }
+      std::sort(
+          rows.begin(), rows.end(),
+          [](const published_process &a, const published_process &b) { return a.pid < b.pid; });
+      {
+        std::lock_guard<std::mutex> lock(pub_mu_);
+        pub_rows_.swap(rows); // the old rows go outside the lock
+      }
+      pub_generation_ = generation;
+      pub_refreshed_ = now;
+      pub_processes_.store(live, std::memory_order_relaxed);
+    } else if (!pub_rows_.empty() && now - pub_refreshed_ >= kCounterRefresh) {
+      std::lock_guard<std::mutex> lock(pub_mu_);
+      for (published_process &r : pub_rows_)
+        if (const process *p = procs_.find(r.pid)) {
+          r.steps = p->step_count();
+          r.run_seconds = p->elapsed_time(now);
+          r.memory = mem_tracker_.current_bytes(r.pid);
+        }
+      pub_refreshed_ = now;
+    }
+  } catch (...) {
+    // No memory for the rows: the old ones stay, and the next run loop rebuilds them.
+    pub_generation_ = ~std::uint64_t{0};
+  }
+
+  pub_runnable_.store(runnable, std::memory_order_relaxed);
+  pub_deadline_.store(next.time_since_epoch().count(), std::memory_order_relaxed);
+  pub_best_.store(best.value_or(std::numeric_limits<int>::min()), std::memory_order_relaxed);
+  pub_count_.fetch_add(1, std::memory_order_release); // last: a reader that sees it sees the rest
+}
+
+async_scheduler::published_summary async_scheduler::published() const noexcept {
+  published_summary s;
+  s.publishes = pub_count_.load(std::memory_order_acquire);
+  if (s.publishes == 0)
+    return s;
+  s.runnable = pub_runnable_.load(std::memory_order_relaxed);
+  s.next_deadline =
+      clock::time_point(clock::duration(pub_deadline_.load(std::memory_order_relaxed)));
+  const int best = pub_best_.load(std::memory_order_relaxed);
+  if (best != std::numeric_limits<int>::min())
+    s.best_runnable = best;
+  s.processes = pub_processes_.load(std::memory_order_relaxed);
+  return s;
+}
 
 std::optional<published_process> async_scheduler::published_info(int pid) const {
-  (void)pid;
+  std::lock_guard<std::mutex> lock(pub_mu_);
+  if (const published_process *r = row_of(pub_rows_, pid))
+    return *r;
   return std::nullopt;
 }
 
-std::vector<published_process> async_scheduler::published_rows() const { return {}; }
+std::vector<published_process> async_scheduler::published_rows() const {
+  std::lock_guard<std::mutex> lock(pub_mu_);
+  return pub_rows_;
+}
 
 } // namespace cvc::state_exec

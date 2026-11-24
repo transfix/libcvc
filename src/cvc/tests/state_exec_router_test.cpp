@@ -280,4 +280,195 @@ TEST(ExecDirectory, APidIsFoundBetweenItsCreationAndItsGroupsFirstPublish) {
   EXPECT_FALSE(app.exec_router().directory().find(child).has_value());
 }
 
+// --- S2b.3 published info ---
+
+// process_table::generation() moves at every insert, erase, status change and priority change,
+// and not between ready and running (no index changes then, and a publish never sees running).
+TEST(PublishedInfo, TheGenerationMovesWhereARowWouldChange) {
+  se::detail::process_table table;
+  std::uint64_t g = table.generation();
+  const auto moved = [&] {
+    const bool m = table.generation() != g;
+    g = table.generation();
+    return m;
+  };
+  se::process_ptr p = se::make_process();
+  p->pid = 1;
+  se::process &proc = *table.insert(std::move(p));
+  EXPECT_TRUE(moved()) << "insert";
+  table.set_status(proc, se::process_status::running);
+  EXPECT_FALSE(moved()) << "ready -> running";
+  table.set_status(proc, se::process_status::ready);
+  EXPECT_FALSE(moved()) << "running -> ready";
+  proc.recv_path = std::string("k");
+  table.set_status(proc, se::process_status::waiting);
+  EXPECT_TRUE(moved()) << "a park";
+  proc.recv_path.reset();
+  table.set_status(proc, se::process_status::ready);
+  EXPECT_TRUE(moved()) << "a wake";
+  proc.priority = 5;
+  table.update(proc);
+  EXPECT_TRUE(moved()) << "a priority change";
+  table.set_status(proc, se::process_status::killed);
+  EXPECT_TRUE(moved()) << "an end";
+  EXPECT_TRUE(table.erase(1));
+  EXPECT_TRUE(moved()) << "an erase";
+  EXPECT_FALSE(table.erase(1));
+  EXPECT_FALSE(moved()) << "nothing erased";
+  EXPECT_TRUE(table.check());
+}
+
+// A row is make_info's process, field for field, and the summary the run loop's. Needs R's call.
+TEST(PublishedInfo, ARowIsTheProcessAsMakeInfoReadsIt) {
+  cvc::app app;
+  quiet_rates(app);
+  group_world a(app, "a");
+  const int waiter = a.submit("(with-lock \"k\" (msg-recv \"in\"))", "X");
+  const int spinner = a.submit(kSpins, "X");
+  a.g().pump(se::pump_budget{500, kNoTime});
+  if (a.sched().published().publishes == 0)
+    GTEST_SKIP() << "the publish at the run loop's end is R's call (S2b.4), not in this build";
+  ASSERT_EQ(status_of(a.sched(), waiter), se::process_status::waiting);
+  const std::optional<se::published_process> row = a.sched().published_info(waiter);
+  const std::optional<se::process_info> info = a.sched().get_process_info(waiter);
+  ASSERT_TRUE(row.has_value());
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(row->pid, waiter);
+  EXPECT_EQ(row->name, info->name);
+  EXPECT_EQ(row->owner, "X");
+  EXPECT_EQ(row->uid, info->uid);
+  EXPECT_EQ(row->scope, info->scope);
+  EXPECT_EQ(row->parent_pid, info->parent_pid);
+  EXPECT_EQ(row->status, se::process_status::waiting);
+  EXPECT_EQ(row->base_priority, info->priority);
+  EXPECT_EQ(row->effective_priority, info->effective_priority);
+  EXPECT_EQ(row->floor, info->priority_floor);
+  EXPECT_EQ(row->locks_held, std::vector<std::string>{"/a.k"});
+  EXPECT_EQ(info->locks_held, 1u);
+  EXPECT_EQ(row->waits_on, info->waiting_on.value_or(""));
+  EXPECT_EQ(row->waits_on, "msg " + se::resolve_channel_key("a", "in"));
+  EXPECT_EQ(row->steps, info->step_count);
+  // Every row in pid order; the summary from the table (no notifier: a fork-join group).
+  const std::vector<se::published_process> rows = a.sched().published_rows();
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_EQ(rows[0].pid, waiter);
+  EXPECT_EQ(rows[1].pid, spinner);
+  const se::async_scheduler::published_summary s = a.sched().published();
+  EXPECT_TRUE(s.runnable);
+  EXPECT_EQ(s.best_runnable, std::optional<int>(0));
+  EXPECT_EQ(s.processes, 2);
+  EXPECT_EQ(s.next_deadline, clock_type::time_point::max());
+  // The router's and the pool's reads: the directory's group, its published row.
+  listed(app, waiter, a.g().route(), "X");
+  const std::optional<se::published_process> via = app.exec_pool().info(waiter);
+  ASSERT_TRUE(via.has_value());
+  EXPECT_EQ(via->status, se::process_status::waiting);
+  EXPECT_FALSE(app.exec_pool().info(999999).has_value());
+  EXPECT_TRUE(a.sched().kill(spinner));
+  EXPECT_TRUE(a.sched().kill(waiter));
+}
+
+// A hold taken or dropped without a wait moves no status, so not the table's generation: the
+// publish compares the lock mirrors with its rows. Needs R's call.
+TEST(PublishedInfo, AHoldTakenOrDroppedWithoutAWaitIsPublished) {
+  cvc::app app;
+  quiet_rates(app);
+  group_world a(app, "a");
+  // Counts to 200, holds k while it counts to 400, then spins.
+  const int pid = a.submit("(begin (set i 0) (while (< i 200) (set i (+ i 1)))"
+                           " (with-lock \"k\" (while (< i 400) (set i (+ i 1))))"
+                           " (while #t (set i (+ i 1))))",
+                           "");
+  const auto row = [&] { return a.sched().published_info(pid); };
+  const auto held = [&] {
+    const auto info = a.sched().get_process_info(pid);
+    return info ? info->locks_held : std::size_t(0);
+  };
+  a.g().pump(se::pump_budget{20, kNoTime});
+  if (a.sched().published().publishes == 0)
+    GTEST_SKIP() << "the publish at the run loop's end is R's call (S2b.4), not in this build";
+  ASSERT_TRUE(row().has_value());
+  ASSERT_EQ(held(), 0u);
+  EXPECT_TRUE(row()->locks_held.empty());
+  // Pump in small steps to the hold, then past it: each publish shows what the mirror has.
+  bool saw_hold = false, saw_release = false;
+  for (int n = 0; n < 2000 && !saw_release; ++n) {
+    a.g().pump(se::pump_budget{20, kNoTime});
+    ASSERT_EQ(status_of(a.sched(), pid), se::process_status::ready);
+    const std::size_t h = held();
+    ASSERT_EQ(row()->locks_held.size(), h) << "pump " << n;
+    if (h == 1) {
+      EXPECT_EQ(row()->locks_held[0], "/a.k");
+      saw_hold = true;
+    } else if (saw_hold) {
+      saw_release = true;
+    }
+  }
+  EXPECT_TRUE(saw_hold);
+  EXPECT_TRUE(saw_release);
+  EXPECT_TRUE(a.sched().kill(pid));
+}
+
+// Rows are rebuilt only when the generation moved, and their counters otherwise refreshed at most
+// every 100 ms, read by counts: across many quick pumps of a spinning process, the published steps
+// change at most once per 100 ms of the loop's own time (plus the first build), however slow the
+// machine; after a change that moves the generation the next publish is exact; and with nothing
+// moving, a refresh still comes. Needs R's call.
+TEST(PublishedInfo, RowsAreRebuiltOnGenerationMovesAndCountersRefreshEvery100Ms) {
+  cvc::app app;
+  quiet_rates(app);
+  group_world a(app, "a");
+  const int spinner = a.submit(kSpins, "");
+  const int waiter = a.submit(kWaits, "");
+  const auto published_steps = [&] { return a.sched().published_info(spinner)->steps; };
+  const auto actual_steps = [&] { return a.sched().get_process_info(spinner)->step_count; };
+  a.g().pump(se::pump_budget{20, kNoTime});
+  if (a.sched().published().publishes == 0)
+    GTEST_SKIP() << "the publish at the run loop's end is R's call (S2b.4), not in this build";
+  EXPECT_EQ(published_steps(), actual_steps()) << "the first publish builds the rows";
+
+  constexpr int kPumps = 2000;
+  const std::uint64_t publishes0 = a.sched().published().publishes;
+  int changes = 0;
+  std::uint64_t last = published_steps();
+  const auto t0 = clock_type::now();
+  for (int n = 0; n < kPumps; ++n) {
+    a.g().pump(se::pump_budget{20, kNoTime});
+    const std::uint64_t now = published_steps();
+    if (now != last)
+      ++changes;
+    last = now;
+  }
+  const double seconds = std::chrono::duration<double>(clock_type::now() - t0).count();
+  EXPECT_EQ(a.sched().published().publishes - publishes0, static_cast<std::uint64_t>(kPumps))
+      << "one publish per run loop";
+  const int ceiling = static_cast<int>(seconds / 0.1) + 1;
+  std::cout << "PublishedInfo: " << kPumps << " pumps in " << seconds * 1e3 << " ms, the published"
+            << " steps changed " << changes << " times (at most " << ceiling << ")\n";
+  EXPECT_LE(changes, ceiling) << "counters refreshed more often than every 100 ms";
+
+  // A generation move (a host's set_priority of the waiter) rebuilds at the next publish: exact.
+  for (int k = 0; k < 5; ++k) {
+    ASSERT_TRUE(a.sched().set_priority(waiter, k + 1));
+    a.g().pump(se::pump_budget{20, kNoTime});
+    EXPECT_EQ(published_steps(), actual_steps()) << "rebuild " << k;
+    EXPECT_EQ(a.sched().published_info(waiter)->base_priority, k + 1);
+  }
+
+  // With nothing moving, a refresh comes (the event, with a hang guard only): exact when it does.
+  last = published_steps();
+  const auto t1 = clock_type::now();
+  bool refreshed = false;
+  while (!refreshed && clock_type::now() - t1 < std::chrono::seconds(30)) {
+    a.g().pump(se::pump_budget{20, kNoTime});
+    if (published_steps() != last) {
+      refreshed = true;
+      EXPECT_EQ(published_steps(), actual_steps());
+    }
+  }
+  EXPECT_TRUE(refreshed) << "the counters were never refreshed";
+  EXPECT_TRUE(a.sched().kill(spinner));
+  EXPECT_TRUE(a.sched().kill(waiter));
+}
+
 } // namespace c_tests
