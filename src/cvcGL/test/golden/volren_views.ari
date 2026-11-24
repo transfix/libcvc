@@ -1,0 +1,82 @@
+# volren_views.ari — golden: one volren node drawn in the main view and in two viewports from
+# cameras of their own (docs/ARIADNE.md §5.18, "Volumes in views"). Each view raycasts the volume
+# for its own camera and size and depth-tests the picture against what it draws: two rods pass
+# through the bunny, so in every view a rod shows outside the surface and is hidden inside it,
+# and the bunny hides the part of a rod behind it. The signed distance field of the embedded bunny
+# (32^3, to keep the run short) is raycast as an opaque surface.
+
+meta:
+  name: golden volren views
+  min_libcvc: 4.0.6
+
+# The main view from further out than the scene's own bounds, on the first tick (after the host
+# framed the realized scene).
+on_tick: |
+  (if (!= (state-get "golden.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-110 -110 -30 110 110 130")
+             (state-set "golden.opened" "1")))
+
+windows:
+  - window: Side
+    id: side
+    pos: [16, 16]
+    size: [300, 250]
+    children:
+      - type: viewport
+        view: side
+        azimuth: 90
+        elevation: 10
+        zoom: 1.7
+        chrome: false
+        shadows: false
+        clear_color: [0.05, 0.06, 0.08]
+        width: 280
+        height: 210
+  - window: Above
+    id: above
+    pos: [644, 16]
+    size: [300, 250]
+    children:
+      - type: viewport
+        view: above
+        azimuth: -40
+        elevation: 60
+        zoom: 1.7
+        chrome: false
+        shadows: false
+        clear_color: [0.05, 0.06, 0.08]
+        width: 280
+        height: 210
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: bunny
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+      fit: { height: 100, up: y }
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 128
+        resolution_scale: 0.5
+        isosurfaces:
+          - { value: 0.0, color: [0.85, 0.80, 0.92], opacity: 1.0, shininess: 24 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    # Two rods through the body, front to back and side to side: in each view their ends show and
+    # their middles are hidden by the surface.
+    - node: rod_y
+      type: geometry
+      source: { box: { size: [8, 150, 8] } }
+      transform: { position: [-5, 0, 40] }
+      material: { color: [0.95, 0.55, 0.10] }
+    - node: rod_x
+      type: geometry
+      source: { box: { size: [150, 8, 8] } }
+      transform: { position: [0, 0, 24] }
+      material: { color: [0.10, 0.75, 0.70] }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.4, azimuth: -38, elevation: 52 }

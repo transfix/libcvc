@@ -21,6 +21,7 @@
 #include <map>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace cvc {
 namespace gl {
@@ -134,16 +135,23 @@ void describe_leaves(cvc::app &ctx, const std::string &base, const leaf_meta (&t
 
 // The plant ledger's items of a vehicle or the episode (cvc/nav/plant_ledger.h) under `base`:
 // those whose source was tracked, or all of them; kNavStatsNotApplicable where one does not apply.
+// The CoPH ledger's items follow, only when CoPH drove it (coph_tracked), even with `all`.
 template <class R>
 void publish_ledger(cvc::gl::state_publisher &pub, const std::string &base, const R &r, bool all) {
   using cvc::nav::plant_ledger_item;
   constexpr bool veh = std::is_same_v<R, cvc::nav::veh_nav_stats>;
-  for (const plant_ledger_item &it :
-       veh ? cvc::nav::plant_ledger_vehicle() : cvc::nav::plant_ledger_episode()) {
-    const bool tracked =
-        it.from == plant_ledger_item::source::energy ? r.energy_tracked : r.plant_tracked;
-    if (!tracked && !all)
-      continue;
+  const auto plant = veh ? cvc::nav::plant_ledger_vehicle() : cvc::nav::plant_ledger_episode();
+  const auto coph =
+      veh ? cvc::nav::plant_ledger_coph_vehicle() : cvc::nav::plant_ledger_coph_episode();
+  std::vector<const plant_ledger_item *> items;
+  for (const plant_ledger_item &it : plant)
+    if (all || (it.from == plant_ledger_item::source::energy ? r.energy_tracked : r.plant_tracked))
+      items.push_back(&it);
+  if (r.coph_tracked)
+    for (const plant_ledger_item &it : coph)
+      items.push_back(&it);
+  for (const plant_ledger_item *p : items) {
+    const plant_ledger_item &it = *p;
     const std::string path = base + "." + it.key;
     describe_leaf(pub.ctx(), path, {it.key, it.unit, it.comment});
     if (!cvc::nav::plant_ledger_applies(it, r)) {
