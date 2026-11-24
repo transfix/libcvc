@@ -606,6 +606,8 @@ ph::world &SceneWorld::world() { return *_impl->world; }
 const ph::world &SceneWorld::world() const { return *_impl->world; }
 const std::vector<SceneWorldBody> &SceneWorld::bodies() const { return _impl->bodies; }
 
+std::vector<ph::body_id> SceneWorld::ground_bodies() const { return _impl->ground_bodies(); }
+
 ph::body_id SceneWorld::body(const std::string &id) const {
   for (const SceneWorldBody &b : _impl->bodies)
     if (b.node == id)

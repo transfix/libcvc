@@ -1115,9 +1115,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   0.007 mm and 0.025 mrad of the relay's Humvee on dynamic4w over the same 9 s, its box within
   0.5 mm of the relay's height and 0.7 mrad of its chassis's attitude (`AriadneOneWorld`); the
   holon predicts it with nothing to correct, and corrects a 1.5 m push exactly (`HolonVehicleTest`).
-- **Still to come:** a wall, another vehicle or an avatar is the relay's correction for a dynamic
-  plant's model (it touches nothing; OW5o and OW5p give the jolt and boat models the room's
-  vehicles and avatars). A sea the
+- **Still to come:** a sea the
   relay's storms change (OW5l predicts a boat on its document's sea, a weather node's keyframes
   not followed). For the statics: a document the
   client does not ship with, from a pack it was pointed at (OW5k: a directory), or fetched from
@@ -1288,10 +1286,27 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   behind, and 4.9 mm without (`AriadneOneWorld`); the 70 kg barely slows a 2.7 t Humvee, so the
   box matters most to what the car does to the avatar. The parked jolt Humvee OW5o's car shoves,
   shown 12 ticks behind: 9.0 mm holding its box, 21 mm without (before this, holding it was worse
-  than not: put back each step where it stood, it was hit again and again). The car a holon
-  predicts ends 0.13 m short of where it gets with no one there, and exactly there with the peer
-  aboard (`HolonVehicleTest`). The avatar's mass is the rules' avatar body's, not one a relay set
-  for that participant (`holon::set_mass`), which a client does not know.
+  than not: put back each step where it stood, it was hit again and again). A knocked avatar's
+  box has its walker (`vehicle_obstacle::walk_force`, the policy's force_max): pushed back toward
+  the velocity it is shown at with up to that force each step, upright, as the relay's walker
+  pushes the avatar toward its intent; knocked ahead by a car that then brakes, it is at worst
+  0.50 m from the relay's avatar (most of it the playout's delay), 2.17 m without. The car a holon
+  predicts ends 0.17 m short of where it gets with no one there, and exactly there with the peer
+  aboard (`HolonVehicleTest`). The avatar's mass is the rules' avatar body's, as every avatar's
+  is on the relay (`holon::set_mass` is not used by a host).
+  A dynamic or dynamic4w model meets the room too. Given the statics or room for the room's
+  boxes, its plant's chassis box is in a world of its own with them (`dynamic_vehicle_model::
+  meets_world`; dyn_bike_plant's and dyn_4w_plant's `options.physics`), and what it hits goes
+  back into the model as on the relay; the world is saved with the model's state
+  (`dynamic_vehicle::world`) for the holon's replay. Touching the ground is not a hit:
+  `avatar_static::ground` marks it as the relay's world does (`SceneWorld::ground_bodies`: the
+  world on's ground bodies, a generated world's terrain; the room scene's plane), and
+  `avatar_world::ground_bodies` hands it to the plant. A model made without a world has no room,
+  so the first vehicle or avatar held makes it again with one. The relay's dynamic or dynamic4w
+  car at full throttle into a parked kinematic-plant vehicle: within 0.6-0.7 mm of it at each
+  sample holding the parked vehicle's box, 375 mm without; into a standing avatar, 0.6-0.7 mm and
+  5.4 mm (`AriadneOneWorld`). The car a holon predicts on either plant stops at a held vehicle
+  and drives through one it does not hold (`HolonVehicleTest`).
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1374,7 +1389,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives; OW5p: the room's avatars in it). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives; OW5p: the room's avatars in it, and the room in a dynamic plant's car). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |

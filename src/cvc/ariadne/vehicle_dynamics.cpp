@@ -158,10 +158,25 @@ dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double 
     _jlast = _jadded;
     return;
   }
-  // WorldVehicles' plant options but the world: one model substep a physics step.
+  // WorldVehicles' plant options: one model substep a physics step. With the statics or room for
+  // the room's vehicles (OW5p), the chassis box in a world of its own holding them, as the relay's
+  // plant has it in its world (the plant steps it, one world step a substep), the ground not hit.
+  if (world && (!world->statics.empty() || !world->obstacle_room.empty())) {
+    ph::world_config cfg;
+    cfg.fixed_dt = fixed_dt;
+    cfg.gravity = world->gravity;
+    _dworld = std::make_unique<avatar_world>(cfg, avatar_body{});
+    if (!world->statics.empty())
+      _dworld->set_statics(world->statics);
+    add_obstacle_room(world);
+  }
   if (drive.plant == "dynamic4w") {
     ph::dyn_4w_plant_options o;
     o.substep = fixed_dt;
+    if (_dworld) {
+      o.physics = &_dworld->world();
+      o.ground_bodies = _dworld->ground_bodies();
+    }
     o.plant.ground_z = drive.ground; // flat, at the relay's reference height, without a ground
     if (_ground)
       o.plant.ground_height = _ground;
@@ -173,12 +188,48 @@ dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double 
     o.substep = fixed_dt;
     if (_ground)
       o.plant.ground_height = _ground;
+    if (_dworld) {
+      o.physics = &_dworld->world();
+      o.ground_bodies = _dworld->ground_bodies();
+    }
     _bike = std::make_unique<ph::dyn_bike_plant>(std::vector<ph::vehicle_desc>{desc}, o);
     _bike->attach(1, &start, si, fixed_dt);
   }
+  if (_dworld)
+    _dlast = std::make_shared<const std::vector<std::uint8_t>>(_dworld->world().save());
 }
 
-dynamic_vehicle_model::~dynamic_vehicle_model() = default;
+ph::world *dynamic_vehicle_model::room_world() const {
+  if (_jolt)
+    return &_jolt->world();
+  if (_dworld)
+    return &_dworld->world();
+  return nullptr;
+}
+
+void dynamic_vehicle_model::load_dworld(const dynamic_vehicle &v) const {
+  if (!_dworld || !v.world || v.world == _dlast)
+    return;
+  try {
+    _dworld->world().restore(*v.world);
+    _dlast = v.world;
+  } catch (const std::exception &) {
+    // Another model's world (the host made this one again): this one's as it is.
+  }
+}
+
+void dynamic_vehicle_model::keep_dworld(dynamic_vehicle &v) const {
+  if (!_dworld)
+    return;
+  _dlast = std::make_shared<const std::vector<std::uint8_t>>(_dworld->world().save());
+  v.world = _dlast;
+}
+
+dynamic_vehicle_model::~dynamic_vehicle_model() {
+  // A dynamic plant's chassis box is in _dworld (OW5p): the plant takes it out, so it goes first.
+  _bike.reset();
+  _four.reset();
+}
 
 double dynamic_vehicle_model::speed(const dynamic_vehicle &v) {
   if (std::holds_alternative<ph::dyn_bike_saved>(v.model))
@@ -278,12 +329,12 @@ void dynamic_vehicle_model::add_obstacle_room(const jolt_vehicle_world *world) {
         m.name = "avatar";
         m.friction = 0.0f;
         m.restitution = 0.0f;
-        slick = _jolt->world().add_material(m);
+        slick = room_world()->add_material(m);
       }
       b.material = *slick;
     }
     obstacle_box box;
-    box.id = _jolt->world().add_body(b);
+    box.id = room_world()->add_body(b);
     box.half = half;
     box.mass = o.mass;
     _boxes.push_back(box);
@@ -293,7 +344,7 @@ void dynamic_vehicle_model::add_obstacle_room(const jolt_vehicle_world *world) {
 bool dynamic_vehicle_model::obstacle_state(std::uint64_t key, ph::body_state &out) const {
   for (const obstacle_box &b : _boxes)
     if (b.held && b.key == key) {
-      out = _jolt->world().state(b.id);
+      out = room_world()->state(b.id);
       return true;
     }
   return false;
@@ -308,11 +359,13 @@ std::size_t dynamic_vehicle_model::obstacles_held() const {
 
 bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
                                            const std::vector<vehicle_obstacle> &obstacles) {
-  if (!_jolt)
-    return true;
-  const jolt_vehicle_saved *s = std::get_if<jolt_vehicle_saved>(&v.model);
-  if (!s || !s->world)
-    return true; // a boat not on the water yet: no world to hold them in
+  if (!room_world())
+    return obstacles.empty(); // a dynamic plant's model without a world: no room for any
+  if (_jolt) {
+    const jolt_vehicle_saved *s = std::get_if<jolt_vehicle_saved>(&v.model);
+    if (!s || !s->world)
+      return true; // a boat not on the water yet: no world to hold them in
+  }
   // Each keeps the box it holds; the rest take a free box of their size.
   std::vector<int> slot(obstacles.size(), -1);
   std::vector<bool> taken(_boxes.size(), false);
@@ -336,9 +389,14 @@ bool dynamic_vehicle_model::hold_obstacles(dynamic_vehicle &v,
     if (slot[i] < 0)
       return false; // no room: the host makes the model again with room for it
   }
-  load_jolt(v);
-  ph::world &w = _jolt->world();
-  const ph::body_state chassis = w.state(_jchassis);
+  if (_jolt)
+    load_jolt(v);
+  else
+    load_dworld(v);
+  ph::world &w = *room_world();
+  const ph::body_state chassis = w.state(_jolt   ? _jchassis
+                                         : _four ? _four->chassis(0)
+                                                 : _bike->chassis(0));
   for (std::size_t i = 0; i < obstacles.size(); ++i) {
     obstacle_box &b = _boxes[static_cast<std::size_t>(slot[i])];
     const ph::body_state &at = obstacles[i].at;
@@ -520,6 +578,8 @@ dynamic_vehicle dynamic_vehicle_model::at_bike(const ph::body_state &chassis,
                                                std::optional<double> steer) const {
   const ph::dyn_bike_saved *was = like ? std::get_if<ph::dyn_bike_saved>(&like->model) : nullptr;
   dynamic_vehicle v;
+  if (like)
+    load_dworld(*like); // with a world (OW5p): as predicted for the tick (the room's boxes)
   ph::dyn_bike_saved m;
   if (was) {
     m = *was;
@@ -555,6 +615,7 @@ dynamic_vehicle dynamic_vehicle_model::at_bike(const ph::body_state &chassis,
   v.vx = chassis.linear_velocity.x;
   v.vy = chassis.linear_velocity.y;
   v.wz = r;
+  v.world = _dlast; // its box goes where the model is at its step (restore)
   return v;
 }
 
@@ -563,6 +624,8 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
                                                std::optional<double> steer) const {
   const ph::dyn_4w_saved *was = like ? std::get_if<ph::dyn_4w_saved>(&like->model) : nullptr;
   dynamic_vehicle v;
+  if (like)
+    load_dworld(*like); // with a world (OW5p): as predicted for the tick (the room's boxes)
   ph::dyn_4w_saved m;
   if (was) {
     m = *was;
@@ -579,6 +642,8 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
     start.heading = static_cast<float>(psi);
     _four->remove_vehicle(0);
     _four->add_vehicle(start);
+    if (_dworld) // its box made again in the world (OW5p): the world as it is now
+      _dlast = std::make_shared<const std::vector<std::uint8_t>>(_dworld->world().save());
     m = _four->save(0);
     const double z = m.body.z, phi = m.body.phi, th = m.body.th;
     m.body = {};
@@ -638,6 +703,7 @@ dynamic_vehicle dynamic_vehicle_model::at_four(const ph::body_state &chassis,
   v.vx = chassis.linear_velocity.x;
   v.vy = chassis.linear_velocity.y;
   v.wz = r;
+  v.world = _dlast; // its box goes where the model is at its step (restore)
   return v;
 }
 
@@ -696,6 +762,7 @@ void dynamic_vehicle_model::step_boat(dynamic_vehicle &v, bool tick) {
 void dynamic_vehicle_model::step_bike(dynamic_vehicle &v, bool tick) {
   if (!std::holds_alternative<ph::dyn_bike_saved>(v.model))
     throw std::invalid_argument("dynamic_vehicle_model::step: a vehicle of the other plant");
+  load_dworld(v); // with a world (OW5p): as V left it, then its box where V's model is
   _bike->restore(0, std::get<ph::dyn_bike_saved>(v.model));
   if (tick) {
     float steer = 0.0f, accel = 0.0f;
@@ -708,9 +775,10 @@ void dynamic_vehicle_model::step_bike(dynamic_vehicle &v, bool tick) {
   ph::quat rot;
   _bike->box_pose(0, pos, rot);
   const double psi0 = _bike->body(0).psi;
-  _bike->advance(); // one substep: one physics step
+  _bike->advance(); // one substep: one physics step (with a world, its step and what it hit)
   const ph::dyn_bike_saved after = _bike->save(0);
   v.model = after;
+  keep_dworld(v);
   // Moving as the model moved, for the world's step: along the ground, turning about +z.
   const double rear_x = _bike->rear_axle(0);
   const double off = -rear_x - _bike->params(0).lr;
@@ -729,6 +797,7 @@ void dynamic_vehicle_model::step_bike(dynamic_vehicle &v, bool tick) {
 void dynamic_vehicle_model::step_four(dynamic_vehicle &v, bool tick) {
   if (!std::holds_alternative<ph::dyn_4w_saved>(v.model))
     throw std::invalid_argument("dynamic_vehicle_model::step: a vehicle of the other plant");
+  load_dworld(v); // with a world (OW5p): as V left it, then its box where V's model is
   _four->restore(0, std::get<ph::dyn_4w_saved>(v.model));
   if (tick) {
     float steer = 0.0f, accel = 0.0f;
@@ -740,9 +809,10 @@ void dynamic_vehicle_model::step_four(dynamic_vehicle &v, bool tick) {
   ph::quat rot;
   _four->box_pose(0, pos, rot);
   const double psi0 = _four->body(0).psi;
-  _four->advance(); // one substep: one physics step
+  _four->advance(); // one substep: one physics step (with a world, its step and what it hit)
   const ph::dyn_4w_saved after = _four->save(0);
   v.model = after;
+  keep_dworld(v);
   // Moving as the model moved, for the world's step.
   const double rear_x = _four->rear_axle(0);
   const double off = -rear_x - _four->params(0).lr;

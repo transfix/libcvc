@@ -502,16 +502,18 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
   _water = water;
   if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
-  // A jolt vehicle's or a boat's model runs on the statics (OW5i, OW5j): its world again, the
-  // vehicle where it is.
+  // A jolt vehicle's or a boat's model runs on the statics (OW5i, OW5j), and a dynamic plant's
+  // meets them (OW5p): its world again, the vehicle where it is (a dynamic plant's with its drive
+  // as it was).
   for (auto &[pid, p] : _participants) {
-    if (!p.vdyn || !p.vdyn->jolt())
+    if (!p.vdyn)
       continue;
     try {
       const jolt_vehicle_world jw = jolt_world();
       auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
                                                            _vground, &jw);
-      p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick());
+      p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick(),
+                         p.vdyn->jolt() ? nullptr : &p.dnow);
       p.dprev = p.dnow;
       p.vlog.clear();
       p.vdyn = std::move(model);
@@ -1585,8 +1587,16 @@ void holon::set_vehicle_ground(std::function<double(double, double)> ground,
     if (!p.vdyn || p.vdyn->jolt()) // a jolt vehicle or a boat goes on the statics
       continue;
     try {
-      p.vdyn =
-          std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(), _vground);
+      // With the statics and the room it meets (OW5p), its world placed where it is.
+      const jolt_vehicle_world jw = jolt_world();
+      auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
+                                                           _vground, &jw);
+      if (model->meets_world()) {
+        p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick(), &p.dnow);
+        p.dprev = p.dnow;
+        p.vlog.clear();
+      }
+      p.vdyn = std::move(model);
     } catch (const std::exception &) {
     }
   }
@@ -1666,17 +1676,19 @@ void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t 
   participant::vlogged e;
   if (p.vdyn) {
     p.dprev = p.dnow;
-    // A jolt vehicle or a boat meets the room's vehicles as the client shows them (OW5o): their
-    // boxes in its model's world. Without room for them, the model again with room, the vehicle
-    // where it is (as a change of statics does).
-    if (p.vdyn->jolt()) {
+    // A jolt vehicle or a boat meets the room's vehicles as the client shows them (OW5o), and so
+    // does a dynamic plant's (OW5p): their boxes in its model's world. Without room for them (a
+    // dynamic plant's model made without a world has none), the model again with room, the
+    // vehicle where it is (as a change of statics does).
+    {
       const std::vector<vehicle_obstacle> obstacles = held_obstacles();
       if (!p.vdyn->hold_obstacles(p.dnow, obstacles)) {
         try {
           const jolt_vehicle_world jw = jolt_world();
           auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
                                                                _vground, &jw);
-          p.dnow = model->at(dynamic_vehicle_state(p.dnow), tick - 1);
+          p.dnow = model->at(dynamic_vehicle_state(p.dnow), tick - 1,
+                             p.vdyn->jolt() ? nullptr : &p.dnow);
           p.dprev = p.dnow;
           p.vlog.clear();
           p.vdyn = std::move(model);

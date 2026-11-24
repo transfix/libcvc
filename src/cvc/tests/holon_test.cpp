@@ -1965,57 +1965,62 @@ TEST(HolonVehicleTest, ASampleCarriesTheSteeringToTheModel) {
 TEST(HolonVehicleTest, TheJoltCarWeDriveMeetsTheRoomsVehicles) {
   if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
     GTEST_SKIP() << "no Jolt in this build";
-  cvc::ariadne::dynamic_drive k = humvee_dynamics();
-  k.plant = "jolt";
-  k.ground = 0.0;
-  const std::array<double, 3> humvee{4.5, 2.0, 1.5};
-  body_state parked;
-  parked.position = vec3{-25.0, 0.0, 0.75};
-  double reached[2] = {0.0, 0.0};
-  std::uint64_t rebuilds[2] = {0, 0};
-  for (int hold = 0; hold < 2; ++hold) {
-    holon client(holon_role::client, physics_config());
-    if (!client.physics())
-      GTEST_SKIP() << "no Jolt backend in this build";
-    cvc::ariadne::avatar_static floor; // a 200 m floor, its top at z = 0
-    floor.center = vec3{0.0, 0.0, -0.1};
-    floor.half_extents = vec3{100.0, 100.0, 0.1};
-    client.set_statics({floor}, 1);
-    client.add_participant("A", true, at(-40.0, 3.0));
-    ASSERT_TRUE(client.predict_vehicle("A", k));
-    const double dt = client.clock().fixed_dt();
-    cvc::ariadne::dynamic_vehicle_model truth(k, dt);
-    body_state start;
-    start.position = vec3{-40.0, 0.0, 1.2};
-    client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(truth.at(start, 1000)),
-                               1000);
-    avatar_intent in;
-    in.throttle = 1.0;
-    in.steer = 0.0;
-    in.brake = 0.0;
-    double x = -1e9;
-    for (int step = 0; step < 480; ++step) {
-      if (hold)
-        ASSERT_TRUE(client.hold_entity(9, humvee, parked)); // the host holds it every frame
-      client.set_intent("A", in);
-      client.advance(dt);
-      x = std::max(x, client.state("A").position.x);
+  // A dynamic plant's car too (OW5p): its model meets the held vehicle in a world of its own.
+  for (const char *plant : {"jolt", "dynamic", "dynamic4w"}) {
+    SCOPED_TRACE(plant);
+    cvc::ariadne::dynamic_drive k = humvee_dynamics();
+    k.plant = plant;
+    k.ground = 0.0;
+    const std::array<double, 3> humvee{4.5, 2.0, 1.5};
+    body_state parked;
+    parked.position = vec3{-25.0, 0.0, 0.75};
+    double reached[2] = {0.0, 0.0};
+    std::uint64_t rebuilds[2] = {0, 0};
+    for (int hold = 0; hold < 2; ++hold) {
+      holon client(holon_role::client, physics_config());
+      if (!client.physics())
+        GTEST_SKIP() << "no Jolt backend in this build";
+      cvc::ariadne::avatar_static floor; // a 200 m floor, its top at z = 0
+      floor.center = vec3{0.0, 0.0, -0.1};
+      floor.half_extents = vec3{100.0, 100.0, 0.1};
+      floor.ground = true; // a dynamic plant's chassis on it has not hit anything (OW5p)
+      client.set_statics({floor}, 1);
+      client.add_participant("A", true, at(-40.0, 3.0));
+      ASSERT_TRUE(client.predict_vehicle("A", k));
+      const double dt = client.clock().fixed_dt();
+      cvc::ariadne::dynamic_vehicle_model truth(k, dt);
+      body_state start;
+      start.position = vec3{-40.0, 0.0, 1.2};
+      client.apply_authoritative("A", cvc::ariadne::dynamic_vehicle_state(truth.at(start, 1000)),
+                                 1000);
+      avatar_intent in;
+      in.throttle = 1.0;
+      in.steer = 0.0;
+      in.brake = 0.0;
+      double x = -1e9;
+      for (int step = 0; step < 480; ++step) {
+        if (hold)
+          ASSERT_TRUE(client.hold_entity(9, humvee, parked)); // the host holds it every frame
+        client.set_intent("A", in);
+        client.advance(dt);
+        x = std::max(x, client.state("A").position.x);
+      }
+      if (hold) {
+        const std::vector<cvc::ariadne::vehicle_obstacle> held = client.held_obstacles();
+        ASSERT_EQ(held.size(), 1u);
+        EXPECT_EQ(held[0].key, 9u);
+        EXPECT_NEAR(held[0].half_extents.x, 2.25, 1e-12);
+      }
+      reached[hold] = x;
+      rebuilds[hold] = client.vehicle_rebuilds();
     }
-    if (hold) {
-      const std::vector<cvc::ariadne::vehicle_obstacle> held = client.held_obstacles();
-      ASSERT_EQ(held.size(), 1u);
-      EXPECT_EQ(held[0].key, 9u);
-      EXPECT_NEAR(held[0].half_extents.x, 2.25, 1e-12);
-    }
-    reached[hold] = x;
-    rebuilds[hold] = client.vehicle_rebuilds();
+    std::printf("  the %s car we drive got to x %.2f holding the parked one at -25, %.2f without\n",
+                plant, reached[1], reached[0]);
+    EXPECT_LT(reached[1], -25.0 - 2.25) << "stopped at the parked vehicle's box";
+    EXPECT_GT(reached[0], -25.0 + 2.25) << "without it, on through where it stands";
+    EXPECT_EQ(rebuilds[1], 1u) << "made again once, with room for it";
+    EXPECT_EQ(rebuilds[0], 0u);
   }
-  std::printf("  the jolt car we drive got to x %.2f holding the parked one at -25, %.2f without\n",
-              reached[1], reached[0]);
-  EXPECT_LT(reached[1], -25.0 - 2.25) << "stopped at the parked vehicle's box";
-  EXPECT_GT(reached[0], -25.0 + 2.25) << "without it, on through where it stands";
-  EXPECT_EQ(rebuilds[1], 1u) << "made again once, with room for it";
-  EXPECT_EQ(rebuilds[0], 0u);
 }
 
 // The room's avatars in the jolt car we drive (OW5p): a peer stands 15 m ahead, and the car the

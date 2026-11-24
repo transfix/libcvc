@@ -499,7 +499,8 @@ public:
   bool held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const;
   // The entities held as the vehicle the local participant drives meets them (OW5o): a jolt or
   // boat model holds their boxes in its world (dynamic_vehicle_model::hold_obstacles), each where
-  // it is at the end of the coming step. How many times a model was made again for room for more.
+  // it is at the end of the coming step; so does a dynamic plant's model, in a world made for its
+  // chassis box with the statics (OW5p). How many times a model was made again for room for more.
   // With them, the peers' avatars (OW5p): each peer the walker's world holds, as a frictionless
   // box of the avatar body's size and mass where it is shown, so the car shoves it as the relay's
   // shoves that avatar -- but not one aboard a vehicle (set_aboard), whose pose is the vehicle's.

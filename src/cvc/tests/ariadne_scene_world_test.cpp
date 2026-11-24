@@ -9192,20 +9192,22 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
 } // namespace
 
 namespace {
-// A drivable jolt Humvee and a parked vehicle of PLANT in its way (OW5o), on the square.
-std::string ram_drivable(const std::string &plant) {
+// A drivable Humvee on DRIVES (jolt, or a dynamic plant: OW5p) and a parked vehicle of PLANT in
+// its way (OW5o), on the square.
+std::string ram_drivable(const std::string &plant, const std::string &drives = "jolt") {
   return std::string(R"(
 world:
   vehicles:
     archetypes:
       humvee:
         vehicle: humvee
-        plant: jolt
+        plant: )") +
+         drives + R"(
         controllers: [nav@1, none, external]
         drivable: true
       parked:
         vehicle: humvee
-        plant: )") +
+        plant: )" +
          plant + R"(
         controllers: [external]
 scene:
@@ -9238,13 +9240,14 @@ struct ram_run {
 // ticks before (a playout's delay; 0, where it is).
 // WALK: an avatar's box gets its walker when knocked loose (vehicle_obstacle::walk_force).
 // BRAKE: the driver brakes once its car is 3 m short of where the parked one stood, so what it hit
-// flies on alone.
+// flies on alone. DRIVES: the driven car's plant (OW5p: a dynamic plant's model meets the room in
+// a world of its own).
 void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0, bool walk = true,
-                bool brake = false) {
+                bool brake = false, const std::string &drives = "jolt") {
   const bool avatar = plant == "avatar";
   cvc::app app;
   register_world_block(app);
-  const std::string doc = ram_drivable(avatar ? "kinematic" : plant);
+  const std::string doc = ram_drivable(avatar ? "kinematic" : plant, drives);
   LoadResult r = load_string(app, doc);
   ASSERT_TRUE(r.ok) << r.error;
   {
@@ -9324,6 +9327,7 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0
   ASSERT_NE(mine, nullptr);
   mine->sync(&warnings);
   cvc::ariadne::jolt_vehicle_world jw;
+  const std::vector<cvc::physics::body_id> ground = mine->ground_bodies();
   for (const SceneWorldBody &b : mine->bodies())
     if (!b.moves && b.desc) {
       cvc::ariadne::avatar_static s;
@@ -9331,6 +9335,8 @@ void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0
       s.body = b.desc;
       s.material = std::make_shared<const cvc::physics::material>(
           mine->world().get_material(b.desc->material));
+      for (const cvc::physics::body_id g : ground) // as world_replica marks it (OW5p)
+        s.ground = s.ground || g.value == b.id.value;
       jw.statics.push_back(std::move(s));
     }
   jw.gravity = mine->world().config().gravity;
@@ -9474,6 +9480,34 @@ TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsAvatars) {
       "from the relay's with its walker, %.3f m without\n",
       walks.parked_moved, walks.box_off, slides.box_off);
   EXPECT_LT(walks.box_off, 0.5 * slides.box_off) << "its walker stops it as the relay's does";
+}
+
+// The room in a dynamic plant's model (OW5p): on the relay a dynamic or dynamic4w vehicle's
+// chassis box is in the world, and what it hits goes back into its plant; the client's model has
+// its box in a world of its own with the statics and the room's boxes, so it meets the parked
+// vehicle and the avatar as the relay's does. Without them it drives on into them between
+// samples. The square it drives on is ground: touching it is not a hit.
+TEST(AriadneOneWorld, AClientsDynamicCarMeetsTheRoom) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *drives : {"dynamic", "dynamic4w"})
+    for (const char *what : {"kinematic", "avatar"}) {
+      SCOPED_TRACE(std::string(drives) + " into " + what);
+      ram_run held, through;
+      ram_parked(what, true, held, 0, true, false, drives);
+      ram_parked(what, false, through, 0, true, false, drives);
+      std::printf("  OW5Q %s into a parked %s: relay's car got to x %.2f, moved it %.3f m; the "
+                  "model %.4f m off at a sample holding its box, %.4f m without\n",
+                  drives, what, held.stopped_at, held.parked_moved, held.worst, through.worst);
+      EXPECT_EQ(held.held, 1u);
+      EXPECT_LT(held.worst, 0.002) << "holding its box, the model meets it as the relay's does";
+      EXPECT_LT(held.worst, through.worst);
+      if (std::string(what) == "kinematic") {
+        EXPECT_LT(held.stopped_at, -10.0 + 2.0) << "the relay's car met the parked vehicle";
+        EXPECT_GT(through.worst, 0.1) << "without, it drives into it between samples";
+      }
+    }
 }
 
 TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {

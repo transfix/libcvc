@@ -429,8 +429,9 @@ std::vector<avatar_static> room_statics(cvc::app &app, const std::string &room) 
     s.rotation = mul(axis_quat(n.rotation[2] * kDeg, 2),
                      mul(axis_quat(n.rotation[1] * kDeg, 1), axis_quat(n.rotation[0] * kDeg, 0)));
     if (n.source_primitive == "plane") {
-      // A slab 0.2 m thick whose top face is the plane.
+      // A slab 0.2 m thick whose top face is the plane: the ground.
       constexpr double kSlab = 0.1;
+      s.ground = true;
       s.half_extents = {0.5 * n.plane_size * n.scale[0], 0.5 * n.plane_size * n.scale[1], kSlab};
       s.center.z -= kSlab;
     } else if (n.source_primitive == "box") {
@@ -988,11 +989,15 @@ void world_replica::build_statics(cvc::app &app) {
         return true;
     return false;
   };
+  // The ground the relay's vehicles drive on (OW5p): the bodies of its world on that are ground.
+  const std::vector<cvc::physics::body_id> ground = _world->ground_bodies();
   for (const SceneWorldBody &b : _world->bodies())
     if (!b.moves && b.desc && in_world(b)) {
       avatar_static s;
       s.type = avatar_static::kind::body;
       s.body = b.desc;
+      s.ground = std::any_of(ground.begin(), ground.end(),
+                             [&](const cvc::physics::body_id &g) { return g.value == b.id.value; });
       // Its surface as the relay's world has it (OW5h): the document's material, by value.
       s.material = std::make_shared<const cvc::physics::material>(
           _world->world().get_material(b.desc->material));
@@ -1005,6 +1010,7 @@ void world_replica::build_statics(cvc::app &app) {
       avatar_static s;
       s.type = avatar_static::kind::geometry;
       s.geometry = std::move(g);
+      s.ground = true; // its terrain (a world's node's colliders: SceneWorld's ground)
       _statics.push_back(std::move(s));
       _taken[id] = rev;
     }

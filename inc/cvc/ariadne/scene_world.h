@@ -209,6 +209,9 @@ public:
   physics::world &world();
   const physics::world &world() const;
   const std::vector<SceneWorldBody> &bodies() const;
+  // The ground its vehicles drive on: the bodies of the world on's nodes that are ground
+  // (SceneWorldBody::ground), as they are now.
+  std::vector<physics::body_id> ground_bodies() const;
   // The body node `id` declared (an invalid id when it has none); a node with colliders has a
   // body per collider, and this is the first.
   physics::body_id body(const std::string &id) const;

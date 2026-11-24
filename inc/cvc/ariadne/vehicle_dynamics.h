@@ -125,19 +125,27 @@ struct dynamic_vehicle {
   double vx = 0.0, vy = 0.0, wz = 0.0;
   // The command its next navigator tick takes, before the navigator's hold (rad, + left; m/s^2).
   double steer_cmd = 0.0, accel_cmd = 0.0;
+  // On the dynamic plants with a world (OW5p): that world as its last step or placement left it
+  // (the statics, the room's boxes, its chassis box); null without one.
+  std::shared_ptr<const std::vector<std::uint8_t>> world;
 };
 
-// Runs one: its plant with that vehicle alone, without a world (it touches nothing), one model
-// substep each physics step; a jolt vehicle or a boat in a world of its own (above).
+// Runs one: its plant with that vehicle alone, one model substep each physics step; a jolt vehicle
+// or a boat in a world of its own (above). On the dynamic plants given statics or room for the
+// room's vehicles (OW5p), the plant's chassis box is in a world of its own with them, as the
+// relay's is in its world: what the box hits goes back into the model (dyn_bike_plant's and
+// dyn_4w_plant's options.physics), and touching the ground (avatar_static::ground) is not a hit.
+// Without them, it touches nothing.
 class dynamic_vehicle_model {
 public:
   // Throws std::invalid_argument for a drive that is not valid() or a preset that is not one.
   // GROUND (world metres at x, y) is the ground it drives on; empty: flat, at drive.ground. A
   // dynamic4w model measures its heights from drive.ground either way, as the relay's plant does.
-  // WORLD: a jolt vehicle's or a boat's statics, water and gravity (ignored on the other plants);
-  // null: flat ground at drive.ground and standard gravity. Throws cvc::unsupported_exception for a
-  // jolt vehicle or a boat in a build without Jolt, and std::invalid_argument for a boat without
-  // water.
+  // WORLD: a jolt vehicle's or a boat's statics, water and gravity; on the dynamic plants, the
+  // statics and the room the chassis meets (OW5p; the water is ignored); null: flat ground at
+  // drive.ground and standard gravity, and on the dynamic plants nothing to meet. Throws
+  // cvc::unsupported_exception for a jolt vehicle or a boat in a build without Jolt, and
+  // std::invalid_argument for a boat without water.
   using ground_fn = std::function<double(double, double)>;
   dynamic_vehicle_model(const dynamic_drive &drive, double fixed_dt, ground_fn ground = {},
                         const jolt_vehicle_world *world = nullptr);
@@ -185,6 +193,9 @@ public:
   const cvc::physics::dyn_4w_plant *four() const { return _four.get(); }
   // A jolt vehicle's world (its statics and the vehicle), and the vehicle in it.
   const avatar_world *jolt() const { return _jolt.get(); }
+  // Whether its chassis meets a world's statics and the room's boxes (hold_obstacles): a jolt
+  // vehicle, a boat, or a dynamic plant's built with a world (OW5p).
+  bool meets_world() const { return _jolt || _dworld; }
   cvc::physics::vehicle_id jolt_vehicle() const { return _jveh; }
   // A boat's world (jolt(): its statics and water) and its plant, once it is on the water (at()).
   bool is_boat() const { return _drive.plant == "dynamicboat"; }
@@ -195,8 +206,9 @@ public:
   // the boxes for OBSTACLES go where each is to be at that step's end (one keeps its box while it
   // is held; a box none of them names goes back out of the way), so the chassis meets them as the
   // relay's meets those vehicles. False, changing nothing, when they do not fit: a size with no
-  // free box. The host then builds the model again with room for them. True and nothing on the
-  // dynamic plants (they meet nothing, as on the relay) and for a boat not yet on the water.
+  // free box. The host then builds the model again with room for them. On a dynamic plant's model
+  // the same in its world (OW5p); one built without a world has no room, so false for any
+  // obstacle (and true for none). True and nothing for a boat not yet on the water.
   bool hold_obstacles(dynamic_vehicle &v, const std::vector<vehicle_obstacle> &obstacles);
   // Where the box held for KEY is in the model's world as the last step left it (OW5p); false
   // for a key no box holds.
@@ -223,6 +235,13 @@ private:
   // from the world's chassis after a step or a placement (its saved world, box, attitude, twist).
   void load_jolt(const dynamic_vehicle &v) const;
   void keep_jolt(dynamic_vehicle &v) const;
+  // A dynamic plant's world (OW5p) as V holds it, and V's saved world from it after a step or a
+  // placement. LIKE's world, when it is not one this model's world can take (another model's),
+  // leaves the world as it is.
+  void load_dworld(const dynamic_vehicle &v) const;
+  void keep_dworld(dynamic_vehicle &v) const;
+  // The world the room's boxes are in: a jolt vehicle's or boat's, or a dynamic plant's; null.
+  cvc::physics::world *room_world() const;
   // The chassis's forward speed at its rear axle (m/s), as nav_plant reads it.
   double jolt_speed() const;
 
@@ -245,6 +264,10 @@ private:
   mutable double _jreach = 5.0; // m: the chassis's reach in plan from its centre (OW5p)
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jadded;
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jlast;
+  // A dynamic plant's world (OW5p): its statics, the room's boxes and the plant's chassis box, and
+  // the saved world it was last left at.
+  std::unique_ptr<avatar_world> _dworld;
+  mutable std::shared_ptr<const std::vector<std::uint8_t>> _dlast;
   // The room's vehicles' boxes (hold_obstacles): the body, its half extents, and the vehicle it
   // holds (KEY, when HELD).
   struct obstacle_box {
