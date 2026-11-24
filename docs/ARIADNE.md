@@ -1307,6 +1307,58 @@ and `TerminalScene`) counts an expression on the document's read lane
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
 
+**Animations.** `animations:` in a scene moves its nodes, or writes state keys, along keyframes over
+the scene clock:
+
+```yaml
+scene:
+  animations:
+    - animation: door_open        # its keys: animations.door_open.time / .playing / .speed
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[0, [0, 0, 0]], [1.5, [0, 0, 95]], [2, [0, 0, 90]]]
+    - animation: beacon
+      loop: true                  # false (the default) | true | pingpong
+      tracks:
+        - { node: beacon, key: color, keys: [[0, [1, 0.2, 0]], [0.5, [1, 0.8, 0]], [1, [1, 0.2, 0]]] }
+        - { state: beacon.level, keys: [[0, 0], [0.5, 1], [1, 0]] }
+    - animation: wave
+      loop: pingpong
+      autoplay: false             # waits for animations.wave.playing
+      speed: 0.5
+      tracks:
+        - { node: flag, key: position, keys: [[0, [0, 0, 0]], [1, [0, 0, 0.4]]] }
+        - { node: post_3/flag, key: scale, keys: [[0, [1, 1, 1]], [1, [1.5, 1.5, 1.5]]] }
+```
+
+- **A track** moves one thing along its `keys:`, a list of `[seconds, value]`:
+  - `node: <id>` with `key: position`, `rotation` (degrees about x, then y, then z), `scale` or
+    `color` (each three numbers), `opacity` (0..1) or `visible` (shown above 0.5). The id names
+    every node with it, so `flag` moves each `repeat:` copy's flag and each prototype instance's;
+    a path, `post_3/flag`, names the flag under `post_3` alone.
+  - `state: <path>`, resolved as a bind is: the value written there, a number or numbers joined by
+    commas, for a widget, a program or a node's `visible:` to read.
+  - `interpolation:` `linear` (the default), `step` (each key's value until the next) or `smooth`
+    (a curve through every key, easing in and out at the first and last). Rotation interpolates
+    each angle on its own, so `[0, 0, 0]` to `[0, 0, 360]` is a whole turn.
+  - Before its first key a track holds the first value, after its last the last.
+- **An animation** runs as long as its latest key (`duration:` sets it longer), then stops
+  (`loop: false`), starts over (`true`) or turns back (`pingpong`). `speed:` is seconds of
+  animation a second of the clock; below 0 it plays backwards. `autoplay: false` waits.
+- **Its keys** under the scene's prefix: `animations.<id>.time` (seconds into it), `.playing`
+  (`1` or `0`) and `.speed`. The animation writes them as it plays and reads them every frame, so a
+  program seeks with `(state-set "animations.door_open.time" "0")`, plays and pauses with
+  `.playing`, and changes `.speed`. An animation that stopped at its end and is played again starts
+  over.
+- **The clock.** A scene with an animation runs on the scene clock, as `clock: {}` would make it,
+  so `sim_transport.ari`'s Paused and Speed pause and slow its animations with everything else. At
+  realize every animation sets what it moves to where it starts, playing or not.
+- **One writer a key.** Physics poses a body's node every step and a `visible:` bind writes its
+  node's visibility every frame, so an animation of either is overwritten: animate a node without
+  a body, and the visibility of one without a `visible:`.
+
 **Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
 handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
 descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the

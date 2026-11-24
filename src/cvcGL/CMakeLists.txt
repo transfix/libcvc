@@ -1035,6 +1035,14 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
 endif()
 
+# A scene's animations: played with no window on a fixed clock step: the start pose at realize, a
+# once animation's keyframes and its end, a loop's colour and state track, a paused pingpong played
+# by its key and moving every repeat: copy's child, a script's seek, pause, play and speed, and a
+# paused scene clock.
+add_executable(cvcgl_ariadne_animation test/cvcgl_ariadne_animation.cpp)
+target_link_libraries(cvcgl_ariadne_animation PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_animation COMMAND cvcgl_ariadne_animation)
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1767,6 +1775,7 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_animation
+                        cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
                         cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)
