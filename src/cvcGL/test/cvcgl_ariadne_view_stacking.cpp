@@ -542,14 +542,19 @@ int main() {
       if (hasView)
         check(vm.hasViewport("inner"), "the lights document's view exists");
 #ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
-      // Every renderer of the window sends its own lights, the main view's and the view's.
+      // With a view, every renderer of the window sends its own lights, the main view's and the
+      // view's. Alone, the main view keeps VTK's default (no other renderer writes its programs).
       std::vector<vtkRenderer *> renderers{h.view->renderer()};
       if (hasView && vm.hasViewport("inner"))
         renderers.push_back(vm.viewport("inner").renderer());
       for (vtkRenderer *r : renderers) {
         auto *gl = vtkOpenGLRenderer::SafeDownCast(r);
-        check(gl && gl->GetUpdateLightingUniformsEveryRender(),
-              "each renderer sends its own lights every render");
+        if (hasView)
+          check(gl && gl->GetUpdateLightingUniformsEveryRender(),
+                "with a view, each renderer sends its own lights every render");
+        else
+          check(gl && !gl->GetUpdateLightingUniformsEveryRender(),
+                "a window with one renderer keeps VTK's default for its lights");
       }
 #endif
       h.view->close();

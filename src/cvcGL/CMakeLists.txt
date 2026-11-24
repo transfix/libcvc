@@ -145,8 +145,8 @@ endif()
 # with only the time they were set, not whose lights they are, so one renderer can draw with
 # another's lights: the main view with a view's (docs/ARIADNE.md §5.18). cvcpkg's VTK
 # (vtk 9.5.0+cvc.7, written for upstream, cy-pca/cvcpkg#636) adds an opt-in
-# vtkOpenGLRenderer::UpdateLightingUniformsEveryRender, which Viewport turns on for every renderer
-# it makes. Compile-only and run at every configure, as the check above.
+# vtkOpenGLRenderer::UpdateLightingUniformsEveryRender, which ViewportManager turns on for every
+# renderer of a window once it has two. Compile-only and run at every configure, as the check above.
 unset(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER CACHE)
 cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingOpenGL2)
@@ -166,7 +166,8 @@ unset(_cvc_try_compile_target_type)
 cmake_pop_check_state()
 if(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER)
   target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER=1)
-  message(STATUS "cvcGL: VTK has UpdateLightingUniformsEveryRender; every Viewport turns it on")
+  message(STATUS "cvcGL: VTK has UpdateLightingUniformsEveryRender; a window with two or more "
+                 "viewports turns it on")
 else()
   message(STATUS "cvcGL: VTK has no UpdateLightingUniformsEveryRender; a view can light the main "
                  "view's props with its own lights")

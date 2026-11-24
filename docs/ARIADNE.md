@@ -4763,7 +4763,8 @@ Limits:
 - A view's texture is no larger than the window: a widget larger than the window draws at the
   window's size and is stretched.
 - Each view, and the main view, draws with its own lights only with cvcpkg's VTK 9.5.0+cvc.7 or
-  later (`vtkOpenGLRenderer::UpdateLightingUniformsEveryRender`, which every viewport turns on).
+  later (`vtkOpenGLRenderer::UpdateLightingUniformsEveryRender`, which cvcGL turns on for every
+  renderer of a window that has a view).
   VTK keeps the light uniforms on the shader program, which the window's renderers share, with
   only the time they were set. So with an older VTK, a prop the main view and a view both draw
   can be lit, in one of them, with the other's lights.

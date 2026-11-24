@@ -31,6 +31,7 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>      // vtkStandardNewMacro
 #include <vtkOpenGLRenderWindow.h> // limitTextureUnits: the window's GL state
+#include <vtkOpenGLRenderer.h>     // lightsPerRenderer
 #include <vtkOpenGLState.h>        // ... and its texture-unit table
 #include <vtkOutputWindow.h>       // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPNGWriter.h>
@@ -309,6 +310,23 @@ struct ViewportManager::Impl {
   // Keep the window's layer count strictly greater than the highest layer index
   // in use, or VTK silently drops the top layer.
   void syncLayerCount() { window->SetNumberOfLayers(highestLayer() + 1); }
+
+  // The window's renderers share its shader programs, and VTK keeps a program's light uniforms
+  // with only the time they were set: with a second renderer, one can draw with the other's
+  // lights, the main view with a view's (they draw the same props). So once the window has two,
+  // every renderer sends its own lights to each program it draws with, once a render (cvcpkg's
+  // VTK 9.5.0+cvc.7); one left out could still draw with another's. It stays on when a view goes:
+  // the view's lights may still be in a program. A window that only ever had one renderer keeps
+  // VTK's default, which sends the lights only when they change.
+  void lightsPerRenderer() {
+#ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
+    if (viewports.size() < 2)
+      return;
+    for (const auto &v : viewports)
+      if (auto *gl = vtkOpenGLRenderer::SafeDownCast(v->renderer()))
+        gl->UpdateLightingUniformsEveryRenderOn();
+#endif
+  }
 
   // ---- FrameYield (see ViewportManager::setFrameYield / lockFrameYield) ----
   // requestedYield: what the app asked for. urlYield: the page's ?frameyield= (0 absent, 1 vtk,
@@ -706,6 +724,7 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
   // count must exceed the highest layer index or VTK rejects the top layer
   // ("Invalid layer for renderer: not rendered") and never draws it.
   m_impl->syncLayerCount();
+  m_impl->lightsPerRenderer();
   return ref;
 }
 
@@ -749,6 +768,7 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   m_impl->byName[name] = vp.get();
   m_impl->viewports.push_back(std::move(vp));
   m_impl->syncLayerCount();
+  m_impl->lightsPerRenderer();
   return ref;
 }
 
