@@ -68,6 +68,10 @@ public:
   void set_double(std::initializer_list<std::string> rel, double v); // round-trip exact
   void set_uint(std::initializer_list<std::string> rel, std::uint64_t v);
   void set_flag(std::initializer_list<std::string> rel, bool b); // "1" | "0"
+  // Take BASE.<rel...> out of the tree, with everything below it: one delete, which every peer
+  // applies, and whose tombstone keeps a peer that still holds it from bringing it back
+  // (state_sync_adapter.h). Never the section itself (an empty REL). Whether it was there.
+  bool remove(std::initializer_list<std::string> rel);
 
   // Write the epoch (EPOCH, or the app's when 0), AT, then the revision: one more than the
   // last, or 1 when the epoch differs from the one the section had (a new run). Returns the stamp.
