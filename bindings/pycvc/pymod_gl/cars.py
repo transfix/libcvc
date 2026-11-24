@@ -14,7 +14,8 @@ this module is everything under it:
 - :class:`Cars`: libcvc's ``sim_world`` over that grid, its agents on a plant that
   ``pycvc.plant_host`` picks by name (nav's kinematic bicycle, Jolt vehicles, the dynamic single
   track), and your ``(steer, accel)`` in its navigator's place (``nav_sim_world_override``). With
-  ``navigator=True`` the navigator drives instead, as a baseline.
+  ``navigator=True`` the navigator drives instead, as a baseline; with ``coph=`` libcvc's CoPH
+  fleet drives every car natively (``pycvc.NavCophDriver``, ``--controller coph``).
 - :class:`GymCars`: the same cars in a world document (``pycvc.WorldGym``, ARIADNE_WORLDS.md
   §14, L4): the document's world, its vehicles as Jolt vehicles in its own physics world, its
   spawn points. Your controller runs on it unchanged; ``--gym DOC`` runs the template on it.
@@ -500,15 +501,24 @@ class Cars:
     navigator ("" = libcvc's built-in one), and ``scale`` the frame it was trained in (normalized
     units per metre; nav's demos use 0.05). ``seed`` makes the starts and goals repeatable;
     ``starts`` and ``goals`` ((n, 2) world positions) set them instead, and the cars start facing
-    their goals. ``rays`` and ``range_m`` shape the range readings."""
+    their goals. ``rays`` and ``range_m`` shape the range readings.
+
+    ``coph`` (a dict, or True for the defaults) has libcvc's CoPH fleet drive every car instead,
+    natively (``pycvc.NavCophDriver``, C6 of docs/roadmap/NAV-COPH-ROADMAP.md), through
+    :meth:`step_coph`. Its keys: ``froude`` (CoPH's lengths in metres, D4; default
+    :meth:`coph_froude`), ``config`` and ``communication`` (dicts over the demos' profile),
+    ``local_goal`` (m, D12) and ``seed``. A car that reaches its goal brakes and stays: its
+    learner's run is over, so it takes no new goal."""
 
     def __init__(self, world: World, n=6, vehicle="humvee", *, seed=0, navigator=False,
                  nav_weights="", scale=SCALE, app=None, prefix="", rays=16, range_m=60.0,
-                 starts=None, goals=None):  # fmt: skip
+                 starts=None, goals=None, coph=None):  # fmt: skip
         _require()
         self.world, self.n = world, int(max(1, n))
         self.app, self.prefix = app, prefix
         self.navigator, self.nav_weights = bool(navigator), str(nav_weights or "")
+        self.coph_options = (dict(coph) if isinstance(coph, dict) else {}) if coph else None
+        self.coph = None
         self.scale = float(scale)
         self.rng = np.random.default_rng(seed)
         self.ray_angles = np.linspace(-math.pi, math.pi, int(rays), endpoint=False)
@@ -585,6 +595,38 @@ class Cars:
         if self.app is not None:  # the tree's settings apply (unset ones are seeded), then publish
             self.pull()
             self.publish()
+        if self.coph_options is not None:
+            self.coph = self._coph_driver(self.coph_options)
+
+    # ── CoPH ──
+    def coph_froude(self) -> float:
+        """The Froude scale s for these cars (D3, D4): the longest car over a RoboRacer's length,
+        so a RoboRacer runs at s = 1 and a Humvee at about 9."""
+        racer = 0.55
+        if hasattr(pycvc, "vehicle_desc"):
+            racer = 2.0 * float(pycvc.vehicle_desc.roboracer().half_extents()[0])
+        return max(1.0, float(np.max(self.length)) / racer)
+
+    def _coph_driver(self, opts):
+        if not hasattr(pycvc, "NavCophDriver"):
+            raise RuntimeError("CoPH needs pycvc with NavCophDriver (libcvc's C6 bindings)")
+        d = pycvc.NavCophDriver(
+            self.sim, opts.get("config"), opts.get("communication"),
+            froude=float(opts.get("froude") or self.coph_froude()),
+            local_goal=float(opts.get("local_goal", 30.0)), seed=int(opts.get("seed", 0)),
+        )  # fmt: skip
+        for i in range(self.n):
+            d.attach(i)
+        return d
+
+    def coph_coeffs(self) -> dict:
+        """Each car's CoPH account, as the coefficient plots take it: the allocation residual (the
+        share of CoPH's force the car could not take), the work, the risk cost and the CoPH steps."""
+        acc = [self.coph.account(i) for i in range(self.n)]
+        return {"alloc_residual": np.array([a["allocation_residual"] for a in acc]),
+                "work": np.array([a["work"] for a in acc]),
+                "risk_cost": np.array([a["risk_cost"] for a in acc]),
+                "coph_steps": np.array([a["steps"] for a in acc], float)}  # fmt: skip
 
     # ── the state tree ──
     def pull(self):
@@ -648,6 +690,16 @@ class Cars:
 
     def step_navigator(self) -> CarsState:
         """One tick of libcvc's navigator driving every car to its goal."""
+        pycvc.nav_sim_world_step(self.sim)
+        self.last_command = (np.full(self.n, np.nan), np.full(self.n, np.nan))
+        return self._advance()
+
+    def step_coph(self) -> CarsState:
+        """One tick of CoPH driving every car (``coph=``): a CoPH step on its own cadence, each
+        car's allocated command every tick (``pycvc.NavCophDriver.apply``), then the world's step."""
+        if self.coph is None:
+            raise RuntimeError("these cars were not made with coph=")
+        self.coph.apply()
         pycvc.nav_sim_world_step(self.sim)
         self.last_command = (np.full(self.n, np.nan), np.full(self.n, np.nan))
         return self._advance()
@@ -1370,7 +1422,11 @@ def _parse(argv, doc_default):
                    help="the plant: kinematic, humvee, roboracer, a comma list, dynamic[:presets] "
                         "(sets nav_plant.vehicle)")  # fmt: skip
     add_args(p)
-    p.add_argument("--controller", choices=("yours", "navigator"), default=None)
+    p.add_argument("--controller", choices=("yours", "navigator", "coph"), default=None,
+                   help="yours (cars.py), libcvc's navigator, or CoPH's fleet natively")  # fmt: skip
+    p.add_argument("--coph-scale", type=float, default=None,
+                   help="--controller coph: the Froude scale s, CoPH's lengths in metres "
+                        "(default: the car's length over a RoboRacer's)")  # fmt: skip
     p.add_argument("--nav-weights", default="", help="a .cvcnav policy for the navigator")
     p.add_argument("--nav-scale", type=float, default=SCALE,
                    help="the navigator's normalized units per metre: the frame its policy was "
@@ -1485,6 +1541,9 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
 
     def build(seed=None):
         n = max(1, host.get_int("run.cars", 6))
+        if host.get("run.controller", "yours") == "coph" and (args.world_doc or args.gym):
+            raise RuntimeError("--controller coph drives the template's own worlds (Cars), not "
+                               "--world-doc or --gym")  # fmt: skip
         if args.world_doc:
             # The host's own world: wait for its grid (a frame or a few), then spawn the cars in it.
             nav = host.get("run.controller", "yours") == "navigator"
@@ -1521,10 +1580,13 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             print(f"cars: the {kind} world failed ({e}); flat ground instead", file=sys.stderr)
             world = flat_world(4.84)
         vehicle = host.get("nav_plant.vehicle", "humvee") or "humvee"
-        nav = host.get("run.controller", "yours") == "navigator"
+        ctl = host.get("run.controller", "yours") or "yours"
+        nav = ctl == "navigator"
+        coph = {"froude": args.coph_scale, "seed": args.seed if seed is None else seed} \
+            if ctl == "coph" else None  # fmt: skip
         cars = Cars(world, n, vehicle, seed=args.seed if seed is None else seed, navigator=nav,
                     nav_weights=args.nav_weights, scale=args.nav_scale, app=host.app,
-                    prefix=pre)  # fmt: skip
+                    prefix=pre, coph=coph)  # fmt: skip
         st.update(cars=cars, speed=[], gap=[], coef={}, world=world)
         show_world(host, world.kind, args.doc)
         if log is not None:
@@ -1532,10 +1594,12 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
                 world=world.info,
                 cars=n,
                 seed=args.seed if seed is None else seed,
-                controller="navigator" if nav else "yours",
+                controller=ctl,
                 nav_weights=args.nav_weights,
                 nav_scale=args.nav_scale,
             )
+            if coph is not None:
+                log.meta["coph_froude"] = coph["froude"] or cars.coph_froude()
         if drawn:
             draw_world(host, st)
             draw_cars(host, st)
@@ -1606,6 +1670,9 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
                     if cars.navigator:
                         s = cars.step_navigator()
                         coeffs = s.nav
+                    elif getattr(cars, "coph", None) is not None:
+                        s = cars.step_coph()
+                        coeffs = cars.coph_coeffs()
                     else:
                         r = controller(s, p)
                         info = r[2] if len(r) > 2 and r[2] else {}
