@@ -1350,7 +1350,7 @@ void batch_notify(void *ctx) noexcept {
 std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                                  std::span<const std::string> programs,
                                                  bool fresh_env, batch_control &control,
-                                                 async_scheduler *group0) {
+                                                 cvc::app &app) {
   using clock = std::chrono::steady_clock;
   // A group's slice per round, as run()'s.
   static constexpr uint64_t kSliceSteps = 2000000;
@@ -1478,27 +1478,42 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
     return false;
   };
   // Group 0, the home of the pooled programs' keys outside every chroot (exec_router.h's homes),
-  // which no pooled pump drains. Before each round this thread drains it, under its pump owner,
-  // when it has posts and no other thread pumps it (an Ariadne frame drains it then), so what the
-  // batch posted there (a send, a subscribe) is applied and its deliveries reach the pooled groups.
-  // Its own processes are not stepped. Never from inside one of its own steps (run_all called by a
-  // host function of it), where a drain would apply posts under the step: the batch leaves it then.
-  const auto group0_posted = [&group0] {
-    return group0 != nullptr && group0->has_pending_ingress() && !group0->pumped_elsewhere();
+  // which no pooled pump drains. Once it exists (app::exec_scheduler_probe, which never builds it),
+  // this thread drains it before each round while it has posts, so what the batch posted there (a
+  // send, a subscribe) is applied and its deliveries reach the pooled groups. Its own processes are
+  // not stepped. Its pump owner is taken, not checked first: held by another thread (an Ariadne
+  // frame, kill_owner, another pool's batch), the take throws kPumpedElsewhereError and this round
+  // skips the drain, which that thread's pump does. Never from inside one of its own steps (run_all
+  // called by a host function of it), where a drain would apply posts under the step: the batch
+  // leaves it then.
+  async_scheduler *group0 = nullptr;
+  bool leave_group0 = false;
+  const auto group0_now = [&]() -> async_scheduler * {
+    if (group0 == nullptr)
+      group0 = app.exec_scheduler_probe(); // once built, it lives as long as the app
+    return leave_group0 ? nullptr : group0;
+  };
+  // Posts there this thread could drain now (not another thread's to drain): a reason to round.
+  const auto group0_posted = [&] {
+    async_scheduler *const g = group0_now();
+    return g != nullptr && g->has_pending_ingress() && !g->pumped_elsewhere();
   };
   const auto drain_group0 = [&] {
-    if (!group0_posted())
+    async_scheduler *const g = group0_now();
+    if (g == nullptr || !g->has_pending_ingress())
       return;
     std::optional<async_scheduler::pump_owner_scope> owner;
     try {
-      owner.emplace(*group0);
-    } catch (const std::runtime_error &) {
-      return; // another thread took it meanwhile: its pump drains it
+      owner.emplace(*g);
+    } catch (const std::runtime_error &e) {
+      if (std::string_view(e.what()) != kPumpedElsewhereError)
+        throw;
+      return;
     }
-    if (group0->current_pid() >= 0)
-      group0 = nullptr;
+    if (g->current_pid() >= 0)
+      leave_group0 = true;
     else
-      group0->drain_ingress();
+      g->drain_ingress();
   };
   // The batch wait (S2-Q6): for the batch, a post to any pooled group calls batch_notify. Every
   // notifier is cleared on each way out, after the last kernel has ended, before the batch returns.

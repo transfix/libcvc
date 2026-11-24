@@ -148,6 +148,7 @@ add_executable(state_exec_hazards_test state_exec_hazards_test.cpp)
 add_executable(state_exec_groups_test state_exec_groups_test.cpp)
 add_executable(exec_pool_test exec_pool_test.cpp)
 add_executable(state_exec_router_test state_exec_router_test.cpp)
+add_executable(state_exec_stress_test state_exec_stress_test.cpp)
 if(NOT WIN32)
   add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
 endif()
@@ -741,6 +742,7 @@ list(APPEND TEST_TARGETS
   state_exec_groups_test
   exec_pool_test
   state_exec_router_test
+  state_exec_stress_test
 )
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
@@ -2175,6 +2177,13 @@ target_link_libraries(state_exec_router_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_stress_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_builtins_test
   PRIVATE
     cvc
@@ -3044,6 +3053,7 @@ target_compile_features(state_exec_hazards_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_groups_test PRIVATE cxx_std_20)
 target_compile_features(exec_pool_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_router_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_stress_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
@@ -3658,6 +3668,9 @@ cvc_discover_tests(state_exec_hazards_test)
 cvc_discover_tests(state_exec_groups_test)
 cvc_discover_tests(exec_pool_test)
 cvc_discover_tests(state_exec_router_test)
+# ST-1 and ST-2 (S2.md 4): the short form; the nightly lane sets CVC_EXEC_STRESS_MINUTES and
+# CVC_EXEC_STRESS_SEEDS for the long ones.
+cvc_discover_tests(state_exec_stress_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(state_exec_builtins_test)
 cvc_discover_tests(state_exec_evaluator_test)
 cvc_discover_tests(state_exec_stackless_evaluator_test)

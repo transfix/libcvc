@@ -914,131 +914,132 @@ and `--actors posters=1,workers=1,hosts=2,teardown=0 --opts pre=1,repop=1,live=1
 of threaded execution's Stage 2 (S2b;
 [`docs/STATE_EXEC_THREADED.md`](../../docs/STATE_EXEC_THREADED.md) 4.6, 4.11 and 8.4's MS-1..MS-12;
 the plan's S2-Q10 and S2-Q15), as the S2b interface commit froze it in the header comment of
-[`exec_router.h`](../../inc/cvc/state/state_exec/exec_router.h): the homes, when the router is
-on, the ordered ingress's throw rule, the protocol's six entries (send, subscribe, unsubscribe,
-deliver, requeue, taken), broadcast tracking, the cap, and teardown and rehoming. It shares only
-`Violation` with the lock model and has no C++ port. `test_router.py` tests it.
+[`exec_router.h`](../../inc/cvc/state/state_exec/exec_router.h): the homes, islands, when the
+router is on, the ordered ingress's throw rule, the protocol's entries (send, subscribe,
+unsubscribe, deliver, requeue, taken, adopt), broadcast tracking, the cap, and teardown and
+rehoming. `--amend none` is S2b.0's text; the default, `--amend all`, is the text as S2b.0a
+amended it from this model's findings. It shares only `Violation` with the lock model and has no
+C++ port. `test_router.py` tests it.
 
 **The world.** One resolved channel key, homed at a group H that registered its prefix, and at
-group 0 (G0) once H's teardown unregisters it; receiving groups R1 and R2, and a sender group S
-(any group may hold senders, H and G0 included). Processes run scripts: `r` a msg-recv, `t` one
-with a deadline, `s` a msg-send of a new message. A process whose group is the home receives
-locally (the FIFO's front, else it parks as a local waiter); elsewhere it parks with a new
-recv_seq and subscribes at the home. A send applied at the home goes to every current waiter (a
-local one at once, a remote one by a deliver), else joins the pending FIFO. R1, R2 and S register
-prefixes of their own elsewhere, so the router is on throughout, unless `--opts islands=1` (they
-register none: on only while H is registered or a record exists, and off a process's messaging
-stays in its own scheduler, RT-1's path).
+group 0 (G0) once H's teardown unregisters it; receiving groups R1 and R2, a sender group S (any
+group may hold senders, H and G0 included), and X, host threads posting with
+exec_pool::post_message. Processes run scripts: `r` a msg-recv, `t` one with a deadline, `s` a
+msg-send of a new message, `p` (in X) a host's post of one. A process whose group is the home
+receives locally (the FIFO's front, else it parks as a local waiter); elsewhere it parks with a
+new recv_seq and subscribes at the home. A send applied at the home goes to every current waiter
+(a local one at once, a remote one by a deliver), else joins the pending FIFO. R1, R2 and S
+register prefixes of their own elsewhere, so the router is on throughout, unless
+`--opts islands=1`: they register none, and once H is gone the key is each island's own (S2b.0a's
+island rule; in S2b.0's text, its own while the router is off, which it is once H is gone and no
+record is left).
 
 **A step** is one group's thread doing one thing atomically: applying the head of its ordered
 ingress, stepping a process, firing a timeout, applying a kill, or one step of its teardown; or
 a timed wait's deadline passing (after which the home skips its record and its group may fire the
 timeout). A post is an atomic append; a closed handle refuses it, and a home-bound poster
-re-resolves the home. Every interleaving is explored breadth first, so each trace is a shortest
-one. A state is kept as its pickle with no memo (`encode`; equal states give equal bytes), about
-300 bytes with its index.
+re-resolves the home (with S2b.0a's order, waiting while the home is still that closed group).
+Every interleaving is explored breadth first, so each trace is a shortest one. A state is kept as
+its pickle with no memo (`encode`; equal states give equal bytes), about 300 bytes with its
+index.
 
 **The properties**, each a violation name. At a receipt: `duplicate` (a message reaches a second
 wait: one it went pending for, or one outside the waiters its send found once one of those took
-it) and `misaddressed`. When a message is first handed to a wait (a receipt or a deliver posted):
-`fifo` (an earlier message of the same sender group is not handed out yet: td 4.11's FIFO per
-(sender group, channel), as the home's order). When every ingress is empty, no teardown is under
-way and no process is runnable: `lost` (neither received nor pending; a fresh send a full FIFO
-dropped is today's behaviour, counted, and allowed), `duplicate` (pending twice, or pending and
-received), `stranded` (a message pending while a wait not past its deadline exists: liveness, as
-the state graph has no cycle), `orphan-wait` (such a wait with no local waiter or record at its
-home), `stale-record` and `tracker-leak`. No step enabled while not idle is a `deadlock`. With
-`--opts choice=1` the requeue's "next waiter" is chosen every way the text allows, and a step
-whose choices give different states is `nondeterministic` (deterministic mode needs one outcome).
-The documented gaps are reported under their own names and do not stop the exploration:
-`gap-requeue-order` and `gap-broadcast-rehomed` (below).
+it) and `misaddressed`. At a tracker's creation or adoption, and at each answer: `id-collision`
+(a home tracks two broadcasts under one id, or an answer lands on another message's tracker).
+When a message is first handed to a wait (a receipt or a deliver posted): `fifo` (an earlier
+message of the same sender group is not handed out yet: td 4.11's FIFO per (sender group,
+channel), as the home's order). When every ingress is empty, no teardown is under way and no
+process is runnable: `lost` (neither received nor pending; a fresh send a full FIFO dropped is
+today's behaviour, counted, and allowed), `duplicate` (pending twice, or pending and received),
+`stranded` (a message pending where a wait not past its deadline is served, or an island's own
+message, sent once H was gone, pending elsewhere while that island waits locally: liveness, as
+the state graph has no cycle), `orphan-wait` (such a wait with no local waiter or record where
+it is served), `stale-record` and `tracker-leak`. No step enabled while not idle is a
+`deadlock`. With `--opts choice=1` the requeue's "next waiter" is chosen every way the text
+allows, and a step whose choices give different states is `nondeterministic`. The documented gaps
+are reported under their own names and do not stop the exploration: `gap-requeue-order` and
+`gap-island-rehomed` (below).
 
 **Running it.**
 
-    python -I router.py --procs S:ss,R1:t,R2:t --opts kills=1 --amend all
-    python -I router.py --procs S:ss,R1:t --but rehome-order     # every amendment but one
-    python -I router.py --suite quick     # the CI checks, about 20 s
+    python -I router.py --procs S:ss,R1:t,R2:t --opts kills=1      # S2b.0a's text
+    python -I router.py --procs S:ss,R1:t --but rehome-order        # every amendment but one
+    python -I router.py --suite quick     # the CI checks, about 25 s
     python -I router.py --suite deep      # quick, then the larger bounds (locks-deep.yml)
     python -I test_router.py              # unittest: the quick suite, and the explorer's checks
 
 The first prints JSON like `state_word.py`'s, with `peak_mb`. `--opts` sets `kills` (a budget of
-kills, any process, any time), `teardown` (H's, default 1), `rdie` (R1's teardown), `throws` (a
-deliver that throws before it patches its frame), `icap` (the ingress cap), `fcap` and `fcap0`
-(H's and G0's max_pending_messages), `busy0` (a capped send on another key in G0's ingress at the
-start), `choice` and `islands`. `--amend` takes `all` (the default), `none` (the frozen text) or
-names; `--but` every amendment but the ones named; `--also rehome-single` adds the alternative
-below; `--mutation` a name. `--suite` exits 0 only when every check holds.
+kills, any process but X's, any time), `teardown` (H's, default 1), `rdie` (R1's teardown),
+`throws` (a deliver that throws before it patches its frame), `icap` (the ingress cap), `fcap`
+and `fcap0` (H's and G0's max_pending_messages), `busy0` (a capped send on another key in G0's
+ingress at the start), `choice` and `islands`. `--amend` takes `all` (the default), `none`
+(S2b.0's text) or names; `--but` every amendment but the ones named; `--mutation` a name.
+`--suite` exits 0 only when every check holds.
 
-### What it finds in the frozen text
+### What it found in S2b.0's text, and S2b.0a
 
-With every amendment below, nothing is found at any bound tried but the two documented gaps. The
-frozen text has eleven findings; each `finding-*` check of the quick suite runs every amendment
+S2b.0's text had twelve findings. S2b.0a took ten amendments as proposed, answered the eleventh
+with the island rule, and closed the broadcast gap with `adopt`; with every amendment nothing is
+found at any bound tried but the two documented gaps. Each `finding-*` check runs every amendment
 but one and must find its violation.
 
 1. **`rehome-order`: FIFO and stale records across a teardown** (`fifo`, 6 steps;
-   `stale-record`, 13). The teardown unregisters, then closes, then forwards: in between, a
-   sender whose cache sees the new epoch posts to G0 directly, ahead of its earlier message still
-   queued at H, and a receiver's unsubscribe reaches G0 before the subscribe H forwards, which
-   leaves a record for a wait that ended (it keeps the router on, and costs a round trip). The
-   amendment: close the handle first, forward, and unregister last; a poster the closed handle
-   refuses waits while the home is still that group (the forward waits on nothing, so the wait
-   is bounded), and the forward resolves the new homes without the group (nor any other closed
-   one).
-2. **`forward-pending-first`** (`fifo`, 9 steps; `duplicate`, 13). The text lists the queued
+   `stale-record`, 13). The teardown unregistered, then closed, then forwarded: in between, a
+   sender whose cache saw the new epoch posted to G0 directly, ahead of its earlier message still
+   queued at H, and a receiver's unsubscribe reached G0 before the subscribe H forwarded, which
+   left a record for a wait that ended. S2b.0a: close the handle first, forward to homes resolved
+   without closed groups, unregister last; a poster the closed handle refuses waits while the
+   home is still that group (the forward waits on nothing, so the wait is bounded). `adopt`
+   relies on it (`finding-rehome-order-adopt`: without the wait a late answer reaches G0 before
+   the adopt, is applied untracked, and the tracker waits for ever, 14 steps).
+2. **`forward-pending-first`** (`fifo`, 9 steps; `duplicate`, 13). The text listed the queued
    entries, then the records, then the pending messages; forwarded in that order, entries H took
-   after it applied its pending messages reach G0 first: a queued send overtakes its sender's
-   pending ones, and two queued subscribes make records at G0 before a pending message arrives
-   there as a send, which G0 then broadcasts to both waiters (it went pending for one taker). The
-   amendment: pending messages first, then records, then queued entries (finding 1's window gives
-   the same duplicate, so both are needed; or `rehome-single`, below).
-3. **`forward-uncapped`** (`lost`, 9 steps). A queued send is forwarded as it is, capped: a new
-   home at its ingress cap (other traffic) refuses it, and its sender was told it was sent. The
-   amendment: every send the teardown forwards is uncapped.
-4. **`uncapped-past-cap`** (`lost`, 14 steps, `--opts fcap0=1`). A rehomed pending message is
-   applied at the new home as a send, so a FIFO there at its max_pending_messages (a per-scheduler
-   field, or messages parked there before H registered) drops a message H had accepted. The
-   amendment: an uncapped send that finds no waiter joins the FIFO past its cap, as a requeue
-   does.
+   after it applied its pending messages reached G0 first: a queued send overtook its sender's
+   pending ones, and two queued subscribes made records at G0 before a pending message arrived
+   there as a send, which G0 then broadcast to both waiters (it went pending for one taker).
+   S2b.0a: pending messages, then records, then trackers, then the queued entries.
+3. **`forward-uncapped`** (`lost`, 9 steps). A queued send was forwarded capped: a new home at
+   its ingress cap (other traffic) refused it, and its sender had been told it was sent.
+4. **`uncapped-past-cap`** (`lost`, 14 steps, `--opts fcap0=1`). A rehomed pending message was
+   applied at the new home as a send, so a FIFO there at its max_pending_messages (a
+   per-scheduler field) dropped a message H had accepted.
 5. **`stale-rule`** (`duplicate`, 10 steps with `rdie=1`, 10 with `throws=1`). "A deliver as a
-   requeue" (a receiving group's teardown) and "a deliver that did not patch its frame goes back
-   to its home as a requeue" (the throw rule) ignore requeue_if_stale: a copy of a message a local
-   waiter at the home took comes back and is handed to another waiter. The amendment: both follow
-   the stale rule (dropped, counted, when requeue_if_stale is false).
-6. **`throw-resubscribe`** (`orphan-wait`, `stranded`, 6 steps). After a deliver throws before it
-   patches the frame, the process still waits with that seq, but the home used its record: it
-   waits until its deadline, or for ever, beside the requeued message. The amendment: the drain
-   also posts a subscribe for the wait (the same seq).
-7. **`refused-stale`** (`lost`, 7 steps, `rdie=1`). Nothing says what a home does when a
-   receiving group's closed handle refuses a deliver; dropped, the message is lost (or a tracked
-   broadcast's tracker never completes). The amendment: the home applies it at once as a stale
-   copy.
+   requeue" (a receiving group's teardown) and the throw rule's requeue ignored
+   requeue_if_stale: a copy of a message a local waiter at the home took came back and was handed
+   to another waiter.
+6. **`throw-resubscribe`** (`orphan-wait`, `stranded`, 6 steps). After a deliver threw before it
+   patched the frame, the process still waited with that seq, but the home had used its record.
+7. **`refused-stale`** (`lost`, 7 steps, `rdie=1`). Nothing said what a home does when a
+   receiving group's closed handle refuses a deliver; dropped, the message was lost.
 8. **`queue-as-requeue`** (`stranded`, 17 steps). "If every copy comes back stale H queues it
-   once": into the FIFO, a waiter that parked meanwhile is passed over for ever. The amendment:
-   it is applied as a requeue (the next waiter, else the front of the FIFO).
-9. **`unique-ids`** (`duplicate`, 26 steps). Broadcast ids are per home: after H's teardown, an
-   answer for H's broadcast b1 reaches G0, which tracks its own b1, and ends G0's tracking early;
-   G0's stale copy then comes back untracked and is queued although another copy was taken. The
-   amendment: ids unique in the app (the router issues them, or they carry the home's group id).
-10. **`next-waiter-order`** (`nondeterministic`, 12 steps, `choice=1`). "The next waiter" is
-    open between a local waiter and a record (and among records), so one schedule has two
-    outcomes in deterministic mode. The amendment: the earliest local waiter, else the earliest
-    record.
-11. **`router-on-groups`** (`stranded`, 5 steps, `islands=1`). The router is on while a group
-    other than group 0 has a prefix or a record exists; groups without a prefix (S2-Q10: "so
-    fork-join groups are covered") then switch between routed and local messaging as it turns on
-    and off, and every key they use changes home: when H's teardown turns it off, a message
-    rehomed to G0, or sent in S, is never seen by a receiver in R1, which parks in its own
-    scheduler (and when a first prefix turns it on, waiters parked locally on keys not under that
-    prefix are stranded, beyond what "Registering a prefix moves no waiter" says). The amendment:
-    on while a group other than group 0 exists, prefix or not.
+   once": into the FIFO, past a waiter that parked meanwhile.
+9. **`unique-ids`** (`id-collision`; its effect, `lost`, 30 steps in
+   `deep-finding-unique-ids-lost`). With per-home ids and `adopt`, G0 tracks H's adopted b1 and
+   then its own b1: G0's own copy's taken ends H's tracker, and H's stale copy is absorbed by
+   G0's, so H's message is lost. (Without `adopt` an orphan answer for H's b1 ended G0's b1 early,
+   and a message was delivered twice, 26 steps.)
+10. **`next-waiter-order`** (`nondeterministic`, 12 steps, `choice=1`). "The next waiter" was open
+    between a local waiter and a record, and among records.
+11. **`island-rule`** (`stranded`, 10 steps, `islands=1`). `active()` counts prefixes, so groups
+    without one switched between routed and local messaging as the router turned on and off:
+    once H was gone, an island's send went to G0 while a record left there kept the router on,
+    and its own receiver, parked locally while it was off, never saw it. S2b.0a's island rule (not
+    this model's first proposal, the router on while any group exists, which would have routed
+    every plain group's own messaging through group 0): a group with no prefix keeps every key no
+    other group's prefix covers in its own scheduler, router on or off; its teardown forwards its
+    own pending messages as a home's.
+12. **`adopt`** (`duplicate`, 15 steps; S2b.0 documented it as a gap). A tracked broadcast whose
+    home was torn down with copies outstanding lost its tracking, each stale copy was applied
+    untracked at the new home, and the message reached a second wait. S2b.0a: the teardown
+    forwards each tracker as an `adopt` (value, id, outstanding, taken) after the records and
+    before the queued entries; the new home takes it over.
+13. **`forward-host-posts`** (`lost`, 7 steps). A host's post_message queued at a dying home is
+    not a router entry; read as "its queued router entries", it died there although the host was
+    told it was taken. S2b.0a: forwarded as an uncapped send, in queue order.
 
-`rehome-single` (not in `all`) is the other way to close finding 2's duplicate, for a lead who
-documents finding 1's reorder instead of closing it: a rehomed pending message goes to one waiter,
-else the back of the FIFO past its cap. With it and without findings 1 and 2's amendments, only
-`fifo` (and `stale-record` with a deadline) remains (`alternative-rehome-single`).
-
-Three of the shortest traces, condensed (each command prints its trace in full, with the
-state after every step, as the `finding-*` checks' configurations print the others):
+Three of the shortest traces, condensed (each command prints its trace in full, with the state
+after every step, as the `finding-*` checks' configurations print the others):
 
 `finding-rehome-order`, `fifo` (6 steps):
 
@@ -1066,29 +1067,32 @@ state after every step, as the `finding-*` checks' configurations print the othe
     R1 drains: p2@R1 takes m1
     R2 drains: p3@R2 takes m1  -> VIOLATION duplicate: m1 reaches a second wait
 
-`finding-router-on-groups`, `stranded` (5 steps):
+`finding-island-rule`, `stranded` (10 steps):
 
-    python -I router.py --procs S:s,R1:r --opts islands=1 --but router-on-groups
+    python -I router.py --procs R1:r,R1:s,R2:t --opts islands=1 --but island-rule
 
-    H teardown step: closes its handle; to forward: nothing
-    H teardown step: unregisters its prefix               [home G0; router off]
-    p1@S step: sends m1 locally: no waiter: joins S's FIFO
-    p2@R1 step: parks locally (#1)                        [R1{waiters p2@R1}; S{fifo m1}]
-    idle -> VIOLATION stranded: m1 pending at S while p2@R1 waits
+    p3@R2 step: parks (#1); posts subscribe(p3@R2#1, timed) to H; its deadline passes
+    H teardown step: closes its handle; forwards subscribe(p3@R2#1) to G0; unregisters
+                                                          [home G0; router off]
+    p1@R1 step: parks locally (#1)                        [R1{waiters p1@R1}]
+    G0 drains: records p3@R2#1 (past its deadline)        [router on]
+    p2@R1 step: posts send(m1) to G0; G0 drains: no live waiter: joins G0's FIFO
+    idle -> VIOLATION stranded: m1 pending at G0 while p1@R1 waits (served at R1)
 
 ### The documented gaps
 
-exec_router.h and td 4.11 name two gaps; the amended protocol keeps both, and the model reports
-what they allow (`gap-*` checks: each must be found):
+The amended text keeps two gaps, and the model reports what they allow (`gap-*` checks: each must
+be found):
 - `gap-requeue-order`: a requeued message is handed out after messages its sender sent later (15
   steps: m1's deliver goes stale while m2 is handed to the same process's next wait; m1 returns
   to the front of the FIFO and goes to the next receiver). Nothing is lost or duplicated.
-- `gap-broadcast-rehomed`: a tracked broadcast whose home is torn down with copies outstanding
-  loses its tracking, and each stale copy is applied untracked at the new home: one copy is
-  taken and another is queued, so the message reaches a second wait (15 steps), or it is queued
-  once per stale copy. "May be queued again" understates it: it is a duplicate delivery. It is
-  never a loss. Closing it needs the tracker forwarded (a new entry kind); with `unique-ids` the
-  new home could adopt the id.
+- `gap-island-rehomed` (`islands=1`): once H is gone the key is each island's own, so islands no
+  longer exchange messages on it: a message pending in one place while a wait is served in
+  another, never handed over (5 steps: S's send stays in S's FIFO while R1 parks in its own
+  scheduler; or a wait parked at H, rehomed to G0, beside its island's later messages). Nothing is
+  lost or duplicated, and an island's own messaging works (an island's own message, sent once H
+  was gone, never strands beside its own local wait: that is `stranded`, found only without the
+  island rule).
 
 ### The mutations
 
@@ -1101,55 +1105,61 @@ messages: `stranded`), `deliver-no-seq` (a deliver patches a later wait of its p
 
 ### Its state counts and times
 
-Measured on 2026-11-23 on the Windows builder (Python 3.11, one process, other work beside it):
-the states, the transitions and the seconds of each check, in `--suite deep`'s run (the quick
-checks keep their states as tuples, the deep ones encoded).
+Measured on 2026-11-23 on the Windows builder (Python 3.11, one process, other work beside it),
+on S2b.0a's text: the states, the transitions and the seconds of each check, in `--suite
+deep`'s run (the quick checks keep their states as tuples, the deep ones encoded).
 
 | Check | Configuration | States | Transitions | Seconds | Found |
 |---|---|---|---|---|---|
-| `amended` | `S:ss,R1:t,R2:t`, amend all | 50,428 | 121,875 | 1.8 | gap-broadcast-rehomed |
-| `amended-kills` | `S:s,G0:t,R1:t`, kills=1, amend all | 28,771 | 65,058 | 0.9 | gap-broadcast-rehomed |
-| `amended-receiver-teardown` | `S:s,H:r,R1:t,R2:t`, choice=1, rdie=1, throws=1, amend all | 161,772 | 429,035 | 5.9 | gap-broadcast-rehomed |
-| `amended-caps` | `S:ss,R1:t,R2:r`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 16,394 | 39,522 | 0.5 | gap-broadcast-rehomed |
-| `amended-islands` | `S:ss,R1:t,R2:r`, islands=1, kills=1, amend all | 60,789 | 140,839 | 2.2 | gap-broadcast-rehomed |
-| `gap-broadcast-rehomed` | `H:s,R1:t,R2:t`, amend all | 4,979 | 11,394 | 0.2 | gap-broadcast-rehomed |
+| `amended` | `S:ss,R1:t,R2:t`, amend all | 65,441 | 158,369 | 2.9 | - |
+| `amended-kills` | `S:s,G0:t,R1:t`, kills=1, amend all | 32,694 | 73,123 | 1.4 | - |
+| `amended-receiver-teardown` | `S:s,H:r,R1:t,R2:r`, choice=1, rdie=1, throws=1, amend all | 44,167 | 108,123 | 2.1 | - |
+| `amended-caps` | `S:ss,R1:t,R2:r`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 20,156 | 47,819 | 0.7 | - |
+| `amended-islands` | `S:ss,R1:t,R2:r`, islands=1, kills=1, amend all | 62,219 | 144,763 | 3.0 | gap-island-rehomed |
+| `amended-island-teardown` | `R1:r,R1:s,R2:t`, islands=1, rdie=1, amend all | 10,191 | 24,832 | 0.4 | gap-island-rehomed |
+| `amended-host-posts` | `X:p,S:s,R1:t,R2:r`, icap=1, amend all | 25,716 | 58,442 | 0.9 | - |
+| `gap-island-rehomed` | `S:s,R1:r`, islands=1, amend all | 91 | 143 | 0.0 | gap-island-rehomed |
 | `gap-requeue-order` | `S:ss,R1:tr,R2:r`, teardown=0, amend all | 2,806 | 5,269 | 0.1 | gap-requeue-order |
-| `finding-rehome-order` | `S:ss,R1:t`, all but rehome-order | 2,518 | 5,419 | 0.1 | fifo, stale-record |
-| `finding-pending-first` | `S:ss,R1:r,R2:r`, all but forward-pending-first | 2,448 | 5,242 | 0.1 | duplicate, fifo |
-| `finding-forward-uncapped` | `S:ss,R1:r`, busy0=1, icap=1, all but forward-uncapped | 528 | 1,058 | 0.0 | fifo, lost |
-| `finding-uncapped-past-cap` | `S:ss,R1:r`, fcap0=1, all but uncapped-past-cap | 308 | 585 | 0.0 | lost |
+| `finding-rehome-order` | `S:ss,R1:t`, all but rehome-order | 2,881 | 6,100 | 0.1 | fifo, stale-record |
+| `finding-rehome-order-adopt` | `H:s,R1:t,R2:t`, all but rehome-order | 12,542 | 28,738 | 0.5 | duplicate, stale-record, tracker-leak |
+| `finding-pending-first` | `S:ss,R1:r,R2:r`, all but forward-pending-first | 3,111 | 6,600 | 0.1 | duplicate, fifo |
+| `finding-forward-uncapped` | `S:ss,R1:r`, busy0=1, icap=1, all but forward-uncapped | 630 | 1,235 | 0.0 | fifo, lost |
+| `finding-uncapped-past-cap` | `S:ss,R1:r`, fcap0=1, all but uncapped-past-cap | 370 | 680 | 0.0 | lost |
 | `finding-stale-rule-teardown` | `S:s,H:r,R1:r`, rdie=1, teardown=0, all but stale-rule | 130 | 224 | 0.0 | duplicate |
 | `finding-stale-rule-throw` | `S:s,H:r,R1:r,R2:r`, teardown=0, throws=1, all but stale-rule | 378 | 661 | 0.0 | duplicate |
 | `finding-throw-resubscribe` | `S:s,R1:r`, teardown=0, throws=1, all but throw-resubscribe | 17 | 18 | 0.0 | orphan-wait, stranded |
 | `finding-refused-stale` | `S:s,R1:r`, rdie=1, teardown=0, all but refused-stale | 58 | 77 | 0.0 | lost |
 | `finding-queue-as-requeue` | `S:s,H:r,R1:t,R2:t`, teardown=0, all but queue-as-requeue | 2,292 | 5,496 | 0.1 | stranded |
-| `finding-unique-ids` | `S:ss,R1:rr,R2:r,R2:t`, all but unique-ids | 184,854 | 434,107 | 6.9 | duplicate, gap-broadcast-rehomed, gap-requeue-order |
+| `finding-unique-ids` | `S:ss,R1:rr,R2:r,R2:t`, all but unique-ids | 308,949 | 721,143 | 14.0 | gap-requeue-order, id-collision |
 | `finding-next-waiter-order` | `S:s,H:r,R1:t,R2:r`, choice=1, teardown=0, all but next-waiter-order | 605 | 1,268 | 0.0 | nondeterministic |
-| `finding-router-on-groups` | `S:s,R1:r`, islands=1, all but router-on-groups | 93 | 146 | 0.0 | stranded |
-| `alternative-rehome-single` | `S:ss,R1:r,R2:r`, all but rehome-order, forward-pending-first, plus rehome-single | 3,228 | 7,258 | 0.1 | fifo |
+| `finding-island-rule` | `R1:r,R1:s,R2:t`, islands=1, all but island-rule | 2,484 | 5,281 | 0.1 | gap-island-rehomed, stranded |
+| `finding-adopt` | `H:s,R1:t,R2:t`, all but adopt | 4,979 | 11,394 | 0.2 | duplicate |
+| `finding-forward-host-posts` | `X:pp,R1:r`, all but forward-host-posts | 285 | 514 | 0.0 | fifo, lost |
 | `mutation-no-requeue` | `S:s,R1:t`, teardown=0, amend all, mutation no-requeue | 44 | 61 | 0.0 | lost |
 | `mutation-requeue-always` | `S:s,H:r,R1:t`, teardown=0, amend all, mutation requeue-always | 110 | 191 | 0.0 | duplicate |
 | `mutation-untracked` | `S:s,R1:t,R2:r`, teardown=0, amend all, mutation untracked | 233 | 404 | 0.0 | duplicate |
 | `mutation-no-unsubscribe` | `R1:t`, teardown=0, amend all, mutation no-unsubscribe | 7 | 8 | 0.0 | stale-record |
 | `mutation-subscribe-no-fifo` | `S:s,R1:r`, teardown=0, amend all, mutation subscribe-no-fifo | 12 | 13 | 0.0 | stranded |
 | `mutation-deliver-no-seq` | `S:s,R1:tr`, teardown=0, amend all, mutation deliver-no-seq | 91 | 133 | 0.0 | misaddressed |
-| `deep-frozen` | `S:ss,R1:t,R2:r,H:r`, busy0=1, fcap0=1, icap=1, rdie=1, throws=1, amend none | 613,945 | 1,653,015 | 36.6 | duplicate, fifo, gap-broadcast-rehomed, gap-requeue-order, lost, orphan-wait, stale-record, stranded, tracker-leak |
-| `deep-frozen-choice-islands` | `S:s,H:r,R1:t,R2:r`, choice=1, islands=1, kills=1, amend none | 46,613 | 106,235 | 2.5 | duplicate, gap-broadcast-rehomed, nondeterministic, orphan-wait, stale-record, stranded |
-| `deep-amended` | `S:ss,R1:t,R2:t,H:t`, kills=1, amend all | 1,082,859 | 2,641,520 | 57.7 | gap-broadcast-rehomed, gap-requeue-order |
-| `deep-amended-g0` | `S:ss,R1:t,R2:t,G0:t`, amend all | 3,021,805 | 7,481,522 | 173.6 | gap-broadcast-rehomed, gap-requeue-order |
-| `deep-amended-receiver-teardown` | `S:ss,R1:t,R2:t`, rdie=1, throws=1, amend all | 642,076 | 1,709,075 | 40.3 | gap-broadcast-rehomed, gap-requeue-order |
-| `deep-amended-choice` | `H:t,S:ss,R1:t,R2:t`, choice=1, amend all | 245,537 | 605,481 | 13.1 | gap-broadcast-rehomed, gap-requeue-order |
-| `deep-amended-caps` | `S:ss,R1:tr,R2:t`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 256,760 | 630,318 | 15.1 | gap-broadcast-rehomed, gap-requeue-order |
-| `deep-amended-two-senders` | `S:ss,R1:st,R2:t`, amend all | 203,595 | 505,131 | 11.2 | - |
-| `deep-amended-ids` | `S:ss,R1:rr,R2:r,R2:t`, kills=1, amend all | 1,892,966 | 4,465,157 | 111.1 | gap-broadcast-rehomed, gap-requeue-order |
-| `deep-amended-islands` | `S:ss,R1:t,R2:t`, islands=1, kills=1, rdie=1, amend all | 698,762 | 1,887,960 | 43.2 | gap-broadcast-rehomed |
+| `deep-frozen` | `S:ss,R1:t,R2:r,H:r`, busy0=1, fcap0=1, icap=1, rdie=1, throws=1, amend none | 759,298 | 2,001,279 | 49.9 | duplicate, fifo, gap-requeue-order, lost, orphan-wait, stale-record, stranded, tracker-leak |
+| `deep-frozen-choice-islands` | `S:s,H:r,R1:t,R2:r`, choice=1, islands=1, kills=1, amend none | 57,999 | 130,307 | 3.2 | duplicate, gap-island-rehomed, nondeterministic, stale-record, stranded |
+| `deep-amended` | `S:ss,R1:t,R2:t,H:t`, kills=1, amend all | 1,365,660 | 3,328,385 | 76.2 | gap-requeue-order |
+| `deep-amended-g0` | `S:ss,R1:t,R2:t,G0:t`, amend all | 3,990,975 | 9,748,755 | 229.4 | gap-requeue-order |
+| `deep-amended-receiver-teardown` | `S:ss,R1:t,R2:t`, rdie=1, throws=1, amend all | 817,849 | 2,195,387 | 56.3 | gap-requeue-order |
+| `deep-amended-choice` | `H:t,S:ss,R1:t,R2:t`, choice=1, amend all | 313,849 | 770,590 | 19.8 | gap-requeue-order |
+| `deep-amended-caps` | `S:ss,R1:tr,R2:t`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 322,622 | 785,129 | 19.0 | gap-requeue-order |
+| `deep-amended-two-senders` | `S:ss,R1:st,R2:t`, amend all | 247,353 | 624,086 | 14.9 | - |
+| `deep-amended-ids` | `S:ss,R1:rr,R2:r,R2:t`, kills=1, amend all | 3,021,495 | 7,096,132 | 188.8 | gap-requeue-order |
+| `deep-amended-islands` | `S:ss,R1:t,R2:t`, islands=1, kills=1, rdie=1, amend all | 691,889 | 1,884,503 | 44.1 | gap-island-rehomed |
+| `deep-amended-host-posts` | `X:pp,R1:t,R2:t`, icap=1, kills=1, amend all | 237,595 | 558,445 | 11.9 | - |
+| `deep-finding-unique-ids-lost` | `H:s,S:s,R1:tr,R2:tr`, all but unique-ids | 800,596 | 1,797,954 | 33.5 | id-collision, lost |
 
-`--suite deep` runs the quick checks, then the deep ones: 36 checks in about 9 minutes here, the
-quick ones about 20 s; the process peaks at a working set of 1.1 GB (`deep-amended-g0`, 3.0
+`--suite deep` runs the quick checks, then the deep ones: 42 checks in about 13 minutes here,
+the quick ones about 27 s; the process peaks at a working set of 1.5 GB (`deep-amended-g0`, 4.0
 million states, about 300 bytes a state). Processes and messages multiply the states; kills,
 deadlines (each adds a clock step) and a second message per sender most of all. Outside the
-suites, `--procs S:ss,R1:st,R2:tt --opts kills=1` and the frozen text with every option at
-once pass 4 million states and were stopped there, finding nothing new.
+suites, on S2b.0's text, `--procs S:ss,R1:st,R2:tt --opts kills=1` and the frozen text with
+every option at once passed 4 million states and were stopped there, finding nothing new.
 
 ## Revisions
 

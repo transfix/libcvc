@@ -1,12 +1,15 @@
 """The router protocol across exec groups (S2b; S2.md S2-Q10, S2-Q15; td 4.6, 4.11, 8.4 MS).
 
 An exhaustive model of the protocol S2b.0 froze in the header comment of
-`inc/cvc/state/state_exec/exec_router.h` ("The protocol", "Broadcasts", "The cap", "Teardown and
-rehoming", the throw rule of "The ordered ingress"), on one resolved channel key homed at a group H
-that registered its prefix, and at group 0 (G0) once H's teardown unregisters it. Like
-state_word.py it has no C++ port. Standard library only.
+`inc/cvc/state/state_exec/exec_router.h` ("Islands", "The protocol", "Broadcasts", "The cap",
+"Teardown and rehoming", the throw rule of "The ordered ingress"), on one resolved channel key
+homed at a group H that registered its prefix, and at group 0 (G0) once H's teardown unregisters
+it. `--amend none` is S2b.0's text; `--amend all` (the default) is S2b.0a's, the text as amended
+from this model's findings. Like state_word.py it has no C++ port. Standard library only.
 
-The groups are G0, H, R1, R2 and S. Each group's thread is one actor, and each step it takes is
+The groups are G0, H, R1, R2 and S, and X for host threads (exec_pool::post_message, which posts
+to the key's home and is neither killed nor torn down). Each group's thread is one actor, and each
+step it takes is
 atomic: it applies the head of its ordered ingress, steps one of its processes, fires one
 timeout, applies one kill, or takes one step of its teardown. A post is an atomic append to the
 target's ingress (group_ref::post); a closed handle refuses it, and a poster re-resolves the home
@@ -16,13 +19,15 @@ any moment (a clock step, `expire`), after which its home skips its record and i
 the timeout. Every interleaving is explored, breadth first, so each trace is a shortest one.
 
 The processes run scripts: `r` a msg-recv, `t` a msg-recv with a deadline, `s` a msg-send of a new
-message (each `s` is its own message, m1, m2, ... in the order of the configuration). A process
+message, `p` (X only) a host's post_message of a new message (each `s` or `p` is its own message,
+m1, m2, ... in the order of the configuration). A process
 whose group is the key's home receives locally (the pending FIFO's front, else it parks as a
 local waiter); elsewhere it parks with a new recv_seq and posts `subscribe` to the home. Kills
 (`kills=N`, any process, at any time) and timeouts post `unsubscribe` for a remote wait. The
-entries and their effects are route_entry's six kinds as the header gives them: send, subscribe,
+entries and their effects are route_entry's kinds as the header gives them: send, subscribe,
 unsubscribe, deliver (by pid and seq; stale: a requeue, or dropped when requeue_if_stale is
-false), requeue (the next waiter, else the front of the FIFO, past its cap), taken; broadcast
+false), requeue (the next waiter, else the front of the FIFO, past its cap), taken, adopt (S2b.0a),
+and a host's post (a message entry, capped, applied as a local send); broadcast
 tracking (no local taker and k >= 2 live records: tracked by an id; one record: untracked; a
 local taker: the remote copies dropped when stale); the ingress cap (`icap`, capped sends only)
 and the pending FIFO's cap (max_pending_messages, a per-scheduler field: `fcap` H's, `fcap0`
@@ -32,20 +37,25 @@ orders them; a deliver that throws before it patches its frame (`throws=1`); oth
 forward); the requeue's next waiter chosen every way the text allows (`choice=1`); and when the
 router is on (exec_router::active()): R1, R2 and S each register a prefix of their own, not
 covering the key, so it is on throughout, unless `islands=1`, where they register none and it is
-on only while H is registered or a record exists; off, a process's msg-send and msg-recv stay in
-its own scheduler (today's path, RT-1).
+on only while H is registered or a record exists. In S2b.0's text a process's msg-send and
+msg-recv stay in its own scheduler while the router is off (today's path, RT-1); with
+`island-rule` an island keeps the key in its own scheduler once no other group's prefix covers it
+(H gone), router on or off.
 
 Properties, each a violation name:
 - at a receipt: `duplicate` (a message reaches a second wait: one it was pending for, or one
   outside the waiters its send found at the home once one of those took it), `misaddressed` (a
   deliver patches a wait other than the one it names);
+- at a tracker's creation or adoption, and at an answer: `id-collision` (a home tracks two
+  broadcasts under one id, or an answer is applied to another message's tracker);
 - at a message's first assignment to a wait (a local receipt, or a deliver posted): `fifo` (an
   earlier message of the same sender group, to the key, is not yet assigned: td 4.11's FIFO per
   (sender group, channel), as the home's order of handing messages out);
 - at idle states (every ingress empty, no teardown under way, no process runnable): `lost` (a
   message neither received nor pending; a fresh send that a full FIFO dropped is today's
   behaviour, counted, and allowed), `duplicate` (pending twice, or pending and received),
-  `stranded` (a message pending anywhere while a wait not past its deadline exists),
+  `stranded` (a message pending where a wait not past its deadline is served, or an island's own
+  message, sent once H was gone, pending elsewhere while that island waits locally),
   `orphan-wait` (such a wait not registered at its home: no local waiter, no record),
   `stale-record` (a record at the home for a wait that ended), `tracker-leak` (a tracked
   broadcast still waiting for an answer);
@@ -53,15 +63,16 @@ Properties, each a violation name:
   the text leaves open (the requeue's "next waiter") changes the outcome of one step.
 The documented gaps of exec_router.h and td 4.11 are reported under their own names and do not
 stop the exploration: `gap-requeue-order` (a requeued message handed out after a later message
-of its sender) and `gap-broadcast-rehomed` (a duplicate of a broadcast whose home was torn down
-with copies outstanding).
+of its sender) and `gap-island-rehomed` (with islands, once H is gone: a message pending in one
+place while a wait is served in another, the islands keeping the key to themselves and the waits
+parked at H rehomed to G0).
 
-`--amend` adds the amendments this model proposes (README.md, "The router model"):
+`--amend` adds the amendments, as S2b.0a took them (README.md, "The router model"):
 - `rehome-order`: the teardown closes its handle first, forwards, and only then unregisters; a
   poster the closed handle refuses waits while the home is still that group (td 4.11's FIFO and no
-  stale records across a teardown);
+  stale records across a teardown; an adopt ahead of every late answer);
 - `forward-pending-first`: the pending messages are forwarded first (they were applied before
-  anything still queued), then the records, then the queued entries;
+  anything still queued), then the records, then the trackers (adopt), then the queued entries;
 - `forward-uncapped`: a queued send the teardown forwards is uncapped, like a pending one;
 - `uncapped-past-cap`: an uncapped send that finds no waiter joins the FIFO past its cap;
 - `stale-rule`: a deliver the teardown or a throw sends back follows requeue_if_stale (dropped
@@ -76,11 +87,14 @@ with copies outstanding).
   a teardown never names that home's own broadcast;
 - `next-waiter-order`: "the next waiter" is fixed (the earliest local waiter, else the earliest
   record), so a deterministic schedule has one outcome;
-- `router-on-groups`: the router is on while a group other than group 0 exists, prefix or not
-  (S2-Q10: "so fork-join groups are covered"), so no key's home moves when it turns on or off.
-Not in `all`: `rehome-single`, a rehomed pending message goes to one waiter, else the back of the
-FIFO (past its cap): the other way to close the duplicate of `forward-pending-first`'s finding,
-for a lead who documents the reorder across a teardown instead of taking `rehome-order`.
+- `island-rule`: a group with no prefix keeps every key no other group's prefix covers in its own
+  scheduler, router on or off (S2b.0a's answer to the finding that its messaging changed home as
+  the router turned on and off); its teardown forwards its own pending messages as a home's;
+- `adopt`: a teardown forwards each broadcast tracker it holds (an `adopt` entry: value, id,
+  copies outstanding, taken), which the new home takes over, so the copies' late answers find it
+  (it needs rehome-order's wait and unique-ids);
+- `forward-host-posts`: a host post queued at a dying home is forwarded as an uncapped send, in
+  queue order (S2b.0 says nothing; read as "its queued router entries" only, it dies there).
 
 `--mutation` breaks one rule, to show the checks find it: `no-requeue` (a stale deliver is always
 dropped), `requeue-always` (a stale copy is requeued although a local waiter took the message),
@@ -91,11 +105,11 @@ unsubscribe), `subscribe-no-fifo` (a subscribe always records, never answering f
 usage:
     python -I router.py [--procs S:ss,R1:t,R2:r] [--opts kills=1,teardown=1,rdie=0,throws=0,
                          icap=0,fcap=0,fcap0=0,choice=0,busy0=0,islands=0]
-                        [--amend all|none|NAME,... | --but NAME,...] [--also rehome-single]
+                        [--amend all|none|NAME,... | --but NAME,...]
                         [--mutation NAME]
     python -I router.py --suite quick|deep      the CI checks (README.md); exit 0 when all hold
 
-`--procs` lists processes as GROUP:SCRIPT (groups G0, H, R1, R2, S); `--but` runs every amendment
+`--procs` lists processes as GROUP:SCRIPT (groups G0, H, R1, R2, S, X); `--but` runs every amendment
 but the ones named. The JSON printed has `states`, `transitions`, `idle_states`, `seconds`,
 `complete`, `peak_mb` and `violations`, each with its detail, its length in steps and its trace.
 """
@@ -115,19 +129,16 @@ import time  # noqa: E402
 
 from lockmodel import Violation  # noqa: E402
 
-G0, H, R1, R2, S = range(5)
-GROUPS = ('G0', 'H', 'R1', 'R2', 'S')
-NG = 5
+G0, H, R1, R2, S, X = range(6)
+GROUPS = ('G0', 'H', 'R1', 'R2', 'S', 'X')   # X: host threads (exec_pool::post_message)
+NG = 6
 
 AMENDMENTS = ('rehome-order', 'forward-pending-first', 'forward-uncapped', 'uncapped-past-cap',
               'stale-rule', 'throw-resubscribe', 'refused-stale', 'queue-as-requeue',
-              'unique-ids', 'next-waiter-order', 'router-on-groups')
+              'unique-ids', 'next-waiter-order', 'island-rule', 'adopt', 'forward-host-posts')
 MUTATIONS = ('no-requeue', 'requeue-always', 'untracked', 'no-unsubscribe', 'subscribe-no-fifo',
              'deliver-no-seq')
-# not in `all`: the other way to close the duplicate of a rehomed pending message, for a lead who
-# documents the reorder across a teardown instead of closing it (README.md)
-ALTERNATIVES = ('rehome-single',)
-GAPS = ('gap-requeue-order', 'gap-broadcast-rehomed')
+GAPS = ('gap-requeue-order', 'gap-island-rehomed')
 
 # a process: (pc, status, seq, expired-seqs bitmask)
 RUN, WL, WR, DONE, DEAD = range(5)
@@ -135,7 +146,7 @@ STATUS = ('runs', 'waits locally', 'waits remotely', 'done', 'dead')
 # a message: (status, W, receipts in W, receipts outside W, flags); W is None until the send is
 # first applied at a home, then the waits it found there (empty: it went pending, one taker)
 M_UNSENT, M_SENT, M_REFUSED = 0, 1, 2
-F_ASSIGNED, F_DROPPED, F_REQUEUED, F_ORPHAN, F_RDROP = 1, 2, 4, 8, 16
+F_ASSIGNED, F_DROPPED, F_REQUEUED, F_ORPHAN, F_RDROP, F_LATE = 1, 2, 4, 8, 16, 32
 # a home's state for the key: (local waiters, records, pending FIFO, trackers, next id); a record
 # is (group, pid, seq, timed), a tracker (id, message, copies outstanding, taken)
 EMPTY_HOME = ((), (), (), (), 1)
@@ -156,8 +167,8 @@ class Config(object):
     def __init__(self, procs, kills=0, teardown=1, rdie=0, throws=0, icap=0, fcap=0, fcap0=0,
                  choice=0, busy0=0, islands=0, amend=(), mutation=()):
         self.procs = tuple((GROUPS.index(g), ops) for g, ops in procs)
-        for _, ops in self.procs:
-            assert ops and set(ops) <= set('rts'), ops
+        for g, ops in self.procs:
+            assert ops and set(ops) <= (set('p') if g == X else set('rts')), (GROUPS[g], ops)
         self.kills = kills
         self.teardown = teardown
         self.rdie = rdie
@@ -171,15 +182,15 @@ class Config(object):
         self.amend = frozenset(AMENDMENTS if amend == 'all' else amend)
         self.mutation = frozenset(mutation)
         for a in self.amend:
-            assert a in AMENDMENTS + ALTERNATIVES, a
+            assert a in AMENDMENTS, a
         for m in self.mutation:
             assert m in MUTATIONS, m
-        # the messages: one per `s`, numbered in order, with their sender
+        # the messages: one per `s` or `p`, numbered in order, with their sender
         self.msg_proc = []
         self.op_msg = {}
         for p, (_, ops) in enumerate(self.procs):
             for i, op in enumerate(ops):
-                if op == 's':
+                if op in 'sp':
                     self.op_msg[(p, i)] = len(self.msg_proc)
                     self.msg_proc.append(p)
 
@@ -195,8 +206,8 @@ class Config(object):
 def router_on(cfg, s):
     """exec_router::active(): a group other than group 0 has a registered prefix (R1, R2 and S
     each have one of their own unless `islands`; H while registered), or a record exists at some
-    home; with router-on-groups, while a group other than group 0 exists (always, here)."""
-    if not cfg.islands or 'router-on-groups' in cfg.amend:
+    home."""
+    if not cfg.islands:
         return True
     return bool(s[REG]) or any(hs[1] for hs in s[HOMES])
 
@@ -271,8 +282,15 @@ class Work(object):
 
     def local_home(self, g):
         """Where a msg-send or msg-recv of a process in g goes: the key's home while the router
-        is on, else g itself (today's path, one scheduler at a time: RT-1)."""
-        return self.homeg() if router_on(self.cfg, self.s) else g
+        is on, else g itself (today's path, one scheduler at a time: RT-1). With island-rule, an
+        island (no prefix) keeps the key while no other group's prefix covers it (H gone), router
+        on or off."""
+        if self.cfg.islands and g in (R1, R2, S):
+            if 'island-rule' in self.am:
+                return H if self.s[REG] else g
+            if not router_on(self.cfg, self.s):
+                return g
+        return self.homeg()
 
     def choose(self, n):
         i = len(self.taken)
@@ -288,8 +306,9 @@ class Work(object):
     def push(self, g, e):
         """Append `e` to g's ingress; False when a capped send finds the ingress at its cap."""
         q = self.s[ING][g]
-        if e[0] == 'S' and not e[2] and self.cfg.icap:
-            if sum(1 for x in q if x[0] == 'S' and not x[2]) >= self.cfg.icap:
+        capped = (e[0] == 'S' and not e[2]) or e[0] == 'P'
+        if capped and self.cfg.icap:
+            if sum(1 for x in q if (x[0] == 'S' and not x[2]) or x[0] == 'P') >= self.cfg.icap:
                 return False
         self.set_item(ING, g, q + (e,))
         return True
@@ -337,7 +356,8 @@ class Work(object):
 
     # --- messages ---
     def mark_sent(self, g, m):
-        self.set_msg(m, (M_SENT,) + self.msg(m)[1:])
+        st, w, rin, rout, fl = self.msg(m)
+        self.set_msg(m, (M_SENT, w, rin, rout, fl | (0 if self.s[REG] else F_LATE)))
         self.set_item(SENT, g, self.s[SENT][g] + (m,))
 
     def assign(self, m):
@@ -378,9 +398,8 @@ class Work(object):
             detail = ('%s reaches a second wait (%s#%d): %d of the waits its send found, %d others'
                       % (mname(m), pname(self.cfg, p), seq, rin, rout))
             if fl & F_ORPHAN:
-                self.soft.append(('gap-broadcast-rehomed', detail))
-            else:
-                raise Violation('duplicate', detail)
+                detail += ' (a broadcast its home dropped the tracking of, with copies outstanding)'
+            raise Violation('duplicate', detail)
 
     def advance(self, p):
         pc, st, seq, exp = self.proc(p)
@@ -397,15 +416,6 @@ class Work(object):
     def apply_send(self, h, m, unc):
         if m is None:
             self.note('a send on another key')
-            return
-        if unc and self.msg(m)[1] is not None and 'rehome-single' in self.am:
-            # a rehomed pending message: one taker, else the back of the FIFO, past its cap
-            loc, recs, pend, trs, nid = self.home(h)
-            if loc or any(not self.expired(r) for r in recs):
-                self.give_next(h, m, requeued=False)
-            else:
-                self.set_home(h, (loc, recs, pend + (m,), trs, nid))
-                self.note('%s: no waiter: joins %s\'s FIFO' % (mname(m), GROUPS[h]))
             return
         loc, recs, pend, trs, nid = self.home(h)
         live = tuple(r for r in recs if not self.expired(r))
@@ -437,14 +447,14 @@ class Work(object):
         else:
             bid = self.new_bid(h)
             hs = self.home(h)
+            self.check_new_id(h, bid, m)
             self.set_home(h, hs[:3] + (hs[3] + ((bid, m, len(live), False),),) + hs[4:])
             for r in live:
                 self.post_deliver(r[0], ('D', h, r[1], r[2], m, bid, True))
 
-    def give_next(self, h, m, requeued=True):
+    def give_next(self, h, m):
         """A stale delivery back at its home: the next waiter, else the front of the FIFO."""
-        if requeued:
-            self.flag(m, F_REQUEUED)
+        self.flag(m, F_REQUEUED)
         loc, recs, pend, trs, nid = self.home(h)
         live = [r for r in recs if not self.expired(r)]
         cands = [('L', p) for p in loc] + [('R', r) for r in live]
@@ -481,10 +491,25 @@ class Work(object):
             trs[i] = t
         self.set_home(h, hs[:3] + (tuple(trs),) + hs[4:])
 
+    def check_new_id(self, h, bid, m):
+        """A home tracks each id once: a second broadcast under an id it tracks means the ids
+        collide (per-home ids, after a teardown forwarded another home's tracker)."""
+        i, t = self.tracker(h, bid)
+        if t is not None:
+            self.soft.append(('id-collision', '%s tracks %s for %s and now for %s too'
+                              % (GROUPS[h], bname(bid), mname(t[1]), mname(m))))
+
+    def check_answer(self, h, bid, t, m):
+        """An answer is for the broadcast its home tracks under that id."""
+        if t[1] != m:
+            self.soft.append(('id-collision', 'an answer for %s names %s, which %s tracks for %s'
+                              % (mname(m), bname(bid), GROUPS[h], mname(t[1]))))
+
     def apply_requeue(self, h, m, bid):
         if bid:
             i, t = self.tracker(h, bid)
             if t is not None:
+                self.check_answer(h, bid, t, m)
                 out = t[2] - 1
                 self.set_tracker(h, i, None if out == 0 else (t[0], t[1], out, t[3]))
                 if t[3]:
@@ -508,14 +533,21 @@ class Work(object):
                                                                             GROUPS[h]))
         self.give_next(h, m)
 
-    def apply_taken(self, h, bid):
+    def apply_taken(self, h, bid, m):
         i, t = self.tracker(h, bid)
         if t is None:
             self.note('%s is not tracked at %s: nothing' % (bname(bid), GROUPS[h]))
             return
+        self.check_answer(h, bid, t, m)
         out = t[2] - 1
         self.set_tracker(h, i, None if out == 0 else (t[0], t[1], out, True))
         self.note('%s taken; %d outstanding' % (bname(bid), out))
+
+    def apply_adopt(self, h, m, bid, out, taken):
+        self.check_new_id(h, bid, m)
+        hs = self.home(h)
+        self.set_home(h, hs[:3] + (hs[3] + ((bid, m, out, taken),),) + hs[4:])
+        self.note('tracks %s from here' % bname(bid))
 
     def apply_subscribe(self, h, g, p, seq, timed):
         loc, recs, pend, trs, nid = self.home(h)
@@ -556,7 +588,7 @@ class Work(object):
                                 % (pname(self.cfg, p), seq, cur))
             self.receive(m, p)
             if bid:
-                self.post_from(('T', bid), frm)
+                self.post_from(('T', bid, m), frm)   # m: the model's bookkeeping only
             return
         if (rqis or 'requeue-always' in self.mut) and 'no-requeue' not in self.mut:
             self.note('stale')
@@ -582,13 +614,26 @@ class Work(object):
         elif k == 'Q':
             self.apply_requeue(g, e[1], e[2])
         elif k == 'T':
-            self.apply_taken(g, e[1])
+            self.apply_taken(g, e[1], e[2])
+        elif k == 'P':
+            self.apply_send(g, e[1], False)   # a host's post_message, applied as a local send
+        elif k == 'A':
+            self.apply_adopt(g, *e[1:])
 
     # --- a process's steps ---
     def step(self, p):
         pc, st, seq, exp = self.proc(p)
         g, ops = self.cfg.procs[p]
         op = ops[pc]
+        if op == 'p':
+            # a host thread's exec_pool::post_message: to the key's home (router.home_of)
+            m = self.cfg.op_msg[(p, pc)]
+            if self.post_home(('P', m)):
+                self.mark_sent(g, m)
+            else:
+                self.set_msg(m, (M_REFUSED,) + self.msg(m)[1:])
+            self.advance(p)
+            return
         if op == 's':
             m = self.cfg.op_msg[(p, pc)]
             if self.local_home(g) == g:
@@ -662,26 +707,41 @@ class Work(object):
                     queued.append(('to', e[1], ('Q', e[4], e[5])))   # "a deliver as a requeue"
             elif e[0] == 'S':
                 queued.append(('home', ('S', e[1], e[2] or 'forward-uncapped' in self.am)))
+            elif e[0] == 'P':
+                if 'forward-host-posts' in self.am:
+                    queued.append(('home', ('S', e[1], True)))
+                else:
+                    self.note('a host post of %s dies with %s (destroy_dropped)'
+                              % (mname(e[1]), GROUPS[g]))
             else:
                 queued.append(('home', e))
         recs = []
         pend = []
+        adopts = []
         if g == H:
             loc, rs, pq, trs, nid = self.home(g)
             recs = [('home', ('U',) + r) for r in rs]
             pend = [('home', ('S', m, True)) for m in pq]
-            for t in trs:
-                self.flag(t[1], F_ORPHAN)
+            for tr in trs:
+                if 'adopt' in self.am:
+                    adopts.append(('home', ('A', tr[1], tr[0], tr[2], tr[3])))
+                else:
+                    self.flag(tr[1], F_ORPHAN)
             self.set_home(g, EMPTY_HOME)
         elif self.home(g) != EMPTY_HOME:
-            # what the router being off left here (islands): it homes no key, so nothing goes on
-            self.note('%s drops its own FIFO and waiters (today\'s path while the router was off)'
-                      % GROUPS[g])
+            # an island's own FIFO and waiters (islands): its waiters are its processes, killed
+            # next; with island-rule its pending messages go on as a home's do, else they die
+            if 'island-rule' in self.am:
+                pend = [('home', ('S', m, True)) for m in self.home(g)[2]]
+            elif self.home(g)[2]:
+                self.note('%s drops its own FIFO (today\'s path while the router was off)'
+                          % GROUPS[g])
             self.set_home(g, EMPTY_HOME)
+        # an adopt goes before every queued entry, so a late answer finds its tracker
         if 'forward-pending-first' in self.am:
-            buf = pend + recs + queued
+            buf = pend + recs + adopts + queued
         else:
-            buf = queued + recs + pend
+            buf = adopts + queued + recs + pend
         self.note('%s closes its handle; to forward: %s' % (
             GROUPS[g], ', '.join(estr(self.cfg, x[2] if x[0] == 'to' else x[1]) for x in buf)
             or 'nothing'))
@@ -753,6 +813,11 @@ def estr(cfg, e):
         return 'requeue(%s%s)' % (mname(e[1]), ', ' + bname(e[2]) if e[2] else '')
     if k == 'T':
         return 'taken(%s)' % bname(e[1])
+    if k == 'P':
+        return 'post(%s)' % mname(e[1])
+    if k == 'A':
+        return 'adopt(%s, %s, %d outstanding%s)' % (mname(e[1]), bname(e[2]), e[3],
+                                                    ', taken' if e[4] else '')
     return str(e)
 
 
@@ -800,7 +865,7 @@ class Model(object):
                 out.append(('step', p))
             elif st in (WL, WR) and self.cfg.procs[p][1][pc] == 't':
                 out.append(('timeout', p) if (exp >> seq) & 1 else ('expire', p))
-            if kills and st in (RUN, WL, WR):
+            if kills and st in (RUN, WL, WR) and g != X:
                 out.append(('kill', p))
         if self.cfg.teardown and s[TDH][0] != TD_DONE:
             out.append(('td', H))
@@ -871,26 +936,42 @@ class Model(object):
                             % (mname(m), ' (a rehomed message a full FIFO dropped)'
                                if fl & F_RDROP else '')))
             elif inf >= 2 or (inf and got):
-                name = 'gap-broadcast-rehomed' if fl & F_ORPHAN else 'duplicate'
-                out.append((name, '%s is pending %d time(s) and was received %d time(s)'
-                            % (mname(m), inf, got)))
+                out.append(('duplicate', '%s is pending %d time(s) and was received %d time(s)%s'
+                            % (mname(m), inf, got, ' (a broadcast its home dropped the tracking '
+                               'of, with copies outstanding)' if fl & F_ORPHAN else '')))
         hs = s[HOMES][homeg]
         live_waits = []
         for p, (pc, st, seq, exp) in enumerate(s[PROCS]):
             if st in (WL, WR) and not (self.cfg.procs[p][1][pc] == 't' and (exp >> seq) & 1):
                 live_waits.append(p)
+        # where each live wait is served: a local waiter in its group, a remote one at the home
+        where = {p: self.pgroup[p] if s[PROCS][p][1] == WL else homeg for p in live_waits}
+        apart = self.cfg.islands and not s[REG]   # H gone: islands keep the key to themselves
         for h in range(NG):
-            if s[HOMES][h][2] and live_waits:
-                out.append(('stranded', '%s pending at %s while %s waits'
-                            % (', '.join(mname(m) for m in s[HOMES][h][2]), GROUPS[h],
-                               pname(self.cfg, live_waits[0]))))
+            pend = s[HOMES][h][2]
+            if not pend or not live_waits:
+                continue
+            here = [p for p in live_waits if where[p] == h]
+            # an island's own message, sent once H was gone, beside its own local wait: its
+            # in-group messaging, which must work whatever the router does
+            own = [p for p in live_waits if s[PROCS][p][1] == WL and any(
+                self.pgroup[self.cfg.msg_proc[m]] == self.pgroup[p] and s[MSGS][m][4] & F_LATE
+                for m in pend)]
+            ps = here or own or live_waits
+            name = 'gap-island-rehomed' if apart and not here and not own else 'stranded'
+            out.append((name, '%s pending at %s while %s waits (served at %s)'
+                        % (', '.join(mname(m) for m in pend), GROUPS[h], pname(self.cfg, ps[0]),
+                           GROUPS[where[ps[0]]])))
+            if name == 'stranded':
                 break
         for p in live_waits:
             pc, st, seq, exp = s[PROCS][p]
             g = self.pgroup[p]
             if st == WL:
-                h = homeg if on else g
-                ok = g == h and p in s[HOMES][g][0]
+                h = g
+                ok = p in s[HOMES][g][0] and (
+                    g == homeg or (self.cfg.islands and g in (R1, R2, S) and not s[REG]) or
+                    not on)
             else:
                 h = homeg
                 ok = any(r[:3] == (g, p, seq) for r in hs[1])
@@ -1162,21 +1243,26 @@ NO_TD = dict(teardown=0)
 # include every name in `must` and be among `must`, `allowed` and the gaps (always allowed). The
 # frozen protocol's findings are each isolated by every amendment but the one that closes it, on
 # the smallest configuration that shows it.
-GAPB = ('gap-broadcast-rehomed',)
 QUICK = [
     # every amendment: nothing found but the documented gaps
     ('amended', 'S:ss,R1:t,R2:t', {}, ALL, (), (), ()),
     ('amended-kills', 'S:s,G0:t,R1:t', dict(kills=1), ALL, (), (), ()),
-    ('amended-receiver-teardown', 'S:s,H:r,R1:t,R2:t', dict(rdie=1, throws=1, choice=1), ALL, (),
+    ('amended-receiver-teardown', 'S:s,H:r,R1:t,R2:r', dict(rdie=1, throws=1, choice=1), ALL, (),
      (), ()),
     ('amended-caps', 'S:ss,R1:t,R2:r', dict(icap=1, fcap=1, fcap0=1, busy0=1), ALL, (), (), ()),
     ('amended-islands', 'S:ss,R1:t,R2:r', dict(islands=1, kills=1), ALL, (), (), ()),
+    ('amended-island-teardown', 'R1:r,R1:s,R2:t', dict(islands=1, rdie=1), ALL, (), (), ()),
+    ('amended-host-posts', 'X:p,S:s,R1:t,R2:r', dict(icap=1), ALL, (), (), ()),
     # the documented gaps, which the amended protocol keeps
-    ('gap-broadcast-rehomed', 'H:s,R1:t,R2:t', {}, ALL, (), GAPB, ()),
+    ('gap-island-rehomed', 'S:s,R1:r', dict(islands=1), ALL, (), ('gap-island-rehomed',), ()),
     ('gap-requeue-order', 'S:ss,R1:tr,R2:r', NO_TD, ALL, (), ('gap-requeue-order',), ()),
     # each finding of the frozen text (README.md), without its amendment
     ('finding-rehome-order', 'S:ss,R1:t', {}, BUT('rehome-order'), (), ('fifo', 'stale-record'),
      ()),
+    # adopt needs rehome-order's wait: a late answer that reaches G0 before the adopt is applied
+    # untracked, and the tracker then waits for it for ever
+    ('finding-rehome-order-adopt', 'H:s,R1:t,R2:t', {}, BUT('rehome-order'), (),
+     ('duplicate', 'tracker-leak'), ('stale-record',)),
     ('finding-pending-first', 'S:ss,R1:r,R2:r', {}, BUT('forward-pending-first'), (),
      ('fifo', 'duplicate'), ()),
     ('finding-forward-uncapped', 'S:ss,R1:r', dict(icap=1, busy0=1), BUT('forward-uncapped'), (),
@@ -1193,14 +1279,18 @@ QUICK = [
      ('lost',), ()),
     ('finding-queue-as-requeue', 'S:s,H:r,R1:t,R2:t', NO_TD, BUT('queue-as-requeue'), (),
      ('stranded',), ()),
-    ('finding-unique-ids', 'S:ss,R1:rr,R2:r,R2:t', {}, BUT('unique-ids'), (), ('duplicate',), ()),
+    # per-home ids collide at the new home (without adopt: an orphan answer ends its tracker;
+    # with it, deep-finding-unique-ids-adopt: two trackers under one id, and a message is lost)
+    ('finding-unique-ids', 'S:ss,R1:rr,R2:r,R2:t', {}, BUT('unique-ids'), (),
+     ('id-collision',), ()),
     ('finding-next-waiter-order', 'S:s,H:r,R1:t,R2:r', dict(NO_TD, choice=1),
      BUT('next-waiter-order'), (), ('nondeterministic',), ()),
-    ('finding-router-on-groups', 'S:s,R1:r', dict(islands=1), BUT('router-on-groups'), (),
+    ('finding-island-rule', 'R1:r,R1:s,R2:t', dict(islands=1), BUT('island-rule'), (),
      ('stranded',), ()),
+    ('finding-adopt', 'H:s,R1:t,R2:t', {}, BUT('adopt'), (), ('duplicate',), ()),
+    ('finding-forward-host-posts', 'X:pp,R1:r', {}, BUT('forward-host-posts'), (), ('lost',),
+     ('fifo',)),
     # the alternative to rehome-order and forward-pending-first: no duplicate, the reorder kept
-    ('alternative-rehome-single', 'S:ss,R1:r,R2:r', {},
-     BUT('rehome-order', 'forward-pending-first') + ALTERNATIVES, (), ('fifo',), ()),
     # the mutations, on the amended protocol
     ('mutation-no-requeue', 'S:s,R1:t', NO_TD, ALL, ('no-requeue',), ('lost',), ()),
     ('mutation-requeue-always', 'S:s,H:r,R1:t', NO_TD, ALL, ('requeue-always',), ('duplicate',),
@@ -1228,6 +1318,10 @@ DEEP = [
     ('deep-amended-two-senders', 'S:ss,R1:st,R2:t', {}, ALL, (), (), ()),
     ('deep-amended-ids', 'S:ss,R1:rr,R2:r,R2:t', dict(kills=1), ALL, (), (), ()),
     ('deep-amended-islands', 'S:ss,R1:t,R2:t', dict(islands=1, rdie=1, kills=1), ALL, (), (), ()),
+    ('deep-amended-host-posts', 'X:pp,R1:t,R2:t', dict(kills=1, icap=1), ALL, (), (), ()),
+    # the collision's effect: a message lost (the invariant stops before it in the quick check)
+    ('deep-finding-unique-ids-lost', 'H:s,S:s,R1:tr,R2:tr', {}, BUT('unique-ids'), (),
+     ('lost', 'id-collision'), ()),
 ]
 
 
@@ -1267,7 +1361,6 @@ def main(argv):
     ap.add_argument('--opts', default='')
     ap.add_argument('--amend', default='all')
     ap.add_argument('--but', default='', help='every amendment but these (overrides --amend)')
-    ap.add_argument('--also', default='', help='alternatives to add (rehome-single)')
     ap.add_argument('--mutation', default='')
     ap.add_argument('--max-states', type=int, default=0)
     ap.add_argument('--suite', choices=('quick', 'deep'))
@@ -1279,9 +1372,6 @@ def main(argv):
         x for x in args.amend.split(',') if x and x != 'none')
     if args.but:
         amend = BUT(*[x for x in args.but.split(',') if x])
-    if args.also:
-        amend = (AMENDMENTS if amend == ALL else amend) + tuple(
-            x for x in args.also.split(',') if x)
     mutation = tuple(x for x in args.mutation.split(',') if x)
     cfg = make_config(args.procs, parse_kv(args.opts), amend, mutation)
     r = explore(cfg, args.max_states or None,
