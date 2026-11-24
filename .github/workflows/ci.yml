@@ -1370,6 +1370,15 @@ jobs:
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
+      - name: The page's loader in headless Chrome (no wasm build)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # arigl-web.js downloading the module it starts, with a stand-in module: a download that
+          # breaks off is fetched again past the cache, and one that keeps breaking names itself.
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_download.mjs --chrome "$chrome"
+
       - name: Install the recipe's wasm deps, and xterm.js for ari's pages
         if: steps.paths.outputs.run == 'true'
         run: |
@@ -3087,9 +3096,10 @@ jobs:
     # Pushes only (master, tags, ci/full/**): pull requests skip the four macOS package lanes.
     # The account runs 5 hosted macOS jobs at a time (40 in all), and with these four every PR
     # needed six macOS jobs to merge, so macOS set the merge rate (2026-11-13: 777 jobs queued,
-    # 177 of them macOS, the oldest 17 h old). The two macOS recipe lanes (ci-recipe.yml) still
-    # gate pull requests. A macOS-only packaging break shows on master's run; to see it before a
-    # merge, push the branch to ci/full/**. Branch protection no longer requires these four.
+    # 177 of them macOS, the oldest 17 h old). The two macOS recipe lanes (ci-recipe.yml) moved
+    # to master too (2026-11-23). A macOS-only packaging break shows on master's run; to see it
+    # before a merge, push the branch to ci/full/**, or give the PR the `macos` label for the
+    # recipe lanes. Branch protection no longer requires these four.
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
     # Non-blocking for experimental matrix entries (the gRPC probe below): a macOS grpc build

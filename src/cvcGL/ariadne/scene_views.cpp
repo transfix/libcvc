@@ -215,13 +215,14 @@ struct SceneViews::View {
     if (hidden.count(p))
       return nullptr;
     // The volumes drawn for the main view: a volslice node's slices face its camera, so a view from
-    // another camera draws slices of its own; a volren node's picture is raycast for the main view
-    // and composited into its pixels, so no view draws it.
+    // another camera draws slices of its own; a volren node's picture is raycast for one camera and
+    // one size, so every view draws a raycast of its own (camera: main too, at its own size). A
+    // volren node takes no override: yet.
     vtkProp *src = p;
     auto vi = volumes.find(p);
     if (vi != volumes.end()) {
       if (vi->second.kind == VolumeKind::raycast)
-        return nullptr;
+        return static_cast<VolRenNode *>(vi->second.node)->viewProp(vp->renderer());
       if (own_eye && vi->second.kind == VolumeKind::slices)
         src = static_cast<VolSliceNode *>(vi->second.node)->viewProp(vp->renderer());
       if (!src)

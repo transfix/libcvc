@@ -15,7 +15,11 @@
 //     group's frame, mode: replace starts over from the node's own look, a `type: volume` node's
 //     opacity override draws a stand-in volume with its opacity scaled, and the volumes drawn for
 //     the main camera's eye: a view from its own camera draws a volslice node's slices swept for
-//     its camera, a `camera: main` view the node's own slices, and no view a volren node.
+//     its camera, a `camera: main` view the node's own slices, and every view a volren node's
+//     raycast of its own (its camera, its size), on a quad of its own; a view whose camera does
+//     not move does not raycast again, one whose camera moves does and leaves the others be; on
+//     CUDA every view's job runs on the device; a view released, or gone, takes its raycast and
+//     quad with it.
 // Skips (rc 0) where nothing rasterises, unless CVC_REQUIRE_RENDER=1.
 #include "streaming_test_util.h"
 
@@ -33,10 +37,12 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/Viewport.h>
 #include <cvc/gl/ViewportManager.h>
+#include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/scene_realize.h> // has_scene_node_type
 #include <cvc/gl/ariadne/scene_views.h>
 #include <cvc/state/state.h>
+#include <cvc/volren/raycaster_cuda.h> // raycast_cuda_available
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_io.h>
 #include <filesystem>
@@ -56,6 +62,7 @@
 #include <vtkRenderer.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
+#include <vtkWeakPointer.h>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -712,10 +719,126 @@ int main() {
       check(!has_prop(other_eye, slicesA) && own && own->GetNumberOfPoints() > 0,
             "own camera: the volslice node draws slices of its own, over its shaders",
             own ? std::to_string(own->GetNumberOfPoints()) + " points" : "none");
-      check(!has_prop(other_eye, raycastA), "own camera: the volren node is left out");
-      check(has_prop(same_eye, slicesA) && !has_prop(same_eye, raycastA),
-            "camera: main: the volslice node drawn as the main view draws it; the volren node "
-            "(composited into the main view's pixels) in no view");
+      check(has_prop(same_eye, slicesA),
+            "camera: main: the volslice node drawn as the main view draws it");
+
+      // The volren node: a raycast of its own in every view, camera: main too (its size is its
+      // own), on a quad of its own over the node's shaders. Until every renderer's raycast has
+      // landed and matches its camera (bounded: a raycast on a slow machine takes frames).
+      auto vr = std::dynamic_pointer_cast<cvc::gl::VolRenNode>(sg.getGraphics("raycast"));
+      check(vr != nullptr, "the volren node is a VolRenNode");
+      const auto settle = [&](const char *what) {
+        int settled = 0, f = 0;
+        for (; f < 3000 && settled < 3; ++f) {
+          rt.step(kDt);
+          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+          settled = vr && vr->converged() ? settled + 1 : 0;
+        }
+        check(settled >= 3, std::string("volren: ") + what + ", every renderer's raycast lands",
+              std::to_string(f) + " frames");
+      };
+      settle("the looks document");
+      const auto own_quad = [&](vtkRenderer *r) -> vtkActor * {
+        auto *own = vtkActor::SafeDownCast(raycastA);
+        vtkPropCollection *props = r->GetViewProps();
+        vtkCollectionSimpleIterator it;
+        props->InitTraversal(it);
+        while (vtkProp *p = props->GetNextProp(it))
+          if (auto *a = vtkActor::SafeDownCast(p))
+            if (own && a != own && a->GetShaderProperty() == own->GetShaderProperty())
+              return a;
+        return nullptr;
+      };
+      if (vr) {
+        check(vr->viewCount() == 3, "volren: a raycast for each of the three views",
+              std::to_string(vr->viewCount()));
+        for (vtkRenderer *r : {moved, other_eye, same_eye}) {
+          cvc::gl::VolRenNode::view_stats s;
+          const bool held = vr->viewStats(r, s);
+          vtkActor *quad = own_quad(r);
+          check(held && s.applied >= 1 && s.converged && s.width >= 2 && s.height >= 2,
+                "volren: the view shows a raycast of its camera at its size",
+                std::to_string(s.applied) + " applied, " + std::to_string(s.width) + "x" +
+                    std::to_string(s.height));
+          auto *ownActor = vtkActor::SafeDownCast(raycastA);
+          check(!has_prop(r, raycastA) && quad && ownActor &&
+                    quad->GetMapper() != ownActor->GetMapper(),
+                "volren: the view draws a quad of its own over the node's shaders, not the node's");
+        }
+        // Its raster is the view's size times resolution_scale, not the main view's.
+        cvc::gl::VolRenNode::view_stats so;
+        vr->viewStats(other_eye, so);
+        const int *osz = other_eye->GetSize();
+        check(so.width ==
+                      std::max(2, static_cast<int>(std::lround(osz[0] * vr->resolutionScale()))) &&
+                  so.height ==
+                      std::max(2, static_cast<int>(std::lround(osz[1] * vr->resolutionScale()))),
+              "volren: a view's raster is its own size times resolution_scale",
+              std::to_string(so.width) + "x" + std::to_string(so.height) + " for a " +
+                  std::to_string(osz[0]) + "x" + std::to_string(osz[1]) + " view");
+
+        // A view whose camera does not move does not raycast again, however many frames draw.
+        for (int f = 0; f < 20; ++f)
+          rt.step(kDt);
+        cvc::gl::VolRenNode::view_stats later;
+        vr->viewStats(other_eye, later);
+        check(later.launched == so.launched && later.applied == so.applied,
+              "volren: a view whose camera does not move does not raycast again",
+              std::to_string(so.launched) + " -> " + std::to_string(later.launched) +
+                  " launched over 20 frames");
+        // ... and one whose camera moves does, while the others stay as they are.
+        cvc::gl::VolRenNode::view_stats sameBefore;
+        vr->viewStats(same_eye, sameBefore);
+        vm.viewport("other_eye").camera().dolly(1.0);
+        settle("the other_eye view's camera dollied");
+        vr->viewStats(other_eye, later);
+        cvc::gl::VolRenNode::view_stats sameAfter;
+        vr->viewStats(same_eye, sameAfter);
+        check(later.launched > so.launched && later.applied > so.applied,
+              "volren: a view whose camera moves raycasts again",
+              std::to_string(so.launched) + " -> " + std::to_string(later.launched) + " launched");
+        check(sameAfter.launched == sameBefore.launched,
+              "volren: another view's camera moving does not raycast this one",
+              std::to_string(sameBefore.launched) + " -> " + std::to_string(sameAfter.launched));
+
+        // On CUDA, the views' jobs share the node's raycaster and the device.
+        if (cvc::volren::raycast_cuda_available()) {
+          vr->setBackend(cvc::volren::backend::cuda);
+          cvc::gl::VolRenNode::view_stats cpu[3];
+          vtkRenderer *rs3[3] = {moved, other_eye, same_eye};
+          for (int i = 0; i < 3; ++i)
+            vr->viewStats(rs3[i], cpu[i]);
+          vr->invalidateVolumeData(); // every renderer raycasts again
+          settle("on CUDA");
+          bool all = true;
+          for (int i = 0; i < 3; ++i) {
+            cvc::gl::VolRenNode::view_stats s;
+            all = all && vr->viewStats(rs3[i], s) && s.applied > cpu[i].applied && s.converged;
+          }
+          check(all && vr->backendUsed() == cvc::volren::backend::cuda,
+                "volren on CUDA: every view raycasts again on the device",
+                vr->backendUsed() == cvc::volren::backend::cuda ? "cuda" : "not cuda");
+          vr->setBackend(cvc::volren::backend::cpu);
+        } else {
+          std::printf(
+              "  (no CUDA device in this build or machine: the CUDA views check skipped)\n");
+        }
+
+        // A view that goes releases its prop: explicitly, and when its renderer goes.
+        vr->releaseViewProp(same_eye);
+        cvc::gl::VolRenNode::view_stats gone;
+        check(vr->viewCount() == 2 && !vr->viewStats(same_eye, gone),
+              "volren: releaseViewProp drops that view's raycast",
+              std::to_string(vr->viewCount()) + " views");
+        vtkWeakPointer<vtkActor> otherQuad = own_quad(other_eye);
+        vtkWeakPointer<vtkRenderer> otherRenderer = other_eye;
+        rt.views().clear(); // the document's views go (a new document does this)
+        vr->tick();
+        check(!otherRenderer && vr->viewCount() == 0,
+              "volren: a view that goes away takes its raycast with it",
+              std::to_string(vr->viewCount()) + " views left");
+        check(!otherQuad, "volren: ... and its quad is released");
+      }
     }
     rt.load(doc.string()); // back to the main document for the teardown below
     for (int f = 0; f < 3; ++f)
