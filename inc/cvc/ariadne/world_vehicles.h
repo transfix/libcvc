@@ -126,8 +126,10 @@ struct SceneData;
 // file), a document asset's file, a file beside the document (`doc_dir`), a data: entry's package
 // (`data`: its uri and path: copied into the look, so it is whole without the document; a view
 // loads it, cvcGL's vehicle_model_state), and the default look made explicit (the Humvee model for
-// a humvee when it is installed, else the box). A look that cannot be found is drawn as its box,
-// with a warning.
+// a humvee when it is installed, else the box). A parted look's files (its chassis, its wheel,
+// its rig's file) each beside the document, else installed where the vehicle models are
+// (find_vehicle_model: `humvee/chassis.glb`), else beside the document still (the view warns when
+// it cannot read one). A look that cannot be found is drawn as its box, with a warning.
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings, const std::vector<SceneData> &data);
@@ -248,14 +250,17 @@ bool parse_poses(const std::string &text, std::vector<std::pair<std::string, ent
 
 // A wheel as it is drawn, in its vehicle's chassis box's frame (m from the box's centre: x
 // forward, y left, z up): its centre, its steering angle (rad, + left), whether it is on the
-// ground, and how far it has rolled about its axle (rad in (-pi, pi], + forward; a `pose`
-// entity's, at its pose's speed; 0 on the plants). Front to back by axle, each axle's left wheel
-// first.
+// ground, how far it has rolled about its axle (rad in (-pi, pi], + forward: a Jolt wheel's own
+// rotation; every other plant's and a `pose` entity's, at its chassis's speed, integrated each
+// physics step), its radius (m), and whether its axle steers. Front to back by axle, each axle's
+// left wheel first.
 struct entity_wheel {
   double x = 0.0, y = 0.0, z = 0.0;
   double steer = 0.0;
   bool down = true;
   double spin = 0.0;
+  double radius = 0.0;
+  bool steered = false;
 };
 
 // An entity as it is now.

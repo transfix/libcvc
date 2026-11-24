@@ -50,6 +50,7 @@ windows:
       - type: viewport
         view: slice
         mode: slice
+        hide: [raycast]               # the slice alone, without the bunny's raycast over it
         axis: { bind: ortho.view }
         input: pick
         pick: ortho.pick
@@ -91,6 +92,7 @@ scene:
     # The bunny raycast, its surface (the SDF's zero level set) see-through so the planes show.
     - node: bunny_volume
       type: volren
+      tags: [raycast]
       source: { sdf: { mesh: stanford.bunny, dim: 64 } }
       fit: { height: 100, up: y }
       volren:

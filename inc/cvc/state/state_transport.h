@@ -388,6 +388,26 @@ public:
   static bool read_scope_delivers(const state_delivery_filter *scope,
                                   const state_mutation &m) noexcept;
 
+  // -------- Deletes a peer missed --------
+  //
+  // A delete replicates live like any write (state_sync_adapter, Deletes). A peer that was not
+  // connected for it still holds the subtree, and a snapshot only says what IS there, so a relay
+  // repeats the deletes it remembers (its shards' tombstones) to a peer it admits without a
+  // backfill: `missed_deletes` picks those whose subtree is still gone from `tree`, the snapshot
+  // it was just sent (a subtree made again since is in it, and must stay; what the peer still
+  // holds below it of the old one stays too, as the relay cannot tell what that is). Oldest
+  // first. A peer that already applied one has it in its seen-set: a repeat keeps its origin and
+  // sequence. Tombstones last ten minutes by default (state_sync_adapter::set_tombstone_limits),
+  // which bounds the absence this repairs.
+  static std::vector<state_mutation> missed_deletes(const std::vector<state_mutation> &tombstones,
+                                                    const std::vector<snapshot_entry> &tree);
+  // The delete that takes `path` from a peer that holds it after it left `shard`'s tree, when the
+  // peer never got the live one (a WS relay's broadcast_snapshot). Its origin is the shard's node
+  // id + "#sync", which writes nothing else, and its sequence the shard clock's time, so it never
+  // matches a journal entry in the peer's seen-set. Untimed (hlc_time 0): it reports what the tree
+  // no longer has, which is not a new delete, so it leaves the peer no tombstone.
+  static state_mutation tree_removal(state_cluster_shard &shard, const std::string &path);
+
   // -------- Transport bridge (wasm interop) --------
   //
   // Link this transport to a sibling of a DIFFERENT backend — e.g. a gRPC transport and a

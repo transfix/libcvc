@@ -984,6 +984,137 @@ TEST(StateTransportWsTest, BroadcastDiffConvergesAClientThatDroppedFrames) {
   S.stop();
 }
 
+namespace {
+bool has_node(cvc::app &a, const std::string &path) {
+  return cvc::state::instance(a).findDescendant(path) != nullptr;
+}
+} // namespace
+
+// A node the relay's tree loses (a world letting an entity go, a document rewriting a list) goes
+// from its clients too: the removal is journaled as one delete and published like a write.
+TEST(StateTransportWsTest, ARelayDeleteReachesItsClients) {
+  using ms = std::chrono::milliseconds;
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), ms(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, ms(2000)));
+
+  write_value(aS, "room.vehicles.v1.x", "1");
+  write_value(aS, "room.vehicles.v2.x", "2");
+  EXPECT_GT(S.pump_all(), 0u);
+  ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.vehicles.v2.x"); }, ms(3000)));
+  ASSERT_TRUE(has_node(aB, "room.vehicles.v1.x"));
+
+  ASSERT_TRUE(cvc::state::instance(aS)("room.vehicles").removeChild("v1"));
+  EXPECT_EQ(S.pump_all(), 1u);
+  EXPECT_TRUE(wait_until([&] { return !has_node(aB, "room.vehicles.v1"); }, ms(3000)));
+  EXPECT_TRUE(has_node(aB, "room.vehicles.v2.x"));
+  EXPECT_EQ(tB.pump_all(), 0u) << "B applied the delete without journaling one";
+
+  tB.stop();
+  S.stop();
+}
+
+// A client that never got a live delete (here the relay drained it unsent) loses the subtree at
+// the next broadcast: one delete for the subtree's top, not one per node. A path that only left
+// the client's view is not deleted.
+TEST(StateTransportWsTest, BroadcastTakesWhatLeftTheTreeFromAPeerThatMissedTheDelete) {
+  using ms = std::chrono::milliseconds;
+  cvc::app aS, aB;
+  cvc::state_transport_ws S, tB;
+  for (auto *t : {&S, &tB})
+    t->set_ping_interval(ms(0));
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  tB.register_shard(&sB);
+  write_value(aS, "room.gone.a", "1");
+  write_value(aS, "room.gone.b.c", "2");
+  write_value(aS, "room.hidden", "3");
+  write_value(aS, "room.keep", "4");
+  EXPECT_GT(S.pump_all(), 0u); // no connection yet
+  ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), ms(2000)));
+  ASSERT_TRUE(wait_identified(S, 1, ms(2000)));
+  ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.gone.b.c"); }, ms(3000)));
+  ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.hidden"); }, ms(3000)));
+  EXPECT_EQ(S.broadcast_snapshot(), 0u);
+
+  ASSERT_TRUE(cvc::state::instance(aS)("room").removeChild("gone"));
+  ASSERT_EQ(sS.drain_local().size(), 1u) << "the delete, never sent";
+  S.peers().add_peer("B", "C");
+  S.peers().set_filter("B", std::make_shared<deny_prefix_filter>("room.hidden"));
+  const std::uint64_t d0 = S.total_broadcast_deletes();
+  EXPECT_EQ(S.broadcast_snapshot(), 1u);
+  EXPECT_EQ(S.total_broadcast_deletes() - d0, 1u) << "room.gone alone";
+  EXPECT_TRUE(wait_until([&] { return !has_node(aB, "room.gone"); }, ms(3000)));
+  EXPECT_TRUE(has_node(aB, "room.keep"));
+  EXPECT_TRUE(has_node(aB, "room.hidden")) << "out of view is not out of the tree";
+  EXPECT_EQ(S.broadcast_snapshot(), 0u);
+  EXPECT_EQ(S.total_broadcast_deletes() - d0, 1u);
+
+  tB.stop();
+  S.stop();
+}
+
+// A relay that does not backfill (it trims its journal) repeats, after a joiner's admit snapshot,
+// the deletes it remembers whose subtree is still gone: a client back from a dropped link loses
+// what was deleted while it was away, and keeps what was deleted and made again.
+TEST(StateTransportWsTest, AnAdmitRepeatsTheDeletesAReturningClientMissed) {
+  using ms = std::chrono::milliseconds;
+  cvc::app aS, aB;
+  cvc::state_transport_ws S;
+  S.start("127.0.0.1:0", "S", "C");
+  S.set_relay(true);
+  S.set_backfill_on_connect(false);
+  cvc::state_cluster_shard sS(aS, "C", "S");
+  cvc::state_cluster_shard sB(aB, "C", "B");
+  sS.attach();
+  sB.attach();
+  S.register_shard(&sS);
+  write_value(aS, "room.v1.x", "1");
+  write_value(aS, "room.v2.x", "2");
+  write_value(aS, "room.v3.x", "3");
+  S.pump_all();
+  {
+    cvc::state_transport_ws tB;
+    tB.register_shard(&sB);
+    ASSERT_TRUE(tB.connect_to_peer(ws(S.listen_address()), ms(2000)));
+    ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.v3.x"); }, ms(3000)));
+    tB.unregister_shard(&sB);
+    tB.stop();
+  }
+  ASSERT_TRUE(wait_until([&] { return S.connection_count() == 0; }, ms(3000)));
+
+  ASSERT_TRUE(cvc::state::instance(aS)("room").removeChild("v1"));
+  ASSERT_TRUE(cvc::state::instance(aS)("room").removeChild("v3"));
+  write_value(aS, "room.v3.y", "again");
+  S.pump_all(); // to no one
+  ASSERT_TRUE(has_node(aB, "room.v1.x"));
+
+  cvc::state_transport_ws tB2;
+  tB2.register_shard(&sB);
+  ASSERT_TRUE(tB2.connect_to_peer(ws(S.listen_address()), ms(2000)));
+  EXPECT_TRUE(wait_until([&] { return !has_node(aB, "room.v1"); }, ms(3000)));
+  ASSERT_TRUE(wait_until([&] { return has_node(aB, "room.v3.y"); }, ms(3000)));
+  EXPECT_TRUE(has_node(aB, "room.v2.x"));
+  EXPECT_EQ(S.total_deletes_repeated(), 1u) << "room.v1; room.v3 is back";
+
+  tB2.stop();
+  S.stop();
+}
+
 // push_snapshot_to writes only to the connection that identified as the named node, regardless of
 // the registry (the caller decided), and reports how many connections it wrote.
 TEST(StateTransportWsTest, PushSnapshotToReachesOnlyNamedPeer) {

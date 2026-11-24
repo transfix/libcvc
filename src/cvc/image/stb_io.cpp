@@ -23,6 +23,7 @@
 #include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/image/image.h>
+#include <cvc/image/image_encode.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -165,6 +166,24 @@ bool stb_decode_gif_memory(const void *data, std::size_t size, std::vector<image
 }
 
 } // namespace detail
+
+std::string encode_png(const image &img) {
+  if (img.width() <= 0 || img.height() <= 0)
+    throw std::runtime_error("cvc::encode_png: the image is empty");
+  const bool keep =
+      img.type() == image::data_type::u8 && img.channels() >= 1 && img.channels() <= 4;
+  const image src = keep ? img : img.converted(image::pixel_format::RGBA, image::data_type::u8);
+  std::string out;
+  auto put = [](void *ctx, void *data, int size) {
+    static_cast<std::string *>(ctx)->append(static_cast<const char *>(data),
+                                            static_cast<std::size_t>(size));
+  };
+  const int ok = stbi_write_png_to_func(put, &out, src.width(), src.height(), src.channels(),
+                                        src.data(), static_cast<int>(src.row_stride_bytes()));
+  if (!ok)
+    throw std::runtime_error("cvc::encode_png: the encode failed");
+  return out;
+}
 
 // Called from register_default_image_handlers (defined in magick_io.cpp) —
 // registered BEFORE magick_image_io so image_file_io::for_read (first-wins)

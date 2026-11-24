@@ -153,6 +153,11 @@ GeometryNode::GeometryNode(cvc::app &ctx, const std::string &statePath, const st
   if (auto *lowMemory = LowMemoryPolyDataMapper::SafeDownCast(m_mapper))
     lowMemory->setApp(ctx);
   m_mapper->SetInputData(m_polyData);
+  // The mapper's input is this node's own polydata, changed in place, with no pipeline above it,
+  // so the mapper need not update one before each draw or bounds query (vtkMapper::Static). The
+  // camera's clipping-range fit asks every actor for its bounds each frame anything moved, and
+  // those updates were most of its cost.
+  m_mapper->StaticOn();
   m_actor->SetMapper(m_mapper);
 
   // Set default material properties
@@ -1579,7 +1584,7 @@ void GeometryNode::onUpdateShader(vtkObject *caller, unsigned long, void *client
 void GeometryNode::bindShaderTextures(
     vtkShaderProgram *program,
     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
-    vtkObject *drawingMapper) {
+    vtkObject *drawingMapper, std::vector<vtkWeakPointer<vtkTextureObject>> *bound) {
   if (!program)
     return;
   // Bind our custom textures onto units the mapper won't reuse. The wasm
@@ -1626,8 +1631,10 @@ void GeometryNode::bindShaderTextures(
   // held a unit, and a scene with enough of them ran out: WebGL2 gives VTK 16 units, the
   // low-memory mapper takes some for each draw, and every draw after that failed and logged
   // (terrain_lab with its water, in the browser). One already active (someone else's) is left as
-  // it was.
+  // it was. A draw of another actor that keeps its own list (`bound`) releases them itself.
   auto *actor = GeometryActor::SafeDownCast(m_actor);
+  if (!bound && actor)
+    bound = &actor->Bound;
   for (auto &kv : textures) {
     if (kv.second && kv.second->GetContext() && program->IsUniformUsed(kv.first.c_str())) {
       const bool wasActive = kv.second->GetTextureUnit() >= 0;
@@ -1647,8 +1654,8 @@ void GeometryNode::bindShaderTextures(
         continue;
       }
       program->SetUniformi(kv.first.c_str(), unit);
-      if (!wasActive && actor)
-        actor->Bound.emplace_back(kv.second);
+      if (!wasActive && bound)
+        bound->emplace_back(kv.second);
     }
   }
   if (tum)

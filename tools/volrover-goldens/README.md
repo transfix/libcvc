@@ -13,7 +13,7 @@ those outputs reproducibly:
    tests read them.
 
 GPL code may be built here, and only here. The libraries that need CGAL (Skeletonization,
-ContourTiler) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
+SecondaryStructures, ContourTiler, PocketTunnel) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
 libcvc, cvcGL or pycvc, and nothing here is installed or packaged.
 
 ```bash
@@ -177,6 +177,169 @@ box, but not the same bytes: the last digits differ, and so does the order of ti
 Its dumbbell differs more, because the cells' memory order is the allocator's: 361 segments, one
 of them not in Linux's 362, and two of Linux's missing. The port contains both platforms'
 dumbbell segments, and its test compares coordinates to 1e-9, so it passes against either set.
+
+## PocketTunnel
+
+PocketTunnel is `src/PocketTunnel`, the pockets, tunnels and voids of a molecular surface
+(docs/roadmap/TEXMOL-F2DOCK-ARISRV-ROADMAP.md §2.2, T5). TexMol carries a copy; the goldens are made
+from VolumeRover's, which is the same at the pinned commit. It needs CGAL, as Skeletonization does
+(`--libs pockettunnel` builds it alone).
+
+- **What is built:** every legacy source but `main.cpp.unused`, two of them from patched copies in
+  the build tree (a patch that does not apply fails the configure):
+  - **`tcocone.cpp`** is Skeletonization's, with the same two `CGAL_assertion()`s whose
+    `has_vertex()` calls fill the indices the code then uses: plain calls, as the port makes them;
+  - **`pocket_tunnel.cpp`** calls the driver's `pocket_tunnel_driver_report()` after
+    `detect_handle()`. `pocket_tunnel_fromsurf()` keeps its triangulation and clusters in locals;
+    the hook reads them, and changes nothing.
+
+  The legacy build's `-DHUGE=1000000` is left out: no source uses it, and it breaks MSVC's own
+  `HUGE`.
+- **What is shimmed:** `shim/cvcraw_geometry/cvcgeom.h`, the points, colours and triangles of the
+  legacy `cvcgeom_t`; and `shim/PEDetection/Timer.h`, which `datastruct.h` includes and does not
+  use.
+- **Inputs:** `inputs/pockettunnel/<case>.pts` (float-exact, as the skeleton's; the legacy entry
+  reads its points as floats) and `<case>.json` (`num_pockets` and `num_tunnels`, VolumeRover2's
+  3 and 3). `make_inputs.py --only pockettunnel` wrote the four balls: each has chambers cut out
+  of it, joined to the outside by narrower necks, sampled on the solid's boundary. `1grl.pts` is a
+  protein's surface, which needs libcvc to make: PDB 1GRL's heavy atoms blurred by
+  `cvc::mol::blur` (blobbiness -0.2, a 3 Å grid) and `cvc::iso` at 10, the points as floats.
+  `pocket_tunnel_test`'s `OnAProtein` makes it again natively, checks the committed copy against
+  it, and writes it with `CVC_POCKETTUNNEL_WRITE_1GRL=<path>`. x86 Linux and Windows make the same
+  2,609 points. On aarch64 (macOS CI) the mesher's multiply-adds are fused and it makes 2,606, so
+  there the test checks only the count, to 1%.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/pockettunnel/`:
+  - `<case>.ptv.txt`: every cluster outside the surface (kind, mouths, volume, cells, maxima), the
+    geometry `pocket_tunnel_fromsurf()` returned (its points with their colours, its triangles,
+    each with the cluster it bounds and its class), and Tight Cocone's marking (the cells it marked
+    outside, the facets it left on the surface); `pockettunnel_driver.cpp` gives the format;
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256.
+
+  `--check` compares a remade `.ptv.txt` by content: each point's colour by its coordinates, the
+  triangles as a set, volumes to within 1e-9.
+
+| Case | Points | What it covers |
+|---|---|---|
+| `pocket` | 1,923 | a chamber with one neck: one pocket |
+| `tunnel` | 2,074 | a chamber with two necks: one tunnel (two mouths) |
+| `three_chambers` | 3,487 | a tunnel and two pockets of different sizes in one ball |
+| `cavity` | 1,873 | a chamber with no neck: Tight Cocone marks it inside, so there is no cluster |
+| `1grl` | 2,609 | PDB 1GRL (a GroEL subunit) at a 3 Å map's resolution: a tunnel (two mouths) and a pocket of over a thousand Å³ each, and three pockets of one cell |
+
+**The legacy result depends on the cells' addresses.** CGAL's facet iterator reports a facet from
+the cell at the lower address, and Tight Cocone's peeling (`create_surface`, `grow_boundary`) is
+greedy: it starts from the first infinite cell it meets and walks in that order. Where its choices
+are close, the cells it marks outside differ with the order. Within one process a second
+triangulation of the same points, placed elsewhere in the heap, can be marked differently: on
+`tunnel`, one Windows run in five marked 33 more cells outside, which made five pockets of one or
+two cells. So the driver runs the legacy entry once a process, and records the marking with the
+result.
+
+`pocket_tunnel_test` compares the port with these goldens at two levels:
+- **exactly after Tight Cocone** (`MatchesTheLegacyLibraryAfterTightCocone`): given the legacy
+  marking (`pocket_tunnel_marked.h`), the port's own stages (S_max, the mouths, the output) make
+  every cluster with the same kind, mouths, cells and maxima, volumes to 1e-12, every shown
+  triangle with its cluster and class, and every point's colour, on all five cases;
+- **end to end** (`MatchesTheLegacyLibrary`): the port's Tight Cocone walks in tet_complex's
+  spatial order. On `pocket`, `tunnel` and `cavity` it marks the same cells and the whole result
+  is the legacy's: on `tunnel`, a tunnel of 3,085 cells and five pockets of one or two. On
+  `three_chambers` each cluster has 3 to 6 more cells than the legacy's (the tunnel 3,105 to
+  3,099, volume 10.619 to 10.614). On `1grl` the large pocket is the legacy's, cell for cell, and
+  the tunnel has 317 cells to the legacy's 307 (1,195 Å³ to 1,180); both find three one-cell
+  pockets. Every cluster of more than a hundred cells keeps its kind and mouths, and its cells
+  and volume to 5%.
+
+**Platforms:** as with Skeletonization, the goldens are the ones CI's check made on ubuntu-24.04
+with GCC and cvcpkg's CGAL, so `--check` passes there and only there. A Windows build (MSVC 2022,
+CGAL 6.0.1) makes the same files in a new process each time, but its heap orders the cells
+differently, and on three cases it marks other cells outside:
+- `tunnel`: 33 fewer, and a single tunnel of 3,083 cells;
+- `three_chambers`: 41 more, the clusters the port's to the cell;
+- `1grl`: 67 more, a tunnel of 309 cells and 17 one-cell pockets.
+Given either platform's marking, the port's stages make that platform's result exactly.
+
+## SecondaryStructures
+
+SecondaryStructures is `src/SecondaryStructures`, a protein's helices and sheets from the isosurface
+of its density map (TexMol roadmap T5). It needs CGAL, as Skeletonization does (`--libs secondary`
+builds it alone).
+
+- **What is built:** every legacy source (not the `.back` and `.junk` files), from patched copies in
+  the build tree. A patch that does not apply fails the configure. The patches:
+  - **Eight `CGAL_assertion()`s with side effects become plain calls:**
+    - `has_vertex()` in `tcocone.cpp` and `find_acceptor()` in `u1.cpp` and `u2.cpp`, as for
+      Skeletonization;
+    - `get_eid()` in `skel.cpp`'s `add_u1_to_skel` and `add_u2_to_skel`. Compiled out, it left the
+      edge index -1, and the code wrote before its edge array.
+  - **`is_cospherical_pair()`** returns false when a cell is infinite, as for Skeletonization.
+  - **A chain step's width:** between two cells with no common facet, it is the smaller cell's
+    circumradius. The legacy took its squared circumradius, where every other width is a length.
+    The port does the same.
+  - **An empty run is skipped.** A candidate point with nothing else within the join distance made
+    an empty run, and `build_cylindrical_helices` divided by zero and read past an empty array for
+    it. The port does the same.
+  - **The variable-length array** becomes a `std::vector` (MSVC has no VLAs).
+  - **`init.cpp`'s `triang.dual(cit)`** becomes `CGAL::circumcenter` of the cell's points. That is
+    what `dual()` computed in the CGAL the code was written for; CGAL 6's asks the cell base for it.
+- **What is shimmed:**
+  - `secondary_dsyev.cpp` stands in for LAPACK's `dsyev_`, which the helix fit calls: a Jacobi
+    eigensolver, so an axis's direction may have the other sign;
+  - `shim/cvcraw_geometry/cvcgeom.h` stands in for the legacy geometry's arrays;
+  - `shim/Histogram/histogram_data.h` keeps the widths its GUI's histograms were given, so the
+    driver can write them;
+  - `shim/Contour/basic.h` is empty: the header includes it and uses nothing from it;
+  - `shim/secondary_huge.h`, force-included, makes the legacy's `HUGE` 1000000 after `math.h`
+    (glibc redefines it, the UCRT rejects it).
+- **The driver:** `secondary_driver.cpp` calls `compute_secondary_structures`, then
+  `buildAllGeometry` with the GUI's defaults (20 helices, 2 sheets, both width windows 2 to 3), as
+  TexMol's `SecondaryStructureData` did. It reads the skeleton's private data members by compiling
+  `Skel`'s header with `private` as `public`.
+- **Inputs:** `inputs/secondary/<case>.pts`, a point a line, each coordinate an exact decimal. A
+  surface's points are what the legacy reads. `<case>.json` records where the case came from.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/secondary/`:
+  - `<case>.ss.txt`, in `secondary_driver.cpp`'s format:
+    - the skeleton's counts;
+    - each component's area;
+    - the two histograms' widths;
+    - the candidate runs;
+    - the helix axes, longest first;
+    - each sheet polygon drawn, as its vertex count, centre and area;
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256.
+
+| Case | Points | What it covers |
+|---|---|---|
+| `helices_and_sheet` | 2,920 | three tubes of radius 2.5 at three angles and a slab 2.5 thick (`make_inputs.py`): 3 helices, 1 sheet |
+| `1grl` | 9,581 | PDB 1GRL's surface: the isosurface at 12 of its heavy atoms' blur map (blobbiness -0.3, 2 Å grid), from `cvc::mol::blur` and `cvc::iso`, rounded to 1/64 Å. `make_inputs.py` leaves it as committed. 22 helices (20 drawn), 2 of 10 sheet candidates |
+
+`secondary_structures_test` (`MatchesTheLegacyLibrary`) compares the port with these goldens.
+
+- **Exactly on `helices_and_sheet`:**
+  - every polygon, edge, component area and histogram width;
+  - each helix axis, to 1e-9, either way round, from the same points;
+  - every sheet polygon, to a float's precision (the legacy sheet geometry holds floats).
+
+  Which of two coincident Voronoi vertices joins a run depends on the cells' order. So one helix
+  of the port holds two points more than the legacy's run, each within 1e-7 of one it already has.
+- **By shares on `1grl`:**
+  - the measured values: 99% of the polygon widths, every helix width, 65 of the 69 component
+    areas, 15 of the 20 helix axes within 1 Å at both ends and 17 within 3 Å, and every sheet
+    polygon;
+  - the bounds the test sets are lower, to leave room for another platform's legacy output.
+
+  The core's Tight Cocone and U2 keep the legacy's results only up to the cells' order and the
+  rounding of their Voronoi vertices:
+  - Tight Cocone's surface already differs, 19,166 facets against 19,154;
+  - P1's skeleton port matches 98.5% of the legacy Skeletonization's segments on the same
+    surface.
+
+**Platforms:** the goldens are the ones CI's check made on ubuntu-24.04 with GCC and cvcpkg's
+CGAL, so `--check` passes there and only there. A Windows build (MSVC 2022, CGAL 6.0.1) makes
+the same counts but not the same bytes:
+- on `helices_and_sheet`, the same values to 4e-13, some of them in another order;
+- on `1grl`, 21 candidate runs to Linux's 22. Both draw 20, and the port's axes are as close to
+  either set: 13 (Windows) or 15 (Linux) of the 20 within 1 Å at both ends, 17 within 3 Å.
+
+The test passes against either set.
 
 ## ContourTiler
 

@@ -49,6 +49,7 @@
 #include <cstdint>
 #include <cvc/core/param_table.h>
 #include <cvc/volume/point_classes.h>
+#include <cvc/volume/volume_grid_contours.h>
 #include <cvc/volume/volume_slice.h>
 #include <deque>
 #include <limits>
@@ -74,10 +75,11 @@ slice_axis grid_view_axis(grid_view v);
 grid_view grid_view_of(slice_axis a);
 
 // What a click in a slice view does: navigate moves the other two planes to the voxel clicked;
-// points marks, selects and moves point classes (point_class_gestures); probe only reads the voxel.
-// (P10 adds contours.)
-enum class grid_tool { navigate, points, probe };
-BOOST_DESCRIBE_ENUM(grid_tool, navigate, points, probe)
+// points marks, selects and moves point classes (point_class_gestures); probe only reads the voxel;
+// contours draws and edits the current object's curves (grid_contour_gestures,
+// cvc/volume/volume_grid_contours.h).
+enum class grid_tool { navigate, points, probe, contours };
+BOOST_DESCRIBE_ENUM(grid_tool, navigate, points, probe, contours)
 
 // The keys under <node>.grid: the switch, the tool and where the three planes are.
 struct volume_grid_params {
@@ -88,12 +90,18 @@ struct volume_grid_params {
   std::int64_t slice_z = -1;
 };
 
+// What draws the volume in the 3D view beside the planes: nothing (the planes alone), VTK's GPU
+// mapper, libcvc's raycaster or view-aligned texture slices (cvc::gl::VolumeRenderNode's kinds).
+enum class grid_render { none, vtk, volren, volslice };
+BOOST_DESCRIBE_ENUM(grid_render, none, vtk, volren, volslice)
+
 // How the slices and their overlays draw: the keys under <node>.grid.display.
 struct volume_grid_display_params {
   double point_scale = 1.0; // every class's radius times this, for drawing and for picking
   bool show_points = true;
   bool crosshairs = true; // where the other two planes cross each slice
   bool grey = false;      // the slices in grey, not through the transfer function
+  grid_render render = grid_render::none; // the volume in the 3D view, through the same TF
 };
 
 // Where the grid's data are: the keys under <node>.grid.source. Each path is a state key whose
@@ -117,7 +125,8 @@ template <> struct param_table<volume_grid_params> : param_fields<volume_grid_pa
             doc("the slice the view switch shows: xy (down z), xz (down y) or zy (down x)")),
       field("tool", &P::tool,
             doc("what a click in a slice view does: navigate moves the other planes there, "
-                "points marks and selects point classes, probe only reads the voxel")),
+                "points marks and selects point classes, probe only reads the voxel, contours "
+                "draws the current object's curves")),
       field("slice.x", &P::slice_x, unit("voxel"), range(-1.0, none),
             doc("the plane looking down x (the ZY view), from 0; -1 is the middle one")),
       field("slice.y", &P::slice_y, unit("voxel"), range(-1.0, none),
@@ -136,6 +145,9 @@ struct param_table<volume_grid_display_params> : param_fields<volume_grid_displa
       field("show_points", &P::show_points, doc("draw the point classes on the slices")),
       field("crosshairs", &P::crosshairs, doc("draw where the other two planes cross each slice")),
       field("grey", &P::grey, doc("draw the slices in grey, not through the transfer function")),
+      field("render", &P::render,
+            doc("what draws the volume in the 3D view, through the same transfer function: none "
+                "(the planes alone), vtk, volren or volslice")),
   };
 };
 
@@ -358,26 +370,31 @@ point_classes reconcile_point_class_rows(const point_classes &old,
 // ---- sessions ---------------------------------------------------------------------------------
 
 // A node's session (§1.5, "Sessions"): its keys (paths relative to the node, values as text), the
-// transfer function it colours through (a cvc::tf::model's string) and its point classes.
+// transfer function it colours through (a cvc::tf::model's string), its point classes and its
+// contours.
 struct volume_grid_session {
   std::map<std::string, std::string> keys;
   std::string transfer_function;
   point_classes classes;
+  grid_contours contours;
 };
 
 // The keys a session keeps: the parameter tables' (grid.view, grid.tool, grid.slice.*,
-// grid.display.*, grid.source.var and grid.source.time) and grid.classes.current. Where the data
-// come from (grid.source.volume, points and session) is the document's, and transient keys (the
-// cursor, picks, published info and job keys, requests) never go in one.
+// grid.display.*, grid.source.var and grid.source.time, grid.contour.* but its source, and the
+// tiler's grid.tile.*), grid.classes.current and grid.objects.current. Where the data come from
+// (grid.source.volume, points and session, grid.contour.source) is the document's, and transient
+// keys (the cursor, picks, published info and job keys, requests) never go in one.
 bool volume_grid_session_key(const std::string &path);
 
 // Write `s` as JSON:
 //   { "format": "cvc.volume_grid.session", "version": 1, "keys": { "grid.view": "xy", ... },
 //     "transfer_function": "...",
 //     "classes": [ { "name": ..., "color": [r, g, b], "radius": ..., "variable": ...,
-//                    "timestep": ..., "points": [i, j, k, ...] }, ... ] }
-// Throws std::invalid_argument when point_class_problems finds anything, and std::runtime_error
-// naming the file when it can't be written.
+//                    "timestep": ..., "points": [i, j, k, ...] }, ... ],
+//     "contours": { grid_contours_json's object } }
+// ("contours" only when there are contour objects.) Throws std::invalid_argument when
+// point_class_problems or grid_contours_problems finds anything, and std::runtime_error naming the
+// file when it can't be written.
 void write_volume_grid_session(const volume_grid_session &s, const std::string &filename);
 std::string volume_grid_session_json(const volume_grid_session &s);
 // Read one. Throws std::runtime_error naming the file and what is wrong: missing, not JSON, not

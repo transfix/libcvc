@@ -38,6 +38,8 @@
 //   /apps/tiler/        the app again, with a page config that preloads the contour tiler's series
 //                       from /apps/data/, the repository's examples/data
 //   /apps/mol/          the app again, with a page config that preloads PDB entry 1GRL from there
+//   /apps/flaky/        the app again, with a page config that preloads blob.bin, whose first
+//                       download breaks off half-way (the page must fetch it again)
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
 //   /apps/wasm/         ariglx-web's files again, beside the --wasmdocs documents and guests
@@ -133,6 +135,20 @@ const TILER_CONFIG = JSON.stringify({
 // /apps/mol/: the app again, preloading the PDB file molecule.ari's mesh_lab reads (a node's
 // source file is not a reference the page follows).
 const MOL_CONFIG = JSON.stringify({preload: ['../data/molecules/1grl.pdb']});
+// /apps/flaky/: the app again, preloading blob.bin, which the server sends whole except the first
+// time: then it promises all of it (Content-Length) and drops the connection half-way, as a cut-off
+// download does. arigl must ask again past the browser's cache (cache: 'reload'), so the page runs.
+const FLAKY_CONFIG = JSON.stringify({preload: ['blob.bin']});
+const FLAKY_BLOB = Buffer.alloc(256 * 1024, 7);
+const flaky = {hits: 0, reloads: 0};
+function serveFlaky(req, res) {
+  flaky.hits++;
+  if (/no-cache/.test(req.headers.pragma || '')) flaky.reloads++;
+  res.writeHead(200, {'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-cache',
+                      'Content-Length': String(FLAKY_BLOB.length), ...ISOLATION});
+  if (flaky.hits > 1) return res.end(FLAKY_BLOB);
+  res.write(FLAKY_BLOB.subarray(0, FLAKY_BLOB.length / 2), () => res.socket.destroy());
+}
 function fileFor(urlPath) {
   const p = decodeURIComponent(urlPath);
   if (!p.startsWith('/apps/') || p.includes('..')) return null;
@@ -140,9 +156,11 @@ function fileFor(urlPath) {
   if (rest === 'cfg/ariadne.config.json') return {json: CONFIG};
   if (rest === 'tiler/ariadne.config.json') return {json: TILER_CONFIG};
   if (rest === 'mol/ariadne.config.json') return {json: MOL_CONFIG};
+  if (rest === 'flaky/ariadne.config.json') return {json: FLAKY_CONFIG};
   if (rest.startsWith('data/')) return path.join(EXAMPLES_DATA, rest.slice('data/'.length));
   if (rest.startsWith('tiler/')) rest = 'app/' + rest.slice('tiler/'.length);
   if (rest.startsWith('mol/')) rest = 'app/' + rest.slice('mol/'.length);
+  if (rest.startsWith('flaky/')) rest = 'app/' + rest.slice('flaky/'.length);
   if (PYDOCS && rest === 'pyprog/ariadne.config.json') return {json: PY_CONFIG};
   if (PYDOCS && (rest.startsWith('py/') || rest.startsWith('pyprog/'))) {
     const name = rest.slice(rest.indexOf('/') + 1);
@@ -196,6 +214,7 @@ const PICKED = Array.from({length: 5000}, (_, i) => (i * 7 + 3) % 251);
 
 const server = http.createServer((req, res) => {
   if (new URL(req.url, 'http://x').pathname === '/apps/up') return upload(req, res);
+  if (new URL(req.url, 'http://x').pathname === '/apps/flaky/blob.bin') return serveFlaky(req, res);
   const f = fileFor(new URL(req.url, 'http://x').pathname);
   if (f && f.json) {
     res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-cache',
@@ -352,6 +371,12 @@ const cases = [
     check: v => v.state === 'failed' && v.log.some(l => /HTTP 404/.test(l)) &&
                 /Could not run/.test(v.status),
   },
+  {
+    name: 'a preload cut off half-way is fetched again past the cache',
+    url: `${ORIGIN}/apps/flaky/?src=main.ari`,
+    before: () => { flaky.hits = flaky.reloads = 0; },
+    check: v => v.state === 'running' && flaky.hits === 2 && flaky.reloads === 1,
+  },
 ];
 
 // The page's file picker, handed a File by the test (a headless page has no one to choose it), and
@@ -405,6 +430,23 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     inject: LOGGED,
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /volume_grid: 32 32 32, slice view down y, added \(10, 15, 12\) to seeds/.test(l)),
+  });
+  // The volume_grid's contours (P10): its document traces the bunny's field on every other plane,
+  // the tiler tiles the curves as a sliced task on the page, then three clicks draw a curve and a
+  // fourth closes it; it prints one line once the tile is done and the curve closed. Its `vgc:`
+  // lines (step | dims | tile | bunny's triangles | status) say where a failing run stopped.
+  const contoursDone = v => v.state === 'running' && v.warnings.length === 0 &&
+      v.out.some(l => /volume_grid_contours: 32 32 32, tiled 1 object: [1-9][0-9]* triangles, closed a curve of drawn on z = 16/.test(l));
+  cases.push({
+    name: 'a volume_grid traces, tiles and draws contours (VolumeGridRover)',
+    url: `${ORIGIN}/apps/app/?src=volume_grid_contours.ari`,
+    inject: LOGGED,
+    check: contoursDone,
+    report: v => contoursDone(v) ? [] : [
+      ...v.warnings.map(w => 'warning: ' + w),
+      ...(v.warning ? ['page warning: ' + v.warning] : []),
+      ...v.out.slice(-12).map(l => 'out: ' + l),
+    ],
   });
   // mesh_lab's skeleton (P2): the bunny decimated, then skeletonized a slice at a time on the
   // single-threaded page; its document prints the counts once the skeleton is drawn (or the error,

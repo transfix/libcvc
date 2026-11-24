@@ -65,8 +65,9 @@
 
 namespace cvc {
 namespace ariadne {
-struct CustomEdit; // backend.h: what a custom widget hands back
-}
+struct CustomEdit;  // backend.h: what a custom widget hands back
+struct SceneCamera; // scene.h: a camera's mode, start and viewpoint
+} // namespace ariadne
 namespace gl {
 class SceneRenderer;
 class ImGuiBackend;
@@ -75,6 +76,13 @@ class SceneGraph;
 namespace ariadne {
 
 struct RealizedScene; // scene_realize.h
+
+// Frame `cam` on the bounds `b` (VTK's order: min x, max x, min y, max y, min z, max z) as the
+// scene camera `s` says (§5.18, Cameras): its mode and where its orbit starts, or its authored
+// viewpoint, with its lens and up axis. What a viewport does with its own camera and a named one,
+// and what AriRuntime does with the main view's when the scene's `cameras:` has one named `main`.
+void frame_scene_camera(CameraController &cam, const double b[6],
+                        const ::cvc::ariadne::SceneCamera &s, SceneGraph &sg);
 
 // A scene a viewport can show: the document's main one ("") or a `scenes:` entry, as the host has
 // realized it.
@@ -121,6 +129,8 @@ public:
     bool hit = false;
     double world[3] = {0.0, 0.0, 0.0};
     std::string node; // the realized node's id ("" when the prop is no node's)
+    // The on_pick: a press here runs: that node's own, else its nearest ancestor's ("" none).
+    std::string on_pick;
     // On a volume_slice node: the voxel the point lies in and its value. In a slice view the
     // pick meets the plane of the slice on the view's axis exactly; `world` is that point even
     // past the volume's edge (then hit and voxel are false), so a drag keeps reporting.
@@ -150,17 +160,21 @@ private:
   void main_view_end();   // ... and its EndEvent: put it back
   void bind_camera(View &v, const std::string &name); // "" its own, "main", or a named camera
   CameraController &controller(View &v);              // what a drag in v moves
+  // Where the keys of the viewport being drawn (pick:, pointer:, axis: { bind }) resolve, for a
+  // view of `sg`: the scope its widget sits in, as its bind: (Backend::custom_scope).
+  std::string key_scope(const SceneGraph &sg) const;
   bool pick_at(View &v, double x, double y, PickHit &hit) const;
   // An input: pick view's pick at the pointer, in `phase` (down, drag, up): written under its
-  // pick key, and its on_pick raised through `edit`.
+  // pick key, and through `edit` the on_pick: of the node the press landed on (PickHit::on_pick)
+  // raised, and the view's own.
   void pick(View &v, const char *phase, ::cvc::ariadne::CustomEdit &edit);
   // A pointer: view's pick at the pointer as it moves with no button down: written under its
   // pointer key with phase "hover" (no on_pick).
   void pointer(View &v);
   // The keys a pick at the pointer writes (x, y, z, hit, node, i, j, k, value, axis, button,
-  // mods, phase, view, seq), `seq` counted by `seq`.
+  // mods, phase, view, seq), `seq` counted by `seq`, and what it hit in `hit`.
   std::vector<std::pair<std::string, std::string>> pick_fields(View &v, const char *phase,
-                                                               long &seq) const;
+                                                               long &seq, PickHit &hit) const;
 
   SceneRenderer *view_;
   ImGuiBackend *backend_;

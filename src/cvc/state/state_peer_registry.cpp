@@ -117,6 +117,36 @@ bool state_peer_registry::delivery_view::deliver(const std::string &path) const 
   return !filter || filter->deliver(path);
 }
 
+namespace {
+// Whether subscription PREFIXES let a delete or reset at PATH through: PATH at or below one of
+// them, or one of them below PATH (the op reaches it). No prefixes is every path.
+bool subtree_matches(const std::vector<std::string> &prefixes, const std::string &path) noexcept {
+  if (prefixes.empty())
+    return true;
+  for (const auto &p : prefixes)
+    if (state_peer_registry::prefix_matches(p, path) ||
+        state_peer_registry::prefix_matches(path, p))
+      return true;
+  return false;
+}
+
+// Whether filter F (null: none) may deliver PATH or, for a subtree op, a path below it.
+bool filter_passes(const state_delivery_filter *f, const std::string &path, bool subtree) noexcept {
+  return f == nullptr || f->deliver(path) || (subtree && f->delivers_below(path));
+}
+} // namespace
+
+bool state_peer_registry::delivery_view::deliver(const std::string &path,
+                                                 bool subtree) const noexcept {
+  if (!subtree)
+    return deliver(path);
+  if (!filter_passes(scope.get(), path, true))
+    return false;
+  if (!known)
+    return true;
+  return subtree_matches(subscriptions, path) && filter_passes(filter.get(), path, true);
+}
+
 bool state_peer_registry::delivery_view::filtered() const noexcept { return ruled() || scope; }
 
 bool state_peer_registry::delivery_view::ruled() const noexcept {
@@ -173,6 +203,23 @@ bool state_peer_registry::should_deliver(const std::string &node_id,
   }
   // The filter is immutable; evaluate it outside the lock.
   return !f || f->deliver(path);
+}
+
+bool state_peer_registry::should_deliver(const std::string &node_id, const std::string &path,
+                                         bool subtree) const {
+  if (!subtree)
+    return should_deliver(node_id, path);
+  std::shared_ptr<const state_delivery_filter> f;
+  {
+    std::lock_guard<std::mutex> lk(_mu);
+    auto it = _peers.find(node_id);
+    if (it == _peers.end())
+      return true; // unknown peer => back-compat default
+    if (!subtree_matches(it->second.subscriptions, path))
+      return false;
+    f = it->second.filter;
+  }
+  return filter_passes(f.get(), path, true);
 }
 
 bool state_peer_registry::note_seen(const std::string &node_id, std::uint64_t now_ns) {

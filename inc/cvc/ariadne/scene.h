@@ -389,6 +389,12 @@ struct SceneNode {
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
 
+  // on_pick: <action> — run when a press in an `input: pick` viewport lands on this node, or on a
+  // descendant with no on_pick: of its own, and again on that press's drags and its release,
+  // wherever they land (§5.18, Picking). A program, with the pick's fields in `event`, or a bare
+  // name for a host handler. It runs in the document's scope, as on_key: does. Empty: none.
+  std::string on_pick;
+
   // repeat: <count> — the node is a template, drawn as `count` copies beside one another (a
   // widget's repeat:, §3). The count is a whole number, a state key holding one (a list's length,
   // as host.set_table writes it), or a read-lane expression (it starts with '('); see
@@ -434,9 +440,9 @@ SceneRepeatCount scene_repeat_count(const std::string &repeat);
 
 // Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
 // `visible:` and `material: { opacity }` binds, its tags, its sources (file, asset, data and item),
-// its texture (an image or a stream), its clips' offset binds and every string in its props, and in
-// its children likewise. The copy's `repeat` is empty. A child that has a repeat: of its own is
-// left as it is, so its copies number themselves, as a nested widget repeat's do.
+// its texture (an image or a stream), its clips' offset binds, its on_pick: and every string in its
+// props, and in its children likewise. The copy's `repeat` is empty. A child that has a repeat: of
+// its own is left as it is, so its copies number themselves, as a nested widget repeat's do.
 SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
@@ -547,7 +553,26 @@ struct SceneCamera {
   bool has_azimuth = false, has_elevation = false;
   double azimuth = 0.0, elevation = 0.0; // where an orbit starts, degrees
   double zoom = 1.0;                     // on the framed distance (2: twice as close)
+  // An authored viewpoint (§5.18, Cameras): where the eye is and what it looks at, in world
+  // coordinates. Either one alone is taken with the framed pose's other; both together replace
+  // azimuth, elevation and zoom.
+  bool has_position = false, has_target = false;
+  double position[3] = {0.0, 0.0, 0.0};
+  double target[3] = {0.0, 0.0, 0.0};
+  bool has_up = false;
+  double up[3] = {0.0, 0.0, 1.0}; // the world's up axis the camera turns about (+z)
+  double fov = 0.0;               // vertical field of view, degrees (0: the camera's own, 30)
+  double near_clip = 0.0;         // a fixed near and far clipping distance (0: fitted)
+  double far_clip = 0.0;
+  bool orthographic = false; // parallel projection in orbit, fly and track
+  double height = 0.0;       // orthographic: how tall the view is at the target (0: framed)
 };
+
+// A camera's viewpoint keys, shared by `scene: cameras:` entries and a viewport's own camera:
+// `position` and `target` ([x, y, z], world coordinates), `up` ([x, y, z], not all 0), `fov`
+// (degrees, 0 to 180), `near` and `far` (distances), `orthographic` and `height`, read from the
+// map `v` into `cam`. A key `v` lacks, or a malformed vector, leaves `cam`'s as it is.
+void read_scene_camera_viewpoint(const Value &v, SceneCamera &cam);
 
 // A document asset (`assets:`): a mesh loaded once and drawn by every node, in any of the
 // document's scenes, whose source is `{ asset: <id> }`. `source` holds what a node would: its

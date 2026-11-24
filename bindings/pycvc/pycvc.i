@@ -1441,6 +1441,7 @@ struct pycvc_py_conversion {
 %include "pycvc_segmentation.i"
 %include "pycvc_tiler.i"
 %include "pycvc_volume_slice.i"
+%include "pycvc_volume_grid_contours.i" // before volume_grid.i: its session holds contours
 %include "pycvc_volume_grid.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
@@ -3889,6 +3890,8 @@ struct execute_options {
   std::string gid;
   std::string root_path;
   std::string owner;
+  // The root the owner's scopes are written from: process_info.scope is root_path relative to it.
+  std::string owner_root;
   unsigned long long max_steps;
   double max_time;
   double max_step_time;
@@ -3965,6 +3968,9 @@ struct process_info {
   int priority;
   std::string uid;
   std::string gid;
+  // Whose it is: its chroot relative to its owner's root ("" for a document's own programs,
+  // "includes.<as>" for a loaded document's; docs/roadmap/ARIADNE_SHELL.md 4.10).
+  std::string scope;
   unsigned long long step_count;
   double elapsed_time;
   unsigned long long current_memory;
@@ -4069,6 +4075,7 @@ struct process {
   std::string gid;
   std::string root_path;
   std::string owner;
+  std::string owner_root;
   bool awaiting_frame;
   unsigned long long max_steps;
   double max_time;
@@ -4839,8 +4846,8 @@ def register_intrinsics(env, ctx):
 // pycvc.ExecPool(app, threads=None, size=None, prefix="exec_pool", fresh_env=False,
 // idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
 // exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
-// raises ValueError. run_all, register_fn, register_async_fn and close() are methods; threads is
-// a read-only property.
+// raises ValueError. run_all, register_fn, register_async_fn, stats() (a dict of run_all's batch
+// wait counters, S2a.8) and close() are methods; threads is a read-only property.
 %feature("kwargs") pycvc::ExecPool::ExecPool;
 %feature("kwargs") pycvc::ExecPool::register_async_fn;
 %exception pycvc::ExecPool::ExecPool {
@@ -4866,6 +4873,10 @@ def register_intrinsics(env, ctx):
 
 // pycvc.WorldGym: a world document driven by reset, step and observe, headless (L4).
 %include "pycvc_gym.i"
+
+// pycvc.net_engine and the rest of cvc::net: the connection engine, with its callbacks on an
+// asyncio loop (docs/roadmap/ARIADNE_NET_ENGINE.md §2.7). pycvc.ariadne.net is the same names.
+%include "pycvc_net.i"
 
 // pycvc.ari: an Ariadne document run from a Python program (Host; ARIADNE.md §9.3, §9.6), which
 // needs pycvc_gl only for a window or offscreen Host. Its source is bindings/pycvc/pymod/ari.py,

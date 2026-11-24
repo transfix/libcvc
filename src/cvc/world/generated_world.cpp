@@ -1174,9 +1174,10 @@ world_generators &generators(cvc::app &app) { return app.slot<world_generators>(
 // The shore edge over any generator's ground, within `band` of the world's rounded edge
 // (world_shore_roundness: the corners curve away into the sea). Measured in from that edge, less a
 // seeded wobble of up to 35 % of the band that fades out by the band's end (bays and headlands),
-// the sea floor (`floor`) rises to the waterline by 25 % of the band, a beach climbs gently
-// (world_beach_slope) to 50 %, and the ground eases back to the relief's own by the band's end.
-// Ground lower than that profile stays as it is, so inland water keeps its bed.
+// the coast is a beach's profile (coast()): the sea floor (`floor`) shelving up to a surf zone that
+// rises to the waterline at 45 % of the band, a beach face up to a berm, and a gentle backshore,
+// then the ground eases back to the relief's own by the band's end. Ground lower than that profile
+// stays as it is, so inland water keeps its bed.
 class shore_terrain : public terrain_source {
 public:
   shore_terrain(std::shared_ptr<const terrain_source> inner, double half, double band, double floor,
@@ -1190,11 +1191,10 @@ public:
     const double h = _inner->sample(x, y), d = from_edge(x, y);
     if (d >= _band)
       return h;
-    const double e = coast_distance(x, y, d), a = 0.25 * _band, b = 0.5 * _band;
-    const double coast = e < a ? _floor + (_sea - _floor) * smooth(e / a)
-                               : _sea + (std::min(e, b) - a) * world_beach_slope;
+    const double e = coast_distance(x, y, d), b = backshore_end();
+    const double z = coast(e);
     const double w = e <= b ? 0.0 : smooth((e - b) / (_band - b));
-    return std::min(h, coast + (h - coast) * w);
+    return std::min(h, z + (h - z) * w);
   }
   double slope_deg(double x, double y, double h_m) const override {
     return from_edge(x, y) >= _band + h_m ? _inner->slope_deg(x, y, h_m)
@@ -1203,13 +1203,17 @@ public:
   terrain_bounds bounds() const override { return _inner->bounds(); }
   double sea_level_m() const override { return _inner->sea_level_m(); }
   double relief_m() const override { return _inner->relief_m(); }
-  bool has_mask(terrain_mask m) const override { return _inner->has_mask(m); }
+  bool has_mask(terrain_mask m) const override {
+    return m == terrain_mask::beach || _inner->has_mask(m);
+  }
   double mask(terrain_mask m, double x, double y) const override {
     const double v = _inner->mask(m, x, y);
     const double d = from_edge(x, y);
+    if (m == terrain_mask::beach) // sand from the sea up to the backshore's end
+      return d < _band && coast_distance(x, y, d) <= backshore_end() ? 1.0 : v;
     if (m != terrain_mask::buildable || d >= _band)
       return v;
-    const double e = coast_distance(x, y, d), b = 0.5 * _band; // no lot on the shore
+    const double e = coast_distance(x, y, d), b = backshore_end(); // no lot on the shore
     return e <= b ? 0.0 : v * smooth((e - b) / (_band - b));
   }
 
@@ -1218,6 +1222,28 @@ private:
     t = std::clamp(t, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
   }
+  // The beach's profile e metres in from the edge (less the wobble), as fractions of the band: the
+  // sea floor at the edge shelves up by 15 % to the foot of a surf zone, which rises at
+  // world_surf_slope to the waterline at 45 % (so a swell shoals and breaks across it, and Hunt's
+  // runup at the waterline is about the swell's height); the beach face climbs
+  // world_beach_face_slope to a berm world_berm_m up (its width at most 20 % of the band), and the
+  // backshore goes on at world_beach_slope to backshore_end(), held level past it.
+  double coast(double e) const {
+    const double toe = 0.15 * _band, wl = 0.45 * _band, deep = _sea - _floor;
+    const double foot = std::min(world_surf_slope * (wl - toe), deep);
+    if (e < toe)
+      return _sea - foot - (deep - foot) * (1.0 - smooth(e / toe));
+    if (e < wl)
+      return _sea - std::min(foot, world_surf_slope * (wl - e));
+    const double face = face_width(), berm = wl + face;
+    if (e < berm)
+      return _sea + world_beach_face_slope * (e - wl);
+    return _sea + world_beach_face_slope * face +
+           world_beach_slope * (std::min(e, backshore_end()) - berm);
+  }
+  double face_width() const { return std::min(world_berm_m / world_beach_face_slope, 0.2 * _band); }
+  // Where the relief starts to take over from the beach: 70 % of the band, or the berm if later.
+  double backshore_end() const { return std::max(0.45 * _band + face_width(), 0.7 * _band); }
   // In from the rounded edge: half less the world_shore_roundness-norm of (x, y), which is the
   // square's own distance along the edges and less towards the corners. At most the square's.
   double from_edge(double x, double y) const {
@@ -1360,7 +1386,7 @@ cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop
 }
 
 world_geometry generated_world::geometry() const {
-  world_geometry g(model ? model->registry() : surface_registry::builtin());
+  world_geometry g(model ? model->registry() : surfaces ? *surfaces : surface_registry::builtin());
   g.set_edge_walls(params.edge == int(world_edge::wall));
   if (terrain) {
     geometry_item t;
@@ -1608,12 +1634,14 @@ struct world_builder::impl {
       // buildings.
       const terrain_source &hf = w.model->terrain();
       const double water = p.water_level_m;
+      // No street on a beach (a shore edge's): the roads keep behind it.
       const bool channel = hf.has_mask(terrain_mask::channel),
-                 cliff = hf.has_mask(terrain_mask::cliff);
-      const city_context ctx{p, hf, [&hf, water, channel, cliff](double x, double y) {
+                 cliff = hf.has_mask(terrain_mask::cliff), beach = hf.has_mask(terrain_mask::beach);
+      const city_context ctx{p, hf, [&hf, water, channel, cliff, beach](double x, double y) {
                                return hf.sample(x, y) < water + 1.5 ||
                                       (channel && hf.mask(terrain_mask::channel, x, y) > 0.5) ||
-                                      (cliff && hf.mask(terrain_mask::cliff, x, y) > 0.5);
+                                      (cliff && hf.mask(terrain_mask::cliff, x, y) > 0.5) ||
+                                      (beach && hf.mask(terrain_mask::beach, x, y) > 0.5);
                              }};
       streets = city(ctx);
       advance(build_stage::grade);
@@ -1775,22 +1803,7 @@ struct world_builder::impl {
     case build_stage::shore: {
       // The bodies of water and the shore grid, from the terrain mesh's samples (the roads graded
       // in), every stride-th one: the shore the mesh draws.
-      const cvc::height_field &t = *w.terrain;
-      const int N = t.rows(), s = water_bodies_stride(N), n = (N - 1) / s + 1;
-      grid_spec g;
-      g.rows = g.cols = n;
-      g.min_x = t.x0();
-      g.min_y = t.y0();
-      g.max_x = t.x0() + t.dx() * (n - 1) * s;
-      g.max_y = t.y0() + t.dy() * (n - 1) * s;
-      std::vector<float> ground(g.count());
-      const std::vector<float> &hs = t.heights();
-      for (int r = 0; r < n; ++r)
-        for (int c = 0; c < n; ++c)
-          ground[std::size_t(r) * n + c] = hs[std::size_t(r) * s * N + std::size_t(c) * s];
-      water_bodies_params wbp;
-      wbp.level_m = p.water_level_m;
-      w.water = build_water_bodies(std::move(ground), g, wbp);
+      w.water = terrain_water_bodies(*w.terrain, p.water_level_m);
       w.terrain_layout = plan_terrain_chunks(*w.terrain);
       w.terrain_chunks.reserve(std::size_t(w.terrain_layout.chunk_rows) *
                                w.terrain_layout.chunk_cols);
@@ -2283,6 +2296,157 @@ cvc::geometry outer_sea(const generated_world &w, double reach_m) {
   return g;
 }
 
+cvc::geometry world_underside(const generated_world &w) {
+  cvc::geometry g;
+  if (w.params.edge == int(world_edge::shore) || !w.terrain)
+    return g;
+  const cvc::height_field &hf = *w.terrain;
+  const int R = hf.rows(), C = hf.cols();
+  if (R < 2 || C < 2)
+    return g;
+  // The terrain mesh's rim, counter-clockwise from above: the south row west to east, the east
+  // column south to north, the north row east to west, the west column north to south.
+  std::vector<cvc::geometry::point_t> rim;
+  rim.reserve(std::size_t(2 * (R + C)));
+  const auto add = [&](int r, int c) {
+    const std::int64_t v = hf.vertex_of(r, c);
+    if (v >= 0)
+      rim.push_back(hf.const_points()[std::size_t(v)]);
+  };
+  for (int c = 0; c < C - 1; ++c)
+    add(0, c);
+  for (int r = 0; r < R - 1; ++r)
+    add(r, C - 1);
+  for (int c = C - 1; c > 0; --c)
+    add(R - 1, c);
+  for (int r = R - 1; r > 0; --r)
+    add(r, 0);
+  const std::size_t N = rim.size();
+  if (N < 8)
+    return g;
+
+  const double cx = 0.5 * (hf.x0() + hf.max_x()), cy = 0.5 * (hf.y0() + hf.max_y());
+  const double half = 0.5 * std::min(hf.max_x() - hf.x0(), hf.max_y() - hf.y0());
+  // How far the rock reaches below its cliffs: about half the world's half-size, more for a
+  // taller relief.
+  const double depth = 0.55 * half + 0.5 * std::max(0.0, w.height_max - w.height_min);
+  // Smooth, seeded, periodic round the rim: a sum of a few angular waves drifting with depth u,
+  // in [-1, 1].
+  double phase[12];
+  for (int i = 0; i < 12; ++i)
+    phase[i] =
+        6.283185307179586 *
+        double(cvc::lsys::detail::splitmix(w.params.seed ^ (0x0DD5u + std::uint64_t(i))) >> 11) /
+        9007199254740992.0;
+  const auto wave = [&phase](double th, double u, int set) {
+    constexpr int m[4] = {3, 5, 9, 14};
+    constexpr double a[4] = {1.0, 0.6, 0.35, 0.2};
+    double s = 0.0;
+    for (int i = 0; i < 4; ++i)
+      s += a[i] * std::sin(m[i] * th + phase[4 * set + i] + (2.0 + i) * u);
+    return s / 2.15;
+  };
+
+  // The rings: 0 the rim itself (so the two meshes meet), 1 a sheer cliff below it (the ground's
+  // cut edge, 2.5-6.5 % of the half-size tall), then kTaper rings that narrow from the square
+  // toward a rounded, jagged cone, and an apex at the bottom.
+  constexpr int kTaper = 9, kRings = 2 + kTaper;
+  std::vector<double> theta(N), cliff(N);
+  double base = std::numeric_limits<double>::infinity();
+  for (std::size_t j = 0; j < N; ++j) {
+    theta[j] = std::atan2(rim[j][1] - cy, rim[j][0] - cx);
+    cliff[j] = half * (0.045 + 0.02 * wave(theta[j], 0.0, 0));
+    base = std::min(base, rim[j][2] - cliff[j]);
+  }
+  const double round_r = 1.06 * half; // the cone's rounded section, between the square's radii
+  cvc::geometry::points_t &P = g.points();
+  P.reserve(N * kRings + 1);
+  P.insert(P.end(), rim.begin(), rim.end());
+  for (std::size_t j = 0; j < N; ++j)
+    P.push_back({rim[j][0], rim[j][1], rim[j][2] - cliff[j]});
+  std::vector<double> ringU(kRings, 0.0), prev(N);
+  for (std::size_t j = 0; j < N; ++j)
+    prev[j] = std::hypot(rim[j][0] - cx, rim[j][1] - cy);
+  for (int k = 1; k <= kTaper; ++k) {
+    const double u = double(k) / (kTaper + 1); // 0.1 .. 0.9 of the way down
+    ringU[std::size_t(1 + k)] = u;
+    const double shrink = std::pow(1.0 - u, 0.6);  // wide near the top, a point below
+    const double toRound = std::min(1.0, 1.7 * u); // the square's corners go first
+    const double rough = 0.08 + 0.1 * u;           // more ragged further down
+    for (std::size_t j = 0; j < N; ++j) {
+      const double sx = rim[j][0] - cx, sy = rim[j][1] - cy;
+      const double sr = std::max(1e-9, std::hypot(sx, sy));
+      // Never out past the ring above, so no ledge stands out beyond the ground's edge.
+      const double rr =
+          std::min((sr + (round_r - sr) * toRound) * shrink * (1.0 + rough * wave(theta[j], u, 1)),
+                   0.97 * prev[j]);
+      prev[j] = rr;
+      const double z = base - depth * std::pow(u, 1.1) + 0.03 * depth * wave(theta[j], u, 2) * u;
+      P.push_back({cx + sx / sr * rr, cy + sy / sr * rr, z});
+    }
+  }
+  P.push_back({cx + 0.03 * half * wave(0.7, 1.0, 1), cy + 0.03 * half * wave(2.1, 1.0, 2),
+               base - 1.05 * depth});
+  const std::size_t apex = P.size() - 1;
+
+  // Faces outward: a quad between rings k and k + 1 is (top j, low j, low j+1), (top j, low j+1,
+  // top j+1), as the terrain's skirts are; the bottom fans to the apex.
+  using idx = cvc::geometry::tri_t::value_type;
+  cvc::geometry::tris_t &T = g.tris();
+  T.reserve(2 * N * (kRings - 1) + N);
+  for (int k = 0; k + 1 < kRings; ++k)
+    for (std::size_t j = 0; j < N; ++j) {
+      const std::size_t j1 = (j + 1) % N;
+      const idx a = idx(k * N + j), b = idx(k * N + j1), c = idx((k + 1) * N + j1),
+                d = idx((k + 1) * N + j);
+      T.push_back({a, d, c});
+      T.push_back({a, c, b});
+    }
+  for (std::size_t j = 0; j < N; ++j)
+    T.push_back({idx((kRings - 1) * N + j), idx(apex), idx((kRings - 1) * N + (j + 1) % N)});
+
+  // Normals: each vertex its faces' (area-weighted).
+  cvc::geometry::normals_t &Nm = g.normals();
+  Nm.assign(P.size(), {0.0, 0.0, 0.0});
+  for (const cvc::geometry::tri_t &t : T) {
+    const auto &p0 = P[t[0]], &p1 = P[t[1]], &p2 = P[t[2]];
+    const double ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const double vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const double n[3] = {uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx};
+    for (const idx v : t)
+      for (int q = 0; q < 3; ++q)
+        Nm[v][q] += n[q];
+  }
+  for (auto &n : Nm) {
+    const double l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (l > 0.0)
+      for (int q = 0; q < 3; ++q)
+        n[q] /= l;
+  }
+
+  // Colours: soil along the cut edge, then rock in strata a few metres thick that waver round the
+  // rim, darker toward the bottom.
+  constexpr double soil[3] = {0.44, 0.36, 0.27}, light[3] = {0.62, 0.56, 0.49},
+                   dark[3] = {0.34, 0.31, 0.28};
+  cvc::geometry::colors_t &Cl = g.colors();
+  Cl.reserve(P.size());
+  for (std::size_t v = 0; v < P.size(); ++v) {
+    const std::size_t k = v == apex ? std::size_t(kRings) : v / N;
+    const double th = v == apex ? 0.0 : theta[v % N];
+    if (k == 0) {
+      Cl.push_back({soil[0], soil[1], soil[2]});
+      continue;
+    }
+    const double u = k >= std::size_t(kRings) ? 1.0 : ringU[k];
+    const double strata =
+        0.5 + 0.5 * std::sin(6.283185307179586 * P[v][2] / 9.0 + 2.0 * wave(th, 0.0, 2));
+    const double f = std::clamp(0.3 * strata + 0.6 * u, 0.0, 1.0);
+    Cl.push_back({light[0] + (dark[0] - light[0]) * f, light[1] + (dark[1] - light[1]) * f,
+                  light[2] + (dark[2] - light[2]) * f});
+  }
+  return g;
+}
+
 std::vector<unsigned char> paint_water(const generated_world &w, int size) {
   size = std::max(2, size);
   std::vector<unsigned char> img(std::size_t(size) * size * 4, 0);
@@ -2298,6 +2462,26 @@ int water_resolution(const generated_world &w) {
   return std::max(80, std::min(320, int(std::lround(2.0 * w.params.half_m / 8.0))));
 }
 int water_bodies_stride(int n) { return std::max(1, (n - 1 + 1023) / 1024); }
+
+water_bodies terrain_water_bodies(const cvc::height_field &t, double level) {
+  const int R = t.rows(), C = t.cols(), s = water_bodies_stride(std::max(R, C));
+  const int nr = (R - 1) / s + 1, nc = (C - 1) / s + 1;
+  grid_spec g;
+  g.rows = nr;
+  g.cols = nc;
+  g.min_x = t.x0();
+  g.min_y = t.y0();
+  g.max_x = t.x0() + t.dx() * (nc - 1) * s;
+  g.max_y = t.y0() + t.dy() * (nr - 1) * s;
+  std::vector<float> ground(g.count());
+  const std::vector<float> &hs = t.heights();
+  for (int r = 0; r < nr; ++r)
+    for (int c = 0; c < nc; ++c)
+      ground[std::size_t(r) * nc + c] = hs[std::size_t(r) * s * C + std::size_t(c) * s];
+  water_bodies_params wbp;
+  wbp.level_m = level;
+  return build_water_bodies(std::move(ground), g, wbp);
+}
 
 std::vector<float> water_field(const generated_world &w, double t, int n, int nz) {
   n = std::max(2, n);

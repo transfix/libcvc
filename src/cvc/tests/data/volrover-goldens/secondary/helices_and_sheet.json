@@ -1,0 +1,37 @@
+{
+  "library": "SecondaryStructures",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "helices_and_sheet",
+  "input": "tools/volrover-goldens/inputs/secondary/helices_and_sheet.pts",
+  "input_sha256": "6f05dad74aca394161d4354577c6a2e2d5c121ea8b698567a21e3b9eaa09e724",
+  "points": 2920,
+  "made_from": "three capsules of radius 2.5 (16 to 20 long, at three angles) and a 20 x 14 x 2.5 slab, sampled every 0.8 and jittered (make_inputs.py)",
+  "parameters": {},
+  "counts": {
+    "skeleton_points": 22129,
+    "skeleton_edges": 6153,
+    "polygons": 2208,
+    "components": 17,
+    "runs": 3,
+    "helices": 3,
+    "helices_drawn": 3,
+    "sheets_drawn": 1,
+    "sheet_candidates": 1,
+    "sheet_polygons": 1662,
+    "debug_files": [
+      "outputTexMol.00.ax",
+      "outputTexMol.U1",
+      "outputTexMol.U2",
+      "outputTexMol.ax",
+      "outputTexMol.curve",
+      "outputTexMol.skel",
+      "outputTexMol.surf",
+      "temp.off",
+      "tempN.off",
+      "test"
+    ]
+  },
+  "ss_sha256": "5d6aeba71935da6c548647e13549d3a423c2af6da82422dca78399b6bae1a40b",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Linux x86_64, Linux-7.0.0-1014-aws-x86_64-with-glibc2.39, Python 3.12.3"
+}

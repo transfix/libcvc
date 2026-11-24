@@ -76,6 +76,9 @@ public:
     bool duplicate = false;    // already in replica seen-set
     bool rejected = false;     // failed authority check
     std::string reject_reason; // populated when rejected
+    // Older than a delete at or above its path (state_sync_adapter::buried): its writer had not
+    // seen the delete. Recorded as seen, never applied, and a relay does not forward it.
+    bool buried = false;
   };
 
   state_cluster_shard(app &ctx, std::string cluster_id, std::string local_node_id,
@@ -211,6 +214,8 @@ public:
   std::uint64_t total_remote_rejected() const noexcept { return _ctr_remote_rejected.load(); }
   std::uint64_t total_conflicts_detected() const noexcept { return _ctr_conflicts_detected.load(); }
   std::uint64_t total_conflicts_lost() const noexcept { return _ctr_conflicts_lost.load(); }
+  // Remote mutations dropped as older than a delete (ingest_result::buried).
+  std::uint64_t total_remote_buried() const noexcept { return _ctr_remote_buried.load(); }
 
   // Per-path conflict detail record.
   struct conflict_entry {
@@ -343,6 +348,11 @@ public:
   using snapshot_entry = state_transport::snapshot_entry;
   std::vector<snapshot_entry> snapshot(const std::string &path_prefix = std::string()) const;
 
+  // The deletes this shard's tree remembers (state_sync_adapter::tombstones: its own and those it
+  // applied), oldest first, each stamped with this shard's cluster id. A relay repeats the ones a
+  // joining peer may have missed (state_transport::missed_deletes).
+  std::vector<state_mutation> tombstones() const;
+
   // Apply one snapshot entry to the local tree as an initial-sync bootstrap: reconstructs value,
   // metadata (comment/hidden/readOnly) and data() (inline or hydrated from a blob_ref). Applies
   // directly through the sync adapter (echo-suppressed), BYPASSING ingest_remote's seen-set /
@@ -449,6 +459,7 @@ private:
   std::atomic<std::uint64_t> _ctr_remote_rejected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_detected{0};
   std::atomic<std::uint64_t> _ctr_conflicts_lost{0};
+  std::atomic<std::uint64_t> _ctr_remote_buried{0};
 
   // Ring buffer of recent conflict entries.
   static constexpr std::size_t kMaxConflictRing = 128;

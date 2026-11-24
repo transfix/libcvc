@@ -1,0 +1,56 @@
+# volume_grid_contours.ari — golden: the volume_grid component's Contours tab (P10) over the signed
+# distance field of the embedded bunny (32^3 here, to keep the run short). The document traces the
+# field's zero level on every other z plane into the object `bunny` (the node's trace request,
+# VolumeGridRover's isocontouring), and auto_tile tiles the curves: the slice view shows plane 15's
+# curve with its control points, the 3D view the three planes, every plane's curves and the tiled
+# surface in the object's colour. The scene waits for the trace and the tile (pending work).
+
+meta:
+  name: golden volume_grid_contours
+  min_libcvc: 4.0.0
+
+import:
+  - cvc://components/volume_grid.ari
+
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
+
+# The trace waits in the request key until the volume is there.
+init: |
+  (begin (state-set "tree.vgc_panel.tab" "Contours")
+         (state-set "graphics.root.children.grid.grid.request" "trace 0 3 27 2"))
+
+on_tick: |
+  (if (!= (state-get "vgc.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-140 -140 -60 140 140 160")
+             (state-set "vgc.opened" "1")))
+
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vgc, title: Volume grid, view_size: 270 }
+    pos: [8, 8]
+    size: [944, 560]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }
+      view: xy
+      tool: contours
+      slice: { z: 15 }
+      objects:
+        - { name: bunny, color: [0.95, 0.7, 0.3] }
+        - { name: drawn, color: [0.3, 0.8, 1.0], interpolation: spline, samples: 4 }
+      contour: { auto_tile: true }
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.42, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.58, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }
