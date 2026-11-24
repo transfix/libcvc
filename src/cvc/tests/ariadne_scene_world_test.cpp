@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/conference/room_calls.h> // GB5: a joined lab's room_call_client
 #include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_scene.h> // room_world_source
@@ -53,6 +54,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // wet_friction
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h> // GB5: a joined lab's room_call_client
 #include <cvc/world/surface.h>
 #include <cvc/world/weather.h>
 #include <cvc/world/world_geometry.h>
@@ -9092,6 +9094,106 @@ TEST(AriadneOneWorld, AClientFollowsTheRelaysWorldSwitch) {
   EXPECT_NEAR(world.ground()(0.0, 0.0), 1.0, 0.05) << "the dome's top";
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+// A lab joined to a relay that runs the same generated_world node (ARIADNE_WORLDS section 18.8,
+// GB5): it makes the world the relay's world_on names, its Regenerate goes to the relay (here none
+// answers: the call ends unavailable when the client fails its calls, and the panel says so) and
+// makes nothing itself, and the
+// world the relay then makes comes back through world_on. A follow is never sent on. Joined to no
+// relay, or to one that runs no such node, the lab makes its worlds itself.
+TEST(AriadneOneWorld, AJoinedLabShowsTheRelaysWorldAndSendsItsRegenerate) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> lab = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(lab, nullptr);
+  ASSERT_NE(lab->generated_world("world"), nullptr);
+  ASSERT_EQ(lab->generated_world("world")->params.seed, 5u);
+  const auto seed_shown = [&] { return lab->generated_world("world")->params.seed; };
+
+  // The relay's world_on: the same node, from seed 9. Not joined yet, so the lab ignores it.
+  const std::string room = "lab";
+  cvc::world::generated_world_params relay_params;
+  ASSERT_TRUE(lab->generated_params("world", relay_params));
+  relay_params.seed = 9;
+  conference::room_world_on on;
+  on.generated.push_back({"world", relay_params});
+  conference::write_room_world_on(app, room, on);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 5u) << "not joined: its own world";
+
+  // Joined (a room_call_client with no transport: its calls wait until fail_all ends them, as a
+  // lost relay does).
+  cvc::app host;
+  cvc::state_cluster_shard shard(host, "conf", "node");
+  const auto calls = std::make_shared<conference::room_call_client>(shard, room, "ann");
+  conference::room_call_client::install(app, calls);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 9u) << "the relay's world";
+  EXPECT_EQ(val(app, "world.seed"), "9") << "the panel shows it";
+  EXPECT_EQ(val(app, "world.server.status"), "the server's world (seed 9)");
+  EXPECT_EQ(val(app, "world.pending"), "0");
+
+  // Regenerate from seed 11: sent to the relay, not made here.
+  cvc::state::instance(app)("world.seed").value("11");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 9u) << "the relay makes it, not the lab";
+  EXPECT_EQ(val(app, "world.server.status"), "asking the server for a new world");
+  calls->fail_all("no relay here");
+  lab->sync(&warnings); // the reply lands
+  EXPECT_EQ(val(app, "world.server.status"), "error: unavailable: no relay here")
+      << val(app, "world.server.status");
+  EXPECT_EQ(val(app, "world.pending"), "1") << "the settings are not the world shown";
+  EXPECT_EQ(seed_shown(), 9u);
+
+  // The relay made it: world_on brings it, and the lab shows it.
+  relay_params.seed = 11;
+  on.generated[0].params = relay_params;
+  conference::write_room_world_on(app, room, on);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 11u);
+  EXPECT_EQ(val(app, "world.pending"), "0");
+  EXPECT_EQ(val(app, "world.server.status"), "the server's world (seed 11)");
+
+  // A follow (SceneWorld::follow_generated, as a client's replica follows) is made here, never
+  // sent on.
+  cvc::world::generated_world_params mine = relay_params;
+  mine.seed = 12;
+  ASSERT_TRUE(lab->follow_generated("world", mine, &warnings));
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 12u);
+
+  // Log in as an admin: the password goes and its key is cleared; here the call ends unavailable.
+  cvc::state::instance(app)("world.server.password").value("secret");
+  cvc::state::instance(app)("world.request").value("rcon");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.password"), "");
+  EXPECT_EQ(val(app, "world.server.status"), "logging in");
+  calls->fail_all("no relay here");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.status"), "refused: no relay here");
+
+  // A relay that runs no such node: the lab makes its own.
+  on.generated[0].node = "elsewhere";
+  conference::write_room_world_on(app, room, on);
+  cvc::state::instance(app)("world.seed").value("13");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 13u);
+
+  // Joined to none: the same.
+  conference::room_call_client::install(app, nullptr);
+  cvc::state::instance(app)("world.request").value("rcon");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.status"), "not joined to a server");
+  cvc::state::instance(app)("world.seed").value("14");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 14u);
 }
 
 // A Regenerate on the relay (OW5f): the params each generated world of the world on was made from

@@ -2063,7 +2063,13 @@ its dataset's name): a directory beside the document, or a zip when it ends in `
 a zip download; `world.save.exports` adds `export/` for other software (the terrain as
 `terrain.glb`, a 16-bit `heightmap.png` and `heightmap.json`), and `world.save.status` says where it
 went or why not. The saved world loads again as a `data:` entry (`uri:` it, `as: city_bundle`), the
-same world: the same hash. Its trees and rocks draw
+same world: the same hash. Joined to a relay whose document runs the same node (its
+`conf.rooms.<room>.world_on` lists it; `GeneratedWorldRelay`), the node makes the world the relay
+has, and its Regenerate, Randomize and `world.auto` edits go to the relay as
+`(room-call "server.regenerate" NODE PARAMS)` instead of being made here: the relay makes them for
+a connection `server.rcon` made an admin and refuses anyone else, and the world it makes comes back
+to every client through `world_on`. `world.request: rcon` sends `world.server.password` as
+`server.rcon` (and clears it), and `world.server.status` says what the relay did. Its trees and rocks draw
 with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<id>_props`,
 `<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
 full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the

@@ -1498,13 +1498,26 @@ level). The content hash leaves `export/` out, so a saved world, with or without
 loads back (`uri:` it, `as: city_bundle`) with the hash it was saved with. The save runs on the
 frame thread, at once.
 
+Done (GB5, part 1: the lab in One World): a lab joined to a relay whose document runs the same
+generated_world node edits the relay's world, which is the room's. The owner, 2026-11-24: "if the
+server has admin through the rcon password then they can do it". `GeneratedWorldRelay` (both hosts,
+cvcGL's node and the headless one) makes the world the relay's `world_on` names (a "follow" request,
+never sent back), and sends the panel's Regenerate, Randomize and `world.auto` edits to the relay
+as `server.regenerate` instead of making them. arisrv answers it only for a connection `server.rcon`
+made an admin (ARISRV_IDENTITY 2.5); the world is made at the relay's next sync, and
+`publish_world_on` takes its params to every client, whose labs and replicas then make it.
+`world_controls` has an admin password field, "Log in as admin" (`world.request: rcon`) and the
+server status. Still open in GB5: the dataset's hash and revision in `world_on`, so a client
+checks the world it made against the relay's, and fetches the bytes by content address when they
+differ or it has no generator; a regenerated world going in at a tick (`SceneColliders.from_tick`).
+
 | Phase | What | Size |
 |---|---|---|
 | GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
 | GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: a data node whose dataset is a world (Austin, a saved or made world) draws with the generated-world renderer: the terrain's LOD chunks on the bundle's ground (a non-square aerial image included), the props' cells, the buildings, roads and water, made in a sliced job and put in a piece at a time. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. Done: `world.request: save`, `data_save_files`, `archive::pack_zip`, `city_bundle_exports` (`export/`, outside the hash), 16-bit grey `encode_png`. | M |
-| GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
+| GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. Part 1 done: a joined lab follows the relay's world, and an rcon admin's Regenerate makes it (`server.regenerate`, `GeneratedWorldRelay`). | M |
 
 ### 18.9 A world's rate: the server chooses, the clients follow
 
