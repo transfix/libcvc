@@ -577,6 +577,10 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
   if (steer)
     s.angular_velocity = chassis.angular_velocity;
   w.set_state(_jchassis, s);
+  // A jolt vehicle's wheels at the relay's steering angle (OW5r), the actuator's: a client that
+  // joins mid-turn turns with the relay's car from the first step, not from straight wheels.
+  if (steer && !_boat && _jveh.valid())
+    w.set_vehicle_steer(_jveh, *steer);
   keep_jolt(v);
   return v;
 }

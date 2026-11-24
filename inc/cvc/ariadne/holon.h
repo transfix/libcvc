@@ -81,6 +81,12 @@ struct holon_config {
 
   cvc::world_clock::config clock; // the holon's own quantum / scale / mode
   double reconcile_tol = 0.05;    // metres; the client's snap threshold (slice 2)
+  // CLIENT: a predicted vehicle is placed again from a sample also when its heading or its
+  // velocity is off what was predicted for that tick by more than these (rad, m/s), not only its
+  // place (OW5r): a heading a little off, its place still within reconcile_tol, carries it off
+  // line.
+  double reconcile_yaw_tol = 0.01;
+  double reconcile_speed_tol = 0.05;
   // CLIENT: how far (in ticks) the replica's clock may drift from the server's tick before
   // apply_authoritative re-aligns it. 60 = 0.5 s at the default 120 Hz. See apply_authoritative.
   std::uint64_t max_skew_ticks = 60;
@@ -681,6 +687,10 @@ private:
   void vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick);
   void vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
                          std::uint64_t server_tick, std::optional<double> steer);
+  // Whether a vehicle predicted at heading YAW and velocity (VX, VY) moves as the sample AUTH does:
+  // within reconcile_yaw_tol and reconcile_speed_tol (OW5r).
+  bool moves_as_predicted(double yaw, double vx, double vy,
+                          const cvc::physics::body_state &auth) const;
   void dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
                          std::uint64_t server_tick, std::optional<double> steer);
   // The world a jolt vehicle or a boat is predicted in: the statics, the water and the gravity
