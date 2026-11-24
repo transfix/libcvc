@@ -1975,6 +1975,36 @@
           "patternProperties": {"^x-": true},
           "additionalProperties": false
         },
+        "pbr": {
+          "description": "Physically based shading (docs/ARIADNE.md §5.4): true for the defaults, or its values.",
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {
+              "type": "object",
+              "properties": {
+                "metallic": {"type": "number", "minimum": 0, "maximum": 1},
+                "roughness": {"type": "number", "minimum": 0, "maximum": 1},
+                "emissive": {"$ref": "#/$defs/rgb"},
+                "coat": {
+                  "anyOf": [
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {
+                      "type": "object",
+                      "properties": {
+                        "strength": {"type": "number", "minimum": 0, "maximum": 1},
+                        "roughness": {"type": "number", "minimum": 0, "maximum": 1}
+                      },
+                      "patternProperties": {"^x-": true},
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
         "opaque": {"$ref": "#/$defs/flag"},
         "opacity": {
           "anyOf": [
@@ -2507,6 +2537,23 @@
         "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
         "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
         "animations": {"type": "array", "items": {"$ref": "#/$defs/animation"}},
+        "environment": {
+          "description": "The light pbr: materials take from all round (docs/ARIADNE.md §5.4): a gradient, or false / none for the lights alone.",
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {"enum": ["none"]},
+            {
+              "type": "object",
+              "properties": {
+                "sky": {"$ref": "#/$defs/rgb"},
+                "horizon": {"$ref": "#/$defs/rgb"},
+                "ground": {"$ref": "#/$defs/rgb"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
         "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
         "main_view": {
           "type": "object",
@@ -2642,6 +2689,23 @@
         "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
         "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
         "animations": {"type": "array", "items": {"$ref": "#/$defs/animation"}},
+        "environment": {
+          "description": "The light pbr: materials take from all round (docs/ARIADNE.md §5.4): a gradient, or false / none for the lights alone.",
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {"enum": ["none"]},
+            {
+              "type": "object",
+              "properties": {
+                "sky": {"$ref": "#/$defs/rgb"},
+                "horizon": {"$ref": "#/$defs/rgb"},
+                "ground": {"$ref": "#/$defs/rgb"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
         "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
         "main_view": {
           "type": "object",
