@@ -36,6 +36,11 @@ public:
   // program parked for `idle_timeout` seconds with nothing pending is killed, as in Exec.run.
   // Anything else, or a negative or NaN idle_timeout, raises ValueError (std::invalid_argument).
   //
+  // One prefix per live pool of the app (its chroots are its groups' channel prefixes): the default
+  // "exec_pool" takes the first free of exec_pool, exec_pool_2, exec_pool_3, ... (`prefix` reports
+  // it), and any other prefix a live pool of the app already uses raises ValueError. A closed
+  // pool's prefix is free again.
+  //
   // Pooled Exec i's programs run with owner "pycvc:<prefix>.<i>" (S2-Q7), which their spawned and
   // forked children keep: a program of one pooled Exec cannot kill, pause or resume another's
   // processes ((kill pid) gives #f). Its group is the home of the channels under its chroot (S2b),
@@ -69,6 +74,9 @@ public:
 
   // The app pool's worker count, the real one (in Python, the read-only property `threads`).
   unsigned threads() const;
+  // The prefix its pooled Execs are chrooted under (in Python, the read-only property `prefix`):
+  // the one given, or the default's pick.
+  std::string prefix() const;
 
 #ifndef SWIG
   // ExecPool.info(pid)'s row (pycvc.i makes the dict): the app pool's exec_pool::info, `pid`'s
