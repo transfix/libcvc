@@ -2786,7 +2786,8 @@ bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
          k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
-         k == "casts_shadow" || k == "tags" || k == "repeat" || k == "use" || k == "args";
+         k == "casts_shadow" || k == "tags" || k == "repeat" || k == "on_pick" || k == "use" ||
+         k == "args";
 }
 
 // A node's subtree has a repeat: below its root.
@@ -3720,6 +3721,7 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
         sn.visible_bind = v; // a state path (or, later, an expression); default true
     }
   }
+  sn.on_pick = str(n, "on_pick"); // a program, or a bare name for a host handler
   const YAML::Node vr = n["volren"];
   if (vr && vr.IsMap()) {
     sn.has_volren = true;
