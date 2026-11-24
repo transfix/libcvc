@@ -598,7 +598,10 @@ void hold_entities(holon &h, cvc::app &app, const std::string &room, const std::
       if (e.id == driving || e.driver == self_pid || e.avatar == self_pid)
         continue;
       cvc::physics::body_state at;
-      if (entities->state(e.id, at) && h.hold_entity(e.id, e.size, at))
+      // Its mass when the relay's world can push it (a jolt vehicle, a dynamic plant's box: its
+      // model's numbers carry it), else a kinematic box (OW5o).
+      const double mass = e.dynamics.valid() ? e.dynamics.mass : 0.0;
+      if (entities->state(e.id, at) && h.hold_entity(e.id, e.size, at, mass))
         keep.insert(e.id);
     }
   }
@@ -692,7 +695,7 @@ std::size_t apply_pose_samples(holon &h, const std::vector<pose_sample> &samples
       continue;
     }
     if (h.has_participant(s.pid)) {
-      h.apply_authoritative(s.pid, s.state, server_tick);
+      h.apply_authoritative(s.pid, s.state, server_tick, s.steer);
       ++applied;
     }
   }

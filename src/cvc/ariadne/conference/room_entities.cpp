@@ -305,6 +305,7 @@ std::vector<pose_subject> entity_pose_subjects(const WorldVehicles &vehicles) {
     pose_subject s;
     s.pid = entity_pid(info.id);
     s.state = entity_ride(info, &vehicles.world()); // its chassis's attitude too (OW5m)
+    s.steer = info.steer;                           // and its steering (OW5n)
     s.state.active = true;
     out.push_back(std::move(s));
   }
