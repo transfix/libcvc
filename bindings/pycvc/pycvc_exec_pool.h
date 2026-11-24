@@ -40,7 +40,7 @@ public:
   // forked children keep: a program of one pooled Exec cannot kill, pause or resume another's
   // processes ((kill pid) gives #f). Its group is the home of the channels under its chroot (S2b),
   // so they stay local; a key outside it ("/k") is homed at the app's exec scheduler (group 0),
-  // which the pool builds now and run_all drains.
+  // which run_all drains while it has posts (the first such key builds it).
   //
   // The pooled Execs are not exposed: no Python thread reaches a pooled scheduler.
   explicit ExecPool(const std::shared_ptr<cvc::app> &app, PyObject *threads = nullptr,
