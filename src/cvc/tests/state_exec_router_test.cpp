@@ -471,4 +471,285 @@ TEST(PublishedInfo, RowsAreRebuiltOnGenerationMovesAndCountersRefreshEvery100Ms)
   EXPECT_TRUE(a.sched().kill(waiter));
 }
 
+// --- S2b.5 the owner rule and pool.kill_owner ---
+
+// Locally (S2-Q8): an owned caller sees and controls only its owner's processes; an unowned one,
+// every process, as before. Both schedulers (the sync one has scheduler_base's default).
+template <class Sched> void local_owner_rule(const char *kind) {
+  cvc::app app;
+  quiet_rates(app);
+  Sched sched;
+  programs w(app, sched, "s");
+  const auto run = [&] {
+    if constexpr (std::is_same_v<Sched, se::async_scheduler>) {
+      sched.drain_ingress();
+      sched.sync_run_steps(kRun.steps, std::nullopt);
+    } else {
+      sched.run(kRun.steps);
+    }
+  };
+  const int mine = sched.execute(std::string(kWaits), w.opts("X"));
+  const int theirs = sched.execute(std::string(kWaits), w.opts("Y"));
+  const int spinner = sched.execute(std::string(kSpins), w.opts("Y"));
+  run();
+  const auto probe = [&](int target) {
+    const std::string t = std::to_string(target);
+    return "(str-concat (if (inspect " + t + ") \"seen\" \"none\") \" \" (if (pause " + t +
+           ") \"t\" \"f\") (if (resume " + t + ") \"t\" \"f\") (if (kill " + t + ") \"t\" \"f\"))";
+  };
+  // X's caller: its own process seen, killed; Y's spinner unknown (none, f f f) and untouched.
+  const int x = sched.execute("(str-concat (str (length (ps))) \" \" " + probe(spinner) +
+                                  " \" \" " + probe(mine) + ")",
+                              w.opts("X"));
+  run();
+  EXPECT_EQ(result_of(sched, x), "2 none fff seen fft") << kind;
+  const auto st = [&](int pid) { return sched.get_process_info(pid)->status; };
+  EXPECT_EQ(st(spinner), se::process_status::ready) << kind;
+  EXPECT_EQ(st(theirs), se::process_status::waiting) << kind;
+  EXPECT_EQ(st(mine), se::process_status::killed) << kind;
+  // An unowned caller, as before: every row (the four so far, and itself), pause and resume of the
+  // spinner, the kill of Y's waiter.
+  const int u = sched.execute("(str-concat (str (length (ps))) \" \" " + probe(spinner) +
+                                  " \" \" " + probe(theirs) + ")",
+                              w.opts(""));
+  run();
+  EXPECT_EQ(result_of(sched, u), "5 seen ttt seen fft") << kind;
+  EXPECT_EQ(st(spinner), se::process_status::killed) << kind;
+  EXPECT_EQ(st(theirs), se::process_status::killed) << kind;
+}
+
+TEST(OwnerRule, LocalControlIsFilteredForAnOwnedCaller) {
+  local_owner_rule<se::async_scheduler>("async");
+  local_owner_rule<se::scheduler>("sync");
+}
+
+// Across groups (S2-Q8): a caller's kill, pause and resume of a pid the directory gives its own
+// owner in another group are posted there and give #t; another owner's, an unowned caller's or an
+// unknown pid's give #f and post nothing. Group 0 is a group as any other.
+TEST(OwnerRule, AcrossGroupsTheCallersOwnerIsPosted) {
+  cvc::app app;
+  quiet_rates(app);
+  group_world a(app, "a"), b(app, "b");
+  group0_world zero(app);
+  const int waiter = a.submit(kWaits, "X");
+  const int spinner = a.submit(kSpins, "X");
+  const int other = a.submit(kWaits, "Y");
+  const int in0 = zero.submit(kWaits, "X");
+  a.g().pump(kRun);
+  zero.pump();
+  listed(app, waiter, a.g().route(), "X");
+  listed(app, spinner, a.g().route(), "X");
+  listed(app, other, a.g().route(), "Y");
+  listed(app, in0, app.exec_scheduler().route_self(), "X");
+  const auto tf = [](const std::string &call) { return "(if " + call + " \"t\" \"f\")"; };
+  const auto pid = [](int p) { return std::to_string(p); };
+  // Refused: Y's caller on X's pids, an unowned caller, X on Y's pid, an unknown pid.
+  const int y =
+      b.submit("(str-concat " + tf("(kill " + pid(waiter) + ")") +
+                   tf("(pause " + pid(spinner) + ")") + tf("(kill " + pid(in0) + ")") + ")",
+               "Y");
+  const int none = b.submit(
+      "(str-concat " + tf("(kill " + pid(waiter) + ")") + tf("(kill " + pid(in0) + ")") + ")", "");
+  const int x_bad =
+      b.submit("(str-concat " + tf("(kill " + pid(other) + ")") + tf("(kill 999999)") + ")", "X");
+  b.g().pump(kRun);
+  EXPECT_EQ(result_of(b.sched(), y), "fff");
+  EXPECT_EQ(result_of(b.sched(), none), "ff");
+  EXPECT_EQ(result_of(b.sched(), x_bad), "ff");
+  EXPECT_FALSE(a.sched().has_pending_control()) << "a refused call posted";
+  EXPECT_FALSE(app.exec_scheduler().has_pending_control()) << "a refused call posted";
+  // X's caller: posted, #t ("requested"), applied at the target's next pump.
+  const int x = b.submit("(str-concat " + tf("(pause " + pid(spinner) + ")") +
+                             tf("(kill " + pid(waiter) + ")") + tf("(kill " + pid(in0) + ")") + ")",
+                         "X");
+  b.g().pump(kRun);
+  EXPECT_EQ(result_of(b.sched(), x), "ttt");
+  EXPECT_TRUE(a.sched().has_pending_control());
+  a.g().pump(se::pump_budget{1, kNoTime});
+  zero.pump();
+  EXPECT_EQ(status_of(a.sched(), spinner), se::process_status::paused);
+  EXPECT_EQ(status_of(a.sched(), waiter), se::process_status::killed);
+  EXPECT_EQ(*a.sched().get_process_info(waiter)->exit_error, "killed_by_user");
+  EXPECT_EQ(status_of(a.sched(), other), se::process_status::waiting);
+  EXPECT_EQ(status_of(app.exec_scheduler(), in0), se::process_status::killed);
+  // A resume is #t even where the target would say #f; this one applies.
+  const int r = b.submit("(str-concat " + tf("(resume " + pid(spinner) + ")") +
+                             tf("(resume " + pid(other) + ")") + ")",
+                         "X");
+  b.g().pump(kRun);
+  EXPECT_EQ(result_of(b.sched(), r), "tf");
+  a.g().pump(se::pump_budget{1, kNoTime});
+  EXPECT_NE(status_of(a.sched(), spinner), se::process_status::paused);
+  EXPECT_TRUE(a.sched().kill(spinner));
+  EXPECT_TRUE(a.sched().kill(other));
+}
+
+// pool.kill_owner's world: groups a, b and c and group 0, each with a waiting and a spinning
+// process of X and one of Y, listed in the directory.
+struct kill_world {
+  cvc::app app;
+  std::vector<std::unique_ptr<group_world>> groups;
+  std::unique_ptr<group0_world> zero;
+  struct proc {
+    se::async_scheduler *sched;
+    int pid;
+    std::string owner;
+  };
+  std::vector<proc> procs;
+
+  explicit kill_world(unsigned threads) {
+    quiet_rates(app);
+    app.root()("state_exec.locks.threading").value(std::string("shared"));
+    cvc::pool_options po;
+    po.threads = threads;
+    po.pump_steps = 200;
+    app.exec_pool(po);
+    for (const char *name : {"a", "b", "c"})
+      groups.push_back(std::make_unique<group_world>(app, name));
+    zero = std::make_unique<group0_world>(app);
+    for (auto &g : groups)
+      add(g->sched(), g->g().route(),
+          [&](const char *src, const char *owner) { return g->submit(src, owner); });
+    add(zero->sched(), app.exec_scheduler().route_self(),
+        [&](const char *src, const char *owner) { return zero->submit(src, owner); });
+  }
+  ~kill_world() {
+    groups.clear();
+    zero.reset();
+  }
+  void add(se::async_scheduler &s, const se::group_ref &route,
+           const std::function<int(const char *, const char *)> &submit) {
+    for (const auto &[src, owner] :
+         {std::pair{kWaits, "X"}, std::pair{kSpins, "X"}, std::pair{kWaits, "Y"}}) {
+      const int pid = submit(src, owner);
+      listed(app, pid, route, owner);
+      procs.push_back({&s, pid, owner});
+    }
+  }
+  cvc::exec_pool &pool() { return app.exec_pool(); }
+  // Every X process killed by the command (owner_reaped), every Y process live.
+  void expect_killed(const std::string &where) {
+    for (const proc &p : procs) {
+      const auto info = p.sched->get_process_info(p.pid);
+      ASSERT_TRUE(info.has_value()) << where;
+      if (p.owner == "X") {
+        EXPECT_EQ(info->status, se::process_status::killed) << where << " pid " << p.pid;
+        EXPECT_EQ(info->exit_error.value_or(""), "owner_reaped") << where << " pid " << p.pid;
+      } else {
+        EXPECT_FALSE(se::is_finished(info->status)) << where << " pid " << p.pid;
+      }
+    }
+  }
+};
+
+// Fork-join (td 4.5): nothing pumps the groups or group 0, so kill_owner drains each inline and
+// returns with every one of the owner's processes killed, at threads 0, 1 and 2.
+TEST(PoolKillOwner, ForkJoinDrainsEachGroupInline) {
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    kill_world w(threads);
+    std::vector<se::exec_group *> gs;
+    for (auto &g : w.groups)
+      gs.push_back(&g->g());
+    w.pool().pump_all(gs, kRun, clock_type::time_point::max());
+    w.zero->pump();
+    w.pool().kill_owner("X");
+    w.expect_killed("threads " + std::to_string(threads));
+    w.pool().kill_owner("X"); // none left live: each group applies it again, killing nothing
+    w.pool().kill_owner("nobody");
+    w.expect_killed("again, threads " + std::to_string(threads));
+  }
+}
+
+// Continuous (S2-Q8): groups attached to this thread are drained under with_group; one attached
+// to another thread is waited for (its pumps apply the command), as is group 0 when that thread
+// holds its pump owner. At threads 0, 1 and 2.
+TEST(PoolKillOwner, ContinuousWaitsForEachGroup) {
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    kill_world w(threads);
+    cvc::exec_pool &pool = w.pool();
+    se::exec_group &c = w.groups[2]->g();
+    pool.attach(w.groups[0]->g());
+    pool.attach(w.groups[1]->g());
+    // c is attached to, and pumped (or serviced) by, another thread until the end.
+    std::atomic<bool> attached{false}, stop{false};
+    std::thread other([&] {
+      pool.attach(c);
+      attached = true;
+      while (!stop.load())
+        if (!pool.pump_host(kNoTime))
+          pool.wait_for_work(0.002);
+      pool.detach(c);
+    });
+    while (!attached.load())
+      std::this_thread::yield();
+    pool.kill_owner("X");
+    stop = true;
+    other.join();
+    pool.detach(w.groups[0]->g());
+    pool.detach(w.groups[1]->g());
+    w.expect_killed("threads " + std::to_string(threads));
+  }
+}
+
+// KO-3's shape (C's own case, at each mode): a group torn down while kill_owner waits on it ends
+// the wait: its teardown holds its token (so kill_owner cannot drain it) until the command is in
+// its ingress; its destructor then refuses the command (done(false)), and kill_owner returns with
+// the other groups' processes killed.
+TEST(PoolKillOwner, AGroupTornDownMeanwhileEndsTheWait) {
+  for (const bool continuous : {false, true}) {
+    kill_world w(1);
+    cvc::exec_pool &pool = w.pool();
+    std::atomic<bool> in_teardown{false};
+    // The dying group: d, with one X process, its teardown hook waiting for the command.
+    auto d = std::make_unique<group_world>(w.app, "d", [&](se::exec_group::options &o) {
+      o.teardown_hook_for_test = [&](se::exec_group &g) {
+        in_teardown = true;
+        const auto t0 = clock_type::now();
+        while (!g.sched().has_pending_control() &&
+               clock_type::now() - t0 < std::chrono::seconds(30))
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      };
+    });
+    const int dpid = d->submit(kWaits, "X");
+    listed(w.app, dpid, d->g().route(), "X");
+    std::thread owner_thread([&, dd = d.release()]() mutable {
+      std::unique_ptr<group_world> mine(dd);
+      if (continuous) {
+        pool.attach(mine->g());
+        pool.pump_host(kNoTime);
+      }
+      mine.reset(); // the teardown (detaching it first when attached)
+    });
+    while (!in_teardown.load())
+      std::this_thread::yield();
+    pool.kill_owner("X");
+    owner_thread.join();
+    w.expect_killed(continuous ? "continuous" : "fork-join");
+  }
+}
+
+// Refused from inside a pump, host body or callback of the pool (std::logic_error): here a native
+// of a group pumped by pump_all, on its caller (threads 0).
+TEST(PoolKillOwner, RefusedFromInsideAPumpOfThePool) {
+  kill_world w(0);
+  std::string seen;
+  group_world &a = *w.groups[0];
+  se::builtins::register_fn(a.env, "ko", [&](std::span<const se::value_t>) -> se::value_t {
+    try {
+      w.pool().kill_owner("Y");
+      seen = "ran";
+    } catch (const std::logic_error &) {
+      seen = "refused";
+    }
+    return se::nil_value();
+  });
+  a.submit("(ko)", "Z");
+  std::vector<se::exec_group *> gs{&a.g()};
+  w.pool().pump_all(gs, kRun, clock_type::time_point::max());
+  EXPECT_EQ(seen, "refused");
+  for (const kill_world::proc &p : w.procs)
+    if (p.owner == "Y")
+      EXPECT_FALSE(se::is_finished(status_of(*p.sched, p.pid)));
+}
+
 } // namespace c_tests

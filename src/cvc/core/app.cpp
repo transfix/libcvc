@@ -441,6 +441,10 @@ app::~app() {
       }
     }
   }
+  // Group 0 (S2b) goes with the members: its scheduler closes its router handle first thing, after
+  // the async host (declared after it) and before group 0's state, whose router and directory
+  // outlive it. By then every group, the pool, the hosts and the app's threads are gone, so nothing
+  // posts to it after the close; a post through the closed handle would be refused.
 }
 
 data_map app::data() {
@@ -1724,9 +1728,12 @@ void app::exec_pump_frame() {
     if (_execGroup0)
       group0_stream = &_execGroup0->random;
   }
+  // Or while anything posted to it waits (S2b, S2.md section 0 row 22): a router entry homed there,
+  // a command (pool.kill_owner's), a message for a process to come.
   if (group0) {
     const se::scheduler_stats s = group0->get_stats();
-    if (s.total_processes - s.terminated - s.killed - s.failed <= 0)
+    if (s.total_processes - s.terminated - s.killed - s.failed <= 0 &&
+        !group0->has_pending_ingress())
       group0 = nullptr;
   }
   // Deterministic mode (td 4.4) reaches group 0 as it does the frame groups: slices fixed in

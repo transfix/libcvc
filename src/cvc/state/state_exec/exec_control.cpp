@@ -83,9 +83,9 @@ std::size_t exec_directory::size() const {
 // --- The router's control entry points (S2b.5) and info (S2b.3) ---
 
 bool exec_router::post_control(int pid, control_cmd cmd) {
-  (void)pid;
-  (void)cmd;
-  return false;
+  // The directory's mutex is a leaf: the entry is copied out before anything is posted.
+  const std::optional<directory_entry> e = directory_.find(pid);
+  return e && e->group.post_control(pid, std::move(cmd));
 }
 
 std::optional<published_process> exec_router::info(int pid) const {
@@ -100,7 +100,28 @@ std::optional<published_process> exec_router::info(int pid) const {
 // --- async_scheduler: the owner rule (S2b.5) ---
 
 bool async_scheduler::control_as(const std::string &caller_owner, int pid, control_cmd::kind what) {
-  return scheduler_base::control_as(caller_owner, pid, what);
+  if (what != control_cmd::kind::kill && what != control_cmd::kind::pause &&
+      what != control_cmd::kind::resume)
+    return false;
+  // The local half (scheduler_base's default, read from the table rather than a process_info): a
+  // caller with an owner reaches only its owner's processes; one without, every process.
+  if (const process *p = procs_.find(pid)) {
+    if (!caller_owner.empty() && p->owner != caller_owner)
+      return false;
+    if (what == control_cmd::kind::kill)
+      return kill(pid);
+    return what == control_cmd::kind::pause ? pause(pid) : resume(pid);
+  }
+  // The directory's half (S2-Q8): a pid in another group of the caller's own, non-empty, owner is
+  // posted there, and "requested" is #t. Owner "" has no rights across groups (S2-Q7).
+  if (caller_owner.empty() || !router_)
+    return false;
+  const std::optional<directory_entry> e = router_->directory().find(pid);
+  if (!e || e->owner != caller_owner || e->group == route_self_)
+    return false;
+  control_cmd cmd;
+  cmd.what = what;
+  return e->group.post_control(pid, std::move(cmd));
 }
 
 // --- async_scheduler: published info (S2b.3; S2-Q9) ---
