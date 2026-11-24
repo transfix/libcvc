@@ -28,7 +28,7 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/ariadne/entity_view.h>  // entity_drawn_as_node: who has a node
+#include <cvc/gl/ariadne/entity_view.h>
 #include <cvc/gl/ariadne/scene_labels.h> // entity_labels:
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/vehicle_view.h>
