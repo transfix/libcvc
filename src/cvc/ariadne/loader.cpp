@@ -101,13 +101,18 @@ struct block_table {
   std::mutex m;
   std::map<std::string, AriBlockParser> parsers;
 };
+// The top-level keys the loader reads itself (builtin_ari_blocks).
+constexpr const char *kBuiltinBlocks[] = {
+    "meta",      "menubar", "windows",      "overlays",      "root",         "children",
+    "scene",     "customs", "init",         "on_tick",       "on_key",       "on_pointer",
+    "on_signal", "units",   "import",       "channels",      "lint",         "args",
+    "requires",  "keys",    "windows_menu", "tests",         "functions",    "data",
+    "assets",    "scenes",  "clock",        "menu_collapse", "notifications"};
 bool is_builtin_block(const std::string &k) {
-  return k == "meta" || k == "menubar" || k == "windows" || k == "overlays" || k == "root" ||
-         k == "children" || k == "scene" || k == "customs" || k == "init" || k == "on_tick" ||
-         k == "on_key" || k == "on_pointer" || k == "on_signal" || k == "units" || k == "import" ||
-         k == "channels" || k == "lint" || k == "args" || k == "requires" || k == "keys" ||
-         k == "windows_menu" || k == "tests" || k == "functions" || k == "data" || k == "assets" ||
-         k == "scenes" || k == "clock" || k == "menu_collapse" || k == "notifications";
+  for (const char *b : kBuiltinBlocks)
+    if (k == b)
+      return true;
+  return false;
 }
 // The parser `app` has for block `key`, or none.
 AriBlockParser find_ari_block(cvc::app &app, const std::string &key) {
@@ -130,203 +135,33 @@ bool has_ari_block(cvc::app &app, const std::string &key) {
   return static_cast<bool>(find_ari_block(app, key));
 }
 
-// ---- the .ari JSON Schema (Layer 2, roadmap §15) ----------------------------
-// A permissive draft-2020-12 schema: it enforces the meta block (min_libcvc
-// required) and the FIELD types of widgets (bind is a string, lo/hi numbers,
-// options an array of strings, …), while leaving the widget type-key and any
-// forward-compat keys unconstrained (additionalProperties defaults true) so a
-// newer document still validates its known structure. Exposed for tooling even
-// when the validator itself is not linked. A tf_editor (short form or `type:`) gets
-// its own config types ($defs/tf_editor): its `default:` may be a model string OR
-// the same document as a YAML map, and its flags take every spelling the loader's
-// flag() reads ($defs/flag); every other widget's `default:` is a string.
-namespace {
-const char *const kAriSchema = R"ARISCHEMA({
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cvcpkg.org/schemas/ari.schema.json",
-  "title": "Ariadne .ari document",
-  "type": "object",
-  "properties": {
-    "meta": {
-      "type": "object",
-      "properties": {
-        "name": {"type": "string"},
-        "author": {"type": "string"},
-        "description": {"type": "string"},
-        "version": {"type": "string"},
-        "min_libcvc": {"type": "string"}
-      },
-      "required": ["min_libcvc"]
-    },
-    "menubar":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-    "windows_menu": {"type": ["boolean", "string"]},
-    "clock":    {"type": "boolean"},
-    "notifications": {"enum": [true, false, "always"]},
-    "menu_collapse": {"enum": [true, false, "auto", "never", "always"]},
-    "keys": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "label": {"type": "string"},
-          "key": {"type": ["string", "array"], "items": {"type": "string"}},
-          "on": {"type": "string"}
-        }
-      }
-    },
-    "windows":  {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-    "overlays": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-    "root":     {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-    "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-    "requires": {
-      "type": "array",
-      "items": {
-        "type": ["string", "object"],
-        "properties": {"name": {"type": "string"}, "optional": {"type": "boolean"}},
-        "required": ["name"]
-      }
-    },
-    "data": {
-      "type": "object",
-      "additionalProperties": {
-        "type": ["string", "object"],
-        "properties": {
-          "uri": {"type": "string"},
-          "path": {"type": "string"},
-          "as": {"type": "string"},
-          "generate": {"type": "string"},
-          "params": {"type": "object"},
-          "load": {"enum": ["eager", "lazy"]}
-        },
-        "anyOf": [{"required": ["uri"]}, {"required": ["generate"]}]
-      }
-    },
-    "args": {
-      "type": "object",
-      "additionalProperties": {
-        "type": ["string", "object", "null"],
-        "properties": {
-          "type": {"enum": ["string", "bool", "int", "float"]},
-          "default": {"type": ["string", "number", "boolean"]},
-          "help": {"type": "string"},
-          "required": {"type": "boolean"},
-          "positional": {"type": "boolean"}
-        }
-      }
-    }
-  },
-  "$defs": {
-    "widget": {
-      "type": ["string", "object"],
-      "properties": {
-        "id": {"type": "string"},
-        "title": {"type": "string"},
-        "type": {"type": "string"},
-        "bind": {"type": "string"},
-        "on": {"type": ["string", "object"]},
-        "lo": {"type": "number"},
-        "hi": {"type": "number"},
-        "def": {"type": ["number", "boolean", "string"]},
-        "fmt": {"type": "string"},
-        "commit": {"enum": ["live", "release"]},
-        "log": {"$ref": "#/$defs/flag"},
-        "autofocus": {"$ref": "#/$defs/flag"},
-        "password": {"$ref": "#/$defs/flag"},
-        "on_top": {"type": "string"},
-        "follow": {"$ref": "#/$defs/flag"},
-        "wrap": {"$ref": "#/$defs/flag"},
-        "hint": {"type": "string"},
-        "multiline": {"$ref": "#/$defs/flag"},
-        "max_lines": {"type": "number"},
-        "max_length": {"type": "number"},
-        "send": {"type": "string"},
-        "live": {"$ref": "#/$defs/flag"},
-        "on_change": {"type": "string"},
-        "hover": {"enum": ["highlight", "none"]},
-        "on_hover_end": {"type": "string"},
-        "options": {"type": ["array", "string"], "items": {"type": "string"}},
-        "pos": {"type": "array", "items": {"type": "number"}},
-        "size": {"type": ["array", "number", "string", "object"],
-                 "items": {"type": ["number", "string"]}},
-        "max_height": {"type": "number"},
-        "emoji": {"type": "string"},
-        "icon": {"type": "string"},
-        "icon_size": {"type": "number"},
-        "selected": {"type": ["boolean", "string"]},
-        "runs": {"type": ["array", "string"]},
-        "on_link": {"type": "string"},
-        "src": {"type": "string"},
-        "auth": {"type": "string"},
-        "status": {"type": "string"},
-        "fit": {"enum": ["contain", "cover", "fill"]},
-        "shape": {"enum": ["rect", "circle"]},
-        "background": {"type": ["string", "object", "array"]},
-        "color": {"type": ["string", "array", "object"]},
-        "poster": {"type": "string"},
-        "controls": {"$ref": "#/$defs/flag"},
-        "fullscreen": {"$ref": "#/$defs/flag"},
-        "badge": {"type": ["string", "number"]},
-        "autoplay": {"$ref": "#/$defs/flag"},
-        "loop": {"$ref": "#/$defs/flag"},
-        "muted": {"$ref": "#/$defs/flag"},
-        "tab": {"type": "string"},
-        "field": {"type": "string"},
-        "current": {"type": "string"},
-        "add": {"$ref": "#/$defs/flag"},
-        "remove": {"$ref": "#/$defs/flag"},
-        "new_item": {"type": "object"},
-        "on_add": {"type": "string"},
-        "on_remove": {"type": "string"},
-        "rows": {"type": "number"},
-        "items": {"type": "array", "items": {"$ref": "#/$defs/widget"}},
-        "children": {"type": "array", "items": {"$ref": "#/$defs/widget"}}
-      },
-      "if": {
-        "anyOf": [
-          {"required": ["tf_editor"]},
-          {"required": ["type"], "properties": {"type": {"const": "tf_editor"}}}
-        ]
-      },
-      "then": {"$ref": "#/$defs/tf_editor"},
-      "else": {"properties": {"default": {"type": "string"}}}
-    },
-    "tf_editor": {
-      "properties": {
-        "default": {"type": ["string", "object"]},
-        "preset": {"type": "string"},
-        "interactive_updates": {"$ref": "#/$defs/flag"},
-        "height": {"type": "number"},
-        "layers": {"type": "array", "items": {"type": "string"}},
-        "show_color": {"$ref": "#/$defs/flag"},
-        "show_opacity": {"$ref": "#/$defs/flag"},
-        "show_isocontours": {"$ref": "#/$defs/flag"},
-        "log_histogram": {"$ref": "#/$defs/flag"},
-        "info": {"$ref": "#/$defs/flag"},
-        "color": {"type": "array"},
-        "alpha": {"type": "array"},
-        "isocontours": {"type": "array", "items": {"type": ["number", "object"]}},
-        "domain": {"type": ["string", "array", "object"]},
-        "opacity_cubed": {"$ref": "#/$defs/flag"},
-        "resolution": {"type": "number"},
-        "range": {"type": "string"},
-        "histogram": {"type": "string"},
-        "contour_spectrum": {"type": "string"},
-        "contour_tree": {"type": "string"}
-      }
-    },
-    "flag": {
-      "anyOf": [
-        {"type": "boolean"},
-        {"enum": [0, 1]},
-        {"type": "string",
-         "pattern": "^([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy]([Ee][Ss])?|[Nn][Oo]?|[Oo]([Nn]|[Ff][Ff]))$"}
-      ]
-    }
-  }
-})ARISCHEMA";
-} // namespace
+std::vector<std::string> builtin_ari_blocks() {
+  return std::vector<std::string>(std::begin(kBuiltinBlocks), std::end(kBuiltinBlocks));
+}
 
-std::string ari_schema_json() { return kAriSchema; }
+// ---- the .ari schema (docs/ARIADNE.md §14) ----------------------------------
+// src/cvc/ariadne/schema/ari.v1.schema.json, compiled in by CMake/CvcEmbedText.cmake.
+namespace detail {
+extern const unsigned char ari_schema_text[];
+extern const std::size_t ari_schema_text_size;
+} // namespace detail
+
+std::string ari_schema_json() {
+  return std::string(reinterpret_cast<const char *>(detail::ari_schema_text),
+                     detail::ari_schema_text_size);
+}
+
+std::string SchemaIssue::text() const {
+  std::string out = source;
+  if (!out.empty() && line > 0)
+    out += ":" + std::to_string(line) + (column > 0 ? ":" + std::to_string(column) : "");
+  else if (out.empty() && line > 0)
+    out = "line " + std::to_string(line) + (column > 0 ? ":" + std::to_string(column) : "");
+  for (const std::string *part : {&context, &pointer})
+    if (!part->empty())
+      out += (out.empty() ? "" : ": ") + *part;
+  return out + (out.empty() ? "" : ": ") + message;
+}
 
 bool have_jsonschema() {
 #ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
@@ -401,6 +236,10 @@ bool is_builtin_widget_type(const std::string &type) {
   return false;
 }
 
+std::vector<std::string> builtin_widget_types() {
+  return std::vector<std::string>(std::begin(kBuiltinWidgetTypes), std::end(kBuiltinWidgetTypes));
+}
+
 #ifdef CVC_ARIADNE_HAVE_YAML
 
 namespace {
@@ -453,6 +292,14 @@ struct Ctx {
   // the ones its mount granted, so a module that redefines one is told.
   std::vector<FunctionDef> functions;
   std::set<std::string> granted;
+
+  // §14 the .ari schema: the file being parsed (SchemaIssue::source; "" for a string), and the
+  // issues found across the whole import/mount graph — shared, like `sources`, so a sub-Ctx adds
+  // to the one list. Null when nothing is checked (no validator in this build).
+  std::string source;
+  std::shared_ptr<std::vector<SchemaIssue>> schema_issues;
+  // The file each unit came from (its library's, or this document's), for its include:s' issues.
+  std::map<std::string, std::string> unit_sources;
 };
 
 // §12.5: record a resolved FILE canonical for hot-reload watching — skip a state/http canonical
@@ -466,6 +313,372 @@ void note_source(Ctx &ctx, const std::string &canonical) {
     if (ctx.source_stamps) // stamp its mtime at read time for the hot-reload baseline
       (*ctx.source_stamps)[canonical] = file_mtime(canonical);
   }
+}
+
+// ---- §14 checking a document against the .ari schema -------------------------------------------
+
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+// The top-level blocks a document may use besides the schema's own: the ones `app` registered
+// (register_ari_block) and the ones the document declares in customs: (`- block: <name>`).
+std::set<std::string> allowed_blocks(cvc::app &app, const YAML::Node &doc) {
+  std::set<std::string> out;
+  {
+    block_table &t = app.slot<block_table>();
+    std::lock_guard<std::mutex> lock(t.m);
+    for (const auto &kv : t.parsers)
+      out.insert(kv.first);
+  }
+  if (doc.IsMap())
+    if (const YAML::Node c = doc["customs"]; c && c.IsSequence())
+      for (const YAML::Node &e : c)
+        if (e.IsMap() && e["block"] && e["block"].IsScalar())
+          out.insert(e["block"].Scalar());
+  return out;
+}
+
+using njson = nlohmann::json;
+
+// A YAML node as JSON for the validator. yaml-cpp scalars are untyped text: "true"/"false" become
+// booleans and a scalar that is wholly a finite number a number, as the loader's flag() and num()
+// read them; anything else stays a string (so "3.4.0" and "%.2f" do).
+njson yaml_to_json(const YAML::Node &n) {
+  switch (n.Type()) {
+  case YAML::NodeType::Sequence: {
+    njson a = njson::array();
+    for (const YAML::Node &e : n)
+      a.push_back(yaml_to_json(e));
+    return a;
+  }
+  case YAML::NodeType::Map: {
+    njson o = njson::object();
+    for (const auto &kv : n)
+      o[kv.first.IsScalar() ? kv.first.Scalar() : std::string()] = yaml_to_json(kv.second);
+    return o;
+  }
+  case YAML::NodeType::Scalar: {
+    const std::string &s = n.Scalar();
+    if (s == "true" || s == "false")
+      return njson(s == "true");
+    try {
+      std::size_t pos = 0;
+      const long long i = std::stoll(s, &pos);
+      if (pos == s.size())
+        return njson(i);
+    } catch (...) {
+    }
+    try {
+      std::size_t pos = 0;
+      const double d = std::stod(s, &pos);
+      if (pos == s.size() && std::isfinite(d))
+        return njson(d);
+    } catch (...) {
+    }
+    return njson(s);
+  }
+  default:
+    return njson(nullptr);
+  }
+}
+
+// The schema's two compiled validators — the document's, and $defs/widget's for an include:
+// expansion — each built on an app at its first use: compiling the schema is most of a check's
+// cost.
+struct schema_checkers {
+  static constexpr const char *app_slot = "cvc.ariadne.ari-schema";
+  std::mutex m;
+  std::string error; // why the schema did not compile (a broken build; never otherwise)
+  std::unique_ptr<nlohmann::json_schema::json_validator> document, widget;
+};
+
+// `c`'s validator for a document or a widget, compiled now if it is not yet; null (and c.error
+// set) when the schema does not compile. Call with c.m held.
+nlohmann::json_schema::json_validator *checker(schema_checkers &c, bool widget) {
+  std::unique_ptr<nlohmann::json_schema::json_validator> &v = widget ? c.widget : c.document;
+  if (v || !c.error.empty())
+    return v.get();
+  try {
+    njson root = njson::parse(ari_schema_json());
+    if (widget) { // $defs/widget as a root of its own: the same document, its top level a widget
+      for (const char *k : {"type", "if", "then", "else"})
+        root.erase(k);
+      root["allOf"] = njson::array({{{"$ref", "#/$defs/widget"}}});
+    }
+    auto made = std::make_unique<nlohmann::json_schema::json_validator>();
+    made->set_root_schema(std::move(root));
+    v = std::move(made);
+  } catch (const std::exception &e) {
+    c.error = e.what();
+  }
+  return v.get();
+}
+
+// What the validator reports: where, its message, and the value (a map or list only as its kind).
+struct raw_issue {
+  std::string pointer, message;
+  njson value;
+};
+
+struct raw_collector : nlohmann::json_schema::error_handler {
+  std::vector<raw_issue> found;
+  void error(const njson::json_pointer &ptr, const njson &instance,
+             const std::string &message) override {
+    found.push_back({ptr.to_string(), message,
+                     instance.is_object()  ? njson::object()
+                     : instance.is_array() ? njson::array()
+                                           : instance});
+  }
+};
+
+std::vector<raw_issue> run_schema(cvc::app &app, const njson &instance, bool widget) {
+  schema_checkers &c = app.slot<schema_checkers>();
+  raw_collector collector;
+  std::lock_guard<std::mutex> lock(c.m);
+  nlohmann::json_schema::json_validator *v = checker(c, widget);
+  if (!v)
+    return {{"", "the .ari schema does not compile (" + c.error + ")", njson()}};
+  try {
+    v->validate(instance, collector);
+  } catch (const std::exception &e) {
+    collector.found.push_back(
+        {"", std::string("the check could not run (") + e.what() + ")", njson()});
+  }
+  return std::move(collector.found);
+}
+
+// A JSON Pointer's tokens ("/windows/0" -> windows, 0), unescaped.
+std::vector<std::string> pointer_tokens(const std::string &p) {
+  std::vector<std::string> out;
+  std::size_t i = 0;
+  while (i < p.size() && p[i] == '/') {
+    const std::size_t end = p.find('/', i + 1);
+    std::string t = p.substr(i + 1, end == std::string::npos ? std::string::npos : end - i - 1);
+    for (std::size_t at = 0; (at = t.find('~', at)) != std::string::npos; ++at)
+      t.replace(at, 2, at + 1 < t.size() && t[at + 1] == '1' ? "/" : "~");
+    out.push_back(std::move(t));
+    if (end == std::string::npos)
+      break;
+    i = end;
+  }
+  return out;
+}
+
+// Where the value `tokens` names is in `root` (with `key`, where its last token's key is): null
+// when the walk leaves the tree, or the node has no position (a clone).
+YAML::Mark mark_at(const YAML::Node &root, const std::vector<std::string> &tokens, bool key) {
+  // reset() rebinds `n`: assigning one YAML::Node to another would overwrite the document.
+  YAML::Node n;
+  n.reset(root);
+  YAML::Mark at = n.Mark();
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    bool found = false;
+    if (n.IsMap()) {
+      for (const auto &kv : n)
+        if (kv.first.IsScalar() && kv.first.Scalar() == tokens[i]) {
+          at = key && i + 1 == tokens.size() ? kv.first.Mark() : kv.second.Mark();
+          n.reset(kv.second);
+          found = true;
+          break;
+        }
+    } else if (n.IsSequence()) {
+      char *end = nullptr;
+      const unsigned long k = std::strtoul(tokens[i].c_str(), &end, 10);
+      if (end && *end == '\0' && k < n.size()) {
+        const YAML::Node item = n[k];
+        n.reset(item);
+        at = n.Mark();
+        found = true;
+      }
+    }
+    if (!found)
+      return YAML::Mark::null_mark();
+  }
+  return at;
+}
+
+std::string quoted_value(const njson &v) {
+  if (v.is_null())
+    return "nothing";
+  if (v.is_object())
+    return "a map";
+  if (v.is_array())
+    return "a list";
+  std::string s = v.is_string() ? v.get<std::string>() : v.dump();
+  for (char &c : s)
+    if (c == '\n' || c == '\r' || c == '\t')
+      c = ' ';
+  if (s.size() > 48)
+    s = s.substr(0, 45) + "...";
+  return "'" + s + "'";
+}
+
+// The key a validator message says the schema does not list ("validation failed for additional
+// property 'bnd': instance invalid as per false-schema"), or "" for any other message. The
+// validator reports it at the map that has the key. (The schema gives additionalProperties no
+// schema but false, so no other message takes this form.)
+std::string unknown_key_of(const std::string &m) {
+  const std::string lead = "validation failed for additional property '";
+  if (m.rfind(lead, 0) != 0 || m.find("false-schema") == std::string::npos)
+    return std::string();
+  const std::size_t b = m.find("': ", lead.size());
+  return b == std::string::npos ? std::string() : m.substr(lead.size(), b - lead.size());
+}
+
+// Whether a message is a summary of alternatives none of which fit (anyOf, oneOf): the validator
+// reports each alternative's own failure as well.
+bool is_alternatives_summary(const std::string &m) {
+  return m.find("no subschema has succeeded") != std::string::npos;
+}
+
+// The validator's message in the loader's words, the value quoted.
+std::string issue_message(const raw_issue &r) {
+  const std::string &m = r.message;
+  const auto says = [&](const char *s) { return m.find(s) != std::string::npos; };
+  if (const std::string key = unknown_key_of(m); !key.empty())
+    return "unknown key '" + key + "'";
+  const std::string v = quoted_value(r.value);
+  if (says("unexpected instance type"))
+    return v + " is the wrong type here";
+  if (says("not found in required enum"))
+    return v + " is not one of the values this key takes";
+  if (says("required property")) {
+    const std::size_t a = m.find('\''), b = m.find('\'', a + 1);
+    return "missing key " +
+           (a != std::string::npos && b != std::string::npos ? m.substr(a, b - a + 1) : m);
+  }
+  if (says("regex pattern"))
+    return v + " is not in the form this key takes";
+  if (says("no subschema has succeeded"))
+    return v + " is not any of the forms this key takes";
+  if (says("more than one subschema has succeeded"))
+    return v + " fits more than one of the forms this key takes";
+  if (says("not const"))
+    return v + " is not the value this key takes";
+  // The rest ("array has too few items", "instance is below minimum of 1", ...) read as they are,
+  // the value in place of their subject.
+  for (const char *subject : {"instance ", "array ", "object "})
+    if (m.rfind(subject, 0) == 0)
+      return v + " " + m.substr(std::string(subject).size());
+  return v + ": " + m;
+}
+
+// Where `node` (a document, or with `widget` a widget) breaks the .ari schema. Positions are
+// looked up in `positions` (the node itself, or the template a clone was made from); an issue
+// whose place it does not have is left at line 0. A top-level key in `allowed` is accepted, and
+// with `skip_tokens` so is a string still holding a {name} token (a unit checked with only the
+// args it declares); a repeat's {i} always is. Sorted by position. Needs the validator.
+std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bool widget,
+                                       const YAML::Node &positions,
+                                       const std::set<std::string> &allowed, bool skip_tokens) {
+  // What the validator found, the noise taken out: a repeat's {i} (and with skip_tokens any
+  // {name}) a value only a copy or an include site gives; a top-level block `allowed`.
+  struct found {
+    raw_issue raw;
+    std::string key;   // the unknown key, for an unknown-key issue
+    std::string place; // the pointer to the value at fault: the key's own for an unknown key
+  };
+  std::vector<found> all;
+  for (raw_issue &r : run_schema(app, yaml_to_json(node), widget)) {
+    // An error inside an allOf, anyOf or oneOf comes with "[combination: allOf / case#0] " before
+    // it, and an allOf adds a summary that repeats its cases' errors: the error is the same
+    // without the prefix, and the summary says nothing more.
+    while (r.message.rfind("[combination: ", 0) == 0 && r.message.find("] ") != std::string::npos)
+      r.message.erase(0, r.message.find("] ") + 2);
+    if (r.message.rfind("at least one subschema has failed", 0) == 0)
+      continue;
+    if (r.value.is_string()) {
+      const std::string &s = r.value.get_ref<const std::string &>();
+      if (s.find("{i}") != std::string::npos)
+        continue;
+      if (skip_tokens) {
+        const std::size_t open = s.find('{');
+        if (open != std::string::npos && s.find('}', open) != std::string::npos)
+          continue;
+      }
+    }
+    found f{std::move(r), std::string(), std::string()};
+    f.key = unknown_key_of(f.raw.message);
+    if (!f.key.empty() && f.raw.pointer.empty() && allowed.count(f.key))
+      continue;
+    std::string escaped = f.key;
+    for (std::size_t at = 0; (at = escaped.find_first_of("~/", at)) != std::string::npos; at += 2)
+      escaped.replace(at, 1, escaped[at] == '~' ? "~0" : "~1");
+    f.place = f.key.empty() ? f.raw.pointer : f.raw.pointer + "/" + escaped;
+    all.push_back(std::move(f));
+  }
+  // Alternatives (anyOf) none of which fit: the validator reports each one's failure beside the
+  // summary. A failure inside the value (an unknown key in a map form, say) says the most, so it
+  // stands and the summary goes; otherwise the summary stands for the alternatives' failures at
+  // the value itself.
+  const auto under = [](const std::string &p, const std::string &q) {
+    return p.size() > q.size() && p.compare(0, q.size(), q) == 0 && p[q.size()] == '/';
+  };
+  std::set<std::string> summarized, explained;
+  for (const found &f : all)
+    if (is_alternatives_summary(f.raw.message))
+      summarized.insert(f.place);
+  for (const std::string &p : summarized)
+    for (const found &f : all)
+      if (under(f.place, p))
+        explained.insert(p);
+  std::vector<SchemaIssue> out;
+  std::set<std::pair<std::string, std::string>> seen;
+  for (const found &f : all) {
+    const bool summary = is_alternatives_summary(f.raw.message);
+    if (summary ? explained.count(f.place) != 0 : summarized.count(f.place) != 0)
+      continue;
+    SchemaIssue i;
+    i.pointer = f.raw.pointer;
+    i.message = issue_message(f.raw);
+    if (!seen.insert({i.pointer, i.message}).second)
+      continue;
+    std::vector<std::string> tokens = pointer_tokens(f.raw.pointer);
+    if (!f.key.empty())
+      tokens.push_back(f.key);
+    const YAML::Mark mark = mark_at(positions, tokens, !f.key.empty());
+    if (!mark.is_null()) {
+      i.line = mark.line + 1;
+      i.column = mark.column + 1;
+    }
+    out.push_back(std::move(i));
+  }
+  std::stable_sort(out.begin(), out.end(), [](const SchemaIssue &a, const SchemaIssue &b) {
+    return std::make_pair(a.line, a.column) < std::make_pair(b.line, b.column);
+  });
+  return out;
+}
+#endif // CVC_ARIADNE_HAVE_JSONSCHEMA
+
+// Check `node` (a document, or with `widget` a widget) found in `source` against the schema, and
+// add what it breaks to the load's issues and warnings. `positions` is where its positions are
+// (see schema_issues); an issue without one takes `fallback`'s, in `fallback_source`.
+void check_schema(Ctx &ctx, const YAML::Node &node, bool widget, const std::string &source,
+                  const std::string &context, const YAML::Node &positions,
+                  const YAML::Mark &fallback, const std::string &fallback_source) {
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+  if (!ctx.schema_issues)
+    return;
+  const std::set<std::string> allowed =
+      widget ? std::set<std::string>{} : allowed_blocks(*ctx.app, node);
+  for (SchemaIssue &i : schema_issues(*ctx.app, node, widget, positions, allowed, false)) {
+    i.source = source;
+    i.context = context;
+    if (i.line == 0 && !fallback.is_null()) {
+      i.source = fallback_source;
+      i.line = fallback.line + 1;
+      i.column = fallback.column + 1;
+    }
+    // A unit included in several places breaks the schema in its template once.
+    const std::string text = i.text();
+    if (std::any_of(ctx.schema_issues->begin(), ctx.schema_issues->end(),
+                    [&](const SchemaIssue &o) { return o.text() == text; }))
+      continue;
+    ctx.warn("ari: schema: " + text);
+    ctx.schema_issues->push_back(std::move(i));
+  }
+#else
+  (void)ctx, (void)node, (void)widget, (void)source, (void)context, (void)positions, (void)fallback,
+      (void)fallback_source;
+#endif
 }
 
 bool has(const YAML::Node &n, const char *key) { return n[key].IsDefined(); }
@@ -1743,7 +1956,9 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
 
 // §12: merge a `units:` map (name -> raw widget template) into the unit table. Stored RAW so
 // an include: can substitute its args before parsing, and so units may be defined in any order.
-void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
+// `source` is the file they are in (an include:'s schema issues name it).
+void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision,
+                 const std::string &source) {
   if (!unitsNode || !unitsNode.IsMap())
     return;
   for (const auto &kv : unitsNode) {
@@ -1751,7 +1966,8 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
       continue;
     const std::string name = kv.first.Scalar();
     // §6.2 a document's own unit marked `fallback: true` stands in only where no import defines
-    // the name (a component the host's library may not have yet).
+    // the name (a component the host's library may not have yet). The key stays on the stored
+    // template (an include drops it, instantiate_unit), so the template keeps its positions.
     const bool fallback = kv.second.IsMap() && kv.second["fallback"] &&
                           kv.second["fallback"].IsScalar() &&
                           kv.second["fallback"].as<std::string>("") == "true";
@@ -1759,12 +1975,8 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision) {
       continue;
     if (warn_collision && ctx.units.count(name))
       ctx.warn("ari: import: unit '" + name + "' is defined by more than one library — last wins");
-    YAML::Node unit = kv.second;
-    if (fallback) {
-      unit = YAML::Clone(kv.second);
-      unit.remove("fallback");
-    }
-    ctx.units[name] = unit;
+    ctx.units[name] = kv.second;
+    ctx.unit_sources[name] = source;
   }
 }
 
@@ -1997,9 +2209,12 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
       ctx.warn("ari: import '" + uri + "' parse error: " + e.what());
       continue;
     }
+    // §14 a library is a document too: its structure is checked (its units as they are included).
+    check_schema(ctx, sub, /*widget=*/false, res.canonical, "", sub, YAML::Mark::null_mark(), "");
     const std::string sub_base = std::filesystem::path(res.canonical).parent_path().string();
     process_imports(ctx, sub, sub_base, depth + 1); // the library's own imports, based at its dir
-    merge_units(ctx, sub["units"], /*warn=*/true);  // then its units (import-vs-import warns)
+    merge_units(ctx, sub["units"], /*warn=*/true,
+                res.canonical); // then its units (warns on a clash)
     if (sub.IsMap()) // and its functions (§6.6), import-vs-import warning like units
       add_functions(ctx, parse_functions(ctx, sub["functions"], "import '" + uri + "': "),
                     /*warn=*/true, "import '" + uri + "': ");
@@ -2012,7 +2227,7 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
 void parse_units(Ctx &ctx, const YAML::Node &doc) {
   process_imports(ctx, doc, ctx.base_dir);
   if (doc.IsMap())
-    merge_units(ctx, doc["units"], /*warn=*/false);
+    merge_units(ctx, doc["units"], /*warn=*/false, ctx.source);
 }
 
 // §6.6: the document's (or fragment's) own functions:, after its imports' (own ones win).
@@ -2103,6 +2318,35 @@ void fill_slots(Ctx &ctx, YAML::Node node, const YAML::Node &slots, const std::s
   node = out;
 }
 
+// A units: template `unit` (named `name`) made into a widget: a clone with its args substituted
+// — the ones it declares, overridden by `site_args` — and `slots` filled.
+YAML::Node instantiate_unit(Ctx &ctx, const YAML::Node &unit, const YAML::Node &site_args,
+                            const YAML::Node &slots, const std::string &name) {
+  // A unit may declare its parameters with defaults (`args: {node: volume}` beside its widget
+  // keys), so a shipped component works with no include args and a document overrides only what
+  // it needs. Include-site args win; a token with neither stays literal.
+  std::map<std::string, std::string> args;
+  const auto collect = [&args](const YAML::Node &a) {
+    if (a && a.IsMap())
+      for (const auto &kv : a)
+        if (kv.first.IsScalar() && kv.second.IsScalar())
+          args[kv.first.Scalar()] = kv.second.Scalar();
+  };
+  // A unit that is itself an include:/load: call keeps its args: as that call's arguments.
+  const bool declares = unit.IsMap() && !unit["include"] && !unit["load"];
+  if (declares)
+    collect(unit["args"]);
+  collect(site_args);
+  YAML::Node inst = YAML::Clone(unit); // never mutate the stored template
+  if (declares && inst["args"])
+    inst.remove("args"); // the declaration, not a widget key
+  if (inst.IsMap() && inst["fallback"])
+    inst.remove("fallback"); // §6.2 merge_units' marker, not a widget key
+  substitute_node(inst, args);
+  fill_slots(ctx, inst, slots, name); // after args: the include site's widgets are its own
+  return inst;
+}
+
 // §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
 Widget expand_include(Ctx &ctx, const YAML::Node &n) {
   const std::string name = str(n, "include");
@@ -2118,26 +2362,12 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: include: recursive unit '" + name + "' — expansion refused");
     return group({});
   }
-  // A unit may declare its parameters with defaults (`args: {node: volume}` beside its widget
-  // keys), so a shipped component works with no include args and a document overrides only what
-  // it needs. Include-site args win; a token with neither stays literal.
-  std::map<std::string, std::string> args;
-  const auto collect = [&args](const YAML::Node &a) {
-    if (a && a.IsMap())
-      for (const auto &kv : a)
-        if (kv.first.IsScalar() && kv.second.IsScalar())
-          args[kv.first.Scalar()] = kv.second.Scalar();
-  };
-  // A unit that is itself an include:/load: call keeps its args: as that call's arguments.
-  const bool declares = it->second.IsMap() && !it->second["include"] && !it->second["load"];
-  if (declares)
-    collect(it->second["args"]);
-  collect(n["args"]);
-  YAML::Node inst = YAML::Clone(it->second); // never mutate the stored template
-  if (declares && inst["args"])
-    inst.remove("args"); // the declaration, not a widget key
-  substitute_node(inst, args);
-  fill_slots(ctx, inst, n["slots"], name); // after args: the include site's widgets are its own
+  const YAML::Node inst = instantiate_unit(ctx, it->second, n["args"], n["slots"], name);
+  // §14 the expansion is a widget: checked as one. A clone has no positions, so they are looked up
+  // in the template (in the unit's own file); what that cannot place, at the include site.
+  const auto src = ctx.unit_sources.find(name);
+  check_schema(ctx, inst, /*widget=*/true, src != ctx.unit_sources.end() ? src->second : ctx.source,
+               "include " + name, it->second, n.Mark(), ctx.source);
   Widget w = parse_widget(ctx, inst);
   ctx.expanding.erase(name);
   // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own
@@ -2268,6 +2498,8 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       if (kv.first.IsScalar() && kv.second.IsScalar())
         args[kv.first.Scalar()] = kv.second.Scalar();
   substitute_node(frag, args);
+  // §14 a fragment is a document: its structure is checked, as its args made it.
+  check_schema(ctx, frag, /*widget=*/false, res.canonical, "", frag, YAML::Mark::null_mark(), "");
   // Parse the fragment in an ISOLATED sub-context: fresh units (module boundary), based at the
   // fragment's own directory, carrying the mount stack (with this URI pushed) + the shared mount
   // counter for the cycle/depth/aggregate guards. Its warnings bubble up to the host document.
@@ -2279,6 +2511,8 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   sub.mount_count = ctx.mount_count;
   sub.sources = ctx.sources; // §12.5 the fragment's own imports/mounts feed the same watch list
   sub.source_stamps = ctx.source_stamps;
+  sub.source = res.canonical; // §14 its include:s' issues name it, and add to the one list
+  sub.schema_issues = ctx.schema_issues;
   // §6.6: the functions the mount grants come first, then the module's imports' and its own.
   sub.functions = grant_functions(ctx, n["functions"], uri);
   for (const FunctionDef &f : sub.functions)
@@ -3793,75 +4027,6 @@ Meta parse_meta(const YAML::Node &m) {
   return meta;
 }
 
-#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
-// Convert a yaml-cpp node to nlohmann::json so json-schema-validator can check it.
-// yaml-cpp scalars are untyped strings; coerce to int/double/bool where the whole
-// scalar parses as one, else keep the string (so "3.4.0" and "%.2f" stay strings).
-nlohmann::json yaml_to_json(const YAML::Node &n) {
-  using nlohmann::json;
-  switch (n.Type()) {
-  case YAML::NodeType::Null:
-    return json(nullptr);
-  case YAML::NodeType::Sequence: {
-    json a = json::array();
-    for (const YAML::Node &e : n)
-      a.push_back(yaml_to_json(e));
-    return a;
-  }
-  case YAML::NodeType::Map: {
-    json o = json::object();
-    for (const auto &kv : n)
-      o[kv.first.Scalar()] = yaml_to_json(kv.second);
-    return o;
-  }
-  case YAML::NodeType::Scalar: {
-    const std::string s = n.Scalar();
-    if (s == "true" || s == "false")
-      return json(s == "true");
-    try {
-      std::size_t pos = 0;
-      const long long i = std::stoll(s, &pos);
-      if (pos == s.size())
-        return json(i);
-    } catch (...) {
-    }
-    try {
-      std::size_t pos = 0;
-      const double d = std::stod(s, &pos);
-      if (pos == s.size())
-        return json(d);
-    } catch (...) {
-    }
-    return json(s);
-  }
-  default:
-    return json(nullptr);
-  }
-}
-
-// Layer 2 (roadmap §15): validate the document against the .ari JSON Schema,
-// collecting violations as warnings (advisory — the lenient loader still loads
-// what it can; the min_libcvc gate above is the only fatal provenance check).
-void schema_validate(const YAML::Node &doc, Ctx &ctx) {
-  struct Collector : nlohmann::json_schema::error_handler {
-    Ctx &ctx;
-    explicit Collector(Ctx &c) : ctx(c) {}
-    void error(const nlohmann::json::json_pointer &ptr, const nlohmann::json &,
-               const std::string &msg) override {
-      const std::string at = ptr.to_string();
-      ctx.warn("ari: schema: " + (at.empty() ? std::string("<root>") : at) + ": " + msg);
-    }
-  } collector(ctx);
-  try {
-    nlohmann::json_schema::json_validator validator;
-    validator.set_root_schema(nlohmann::json::parse(kAriSchema));
-    validator.validate(yaml_to_json(doc), collector);
-  } catch (const std::exception &e) {
-    ctx.warn(std::string("ari: schema validation could not run: ") + e.what());
-  }
-}
-#endif // CVC_ARIADNE_HAVE_JSONSCHEMA
-
 // Parse the `customs:` block (§ extensibility): the custom types the document uses.
 // Each entry names exactly one of widget:/node:/block: with an optional `required:`
 // flag (default false — a missing one warns; `required: true` fails the load).
@@ -4300,6 +4465,9 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   ctx.base_dir = base_dir;
   ctx.sources = std::make_shared<std::vector<std::string>>(); // §12.5 hot-reload watch list
   ctx.source_stamps = std::make_shared<std::map<std::string, std::int64_t>>();
+  ctx.source = self_path;
+  if (have_jsonschema())
+    ctx.schema_issues = std::make_shared<std::vector<SchemaIssue>>();
   if (!self_path.empty()) {
     ctx.imported.insert(self_path);
     note_source(ctx, self_path); // the main document is itself watched
@@ -4313,6 +4481,13 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
               libcvc_version();
     return r;
   }
+
+  // §14 the document's structure, before anything below reads it (so a load that fails further
+  // on still says what in it breaks the schema). Its imports, fragments and include: expansions
+  // are checked as the parse reaches them.
+  check_schema(ctx, doc, /*widget=*/false, ctx.source, "", doc, YAML::Mark::null_mark(), "");
+  if (ctx.schema_issues)
+    r.schema_issues = *ctx.schema_issues;
 
   // Custom-object gate (§ extensibility): a declared `customs:` entry that this build
   // can't satisfy fails the load (required) or warns (optional). Widget/block customs
@@ -4372,11 +4547,6 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       }
     }
   }
-
-#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
-  // Layer 2: structural validation (before the semantic Layer-3 walk below).
-  schema_validate(doc, ctx);
-#endif
 
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   parse_own_functions(ctx, doc, ""); // §6.6, BEFORE the body: a load: grants out of them
@@ -4491,12 +4661,16 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   lint_channels(ctx, r);
   if (!r.error.empty()) {
     r.warnings = std::move(ctx.warnings); // keep the warnings gathered before the violation
+    if (ctx.schema_issues)
+      r.schema_issues = *ctx.schema_issues;
     return r;
   }
   if (r.meta.min_libcvc.empty())
     ctx.warn("ari: no meta.min_libcvc declared — the provenance gate is skipped "
              "(roadmap §3.1a asks every .ari to declare it)");
   r.warnings = std::move(ctx.warnings);
+  if (ctx.schema_issues)
+    r.schema_issues = std::move(*ctx.schema_issues);
   if (ctx.sources)
     r.sources = std::move(*ctx.sources); // §12.5 the files a host watches for hot-reload
   if (ctx.source_stamps)
@@ -4571,6 +4745,80 @@ LoadResult load_file(cvc::app &app, const std::string &path) {
   }
 }
 
+namespace {
+// §14 validate_*: the document, then each of its own units instantiated with the args it declares
+// (a unit is checked where it is included; this checks the ones nothing here includes too). A
+// string still holding a {name} token there is a value only an include site gives, so not checked.
+ValidationResult validate_node(cvc::app &app, const YAML::Node &doc, const std::string &source) {
+  ValidationResult v;
+#ifdef CVC_ARIADNE_HAVE_JSONSCHEMA
+  v.checked = true;
+  const auto add = [&](std::vector<SchemaIssue> found, const std::string &context,
+                       const YAML::Mark &fallback) {
+    for (SchemaIssue &i : found) {
+      i.source = source;
+      i.context = context;
+      if (i.line == 0 && !fallback.is_null()) {
+        i.line = fallback.line + 1;
+        i.column = fallback.column + 1;
+      }
+      v.issues.push_back(std::move(i));
+    }
+  };
+  add(schema_issues(app, doc, false, doc, allowed_blocks(app, doc), false), "",
+      YAML::Mark::null_mark());
+  if (doc.IsMap())
+    if (const YAML::Node units = doc["units"]; units && units.IsMap()) {
+      Ctx ctx; // for instantiate_unit's slot warnings, which a check has no use for
+      ctx.app = &app;
+      for (const auto &kv : units) {
+        if (!kv.first.IsScalar() || !kv.second.IsMap())
+          continue;
+        const std::string name = kv.first.Scalar();
+        const YAML::Node inst = instantiate_unit(ctx, kv.second, YAML::Node(), YAML::Node(), name);
+        add(schema_issues(app, inst, true, kv.second, {}, /*skip_tokens=*/true), "unit " + name,
+            kv.first.Mark());
+      }
+    }
+  std::stable_sort(v.issues.begin(), v.issues.end(),
+                   [](const SchemaIssue &a, const SchemaIssue &b) {
+                     return std::make_pair(a.line, a.column) < std::make_pair(b.line, b.column);
+                   });
+#else
+  (void)app, (void)doc, (void)source;
+#endif
+  return v;
+}
+} // namespace
+
+ValidationResult validate_string(cvc::app &app, const std::string &yaml) {
+  YAML::Node doc;
+  try {
+    doc = YAML::Load(yaml);
+  } catch (const std::exception &e) {
+    ValidationResult v;
+    v.error = std::string("ari: YAML parse error: ") + e.what();
+    return v;
+  }
+  return validate_node(app, doc, std::string());
+}
+
+ValidationResult validate_file(cvc::app &app, const std::string &path) {
+  YAML::Node doc;
+  try {
+    doc = YAML::LoadFile(path);
+  } catch (const YAML::BadFile &e) {
+    ValidationResult v;
+    v.error = std::string("ari: cannot open '") + path + "': " + e.what();
+    return v;
+  } catch (const std::exception &e) {
+    ValidationResult v;
+    v.error = std::string("ari: YAML parse error in '") + path + "': " + e.what();
+    return v;
+  }
+  return validate_node(app, doc, path);
+}
+
 bool parse_value(const std::string &text, Value &out, std::string *why) {
   try {
     out = to_value(YAML::Load(text));
@@ -4597,6 +4845,16 @@ LoadResult unavailable() {
 
 LoadResult load_string(cvc::app &, const std::string &) { return unavailable(); }
 LoadResult load_file(cvc::app &, const std::string &) { return unavailable(); }
+ValidationResult validate_string(cvc::app &, const std::string &) {
+  ValidationResult v;
+  v.error = unavailable().error;
+  return v;
+}
+ValidationResult validate_file(cvc::app &, const std::string &) {
+  ValidationResult v;
+  v.error = unavailable().error;
+  return v;
+}
 bool parse_value(const std::string &, Value &, std::string *why) {
   if (why)
     *why = "libcvc was built without yaml-cpp";

@@ -3785,6 +3785,18 @@ overrides = director-subclass**.)
 
 ## 15. Validation & the `.ari` schema
 
+> **Status (2026-11): landed** as docs/ARIADNE.md §14. The schema is one closed JSON Schema,
+> written as JSON rather than YAML, in json-schema-validator's draft-7 subset:
+> `src/cvc/ariadne/schema/ari.v1.schema.json`, compiled in (`ari_schema_json()`) and installed
+> under `share/libcvc/ariadne/schema/`. Every load checks the document, its imports, fragments
+> and include: expansions (`LoadResult::schema_issues`, with line and column);
+> `validate_string` / `validate_file` check without loading; `ari validate` (`--structural-only`,
+> `--strict`, `--json`; exit 0/1/2/3, 4 without the validator) and `ari schema` are the CLI.
+> Not done from the plan below: `meta.schema` version selection (the version is in the file name
+> and `$id`), a separate relaxed variant for templates (a unit is checked as instantiated, a token
+> only an include site fills skipped), a Python copy of the file, and schema fragments a host
+> registers for its custom widget and node types (their own keys stay unchecked).
+
 Ariadne needs an *external contract* — one an author, a `load:`'d fragment, an Ari-browser address bar, or a
 hostile web source can be checked against **before** the loader walks a node. It's **three layers**, with a
 formal JSON Schema for the middle one. This reuses a shipped in-house precedent: **`cvcpkg validate` already

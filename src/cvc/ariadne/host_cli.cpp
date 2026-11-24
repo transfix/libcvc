@@ -357,7 +357,8 @@ HostOptions parse_host_args(int argc, const char *const *argv,
     o.doc = positional.front();
     o.doc_args.assign(positional.begin() + 1, positional.end());
   }
-  if (o.doc.empty() && !o.help && o.command != "info") // info describes the host, not a document
+  // info describes the host and schema prints the .ari schema: neither takes a document.
+  if (o.doc.empty() && !o.help && o.command != "info" && o.command != "schema")
     o.error = "no document given";
   return o;
 }
