@@ -3416,4 +3416,81 @@ TEST(GroupZeroDriver, AFrameSkipsGroupZeroWhileAnotherThreadHoldsIt) {
   }
 }
 
+// S2b R2a C-M2 (the review's probe): two kill_owners at once with group 0 undriven. The first holds
+// group 0's token and has taken its ingress (it is applying its command) when the second posts; the
+// second's try of the token fails, but nothing else will drain group 0: the first drains until the
+// ingress is empty, and the second tries again on a backoff, so both return.
+TEST(PoolKillOwner, TwoAtOnceBothReturn) {
+  cvc::app app;
+  quiet_rates(app);
+  app.root()("state_exec.locks.threading").value(std::string("shared"));
+  cvc::pool_options po;
+  po.threads = 1;
+  cvc::exec_pool &pool = app.exec_pool(po);
+  group0_world zero(app); // nothing drives group 0 but kill_owner
+  constexpr int kMany = 20000;
+  for (int i = 0; i < kMany; ++i)
+    zero.submit("(+ 1 2)", "b");
+  const int a = zero.submit("(+ 1 2)", "a");
+  se::async_scheduler &g0 = zero.sched();
+  std::atomic<bool> b_back{false}, a_back{false};
+  std::thread tb([&] {
+    pool.kill_owner("b");
+    b_back = true;
+  });
+  // tb holds group 0's token and has swapped its ingress out (its command is being applied).
+  while (!(g0.pumped_elsewhere() && !g0.has_pending_ingress()) && !b_back.load())
+    std::this_thread::yield();
+  const bool overlapped = !b_back.load();
+  std::thread ta([&] {
+    pool.kill_owner("a");
+    a_back = true;
+  });
+  tb.join();
+  // A hang guard only (30 s): the wait is for a_back.
+  const auto t0 = clock_type::now();
+  while (!a_back.load() && clock_type::now() - t0 < std::chrono::seconds(30))
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const bool returned = a_back.load();
+  EXPECT_TRUE(overlapped) << "the case missed its window (raise kMany)";
+  EXPECT_TRUE(returned) << "kill_owner(\"a\") hung: its command sits in group 0's ingress";
+  if (!returned) { // unblock it: drain group 0 here
+    se::async_scheduler::pump_owner_scope token(g0);
+    g0.drain_ingress();
+  }
+  ta.join();
+  EXPECT_EQ(status_of(g0, a), se::process_status::killed);
+}
+
+// S2b R2a C-m5 (the review's probe): kill_owner from inside a group's own pump is refused before it
+// posts or drains anything: h, made (and so drained) first, keeps its process.
+TEST(PoolKillOwner, RefusedInsideAGroupsPumpBeforeActing) {
+  cvc::app app;
+  quiet_rates(app);
+  app.root()("state_exec.locks.threading").value(std::string("shared"));
+  cvc::pool_options po;
+  po.threads = 1;
+  cvc::exec_pool &pool = app.exec_pool(po);
+  group_world h(app, "h"); // made first: drained first
+  const int victim = h.submit(kSpins, "x");
+  bool refused = false;
+  group_world g(app, "g", [&](se::exec_group::options &o) {
+    o.pump_hook_for_test = [&](se::exec_group &) {
+      try {
+        pool.kill_owner("x");
+      } catch (const std::logic_error &) {
+        refused = true;
+      }
+    };
+  });
+  const int own = g.submit(kSpins, "x");
+  g.g().pump(se::pump_budget{10, kNoTime});
+  EXPECT_TRUE(refused);
+  EXPECT_NE(status_of(h.sched(), victim), se::process_status::killed)
+      << "a refused kill_owner killed a process of another group";
+  EXPECT_FALSE(h.sched().has_pending_control()) << "a refused kill_owner posted";
+  h.sched().kill(victim);
+  g.sched().kill(own);
+}
+
 } // namespace c_tests
