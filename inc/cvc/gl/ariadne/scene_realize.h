@@ -189,6 +189,7 @@ struct RealizedScene {
     std::vector<std::string> tags;
     std::weak_ptr<GraphicsNode> node;
     bool subtree = true; // false: the tags are the node's own props', not its children's
+    std::string on_pick; // the node's on_pick: (realize_node's entry; a part's is empty)
   };
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.

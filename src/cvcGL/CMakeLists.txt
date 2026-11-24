@@ -1266,6 +1266,15 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
+# A node's own on_pick: (its nearest ancestor's when it has none) run by a press that lands on it,
+# and by that press's drags and release wherever they land, in the document's scope, beside the
+# view's own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_node_pick test/cvcgl_ariadne_node_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_node_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_node_pick COMMAND cvcgl_ariadne_node_pick)
+endif()
+
 # Authored viewpoints: a scene camera's position:, target:, fov:, near:, far: and orthographic:
 # with height:, on the main view (a `cameras:` entry named main), a named camera and a viewport's
 # own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.

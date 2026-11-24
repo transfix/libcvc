@@ -390,6 +390,12 @@ struct SceneNode {
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
 
+  // on_pick: <action> — run when a press in an `input: pick` viewport lands on this node, or on a
+  // descendant with no on_pick: of its own, and again on that press's drags and its release,
+  // wherever they land (§5.18, Picking). A program, with the pick's fields in `event`, or a bare
+  // name for a host handler. It runs in the document's scope, as on_key: does. Empty: none.
+  std::string on_pick;
+
   // repeat: <count> — the node is a template, drawn as `count` copies beside one another (a
   // widget's repeat:, §3). The count is a whole number, a state key holding one (a list's length,
   // as host.set_table writes it), or a read-lane expression (it starts with '('); see
@@ -435,9 +441,9 @@ SceneRepeatCount scene_repeat_count(const std::string &repeat);
 
 // Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
 // `visible:` and `material: { opacity }` binds, its tags, its sources (file, asset, data and item),
-// its texture (an image or a stream), its clips' offset binds and every string in its props, and in
-// its children likewise. The copy's `repeat` is empty. A child that has a repeat: of its own is
-// left as it is, so its copies number themselves, as a nested widget repeat's do.
+// its texture (an image or a stream), its clips' offset binds, its on_pick: and every string in its
+// props, and in its children likewise. The copy's `repeat` is empty. A child that has a repeat: of
+// its own is left as it is, so its copies number themselves, as a nested widget repeat's do.
 SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
