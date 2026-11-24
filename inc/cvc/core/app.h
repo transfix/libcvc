@@ -672,6 +672,9 @@ public:
   // chroot + per-document child env). See docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Which Scheduler
   // Runs a Program".
   cvc::state_exec::async_scheduler &exec_scheduler();
+  // exec_scheduler() if it has been built, else null; never builds it (S2b: a host that drains
+  // group 0 for router entries homed there only while it exists, as pycvc's ExecPool does).
+  cvc::state_exec::async_scheduler *exec_scheduler_probe();
 
   // The async host for exec_scheduler() (docs/STATE_EXEC_EXCEPTIONS.md 3.2): an async function
   // registered with it (state_exec::register_async_fn) parks its calling process while its
