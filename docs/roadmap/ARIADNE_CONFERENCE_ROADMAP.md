@@ -1538,7 +1538,8 @@ though it shipped in **#636** — now corrected). The statuses below are **verif
 * pycvc URI-scheme handler override + bytes branch (§14.2) — *not found; verify.*
 * Full YAML-free s-expr `.ari` **document** dialect (§18) — exprs land in binds/scripts; the whole-document
   front-end is the remainder.
-* Formal draft-2020-12 JSON Schema + the `ari validate` command (§15) — the validator *integration* exists;
+* ~~Formal draft-2020-12 JSON Schema + the `ari validate` command (§15)~~ — **landed** (docs/ARIADNE.md §14:
+  the closed `ari.v1.schema.json`, every load checked, `ari validate`). Was: the validator *integration* existed;
   the formal schema + CLI may be the gap.
 * HTTP response-**cache LRU** (§13.9) — per-request `max_bytes` cap exists (`http_client_fetch.cpp`); the
   response-cache LRU + the write side (§13.10) are unverified.

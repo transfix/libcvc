@@ -13,7 +13,7 @@ those outputs reproducibly:
    tests read them.
 
 GPL code may be built here, and only here. The libraries that need CGAL (Skeletonization,
-ContourTiler, PocketTunnel) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
+SecondaryStructures, ContourTiler, PocketTunnel) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
 libcvc, cvcGL or pycvc, and nothing here is installed or packaged.
 
 ```bash
@@ -257,6 +257,89 @@ differently, and on three cases it marks other cells outside:
 - `three_chambers`: 41 more, the clusters the port's to the cell;
 - `1grl`: 67 more, a tunnel of 309 cells and 17 one-cell pockets.
 Given either platform's marking, the port's stages make that platform's result exactly.
+
+## SecondaryStructures
+
+SecondaryStructures is `src/SecondaryStructures`, a protein's helices and sheets from the isosurface
+of its density map (TexMol roadmap T5). It needs CGAL, as Skeletonization does (`--libs secondary`
+builds it alone).
+
+- **What is built:** every legacy source (not the `.back` and `.junk` files), from patched copies in
+  the build tree. A patch that does not apply fails the configure. The patches:
+  - **Eight `CGAL_assertion()`s with side effects become plain calls:**
+    - `has_vertex()` in `tcocone.cpp` and `find_acceptor()` in `u1.cpp` and `u2.cpp`, as for
+      Skeletonization;
+    - `get_eid()` in `skel.cpp`'s `add_u1_to_skel` and `add_u2_to_skel`. Compiled out, it left the
+      edge index -1, and the code wrote before its edge array.
+  - **`is_cospherical_pair()`** returns false when a cell is infinite, as for Skeletonization.
+  - **A chain step's width:** between two cells with no common facet, it is the smaller cell's
+    circumradius. The legacy took its squared circumradius, where every other width is a length.
+    The port does the same.
+  - **An empty run is skipped.** A candidate point with nothing else within the join distance made
+    an empty run, and `build_cylindrical_helices` divided by zero and read past an empty array for
+    it. The port does the same.
+  - **The variable-length array** becomes a `std::vector` (MSVC has no VLAs).
+  - **`init.cpp`'s `triang.dual(cit)`** becomes `CGAL::circumcenter` of the cell's points. That is
+    what `dual()` computed in the CGAL the code was written for; CGAL 6's asks the cell base for it.
+- **What is shimmed:**
+  - `secondary_dsyev.cpp` stands in for LAPACK's `dsyev_`, which the helix fit calls: a Jacobi
+    eigensolver, so an axis's direction may have the other sign;
+  - `shim/cvcraw_geometry/cvcgeom.h` stands in for the legacy geometry's arrays;
+  - `shim/Histogram/histogram_data.h` keeps the widths its GUI's histograms were given, so the
+    driver can write them;
+  - `shim/Contour/basic.h` is empty: the header includes it and uses nothing from it;
+  - `shim/secondary_huge.h`, force-included, makes the legacy's `HUGE` 1000000 after `math.h`
+    (glibc redefines it, the UCRT rejects it).
+- **The driver:** `secondary_driver.cpp` calls `compute_secondary_structures`, then
+  `buildAllGeometry` with the GUI's defaults (20 helices, 2 sheets, both width windows 2 to 3), as
+  TexMol's `SecondaryStructureData` did. It reads the skeleton's private data members by compiling
+  `Skel`'s header with `private` as `public`.
+- **Inputs:** `inputs/secondary/<case>.pts`, a point a line, each coordinate an exact decimal. A
+  surface's points are what the legacy reads. `<case>.json` records where the case came from.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/secondary/`:
+  - `<case>.ss.txt`, in `secondary_driver.cpp`'s format:
+    - the skeleton's counts;
+    - each component's area;
+    - the two histograms' widths;
+    - the candidate runs;
+    - the helix axes, longest first;
+    - each sheet polygon drawn, as its vertex count, centre and area;
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256.
+
+| Case | Points | What it covers |
+|---|---|---|
+| `helices_and_sheet` | 2,920 | three tubes of radius 2.5 at three angles and a slab 2.5 thick (`make_inputs.py`): 3 helices, 1 sheet |
+| `1grl` | 9,581 | PDB 1GRL's surface: the isosurface at 12 of its heavy atoms' blur map (blobbiness -0.3, 2 Å grid), from `cvc::mol::blur` and `cvc::iso`, rounded to 1/64 Å. `make_inputs.py` leaves it as committed. 22 helices (20 drawn), 2 of 10 sheet candidates |
+
+`secondary_structures_test` (`MatchesTheLegacyLibrary`) compares the port with these goldens.
+
+- **Exactly on `helices_and_sheet`:**
+  - every polygon, edge, component area and histogram width;
+  - each helix axis, to 1e-9, either way round, from the same points;
+  - every sheet polygon, to a float's precision (the legacy sheet geometry holds floats).
+
+  Which of two coincident Voronoi vertices joins a run depends on the cells' order. So one helix
+  of the port holds two points more than the legacy's run, each within 1e-7 of one it already has.
+- **By shares on `1grl`:**
+  - the measured values: 99% of the polygon widths, every helix width, 65 of the 69 component
+    areas, 15 of the 20 helix axes within 1 Å at both ends and 17 within 3 Å, and every sheet
+    polygon;
+  - the bounds the test sets are lower, to leave room for another platform's legacy output.
+
+  The core's Tight Cocone and U2 keep the legacy's results only up to the cells' order and the
+  rounding of their Voronoi vertices:
+  - Tight Cocone's surface already differs, 19,166 facets against 19,154;
+  - P1's skeleton port matches 98.5% of the legacy Skeletonization's segments on the same
+    surface.
+
+**Platforms:** the goldens are the ones CI's check made on ubuntu-24.04 with GCC and cvcpkg's
+CGAL, so `--check` passes there and only there. A Windows build (MSVC 2022, CGAL 6.0.1) makes
+the same counts but not the same bytes:
+- on `helices_and_sheet`, the same values to 4e-13, some of them in another order;
+- on `1grl`, 21 candidate runs to Linux's 22. Both draw 20, and the port's axes are as close to
+  either set: 13 (Windows) or 15 (Linux) of the 20 within 1 Å at both ends, 17 within 3 Å.
+
+The test passes against either set.
 
 ## ContourTiler
 

@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/image/image.h>
+#include <cvc/image/image_encode.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/physics/world.h>
@@ -23,11 +25,13 @@
 #include <cvc/world/generated_world.h>
 #include <cvc/world/surface.h>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <map>
 #include <string>
 
 using namespace cvc::world;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -329,6 +333,9 @@ TEST(CityBundleV2, AGeneratedWorldIsTheSameWorldReadBack) {
   city_bundle_write info;
   info.generator = b.generator;
   info.water_level = b.water_level;
+  for (const char *extra : {"props.json", "streets.json", "ground.png"})
+    if (files.count(extra))
+      info.extra[extra] = files.at(extra);
   const city_bundle_files again = city_bundle_bytes(app, b.geometry, info);
   EXPECT_EQ(city_bundle_hash(again), b.hash);
   // And the same params make the same bundle.
@@ -377,4 +384,217 @@ TEST(CityBundleV2, PhysicsRunsTheSameOnEveryLoad) {
         worst = std::max(worst, std::fabs(hit->point.z - gw.height(x, y)));
     }
   EXPECT_LT(worst, 0.01);
+}
+
+// ── GB3: everything the renderer draws is in the bundle (world_from_bundle) ──
+
+// A generated world's bundle holds the props' coarser rungs and their cells, the streets and the
+// painted ground; read back, it is the world the renderer drew: the same meshes, cells, streets,
+// counts, terrain chunks and water, rebuilt where they are derived. Written again with its ground,
+// it is the same bundle.
+TEST(CityBundleV2, AGeneratedWorldReadsBackAsTheWorldItDraws) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  generated_world_params p = small_params();
+  p.water_level_m = 2.0; // some water, so the rebuilt water has something to match
+  const generated_world gw = generate_world(app, p);
+  ASSERT_FALSE(gw.prop_cells.empty());
+  ASSERT_FALSE(gw.props_r1.const_tris().empty());
+  const city_bundle_files files = generated_world_bundle(app, gw, "test");
+  for (const char *f : {"props_r1.glb", "props_r2.glb", "props.json", "streets.json", "ground.png"})
+    EXPECT_EQ(files.count(f), 1u) << f;
+  const city_bundle b = load_city_bundle(app, city_bundle_memory_reader(files), "generated");
+  const bundle_world bw = world_from_bundle(app, b, city_bundle_memory_reader(files));
+  ASSERT_TRUE(bw.world);
+  const generated_world &w = *bw.world;
+
+  EXPECT_EQ(generated_world_params_json(w.params), generated_world_params_json(gw.params));
+  EXPECT_EQ(w.terrain->heights(), gw.terrain->heights());
+  EXPECT_EQ(w.terrain->cell_materials(), gw.terrain->cell_materials());
+  auto same_faces = [](const cvc::geometry &a, const cvc::geometry &c, const char *what) {
+    EXPECT_EQ(a.const_tris().size(), c.const_tris().size()) << what;
+    EXPECT_EQ(a.const_lines().size(), c.const_lines().size()) << what;
+    EXPECT_EQ(a.const_colors().empty(), c.const_colors().empty()) << what;
+  };
+  same_faces(w.buildings, gw.buildings, "buildings");
+  same_faces(w.roads, gw.roads, "roads");
+  same_faces(w.props, gw.props, "props");
+  same_faces(w.foliage, gw.foliage, "foliage");
+  same_faces(w.needles, gw.needles, "needles");
+  same_faces(w.props_r1, gw.props_r1, "props_r1");
+  same_faces(w.props_r2, gw.props_r2, "props_r2");
+
+  // The cells: the same runs of faces and bounds; each cell's mesh is the cell's.
+  EXPECT_DOUBLE_EQ(w.prop_cell_m, gw.prop_cell_m);
+  ASSERT_EQ(w.prop_cells.size(), gw.prop_cells.size());
+  for (std::size_t i = 0; i < w.prop_cells.size(); ++i) {
+    const auto &a = w.prop_cells[i], &c = gw.prop_cells[i];
+    for (int k = 0; k < 3; ++k) {
+      EXPECT_DOUBLE_EQ(a.min[k], c.min[k]) << i;
+      EXPECT_DOUBLE_EQ(a.max[k], c.max[k]) << i;
+    }
+    const std::pair<const generated_world::prop_span *, const generated_world::prop_span *>
+        spans[] = {{&a.props, &c.props},
+                   {&a.foliage, &c.foliage},
+                   {&a.needles, &c.needles},
+                   {&a.props_r1, &c.props_r1},
+                   {&a.props_r2, &c.props_r2}};
+    const cvc::geometry *meshes[][2] = {{&w.props, &gw.props},
+                                        {&w.foliage, &gw.foliage},
+                                        {&w.needles, &gw.needles},
+                                        {&w.props_r1, &gw.props_r1},
+                                        {&w.props_r2, &gw.props_r2}};
+    for (int s = 0; s < 5; ++s) {
+      EXPECT_EQ(spans[s].first->c0, spans[s].second->c0) << i << " " << s;
+      EXPECT_EQ(spans[s].first->c1, spans[s].second->c1) << i << " " << s;
+      const cvc::geometry got = prop_span_mesh(*meshes[s][0], *spans[s].first);
+      const cvc::geometry want = prop_span_mesh(*meshes[s][1], *spans[s].second);
+      EXPECT_EQ(got.const_tris().size(), want.const_tris().size()) << i << " " << s;
+      EXPECT_EQ(got.const_lines().size(), want.const_lines().size()) << i << " " << s;
+      EXPECT_LE(got.const_points().size(), want.const_points().size()) << i << " " << s;
+      for (const auto &f : got.const_tris())
+        for (int k = 0; k < 3; ++k)
+          EXPECT_LT(std::size_t(f[k]), got.const_points().size()) << i << " " << s;
+    }
+  }
+
+  // The streets and the city's counts.
+  ASSERT_EQ(w.streets.nodes.size(), gw.streets.nodes.size());
+  ASSERT_EQ(w.streets.segments.size(), gw.streets.segments.size());
+  for (std::size_t i = 0; i < w.streets.segments.size(); ++i) {
+    EXPECT_EQ(w.streets.segments[i].a, gw.streets.segments[i].a);
+    EXPECT_EQ(w.streets.segments[i].b, gw.streets.segments[i].b);
+    EXPECT_DOUBLE_EQ(w.streets.segments[i].width, gw.streets.segments[i].width);
+    EXPECT_EQ(w.streets.segments[i].kind, gw.streets.segments[i].kind);
+    EXPECT_EQ(w.streets.segments[i].arterial, gw.streets.segments[i].arterial);
+  }
+  for (std::size_t i = 0; i < w.streets.nodes.size(); ++i) {
+    EXPECT_DOUBLE_EQ(w.streets.nodes[i].x, gw.streets.nodes[i].x);
+    EXPECT_DOUBLE_EQ(w.streets.nodes[i].y, gw.streets.nodes[i].y);
+  }
+  EXPECT_EQ(w.building_count, gw.building_count);
+  EXPECT_EQ(w.archetypes, gw.archetypes);
+  EXPECT_EQ(w.districts, gw.districts);
+  EXPECT_DOUBLE_EQ(w.road_length, gw.road_length);
+
+  // Rebuilt from the stored terrain: the same chunks, and the same water.
+  EXPECT_EQ(w.terrain_layout.chunk_rows, gw.terrain_layout.chunk_rows);
+  EXPECT_EQ(w.terrain_layout.chunk_cols, gw.terrain_layout.chunk_cols);
+  ASSERT_EQ(w.terrain_chunks.size(), gw.terrain_chunks.size());
+  for (std::size_t i = 0; i < w.terrain_chunks.size(); ++i) {
+    const auto &a = w.terrain_chunks[i], &c = gw.terrain_chunks[i];
+    ASSERT_EQ(a.rungs.size(), c.rungs.size()) << i;
+    EXPECT_EQ(a.error_m, c.error_m) << i;
+    ASSERT_EQ(a.water.size(), c.water.size()) << i;
+    for (std::size_t k = 0; k < a.rungs.size(); ++k) {
+      EXPECT_EQ(a.rungs[k].const_tris().size(), c.rungs[k].const_tris().size()) << i;
+      if (k < a.water.size())
+        EXPECT_EQ(a.water[k].const_tris().size(), c.water[k].const_tris().size()) << i;
+    }
+  }
+  EXPECT_GT(gw.water.wet_cells(), 0u);
+  EXPECT_EQ(w.water.wet_cells(), gw.water.wet_cells());
+  EXPECT_EQ(w.water_ground.size(), gw.water_ground.size());
+
+  // The ground: the material painting at the bundle's size, texel for texel.
+  ASSERT_EQ(bw.ground.width, world_ground_size);
+  ASSERT_EQ(bw.ground.height, world_ground_size);
+  EXPECT_TRUE(bw.ground.rgb == paint_surface(gw, surface_color::material, world_ground_size));
+
+  // Written again, with its ground: the same bundle.
+  const city_bundle_files again = generated_world_bundle(app, w, "test", &bw.ground);
+  EXPECT_EQ(city_bundle_hash(again), b.hash);
+  for (const auto &[name, bytes] : files)
+    if (name != "world.json") {
+      ASSERT_EQ(again.count(name), 1u) << name;
+      EXPECT_TRUE(*again.at(name) == *bytes) << name;
+    }
+}
+
+// A version 1 city (terrain.json, satellite.png) is a world to draw too: its terrain and chunks,
+// no water (it has no level), and the satellite image as its ground.
+TEST(CityBundleV2, AVersionOneCityIsAWorldToDraw) {
+  cvc::app app;
+  const fs::path dir = fs::temp_directory_path() / "cvc_gb3_v1_city";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  {
+    std::ofstream tj(dir / "terrain.json");
+    tj << R"({"bounds": {"min_x": 100, "min_y": -50, "max_x": 400, "max_y": 150},
+  "rows": 5, "cols": 7, "grid": [)";
+    for (int r = 0; r < 5; ++r) {
+      tj << (r ? ", [" : "[");
+      for (int c = 0; c < 7; ++c)
+        tj << (c ? ", " : "") << (4 - r) + 0.5 * c;
+      tj << "]";
+    }
+    tj << "]}";
+  }
+  {
+    std::vector<unsigned char> px(16 * 8 * 3);
+    for (int y = 0; y < 8; ++y)
+      for (int x = 0; x < 16; ++x)
+        px[std::size_t(y * 16 + x) * 3] = static_cast<unsigned char>(y * 30); // red rises south
+    const std::string png = cvc::encode_png(
+        cvc::image(16, 8, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px.data()));
+    std::ofstream(dir / "satellite.png", std::ios::binary) << png;
+  }
+  city_bundle_options o;
+  o.buildings = false;
+  const city_bundle b = load_city_bundle(app, dir.string(), o);
+  const bundle_world bw = world_from_bundle(app, b, city_bundle_dir_reader(dir.string()));
+  ASSERT_TRUE(bw.world);
+  const generated_world &w = *bw.world;
+  EXPECT_EQ(w.terrain->rows(), 5);
+  EXPECT_EQ(w.terrain->cols(), 7);
+  EXPECT_DOUBLE_EQ(w.grid.min_x, 100.0);
+  EXPECT_DOUBLE_EQ(w.grid.max_y, 150.0);
+  EXPECT_DOUBLE_EQ(w.params.half_m, 150.0);
+  EXPECT_EQ(w.params.terrain, "bundle");
+  EXPECT_FALSE(w.terrain_chunks.empty());
+  EXPECT_EQ(w.water.wet_cells(), 0u);
+  EXPECT_LT(w.params.water_level_m, w.height_min);
+  for (const terrain_chunk &ch : w.terrain_chunks)
+    EXPECT_TRUE(ch.water.empty());
+  EXPECT_TRUE(w.buildings.const_points().empty());
+  EXPECT_TRUE(w.prop_cells.empty());
+  // The satellite image, rows south first: the image's bottom row (red 210) is row 0.
+  ASSERT_EQ(bw.ground.width, 16);
+  ASSERT_EQ(bw.ground.height, 8);
+  EXPECT_EQ(bw.ground.rgb[0], 210);
+  EXPECT_EQ(bw.ground.rgb[std::size_t(7 * 16) * 3], 0);
+  fs::remove_all(dir);
+}
+
+// A props.json or streets.json that does not fit the meshes says so.
+TEST(CityBundleV2, ABadRendererFileSaysWhy) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  const generated_world gw = generate_world(app, small_params());
+  city_bundle_files files = generated_world_bundle(app, gw, "test");
+  const city_bundle b = load_city_bundle(app, city_bundle_memory_reader(files), "generated");
+  auto why = [&](const city_bundle_files &f) {
+    try {
+      world_from_bundle(app, b, city_bundle_memory_reader(f));
+    } catch (const std::runtime_error &e) {
+      return std::string(e.what());
+    }
+    return std::string();
+  };
+  city_bundle_files bad = files;
+  bad["props.json"] = std::make_shared<const std::string>(
+      R"({"cell_m": 50, "cells": [[0, 0, 0, 1, 1, 1, 0, 99999999, 0, 0, 0, 0, 0, 0, 0, 0]]})");
+  EXPECT_NE(why(bad).find("outside its mesh"), std::string::npos) << why(bad);
+  bad = files;
+  bad["props.json"] = std::make_shared<const std::string>(R"({"cells": [[1, 2, 3]]})");
+  EXPECT_NE(why(bad).find("is not 16 numbers"), std::string::npos) << why(bad);
+  bad = files;
+  bad["streets.json"] = std::make_shared<const std::string>(
+      R"({"nodes": [[0, 0, 1]], "segments": [[0, 5, 6, 0, false]]})");
+  EXPECT_NE(why(bad).find("not in nodes"), std::string::npos) << why(bad);
+  bad = files;
+  bad["ground.png"] = std::make_shared<const std::string>("not a png");
+  EXPECT_NE(why(bad).find("ground.png"), std::string::npos) << why(bad);
 }

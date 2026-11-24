@@ -1,0 +1,68 @@
+# volume_render.ari — one volume, three renderers: the signed distance field of the embedded
+# Stanford bunny in a `volume_render` node, drawn by VTK's GPU mapper, libcvc's raycaster (volren)
+# or view-aligned texture slices (volslice), switched from the panel while it runs, all through
+# one transfer function (docs/ARIADNE.md §5.4).
+#
+# The app holds the volume (the data: block), and the node draws it as it is held: switching the
+# renderer hands the same voxels to the next one, and an edit in the transfer function editor
+# carries over the switch.
+#
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/volume_render.ari
+
+meta:
+  name: Volume render (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/transfer_function.ari
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+# The volume the node draws: the bunny's signed distance field, made and held by the app.
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 64, fit: { height: 100, up: y } }
+
+windows:
+  - window: Renderer
+    pos: [12, 12]
+    size: [420, 560]
+    children:
+      - combo: Renderer
+        bind: graphics.root.children.bunny.renderer
+        options: [VTK, volren, volslice, None]
+        values: [vtk, volren, volslice, none]
+        tooltip: "what draws the volume: VTK's GPU mapper, libcvc's raycaster or texture slices"
+      - text: Status
+        bind: graphics.root.children.bunny.status
+      - separator
+      - include: transfer_function_editor
+        args: { node: bunny, id: bunny_tf, label: Transfer function }
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # Negative inside, positive outside: the surface is where the field crosses zero, so the
+    # transfer function makes the band around zero opaque and the rest clear.
+    - node: bunny
+      type: volume_render
+      source: { data: bunny }       # the app's volume (data: above)
+      renderer: volren
+      transfer_function:
+        domain: [-20, 20]
+        color: [[0, 0.75, 0.25, 0.05], [0.45, 1.0, 0.75, 0.35], [0.5, 1.0, 1.0, 1.0],
+                [0.55, 0.45, 0.7, 1.0], [1, 0.05, 0.1, 0.35]]
+        alpha: [[0, 0.6], [0.46, 0.5], [0.5, 0.9], [0.54, 0.05], [1, 0]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

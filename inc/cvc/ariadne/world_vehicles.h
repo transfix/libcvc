@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/ariadne/vehicle_drive.h>      // dynamic_drive
 #include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h>        // vehicle_archetype
 #include <cvc/ariadne/world_spawns.h>
@@ -34,6 +35,7 @@
 
 namespace cvc {
 class app;
+class height_field;
 namespace physics {
 class world;
 class flow_velocity;
@@ -122,8 +124,10 @@ struct SceneData;
 // file), a document asset's file, a file beside the document (`doc_dir`), a data: entry's package
 // (`data`: its uri and path: copied into the look, so it is whole without the document; a view
 // loads it, cvcGL's vehicle_model_state), and the default look made explicit (the Humvee model for
-// a humvee when it is installed, else the box). A look that cannot be found is drawn as its box,
-// with a warning.
+// a humvee when it is installed, else the box). A parted look's files (its chassis, its wheel,
+// its rig's file) each beside the document, else installed where the vehicle models are
+// (find_vehicle_model: `humvee/chassis.glb`), else beside the document still (the view warns when
+// it cannot read one). A look that cannot be found is drawn as its box, with a warning.
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings, const std::vector<SceneData> &data);
@@ -244,14 +248,17 @@ bool parse_poses(const std::string &text, std::vector<std::pair<std::string, ent
 
 // A wheel as it is drawn, in its vehicle's chassis box's frame (m from the box's centre: x
 // forward, y left, z up): its centre, its steering angle (rad, + left), whether it is on the
-// ground, and how far it has rolled about its axle (rad in (-pi, pi], + forward; a `pose`
-// entity's, at its pose's speed; 0 on the plants). Front to back by axle, each axle's left wheel
-// first.
+// ground, how far it has rolled about its axle (rad in (-pi, pi], + forward: a Jolt wheel's own
+// rotation; every other plant's and a `pose` entity's, at its chassis's speed, integrated each
+// physics step), its radius (m), and whether its axle steers. Front to back by axle, each axle's
+// left wheel first.
 struct entity_wheel {
   double x = 0.0, y = 0.0, z = 0.0;
   double steer = 0.0;
   bool down = true;
   double spin = 0.0;
+  double radius = 0.0;
+  bool steered = false;
 };
 
 // An entity as it is now.
@@ -568,6 +575,15 @@ public:
   // ticked on a step with a clock tick (before_step(clock_tick)). The phase it reports changes
   // only when the navigator is built again; revision() moves when it does.
   bool kinematics(std::uint64_t id, kinematic_drive &out) const;
+  // Entity `id` on a dynamic plant as a client runs it (OW5d, OW5e; vehicle_dynamics.h): the
+  // plant, its vehicle (its archetype's preset and the numbers the world gave it), the navigator's
+  // hold on a command (sim_world::plant_plan_of, in SI), the clock ticks the navigator ticks on,
+  // and on dynamic4w the height its vehicles ride from. False as kinematics() is, for one on
+  // neither the `dynamic` nor the `dynamic4w` plant.
+  bool dynamics(std::uint64_t id, dynamic_drive &out) const;
+  // The ground the vehicles drive on (m) at (x, y): vehicle_ground_height of the world's grid and
+  // terrain.
+  double ground_height(double x, double y) const;
   // The navigator's tick to use (s). By default the world's: cvc::sim_tick of its physics step
   // (cvc/core/sim_tick.h), kSimTick (7/120 s) at the default 120 Hz, 4/60 s at 60 Hz. It takes
   // effect when the navigator is next built (a new grid, a restart: WorldGym::reset), held to the
@@ -647,6 +663,13 @@ private:
   struct impl;
   std::unique_ptr<impl> _impl;
 };
+
+// The ground a vehicle drives on at (x, y), in world metres: the world's terrain where it has one
+// (the physics collider's own heights), else the navigator's grid's heights between its samples,
+// else 0. WorldVehicles' plants drive on it; a client running one of its vehicles drives on the
+// same (OW5g: SceneWorld::vehicle_ground gives the two).
+double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
+                             double x, double y);
 
 } // namespace ariadne
 } // namespace cvc

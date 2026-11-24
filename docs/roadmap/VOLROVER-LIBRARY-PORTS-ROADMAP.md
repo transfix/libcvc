@@ -1389,6 +1389,22 @@ their units and ranges as properties. Bulk data is on the data channel:
   decoder that reads a local file plane by plane; a `.pts` decoder (it needs the volume's frame).
   Found: in the 3D view a point disk coplanar with a plane can lose the depth test to that plane
   (which disk shows depends on draw order); the slice views show them all.
+- **Which volume** (after Joe on 2026-11-21: with several volumes loaded, how does the grid pick
+  one?): the node publishes `grid.volumes`, the outputs of the document's `data:` entries that
+  hold a volume, and the key `grid.source.volume` names when it is elsewhere; the Probe tab's
+  Source combo picks from it and writes `grid.source.volume`, which the grid follows. The demo
+  holds a coarser bunny beside the fine one. Not offered: volumes at keys outside `data:` that the
+  grid does not name (a filter's output a document points at with `source: { state }` shows while
+  named), and a scene-wide "current volume" that every node follows.
+- **Which renderer** (after Joe on 2026-11-21: switch the 3D volume renderer between VTK, volren
+  and volslice, for any scene's volume): cvcGL's `VolumeRenderNode` and Ariadne's
+  `type: volume_render` draw one volume the app holds with the renderer `<node>.renderer` picks,
+  switchable while it runs, one transfer-function model bound to whichever draws
+  (`tf_binding_options::model_key`). The grid's `display.render` draws its own volume in the 3D
+  view the same way (the Transfer function tab's 3D volume combo), through the planes' transfer
+  function. Demo `examples/ariadne/documents/volume_render.ari`; test `cvcgl_volume_render`. The
+  built-in `volume`, `volren` and `volslice` types keep their fixed renderer; moving them to
+  state-tree sources is the state-tree work's (docs/roadmap/DATA_FROM_STATE_TREE.md, D1/D2).
 - **Viewport pieces it needed:** `pointer:` (the pick's keys as the pointer moves, for the probe)
   and `axis` on a pick; a slider's `range: key`.
 - **The component:** `volume_grid`, `volume_grid_views`, `volume_grid_tools`, the `switch` and
@@ -1792,6 +1808,8 @@ not as follow-ups.
   `utility.h`'s XML-RPC helpers, and the `__system.xmlrpc` keys.
 - **Skeletonization's helix-specific strand window and its `#if 0` helix block.** The window
   becomes an off-by-default parameter. The block fits better with a SecondaryStructures port.
+  *(T5 ported SecondaryStructures, which picks helices by the same (2, 3) window on its U2
+  widths: `cvc::find_secondary_structures`, TEXMOL-F2DOCK-ARISRV-ROADMAP.md §2.6.)*
 
 ---
 

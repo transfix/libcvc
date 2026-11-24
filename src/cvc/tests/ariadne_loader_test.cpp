@@ -71,6 +71,27 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
   return false;
 }
 
+// The loader's own warnings: every one but the schema's ("ari: schema: ...", which a build with
+// the validator adds for the same mistakes; has_schema_issue checks those).
+std::vector<std::string> loader_warnings(const LoadResult &r) {
+  std::vector<std::string> out;
+  for (const std::string &w : r.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      out.push_back(w);
+  return out;
+}
+
+// Whether the schema check reported the value at `pointer` (true without the validator, which
+// checks nothing).
+bool has_schema_issue(const LoadResult &r, const std::string &pointer) {
+  if (!have_jsonschema())
+    return true;
+  for (const SchemaIssue &i : r.schema_issues)
+    if (i.pointer == pointer)
+      return true;
+  return false;
+}
+
 // First widget in the tree whose mount scope equals `scope` (§12 load: wrapper).
 const Widget *find_scope(const Widget &w, const std::string &scope) {
   if (w.scope == scope)
@@ -780,10 +801,12 @@ windows:
   ASSERT_EQ(win->children.size(), 5u);
   EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
   EXPECT_EQ(win->children[3].label, "");
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
             std::string::npos)
-      << r.warnings[0];
+      << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/4/glyphs"));
 }
 
 // text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
@@ -848,10 +871,13 @@ windows:
   EXPECT_TRUE(odd->multiline) << "multi-line by default";
   EXPECT_EQ(odd->max_lines, 4);
   EXPECT_EQ(odd->send, "") << "no send button by default";
-  ASSERT_EQ(r.warnings.size(), 2u);
-  EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
-      << r.warnings[0];
-  EXPECT_NE(r.warnings[1].find("max_lines must be >= 1"), std::string::npos) << r.warnings[1];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 2u);
+  EXPECT_NE(warnings[0].find("message_input 'Odd' has no on:"), std::string::npos) << warnings[0];
+  EXPECT_NE(warnings[1].find("max_lines must be >= 1"), std::string::npos) << warnings[1];
+  // The schema says so too, and that a message_input has no height: (a text_view's).
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3/max_lines"));
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3"));
 }
 
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
@@ -1161,6 +1187,35 @@ windows:
     EXPECT_EQ(w.find("'icon'"), std::string::npos) << w; // a known key, not an unknown one
   }
   EXPECT_TRUE(warned);
+}
+
+// §5.22 a tray icon's picture (an avatar), and §5.24 `notifications: always`.
+TEST(AriadneLoader, TrayIconPictureAndBellAlways) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"ari(
+meta: { min_libcvc: "0.0.0" }
+notifications: always
+menubar:
+  - tray_icon: user
+    icon: (state-get "me.avatar_url")
+    auth: site
+    on: profile
+)ari");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *you = find(r.root, Kind::TrayIcon, "user");
+  ASSERT_NE(you, nullptr);
+  EXPECT_EQ(you->button_icon, "(state-get \"me.avatar_url\")");
+  EXPECT_EQ(you->media_auth, "site");
+  // The document's bell setting, outside the bar: on, and shown with an empty feed.
+  const Widget *bell = nullptr;
+  for (const Widget &c : r.root.children)
+    if (c.kind == Kind::TrayIcon && c.tray_bell)
+      bell = &c;
+  ASSERT_NE(bell, nullptr);
+  EXPECT_TRUE(bell->bdef);
+  EXPECT_TRUE(bell->bell_always);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("notifications"), std::string::npos) << w;
 }
 
 // §5.9 `resizable:` (default true): the user resizes a window by an edge or a corner. A window's
@@ -2457,6 +2512,7 @@ scene:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.scene.clock.hz, 60.0);
+  EXPECT_TRUE(r.schema_issues.empty()) << "the schema takes hz too";
   for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
     LoadResult b = fresh_load(
         std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
@@ -2466,6 +2522,7 @@ scene:
     for (const std::string &w : b.warnings)
       warned = warned || w.find("clock: hz") != std::string::npos;
     EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+    EXPECT_TRUE(has_schema_issue(b, "/scene/clock/hz")) << bad;
   }
 }
 
@@ -2777,6 +2834,54 @@ scenes:
   EXPECT_TRUE(warned);
 }
 
+// §5.18 a camera's authored viewpoint: position, target, up, fov, near, far, orthographic, height;
+// a camera without them keeps the defaults, and a malformed vector or an fov out of range is left
+// out rather than half read.
+TEST(AriadneScene, CameraViewpoints) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  cameras:
+    - camera: main
+      position: [12, -9, 7.5]
+      target: [1, 1, 0]
+      up: [0, 1, 0]
+      fov: 35
+      near: 0.25
+      far: 400
+    - { camera: plan, orthographic: true, height: 16, target: [0, 0, 0] }
+    - { camera: rig, azimuth: -30 }
+    - { camera: bad, position: [1, two, 3], target: [1, 2], up: [0, 0, 0], fov: 200 }
+  nodes: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.cameras.size(), 4u);
+  const SceneCamera &m = r.scene.cameras[0];
+  EXPECT_EQ(m.id, "main");
+  EXPECT_TRUE(m.has_position && m.has_target && m.has_up);
+  EXPECT_DOUBLE_EQ(m.position[2], 7.5);
+  EXPECT_DOUBLE_EQ(m.target[0], 1.0);
+  EXPECT_DOUBLE_EQ(m.up[1], 1.0);
+  EXPECT_DOUBLE_EQ(m.fov, 35.0);
+  EXPECT_DOUBLE_EQ(m.near_clip, 0.25);
+  EXPECT_DOUBLE_EQ(m.far_clip, 400.0);
+  EXPECT_FALSE(m.orthographic);
+  const SceneCamera &p = r.scene.cameras[1];
+  EXPECT_TRUE(p.orthographic);
+  EXPECT_DOUBLE_EQ(p.height, 16.0);
+  EXPECT_FALSE(p.has_position);
+  EXPECT_TRUE(p.has_target);
+  const SceneCamera &g = r.scene.cameras[2];
+  EXPECT_FALSE(g.has_position || g.has_target || g.has_up || g.orthographic);
+  EXPECT_DOUBLE_EQ(g.fov, 0.0);
+  EXPECT_DOUBLE_EQ(g.near_clip, 0.0);
+  EXPECT_DOUBLE_EQ(g.up[2], 1.0);
+  const SceneCamera &b = r.scene.cameras[3];
+  EXPECT_FALSE(b.has_position || b.has_target || b.has_up);
+  EXPECT_DOUBLE_EQ(b.fov, 0.0);
+}
+
 // §9.5.1 tags: a list or one name, on any node at any depth; a built-in key, not a custom node's
 // prop. A node without tags has none (it is in every view).
 TEST(AriadneScene, NodeTags) {
@@ -2967,6 +3072,36 @@ scene:
   ASSERT_EQ(r.scene.nodes.size(), 1u);
   EXPECT_EQ(r.scene.nodes[0].material_texture_stream, "fog.tile{i}");
   EXPECT_EQ(scene_node_instance(r.scene.nodes[0], 2).material_texture_stream, "fog.tile2");
+}
+
+// A node's on_pick: is its own (not a custom type's prop), at any depth, and a copy's names it.
+TEST(AriadneScene, OnPickParsedOntoNodeAndCopies) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: shelf
+      on_pick: shelf_clicked
+      children:
+        - node: jar
+          source: { box: 1 }
+    - node: crate_{i}
+      repeat: 3
+      source: { box: 1 }
+      on_pick: (state-set "selected" "crate_{i}")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    ADD_FAILURE() << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  EXPECT_EQ(r.scene.nodes[0].on_pick, "shelf_clicked");
+  EXPECT_EQ(r.scene.nodes[0].props.find("on_pick"), nullptr);
+  ASSERT_EQ(r.scene.nodes[0].children.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].children[0].on_pick, "");
+  EXPECT_EQ(r.scene.nodes[1].on_pick, "(state-set \"selected\" \"crate_{i}\")");
+  EXPECT_EQ(scene_node_instance(r.scene.nodes[1], 2).on_pick,
+            "(state-set \"selected\" \"crate_2\")");
 }
 
 // A copy has no body and no world (both are built once from the declared nodes), and a nested
@@ -5493,6 +5628,33 @@ root:
   EXPECT_EQ(other->app_name, "other");
 }
 
+// §5.25 a load:'s own name: (a key or an expression, `{i}` its instance) is kept for the Runtime
+// to work out; and a repeated mount whose module repeats widgets of its own is not a nested
+// repeat (the module's {i} is its own), so it loads without that warning.
+TEST(AriadneMount, ALoadsNameIsKeptAndARepeatedMountIsNotANestedRepeat) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("site_app.ari", "meta: { name: Site, min_libcvc: \"3.4.0\" }\n"
+                                 "menubar:\n  - menu_item: Home\n    on: (state-set \"h\" 1)\n"
+                                 "root:\n  - type: group\n    repeat: (int 2)\n"
+                                 "    children: [ { text: \"row {i}\" } ]\n");
+  const std::string main = write_temp_ari("main_named_sites.ari", R"(
+meta: { min_libcvc: "3.4.0" }
+root:
+  - load: site_app.ari
+    as: site
+    repeat: (int 2)
+    name: slots.{i}.name
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *site = find_scope(r.root, "includes.site");
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->app_name, "Site");
+  EXPECT_EQ(site->app_name_bind, "slots.{i}.name");
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("nested 'repeat'"), std::string::npos) << w;
+}
+
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
   SKIP_WITHOUT_YAML();
   write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");
@@ -6166,15 +6328,11 @@ TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
                           "windows: []\n";
   const LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
-  bool flagged = false;
-  for (const std::string &w : r.warnings) {
-    if (w.find("schema:") == std::string::npos)
-      continue;
-    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
-    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
-    flagged = flagged || w.find("'neither'") != std::string::npos;
+  for (const SchemaIssue &i : r.schema_issues) {
+    EXPECT_EQ(i.pointer.rfind("/data/made", 0), std::string::npos) << i.text();
+    EXPECT_EQ(i.pointer.rfind("/data/fetched", 0), std::string::npos) << i.text();
   }
-  EXPECT_TRUE(flagged);
+  EXPECT_TRUE(has_schema_issue(r, "/data/neither"));
 }
 
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
@@ -6407,11 +6565,11 @@ windows:
         default: {a: 1}
 )");
   ASSERT_TRUE(bad.ok) << bad.error;
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/default"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/height"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/interactive_updates"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/layers"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/1/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/height"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/interactive_updates"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/layers"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/1/default"));
 }
 
 // id: names any widget (not only a window), so a backend / the core can key per-instance state.
@@ -6833,6 +6991,17 @@ windows:
     for (const std::string &k : keys)
       if (k.find("{i}") == std::string::npos)
         EXPECT_EQ(k.find('{'), std::string::npos) << k;
+    // The Source combo: picks from the volumes the node offers, writing the key it follows; the
+    // text in its place while the node offers none.
+    const Widget *source = find(*windows[i], Kind::Combo, "Source");
+    ASSERT_NE(source, nullptr) << g;
+    EXPECT_EQ(source->bind, g + "source.volume");
+    EXPECT_NE(source->options_expr.find(g + "volumes"), std::string::npos) << source->options_expr;
+    EXPECT_NE(source->visible_when.find(g + "volumes"), std::string::npos);
+    const Widget *said = find(*windows[i], Kind::Text, "Source");
+    ASSERT_NE(said, nullptr) << g;
+    EXPECT_EQ(said->bind, g + "info.source");
+    EXPECT_NE(said->visible_when.find(g + "volumes"), std::string::npos);
   }
   // The views: their names, axes, picks, pointer and the grid they show.
   std::vector<const Widget *> custom;
@@ -7012,6 +7181,31 @@ TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
+// The volume_render demo: one volume_render node on a data: entry, a Renderer combo bound to its
+// renderer key, and the transfer function editor on its model.
+TEST(AriadneComponents, VolumeRenderDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_render.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  // cvcGL registers the sdf generator (the volume, data.bunny), not this test.
+  for (const std::string &w : r.warnings)
+    EXPECT_NE(w.find("generate: sdf is not a generator this build has"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].type, "volume_render");
+  EXPECT_EQ(r.scene.nodes[0].source_data, "bunny");
+  const Widget *renderer = find(r.root, Kind::Combo, "Renderer");
+  ASSERT_NE(renderer, nullptr);
+  EXPECT_EQ(renderer->bind, "graphics.root.children.bunny.renderer");
+}
+
 // A slider's range: key is the bound key's min and max; anything else warns and keeps lo: / hi:.
 TEST(AriadneLoader, SliderRangeFromKey) {
   SKIP_WITHOUT_YAML();
@@ -7032,8 +7226,10 @@ windows:
         range: data
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("range: 'data'"), std::string::npos) << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/2/range"));
   const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
   const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
   const Widget *odd = find(r.root, Kind::SliderInt, "Odd");

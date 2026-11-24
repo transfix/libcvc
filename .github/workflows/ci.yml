@@ -1278,7 +1278,9 @@ jobs:
         # waiter granted once its holder lets go, an empty lock-query, on both schedulers; then
         # app::lock_manager()'s auto mode (single), the attach pycvc's Exec makes
         # (lock_attach{ threads_compiled_in }) accepted, and a section with a waiter on it; then
-        # app::exec_pool() at threads 0, whose pump_all pumps two groups inline (threaded Stage 1a).
+        # app::exec_pool() at threads 0, whose pump_all pumps two groups inline (threaded Stage 1a);
+        # then a group attached to a pool at threads 0, which only its attaching thread pumps,
+        # driven by pump_host and wait_for_work until its program ends (Stage 2a).
         if: steps.paths.outputs.run == 'true'
         run: |
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
@@ -1820,14 +1822,16 @@ jobs:
       # The terminal backends are optional at configure time: without ftxui / tvision the
       # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
       # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
-      # ftxui there. Make a missing backend a failure.
+      # ftxui there. Make a missing backend a failure. So too the .ari schema's validator
+      # (json-schema-validator): without it no load checks a document, and ariadne_schema_test skips.
       # Likewise SDL3: without it cvcGL's onscreen window is VTK's and cvcgl_sdl_attach skips.
       - name: Assert the Ariadne terminal backends and cvcGL's SDL3 are configured
         shell: bash
         run: |
-          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
+          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED" \
+                      "Ariadne: .ari Layer-2 JSON-Schema validation ENABLED"; do
             grep -qF "$want" configure.log \
-              || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
+              || { echo "::error::the configure did not print '$want': the Ariadne tests that need it would only skip"; exit 1; }
           done
           grep -qF "cvcGL: SDL3 input/peripheral seam ENABLED" configure.log \
             || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
@@ -2466,6 +2470,20 @@ jobs:
   # lane's own host, the teardown reap, a started call's finisher, the stream and WebSocket locks,
   # and the pins that release the leaf first) are required in all three legs: SAN_REQUIRED_S1B,
   # appended as SAN_REQUIRED_S1A is.
+  #
+  # Threaded execution's Stage 2a (the continuous pool; S2.md section 5) adds no binary to the gcc
+  # legs: its cases are in binaries they run whole. The clang leg adds state_exec_coordinator_test
+  # whole and state_exec_stackless_evaluator_test's NativeSite cases (the long-step monitor's
+  # names; its cxx_runs filter, so no other suite is added there). SAN_BENCH's mt.groups runs both
+  # pump modes: fork-join, and continuous, eight groups attached to up to eight workers (three on
+  # the 4-vCPU runner) driven by the caller's pump_host and wait_for_work. Stage 2a's cases (the
+  # pool's eventcount, host posts, deadlines, starvation, a blocked worker, a busy pool's
+  # teardown; attached groups against their solo runs, their teardown under pumps, host bodies
+  # and the token, caller-only groups, churn with kernels in flight; groups with locks; the wake
+  # notifier and the pump's report; the split kernel pools and the evaluator's native names) and
+  # mt.groups' continuous points are required in all three legs: SAN_REQUIRED_S2A, appended as
+  # SAN_REQUIRED_S1A is. Q's state-word model runs in CTest (its quick suite) and in
+  # locks-deep.yml (its deep suite), under no sanitizer: it is Python.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -2479,13 +2497,14 @@ jobs:
           # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
           # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
           # both gcc legs, follow the locks phases'; "(" after a name keeps it from matching a
-          # longer one. Stage 1a's are SAN_REQUIRED_S1A's and Stage 1b's SAN_REQUIRED_S1B's, in
-          # every leg. A leg may also name its own C and C++ compilers (cc, cxx; the runner's gcc
-          # otherwise), C++ tests (cxx_tests, for SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH)
-          # and how some of its C++ tests run (cxx_runs, run.sh's SAN_CXX_RUNS): one line a binary
-          # of its C++ tests, `<name>: [VAR=VALUE ...] [--option ...]`, whose variables are set
-          # and options passed for that binary's run alone (the others run bare). A --gtest_filter
-          # there still leaves the Stress suites out: run.sh adds *Stress* to its negative patterns.
+          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, Stage 1b's SAN_REQUIRED_S1B's and
+          # Stage 2a's SAN_REQUIRED_S2A's, in every leg. A leg may also name its own C and C++
+          # compilers (cc, cxx; the runner's gcc otherwise), C++ tests (cxx_tests, for
+          # SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH) and how some of its C++ tests run
+          # (cxx_runs, run.sh's SAN_CXX_RUNS): one line a binary of its C++ tests,
+          # `<name>: [VAR=VALUE ...] [--option ...]`, whose variables are set and options passed
+          # for that binary's run alone (the others run bare). A --gtest_filter there still leaves
+          # the Stress suites out: run.sh adds *Stress* to its negative patterns.
           - name: tsan
             flags: -fsanitize=thread
             required: |
@@ -2639,11 +2658,12 @@ jobs:
               test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
-          # into the interpreter. Its lines are Stage 1a's and 1b's only. Its Ariadne run sizes a
-          # pool built from the tree at up to four workers (CVC_EXEC_THREADS; three on the 4-vCPU
-          # runner, and a case that sizes its own pool keeps it) and so makes the lock manager
-          # shared, which the AppLockManager cases assert is single: they are left out (as in
-          # CTest's threads_auto).
+          # into the interpreter. Its lines are Stage 1a's, 1b's and 2a's only, and of
+          # state_exec_stackless_evaluator_test it runs the NativeSite cases alone (Stage 2a's;
+          # the gcc legs run the whole binary). Its Ariadne run sizes a pool built from the tree
+          # at up to four workers (CVC_EXEC_THREADS; three on the 4-vCPU runner, and a case that
+          # sizes its own pool keeps it) and so makes the lock manager shared, which the
+          # AppLockManager cases assert is single: they are left out (as in CTest's threads_auto).
           # --gcc-install-dir: gcc 13's libstdc++, the gcc legs' own, not the newer 14 clang would
           # pick, so every leg builds against one library. (Either one's C++20 std::pair rejects
           # pair<std::string, T> inside T under clang, which is why such members are structs.)
@@ -2659,10 +2679,12 @@ jobs:
               state_exec_scheduler_test state_exec_async_test state_exec_async_calls_test
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
               ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
-              net_engine_test
+              net_engine_test state_exec_coordinator_test state_exec_stackless_evaluator_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
-            bench: mt.groups --size t=8 --size groups=8 --size runs=1
+              state_exec_stackless_evaluator_test: --gtest_filter=NativeSite.*
+            bench: |
+              mt.groups --size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size shape=even
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -2695,10 +2717,11 @@ jobs:
         test_pycvc_exec_pool.py test_pycvc_jobs.py test_pycvc_contours.py
         test_pycvc_point_classes.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
-      # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file.
+      # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file. A scenario's
+      # log is named after it, so each scenario takes one line (mt.groups' both pump modes).
       SAN_BENCH: |
         mt.multi_exec --size t=8 --size runs=1
-        mt.groups --size t=8 --size groups=8 --size runs=1
+        mt.groups --size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size shape=even
       # Stage 1a's required lines (the matrix's `required` format), the same in every leg: each
       # case of state_exec_groups_test and exec_pool_test (a case added to either adds its line),
       # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
@@ -2787,9 +2810,9 @@ jobs:
         test_pycvc_state_exec_locks.py: ok: test_po_pump_calls_refused_while_run_pumps
         test_pycvc_state_exec_locks.py: ok: test_po_raw_pump_call_holds_the_owner
         test_pycvc_state_exec_locks.py: ok: test_po_run_holds_the_owner_until_it_returns
-        mt.groups: t=8 groups=8 prog=fib runs=1
-        mt.groups: t=8 groups=8 prog=exceptions runs=1
-        mt.groups: t=8 groups=8 prog=cycle runs=1
+        mt.groups: t=8 groups=8 prog=fib runs=1 pump=fork_join
+        mt.groups: t=8 groups=8 prog=exceptions runs=1 pump=fork_join
+        mt.groups: t=8 groups=8 prog=cycle runs=1 pump=fork_join
       # Stage 1b's required lines (the matrix's `required` format), the same in every leg, so
       # AR-3b is required in both TSan legs: the Ariadne cases of section 4 (IS-1b, AR-1, AR-2,
       # AR-3, AR-3b, SP-1, EL-1, FF-3's init lane), HZ-8 (the teardown reap, S1-Q8; moved here
@@ -2842,6 +2865,106 @@ jobs:
         state_exec_async_calls_test: OK ] AsyncCalls.AShutdownsCancelHookMayWaitForAThreadInTheFinisher
         stream_test: OK ] Stream.EventsGoToTheSchedulerItWasOpenedWith
         net_ws_client_test: OK ] NetWsClient.TwoThreadsSendingOnOneConnectionSendWholeMessages
+      # Stage 2a's required lines (the matrix's `required` format), the same in every leg: the
+      # cases of S2.md section 4 (PL-2..PL-5, PL-9, PL-10, CT-1..CT-4, ST-3, LG-1, LG-2, LG-6,
+      # LG-7, RA-1), the implementers' unit tests (the wake notifier and the pump's report; the
+      # split kernel pools and the evaluator's native names; pycvc's batch wait; the pool's own;
+      # an attached group's teardown and the long-step monitor), and mt.groups' continuous points.
+      # A case added to them adds its line.
+      SAN_REQUIRED_S2A: |
+        exec_pool_test: OK ] ExecPool.PL02_EventcountNeverMissesAWake
+        exec_pool_test: OK ] ExecPool.PL03_AHostPostWakesAParkedPool
+        exec_pool_test: OK ] ExecPool.PL04_ASleeperIsPumpedAtItsDeadline
+        exec_pool_test: OK ] ExecPool.PL05_ALightGroupIsNotStarved
+        exec_pool_test: OK ] ExecPool.PL09_ABlockedWorkerBlocksOnlyItsGroup
+        exec_pool_test: OK ] ExecPool.PL10_DestroyingABusyPool
+        state_exec_groups_test: OK ] Groups.CT01_ContinuousEqualsSolo
+        state_exec_groups_test: OK ] Groups.CT02_TeardownDuringContinuousPumps
+        state_exec_groups_test: OK ] Groups.CT03_HostBodiesAndTheToken
+        state_exec_groups_test: OK ] Groups.CT04_CallerOnlyGroupsStayOnTheirThread
+        state_exec_groups_test: OK ] Groups.ST03_GroupChurnWithKernelsInFlight
+        state_exec_locks_test: OK ] LocksGroups.LG01_ContinuousGroupsWithLocksEqualSolo
+        state_exec_locks_test: OK ] LocksGroups.LG02_CrossGroupGrantRaces
+        state_exec_locks_test: OK ] LocksGroups.LG06_DeterministicGrantOrderRepeats
+        state_exec_locks_test: OK ] LocksGroups.LG07_DeterministicDeadlockVictim
+        state_exec_async_test: OK ] WakeNotifier.EveryPostCallsIt
+        state_exec_async_test: OK ] WakeNotifier.ItReplacesTheSignal
+        state_exec_async_test: OK ] WakeNotifier.ClearingWaitsForACallInProgress
+        state_exec_async_test: OK ] WakeNotifier.FuzzedPostsEachCallItOnce
+        state_exec_async_test: OK ] PumpReport.ASleepersWakeIsAPreciseDeadline
+        state_exec_async_test: OK ] PumpReport.ATimedReceivesDeadlineIsPrecise
+        state_exec_async_test: OK ] PumpReport.AFrameWaiterIsACoarseMillisecond
+        state_exec_async_test: OK ] PumpReport.ALimitedProcesssCallInFlightBeatsCoarsely
+        state_exec_async_test: OK ] PumpReport.ABudgetThatRanOutLeavesItRunnable
+        state_exec_async_test: OK ] PumpReport.BestRunnableIsTheBestReadyLevel
+        state_exec_async_test: OK ] PumpReport.NothingPendingAndTheCollectionFallingDue
+        state_exec_async_calls_test: OK ] KernelPools.AtThreadsZeroAnIoCallAndAPlainOneShareTheOnePool
+        state_exec_async_calls_test: OK ] KernelPools.WithExecWorkersAnIoCallStaysAndAPlainOneRunsOnBackgroundCpu
+        state_exec_async_calls_test: OK ] KernelPools.BackgroundCpuHasAtLeastOneWorker
+        state_exec_async_calls_test: OK ] KernelPools.AnIoCallIsntQueuedBehindAPlainKernelOnceSplit
+        state_exec_async_calls_test: OK ] KernelPools.WaitForThreadsInterruptsABackgroundCpuKernel
+        state_exec_async_calls_test: OK ] KernelPools.ACallOnceBackgroundCpuHasStoppedRaisesAndLeavesTheHost
+        state_exec_stackless_evaluator_test: OK ] NativeSite.AStepNamesTheNativeItAppliedAndOnlyThatStep
+        state_exec_stackless_evaluator_test: OK ] NativeSite.ArithmeticIsANativeToo
+        state_exec_stackless_evaluator_test: OK ] NativeSite.ItIsTheCallSitesSymbol
+        state_exec_stackless_evaluator_test: OK ] NativeSite.AFunctionAJobCallsIsNative
+        state_exec_stackless_evaluator_test: OK ] NativeSite.AFormOnlyItsFrameHoldsKeepsTheName
+        state_exec_stackless_evaluator_test: OK ] NativeSite.ARaisingNativeKeepsItsNameThroughTheUnwind
+        test_pycvc_exec_pool.py: ok: test_ra01_a_post_ends_the_batch_wait
+        test_pycvc_exec_pool.py: ok: test_bw01_a_post_is_consumed_before_a_sleeper_wakes
+        mt.groups: t=8 groups=8 prog=fib runs=1 pump=continuous
+        mt.groups: t=8 groups=8 prog=exceptions runs=1 pump=continuous
+        mt.groups: t=8 groups=8 prog=cycle runs=1 pump=continuous
+        exec_pool_test: OK ] ExecPoolContinuous.AttachIsRefusedTwice
+        exec_pool_test: OK ] ExecPoolContinuous.AttachedGroupsRunOnTheWorkers
+        exec_pool_test: OK ] ExecPoolContinuous.ForceMoveGivesEachPumpAnotherWorker
+        exec_pool_test: OK ] ExecPoolContinuous.ANewGroupDoesNotStarveABusyOne
+        exec_pool_test: OK ] ExecPoolContinuous.IdleWorkersParkAndFuzzPointsAreCounted
+        exec_pool_test: OK ] ExecPoolContinuous.AttachedGroupsRunToTheirResults
+        exec_pool_test: OK ] ExecPoolContinuous.APostWakesAnIdleGroup
+        exec_pool_test: OK ] ExecPoolContinuous.AGroupPostedDuringWithGroupIsPumpedAfterIt
+        exec_pool_test: OK ] ExecPoolContinuous.OnCompleteRunsOnTheAttachingThread
+        exec_pool_test: OK ] ExecPoolContinuous.AHostProxiedBodyRunsOnTheAttachingThreadUnderTheToken
+        exec_pool_test: OK ] ExecPoolContinuous.AFailedGroupIsTakenOnItsAttachingThread
+        exec_pool_test: OK ] ExecPoolContinuous.DeterministicModeRotatesInCreationOrder
+        exec_pool_test: OK ] ExecPoolContinuous.DetachRunsTheGroupsQueuedEntries
+        exec_pool_test: OK ] ExecPoolContinuous.DetachBeginAndEndDropTheGroupsEntries
+        exec_pool_test: OK ] ExecPoolContinuous.ASubmitInsideWithGroupIsPumped
+        exec_pool_test: OK ] ExecPoolContinuous.WithGroupMayDetachTheGroup
+        exec_pool_test: OK ] ExecPoolContinuous.AFailedGroupIsReadBeforeTakeFailed
+        exec_pool_test: OK ] ExecPoolContinuous.AWorkerFiringATimerTakesNoParkedWorker
+        exec_pool_test: OK ] ExecPoolContinuous.WithGroupGetsAGroupItsWorkerKeepsRepumping
+        exec_pool_test: OK ] ExecGroupTeardown.AnAttachedGroupLeavesItsPoolBeforeTheKills
+        state_exec_async_test: OK ] LongSteps.AGroupsLongNativeIsCountedAndLogged
+        state_exec_async_test: OK ] LongSteps.TheTreesSettingWinsOverTheDefault
+        state_exec_async_test: OK ] LongSteps.AThrowingLongStepIsCounted
+        state_exec_async_test: OK ] LongSteps.ALongWindowAtSlice256NamesItsLastNative
+        state_exec_async_test: OK ] LongSteps.ANameIsReportedOnceAMinute
+        state_exec_async_calls_test: OK ] LongStepSink.Group0LogsALongStepThroughTheApp
+        exec_pool_test: OK ] ExecPoolContinuous.DetachInsideItsOwnDeferredCallbackLeavesThePoolAlone
+        exec_pool_test: OK ] ExecPoolContinuous.DetachFromADeferredOnCompleteLeavesTheGroupAlone
+        exec_pool_test: OK ] ExecPoolContinuous.DetachInsideItsOwnPumpIsRefused
+        exec_pool_test: OK ] ExecPoolContinuous.WithGroupInsideItsOwnWaitingBodyIsRefused
+        exec_pool_test: OK ] ExecPoolContinuous.AGroupWokenByABusyWorkerIsPumpedByAnIdleOne
+        exec_pool_test: OK ] ExecPoolContinuous.AQueuedCallbackDoesNotFreezeABusyGroup
+        exec_pool_test: OK ] ExecPoolContinuous.DeterministicRunsRepeatWithAFrameWaiter
+        exec_pool_test: OK ] ExecPoolContinuous.AnExecuteOutsideWithGroupRuns
+        exec_pool_test: OK ] ExecPoolContinuous.AttachRefusesASchedulerWithANotifier
+        exec_pool_test: OK ] ExecPoolContinuous.ALongHostWaitIsCountedWhileItWaits
+        exec_pool_test: OK ] ExecPoolContinuous.APumpAllOfAnAttachingThreadServicesItsHostQueue
+        exec_pool_test: OK ] ExecPoolContinuous.AFailedGroupIsWorkOnceUntilTaken
+        state_exec_async_test: OK ] PumpReport.WithoutANotifierTheReportIsLeftAsItWas
+        state_exec_async_test: OK ] LongSteps.AStepWithNoNativeIsNamedSo
+        state_exec_async_calls_test: OK ] KernelPools.BeforeAnyExecPoolAKernelTakesNoPoolLock
+        exec_pool_test: OK ] ExecPoolContinuous.AWithGroupInsideADetachOfTheSameGroupDoesNotWaitForItsPump
+        exec_pool_test: OK ] ExecPoolContinuous.AWithGroupThatRacedADetachWaitsForItsToken
+        exec_pool_test: OK ] ExecPoolContinuous.CrossSubmitsFromTwoWorkersAreRefused
+        exec_pool_test: OK ] ExecPoolContinuous.AHostInsideWithGroupAndANativeSubmittingBackDoNotDeadlock
+        exec_pool_test: OK ] ExecPoolContinuous.AGroupFailingAfterAnotherIsTornDownIsWork
+        exec_pool_test: OK ] ExecPoolContinuous.AHostPumpingItsOwnGroupDoesNotFreezeABusyOne
+        exec_pool_test: OK ] ExecPoolContinuous.ALastGroupDetachedByAnEntryLeavesNoRecord
+      # ^ SAN_REQUIRED_S2A ends here. No comment line inside the list: run.sh would read it as a
+      # required line.
       # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
       # in every leg: its I/O threads take commands from the test's thread and post events back,
       # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
@@ -2959,6 +3082,7 @@ jobs:
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
             ${{ env.SAN_REQUIRED_S1B }}
+            ${{ env.SAN_REQUIRED_S2A }}
             ${{ env.SAN_REQUIRED_NET }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 

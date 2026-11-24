@@ -30,6 +30,7 @@
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
 #include <string>
+#include <utility> // move (set_custom_scope)
 #include <vector>
 
 namespace cvc {
@@ -124,9 +125,20 @@ struct CustomEdit {
   bool committed = false;
   std::string value;
   // An event the widget raises this frame (a program, or a bare name for a host handler), and the
-  // fields a program reads from its `event` dict (a viewport's on_pick:). Empty: none.
+  // fields a program reads from its `event` dict. Empty: none.
   std::string fire;
   std::vector<std::pair<std::string, std::string>> fields;
+  // More events this frame, queued after `fire` in this order, each with fields of its own (each
+  // program runs as a process of its own, so not necessarily in this order). One with `document`
+  // runs in the document's own scope (its prefix and functions), as on_key: does, wherever the
+  // widget sits: a viewport raises a scene node's on_pick:, which is the scene's, that way, and
+  // its own on_pick: as a plain one.
+  struct Event {
+    std::string fire;
+    std::vector<std::pair<std::string, std::string>> fields;
+    bool document = false;
+  };
+  std::vector<Event> events;
 };
 // An RGB colour edit (§ G7). `drawn` is the backend's signal that it actually rendered a colour
 // widget (false on a backend that has none — the core then shows the value as text). `rgb` is the
@@ -502,6 +514,8 @@ public:
     bool text = false;   // the glyph is text (the clock's time), drawn as the bar's text is
     std::string icon;    // the named icon it shows (cvc/ariadne/icons.h), "" when none: a backend
                          // may draw its own picture for a name ("bell") instead of the glyph
+    std::string picture; // §5.22 a published image (round, already shaped) to draw in place of
+                         // the glyph, the bar's height; "" when none or not loaded: the glyph
   };
   virtual int begin_tray(const std::vector<TrayIcon> &icons) {
     (void)icons;
@@ -1030,6 +1044,16 @@ public:
     (void)w;
     return {};
   }
+  // The state prefix the custom widget being drawn sits in, which its `bind:` resolves against:
+  // the document's, or the mount's around it (a load:ed module's <prefix>.includes.<as>, §12). The
+  // core sets it for the length of each custom_widget() call, so a handler that resolves keys of
+  // its own (a viewport's pick:) resolves them where the widget's bind: goes, with resolve_bind,
+  // inside a module's sandbox. Empty outside a call.
+  const std::string &custom_scope() const { return custom_scope_; }
+  void set_custom_scope(std::string scope) { custom_scope_ = std::move(scope); }
+
+private:
+  std::string custom_scope_;
 };
 
 } // namespace ariadne

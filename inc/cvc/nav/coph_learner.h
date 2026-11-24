@@ -86,12 +86,22 @@ struct coph_route_context {
   std::optional<coph_vec2> target;
   std::vector<int> route_nodes;
   std::vector<int> blocked_edges;
+  // The profile's own router (navigation.route, without a network): its planned path (points of
+  // the 0.1 m grid, the goal possibly last), the waypoint's index on it, the step it planned at,
+  // its last 17 [step, x, y] (progress shaping) and the step of its last stagnation.
+  std::vector<coph_vec2> path;
+  int cursor = 0;
+  long long planned_at = -10000;
+  std::vector<std::array<double, 3>> progress_history;
+  long long last_stagnation = -10000;
 };
 
 // One learner's state, between updates.
 struct coph_learner_state {
   coph_config cfg;
   coph_vec2 goal{};
+  // The surveyed network the maze router plans on. Empty: the learner has none (a car's,
+  // grl_snam.ariadne.coph_cars.CarLearner) and routes with the profile's own planner.
   coph_network network;
   std::vector<coph_stage> stages;   // the kept stages, oldest first (coph_ledger::stages)
   std::vector<coph_shape> geometry; // the geometry store (coph_ledger::geometry)
@@ -111,6 +121,10 @@ struct coph_learner_state {
   // waypoint); control_target falls back to the goal. A packet's H and V_task use it.
   std::optional<coph_vec2> navigation_target;
   coph_exchange_state exchange;
+  // Without a network: each kept stage's entry navigation context (Stage.entry_navigation), by
+  // stage id. The agent records it when a stage is entered; a replay starts from it. A stage
+  // without one starts from an empty context.
+  std::vector<std::pair<std::int64_t, coph_route_context>> entry_navigation;
 };
 
 // A reading whose uid ends in a multiple of 5 is held out for validation.
@@ -189,6 +203,7 @@ struct coph_frozen_stage {
   std::vector<double> weights;
   std::vector<coph_shape> obstacles;
   std::vector<coph_vec2> support;
+  coph_route_context entry_navigation; // without a network: the stage's entry context
   // Within the box (plus 1e-10) and within 0.65 of a support point.
   bool supported(const coph_vec2 &q, const coph_config &cfg) const;
 };
@@ -197,6 +212,7 @@ struct coph_frozen_stage {
 struct coph_atlas {
   std::vector<coph_frozen_stage> stages;
   std::vector<coph_shape> geometry;
+  std::vector<coph_footprint> footprints; // the kept stages', each once, oldest stage first
   bool overflow = false;
   coph_vec2 goal{};
   const coph_config *cfg = nullptr;
@@ -219,11 +235,39 @@ struct coph_route {
   std::vector<int> nodes;
   std::vector<int> blocked;
   // maze_route's route_changed: the nodes or the blocked edges differ from the context's last
-  // route; always true without a route.
+  // route; always true without a route. The profile's router: it planned at this step.
   bool changed = false;
+  // The profile's router: its path, its A* expansions when it planned, and whether it saw the
+  // agent stagnate.
+  std::vector<coph_vec2> path;
+  int expansions = 0;
+  bool stagnation = false;
 };
 coph_route coph_maze_route(const coph_vec2 &q, const coph_vec2 &goal, const coph_network &network,
                            coph_route_context &ctx, int step);
+
+// navigation.edge_clear: the segment a-b stays farther than r + margin + 1e-9 from every shape's
+// (x, y, r), and the footprints' disks cover all of it (none: not clear).
+bool coph_edge_clear(const coph_vec2 &a, const coph_vec2 &b, const std::vector<coph_shape> &shapes,
+                     const std::vector<coph_footprint> &footprints, double margin);
+
+// navigation.route without a maze graph: the profile's own planner, for a learner without a
+// network. It replans when the agent stagnated (progress shaping: under 0.05 m moved and 0.05 m
+// gained on its target over 16 steps, away from the goal, at most once per update_every), it has
+// no path, update_every steps passed since it planned, it is more than 0.25 from the path, its
+// waypoint is not edge_clear, or a shape now lies within r + 0.12 + safety_margin of the rest of
+// the path. A plan is A* on the 0.1 m grid over the kept stages' boxes, on the points inside a
+// footprint (radius less 0.075) and clear of every shape by r + 0.12 + safety_margin + 0.075:
+// 8-neighbour edges (a diagonal only between two free orthogonal neighbours) clear of the shapes,
+// priced length (1 + 4 (risk_i + risk_j) / 2) by the newest stage whose box and support hold a
+// point (risk 1 where none does), from the nearest of the 16 nearest points the agent can reach
+// edge_clear, to the point nearest the goal, at most route_expansion_cap expansions. The goal ends
+// the path when it is edge_clear from the last point and that point is within 0.2 of it. The
+// waypoint is the farthest path point within 1 that is edge_clear; within 1 of the goal with the
+// goal edge_clear, the goal itself (direct_goal). Throws std::invalid_argument on a slab (the
+// planner takes disks only). Leaves its path in ctx.
+coph_route coph_profile_route(const coph_vec2 &q, const coph_atlas &atlas, coph_route_context &ctx,
+                              int step);
 
 // navigation.guarded_control in the profile: one control step.
 struct coph_control_meta {
@@ -237,6 +281,11 @@ struct coph_control_meta {
   bool infeasible = false;
   coph_vec2 proposed{}; // the raw command, before the force limit (guarded_control's nominal)
   bool route_changed = false;
+  // The profile's router (without a network): its expansions, its path and whether it saw the
+  // agent stagnate.
+  int route_expansions = 0;
+  std::vector<coph_vec2> route;
+  bool stagnation = false;
 };
 template <class T> struct coph_control_of {
   coph_vec2_of<T> applied;

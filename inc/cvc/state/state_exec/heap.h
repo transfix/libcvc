@@ -17,10 +17,12 @@
 #ifndef CVC_STATE_EXEC_HEAP_H
 #define CVC_STATE_EXEC_HEAP_H
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cvc/state/state_exec/types.h>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace cvc {
@@ -130,6 +132,11 @@ cycle_stats collect_cycles(exec_context &ctx);
 /// objects as survived the last one, at least an eighth of the objects it walked (so a walk costs
 /// a bounded amount per newly tracked object), and at least 256.
 bool cycle_collection_due(const cycle_registry &r);
+/// When a collection of `r` falls due if nothing more is tracked (Stage 2, S2-Q4: a pump's next
+/// deadline): time_point::min() when one is due by its growth already, a second after the last
+/// collection when a process ended since and something was tracked (the exit rule), else nullopt.
+std::optional<std::chrono::steady_clock::time_point>
+cycle_collection_due_at(const cycle_registry &r);
 
 /// Note that a process ended, in `r`: what it leaked is garbage now, so a collection is due as
 /// soon as anything has been tracked since the last one (at most once a second). A scheduler names

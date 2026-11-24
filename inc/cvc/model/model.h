@@ -59,8 +59,12 @@ struct material {
 // Purpose:
 //   A scene: several meshes and the materials they reference. Each mesh pairs a
 //   cvc::geometry with an index into materials (-1 when the mesh has no material).
+//   A file's scene graph (glTF, FBX, DAE, ...) comes along as `nodes`: each node
+//   places the meshes it draws by its transform and every ancestor's, and a mesh
+//   several nodes draw is drawn once for each.
 // ---- Change History ----
 // 2024 -- Joe R. -- Creation (Phase-3 model surface).
+// 2026 -- Joe R. -- The file's node tree (nodes, instances(), placed()).
 struct model {
   struct mesh {
     geometry geom;
@@ -68,8 +72,41 @@ struct model {
     std::string name;
   };
 
+  // A 4x4 affine transform, row-major: element (r, c) is [r * 4 + c], so the
+  // translation is [3], [7], [11] and the last row is 0 0 0 1. It maps a point p
+  // (a column) to M p.
+  typedef boost::array<double, 16> transform_t;
+  static transform_t identity_transform();
+  static bool is_identity(const transform_t &t);
+  // a * b: b applied first.
+  static transform_t compose(const transform_t &a, const transform_t &b);
+
+  // A node of the file's scene graph: its name, its transform relative to its
+  // parent, the meshes it draws (indices into meshes) and its children (indices
+  // into nodes).
+  struct node {
+    std::string name;
+    transform_t transform = identity_transform();
+    std::vector<int> meshes;
+    std::vector<int> children;
+  };
+
+  // One drawn copy of a mesh: which mesh, the node that draws it (-1 when the
+  // model has no nodes), and its transform into the model's space (the node's
+  // own composed with every ancestor's).
+  struct instance {
+    int mesh = -1;
+    int node = -1;
+    transform_t transform = identity_transform();
+  };
+
   std::vector<mesh> meshes;
   std::vector<material> materials;
+
+  // The scene graph, nodes[0] its root. Empty: every mesh is drawn once, as it
+  // is (a model built in code, or read from a format without a scene graph).
+  // With nodes, only the meshes a node draws are drawn.
+  std::vector<node> nodes;
 
   // The physical length, in canonical SI metres, of ONE unit of this model's
   // local coordinate system -- i.e. what the vertex coordinates are authored in.
@@ -84,22 +121,45 @@ struct model {
 
   bool empty() const { return meshes.empty(); }
 
+  // ------------------
+  // model::instances
+  // ------------------
+  // Purpose:
+  //   Every drawn copy of a mesh, in the order the scene graph lists them: depth
+  //   first from nodes[0], a node's meshes before its children. A node that two
+  //   parents list is drawn under each. With no nodes, each mesh once, in order,
+  //   untransformed. A mesh or child index out of range is skipped, and so is a
+  //   child that is its own ancestor (a cycle).
+  std::vector<instance> instances() const;
+
+  // ---------------
+  // model::placed
+  // ---------------
+  // Purpose:
+  //   `g` moved by `t`: its points transformed, its normals by the inverse
+  //   transpose and made unit, its tangents turned and made unit, and when `t`
+  //   mirrors (a negative determinant) its triangles and quads rewound and its
+  //   tangents' handedness flipped, so faces keep facing out. The identity
+  //   returns `g` unchanged (shared).
+  static geometry placed(const geometry &g, const transform_t &t);
+
   // ---------------
   // model::merged
   // ---------------
   // Purpose:
-  //   Concatenate every mesh into a single cvc::geometry, offsetting each mesh's
-  //   triangle (and line/quad) indices by the running vertex count so the merged
-  //   index buffer is correct. Per-vertex attributes (normals/colors/uvs/tangents)
-  //   are appended in the same order. Material assignment is not preserved.
+  //   Every instance's mesh, placed by its transform, concatenated into a single
+  //   cvc::geometry, offsetting each triangle (and line/quad) index by the running
+  //   vertex count so the merged index buffer is correct. Per-vertex attributes
+  //   (normals/colors/uvs/tangents) are appended in the same order. Material
+  //   assignment is not preserved.
   geometry merged() const;
 
   // ---------------
   // model::extents
   // ---------------
   // Purpose:
-  //   Union of every mesh's bounding box (reuses geometry's bbox facility), in
-  //   the model's own (authoring) coordinate space.
+  //   Union of every instance's bounding box, placed, in the model's own
+  //   (authoring) coordinate space.
   bounding_box extents() const;
 
   // ---------------

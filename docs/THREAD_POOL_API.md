@@ -62,6 +62,12 @@ unsigned int active = app.getActiveThreadCount();
 unsigned int pending = app.getPendingThreadCount();
 ```
 
+Once the app's exec pool has workers (`app.exec_pool()` built with threads above 0), state_exec's
+async kernels other than I/O calls' run on a second pool, `background_cpu`, of max(1, cores - exec
+workers) workers (docs/STATE_EXEC_THREADED.md 4.9). From then on the size and the counts above are
+this pool's (`background_io`) only: they neither bound nor count those kernels, and
+`app.backgroundCpuPoolSize()` gives the other pool's size.
+
 ## Comparison: startThread vs startThreadPooled
 
 ### `startThread(key, task, wait=true)`

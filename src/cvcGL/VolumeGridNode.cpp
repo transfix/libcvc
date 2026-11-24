@@ -20,6 +20,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
+#include <cvc/gl/VolumeRenderNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/state/followed_key.h>
 #include <cvc/state/state.h>
@@ -73,6 +74,12 @@ const void *payload_pointee(const boost::any &d) {
     return v;
   return cvc::any_pointee<const cvc::point_classes, cvc::point_classes,
                           const cvc::volume_grid_session, cvc::volume_grid_session>(d);
+}
+
+// Whether a key's data is a volume the planes can cut, without making one: a pointer to one (a
+// data: entry's, a program's data object, a slice_source) or a cvc::volume held by value.
+bool holds_volume(const boost::any &d) {
+  return cvc::volume_payload_pointee(d) != nullptr || boost::any_cast<cvc::volume>(&d) != nullptr;
 }
 
 // The point in object space at plane coordinates (r, u) on the plane `plane` along axis `a`.
@@ -149,6 +156,10 @@ void VolumeGridNode::ensureChildren() {
   m_surfaces = addGraphicsChild<NullGraphicNode>("surfaces");
   m_surfaces->setVisible(false); // with the planes: an empty group's box frames no view
   m_contours->ensureChildren();  // after the planes' own overlays, so it draws over them
+  // The volume in the 3D view (grid.display.render), in the surfaces group the slice views hide,
+  // after the contours' curves and surfaces there; nothing until a renderer is asked for.
+  m_volumeRender = m_surfaces->addGraphicsChild<VolumeRenderNode>("volume");
+  put(m_volumeRender->getState("renderer"), "none");
   // The grey display's model: the planes colour through it instead of the transfer function.
   getState("grey_transfer_function").value(cvc::tf::to_string(cvc::tf::model::preset("grayscale")));
   cvc::job_keys(app().root(), getState("grid").fullName()).idle();
@@ -193,6 +204,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
   if (vol) {
     m_histogramVolume = std::move(vol);
     getState("grid.volume").data(boost::any(m_histogramVolume));
+    m_volumeRender->setVolume(m_histogramVolume); // the 3D view draws the app's volume too
   } else {
     auto stand_in = std::make_shared<cvc::volume>(app());
     try {
@@ -209,6 +221,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
     stand_in->max(m_source->max());
     m_histogramVolume = stand_in;
     getState("grid.volume").data(boost::any());
+    m_volumeRender->setVolume(nullptr); // read plane by plane: no whole volume to draw
   }
   for (const auto &s : m_slices) {
     s->setSource(m_source);
@@ -297,6 +310,52 @@ void VolumeGridNode::followSources() {
     else if (!d.empty())
       status("error: " + m_followSession.path() + " holds no volume grid session");
   }
+}
+
+// grid.volumes, what the panel's Source combo offers. The document's data: entries are the links
+// under <scope>.data (with no scope that is the store's own node, whose other children are the
+// requests the links point at, so only the links count), and an entry's outputs are the children
+// of the node it points at. Made again only when grid.source.volume, an entry, where it points or
+// its rev changes.
+void VolumeGridNode::publishVolumes() {
+  const std::string current = getState("grid.source.volume").value();
+  cvc::state &root = app().root();
+  cvc::state *data =
+      current.empty()
+          ? nullptr
+          : root.findThroughLinks(m_scope.empty() ? std::string("data")
+                                                  : m_scope + cvc::state::SEPARATOR + "data");
+  std::vector<std::pair<std::string, cvc::state *>> entries;
+  std::string signature = current;
+  if (data)
+    for (const std::string &name : data->childNames()) {
+      cvc::state &link = (*data)(name);
+      if (!link.isLink())
+        continue;
+      const std::string target = link.linkTarget();
+      cvc::state *node = root.findThroughLinks(target);
+      if (!node)
+        continue;
+      cvc::state *rev = root.findThroughLinks(target + cvc::state::SEPARATOR + "rev");
+      signature += '\n' + name + '=' + target + '@' + (rev ? rev->value() : std::string());
+      entries.emplace_back(name, node);
+    }
+  if (signature == m_volumesSignature)
+    return;
+  m_volumesSignature = signature;
+  std::string list;
+  bool listed = current.empty();
+  for (const auto &[name, node] : entries)
+    for (const std::string &out : node->childNames())
+      if (holds_volume((*node)(out).data())) {
+        const std::string path =
+            std::string("data") + cvc::state::SEPARATOR + name + cvc::state::SEPARATOR + out;
+        listed = listed || path == current;
+        list += (list.empty() ? "" : "\n") + path;
+      }
+  if (!listed)
+    list += (list.empty() ? "" : "\n") + current;
+  put(getState("grid.volumes"), list);
 }
 
 void VolumeGridNode::adoptPoints(const boost::any &d, const std::string &from) {
@@ -439,6 +498,12 @@ void VolumeGridNode::readKeys() {
     for (const auto &s : m_slices)
       s->setModelKey(key);
   }
+  // What draws the volume in the 3D view.
+  const cvc::grid_render r = m_display.render;
+  put(m_volumeRender->getState("renderer"), r == cvc::grid_render::vtk        ? "vtk"
+                                            : r == cvc::grid_render::volren   ? "volren"
+                                            : r == cvc::grid_render::volslice ? "volslice"
+                                                                              : "none");
   syncSlices();
   fixCurrent();
 }
@@ -691,6 +756,7 @@ bool VolumeGridNode::tick() {
       put(grid("classes"), "0");
   }
   followSources(); // the app's volume, points and session, as they change
+  publishVolumes(); // what the Source combo offers, while waiting for a volume too
   if (!m_source) {
     m_contours->tick(m_index); // its keys and its source: the curves wait for the planes
     publishSession();
@@ -749,6 +815,7 @@ bool VolumeGridNode::tick() {
   changed = m_contours->tick(m_index) || changed;
   for (const auto &s : m_slices)
     changed = s->tick() || changed;
+  changed = m_volumeRender->tick() || changed;
   return changed;
 }
 

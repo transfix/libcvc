@@ -1313,8 +1313,9 @@ TEST(WorldGenerated, TheScrubWorldsNavigatorHasNoWaterOnDryGround) {
 }
 
 // The world's edge: walls by default, or a shore: a band at the rim becomes coast (the sea floor
-// at the edge, rising to the waterline, then a gentle beach, then the relief again), the sea is
-// drawn on past the world, and there are no walls. Inland the ground is the walled world's own.
+// at the edge shelving up to a surf zone, the waterline, a beach face up to a berm of sand, then
+// the relief again), the sea is drawn on past the world, and there are no walls. Inland the ground
+// is the walled world's own.
 TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
   EXPECT_EQ(world_edge_from_name("wall"), int(world_edge::wall));
   EXPECT_EQ(world_edge_from_name("shore"), int(world_edge::shore));
@@ -1368,11 +1369,12 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
     }
   EXPECT_EQ(edge, 4 * (hf.rows() - 1));
   EXPECT_GT(inland, hf.rows() * hf.cols() / 2);
-  // The coast's cells: deep water at the edge, a beach of sand further in, all round.
+  // The coast's cells: deep water at the edge, a beach of sand further in, all round, and sand on
+  // the berm too, though it stands higher than the shore band derived_class gives sand.
   const surface_registry &reg = shore.model->registry();
   std::uint16_t sand = 0;
   ASSERT_TRUE(reg.find("sand", sand));
-  int rim = 0, deep = 0, beach = 0;
+  int rim = 0, deep = 0, beach = 0, berm = 0;
   for (int r = 0; r < hf.cell_rows(); ++r)
     for (int c = 0; c < hf.cell_cols(); ++c) {
       const double x = hf.x0() + (c + 0.5) * hf.dx(), y = hf.y0() + (r + 0.5) * hf.dy();
@@ -1381,12 +1383,14 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
       if (half - std::max(std::fabs(x), std::fabs(y)) < 0.5 * hf.dx()) {
         ++rim;
         deep += reg[k].hard ? 1 : 0;
-      } else if (d > 0.4 * band && d < 0.5 * band) { // the beach, wherever the coast wanders
+      } else if (d > 0.6 * band && d < 0.7 * band) { // the beach, wherever the coast wanders
         beach += k == sand ? 1 : 0;
+        berm += k == sand && shore.height(x, y) > p.water_level_m + 0.6 ? 1 : 0;
       }
     }
   EXPECT_EQ(deep, rim) << "the rim is deep water all round";
   EXPECT_GT(beach, 2 * hf.cell_rows()) << "a beach all round";
+  EXPECT_GT(berm, hf.cell_rows()) << "the berm is sand";
 
   // The sea past the world: a ring at the waterline from the edge out, facing up, in the deep
   // water's colour.
@@ -1408,6 +1412,60 @@ TEST(WorldGenerated, AShoreEdgeLinesTheWorldWithABeachAndTheSea) {
     EXPECT_GT(nz, 0.0) << "a triangle faces down";
   }
   EXPECT_EQ(sea.const_colors()[0], water_colour(p.water_level_m - floor));
+}
+
+// A floating world (the wall and none edges) hangs over a rock (world_underside): its top ring is
+// the terrain mesh's rim, sample for sample, so the two meet with no gap; it falls as a cliff and
+// narrows to a point about half the half-size further down; every face looks outward or down, and
+// every vertex has a colour and a unit normal. A shore-edged world has none: the sea hides its
+// underside.
+TEST(WorldGenerated, AFloatingWorldHangsOverARock) {
+  cvc::app app;
+  generated_world_params p = small_world();
+  const generated_world walled = generate_world(app, p);
+  p.edge = int(world_edge::shore);
+  EXPECT_TRUE(world_underside(generate_world(app, p)).const_points().empty());
+  p.edge = int(world_edge::none);
+  EXPECT_FALSE(world_underside(generate_world(app, p)).const_points().empty());
+
+  const cvc::geometry rock = world_underside(walled);
+  const cvc::height_field &hf = *walled.terrain;
+  const int R = hf.rows(), C = hf.cols();
+  const std::size_t rim = std::size_t(2 * (R - 1) + 2 * (C - 1));
+  const auto &P = rock.const_points();
+  ASSERT_GT(P.size(), 3 * rim);
+  ASSERT_EQ(rock.const_normals().size(), P.size());
+  ASSERT_EQ(rock.const_colors().size(), P.size());
+  // The top ring: the rim's samples, counter-clockwise from (x0, y0).
+  const auto expectRim = [&](std::size_t j, int r, int c) {
+    const auto &v = hf.const_points()[std::size_t(hf.vertex_of(r, c))];
+    EXPECT_EQ(P[j], v) << "rim sample " << j << " (" << r << ", " << c << ")";
+  };
+  expectRim(0, 0, 0);
+  expectRim(std::size_t(C - 1), 0, C - 1);
+  expectRim(std::size_t(C - 1 + R - 1), R - 1, C - 1);
+  expectRim(rim - 1, 1, 0);
+  double zTop = 1e300, zLow = 1e300;
+  for (std::size_t j = 0; j < rim; ++j)
+    zTop = std::min(zTop, double(P[j][2]));
+  for (const auto &v : P)
+    zLow = std::min(zLow, double(v[2]));
+  EXPECT_LT(zLow, zTop - 0.5 * p.half_m) << "it hangs well below the ground";
+  EXPECT_GT(zLow, zTop - 1.5 * p.half_m - (walled.height_max - walled.height_min));
+  // The apex (last) is the lowest point, near the middle.
+  EXPECT_DOUBLE_EQ(P.back()[2], zLow);
+  EXPECT_LT(std::hypot(P.back()[0], P.back()[1]), 0.1 * p.half_m);
+  for (const auto &t : rock.const_tris()) {
+    const auto &a = P[t[0]], &b = P[t[1]], &c = P[t[2]];
+    const double ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const double vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    const double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const double mx = (a[0] + b[0] + c[0]) / 3.0, my = (a[1] + b[1] + c[1]) / 3.0;
+    EXPECT_TRUE(nx * mx + ny * my > 0.0 || nz < 0.0) << "a face looks inward";
+    EXPECT_LE(nz, 1e-9 * std::sqrt(nx * nx + ny * ny + nz * nz)) << "a face looks up";
+  }
+  for (const auto &n : rock.const_normals())
+    EXPECT_NEAR(std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]), 1.0, 1e-9);
 }
 
 // terrain_lab's world (seed 5, 1.2 km, its 5 m mesh): no dry mesh sample within half a metre of
