@@ -619,6 +619,7 @@ state &state::value(const std::string &v, bool setValueType) {
     _value = v;
     _lastMod = boost::posix_time::microsec_clock::universal_time();
     _initialized = true;
+    _revision.fetch_add(1, std::memory_order_release);
 
     if (setValueType)
       _valueTypeName = std::string("std::string");
@@ -684,6 +685,7 @@ state::atomicUpdate(const std::function<bool(const std::string &old, std::string
       target->_value = std::move(out);
       target->_lastMod = boost::posix_time::microsec_clock::universal_time();
       target->_initialized = true;
+      target->_revision.fetch_add(1, std::memory_order_release);
       target->_valueTypeName = std::string("std::string");
       target->_valueCondition.notify_all();
       changed = true;
@@ -738,6 +740,7 @@ void state::touch() {
   {
     boost::mutex::scoped_lock lock(_mutex);
     _lastMod = boost::posix_time::microsec_clock::universal_time();
+    _revision.fetch_add(1, std::memory_order_release); // its signals fire as for a change
   }
   valueChanged();
   dataChanged();
@@ -761,6 +764,7 @@ void state::reset(bool resetChildren, bool fireCallbacks) {
     n._value = std::string();
     n._valueTypeName = std::string();
     n._data = boost::any();
+    n._revision.fetch_add(1, std::memory_order_release);
     n._comment = std::string();
     n._properties.clear();
     n._hidden = false;
@@ -1137,6 +1141,7 @@ state &state::data(const boost::any &d) {
     _data = d;
     _lastMod = boost::posix_time::microsec_clock::universal_time();
     _initialized = true;
+    _revision.fetch_add(1, std::memory_order_release);
 
     // Notify any threads waiting for data
     _dataCondition.notify_all();

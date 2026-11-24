@@ -187,6 +187,19 @@ inline cvc::state_key &kept_key(cvc::state_key &key, cvc::app &ctx, const std::s
     key = bind_key(ctx, path);
   return key;
 }
+template <typename T> T read_or_seed(cvc::state_key &key, const T &def) {
+  try {
+    cvc::state *eff = key.find();
+    const std::string v = eff ? eff->value() : std::string();
+    if (v.empty()) {
+      key.get().value(def); // the write view, as write_node seeds
+      return def;
+    }
+    return boost::lexical_cast<T>(v);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
 template <typename T> T read_or(cvc::state_key &key, const T &def) {
   try {
     cvc::state *eff = key.find();
@@ -226,9 +239,13 @@ struct SceneVisibilityBinding {
   std::string source_path;     // resolved bind path some widget layer OWNS (+ seeds)
   std::string target_path;     // the node's `<node-state-path>.visible` key
   bool default_visible = true; // fallback ONLY while the source has no value yet
-  // The two paths kept resolved between polls (bind_key): the poll's own, so a const binding
-  // keeps them too.
+  // The two paths kept resolved between polls (bind_key), and the two nodes as the last poll left
+  // them (each one's revision): the poll's own, so a const binding keeps them too.
   mutable cvc::state_key source_key, target_key;
+  mutable const cvc::state *seen_source = nullptr, *seen_target = nullptr;
+  mutable std::uint64_t seen_source_rev = 0, seen_target_rev = 0;
+  mutable std::uint64_t seen_epoch = 0; // the tree's shape then: a node made again is not the one
+  mutable bool seen = false;
 };
 
 // Poll every visibility binding once and mirror source -> node `.visible`. Reads and
@@ -240,13 +257,32 @@ struct SceneVisibilityBinding {
 // widgets use; the write to the node key no-ops unless the value actually changed.
 // Call from the owner/render thread so the node's setVisible runs inline the frame. Both paths
 // stay resolved between polls (bind_key), so a frame costs no walk from the root while the tree's
-// shape holds still.
+// shape holds still, and a binding whose source and target are the nodes the last poll saw, both
+// unwritten since (state::revision), is left as that poll left it.
 inline void sync_scene_visibility(cvc::app &app,
                                   const std::vector<SceneVisibilityBinding> &bindings) {
   for (const SceneVisibilityBinding &b : bindings) {
-    const int v = read_bool_or(kept_key(b.source_key, app, b.source_path),
-                               b.default_visible ? 1 : 0); // visible = a bool
-    write<int>(kept_key(b.target_key, app, b.target_path), v);
+    cvc::state_key &src = kept_key(b.source_key, app, b.source_path);
+    cvc::state_key &dst = kept_key(b.target_key, app, b.target_path);
+    cvc::state *s = nullptr, *t = nullptr;
+    try {
+      s = src.find();
+      t = &dst.get();
+    } catch (const std::exception &) {
+      b.seen = false;
+    }
+    if (b.seen && t && t->structureEpoch() == b.seen_epoch && s == b.seen_source &&
+        t == b.seen_target && (!s || s->revision() == b.seen_source_rev) &&
+        t->revision() == b.seen_target_rev)
+      continue;
+    const int v = read_bool_or(src, b.default_visible ? 1 : 0); // visible = a bool
+    write<int>(dst, v);
+    b.seen = t != nullptr;
+    b.seen_source = s;
+    b.seen_target = t;
+    b.seen_source_rev = s ? s->revision() : 0;
+    b.seen_target_rev = t ? t->revision() : 0;
+    b.seen_epoch = t ? t->structureEpoch() : 0;
   }
 }
 

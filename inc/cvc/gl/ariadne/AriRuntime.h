@@ -17,6 +17,7 @@
 #include <cvc/ariadne/app_runtime.h>     // cvc::ariadne::AppRuntime, SceneAdapter
 #include <cvc/gl/ariadne/ImGuiBackend.h> // cvc::gl::ImGuiBackend
 #include <cvc/image/image.h>             // publish_image
+#include <cvc/state/state_key.h>         // the keys a frame reads, kept resolved
 #include <functional>
 #include <memory>
 #include <string>
@@ -167,6 +168,7 @@ private:
   // publishes quality.tier, quality.scale and quality.frame_ms under prefix().
   std::unique_ptr<cvc::ariadne::AdaptiveQuality> quality_;
   bool qualityHeld_ = true; // quality.adaptive was 0 (or nothing has run yet)
+  cvc::state_key qualityAdaptive_, qualityFps_; // the keys it reads each frame, kept resolved
   void tickQuality(double frame_s);
 };
 

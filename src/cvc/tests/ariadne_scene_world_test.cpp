@@ -3482,6 +3482,97 @@ TEST(AriadneWorldVehicles, APoseEntityFollowsAScriptedTrackExactly) {
     EXPECT_EQ(hash, 0xe6d183c87bbc907eull) << std::hex << "state hash " << hash;
 }
 
+// The telemetry's rate (physics.telemetry_hz, kSceneTelemetryHz by default). Each frame that steps
+// writes the world's tick and time; an entity's pose and books, and the stats' lines, only on the
+// frame whose steps cross into a new tenth of a second of world time (counted in steps from tick 0,
+// so at the same ticks at any frame rate). 0 writes them every frame that steps, and a world that
+// stops writes them once more, where it stopped. Only what changed is written.
+TEST(AriadneWorldVehicles, TheTelemetryIsWrittenAtItsRate) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_poses();
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  WorldVehicles &v = *w->vehicles();
+  const std::uint64_t id = spawn_posed(v, "lead");
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  cvc::state &st = cvc::state::instance(app);
+  EXPECT_EQ(val(app, "physics.telemetry_hz"), "10") << "seeded";
+  const auto writes = [&](const std::string &path) { return st(path).revision(); };
+  const std::string x_key = "entities." + std::to_string(id) + ".x";
+
+  int k = 0;
+  write_track(st, id, track(k));
+  run(app, *w, clock, 10); // placed at its first pose
+  ASSERT_TRUE(entity(v, id).placed);
+  const double dt = w->world().config().fixed_dt;
+  const auto every =
+      static_cast<std::uint64_t>(std::llround(0.1 / dt)); // steps a tenth of a second
+
+  // Two seconds at 60 frames a second, the entity moving every frame.
+  const std::uint64_t tick0 = w->world().tick();
+  const std::uint64_t x0 = writes(x_key), tick_writes0 = writes("physics.stats.tick");
+  const std::uint64_t history0 = writes("physics.stats.step_ms_history");
+  std::uint64_t stepped = 0;
+  for (int f = 0; f < 120; ++f) {
+    write_track(st, id, track(++k));
+    const std::uint64_t before = w->world().tick();
+    run(app, *w, clock, 1);
+    stepped += w->world().tick() != before;
+    ASSERT_EQ(val(app, "physics.stats.tick"), std::to_string(w->world().tick())) << "every frame";
+  }
+  const std::uint64_t periods = w->world().tick() / every - tick0 / every;
+  EXPECT_GE(periods, 19u);
+  EXPECT_LE(periods, 21u);
+  EXPECT_EQ(writes("physics.stats.tick") - tick_writes0, stepped);
+  EXPECT_EQ(writes(x_key) - x0, periods) << "once a period: it moved in each";
+  EXPECT_EQ(writes("physics.stats.step_ms_history") - history0, periods);
+  EXPECT_EQ(val(app, "entities." + std::to_string(id) + ".command.by"), "pose");
+
+  // 0: every frame that steps.
+  st("physics.telemetry_hz").value("0");
+  const std::uint64_t x1 = writes(x_key);
+  stepped = 0;
+  for (int f = 0; f < 30; ++f) {
+    write_track(st, id, track(++k));
+    const std::uint64_t before = w->world().tick();
+    run(app, *w, clock, 1);
+    stepped += w->world().tick() != before;
+  }
+  EXPECT_EQ(writes(x_key) - x1, stepped);
+
+  // Back at 10, then the world stops: the next frame writes where it stopped, and only that one.
+  st("physics.telemetry_hz").value("10");
+  for (int f = 0; f < 7; ++f) {
+    write_track(st, id, track(++k));
+    run(app, *w, clock, 1);
+  }
+  st("physics.enabled").value("0");
+  run(app, *w, clock, 1);
+  char at[32];
+  std::snprintf(at, sizeof(at), "%.6g", entity(v, id).x);
+  EXPECT_EQ(val(app, x_key), at);
+  EXPECT_EQ(val(app, "physics.stats.tick"), std::to_string(w->world().tick()));
+  const std::uint64_t x2 = writes(x_key), history2 = writes("physics.stats.step_ms_history");
+  run(app, *w, clock, 30);
+  EXPECT_EQ(writes(x_key), x2) << "a world that holds still writes nothing more";
+  EXPECT_EQ(writes("physics.stats.step_ms_history"), history2);
+
+  // Something else writes a key the telemetry writes: the next write puts it back.
+  st("physics.enabled").value("1");
+  st(x_key).value("not where it is");
+  st("physics.telemetry_hz").value("0");
+  write_track(st, id, track(k)); // where it already is
+  run(app, *w, clock, 1);
+  std::snprintf(at, sizeof(at), "%.6g", entity(v, id).x);
+  EXPECT_EQ(val(app, x_key), at);
+}
+
 // Timed poses (set_pose's): drawn between the last two, a span behind; held when the next is late;
 // a jump, a time gone back or the first one taken at once; the same time again changes nothing.
 // A `pose` entity's model, as a relay sends it to its clients (conference::room_entities_of): its
