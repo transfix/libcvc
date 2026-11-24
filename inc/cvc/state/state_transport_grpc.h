@@ -307,6 +307,9 @@ public:
   void set_authenticator(state_authenticator authenticator) override;
   std::size_t disconnect_principal(const std::string &principal) override;
   bool disconnect_connection(std::uint64_t number) override;
+  // See state_transport::reap_idle. A stream silent past `timeout` is cancelled: an accepted one
+  // ends in its handler (the on-close retraction), a dialed one in its reader (no longer a link).
+  std::size_t reap_idle(std::chrono::milliseconds timeout) override;
   // See state_transport::set_read_scope and refresh_read_scope.
   void set_read_scope(state_read_scope scope) override;
   std::size_t refresh_read_scope(const std::string &principal) override;

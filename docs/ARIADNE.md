@@ -1443,6 +1443,56 @@ scene:
       material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
 ```
 
+**Physically based materials.** `material: { pbr: ... }` shades a geometry node physically, with
+VTK's PBR, in place of the Phong keys. The scene's `environment:` is the light that reaches it
+from all round:
+
+```yaml
+scene:
+  environment:                    # optional: the light from all round
+    sky: [0.55, 0.62, 0.75]       # straight up
+    horizon: [0.45, 0.45, 0.45]
+    ground: [0.18, 0.16, 0.14]    # straight down
+  nodes:
+    - node: body
+      source: { file: car.glb }
+      material:
+        color: [0.75, 0.05, 0.05] # the base colour
+        pbr: { metallic: 0.6, roughness: 0.35, coat: { strength: 1, roughness: 0.05 } }
+    - node: lamp
+      source: { sphere: 0.2 }
+      material: { color: [0, 0, 0], pbr: { emissive: [1.0, 0.85, 0.5] } }
+    - node: rail
+      source: { box: 1 }
+      material: { pbr: { metallic: 1, roughness: 0.1 } }
+```
+
+- **The keys.** `pbr: true` takes the defaults. Each value is 0..1, clamped with a warning.
+  - `metallic`: 0 (the default) a dielectric, such as paint, plastic or stone; 1 a metal.
+  - `roughness`: 0 a mirror, 1 matte; 0.5 by default.
+  - `emissive: [r, g, b]`: the colour the node glows with, lit or not. None by default.
+  - `coat`: a clear coat over the surface, such as car paint's or varnish. Either its strength,
+    or `{ strength, roughness }` (strength 1 and roughness 0 when left out).
+- **The base colour** is what the node shows when Phong-shaded: its `color`, its `texture` or its
+  mesh's own colours, read as sRGB.
+- **The lights** light it face on as brightly as a Phong surface with `diffuse: 1`. VTK's BRDF
+  divides a light by π; libcvc multiplies it back, as three.js's legacy light units did.
+- **The Phong keys** (`ambient`, `diffuse`, `specular`, `specular_power`) do not apply, and warn
+  beside `pbr:`.
+- **The environment** is image-based lighting from a gradient: `sky` straight up, through
+  `horizon`, to `ground` straight down, about +z. It lights every side of a `pbr:` node and is
+  what a metal reflects. Phong nodes ignore it.
+  - A scene with a `pbr:` node and no `environment:` gets the default: sky
+    `[0.50, 0.53, 0.60]`, horizon `[0.42, 0.42, 0.42]`, ground `[0.20, 0.19, 0.18]`, about as
+    bright as Phong's `ambient: 0.2`.
+  - `environment: false` (or `none`) leaves the lights alone, and a side they miss is black.
+  - The first frame after it is set filters it on the GPU, once per view.
+- **Where it applies.** The main view and every `viewport` widget are lit by the environment.
+  The material reaches whatever the node draws: its mesh, its `model:`, every rung of an LOD
+  ladder, and a dataset's meshes.
+- **Not yet:** metallic, roughness, normal and emissive textures; an image as the environment;
+  the materials a glTF model carries.
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
@@ -6299,8 +6349,9 @@ event wait that yields with `emscripten_sleep`. Both pages are in the gallery.
 
 What differs from a real terminal:
 
-- The loop yields with `emscripten_sleep`, so the build links `-sASYNCIFY`. A hidden
-  tab throttles timers, which slows redraws and `on_tick`.
+- The loop yields with `emscripten_sleep`, which suspends `main` under JSPI (`-sJSPI`, so the
+  page needs a browser with it: §9.4). A hidden tab throttles timers, which slows redraws and
+  `on_tick`.
 - Ctrl-C reaches the document's `on_signal:` as SIGINT, as in a terminal. Only keys
   the browser lets a page see get through: Ctrl-W / Ctrl-T / Ctrl-N belong to the
   browser. Ctrl-Z is ignored, because a page has no job control.
@@ -6540,9 +6591,24 @@ they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
 document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
 the extra data files to fetch; both pages read the same file. The URL can only add document
-arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
-terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+arguments. A download that breaks off (the module, its Python zip, the document or a file it
+names) is fetched twice more past the browser's cache (`cache: 'reload'`); one that still breaks
+fails the load with its name and how much of it arrived. A failed load shows what the runtime
+printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
+
+**Which browsers.** Every browser build (arigl-web, `ari.html`, ariglx-web, and the gallery's
+demos and `arigl_term`) is built with wasm exceptions and JSPI (JavaScript Promise Integration),
+with no Asyncify fallback ([WASM_JSPI_EXCEPTIONS.md](roadmap/WASM_JSPI_EXCEPTIONS.md)). They
+run in Chrome 137, Firefox 153 or Safari 27, or later. On an iPhone or iPad every browser,
+Chrome and Firefox included, is WebKit, so there they need iOS 27 (iPadOS 27). Each page checks
+for JSPI (`WebAssembly.Suspending` and `WebAssembly.promising`) before it fetches anything of
+the module. Without it, the page says what the browser needs, in place of a load that would
+fail part way: those versions, or iOS 27 on an iPhone or iPad (told by the user agent, and an
+iPad's Mac user agent by its touch screen), and the browser's own user agent.
+`window.ariadneWeb.state` is then `unsupported` and `ariadneWeb.needs` holds the text.
+`arigl_web_smoke.mjs` checks the gate in headless Chrome with `WebAssembly.Suspending` deleted
+before the page's script runs, as Chrome, on an iPhone and on an iPad.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is
 relative to the working directory, not to the document. The browser shell runs in the
@@ -6920,6 +6986,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **`server: leave_grace_s:`** is how long the relay keeps a departed participant's subtree in the
+  room tree, in whole seconds (default 300; 0 removes it as its connection ends). One that joins
+  again in time finds what it published still there. `arisrv --leave-grace-s` overrides it.
 - **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
   where every client is sent them; a subscribing client's node wears it with
   `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").

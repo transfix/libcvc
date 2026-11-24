@@ -80,6 +80,13 @@
              animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #status { color: #8b98a5; text-align: center; padding: 0 16px; }
+  /* The browser gate: a browser without JSPI gets what it needs, not the load. */
+  #overlay.unsupported .spinner { display: none; }
+  #overlay.unsupported #status { color: #cdd6e0; font-size: 17px; font-weight: 600; }
+  #needs { max-width: 36em; padding: 0 16px; text-align: center; }
+  #needs p { margin: 0 0 10px; }
+  #needs .ua { color: #8b98a5; font: 11px/1.45 ui-monospace, monospace;
+               overflow-wrap: anywhere; }
   /* One line tall, printed in or not: the canvas is sized to the stage before the program first
      prints, and the windows are placed in it then. */
   footer { flex: none; padding: 4px 14px; border-top: 1px solid #232a33;
@@ -280,6 +287,44 @@
     return true;
   }
 
+  // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4), arigl-web.js's check and text.
+  // The demos are built with wasm exceptions and JSPI and have no fallback, so a browser without
+  // JSPI gets what it needs in place of the load, before anything downloads. Every browser on an
+  // iPhone or iPad is WebKit, so there it is iOS 27 whichever browser it is.
+  function missingJspi() {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+        typeof WebAssembly.promising === 'function')
+      return null;
+    const ua = navigator.userAgent || '';
+    const ios = /iPhone|iPad|iPod/.test(ua) ||
+                (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS's desktop UA
+    const versions = 'Chrome 137, Firefox 153 or Safari 27, or later';
+    return ['This page needs a newer browser',
+            'It runs on WebAssembly with JSPI (JavaScript Promise Integration), which this ' +
+                'browser does not have.'].concat(ios ? [
+      'On an iPhone or iPad every browser, Chrome and Firefox included, uses Safari\'s engine, ' +
+          'so it needs iOS 27 or later (iPadOS 27 on an iPad): Settings > General > Software ' +
+          'Update.',
+      'On a computer: ' + versions + '.',
+    ] : ['It needs ' + versions + ' (Edge 137 and other browsers built on Chrome 137 too).']);
+  }
+
+  function unsupported(lines) {
+    const o = document.getElementById('overlay');
+    o.classList.add('unsupported');
+    statusEl.textContent = lines[0];
+    const box = document.createElement('div');
+    box.id = 'needs';
+    for (const text of lines.slice(1).concat(['This browser: ' + navigator.userAgent])) {
+      const p = document.createElement('p');
+      p.textContent = text;
+      box.appendChild(p);
+    }
+    box.lastChild.className = 'ua';
+    statusEl.after(box);
+    document.title = 'Needs a newer browser — ' + document.title;
+  }
+
   function loadFailed(why) {
     const o = document.getElementById('overlay');
     o.querySelector('.spinner').style.display = 'none';
@@ -351,6 +396,7 @@
     const lines = [];
     const add = (k, v) => lines.push(k + ': ' + v);
     add('agent', navigator.userAgent);
+    add('jspi', missingJspi() ? 'NO (the demos need it)' : 'yes');
     add('screen', screen.width + 'x' + screen.height + ' @' + devicePixelRatio + 'x');
     const gl = document.createElement('canvas').getContext('webgl2');
     if (!gl) {
@@ -442,8 +488,11 @@
     console.log('gldiag\n' + lines.join('\n'));
   }
 
+  const needs = missingJspi();
   if (new URLSearchParams(location.search).has('gldiag'))
     glDiag();
+  else if (needs)
+    unsupported(needs);
   else
     boot();
 </script>
