@@ -22,7 +22,8 @@
 //     conf.rooms.<room>.entities.{ epoch, at, rev }
 //
 //   written when they change: a spawn, a removal, a new world (WorldVehicles::revision). An entity
-//   that went stays with present 0, as the room's objects do.
+//   that went is removed from the tree (a delete), as the room's objects are; a reader takes only
+//   the entities with present 1, which a write sets last.
 // - Where they are: the pose stream (pose_stream.h), beside the participants, under entity_pid(id)
 //   ("~e<id>": no participant's pid, a state name, starts with '~'). A client plays them out with a
 //   holon of their own (holon_sync's entity_pump), the participants' playout without bodies.
@@ -96,9 +97,9 @@ bool is_entity_pid(const std::string &pid);
 // conf.rooms.<room>.entities.
 std::string room_entities_path(const std::string &room);
 
-// Write `entities` as the room's entities section: each one's fields, present 0 for every entity
-// the section has that `entities` does not, then the revision (section_writer::commit, `epoch` as
-// it takes it). Returns the stamp.
+// Write `entities` as the room's entities section: each one's fields, a removal (section_writer::
+// remove) for every entity the section has that `entities` does not, then the revision
+// (section_writer::commit, `epoch` as it takes it). Returns the stamp.
 section_stamp write_room_entities(cvc::app &app, const std::string &room,
                                   const std::vector<room_entity> &entities,
                                   std::uint64_t epoch = 0);
