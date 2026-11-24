@@ -2049,6 +2049,101 @@ TEST(AriadneScene, AnimationPlayback) {
   EXPECT_DOUBLE_EQ(h.time, 0.0);
 }
 
+// material: { pbr: ... } and the scene's environment: (gap item 5): every key read, defaults kept,
+// a bad value clamped or left out with a warning, and the Phong keys beside pbr: warned about.
+TEST(AriadneScene, PbrMaterialAndEnvironment) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  environment: { sky: [0.6, 0.7, 0.9], ground: [0.1, 0.1, 0.1] }
+  nodes:
+    - node: car
+      source: { box: 1 }
+      material:
+        color: [0.8, 0.1, 0.1]
+        pbr: { metallic: 0.9, roughness: 0.3, emissive: [1, 0.5, 0], coat: { strength: 1, roughness: 0.1 } }
+    - node: plain
+      source: { box: 1 }
+      material: { pbr: true }
+    - node: off
+      source: { box: 1 }
+      material: { pbr: false, specular: 0.5 }
+    - node: bad
+      source: { box: 1 }
+      material: { specular: 0.5, pbr: { metallic: 1.5, roughness: x, emissive: [1, 2], coat: 0.4 } }
+    - node: phong
+      source: { box: 1 }
+      material: { color: [1, 1, 1] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *car = find_scene_node(r.scene.nodes, "car");
+  ASSERT_NE(car, nullptr);
+  EXPECT_TRUE(car->has_pbr);
+  EXPECT_FLOAT_EQ(car->pbr_metallic, 0.9f);
+  EXPECT_FLOAT_EQ(car->pbr_roughness, 0.3f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[0], 1.0f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[1], 0.5f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[2], 0.0f);
+  EXPECT_FLOAT_EQ(car->pbr_coat, 1.0f);
+  EXPECT_FLOAT_EQ(car->pbr_coat_roughness, 0.1f);
+  EXPECT_FLOAT_EQ(car->color[0], 0.8f); // still the base colour
+
+  const SceneNode *plain = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->has_pbr);
+  EXPECT_FLOAT_EQ(plain->pbr_metallic, 0.0f);
+  EXPECT_FLOAT_EQ(plain->pbr_roughness, 0.5f);
+  EXPECT_FLOAT_EQ(plain->pbr_emissive[0], 0.0f);
+  EXPECT_FLOAT_EQ(plain->pbr_coat, 0.0f);
+
+  const SceneNode *off = find_scene_node(r.scene.nodes, "off");
+  ASSERT_NE(off, nullptr);
+  EXPECT_FALSE(off->has_pbr);
+  EXPECT_TRUE(off->has_specular);
+  EXPECT_FALSE(has_warning(r, "'off': material.pbr shades it physically"));
+
+  const SceneNode *bad = find_scene_node(r.scene.nodes, "bad");
+  ASSERT_NE(bad, nullptr);
+  EXPECT_TRUE(bad->has_pbr);
+  EXPECT_FLOAT_EQ(bad->pbr_metallic, 1.0f);    // clamped
+  EXPECT_FLOAT_EQ(bad->pbr_roughness, 0.5f);   // not a number: the default
+  EXPECT_FLOAT_EQ(bad->pbr_emissive[0], 0.0f); // two channels: not used
+  EXPECT_FLOAT_EQ(bad->pbr_coat, 0.4f);
+  EXPECT_FLOAT_EQ(bad->pbr_coat_roughness, 0.0f);
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.metallic is 0..1, not 1.5"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.roughness is a number 0..1"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.emissive is a colour"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr shades it physically"));
+
+  const SceneNode *phong = find_scene_node(r.scene.nodes, "phong");
+  ASSERT_NE(phong, nullptr);
+  EXPECT_FALSE(phong->has_pbr);
+
+  EXPECT_TRUE(r.scene.has_environment);
+  EXPECT_FALSE(r.scene.environment_off);
+  EXPECT_FLOAT_EQ(r.scene.environment_sky[2], 0.9f);
+  EXPECT_FLOAT_EQ(r.scene.environment_horizon[0], 0.42f); // unset: the default
+  EXPECT_FLOAT_EQ(r.scene.environment_ground[1], 0.1f);
+
+  for (const char *spelling : {"false", "none", "true", "[1, 2]"}) {
+    LoadResult e = fresh_load(std::string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  environment: )") + spelling +
+                              R"(
+  nodes:
+    - node: n
+      source: { box: 1 }
+)");
+    ASSERT_TRUE(e.ok) << e.error;
+    const std::string s = spelling;
+    EXPECT_EQ(e.scene.has_environment, s != "[1, 2]") << s;
+    EXPECT_EQ(e.scene.environment_off, s == "false" || s == "none") << s;
+    EXPECT_EQ(has_warning(e, "scene environment is"), s == "[1, 2]") << s;
+  }
+}
+
 // A volren/volslice volume declared as the signed distance field of a MESH:
 // source: { sdf: { mesh: <uri>, dim: N } } — no pre-baked volume asset.
 TEST(AriadneScene, VolumeSdfMeshSource) {

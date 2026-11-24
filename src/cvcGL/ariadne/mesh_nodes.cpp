@@ -312,12 +312,21 @@ cvc::colormap_kind colormap_or_viridis(const std::string &name) {
   return k;
 }
 
-// The node's `material:` block, as the built-in geometry node applies it.
+// The node's `material:` block, as the built-in geometry node applies it (apply_node_material),
+// but for opacity, which the realizer gives the node it returns and not its children.
 void apply_material(GeometryNode &g, const ari::SceneNode &n) {
   if (!n.has_material)
     return;
   g.setUseSingleColor(n.use_single_color);
   g.setColor(n.color[0], n.color[1], n.color[2]);
+  if (n.has_pbr) {
+    g.setMetallic(n.pbr_metallic);
+    g.setRoughness(n.pbr_roughness);
+    g.setEmissive(n.pbr_emissive[0], n.pbr_emissive[1], n.pbr_emissive[2]);
+    g.setCoat(n.pbr_coat, n.pbr_coat_roughness);
+    g.setPBR(true);
+    return;
+  }
   g.setAmbient(n.ambient);
   g.setDiffuse(n.diffuse);
   if (n.has_specular) {

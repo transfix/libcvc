@@ -24,6 +24,7 @@ class vtkRenderer;
 class vtkMultiVolume;
 class vtkRenderPass;
 class vtkShadowMapBakerPass;
+class vtkTexture;
 
 namespace cvc {
 class app;
@@ -175,6 +176,28 @@ public:
   std::size_t numLights() const;
   // True when the light exists and is a shadow-casting kind (see the cone note).
   bool lightCastsShadow(int id) const;
+
+  // ── image-based lighting ──────────────────────────────────────────────────
+  // The light a PBR surface (GeometryNode::setPBR) takes from all round, beside the lights: VTK's
+  // image-based lighting, from an environment image this scene makes. The image is a vertical
+  // gradient: `sky` straight up, `horizon` level, `ground` straight down, about +z (sRGB colours,
+  // each channel 0..1, blended in linear light). A Phong surface ignores it.
+  //
+  // Off by default. On, it lights the scene's renderer, and like the lights it follows the scene
+  // onto any renderer setRenderer gives it; a mirror viewport copies it from its source
+  // (ViewportManager). Turning it on makes every program in the renderer once again, and VTK
+  // filters the image on the GPU the first frame after it is set: a document turns it on when it
+  // has a PBR surface to light.
+  void setImageBasedLighting(bool on);
+  bool imageBasedLighting() const { return m_ibl; }
+  void setEnvironment(const double sky[3], const double horizon[3], const double ground[3]);
+  // The defaults: a dim grey-blue sky, a mid-grey horizon and a dark ground, about as bright on
+  // a PBR surface as a Phong one's ambient 0.2.
+  void resetEnvironment();
+  void environment(double sky[3], double horizon[3], double ground[3]) const;
+  // The image, made when image-based lighting first needs it (null before): an equirectangular
+  // sRGB vtkTexture, its rows bottom (straight down) to top (straight up).
+  vtkTexture *environmentTexture() const;
 
   // Shadow mapping, via VTK's shadow-map render passes. Returns false if there
   // is no render target yet, so a caller can fall back rather than silently
@@ -554,6 +577,14 @@ private:
   vtkSmartPointer<vtkShadowMapBakerPass> m_shadowBaker;
   bool m_lodEnabled = true;                             // see setLODEnabled
   void applyLights();
+  // setImageBasedLighting / setEnvironment: the colours, and the image made from them (null until
+  // needed, and again after the colours change).
+  bool m_ibl = false;
+  double m_envSky[3] = {0.50, 0.53, 0.60};
+  double m_envHorizon[3] = {0.42, 0.42, 0.42};
+  double m_envGround[3] = {0.20, 0.19, 0.18};
+  vtkSmartPointer<vtkTexture> m_envTexture;
+  void applyEnvironment(); // onto m_renderer
   cvc::app &m_ctx; // app whose state tree / thread pool this scene runs under
   std::unique_ptr<cvc::gl::state_publisher> m_publisher; // scene-owned, runs under m_ctx
   // Owned half of aliveToken(). Held by nothing else, and reset in ~SceneGraph,
