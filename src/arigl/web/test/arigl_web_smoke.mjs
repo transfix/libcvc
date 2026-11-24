@@ -20,6 +20,12 @@
 // guest over Chrome's 8 MB (big.wasm, the guest with a 9 MiB custom section after it, which this
 // makes) compiled and instantiated asynchronously.
 //
+// The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4): with WebAssembly.Suspending deleted
+// before the page's own script runs, as in a browser without JSPI, each page must show the browsers
+// it needs (Chrome 137, Firefox 153, Safari 27; iOS 27 on an iPhone or iPad, whatever the browser)
+// in place of the load, and fetch neither the module's .js nor its .wasm. Every other case is the
+// normal run, through the same gate.
+//
 //   node arigl_web_smoke.mjs --web <share/arigl-web> --docset <src/cvc/tests/data/ariadne_docset> \
 //        --chrome <chrome or chromium> [--pydocs DIR [--expect-pil]] [--wasmdocs DIR]
 //        [--isolated] [--shots DIR] [--keep]
@@ -212,7 +218,10 @@ function upload(req, res) {
 // The file the test hands the page's picker: 5000 bytes, five chunks, the last one short.
 const PICKED = Array.from({length: 5000}, (_, i) => (i * 7 + 3) % 251);
 
+// Every path the page asked for, for the gate's cases (cleared before each of them).
+let requested = [];
 const server = http.createServer((req, res) => {
+  requested.push(new URL(req.url, 'http://x').pathname);
   if (new URL(req.url, 'http://x').pathname === '/apps/up') return upload(req, res);
   if (new URL(req.url, 'http://x').pathname === '/apps/flaky/blob.bin') return serveFlaky(req, res);
   const f = fileFor(new URL(req.url, 'http://x').pathname);
@@ -324,6 +333,7 @@ async function settle(page, check) {
         'JSON.stringify(window.ariadneWeb ? {state: ariadneWeb.state, log: ariadneWeb.log,' +
         ' text: ariadneWeb.text ? ariadneWeb.text() : "", csp: window.__csp || [],' +
         ' warnings: ariadneWeb.warnings || [], out: window.__out || [],' +
+        ' needs: ariadneWeb.needs || null,' +
         ' isolated: self.crossOriginIsolated === true, sab: typeof SharedArrayBuffer,' +
         ' warning: (w => w && !w.hidden ? w.textContent : "")(' +
         '    document.getElementById("warning")),' +
@@ -378,6 +388,41 @@ const cases = [
     check: v => v.state === 'running' && flaky.hits === 2 && flaky.reloads === 1,
   },
 ];
+
+// The browser gate. NO_JSPI runs before the page's own script, as a browser without JSPI would
+// be; IPHONE and IPAD make it Chrome on an iPhone, and Safari on an iPad (whose user agent is a
+// Mac's). The page must name what it needs and load nothing of the module: neither its .js nor its
+// .wasm (nor ariglx-web's python312.zip).
+const NO_JSPI = 'delete WebAssembly.Suspending;';
+const asAgent = (ua, touch) =>
+  `Object.defineProperty(Navigator.prototype, 'userAgent', {get: () => ${JSON.stringify(ua)}});` +
+  `Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {get: () => ${touch}});`;
+const IPHONE = asAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) ' +
+                       'AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/138.0.7204.156 ' +
+                       'Mobile/15E148 Safari/604.1', 5);
+const IPAD = asAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 ' +
+                     '(KHTML, like Gecko) Version/18.5 Safari/605.1.15', 5);
+const needsText = v => (v.needs || []).join('\n');
+const namesBrowsers = v => v.state === 'unsupported' && /Chrome 137/.test(needsText(v)) &&
+                           /Firefox 153/.test(needsText(v)) && /Safari 27/.test(needsText(v));
+const namesIos = v => namesBrowsers(v) && /iOS 27/.test(needsText(v));
+const loadedNothing = () => !requested.some(p => /\.(wasm|zip)$|\/(arigl|ariglx|ari)\.js$/.test(p));
+cases.push(
+  {
+    name: 'without JSPI the page names the browsers it needs and loads nothing of the module',
+    url: `${ORIGIN}/apps/app/?src=main.ari`,
+    inject: NO_JSPI,
+    before: () => { requested = []; },
+    check: v => namesBrowsers(v) && !/iOS 27/.test(needsText(v)) &&
+                /needs a newer browser/.test(v.status) && loadedNothing(),
+  },
+  {
+    name: 'without JSPI on an iPhone, in Chrome, the page asks for iOS 27',
+    url: `${ORIGIN}/apps/app/?src=main.ari`,
+    inject: IPHONE + NO_JSPI,
+    before: () => { requested = []; },
+    check: v => namesIos(v) && loadedNothing(),
+  });
 
 // The page's file picker, handed a File by the test (a headless page has no one to choose it), and
 // what the page writes to the console (Module.print).
@@ -514,6 +559,21 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       url: `${ORIGIN}/apps/app/ari.html?src=` +
            encodeURIComponent(`http://localhost:${PORT}/apps/app/main.ari`),
       check: v => v.state === 'failed' && /not this page's origin/.test(v.text),
+    },
+    {
+      name: 'ari: without JSPI the page names the browsers it needs, in place of the terminal',
+      url: `${ORIGIN}/apps/app/ari.html?src=main.ari`,
+      inject: NO_JSPI,
+      before: () => { requested = []; },
+      check: v => namesBrowsers(v) && !/iOS 27/.test(needsText(v)) &&
+                  v.text === needsText(v) && loadedNothing(),
+    },
+    {
+      name: 'ari: without JSPI on an iPad (a Mac\'s user agent and touch), it asks for iOS 27',
+      url: `${ORIGIN}/apps/app/ari.html?src=main.ari`,
+      inject: IPAD + NO_JSPI,
+      before: () => { requested = []; },
+      check: v => namesIos(v) && loadedNothing(),
     },
     {
       name: 'ari: a picked file goes to the page\'s origin in chunks',

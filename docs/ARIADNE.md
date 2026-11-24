@@ -6323,8 +6323,9 @@ event wait that yields with `emscripten_sleep`. Both pages are in the gallery.
 
 What differs from a real terminal:
 
-- The loop yields with `emscripten_sleep`, so the build links `-sASYNCIFY`. A hidden
-  tab throttles timers, which slows redraws and `on_tick`.
+- The loop yields with `emscripten_sleep`, which suspends `main` under JSPI (`-sJSPI`, so the
+  page needs a browser with it: §9.4). A hidden tab throttles timers, which slows redraws and
+  `on_tick`.
 - Ctrl-C reaches the document's `on_signal:` as SIGINT, as in a terminal. Only keys
   the browser lets a page see get through: Ctrl-W / Ctrl-T / Ctrl-N belong to the
   browser. Ctrl-Z is ignored, because a page has no job control.
@@ -6569,6 +6570,19 @@ names) is fetched twice more past the browser's cache (`cache: 'reload'`); one t
 fails the load with its name and how much of it arrived. A failed load shows what the runtime
 printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
+
+**Which browsers.** Every browser build (arigl-web, `ari.html`, ariglx-web, and the gallery's
+demos and `arigl_term`) is built with wasm exceptions and JSPI (JavaScript Promise Integration),
+with no Asyncify fallback ([WASM_JSPI_EXCEPTIONS.md](roadmap/WASM_JSPI_EXCEPTIONS.md)). They
+run in Chrome 137, Firefox 153 or Safari 27, or later. On an iPhone or iPad every browser,
+Chrome and Firefox included, is WebKit, so there they need iOS 27 (iPadOS 27). Each page checks
+for JSPI (`WebAssembly.Suspending` and `WebAssembly.promising`) before it fetches anything of
+the module. Without it, the page says what the browser needs, in place of a load that would
+fail part way: those versions, or iOS 27 on an iPhone or iPad (told by the user agent, and an
+iPad's Mac user agent by its touch screen), and the browser's own user agent.
+`window.ariadneWeb.state` is then `unsupported` and `ariadneWeb.needs` holds the text.
+`arigl_web_smoke.mjs` checks the gate in headless Chrome with `WebAssembly.Suspending` deleted
+before the page's script runs, as Chrome, on an iPhone and on an iPad.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is
 relative to the working directory, not to the document. The browser shell runs in the
