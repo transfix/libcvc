@@ -2482,8 +2482,8 @@ jobs:
   # runs mt.cross_group_msg at t=4 k=4: pingpong, fan-out and broadcast between groups through
   # the router, and the same programs in one group. Stage 2b's cases and mt.cross_group_msg's
   # cross-group points are required in all three legs: SAN_REQUIRED_S2B, appended as
-  # SAN_REQUIRED_S1A is. The router protocol's model, once it lands, runs in CTest (its quick
-  # suite) and in locks-deep.yml (its deep suite).
+  # SAN_REQUIRED_S1A is. The router protocol's model runs in CTest (its quick suite) and in
+  # locks-deep.yml (its deep suite), under no sanitizer: it is Python.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
