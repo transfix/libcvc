@@ -409,6 +409,8 @@ set(SOURCE_FILES
   state/state_exec/async_host.cpp
   state/state_exec/async_scheduler.cpp
   state/state_exec/exec_group.cpp
+  state/state_exec/exec_router.cpp
+  state/state_exec/exec_control.cpp
   state/state_exec/intrinsics.cpp
   state/state_exec/resource_policy.cpp
   state/state_exec/stdlib.cpp

@@ -116,6 +116,11 @@ public:
   /// running processes, the run-queue level a pick would take (0 for every process under round
   /// robin, whose one level is 0); nullopt when none is runnable. O(levels).
   std::optional<int> best_runnable() const;
+  /// Stage 2 (S2b, S2-Q9): moves at every change a published row shows (an insert, an erase, a
+  /// status change, a priority change, a lock hold taken or dropped), so a publisher rebuilds its
+  /// rows only when it moved. Owner only.
+  std::uint64_t generation() const noexcept { return generation_; }
+  void bump_generation() noexcept { ++generation_; }
   /// The round-robin pick (round_robin, and priority_rr within the best priority): the
   /// `rr_index`-th (mod the count) of the runnable processes in pid order; rr_index becomes the
   /// next index. nullptr when none is runnable.
@@ -210,6 +215,7 @@ private:
   std::uint32_t dead_ = 0;
   std::vector<level> levels_; // sorted by key
   std::size_t queued_ = 0;
+  std::uint64_t generation_ = 0;   // generation()
   std::uint32_t last_pick_ = none; // the slot pick_round_robin returned last (a hint)
   // Stage S: the process a run is running (begin_run) and its level, and whether a process entered
   // the run queue at a better one since, or the runner was re-levelled to a worse one.

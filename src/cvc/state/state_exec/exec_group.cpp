@@ -128,6 +128,7 @@ struct exec_group::impl {
   std::unique_ptr<async_host> host; // declared after the scheduler it posts to, so it goes first
   std::atomic<bool> failed{false};
   detail::group_pool_link link;
+  group_ref route; // its handle in the app's router and directory (S2b; empty with no app)
   app_groups *of_app = nullptr; // its app's counts (null: no app)
   // The thread pumping the group now, if any (pumping_here; a group destroyed from inside its own
   // pump aborts).
@@ -205,6 +206,12 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     m.sched->set_lock_manager(locks, lock_attach{shared});
     // A single manager's tables have one thread: every pool pumps this group on its caller only.
     m.link.caller_only = !shared;
+    // The app's routing (S2b, exec_router.h): its handle, and the prefixes it is the home of.
+    exec_router &router = app->exec_router();
+    m.route = group_ref::make(*m.sched, this);
+    m.sched->set_router(&router, m.route);
+    for (const std::string &prefix : m.opts.channel_prefixes)
+      router.register_prefix(m.route, prefix);
     if (!shared && !pool_built) {
       const bool first = !of_app->single_noted.exchange(true, std::memory_order_relaxed);
       if (first)
@@ -280,6 +287,9 @@ exec_group::~exec_group() {
   if (m.opts.teardown_hook_for_test)
     step("the teardown hook", [&] { m.opts.teardown_hook_for_test(*this); });
   cvc::detail::detach_end(*this);
+  // (S2b) Its prefixes unregistered and its handle closed, what it holds for the router goes to
+  // the keys' new homes, before the kills post their unsubscribes (exec_router.h).
+  step("leaving the router", [&] { m.sched->leave_router(); });
   step("listing its processes", [&] {
     for (const process_info &p : m.sched->list_processes())
       if (!is_finished(p.status))
@@ -566,6 +576,8 @@ bool exec_group::pumping_here() const {
 }
 
 const exec_group::options &exec_group::opts() const { return impl_->opts; }
+
+const group_ref &exec_group::route() const noexcept { return impl_->route; }
 
 detail::group_pool_link &exec_group::pool_link() noexcept { return impl_->link; }
 

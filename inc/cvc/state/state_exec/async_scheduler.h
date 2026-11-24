@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/exec_router.h> // group_ref, route_entry (S2b)
 #include <cvc/state/state_exec/heap.h> // cycle_registry
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
@@ -24,6 +25,7 @@
 #include <cvc/state/state_exec/task.h>
 #include <cvc/state/state_exec/types.h>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -179,6 +181,68 @@ public:
   /// The steps (or windows) the monitor caught since the scheduler was made (any thread).
   std::uint64_t long_steps() const noexcept { return long_steps_.load(std::memory_order_relaxed); }
 
+  // --- Stage 2: the router and process control across groups (S2b; td 4.5, 4.6; S2-Q7..S2-Q10;
+  // the rules are exec_router.h's) ---
+
+  /// Join the app's routing as the group `self` names: exec_group's constructor (an app's group)
+  /// and app::exec_scheduler() (group 0). From then on messaging on a key homed in another group
+  /// goes through `router` while it is active, the pids this scheduler issues are written to its
+  /// directory at their creation and erased at their reap, and each run loop publishes the
+  /// processes' rows. Once, before the first process. A scheduler never given one (a plain pycvc
+  /// Exec, a bare scheduler, a group with no app) never routes, writes or publishes anything.
+  void set_router(exec_router *router, group_ref self);
+  exec_router *router() const noexcept { return router_; }
+  /// The handle set_router gave (empty with none).
+  const group_ref &route_self() const noexcept { return route_self_; }
+  /// The teardown's step (S2b.4; exec_router.h, "Teardown and rehoming"): unregister this group's
+  /// prefixes, close its handle, then send its queued router entries, its remote-waiter records and
+  /// the pending messages of the keys it homed to their new homes. The token holder, after the
+  /// lock port's close and before the kills. Nothing without a router.
+  void leave_router();
+  /// Any thread (group_ref::post, which keeps the scheduler alive): push a router entry into the
+  /// ordered ingress, as post_message's posts are pushed (a wait or the notifier is woken). False
+  /// when the scheduler is being destroyed, or `e` is a send (not uncapped) and the ingress holds
+  /// ingress_cap() capped entries (counted in ingress_counters().ingress_refused).
+  bool post_route(detail::route_entry e);
+  /// Per-pid delivery (td 4.6's deliver; S2b.1): when `pid` waits on `key` with recv_seq `seq`,
+  /// give it `msg` as deliver_to_receivers gives a waiter its message, ready it, and return true;
+  /// else false (stale). Scheduler thread.
+  bool deliver_to(int pid, std::uint64_t seq, const std::string &key, const value_t &msg);
+
+  /// The ingress cap (S2-Q10): the capped entries (send entries and host post_message posts) the
+  /// ingress may hold undrained; 0: none. The tree's state_exec.groups.ingress_cap, else 65536; a
+  /// value set here wins over the tree's. Scheduler thread.
+  void set_ingress_cap(std::size_t cap);
+  std::size_t ingress_cap() const noexcept { return ingress_cap_; }
+  /// The ingress's counters since the scheduler was made (td 4.17, S2-Q10), any thread.
+  struct ingress_stats {
+    std::uint64_t ingress_refused = 0; ///< capped entries refused at the cap
+    std::uint64_t requeued = 0;        ///< messages a requeue gave back to this home
+    std::uint64_t stale_dropped =
+        0; ///< stale deliveries dropped (a waiter already had the message)
+    std::uint64_t pending_dropped = 0; ///< messages a full pending FIFO dropped
+    std::uint64_t control_refused = 0; ///< commands refused (never applied, or one that threw)
+    std::uint64_t throw_dropped = 0;   ///< entries a drain's throw left unapplied, not put back
+    std::uint64_t destroy_dropped = 0; ///< messages and router entries the destructor dropped
+  };
+  ingress_stats ingress_counters() const noexcept;
+
+  /// What the last run loop published (S2-Q9), any thread. Zero before the first publish, and
+  /// always for a scheduler with no router.
+  struct published_summary {
+    bool runnable = false;
+    std::chrono::steady_clock::time_point next_deadline =
+        std::chrono::steady_clock::time_point::max();
+    std::optional<int> best_runnable;
+    int processes = 0;
+    std::uint64_t publishes = 0; ///< run loops that published so far
+  };
+  published_summary published() const noexcept;
+  /// `pid`'s published row, any thread; nullopt for a pid the last publish did not have.
+  std::optional<published_process> published_info(int pid) const;
+  /// Every published row, in pid order, any thread (S2c's cross-group ps filters them by owner).
+  std::vector<published_process> published_rows() const;
+
   // --- Process submission ---
 
   int execute(const std::string &script, const execute_options &opts = {}) override;
@@ -283,7 +347,10 @@ public:
   /// the next step (drain_ingress → deliver_to_receivers), so no scheduler state is
   /// mutated off-thread. deliver_to_receivers itself is NOT thread-safe — external
   /// threads must use this, only the scheduler thread may call deliver_to_receivers.
-  void post_message(const std::string &path, const value_t &msg);
+  /// Stage 2 (S2b, S2-Q10): it counts against the ingress cap, and returns false, posting nothing,
+  /// once the cap is reached (or the scheduler is being destroyed); and on a key the router homes
+  /// in another group it forwards the message there as a send (the home's cap then applies).
+  bool post_message(const std::string &path, const value_t &msg);
 
   /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
   /// run: a post_message() or a settled async call (from any thread), a post to the lock port
@@ -362,6 +429,10 @@ public:
   /// null for none. Returns the new pid.
   int restore(cvc::state &node, environment_ptr natives = nullptr);
 
+  /// S2b (S2-Q8): the local half as scheduler_base's, plus the directory's: a pid in another group
+  /// of the caller's (non-empty) owner is posted there.
+  bool control_as(const std::string &caller_owner, int pid, control_cmd::kind what) override;
+
   bool set_priority(int pid, int priority) override;
   std::optional<priority_info> get_priority(int pid) const override;
   priority_change set_priority_checked(int caller_pid, int pid, int priority) override;
@@ -384,6 +455,13 @@ public:
   /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
   bool has_pending_control() const noexcept {
     return controls_waiting_.load(std::memory_order_acquire) != 0;
+  }
+  /// Thread-safe (S2b): whether anything posted waits for a drain: a message, a command, a router
+  /// entry or a settled call. A driver that pumps a scheduler only while it has live processes
+  /// (group 0's) pumps it for this too, so a router entry homed there is never stranded (S2.md
+  /// section 0, row 22).
+  bool has_pending_ingress() const noexcept {
+    return ingress_pending_.load(std::memory_order_acquire);
   }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -743,6 +821,35 @@ private:
   /// CVC_EXEC_FUZZ's yields at the ingress posts (S2-Q15), read as the scheduler is made; null
   /// when it is off.
   std::unique_ptr<detail::lock_fuzz> ingress_fuzz_;
+
+  /// Stage 2 (S2b): the app's router and this scheduler's handle (set_router; null and empty:
+  /// none), the ingress cap and whether a host set it, and the ingress's counters
+  /// (ingress_counters()). The ordered queue itself, its home records (remote waiters, tracked
+  /// broadcasts) and the cache of homes are S2b.1's and S2b.4's, beside the members they replace.
+  exec_router *router_ = nullptr;
+  group_ref route_self_;
+  std::size_t ingress_cap_ = 65536;
+  bool ingress_cap_set_ = false;
+  struct ingress_counter_set {
+    std::atomic<std::uint64_t> ingress_refused{0}, requeued{0}, stale_dropped{0},
+        pending_dropped{0}, control_refused{0}, throw_dropped{0}, destroy_dropped{0};
+  };
+  ingress_counter_set ingress_counts_;
+  /// Published info (S2-Q9; S2b.3): the summary's atomics, the rows under their mutex, the
+  /// generation they were built at, and when their counters were last refreshed. Written at the
+  /// run loop's end (publish_info), read by any thread.
+  std::atomic<bool> pub_runnable_{false};
+  std::atomic<std::int64_t> pub_deadline_{std::numeric_limits<std::int64_t>::max()};
+  std::atomic<int> pub_best_{std::numeric_limits<int>::min()}; // min(): none
+  std::atomic<int> pub_processes_{0};
+  std::atomic<std::uint64_t> pub_count_{0};
+  mutable std::mutex pub_mu_;
+  std::vector<published_process> pub_rows_; // in pid order, under pub_mu_
+  std::uint64_t pub_generation_ = ~std::uint64_t{0};
+  clock::time_point pub_refreshed_{};
+  /// Publish at the run loop's end (S2-Q9): the summary always; the rows when the table's
+  /// generation moved, their counters at most every 100 ms. Pump owner; nothing without a router.
+  void publish_info();
   /// The long-step monitor (S2a.7): the threshold in force in seconds (0: off), the tree's
   /// state_exec.long_step_ms in seconds while it is set (else the default applies), when the step
   /// or the run's window being timed began, and when each native was last reported.

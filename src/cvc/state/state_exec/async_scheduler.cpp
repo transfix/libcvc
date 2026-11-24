@@ -269,6 +269,9 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 } // namespace
 
 async_scheduler::~async_scheduler() {
+  // No post reaches it through its router handle from here on (exec_router.h; group 0's teardown:
+  // an app's groups closed theirs in leave_router).
+  route_self_.close();
   home_.reset();
   // Commands posted and never applied: their done gets false, each counted out first. Taken under
   // the lock, so a post that returned before the destruction began is seen. A done that posts
@@ -1360,7 +1363,7 @@ std::size_t async_scheduler::total_pending_messages() const {
   return total;
 }
 
-void async_scheduler::post_message(const std::string &path, const value_t &msg) {
+bool async_scheduler::post_message(const std::string &path, const value_t &msg) {
   // Callable from any thread — the ONLY thread-safe entry point into messaging. Just enqueue
   // under the lock; delivery happens on the scheduler thread in drain_ingress(). A driver
   // blocked in wait_for_work() wakes.
@@ -1373,6 +1376,56 @@ void async_scheduler::post_message(const std::string &path, const value_t &msg) 
   ingress_.emplace_back(path, msg);
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
+  return true;
+}
+
+// --- Stage 2: the router (S2b; exec_router.h). S2b.0 stubs: nothing is routed. ---
+
+void async_scheduler::set_router(exec_router *router, group_ref self) {
+  router_ = router;
+  route_self_ = std::move(self);
+}
+
+void async_scheduler::leave_router() {
+  if (!router_)
+    return;
+  router_->unregister(route_self_);
+  route_self_.close();
+}
+
+bool async_scheduler::post_route(detail::route_entry e) {
+  (void)e;
+  return false;
+}
+
+bool async_scheduler::deliver_to(int pid, std::uint64_t seq, const std::string &key,
+                                 const value_t &msg) {
+  (void)pid;
+  (void)seq;
+  (void)key;
+  (void)msg;
+  return false;
+}
+
+void async_scheduler::set_ingress_cap(std::size_t cap) {
+  ingress_cap_ = cap;
+  ingress_cap_set_ = true;
+}
+
+async_scheduler::ingress_stats async_scheduler::ingress_counters() const noexcept {
+  const auto get = [](const std::atomic<std::uint64_t> &a) {
+    return a.load(std::memory_order_relaxed);
+  };
+  const ingress_counter_set &c = ingress_counts_;
+  ingress_stats s;
+  s.ingress_refused = get(c.ingress_refused);
+  s.requeued = get(c.requeued);
+  s.stale_dropped = get(c.stale_dropped);
+  s.pending_dropped = get(c.pending_dropped);
+  s.control_refused = get(c.control_refused);
+  s.throw_dropped = get(c.throw_dropped);
+  s.destroy_dropped = get(c.destroy_dropped);
+  return s;
 }
 
 void async_scheduler::drain_ingress() {
@@ -2310,6 +2363,10 @@ void async_scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out
     case control_cmd::kind::signal:
       applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
       break;
+    case control_cmd::kind::kill_owner:
+      kill_owner(cmd.owner); // S2b (S2-Q8): pool.kill_owner's command; the pid is not read
+      applied = true;
+      break;
     }
   } catch (...) {
     // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
@@ -2415,6 +2472,7 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.uid = proc.uid;
   info.gid = proc.gid;
   info.scope = process_scope(proc.root_path, proc.owner_root);
+  info.owner = proc.owner;
   info.step_count = proc.step_count();
   fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();

@@ -29,6 +29,7 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/exec_router.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/process_table.h>
@@ -1807,7 +1808,13 @@ void take_token(se::exec_group &g, std::optional<se::async_scheduler::pump_owner
 
 } // namespace
 
-struct exec_pool::impl : pool_state {};
+struct exec_pool::impl : pool_state {
+  cvc::app *app = nullptr; // whose router and directory the S2b calls use (null: none)
+};
+
+exec_pool::exec_pool(const pool_options &opts, cvc::app *app) : exec_pool(opts) {
+  impl_->app = app;
+}
 
 exec_pool::exec_pool(const pool_options &opts) : impl_(std::make_unique<impl>()) {
   impl &p = *impl_;
@@ -2747,6 +2754,28 @@ bool exec_pool::attached(const state_exec::exec_group &group) const {
 }
 
 const pool_options &exec_pool::options() const { return impl_->opts; }
+
+// --- Stage 2: messaging and process control across groups (S2b; exec_router.h) ---
+
+bool exec_pool::post_message(const std::string &channel, se::value_t value) {
+  return impl_->app && impl_->app->exec_router().post_message(channel, value);
+}
+
+bool exec_pool::post_control(int pid, se::control_cmd cmd) {
+  return impl_->app && impl_->app->exec_router().post_control(pid, std::move(cmd));
+}
+
+// S2b.0 stub (C builds it in S2b.5).
+void exec_pool::kill_owner(const std::string &owner) {
+  (void)owner;
+  throw std::logic_error("exec_pool::kill_owner: not built (S2b.5)");
+}
+
+std::optional<se::published_process> exec_pool::info(int pid) {
+  if (!impl_->app)
+    return std::nullopt;
+  return impl_->app->exec_router().info(pid);
+}
 
 bool exec_pool::deterministic() const { return impl_->deterministic; }
 

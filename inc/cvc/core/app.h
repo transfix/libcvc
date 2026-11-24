@@ -133,6 +133,7 @@ class async_scheduler;
 class async_host;
 class lock_manager;
 class exec_group;
+class exec_router;
 } // namespace state_exec
 
 class app;
@@ -720,6 +721,11 @@ public:
   // none repeats app-wide: made with group 0's state, counting from 1, the app scheduler's first
   // pid as before (async_scheduler::set_pid_source).
   std::shared_ptr<std::atomic<int>> exec_pid_source();
+  // This app's router and pid directory (S2b; docs/STATE_EXEC_THREADED.md 4.5, 4.6;
+  // state_exec/exec_router.h): made with group 0's state, beside the pid source, at the first call,
+  // and kept until the app goes, after every scheduler that uses it. exec_scheduler() registers
+  // group 0 with it, and each exec_group built with this app its channel prefixes.
+  cvc::state_exec::exec_router &exec_router();
 
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.

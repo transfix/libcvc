@@ -18,6 +18,7 @@
 #include <cvc/core/thread_class.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -30,6 +31,10 @@ class exec_pool;
 namespace state_exec {
 class exec_group;
 struct pump_budget;
+struct control_cmd;       // scheduler_base.h
+struct published_process; // scheduler_base.h
+struct value_tag;         // types.h
+using value_t = value_tag;
 } // namespace state_exec
 
 namespace detail {
@@ -100,6 +105,10 @@ struct pool_stats {
 class exec_pool {
 public:
   explicit exec_pool(const pool_options &opts);
+  // The pool of `app` (S2b): its messaging and control across groups (post_message, post_control,
+  // kill_owner, info) use that app's router and directory (app::exec_router()). app::exec_pool()
+  // builds its pool so; one built without an app finds nothing there (false, nullopt, no kills).
+  exec_pool(const pool_options &opts, cvc::app *app);
   // Stops the workers after their current pumps. Every group's owner has destroyed it before.
   ~exec_pool();
   exec_pool(const exec_pool &) = delete;
@@ -266,6 +275,34 @@ public:
   std::vector<state_exec::exec_group *> take_failed();
   // Whether `group` is attached to this pool (any thread; a snapshot).
   bool attached(const state_exec::exec_group &group) const;
+
+  // --- Stage 2: messaging and process control across groups (S2b; td 4.5, 4.6, 4.12;
+  // S2-Q8..S2-Q10; state_exec/exec_router.h has the rules) ---
+
+  // Post `value` on `channel`, a resolved key (absolute: no chroot is applied), to its home group
+  // (group 0 while the router is off), as a host's async_scheduler::post_message: it counts against
+  // the home's ingress cap. False when the home refused it (its cap), or the pool has no app. Any
+  // thread.
+  bool post_message(const std::string &channel, state_exec::value_t value);
+  // Post `cmd` (kill, pause, resume, signal or set_priority, unchecked: a host's) to the group the
+  // app's directory has `pid` in. True when that group took it (its done, if set, is then called
+  // once, on the thread that applies it); false for a pid not in the directory or a group being
+  // torn down, and then done is never called. Never blocks. Any thread.
+  bool post_control(int pid, state_exec::control_cmd cmd);
+  // Kill every process of `owner` in every group of the app, group 0 included, and return once each
+  // group has applied it (S2-Q8; td 4.5): a kill_owner command to each group the directory has a
+  // process of `owner` in, then the wait. A group no thread pumps (fork-join: no pump_all holds it;
+  // group 0 with no pump owner) has its ingress drained inline by this thread under its token; an
+  // attached group is waited for (its done), this thread servicing its host queue meanwhile; a
+  // group pumped elsewhere is waited for. A group torn down meanwhile counts as applied (its
+  // destructor refuses the command: KO-3). Before the contexts of `owner`'s processes are freed
+  // (Ariadne's, in Stage 3). Not from inside a pump, a host body or a callback of this pool
+  // (std::logic_error).
+  void kill_owner(const std::string &owner);
+  // `pid`'s published row (S2-Q9), as its group last published it; nullopt for a pid not in the
+  // directory, or not published since its creation (its group publishes at its next run loop's
+  // end). Any thread.
+  std::optional<state_exec::published_process> info(int pid);
 
   // The options the pool was built with, before its clamps (threads() is what they came to).
   const pool_options &options() const;
