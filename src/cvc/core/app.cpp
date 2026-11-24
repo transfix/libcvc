@@ -1734,12 +1734,22 @@ void app::exec_pump_frame() {
       group0_stream = &_execGroup0->random;
   }
   // Or while anything posted to it waits (S2b, S2.md section 0 row 22): a router entry homed there,
-  // a command (pool.kill_owner's), a message for a process to come.
+  // a command (pool.kill_owner's), a message for a process to come. Read under its token, tried:
+  // another thread may hold it (pycvc's ExecPool.run_all drains group 0 on its own thread,
+  // pool.kill_owner drains it inline), and group 0 is then skipped this frame, never a throw.
   if (group0) {
-    const se::scheduler_stats s = group0->get_stats();
-    if (s.total_processes - s.terminated - s.killed - s.failed <= 0 &&
-        !group0->has_pending_ingress())
-      group0 = nullptr;
+    std::optional<se::async_scheduler::pump_owner_scope> token;
+    try {
+      token.emplace(*group0);
+    } catch (const std::runtime_error &) {
+      group0 = nullptr; // held by another thread: next frame
+    }
+    if (group0) {
+      const se::scheduler_stats s = group0->get_stats();
+      if (s.total_processes - s.terminated - s.killed - s.failed <= 0 &&
+          !group0->has_pending_ingress())
+        group0 = nullptr;
+    }
   }
   // Deterministic mode (td 4.4) reaches group 0 as it does the frame groups: slices fixed in
   // steps, no deadline, and its stream seeded from a fixed name. The pool's flag when there is a
@@ -1763,7 +1773,14 @@ void app::exec_pump_frame() {
     group0_stream->seed = h;
   }
   const auto pump_group0 = [group0, deadline, deterministic] {
-    se::async_scheduler::pump_owner_scope token(*group0); // the token, as a group's pump takes
+    // The token, as a group's pump takes it; another thread's since the look above, group 0 is
+    // skipped this frame (as above).
+    std::optional<se::async_scheduler::pump_owner_scope> token;
+    try {
+      token.emplace(*group0);
+    } catch (const std::runtime_error &) {
+      return;
+    }
     group0->drain_ingress();
     group0->wake_awaiting();
     if (deterministic) {

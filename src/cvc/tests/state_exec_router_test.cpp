@@ -103,6 +103,7 @@ TEST(RouterInterfaces, ATeardownForwardsPastClosedHomes) {
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <thread>
@@ -782,6 +783,39 @@ TEST(PoolKillOwner, RefusedFromInsideAPumpOfThePool) {
   for (const kill_world::proc &p : w.procs)
     if (p.owner == "Y")
       EXPECT_FALSE(se::is_finished(status_of(*p.sched, p.pid)));
+}
+
+// exec_pump_frame's group 0 (S2b): held by another thread (pycvc's ExecPool.run_all drains group 0
+// on its own; pool.kill_owner inline), it is skipped this frame, never a throw, and pumped the next
+// frame once free. With no frame group (group 0 pumped alone) and with one (host_first).
+TEST(GroupZeroDriver, AFrameSkipsGroupZeroWhileAnotherThreadHoldsIt) {
+  for (const bool with_frame_group : {false, true}) {
+    cvc::app app;
+    quiet_rates(app);
+    group0_world zero(app);
+    const int pid = zero.submit("(begin (set i 0) (while (< i 50) (set i (+ i 1))) i)", "");
+    std::unique_ptr<group_world> frame;
+    std::optional<cvc::frame_group_handle> handle;
+    if (with_frame_group) {
+      frame = std::make_unique<group_world>(app, "f");
+      handle.emplace(app.register_frame_group(frame->g()));
+    }
+    std::atomic<bool> held{false}, release{false};
+    std::thread holder([&] {
+      se::async_scheduler::pump_owner_scope token(zero.sched());
+      held = true;
+      while (!release.load())
+        std::this_thread::yield();
+    });
+    while (!held.load())
+      std::this_thread::yield();
+    EXPECT_NO_THROW(app.exec_pump_frame()) << with_frame_group;
+    EXPECT_EQ(status_of(zero.sched(), pid), se::process_status::ready) << "pumped while held";
+    release = true;
+    holder.join();
+    app.exec_pump_frame();
+    EXPECT_EQ(result_of(zero.sched(), pid), "50") << with_frame_group;
+  }
 }
 
 } // namespace c_tests
