@@ -26,6 +26,8 @@
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene_boat.h>
+#include <cvc/ariadne/scene_generated_world.h> // SceneColliders
+#include <cvc/ariadne/scene_water.h>           // a followed sea (OW5q)
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_vehicles.h>
@@ -1971,6 +1973,87 @@ scene:
   fs::remove_all(dir, ec);
 }
 
+// A drawn water node shows another host's sea (OW5q): it seeds its water.sea and water.clock keys
+// empty, so a client of a relay sees the node is there (show_relay_seas), and once water.sea holds
+// a keyframe its runtime's field is that sea's at the next frame. (The GPU sea, drawn at
+// water.clock's time, needs a GL context; the frame here has no renderer.)
+void test_drawn_water_shows_another_hosts_sea() {
+  cvc::app app;
+  std::printf("test_drawn_water_shows_another_hosts_sea\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 4
+      body: {}
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  cvc::state &root = cvc::state::instance(app);
+  // Its keys under the scene's state prefix, where show_relay_seas writes them (arigl passes it).
+  const std::string sea_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "water.sea");
+  const std::string clock_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "water.clock");
+  CHECK(root.findDescendant(sea_key) != nullptr);
+  CHECK(root.findDescendant(clock_key) != nullptr);
+  CHECK(root(sea_key).value().empty());
+  const auto it = out.colliders.find("water");
+  CHECK(it != out.colliders.end() && it->second && it->second->geometry);
+  if (it == out.colliders.end() || !it->second || !it->second->geometry)
+    return;
+  const auto surface = [&]() -> const void * {
+    for (const cvc::world::volume_item &v : it->second->geometry->volumes())
+      return v.field.surface.get();
+    return nullptr;
+  };
+  for (const auto &tick : out.custom_ticks)
+    tick(nullptr);
+  const void *own = surface();
+  const std::uint64_t rev = it->second->revision;
+  cvc::ariadne::SceneWaterKeyframe k;
+  k.from = {4.0, 0.0, 5000.0};
+  k.to = {12.0, 0.5, 5000.0};
+  k.t0 = 1.0;
+  k.t1 = 3.0;
+  k.keyframe = 2;
+  k.from_tick = 240;
+  root(sea_key).value(cvc::ariadne::format_sea_keyframe(k));
+  root(clock_key).value("2.5");
+  for (const auto &tick : out.custom_ticks)
+    tick(nullptr);
+  CHECK(it->second->revision != rev);
+  CHECK(surface() != own);
+  CHECK(it->second->from_tick == 240u);
+  cvc::ariadne::SceneNode wn;
+  wn.id = "water";
+  CHECK(cvc::ariadne::scene_water_time(app, wn, sg.getStatePrefix(), 9.0) == 2.5);
+  std::printf("  the drawn water's field follows water.sea (revision %llu -> %llu)\n",
+              static_cast<unsigned long long>(rev),
+              static_cast<unsigned long long>(it->second->revision));
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -1990,6 +2073,7 @@ int main() {
   test_boat_models_drawn();
   test_boat_model_from_data();
   test_node_model_from_data();
+  test_drawn_water_shows_another_hosts_sea();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

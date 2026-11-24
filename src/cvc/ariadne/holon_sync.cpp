@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cvc/ariadne/bind.h>                       // resolve_bind
 #include <cvc/ariadne/conference/room_avatar.h>     // each reserve
 #include <cvc/ariadne/conference/room_entities.h>   // entity pids, the entities section
 #include <cvc/ariadne/conference/room_intrinsics.h> // room_participant_path, room_roster
@@ -26,6 +27,7 @@
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>         // load_file: the world document
 #include <cvc/ariadne/scene_water.h>    // the relay's seas (OW5q)
+#include <cvc/ariadne/scene_weather.h>  // the relay's storms (OW5q)
 #include <cvc/ariadne/scene_world.h>    // world_replica's world
 #include <cvc/ariadne/uri.h>            // resolve
 #include <cvc/ariadne/world_pack.h>     // world_replica's packs
@@ -864,6 +866,15 @@ conference::room_world_on world_on_of(const SceneWorld &world) {
     s.t1 = k.t1;
     on.seas.push_back(std::move(s));
   }
+  // Each weather node's storms (OW5q): a live weather.events, a new storm-wind peak.
+  for (const auto &wf : world.weathers()) {
+    conference::room_weather x;
+    x.node = wf->node();
+    x.events = wf->events_text();
+    x.gust = wf->gust_front();
+    x.gust_from = wf->gust_from();
+    on.weathers.push_back(std::move(x));
+  }
   return on;
 }
 
@@ -889,6 +900,12 @@ void world_replica::follow(cvc::app &app, const std::string &room) {
     _world->set_world(on.world, &warnings);
   for (const conference::room_generated_world &g : on.generated)
     _world->follow_generated(g.node, g.params, &warnings);
+  // The relay's storms (OW5q): its events and storm-wind peak; the air is made again at the sync.
+  for (const conference::room_weather &x : on.weathers)
+    if (_world->follow_weather(x.node, x.events, x.gust, x.gust_from)) {
+      _sea_new = true; // the air with the water, after the tick the peak went in after
+      _sea_from = std::max(_sea_from, x.gust_from);
+    }
   // The relay's seas (OW5q), each made here as the relay made it; their fields go in at the sync.
   for (const conference::room_water_sea &s : on.seas) {
     const WaterRuntime *w = _world->water(s.node);
@@ -961,6 +978,22 @@ void world_replica::pump(cvc::app &app, const std::string &room, const cvc::worl
           // Its keys (the world switch, a dataset's) under a prefix of its own, apart from the
           // client's document.
           _world = SceneWorld::from_scene(app, r.scene, "world_replica", "", &warnings);
+          // Its water and weather nodes' keys, for a document of the same nodes (OW5q).
+          _water_keys.clear();
+          _weather_keys.clear();
+          const std::function<void(const std::vector<SceneNode> &)> keyed =
+              [&](const std::vector<SceneNode> &nodes) {
+                for (const SceneNode &n : nodes) {
+                  if (n.type == "water" && !n.id.empty())
+                    _water_keys[n.id] = {
+                        node_key(n, "water.sea"), node_key(n, "water.clock"), {}, {}};
+                  if (n.type == "weather" && !n.id.empty())
+                    _weather_keys[n.id] = {
+                        {}, {}, node_key(n, "weather.events"), node_key(n, "weather.gust_front")};
+                  keyed(n.children);
+                }
+              };
+          keyed(r.scene.nodes);
           _status = src.uri + (_world ? ": built" + pack_note : ": its world could not be made");
           const std::function<void(const std::vector<SceneNode> &)> ids =
               [&](const std::vector<SceneNode> &nodes) {
@@ -1002,6 +1035,10 @@ void world_replica::pump(cvc::app &app, const std::string &room, const cvc::worl
       }
     }
   }
+  // The air (the scene's wind with the storms' fronts) is with the water: a new one, the water
+  // again.
+  if (_ready && _world->wind() != _air)
+    wet = true;
   if (pending && !_ready)
     return;
   if (changed) {
@@ -1082,9 +1119,13 @@ void world_replica::build_statics(cvc::app &app) {
 }
 
 void world_replica::take_water(cvc::app &app) {
-  // The water (OW5j): its world's fluid fields, else the still water the relay's boats float on.
+  // The water (OW5j): its world's fluid fields, else the still water the relay's boats float on;
+  // then its air (OW5q), the scene's wind with the storms' fronts, which blows on a hull as on the
+  // relay's.
   _water.clear();
-  for (const cvc::physics::field_snapshot &f : _world->world().snapshot().fields)
+  _air = _world->wind();
+  const cvc::physics::world_snapshot snap = _world->world().snapshot();
+  for (const cvc::physics::field_snapshot &f : snap.fields)
     if (f.desc.kind == cvc::physics::field_kind::fluid)
       _water.push_back(f.desc);
   std::shared_ptr<const cvc::nav::world_grid> grid;
@@ -1094,6 +1135,55 @@ void world_replica::take_water(cvc::app &app) {
     if (const std::optional<cvc::physics::field> still =
             boat_still_water(app, *grid, _world->world()))
       _water.push_back(*still);
+  for (const cvc::physics::field_snapshot &f : snap.fields)
+    if (f.desc.kind == cvc::physics::field_kind::flow)
+      _water.push_back(f.desc);
+}
+
+std::size_t show_relay_seas(cvc::app &app, const std::string &room, const holon &h,
+                            const world_replica &world, const std::string &bind_prefix) {
+  conference::room_world_on on;
+  if (!world.ready() || !conference::read_room_world_on(app, room, on))
+    return 0;
+  cvc::state &root = cvc::state::instance(app);
+  std::size_t wrote = 0;
+  // A key the document has (its node seeded it), set when it differs.
+  const auto put = [&](const std::string &rel, const std::string &value) {
+    if (rel.empty())
+      return;
+    cvc::state *k = root.findDescendant(resolve_bind(bind_prefix, rel));
+    if (!k || k->value() == value)
+      return;
+    k->value(value);
+    ++wrote;
+  };
+  char now[64];
+  std::snprintf(now, sizeof(now), "%.17g", h.clock().t());
+  for (const conference::room_water_sea &s : on.seas) {
+    const auto it = world.water_keys().find(s.node);
+    if (it == world.water_keys().end())
+      continue;
+    SceneWaterKeyframe k;
+    k.from = {s.from_speed, s.from_dir, s.from_fetch};
+    k.to = {s.to_speed, s.to_dir, s.to_fetch};
+    k.t0 = s.t0;
+    k.t1 = s.t1;
+    k.keyframe = s.keyframe;
+    k.from_tick = s.from_tick;
+    put(it->second.sea, format_sea_keyframe(k));
+    put(it->second.clock, now);
+  }
+  for (const conference::room_weather &x : on.weathers) {
+    const auto it = world.weather_keys().find(x.node);
+    if (it == world.weather_keys().end())
+      continue;
+    if (!x.events.empty())
+      put(it->second.events, x.events);
+    char gust[64];
+    std::snprintf(gust, sizeof(gust), "%.17g", x.gust);
+    put(it->second.gust, gust);
+  }
+  return wrote;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

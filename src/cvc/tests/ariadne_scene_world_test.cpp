@@ -9738,12 +9738,17 @@ scene:
       body: {}
 )";
 
-// The fluid fields WORLD has (a water node's), as world_replica takes them.
-std::vector<cvc::physics::field> water_of(const SceneWorld &world) {
+// The fluid fields WORLD has (a water node's), and with AIR its flow fields after them (the scene's
+// wind with the storms' fronts), as world_replica takes them (OW5q).
+std::vector<cvc::physics::field> water_of(const SceneWorld &world, bool air = false) {
   std::vector<cvc::physics::field> out;
   for (const cvc::physics::field_snapshot &f : world.world().snapshot().fields)
     if (f.desc.kind == cvc::physics::field_kind::fluid)
       out.push_back(f.desc);
+  if (air)
+    for (const cvc::physics::field_snapshot &f : world.world().snapshot().fields)
+      if (f.desc.kind == cvc::physics::field_kind::flow)
+        out.push_back(f.desc);
   return out;
 }
 
@@ -9811,7 +9816,13 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
   jw.gravity = mine->world().config().gravity;
   jw.water = water_of(*mine);
   ASSERT_EQ(jw.water.size(), 1u) << "the water node's field";
-  cvc::ariadne::dynamic_vehicle_model follows(k, dt, {}, &jw), keeps(k, dt, {}, &jw);
+  cvc::ariadne::jolt_vehicle_world aired = jw;
+  aired.water = water_of(*mine, true);
+  ASSERT_EQ(aired.water.size(), 2u) << "and the air, the scene's wind with the storm's front";
+  // FOLLOWS: the relay's sea and its air (world_replica's); STILL: the relay's sea, no air; KEEPS:
+  // its document's sea, no air.
+  cvc::ariadne::dynamic_vehicle_model follows(k, dt, {}, &aired), still(k, dt, {}, &jw),
+      keeps(k, dt, {}, &jw);
   pose_stream_encoder enc;
   pose_stream_decoder dec;
   const auto sample = [&]() {
@@ -9828,6 +9839,8 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
   pose_sample now = sample();
   cvc::ariadne::dynamic_vehicle mf = follows.at(now.state, h.tick(), nullptr, now.steer);
   cvc::ariadne::dynamic_vehicle mk = keeps.at(now.state, h.tick(), nullptr, now.steer);
+  cvc::ariadne::dynamic_vehicle ms = still.at(now.state, h.tick(), nullptr, now.steer);
+  double xy_s = 0.0, tilt_s = 0.0, z_s = 0.0;
   std::map<std::string, SceneWaterKeyframe> had;
   int taken = 0;
   double worst_f = 0.0, worst_k = 0.0, heave_lo = 1e9, heave_hi = -1e9;
@@ -9866,7 +9879,8 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
     }
     mine->sync(h.clock(), &warnings);
     if (fresh) {
-      follows.set_water(water_of(*mine), from);
+      follows.set_water(water_of(*mine, true), from);
+      still.set_water(water_of(*mine), from);
       ++taken;
     }
     for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
@@ -9874,6 +9888,8 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
       command_after(mf, k, in, dt);
       keeps.step(mk, t);
       command_after(mk, k, in, dt);
+      still.step(ms, t);
+      command_after(ms, k, in, dt);
     }
     const cvc::physics::body_state relay = h.state("ann");
     heave_lo = std::min(heave_lo, relay.position.z);
@@ -9889,11 +9905,17 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
                       std::hypot(f.position.x - relay.position.x, f.position.y - relay.position.y));
       xy_k = std::max(xy_k,
                       std::hypot(g.position.x - relay.position.x, g.position.y - relay.position.y));
+      const cvc::physics::body_state e = cvc::ariadne::dynamic_vehicle_state(ms);
+      z_s = std::max(z_s, std::fabs(e.position.z - relay.position.z));
+      tilt_s = std::max(tilt_s, apart(e.rotation, relay.rotation));
+      xy_s = std::max(xy_s,
+                      std::hypot(e.position.x - relay.position.x, e.position.y - relay.position.y));
     }
     if (h.tick() % 4 == 0) {
       now = sample();
       mf = follows.at(now.state, h.tick(), &mf, now.steer);
       mk = keeps.at(now.state, h.tick(), &mk, now.steer);
+      ms = still.at(now.state, h.tick(), &ms, now.steer);
     }
   }
   const SceneWaterKeyframe relays = w->water("water")->keyframe();
@@ -9906,6 +9928,27 @@ TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
               static_cast<unsigned long long>(relays.from_tick),
               static_cast<unsigned long long>(clients.keyframe), taken, heave_hi - heave_lo,
               worst_f, tilt_f, xy_f, worst_k, tilt_k, xy_k);
+  std::printf("  OW5Q without the relay's air on the hull: %.4f m, %.4f rad, %.4f m\n", z_s, tilt_s,
+              xy_s);
+  // The client's air is the relay's to the bit, the storm's front in it, at the clock's time.
+  ASSERT_TRUE(w->wind_field().valid());
+  const cvc::physics::field relay_air = w->world().get_field(w->wind_field());
+  const cvc::physics::field client_air = water_of(*mine, true).back();
+  ASSERT_TRUE(relay_air.wind && client_air.wind);
+  int air_off = 0;
+  double strongest = 0.0;
+  for (double t : {0.0, 3.0, 6.0, 9.0})
+    for (double x : {-300.0, -100.0, -40.0, 0.0, 60.0}) {
+      const cvc::physics::vec3 p{x, 5.0, 2.0};
+      const cvc::physics::vec3 a = relay_air.wind->velocity(p, t),
+                               b = client_air.wind->velocity(p, t);
+      if (a.x != b.x || a.y != b.y || a.z != b.z)
+        ++air_off;
+      strongest = std::max(strongest, std::hypot(a.x, a.y));
+    }
+  EXPECT_EQ(air_off, 0) << "the client's air, the relay's";
+  EXPECT_GT(strongest, 8.0) << "a front in it (the wind is 6 m/s)";
+  EXPECT_LE(xy_f, xy_s + 1e-4) << "the air on the hull, as on the relay's";
   EXPECT_GE(relays.keyframe, 2u) << "the front grew the relay's sea";
   EXPECT_EQ(clients.keyframe, relays.keyframe);
   EXPECT_TRUE(clients == relays) << "the same keyframe, the same tick";
@@ -9992,7 +10035,11 @@ TEST(AriadneOneWorld, AClientsReplicaHasTheRelaysWater) {
 // what it has on (room_world_on's seas), and a client's replica of its document makes the same sea
 // (WaterRuntime::follow_sea) and hands the holon the new water with the tick it goes in after
 // (world_replica::water_revision, water_from_tick; holon::set_water). The same keyframe again is
-// the sea it has.
+// the sea it has. The relay's storms the same way (room_world_on's weathers: a live
+// weather.events, a new storm-wind peak): the replica's air is made again with them. And the
+// document the client draws shows the relay's sea at the relay's time and its storms
+// (show_relay_seas: the water node's water.sea and water.clock, the weather node's keys), where it
+// has those nodes.
 TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   REQUIRE_YAML();
   if (!jolt())
@@ -10003,7 +10050,8 @@ TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   const fs::path doc = dir / "sea.ari";
   {
     std::ofstream out(doc, std::ios::binary);
-    out << "meta: { name: sea, min_libcvc: \"0.0.0\" }" << kStormBoat;
+    out << "meta: { name: sea, min_libcvc: \"0.0.0\" }" << kStormBoat
+        << "    - node: weather\n      type: weather\n      chance: 0\n      area: 100\n";
   }
   cvc::app app;
   register_world_block(app);
@@ -10014,7 +10062,9 @@ TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   for (int i = 0; i < 5 && !world.ready(); ++i)
     world.pump(app, room);
   ASSERT_TRUE(world.ready()) << world.status();
-  ASSERT_EQ(world.water().size(), 1u) << "the water node's field";
+  ASSERT_EQ(world.water().size(), 2u) << "the water node's field, then the air";
+  EXPECT_EQ(world.water()[0].kind, cvc::physics::field_kind::fluid);
+  EXPECT_EQ(world.water()[1].kind, cvc::physics::field_kind::flow);
   const cvc::physics::field grown = world.water()[0];
   EXPECT_EQ(world.water_revision(), 0u);
   const section_stamp built = world.stamp();
@@ -10056,11 +10106,46 @@ TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   EXPECT_EQ(got.t1, 9.0);
   EXPECT_EQ(world.water_revision(), 1u) << "the new sea";
   EXPECT_EQ(world.water_from_tick(), 600u);
-  ASSERT_EQ(world.water().size(), 1u);
+  ASSERT_EQ(world.water().size(), 2u);
   EXPECT_NE(world.water()[0].surface.get(), grown.surface.get()) << "its field made again";
   world.pump(app, room);
   EXPECT_EQ(world.water_revision(), 1u) << "the sea it has";
   EXPECT_TRUE(world.stamp().same(built)) << "the statics are as they were";
+
+  // The relay's storms: a storm its live weather.events put over the lake, and a storm-wind peak
+  // of 24 m/s from tick 300.
+  cvc::world::weather_event e;
+  e.t = 0.0;
+  e.tau = -1500.0;
+  e.x = -1200.0;
+  e.y = 0.0;
+  e.radius = 400.0;
+  e.peak = 1.0;
+  e.life = 3000.0;
+  const std::string events = cvc::world::format_weather_events({e});
+  ASSERT_FALSE(world.world()->weathers().empty());
+  const WeatherFriction &replica_weather = *world.world()->weathers().front();
+  EXPECT_NE(replica_weather.events_text(), events);
+  const void *calm_air = world.water()[1].wind.get();
+  conference::room_weather x;
+  x.node = "weather";
+  x.events = events;
+  x.gust = 24.0;
+  x.gust_from = 300;
+  on.weathers.push_back(x);
+  conference::write_room_world_on(app, room, on);
+  ASSERT_TRUE(conference::read_room_world_on(app, room, back));
+  EXPECT_TRUE(back == on) << "the weathers come back";
+  world.pump(app, room);
+  EXPECT_EQ(replica_weather.events_text(), events) << "the relay's storms";
+  EXPECT_EQ(replica_weather.gust_front(), 24.0);
+  EXPECT_EQ(replica_weather.gust_from(), 300u);
+  EXPECT_EQ(world.water_revision(), 2u) << "the air made again with them";
+  EXPECT_EQ(world.water_from_tick(), 300u);
+  ASSERT_EQ(world.water().size(), 2u);
+  EXPECT_NE(world.water()[1].wind.get(), calm_air);
+  world.pump(app, room);
+  EXPECT_EQ(world.water_revision(), 2u) << "the storms it has";
 
   // The holon takes it from client_pump.
   holon client(holon_role::client, room_holon_config());
@@ -10070,7 +10155,35 @@ TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   write_pose(app, room, "ann", feet, 100);
   client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
   EXPECT_TRUE(client.statics_stamp().same(world.stamp()));
-  EXPECT_EQ(client.water_revision(), 1u);
+  EXPECT_EQ(client.water_revision(), 2u);
+
+  // The document the client draws, the same one under its own prefix: its water node shows the
+  // relay's sea at the relay's time, and its weather node the relay's storms.
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.vehicles.clear();
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> drawn = SceneWorld::from_scene(app, r.scene, "drawn", "", &warnings);
+  ASSERT_NE(drawn, nullptr);
+  EXPECT_EQ(show_relay_seas(app, room, client, world, "elsewhere"), 0u) << "no such nodes there";
+  EXPECT_GE(show_relay_seas(app, room, client, world, "drawn"), 4u);
+  EXPECT_EQ(show_relay_seas(app, room, client, world, "drawn"), 0u) << "as they are";
+  cvc::state &root = cvc::state::instance(app);
+  SceneWaterKeyframe shown;
+  ASSERT_TRUE(parse_sea_keyframe(root("drawn.water.sea").value(), shown));
+  EXPECT_TRUE(shown == got) << "the relay's keyframe";
+  EXPECT_EQ(std::strtod(root("drawn.water.clock").value().c_str(), nullptr), client.clock().t());
+  EXPECT_EQ(root("drawn.weather.events").value(), events);
+  drawn->sync(&warnings);
+  const WaterRuntime *drawn_water = drawn->water("water");
+  ASSERT_NE(drawn_water, nullptr);
+  EXPECT_TRUE(drawn_water->following()) << "its water.sea key";
+  EXPECT_TRUE(drawn_water->keyframe() == got);
+  SceneNode wn;
+  wn.id = "water";
+  EXPECT_EQ(scene_water_time(app, wn, "drawn", -1.0), client.clock().t()) << "the relay's time";
+  EXPECT_EQ(scene_water_time(app, wn, "elsewhere", -1.0), -1.0) << "else the app's";
+  EXPECT_EQ(drawn->weathers().front()->events_text(), events);
   std::error_code ec;
   fs::remove_all(dir, ec);
 }

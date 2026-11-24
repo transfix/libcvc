@@ -305,8 +305,13 @@ bool room_water_sea::operator==(const room_water_sea &o) const {
          t1 == o.t1;
 }
 
+bool room_weather::operator==(const room_weather &o) const {
+  return node == o.node && events == o.events && gust == o.gust && gust_from == o.gust_from;
+}
+
 bool room_world_on::operator==(const room_world_on &o) const {
-  if (world != o.world || generated.size() != o.generated.size() || seas != o.seas)
+  if (world != o.world || generated.size() != o.generated.size() || seas != o.seas ||
+      weathers != o.weathers)
     return false;
   for (std::size_t i = 0; i < generated.size(); ++i)
     if (generated[i].node != o.generated[i].node ||
@@ -363,6 +368,15 @@ section_stamp write_room_world_on(cvc::app &app, const std::string &room_id,
     w.set_double({s, "t0"}, k.t0);
     w.set_double({s, "t1"}, k.t1);
   }
+  w.set({"weathers"}, std::to_string(on.weathers.size()));
+  for (std::size_t i = 0; i < on.weathers.size(); ++i) {
+    const std::string s = "w" + std::to_string(i);
+    const room_weather &x = on.weathers[i];
+    w.set({s, "node"}, x.node);
+    w.set({s, "events"}, x.events);
+    w.set_double({s, "gust"}, x.gust);
+    w.set_uint({s, "gust_from"}, x.gust_from);
+  }
   return w.commit(0, epoch);
 }
 
@@ -418,6 +432,17 @@ bool read_room_world_on(cvc::app &app, const std::string &room_id, room_world_on
     k.t1 = r.number({s, "t1"}, 0.0);
     if (!k.node.empty())
       on.seas.push_back(std::move(k));
+  }
+  const int weathers = static_cast<int>(r.number({"weathers"}, 0.0));
+  for (int i = 0; i < weathers; ++i) {
+    const std::string s = "w" + std::to_string(i);
+    room_weather x;
+    x.node = r.text({s, "node"});
+    x.events = r.text({s, "events"});
+    x.gust = r.number({s, "gust"}, 0.0);
+    x.gust_from = std::strtoull(r.text({s, "gust_from"}, "0").c_str(), nullptr, 10);
+    if (!x.node.empty())
+      on.weathers.push_back(std::move(x));
   }
   out = std::move(on);
   return true;

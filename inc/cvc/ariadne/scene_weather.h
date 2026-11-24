@@ -139,6 +139,16 @@ public:
   // air (StormWindFlow) is made again on.
   std::uint64_t revision() const;
 
+  // ANOTHER HOST'S WEATHER (OW5q). What model() was made from: the storms' events as last parsed
+  // (weather.events, the `events` prop until the key changes them) and the clock tick the
+  // storm-wind peak (gust_front()) went in after (0: from the start). A relay publishes them
+  // (conference::room_world_on), and a client's replica follows them here: EVENTS (empty: keep its
+  // own) and GUST go into model() at once, nothing stepping the replica's world; the keys take
+  // them too, so read_keys() keeps them. True when model() changed.
+  const std::string &events_text() const;
+  std::uint64_t gust_from() const;
+  bool follow(const std::string &events, double gust, std::uint64_t gust_from);
+
 private:
   struct impl;
   std::unique_ptr<impl> _impl;

@@ -1422,6 +1422,14 @@ std::vector<std::string> SceneWorld::water_nodes() const {
   return out;
 }
 
+bool SceneWorld::follow_weather(const std::string &node, const std::string &events, double gust,
+                                std::uint64_t gust_from) {
+  for (const auto &wf : _impl->weathers)
+    if (wf->node() == node)
+      return wf->follow(events, gust, gust_from);
+  return false;
+}
+
 bool SceneWorld::follow_sea(const std::string &node, const SceneWaterKeyframe &k) {
   for (const auto &w : _impl->waters)
     if (w->node() == node) {

@@ -1337,9 +1337,29 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   and 0.8 mm of its place following the relay's sea, and 2.5 mm, 0.4 mrad and 1.0 mm on its
   document's; the client's sea is the relay's keyframe for keyframe (`AriadneOneWorld`). A model
   given a 14 m/s keyframe from tick 130 floats as one without it to the bit up to there, 0.19 m
-  apart by tick 200, and replayed from tick 100 floats on the calm water again. The storms' air on
-  the hull is not in the model, the client's drawn sea is still its own, and a
-  relay's live weather keys (its `weather.events`) are not followed.
+  apart by tick 200, and replayed from tick 100 floats on the calm water again.
+  - **The air on the hull.** The replica's air (the scene's wind with the storms' fronts, a flow
+    field) goes to the boat's model with the water (`world_replica::water`, after the water), so
+    the storm wind blows on its hull as on the relay's; it is the relay's air to the bit at every
+    point and time checked, a front of over 8 m/s in it. On that lake, 0.7 mm off the launch's
+    place with it, 0.8 mm without (the launch, sampled every 4 ticks, feels little of it
+    between samples).
+  - **The relay's storms.** Its weather nodes' events (a live `weather.events`) and storm-wind
+    peak with the tick it went in after go in `room_world_on`'s `weathers`; the replica's weather
+    takes them at once (`WeatherFriction::follow`, `SceneWorld::follow_weather`: nothing steps
+    the replica's world to switch a peak in) and makes its air again, which the holon takes as
+    new water after that tick.
+  - **The sea the client draws.** A water node shows another host's sea through two keys under its
+    key root: `water.sea` (a keyframe, `format_sea_keyframe`) in place of its own lag, and
+    `water.clock`, the time it is drawn at (`scene_water_followed`, `scene_water_time`); both the
+    drawn node (with a body or without) and `WaterRuntime` read them, and seed them empty so a
+    host sees the node is there. arigl writes them each frame after `client_pump`
+    (`show_relay_seas`): for each water node of the relay's document its document has, the
+    relay's keyframe and the relay's time as the holon counts it, and its weather nodes' events
+    and peak, so it draws the relay's sea at the relay's time, under the relay's storms. The
+    drawn node's field follows `water.sea` at the next frame (`cvcgl_ariadne_physics`). Not
+    checked: the GPU sea drawn at that time (no GL context in the tests), and the drawn storms,
+    which keep the app's clock.
 
 ### 18.6 Driving a vehicle, and being one
 

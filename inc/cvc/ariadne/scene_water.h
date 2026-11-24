@@ -210,6 +210,27 @@ struct SceneWaterKeyframe {
   bool operator!=(const SceneWaterKeyframe &o) const { return !(*this == o); }
 };
 
+// A keyframe as text and back (17 digits: to the bit), the `water.sea` key's: "keyframe from_tick
+// from_speed from_dir from_fetch to_speed to_dir to_fetch t0 t1". parse is false (OUT untouched)
+// for anything else.
+std::string format_sea_keyframe(const SceneWaterKeyframe &k);
+bool parse_sea_keyframe(const std::string &text, SceneWaterKeyframe &out);
+
+// A WATER NODE SHOWING ANOTHER HOST'S SEA (OW5q). Two keys under its key root a host writes:
+// `water.sea`, a keyframe (format_sea_keyframe) its sea is from then on, in place of its own lag
+// (WaterRuntime::tick follows it, and so does the drawn node, with a body or without); and
+// `water.clock`, the other host's clock time (s) its sea is drawn at, in place of the app's world
+// clock's. A client of a relay writes both for its document's water nodes from the room
+// (show_relay_seas), so the sea it draws is the relay's at the relay's time, the sea its boat's
+// model floats on. Unset (or empty): its own.
+bool scene_water_followed(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
+                          SceneWaterKeyframe &out);
+// Seed both keys empty (a water node's own sea), so a host sees the node is there: a WaterRuntime
+// does at its start, and so does the drawn node.
+void scene_water_seed_follow(cvc::app &app, const SceneNode &n, const std::string &bind_prefix);
+double scene_water_time(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
+                        double app_t);
+
 // Steps a water node's sea along its lagged wind (cvc::ocean::sea_lag). advance() with the spec
 // and coast now and the clock's time: true when the sea changed (a keyframe, or a new coast or lee
 // switch that rebuilt the fetch maps).
@@ -291,8 +312,9 @@ public:
   SceneWaterKeyframe keyframe() const;
   // From now on the sea is K's, not this runtime's own lag: a client's replica of the relay's
   // document follows the relay's sea, which its storms grew (OW5q). The field is made again at the
-  // next tick() when K is another keyframe; K.from_tick is the colliders' from_tick then. Whether
-  // the runtime follows a sea now.
+  // next tick() when K is another keyframe; K.from_tick is the colliders' from_tick then. tick()
+  // does the same with the node's `water.sea` key when it holds one (scene_water_followed).
+  // Whether the runtime follows a sea now.
   void follow_sea(const SceneWaterKeyframe &k);
   bool following() const;
 

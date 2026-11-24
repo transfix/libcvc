@@ -233,11 +233,15 @@ std::string file_sha256(const std::string &path);
 // replica makes the relay's from these (WaterRuntime::follow_sea). The doubles are written to 17
 // digits, so they come back to the bit.
 //
+// And each weather node's storms as the relay has them now (OW5q): its events (weather.events, a
+// live key on the relay) and its storm-wind peak with the tick it went in after, from which a
+// client's replica makes the same air (the storms' gust fronts) and so the same sea.
+//
 //   conf.rooms.<room>.world_on.{world, generated, g<i>.{node, seed, half, trees, rocks, buildings,
 //     tree_gen, amp, water_level, preset, ontology, cell, max_terrain_n, raster_n, sliver,
 //     terrain, city, terrain_file, edge}, seas, s<i>.{node, keyframe, from_tick, from_speed,
-//     from_dir, from_fetch, to_speed, to_dir, to_fetch, t0, t1}}, stamped {epoch, at, rev}
-//     (section.h)
+//     from_dir, from_fetch, to_speed, to_dir, to_fetch, t0, t1}, weathers, w<i>.{node, events,
+//     gust, gust_from}}, stamped {epoch, at, rev} (section.h)
 struct room_generated_world {
   std::string node;
   cvc::world::generated_world_params params;
@@ -250,10 +254,18 @@ struct room_water_sea {
   double t0 = 0.0, t1 = 0.0;
   bool operator==(const room_water_sea &o) const;
 };
+struct room_weather {
+  std::string node;
+  std::string events; // the storms' events, cvc::world::format_weather_events' text
+  double gust = 0.0;  // the storm-wind peak, m/s (WeatherFriction::gust_front)
+  std::uint64_t gust_from = 0;
+  bool operator==(const room_weather &o) const;
+};
 struct room_world_on {
   std::string world;
   std::vector<room_generated_world> generated; // in the world's node order
   std::vector<room_water_sea> seas;            // the water nodes', in the document's order
+  std::vector<room_weather> weathers;          // the weather nodes', in the document's order
   bool operator==(const room_world_on &o) const;
 };
 std::string room_world_on_path(const std::string &room_id);

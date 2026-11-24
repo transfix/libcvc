@@ -25,6 +25,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
@@ -288,6 +290,59 @@ SceneWaterCascades scene_water_cascades(const SceneWaterSpec &s) {
 
 double SceneWaterSea::weight(double t) const { return cvc::ocean::crossfade_weight(t, t0, t1); }
 
+std::string format_sea_keyframe(const SceneWaterKeyframe &k) {
+  char buf[512];
+  std::snprintf(buf, sizeof(buf), "%llu %llu %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g",
+                static_cast<unsigned long long>(k.keyframe),
+                static_cast<unsigned long long>(k.from_tick), k.from.speed_mps, k.from.dir_rad,
+                k.from.fetch_m, k.to.speed_mps, k.to.dir_rad, k.to.fetch_m, k.t0, k.t1);
+  return buf;
+}
+
+bool parse_sea_keyframe(const std::string &text, SceneWaterKeyframe &out) {
+  unsigned long long key = 0, from = 0;
+  SceneWaterKeyframe k;
+  char tail = 0;
+  if (std::sscanf(text.c_str(), "%llu %llu %lf %lf %lf %lf %lf %lf %lf %lf %c", &key, &from,
+                  &k.from.speed_mps, &k.from.dir_rad, &k.from.fetch_m, &k.to.speed_mps,
+                  &k.to.dir_rad, &k.to.fetch_m, &k.t0, &k.t1, &tail) != 10 ||
+      key == 0)
+    return false;
+  for (const double v : {k.from.speed_mps, k.from.dir_rad, k.from.fetch_m, k.to.speed_mps,
+                         k.to.dir_rad, k.to.fetch_m, k.t0, k.t1})
+    if (!std::isfinite(v))
+      return false;
+  k.keyframe = key;
+  k.from_tick = from;
+  out = k;
+  return true;
+}
+
+bool scene_water_followed(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
+                          SceneWaterKeyframe &out) {
+  const std::string text =
+      read_or<std::string>(app, resolve_bind(bind_prefix, node_key(n, "water.sea")), std::string());
+  return !text.empty() && parse_sea_keyframe(text, out);
+}
+
+void scene_water_seed_follow(cvc::app &app, const SceneNode &n, const std::string &bind_prefix) {
+  read_or_seed<std::string>(app, resolve_bind(bind_prefix, node_key(n, "water.sea")),
+                            std::string());
+  read_or_seed<std::string>(app, resolve_bind(bind_prefix, node_key(n, "water.clock")),
+                            std::string());
+}
+
+double scene_water_time(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
+                        double app_t) {
+  const std::string text = read_or<std::string>(
+      app, resolve_bind(bind_prefix, node_key(n, "water.clock")), std::string());
+  if (text.empty())
+    return app_t;
+  char *end = nullptr;
+  const double t = std::strtod(text.c_str(), &end);
+  return end != text.c_str() && std::isfinite(t) ? t : app_t;
+}
+
 bool SceneWaterKeyframe::operator==(const SceneWaterKeyframe &o) const {
   const auto same = [](const cvc::ocean::sea_wind &a, const cvc::ocean::sea_wind &b) {
     return a.speed_mps == b.speed_mps && a.dir_rad == b.dir_rad && a.fetch_m == b.fetch_m;
@@ -472,6 +527,7 @@ WaterRuntime::WaterRuntime(cvc::app &app, const SceneNode &n, const std::string 
   _impl->node = n;
   _impl->prefix = bind_prefix;
   _impl->ground = std::move(ground);
+  scene_water_seed_follow(app, n, bind_prefix);
   tick();
 }
 WaterRuntime::~WaterRuntime() = default;
@@ -553,6 +609,8 @@ bool WaterRuntime::tick(const cvc::world_clock *on) {
   bool seaNew = false;
   std::uint64_t from_tick = 0;
   const cvc::world_clock &clock = on ? *on : d.app->world_clock();
+  if (SceneWaterKeyframe keyed; scene_water_followed(*d.app, d.node, d.prefix, keyed))
+    follow_sea(keyed); // a host showing another host's sea (OW5q)
   if (d.following) {
     // Another host's sea (follow_sea, OW5q): its keyframe, made here as it was made there, and in
     // after the tick it went in after there. The coast again on this ground when it changed.

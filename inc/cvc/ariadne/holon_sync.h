@@ -363,8 +363,9 @@ public:
   const section_stamp &stamp() const { return _stamp; }
   // The water with them (OW5j), which a boat's model floats on: the fluid fields its world has
   // (a water node's), else the still water the relay adds for its boats over the world's grid
-  // (boat_still_water). It changes with the statics, under their stamp, and on its own when the
-  // relay's sea takes a new keyframe (OW5q: room_world_on's seas, which its storms grow): then
+  // (boat_still_water); then its air, the scene's wind with the storms' fronts (OW5q), which blows
+  // on a hull. It changes with the statics, under their stamp, and on its own when the relay's sea
+  // takes a new keyframe or its storms change (OW5q: room_world_on's seas and weathers): then
   // water_revision() moves, and the new water goes in after the relay's tick water_from_tick()
   // (holon::set_water), as the relay's world puts it in.
   const std::vector<cvc::physics::field> &water() const { return _water; }
@@ -380,6 +381,14 @@ public:
   // either. client_pump gives it to the holon (holon::set_vehicle_ground).
   std::function<double(double, double)> ground() const;
   std::uint64_t ground_revision() const { return _ground_rev; }
+  // The relay's document's water and weather nodes' keys, relative to a bind prefix (node_key:
+  // `water.sea`, `water.clock`; `weather.events`, `weather.gust_front`), by node id (OW5q:
+  // show_relay_seas writes them into a document of the same nodes).
+  struct node_keys {
+    std::string sea, clock, events, gust;
+  };
+  const std::map<std::string, node_keys> &water_keys() const { return _water_keys; }
+  const std::map<std::string, node_keys> &weather_keys() const { return _weather_keys; }
 
 private:
   void build_statics(cvc::app &app);
@@ -388,6 +397,8 @@ private:
   bool _sea_new = false; // follow() gave a water node a new sea
   std::uint64_t _sea_from = 0;
   std::uint64_t _water_rev = 0, _water_from = 0;
+  std::map<std::string, node_keys> _water_keys, _weather_keys;
+  std::shared_ptr<const cvc::physics::flow_velocity> _air; // the air taken with the water
   section_stamp _source_stamp;
   section_stamp _on_stamp; // the room_world_on followed
   std::string _built_on;   // the world on when the statics were built
@@ -407,6 +418,18 @@ private:
   std::string from_packs(const std::string &sha256, std::string &why) const;
   std::string _status;
 };
+
+// CLIENT (OW5q): the relay's sea and storms in the document this client draws. For each water node
+// of the relay's document (WORLD's) that the room carries a sea for (room_world_on's seas), its
+// `water.sea` key under BIND_PREFIX gets the relay's keyframe and its `water.clock` the relay's
+// time as H's clock counts it (the server's ticks); for each weather node, its `weather.events`
+// and `weather.gust_front` the relay's. Only where the document has that node: its key is there (a
+// water node seeds its keys, scene_water_seed_follow; a weather node seeds its own). So the sea
+// it draws (scene_water.h's followed sea) is the relay's at the relay's time, the one its boat's
+// model floats on, under the relay's storms. Call each frame after client_pump. Returns the keys
+// it wrote.
+std::size_t show_relay_seas(cvc::app &app, const std::string &room, const holon &h,
+                            const world_replica &world, const std::string &bind_prefix);
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
 // tick, and it is written to <self>.intent stamped with that tick, for the server to validate and

@@ -343,6 +343,11 @@ public:
   // Water node NODE's sea is K from now on, another host's (WaterRuntime::follow_sea; a client's
   // replica follows the relay's, OW5q); its field goes in at the next sync. False for no such node.
   bool follow_sea(const std::string &node, const SceneWaterKeyframe &k);
+  // Weather node NODE's storms are another host's from now on (WeatherFriction::follow; a client's
+  // replica follows the relay's, OW5q); the air is made again with them at the next sync. True when
+  // they changed.
+  bool follow_weather(const std::string &node, const std::string &events, double gust,
+                      std::uint64_t gust_from);
   // Take on the scene's wind (scene_wind.h, O14): seed its keys from `scene: wind:` and, while
   // wind.speed is set under bind_prefix, keep a flow field of air (1.225 kg/m^3, C_d 1) whose
   // velocity is that wind (cvc::physics::wind_flow, its profile over the document's wind base)
