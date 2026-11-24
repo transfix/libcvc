@@ -431,7 +431,11 @@ same way. The exceptions:
   or `sync_run()` at its next step boundary, and an idle sync `run()` at once; under `Exec.run()`
   it ends only the slice that is running, and `run()` goes on. A `stop()` made while no run is
   active is discarded by the next run.
-- `async_scheduler.post_message()` may come from any thread.
+- `async_scheduler.post_message()` may come from any thread. It returns `True` once the message is
+  queued, and `False`, queueing nothing, when the scheduler refused it: its ingress already holds
+  `state_exec.groups.ingress_cap` messages not yet drained (host posts and other groups' sends;
+  65536 by default, 0 for no cap), or the scheduler is being destroyed. A program's `msg-send` its
+  channel's home refuses so gives `{"status": "error", "reason": "ingress full"}`.
 - `Exec.set_priority`, `Exec.get_priority` and `Exec.lock_query`, above.
 
 The tree helpers (`pycvc.state_get`, `state_has`, `state_set`, `state_children`,
@@ -531,7 +535,8 @@ later different request keeps the built size and logs a warning, and `pool.threa
 count. The pool holds `size` pooled `Exec`s (the real `pool.threads` by default, at least 1),
 each its own group: its own scheduler, async host, cycle registry and `math.random` stream, its
 natives over the one frozen builtins scope, and its context chrooted at `"<prefix>.<i>"`, so its
-programs' state keys, channels and lock keys resolve under it. The pooled `Exec`s are not exposed.
+programs' state keys, channels and lock keys resolve under it. The pooled `Exec`s are not exposed;
+`info(pid)` reads what their groups publish.
 
 ```python
 pool = pycvc.ExecPool(app, threads=8)
@@ -567,6 +572,22 @@ pool.close()
   calls it raises instead.
 - Without threads (the Emscripten pycvc), or at `threads=0`, every group is pumped on the calling
   thread, in creation order.
+- **Owners.** Pooled `Exec` `i`'s programs run with the owner tag `"pycvc:<prefix>.<i>"`, which
+  their spawned and forked children keep (a plain `Exec`'s programs have owner `""`;
+  `process_info.owner` shows it). Two pools of one app with the same prefix share their tags, as
+  they share their chroots. A program controls only its own owner's processes across groups:
+  a `(kill pid)`, `(pause pid)` or `(resume pid)` of another pooled `Exec`'s process gives `#f` and
+  leaves it running, as an unknown pid does (`docs/STATE_EXEC_THREADED.md` 4.5, the owner rule).
+  `(lock-query)` in a pooled program shows the pids of its own `Exec`'s holds.
+- **Channels.** Each pooled `Exec`'s group is the home of the channels under its chroot, so a
+  program's own channels stay in its group. A key outside it (`"/jobs"`) is app-global: its home is
+  the app's exec scheduler (group 0). A key under another pooled `Exec`'s chroot
+  (`"/<prefix>.1.inbox"`) goes straight to that `Exec`'s group.
+- `info(pid)` returns a process's row as its group last published it (each pump ends with a
+  publish), any thread, as a dict: `pid`, `name`, `owner`, `uid`, `scope`, `parent_pid`, `status`
+  (a `pycvc.process_status`), `base_priority`, `effective_priority`, `floor`, `locks_held` (the
+  absolute keys), `waits_on`, `steps`, `run_seconds` and `memory` (the last three may lag up to
+  100 ms). `None` for a pid in no group of the app, or one not published since it was made.
 
 **The GIL and `state_observer`.** A `pycvc.state_observer`'s slot takes the GIL on the thread that
 writes, which can be a pool worker. `run_all` and `AriApp.frame` release the GIL while workers
@@ -628,9 +649,9 @@ costs a post and a wake, so keep a hot key's sections in one `Exec`.
 in the `Exec`'s programs: `{"held": [{"key", "mode", "pids", "count", "generation",
 "abandoned"}], "waiting": [{"key", "mode", "pid"}]}`. `""` is every key; otherwise `prefix` is a
 key as a program writes it. Counts include every `Exec`'s holds and waiters; pids show only for
-this `Exec`'s processes (another's are left out of `pids`, and are `None` in `waiting`). Any thread
-may call it, with or without a `run()` active: it reads the manager under the manager's mutex,
-with the GIL released, and never waits for `run()`.
+this `Exec`'s processes, those of the owner its programs run as (another's are left out of `pids`,
+and are `None` in `waiting`). Any thread may call it, with or without a `run()` active: it reads
+the manager under the manager's mutex, with the GIL released, and never waits for `run()`.
 
 **`idle_timeout` and lock waits.** `run()` kills a program left parked with nothing pending for
 `idle_timeout` seconds. A lock wait, the program's own or a spawned process's, counts as pending

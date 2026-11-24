@@ -886,6 +886,11 @@ Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &
   exec_group::options opts;
   opts.name = name;
   opts.app = app.get();
+  // Its programs' owner tag (S2-Q7), which their spawned and forked children keep: one pooled Exec
+  // controls none of another's processes (exec_router.h, the owner rule). Its chroot is its group's
+  // channel prefix (S2.md section 0, row 23), so its channels are homed here and stay local.
+  opts.owner = "pycvc:" + name;
+  opts.channel_prefixes = {name};
   impl_ = std::make_shared<ExecImpl>(std::make_unique<exec_group>(std::move(opts)));
   impl_->app = app;
   impl_->root = &root;
@@ -1278,17 +1283,18 @@ PyObject *Exec::lock_query(const std::string &prefix) {
     abs = cvc::state_exec::detail::resolve_lock_key(ctx, prefix, "Exec.lock_query");
   // Straight to the manager, from any thread (docs/STATE_EXEC_LOCKS.md 7.4): it never waits for
   // run() or the control mutex, only for the manager's mutex, which nothing holds while it waits
-  // for the GIL. The home is the viewer (only this Exec's pids show, owner ""): its manager and id
-  // are copied while the GIL is held, and the home itself is never touched without it. The GIL is
-  // released for the query and taken back once it has returned, and only then are Python objects
-  // made.
+  // for the GIL. The home is the viewer, with the owner its programs run as (a pooled Exec's tag,
+  // S2-Q7; a plain Exec's ""), so only this Exec's pids show: its manager and id are copied while
+  // the GIL is held, and the home itself is never touched without it. The GIL is released for the
+  // query and taken back once it has returned, and only then are Python objects made.
   const lock_home &home = *impl->sched.locks();
   const std::shared_ptr<lock_manager> manager = home.manager_ptr();
   const cvc::state_exec::detail::home_id viewer = home.id();
+  const std::string owner = impl->group ? impl->group->opts().owner : std::string();
   lock_query_result r;
   {
     gil_released nogil;
-    r = manager->table().query(abs, viewer, "");
+    r = manager->table().query(abs, viewer, owner);
   }
   return value_to_py(lock_query_value(r, ctx.root_path));
 }
@@ -1497,6 +1503,7 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
           try {
             execute_options opts;
             opts.name = "pycvc";
+            opts.owner = s.impl->group->opts().owner; // its pooled Exec's tag (S2-Q7)
             opts.env = fresh_env ? environment::extend(s.impl->natives) : s.impl->env;
             s.pid = s.impl->group->execute(programs[s.prog], opts);
             s.idle_deadline =

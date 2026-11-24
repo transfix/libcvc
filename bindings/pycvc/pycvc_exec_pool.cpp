@@ -205,6 +205,10 @@ void ExecPool::register_async_fn(const std::string &name, PyObject *callable, bo
 
 unsigned ExecPool::threads() const { return impl_->pool->threads(); }
 
+std::optional<cvc::state_exec::published_process> ExecPool::published(int pid) const {
+  return impl_->pool->info(pid);
+}
+
 PyObject *ExecPool::stats() const {
   const batch_control &b = impl_->batch;
   PyObject *d = PyDict_New();

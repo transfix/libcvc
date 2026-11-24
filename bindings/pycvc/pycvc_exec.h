@@ -180,8 +180,8 @@ public:
   // The app's locks under `prefix`, as (lock-query prefix) in this Exec's programs returns them
   // (docs/STATE_EXEC_LOCKS.md 4.1, 7.4): {"held": [{"key", "mode", "pids", "count", "generation",
   // "abandoned"}], "waiting": [{"key", "mode", "pid"}]}. "" is every key. Counts include every
-  // Exec's holds; pids are shown only for this Exec's processes (its owner "" ones), since pids
-  // repeat across Execs.
+  // Exec's holds; pids are shown only for this Exec's processes (those of the owner its programs
+  // run as: "" for an Exec, its tag for a pooled one), since pids repeat across Execs.
   //
   // THREADS: any thread may call it, and it never waits for run(): it reads the app's lock
   // manager directly, under the manager's own mutex, with the GIL released.
@@ -226,7 +226,9 @@ private:
   struct pooled_tag {};
   // Pooled Exec `name`, an Exec in group mode: its scheduler, async host, cycle registry and
   // random stream are an exec_group's (the app pool's pid source, the app's lock manager), its
-  // natives extend the frozen builtins (td 4.2), and its context is chrooted at `name`.
+  // natives extend the frozen builtins (td 4.2), and its context is chrooted at `name`. Its
+  // programs run with owner "pycvc:<name>" (S2-Q7), and its group is the home of the channels
+  // under `name` (its channel_prefixes, S2b).
   Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &name,
        double idle_timeout);
   // A pooled Exec's group.
