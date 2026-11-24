@@ -30,7 +30,6 @@
 #include <cvc/nav/coph_model.h>
 #include <cvc/nav/coph_packet.h>
 #include <functional>
-#include <map>
 #include <memory>
 #include <optional>
 #include <random>
@@ -183,61 +182,71 @@ PyObject *shape_list(const coph_shape &s) {
 // The configurations: dicts over the demos' profile
 // ---------------------------------------------------------------------------
 
-using config_field = std::pair<std::function<void(cvc::nav::coph_config &, PyObject *, const std::string &)>,
-                               std::function<PyObject *(const cvc::nav::coph_config &)>>;
+// One coph_config field: its name, and how a dict's value sets it and how it reads back. A
+// constexpr table of names and plain function pointers, so it is constant data with no
+// initialisation at run time (libcvc keeps no process-wide state: tools/singleton_scan).
+struct config_field {
+  const char *name;
+  void (*set)(cvc::nav::coph_config &, PyObject *, const std::string &);
+  PyObject *(*get)(const cvc::nav::coph_config &);
+};
 
 #define PYCVC_COPH_STR(f) \
-  {#f, {[](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { c.f = text(o, w); }, \
-        [](const cvc::nav::coph_config &c) { return PyUnicode_FromString(c.f.c_str()); }}}
+  {#f, [](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { c.f = text(o, w); }, \
+   [](const cvc::nav::coph_config &c) { return PyUnicode_FromString(c.f.c_str()); }}
 #define PYCVC_COPH_DBL(f) \
-  {#f, {[](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { c.f = number(o, w); }, \
-        [](const cvc::nav::coph_config &c) { return PyFloat_FromDouble(c.f); }}}
+  {#f, [](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { c.f = number(o, w); }, \
+   [](const cvc::nav::coph_config &c) { return PyFloat_FromDouble(c.f); }}
 #define PYCVC_COPH_INT(f) \
-  {#f, {[](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { c.f = static_cast<int>(integer(o, w)); }, \
-        [](const cvc::nav::coph_config &c) { return PyLong_FromLong(c.f); }}}
+  {#f, [](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { c.f = static_cast<int>(integer(o, w)); }, \
+   [](const cvc::nav::coph_config &c) { return PyLong_FromLong(c.f); }}
 #define PYCVC_COPH_PAIR(f) \
-  {#f, {[](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { \
-          const coph_vec2 v = vec2(o, w); \
-          c.f = {v[0], v[1]}; \
-        }, \
-        [](const cvc::nav::coph_config &c) { return Py_BuildValue("(dd)", c.f.first, c.f.second); }}}
+  {#f, [](cvc::nav::coph_config &c, PyObject *o, const std::string &w) { \
+     const coph_vec2 v = vec2(o, w); \
+     c.f = {v[0], v[1]}; \
+   }, \
+   [](const cvc::nav::coph_config &c) { return Py_BuildValue("(dd)", c.f.first, c.f.second); }}
 
-const std::map<std::string, config_field> &config_fields() {
-  static const std::map<std::string, config_field> fields = {
-      PYCVC_COPH_STR(stage_blend_mode), PYCVC_COPH_STR(route_field_mode), PYCVC_COPH_STR(controller_mode),
-      PYCVC_COPH_STR(shaping_mode), PYCVC_COPH_DBL(shaping_k), PYCVC_COPH_DBL(shaping_ell),
-      PYCVC_COPH_DBL(shaping_eta), PYCVC_COPH_DBL(safety_margin), PYCVC_COPH_INT(obstacle_cap),
-      PYCVC_COPH_INT(footprint_cap), PYCVC_COPH_INT(route_expansion_cap), PYCVC_COPH_STR(navigation_target),
-      PYCVC_COPH_STR(replay_objective), PYCVC_COPH_STR(replay_domain), PYCVC_COPH_STR(replay_horizon_mode),
-      {"replay_update_cap",
-       {[](cvc::nav::coph_config &c, PyObject *o, const std::string &w) {
-          if (o)
-            c.replay_update_cap = static_cast<int>(integer(o, w));
-          else
-            c.replay_update_cap.reset();
-        },
-        [](const cvc::nav::coph_config &c) -> PyObject * {
-          if (c.replay_update_cap)
-            return PyLong_FromLong(*c.replay_update_cap);
-          Py_RETURN_NONE;
-        }}},
-      PYCVC_COPH_INT(boundary_max_steps), PYCVC_COPH_INT(boundary_follow_steps), PYCVC_COPH_DBL(dt),
-      PYCVC_COPH_INT(steps), PYCVC_COPH_DBL(stage_width), PYCVC_COPH_DBL(stage_height),
-      PYCVC_COPH_DBL(overlap), PYCVC_COPH_INT(previous), PYCVC_COPH_INT(sample_cap),
-      PYCVC_COPH_INT(transition_cap), PYCVC_COPH_INT(anchor_cap), PYCVC_COPH_INT(rbf_side),
-      PYCVC_COPH_DBL(rbf_width), PYCVC_COPH_INT(update_every), PYCVC_COPH_INT(replay_steps),
-      PYCVC_COPH_INT(solver_steps), PYCVC_COPH_DBL(damping_initial), PYCVC_COPH_PAIR(policy_initial),
-      PYCVC_COPH_PAIR(damping_bounds), PYCVC_COPH_PAIR(policy_bounds), PYCVC_COPH_DBL(damping_trust),
-      PYCVC_COPH_DBL(policy_trust), PYCVC_COPH_DBL(fit_ridge), PYCVC_COPH_DBL(validation_slack),
-      PYCVC_COPH_DBL(sensor_radius), PYCVC_COPH_DBL(force_limit),
-  };
-  return fields;
-}
+constexpr config_field kConfigFields[] = {
+    PYCVC_COPH_STR(stage_blend_mode), PYCVC_COPH_STR(route_field_mode), PYCVC_COPH_STR(controller_mode),
+    PYCVC_COPH_STR(shaping_mode), PYCVC_COPH_DBL(shaping_k), PYCVC_COPH_DBL(shaping_ell),
+    PYCVC_COPH_DBL(shaping_eta), PYCVC_COPH_DBL(safety_margin), PYCVC_COPH_INT(obstacle_cap),
+    PYCVC_COPH_INT(footprint_cap), PYCVC_COPH_INT(route_expansion_cap), PYCVC_COPH_STR(navigation_target),
+    PYCVC_COPH_STR(replay_objective), PYCVC_COPH_STR(replay_domain), PYCVC_COPH_STR(replay_horizon_mode),
+    {"replay_update_cap",
+     [](cvc::nav::coph_config &c, PyObject *o, const std::string &w) {
+       if (o)
+         c.replay_update_cap = static_cast<int>(integer(o, w));
+       else
+         c.replay_update_cap.reset();
+     },
+     [](const cvc::nav::coph_config &c) -> PyObject * {
+       if (c.replay_update_cap)
+         return PyLong_FromLong(*c.replay_update_cap);
+       Py_RETURN_NONE;
+     }},
+    PYCVC_COPH_INT(boundary_max_steps), PYCVC_COPH_INT(boundary_follow_steps), PYCVC_COPH_DBL(dt),
+    PYCVC_COPH_INT(steps), PYCVC_COPH_DBL(stage_width), PYCVC_COPH_DBL(stage_height),
+    PYCVC_COPH_DBL(overlap), PYCVC_COPH_INT(previous), PYCVC_COPH_INT(sample_cap),
+    PYCVC_COPH_INT(transition_cap), PYCVC_COPH_INT(anchor_cap), PYCVC_COPH_INT(rbf_side),
+    PYCVC_COPH_DBL(rbf_width), PYCVC_COPH_INT(update_every), PYCVC_COPH_INT(replay_steps),
+    PYCVC_COPH_INT(solver_steps), PYCVC_COPH_DBL(damping_initial), PYCVC_COPH_PAIR(policy_initial),
+    PYCVC_COPH_PAIR(damping_bounds), PYCVC_COPH_PAIR(policy_bounds), PYCVC_COPH_DBL(damping_trust),
+    PYCVC_COPH_DBL(policy_trust), PYCVC_COPH_DBL(fit_ridge), PYCVC_COPH_DBL(validation_slack),
+    PYCVC_COPH_DBL(sensor_radius), PYCVC_COPH_DBL(force_limit),
+};
 
 #undef PYCVC_COPH_STR
 #undef PYCVC_COPH_DBL
 #undef PYCVC_COPH_INT
 #undef PYCVC_COPH_PAIR
+
+const config_field *find_field(const std::string &name) {
+  for (const config_field &f : kConfigFields)
+    if (name == f.name)
+      return &f;
+  return nullptr;
+}
 
 // The dict's keys over the demos' profile, validated (Config.__post_init__). A key set to None
 // clears an optional (replay_update_cap).
@@ -250,10 +259,10 @@ cvc::nav::coph_config config(PyObject *d) {
     Py_ssize_t pos = 0;
     while (PyDict_Next(d, &pos, &key, &value)) {
       const std::string k = text(key, "a configuration key");
-      const auto it = config_fields().find(k);
-      if (it == config_fields().end())
+      const config_field *f = find_field(k);
+      if (!f)
         throw std::invalid_argument("coph_config has no field '" + k + "'");
-      it->second.first(c, value == Py_None ? nullptr : value, "configuration['" + k + "']");
+      f->set(c, value == Py_None ? nullptr : value, "configuration['" + k + "']");
     }
   }
   c.validate();
@@ -262,8 +271,8 @@ cvc::nav::coph_config config(PyObject *d) {
 
 PyObject *config_dict(const cvc::nav::coph_config &c) {
   PyObject *d = PyDict_New();
-  for (const auto &[k, f] : config_fields())
-    put(d, k.c_str(), f.second(c));
+  for (const config_field &f : kConfigFields)
+    put(d, f.name, f.get(c));
   return d;
 }
 
