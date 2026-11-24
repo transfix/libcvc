@@ -801,8 +801,8 @@ void async_scheduler::leave_router() {
   // (1) Its handle closes: a post through it is refused from now on, and its poster re-resolves
   // the home, waiting while that is still this group (exec_router.h, "Teardown and rehoming").
   route_self_.close();
-  // The keys it homes: only a group with a prefix homes any (an island's messaging goes with it),
-  // found while it is still registered.
+  // The keys it homes: only a group with a prefix homes any (an island homes nothing for another
+  // group: its own keys' messages die with it, counted), found while it is still registered.
   const bool prefixed = router_->has_prefix(route_self_);
   const auto homed = [&](const std::string &key) {
     return prefixed && !never_routed(key) && cached_home(key) == route_self_;
@@ -830,6 +830,13 @@ void async_scheduler::leave_router() {
       forward(std::move(e));
     }
   }
+  // The pending messages of the keys it did not home (an island's own keys, '#' keys) die with it,
+  // counted.
+  std::uint64_t dying = 0;
+  for (const auto &[key, q] : pending_messages_)
+    dying += q.size();
+  pending_messages_.clear();
+  ingress_counts_.destroy_dropped.fetch_add(dying, std::memory_order_relaxed);
   // (2b) Its remote-waiter records, as subscribes with the same seq, in subscription order; counted
   // out of the router once posted (the new home counts each in as it records it).
   std::map<std::string, std::deque<remote_waiter>> records;

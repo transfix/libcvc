@@ -598,6 +598,29 @@ TEST(RouterR, AnIslandKeepsItsOwnKeys) {
   EXPECT_EQ(g0.total_pending_messages(), 1u) << "an island's key reached group 0";
 }
 
+// An island homes nothing for another group (S2b.0a): its teardown forwards none of its own
+// keys' messages, pending or queued; they die with it, counted (destroy_dropped).
+TEST(RouterR, AnIslandsTeardownForwardsNothing) {
+  cvc::app app;
+  r_world p(app, "p", {"p"}); // the router on
+  auto a = std::make_unique<r_world>(app, "a");
+  ASSERT_TRUE(a->sched->post_message("a.k", str("pending")));
+  a->pump();
+  ASSERT_TRUE(a->sched->post_message("a.k", str("queued")));
+  se::async_scheduler::ingress_stats at_end;
+  se::control_cmd kill;
+  kill.what = se::control_cmd::kind::kill;
+  se::async_scheduler *const raw = a->sched;
+  kill.done = [&](bool) { at_end = raw->ingress_counters(); }; // refused by its destructor
+  ASSERT_TRUE(a->sched->post_control(1, std::move(kill)));
+  a.reset();
+  EXPECT_EQ(at_end.destroy_dropped, 2u);
+  if (se::async_scheduler *g0 = app.exec_scheduler_probe()) {
+    g0->drain_ingress();
+    EXPECT_EQ(g0->total_pending_messages(), 0u) << "an island's message was forwarded";
+  }
+}
+
 // The cache of homes is checked against the router's epoch: a key homed at group 0 is sent to a
 // group registered for it since.
 TEST(RouterR, TheCacheOfHomesFollowsTheEpoch) {
