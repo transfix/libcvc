@@ -23,6 +23,8 @@ namespace ariadne {
 namespace {
 constexpr double kMetre = 1000.0; // mm
 constexpr double kUnit = 32767.0; // quaternion component scale
+constexpr double kRate = 1000.0;  // mrad/s
+constexpr double kSteer = 1e6;    // microradians
 
 std::int32_t to_fixed(double v, double scale) {
   const double s = std::round(v * scale);
@@ -42,6 +44,48 @@ std::int32_t add(std::int32_t a, std::int32_t b) {
   return static_cast<std::int32_t>(static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b));
 }
 
+// An entry's numbers: a slot's absolute pose (its first entry), the difference from what the slot
+// was last sent, and that difference added back.
+void put_absolute(cvc::pose_entry &e, const pose_q &q) {
+  e.x = q.x, e.y = q.y, e.z = q.z;
+  e.vx = q.vx, e.vy = q.vy, e.vz = q.vz;
+  e.qw = q.qw, e.qx = q.qx, e.qy = q.qy, e.qz = q.qz;
+  e.wx = q.wx, e.wy = q.wy, e.wz = q.wz;
+  e.steer = q.steer;
+}
+void put_difference(cvc::pose_entry &e, const pose_q &q, const pose_q &was) {
+  e.x = sub(q.x, was.x), e.y = sub(q.y, was.y), e.z = sub(q.z, was.z);
+  e.vx = sub(q.vx, was.vx), e.vy = sub(q.vy, was.vy), e.vz = sub(q.vz, was.vz);
+  e.qw = sub(q.qw, was.qw), e.qx = sub(q.qx, was.qx), e.qy = sub(q.qy, was.qy);
+  e.qz = sub(q.qz, was.qz);
+  e.wx = sub(q.wx, was.wx), e.wy = sub(q.wy, was.wy), e.wz = sub(q.wz, was.wz);
+  e.steer = sub(q.steer, was.steer);
+}
+pose_q absolute_of(const cvc::pose_entry &e) {
+  pose_q q{e.x, e.y, e.z, e.vx, e.vy, e.vz, e.qw, e.qx, e.qy, e.qz};
+  q.wx = e.wx, q.wy = e.wy, q.wz = e.wz;
+  q.steer = e.steer;
+  return q;
+}
+void add_difference(pose_q &q, const cvc::pose_entry &e) {
+  q.x = add(q.x, e.x), q.y = add(q.y, e.y), q.z = add(q.z, e.z);
+  q.vx = add(q.vx, e.vx), q.vy = add(q.vy, e.vy), q.vz = add(q.vz, e.vz);
+  q.qw = add(q.qw, e.qw), q.qx = add(q.qx, e.qx), q.qy = add(q.qy, e.qy);
+  q.qz = add(q.qz, e.qz);
+  q.wx = add(q.wx, e.wx), q.wy = add(q.wy, e.wy), q.wz = add(q.wz, e.wz);
+  q.steer = add(q.steer, e.steer);
+}
+
+// A slot's sample: its angular velocity and steering angle when the snapshot carries them.
+pose_sample sample_of(const std::string &pid, const pose_q &q, bool motion) {
+  pose_sample s{pid, dequantize_pose(q), std::nullopt};
+  if (motion)
+    s.steer = dequantize_steer(q);
+  else
+    s.state.angular_velocity = {};
+  return s;
+}
+
 // One connection's view of a participant: its slot and what it was last sent.
 struct sent_state {
   std::uint32_t slot = 0;
@@ -50,7 +94,7 @@ struct sent_state {
 };
 } // namespace
 
-pose_q quantize_pose(const cvc::physics::body_state &s) {
+pose_q quantize_pose(const cvc::physics::body_state &s, double steer) {
   pose_q q;
   q.x = to_fixed(s.position.x, kMetre);
   q.y = to_fixed(s.position.y, kMetre);
@@ -64,8 +108,14 @@ pose_q quantize_pose(const cvc::physics::body_state &s) {
   q.qx = to_fixed(sign * s.rotation.x, kUnit);
   q.qy = to_fixed(sign * s.rotation.y, kUnit);
   q.qz = to_fixed(sign * s.rotation.z, kUnit);
+  q.wx = to_fixed(s.angular_velocity.x, kRate);
+  q.wy = to_fixed(s.angular_velocity.y, kRate);
+  q.wz = to_fixed(s.angular_velocity.z, kRate);
+  q.steer = to_fixed(steer, kSteer);
   return q;
 }
+
+double dequantize_steer(const pose_q &q) { return q.steer / kSteer; }
 
 cvc::physics::body_state dequantize_pose(const pose_q &q) {
   cvc::physics::body_state s;
@@ -74,6 +124,7 @@ cvc::physics::body_state dequantize_pose(const pose_q &q) {
   const double w = q.qw / kUnit, x = q.qx / kUnit, y = q.qy / kUnit, z = q.qz / kUnit;
   const double n = std::sqrt(w * w + x * x + y * y + z * z);
   s.rotation = n > 1e-9 ? cvc::physics::quat{w / n, x / n, y / n, z / n} : cvc::physics::quat{};
+  s.angular_velocity = {q.wx / kRate, q.wy / kRate, q.wz / kRate};
   s.active = true;
   return s;
 }
@@ -121,6 +172,7 @@ cvc::pose_snapshot pose_stream_encoder::encode(std::uint64_t tick,
   else
     out.seq = m.seq + 1 == 0 ? 1 : m.seq + 1; // 0 is reserved for "restart"
   out.base_seq = m.restart ? 0 : m.seq;
+  out.carries = cvc::pose_snapshot::kCarriesMotion;
   std::map<std::string, sent_state> next = m.restart ? std::map<std::string, sent_state>{} : m.sent;
   std::uint32_t next_slot = m.next_slot;
   std::set<std::string> present;
@@ -129,7 +181,7 @@ cvc::pose_snapshot pose_stream_encoder::encode(std::uint64_t tick,
     const auto it = next.find(subject.pid);
     if (!subject.due)
       continue;
-    const pose_q q = quantize_pose(subject.state);
+    const pose_q q = quantize_pose(subject.state, subject.steer);
     cvc::pose_entry e;
     if (it == next.end()) { // new to the connection: named, absolute
       sent_state st;
@@ -139,9 +191,7 @@ cvc::pose_snapshot pose_stream_encoder::encode(std::uint64_t tick,
       next.emplace(subject.pid, st);
       e.slot = st.slot;
       e.pid = subject.pid;
-      e.x = q.x, e.y = q.y, e.z = q.z;
-      e.vx = q.vx, e.vy = q.vy, e.vz = q.vz;
-      e.qw = q.qw, e.qx = q.qx, e.qy = q.qy, e.qz = q.qz;
+      put_absolute(e, q);
       out.entries.push_back(std::move(e));
       continue;
     }
@@ -150,10 +200,7 @@ cvc::pose_snapshot pose_stream_encoder::encode(std::uint64_t tick,
     if (!moved && tick < st.tick + heartbeat_ticks)
       continue;
     e.slot = st.slot;
-    e.x = sub(q.x, st.q.x), e.y = sub(q.y, st.q.y), e.z = sub(q.z, st.q.z);
-    e.vx = sub(q.vx, st.q.vx), e.vy = sub(q.vy, st.q.vy), e.vz = sub(q.vz, st.q.vz);
-    e.qw = sub(q.qw, st.q.qw), e.qx = sub(q.qx, st.q.qx), e.qy = sub(q.qy, st.q.qy);
-    e.qz = sub(q.qz, st.q.qz);
+    put_difference(e, q, st.q);
     st.q = q;
     st.tick = tick;
     out.entries.push_back(std::move(e));
@@ -282,25 +329,22 @@ bool pose_stream_decoder::decode(const cvc::pose_snapshot &snap, std::vector<pos
     for (std::uint32_t g : snap.gone)
       slots.erase(g);
     std::vector<pose_sample> samples;
+    const bool motion = (snap.carries & cvc::pose_snapshot::kCarriesMotion) != 0;
     for (const cvc::pose_entry &e : snap.entries) {
       impl::slot_state *st = nullptr;
       if (!e.pid.empty()) {
         impl::slot_state &n = slots[e.slot];
         n.pid = e.pid;
-        n.q = pose_q{e.x, e.y, e.z, e.vx, e.vy, e.vz, e.qw, e.qx, e.qy, e.qz};
+        n.q = absolute_of(e);
         st = &n;
       } else {
         const auto it = slots.find(e.slot);
         if (it == slots.end())
           continue;
         st = &it->second;
-        pose_q &q = st->q;
-        q.x = add(q.x, e.x), q.y = add(q.y, e.y), q.z = add(q.z, e.z);
-        q.vx = add(q.vx, e.vx), q.vy = add(q.vy, e.vy), q.vz = add(q.vz, e.vz);
-        q.qw = add(q.qw, e.qw), q.qx = add(q.qx, e.qx), q.qy = add(q.qy, e.qy);
-        q.qz = add(q.qz, e.qz);
+        add_difference(st->q, e);
       }
-      samples.push_back(pose_sample{st->pid, dequantize_pose(st->q)});
+      samples.push_back(sample_of(st->pid, st->q, motion));
     }
     if (m.bases.emplace(snap.seq, std::move(slots)).second) {
       m.base_seqs.push_back(snap.seq);
@@ -327,25 +371,22 @@ bool pose_stream_decoder::decode(const cvc::pose_snapshot &snap, std::vector<pos
   m.seq = snap.seq;
   for (std::uint32_t g : snap.gone)
     m.slots.erase(g);
+  const bool motion = (snap.carries & cvc::pose_snapshot::kCarriesMotion) != 0;
   for (const cvc::pose_entry &e : snap.entries) {
     impl::slot_state *st = nullptr;
     if (!e.pid.empty()) { // named: absolute
       impl::slot_state &n = m.slots[e.slot];
       n.pid = e.pid;
-      n.q = pose_q{e.x, e.y, e.z, e.vx, e.vy, e.vz, e.qw, e.qx, e.qy, e.qz};
+      n.q = absolute_of(e);
       st = &n;
     } else {
       const auto it = m.slots.find(e.slot);
       if (it == m.slots.end())
         continue; // a slot this stream never named: nothing to add the difference to
       st = &it->second;
-      pose_q &q = st->q;
-      q.x = add(q.x, e.x), q.y = add(q.y, e.y), q.z = add(q.z, e.z);
-      q.vx = add(q.vx, e.vx), q.vy = add(q.vy, e.vy), q.vz = add(q.vz, e.vz);
-      q.qw = add(q.qw, e.qw), q.qx = add(q.qx, e.qx), q.qy = add(q.qy, e.qy);
-      q.qz = add(q.qz, e.qz);
+      add_difference(st->q, e);
     }
-    out.push_back(pose_sample{st->pid, dequantize_pose(st->q)});
+    out.push_back(sample_of(st->pid, st->q, motion));
   }
   return true;
 }

@@ -1443,6 +1443,56 @@ scene:
       material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
 ```
 
+**Physically based materials.** `material: { pbr: ... }` shades a geometry node physically, with
+VTK's PBR, in place of the Phong keys. The scene's `environment:` is the light that reaches it
+from all round:
+
+```yaml
+scene:
+  environment:                    # optional: the light from all round
+    sky: [0.55, 0.62, 0.75]       # straight up
+    horizon: [0.45, 0.45, 0.45]
+    ground: [0.18, 0.16, 0.14]    # straight down
+  nodes:
+    - node: body
+      source: { file: car.glb }
+      material:
+        color: [0.75, 0.05, 0.05] # the base colour
+        pbr: { metallic: 0.6, roughness: 0.35, coat: { strength: 1, roughness: 0.05 } }
+    - node: lamp
+      source: { sphere: 0.2 }
+      material: { color: [0, 0, 0], pbr: { emissive: [1.0, 0.85, 0.5] } }
+    - node: rail
+      source: { box: 1 }
+      material: { pbr: { metallic: 1, roughness: 0.1 } }
+```
+
+- **The keys.** `pbr: true` takes the defaults. Each value is 0..1, clamped with a warning.
+  - `metallic`: 0 (the default) a dielectric, such as paint, plastic or stone; 1 a metal.
+  - `roughness`: 0 a mirror, 1 matte; 0.5 by default.
+  - `emissive: [r, g, b]`: the colour the node glows with, lit or not. None by default.
+  - `coat`: a clear coat over the surface, such as car paint's or varnish. Either its strength,
+    or `{ strength, roughness }` (strength 1 and roughness 0 when left out).
+- **The base colour** is what the node shows when Phong-shaded: its `color`, its `texture` or its
+  mesh's own colours, read as sRGB.
+- **The lights** light it face on as brightly as a Phong surface with `diffuse: 1`. VTK's BRDF
+  divides a light by π; libcvc multiplies it back, as three.js's legacy light units did.
+- **The Phong keys** (`ambient`, `diffuse`, `specular`, `specular_power`) do not apply, and warn
+  beside `pbr:`.
+- **The environment** is image-based lighting from a gradient: `sky` straight up, through
+  `horizon`, to `ground` straight down, about +z. It lights every side of a `pbr:` node and is
+  what a metal reflects. Phong nodes ignore it.
+  - A scene with a `pbr:` node and no `environment:` gets the default: sky
+    `[0.50, 0.53, 0.60]`, horizon `[0.42, 0.42, 0.42]`, ground `[0.20, 0.19, 0.18]`, about as
+    bright as Phong's `ambient: 0.2`.
+  - `environment: false` (or `none`) leaves the lights alone, and a side they miss is black.
+  - The first frame after it is set filters it on the GPU, once per view.
+- **Where it applies.** The main view and every `viewport` widget are lit by the environment.
+  The material reaches whatever the node draws: its mesh, its `model:`, every rung of an LOD
+  ladder, and a dataset's meshes.
+- **Not yet:** metallic, roughness, normal and emissive textures; an image as the environment;
+  the materials a glTF model carries.
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
@@ -4645,8 +4695,20 @@ second `vtkVolume` with its own property and its own mapper, which uploads the v
 time: a GPU volume mapper keeps one set of transfer-function tables, for the property it last drew.
 A `volslice` node's slices face the camera they were swept for. A view from a camera of its own
 draws slices of its own, swept for its camera, over the node's shaders, textures and transfer
-function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own. A `volren` node's
-picture is raycast for the main view and composited into its pixels, so it is in the main view only.
+function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own.
+A `volren` node draws in every view, `camera: main` ones too. Its picture is raycast for one camera
+at one size, so each view raycasts the volume for its own camera at its own size times
+`volren.resolution_scale` (`VolRenNode::viewProp`), and draws it on a quad of its own, depth-tested
+against what the view draws with that camera's near and far. A view raycasts again only when its
+camera or size, the node's transform or clip planes, or the node's settings change (every frame it
+draws, with `volren.continuous`), never while it is hidden, and no more often than it draws, so a
+view with `refresh_hz` raycasts at most that many times a second. Each view that shows the node
+costs a raycast of its own at its raster: a 360 x 270 view at the default scale of 0.5 casts
+180 x 135 rays each time, beside the main view's. The jobs share the node's raycaster and take turns
+on its worker thread, so views add latency rather than threads; on CUDA they share the device and
+the volume uploaded to it once, and a volume's shadow maps are built once for all of them. A view
+draws the scene without the volume until its first raycast lands. A `volren` node takes no
+`override:` yet.
 `examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
 one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
 
@@ -4824,8 +4886,8 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A `volren` node is in the main view only. A `volslice` node takes `transform` but no restyling;
-  a `type: volume` node takes `opacity` and `transform`.
+- A `volren` node takes no restyling: no `override:` entry applies to it. A `volslice` node takes
+  `transform` but no restyling; a `type: volume` node takes `opacity` and `transform`.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
 - A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
@@ -5309,10 +5371,27 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
   their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
   it is drawn in an application's scope.
+- **Mirrored in the state tree:** the Runtime writes the list under the document's prefix, as the
+  feed mirrors itself to `notify.*` (§5.24), for a Processes window or a launcher to read:
+  `ariadne.apps.<key>.name` (as the menu names it, a loader's `name:` included), `.scope` (its
+  prefix from the document's: `includes.fe_lab`) and `.running` (1, or 0 while it is quit), and
+  `ariadne.name`, the document's own `meta.name`.
+  `<key>` is the scope without its `includes` segments, joined by `_`: `fe_lab`, a repeated
+  mount's `cam_0`, a nested mount's `outer_inner`. It is written as the list changes, Quit and
+  reopening included; an application gone from the tree is taken out (`mirror_apps`).
+- **Whose a process is:** every process the Runtime starts records its context's chroot and the
+  document's prefix, so `(ps)` and `(inspect)` give it a `scope` from the document's prefix: `""`
+  for the document's own `on_tick:`, actions and tests, `includes.fe_lab` for the application's,
+  the children they spawn included (STATE_EXEC_DEVELOPER_GUIDE.md, "Whose a process is").
+  `components/processes.ari` lists them by application (§6.5). With its chroot recorded, an
+  action's async calls post their progress under its chroot, as
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) 3.10 says they do.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
-  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
-  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
-  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart`,
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`,
+  `TheApplicationsAreMirroredUnderTheDocumentsPrefix`, `ProcessRowsSayWhoseTheyAre` and
+  `ProcessesListsByApplicationAndKillsARow`, the loader's `ALoadedDocumentIsNamedByItsMeta`, and
+  `ari test src/ari/tests/processes_component.ari` (ctest `ari_processes_component`) check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
 
 ### 5.26 Colours from state: `color:` and `background: { color: }`
@@ -5641,6 +5720,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -6533,8 +6613,10 @@ they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
 document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
 the extra data files to fetch; both pages read the same file. The URL can only add document
-arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
-terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+arguments. A download that breaks off (the module, its Python zip, the document or a file it
+names) is fetched twice more past the browser's cache (`cache: 'reload'`); one that still breaks
+fails the load with its name and how much of it arrived. A failed load shows what the runtime
+printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is

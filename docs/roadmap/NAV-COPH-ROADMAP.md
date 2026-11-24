@@ -498,10 +498,30 @@ demos' runner with two `CrossingLearner` agents for 60 ticks of the crossing, co
     mass would (a 0.74 m turning radius, and almost no lateral force at low speed). It stops
     0.21 m short, where the router finds no clear start, and never touches the block. Turning
     that stop into a way round is the allocation research §3.3.2 leaves open.
-- **Next, part 2c:** the `plant_ledger` items (D11). They need their own table, printed only with
-  CoPH attached, because adding rows to the plant table changes every run's output (the
-  `.cvcrun` columns, the panels, pycvc's item list and cvcGL's publish tests). sim_world's stats
-  collector also needs a public hook for the driver's terms.
+
+**Landed in part 2c: the CoPH ledger's items (D11).** The episode record carries each driven car's
+account. Tested by `nav_stats_test` (`NavStats.CophLedger`) and `nav_coph_driver_test`.
+- **Where they come from.** While the sim's `nav_stats` is armed, each `coph_driver::apply()` feeds
+  that tick's share of every attached car's account to `sim_world::feed_coph`. The next `step()`
+  folds it into the collector as `nav_samplers::coph` (`coph_sample`: a CoPH step's work, heat,
+  kinetic change, residual, shaping jump, unallocated work and risk cost, and every tick's `|e|²dt`
+  and `|u|²dt`).
+- **What the record holds.** A car CoPH drove (`coph_tracked`) gets `coph_steps`, `coph_work`,
+  `coph_heat`, `coph_kinetic_change`, `coph_residual`, `coph_residual_max`, `coph_shaping_jumps`,
+  `coph_unallocated_work`, `coph_risk_cost` and `coph_allocation_residual`. The episode gets
+  `coph_vehicles` and the fleet's sums.
+- **Their own tables.** `plant_ledger_coph_vehicle()` and `plant_ledger_coph_episode()` list the
+  items, with `source::coph`. The JSON and cvcGL's `publish_nav_stats` write them only for what CoPH
+  drove. Every other run's output is unchanged, including every reader that takes a column or key
+  per item of the plant tables (`.cvcrun` columns, the panels, pycvc's item lists).
+- **Results on Windows.**
+  - Each of a car's sums in the record equals its account bit for bit. The shaping jumps are
+    differences of the learner's running total, so they agree to round-off.
+  - With `nav_stats` armed and a driver that drives nothing, the record is byte-unchanged and has
+    no CoPH key.
+- **Left out:** the cross-episode scorecard (`aggregate_nav`), and the CoPH items in nav_arms'
+  `.cvcrun` columns and pycvc's lists. Each can take them from the new tables when a reader needs
+  them.
 
 `coph_fleet` lives outside `sim_world`, as `route_follower` does (D10). Before each `step()`, it:
 - reads each attached agent's pose, heading and speed;

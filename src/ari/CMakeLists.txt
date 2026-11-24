@@ -251,7 +251,14 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
                    "-DEXPECT6=opened: nothing"
                    "-DREJECT1=last words here"
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
-  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_rich_text PROPERTIES
+  # The Processes window's DSL (components/processes.ari): its rows by application, from (ps)'s
+  # scope and the ariadne.apps mirror of the application it loads (tests/processes_app.ari).
+  add_test(NAME ari_processes_component
+           COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/processes_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_processes_component
+                       ari_rich_text PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 

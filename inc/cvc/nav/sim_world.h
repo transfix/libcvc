@@ -53,6 +53,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -811,6 +812,12 @@ public:
   // only — never call while a sim-thread worker is stepping.
   episode_nav_stats nav_stats() const;
   bool nav_stats_armed() const { return static_cast<bool>(stats_); }
+  // The CoPH ledger's terms of each agent for the next step(), one per agent by index
+  // (cvc/nav/coph_driver.h feeds them from apply(); D11 of docs/roadmap/NAV-COPH-ROADMAP.md). That
+  // step folds them into the armed nav_stats as nav_samplers::coph; an agent past the end of
+  // `samples` is untracked for it. A no-op while nav_stats is not armed, so a run without it is
+  // untouched.
+  void feed_coph(std::span<const coph_sample> samples);
 
 private:
   // step()'s yielding pass (set_yield).
@@ -996,6 +1003,8 @@ private:
   friction_field ter_slope_; // the slope planes, as a two-plane field
   std::vector<int> ter_entries_;
   std::vector<int> st_entries_; // [n], this tick's, for nav_stats
+  std::vector<coph_sample> st_coph_; // [n], the next step's CoPH terms (feed_coph)
+  bool st_coph_fed_ = false;
   bool infeasible_at(float onx, float ony) const;
 
   field_stack field_view() const;

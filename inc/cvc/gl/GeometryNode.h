@@ -347,6 +347,28 @@ public:
   void setPointSize(double size);
   void setLineWidth(double width);
 
+  // Physically based shading (VTK's PBR) in place of the Phong model the setters above drive.
+  // - The base colour is what a Phong surface shows: the colour (setColor), the texture or the
+  //   per-vertex colours, read as sRGB and made linear in the shader, which writes sRGB again.
+  // - metallic: 0 a dielectric .. 1 a metal. roughness: 0 a mirror .. 1 matte. emissive (sRGB,
+  //   0..1): the colour it glows with, lit or not. A clear coat of `strength` 0..1 with a
+  //   roughness of its own (strength 0: none). All clamped to 0..1.
+  // - A light lights it face on as brightly as it lights a Phong surface with diffuse 1: VTK's
+  //   BRDF divides the light by pi, and the shader multiplies it back (the non-physical light
+  //   units three.js used before its physical ones).
+  // - The light from all round is the scene's environment (SceneGraph::setImageBasedLighting).
+  //   Without it only the lights light the surface, and a side they miss is black.
+  // - ambient, diffuse, specular and specular_power do not apply. setPBR(true) sets diffuse to 1,
+  //   because VTK scales the base colour by it.
+  // State: pbr, metallic, roughness, emissive_r/g/b, coat and coat_roughness, made when first
+  // set. Off by default; off again, the surface is Phong-shaded as before.
+  void setPBR(bool on);
+  bool pbr() const { return m_pbr; }
+  void setMetallic(double value);
+  void setRoughness(double value);
+  void setEmissive(double r, double g, double b);
+  void setCoat(double strength, double roughness);
+
   // Helper to convert render mode to/from string
   static std::string renderModeToString(GeometryRenderMode mode);
   static GeometryRenderMode stringToRenderMode(const std::string &str);
@@ -401,10 +423,13 @@ protected:
   // Each texture holds its unit only for the draw under way: this node's actor
   // releases it once that draw is done. `drawingMapper` is the mapper whose draw
   // fired the event (default: this node's): the units its vertex data takes are
-  // kept clear (LowMemoryPolyDataMapper::arrayTextureUnits).
+  // kept clear (LowMemoryPolyDataMapper::arrayTextureUnits). `bound`, for a draw
+  // of another actor (a view's stand-in with textures of its own): the textures
+  // this activates go there instead, for that actor to release after its draw.
   void bindShaderTextures(vtkShaderProgram *program,
                           const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
-                          vtkObject *drawingMapper = nullptr);
+                          vtkObject *drawingMapper = nullptr,
+                          std::vector<vtkWeakPointer<vtkTextureObject>> *bound = nullptr);
 
   // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
   // public add*ShaderReplacement / clearShaderReplacements (see there), and
@@ -477,6 +502,10 @@ private:
   bool m_textureFlipV; // true when a texture is active: UVs' V is flipped (top-left image -> VTK)
   bool m_textureInterpolate = true; // setTextureInterpolate: linear (true) or nearest sampling
   bool m_forceOpaque = false; // setForceOpaque's ask, kept while the mesh is see-through
+  bool m_pbr = false;         // setPBR, as applied to the actor (owner thread)
+  int m_interpolationWithoutPBR = 1; // the property's interpolation before PBR (VTK_GOURAUD)
+  void applyPBR(bool on);            // the property and the shader edits, owner thread
+  void applyPBRValue(const std::string &key);
 
   boost::signals2::connection m_dataConnection;
 
