@@ -89,6 +89,7 @@ TEST(RouterInterfaces, ATeardownForwardsPastClosedHomes) {
 
 // --- R's unit tests (S2b.1, S2b.4) ---
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cvc/core/exec_pool.h>
@@ -100,6 +101,7 @@ TEST(RouterInterfaces, ATeardownForwardsPastClosedHomes) {
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -787,6 +789,229 @@ TEST(RouterR, ARemoteReceiverGetsEveryMessageInOrderOnAPool) {
     EXPECT_EQ(c.requeued + c.stale_dropped + c.ingress_refused + c.throw_dropped, 0u);
   }
 }
+
+// --- R's fixes after the R2 reviews (S2b.R2; R2a's and R2b's probes, adopted) ---
+
+// Waits for `flag` up to `seconds`: a hang guard only (rule 7), never a speed assertion.
+bool r_wait_for(const std::atomic<bool> &flag, double seconds) {
+  const auto until = std::chrono::steady_clock::now() +
+                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                         std::chrono::duration<double>(seconds));
+  while (!flag.load()) {
+    if (std::chrono::steady_clock::now() > until)
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
+// C-M3 (R2a's probe PostMessageThroughAHandleRacingItsClose): group_ref::post_message held its
+// handle's lock across async_scheduler::post_message, which read route_self_.closed() under the
+// same lock again; with the group's close() waiting for the first hold, the second shared acquire
+// queued behind the writer: the poster and the close waited for each other. Now the closed flag is
+// read lock-free and the post goes into the group unrouted.
+TEST(RouterR, APostThroughAHandleNeverDeadlocksWithItsClose) {
+  for (int round = 0; round < 20; ++round) {
+    auto *app = new cvc::app;
+    auto *h = new r_world(*app, "h", {"h"}); // router on, h homes "h.*"
+    h->sched->set_ingress_cap(0);
+    const se::group_ref ref = h->group->route();
+    struct flags {
+      std::atomic<bool> posting{false}, poster_done{false}, closed{false};
+    };
+    auto f = std::make_shared<flags>();
+    std::thread poster([f, ref] {
+      while (ref.post_message("h.k", str("x")))
+        f->posting = true;
+      f->poster_done = true;
+    });
+    while (!f->posting.load())
+      std::this_thread::yield();
+    std::thread closer([f, ref] {
+      ref.close();
+      f->closed = true;
+    });
+    if (!r_wait_for(f->closed, 30.0) || !r_wait_for(f->poster_done, 30.0)) {
+      ADD_FAILURE() << "round " << round << ": the poster and close() deadlocked";
+      poster.detach(); // left blocked; the app and the group are leaked with them
+      closer.detach();
+      return;
+    }
+    poster.join();
+    closer.join();
+    delete h;
+    delete app;
+  }
+}
+
+// group_ref::post_message posts into its group, unrouted, a '#' key never capped (S2b.R2).
+TEST(RouterR, APostThroughAHandleGoesIntoItsGroup) {
+  cvc::app app;
+  r_world zero(app), h(app, "h", {"h"});
+  h.sched->set_ingress_cap(1);
+  const se::group_ref ref = h.group->route();
+  EXPECT_TRUE(ref.post_message("z.k", str("unrouted"))); // homed at group 0, posted into h
+  EXPECT_FALSE(ref.post_message("z.k", str("capped")));
+  EXPECT_TRUE(ref.post_message("h#reply", str("never capped")));
+  h.sched->drain_ingress();
+  EXPECT_EQ(h.sched->total_pending_messages(), 2u);
+  EXPECT_EQ(zero.sched->total_pending_messages(), 0u);
+}
+
+// C-M4 (R2a's probe AnUnregisterAloneLosesTheMessagesItHomes): Ariadne's retire with the old
+// group's token held elsewhere only unregisters it; the document went back to group 0, so no
+// prefix covers its key. Its teardown dropped the message it had accepted as the key's home; a
+// group that registered a prefix now forwards it, as the full path does.
+TEST(RouterR, AnUnregisterAloneStillForwardsAtTheTeardown) {
+  for (const bool token_held : {false, true}) {
+    cvc::app app;
+    r_world zero(app);
+    auto d = std::make_unique<r_world>(app, "d", std::vector<std::string>{"d"});
+    ASSERT_TRUE(app.exec_router().post_message("d.k", str("m")));
+    d->pump(); // at its home: d's pending FIFO
+    if (token_held) {
+      std::atomic<bool> held{false}, release{false};
+      se::async_scheduler &s = *d->sched;
+      std::thread holder([&] {
+        se::async_scheduler::pump_owner_scope token(s);
+        held = true;
+        while (!release.load())
+          std::this_thread::yield();
+      });
+      while (!held.load())
+        std::this_thread::yield();
+      app.exec_router().unregister(d->group->route()); // retire_from_router's fallback
+      release = true;
+      holder.join();
+    } else {
+      se::async_scheduler::pump_owner_scope token(*d->sched);
+      d->sched->leave_router(); // retire_from_router's full path
+    }
+    d.reset(); // the old group's teardown leaves again
+    zero.pump();
+    EXPECT_EQ(drain_fifo(*zero.sched, "d.k"), (std::vector<std::string>{"m"}))
+        << (token_held ? "the fallback" : "the full path");
+  }
+}
+
+// S-m1, C-m4 (R2b's probe Sm1_ATornDownHomeForwardsAMessageALaterPrefixCovers; R2a's
+// ATeardownForwardsAMessageParkedBeforeALongerPrefix is the same case): a message its home
+// accepted, on a key a longer prefix registered since covers, died at the home's teardown; it goes
+// to that prefix's group now.
+TEST(RouterR, ATornDownHomeForwardsAMessageALaterPrefixCovers) {
+  cvc::app app;
+  auto d = std::make_unique<r_world>(app, "d", std::vector<std::string>{"d"});
+  ASSERT_TRUE(d->sched->post_message("d.x.k", envelope("accepted")));
+  d->pump();                    // no waiter: queued at its home
+  r_world x(app, "x", {"d.x"}); // the key's home from now on
+  d.reset();
+  x.sched->drain_ingress();
+  EXPECT_EQ(drain_fifo(*x.sched, "d.x.k"), (std::vector<std::string>{"accepted"}))
+      << "dropped at its home's teardown";
+}
+
+// C-M5 (after R2a's probe AnAnswerThatOutwaitsTheForwardIsNotADuplicate): a tracked broadcast's
+// answers, refused by their closed home, waited at most 2^20 yields, then went to the new home
+// ahead of the forwarded tracker: the stale copy was queued again although another copy was taken.
+// Now they wait, with no cap, until the home unregisters after its forward. The forward comes after
+// a pause (1 s) that only widens the window the old cap lost; nothing is timed.
+TEST(RouterR, AnAnswerWaitsForItsClosedHomesForward) {
+  cvc::app app;
+  r_world zero(app);
+  r_world h(app, "h", {"h"}), r1(app, "r1"), r2(app, "r2");
+  const int p1 = r1.submit(kReceive), p2 = r2.submit(kReceive);
+  r1.pump();
+  r2.pump(); // both park on "h.k" and subscribe at h
+  h.pump();  // two remote waiters recorded
+  ASSERT_TRUE(app.exec_router().post_message("h.k", envelope("m")));
+  h.pump();                 // no local waiter, two remote: tracked, a copy to each
+  h.group->route().close(); // h's teardown, step (1)
+  std::atomic<bool> answered{false};
+  std::thread receivers([&] {
+    r1.pump(); // r1's process takes its copy: `taken` waits on h
+    r2.sched->kill(p2);
+    r2.pump(); // its stale copy's requeue waits on h too
+    answered = true;
+  });
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+  EXPECT_FALSE(answered.load()) << "an answer went on while its closed home was registered";
+  {
+    se::async_scheduler::pump_owner_scope token(*h.sched);
+    h.sched->leave_router(); // h's forward, the adopt, then the unregister
+  }
+  const bool done = r_wait_for(answered, 30.0);
+  EXPECT_TRUE(done) << "the answers never went on after the unregister";
+  if (!done) {
+    receivers.detach();
+    return;
+  }
+  receivers.join();
+  zero.pump();
+  EXPECT_EQ(r1.result(p1), "m");
+  EXPECT_EQ(drain_fifo(*zero.sched, "h.k"), std::vector<std::string>{})
+      << "a message one receiver took was queued again at the new home";
+  EXPECT_EQ(zero.counters().stale_dropped, 1u);
+}
+
+// C-m1 (after R2a's probe ATeardownNeverWaitsForItsOwnUnregister): a's teardown sends a queued
+// deliver from h back as a requeue; h is closed (its teardown on another thread), and home_of then
+// gave a itself, closed and registered until its own step (3): it waited 2^20 yields on itself.
+// A teardown's posts now resolve without closed groups at once.
+TEST(RouterR, ATeardownNeverWaitsOnItself) {
+  cvc::app app;
+  r_world zero(app);
+  auto a = std::make_unique<r_world>(app, "a", std::vector<std::string>{"d"});
+  r_world h(app, "h", {"d.h"});
+  a->submit(R"((get-attr (msg-recv "d.h.k") "payload"))");
+  a->pump(); // parks, subscribes at h
+  h.pump();  // h records the remote waiter
+  ASSERT_TRUE(app.exec_router().post_message("d.h.k", envelope("m")));
+  h.pump(); // the deliver, into a's ingress (a is not pumped again)
+  ASSERT_TRUE(a->sched->has_pending_ingress());
+  se::exec_router &router = app.exec_router();
+  h.group->route().close(); // h's teardown, step (1), on "another thread"
+  const std::uint64_t before = router.consulted();
+  a.reset(); // the deliver goes back as a requeue, its process's kill unsubscribes
+  EXPECT_LT(router.consulted() - before, 1000u) << "a's teardown waited on a closed group";
+  // The requeue went to group 0 (new_home_of), not lost; h, still registered, homes the key, so
+  // group 0 counts it in its FIFOs but does not answer for the key.
+  zero.pump();
+  EXPECT_EQ(zero.sched->total_pending_messages(), 1u);
+}
+
+// S-M1 (R2b's probe SM1_AKernelsReplyIsNeverRefusedByTheIngressCap): a kernel's reply on its '#'
+// channel counted against the ingress cap, and with 65536 host posts waiting it was refused and
+// lost (its posters ignore the result). A '#' key's post is never capped.
+TEST(RouterR, AReplyOnAHashKeyIsNeverCapped) {
+  cvc::app app;
+  r_world g0(app);
+  ASSERT_FALSE(app.exec_router().active());
+  const int w = g0.submit(R"((msg-recv "task#1"))");
+  g0.pump(); // waits for its kernel's reply
+  for (int i = 0; i < 65536; ++i)
+    ASSERT_TRUE(g0.sched->post_message("flood", se::value_t(int64_t(i))));
+  EXPECT_FALSE(g0.sched->post_message("flood", se::value_t(int64_t(-1))));
+  EXPECT_TRUE(g0.sched->post_message("task#1", se::value_t(std::string("done"))))
+      << "the reply was refused, and its poster drops it";
+  g0.pump();
+  const bool ended = se::is_finished(g0.status(w));
+  EXPECT_TRUE(ended) << "the waiter never got its only reply";
+  if (!ended)
+    g0.sched->kill(w);
+  g0.sched->reap(w);
+}
+
+#ifdef NDEBUG
+// S-m8: "" is group 0's prefix alone; another group's is ignored (a debug build asserts).
+TEST(RouterR, OnlyGroupZeroRegistersTheEmptyPrefix) {
+  cvc::app app;
+  r_world zero(app), g(app, "g");
+  app.exec_router().register_prefix(g.group->route(), "");
+  EXPECT_FALSE(app.exec_router().active());
+  EXPECT_FALSE(app.exec_router().has_prefix(g.group->route()));
+  EXPECT_TRUE(app.exec_router().home_of("any.key").is_group0());
+}
+#endif
 
 } // namespace
 

@@ -863,7 +863,7 @@ private:
   /// broadcasts) and the cache of homes are S2b.1's and S2b.4's, beside the members they replace.
   exec_router *router_ = nullptr;
   group_ref route_self_;
-  std::size_t ingress_cap_ = 65536;
+  std::atomic<std::size_t> ingress_cap_{65536}; // written under ingress_mutex_ (S2b.R2, C-m7)
   bool ingress_cap_set_ = false;
   struct ingress_counter_set {
     std::atomic<std::uint64_t> ingress_refused{0}, requeued{0}, stale_dropped{0},
@@ -907,16 +907,21 @@ private:
   mutable std::unordered_map<std::string, group_ref> home_cache_;
   mutable std::uint64_t home_cache_epoch_ = 0;
   mutable bool home_cache_prefixed_ = false; // this group registered a prefix, as of that epoch
+  /// It registered a prefix once (S2b.R2, C-M4): its teardown forwards what it holds even once
+  /// unregistered. Set by set_router (exec_group registers its prefixes first) and the cache.
+  mutable bool prefixed_once_ = false;
   bool deliver_patched_ = false;
   /// `key`'s home through the cache (router set; not a '#' key).
   group_ref cached_home(const std::string &key) const;
   /// Whether `key` is homed in another group (router on, not '#'; an island's keys no other
   /// group's prefix covers stay its own), which `home` gets. Scheduler thread.
   bool homed_elsewhere(const std::string &key, group_ref *home) const;
-  /// Post `e` to `home`, any thread. A closed handle is resolved again (home_of), waiting while
-  /// it is still that closed group (exec_router.cpp). `posted_to` gets the home that took it. 1:
-  /// taken; 0: refused by the home (its cap); -1: no home took it.
-  int post_routed(group_ref home, detail::route_entry e, group_ref *posted_to = nullptr) const;
+  /// Post `e` to `home`. A closed handle is resolved again (home_of), waiting while it is still
+  /// that closed group (exec_router.cpp), unless the poster is this scheduler's teardown (its
+  /// handle closed, and not `host`: a host's post from another thread). `posted_to` gets the home
+  /// that took it. 1: taken; 0: refused by the home (its cap); -1: no home took it.
+  int post_routed(group_ref home, detail::route_entry e, group_ref *posted_to = nullptr,
+                  bool host = false) const;
   /// A message sent at its home (a local msg-send, a host message, a send entry): every waiter,
   /// local at once and remote by a deliver, else the back of the pending FIFO (past
   /// max_pending_messages when `uncapped`: a rehomed message). The waiters reached.
