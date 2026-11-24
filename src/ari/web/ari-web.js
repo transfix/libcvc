@@ -32,6 +32,44 @@
   if (location.pathname.endsWith('/')) document.getElementById('gallery').hidden = false;
   const setStatus = (text) => { statusEl.textContent = text; };
 
+  // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4), arigl-web.js's check and text.
+  // The module is built with wasm exceptions and JSPI and has no fallback, so a browser without
+  // JSPI gets what it needs in place of the terminal, before anything downloads. Every browser on
+  // an iPhone or iPad is WebKit, so there it is iOS 27 whichever browser it is.
+  const missingJspi = () => {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+        typeof WebAssembly.promising === 'function')
+      return null;
+    const ua = navigator.userAgent || '';
+    const ios = /iPhone|iPad|iPod/.test(ua) ||
+                (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS's desktop UA
+    const versions = 'Chrome 137, Firefox 153 or Safari 27, or later';
+    return ['This page needs a newer browser',
+            'It runs on WebAssembly with JSPI (JavaScript Promise Integration), which this ' +
+                'browser does not have.'].concat(ios ? [
+      'On an iPhone or iPad every browser, Chrome and Firefox included, uses Safari\'s engine, ' +
+          'so it needs iOS 27 or later (iPadOS 27 on an iPad): Settings > General > Software ' +
+          'Update.',
+      'On a computer: ' + versions + '.',
+    ] : ['It needs ' + versions + ' (Edge 137 and other browsers built on Chrome 137 too).']);
+  };
+  const needs = missingJspi();
+  if (needs) {
+    window.ariadneWeb = {state: 'unsupported', needs, log: [], src: '', warnings: [],
+                         text: () => needs.join('\n')};
+    setStatus('needs a newer browser');
+    const box = document.getElementById('term');
+    box.id = 'needs';
+    for (const [i, text] of needs.concat(['This browser: ' + navigator.userAgent]).entries()) {
+      const p = document.createElement(i ? 'p' : 'h1');
+      p.textContent = text;
+      box.append(p);
+    }
+    box.lastChild.className = 'ua';
+    document.title = 'Needs a newer browser — ' + document.title;
+    return;
+  }
+
   const term = new Terminal({
     fontFamily: '"DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace',
     fontSize: 14,

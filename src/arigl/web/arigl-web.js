@@ -34,6 +34,13 @@
   let warningTimer = 0;
   warningEl.addEventListener('click', () => { warningEl.hidden = true; });
 
+  // The browser gate, before anything downloads (below).
+  const needs = missingJspi();
+  if (needs) {
+    unsupported(needs);
+    return;
+  }
+
   // Browsers suspend an AudioContext made before the user has touched the page (autoplay policy),
   // and SDL's audio output (a document's sound, a conference peer's mic) is one: wrap the
   // constructor before arigl.js makes any, keep every context, and resume them on the first click,
@@ -59,6 +66,48 @@
   })();
 
   function status(text) { statusEl.textContent = text; }
+
+  // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4). The module is built with wasm
+  // exceptions and JSPI and has no fallback, so a browser without JSPI would fail part way through
+  // the load. Null when the browser has it; otherwise what to say instead, a headline and then
+  // paragraphs. Every browser on an iPhone or iPad is WebKit, so there it is iOS 27 whichever
+  // browser it is. ari-web.js and the inline pages carry the same check and text.
+  function missingJspi() {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+        typeof WebAssembly.promising === 'function')
+      return null;
+    const ua = navigator.userAgent || '';
+    const ios = /iPhone|iPad|iPod/.test(ua) ||
+                (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS's desktop UA
+    const versions = 'Chrome 137, Firefox 153 or Safari 27, or later';
+    return ['This page needs a newer browser',
+            'It runs on WebAssembly with JSPI (JavaScript Promise Integration), which this ' +
+                'browser does not have.'].concat(ios ? [
+      'On an iPhone or iPad every browser, Chrome and Firefox included, uses Safari\'s engine, ' +
+          'so it needs iOS 27 or later (iPadOS 27 on an iPad): Settings > General > Software ' +
+          'Update.',
+      'On a computer: ' + versions + '.',
+    ] : ['It needs ' + versions + ' (Edge 137 and other browsers built on Chrome 137 too).']);
+  }
+
+  // The gate's page in place of the loading screen: what the browser needs, then its user agent.
+  // Text only.
+  function unsupported(lines) {
+    state.state = 'unsupported';
+    state.needs = lines;
+    overlay.classList.add('unsupported');
+    status(lines[0]);
+    const box = document.createElement('div');
+    box.id = 'needs';
+    for (const text of lines.slice(1).concat(['This browser: ' + navigator.userAgent])) {
+      const p = document.createElement('p');
+      p.textContent = text;
+      box.appendChild(p);
+    }
+    box.lastChild.className = 'ua';
+    statusEl.after(box);
+    document.title = 'Needs a newer browser — ' + document.title;
+  }
 
   // The error page: what went wrong in one line, then everything arigl printed. Text only.
   function fail(headline) {

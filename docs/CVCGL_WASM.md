@@ -505,6 +505,15 @@ and open `/apps/nicotina/` (the default document is `main.ari`) or
 `/apps/nicotina/?src=main.ari`, and for the terminal client `/apps/nicotina/ari.html`. Any static server works for the single-threaded build,
 `python3 -m http.server` included.
 
+**Which browsers.** The module is built with wasm exceptions and JSPI (JavaScript Promise
+Integration), with no Asyncify fallback ([WASM_JSPI_EXCEPTIONS.md](roadmap/WASM_JSPI_EXCEPTIONS.md)).
+That takes Chrome 137, Firefox 153 or Safari 27, or later. Every browser on an iPhone or iPad
+is WebKit, so there it takes iOS 27 (iPadOS 27), whichever browser it is. Before it fetches
+anything of the module, the page checks for `WebAssembly.Suspending` and
+`WebAssembly.promising`. A browser without them gets a page that names those versions (iOS 27
+on an iPhone or an iPad, by its user agent and touch screen) and its own user agent, in place
+of a load that would fail part way. `ari.html` does the same in place of its terminal.
+
 **How a document loads.** The page resolves `src` against its own URL and runs
 `arigl run <flags> <absolute src URL> <document args>`. Before the load, arigl
 ([`web_document.h`](../inc/cvc/ariadne/web_document.h), over [`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)) does
@@ -585,7 +594,8 @@ shows that it has ended. A warning while the document runs (a program that faile
 `on_tick:` that stopped) shows in the canvas's corner for 8 s (ARIADNE.md §2.4). The page reads
 `Module.ariadneRunning()`, `Module.ariadneWarning(text)` and `Module.ariadneExit(status)`, which
 arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`, `running`, `ended`
-or `failed`, `log` holds arigl's output, and `warnings` the warnings) for tests and the console.
+or `failed`, or `unsupported` from the browser gate, with its text in `needs`; `log` holds arigl's
+output, and `warnings` the warnings) for tests and the console.
 
 **Content-Security-Policy.** Nothing in the page is inline, and nothing in the module
 evals: cvcGL's touch probe used `emscripten_run_script_int` and is now an `EM_JS`. The
