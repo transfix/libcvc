@@ -162,7 +162,7 @@ void async_scheduler::refresh_slice() {
         !v || v->empty() ? std::optional<std::size_t>(kDefaultIngressCap) : parse_count(*v);
     if (cap) {
       std::lock_guard<std::mutex> lock(ingress_mutex_);
-      ingress_cap_ = *cap;
+      ingress_cap_.store(*cap, std::memory_order_relaxed);
     }
   }
 }
@@ -1427,13 +1427,15 @@ bool async_scheduler::deliver_to(int pid, std::uint64_t seq, const std::string &
   if (!p || p->status != process_status::waiting || !p->recv_path || p->recv_seq != seq ||
       *p->recv_path != key)
     return false;
-  p->recv_path.reset();
-  p->recv_deadline.reset();
+  // The frame first, then the wait (S2b.R2, C-m3): a throw while patching leaves the wait whole,
+  // for the throw rule's resubscribe.
   p->state.result = msg;
   if (!deliver_await(p->state, msg) && !p->state.stack.empty() &&
       !p->state.stack.back().results.empty())
     p->state.stack.back().results.back() = msg;
   deliver_patched_ = true; // the throw rule: from here on it is delivered
+  p->recv_path.reset();
+  p->recv_deadline.reset();
   procs_.set_status(*p, process_status::ready);
   if (!remote_waits_.empty()) {
     const auto w = remote_waits_.find(pid);
@@ -1491,10 +1493,13 @@ bool async_scheduler::post_message(const std::string &path, const value_t &msg) 
       e.what = detail::route_entry::kind::send;
       e.key = path;
       e.value = msg;
-      return post_routed(std::move(home), std::move(e)) > 0;
+      return post_routed(std::move(home), std::move(e), nullptr, true) > 0;
     }
   }
-  return push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), true);
+  // A '#' key's post is a runtime reply (a kernel's, a task's, a lane's): a completion, never
+  // capped (S2b.R2, S-M1); its waiter would wait for good.
+  const bool capped = path.find('#') == std::string::npos;
+  return push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), capped);
 }
 
 bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
@@ -1505,7 +1510,8 @@ bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
     return false; // the destructor took the queue: nothing posted now would be applied
   // The cap (S2-Q10) counts the capped entries in the queue; a drain empties it.
   if (capped) {
-    if (ingress_cap_ != 0 && ingress_capped_ >= ingress_cap_) {
+    const std::size_t cap = ingress_cap_.load(std::memory_order_relaxed);
+    if (cap != 0 && ingress_capped_ >= cap) {
       ingress_counts_.ingress_refused.fetch_add(1, std::memory_order_relaxed);
       return false;
     }
@@ -1526,6 +1532,10 @@ bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
 void async_scheduler::set_router(exec_router *router, group_ref self) {
   router_ = router;
   route_self_ = std::move(self);
+  // exec_group registers its prefixes before this (S2b.R2, C-M4): a group that had one forwards
+  // what it holds at its teardown even once unregistered.
+  if (router_ && route_self_ && router_->has_prefix(route_self_))
+    prefixed_once_ = true;
 }
 
 bool async_scheduler::post_route(detail::route_entry e) {
@@ -1536,7 +1546,7 @@ bool async_scheduler::post_route(detail::route_entry e) {
 
 void async_scheduler::set_ingress_cap(std::size_t cap) {
   std::lock_guard<std::mutex> lock(ingress_mutex_); // a post reads it under the lock
-  ingress_cap_ = cap;
+  ingress_cap_.store(cap, std::memory_order_relaxed);
   ingress_cap_set_ = true;
 }
 
@@ -2538,10 +2548,23 @@ void async_scheduler::entry_threw(ingress_entry &e, bool counted_out) noexcept {
       ingress_counts_.control_refused.fetch_add(1, std::memory_order_relaxed);
     }
   } else if (detail::route_entry *r = std::get_if<detail::route_entry>(&e);
-             r && r->what == detail::route_entry::kind::deliver && !deliver_patched_) {
-    // A deliver that threw before patching its frame (the throw rule, exec_router.h): stale, as
-    // one would be, and its process, which still waits with that seq, subscribes again.
-    deliver_threw(std::move(*r));
+             r && r->what == detail::route_entry::kind::deliver) {
+    if (!deliver_patched_) {
+      // A deliver that threw before patching its frame (the throw rule, exec_router.h): stale, as
+      // one would be, and its process, which still waits with that seq, subscribes again.
+      deliver_threw(std::move(*r));
+    } else if (r->broadcast != 0) {
+      // Delivered, then threw: a tracked copy still answers taken, or its tracker would wait for
+      // good (S2b.R2, C-m3).
+      try {
+        detail::route_entry t;
+        t.what = detail::route_entry::kind::taken;
+        t.key = r->key;
+        t.broadcast = r->broadcast;
+        post_routed(r->from, std::move(t));
+      } catch (...) {
+      }
+    }
   }
   ingress_counts_.throw_dropped.fetch_add(1, std::memory_order_relaxed);
 }

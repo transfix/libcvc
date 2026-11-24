@@ -206,12 +206,20 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     m.sched->set_lock_manager(locks, lock_attach{shared});
     // A single manager's tables have one thread: every pool pumps this group on its caller only.
     m.link.caller_only = !shared;
-    // The app's routing (S2b, exec_router.h): its handle, and the prefixes it is the home of.
+    // The app's routing (S2b, exec_router.h): its handle, and the prefixes it is the home of,
+    // registered before the scheduler joins (set_router remembers it had one, S2b.R2 C-M4). A
+    // throw midway unregisters and closes the handle (no destructor runs: S2b.R2, C-m2).
     exec_router &router = app->exec_router();
     m.route = group_ref::make(*m.sched, this);
-    m.sched->set_router(&router, m.route);
-    for (const std::string &prefix : m.opts.channel_prefixes)
-      router.register_prefix(m.route, prefix);
+    try {
+      for (const std::string &prefix : m.opts.channel_prefixes)
+        router.register_prefix(m.route, prefix);
+      m.sched->set_router(&router, m.route);
+    } catch (...) {
+      router.unregister(m.route);
+      m.route.close();
+      throw;
+    }
     if (!shared && !pool_built) {
       const bool first = !of_app->single_noted.exchange(true, std::memory_order_relaxed);
       if (first)
