@@ -1955,6 +1955,14 @@ struct Runtime::Impl {
     std::shared_ptr<const NotifyScope> notify; // its notify verbs', which its children bind too
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
+  // A program's process carries its context's chroot, as a spawned child's does, and this
+  // document's prefix as its owner's root: `(ps)` names whose it is from the two ("" for the
+  // document's own, "includes.<as>" for a mount's; docs/roadmap/ARIADNE_SHELL.md 4.10), and its
+  // async calls post their progress under its chroot (docs/STATE_EXEC_EXCEPTIONS.md 3.10).
+  void own_scope(cvc::state_exec::execute_options &opts, const ActionContext &ac) const {
+    opts.root_path = ac.ictx.root_path;
+    opts.owner_root = prefix;
+  }
   // Runtime::start_process while the sweep walks live_actions_ (a done that starts the next one):
   // joined to them once the walk is over.
   bool sweeping_actions_ = false;
@@ -2348,6 +2356,16 @@ struct Runtime::Impl {
       queued_events.back().event_fields = std::move(fields);
     }
   }
+  // As enqueue_fields, in the document's own scope (its prefix and functions) wherever the walk
+  // is, as the programs no widget owns run (a scene node's on_pick:, on_key:).
+  void enqueue_document_fields(const std::string &event,
+                               std::vector<std::pair<std::string, std::string>> fields) {
+    if (!event.empty()) {
+      queued_events.push_back({event, prefix});
+      queued_events.back().functions = doc_functions;
+      queued_events.back().event_fields = std::move(fields);
+    }
+  }
 
   void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
   void emit_node(const Widget &w); // draw the widget assuming it is visible
@@ -2429,6 +2447,17 @@ struct Runtime::Impl {
   void quit_app(const std::string &scope);
   void restart_app(const std::string &scope);
   bool app_running(const std::string &scope) const;
+  // The applications mirrored into the state tree under the document's prefix, as the feed
+  // mirrors itself to notify.* (docs/roadmap/ARIADNE_SHELL.md 4.9): ariadne.apps.<key>.{name,
+  // scope, running}, and ariadne.name, the document's own meta.name, for a Processes view to read.
+  // What was last written, so a frame writes only what changed.
+  struct MirroredApp {
+    std::string name, scope;
+    bool running = true;
+  };
+  std::map<std::string, MirroredApp> mirrored_apps;
+  std::string mirrored_name;
+  void mirror_apps();
   static constexpr const char *kAppEvent = "\x1F"
                                            "app.";
   // Draw as if inside the mount at `scope` (its prefix and functions), for an application's menus
@@ -3786,6 +3815,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, path, e.value);
     if (e.handled && !e.fire.empty()) // an event it raised, with its fields
       enqueue_fields(e.fire, std::move(e.fields));
+    for (CustomEdit::Event &ev : e.events) // and any more, in order
+      if (e.handled && ev.document)
+        enqueue_document_fields(ev.fire, std::move(ev.fields));
+      else if (e.handled)
+        enqueue_fields(ev.fire, std::move(ev.fields));
     break;
   }
   }
@@ -4893,6 +4927,7 @@ void Runtime::Impl::render() {
   apps_drawn = false;
   first_bar_drawn = false;
   plan_frame_apps(); // §5.25 the repeated applications' instances this frame
+  mirror_apps();
   backend->begin_frame();
   clicks_fired = 0;
   instance_path.clear();
@@ -5348,6 +5383,69 @@ bool Runtime::Impl::app_running(const std::string &path) const {
   return true;
 }
 
+namespace {
+// §5.25 an application's key under ariadne.apps: its scope from the document's prefix with the
+// `includes` segments left out and the rest joined by '_' (includes.fe is fe, a repeated mount's
+// includes.cam.0 is cam_0, a nested includes.a.includes.b is a_b).
+std::string app_key(const std::string &scope) {
+  std::string key;
+  std::size_t at = 0;
+  while (at <= scope.size()) {
+    std::size_t dot = scope.find(cvc::state::SEPARATOR[0], at);
+    if (dot == std::string::npos)
+      dot = scope.size();
+    const std::string segment = scope.substr(at, dot - at);
+    if (!segment.empty() && segment != "includes")
+      key += (key.empty() ? "" : "_") + segment;
+    at = dot + 1;
+  }
+  return key;
+}
+} // namespace
+
+// §5.25 this frame's applications, mirrored under the document's prefix
+// (docs/roadmap/ARIADNE_SHELL.md 4.9): ariadne.apps.<key>.{name, scope, running}, scope written
+// from the prefix as (ps) writes a process's, and ariadne.name. Only what changed is written; an
+// application gone from the tree is taken out.
+void Runtime::Impl::mirror_apps() {
+  if (root.app_name != mirrored_name) {
+    write<std::string>(app, resolve_bind(prefix, "ariadne.name"), root.app_name);
+    mirrored_name = root.app_name;
+  }
+  if (frame_apps.empty() && mirrored_apps.empty())
+    return;
+  const std::string base = resolve_bind(prefix, "ariadne.apps");
+  std::map<std::string, MirroredApp> now;
+  for (const WindowsMenuPlan::App &a : frame_apps) {
+    MirroredApp m;
+    m.name = a.name;
+    m.scope = cvc::state_exec::process_scope(a.scope, prefix);
+    m.running = app_running(a.scope);
+    std::string key = app_key(m.scope);
+    if (key.empty())
+      key = "app";
+    for (int n = 2; now.count(key); ++n) // two scopes that read alike: the later one numbered
+      key = app_key(m.scope) + "_" + std::to_string(n);
+    const auto was = mirrored_apps.find(key);
+    const std::string at = base + cvc::state::SEPARATOR + key + cvc::state::SEPARATOR;
+    if (was == mirrored_apps.end() || was->second.name != m.name)
+      write<std::string>(app, at + "name", m.name);
+    if (was == mirrored_apps.end() || was->second.scope != m.scope)
+      write<std::string>(app, at + "scope", m.scope);
+    if (was == mirrored_apps.end() || was->second.running != m.running)
+      write<int>(app, at + "running", m.running ? 1 : 0);
+    now.emplace(std::move(key), std::move(m));
+  }
+  for (const auto &[key, m] : mirrored_apps)
+    if (!now.count(key)) {
+      try {
+        cvc::state::instance(app)(base).removeChild(key);
+      } catch (const std::exception &) {
+      }
+    }
+  mirrored_apps = std::move(now);
+}
+
 // §5.25 the loaded documents' menus, each under its name: its menubar's entries (its menus as
 // submenus), drawn in its scope with its functions, then Restart <name> and Quit <name>. Once a
 // frame, in the first bar that is the document's own.
@@ -5568,6 +5666,7 @@ bool Runtime::Impl::builtin_event(const QueuedAction &a) {
       restart_app(scope);
     else if (verb == "open")
       quit_apps.erase(scope);
+    mirror_apps(); // its running at once, not at the next frame
     return true;
   }
   const std::string_view tag = kNotifyEvent;
@@ -6771,6 +6870,7 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // so ~Impl's kill_owner reaps exactly this document's processes
+    own_scope(opts, *ac);
     opts.max_steps = action_max_steps(root);
     opts.max_time = action_max_time(root);
     opts.max_memory = max_bytes;
@@ -6986,6 +7086,7 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     se::execute_options opts;
     opts.env = ac->env;
     opts.owner = owner_; // reaped by ~Impl's kill_owner(owner_) on teardown
+    own_scope(opts, *ac);
     opts.max_steps = 0;  // unlimited total — a resident loops forever (see above)
     opts.max_time = 0.0; // unlimited TOTAL run-time; the per-STEP cap below is the hang backstop
     // §13.8 resident per-STEP time cap: a resident has no total budget, so give it a per-step
@@ -7536,6 +7637,7 @@ int Runtime::start_process(LaneProcess p) {
   opts.name = p.name;
   opts.env = env;
   opts.owner = m_->owner_; // reaped with the document, by ~Impl's kill_owner
+  m_->own_scope(opts, *ac);
   opts.priority = p.priority;
   if (p.lane == ProgramLane::init) {
     // run_init's caps (a load-time seed or compute is generous, §7.4).

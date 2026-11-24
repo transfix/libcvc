@@ -17,8 +17,11 @@
 #include <cstdlib>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coph_driver.h>
+#include <cvc/nav/plant_ledger.h>
 #include <cvc/nav/sim_world.h>
 #include <gtest/gtest.h>
+#include <memory>
+#include <string>
 #include <vector>
 
 using namespace cvc::nav;
@@ -274,4 +277,73 @@ TEST(CophDriver, ABlockSensedLateIsNeverHit) {
               ticks, fr.pos[0], fr.pos[1], closest, last.reason.c_str(), last.route_reason.c_str(),
               drive.account(0).allocation_residual());
   EXPECT_GT(closest, 0.1); // its body (0.25 m radius) stays off the block
+}
+
+// With the sim's nav_stats armed, the episode record carries the CoPH ledger of the car CoPH
+// drives (D11): car 0, while the sim's own drive moves car 1. Each of car 0's sums is its account's
+// bit for bit (the shaping jumps to round-off), and the JSON has every CoPH item for car 0 and the
+// episode, and none for car 1.
+TEST(CophDriver, TheEpisodeRecordCarriesTheCarsAccount) {
+  const field f(false);
+  sim_world sim = crossing(f);
+  sim.begin_nav_stats();
+  coph_driver drive(sim, driver_config());
+  drive.attach(0);
+  for (int t = 0; t < 200; ++t) {
+    drive.apply();
+    sim.step();
+  }
+  const episode_nav_stats e = sim.nav_stats();
+  ASSERT_EQ(e.per_vehicle.size(), 2u);
+  const veh_nav_stats &s = e.per_vehicle[0];
+  const coph_driver::ledger &l = drive.account(0);
+  EXPECT_TRUE(s.coph_tracked);
+  EXPECT_GT(s.coph_steps, 50);
+  EXPECT_EQ(s.coph_steps, l.energy.steps);
+  EXPECT_EQ(s.coph_work, l.energy.work);
+  EXPECT_EQ(s.coph_heat, l.energy.heat);
+  EXPECT_EQ(s.coph_kinetic_change, l.energy.kinetic_change);
+  EXPECT_EQ(s.coph_residual, l.energy.residual);
+  EXPECT_EQ(s.coph_residual_max, l.max_step_residual);
+  EXPECT_EQ(s.coph_unallocated_work, l.energy.unallocated_work);
+  EXPECT_EQ(s.coph_risk_cost, l.risk_cost);
+  EXPECT_EQ(s.coph_allocation_residual, l.allocation_residual());
+  EXPECT_NEAR(s.coph_shaping_jumps, l.energy.shaping_jumps,
+              1e-12 * (1.0 + std::fabs(l.energy.shaping_jumps)));
+  EXPECT_FALSE(e.per_vehicle[1].coph_tracked);
+  EXPECT_TRUE(e.coph_tracked);
+  EXPECT_EQ(e.coph_vehicles, 1);
+  EXPECT_EQ(e.total_coph_work, l.energy.work);
+  const std::string j = e.to_json();
+  for (const plant_ledger_item &it : plant_ledger_coph_vehicle())
+    EXPECT_NE(j.find(std::string(",\"") + it.key + "\":"), std::string::npos) << it.key;
+  for (const plant_ledger_item &it : plant_ledger_coph_episode())
+    EXPECT_NE(j.find(std::string(",\"") + it.key + "\":"), std::string::npos) << it.key;
+  EXPECT_EQ(j.find("coph_steps"), j.rfind("coph_steps")); // car 0's only
+  std::printf("car 0 after 200 ticks: %ld CoPH steps, work %.6g, heat %.6g, residual %.4g, "
+              "unallocated work %.6g, allocation residual %.3f\n",
+              s.coph_steps, s.coph_work, s.coph_heat, s.coph_residual, s.coph_unallocated_work,
+              s.coph_allocation_residual);
+}
+
+// With the sim's nav_stats armed and a coph_driver that drives nothing, the record is the one
+// without a driver, byte for byte, and has no CoPH key.
+TEST(CophDriver, ARecordWithoutCophHasNoneOfItsKeys) {
+  const field f(true);
+  const auto record = [&](bool driver) {
+    sim_world sim = crossing(f);
+    sim.begin_nav_stats();
+    std::unique_ptr<coph_driver> d;
+    if (driver)
+      d = std::make_unique<coph_driver>(sim, driver_config());
+    for (int t = 0; t < 200; ++t) {
+      if (d)
+        d->apply();
+      sim.step();
+    }
+    return sim.nav_stats().to_json();
+  };
+  const std::string plain = record(false);
+  EXPECT_EQ(record(true), plain);
+  EXPECT_EQ(plain.find("coph"), std::string::npos);
 }

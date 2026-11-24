@@ -28,6 +28,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
 12. [Golden-image tests](#12-golden-image-tests)
 13. [Testing a document: `quit`, `assert` and `ari test`](#13-testing-a-document-quit-assert-and-ari-test)
+14. [Validating a document: the `.ari` schema and `ari validate`](#14-validating-a-document-the-ari-schema-and-ari-validate)
 
 ---
 
@@ -945,6 +946,11 @@ An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `loa
 `cvc::state` and never runs the DSL. The host runs the scripts (§9). This separation is
 why the same `LoadResult` can be driven by different hosts.
 
+The structure a document may have, every key and the values it takes, is the `.ari` schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)).
+The loader stays lenient, loading what it understands, but a build with the validator checks
+every document against the schema as it loads and warns about each place that breaks it (§14).
+
 ### 5.1 Top-level keys
 
 The built-in top-level keys (`is_builtin_block`,
@@ -962,9 +968,11 @@ the tray's bell or not (§5.24). `assets:` and
 `scenes:` are §5.18's shared meshes and scenes of their own.
 
 Any **other** top-level key is dispatched to a parser registered via
-`register_ari_block`, or — if none is registered — **silently ignored**. This is
-deliberate forward-compatibility: a document authored for a newer build still loads the
-parts an older build understands.
+`register_ari_block`, or, if none is registered, ignored: a document authored for a newer build
+still loads the parts an older build understands. It is not silent, though: the schema check
+(§14) warns about a key that is neither the schema's nor a registered block, unless the
+document declares the block in `customs:` (`- block: <name>`). The blocks the scripting hosts
+and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in the schema.
 
 ### 5.2 `meta:` and the `min_libcvc` gate
 
@@ -1275,7 +1283,7 @@ scene:
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
   its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
-  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  bound offsets, its `on_pick:`, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -1298,6 +1306,21 @@ and `TerminalScene`) counts an expression on the document's read lane
 (`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
+
+**Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
+handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
+descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the
+viewport's `on_pick:` does, and runs in the document's scope. The press's drags and release run
+it too, wherever they land (§5.18, Picking):
+
+```yaml
+scene:
+  nodes:
+    - node: crate_{i}
+      repeat: 4
+      source: { box: 1 }
+      on_pick: (if (= (get-attr event "phase") "down") (state-set "selected" "crate_{i}"))
+```
 
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
@@ -4466,7 +4489,7 @@ windows:
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
-| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. The picked node's own `on_pick:` (below) runs as well. |
 | `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
@@ -4497,6 +4520,25 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**A node's own `on_pick:`.** A node can carry an `on_pick:` (§5.4), so the scene says what a
+click on each thing does and the view need not sort picks by node:
+
+- **Which node's.** A press runs the `on_pick:` of the node it hits or, when that node has none,
+  of its nearest ancestor that has one: a group's handler covers its children, and a child's own
+  replaces it. A press that hits no such node runs none. In a slice view a press past the
+  volume's edge lands on the plane, not on the node.
+- **The press is the node's.** The node a press lands on keeps it: its `on_pick:` runs again on
+  each `drag` and on the `up`, wherever they land, with the same fields. `node` and `hit` say what
+  is under the pointer then, and `x`, `y` and `z` where, so a program can drag what it picked.
+- **Scope.** It runs in the document's scope, as `on_key:` does (§6.3): its keys resolve against
+  the document's prefix and it calls the document's functions, wherever the viewport sits, a
+  `load:`ed module's included.
+- **With the view's.** The view's own `on_pick:` runs too, in the view's scope. The two are
+  separate programs, so neither waits for the other: do not count on which runs first.
+  `SceneViews::pick` reports the node's in `PickHit::on_pick`.
+
+(`cvcgl_ariadne_node_pick`.)
 
 **Slice views.** `mode: slice` is a parallel view straight down one axis with no rotation
 (`CameraController::Mode::Slice`): the plane a `volume_slice` node (§5.4) lies in, with the
@@ -5218,10 +5260,27 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
   their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
   it is drawn in an application's scope.
+- **Mirrored in the state tree:** the Runtime writes the list under the document's prefix, as the
+  feed mirrors itself to `notify.*` (§5.24), for a Processes window or a launcher to read:
+  `ariadne.apps.<key>.name` (as the menu names it, a loader's `name:` included), `.scope` (its
+  prefix from the document's: `includes.fe_lab`) and `.running` (1, or 0 while it is quit), and
+  `ariadne.name`, the document's own `meta.name`.
+  `<key>` is the scope without its `includes` segments, joined by `_`: `fe_lab`, a repeated
+  mount's `cam_0`, a nested mount's `outer_inner`. It is written as the list changes, Quit and
+  reopening included; an application gone from the tree is taken out (`mirror_apps`).
+- **Whose a process is:** every process the Runtime starts records its context's chroot and the
+  document's prefix, so `(ps)` and `(inspect)` give it a `scope` from the document's prefix: `""`
+  for the document's own `on_tick:`, actions and tests, `includes.fe_lab` for the application's,
+  the children they spawn included (STATE_EXEC_DEVELOPER_GUIDE.md, "Whose a process is").
+  `components/processes.ari` lists them by application (§6.5). With its chroot recorded, an
+  action's async calls post their progress under its chroot, as
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) 3.10 says they do.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
-  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
-  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
-  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart`,
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`,
+  `TheApplicationsAreMirroredUnderTheDocumentsPrefix`, `ProcessRowsSayWhoseTheyAre` and
+  `ProcessesListsByApplicationAndKillsARow`, the loader's `ALoadedDocumentIsNamedByItsMeta`, and
+  `ari test src/ari/tests/processes_component.ari` (ctest `ari_processes_component`) check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
 
 ### 5.26 Colours from state: `color:` and `background: { color: }`
@@ -5550,6 +5609,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -8496,3 +8556,115 @@ Interactive behaviour, keys and both terminal backends are tested by driving `ar
 as `src/ari/tests/run_in_tmux_test.sh` (transfix/libcvc#883) does. Scripted input for `snapshot` and `test`, and file
 descriptors as state channels, are on the agenda (transfix/libcvc#894).
 
+---
+
+## 14. Validating a document: the `.ari` schema and `ari validate`
+
+### 14.1 The schema
+
+The `.ari` schema is a JSON Schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)):
+every top-level block, every built-in widget type and scene node, and the keys and values each
+takes, each described. It is the definition of a document's structure; where this guide and the
+schema disagree, the schema (with the loader beside it) is right. The library carries it
+compiled in (`cvc::ariadne::ari_schema_json()`; `ari schema` prints it), and an install puts it
+at `share/libcvc/ariadne/schema/ari.v1.schema.json`, so an editor can check a document as it is
+written. With the YAML language server (VS Code's YAML extension), a modeline does it:
+
+```yaml
+# yaml-language-server: $schema=../../src/cvc/ariadne/schema/ari.v1.schema.json
+```
+
+What the schema holds a document to:
+
+- **Every map is closed.** A key it does not list is an error: a misspelt key (`bnd:`), a
+  misspelt widget type (`slider_itn:`), a key on the wrong widget (a `commit:` on a button), a
+  misspelt block (`widnows:`). Three things stay open: a key that starts with `x-`, anywhere,
+  which is the author's or a tool's own; a custom widget's keys (`type: gauge`) and a custom
+  scene node's (`type: forest_trees`), which are their handler's; and a top-level block an app
+  registered (`register_ari_block`) or the document declares in `customs:`.
+- **Every value has its type**: a number where the loader reads one, one of the values an enum
+  key takes (`commit: live | release`), a colour in one of the forms §5.26 lists, `[x, y, z]`
+  for a position.
+- **A widget's type is its first type key**, in the loader's order
+  (`builtin_widget_types()`): a `progress:` with an `overlay:` caption is a progress. Two type
+  keys that are not such a pair are an error: in `{button: Go, text: x}` the text wins, and the
+  `button:` is an unknown key.
+- **What it cannot see**: inside a program (`on:`, `init:`, `visible_when:`, ...) it checks
+  only that it is text, and a `bind:` the same; a custom type's own keys not at all. The loader
+  and the runtime check the rest (a program that does not parse, a state key no one writes).
+
+Flags take every spelling the loader reads (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+A value written in YAML as `1.5` is a number, and `"1.5"` too: the schema types scalars as the
+loader reads them, not by their quotes.
+
+### 14.2 When a document is checked
+
+A build with the validator (json-schema-validator over nlohmann-json; `have_jsonschema()`,
+`ari info`'s *json_schema*) checks every document it loads:
+
+- the document itself, before anything else reads it;
+- each library it `import:`s, and each fragment it `load:`s (after the mount's `args:`);
+- each `include:` expansion, as a widget, after its args are substituted and its slots filled.
+  A problem there is reported in the unit's own file and line, with the context
+  `include <unit>`.
+
+Each problem is a warning, `ari: schema: <file>:<line>:<column>: <context>: <pointer>:
+<message>`, and a `SchemaIssue` in `LoadResult::schema_issues`. The load goes on: the loader is
+lenient, and a host decides how strict to be. `ari test` fails a document that warns, so a
+tested document is a valid one.
+
+`validate_string(app, yaml)` and `validate_file(app, path)` check a document without loading
+it: its structure, and each of its own `units:` instantiated with the args it declares (a
+`{name}` token only an include site fills is not checked). They resolve nothing.
+
+A build without the validator checks nothing: `validate_*` say so (`checked` is false) and
+loads report no schema issues. CI's libcvc lanes fail when their configure did not find it.
+
+### 14.3 `ari validate`
+
+```
+ari validate [--structural-only] [--strict] [--json] doc.ari...
+ari validate -              # a document on stdin
+ari schema                  # print the schema
+```
+
+`ari validate` checks each document: its structure and units (`validate_file`), then a load
+without running anything (no `init:`, no frame, no network), which checks what the load reaches
+and lists the loader's own warnings. Each problem is a line of its own, file first, as a
+compiler writes them:
+
+```
+doc.ari:11:5: /windows/0: unknown key 'closeable'
+doc.ari:14:9: /windows/0/children/0: unknown key 'bnd'
+doc.ari:16:13: /windows/0/children/0/hi: 'fast' is the wrong type here
+doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or write state
+```
+
+- `--structural-only`: the document and its units alone, nothing resolved (no imports, no
+  fragments): what an editor or a pre-commit hook wants.
+- `--strict`: a loader warning fails the document too.
+- `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
+  column, context, pointer, message), its load error and its warnings.
+
+The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
+the `cvc://` component library, `--component-path`). A document for arigl may name widget types
+`ari` does not have (`viewport`); the load warns about them, and the document is still valid.
+The exit code is 0 when every document is valid, 1 for a schema problem, 2 when a load fails
+(or warns, with `--strict`) or on a usage error, 3 when the YAML does not parse, and 4 when this
+`ari` was built without the validator.
+
+### 14.4 Changing the schema
+
+A key the loader reads goes in the schema in the same change: the test that every shipped
+document is valid (`ariadne_schema_test`'s `EveryShippedDocumentIsValid`) fails until it does.
+The schema keeps to what json-schema-validator implements (draft 7's keywords: no
+`unevaluatedProperties`, no `prefixItems`, no assertion beside a `$ref`), which
+`KeepsToWhatTheValidatorImplements` checks. A map whose every value has a schema (`keys:`,
+`data:`, ...) says so with `patternProperties: {"^.*$": ...}`, never a schema-valued
+`additionalProperties`: the validator reports an error in such a value as one message at the
+map, with no pointer into the value. `additionalProperties` is only ever `false`, closing a map.
+A widget type's schema, `w_<type>`, lists its own
+keys and takes the shared ones by the one pattern every type carries
+(`EveryWidgetTakesTheSharedKeys`); a new widget type also needs its link in `short_widget`, in
+the loader's order, and its entry in `typed_widget` (`EveryBuiltinWidgetTypeHasItsSchema`).

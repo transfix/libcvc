@@ -29,7 +29,9 @@ constexpr std::uint32_t kVehicleContact = plant_sample::has_vehicle_contact;
 #define CVC_LEDGER_VEH(field) [](const veh_nav_stats &v) { return static_cast<double>(v.field); }
 #define CVC_LEDGER_EP(field) [](const episode_nav_stats &e) { return static_cast<double>(e.field); }
 
-bool applies(const item &it, bool energy, bool plant, std::uint32_t measured) {
+bool applies(const item &it, bool energy, bool plant, std::uint32_t measured, bool coph) {
+  if (it.from == source::coph)
+    return coph;
   // A building contact needs a plant that collides; energy fed without a ledger counts as before.
   const bool has = (measured & it.needs) == it.needs;
   if (it.from == source::energy)
@@ -100,6 +102,46 @@ constexpr item kEpisodeItems[] = {
      kind::count, source::plant, kVehicleContact, nullptr, CVC_LEDGER_EP(total_vehicle_hits)},
 };
 
+// The CoPH ledger's (coph_driver.h): CoPH's frame, per unit mass ("1"), over the CoPH steps.
+constexpr item kCophVehicleItems[] = {
+    {"coph_steps", "", "CoPH steps its coph_driver took for it.", kind::count, source::coph, 0,
+     CVC_LEDGER_VEH(coph_steps), nullptr},
+    {"coph_work", "1",
+     "The work of the force it took along its path (CoPH's frame, per unit mass).", kind::measure,
+     source::coph, 0, CVC_LEDGER_VEH(coph_work), nullptr},
+    {"coph_heat", "1", "The heat CoPH's plant books under that force at the learner's damping.",
+     kind::measure, source::coph, 0, CVC_LEDGER_VEH(coph_heat), nullptr},
+    {"coph_kinetic_change", "1", "Its own kinetic energy change (CoPH's frame, per unit mass).",
+     kind::measure, source::coph, 0, CVC_LEDGER_VEH(coph_kinetic_change), nullptr},
+    {"coph_residual", "1",
+     "kinetic change - work + heat, summed: how far its motion is from CoPH's damped point mass.",
+     kind::measure, source::coph, 0, CVC_LEDGER_VEH(coph_residual), nullptr},
+    {"coph_residual_max", "1", "The largest |residual| of one CoPH step.", kind::measure,
+     source::coph, 0, CVC_LEDGER_VEH(coph_residual_max), nullptr},
+    {"coph_shaping_jumps", "1", "The learner's energy jumps at its commits, V_new(x) - V_old(x).",
+     kind::measure, source::coph, 0, CVC_LEDGER_VEH(coph_shaping_jumps), nullptr},
+    {"coph_unallocated_work", "1", "e . dq of the force it did not take.", kind::measure,
+     source::coph, 0, CVC_LEDGER_VEH(coph_unallocated_work), nullptr},
+    {"coph_risk_cost", "1", "dt 4 r over its CoPH steps, r the risk it read.", kind::measure,
+     source::coph, 0, CVC_LEDGER_VEH(coph_risk_cost), nullptr},
+    {"coph_allocation_residual", "1",
+     "sqrt(sum |e|^2 dt / sum |u|^2 dt): the share of CoPH's force it could not take.",
+     kind::measure, source::coph, 0, CVC_LEDGER_VEH(coph_allocation_residual), nullptr},
+};
+
+constexpr item kCophEpisodeItems[] = {
+    {"coph_vehicles", "", "Vehicles a coph_driver drove.", kind::count, source::coph, 0, nullptr,
+     CVC_LEDGER_EP(coph_vehicles)},
+    {"total_coph_work", "1", "Their coph_work, summed.", kind::measure, source::coph, 0, nullptr,
+     CVC_LEDGER_EP(total_coph_work)},
+    {"total_coph_heat", "1", "Their coph_heat, summed.", kind::measure, source::coph, 0, nullptr,
+     CVC_LEDGER_EP(total_coph_heat)},
+    {"total_coph_unallocated_work", "1", "Their coph_unallocated_work, summed.", kind::measure,
+     source::coph, 0, nullptr, CVC_LEDGER_EP(total_coph_unallocated_work)},
+    {"coph_residual_max", "1", "The largest |residual| of one CoPH step of any of them.",
+     kind::measure, source::coph, 0, nullptr, CVC_LEDGER_EP(coph_residual_max)},
+};
+
 #undef CVC_LEDGER_VEH
 #undef CVC_LEDGER_EP
 
@@ -109,12 +151,16 @@ std::span<const plant_ledger_item> plant_ledger_vehicle() { return kVehicleItems
 
 std::span<const plant_ledger_item> plant_ledger_episode() { return kEpisodeItems; }
 
+std::span<const plant_ledger_item> plant_ledger_coph_vehicle() { return kCophVehicleItems; }
+
+std::span<const plant_ledger_item> plant_ledger_coph_episode() { return kCophEpisodeItems; }
+
 bool plant_ledger_applies(const plant_ledger_item &it, const veh_nav_stats &v) {
-  return it.veh && applies(it, v.energy_tracked, v.plant_tracked, v.plant_measured);
+  return it.veh && applies(it, v.energy_tracked, v.plant_tracked, v.plant_measured, v.coph_tracked);
 }
 
 bool plant_ledger_applies(const plant_ledger_item &it, const episode_nav_stats &e) {
-  return it.ep && applies(it, e.energy_tracked, e.plant_tracked, e.plant_measured);
+  return it.ep && applies(it, e.energy_tracked, e.plant_tracked, e.plant_measured, e.coph_tracked);
 }
 
 } // namespace nav
