@@ -305,6 +305,16 @@ void world_clock::set_cap_scales_with_rate(bool on) {
   _cfg.cap_scales_with_rate = on;
 }
 
+int world_clock::max_steps_per_advance() const {
+  std::lock_guard<std::mutex> lk(_mutex);
+  return _cfg.max_steps_per_advance;
+}
+
+void world_clock::set_max_steps_per_advance(int n) {
+  std::lock_guard<std::mutex> lk(_mutex);
+  _cfg.max_steps_per_advance = n < 1 ? 1 : n;
+}
+
 std::uint64_t world_clock::total_dropped() const {
   std::lock_guard<std::mutex> lk(_mutex);
   return _dropped;

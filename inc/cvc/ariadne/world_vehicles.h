@@ -24,11 +24,13 @@
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/nav/detail/dyn_4w.h> // the models a twin steps: dyn4_params, dyn_bike_params, bike_veh
 #include <cvc/physics/dyn_boat_plant.h> // dyn_boat_desc
+#include <cvc/physics/field.h>          // boat_still_water's field
 #include <cvc/physics/types.h>
 #include <cvc/physics/vehicle.h> // vehicle_desc
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -303,6 +305,15 @@ struct entity_info {
   entity_pose pose;
   bool posed = false;
 };
+
+// An entity's pose for the pose stream: its chassis's centre, heading and horizontal velocity, and
+// when its chassis is a body in WORLD (a jolt vehicle's, a boat's hull, a dynamic plant's box)
+// that body's attitude, vertical speed and angular velocity too, so a client draws it pitched and
+// rolled as it is and a driver's model takes them from the sample (OW5m; the angular velocity
+// OW5n). Without one, a turn about z alone, not turning. The relay's room entities
+// (conference::entity_pose_subjects) and a driver's pose (holon) alike; entity_info::steer is the
+// steering angle that goes with it.
+physics::body_state entity_ride(const entity_info &e, const physics::world *world);
 
 // The navigator's drive on an entity's last tick, as a twin replays it: the coefficients its
 // policy gave (alpha, the walls' barrier; beta, the goal's pull; gamma, the damping), the point it
@@ -609,6 +620,8 @@ public:
   const std::vector<float> &sdf() const;
 
   std::vector<entity_info> entities() const;
+  // The physics world its entities are in.
+  const physics::world &world() const;
   // Entity `id`'s wheels as drawn (entity_wheel), as of the last step: a view poses each one.
   // Empty for an id that is not a placed entity.
   std::vector<entity_wheel> wheels(std::uint64_t id) const;
@@ -670,6 +683,14 @@ private:
 // same (OW5g: SceneWorld::vehicle_ground gives the two).
 double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
                              double x, double y);
+
+// The still water WorldVehicles adds for its boats when WORLD has none over GRID's water: a
+// fluid field (1000 kg/m^3, drag coefficient 1, damping 1e4) at the grid's water level over the
+// grid, from a metre below its lowest ground. Nothing for a grid without water, or where the
+// world's own water (a water node's field) covers the grid's first deep cell. A client predicting
+// a boat floats it on the same (OW5j: world_replica's water).
+std::optional<physics::field> boat_still_water(cvc::app &app, const nav::world_grid &grid,
+                                               const physics::world &world);
 
 } // namespace ariadne
 } // namespace cvc

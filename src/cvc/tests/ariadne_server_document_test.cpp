@@ -778,6 +778,22 @@ TEST(ServerBlockTest, ClientGuestsTakeOnOffOrCaps) {
   EXPECT_NE(bad.find("client_guests"), std::string::npos) << bad;
 }
 
+// leave_grace_s: a whole number of seconds, 0 or more; -1 when the block has none.
+TEST(ServerBlockTest, LeaveGraceTakesWholeSeconds) {
+  ari::ServerBlock b;
+  EXPECT_EQ(ari::parse_server_block(map({{"publish", scalar("cyprov")}}), b), "");
+  EXPECT_EQ(b.leave_grace_s, -1) << "not given";
+  EXPECT_EQ(ari::parse_server_block(map({{"leave_grace_s", scalar("60")}}), b), "");
+  EXPECT_EQ(b.leave_grace_s, 60);
+  EXPECT_EQ(ari::parse_server_block(map({{"leave_grace_s", scalar("0")}}), b), "");
+  EXPECT_EQ(b.leave_grace_s, 0) << "0: removed as the connection ends";
+  for (const char *bad : {"-1", "2.5", "soon", ""}) {
+    const std::string why = ari::parse_server_block(map({{"leave_grace_s", scalar(bad)}}), b);
+    EXPECT_NE(why.find("leave_grace_s"), std::string::npos) << bad << ": " << why;
+  }
+  EXPECT_NE(ari::parse_server_block(map({{"leave_grace_s", seq({"1"})}}), b), "");
+}
+
 namespace {
 namespace se = cvc::state_exec;
 

@@ -104,12 +104,16 @@ struct ServerBlock {
   std::vector<std::string> publish; // the published namespaces, in document order, no repeats
   ClientPrograms client_programs;
   ClientPrograms client_guests;
+  // How long the relay keeps a departed participant's subtree before removing it, in whole
+  // seconds (arisrv's --leave-grace-s overrides it); -1 when the block does not say.
+  long leave_grace_s = -1;
 };
 
 // Read a server: block's content into `out`: "" or what is wrong. A key it does not know is a
 // warning, pushed onto `warnings` when given. publish: takes a list of names, or one name.
 // client_programs: and client_guests: each take on/off (true/false), or a map of the caps (steps,
-// time in seconds, memory_mb), which turns them on.
+// time in seconds, memory_mb), which turns them on. leave_grace_s: takes a whole number of
+// seconds, 0 or more.
 std::string parse_server_block(const Value &content, ServerBlock &out,
                                std::vector<std::string> *warnings = nullptr);
 

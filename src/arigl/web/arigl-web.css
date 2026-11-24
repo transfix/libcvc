@@ -24,6 +24,13 @@ canvas#canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: b
 #overlay.failed #details { display: block; }
 #overlay.failed .spinner, #overlay.ended .spinner { display: none; }
 #overlay a { color: var(--accent); }
+/* The browser gate (arigl-web.js): a browser without JSPI gets what it needs, not the load. */
+#overlay.unsupported .spinner { display: none; }
+#overlay.unsupported #status { color: var(--fg); font-size: 17px; font-weight: 600; }
+#needs { max-width: 36em; text-align: center; }
+#needs p { margin: 0 0 10px; }
+#needs .ua { color: var(--dim); font: 11px/1.45 ui-monospace, monospace;
+             overflow-wrap: anywhere; }
 /* A warning while the document runs: the latest, over the canvas's bottom-left corner. */
 #warning { position: fixed; left: 8px; bottom: 8px; max-width: min(60em, calc(100% - 16px));
            padding: 4px 10px; box-sizing: border-box; background: #2b2410; color: #e5c07b;

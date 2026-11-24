@@ -30,10 +30,12 @@
 //           on: reset
 //
 // It builds the SAME Widget tree the programmatic builders (widget.h) produce, so
-// a .ari document and a hand-built tree are interchangeable. The full schema
-// (frame/layout/size, expressions, scene graph, meta/validation) follows in later
-// slices; unknown keys are ignored, not errors, so a fuller document still loads
-// its P0 subset.
+// a .ari document and a hand-built tree are interchangeable. The loader is lenient: it
+// loads what it understands and warns about the rest. The document's structure is
+// defined by the .ari schema (src/cvc/ariadne/schema/ari.v1.schema.json, docs/ARIADNE.md
+// §14); when this build has the validator, every load checks the document against it and
+// reports each problem (an unknown key, a wrong type) as a warning and in
+// LoadResult::schema_issues.
 
 #include <cstdint>
 #include <cvc/ariadne/data.h> // DataSpec
@@ -101,6 +103,31 @@ struct LintConfig {
   bool quiet = false;
 };
 
+// A place in a document where it breaks the .ari schema, and what is wrong there.
+struct SchemaIssue {
+  // The file it is in (a load's own file, an import:ed library, a load: fragment), or "" for a
+  // document given as a string.
+  std::string source;
+  // When it is in an include: expansion: "include <unit>", and `pointer`, `line` and `column`
+  // are the unit's, where the loader could tell (the include site's otherwise).
+  std::string context;
+  std::string pointer;      // a JSON Pointer to the value: /windows/0/children/2
+  int line = 0, column = 0; // 1-based, in `source`; 0 when unknown
+  std::string message;      // "unknown key 'bnd'", "'abc' is not a number", ...
+  // "<source>:<line>:<column>: <context>: <pointer>: <message>", leaving out what is unknown.
+  std::string text() const;
+};
+
+// What validate_string / validate_file found.
+struct ValidationResult {
+  // False when nothing was checked: this build has no validator (have_jsonschema()), or the
+  // YAML did not parse (`error` says why).
+  bool checked = false;
+  std::string error;               // the YAML could not be read or parsed
+  std::vector<SchemaIssue> issues; // where the document breaks the schema, in document order
+  bool ok() const { return checked && error.empty() && issues.empty(); }
+};
+
 struct LoadResult {
   bool ok = false;                        // false if the load failed (see `error`)
   Widget root;                            // a Group of the document's widgets (empty on failure)
@@ -157,6 +184,10 @@ struct LoadResult {
   std::vector<std::pair<std::string, Value>> extras;
   std::vector<std::string> warnings; // non-fatal issues (unknown types, empty binds, …)
   std::string error;                 // human-readable message when !ok
+  // Where the document, its import:ed libraries, its load: fragments and its include:
+  // expansions break the .ari schema (each also in `warnings`, as "ari: schema: " + text()).
+  // Empty when this build has no validator.
+  std::vector<SchemaIssue> schema_issues;
   // §12.5 hot-reload: the local FILE paths read during this load — the main document plus every
   // file:// import: and load: fragment (state/http sources are not file-watchable, so omitted).
   // A host watches these for mtime changes and re-loads on change; sources_changed() does the
@@ -201,18 +232,38 @@ bool sources_changed(const std::vector<std::string> &sources,
 bool have_yaml();
 
 // Whether this build has the JSON-Schema validator (nlohmann-json +
-// json-schema-validator). When true, load_* run Layer-2 structural validation
-// (roadmap §15) against the .ari schema and add any violations to `warnings`.
+// json-schema-validator). When true, load_* check documents against the .ari schema
+// (LoadResult::schema_issues) and validate_* work.
 bool have_jsonschema();
 
-// The JSON Schema (draft 2020-12) for a .ari document — the machine-readable
-// structural contract Layer-2 validates against, also usable by external tooling
-// (an editor, `ari validate`). Available regardless of have_jsonschema().
+// The .ari schema: the JSON Schema (draft 2020-12, in the subset json-schema-validator
+// implements) a document's structure must follow — every widget type, scene node and
+// top-level block, and the keys and values each takes. The text of
+// src/cvc/ariadne/schema/ari.v1.schema.json, compiled in; installed as
+// share/libcvc/ariadne/schema/ari.v1.schema.json for editors. Available regardless of
+// have_jsonschema().
 std::string ari_schema_json();
+
+// Check a .ari document's structure against the schema, without loading it: the YAML parses,
+// and the document, and each of its own units: instantiated with its declared args, follow
+// the schema. A top-level block `app` registered (register_ari_block) or the document declares
+// in customs: is allowed. It resolves nothing (no import:, load: or include: of an imported
+// unit): a load does that, and checks what it reaches (LoadResult::schema_issues). Never throws.
+ValidationResult validate_string(cvc::app &app, const std::string &yaml);
+// The same for a file; each issue's `source` is the file's path as given.
+ValidationResult validate_file(cvc::app &app, const std::string &path);
 
 // Whether `type` is a widget type the loader builds itself (text, slider_int, button, …) rather
 // than a custom one (has_widget_type). requires: and (has? ...) accept both.
 bool is_builtin_widget_type(const std::string &type);
+
+// Every built-in widget type, in the order the loader looks for a widget's type key: a widget
+// map's type is the first of these it has (so `progress: P` with `overlay: 50%` is a progress).
+std::vector<std::string> builtin_widget_types();
+
+// Every built-in top-level block (meta, windows, scene, ...): the keys the loader reads itself.
+// Any other top-level key is a custom block's (register_ari_block).
+std::vector<std::string> builtin_ari_blocks();
 
 // The libcvc version this build reports (CVC_VERSION_STRING) — what the
 // min_libcvc gate compares against. Exposed for tooling / diagnostics.

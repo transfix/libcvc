@@ -25,6 +25,12 @@
 // change — or every frame with setContinuous(true).  On single-threaded wasm
 // builds the raycast runs synchronously inside tick().
 //
+// VIEWS: another renderer that draws the scene from a camera of its own (an
+// Ariadne `viewport` widget, a thumbnail) gets a raycast of its own through
+// viewProp(): its own camera, picture, depth map and quad, and its own job.
+// The jobs, the node's own and every view's, share the node's raycaster on its
+// worker thread, taking turns.
+//
 // Settings are state-tree-bound: the node owns a cvc::volren::state_settings
 // at "<node state path>.volren" (renderer + per-volume settings; its
 // camera/raster fields are ignored — the LIVE viewer camera drives those),
@@ -85,7 +91,11 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
+class vtkActor;
+class vtkObject;
+class vtkRenderer;
 class vtkTextureObject;
 
 namespace cvc {
@@ -280,13 +290,57 @@ public:
   bool tick();
 
   // True when the frame ON SCREEN was raycast from the current camera,
-  // transform and settings, and no further raycast is pending.  Updated by
-  // tick().  Poll this before capturing a frame: "no new frame this tick" is
-  // ambiguous between settled and still-working, and under load the latter is
-  // what you get.
-  bool converged() const { return m_converged.load(std::memory_order_relaxed); }
+  // transform and settings, and no further raycast is pending -- in the node's
+  // own renderer and in every view that drew it since the last tick() or has a
+  // raycast in flight (viewProp).  Updated by tick() and viewProp().  Poll this
+  // before capturing a frame: "no new frame this tick" is ambiguous between
+  // settled and still-working, and under load the latter is what you get.
+  bool converged() const {
+    return m_converged.load(std::memory_order_relaxed) &&
+           m_viewsConverged.load(std::memory_order_relaxed);
+  }
 
-  // Perf/testing introspection.
+  // ---- views: other renderers that draw this node --------------------------
+  // This node as `view` draws it (a view of the scene from a camera of its own:
+  // Ariadne's `viewport` widget): a quad of its own showing a raycast of its
+  // own, made for `view`'s active camera at `view`'s size times
+  // resolutionScale(), depth-tested against what `view` draws with that
+  // camera's near and far (read at each draw).  Each view has its own camera,
+  // picture, depth map, quad and job; the jobs share this node's raycaster (one
+  // thread pool, its cached shadow maps, the app's CUDA device cache) on its
+  // worker thread, taking turns, so a view's job never replaces another's.
+  //
+  // A view raycasts again only when its camera or size, this node's transform
+  // or clip planes, or the settings change (every call, with continuous()),
+  // and never while it is hidden (vtkRenderer::GetDraw() off) or this node is.
+  // Call it each time `view` draws -- a mirror filter does
+  // (Viewport::setMirrorFilter) -- so a view that draws less often (a
+  // throttled one, Viewport::setRefreshHz) raycasts less often too.
+  //
+  // Null until the view's first raycast lands (its picture then shows from the
+  // next call), and before the node has a volume.  The quad takes no
+  // restyling.  It lives until releaseViewProp(view), or until `view` is gone,
+  // which the next tick() or viewProp() notices.  Owner thread.
+  vtkActor *viewProp(vtkRenderer *view);
+  void releaseViewProp(vtkRenderer *view);
+
+  // How many views hold a prop now (owner thread).
+  std::size_t viewCount() const;
+  // One view's raycasts, for tests and readouts: `launched` jobs submitted (or
+  // run inline on single-threaded wasm), `applied` frames shown, the raster of
+  // the last one, and whether what it shows matches its live camera with
+  // nothing in flight.  False when `view` holds no prop.  Owner thread.
+  struct view_stats {
+    std::uint64_t launched = 0;
+    std::uint64_t applied = 0;
+    int width = 0, height = 0;
+    bool converged = false;
+  };
+  bool viewStats(vtkRenderer *view, view_stats &out) const;
+
+  // Perf/testing introspection.  lastRenderSeconds is the last raycast's, in
+  // any renderer; framesRendered counts the frames applied in the node's own
+  // renderer (a view's are in viewStats).
   double lastRenderSeconds() const { return m_lastRenderSeconds.load(); }
   std::uint64_t framesRendered() const { return m_framesRendered.load(); }
   // Raster of the last APPLIED frame, 0 before the first one.  This is the
@@ -317,14 +371,21 @@ protected:
 private:
   struct snapshot; // camera + composed matrix + settings for one raycast
   struct worker;
+  struct view_quad; // a view's quad, picture, depth map and raycast identity (viewProp)
 
   void seedOwnState();
-  bool buildSnapshot(snapshot &out); // owner thread; false when not renderable yet
+  // Owner thread; false when not renderable yet. `ren` is the renderer whose camera and size the
+  // raycast is for, `view` its id (0 the node's own renderer).
+  bool buildSnapshot(snapshot &out, vtkRenderer *ren, std::uint64_t view);
   void applyFrame(const cvc::volren::frame &f, const snapshot &snap); // owner thread
+  void applyViewFrame(const cvc::volren::frame &f, const snapshot &snap); // owner thread
   void poseQuad(const snapshot &snap); // owner thread; every tick, hugs the live camera
   void pushDepthUniforms();            // owner thread, every tick
   void ensureQuad();
   void launchOrRun(const snapshot &snap);
+  void pruneViews();           // owner thread: the views whose renderer is gone go
+  void updateViewsConverged(); // owner thread: m_viewsConverged from the views
+  static void onViewShader(vtkObject *caller, unsigned long, void *clientData, void *callData);
 
   mutable std::mutex m_configMutex;                         // guards m_snapshotSettings + m_volumes
   cvc::volren::state_settings::snapshot m_snapshotSettings; // settings source of truth
@@ -357,6 +418,12 @@ private:
       m_colorTexObj; // raycast RGBA, sampled by our shader (wasm-safe)
   bool m_quadReady = false;
   bool m_frameAppliedSinceTick = false;
+
+  // The views (viewProp), owner thread only. Ids are never reused: a job of a view that went lands
+  // with an id no view has.
+  std::vector<std::unique_ptr<view_quad>> m_views;
+  std::uint64_t m_nextViewId = 1;
+  std::atomic<bool> m_viewsConverged{true};
 };
 
 } // namespace gl

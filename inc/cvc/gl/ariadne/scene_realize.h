@@ -25,6 +25,7 @@
 #include <cvc/ariadne/loader.h>      // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/ariadne/scene.h>       // SceneClock (RealizedScene holds the resolved clock by value)
 #include <cvc/ariadne/scene_world.h> // RealizedScene runs the scene's world (core libcvc)
+#include <cvc/ariadne/world_worker.h> // RealizedScene::world_worker (D3)
 #include <cvc/core/types.h>          // cvc::sdf_algorithm (sdf_volume_from_mesh)
 #include <cvc/core/world_clock.h>    // tick_scene returns the frame's world_clock::step_result
 #include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
@@ -185,6 +186,7 @@ struct RealizedScene {
     std::vector<std::string> tags;
     std::weak_ptr<GraphicsNode> node;
     bool subtree = true; // false: the tags are the node's own props', not its children's
+    std::string on_pick; // the node's on_pick: (realize_node's entry; a part's is empty)
   };
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
@@ -255,6 +257,11 @@ struct RealizedScene {
   std::unique_ptr<cvc::ariadne::SceneWorld> world;
   cvc::physics::world *physics = nullptr;
   std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
+  // D3: the worker that steps `world` off the frame's thread, in a local holon, when the host runs
+  // one (GlSceneAdapter owns it and stops it before this scene goes); null, and tick_scene steps
+  // the world itself. With it, tick_scene publishes what the worker ran (SceneWorld::publish_due)
+  // under the frame's lock, and holds the clock while the world is behind.
+  cvc::ariadne::world_worker *world_worker = nullptr;
   std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
   // The nodes the moving bodies draw, by node id: restart_scene_world binds them again.
   std::map<std::string, std::shared_ptr<GraphicsNode>> body_nodes;
@@ -286,6 +293,10 @@ struct RealizedScene {
   // A vehicle drawn as its box while its look's data package loads: the vehicles are drawn again
   // once none is loading (sync_vehicle_markers).
   bool vehicle_models_pending = false;
+  // The world's entities drawn at scale (entity_view.h, FL2): its entity_layer nodes' view, and
+  // the physics binding's group that poses it. Made by the first entity_layer node, else by
+  // update_entity_view (the implicit layer over every entity).
+  std::shared_ptr<struct scene_entities> entities;
   // The document's data: entries (Scene::data), which a node's model names (a boat's `model:`).
   std::vector<cvc::ariadne::SceneData> data;
   // The spawn points as drawn (their node ids), as of the spawn points' revision `spawns_rev`.

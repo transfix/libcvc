@@ -80,6 +80,7 @@ SceneNode scene_node_instance(const SceneNode &n, int index) {
   out.id = with_index(std::move(out.id), idx);
   out.visible_bind = with_index(std::move(out.visible_bind), idx);
   out.opacity_bind = with_index(std::move(out.opacity_bind), idx);
+  out.on_pick = with_index(std::move(out.on_pick), idx);
   for (std::string &t : out.tags)
     t = with_index(std::move(t), idx);
   out.source_file = with_index(std::move(out.source_file), idx);

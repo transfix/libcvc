@@ -30,7 +30,8 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/ariadne/node_data.h> // a node's data on the state tree, followed
+#include <cvc/gl/ariadne/entity_view.h> // the world's vehicles at scale (FL2)
+#include <cvc/gl/ariadne/node_data.h>   // a node's data on the state tree, followed
 #include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
@@ -1099,7 +1100,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   bind_live_texture(sg, n, node, bind_prefix, out, warnings); // material: { texture: { stream } }
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node});              // added once every node exists (realize_physics)
-  out.nodes.push_back({n.id, n.tags, node});
+  out.nodes.push_back({n.id, n.tags, node, true, n.on_pick});
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
@@ -1590,11 +1591,19 @@ void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
     return;
   g.setUseSingleColor(n.use_single_color);
   g.setColor(n.color[0], n.color[1], n.color[2]);
-  g.setAmbient(n.ambient);
-  g.setDiffuse(n.diffuse);
-  if (n.has_specular) {
-    g.setSpecular(n.specular);
-    g.setSpecularPower(n.specular_power);
+  if (n.has_pbr) { // physically based: the Phong keys do not apply
+    g.setMetallic(n.pbr_metallic);
+    g.setRoughness(n.pbr_roughness);
+    g.setEmissive(n.pbr_emissive[0], n.pbr_emissive[1], n.pbr_emissive[2]);
+    g.setCoat(n.pbr_coat, n.pbr_coat_roughness);
+    g.setPBR(true);
+  } else {
+    g.setAmbient(n.ambient);
+    g.setDiffuse(n.diffuse);
+    if (n.has_specular) {
+      g.setSpecular(n.specular);
+      g.setSpecularPower(n.specular_power);
+    }
   }
   if (n.has_opacity) // see-through below 1, even when forced opaque (GeometryNode::setForceOpaque)
     g.setOpacity(n.opacity);
@@ -1790,6 +1799,16 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
 
 } // namespace
 
+namespace {
+// Whether a node, at any depth, has a pbr: material.
+bool scene_has_pbr(const std::vector<cvc::ariadne::SceneNode> &nodes) {
+  for (const cvc::ariadne::SceneNode &n : nodes)
+    if ((n.has_material && n.has_pbr) || scene_has_pbr(n.children))
+      return true;
+  return false;
+}
+} // namespace
+
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
   return realize_scene(sg, scene, bind_prefix, warnings, RealizeOptions());
@@ -1916,6 +1935,21 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   }
   if (scene.has_chrome) // strip/show the SceneGraph diagnostic chrome (grid/axis/bbox)
     sg.setDiagnosticChromeVisible(scene.chrome_visible);
+  // The light from all round, for the pbr: materials: the scene's environment:, or the default
+  // one when it has a pbr: node and no environment: (environment: false lights them with the
+  // lights alone).
+  if (scene.environment_off) {
+    sg.setImageBasedLighting(false);
+  } else if (scene.has_environment || scene_has_pbr(scene.nodes)) {
+    double sky[3], horizon[3], ground[3];
+    for (int c = 0; c < 3; ++c) {
+      sky[c] = scene.environment_sky[c];
+      horizon[c] = scene.environment_horizon[c];
+      ground[c] = scene.environment_ground[c];
+    }
+    sg.setEnvironment(sky, horizon, ground);
+    sg.setImageBasedLighting(true);
+  }
   return out;
 }
 
@@ -2253,7 +2287,10 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
     // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
     // rate). Pull, advance, push.
-    clock_step = realized.clock_driver->drive(wall_dt);
+    // A world on a worker that has fallen behind holds the clock this frame: it runs slower than
+    // its speed, as a world too heavy for this thread would, rather than further behind.
+    const bool held = realized.world_worker && wall_dt < 0.0 && realized.world_worker->behind();
+    clock_step = held ? realized.clock_driver->hold() : realized.clock_driver->drive(wall_dt);
   }
 
   // physics: step the world by the quanta the clock just ran, then pose the moving bodies' nodes
@@ -2262,7 +2299,16 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     cvc::world_clock &wc = realized.app->world_clock();
     try {
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
-      realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      if (realized.world_worker) {
+        // D3: the worker steps it (and captures its poses); this thread publishes what it ran,
+        // under the frame's lock (AriRuntime::frame), with the world's syncs.
+        if (const std::string failed = realized.world_worker->error(); !failed.empty())
+          throw std::runtime_error(failed);
+        realized.world->publish_due();
+      } else {
+        realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      }
+      update_entity_view(realized, renderer);  // the entity layers, and who is promoted
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
       pose_vehicle_wheels(realized);           // each wheel where its plant has it
       sync_spawn_markers(realized, nullptr);   // the spawn points, as edited

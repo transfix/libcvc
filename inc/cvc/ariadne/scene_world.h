@@ -140,6 +140,10 @@ public:
   // Pull the clock's keys (speed, pause, mode, step requests), advance by `wall_dt` seconds (< 0:
   // the real time since the last call, 0 on the first), push its time and tick.
   cvc::world_clock::step_result drive(double wall_dt);
+  // As drive(), but the clock runs no time and the wall time since the last call is let go: a
+  // world stepped on a worker that has fallen behind (world_worker::behind) runs slower than its
+  // speed, as one too heavy for the frame's thread would, instead of further behind.
+  cvc::world_clock::step_result hold();
 
 private:
   struct impl;
@@ -241,7 +245,9 @@ public:
   // Run the steps due on `clock` since the last call and publish the telemetry when any ran. The
   // first call anchors at the clock's tick and runs none. `after_step` is called after the last two
   // steps of a batch (and once on the first call), where a view captures the poses it draws
-  // between (pose_tracker::capture). Returns the steps run.
+  // between (pose_tracker::capture). Returns the steps run. The first call also sets the world's
+  // field time to the clock's time (world::set_field_time), as world::follow does, so its water's
+  // waves are read at the clock's time from then on.
   std::uint64_t follow(const cvc::world_clock &clock,
                        const std::function<void()> &after_step = nullptr);
   // The same, with `before_each` called before each step (after the vehicles, boats and weather
@@ -251,6 +257,21 @@ public:
   using step_hook = std::function<void(std::uint64_t tick)>;
   std::uint64_t follow(const cvc::world_clock &clock, const std::function<void()> &after_step,
                        const step_hook &before_each, const step_hook &after_each);
+
+  // Stepped on a thread of its own (world_worker, a drawn host's D3): follow() then only steps. It
+  // runs no sync() and writes no key, since a state subscriber runs on the thread that writes, and
+  // after each step it calls `capture` when it is given no after_step of its own (a holon's follow
+  // gives none), where a view's pose_tracker captures. The host's thread calls publish_due() in
+  // their place, under the lock the steps take. `restarted` runs at the end of each restart() (on
+  // the host's thread), where the stepper anchors the world on its own clock again: the host's
+  // clock went back (sim.restart), and may be past where it was by the time the stepper looks. Off
+  // (the default), follow() does all of it.
+  void set_deferred(bool on, std::function<void()> capture = nullptr,
+                    std::function<void()> restarted = nullptr);
+  bool deferred() const;
+  // While deferred, on the host's thread: sync(), then the telemetry follow() leaves out when any
+  // step ran since the last call. Returns how many ran.
+  std::uint64_t publish_due(std::vector<std::string> *warnings = nullptr);
 
   // Rebuild the world as build() made it: the same object, a fresh physics world with the same
   // config and materials, each node's body where the document put it (at rest unless it declared
@@ -358,6 +379,8 @@ public:
 
 private:
   SceneWorld();
+  // The telemetry of steps that ran: the stats, the vehicles', the boats' and the weathers' keys.
+  void publish_steps();
   // The world on's first grid and the world its node makes (its terrain, its roads), as the
   // vehicles take them.
   void ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> &grid,
