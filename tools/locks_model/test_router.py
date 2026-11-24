@@ -127,6 +127,24 @@ class Explorer(unittest.TestCase):
                         colour[v] = 2
                         stack.pop()
 
+    def test_an_islands_own_messages_die_with_it(self):
+        # S2b.0a: an island homes nothing for another group, so its teardown forwards none of its
+        # own keys' messages; they die with it, counted, as a Stage 1 group's do (not `lost`)
+        m = rt.Model(rt.make_config('R1:s', dict(islands=1, rdie=1), rt.ALL))
+        s = m.initial()
+        for label in (('td', rt.H), ('td', rt.H), ('td', rt.H), ('step', 0)):
+            s = m.successors(s, label)[0][1]   # H closes, unregisters, kills; R1 sends locally
+        self.assertFalse(s[rt.REG])
+        self.assertEqual(s[rt.HOMES][rt.R1][2], (0,))
+        notes = []
+        s = m.apply(s, ('td', rt.R1), (), notes).freeze()
+        self.assertIn('die with it', ' '.join(notes))
+        self.assertEqual(s[rt.ING][rt.G0], ())   # nothing forwarded
+        while s[rt.TDR][0] != rt.TD_DONE:
+            s = m.successors(s, ('td', rt.R1))[0][1]
+        self.assertTrue(m.idle(s))
+        self.assertEqual(m.idle_check(s), [])
+
     def test_a_poster_waits_on_a_closed_home(self):
         # rehome-order: H closed and still registered; R1's subscribe waits for the unregister
         m = rt.Model(rt.make_config('R1:r', {}, rt.ALL))

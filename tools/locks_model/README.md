@@ -1027,8 +1027,9 @@ but one and must find its violation.
     and its own receiver, parked locally while it was off, never saw it. S2b.0a's island rule (not
     this model's first proposal, the router on while any group exists, which would have routed
     every plain group's own messaging through group 0): a group with no prefix keeps every key no
-    other group's prefix covers in its own scheduler, router on or off; its teardown forwards its
-    own pending messages as a home's.
+    other group's prefix covers in its own scheduler, router on or off. It homes nothing for
+    another group, so its teardown forwards none of its own keys' messages: they die with it,
+    counted, as a Stage 1 group's do, which the model expects (not `lost`).
 12. **`adopt`** (`duplicate`, 15 steps; S2b.0 documented it as a gap). A tracked broadcast whose
     home was torn down with copies outstanding lost its tracking, each stale copy was applied
     untracked at the new home, and the message reached a second wait. S2b.0a: the teardown
@@ -1116,7 +1117,7 @@ deep`'s run (the quick checks keep their states as tuples, the deep ones encoded
 | `amended-receiver-teardown` | `S:s,H:r,R1:t,R2:r`, choice=1, rdie=1, throws=1, amend all | 44,167 | 108,123 | 2.1 | - |
 | `amended-caps` | `S:ss,R1:t,R2:r`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 20,156 | 47,819 | 0.7 | - |
 | `amended-islands` | `S:ss,R1:t,R2:r`, islands=1, kills=1, amend all | 62,219 | 144,763 | 3.0 | gap-island-rehomed |
-| `amended-island-teardown` | `R1:r,R1:s,R2:t`, islands=1, rdie=1, amend all | 10,191 | 24,832 | 0.4 | gap-island-rehomed |
+| `amended-island-teardown` | `R1:r,R1:s,R2:t`, islands=1, rdie=1, amend all | 9,921 | 24,193 | 0.2 | gap-island-rehomed |
 | `amended-host-posts` | `X:p,S:s,R1:t,R2:r`, icap=1, amend all | 25,716 | 58,442 | 0.9 | - |
 | `gap-island-rehomed` | `S:s,R1:r`, islands=1, amend all | 91 | 143 | 0.0 | gap-island-rehomed |
 | `gap-requeue-order` | `S:ss,R1:tr,R2:r`, teardown=0, amend all | 2,806 | 5,269 | 0.1 | gap-requeue-order |
