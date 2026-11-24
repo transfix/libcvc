@@ -509,6 +509,26 @@ def test_s2b7_post_message_returns_bool():
     assert ex.run('(msg-recv "s2b7.x")') == "1"
 
 
+def test_s2b7_a_global_key_meets_across_pooled_execs():
+    # S2b.7 (exec_router.h's homes): pooled programs meet on an app-global key. "/s2b7.jobs" is
+    # homed at group 0, the app's exec scheduler, which run_all drains between rounds: pooled Exec
+    # 0's program receives what pooled Exec 1's sends there. Its reply goes to a key under Exec 1's
+    # chroot ("/s2b7pool.1.reply"), homed at Exec 1's group, where Exec 1's program waits on it as
+    # "reply". Needs the router (S2b.4); without it each key stays in its sender's group and the
+    # receiver is killed at its idle limit.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=S2B_THREADS, size=2, prefix="s2b7pool",
+                          idle_timeout=3 * WAIT)
+    try:
+        res = pool.run_all([
+            '(begin (set m (msg-recv "/s2b7.jobs")) (msg-send "/s2b7pool.1.reply" (+ m 1)) m)',
+            '(begin (msg-send "/s2b7.jobs" 41) (msg-recv "reply"))',
+        ])
+    finally:
+        pool.close()
+    assert res == ["41", "42"], res
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

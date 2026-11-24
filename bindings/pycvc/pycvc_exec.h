@@ -244,10 +244,13 @@ private:
   // rounds until every program has ended or passed its idle limit, then waits for their kernels.
   // With nothing to pump between rounds it waits once for the batch, on `control`'s wakeup, which
   // its groups' posts notify for the batch (S2-Q6). Once `control.closing` is set, what runs is
-  // killed and what has not started is not started.
+  // killed and what has not started is not started. `group0` (the app's exec scheduler, or null),
+  // the home of the programs' keys outside their chroots, is drained before each round while it
+  // has posts and no other thread pumps it (S2b, exec_router.h's homes).
   static std::vector<batch_outcome> run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                               std::span<const std::string> programs, bool fresh_env,
-                                              batch_control &control);
+                                              batch_control &control,
+                                              cvc::state_exec::async_scheduler *group0);
 #endif
 };
 

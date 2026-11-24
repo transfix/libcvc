@@ -581,8 +581,11 @@ pool.close()
   `(lock-query)` in a pooled program shows the pids of its own `Exec`'s holds.
 - **Channels.** Each pooled `Exec`'s group is the home of the channels under its chroot, so a
   program's own channels stay in its group. A key outside it (`"/jobs"`) is app-global: its home is
-  the app's exec scheduler (group 0). A key under another pooled `Exec`'s chroot
-  (`"/<prefix>.1.inbox"`) goes straight to that `Exec`'s group.
+  the app's exec scheduler (group 0), which the pool builds when it is made and `run_all` drains
+  before each round, while it has posts and no other thread (an Ariadne frame) pumps it, so
+  programs of different pooled `Exec`s meet there. A key under another pooled `Exec`'s chroot
+  (`"/<prefix>.1.inbox"`) goes straight to that `Exec`'s group. A post to group 0 from outside the
+  batch is found at the batch wait's end (at most 50 ms).
 - `info(pid)` returns a process's row as its group last published it (each pump ends with a
   publish), any thread, as a dict: `pid`, `name`, `owner`, `uid`, `scope`, `parent_pid`, `status`
   (a `pycvc.process_status`), `base_priority`, `effective_priority`, `floor`, `locks_held` (the
