@@ -801,11 +801,18 @@ void async_scheduler::leave_router() {
   // (1) Its handle closes: a post through it is refused from now on, and its poster re-resolves
   // the home, waiting while that is still this group (exec_router.h, "Teardown and rehoming").
   route_self_.close();
-  // The keys it homes: only a group with a prefix homes any (an island homes nothing for another
-  // group: its own keys' messages die with it, counted), found while it is still registered.
+  // The keys whose messages it holds for a prefix, found before its own prefixes go: while it is
+  // registered, the keys they cover. Unregistered already (Ariadne's move, when another thread held
+  // its token, unregistered it alone; or a second leave), the keys another group's prefix covers
+  // now. An island homes nothing for another group: its own keys' messages die with it, counted.
+  // With the router off no group has a prefix: nothing is asked of it (RT-1).
   const bool prefixed = router_->has_prefix(route_self_);
+  const bool others = prefixed || router_->active();
   const auto homed = [&](const std::string &key) {
-    return prefixed && !never_routed(key) && cached_home(key) == route_self_;
+    if (!others || never_routed(key))
+      return false;
+    const group_ref h = cached_home(key);
+    return prefixed ? h == route_self_ : h && !h.is_group0() && h != route_self_;
   };
   const auto forward = [&](detail::route_entry &&e) {
     if (post_routed(router_->new_home_of(e.key), std::move(e)) <= 0)

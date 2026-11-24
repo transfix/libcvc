@@ -640,6 +640,39 @@ TEST(RouterR, TheDirectoryAndThePublishFollowTheProcess) {
   EXPECT_FALSE(app.exec_router().directory().find(pid).has_value());
 }
 
+// Ariadne's move (A's retire_from_router): the old group leaves the router under its token, after
+// its processes were killed and reaped and the new group registered the same prefix; its teardown
+// leaves again and finds nothing. When the token was held elsewhere the move only unregistered
+// it: its teardown still forwards what it held for the prefix, to the group that has it now.
+TEST(RouterR, LeavingTheRouterTwiceAndAfterAMove) {
+  cvc::app app;
+  auto old_group = std::make_unique<r_world>(app, "old", std::vector<std::string>{"d"});
+  ASSERT_TRUE(old_group->sched->post_message("d.k", envelope("held")));
+  const int pid = old_group->submit(R"((get-attr (msg-recv "never") "payload"))");
+  old_group->pump();
+  r_world moved(app, "new", {"d"}); // the same prefix, registered after
+  ASSERT_TRUE(old_group->sched->kill(pid));
+  ASSERT_TRUE(old_group->sched->reap(pid));
+  old_group->sched->leave_router(); // no lock port closed first
+  moved.sched->drain_ingress();
+  EXPECT_EQ(drain_fifo(*moved.sched, "d.k"), (std::vector<std::string>{"held"}));
+  const se::async_scheduler::ingress_stats before = old_group->counters();
+  old_group->sched->leave_router(); // again: nothing to send
+  old_group.reset();                // and its teardown's
+  EXPECT_FALSE(moved.sched->has_pending_ingress());
+  EXPECT_EQ(before.destroy_dropped, 0u);
+
+  // Only unregistered by the move: the teardown forwards to the prefix's home now.
+  auto held = std::make_unique<r_world>(app, "held", std::vector<std::string>{"e"});
+  ASSERT_TRUE(held->sched->post_message("e.k", envelope("kept")));
+  held->pump();
+  r_world next(app, "next", {"e"});
+  app.exec_router().unregister(held->group->route());
+  held.reset();
+  next.sched->drain_ingress();
+  EXPECT_EQ(drain_fifo(*next.sched, "e.k"), (std::vector<std::string>{"kept"}));
+}
+
 // The cache of homes is checked against the router's epoch: a key homed at group 0 is sent to a
 // group registered for it since.
 TEST(RouterR, TheCacheOfHomesFollowsTheEpoch) {
