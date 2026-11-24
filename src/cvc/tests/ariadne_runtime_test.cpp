@@ -295,6 +295,13 @@ struct MockBackend : Backend {
     rec(std::string("color:") + l);
     return color_ret;
   }
+  ColorEdit color_hex(const char *l, const float rgb[3]) override {
+    last_color[0] = rgb[0];
+    last_color[1] = rgb[1];
+    last_color[2] = rgb[2];
+    rec(std::string("color_hex:") + l);
+    return color_ret;
+  }
   bool draw_image_ret =
       false;              // whether the mock "drew" the image (else the core falls back to text)
   std::string last_image; // the image name the core resolved (src or bound key)
@@ -4411,6 +4418,46 @@ TEST(AriadneRuntime, ColorWidgetReadsAndWritesCsv) {
   EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
 }
 
+// fmt: hex draws the picker as one "#rrggbb" field (Backend::color_hex), reading and writing the
+// same "r,g,b" key; fmt: rgb (the default) the per-channel picker; another fmt warns.
+TEST(AriadneRuntime, ColorWidgetFmtHexDrawsTheHexPicker) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("tint").value(std::string("0.2,0.4,0.6"));
+  const LoadResult r =
+      load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: W\n    children:\n"
+                       "      - color: Hex\n        bind: tint\n        fmt: hex\n"
+                       "      - color: Rgb\n        bind: tint\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty());
+  mb.color_ret = ColorEdit{true, true, true, {0.1f, 0.5f, 0.9f}};
+  rt.set_root(r.root);
+  rt.render();
+  EXPECT_TRUE(mb.saw("color_hex:Hex"));
+  EXPECT_FALSE(mb.saw("color:Hex"));
+  EXPECT_TRUE(mb.saw("color:Rgb"));
+  EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
+  const LoadResult bad =
+      load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: W\n    children:\n"
+                       "      - color: Odd\n        bind: tint\n        fmt: hsv\n");
+  ASSERT_TRUE(bad.ok) << bad.error;
+  // The loader's own warning; a build with the schema validator flags the same fmt as well.
+  std::vector<std::string> loader_warnings;
+  for (const std::string &w : bad.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      loader_warnings.push_back(w);
+  ASSERT_EQ(loader_warnings.size(), 1u);
+  EXPECT_NE(loader_warnings[0].find("not rgb or hex"), std::string::npos) << loader_warnings[0];
+  if (cvc::ariadne::have_jsonschema()) {
+    bool flagged = false;
+    for (const cvc::ariadne::SchemaIssue &i : bad.schema_issues)
+      flagged = flagged || i.pointer == "/windows/0/children/0/fmt";
+    EXPECT_TRUE(flagged);
+  }
+}
+
 TEST(AriadneRuntime, ColorWidgetFallsBackToTextWhenBackendCantDraw) {
   cvc::app app;
   Runtime rt(app, "");
@@ -7955,6 +8002,43 @@ TEST(AriadneRuntime, ProgramsAndWarningsPostToTheFeedFromTheirDocument) {
 
 // §5.24 `notifications: false` keeps the bell out of the tray whatever the feed holds; `- bell`
 // places it among the tray's icons.
+// §5.28 a notification's context menu copies its whole message: the core hands the backend the
+// entry's text (next_item_copy) before the bell's one-line entry and the Notifications window's.
+TEST(AriadneRuntime, ANotificationsEntryCopiesItsWholeMessage) {
+  struct CopyBackend : TrayBackend {
+    void next_item_copy(const std::string &t) override { rec("copy:" + t); }
+  };
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  CopyBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  cvc::notification n;
+  n.text = "build failed\nstep 3: link error";
+  cvc::notify(app, n);
+  mb.open = "\xF0\x9F\x94\x94";
+  rt.render();
+  const auto at = [&](const std::string &prefix) {
+    for (std::size_t i = 0; i < mb.log.size(); ++i)
+      if (mb.log[i].rfind(prefix, 0) == 0)
+        return static_cast<int>(i);
+    return -1;
+  };
+  const int copy = at("copy:" + n.text), entry = at("menu_action:\xE2\x80\xA2 build failed  ");
+  ASSERT_GE(copy, 0) << mb.dump();
+  EXPECT_EQ(copy + 1, entry) << "just before the entry\n" << mb.dump();
+  EXPECT_LT(at("copy:"), at("menu_action:Mark all read")) << "the bell's own items copy nothing";
+  EXPECT_EQ(at("copy:"), copy) << "one entry, one copy";
+  // The Notifications window: the same, before the entry's line.
+  mb.open.clear();
+  cvc::state::instance(app)("ui.demo.tree._notifications.open").value("1");
+  mb.log.clear();
+  rt.render();
+  const int wcopy = at("copy:" + n.text), line = at("text_line:\xE2\x80\xA2 build failed  ");
+  ASSERT_GE(wcopy, 0) << mb.dump();
+  EXPECT_EQ(wcopy + 1, line) << mb.dump();
+}
+
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
   {
     cvc::app app;

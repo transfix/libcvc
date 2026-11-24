@@ -103,11 +103,11 @@ struct block_table {
 };
 // The top-level keys the loader reads itself (builtin_ari_blocks).
 constexpr const char *kBuiltinBlocks[] = {
-    "meta",      "menubar", "windows",      "overlays",      "root",         "children",
-    "scene",     "customs", "init",         "on_tick",       "on_key",       "on_pointer",
-    "on_signal", "units",   "import",       "channels",      "lint",         "args",
-    "requires",  "keys",    "windows_menu", "tests",         "functions",    "data",
-    "assets",    "scenes",  "clock",        "menu_collapse", "notifications"};
+    "meta",      "menubar", "windows",      "overlays",      "root",          "children",
+    "scene",     "customs", "init",         "on_tick",       "on_key",        "on_pointer",
+    "on_signal", "units",   "import",       "channels",      "lint",          "args",
+    "requires",  "keys",    "windows_menu", "tests",         "functions",     "data",
+    "assets",    "scenes",  "clock",        "menu_collapse", "notifications", "prototypes"};
 bool is_builtin_block(const std::string &k) {
   for (const char *b : kBuiltinBlocks)
     if (k == b)
@@ -260,6 +260,15 @@ struct Ctx {
   // count explode exponentially.
   std::map<std::string, YAML::Node> units;
   std::set<std::string> expanding;
+
+  // The document's `prototypes:`, scene-node templates stored raw like units, which a node's
+  // `use:` instantiates (expand_use). `using_protos` is their expansion stack (a cycle guard, as
+  // `expanding` is for units). `proto_assets` are the hidden assets the instances' meshes share,
+  // id -> the part's { source, fit }, in the order first used: the load adds them to every
+  // scene's assets.
+  std::map<std::string, YAML::Node> prototypes;
+  std::set<std::string> using_protos;
+  std::vector<std::pair<std::string, YAML::Node>> proto_assets;
 
   // §12 cross-file libraries: `import:` merges another .ari file's units in. base_dir is the
   // importing file's directory (relative imports resolve against it; empty for load_string).
@@ -1596,6 +1605,12 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
     check_bind(ctx, "color", label, bind);
     Widget w = color_widget(label, bind, str(n, "default", str(n, "def")));
     w.on = action(n);
+    // fmt: rgb (a field per channel, the default) or hex (one "#rrggbb" field).
+    w.fmt = str(n, "fmt", "rgb");
+    if (w.fmt != "rgb" && w.fmt != "hex") {
+      ctx.warn("ari: color '" + label + "': fmt '" + w.fmt + "' is not rgb or hex -- rgb");
+      w.fmt = "rgb";
+    }
     return w;
   }
   if (type == "image") { // a host-published image, or a picture by URI (§5.11)
@@ -2777,7 +2792,8 @@ bool known_scene_node_key(const std::string &k) {
   return k == "node" || k == "id" || k == "type" || k == "source" || k == "material" ||
          k == "transform" || k == "fit" || k == "visible" || k == "volren" || k == "volslice" ||
          k == "volume" || k == "shader" || k == "clip" || k == "body" || k == "children" ||
-         k == "casts_shadow" || k == "tags" || k == "repeat" || k == "on_pick";
+         k == "casts_shadow" || k == "tags" || k == "repeat" || k == "on_pick" || k == "use" ||
+         k == "args";
 }
 
 // A node's subtree has a repeat: below its root.
@@ -3326,6 +3342,137 @@ SceneClip parse_scene_clip(const YAML::Node &c) {
   return clip;
 }
 
+// A scalar anywhere under `n` holds a {name} token: a value each instance may fill in differently
+// (a prototype's args, a repeat's {i}).
+bool has_brace_token(const YAML::Node &n) {
+  if (n.IsScalar()) {
+    const std::string &s = n.Scalar();
+    for (std::size_t i = s.find('{'); i != std::string::npos; i = s.find('{', i + 1)) {
+      const std::size_t close = s.find('}', i);
+      if (close == std::string::npos)
+        return false;
+      const std::string name = s.substr(i + 1, close - i - 1);
+      if (!name.empty() && std::all_of(name.begin(), name.end(),
+                                       [](unsigned char c) { return std::isalnum(c) || c == '_'; }))
+        return true;
+    }
+    return false;
+  }
+  if (n.IsSequence()) {
+    for (const YAML::Node &e : n)
+      if (has_brace_token(e))
+        return true;
+  } else if (n.IsMap()) {
+    for (const auto &kv : n)
+      if (has_brace_token(kv.second))
+        return true;
+  }
+  return false;
+}
+
+// A prototype's part whose mesh its instances share: a geometry node with no body: or world:
+// (physics reads a primitive's shape off its source) whose source is a file, a URI or a primitive
+// with no {name} token in it or its fit:.
+bool shares_proto_mesh(const YAML::Node &part) {
+  if (!part.IsMap() || str(part, "type", "geometry") != "geometry" || part["body"] || part["world"])
+    return false;
+  const YAML::Node src = part["source"];
+  if (!src || has_brace_token(src) || (part["fit"] && has_brace_token(part["fit"])))
+    return false;
+  if (src.IsScalar())
+    return true;
+  return src.IsMap() && !src["asset"] && !src["data"] && !src["heightfield"] && !src["sdf"] &&
+         (src["file"] || src["uri"] || src["box"] || src["sphere"] || src["plane"]);
+}
+
+// Point an instance's mesh parts at hidden assets, one per part of the prototype (`id`, the part's
+// path in it), so every instance's part is read and fitted once and drawn from one set of VTK
+// arrays (assets:, GeometryNode::shareArraysFrom). `part` is the prototype's own, `inst` the
+// instance's copy; the instance's children begin with the prototype's, in order. `own_mesh`: the
+// use site gave the instance's root a source: or fit: of its own.
+void share_proto_meshes(Ctx &ctx, const YAML::Node &part, YAML::Node inst, const std::string &id,
+                        bool own_mesh) {
+  if (!own_mesh && shares_proto_mesh(part)) {
+    const bool known = std::any_of(ctx.proto_assets.begin(), ctx.proto_assets.end(),
+                                   [&id](const auto &a) { return a.first == id; });
+    if (!known) {
+      YAML::Node asset;
+      asset["source"] = YAML::Clone(part["source"]);
+      if (part["fit"])
+        asset["fit"] = YAML::Clone(part["fit"]);
+      ctx.proto_assets.emplace_back(id, asset);
+    }
+    YAML::Node src;
+    src["asset"] = id;
+    inst["source"] = src;
+  }
+  const YAML::Node pc = part["children"];
+  YAML::Node ic = inst["children"];
+  if (pc && pc.IsSequence() && ic && ic.IsSequence())
+    for (std::size_t k = 0; k < pc.size() && k < ic.size(); ++k)
+      share_proto_meshes(ctx, pc[k], ic[k], id + "/" + std::to_string(k), false);
+}
+
+// A node's `use: <prototype>`, as the node it stands for: the prototype's, its {name} args filled
+// in (its own args: as defaults, then the node's args:), with the node's keys over it. Each key the
+// node has replaces the prototype's, but for material:, which merges key by key, and children:,
+// which come after the prototype's. False, with a warning, for a name no prototype has or one
+// already being expanded (a cycle); `name` is left on the expansion stack for the caller to take
+// off after it has parsed `out`.
+bool expand_use(Ctx &ctx, const YAML::Node &n, YAML::Node &out, std::string &name) {
+  name = str(n, "use");
+  const std::string at =
+      "ari: scene node '" + str(n, "node", str(n, "id")) + "': use: '" + name + "'";
+  const auto it = ctx.prototypes.find(name);
+  if (it == ctx.prototypes.end()) {
+    ctx.warn(at + " names no prototype (no such prototypes: entry)");
+    return false;
+  }
+  if (!ctx.using_protos.insert(name).second) {
+    ctx.warn(at + " is within itself — not expanded");
+    return false;
+  }
+  std::map<std::string, std::string> args;
+  const auto collect = [&args](const YAML::Node &a) {
+    if (a && a.IsMap())
+      for (const auto &kv : a)
+        if (kv.first.IsScalar() && kv.second.IsScalar())
+          args[kv.first.Scalar()] = kv.second.Scalar();
+  };
+  collect(it->second["args"]);
+  collect(n["args"]);
+  YAML::Node inst = YAML::Clone(it->second);
+  if (inst["args"])
+    inst.remove("args"); // the declaration, not a node key
+  substitute_node(inst, args);
+  share_proto_meshes(ctx, it->second, inst, "prototype:" + name, n["source"] || n["fit"]);
+  if (n["node"] || n["id"]) { // the instance's own id, whichever spelling either side used
+    inst.remove("node");
+    inst.remove("id");
+  } else if (!inst["node"] && !inst["id"]) {
+    inst["node"] = name;
+  }
+  for (const auto &kv : n) {
+    if (!kv.first.IsScalar())
+      continue;
+    const std::string key = kv.first.Scalar();
+    if (key == "use" || key == "args")
+      continue;
+    YAML::Node mine = inst[key];
+    if (key == "material" && kv.second.IsMap() && mine && mine.IsMap()) {
+      for (const auto &m : kv.second)
+        mine[m.first.Scalar()] = YAML::Clone(m.second);
+    } else if (key == "children" && kv.second.IsSequence() && mine && mine.IsSequence()) {
+      for (const YAML::Node &c : kv.second)
+        mine.push_back(YAML::Clone(c));
+    } else {
+      inst[key] = YAML::Clone(kv.second);
+    }
+  }
+  out = inst;
+  return true;
+}
+
 // A scalar read as a number: false (and `out` untouched) when it is not one.
 bool scalar_num(const YAML::Node &v, double &out) {
   if (!v || !v.IsScalar())
@@ -3376,6 +3523,15 @@ void unit_rgb(Ctx &ctx, const YAML::Node &v, float out[3], const std::string &wh
 }
 
 SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
+  if (n.IsMap() && n["use"]) { // a prototype's instance: parsed as the node it stands for
+    YAML::Node inst;
+    std::string name;
+    if (expand_use(ctx, n, inst, name)) {
+      SceneNode sn = parse_scene_node(ctx, inst);
+      ctx.using_protos.erase(name);
+      return sn;
+    }
+  }
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
   sn.type = str(n, "type", "geometry");
@@ -3814,6 +3970,138 @@ void stamp_base_dir(std::vector<SceneNode> &nodes, const std::string &dir) {
   }
 }
 
+// A YAML scalar as a finite number: false (and `out` untouched) otherwise.
+bool finite_num(const YAML::Node &v, double &out) {
+  if (!v || !v.IsScalar())
+    return false;
+  try {
+    const double d = v.as<double>();
+    if (!std::isfinite(d))
+      return false;
+    out = d;
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// One keyframe's value: a number, or a list of numbers.
+bool keyframe_value(const YAML::Node &v, std::vector<double> &out) {
+  out.clear();
+  double d = 0.0;
+  if (finite_num(v, d)) {
+    out.push_back(d);
+    return true;
+  }
+  if (!v.IsSequence() || v.size() == 0)
+    return false;
+  for (const YAML::Node &e : v) {
+    if (!finite_num(e, d))
+      return false;
+    out.push_back(d);
+  }
+  return true;
+}
+
+// scene: animations: [{ animation: <id>, loop, autoplay, speed, duration, tracks: [{ node, key |
+// state, interpolation, keys: [[t, value], ...] }] }] (scene_animation.h). A track that names
+// neither or both of node: and state:, a node key no track can move, or keyframes of mixed width is
+// left out with a warning; keyframes are put in time order.
+std::vector<SceneAnimation> parse_scene_animations(Ctx &ctx, const YAML::Node &list) {
+  std::vector<SceneAnimation> out;
+  if (!list.IsSequence()) {
+    ctx.warn("ari: scene animations: must be a list of { animation: <id>, tracks } — ignored");
+    return out;
+  }
+  for (const YAML::Node &a : list) {
+    if (!a.IsMap())
+      continue;
+    SceneAnimation an;
+    an.id = str(a, "animation", str(a, "id"));
+    if (an.id.empty() || an.id.find_first_of(". /") != std::string::npos) {
+      ctx.warn("ari: scene animation '" + an.id +
+               "': its animation: name is a key segment (no '.', '/' or space) — ignored");
+      continue;
+    }
+    const std::string at = "ari: scene animation '" + an.id + "'";
+    if (const YAML::Node lp = a["loop"]) {
+      if (lp.IsScalar() && lp.Scalar() == "pingpong")
+        an.loop = SceneAnimation::loop_mode::pingpong;
+      else if (flag(a, "loop", false) == flag(a, "loop", true)) // a boolean spelling
+        an.loop =
+            flag(a, "loop") ? SceneAnimation::loop_mode::loop : SceneAnimation::loop_mode::once;
+      else
+        ctx.warn(at + ": loop: is true, false or pingpong — once");
+    }
+    an.autoplay = flag(a, "autoplay", true);
+    if (a["speed"] && !finite_num(a["speed"], an.speed))
+      ctx.warn(at + ": speed: is a number — 1");
+    if (a["duration"] && (!finite_num(a["duration"], an.duration) || an.duration < 0.0)) {
+      ctx.warn(at + ": duration: is a number of seconds, 0 or more — its last keyframe's time");
+      an.duration = 0.0;
+    }
+    const YAML::Node tracks = a["tracks"];
+    for (std::size_t ti = 0; tracks && tracks.IsSequence() && ti < tracks.size(); ++ti) {
+      const YAML::Node tn = tracks[ti];
+      if (!tn.IsMap())
+        continue;
+      SceneAnimationTrack tr;
+      tr.node = str(tn, "node");
+      tr.state = str(tn, "state");
+      tr.key = str(tn, "key");
+      const std::string tat = at + " track " + std::to_string(ti);
+      if (tr.node.empty() == tr.state.empty()) {
+        ctx.warn(tat + ": names a node: (with a key:) or a state:, one of them — left out");
+        continue;
+      }
+      const int width = tr.node.empty() ? 0 : node_key_width(tr.key);
+      if (!tr.node.empty() && width == 0) {
+        ctx.warn(tat + ": a node's key: is position, rotation, scale, color, opacity or visible, " +
+                 "not '" + tr.key + "' — left out");
+        continue;
+      }
+      const std::string ip = str(tn, "interpolation", "linear");
+      if (ip == "step")
+        tr.interpolation = SceneAnimationTrack::interp::step;
+      else if (ip == "smooth")
+        tr.interpolation = SceneAnimationTrack::interp::smooth;
+      else if (ip != "linear")
+        ctx.warn(tat + ": interpolation: is linear, step or smooth — linear");
+      std::vector<std::pair<double, std::vector<double>>> keys;
+      bool ok = true;
+      const YAML::Node kn = tn["keys"];
+      for (std::size_t k = 0; kn && kn.IsSequence() && k < kn.size() && ok; ++k) {
+        const YAML::Node pair = kn[k];
+        double time = 0.0;
+        std::vector<double> value;
+        ok = pair.IsSequence() && pair.size() == 2 && finite_num(pair[0], time) && time >= 0.0 &&
+             keyframe_value(pair[1], value) &&
+             (width ? static_cast<int>(value.size()) == width
+                    : keys.empty() || value.size() == keys.front().second.size());
+        if (ok)
+          keys.emplace_back(time, std::move(value));
+      }
+      if (!ok || keys.empty()) {
+        ctx.warn(tat + ": keys: is a list of [seconds, value] with the value " +
+                 (width ? std::to_string(width) + " number(s) wide" : std::string("one width")) +
+                 " — left out");
+        continue;
+      }
+      std::stable_sort(keys.begin(), keys.end(),
+                       [](const auto &x, const auto &y) { return x.first < y.first; });
+      for (auto &[time, value] : keys) {
+        tr.times.push_back(time);
+        tr.values.push_back(std::move(value));
+      }
+      an.tracks.push_back(std::move(tr));
+    }
+    if (an.tracks.empty())
+      ctx.warn(at + ": has no track that moves anything");
+    out.push_back(std::move(an));
+  }
+  return out;
+}
+
 Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
   Scene sc;
   if (!s || !s.IsMap())
@@ -3898,6 +4186,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       }
     }
   }
+  if (const YAML::Node an = s["animations"]) // keyframed tracks over the scene clock
+    sc.animations = parse_scene_animations(ctx, an);
   if (s["chrome"]) { // scene-level: the diagnostic grid/axis/bounding-box chrome
     sc.has_chrome = true;
     sc.chrome_visible = flag(s, "chrome", true);
@@ -4530,6 +4820,19 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   r.functions = ctx.functions;
   r.root.functions = make_function_scope(ctx.functions);
   if (doc.IsMap()) {
+    // prototypes: { <name>: <node> } — scene-node templates a node's use: instantiates, in any
+    // scene (expand_use). Kept raw, like units, so each instance fills in its own args.
+    if (const YAML::Node ps = doc["prototypes"]; ps && ps.IsMap()) {
+      for (const auto &kv : ps) {
+        if (kv.first.IsScalar() && kv.second.IsMap())
+          ctx.prototypes[kv.first.Scalar()] = kv.second;
+        else
+          ctx.warn("ari: prototypes: '" + (kv.first.IsScalar() ? kv.first.Scalar() : "?") +
+                   "' is not a node — ignored");
+      }
+    } else if (ps) {
+      ctx.warn("ari: prototypes: must be a map of name -> node — ignored");
+    }
     r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
     stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
     r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
@@ -4581,6 +4884,17 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       }
     } else if (ss) {
       ctx.warn("ari: scenes: must be a list of { scene: <id>, ... } — ignored");
+    }
+    // The meshes the prototypes' instances share (share_proto_meshes), as assets of every scene.
+    for (const auto &[id, part] : ctx.proto_assets) {
+      SceneAsset a;
+      a.id = id;
+      a.source = parse_scene_node(ctx, part);
+      a.source.id = id;
+      a.source.base_dir = ctx.base_dir;
+      r.scene.assets.push_back(a);
+      for (Scene &sc : r.scenes)
+        sc.assets.push_back(a);
     }
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.

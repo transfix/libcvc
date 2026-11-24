@@ -193,8 +193,10 @@ public:
   // device pixels (VTK: CSS size x window.devicePixelRatio, about 3 on a phone),
   // so without this the UI would come out a third of its size there. Read from
   // devicePixelRatio every frame in the browser (browser zoom changes it, and
-  // the UI follows), 1.0 natively. A positive value overrides it; 0 goes back to
-  // the display's.
+  // the UI follows). Natively it is the window's display scale, also read every
+  // frame: on Windows the monitor's (1.25 at 125%, and it follows the window to
+  // another monitor), 1.0 elsewhere and offscreen. A positive value overrides
+  // it; 0 goes back to the display's.
   void setPixelRatio(float ratio);
   float pixelRatio() const;
 

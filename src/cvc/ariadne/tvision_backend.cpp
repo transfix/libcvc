@@ -179,7 +179,7 @@ bool key_event(const KeyDownEvent &k, TermEvent &out) {
       {kbF4, "F4", false, false},          {kbF5, "F5", false, false},
       {kbF7, "F7", false, false},          {kbF8, "F8", false, false},
       {kbF9, "F9", false, false},          {kbF11, "F11", false, false},
-      {kbF12, "F12", false, false},
+      {kbF12, "F12", false, false},        {kbShiftF10, "F10", true, false}, // §5.28 a menu
   };
   for (const Named &n : kNamed)
     if (k.keyCode == n.code) {
@@ -869,7 +869,16 @@ TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::func
 bool TvisionBackend::available() { return true; }
 
 bool TvisionBackend::set_clipboard(cvc::app &, const std::string &text) {
+  return clipboard_copy(text);
+}
+
+bool TvisionBackend::clipboard_copy(const std::string &text) {
   TClipboard::setText(TStringView(text.data(), text.size())); // it reports nothing back
+  return true;
+}
+
+bool TvisionBackend::clipboard_request() {
+  TClipboard::requestText(); // the text comes as a paste of keys to the focused view
   return true;
 }
 
@@ -885,6 +894,8 @@ FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
 bool TvisionBackend::available() { return false; }
 
 bool TvisionBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
+bool TvisionBackend::clipboard_copy(const std::string &) { return false; }
+bool TvisionBackend::clipboard_request() { return false; }
 
 #endif
 

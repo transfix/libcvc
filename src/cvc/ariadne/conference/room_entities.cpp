@@ -171,8 +171,8 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
   }
   const section_reader r(app, base);
   for (std::uint64_t id : section_ids(app, base))
-    if (!written.count(id) && r.flag({entity_key(id), "present"}, false))
-      w.set_flag({entity_key(id), "present"}, false);
+    if (!written.count(id))
+      w.remove({entity_key(id)}); // a delete, before the revision that covers it
   return w.commit(0, epoch);
 }
 

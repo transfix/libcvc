@@ -221,6 +221,15 @@ public:
   void cancel();
   seeded_segmentation take(); // once done; moved out, so call it once
 
+  // The labels so far, between steps, as the fronts advance (VolumeGridRover's Segmentation tab
+  // draws them while it marches): each voxel's class, or seeded_segmentation::unlabelled, written
+  // into `labels`, which is made a UChar volume of the input's dimensions and bounding box first
+  // when it is not one. True while there are labels to show, in the "classifying" and "marching"
+  // phases (the point classes' seeds, then the fronts from them); false otherwise, `labels` left
+  // as it was (the finished labels are take()'s). A copy of every voxel, outside the step budget:
+  // call it a few times a second, not after every step. Like step(), not thread-safe.
+  bool labels_so_far(volume &labels) const;
+
 private:
   struct impl;
   std::unique_ptr<impl> _impl;

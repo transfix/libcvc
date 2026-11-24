@@ -142,6 +142,10 @@ struct RealizeOptions {
 // now (defined in scene_realize.cpp).
 struct SceneRepeatBinding;
 
+// A scene's animation (animations:, scene_animation.h) as it plays: its playhead, its state keys
+// and what each track moves (defined in scene_realize.cpp).
+struct SceneAnimationBinding;
+
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
 // custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
@@ -272,6 +276,10 @@ struct RealizedScene {
   // struct's lists (created, visibility, clip, opacity, the tickers, nodes, custom_ticks,
   // height_fields, data_nodes) come with it and go with it.
   std::vector<std::shared_ptr<SceneRepeatBinding>> repeats;
+  // The scene's animations. tick_scene moves each one's playhead by the scene clock's step (the
+  // scene runs on the clock once it has one), publishes it at <prefix>.animations.<id>.time and
+  // .playing, takes a script's writes to .time, .playing and .speed, and sets what its tracks move.
+  std::vector<std::shared_ptr<SceneAnimationBinding>> animations;
   // What a copy made after realize_scene is realized with: its options (an assets cache of the
   // scene's own, own_assets, when they named none) and the document's assets.
   RealizeOptions options;
