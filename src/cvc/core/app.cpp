@@ -1684,6 +1684,11 @@ cvc::exec_pool &app::exec_pool(const pool_options &opts) {
   return *pool;
 }
 
+cvc::state_exec::async_scheduler *app::exec_scheduler_probe() {
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  return _execScheduler.get();
+}
+
 cvc::exec_pool *app::exec_pool_probe() const {
   boost::mutex::scoped_lock lock(_execPoolMutex);
   return _execPool.get();
