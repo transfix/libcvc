@@ -304,9 +304,8 @@ std::vector<pose_subject> entity_pose_subjects(const WorldVehicles &vehicles) {
       continue;
     pose_subject s;
     s.pid = entity_pid(info.id);
-    s.state.position = {info.x, info.y, info.z};
-    s.state.rotation = {std::cos(0.5 * info.yaw), 0.0, 0.0, std::sin(0.5 * info.yaw)};
-    s.state.linear_velocity = {info.vx, info.vy, 0.0};
+    s.state = entity_ride(info, &vehicles.world()); // its chassis's attitude too (OW5m)
+    s.steer = info.steer;                           // and its steering (OW5n)
     s.state.active = true;
     out.push_back(std::move(s));
   }

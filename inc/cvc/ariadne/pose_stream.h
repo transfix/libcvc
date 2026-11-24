@@ -16,6 +16,7 @@
 #include <cvc/physics/body.h>
 #include <cvc/state/pose_snapshot.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,25 +38,33 @@ namespace ariadne {
 // snapshot the relay could not write is not lost: the encoder only moves on at commit(), so the
 // next one carries the difference from what the viewer actually has.
 
-// A pose in the stream's units.
+// A pose in the stream's units, with its angular velocity (mrad/s) and a vehicle's steering angle
+// (microradians, + left; 0 for anything that does not steer).
 struct pose_q {
   std::int32_t x = 0, y = 0, z = 0;
   std::int32_t vx = 0, vy = 0, vz = 0;
   std::int32_t qw = 0, qx = 0, qy = 0, qz = 0;
+  std::int32_t wx = 0, wy = 0, wz = 0;
+  std::int32_t steer = 0;
   bool operator==(const pose_q &o) const {
     return x == o.x && y == o.y && z == o.z && vx == o.vx && vy == o.vy && vz == o.vz &&
-           qw == o.qw && qx == o.qx && qy == o.qy && qz == o.qz;
+           qw == o.qw && qx == o.qx && qy == o.qy && qz == o.qz && wx == o.wx && wy == o.wy &&
+           wz == o.wz && steer == o.steer;
   }
   bool operator!=(const pose_q &o) const { return !(*this == o); }
 };
-pose_q quantize_pose(const cvc::physics::body_state &s);
-// Back to a body_state (the rotation renormalized); angular velocity is not carried (zero).
+pose_q quantize_pose(const cvc::physics::body_state &s, double steer = 0.0);
+// Back to a body_state (the rotation renormalized, the angular velocity the stream's).
 cvc::physics::body_state dequantize_pose(const pose_q &q);
+// The steering angle (rad) of a pose in the stream's units.
+double dequantize_steer(const pose_q &q);
 
-// What a viewer may be sent this step about one participant.
+// What a viewer may be sent this step about one participant: its pose, angular velocity and (a
+// vehicle's, or a driver's riding one) steering angle (rad, + left).
 struct pose_subject {
   std::string pid;
   cvc::physics::body_state state;
+  double steer = 0.0;
   bool due = true; // false: it stays known to the viewer, but no entry this step
 };
 
@@ -99,10 +108,14 @@ private:
   std::unique_ptr<impl> _impl;
 };
 
-// A participant's pose from one snapshot.
+// A participant's pose from one snapshot. STEER is set when the snapshot carries its angular
+// velocity and steering angle (pose_snapshot::kCarriesMotion, OW5n): then state.angular_velocity
+// is the relay's and *steer its steering angle (rad, + left). A relay before it carries neither,
+// and its samples' angular velocity is zero and steer unset: not known, rather than not turning.
 struct pose_sample {
   std::string pid;
   cvc::physics::body_state state;
+  std::optional<double> steer;
 };
 
 class pose_stream_decoder {
