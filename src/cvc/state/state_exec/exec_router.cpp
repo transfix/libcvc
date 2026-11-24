@@ -209,6 +209,18 @@ group_ref exec_router::new_home_of(std::string_view key) const {
   return group_ref(); // group 0 is going too (~app): nothing to forward to
 }
 
+group_ref exec_router::prefix_home_of(std::string_view key) const {
+  impl &m = *impl_;
+  m.consulted.fetch_add(1, std::memory_order_relaxed);
+  std::shared_lock<std::shared_mutex> lock(m.mu);
+  const impl::registration *best = nullptr;
+  for (const impl::registration &r : m.regs)
+    if (!r.prefix.empty() && impl::covers(key, r.prefix) &&
+        (!best || r.prefix.size() > best->prefix.size()))
+      best = &r;
+  return best ? best->group : group_ref();
+}
+
 bool exec_router::has_prefix(const group_ref &group) const {
   impl &m = *impl_;
   std::shared_lock<std::shared_mutex> lock(m.mu);
@@ -372,7 +384,9 @@ group_ref async_scheduler::cached_home(const std::string &key) const {
   }
   if (const auto it = home_cache_.find(key); it != home_cache_.end())
     return it->second;
-  group_ref home = router_->home_of(key);
+  // An island asks only whether another group's prefix covers the key (never building group 0);
+  // empty means its own.
+  group_ref home = home_cache_prefixed_ ? router_->home_of(key) : router_->prefix_home_of(key);
   if (home_cache_.size() >= kHomeCacheCap)
     home_cache_.clear();
   home_cache_.emplace(key, home);

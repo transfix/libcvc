@@ -1480,12 +1480,13 @@ bool async_scheduler::post_message(const std::string &path, const value_t &msg) 
   // (exec_router.h, "Host posts"). The router's lookup is thread-safe; the cache is not, and is
   // not used here.
   if (router_ && router_->active() && path.find('#') == std::string::npos) {
-    group_ref home = router_->home_of(path);
-    // An island (no prefix of its own) keeps the keys no other group's prefix covers (S2b.0a). A
-    // key homed here once its handle closed (its teardown) goes on as a send too: the poster
-    // waits for the forward, so it arrives after what the teardown sends on.
-    const bool island_key = home.is_group0() && !router_->has_prefix(route_self_);
-    if (home && !island_key && (home != route_self_ || route_self_.closed())) {
+    // An island (no prefix of its own) keeps the keys no other group's prefix covers (S2b.0a): it
+    // asks only for a covering prefix, never building group 0. A key homed here once its handle
+    // closed (its teardown) goes on as a send too: the poster waits for the forward, so it arrives
+    // after what the teardown sends on.
+    const bool island = !router_->has_prefix(route_self_);
+    group_ref home = island ? router_->prefix_home_of(path) : router_->home_of(path);
+    if (home && (home != route_self_ || route_self_.closed())) {
       detail::route_entry e;
       e.what = detail::route_entry::kind::send;
       e.key = path;

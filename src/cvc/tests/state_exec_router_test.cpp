@@ -2901,7 +2901,9 @@ TEST(ExecDirectory, APidIsFoundBetweenItsCreationAndItsGroupsFirstPublish) {
   // Reaped, both leave it.
   a.g().pump(kRun);
   EXPECT_TRUE(a.sched().kill(pid));
-  EXPECT_TRUE(a.sched().kill(child));
+  // A child forked before its parent's first step ends at its own first step (R found it done:
+  // terminated, 0 steps), so the kill may find nothing to kill; the reap is what this checks.
+  a.sched().kill(child);
   EXPECT_TRUE(a.sched().reap(pid));
   EXPECT_TRUE(a.sched().reap(child));
   EXPECT_FALSE(app.exec_router().directory().find(pid).has_value());

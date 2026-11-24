@@ -444,8 +444,9 @@ public:
   void note_priority_clamped() override;
   /// Thread-safe: `cmd` for process `pid`, applied between steps on the scheduler's thread by the
   /// next drain (a step's, or drain_ingress()'s), as post_message's posts are; a driver blocked
-  /// in wait_for_work() wakes. Commands are applied one at a time, first in, first out, after the
-  /// drain's messages and completions, whatever the order they were all posted in (S0.7). kill,
+  /// in wait_for_work() wakes. Commands are applied one at a time in the order they were posted
+  /// with the messages and router entries (the ordered ingress, S2b.1), before the drain's settled
+  /// calls (S0.7's throw rule is kept). kill,
   /// pause, resume, signal and set_priority are the direct calls' host paths, unchecked (kill's
   /// reason is killed_by_user; signal "SIGKILL" kills); an unknown pid is found, and refused,
   /// then. Each one's `done`, when set, gets what its call returned (a kill that throws has still

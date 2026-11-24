@@ -267,6 +267,10 @@ public:
   /// home_of, with every closed group's prefixes left out: where a teardown forwards what it holds
   /// (exec_router.h, "Teardown and rehoming"). Not counted in consulted().
   group_ref new_home_of(std::string_view key) const;
+  /// The group whose registered prefix (not group 0's "") covers `key`, the longest; empty when
+  /// none does. Never builds group 0: an island's lookup (its keys no prefix covers are its own).
+  /// Counted in consulted().
+  group_ref prefix_home_of(std::string_view key) const;
   /// Whether `group` registered a prefix (group 0's "" counts): a group that did not is an island
   /// (the header's rule), whose keys no other group's prefix covers stay its own.
   bool has_prefix(const group_ref &group) const;
