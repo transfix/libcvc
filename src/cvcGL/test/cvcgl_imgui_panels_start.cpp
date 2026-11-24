@@ -1,7 +1,8 @@
-// The overlay's panels start hidden on a phone's view and open on anything larger, a laptop's
-// browser canvas included. The rule is decided at the overlay's first frame, so each case is a new
-// offscreen window of the size and pixel ratio it names, rendered a few times. Skips (rc 0) where
-// the overlay has no GL to draw with, unless CVC_REQUIRE_RENDER=1.
+// The overlay's panels start open everywhere, a phone included. A host that asks
+// (setPhoneHidesPanels(true)) has them start hidden on a phone's view and open on anything larger,
+// a laptop's browser canvas included. The rule is decided at the overlay's first frame, so each
+// case is a new offscreen window of the size and pixel ratio it names, rendered a few times. Skips
+// (rc 0) where the overlay has no GL to draw with, unless CVC_REQUIRE_RENDER=1.
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
@@ -29,13 +30,14 @@ struct View {
 // The panels after the first frames of a w x h window at this pixel ratio: 1 open, 0 hidden, -1
 // where the overlay could not draw. A few renders, as a host makes: the overlay's GL backend starts
 // at the first, so ImGui's first frame is the second.
-int panels_after_first_frames(int w, int h, float ratio) {
+int panels_after_first_frames(int w, int h, float ratio, bool phoneHides) {
   cvc::app app;
   cvc::gl::SceneGraph sg(app, "panels");
   cvc::gl::SceneRenderer view(sg, w, h, /*offscreen=*/true, "panels");
   cvc::gl::ImGuiOverlay ui(view);
   ui.setPixelRatio(ratio);
   ui.setVisible(true);
+  ui.setPhoneHidesPanels(phoneHides);
   for (int frame = 0; frame < 3; ++frame)
     view.render();
   if (!ui.enabled())
@@ -54,8 +56,16 @@ int main() {
       {1170, 2400, 3.0f, "a phone upright (390 x 800 CSS px)", false},
       {2532, 1050, 3.0f, "a phone on its side (844 x 350 CSS px)", false},
   };
+  // By default every view starts with its panels open, a phone's too.
   for (const View &v : views) {
-    const int open = panels_after_first_frames(v.w, v.h, v.ratio);
+    const int open = panels_after_first_frames(v.w, v.h, v.ratio, /*phoneHides=*/false);
+    if (open < 0)
+      break; // no GL: said below
+    chk(open == 1, std::string(v.what) + ": by default the panels start open");
+  }
+  // A host that asks hides them on a phone only.
+  for (const View &v : views) {
+    const int open = panels_after_first_frames(v.w, v.h, v.ratio, /*phoneHides=*/true);
     if (open < 0) {
       const char *require = std::getenv("CVC_REQUIRE_RENDER");
       if (require && *require && std::string(require) != "0") {
@@ -66,7 +76,8 @@ int main() {
       return 0;
     }
     chk((open == 1) == v.open,
-        std::string(v.what) + (v.open ? ": the panels start open" : ": the panels start hidden"));
+        std::string(v.what) + (v.open ? ": asked to, the panels still start open"
+                                      : ": asked to, the panels start hidden"));
   }
 
   // A document with no scene is all panels (AriRuntime turns the rule off for it): on a phone
@@ -79,7 +90,8 @@ int main() {
     cvc::gl::ImGuiOverlay ui(view);
     ui.setPixelRatio(3.0f);
     ui.setVisible(true);
-    chk(ui.phoneHidesPanels(), "a phone hides the panels by default");
+    chk(!ui.phoneHidesPanels(), "a phone shows the panels by default");
+    ui.setPhoneHidesPanels(true);
     ui.setPhoneHidesPanels(false);
     for (int frame = 0; frame < 3; ++frame)
       view.render();
@@ -92,9 +104,10 @@ int main() {
     cvc::gl::ImGuiOverlay ui(view);
     ui.setPixelRatio(3.0f);
     ui.setVisible(true);
+    ui.setPhoneHidesPanels(true);
     for (int frame = 0; frame < 3; ++frame)
       view.render();
-    chk(!ui.panelsOpen(), "a phone: hidden at the first frame");
+    chk(!ui.panelsOpen(), "a phone that hides them: hidden at the first frame");
     ui.setPhoneHidesPanels(false); // the document, loaded after, has no scene
     chk(ui.panelsOpen(), "the rule turned off afterwards: shown again");
     ui.setPanelsOpen(false); // the user hides them

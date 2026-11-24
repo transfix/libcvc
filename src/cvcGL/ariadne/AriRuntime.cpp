@@ -527,10 +527,10 @@ std::vector<std::string> AriRuntime::load(const std::string &path) {
   if (quality_)    // the same machine, so the same tier; the start's cooldown for the new document
     quality_->reset(quality_->tier());
   std::vector<std::string> warnings = app_rt_.load(path);
-  // §5.14 on a phone the panels start hidden so a scene isn't buried; a document with no scene
-  // (a feed, a form) is nothing but its panels, so it starts with them shown.
+  // §5.14 a document's panels start shown on a phone as anywhere else, its scene or not; the
+  // round button hides them.
   const bool scene = realized() != nullptr;
-  overlay_->setPhoneHidesPanels(scene);
+  overlay_->setPhoneHidesPanels(false);
   // §5.4 whether the document draws a scene, under its own prefix: a host's scene-only menu items
   // (arigl's Settings: Controls..., the scene's display settings) show only then.
   cvc::state::instance(app_)(prefix() + ".ariadne.scene").value(std::string(scene ? "1" : "0"));

@@ -9,6 +9,7 @@
 meta:
   name: Reopen refit
   author: cvc
+  min_libcvc: 4.0.0
 
 init: (begin (state-set "ui.screen" "in") (state-set "ui.msg" ""))
 
