@@ -2439,6 +2439,42 @@
       "patternProperties": {"^x-": true},
       "additionalProperties": false
     },
+    "animation": {
+      "type": "object",
+      "description": "A scene's keyframed animation over the scene clock (docs/ARIADNE.md §5.4, Animations); its keys are animations.<id>.time, .playing and .speed.",
+      "properties": {
+        "animation": {"$ref": "#/$defs/string"},
+        "id": {"$ref": "#/$defs/string"},
+        "loop": {"anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["pingpong"]}], "description": "At the end: stop (false), start over (true) or turn back (pingpong)."},
+        "autoplay": {"$ref": "#/$defs/flag"},
+        "speed": {"type": "number", "description": "Seconds of animation a second of the scene clock; below 0, backwards."},
+        "duration": {"type": "number", "minimum": 0, "description": "Its length; its last keyframe's time when 0 or unset."},
+        "tracks": {"type": "array", "items": {"$ref": "#/$defs/animation_track"}}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "animation_track": {
+      "type": "object",
+      "description": "One track: a node's key (node: and key:) or a state key (state:) along its keys: [[seconds, value], ...].",
+      "properties": {
+        "node": {"$ref": "#/$defs/string", "description": "A node id (every node with it) or a path a/b."},
+        "key": {"enum": ["position", "rotation", "scale", "color", "opacity", "visible"]},
+        "state": {"$ref": "#/$defs/string", "description": "A state key, resolved as a bind is."},
+        "interpolation": {"enum": ["linear", "step", "smooth"]},
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": [{"type": "number"}, {"anyOf": [{"type": "number"}, {"type": "array", "items": {"type": "number"}}]}]
+          }
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
     "camera": {
       "type": "object",
       "description": "A named camera viewports can use.",
@@ -2469,6 +2505,7 @@
         "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
         "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
         "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
+        "animations": {"type": "array", "items": {"$ref": "#/$defs/animation"}},
         "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
         "main_view": {
           "type": "object",
@@ -2603,6 +2640,7 @@
         "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
         "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
         "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
+        "animations": {"type": "array", "items": {"$ref": "#/$defs/animation"}},
         "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
         "main_view": {
           "type": "object",
