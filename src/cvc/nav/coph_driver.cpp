@@ -225,7 +225,17 @@ void coph_driver::coph_step(const std::vector<pose> &poses) {
       l.energy.add(b);
       l.energy.add_unallocated(e_mean, {x0[0], x0[1]}, {x1[0], x1[1]});
       l.max_step_residual = std::max(l.max_step_residual, std::fabs(b.residual));
-      l.risk_cost += cfg.dt * 4.0 * risk_at(c.agent, p.p);
+      const double risk = cfg.dt * 4.0 * risk_at(c.agent, p.p);
+      l.risk_cost += risk;
+      // The same terms for nav_stats' CoPH ledger (D11), so its sums are the account's.
+      coph_sample &t = terms_[v];
+      t.step = 1;
+      t.work = b.work;
+      t.heat = b.heat;
+      t.kinetic_change = b.kinetic_change;
+      t.residual = b.residual;
+      t.unallocated_work = e_mean[0] * (x1[0] - x0[0]) + e_mean[1] * (x1[1] - x0[1]);
+      t.risk_cost = risk;
       x.u_used = u_used;
     }
     // sense: CoPH's 21 lattice points of the risk, and the cells the vehicle sees.
@@ -265,7 +275,9 @@ void coph_driver::coph_step(const std::vector<pose> &poses) {
       c.u = {0, 0};
       c.x_prev.reset();
     }
-    ledgers_[v].energy.shaping_jumps = fleet_->energy(v).shaping_jumps;
+    const double jumps = fleet_->energy(v).shaping_jumps;
+    terms_[v].shaping_jumps = jumps - ledgers_[v].energy.shaping_jumps;
+    ledgers_[v].energy.shaping_jumps = jumps;
   }
   ++steps_;
 }
@@ -274,6 +286,9 @@ void coph_driver::coph_step(const std::vector<pose> &poses) {
 void coph_driver::apply() {
   if (cars_.empty())
     return; // nothing attached: the sim's run is untouched
+  terms_.assign(cars_.size(), coph_sample{});
+  for (coph_sample &t : terms_)
+    t.attached = 1;
   const std::vector<pose> poses = read();
   if (ticks_ % k_ == 0)
     coph_step(poses);
@@ -300,11 +315,20 @@ void coph_driver::apply() {
     c.e_sum = {c.e_sum[0] + al.unallocated[0], c.e_sum[1] + al.unallocated[1]};
     ++c.held;
     ledger &l = ledgers_[v];
-    l.e2 +=
+    terms_[v].e2 =
         (al.unallocated[0] * al.unallocated[0] + al.unallocated[1] * al.unallocated[1]) * dt_coph;
-    l.u2 += (c.u[0] * c.u[0] + c.u[1] * c.u[1]) * dt_coph;
+    terms_[v].u2 = (c.u[0] * c.u[0] + c.u[1] * c.u[1]) * dt_coph;
+    l.e2 += terms_[v].e2;
+    l.u2 += terms_[v].u2;
   }
   ++ticks_;
+  // nav_stats' CoPH ledger, when the sim's nav_stats is armed (sim_world::feed_coph).
+  if (sim_.nav_stats_armed()) {
+    feed_.assign(static_cast<std::size_t>(sim_.size()), coph_sample{});
+    for (std::size_t v = 0; v < cars_.size(); ++v)
+      feed_[static_cast<std::size_t>(cars_[v].agent)] = terms_[v];
+    sim_.feed_coph(feed_);
+  }
 }
 
 } // namespace nav

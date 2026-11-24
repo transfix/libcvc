@@ -113,6 +113,24 @@ struct drive_sample {
   float curvature = 0; // |tan(steer)| / L, 1/m (drive_telemetry.curvature)
 };
 
+// One tick's CoPH ledger terms for one vehicle (cvc/nav/coph_driver.h feeds them through
+// sim_world::feed_coph; C5 of docs/roadmap/NAV-COPH-ROADMAP.md, D11). They are in CoPH's frame,
+// per unit mass, and each is this tick's share: a CoPH step's terms land on the tick that completes
+// it (step = 1) and are 0 on the ticks between; e2 and u2 come every tick the vehicle allocates.
+// attached = 0 marks a vehicle CoPH does not drive, whose other fields are ignored.
+struct coph_sample {
+  std::uint8_t attached = 0;
+  std::uint8_t step = 0;
+  double work = 0;             // u_used . dq of the step
+  double heat = 0;             // what CoPH's plant books at the learner's damping
+  double kinetic_change = 0;   // the vehicle's own
+  double residual = 0;         // kinetic_change - work + heat
+  double shaping_jumps = 0;    // the learner's V_new(x) - V_old(x) at its commits
+  double unallocated_work = 0; // e . dq: the force the vehicle did not take
+  double risk_cost = 0;        // dt 4 r
+  double e2 = 0, u2 = 0;       // |e|^2 dt and |u|^2 dt
+};
+
 // Optional per-position samplers; any left null degrades that stat gracefully to
 // zero. material_id is abstracted so the source can be swapped with no schema change.
 struct nav_samplers {
@@ -156,6 +174,10 @@ struct nav_samplers {
   // stay at their defaults (feature off). The collector reduces these per vehicle into means/peaks.
   // The caller maps its drive_telemetry -> drive_sample (see drive_sample) once per tick.
   const drive_sample *drive = nullptr;
+  // The CoPH ledger's terms for THIS step (coph_sample[n]; sim_world::feed_coph, from a
+  // coph_driver). null, or a vehicle's attached = 0 => that vehicle's CoPH ledger is untracked,
+  // and neither its record nor its JSON carries it, byte-unchanged.
+  const coph_sample *coph = nullptr;
 };
 
 // One per vehicle, accumulated over an episode. Mirrors grl_snam NavStats + the
@@ -257,6 +279,20 @@ struct veh_nav_stats {
   double brake_share = 0;
   int vehicle_hits = 0;
   double vehicle_hit_s = 0;
+  // The CoPH ledger (D11 of docs/roadmap/NAV-COPH-ROADMAP.md), reduced from nav_samplers.coph:
+  // only for a vehicle CoPH drove, which sets coph_tracked; otherwise at these defaults and left
+  // out of the JSON. In CoPH's frame, per unit mass, over its CoPH steps (coph_steps): the work of
+  // the force it took, the heat, its kinetic change and their residual (the sum, and the largest
+  // step's |residual|: how far its motion is from CoPH's damped point mass), the learner's shaping
+  // jumps, the unallocated work, the risk cost, and coph_allocation_residual = sqrt(sum |e|^2 dt /
+  // sum |u|^2 dt) over the ticks, reduced from coph_e2 and coph_u2 (the sums; not in the JSON).
+  bool coph_tracked = false;
+  long coph_steps = 0;
+  double coph_work = 0, coph_heat = 0, coph_kinetic_change = 0;
+  double coph_residual = 0, coph_residual_max = 0;
+  double coph_shaping_jumps = 0, coph_unallocated_work = 0, coph_risk_cost = 0;
+  double coph_allocation_residual = 0;
+  double coph_e2 = 0, coph_u2 = 0;
   // formation holding (0 unless a formation_slot sampler is provided) — distance to this vehicle's
   // slot, and whether it ended in it. The continuous formation-holding measure, distinct from the
   // mission-arrival latch above (a deep-formation slot is legitimately far from the objective
@@ -343,6 +379,13 @@ struct episode_nav_stats {
   double first_roll_s = -1;
   int total_vehicle_hits = 0;
   std::uint32_t plant_measured = plant_sample::has_all;
+  // the CoPH ledger's fleet view, when CoPH drove a vehicle (veh_nav_stats::coph_tracked;
+  // otherwise these defaults and left out of the JSON): the vehicles it drove, the sums of their
+  // work, heat and unallocated work, and the largest step |residual| of any of them
+  bool coph_tracked = false;
+  int coph_vehicles = 0;
+  double total_coph_work = 0, total_coph_heat = 0, total_coph_unallocated_work = 0;
+  double coph_residual_max = 0;
   // fleet belief coverage (all zero unless the caller fills it via compute_coverage). Episode-level
   // because the belief rasters are shared across the fleet; per-plane detail lives in the rasters
   // themselves (published for visualization), not here.
