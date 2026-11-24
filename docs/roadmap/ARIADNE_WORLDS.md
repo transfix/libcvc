@@ -1499,8 +1499,9 @@ loads back (`uri:` it, `as: city_bundle`) with the hash it was saved with. The s
 frame thread, at once.
 
 Done (GB5, part 1: the lab in One World): a lab joined to a relay whose document runs the same
-generated_world node edits the relay's world, which is the room's. The owner, 2026-11-24: "if the
-server has admin through the rcon password then they can do it". `GeneratedWorldRelay` (both hosts,
+generated_world node edits the relay's world, which is the room's. The owner, 2026-11-24: "the
+client elevates to admin permissions if they have the rcon password, so they can edit the server
+world". `GeneratedWorldRelay` (both hosts,
 cvcGL's node and the headless one) makes the world the relay's `world_on` names (a "follow" request,
 never sent back), and sends the panel's Regenerate, Randomize and `world.auto` edits to the relay
 as `server.regenerate` instead of making them. arisrv answers it only for a connection `server.rcon`
