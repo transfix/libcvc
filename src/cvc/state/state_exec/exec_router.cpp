@@ -105,8 +105,14 @@ struct exec_router::impl {
   std::atomic<int> others{0};          // registrations of groups other than group 0
   std::atomic<long> remote_waiters{0}; // note_remote_waiters
   mutable std::atomic<std::uint64_t> consulted{0};
+  std::atomic<std::uint64_t> broadcasts{0}; // new_broadcast_id
   // CVC_EXEC_FUZZ's yields at the host's posts (S2-Q15), read as the router is made; null: off.
   std::unique_ptr<detail::lock_fuzz> fuzz;
+
+  static bool covers(std::string_view key, const std::string &p) noexcept {
+    return key.size() >= p.size() && key.compare(0, p.size(), p) == 0 &&
+           (key.size() == p.size() || p.empty() || key[p.size()] == '.');
+  }
 };
 
 exec_router::exec_router(cvc::app *app) : app_(app), impl_(std::make_unique<impl>()) {
@@ -158,13 +164,9 @@ group_ref exec_router::home_of(std::string_view key) const {
     {
       std::shared_lock<std::shared_mutex> lock(m.mu);
       const impl::registration *best = nullptr;
-      for (const impl::registration &r : m.regs) {
-        const std::string &p = r.prefix;
-        const bool covers = key.size() >= p.size() && key.compare(0, p.size(), p) == 0 &&
-                            (key.size() == p.size() || p.empty() || key[p.size()] == '.');
-        if (covers && (!best || p.size() > best->prefix.size()))
+      for (const impl::registration &r : m.regs)
+        if (impl::covers(key, r.prefix) && (!best || r.prefix.size() > best->prefix.size()))
           best = &r;
-      }
       if (best)
         return best->group;
       if (m.group0 || !app_)
@@ -176,6 +178,49 @@ group_ref exec_router::home_of(std::string_view key) const {
   }
   std::shared_lock<std::shared_mutex> lock(m.mu);
   return m.group0;
+}
+
+group_ref exec_router::new_home_of(std::string_view key) const {
+  impl &m = *impl_;
+  // The covering registrations, longest first, taken under the router's lock and checked for a
+  // closed handle after it (the router's lock stays a leaf: no group_ref lock under it).
+  std::vector<std::pair<std::size_t, group_ref>> candidates;
+  group_ref zero;
+  {
+    std::shared_lock<std::shared_mutex> lock(m.mu);
+    for (const impl::registration &r : m.regs)
+      if (impl::covers(key, r.prefix))
+        candidates.emplace_back(r.prefix.size(), r.group);
+    zero = m.group0;
+  }
+  std::stable_sort(candidates.begin(), candidates.end(),
+                   [](const auto &a, const auto &b) { return a.first > b.first; });
+  for (const auto &[length, group] : candidates)
+    if (!group.closed())
+      return group;
+  if (zero && !zero.closed())
+    return zero;
+  if (!zero && app_) {
+    app_->exec_scheduler(); // group 0 not built yet: built now, it registers ""
+    std::shared_lock<std::shared_mutex> lock(m.mu);
+    return m.group0;
+  }
+  return group_ref(); // group 0 is going too (~app): nothing to forward to
+}
+
+bool exec_router::has_prefix(const group_ref &group) const {
+  impl &m = *impl_;
+  std::shared_lock<std::shared_mutex> lock(m.mu);
+  if (group && m.group0 == group)
+    return true;
+  for (const impl::registration &r : m.regs)
+    if (r.group == group)
+      return true;
+  return false;
+}
+
+std::uint64_t exec_router::new_broadcast_id() noexcept {
+  return impl_->broadcasts.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 bool exec_router::active() const noexcept {
