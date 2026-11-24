@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cvc/core/world_clock.h>
 #include <stdexcept>
 #include <string>
@@ -39,7 +40,9 @@ namespace cvc {
 //                    the shipped policies were trained at (owner, 2026-11-19: "7 quanta");
 //   kSimCatchup      0.25 s: the world time a real-time frame may catch up at 1x. A stalled frame's
 //                    time beyond it is dropped and reported (world_clock::step_result::
-//                    dropped_steps, sim.dropped), never run late.
+//                    dropped_steps, sim.dropped), never run late. A scene sets its own (`clock:
+//                    { max_lag }`), and a world stepped on a thread of its own (world_worker) may
+//                    trail its clock by as much before the clock waits for it.
 //
 // Real time ticks against world time: the host's world_clock advances by wall time x speed in
 // whole quanta (sim_clock_config), and each simulation follows it with a clock_follower, so a
@@ -48,6 +51,7 @@ inline constexpr double kSimQuantum = 1.0 / 120.0;
 inline constexpr int kSimTickQuanta = 7;
 inline constexpr double kSimTick = kSimTickQuanta * kSimQuantum;
 inline constexpr double kSimCatchup = 0.25;
+inline constexpr double kSimCatchupMax = 10.0; // the longest a scene's max_lag may be (s)
 
 // The whole number of `step`s in `span` (both seconds). Throws std::invalid_argument when `span`
 // or `step` is not finite and positive, or `span` is not a whole number of `step`s (to 1e-9 s).
@@ -99,14 +103,35 @@ inline double sim_tick(double quantum) {
   return sim_tick_quanta(quantum) * quantum;
 }
 
+// Whether SECONDS is a catch-up (a scene's `clock: { max_lag }`): finite, more than 0 and at most
+// kSimCatchupMax.
+inline bool sim_catchup_valid(double seconds) {
+  return std::isfinite(seconds) && seconds > 0.0 && seconds <= kSimCatchupMax;
+}
+
+// A catch-up of SECONDS (world time at 1x) in quanta of QUANTUM: the nearest whole number, at least
+// one (30 for kSimCatchup at kSimQuantum).
+inline int sim_catchup_quanta(double seconds, double quantum) {
+  return std::max(1, static_cast<int>(std::lround(std::min(seconds, kSimCatchupMax) / quantum)));
+}
+
+// That catch-up at SCALE world seconds a wall second: it grows with the speed as the clock's stall
+// guard does (world_clock::config::cap_scales_with_rate), by ceil(scale) past 1x, so a frame at
+// 3.6x may catch up four times as many quanta as one at 1x.
+inline std::uint64_t sim_catchup_quanta_at(double seconds, double quantum, double scale) {
+  const double mult = std::isfinite(scale) && scale > 1.0 ? std::min(std::ceil(scale), 1.0e6) : 1.0;
+  return static_cast<std::uint64_t>(sim_catchup_quanta(seconds, quantum) * mult);
+}
+
 // A simulation host's clock: QUANTUM (the suite's by default), real time at `scale` (world seconds
-// per wall second), and a catch-up of at most kSimCatchup of world time a frame at 1x, growing with
-// the speed.
-inline world_clock::config sim_clock_config(double scale = 1.0, double quantum = kSimQuantum) {
+// per wall second), and a catch-up of at most CATCHUP of world time a frame at 1x (kSimCatchup by
+// default), growing with the speed.
+inline world_clock::config sim_clock_config(double scale = 1.0, double quantum = kSimQuantum,
+                                            double catchup = kSimCatchup) {
   world_clock::config c;
   c.fixed_dt = quantum;
   c.scale = scale;
-  c.max_steps_per_advance = std::max(1, static_cast<int>(std::lround(kSimCatchup / quantum)));
+  c.max_steps_per_advance = sim_catchup_quanta(catchup, quantum);
   c.cap_scales_with_rate = true;
   return c;
 }

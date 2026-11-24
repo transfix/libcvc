@@ -531,6 +531,15 @@ struct SceneClock {
   // follow (room_clock). A clock that has already ticked at another quantum keeps it, with a
   // warning.
   double hz = 0.0;
+  // How far the world may fall behind its clock (s of world time at 1x, growing with the speed),
+  // from one quantum to cvc::kSimCatchupMax: past it the clock lets the time go rather than run it
+  // late, and the world runs slower than its speed. On the frame's thread it is the catch-up one
+  // frame may run (the clock's stall guard: a stall's time past it is dropped, sim.dropped); on a
+  // world stepped on a thread of its own (world_worker, arigl --world-thread), how far it may
+  // trail the clock before the clock waits for it. 0, the default: the clock keeps the catch-up
+  // its host gave it (cvc::kSimCatchup, 0.25 s, for a scene with vehicles or a rate), and a worker
+  // allows cvc::kSimCatchup.
+  double max_lag = 0.0;
 };
 
 // Where the shadow maps are spent (cvc::gl::SceneGraph::setShadowFocus). Unfocused, each light's

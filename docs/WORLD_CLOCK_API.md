@@ -84,7 +84,10 @@ chosen speed.
 | `lockstep_steps` | 1 | Quanta per `advance()` in `lockstep`. |
 
 `configure(cfg)` replaces the configuration and restarts at tick 0. It is how a
-host picks a quantum every simulation divides before any of them starts.
+host picks a quantum every simulation divides before any of them starts. The
+stall guard, the rate scaling and the lockstep steps also have setters
+(`set_max_steps_per_advance`, `set_cap_scales_with_rate`, `set_lockstep_steps`)
+that change them in place: the tick, the bank and the drop count stand.
 
 ## Observability
 
@@ -147,6 +150,13 @@ and tick keys, with mode, lockstep_steps, step and the remaining telemetry
 beside them (`clk.sim.speed` gives `clk.sim.mode`, `clk.sim.step`, ...).
 `tick_scene` returns the frame's `step_result`. A capture passes its fixed
 frame dt; a live window passes nothing, and the elapsed wall time is measured.
+A scene's `clock: { max_lag: <s> }` sets the stall guard when the binding is
+made: `sim_catchup_quanta(max_lag, fixed_dt)` quanta at 1x, scaling with the
+rate. A world stepped on a thread of its own (`cvc::ariadne::world_worker`,
+arigl `--world-thread`) may trail the clock by as much before the host holds
+the clock (`SceneClockDriver::hold`). Unset, the clock keeps the guard its host
+gave it (`sim_clock_config`'s `kSimCatchup`, 0.25 s, for a scene with vehicles
+or a rate), and a worker allows `kSimCatchup`.
 
 **Threaded followers in a capture.** `sim_thread::wait_caught_up(timeout)`
 blocks until the worker has run and published every step due up to the

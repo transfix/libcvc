@@ -2547,6 +2547,40 @@ scene:
     rotation). A parted look's wheels move the same way (above); a one-piece model's wheels are
     the mesh's and do not move. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **At scale: entity layers.** Past 32 entities the world's vehicles are drawn as one mesh per
+    archetype and level of detail, and only the nearest 8 to the camera (and the one it follows)
+    as their own nodes, with their wheels and labels as above (the others' wheels stand still: a
+    parted look's in a tyre's dark)
+    ([`entity_view.h`](../inc/cvc/gl/ariadne/entity_view.h); the fleets roadmap's FL2). A
+    `type: entity_layer` node says how:
+
+    ```yaml
+    - node: city_bodies
+      type: entity_layer
+      of: { fleet: city }                     # or { archetype: humvee } | { team: 3 } | all
+      layer: bodies                           # the bodies (flags, goals, trails, ... are to come)
+      lod: { near_cap: 10, px: [24, 8, 3] }   # or lod: false
+      promote: 8                              # their own nodes: the followed, then the nearest
+      threshold: 32                           # a layer of at most this many: each its own node
+    ```
+
+    - A fitted model look (a file with `fit`, a data look) has four rungs: the model, textured,
+      and three quadric-decimated copies in each entity's colour. An entity on screen takes the
+      finest rung its size there allows (a radius of at least `px` pixels; at most `near_cap` on
+      the finest, 28 and 72 on the next two), and one off screen is drawn by none. A box look is
+      one mesh.
+    - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
+      `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
+      another is a fifth nearer, so a moving camera does not swap them frame by frame.
+    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
+      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
+      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - The meshes are posed from the physics binding's poses, between steps, whether the frame
+      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      entities the same way (`room_view`, from its entity playout, under node `room_entities`),
+      the vehicle it drives among the promoted.
+    - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
+      node, and 800 take 8 ms of drawing, where they took seconds.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
@@ -5993,7 +6027,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 `cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
-arigl run      [--terminal] [flags] doc.ari [document args...]
+arigl run      [--terminal] [--world-thread] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
 arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
@@ -6007,6 +6041,29 @@ with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
 frame rather than the wall time, so its frames are reproducible.
+
+**`--world-thread`** (`arigl run` in a window, native builds): the scene's world (its physics and
+its vehicles' navigators) steps on a thread of its own, in a local server-role holon
+(`cvc::ariadne::world_worker`), rather than on the frame's. The holon's clock follows the scene's
+tick for tick, one quantum at a time, so the world takes the same steps in the same order. The
+frame holds the world's lock from its start to its end: it pumps the document, publishes what
+the worker ran (the `physics.stats` and vehicle keys are written on the frame's thread, as
+always), and draws the bodies from the poses the worker captured; the worker steps while the
+frame renders and waits. A world further behind its clock than the scene allows holds the clock,
+so it runs slower than its speed rather than further behind, as it would on the frame's thread.
+How far is a setting, `scene: clock: { max_lag: <s> }`: seconds of world time at 1x, growing with
+the speed as the clock's catch-up does (by ceil(speed) past 1x), more than 0 and at most 10;
+0.25 s (`cvc::kSimCatchup`) by default. A world the holon can't take (no Jolt, a build without
+threads) stays on the frame's thread, and arigl says so once. Snapshots, `--terminal`, the
+browser (single-threaded or not: its main thread must not wait on a worker's step, so arigl says
+so and ignores the flag), the headless hosts, the gym and arisrv step on their own thread as
+before, bit for bit. On the frame's thread (arigl without the flag, snapshots, `--terminal`, the
+browser, the headless `AppRuntime`) `max_lag` is the catch-up one frame may run (the clock's stall
+guard: a stall's time past it is dropped and counted in `sim.dropped`), so the same document
+bounds its world's lag the same way on each of them. The gym runs the steps it is asked for, and
+the relay keeps its holon's own catch-up. It is the fleets roadmap's D3
+([FLEETS_AND_NIGHT_ROADMAP.md](roadmap/FLEETS_AND_NIGHT_ROADMAP.md)), and OW7's first part
+([ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §18.2).
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
