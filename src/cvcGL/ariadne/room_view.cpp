@@ -10,15 +10,18 @@
 #include <cvc/ariadne/holon.h>
 #include <cvc/ariadne/holon_sync.h> // entity_playout
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/world_rules.h>    // vehicle_plant_floats
 #include <cvc/ariadne/world_vehicles.h> // find_vehicle_model: a model look, found here
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // lod_stats, make_view_params
 #include <cvc/gl/LodPyramidCache.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
+#include <cvc/gl/ariadne/entity_view.h> // the entities at scale
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/vehicle_view.h> // vehicle_scene_node
+#include <cvc/physics/pose_tracker.h>    // pose_matrix
 #include <set>
 #include <utility>
 #include <vtkRenderer.h>
@@ -128,6 +131,8 @@ room_view::~room_view() {
     remove_marker(_avatars.begin()->first);
   for (const auto &kv : _entity_built)
     _view.scene().removeGraphics(entity_node_id(kv.first));
+  if (_entity_view && _view.scene().getGraphics(_entity_view->implicit_id()))
+    _view.scene().removeGraphics(_entity_view->implicit_id()); // the entities at scale
   // _lod_cache goes with the members: it cancels its queued builds and waits for a running one.
 }
 
@@ -425,6 +430,33 @@ bool room_view::avatar_look(const std::string &pid, rs::avatar_look &out) const 
   return true;
 }
 
+namespace {
+
+// An entity's size as its identity has it (its chassis box and wheels).
+vehicle_shape entity_shape(const cvc::ariadne::conference::room_entity &e) {
+  vehicle_shape shape;
+  shape.length = e.size[0], shape.width = e.size[1], shape.height = e.size[2];
+  shape.wheelbase = e.wheels[0] > 0.0 ? e.wheels[0] : 0.68 * e.size[0];
+  shape.track = e.wheels[1] > 0.0 ? e.wheels[1] : 0.84 * e.size[1];
+  shape.wheel_radius = e.wheels[2] > 0.0 ? e.wheels[2] : 0.0;
+  return shape;
+}
+
+// A file look is the relay's model by its file's name: drawn from this host's own copy
+// (find_vehicle_model: the cvcpkg packages it has), else as its box.
+cvc::ariadne::vehicle_look entity_look(const cvc::ariadne::conference::room_entity &e) {
+  cvc::ariadne::vehicle_look look;
+  look.kind = "box";
+  if (e.look.kind == "file" && !e.look.path.empty())
+    if (const std::string local = cvc::ariadne::find_vehicle_model(e.look.path); !local.empty()) {
+      look = e.look;
+      look.path = local;
+    }
+  return look;
+}
+
+} // namespace
+
 void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
   namespace rc = cvc::ariadne::conference;
   SceneGraph &sg = _view.scene();
@@ -441,12 +473,56 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
     _entity_names.erase(rc::entity_pid(it->first));
     it = _entity_built.erase(it);
   }
+  // The entity view: the room's entities at scale, as a scene draws its own world's.
+  if (!_models)
+    _models = make_vehicle_model_cache();
+  if (!_entity_view)
+    _entity_view = std::make_unique<entity_view>("room_entities");
+  if (entities.revision() != _entity_view_rev || _entity_view->pending_settled(_app, *_models)) {
+    _entity_view_rev = entities.revision();
+    std::vector<entity_draw_info> infos;
+    for (const std::uint64_t id : shown) {
+      const rc::room_entity *e = entities.find(id);
+      if (!e || cvc::ariadne::vehicle_plant_floats(e->plant))
+        continue; // no identity yet, or a boat: a node of its own
+      entity_draw_info d;
+      d.id = id;
+      d.archetype = e->archetype;
+      d.team = e->team;
+      d.color = e->color;
+      d.color2 = e->color2;
+      d.look = entity_look(*e);
+      d.shape = entity_shape(*e);
+      d.base_z = e->base_z;
+      d.fit_length = e->fit_length;
+      cvc::physics::pose p;
+      if (entities.pose(id, p)) {
+        d.position = {p.position.x, p.position.y, p.position.z};
+        d.has_position = true;
+      }
+      infos.push_back(std::move(d));
+    }
+    _entity_view->set_entities(sg, *_models, infos);
+  }
+  std::set<std::uint64_t> followed = followed_entity_ids(_app, _prefix);
+  for (const rc::room_entity &e : entities.entities())
+    if (!_self.empty() && e.driver == _self)
+      followed.insert(e.id); // the vehicle this client drives
+  _entity_view->promote(_view.renderer(), followed);
   for (const std::uint64_t id : shown) {
     rc::room_entity fallback;
     fallback.id = id;
     const rc::room_entity *found = entities.find(id);
     const rc::room_entity &e = found ? *found : fallback;
     const std::string node = entity_node_id(id);
+    if (!_entity_view->drawn_as_node(id)) { // drawn by the entity view's meshes
+      if (_entity_built.erase(id))
+        sg.removeGraphics(node);
+      _entity_posed.erase(id);
+      _heads.erase(rc::entity_pid(id));
+      _entity_names.erase(rc::entity_pid(id));
+      continue;
+    }
     // What its node is built from: a change (its identity replicating, another archetype)
     // rebuilds it.
     char key[512];
@@ -459,21 +535,8 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
     if (built == _entity_built.end() || built->second != key) {
       if (built != _entity_built.end())
         sg.removeGraphics(node);
-      vehicle_shape shape;
-      shape.length = e.size[0], shape.width = e.size[1], shape.height = e.size[2];
-      shape.wheelbase = e.wheels[0] > 0.0 ? e.wheels[0] : 0.68 * e.size[0];
-      shape.track = e.wheels[1] > 0.0 ? e.wheels[1] : 0.84 * e.size[1];
-      shape.wheel_radius = e.wheels[2] > 0.0 ? e.wheels[2] : 0.0;
-      // A file look is the relay's model by its file's name: drawn from this host's own copy
-      // (find_vehicle_model: the cvcpkg packages it has), else as its box.
-      cvc::ariadne::vehicle_look look;
-      look.kind = "box";
-      if (e.look.kind == "file" && !e.look.path.empty())
-        if (const std::string local = cvc::ariadne::find_vehicle_model(e.look.path);
-            !local.empty()) {
-          look = e.look;
-          look.path = local;
-        }
+      const vehicle_shape shape = entity_shape(e);
+      const cvc::ariadne::vehicle_look look = entity_look(e);
       cvc::ariadne::Scene one;
       one.nodes.push_back(vehicle_scene_node(node, look, shape, e.color.data(), e.color2.data()));
       realize_scene(sg, one, _prefix, &_warnings);
@@ -517,6 +580,20 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
                                      p.position.z + 0.5 * e.size[2] + kLabelAboveTop};
     _entity_names[pid] = e.name;
   }
+  const std::vector<std::uint64_t> &posed = _entity_view->posed_ids();
+  double m[16];
+  for (std::size_t k = 0; k < posed.size(); ++k) {
+    cvc::physics::pose p;
+    if (!entities.pose(posed[k], p))
+      continue;
+    cvc::physics::pose_matrix(p, m);
+    _entity_view->pose(k, m);
+  }
+  _entity_view->draw();
+}
+
+entity_view_stats room_view::entity_stats() const {
+  return _entity_view ? _entity_view->stats() : entity_view_stats{};
 }
 
 std::vector<std::uint64_t> room_view::entity_ids() const {

@@ -228,7 +228,7 @@ TEST(RoomSceneTest, ObjectRoundTrips) {
   EXPECT_TRUE(m->visible_default);
 }
 
-TEST(RoomSceneTest, RemoveIsSoftAndBumpsRevision) {
+TEST(RoomSceneTest, RemoveDeletesAndBumpsRevision) {
   cvc::app app;
   for (const SceneNode &n : rs::default_scene_objects())
     rs::write_scene_object(app, "r", n);
@@ -240,11 +240,14 @@ TEST(RoomSceneTest, RemoveIsSoftAndBumpsRevision) {
   const std::vector<SceneNode> out = rs::read_scene_objects(app, "r");
   ASSERT_EQ(out.size(), 1u);
   EXPECT_EQ(out[0].id, "ground");
+  EXPECT_EQ(app.root().findDescendant(object_path("r", "ref")), nullptr) << "its subtree is gone";
 
   rs::remove_scene_object(app, "r", "never-written"); // a no-op, no revision bump
   EXPECT_EQ(rs::scene_revision(app, "r"), before + 1);
+  rs::remove_scene_object(app, "r", "ref"); // nor a second removal
+  EXPECT_EQ(rs::scene_revision(app, "r"), before + 1);
 
-  // Re-writing a soft-removed object brings it back.
+  // Re-writing a removed object brings it back.
   rs::write_scene_object(app, "r", rs::default_scene_objects()[1]);
   EXPECT_EQ(rs::read_scene_objects(app, "r").size(), 2u);
 }
@@ -617,8 +620,8 @@ TEST(RoomSceneTest, RigKnobsRoundTrip) {
     EXPECT_TRUE(leaf.rfind("stage", 0) != 0 && leaf != "fill" && leaf.rfind("key", 0) != 0) << leaf;
 }
 
-// write_room_world writes the whole scene in one revision, written last, and soft-removes what
-// the new world no longer has.
+// write_room_world writes the whole scene in one revision, written last, and removes what the new
+// world no longer has.
 TEST(RoomSceneTest, RoomWorldIsOneRevision) {
   cvc::app app;
   rs::write_room_world(app, "r", rs::default_world());
@@ -637,7 +640,7 @@ TEST(RoomSceneTest, RoomWorldIsOneRevision) {
   const std::vector<SceneNode> now = rs::read_scene_objects(app, "r");
   ASSERT_EQ(now.size(), 1u);
   EXPECT_EQ(now[0].id, "ground");
-  EXPECT_EQ(app.root().findDescendant(object_path("r", "ref") + ".present")->value(), "0");
+  EXPECT_EQ(app.root().findDescendant(object_path("r", "ref")), nullptr);
 
   // A bad id throws before anything is written.
   rs::room_world bad = rs::default_world();
@@ -680,7 +683,7 @@ void ingest_scene(cvc::app &relay, cvc::app &client, const std::string &room) {
 } // namespace
 
 // A client that outlived a relay keeps that relay's entries, and a restarted relay with another
-// world never soft-removes the ones it has no id for: it never knew them. The reader takes only the
+// world never removes the ones it has no id for: it never knew them. The reader takes only the
 // scene's own run -- the objects, lights and fits stamped with its epoch -- and never a plain
 // light's rig knobs, which only an earlier light under the same id can have left.
 TEST(RoomSceneTest, AnOldRelaysEntriesAreNotRead) {

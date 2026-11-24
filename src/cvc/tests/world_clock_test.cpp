@@ -586,6 +586,22 @@ TEST(WorldClockTest, ACapThatScalesWithRateKeepsTwoTimesAtTwoTimes) {
   EXPECT_TRUE(scaled_cap.cap_scales_with_rate());
 }
 
+// The stall guard changes in place (a scene's clock: { max_lag } sets it on a clock that may have
+// run): the tick stands, the next frame runs at most the new cap, and it is never under one.
+TEST(WorldClockTest, TheStallGuardChangesInPlace) {
+  world_clock c;
+  c.advance_ticks(5);
+  c.set_max_steps_per_advance(4);
+  EXPECT_EQ(c.max_steps_per_advance(), 4);
+  EXPECT_EQ(c.tick(), 5u) << "the tick stands";
+  const auto r = c.advance(1.0); // 120 quanta demanded, 4 allowed
+  EXPECT_EQ(r.steps, 4);
+  EXPECT_EQ(r.steps + r.dropped_steps, 120);
+  EXPECT_EQ(c.tick(), 9u);
+  c.set_max_steps_per_advance(0);
+  EXPECT_EQ(c.max_steps_per_advance(), 1) << "clamped to one quantum";
+}
+
 TEST(WorldClockTest, RealizedScaleRestartsOnReset) {
   world_clock c;
   for (int i = 0; i < 100; ++i)
@@ -797,6 +813,8 @@ TEST(SimTickTest, AWorldsRateSetsItsQuantumAndTheNavigatorsTick) {
   EXPECT_EQ(c.fixed_dt, 1.0 / 60.0);
   EXPECT_EQ(c.max_steps_per_advance, 15) << "a quarter second at 60 Hz";
   EXPECT_EQ(cvc::sim_clock_config(1.0, 1.0 / 10.0).max_steps_per_advance, 3) << "2.5, rounded";
+  EXPECT_EQ(cvc::sim_clock_config(1.0, cvc::kSimQuantum, 0.5).max_steps_per_advance, 60)
+      << "a scene's own catch-up";
 
   cvc::world_clock fresh;
   EXPECT_TRUE(cvc::adopt_sim_clock(fresh, 1.0 / 60.0));
@@ -833,4 +851,21 @@ TEST(SimTickTest, AdoptingTheSimulationClockKeepsTheSpeedAndSparesARunningClock)
   ASSERT_GT(running.tick(), 0u);
   EXPECT_FALSE(cvc::adopt_sim_clock(running));
   EXPECT_EQ(running.fixed_dt(), 0.01) << "a running clock keeps its quantum";
+}
+
+// A catch-up (a scene's clock: { max_lag }) is world seconds at 1x: more than 0, at most
+// kSimCatchupMax; in whole quanta, at least one; and it grows with the speed as the clock's stall
+// guard does, by ceil(speed) past 1x.
+TEST(SimTickTest, ACatchUpIsWholeQuantaAndGrowsWithTheSpeed) {
+  for (double s : {0.001, 0.25, 1.0, cvc::kSimCatchupMax})
+    EXPECT_TRUE(cvc::sim_catchup_valid(s)) << s;
+  for (double s : {0.0, -0.25, cvc::kSimCatchupMax + 0.5, std::nan(""), HUGE_VAL})
+    EXPECT_FALSE(cvc::sim_catchup_valid(s)) << s;
+  EXPECT_EQ(cvc::sim_catchup_quanta(cvc::kSimCatchup, cvc::kSimQuantum), 30);
+  EXPECT_EQ(cvc::sim_catchup_quanta(cvc::kSimCatchup, 1.0 / 60.0), 15);
+  EXPECT_EQ(cvc::sim_catchup_quanta(0.001, cvc::kSimQuantum), 1) << "never under one quantum";
+  EXPECT_EQ(cvc::sim_catchup_quanta_at(cvc::kSimCatchup, cvc::kSimQuantum, 1.0), 30u);
+  EXPECT_EQ(cvc::sim_catchup_quanta_at(cvc::kSimCatchup, cvc::kSimQuantum, 0.5), 30u);
+  EXPECT_EQ(cvc::sim_catchup_quanta_at(cvc::kSimCatchup, cvc::kSimQuantum, 3.6), 120u);
+  EXPECT_EQ(cvc::sim_catchup_quanta_at(cvc::kSimCatchup, cvc::kSimQuantum, 0.0), 30u) << "paused";
 }

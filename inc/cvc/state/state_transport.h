@@ -142,8 +142,19 @@ public:
   // without connections report none (the default).
   virtual std::vector<state_link_report> link_reports() const { return {}; }
 
+  // Close each live connection that has sent no frame for TIMEOUT, as a dropped link closes: a
+  // relay's on-close retraction fires for a peer it accepted, and a client finds its link to the
+  // relay gone (it reconnects). Both ends probe each other every ping_interval(), so only a peer
+  // that went away without closing (a crash behind NAT, a suspended phone, a pulled cable) is
+  // silent that long. Call it periodically, on a relay and a client alike. Returns how many it
+  // closed (the WebSocket transport: how many it swept). Default: none (0). No-op under wasm.
+  virtual std::size_t reap_idle(std::chrono::milliseconds timeout) {
+    (void)timeout;
+    return 0;
+  }
+
   // How often each connection is pinged (default 2 s; 0 turns the probe off). The probe also keeps
-  // a quiet-but-connected peer from looking idle to a relay's reaper.
+  // a quiet-but-connected peer from looking idle to a reaper (reap_idle).
   void set_ping_interval(std::chrono::milliseconds interval) noexcept {
     _ping_interval_ms.store(interval.count(), std::memory_order_relaxed);
   }

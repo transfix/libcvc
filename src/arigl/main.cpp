@@ -103,7 +103,7 @@
 #include <cvc/ariadne/conference/avatar_panel.h>    // the Avatar window: settings, energy, ledger
 #include <cvc/ariadne/conference/room_aoi.h>        // the relay's AOI params -> peers' audio gain
 #include <cvc/ariadne/conference/room_calls.h>      // room-call: the relay's functions
-#include <cvc/ariadne/conference/room_intrinsics.h> // room_join (re-assert after a reconnect)
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_join, room_reassert (after a reconnect)
 #include <cvc/ariadne/conference/room_lane.h>       // the fast lane (CVC_ARIADNE_LANE=1)
 #include <cvc/ariadne/conference/room_net.h>        // our link quality + voice activity to the room
 #include <cvc/ariadne/conference/voice_monitor.h>   // the Audio window: jitter buffers
@@ -308,6 +308,8 @@ int usage(int code) {
                "\n"
                "flags (before the document):\n"
                "  --terminal             run in the terminal, the scene drawn behind the widgets\n"
+               "  --world-thread         run: step the scene's world on a thread of its own, in a\n"
+               "                         local holon (not in a browser, or with --terminal)\n"
                "%s"
                "\n"
                "A window by default (ImGui over the VTK scene). snapshot renders offscreen: write\n"
@@ -682,12 +684,15 @@ struct ConferenceSession {
   // round trip and traffic both ways), publish it to the room as participants.<pid>.net.* so every
   // roster shows it next to our name, and show it in our own row (self.ping / self.down / self.up).
   // If the link is gone (the relay restarted, the network dropped, or a long-backgrounded tab was
-  // reaped) dial the relay again every few seconds, and after reconnecting re-assert our presence
-  // for a few seconds (the relay marked us as left; our write must land after its snapshot).
+  // reaped) or silent past kRelayIdleS (gone without closing), dial the relay again every few
+  // seconds, and after reconnecting re-assert our presence for a few seconds (the relay marked us
+  // as left; our write must land after its snapshot), and what we published (own_): a relay
+  // removes a participant away past its grace, and its delete takes our copy too.
   std::string relay_url_;
   bool relay_grpc_ = false;
   bool ever_linked_ = false;
   double next_net_s_ = 0.0, next_reconnect_s_ = 0.0, rejoin_until_s_ = 0.0;
+  cvc::ariadne::conference::room_own_leaves own_; // room_own_state before the redial; one outage
   cvc::state_link_rate_meter link_meter_; // our own row, each second
   // What the room gets, over room_net's net_publish_period_s.
   cvc::state_link_rate_meter publish_meter_;
@@ -1259,6 +1264,9 @@ struct ConferenceSession {
       aoi_ = ap;
     else
       aoi_.reset();
+    // A link that went silent (the relay, or the path to it, gone without closing) is closed, so
+    // it is no longer a link and we dial again below. The relay probes it every 2 s.
+    tp_->reap_idle(std::chrono::seconds(static_cast<long long>(kRelayIdleS)));
     const std::vector<cvc::state_link_report> links = tp_->link_reports();
     const cvc::state_link_report *relay = nullptr;
     for (const cvc::state_link_report &r : links)
@@ -1314,8 +1322,12 @@ struct ConferenceSession {
         }
       }
     }
-    if (now < rejoin_until_s_)
+    if (now < rejoin_until_s_) {
       cvc::ariadne::conference::room_join(*app_, room_, pid_, st(prefix_ + ".conf.self").value());
+      cvc::ariadne::conference::room_reassert(*app_, room_, pid_, own_);
+    } else {
+      own_.clear(); // back for the whole window: the next outage takes its own
+    }
   }
 
   // Run our holon's clock ahead of the relay's by the round trip plus a margin (holon::
@@ -1334,11 +1346,16 @@ struct ConferenceSession {
   static constexpr double kLeadMarginS = 0.06;
   static constexpr double kLaneRetryS = 5.0; // a lane that has not opened by then is offered again
   static constexpr double kLaneIdleS = 3.0;  // an open lane silent this long is offered anew
+  static constexpr double kRelayIdleS = 10.0; // the relay link silent this long is closed
 
   void reconnect(double now) {
     next_reconnect_s_ = now + 3.0;
     std::fprintf(stderr, "arigl: conference: lost the relay link; reconnecting to %s\n",
                  relay_url_.c_str());
+    // What we published, before the relay's admit can delete it here: added to what an earlier
+    // try of this outage took, which that admit may have deleted since.
+    for (auto &kv : cvc::ariadne::conference::room_own_state(*app_, room_, pid_))
+      own_[kv.first] = std::move(kv.second);
     bool ok = false;
 #if CVC_ENABLE_GRPC
     if (relay_grpc_ && grpc_)
@@ -2916,7 +2933,15 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
     const double fps = o.fps > 0 ? o.fps : 120.0;
 #ifndef __EMSCRIPTEN__
     const auto period = std::chrono::duration<double>(1.0 / fps);
+    if (has_flag(o, "--world-thread")) // D3: the world steps while the frame renders and sleeps
+      rt.set_world_thread(true);
 #else
+    // A browser steps the world on the frame's thread (single-threaded or not, its main thread
+    // must not wait on a worker's step), as it does without the flag; the scene's max_lag is then
+    // the catch-up a frame may run.
+    if (has_flag(o, "--world-thread"))
+      std::fprintf(stderr, "arigl: --world-thread: a browser steps the scene's world on the "
+                           "frame's thread\n");
     // $CVC_ARIGL_YIELD=timeout (the page's ?yield=timeout) yields on a 0 ms timer instead of the
     // next animation frame: the pacing's A/B.
     const char *yield_env = std::getenv("CVC_ARIGL_YIELD");
@@ -3202,7 +3227,7 @@ int arigl_main(int argc, char **argv) {
                                             std::vector<std::string>(argv + 2, argv + argc));
 #endif
   const ari::HostOptions o =
-      ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions"});
+      ari::parse_host_args(argc, argv, {"--terminal", "--json", "--functions", "--world-thread"});
   if (o.help)
     return usage(0);
   if (!o.error.empty()) {
