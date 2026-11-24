@@ -1300,6 +1300,11 @@ struct pycvc_py_conversion {
 // (cvc/ph/compose.h, docs/PH_COMPOSE.md).
 %include "pycvc_ph.i"
 
+// ── cvc::nav's CoPH: the kernels, the learner and the fleet ────────────────────
+// NavCophAgent, NavCophFleet, NavCophPacket and the golden kernels (cvc/nav/coph_*.h, C6 of
+// docs/roadmap/NAV-COPH-ROADMAP.md).
+%include "pycvc_nav_coph.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1443,6 +1448,7 @@ struct pycvc_py_conversion {
 %include "pycvc_volume_slice.i"
 %include "pycvc_volume_grid_contours.i" // before volume_grid.i: its session holds contours
 %include "pycvc_volume_grid.i"
+%include "pycvc_volume_grid_segment.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does

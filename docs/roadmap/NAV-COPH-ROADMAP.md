@@ -541,6 +541,47 @@ run is byte-unchanged.
   natively. pycvc-gl's wasm build then runs the CoPH demo in the browser, without torch.
 - **Live parity.** GRL-SNAM's parity test can check the native fleet against the torch one.
 
+**Landed in part 1: the bindings.** `bindings/pycvc/pycvc_nav_coph.i`, tested by `pycvc_nav_coph`
+(`test_pycvc_nav_coph.py`).
+- **The kernels.** `nav_coph_flow`, `nav_coph_balance`, `nav_coph_risk`, `nav_coph_potential`,
+  `nav_coph_grad_potential`, `nav_coph_command`, `nav_coph_shaping` and `nav_coph_allocate`. A
+  packet's bytes are `NavCophPacket.bytes()`, the length of its `json()`.
+- **The configurations.** Dicts over the demos' profile, with `coph_config`'s field names.
+  `nav_coph_profile()` and `nav_coph_communication_profile()` return the whole of each, and an
+  unknown key is an error.
+- **`NavCophAgent`.** One learner, a crossing one or a car's (`network="none"`): observe, advance,
+  action, update, `export_to` (a `NavCophPacket`) and assimilate.
+- **`NavCophFleet`.** The runner's fleet:
+  - `run_crossing()` on the crossing world; its sensor noise may be a Python callable;
+  - `boundary()` for a world of the caller's;
+  - the samples, controls, updates, events and energy accounts.
+- **Results on Windows.**
+  - G2, G3 and G11 come within the golden's tier from Python, through the same file libcvc's C++
+    tests read.
+  - The fleet on G12's crossing world and noise matches libcvc's
+    `CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun`: both agents reach their goals (767
+    and 784 steps), with residuals of 7.5e-15 and 7.0e-15.
+
+**Landed in part 2: `--controller coph`.** `pycvc.NavCophDriver` binds C5's `coph_driver` to a
+`nav_sim_world_create` handle. `pycvc_gl.cars` uses it: `Cars(..., coph={...})` and
+`step_coph()`, the template's `--controller coph` and the Run panel's CoPH choice (docs/CARS.md,
+"CoPH, natively").
+- **The Froude scale.** By default it is the car's length over a RoboRacer's: 1 for a RoboRacer,
+  about 9 for a Humvee (D3, D4). `--coph-scale` sets it.
+- **The coefficient plots.** They show each car's account: the allocation residual, the work, the
+  risk cost and the CoPH steps.
+- **Results on Windows.**
+  - From Python, the driver's two cars pass each other and arrive in 485 ticks, as
+    `CophDriver.TwoCarsCrossTheField` does in C++. With nothing attached, the run is the sim's
+    own, bit for bit.
+  - Two Humvee-sized cars on nav's bicycle cross 60 m of the flat world past each other and both
+    arrive, in 37.9 s, with no contact (s = 9.05).
+  - The template's headless `--controller coph` run is checked by CI's `pycvc_gl_cars`. This box
+    has no cvcGL.
+- **Limits.** A CoPH car that reached its goal brakes and stays: its learner's run is over, so it
+  takes no new goal. It runs on `Cars` only, not `--gym` or `--world-doc`.
+- **Next, part 3:** the browser demo (pycvc-gl's wasm build).
+
 ## 5. Golden cases and tiers
 
 FLOAT64 means `|mine − golden| ≤ rtol |golden| + atol`, with `rtol` 1e-12 for closed forms and

@@ -1307,6 +1307,58 @@ and `TerminalScene`) counts an expression on the document's read lane
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
 
+**Animations.** `animations:` in a scene moves its nodes, or writes state keys, along keyframes over
+the scene clock:
+
+```yaml
+scene:
+  animations:
+    - animation: door_open        # its keys: animations.door_open.time / .playing / .speed
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[0, [0, 0, 0]], [1.5, [0, 0, 95]], [2, [0, 0, 90]]]
+    - animation: beacon
+      loop: true                  # false (the default) | true | pingpong
+      tracks:
+        - { node: beacon, key: color, keys: [[0, [1, 0.2, 0]], [0.5, [1, 0.8, 0]], [1, [1, 0.2, 0]]] }
+        - { state: beacon.level, keys: [[0, 0], [0.5, 1], [1, 0]] }
+    - animation: wave
+      loop: pingpong
+      autoplay: false             # waits for animations.wave.playing
+      speed: 0.5
+      tracks:
+        - { node: flag, key: position, keys: [[0, [0, 0, 0]], [1, [0, 0, 0.4]]] }
+        - { node: post_3/flag, key: scale, keys: [[0, [1, 1, 1]], [1, [1.5, 1.5, 1.5]]] }
+```
+
+- **A track** moves one thing along its `keys:`, a list of `[seconds, value]`:
+  - `node: <id>` with `key: position`, `rotation` (degrees about x, then y, then z), `scale` or
+    `color` (each three numbers), `opacity` (0..1) or `visible` (shown above 0.5). The id names
+    every node with it, so `flag` moves each `repeat:` copy's flag and each prototype instance's;
+    a path, `post_3/flag`, names the flag under `post_3` alone.
+  - `state: <path>`, resolved as a bind is: the value written there, a number or numbers joined by
+    commas, for a widget, a program or a node's `visible:` to read.
+  - `interpolation:` `linear` (the default), `step` (each key's value until the next) or `smooth`
+    (a curve through every key, easing in and out at the first and last). Rotation interpolates
+    each angle on its own, so `[0, 0, 0]` to `[0, 0, 360]` is a whole turn.
+  - Before its first key a track holds the first value, after its last the last.
+- **An animation** runs as long as its latest key (`duration:` sets it longer), then stops
+  (`loop: false`), starts over (`true`) or turns back (`pingpong`). `speed:` is seconds of
+  animation a second of the clock; below 0 it plays backwards. `autoplay: false` waits.
+- **Its keys** under the scene's prefix: `animations.<id>.time` (seconds into it), `.playing`
+  (`1` or `0`) and `.speed`. The animation writes them as it plays and reads them every frame, so a
+  program seeks with `(state-set "animations.door_open.time" "0")`, plays and pauses with
+  `.playing`, and changes `.speed`. An animation that stopped at its end and is played again starts
+  over.
+- **The clock.** A scene with an animation runs on the scene clock, as `clock: {}` would make it,
+  so `sim_transport.ari`'s Paused and Speed pause and slow its animations with everything else. At
+  realize every animation sets what it moves to where it starts, playing or not.
+- **One writer a key.** Physics poses a body's node every step and a `visible:` bind writes its
+  node's visibility every frame, so an animation of either is overwritten: animate a node without
+  a body, and the visibility of one without a `visible:`.
+
 **Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
 handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
 descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the
@@ -2547,6 +2599,40 @@ scene:
     rotation). A parted look's wheels move the same way (above); a one-piece model's wheels are
     the mesh's and do not move. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **At scale: entity layers.** Past 32 entities the world's vehicles are drawn as one mesh per
+    archetype and level of detail, and only the nearest 8 to the camera (and the one it follows)
+    as their own nodes, with their wheels and labels as above (the others' wheels stand still: a
+    parted look's in a tyre's dark)
+    ([`entity_view.h`](../inc/cvc/gl/ariadne/entity_view.h); the fleets roadmap's FL2). A
+    `type: entity_layer` node says how:
+
+    ```yaml
+    - node: city_bodies
+      type: entity_layer
+      of: { fleet: city }                     # or { archetype: humvee } | { team: 3 } | all
+      layer: bodies                           # the bodies (flags, goals, trails, ... are to come)
+      lod: { near_cap: 10, px: [24, 8, 3] }   # or lod: false
+      promote: 8                              # their own nodes: the followed, then the nearest
+      threshold: 32                           # a layer of at most this many: each its own node
+    ```
+
+    - A fitted model look (a file with `fit`, a data look) has four rungs: the model, textured,
+      and three quadric-decimated copies in each entity's colour. An entity on screen takes the
+      finest rung its size there allows (a radius of at least `px` pixels; at most `near_cap` on
+      the finest, 28 and 72 on the next two), and one off screen is drawn by none. A box look is
+      one mesh.
+    - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
+      `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
+      another is a fifth nearer, so a moving camera does not swap them frame by frame.
+    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
+      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
+      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - The meshes are posed from the physics binding's poses, between steps, whether the frame
+      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      entities the same way (`room_view`, from its entity playout, under node `room_entities`),
+      the vehicle it drives among the promoted.
+    - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
+      node, and 800 take 8 ms of drawing, where they took seconds.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
@@ -3021,6 +3107,12 @@ data:                                    # the app loads the data
     - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
   points: { data: seeds }                # point classes (item: classes), or { state: <key> }
   session: { data: last }                # a session to apply (item: session), or { state: <key> }
+  segment:                               # the Segmentation tab's keys (grid.segment.*)
+    t_low: 72                            # cvc::seeded_segmentation_params' fields
+    automatic: none
+    opacity: 0.6                         # cvc::volume_grid_segment_view_params' fields
+    mesh: { smoothing: 8 }               # cvc::class_surface_params' fields
+  request: segment                       # one request, run once the volume is there
   objects:                               # the contour objects it starts with
     - { name: axon, color: [0.2, 0.8, 0.3], interpolation: spline, samples: 5 }
   contours: { data: traced }             # contours the app holds (item: contours), or { state }
@@ -3043,11 +3135,13 @@ seeds its key only while the key is empty:
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
-| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane); the contours': `tile`, `stop_tile` (and `stop` while a tile runs), `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane), `segment` (the Segmentation tab's run, below), `stop` (ends what runs: a segmentation, keeping the last result, and a tile); the contours': `tile`, `stop_tile`, `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `busy`, `stoppable`, `progress`, `phase`, `status`, `stats.work_ms`, `pid` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), while a `segment` runs (a tile's are under `tile.*`) |
+| `segment.*`, `segment.mesh.*` | the Segmentation tab's parameters: `cvc::seeded_segmentation_params` (`t_low`, `t_high`, `gamma`, `automatic`, ...; `variable` and `timestep` written as `source.var` and `time` when a run starts), `cvc::volume_grid_segment_view_params` (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`, `live`) and `cvc::class_surface_params` under `mesh` (`smoothing`, `close`, ...). `t_low`'s and `t_high`'s `min` and `max` properties are the volume's range |
+| `segment.rows`, `segment.rows.<i>.{name,color,visible,voxels,triangles}`, `segment.info.*`, `segment.warnings` | the last result's classes as rows (editing `color` or `visible` recolours or hides that class's labels and surface), and what it labelled |
 | `objects`, `objects.<i>.{name,color,interpolation,samples,visible,curves,points,triangles}`, `objects.current` | the contour objects as rows a `list:` binds (`interpolation` is `linear` or `spline`, `samples` a spline's points per span; `curves`, `points` and `triangles` are written); `current` is the object a click draws |
 | `contour.*`, `contour.{selected,info,active}` | `cvc::volume_grid_contour_params`: `show`, `control_points`, `point_size` (voxels), `line_width`, `snap`, `show_3d`, `show_surfaces`, `surface_opacity`, `auto_tile` and `source` (a key whose data channel holds a `contour_stack` or a `grid_contours`, followed); published: how many control points are selected, a summary, the curve being drawn |
 | `tile.*` | `cvc::tile_params` (lengths in object units) and the tile job's keys (`busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms`, `pid`, `label`, `warnings`): under `tile`, so a tile runs beside the segmentation's job |
-| `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
 
 The point classes, the selection, the session and the volume are on the data channel at
 `grid.points`, `grid.selection` (`std::shared_ptr<const cvc::point_classes>`), `grid.session`
@@ -3073,14 +3167,35 @@ beyond the planes, which the slice views hide: the volume itself, drawn by the r
 `display.render` picks (`none` by default; `vtk`, `volren` or `volslice`, a
 [`VolumeRenderNode`](../inc/cvc/gl/VolumeRenderNode.h) as `volume_render` below has, through the
 grid's transfer function, so one `tf_editor` colours the planes and the volume; the component's
-Transfer function tab picks it), the contours' curves and tiled surfaces, and later phases'.
-Until the first volume arrives the planes and that group are hidden,
+Transfer function tab picks it), the contours' curves and tiled surfaces, and the segmented
+classes. Until the first volume arrives the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
 `cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
 pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
 `test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
+
+**Segmentation** ([`VolumeGridSegmentation.h`](../inc/cvc/gl/VolumeGridSegmentation.h), the
+component's Segmentation tab, roadmap §5). `request: segment` segments the grid's volume, seeded by
+its point classes of the shown variable and timestep (`cvc::segment_seeded`, GenSeg's fast
+marching), then makes each class's surface (`cvc::class_surfaces`), as one sliced task on the app's
+scheduler: the views stay live, the job keys show its progress, and `stop` ends it keeping the last
+result. The labels draw on each plane as a see-through `labels` layer in the classes' colours (the
+point classes' at the run), while the fronts advance (`segment.live`) and then for good; each
+class's surface draws in a `segments` group under `<id>_surfaces`, so a view with
+`show: [surfaces]` shows the classes alone. The result is on the data channel:
+`grid.segment.labels` (a UChar `cvc::volume`, 255 none), `grid.segment.classes` (a
+`std::shared_ptr<const std::vector<cvc::volume>>`, each class's voxels named after it),
+`grid.segment.border` (`cvc::point_classes`) and `grid.segment.surfaces.<n>` (class n's
+`cvc::geometry`). The app saves them: `(data-save "graphics.root.children.grid.grid.segment.classes"
+"segments.rawv" "volume")` writes the classes as one file's variables (VolumeGridRover's
+`SegTmp.rawv`), as the tab's Save classes does. A new volume clears the result. The data side is
+core libcvc ([`volume_grid_segment.h`](../inc/cvc/volume/volume_grid_segment.h),
+[`class_surfaces.h`](../inc/cvc/volume/class_surfaces.h)) with pycvc and `segment.surfaces` in the
+DSL (`volume_grid_segment_test`, `class_surfaces_test`, `cvcgl_volume_grid_segment`,
+`test_pycvc_volume_grid_segment.py`). `examples/ariadne/documents/volume_grid_segment.ari` segments
+the bones of VolRover's Visible Human CT.
 
 **Contours** ([`VolumeGridContours.h`](../inc/cvc/gl/VolumeGridContours.h), P10). With the
 `contours` tool a click adds a point to the current object's curve on that plane: at the end being
@@ -3505,8 +3620,10 @@ How each backend does it:
   wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
   `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
   draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
-  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
-  bar for a document laid out for 600.
+  smaller, its shape kept. A `tabs` bar fits the line's room, left of a vertical scroll bar: tabs
+  that cannot shrink into it scroll there behind arrows, and the ones scrolled out are not the
+  line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
+  little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
@@ -4212,6 +4329,9 @@ back (a window reopened) keeps its place.
   holds where libcvc has this. `ariadne_ftxui_test`'s `MessageFieldLiveDraftAndACompletion` and
   `cvcgl_imgui_chat_widgets` type into one.
 
+Both have the context menu of §5.28. On a `text_view:` it is Copy line (the message under the
+pointer), Copy all and Select text...; on a `message_input:`, Cut, Copy, Paste and Select all.
+
 ### 5.16 Conference chat: the chat verbs and the chat component
 
 In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
@@ -4395,7 +4515,7 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 | encoder | Writes |
 |---|---|
 | `bytes` | the bytes (a `DataBytes` or a string) as they are |
-| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...) |
+| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...); or a `std::vector<cvc::volume>` as one file's variables, in a format that holds several (`.rawv`) |
 | `point_classes` | `cvc::point_classes` as a `.vgr` |
 | `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
 | `contours` | a `cvc::contour_stack` in a one-file format, by FILE's extension: `.cvcc`, `.contour` or `.pcd` (a `.ser` or `.config` writes files beside it, and is refused) |
@@ -5286,7 +5406,8 @@ menubar:
   its tone is the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
-  window with every entry (`tree._notifications.open`; its X closes it).
+  window with every entry (`tree._notifications.open`; its X closes it). A right-click on an entry,
+  in the menu or the window, offers Copy, which copies its whole message (§5.28).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
   - A document's top-level `notifications: true|false` overrides the host; `always` is true, the
@@ -5476,7 +5597,9 @@ colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directl
   group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
   a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
   `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
-  colour.
+  colour. The picker shows a field per channel; with `fmt: hex` it shows one `#rrggbb` field beside
+  its swatch instead (`Backend::color_hex`; a backend without one draws the default picker), as the
+  `volume_grid` component's class tables do. Its key holds `r,g,b` either way.
 
 **Backends.**
 
@@ -5541,6 +5664,91 @@ current one to look pressed:
 `ariadne_loader_test`'s `ButtonIconAndSelectedParse` checks the keys; `ariadne_ftxui_test`'s
 `SelectedButtonIsMarked` the terminal's look; `cvcgl_imgui_group_click` taps a selected
 button with a picture through ImGui's own input.
+
+### 5.28 Copy, cut and paste: the context menu
+
+Text in every host has a context menu, with nothing in the document asking for it. A right-click
+opens it. So does a long press on a touch screen (half a second, the finger still), and Shift+F10
+or the Menu key on the focused widget in a terminal. What it offers depends on what is under the
+pointer:
+
+| Under the pointer | The menu |
+|---|---|
+| A field: `input_text:`, `message_input:` | Cut, Copy, Paste, Select all |
+| A text: `text:`, a bound value, a rich text (§5.20) | Copy, Select text... |
+| A `text_view:` (a chat log, a console) | Copy line, Copy all, Select text... |
+| A notification: the bell's entry, a Notifications window line (§5.24) | Copy |
+
+- **Cut and Copy** take the selection, or the whole text when nothing is selected. A `password:`
+  field has neither.
+- **Paste** puts the clipboard's text at the cursor, over the selection. A one-line field drops
+  the text's line breaks. A multi-line `message_input:` keeps them, as LF.
+- **Copy on a value** (a bound `text:` with a label) copies the value, not "label: value".
+- **Copy line** copies the line under the pointer: in a chat log, the message it is on.
+- **Copy on a notification** copies the whole message, every line of it, not the one line its
+  entry shows.
+- **Select text...** shows the text in a read-only field in a window of its own. Select a part
+  of it there (drag, Shift with the arrows, Ctrl+A or its Select all), then copy it with its
+  Copy, its context menu or Ctrl+C. This is how to copy part of a long message.
+
+On a touch screen the menu opens under the finger. It takes no tap until the finger has lifted,
+so the lift that ends the long press picks nothing.
+
+How each host does it:
+
+- **ImGui, natively** (`arigl`, cvcGL apps): the system clipboard. That is SDL's under cvcGL's
+  window, Wayland included. Under VTK's own window it is the platform's: Win32 through ImGui,
+  NSPasteboard, or an X11 selection. Ctrl+X, Ctrl+C, Ctrl+V and Ctrl+A work in a field as they
+  always did (Cmd on a Mac). The menu edits through the field's own callback, so ImGui's undo
+  (Ctrl+Z) takes back a Cut or a Paste.
+- **The arigl-web page**: the browser's own menu stays off the canvas.
+  - Copy is `navigator.clipboard.writeText`.
+  - Paste is `navigator.clipboard.readText()`, which answers later; the text goes into the field
+    when it does. Chrome asks the user once for the permission. Firefox and Safari show their own
+    Paste button by the pointer each time, which the user clicks.
+  - Safari allows these calls only inside the click itself, and ImGui sees a click a frame after
+    the browser does. So the page makes the call in the pointer release over the menu item
+    (`cvc::gl::clipboard::arm`).
+  - When the browser refuses (the permission denied, its prompt dismissed, an `http://` page),
+    the field takes the focus and a note under it says to press Ctrl+V. Ctrl+V works as it always
+    did, through the page's `paste` event.
+- **FTXUI** (`ari`):
+  - Copy is an OSC 52 escape, as `(clipboard-set)`'s is (§10.7).
+  - Paste asks the terminal for the clipboard with an OSC 52 read
+    (`ESC ] 52 ; c ; ? ESC \`), and the answer is typed into the field. xterm with
+    `allowWindowOps` answers, and foot, kitty and iTerm2 do once the user allows it. Most
+    terminals stay silent, so after 3 seconds the tooltip line says to use the terminal's own
+    paste (Ctrl+Shift+V, Shift+Insert or its menu). That paste types into the focused field as
+    it always did.
+  - A field selects with Shift and the arrows, Home and End. Typing replaces the selection.
+  - For part of a text, use the terminal's own selection. The program has the mouse, so that is
+    Shift+drag in most terminals.
+- **The ari.html page** (xterm.js): it answers the OSC 52 read with
+  `navigator.clipboard.readText()`, as above. While the program has the mouse, a right-click is
+  the program's, not the browser's menu.
+- **tvision** (`ari run --backend tvision`): Copy and Paste use tvision's `TClipboard`. That is
+  the system clipboard on Windows. On Unix it is `wl-copy`, `xsel` or `xclip` when there is a
+  display, else OSC 52. A Paste arrives as a paste of keys into the focused field. The bell's
+  menu is tvision's own menu, which has no context menu, so copy a notification from the
+  Notifications window (Show all...).
+
+For a backend: the core calls `Backend::next_item_copy(TEXT)` just before an item whose Copy is
+not the text it shows (a notification's entry), and the item after it copies what it shows again.
+Each backend draws its own menus. `ImGuiBackend::context_item_drawn` reports each item's rect, for
+a test.
+
+The tests:
+
+- `cvcgl_imgui_context_menu`: ImGui on a bare context, driven by the mouse and the keys.
+- `ariadne_ftxui_test`'s `ARightClickOnATextOffersCopy`, `AFieldsMenuCutsCopiesAndPastes`,
+  `ATextViewsMenuCopiesALineOrAll`, `ANotificationsEntryCopiesItsWholeMessage` and
+  `APasteWithNoTerminalToAskSaysHowToPaste`.
+- `ariadne_term_graphics_test`'s `Osc52ReadsAndItsAnswer`.
+- `ariadne_runtime_test`'s `ANotificationsEntryCopiesItsWholeMessage`.
+- In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs` runs arigl-web in headless Chrome,
+  grants it the clipboard, and right-clicks through the page's own input. It covers Copy, Paste,
+  Cut, and a refused read followed by Ctrl+V. On ari.html it uses Shift+F10 and Paste through the
+  OSC 52 read.
 
 ## 6. Composition: include / import / load
 
@@ -5718,7 +5926,8 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
@@ -6042,7 +6251,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 `cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
-arigl run      [--terminal] [flags] doc.ari [document args...]
+arigl run      [--terminal] [--world-thread] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
 arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
@@ -6056,6 +6265,29 @@ with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
 frame rather than the wall time, so its frames are reproducible.
+
+**`--world-thread`** (`arigl run` in a window, native builds): the scene's world (its physics and
+its vehicles' navigators) steps on a thread of its own, in a local server-role holon
+(`cvc::ariadne::world_worker`), rather than on the frame's. The holon's clock follows the scene's
+tick for tick, one quantum at a time, so the world takes the same steps in the same order. The
+frame holds the world's lock from its start to its end: it pumps the document, publishes what
+the worker ran (the `physics.stats` and vehicle keys are written on the frame's thread, as
+always), and draws the bodies from the poses the worker captured; the worker steps while the
+frame renders and waits. A world further behind its clock than the scene allows holds the clock,
+so it runs slower than its speed rather than further behind, as it would on the frame's thread.
+How far is a setting, `scene: clock: { max_lag: <s> }`: seconds of world time at 1x, growing with
+the speed as the clock's catch-up does (by ceil(speed) past 1x), more than 0 and at most 10;
+0.25 s (`cvc::kSimCatchup`) by default. A world the holon can't take (no Jolt, a build without
+threads) stays on the frame's thread, and arigl says so once. Snapshots, `--terminal`, the
+browser (single-threaded or not: its main thread must not wait on a worker's step, so arigl says
+so and ignores the flag), the headless hosts, the gym and arisrv step on their own thread as
+before, bit for bit. On the frame's thread (arigl without the flag, snapshots, `--terminal`, the
+browser, the headless `AppRuntime`) `max_lag` is the catch-up one frame may run (the clock's stall
+guard: a stall's time past it is dropped and counted in `sim.dropped`), so the same document
+bounds its world's lag the same way on each of them. The gym runs the steps it is asked for, and
+the relay keeps its holon's own catch-up. It is the fleets roadmap's D3
+([FLEETS_AND_NIGHT_ROADMAP.md](roadmap/FLEETS_AND_NIGHT_ROADMAP.md)), and OW7's first part
+([ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §18.2).
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
@@ -6372,8 +6604,9 @@ event wait that yields with `emscripten_sleep`. Both pages are in the gallery.
 
 What differs from a real terminal:
 
-- The loop yields with `emscripten_sleep`, so the build links `-sASYNCIFY`. A hidden
-  tab throttles timers, which slows redraws and `on_tick`.
+- The loop yields with `emscripten_sleep`, which suspends `main` under JSPI (`-sJSPI`, so the
+  page needs a browser with it: §9.4). A hidden tab throttles timers, which slows redraws and
+  `on_tick`.
 - Ctrl-C reaches the document's `on_signal:` as SIGINT, as in a terminal. Only keys
   the browser lets a page see get through: Ctrl-W / Ctrl-T / Ctrl-N belong to the
   browser. Ctrl-Z is ignored, because a page has no job control.
@@ -6618,6 +6851,19 @@ names) is fetched twice more past the browser's cache (`cache: 'reload'`); one t
 fails the load with its name and how much of it arrived. A failed load shows what the runtime
 printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
+
+**Which browsers.** Every browser build (arigl-web, `ari.html`, ariglx-web, and the gallery's
+demos and `arigl_term`) is built with wasm exceptions and JSPI (JavaScript Promise Integration),
+with no Asyncify fallback ([WASM_JSPI_EXCEPTIONS.md](roadmap/WASM_JSPI_EXCEPTIONS.md)). They
+run in Chrome 137, Firefox 153 or Safari 27, or later. On an iPhone or iPad every browser,
+Chrome and Firefox included, is WebKit, so there they need iOS 27 (iPadOS 27). Each page checks
+for JSPI (`WebAssembly.Suspending` and `WebAssembly.promising`) before it fetches anything of
+the module. Without it, the page says what the browser needs, in place of a load that would
+fail part way: those versions, or iOS 27 on an iPhone or iPad (told by the user agent, and an
+iPad's Mac user agent by its touch screen), and the browser's own user agent.
+`window.ariadneWeb.state` is then `unsupported` and `ariadneWeb.needs` holds the text.
+`arigl_web_smoke.mjs` checks the gate in headless Chrome with `WebAssembly.Suspending` deleted
+before the page's script runs, as Chrome, on an iPhone and on an iPad.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is
 relative to the working directory, not to the document. The browser shell runs in the
@@ -6995,6 +7241,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **`server: leave_grace_s:`** is how long the relay keeps a departed participant's subtree in the
+  room tree, in whole seconds (default 300; 0 removes it as its connection ends). One that joins
+  again in time finds what it published still there. `arisrv --leave-grace-s` overrides it.
 - **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
   where every client is sent them; a subscribing client's node wears it with
   `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").
@@ -8095,6 +8344,8 @@ screen view. The backend answers them, so they work the same in every host built
   only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
 - `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
   `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
+- The user copies and pastes with the context menu every host has on text (§5.28), with nothing
+  in the document. Its Paste reads the clipboard; a document's programs cannot.
 
 ### 10.8 Picking and sending files: `file-pick` and `http-upload`
 

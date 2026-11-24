@@ -152,6 +152,203 @@ TEST(RoomIntrinsics, LeaveRetractsParticipantAcrossNodes) {
   sB.detach();
 }
 
+// The relay removes a participant: one delete, and the subtree goes from every node, all of it
+// (what the participant published too), though the relay's copy came from the participant.
+TEST(RoomIntrinsics, RemoveTakesTheParticipantFromEveryNode) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B"); // B: the relay
+  sA.attach();
+  sB.attach();
+  tp.register_shard(&sA);
+  tp.register_shard(&sB);
+
+  conf::room_join(aA, "standup", "A", "Alice");
+  conf::room_join(aA, "standup", "Z", "Zed");
+  aA.root()("conf.rooms.standup.participants.A.streams.cam.id").value(std::string("s1"));
+  tp.pump_all();
+  ASSERT_NE(aB.root().findDescendant("conf.rooms.standup.participants.A.streams.cam.id"), nullptr);
+
+  conf::room_leave(aA, "standup", "A");
+  tp.pump_all();
+  ASSERT_NE(aB.root().findDescendant("conf.rooms.standup.participants.A"), nullptr)
+      << "a leave only marks it left";
+
+  EXPECT_TRUE(conf::room_remove(aB, "standup", "A"));
+  EXPECT_FALSE(conf::room_remove(aB, "standup", "A")) << "gone already";
+  EXPECT_EQ(tp.pump_all(), 1u) << "one delete";
+  EXPECT_EQ(aB.root().findDescendant("conf.rooms.standup.participants.A"), nullptr);
+  EXPECT_EQ(aA.root().findDescendant("conf.rooms.standup.participants.A"), nullptr)
+      << "the delete reached the participant's own node";
+  ASSERT_EQ(conf::room_roster(aA, "standup").size(), 1u);
+  EXPECT_EQ(conf::room_roster(aA, "standup")[0].pid, "Z");
+
+  // Back on the same pid: a join writes it anew, on both.
+  conf::room_join(aA, "standup", "A", "Alice");
+  tp.pump_all();
+  EXPECT_NE(by_pid(conf::room_roster(aB, "standup"), "A"), nullptr);
+
+  tp.unregister_shard(&sA);
+  tp.unregister_shard(&sB);
+  sA.detach();
+  sB.detach();
+}
+
+// A departed participant is removed once it has been away the grace, not before.
+TEST(RoomDepartures, OneAwayTheGraceIsRemoved) {
+  using namespace std::chrono_literals;
+  cvc::app app;
+  conf::room_join(app, "standup", "A", "Alice");
+  conf::room_join(app, "standup", "B", "Bob");
+  conf::room_departures d(10s);
+  const auto t0 = conf::room_departures::clock::time_point{} + 1h;
+  conf::room_leave(app, "standup", "A");
+  d.left("A", t0);
+
+  EXPECT_TRUE(d.reap(app, "standup", {}, t0 + 9s).empty());
+  EXPECT_EQ(d.waiting(), 1u);
+  ASSERT_NE(app.root().findDescendant("conf.rooms.standup.participants.A"), nullptr);
+
+  EXPECT_EQ(d.reap(app, "standup", {}, t0 + 10s), std::vector<std::string>{"A"});
+  EXPECT_EQ(d.waiting(), 0u);
+  EXPECT_EQ(app.root().findDescendant("conf.rooms.standup.participants.A"), nullptr);
+  ASSERT_EQ(conf::room_roster(app, "standup").size(), 1u);
+  EXPECT_EQ(conf::room_roster(app, "standup")[0].pid, "B");
+
+  // A later departure starts a new wait.
+  conf::room_leave(app, "standup", "B");
+  d.left("B", t0 + 1s);
+  d.left("B", t0 + 5s);
+  EXPECT_TRUE(d.reap(app, "standup", {}, t0 + 14s).empty());
+  EXPECT_EQ(d.reap(app, "standup", {}, t0 + 15s), std::vector<std::string>{"B"});
+}
+
+// One that joins again in time is kept. One whose connection is back (a client that reconnected
+// but has not said so yet) has the whole grace from then to join, and is removed if it never does.
+TEST(RoomDepartures, OneBackInTimeIsKept) {
+  using namespace std::chrono_literals;
+  cvc::app app;
+  conf::room_join(app, "standup", "A", "Alice");
+  conf::room_join(app, "standup", "B", "Bob");
+  conf::room_departures d(10s);
+  const auto t0 = conf::room_departures::clock::time_point{} + 1h;
+  conf::room_leave(app, "standup", "A");
+  conf::room_leave(app, "standup", "B");
+  d.left("A", t0);
+  d.left("B", t0);
+  d.left("never-joined", t0);
+
+  conf::room_join(app, "standup", "A", "Alice");
+  EXPECT_TRUE(d.reap(app, "standup", {"B"}, t0 + 9s).empty()) << "A rejoined; B is connected";
+  EXPECT_EQ(d.waiting(), 2u) << "B waits anew; nothing to remove for never-joined yet";
+  EXPECT_TRUE(d.reap(app, "standup", {"B"}, t0 + 10s).empty()) << "never-joined had no node";
+  EXPECT_EQ(d.waiting(), 1u);
+  EXPECT_TRUE(d.reap(app, "standup", {"B"}, t0 + 18s).empty()) << "B's new wait is not over";
+  EXPECT_NE(app.root().findDescendant("conf.rooms.standup.participants.B"), nullptr);
+
+  // B joins: forgotten, so its next departure waits anew.
+  conf::room_join(app, "standup", "B", "Bob");
+  EXPECT_TRUE(d.reap(app, "standup", {"B"}, t0 + 18s).empty());
+  EXPECT_EQ(d.waiting(), 0u);
+  EXPECT_NE(app.root().findDescendant("conf.rooms.standup.participants.A"), nullptr);
+
+  // Once more, and this time it never joins: removed a grace after it was seen connected.
+  conf::room_leave(app, "standup", "B");
+  d.left("B", t0 + 20s);
+  EXPECT_TRUE(d.reap(app, "standup", {"B"}, t0 + 21s).empty());
+  EXPECT_TRUE(d.reap(app, "standup", {"B"}, t0 + 30s).empty());
+  EXPECT_EQ(d.reap(app, "standup", {"B"}, t0 + 31s), std::vector<std::string>{"B"});
+}
+
+// One marked left that keeps its connection (a document's (room-leave), which closes nothing) is
+// found by reap and removed after the grace too. One joined and connected is left alone.
+TEST(RoomDepartures, OneThatLeftButStaysConnectedIsRemoved) {
+  using namespace std::chrono_literals;
+  cvc::app app;
+  conf::room_join(app, "standup", "A", "Alice");
+  conf::room_join(app, "standup", "C", "Cy");
+  conf::room_departures d(10s);
+  const auto t0 = conf::room_departures::clock::time_point{} + 1h;
+  EXPECT_TRUE(d.reap(app, "standup", {"A", "C"}, t0).empty());
+  EXPECT_EQ(d.waiting(), 0u) << "both present";
+
+  conf::room_leave(app, "standup", "C");
+  EXPECT_TRUE(d.reap(app, "standup", {"A", "C"}, t0 + 1s).empty());
+  EXPECT_EQ(d.waiting(), 1u) << "noticed";
+  EXPECT_TRUE(d.reap(app, "standup", {"A", "C"}, t0 + 10s).empty());
+  EXPECT_EQ(d.reap(app, "standup", {"A", "C"}, t0 + 11s), std::vector<std::string>{"C"});
+  EXPECT_EQ(app.root().findDescendant("conf.rooms.standup.participants.C"), nullptr);
+  EXPECT_NE(app.root().findDescendant("conf.rooms.standup.participants.A"), nullptr);
+  EXPECT_EQ(d.waiting(), 0u);
+}
+
+// What a participant published, kept before a relay removed it, is written again after its rejoin
+// (room_own_state, room_reassert): its streams, its avatar, its voice. Not the relay's keys, its
+// intent (the relay zeroes a departed one's) nor its net readings. A leaf it wrote anew since is
+// left as it is.
+TEST(RoomIntrinsics, ARejoinWritesAgainWhatItPublished) {
+  cvc::app aA, aB;
+  cvc::state_transport_inproc tp;
+  cvc::state_cluster_shard sA(aA, "C", "A");
+  cvc::state_cluster_shard sB(aB, "C", "B"); // B: the relay
+  sA.attach();
+  sB.attach();
+  tp.register_shard(&sA);
+  tp.register_shard(&sB);
+  const std::string pa = "conf.rooms.standup.participants.A.";
+  const auto at = [](cvc::app &a, const std::string &path) {
+    cvc::state *n = a.root().findDescendant(path);
+    return n ? n->value() : std::string("<missing>");
+  };
+
+  conf::room_join(aA, "standup", "A", "Alice");
+  aA.root()(pa + "streams.cam.id").value(std::string("s1"));
+  aA.root()(pa + "streams.cam.w").value(std::string("640"));
+  aA.root()(pa + "avatar.color").value(std::string("teal"));
+  aA.root()(pa + "voice.talking").value(std::string("0"));
+  aA.root()(pa + "intent.move.x").value(std::string("1"));
+  aA.root()(pa + "net.rtt_ms").value(std::string("40"));
+  aB.root()(pa + "pose.x").value(std::string("2")); // the relay's
+  aB.root()(pa + "streams.cam.ready").value(std::string("1"));
+  tp.pump_all();
+  ASSERT_EQ(at(aA, pa + "pose.x"), "2");
+
+  const conf::room_own_leaves own = conf::room_own_state(aA, "standup", "A");
+  const conf::room_own_leaves want = {{"avatar.color", "teal"},
+                                      {"streams.cam.id", "s1"},
+                                      {"streams.cam.w", "640"},
+                                      {"voice.talking", "0"}};
+  EXPECT_EQ(own, want);
+
+  // The relay removes it (away past its grace); the delete reaches its own node too.
+  ASSERT_TRUE(conf::room_remove(aB, "standup", "A"));
+  tp.pump_all();
+  ASSERT_EQ(aA.root().findDescendant("conf.rooms.standup.participants.A"), nullptr);
+
+  // Back: it joins, and it has turned its mic on since.
+  conf::room_join(aA, "standup", "A", "Alice");
+  aA.root()(pa + "voice.talking").value(std::string("1"));
+  EXPECT_EQ(conf::room_reassert(aA, "standup", "A", own), 3u) << "all but voice.talking";
+  tp.pump_all();
+  EXPECT_EQ(at(aB, pa + "streams.cam.id"), "s1");
+  EXPECT_EQ(at(aB, pa + "streams.cam.w"), "640");
+  EXPECT_EQ(at(aB, pa + "avatar.color"), "teal");
+  EXPECT_EQ(at(aB, pa + "voice.talking"), "1") << "its newer write";
+  EXPECT_EQ(at(aB, pa + "intent.move.x"), "<missing>");
+  EXPECT_EQ(at(aB, pa + "net.rtt_ms"), "<missing>");
+  EXPECT_NE(by_pid(conf::room_roster(aB, "standup"), "A"), nullptr);
+
+  // Still there (back within the grace): written once more, for a relay that may not have it.
+  EXPECT_EQ(conf::room_reassert(aA, "standup", "A", own), 3u);
+  EXPECT_EQ(conf::room_reassert(aA, "standup", "A", {}), 0u);
+
+  tp.unregister_shard(&sA);
+  tp.unregister_shard(&sB);
+  sA.detach();
+  sB.detach();
+}
+
 // A participant's voice.talking leaf costs one mutation per change: writing the value it already
 // holds journals nothing, and a flip journals the new value alone (not a touch that re-sends the
 // old one first). A is a client whose shard is rooted at the room tree, B a whole-tree relay; the
@@ -733,7 +930,7 @@ TEST(RoomBridge, PidsAreStateNamesAndDistinct) {
 
 // Bridged users are listed apart from the participants, in pid order; the relay's every change
 // moves bridge.rev, a repeat with nothing new does not, and leaving is soft.
-TEST(RoomBridge, PresenceListsThemApartAndLeavingIsSoft) {
+TEST(RoomBridge, PresenceListsThemApartAndLeavingRemoves) {
   cvc::app app;
   conf::room_join(app, "standup", "alice", "Alice");
   std::string why;
@@ -768,12 +965,13 @@ TEST(RoomBridge, PresenceListsThemApartAndLeavingIsSoft) {
   EXPECT_FALSE(conf::room_bridge_absent(app, "standup", "nmdc", "zed")) << "gone already";
   EXPECT_FALSE(conf::room_bridged_user_of(app, "standup", "_nmdc_zed", u));
   ASSERT_EQ(conf::room_bridged(app, "standup").size(), 1u);
-  cvc::state *present =
-      app.root().findDescendant("conf.rooms.standup.bridge.users._nmdc_zed.present");
-  ASSERT_NE(present, nullptr) << "soft: the node stays";
-  EXPECT_EQ(present->value(), "0");
+  EXPECT_EQ(app.root().findDescendant("conf.rooms.standup.bridge.users._nmdc_zed"), nullptr)
+      << "removed";
   ASSERT_TRUE(conf::room_bridge_presence(app, "standup", "nmdc", "zed", "Zed", "", why));
-  EXPECT_EQ(conf::room_bridged(app, "standup").size(), 2u) << "back on the same node";
+  EXPECT_EQ(conf::room_bridged(app, "standup").size(), 2u) << "back, written anew";
+  ASSERT_TRUE(conf::room_bridged_user_of(app, "standup", "_nmdc_zed", u));
+  EXPECT_EQ(u.uid, "zed");
+  EXPECT_EQ(u.via, "nmdc");
 
   // Another relay process (a new chat epoch): what the earlier one wrote is not listed.
   app.root()("conf.rooms.standup.chat.epoch").value("another");

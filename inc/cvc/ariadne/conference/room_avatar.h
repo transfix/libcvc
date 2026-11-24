@@ -102,7 +102,7 @@ std::string room_avatars_path(const std::string &room_id);
 // The catalog revision: 0 when none was ever written, then +1 per write.
 std::uint64_t avatar_catalog_revision(cvc::app &app, const std::string &room_id);
 
-// Write the whole catalog. Options present before but absent now are soft-removed (present = 0).
+// Write the whole catalog. Options present before but absent now are removed (a delete each).
 void write_avatar_catalog(cvc::app &app, const std::string &room_id, const avatar_catalog &c);
 
 // Read the catalog (present options only, in their written order). Empty if none was written.

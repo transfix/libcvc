@@ -72,7 +72,10 @@ class ViewportManager;
 //
 class SceneRenderer {
 public:
-  // `offscreen == false` needs a display and produces a real window. `name`
+  // `offscreen == false` needs a display and produces a real window. On a scaled
+  // Windows display its width and height are the display's logical pixels, and
+  // the window is that times the display's scale in pixels (frameWidth() and
+  // frameHeight() say how many), drawn sharp; resize() likewise. `name`
   // identifies this viewer in the state graph: a CameraController attached here
   // roots its state at "<scene prefix>.viewers.<name>.camera", so it is obvious
   // which viewer a camera belongs to.

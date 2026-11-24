@@ -317,6 +317,7 @@ struct relay_session::impl {
   std::shared_ptr<room_call_client> calls;
 
   std::chrono::steady_clock::time_point next_clock{}; // when the relay's time is read next
+  std::chrono::steady_clock::time_point next_reap{};  // when a silent link is looked for next
 
   // Once a second while joined: the relay's clock as our link to it measures it (the Pong's wall
   // time), for the tray clock (cvc/core/server_clock.h).
@@ -724,6 +725,12 @@ void relay_session::step() {
   const auto t = std::chrono::steady_clock::now();
   switch (s.now) {
   case impl::phase::joined: {
+    // Once a second: a link silent for 10 s (the relay, or the path to it, gone without closing;
+    // the relay probes it every 2 s) is closed, so it is gone below and we dial again.
+    if (t >= s.next_reap) {
+      s.next_reap = t + std::chrono::seconds(1);
+      s.live->tp->reap_idle(std::chrono::seconds(10));
+    }
     bool gone = false;
     (void)s.live->admitted(gone);
     if (gone) {

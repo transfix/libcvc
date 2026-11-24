@@ -135,6 +135,10 @@ TEST(RoomAvatar, TheCatalogRoundTripsAndSeedsOnce) {
   const conf::avatar_catalog now = conf::read_avatar_catalog(app, "r");
   ASSERT_EQ(now.colors.size(), 1u);
   EXPECT_EQ(now.colors[0].id, want.colors[1].id);
+  EXPECT_EQ(
+      app.root().findDescendant(conf::room_avatars_path("r") + ".colors." + want.colors[0].id),
+      nullptr)
+      << "a dropped option leaves the tree";
   ASSERT_EQ(now.accessories.size(), 1u);
   EXPECT_EQ(now.accessories[0].parts.size(), 1u);
   EXPECT_THROW(
@@ -443,6 +447,37 @@ TEST(RoomAvatar, ThePanelRereadsTheCatalogOnlyWhenItChanges) {
   panel.update(client, app, "elsewhere", "A", 1.0 / 60.0);
   EXPECT_EQ(shown(), " / ");
   EXPECT_EQ(panel.catalog_reads(), 4u);
+}
+
+// A document that left with (room-leave) and joins again gets back what it had published, here its
+// avatar choice, though the relay removed its participant node meanwhile.
+TEST(RoomAvatar, ARejoinAfterALeaveBringsTheChoiceBack) {
+  cvc::app app;
+  conf::register_room_intrinsics(app);
+  cvc::ariadne::Runtime rt(app, "");
+  const auto get = [&](const std::string &path) {
+    cvc::state *n = app.root().findDescendant(path);
+    return n ? n->value() : std::string("<missing>");
+  };
+  conf::seed_avatar_catalog(app, "room");
+  ASSERT_EQ(run_to_end(rt, "(begin (set j (room-join \"ep\" \"room\"))"
+                           "  (state-set \"tok\" (get-attr j \"token\"))"
+                           "  (state-set \"pid\" (get-attr j \"pid\"))"
+                           "  (room-set-avatar (state-get \"tok\") \"teal\" \"cap\"))"),
+            "");
+  const std::string pid = get("pid");
+  ASSERT_NE(pid, "<missing>");
+  const std::string choice = conf::room_participant_path("room", pid) + ".avatar.color";
+  ASSERT_EQ(get(choice), "teal");
+
+  ASSERT_EQ(run_to_end(rt, "(room-leave (state-get \"tok\"))"), "");
+  ASSERT_TRUE(conf::room_remove(app, "room", pid)); // the relay, after its grace
+  ASSERT_EQ(get(choice), "<missing>");
+
+  ASSERT_EQ(run_to_end(rt, "(state-set \"tok\" (get-attr (room-join \"ep\" \"room\") \"token\"))"),
+            "");
+  EXPECT_EQ(get(choice), "teal");
+  EXPECT_EQ(get(conf::room_participant_path("room", pid) + ".presence.joined"), "1");
 }
 
 // The avatar verbs a document calls every tick (conference_roster.ari's on_tick:

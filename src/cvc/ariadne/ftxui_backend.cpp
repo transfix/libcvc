@@ -817,6 +817,10 @@ struct FtxuiBackend::Impl {
     std::string box;
   };
 
+  // §5.28 what a leaf's context menu offers: Copy (a text, a notification's entry), Cut / Copy /
+  // Paste / Select all (a field), Copy line / Copy all (a text view).
+  enum class Menu { None, Text, Field, View };
+
   // One emitted leaf, kept for the next event's focus walk and hit-test.
   struct Item {
     std::string id;
@@ -826,6 +830,10 @@ struct FtxuiBackend::Impl {
     bool focusable = false;
     // §5.20 a rich text: where its links are (its link k is the item `<id>/k`), as last drawn.
     std::shared_ptr<RichHits> rich;
+    // §5.28 its context menu, and what Copy copies: a text's, a field's value, a text view's text.
+    Menu ctx = Menu::None;
+    std::string copy;
+    bool masked = false; // a password field's: no Cut or Copy
   };
 
   // What a walk produced, beyond the Element tree.
@@ -883,6 +891,27 @@ struct FtxuiBackend::Impl {
   fx::Element root = fx::text("");
   std::string tooltip;
   std::string clipboard_out;            // OSC 52 escapes clipboard-set queued, for run() to write
+  FtxuiBackend *self = nullptr;         // its clipboard_copy / clipboard_request (tvision's own)
+  // §5.28 the context menu open: the item it opened on ("" none), the window and dropdown it is
+  // in, the cell it opened at (hosted: in the window's cells), what it offers, taken when it
+  // opened, and the entry lit.
+  struct ContextMenu {
+    std::string on, win, menu;
+    int x = 0, y = 0;
+    Menu kind = Menu::None;
+    std::string copy, line; // Copy's (a text view's Copy all's), a text view's line
+    bool masked = false;
+    std::vector<std::string> entries;
+    std::vector<bool> enabled;
+    int hi = 0;
+  } ctx;
+  std::string next_copy; // next_item_copy, for the next leaf
+  bool have_next_copy = false;
+  // A Paste asked of the clipboard for this field, answered as typed text until paste_until; after
+  // it, `hint` says to paste with the terminal's own paste, until hint_until.
+  std::string paste_field;
+  std::chrono::steady_clock::time_point paste_until, hint_until;
+  std::string hint;
   std::string last_item;                // the leaf emitted last (item_* queries, set_tooltip)
   int last_picture_cols = 0;            // that leaf's width in columns, when it is a picture
   // §5.22 the tray this walk: drawn at all (not when even its overflow icon has no room beside the
@@ -929,12 +958,98 @@ struct FtxuiBackend::Impl {
     std::string text;
     std::size_t cursor = 0; // byte offset, on a UTF-8 boundary
     std::string reported;   // a live message field: the text it last reported (message_input)
+    // §5.28 the selection's other end (npos: none): [lo(), hi()) is selected. Shift with the
+    // arrows, Home and End extends it; Select all selects everything; typing replaces it.
+    std::size_t anchor = std::string::npos;
+    bool selected() const { return anchor != std::string::npos && anchor != cursor; }
+    std::size_t lo() const { return selected() ? std::min(anchor, cursor) : cursor; }
+    std::size_t hi() const { return selected() ? std::max(anchor, cursor) : cursor; }
+    std::string selection() const { return text.substr(lo(), hi() - lo()); }
+    // Deletes the selection: false when there was none.
+    bool erase_selection() {
+      const bool had = selected();
+      if (had) {
+        const std::size_t a = lo();
+        text.erase(a, hi() - a);
+        cursor = a;
+      }
+      anchor = std::string::npos;
+      return had;
+    }
+    void insert(const std::string &s) {
+      erase_selection();
+      text.insert(cursor, s);
+      cursor += s.size();
+    }
+    // The cursor to P, the selection extended to it (shift) or dropped.
+    void move(std::size_t p, bool shift) {
+      if (shift && anchor == std::string::npos)
+        anchor = cursor;
+      if (!shift)
+        anchor = std::string::npos;
+      cursor = std::min(p, text.size());
+    }
+    // An editing key: Backspace / Delete (the selection, else a character), Left / Right / Home /
+    // End (with Shift, extending the selection; without, a selection's Left / Right goes to its
+    // start / end). False for any other key.
+    bool key(const TermEvent &ev) {
+      if (ev.kind != TermEvent::Kind::Key)
+        return false;
+      const std::string &k = ev.key;
+      if (k == "Backspace" || k == "Delete") {
+        if (!erase_selection() && (k == "Backspace" ? cursor > 0 : cursor < text.size())) {
+          const std::size_t a = k == "Backspace" ? utf8_prev(text, cursor) : cursor;
+          const std::size_t b = k == "Backspace" ? cursor : utf8_next(text, cursor);
+          text.erase(a, b - a);
+          cursor = a;
+        }
+      } else if (k == "Left") {
+        move(selected() && !ev.shift ? lo() : utf8_prev(text, cursor), ev.shift);
+      } else if (k == "Right") {
+        move(selected() && !ev.shift ? hi() : utf8_next(text, cursor), ev.shift);
+      } else if (k == "Home") {
+        move(0, ev.shift);
+      } else if (k == "End") {
+        move(text.size(), ev.shift);
+      } else {
+        return false;
+      }
+      return true;
+    }
   };
+
+  // T's [start, stop) as a focused field draws it: the selection inverted, else the cursor's cell
+  // (when the cursor is on it); `shown` masks a password's text.
+  static fx::Element edit_row(const std::string &t, std::size_t start, std::size_t stop,
+                              std::size_t cursor, const Edit *ed,
+                              const std::function<std::string(const std::string &)> &shown) {
+    const auto text = [&](std::size_t a, std::size_t b) {
+      const std::string s = t.substr(a, b - a);
+      return fx::text(shown ? shown(s) : s);
+    };
+    if (ed && ed->selected()) {
+      const std::size_t lo = std::clamp(ed->lo(), start, stop),
+                        hi = std::clamp(ed->hi(), start, stop);
+      // A line break inside the selection: the line's end is a selected cell.
+      const bool nl = ed->lo() <= stop && ed->hi() > stop && stop < t.size();
+      return fx::hbox({text(start, lo), text(lo, hi) | fx::inverted,
+                       nl ? fx::text(" ") | fx::inverted : fx::text(""), text(hi, stop)});
+    }
+    if (cursor < start || cursor > stop)
+      return text(start, stop);
+    const std::size_t c2 = std::min(utf8_next(t, cursor), stop);
+    return fx::hbox({text(start, cursor),
+                     (cursor < stop ? text(cursor, c2) : fx::text(" ")) | fx::inverted,
+                     text(c2, stop)});
+  }
   // A text_view's wrapped rows and scroll.
   struct TextView {
     std::string text;
     std::vector<std::string> rows; // the text's lines, word-wrapped to `width` cells
-    std::size_t lines = 0;         // logical lines in the text
+    // §5.28 each row's line in the text, [begin, end): a right-click's Copy line.
+    std::vector<std::pair<std::size_t, std::size_t>> row_line;
+    int label_rows = 0;    // rows its label takes above the text
+    std::size_t lines = 0; // logical lines in the text
     int width = 0;
     int top = 0;           // the first row in view
     bool at_bottom = true; // the last row is in view
@@ -1596,6 +1711,218 @@ struct FtxuiBackend::Impl {
     return nullptr;
   }
 
+  // ---- §5.28 context menus ---------------------------------------------------------------------
+
+  // The leaf just emitted has a context menu of KIND that copies SHOWN (or next_item_copy's text).
+  // A menu item has one only when next_item_copy gave it one.
+  void leaf_menu(Menu kind, const std::string &shown, bool menu_item = false) {
+    const bool given = have_next_copy;
+    have_next_copy = false;
+    if ((menu_item && !given) || walk.items.empty())
+      return;
+    Item &it = walk.items.back();
+    it.ctx = kind;
+    it.copy = given ? next_copy : shown;
+  }
+
+  // The leaf with a context menu at cell (x, y): the innermost (the last drawn) of those there.
+  const Item *menu_item_at(int x, int y, const std::string &win, const std::string &menu) const {
+    const Item *found = nullptr;
+    for (const Item &it : shown.items) {
+      if (it.ctx == Menu::None || it.win != win || it.menu != menu)
+        continue;
+      const auto b = boxes.find(it.id);
+      if (b != boxes.end() && inside(b->second, x, y))
+        found = &it;
+    }
+    return found;
+  }
+
+  bool context_open() const { return !ctx.on.empty(); }
+  void close_context() { ctx = ContextMenu{}; }
+
+  // Open IT's menu at cell (x, y).
+  void open_context(const Item &it, int x, int y) {
+    ContextMenu c;
+    c.on = it.id;
+    c.win = it.win;
+    c.menu = it.menu;
+    c.x = x;
+    c.y = y;
+    c.kind = it.ctx;
+    c.copy = it.copy;
+    c.masked = it.masked;
+    switch (it.ctx) {
+    case Menu::Field: {
+      const auto e = edits.find(it.id);
+      const std::string &t = e != edits.end() ? e->second.text : it.copy;
+      const bool can = !it.masked && !t.empty();
+      c.entries = {"Cut", "Copy", "Paste", "Select all"};
+      c.enabled = {can, can, true, !t.empty()};
+      break;
+    }
+    case Menu::View: {
+      const auto v = text_views.find(it.id);
+      const auto b = boxes.find(it.id);
+      if (v != text_views.end() && b != boxes.end()) {
+        const int row = v->second.top + (y - b->second.y_min - v->second.label_rows);
+        if (row >= 0 && row < static_cast<int>(v->second.row_line.size())) {
+          const auto span = v->second.row_line[static_cast<std::size_t>(row)];
+          c.line = v->second.text.substr(span.first, span.second - span.first);
+        }
+      }
+      c.entries = {"Copy line", "Copy all"};
+      c.enabled = {!c.line.empty(), !c.copy.empty()};
+      break;
+    }
+    default:
+      c.entries = {"Copy"};
+      c.enabled = {!c.copy.empty()};
+      break;
+    }
+    c.hi = 0;
+    while (c.hi < static_cast<int>(c.enabled.size()) - 1 && !c.enabled[c.hi])
+      ++c.hi;
+    ctx = std::move(c);
+  }
+
+  // Shift+F10 or the Menu key: the focused leaf's menu, under it.
+  bool open_context_focused() {
+    const Item *it = find_item(last, focused);
+    if (!it || it->ctx == Menu::None)
+      return false;
+    const auto b = boxes.find(it->id);
+    open_context(*it, b != boxes.end() ? b->second.x_min : 0,
+                 b != boxes.end() ? b->second.y_max + 1 : 0);
+    return true;
+  }
+
+  // The field's edit, made from its value when it is not being edited.
+  Edit &field_edit(const std::string &id, const std::string &value) {
+    auto e = edits.find(id);
+    if (e == edits.end())
+      e = edits.emplace(id, Edit{value, value.size()}).first;
+    return e->second;
+  }
+
+  void copy_out(const std::string &text) {
+    if (self && !text.empty())
+      self->clipboard_copy(text);
+  }
+
+  // Entry I of the open menu, picked.
+  void context_pick(int i) {
+    if (i < 0 || i >= static_cast<int>(ctx.entries.size()) || !ctx.enabled[i]) {
+      close_context();
+      return;
+    }
+    const std::string what = ctx.entries[static_cast<std::size_t>(i)];
+    ContextMenu c = ctx;
+    close_context();
+    if (const Item *it = find_item(last, c.on)) // its value now (a commit since it was drawn)
+      c.copy = it->copy;
+    if (c.kind != Menu::Field) {
+      copy_out(what == "Copy line" ? c.line : c.copy);
+      return;
+    }
+    // A Copy leaves a field that is not being edited as it is; Cut and Select all edit it.
+    const auto e = edits.find(c.on);
+    if (what == "Copy") {
+      copy_out(e == edits.end()       ? c.copy
+               : e->second.selected() ? e->second.selection()
+                                      : e->second.text);
+    } else if (what == "Cut") {
+      Edit &ed = field_edit(c.on, c.copy);
+      if (!ed.selected()) { // nothing selected: all of it
+        ed.anchor = 0;
+        ed.cursor = ed.text.size();
+      }
+      copy_out(ed.selection());
+      ed.erase_selection();
+    } else if (what == "Select all") {
+      Edit &ed = field_edit(c.on, c.copy);
+      ed.anchor = 0;
+      ed.cursor = ed.text.size();
+    } else if (what == "Paste") {
+      // The answer comes as typed text, to the focused field: this one.
+      if (self && self->clipboard_request()) {
+        paste_field = c.on;
+        paste_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+      } else {
+        paste_hint();
+      }
+    }
+    set_focus(c.on);
+  }
+
+  void paste_hint() {
+    hint = "Paste with the terminal's own paste (Ctrl+Shift+V, Shift+Insert or its menu)";
+    hint_until = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+  }
+
+  // A key while the menu is open: Up / Down move along it, Return or Space picks, anything else
+  // closes it (and is swallowed).
+  void route_context_key(const TermEvent &e) {
+    const int n = static_cast<int>(ctx.entries.size());
+    if (e.key == "Up" || e.key == "Down") {
+      const int d = e.key == "Up" ? -1 : 1;
+      for (int k = 1; k <= n; ++k) {
+        const int i = ((ctx.hi + d * k) % n + n) % n;
+        if (ctx.enabled[static_cast<std::size_t>(i)]) {
+          ctx.hi = i;
+          break;
+        }
+      }
+    } else if (e.key == "Return" || e.key == "Space") {
+      context_pick(ctx.hi);
+    } else {
+      close_context();
+    }
+    use();
+  }
+
+  // The menu's entry at cell (x, y), or -1.
+  int context_entry_at(int x, int y) const {
+    for (std::size_t i = 0; i < ctx.entries.size(); ++i) {
+      const auto b = boxes.find("ctx|" + std::to_string(i));
+      if (b != boxes.end() && inside(b->second, x, y))
+        return static_cast<int>(i);
+    }
+    return -1;
+  }
+
+  // The open menu, drawn over its window (end_frame): a bordered list at the cell it opened at,
+  // kept inside the screen or the window's body.
+  void draw_context() {
+    if (!context_open())
+      return;
+    fx::Elements rows;
+    for (std::size_t i = 0; i < ctx.entries.size(); ++i) {
+      fx::Element row = fx::text(" " + ctx.entries[i] + " ");
+      if (!ctx.enabled[i])
+        row = row | fx::dim;
+      else if (static_cast<int>(i) == ctx.hi)
+        row = row | fx::inverted;
+      rows.push_back(row | fx::reflect(boxes["ctx|" + std::to_string(i)]));
+    }
+    const int n = static_cast<int>(rows.size());
+    int w = 0;
+    for (const std::string &e : ctx.entries)
+      w = std::max(w, fx::string_width(e) + 4);
+    const auto bh = body_h.find(ctx.win);
+    const int room_h = opt.hosted && bh != body_h.end() ? bh->second : term_h;
+    const int x = std::clamp(ctx.x, 0, std::max(0, term_w - w));
+    const int y = ctx.y + n + 2 > room_h ? std::max(0, room_h - n - 2) : std::max(0, ctx.y);
+    fx::Element list =
+        place(isolated(fx::vbox(std::move(rows)) | fx::border | fx::clear_under), x, y);
+    if (!opt.hosted)
+      popups.push_back(std::move(list));
+    else if (ctx.win.empty())
+      win_popups[""].push_back(std::move(list));
+    else if (auto b = walk.bodies.find(ctx.win); b != walk.bodies.end())
+      b->second.popups.push_back(std::move(list));
+  }
+
   // ---- routing (step 1 of feed) ----------------------------------------------------------------
 
   void route(const TermEvent &e) {
@@ -1603,6 +1930,18 @@ struct FtxuiBackend::Impl {
       route_mouse(e);
       return;
     }
+    if (context_open()) {
+      route_context_key(e);
+      return;
+    }
+    // §5.28 Shift+F10 or the Menu key: the focused leaf's context menu.
+    if (e.kind == TermEvent::Kind::Key && ((e.key == "F10" && e.shift) || e.key == "Menu")) {
+      if (open_context_focused())
+        use();
+      return;
+    }
+    if (!paste_field.empty() && e.kind == TermEvent::Kind::Text && focused == paste_field)
+      paste_field.clear(); // the clipboard's answer, typed into the field
     if (!open_menu.empty()) {
       route_menu_key(e);
       return;
@@ -1677,6 +2016,36 @@ struct FtxuiBackend::Impl {
   void route_mouse(const TermEvent &e) {
     ptr_x = e.x;
     ptr_y = e.y;
+    // §5.28 the context menu: over it the pointer lights an entry and a press picks it; a press
+    // anywhere else closes it. A right-click opens the menu of the leaf under it.
+    if (context_open()) {
+      const int i = context_entry_at(e.x, e.y);
+      if (e.mouse == TermEvent::Mouse::Move && i >= 0 && ctx.enabled[static_cast<std::size_t>(i)])
+        ctx.hi = i;
+      if (e.mouse == TermEvent::Mouse::Press) {
+        if (i >= 0 && e.button == 1)
+          context_pick(i);
+        else if (e.button != 3)
+          close_context();
+      }
+      if (e.mouse != TermEvent::Mouse::Press || e.button != 3) {
+        consumed = true;
+        return;
+      }
+      close_context(); // a right-click elsewhere: that leaf's menu instead
+    }
+    if (e.mouse == TermEvent::Mouse::Press && e.button == 3) {
+      const std::string win = opt.hosted ? host_window : window_at(e.x, e.y);
+      const auto dd = boxes.find("menud|" + open_menu);
+      const bool in_dropdown = !open_menu.empty() && shown.menu_popup == open_menu &&
+                               dd != boxes.end() && inside(dd->second, e.x, e.y);
+      if (const Item *it = in_dropdown ? menu_item_at(e.x, e.y, "", open_menu)
+                                       : menu_item_at(e.x, e.y, win, "")) {
+        open_context(*it, e.x, e.y);
+        consumed = true;
+        return;
+      }
+    }
     switch (e.mouse) {
     case TermEvent::Mouse::Move:
       if (seam_drag.active) {
@@ -1949,8 +2318,8 @@ struct FtxuiBackend::Impl {
   }
 };
 
-FtxuiBackend::FtxuiBackend() : m_(new Impl(Options{})) {}
-FtxuiBackend::FtxuiBackend(const Options &opts) : m_(new Impl(opts)) {}
+FtxuiBackend::FtxuiBackend() : m_(new Impl(Options{})) { m_->self = this; }
+FtxuiBackend::FtxuiBackend(const Options &opts) : m_(new Impl(opts)) { m_->self = this; }
 FtxuiBackend::~FtxuiBackend() = default;
 
 Capabilities FtxuiBackend::capabilities() const {
@@ -2013,6 +2382,17 @@ void FtxuiBackend::end_frame() {
     for (fx::Element &e : f.items)
       m.add(std::move(e));
   }
+  // §5.28 the context menu, over everything in its window; a Paste the clipboard did not answer.
+  if (m.context_open() && !m.find_item(m.walk, m.ctx.on))
+    m.close_context(); // its leaf is gone
+  m.draw_context();
+  const auto now = std::chrono::steady_clock::now();
+  if (!m.paste_field.empty() && now > m.paste_until) {
+    m.paste_field.clear();
+    m.paste_hint();
+  }
+  if (m.tooltip.empty() && now < m.hint_until)
+    m.tooltip = m.hint;
   m.compose();
   m.gfx_last = std::move(m.gfx_walk);
   m.gfx_walk.clear();
@@ -2281,6 +2661,7 @@ bool FtxuiBackend::menu_item_action(const char *label) {
   if (m.has_focus(id))
     el = el | fx::inverted;
   m.leaf(id, true, el);
+  m.leaf_menu(Impl::Menu::Text, label, /*menu_item=*/true); // §5.28 a notification's entry
   if (hit && !m.cur_menu.empty())
     m.menu_close_req = true;
   if (m.opt.hosted && !m.cur_menu.empty())
@@ -2908,10 +3289,22 @@ void FtxuiBackend::begin_item_group(const char *id, const ItemGroupOptions &opts
 constexpr std::size_t kMaxClipboard = 1 << 20;
 
 bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &text) {
+  return clipboard_copy(text);
+}
+
+bool FtxuiBackend::clipboard_copy(const std::string &text) {
   Impl &m = *m_;
   if (m.opt.hosted || text.size() > kMaxClipboard)
     return false;
   m.clipboard_out += gfx::osc52_copy(text);
+  return true;
+}
+
+bool FtxuiBackend::clipboard_request() {
+  Impl &m = *m_;
+  if (m.opt.hosted)
+    return false;
+  m.clipboard_out += gfx::osc52_query();
   return true;
 }
 
@@ -3023,7 +3416,11 @@ bool FtxuiBackend::item_pointer(float &x, float &y, float &dx, float &dy, int &b
 // ---- leaves
 // --------------------------------------------------------------------------------------
 
-void FtxuiBackend::text_line(const char *t) { m_->leaf(m_->uid("t|"), false, text_block(t)); }
+// §5.28 each text has a context menu with Copy (a value's: the value).
+void FtxuiBackend::text_line(const char *t) {
+  m_->leaf(m_->uid("t|"), false, text_block(t));
+  m_->leaf_menu(Impl::Menu::Text, t ? t : "");
+}
 
 // "label: value"; with no label just the value, as the ImGui backend draws it.
 static std::string labelled(const char *label, const std::string &value) {
@@ -3032,15 +3429,23 @@ static std::string labelled(const char *label, const std::string &value) {
 
 void FtxuiBackend::text_value(const char *label, const std::string &value) {
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)));
+  m_->leaf_menu(Impl::Menu::Text, value);
 }
 
 void FtxuiBackend::text_line_colored(const char *t, const float rgb[3]) {
   m_->leaf(m_->uid("t|"), false, text_block(t) | fx::color(rgb_color(rgb)));
+  m_->leaf_menu(Impl::Menu::Text, t ? t : "");
 }
 
 void FtxuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)) | fx::color(rgb_color(rgb)));
+  m_->leaf_menu(Impl::Menu::Text, value);
+}
+
+void FtxuiBackend::next_item_copy(const std::string &text) {
+  m_->next_copy = text;
+  m_->have_next_copy = true;
 }
 
 void FtxuiBackend::begin_text_color(const float rgb[3]) {
@@ -3132,6 +3537,10 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
     el = el | fx::focus; // a scrolled window keeps the focused link in view
   m.leaf(id, false, el);
   m.walk.items.back().rich = std::move(hits);
+  std::string shown; // §5.28 the paragraph's text, a picture as its :shortcode:
+  for (const TextRun &r : runs)
+    shown += r.text;
+  m.leaf_menu(Impl::Menu::Text, shown);
   return ev;
 }
 
@@ -3445,31 +3854,8 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
     const TermEvent &ev = m.ev;
     bool used = true;
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
-      Impl::Edit &ed = edit();
-      const std::string add = one_line(ev.text);
-      ed.text.insert(ed.cursor, add);
-      ed.cursor += add.size();
-    } else if (ev.key == "Backspace") {
-      Impl::Edit &ed = edit();
-      if (ed.cursor > 0) {
-        const std::size_t p = utf8_prev(ed.text, ed.cursor);
-        ed.text.erase(p, ed.cursor - p);
-        ed.cursor = p;
-      }
-    } else if (ev.key == "Delete") {
-      Impl::Edit &ed = edit();
-      ed.text.erase(ed.cursor, utf8_next(ed.text, ed.cursor) - ed.cursor);
-    } else if (ev.key == "Left") {
-      Impl::Edit &ed = edit();
-      ed.cursor = utf8_prev(ed.text, ed.cursor);
-    } else if (ev.key == "Right") {
-      Impl::Edit &ed = edit();
-      ed.cursor = utf8_next(ed.text, ed.cursor);
-    } else if (ev.key == "Home") {
-      edit().cursor = 0;
-    } else if (ev.key == "End") {
-      Impl::Edit &ed = edit();
-      ed.cursor = ed.text.size();
+      edit().insert(one_line(ev.text)); // over the selection, if any
+    } else if (edit().key(ev)) {
     } else if (ev.key == "Return") {
       // Enter commits even when nothing changed (a chat box's send), as the ImGui backend does.
       e.value = it != m.edits.end() ? it->second.text : current;
@@ -3505,18 +3891,16 @@ StringEdit FtxuiBackend::input_text(const char *label, const char *key, const st
   };
   fx::Elements row{fx::text(std::string(label) + ": [")};
   if (m.has_focus(id)) {
-    const std::string &t = it != m.edits.end() ? it->second.text : e.value;
-    const std::size_t c = it != m.edits.end() ? it->second.cursor : t.size();
-    const std::size_t c2 = utf8_next(t, c);
-    row.push_back(fx::text(shown(t.substr(0, c))));
-    row.push_back(fx::text(c < t.size() ? shown(t.substr(c, c2 - c)) : std::string(" ")) |
-                  fx::inverted);
-    row.push_back(fx::text(c2 < t.size() ? shown(t.substr(c2)) : std::string()));
+    const Impl::Edit *ed = it != m.edits.end() ? &it->second : nullptr;
+    const std::string &t = ed ? ed->text : e.value;
+    row.push_back(Impl::edit_row(t, 0, t.size(), ed ? ed->cursor : t.size(), ed, shown));
   } else {
     row.push_back(fx::text(shown(e.value)));
   }
   row.push_back(fx::text("]"));
   m.leaf(id, true, fx::hbox(std::move(row)));
+  m.leaf_menu(Impl::Menu::Field, e.value); // §5.28 Cut, Copy, Paste, Select all
+  m.walk.items.back().masked = masked;
   return e;
 }
 
@@ -3592,16 +3976,12 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     if (ev.kind == TermEvent::Kind::Text && !ev.ctrl && !ev.alt) {
       Impl::Edit &ed = edit();
       const std::string add = opts.multiline ? ev.text : one_line(ev.text);
-      if (fits(ed.text, add.size())) {
-        ed.text.insert(ed.cursor, add);
-        ed.cursor += add.size();
-      }
+      if (fits(ed.text, add.size() - std::min(add.size(), ed.hi() - ed.lo())))
+        ed.insert(add); // over the selection, if any
     } else if (newline) {
       Impl::Edit &ed = edit();
-      if (opts.multiline && fits(ed.text, 1)) {
-        ed.text.insert(ed.cursor, "\n");
-        ++ed.cursor;
-      }
+      if (opts.multiline && fits(ed.text, 1))
+        ed.insert("\n");
     } else if (ev.key == "Return") {
       // Sent, unless there is nothing but blanks. The field stays focused for the next one.
       const std::string t = it != m.edits.end() ? it->second.text : current;
@@ -3616,27 +3996,7 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
       }
       if (e.submitted)
         it = m.edits.emplace(id, Impl::Edit{std::string(), 0}).first;
-    } else if (ev.key == "Backspace") {
-      Impl::Edit &ed = edit();
-      if (ed.cursor > 0) {
-        const std::size_t p = utf8_prev(ed.text, ed.cursor);
-        ed.text.erase(p, ed.cursor - p);
-        ed.cursor = p;
-      }
-    } else if (ev.key == "Delete") {
-      Impl::Edit &ed = edit();
-      ed.text.erase(ed.cursor, utf8_next(ed.text, ed.cursor) - ed.cursor);
-    } else if (ev.key == "Left") {
-      Impl::Edit &ed = edit();
-      ed.cursor = utf8_prev(ed.text, ed.cursor);
-    } else if (ev.key == "Right") {
-      Impl::Edit &ed = edit();
-      ed.cursor = utf8_next(ed.text, ed.cursor);
-    } else if (ev.key == "Home") {
-      edit().cursor = 0;
-    } else if (ev.key == "End") {
-      Impl::Edit &ed = edit();
-      ed.cursor = ed.text.size();
+    } else if (edit().key(ev)) {
     } else if (ev.key == "Escape" && it != m.edits.end()) {
       m.edits.erase(it); // back to the draft in state
       it = m.edits.end();
@@ -3655,24 +4015,16 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
   // "label: [text]", a line per line of the text, the cursor an inverted cell while focused; the
   // hint, dimmed, while it is empty and not focused.
   const bool focused = m.has_focus(id);
-  const std::string &t = it != m.edits.end() ? it->second.text : (e.submitted ? "" : e.value);
-  const std::size_t cursor = it != m.edits.end() ? it->second.cursor : t.size();
+  const Impl::Edit *ed = it != m.edits.end() ? &it->second : nullptr;
+  const std::string &t = ed ? ed->text : (e.submitted ? "" : e.value);
+  const std::size_t cursor = ed ? ed->cursor : t.size();
   fx::Elements lines;
   std::size_t start = 0;
   for (;;) {
     const std::size_t nl = t.find('\n', start);
     const std::size_t stop = nl == std::string::npos ? t.size() : nl;
-    const std::string line = t.substr(start, stop - start);
-    fx::Element row;
-    if (focused && cursor >= start && cursor <= stop) {
-      const std::size_t c = cursor - start, c2 = utf8_next(line, c);
-      row = fx::hbox(
-          {fx::text(line.substr(0, c)),
-           fx::text(c < line.size() ? line.substr(c, c2 - c) : std::string(" ")) | fx::inverted,
-           fx::text(c2 < line.size() ? line.substr(c2) : std::string())});
-    } else {
-      row = fx::text(line);
-    }
+    const fx::Element row = focused ? Impl::edit_row(t, start, stop, cursor, ed, nullptr)
+                                    : fx::text(t.substr(start, stop - start));
     lines.push_back(row);
     if (nl == std::string::npos)
       break;
@@ -3688,6 +4040,7 @@ MessageEdit FtxuiBackend::message_input(const char *label, const char *key,
     rows.push_back(fx::hbox({fx::text(i == 0 ? caption : std::string(caption.size(), ' ')),
                              lines[i] | fx::flex, right[i]}));
   m.leaf(id, true, fx::vbox(std::move(rows)));
+  m.leaf_menu(Impl::Menu::Field, e.submitted ? std::string() : e.value); // §5.28
   return e;
 }
 
@@ -3704,6 +4057,7 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
     width = b->second.x_max - b->second.x_min; // the box is inclusive; one column is the gutter
   const auto wrap = [&](const std::string &all, std::vector<std::string> &out) {
     out.clear();
+    v.row_line.clear();
     std::size_t lines = 0;
     for (std::size_t i = 0; i <= all.size();) {
       const std::size_t j = std::min(all.find('\n', i), all.size());
@@ -3716,6 +4070,7 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
       } else {
         out.push_back(line);
       }
+      v.row_line.resize(out.size(), {i, j});
       ++lines;
       i = j + 1;
     }
@@ -3796,9 +4151,13 @@ TextViewEvent FtxuiBackend::text_view(const char *label, const char *key, const 
                   fx::text(gutter) | fx::dim}));
   }
   fx::Element body = fx::vbox(std::move(shown)) | fx::flex;
-  if (label && *label && std::string(label).rfind("##", 0) != 0)
+  v.label_rows = 0;
+  if (label && *label && std::string(label).rfind("##", 0) != 0) {
     body = fx::vbox({fx::text(label) | (m.has_focus(id) ? fx::inverted : fx::nothing), body});
+    v.label_rows = 1;
+  }
   m.leaf(id, true, body);
+  m.leaf_menu(Impl::Menu::View, text); // §5.28 Copy line, Copy all
   return ev;
 }
 
@@ -4484,6 +4843,19 @@ bool translate(fx::Event e, TermEvent &out) {
       return true;
     }
   const std::string &in = e.input();
+  // §5.28 the terminal's answer to a context menu's Paste (an OSC 52 read): its text, typed.
+  if (std::string pasted; gfx::osc52_reply(in, pasted)) {
+    out = TermEvent::text_event(std::move(pasted));
+    return true;
+  }
+  if (in == "\x1b[21;2~") { // Shift-F10: the focused widget's context menu
+    out = TermEvent::key_event("F10", true);
+    return true;
+  }
+  if (in == "\x1b[29~") { // the Menu key (xterm's, and the Linux console's)
+    out = TermEvent::key_event("Menu");
+    return true;
+  }
   if (in.size() == 1 && in[0] >= 1 && in[0] <= 26) { // Ctrl-A .. Ctrl-Z
     out = TermEvent::key_event(std::string(1, static_cast<char>('A' + in[0] - 1)), false, true);
     return true;
@@ -4778,6 +5150,9 @@ bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
 bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
+bool FtxuiBackend::clipboard_copy(const std::string &) { return false; }
+bool FtxuiBackend::clipboard_request() { return false; }
+void FtxuiBackend::next_item_copy(const std::string &) {}
 std::string FtxuiBackend::take_clipboard() { return {}; }
 FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
 void FtxuiBackend::end_fullscreen_view() {}

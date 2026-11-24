@@ -48,6 +48,12 @@ public:
   // Whether this build has the tvision backend.
   static bool available();
 
+protected:
+  // §5.28 a context menu's Copy is TClipboard::setText; its Paste TClipboard::requestText, whose
+  // text tvision delivers as a paste of keys to the focused window, so to the field.
+  bool clipboard_copy(const std::string &text) override;
+  bool clipboard_request() override;
+
 private:
   RunExit run_desktop(Runtime &rt, const RunOptions &opts, const std::function<void()> &drain,
                       const std::function<bool()> &should_close,

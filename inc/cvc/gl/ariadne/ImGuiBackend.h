@@ -136,8 +136,14 @@ public:
   // its "Open file" window with this backend's widgets.
   bool pick_files(const cvc::ariadne::FilePickRequest &req,
                   cvc::ariadne::FilePickDone done) override;
-  // Hands a file dialog's answer to the program that asked (pick_files).
+  // Hands a file dialog's answer to the program that asked (pick_files), and sees a touch screen's
+  // long press (§5.28).
   void begin_frame() override;
+  // §5.28 after the document's windows: the Select text window, a refused browser Paste's hint, and
+  // the browser's armed Copy or Paste (cvc::gl::clipboard::arm).
+  void end_frame() override;
+  // §5.28 the next text or menu item copies `text` from its context menu.
+  void next_item_copy(const std::string &text) override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
@@ -192,6 +198,7 @@ public:
   cvc::ariadne::TextViewEvent text_view(const char *label, const char *key, const std::string &text,
                                         const cvc::ariadne::TextViewOptions &opts) override;
   cvc::ariadne::ColorEdit color(const char *label, const float rgb[3]) override; // §G7 RGB picker
+  cvc::ariadne::ColorEdit color_hex(const char *label, const float rgb[3]) override; // #rrggbb
   // §10 transfer-function editor: the ColorTable2 port drawn with the ImGui draw list (zoom strip,
   // colour ramp, opacity curve, isocontour bars, histogram / contour spectrum / contour tree
   // layers, context menu, colour picker, isocontour info). src/cvcGL/ariadne/tf_editor_imgui.cpp.
@@ -251,6 +258,12 @@ protected:
     (void)row;
     (void)editor;
     (void)reset;
+  }
+  // §5.28 after each item of a context menu, and each button of the Select text window: its label
+  // and screen rect (x0, y0, x1, y1), for a test or a tool driving the menu.
+  virtual void context_item_drawn(const char *label, const float rect[4]) {
+    (void)label;
+    (void)rect;
   }
 
 private:
@@ -455,6 +468,17 @@ private:
   // end_window measures what the window draws after it.
   std::shared_ptr<TextViewState> m_lastTextView;
   void *m_lastTextViewWindow = nullptr;
+
+  // §5.28 context menus (ImGuiBackend.cpp): the one open and what it offers, a field's action
+  // waiting for the field to have the focus again, the Select text window, a long press, and what
+  // the browser's pointer release would copy or paste. Made on first use.
+  struct ContextMenus;
+  std::shared_ptr<ContextMenus> m_menus;
+  ContextMenus &context_menus();
+  // The context menu of the read-only item just drawn, which shows `shown`: Copy (it, or the
+  // next_item_copy text) and Select text... `menu_item`: a menu item, which has one only when
+  // next_item_copy gave it one.
+  void copy_menu(const std::string &shown, bool menu_item = false);
 };
 
 } // namespace gl
