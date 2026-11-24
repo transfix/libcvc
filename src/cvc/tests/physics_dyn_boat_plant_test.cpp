@@ -679,6 +679,47 @@ TEST(DynBoatPlant, AHostThatStepsTheWorldRunsItTheSame) {
   }
 }
 
+// A run continued (OW5j): the world saved at a tick with the driver's memory (remember), then
+// restored and resumed, steps on exactly as the run did from there. Restored without the memory,
+// the driver starts afresh and the run differs.
+TEST(DynBoatPlant, ARunRestoredWithItsDriversMemoryStepsOnTheSame) {
+  REQUIRE_JOLT();
+  auto w = water_world(water());
+  dyn_boat_plant_options o;
+  o.physics = w.get();
+  dyn_boat_plant p({dyn_boat_desc::launch()}, o);
+  const cvc::nav::plant_state start = at(0.0f, 0.0f);
+  p.attach(1, &start, si_frame(), w->config().fixed_dt); // one world step a tick
+  const auto drive = [&](int t) {
+    if (t % 12 == 0)
+      p.command(0, t < 300 ? 0.2f : -0.1f, t < 240 ? 1.5f : 0.5f);
+    p.advance();
+  };
+  for (int t = 0; t < 200; ++t)
+    drive(t);
+  const std::vector<std::uint8_t> saved = w->save();
+  const dyn_boat_plant::memory mem = p.remember(0);
+  EXPECT_NE(mem.trim, 0.0) << "the speed loop has learnt something";
+  for (int t = 200; t < 400; ++t)
+    drive(t);
+  const std::uint64_t run = w->state_hash();
+  const cvc::nav::plant_state end = p.state(0);
+
+  w->restore(saved);
+  p.resume(0, mem);
+  for (int t = 200; t < 400; ++t)
+    drive(t);
+  EXPECT_EQ(w->state_hash(), run) << "the same steps from there";
+  EXPECT_EQ(p.state(0).x, end.x);
+  EXPECT_EQ(p.state(0).speed, end.speed);
+
+  w->restore(saved);
+  p.resume(0, {});
+  for (int t = 200; t < 400; ++t)
+    drive(t);
+  EXPECT_NE(w->state_hash(), run) << "a fresh driver steers another way";
+}
+
 // A hull driven into a pier (a static box) counts the contact as one with static geometry, as
 // nav_stats' building contacts; open water counts none.
 TEST(DynBoatPlant, AHullThatHitsAPierCountsIt) {

@@ -662,6 +662,29 @@ void dyn_boat_plant::release_controls(int i) {
   _agents.at(static_cast<std::size_t>(i)).hold = false;
 }
 
+dyn_boat_plant::memory dyn_boat_plant::remember(int i) const {
+  const agent &a = _agents.at(static_cast<std::size_t>(i));
+  memory m;
+  m.trim = a.driver.trim;
+  m.got = a.driver.got;
+  m.yaw_trim = a.driver.yaw_trim;
+  m.steer = a.steer_cmd;
+  m.accel = a.accel_cmd;
+  return m;
+}
+
+void dyn_boat_plant::resume(int i, const memory &m) {
+  agent &a = _agents.at(static_cast<std::size_t>(i));
+  need(_o.physics != nullptr, "resume: the world is gone (world_gone)");
+  a.driver.trim = m.trim;
+  a.driver.got = m.got;
+  a.driver.yaw_trim = m.yaw_trim;
+  a.steer_cmd = m.steer;
+  a.accel_cmd = m.accel;
+  a.now = _o.physics->boat_state(a.boat);
+  a.start.on = false;
+}
+
 void dyn_boat_plant::command(int i, float steer, float accel) {
   agent &a = _agents.at(static_cast<std::size_t>(i));
   a.steer_cmd = clamp(static_cast<double>(steer), -a.max_steer, a.max_steer);

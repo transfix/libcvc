@@ -32,6 +32,7 @@ windows:
       - type: viewport
         view: slice
         mode: slice
+        hide: [raycast]               # the slice alone, without the bunny's raycast over it
         axis: { bind: ortho.view }
         input: pick
         pick: ortho.pick
@@ -58,6 +59,7 @@ scene:
   nodes:
     - node: bunny_volume
       type: volren
+      tags: [raycast]
       source: { sdf: { mesh: stanford.bunny, dim: 32 } }
       fit: { height: 100, up: y }
       volren:

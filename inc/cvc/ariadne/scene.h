@@ -303,6 +303,18 @@ struct SceneNode {
   bool has_specular = false;    // gate the specular pair so an unset material keeps GeometryNode's
   float specular = 0.25f;       //   defaults; both applied only when the material states specular
   float specular_power = 24.0f;
+  // material: { pbr: true | { metallic, roughness, emissive, coat } } — physically based shading
+  // (GeometryNode::setPBR) in place of the Phong keys above. `color`, `texture` and per-vertex
+  // colours stay the base colour. metallic 0 (a dielectric) .. 1 (a metal); roughness 0 (a
+  // mirror) .. 1 (matte); emissive the colour it glows with whatever lights it ([0, 0, 0]: none);
+  // coat a clear coat's strength 0..1 and coat_roughness its roughness (`coat: 0.8` or
+  // `coat: { strength, roughness }`). All clamped to 0..1.
+  bool has_pbr = false;
+  float pbr_metallic = 0.0f;
+  float pbr_roughness = 0.5f;
+  float pbr_emissive[3] = {0.0f, 0.0f, 0.0f};
+  float pbr_coat = 0.0f;
+  float pbr_coat_roughness = 0.0f;
 
   // material: { texture: <uri> } — an image sampled through the geometry's UVs (GeometryNode::
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
@@ -644,6 +656,15 @@ struct Scene {
   bool background_gradient = false; // false = solid (background_top); true = top→bottom gradient
   float background_top[3] = {0.09f, 0.10f, 0.12f};
   float background_bottom[3] = {0.02f, 0.02f, 0.03f};
+  // environment: { sky, horizon, ground } — the light a pbr: material takes from all around
+  // (SceneGraph::setEnvironment): straight up, at the horizon and straight down, colours 0..1.
+  // A scene with a pbr: node lights it with the default environment when this is unset (or
+  // `environment: true`); `environment: false` (or `none`) lights it with the lights alone.
+  bool has_environment = false;
+  bool environment_off = false;
+  float environment_sky[3] = {0.50f, 0.53f, 0.60f};
+  float environment_horizon[3] = {0.42f, 0.42f, 0.42f};
+  float environment_ground[3] = {0.20f, 0.19f, 0.18f};
   bool any() const {
     return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background ||
            clock.present || physics.present;

@@ -1300,6 +1300,11 @@ struct pycvc_py_conversion {
 // (cvc/ph/compose.h, docs/PH_COMPOSE.md).
 %include "pycvc_ph.i"
 
+// ── cvc::nav's CoPH: the kernels, the learner and the fleet ────────────────────
+// NavCophAgent, NavCophFleet, NavCophPacket and the golden kernels (cvc/nav/coph_*.h, C6 of
+// docs/roadmap/NAV-COPH-ROADMAP.md).
+%include "pycvc_nav_coph.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This

@@ -1470,6 +1470,56 @@ scene:
       material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
 ```
 
+**Physically based materials.** `material: { pbr: ... }` shades a geometry node physically, with
+VTK's PBR, in place of the Phong keys. The scene's `environment:` is the light that reaches it
+from all round:
+
+```yaml
+scene:
+  environment:                    # optional: the light from all round
+    sky: [0.55, 0.62, 0.75]       # straight up
+    horizon: [0.45, 0.45, 0.45]
+    ground: [0.18, 0.16, 0.14]    # straight down
+  nodes:
+    - node: body
+      source: { file: car.glb }
+      material:
+        color: [0.75, 0.05, 0.05] # the base colour
+        pbr: { metallic: 0.6, roughness: 0.35, coat: { strength: 1, roughness: 0.05 } }
+    - node: lamp
+      source: { sphere: 0.2 }
+      material: { color: [0, 0, 0], pbr: { emissive: [1.0, 0.85, 0.5] } }
+    - node: rail
+      source: { box: 1 }
+      material: { pbr: { metallic: 1, roughness: 0.1 } }
+```
+
+- **The keys.** `pbr: true` takes the defaults. Each value is 0..1, clamped with a warning.
+  - `metallic`: 0 (the default) a dielectric, such as paint, plastic or stone; 1 a metal.
+  - `roughness`: 0 a mirror, 1 matte; 0.5 by default.
+  - `emissive: [r, g, b]`: the colour the node glows with, lit or not. None by default.
+  - `coat`: a clear coat over the surface, such as car paint's or varnish. Either its strength,
+    or `{ strength, roughness }` (strength 1 and roughness 0 when left out).
+- **The base colour** is what the node shows when Phong-shaded: its `color`, its `texture` or its
+  mesh's own colours, read as sRGB.
+- **The lights** light it face on as brightly as a Phong surface with `diffuse: 1`. VTK's BRDF
+  divides a light by π; libcvc multiplies it back, as three.js's legacy light units did.
+- **The Phong keys** (`ambient`, `diffuse`, `specular`, `specular_power`) do not apply, and warn
+  beside `pbr:`.
+- **The environment** is image-based lighting from a gradient: `sky` straight up, through
+  `horizon`, to `ground` straight down, about +z. It lights every side of a `pbr:` node and is
+  what a metal reflects. Phong nodes ignore it.
+  - A scene with a `pbr:` node and no `environment:` gets the default: sky
+    `[0.50, 0.53, 0.60]`, horizon `[0.42, 0.42, 0.42]`, ground `[0.20, 0.19, 0.18]`, about as
+    bright as Phong's `ambient: 0.2`.
+  - `environment: false` (or `none`) leaves the lights alone, and a side they miss is black.
+  - The first frame after it is set filters it on the GPU, once per view.
+- **Where it applies.** The main view and every `viewport` widget are lit by the environment.
+  The material reaches whatever the node draws: its mesh, its `model:`, every rung of an LOD
+  ladder, and a dataset's meshes.
+- **Not yet:** metallic, roughness, normal and emissive textures; an image as the environment;
+  the materials a glTF model carries.
+
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
 raycaster has
@@ -4672,8 +4722,20 @@ second `vtkVolume` with its own property and its own mapper, which uploads the v
 time: a GPU volume mapper keeps one set of transfer-function tables, for the property it last drew.
 A `volslice` node's slices face the camera they were swept for. A view from a camera of its own
 draws slices of its own, swept for its camera, over the node's shaders, textures and transfer
-function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own. A `volren` node's
-picture is raycast for the main view and composited into its pixels, so it is in the main view only.
+function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own.
+A `volren` node draws in every view, `camera: main` ones too. Its picture is raycast for one camera
+at one size, so each view raycasts the volume for its own camera at its own size times
+`volren.resolution_scale` (`VolRenNode::viewProp`), and draws it on a quad of its own, depth-tested
+against what the view draws with that camera's near and far. A view raycasts again only when its
+camera or size, the node's transform or clip planes, or the node's settings change (every frame it
+draws, with `volren.continuous`), never while it is hidden, and no more often than it draws, so a
+view with `refresh_hz` raycasts at most that many times a second. Each view that shows the node
+costs a raycast of its own at its raster: a 360 x 270 view at the default scale of 0.5 casts
+180 x 135 rays each time, beside the main view's. The jobs share the node's raycaster and take turns
+on its worker thread, so views add latency rather than threads; on CUDA they share the device and
+the volume uploaded to it once, and a volume's shadow maps are built once for all of them. A view
+draws the scene without the volume until its first raycast lands. A `volren` node takes no
+`override:` yet.
 `examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
 one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
 
@@ -4802,8 +4864,8 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A `volren` node is in the main view only. A `volslice` node takes `transform` but no restyling;
-  a `type: volume` node takes `opacity` and `transform`.
+- A `volren` node takes no restyling: no `override:` entry applies to it. A `volslice` node takes
+  `transform` but no restyling; a `type: volume` node takes `opacity` and `transform`.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
 - A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
@@ -6529,8 +6591,10 @@ they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
 document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
 the extra data files to fetch; both pages read the same file. The URL can only add document
-arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
-terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+arguments. A download that breaks off (the module, its Python zip, the document or a file it
+names) is fetched twice more past the browser's cache (`cache: 'reload'`); one that still breaks
+fails the load with its name and how much of it arrived. A failed load shows what the runtime
+printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is
