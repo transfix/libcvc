@@ -1690,7 +1690,7 @@ list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_re
 # the retained Widget tree, the Runtime + reconcile boundary, and direct
 # cvc::state binding, walking a pluggable Backend. It touches NO VTK/ImGui/GL —
 # the ImGui-over-VTK backend lives in cvcGL (src/cvcGL/ariadne). Roadmap §16.1.
-list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/voice_monitor.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_camera.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/scene_swarm.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/controls.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/world_worker.cpp ariadne/vehicle_kinematics.cpp ariadne/vehicle_dynamics.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp ariadne/heatmap_emit.cpp ariadne/settings_emit.cpp)
+list(APPEND SOURCE_FILES ariadne/ariadne.cpp ariadne/loader.cpp ariadne/uri.cpp ariadne/uri_state.cpp ariadne/uri_http.cpp ariadne/uri_http_cache.cpp ariadne/net_intrinsics.cpp ariadne/net_host.cpp ariadne/files.cpp ariadne/file_picker.cpp ariadne/data.cpp ariadne/media.cpp ariadne/media_player.cpp ariadne/media_browser.cpp ariadne/stream_intrinsics.cpp ariadne/conference/room_intrinsics.cpp ariadne/conference/room_scene.cpp ariadne/conference/room_entities.cpp ariadne/conference/room_net.cpp ariadne/conference/room_aoi.cpp ariadne/conference/room_aoi_relay.cpp ariadne/conference/room_avatar.cpp ariadne/conference/avatar_panel.cpp ariadne/conference/room_pose_relay.cpp ariadne/conference/room_write_gate.cpp ariadne/conference/room_chat.cpp ariadne/conference/room_rungs.cpp ariadne/conference/voice_monitor.cpp ariadne/conference/room_lane.cpp ariadne/conference/room_calls.cpp ariadne/conference/relay_session.cpp ariadne/conference/client_registry.cpp ariadne/state_io.cpp ariadne/ftxui_backend.cpp ariadne/term_graphics.cpp ariadne/tvision_backend.cpp ariadne/app_runtime.cpp ariadne/scene_geometry.cpp ariadne/scene_repeat.cpp ariadne/scene_camera.cpp ariadne/scene_generated_world.cpp ariadne/scene_world.cpp ariadne/scene_water.cpp ariadne/scene_boat.cpp ariadne/scene_wind.cpp ariadne/scene_weather.cpp ariadne/world_vehicles.cpp ariadne/scene_swarm.cpp ariadne/world_spawns.cpp ariadne/world_gym.cpp ariadne/keys.cpp ariadne/controls.cpp ariadne/doc_args.cpp ariadne/host_cli.cpp ariadne/host_signals.cpp ariadne/host_warnings.cpp ariadne/requires.cpp ariadne/rich_text.cpp ariadne/script_engine.cpp ariadne/host_info.cpp ariadne/avatar_sim.cpp ariadne/avatar_physics.cpp ariadne/holon.cpp ariadne/holon_sync.cpp ariadne/world_worker.cpp ariadne/world_pack.cpp ariadne/vehicle_kinematics.cpp ariadne/vehicle_dynamics.cpp ariadne/pose_stream.cpp ariadne/tf_editor_emit.cpp ariadne/chart_emit.cpp ariadne/heatmap_emit.cpp ariadne/settings_emit.cpp)
 # A document set fetched from a URL, and a runtime's browser page loading one (arigl-web, ari).
 list(APPEND SOURCE_FILES ariadne/doc_fetch.cpp ariadne/web_document.cpp)
 # The document a relay runs (arisrv --doc) and the namespaces it publishes.
@@ -1719,6 +1719,7 @@ list(APPEND INCLUDE_FILES
   ../../inc/cvc/ariadne/vehicle_dynamics.h
   ../../inc/cvc/ariadne/holon_sync.h
   ../../inc/cvc/ariadne/world_worker.h
+  ../../inc/cvc/ariadne/world_pack.h
   ../../inc/cvc/ariadne/pose_stream.h
   ../../inc/cvc/ariadne/app_runtime.h
   ../../inc/cvc/ariadne/keys.h
@@ -1983,6 +1984,23 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
         FILES_MATCHING PATTERN "*.ari")
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
+# The .ari schema (docs/ARIADNE.md §14): compiled into the library (ari_schema_json(), what the
+# loader and `ari validate` check against), and installed beside the components for editors and
+# other tools (share/libcvc/ariadne/schema/ari.v1.schema.json).
+set(CVC_ARI_SCHEMA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/schema/ari.v1.schema.json)
+set(_cvc_ari_schema_cpp ${CMAKE_CURRENT_BINARY_DIR}/ariadne/ari_schema_text.cpp)
+add_custom_command(
+  OUTPUT ${_cvc_ari_schema_cpp}
+  COMMAND ${CMAKE_COMMAND} -DINPUT=${CVC_ARI_SCHEMA_FILE} -DOUTPUT=${_cvc_ari_schema_cpp}
+          -DNAMESPACE=cvc::ariadne::detail -DSYMBOL=ari_schema_text
+          -P ${PROJECT_SOURCE_DIR}/CMake/CvcEmbedText.cmake
+  DEPENDS ${CVC_ARI_SCHEMA_FILE} ${PROJECT_SOURCE_DIR}/CMake/CvcEmbedText.cmake
+  COMMENT "Embedding the .ari schema"
+  VERBATIM)
+target_sources(cvc PRIVATE ${_cvc_ari_schema_cpp})
+install(FILES ${CVC_ARI_SCHEMA_FILE}
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne/schema
+        COMPONENT libcvc)
 
 # cvc::net HTTP backend selection (roadmap §13.x). Pick the transport for cvc::net at configure time:
 # Emscripten fetch on wasm, libcurl on native. CVC_ARIADNE_HAVE_HTTP stays defined whenever a real
@@ -2272,9 +2290,12 @@ endif()
 # Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the
 # json-schema-validator (over nlohmann-json) is present, the loader validates each
 # document against the .ari schema and reports violations as warnings
-# (CVC_ARIADNE_HAVE_JSONSCHEMA); when absent, the schema is still exposed
-# (ari_schema_json) but no runtime validation runs. Needs yaml-cpp too (it
-# validates the parsed document). Its config does find_dependency(nlohmann_json).
+# (CVC_ARIADNE_HAVE_JSONSCHEMA), and validate_string / validate_file / `ari validate` work;
+# when absent, the schema is still exposed (ari_schema_json) but nothing validates. Needs
+# yaml-cpp too (it validates the parsed document). Its config does
+# find_dependency(nlohmann_json). CI's libcvc lanes fail when the ENABLED line below is missing
+# from the configure's output (ci.yml), so a lane that loses the validator does not go on
+# checking nothing.
 find_package(nlohmann_json_schema_validator CONFIG QUIET)
 if(TARGET nlohmann_json_schema_validator::validator)
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_JSONSCHEMA)

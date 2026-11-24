@@ -245,7 +245,9 @@ public:
   // Run the steps due on `clock` since the last call and publish the telemetry when any ran. The
   // first call anchors at the clock's tick and runs none. `after_step` is called after the last two
   // steps of a batch (and once on the first call), where a view captures the poses it draws
-  // between (pose_tracker::capture). Returns the steps run.
+  // between (pose_tracker::capture). Returns the steps run. The first call also sets the world's
+  // field time to the clock's time (world::set_field_time), as world::follow does, so its water's
+  // waves are read at the clock's time from then on.
   std::uint64_t follow(const cvc::world_clock &clock,
                        const std::function<void()> &after_step = nullptr);
   // The same, with `before_each` called before each step (after the vehicles, boats and weather

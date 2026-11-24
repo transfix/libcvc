@@ -16,9 +16,19 @@ name: CI (recipe-first)
 # dependency bundles come prebuilt from the cvcpkg.org catalog (the
 # closure — libxml2, the ImageMagick delegates, the libtiff codecs,
 # hdf5, boost, cgal/gmp/mpfr, … — is published for linux, macOS and
-# Windows). Every lane is a merge blocker: master's branch protection has
-# required every CI check since 2026-11-12, so a lane that is not green
-# blocks the merge.
+# Windows). The Linux and Windows lanes are merge blockers: master's branch
+# protection requires them, so a lane that is not green blocks the merge.
+#
+# The macOS lanes run on master, not on pull requests (since 2026-11-23).
+# The account runs 5 hosted macOS jobs at a time, and the two lanes here
+# were the last macOS jobs every PR needed (ci.yml's package-macos lanes
+# moved to pushes on 2026-11-13), so macOS still set how fast PRs merged.
+# They run on each push to master, on ci/full/** pushes and on
+# workflow_dispatch, and on a pull request that has the `macos` label (for
+# a platform-sensitive change). Adding the label restarts the PR's run with
+# them. Branch protection no longer requires them; check master's run
+# before tagging a release. The macOS packages cvcpkg publishes are built
+# by publish-cvcpkg.yml and release.yml, which this does not change.
 #
 # Notes on current reality (2026-08-11):
 #   * The old draft blocker is resolved: libcvc + its whole dep closure are
@@ -43,6 +53,10 @@ name: CI (recipe-first)
 
 on:
   pull_request:
+    # labeled: adding the `macos` label starts the PR's run again, with the macOS lanes.
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [master, 'ci/full/**']
   workflow_dispatch:
     inputs:
       fallback_to_source:
@@ -50,27 +64,40 @@ on:
         type: boolean
         default: false
 
+# A label other than `macos` gets a group of its own, so it doesn't cancel the PR's run (its own
+# run builds nothing). Master's runs aren't cancelled: merges land faster than a macOS lane
+# finishes, so cancelling would leave master with no finished macOS run. A newer push waits for the
+# running one and replaces any push already waiting.
 concurrency:
-  group: ci-recipe-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-recipe-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'macos' && '-label' || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  build-recipe:
-    name: recipe / ${{ matrix.os }} / ${{ matrix.build_type }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
+  # Which lanes this run builds (see the header). A matrix entry can't be skipped with an `if:`
+  # (a job's `if:` can't see `matrix`, and a step's runs on the lane's runner), so the lane list
+  # is made here, on a Linux runner, and build-recipe takes it as its matrix.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.lanes.outputs.include }}
+    steps:
+      - id: lanes
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          REF: ${{ github.ref }}
+          MACOS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'macos') }}
+        run: |
+          set -euo pipefail
           # Linux is the verified, REQUIRED lane (both configs). It runs on the glibc floor,
-          # ubuntu-22.04 (glibc 2.35), where publish-cvcpkg.yml builds the libcvc recipe it checks;
-          # ubuntu-latest drifts (it became 26.04 with gcc 15.2).
-          - { os: ubuntu-22.04, build_type: Release }
-          - { os: ubuntu-22.04, build_type: Debug }
-          # macOS is a REQUIRED lane (both configs) since 2026-11-12. It was informative
-          # (continue-on-error) until master's branch protection began requiring every CI check;
-          # without continue-on-error a failure fails the lane outright.
-          - { os: macos-latest, build_type: Release }
-          - { os: macos-latest, build_type: Debug }
+          # ubuntu-22.04 (glibc 2.35), where publish-cvcpkg.yml builds the libcvc recipe it
+          # checks; ubuntu-latest drifts (it became 26.04 with gcc 15.2).
+          linux='{"os":"ubuntu-22.04","build_type":"Release"},{"os":"ubuntu-22.04","build_type":"Debug"}'
+          # macOS (both configs): on master, not on pull requests (see the header). Without
+          # continue-on-error a failure fails the lane outright.
+          macos='{"os":"macos-latest","build_type":"Release"},{"os":"macos-latest","build_type":"Debug"}'
           # Windows is a REQUIRED lane. It was previously experimental on the
           # theory that the catalog closure was too new -- it is not: the
           # closure installs cleanly (37 components). The lane failed because
@@ -83,7 +110,34 @@ jobs:
           # ci.yml:425 and publish-cvcpkg.yml: windows-latest now ships
           # VS2026 (v180), whose CL.exe ICEs (0xC0000005) on libcvc's C++20
           # state_exec/distributed-state TUs.
-          - { os: windows-2022, build_type: Release }
+          windows='{"os":"windows-2022","build_type":"Release"}'
+          case "$EVENT" in
+            pull_request)
+              if [ "$ACTION" = labeled ] && [ "$LABEL" != macos ]; then
+                lanes=""
+              elif [ "$MACOS_LABEL" = true ]; then
+                lanes="$linux,$macos,$windows"
+              else
+                lanes="$linux,$windows"
+              fi ;;
+            # Master: the PR ran Linux and Windows at its head, and ci.yml's push run builds the
+            # merge on Linux; macOS is what it hasn't run.
+            push)
+              if [ "$REF" = refs/heads/master ]; then lanes="$macos"; else lanes="$linux,$macos,$windows"; fi ;;
+            *)
+              lanes="$linux,$macos,$windows" ;;
+          esac
+          echo "include=[$lanes]" >> "$GITHUB_OUTPUT"
+          echo "lanes: [$lanes]"
+
+  build-recipe:
+    needs: plan
+    if: needs.plan.outputs.include != '[]'
+    name: recipe / ${{ matrix.os }} / ${{ matrix.build_type }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:

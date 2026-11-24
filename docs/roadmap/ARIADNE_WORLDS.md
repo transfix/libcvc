@@ -446,6 +446,18 @@ already holds the world should download nothing.
   loaded a world once doesn't fetch it again.
 - **Live edits list changed hashes** in the section revision that carries them, so a client fetches
   only what changed.
+- **As built (OW5k, a pack as a directory):** `cvc::ariadne::world_pack` (world_pack.h) is a
+  directory with an index, `world-pack.index` at its root: one line per file,
+  `<sha256> <size> <path>`, the path relative to the root. `write_world_pack_index` writes one for
+  every file under a directory. A client is pointed at packs by `CVC_WORLD_PACKS` (directories,
+  separated as PATH's are) or `world_replica::add_pack`. When the room's document URI does not
+  give the relay's bytes here, the replica finds the document by the SHA-256 the room names
+  (`room_world_source`), in the first pack that lists it and whose files all match its index
+  (`world_pack::verify`: each file's size and SHA-256). It builds the world from there, and the
+  document's assets resolve inside the pack. A pack with a file that differs from its index is
+  refused, and the replica's status says which file (`AriadneOneWorld`). Still to come: packs from
+  a cvcpkg package or an archive at a URL, a viewer document's and a command-line flag's packs,
+  the relay deployed with a pack, the manifest's priorities, and fetching from the relay.
 
 ## 13. Private rooms: end-to-end encrypted, the relay only forwards
 
@@ -798,7 +810,7 @@ asset delivery, **E** = end-to-end encryption.
 | RM2 | **Rooms made at run time,** by server programs and by participants where the rules allow. | RM1, S0 | S |
 | CF1 | **The features sections** and server tokens in `requires:`. | RM1 | S |
 | CF2 | **The stock conference components** under `cvc://conference/`; the example documents become layouts over them. | CF1 | M |
-| AD1 | **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs from a cvcpkg package, an archive at a URL or a directory, each read through its index. | WD1 | M |
+| AD1 | **Started** (2026-11-23, OW5k: a pack as a directory with its index; a client finds the relay's document in one by its hash). **Assets by hash** in the manifest, with size and priority; the lookup order (bundle, cache, pack, relay); world packs from a cvcpkg package, an archive at a URL or a directory, each read through its index. | WD1 | M |
 | AD2 | **Fetch by need:** colliders first, cells near the client, coarse before fine; stand-ins; the browser's content cache. | AD1, WD9 for cells | M |
 | E0 | **Keys:** X25519 identity and prekeys signed by the device key, the key directory on the relay, safety numbers, the libsodium recipe. | — | M |
 | E1 | **Encrypted direct messages:** X3DH and the Double Ratchet; `chat.ari` gets txwtf's lock. | E0 | M |
@@ -1132,10 +1144,13 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   0.007 mm and 0.025 mrad of the relay's Humvee on dynamic4w over the same 9 s, its box within
   0.5 mm of the relay's height and 0.7 mrad of its chassis's attitude (`AriadneOneWorld`); the
   holon predicts it with nothing to correct, and corrects a 1.5 m push exactly (`HolonVehicleTest`).
-- **Still to come:** a boat predicted (it needs the water), played out until then. A wall or
-  another vehicle is the relay's correction (a client's dynamic model touches nothing; a jolt
-  model touches only the statics). For the statics: a document the client does not ship with fetched as a world pack
-  (section 12).
+- **Still to come:** an avatar is the relay's correction for a jolt or boat model, and a wall or
+  another vehicle for a dynamic plant's model (it touches nothing; OW5o gives the jolt and boat
+  models the room's vehicles). A sea the
+  relay's storms change (OW5l predicts a boat on its document's sea, a weather node's keyframes
+  not followed). For the statics: a document the
+  client does not ship with, from a pack it was pointed at (OW5k: a directory), or fetched from
+  the relay (section 12).
 - **As built (OW5f, the relay's world followed):** the relay publishes what its document has on
   (`room_world_on`: `conf.rooms.<room>.world_on`, `publish_world_on`, written when it changes):
   the scene's world that is on, and the params each generated_world node of it (of the scene,
@@ -1195,6 +1210,97 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
   its ride height is within 3-5 mm, and its pitch and roll within 0.02 rad (a sample does not
   carry them; `AriadneOneWorld`). Two models on the same statics agree exactly, and a 1.5 m push
   is corrected at the next sample (`HolonVehicleTest`).
+- **As built (OW5j, boats):** the boat a participant drives (`dynamicboat`) is predicted too. The
+  relay runs it on `dyn_boat_plant`: its hull a body in the world that the water's field floats and
+  drags, its driver turning the navigator's command into a throttle and a rudder every world step.
+  The room's entities carry it as they carry the other plants (`WorldVehicles::dynamics`; the boat
+  is its preset with its mass and top speed, `boat_desc_of`). A client's `dynamic_vehicle_model`
+  runs the same plant in a Jolt world of its own made as for a jolt vehicle, with the holon's
+  statics and their water. The water comes with the statics (`world_replica::water`,
+  `holon::set_statics`): the replica's world's fluid fields (a water node's), else the still water
+  the relay adds for its boats over the grid's lake (`boat_still_water`, which `WorldVehicles`
+  now calls too). The boat's state is that world, saved each step, and the driver's memory, which
+  the save does not hold (its speed and rudder trims, the acceleration it last measured, the
+  command it holds: `dyn_boat_plant::remember` and `resume`). A boat goes on the water at its
+  first sample over water deep enough for it (`dyn_boat_plant::attach`); until then, and without
+  water, it is played out. With the relay's sample every 4 ticks, each finds the model within
+  0.8 mm and 0.08 mrad of the relay's launch on a still lake, afloat within 0.03 mm of its height
+  and 5 mrad of its pitch and roll (`AriadneOneWorld`). Two models on the same water agree
+  exactly, and a 1.5 m push is corrected at the next sample (`HolonVehicleTest`). A sea's waves
+  came with OW5l.
+- **As built (OW5l, a sea's waves):** the relay's world reads its water's waves at the clock's
+  time: `SceneWorld::follow` sets the world's field time to the clock's at its first call, as
+  `world::follow` does, so the step ending on tick T reads the sea at T x fixed_dt however long the
+  holon ran before the world was attached. (Before, the field time counted from the world's own
+  first step, so a world attached late floated its bodies on other waves than the drawn sea, which
+  is drawn at the clock's time.) A client's boat model sets its world's field time to the sample's
+  tick x fixed_dt (`dynamic_vehicle_model::at`; the holon passes the server's tick), and each step
+  adds fixed_dt, so it reads the same waves at the same tick. On a lake with a 14 m/s wind sea
+  that heaves the relay's launch 0.71 m, each sample finds the model within 2.2 mm of it and
+  6.4 mm of its height; a model reading the waves half a second off is 171 mm off its height
+  (`AriadneOneWorld`). A model starts at rest, level, where the relay's hull may already be
+  pitching on a wave (the driver's pose carries its heading alone), so its attitude is up to
+  145 mrad off in the first second; the same waves bring it within 23 mrad of the hull's pitch and
+  roll, and 1.4 mrad of its heading, from then on. The replica's water is its document's: a sea
+  the relay's storms change on the clock's periods (a weather node) is not followed yet.
+- **As built (OW5m, a vehicle's attitude in its pose):** the pose stream carries an entity's
+  chassis's attitude and vertical speed when its chassis is a body in the relay's world (a jolt
+  vehicle's, a boat's hull, a dynamic plant's box), for the room's entities the relay streams
+  (`conference::entity_pose_subjects`, which every client draws them by) and for a driver's pose
+  alike (`entity_ride`); before, a turn about z alone. So a client draws
+  the room's vehicles pitched and rolled as they are, and a jolt or boat model takes its chassis's
+  pitch, roll and vertical speed from each sample (`dynamic_vehicle_model::at`), its spin still the
+  predicted one (the stream does not carry it). A sample with a heading alone, an older relay's,
+  keeps the predicted pitch and roll (`HolonVehicleTest`). The driver's pose is within 4e-8 rad of
+  the hull's attitude. On the waves of OW5l the model is within 7.9 mrad of the hull's pitch and
+  roll from its first sample (145 mrad before) and 2.6 mrad from the second second, and within
+  4.7 mm of its height; the jolt Humvee within 3.7 mrad (17.5 before) and 0.4 mm of its height
+  (`AriadneOneWorld`). A model reading the waves half a second off now drifts only 18 mm from the
+  hull's height between samples, since each puts it back. The driver's drive axes read the
+  pose's heading whatever its tilt (holon's `heading_of`).
+- **As built (OW5n, a vehicle's spin and steering in its pose):** the pose stream carries each
+  entry's angular velocity (mrad/s) and a vehicle's steering angle (microradians), as differences
+  like the rest (`PoseEntry.wx, wy, wz, steer`; `PoseSnapshot.carries`, whose kCarriesMotion bit a
+  relay before OW5n leaves 0, so its zeros read as not known rather than not turning). The relay
+  fills them from the chassis body (`entity_ride`) and the plant's steering (`entity_info::steer`,
+  `holon::steer` for a driver), and a client's sample carries them (`pose_sample::steer`) through
+  `holon::apply_authoritative` to `dynamic_vehicle_model::at`: the dynamic plants take the
+  steering angle and the yaw rate, dynamic4w the roll and pitch rates too, a jolt or boat model
+  its chassis's spin. A dynamic4w model also takes its suspension's pitch, roll and heave from the
+  sample (the relay's box's attitude, OW5m; the heave from the box's height, `dyn_4w_plant::
+  box_pose` inverted); its heave rate stays the predicted one, since the pose's vertical speed is
+  the box's after the relay's step under gravity. A client that starts predicting a vehicle the
+  relay is already driving starts it as the relay has it, not level, still and with its wheels
+  straight: joining a four-wheel Humvee mid-turn through the pose stream, its model is within
+  0.7 mrad of the chassis's pitch and roll and 0.3 mrad of its heading (94 to 98 and 10.5 before;
+  24 to 25 and 10.4 with the attitude alone), and within 2 mm of its height in the stream's
+  millimetres (`AriadneOneWorld`); a sample places the holon's model with the relay's steering and
+  yaw rate (`HolonVehicleTest`). The jolt Humvee is now within 1.1 mrad of its chassis's attitude
+  (3.7 before) and the boat on OW5l's waves within 3.6 mm of the hull's height (4.7 before); a
+  boat model reading the waves half a second off drifts 8 mm between samples, a second off 15 mm.
+- **As built (OW5o, the room's vehicles in the car a client drives):** a jolt or boat model's
+  world holds a box for each of the room's vehicles the client shows (`dynamic_vehicle_model::
+  hold_obstacles`, from the holon's held entities: `holon::held_obstacles`), so the car the client
+  predicts meets them as the relay's meets those vehicles, instead of driving into them between
+  samples. Before each step each box is put where its vehicle is to be at the step's end, on from
+  where it was shown along its velocity, as the walker's world holds them. A vehicle the relay
+  moves as it will (the kinematic plant's box) is a kinematic box; one the relay's world can push
+  (a jolt vehicle, a dynamic plant's box) a body of its mass (`room_entity::dynamics`, passed to
+  `holon::hold_entity`), put where it is shown before each step, so the car shoves it as the
+  relay's does. The boxes are made with the model's world (`jolt_vehicle_world::obstacle_room`:
+  one for each vehicle held and two more of each size and mass), since its saved states must keep
+  the same bodies; a box no vehicle holds waits out of the way. When more come into view than it
+  has room for, the holon makes the model again with room, the vehicle where it is, as a change of
+  statics does (`holon::vehicle_rebuilds`). The relay's car at full throttle into a parked
+  vehicle: the client's model, sampled every 4 ticks through the pose stream, is within 3.9 mm of
+  it at each sample holding the parked vehicle's box, 50 mm without (a kinematic-plant vehicle);
+  4 mm and 21 mm for a parked jolt Humvee the car shoves 4 m (`AriadneOneWorld`). The car a holon
+  predicts stops at a held vehicle and drives through one it does not hold (`HolonVehicleTest`).
+  A vehicle is held where it is shown, its playout's delay behind the relay; a parked one is
+  where it is. Avatars are not held yet: they could be bodies of their 70 kg as the relay's are,
+  less the walker that pulls one back toward its intent. The dynamic plants' models still meet
+  nothing, though the relay's boxes for them are bodies whose collisions go back into their
+  plants.
 
 ### 18.6 Driving a vehicle, and being one
 
@@ -1277,7 +1383,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW2 | **Built** (2026-11-19, server side). **The holon runs the document's world.** `SceneWorld` on the holon's clock; avatars as bodies in it; `room_statics` replaced by the scene's bodies; vehicles beside the avatars, colliding. A test: a car shoves an avatar, an avatar stops a car. | L |
 | OW3 | **Started** (2026-11-19: the table and drivers, server side). **Generic entities.** One table; controller, driver and owner per entity; controller-shaped intents; participants own entities; one pose stream. | L |
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
-| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
+| OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |

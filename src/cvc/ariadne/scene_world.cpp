@@ -1910,8 +1910,12 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
   const std::function<void()> &capture = after_step || !d.deferred ? after_step : d.capture;
   if (!d.follower) {
     d.follower = cvc::clock_follower::for_step(clock, d.world->config().fixed_dt);
-    // The world's steps follow the clock from here: the storms in its air are read at the clock's
-    // time, as the drawn ones are (StormWindFlow's offset), however late it anchored.
+    // The world's steps follow the clock from here, and so does its field time, as world::follow
+    // anchors it: its water's waves are read at the clock's time (the step ending on tick T at
+    // T x fixed_dt), as the drawn sea is, however late it anchored. So a holon's client reads the
+    // relay's waves at a tick from the tick alone (OW5l). The storms in its air are read at the
+    // clock's time too (StormWindFlow's offset, now 0 from here).
+    d.world->set_field_time(clock.t());
     d.clock_offset = clock.t() - d.world->field_time();
     sync_wind();
     if (capture)

@@ -34,6 +34,13 @@
   let warningTimer = 0;
   warningEl.addEventListener('click', () => { warningEl.hidden = true; });
 
+  // The browser gate, before anything downloads (below).
+  const needs = missingJspi();
+  if (needs) {
+    unsupported(needs);
+    return;
+  }
+
   // Browsers suspend an AudioContext made before the user has touched the page (autoplay policy),
   // and SDL's audio output (a document's sound, a conference peer's mic) is one: wrap the
   // constructor before arigl.js makes any, keep every context, and resume them on the first click,
@@ -59,6 +66,48 @@
   })();
 
   function status(text) { statusEl.textContent = text; }
+
+  // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4). The module is built with wasm
+  // exceptions and JSPI and has no fallback, so a browser without JSPI would fail part way through
+  // the load. Null when the browser has it; otherwise what to say instead, a headline and then
+  // paragraphs. Every browser on an iPhone or iPad is WebKit, so there it is iOS 27 whichever
+  // browser it is. ari-web.js and the inline pages carry the same check and text.
+  function missingJspi() {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+        typeof WebAssembly.promising === 'function')
+      return null;
+    const ua = navigator.userAgent || '';
+    const ios = /iPhone|iPad|iPod/.test(ua) ||
+                (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS's desktop UA
+    const versions = 'Chrome 137, Firefox 153 or Safari 27, or later';
+    return ['This page needs a newer browser',
+            'It runs on WebAssembly with JSPI (JavaScript Promise Integration), which this ' +
+                'browser does not have.'].concat(ios ? [
+      'On an iPhone or iPad every browser, Chrome and Firefox included, uses Safari\'s engine, ' +
+          'so it needs iOS 27 or later (iPadOS 27 on an iPad): Settings > General > Software ' +
+          'Update.',
+      'On a computer: ' + versions + '.',
+    ] : ['It needs ' + versions + ' (Edge 137 and other browsers built on Chrome 137 too).']);
+  }
+
+  // The gate's page in place of the loading screen: what the browser needs, then its user agent.
+  // Text only.
+  function unsupported(lines) {
+    state.state = 'unsupported';
+    state.needs = lines;
+    overlay.classList.add('unsupported');
+    status(lines[0]);
+    const box = document.createElement('div');
+    box.id = 'needs';
+    for (const text of lines.slice(1).concat(['This browser: ' + navigator.userAgent])) {
+      const p = document.createElement('p');
+      p.textContent = text;
+      box.appendChild(p);
+    }
+    box.lastChild.className = 'ua';
+    statusEl.after(box);
+    document.title = 'Needs a newer browser — ' + document.title;
+  }
 
   // The error page: what went wrong in one line, then everything arigl printed. Text only.
   function fail(headline) {
@@ -193,29 +242,83 @@
   }
 
   // Download the files the module needs before it starts, together, with one progress line.
+  //
+  // Each is asked for with cache: 'no-cache', so a cached copy is revalidated (a second visit costs
+  // a 304). A download that breaks off is fetched again past the browser's cache, cache: 'reload'
+  // (a fresh copy that replaces the cached one), up to RETRIES more times. That covers a dropped
+  // connection, and Firefox resuming a partial copy left in its cache by a load that was cut
+  // off: on GitHub Pages that resumed body can break ("Error in input stream") on every load until
+  // the copy is gone, and a fetch past the cache gets the whole file. A file that still breaks
+  // fails the page with its name, how much of it arrived and the browser's own words, and the
+  // other downloads stop.
+  const RETRIES = 2;
+  const MB = n => (n / 1048576).toFixed(1);
   async function download(names) {
     const got = names.map(() => 0);
+    const again = names.map(() => false);
+    const stop = new AbortController();
     const show = () => {
-      const mb = (got.reduce((a, b) => a + b, 0) / 1048576).toFixed(1);
-      status('Downloading ' + names.join(' and ') + ' — ' + mb + ' MB');
+      if (failed || stop.signal.aborted) return; // the error line stays
+      const retrying = names.filter((_, i) => again[i]);
+      status('Downloading ' + names.join(' and ') + ' — ' + MB(got.reduce((a, b) => a + b, 0)) +
+             ' MB' + (retrying.length ? ' (again: ' + retrying.join(', ') + ')' : ''));
     };
-    return Promise.all(names.map(async (name, i) => {
-      const resp = await fetch(name, {cache: 'no-cache'});
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching ' + name);
-      const reader = resp.body.getReader();
-      const chunks = [];
-      for (;;) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        got[i] += value.length;
-        show();
+    const files = Promise.all(names.map(async (name, i) => {
+      let last = null;
+      for (let attempt = 0; attempt <= RETRIES; attempt++) {
+        if (attempt) {
+          again[i] = true;
+          got[i] = 0;
+          show();
+          await new Promise(r => setTimeout(r, 500 * attempt));
+        }
+        let resp;
+        try {
+          resp = await fetch(name, {cache: attempt ? 'reload' : 'no-cache', signal: stop.signal});
+        } catch (e) {
+          if (stop.signal.aborted) throw e;
+          last = {what: 'could not be fetched', error: e, got: 0, size: 0};
+          continue;
+        }
+        // A refusal is the server's answer, not a broken download: it is not asked again.
+        if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching ' + name);
+        // The file's size, when the bytes read are the bytes sent (no Content-Encoding).
+        const size = resp.headers.get('content-encoding') ? 0 :
+                     Number(resp.headers.get('content-length')) || 0;
+        const chunks = [];
+        try {
+          const reader = resp.body.getReader();
+          for (;;) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            got[i] += value.length;
+            show();
+          }
+          if (size && got[i] !== size)
+            throw new Error('the body ended at ' + got[i] + ' of ' + size + ' bytes');
+        } catch (e) {
+          if (stop.signal.aborted) throw e;
+          last = {what: 'broke off', error: e, got: got[i], size};
+          continue;
+        }
+        const buf = new Uint8Array(got[i]);
+        let off = 0;
+        for (const c of chunks) { buf.set(c, off); off += c.length; }
+        return buf;
       }
-      const buf = new Uint8Array(got[i]);
-      let off = 0;
-      for (const c of chunks) { buf.set(c, off); off += c.length; }
-      return buf;
+      const of = last.size ? ' of ' + MB(last.size) : '';
+      const where = last.got ? ' after ' + MB(last.got) + of + ' MB' : '';
+      throw new Error('downloading ' + name + ' ' + last.what + where + ', ' + (RETRIES + 1) +
+                      ' tries (' + ((last.error && last.error.message) || last.error) + '). ' +
+                      'Reload the page to try again; if it keeps failing, clear this ' +
+                      'site\'s data.');
     }));
+    // The first failure is the page's; the others' downloads are not wanted any more.
+    return files.catch(e => {
+      stop.abort();
+      throw e;
+    });
   }
 
   // Download the module's .wasm (and the Python zip), then start its .js on it.

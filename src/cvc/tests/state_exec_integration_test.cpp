@@ -1104,6 +1104,52 @@ TEST_F(E2EIntrinsicsTest, ProcessInspectsItself) {
   EXPECT_EQ(std::get<int64_t>(result->v), pid);
 }
 
+// (ps) and (inspect) rows say whose a process is (docs/roadmap/ARIADNE_SHELL.md 4.10): `scope`, its
+// chroot from its owner's root. A plain host gives neither, so its rows' scope is "". A forked
+// child keeps its parent's, and process_info carries it for a host.
+TEST_F(E2EIntrinsicsTest, ProcessRowsCarryTheirScope) {
+  const auto with = [](const char *root_path, const char *owner_root) {
+    execute_options o;
+    o.root_path = root_path;
+    o.owner_root = owner_root;
+    return o;
+  };
+  const int plain = exec("(sleep 60)");
+  const int own = exec("(sleep 60)", with("docs.a", "docs.a"));
+  const int mount = exec("(begin (fork) (sleep 60))", with("docs.a.includes.fe", "docs.a"));
+  const int outside = exec("(sleep 60)", with("other", "docs.a"));
+  const int chrooted = exec("(sleep 60)", with("jobs", ""));
+  const int monitor = exec(R"((begin
+        (set seen (dict))
+        (for p (ps) (set-attr seen (str (get-attr p "pid")) (get-attr p "scope")))
+        (list seen (get-attr (inspect (self-pid)) "scope"))))");
+  sched.run(100000); // returns once all but the monitor sleep
+  const std::optional<value_t> r = sched.get_result(monitor);
+  ASSERT_TRUE(r.has_value());
+  const std::vector<value_t> &got = *std::get<list_ptr>(r->v);
+  const auto scope_of = [&](int pid) {
+    for (const auto &[k, v] : *std::get<dict_ptr>(got[0].v))
+      if (k == std::to_string(pid))
+        return std::get<std::string>(v.v);
+    return std::string("(not listed)");
+  };
+  EXPECT_EQ(scope_of(plain), "") << "a plain host's process";
+  EXPECT_EQ(scope_of(own), "") << "a document's own";
+  EXPECT_EQ(scope_of(mount), "includes.fe") << "a mount's";
+  EXPECT_EQ(scope_of(outside), "/other") << "a chroot outside the owner's root, written whole";
+  EXPECT_EQ(scope_of(chrooted), "jobs") << "no owner root: the chroot itself";
+  EXPECT_EQ(std::get<std::string>(got[1].v), "") << "inspect's row has it too";
+  int forked = 0;
+  for (const process_info &p : sched.list_processes())
+    if (p.parent_pid == mount) {
+      EXPECT_EQ(p.scope, "includes.fe") << "a forked child keeps its parent's";
+      ++forked;
+    }
+  EXPECT_EQ(forked, 1);
+  EXPECT_EQ(sched.get_process_info(mount)->scope, "includes.fe");
+  EXPECT_EQ(process_scope("docs.ab", "docs.a"), "/docs.ab") << "a sibling is not under it";
+}
+
 TEST_F(E2EIntegrationTest, WhileLoopWithCounter) {
   int pid = sched.execute(std::string(R"(
         (begin

@@ -1,0 +1,73 @@
+# processes_component.ari — `ari test` for components/processes.ari: its rows name each process's
+# application from its (ps) scope and the ariadne.apps mirror, the document's own by its
+# meta.name, and it keeps to its row cap. ctest: ari_processes_component. (Kill, which the Runtime
+# reports as a warning and `ari test` counts as a failure, is ariadne_runtime_test's.)
+#
+#   ari test --component-path src/cvc/ariadne src/ari/tests/processes_component.ari
+
+meta: { name: Process monitor test, min_libcvc: 4.0.6 }
+
+import: cvc://components/processes.ari
+
+init: |
+  (state-set "processes.every" "0")       ; a poll every tick, not twice a second
+
+functions: |
+  ; The first row whose application is APP, or -1.
+  (defun row-of (app)
+    (set found -1)
+    (for i (range 0 (int (processes-num "processes.count" 0)))
+      (if (and (< found 0) (= (state-get (str-concat "processes." (str i) ".app")) app))
+        (set found i)
+        #f))
+    found)
+  ; PRED, called again every 0.1 s until it holds or 3 s have passed.
+  (defun wait-until (pred)
+    (set tries 0)
+    (while (and (< tries 30) (not (pred)))
+      (sleep 0.1)
+      (set tries (+ tries 1)))
+    (pred))
+
+windows:
+  - include: processes
+
+root:
+  - load: processes_app.ari
+    as: worker
+
+on_tick: (processes-step "processes")
+
+tests:
+  mirrors_the_application: |
+    (assert (wait-until (lambda () (= (state-get "ariadne.apps.worker.name") "Worker")))
+            "the loaded document is mirrored under ariadne.apps by its mount id")
+    (assert (= (state-get "ariadne.apps.worker.scope") "includes.worker"))
+    (assert (= (state-get "ariadne.apps.worker.running") "1"))
+    (assert (= (state-get "ariadne.name") "Process monitor test") "the document's own meta.name")
+  ps_rows_carry_their_scope: |
+    (set own "?")
+    (set worker #f)
+    (for p (ps)
+      (if (= (get-attr p "pid") (self-pid)) (set own (get-attr p "scope")) #f)
+      (if (= (get-attr p "scope") "includes.worker") (set worker #t) #f))
+    (assert (= own "") "a test runs in the document's own scope")
+    (assert worker "the loaded document's on_tick runs in includes.worker")
+    (assert (= (get-attr (inspect (self-pid)) "scope") "") "inspect has the scope too")
+  names_rows_by_application: |
+    (assert (wait-until (lambda () (>= (row-of "Worker") 0)))
+            "the loaded document's on_tick is listed as Worker's")
+    (assert (= (state-get (str-concat "processes." (str (row-of "Worker")) ".scope")) "includes.worker"))
+    (assert (>= (row-of "Process monitor test") 0) "the document's own rows are named by its meta.name")
+    (set r (str-concat "processes." (str (row-of "Worker")) "."))
+    ; a resident parks between ticks on its lane's next delivery (or was just woken for one)
+    (assert (or (= (state-get (str-concat r "waits")) "msg tick") (= (state-get (str-concat r "waits")) ""))
+            (state-get (str-concat r "waits")))
+    (assert (not (= (state-get (str-concat r "status")) "")))
+    (assert (string.ends-with (state-get (str-concat r "memory")) "B"))
+  keeps_to_its_row_cap: |
+    (state-set "processes.max" "1")
+    (assert (wait-until (lambda () (= (state-get "processes.count") "1"))) "one row at most")
+    (assert (string.starts-with (state-get "processes.more") "and ") "the rest are counted")
+    (assert (> (int (state-get "processes.total")) 1))
+    (state-set "processes.max" "50")
