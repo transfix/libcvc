@@ -233,6 +233,21 @@ public:
   // The kinetic energy at attach() (J), the books' start: 0, at rest.
   double kinetic_at_attach(int i) const { return _agents.at(static_cast<std::size_t>(i)).kinetic0; }
 
+  // ── a run continued ──
+  // What agent i's next steps depend on that the world's save() does not hold: its driver's
+  // memory (the speed loop's integral trim and the acceleration it last measured, the rudder's
+  // integral trim) and nav's command it holds (rad, m/s^2).
+  struct memory {
+    double trim = 0.0, got = 0.0, yaw_trim = 0.0;
+    double steer = 0.0, accel = 0.0;
+  };
+  memory remember(int i) const;
+  // After the world was restored (world::restore) to a state saved with this plant's boats in it:
+  // agent i's memory as remember() gave it then, and its boat as the world has it now, so the
+  // steps from there are the ones the plant took from that state. A held helm (hold_controls)
+  // stays as it is.
+  void resume(int i, const memory &m);
+
   // ── the world ──
   world *physics() const { return _o.physics; }
   // With options.step_world off: the driver's controls for every boat before each of the host's

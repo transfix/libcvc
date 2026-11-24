@@ -188,6 +188,10 @@ message PoseEntry {
   sint32 qx = 10;
   sint32 qy = 11;
   sint32 qz = 12;
+  sint32 wx = 13; // angular velocity, mrad/s (with PoseSnapshot.carries' kCarriesMotion)
+  sint32 wy = 14;
+  sint32 wz = 15;
+  sint32 steer = 16; // a vehicle's steering angle (its bicycle angle, + left), microradians
 }
 message PoseSnapshot {
   uint64 server_tick = 1;        // the relay holon's tick every entry is at
@@ -195,6 +199,8 @@ message PoseSnapshot {
   uint32 base_seq = 3;           // the snapshot the entries are differences from (seq - 1 here)
   repeated PoseEntry entries = 4;
   repeated uint32 gone = 5;      // slots that left: forget them
+  uint32 carries = 6;            // bit 0: the entries' wx, wy, wz and steer are the relay's (OW5n);
+                                 // without it (an older relay) they are not sent, not zero
 }
 
 // Link-quality probe. Each end of a connection sends a Ping on a timer; the other end answers at
