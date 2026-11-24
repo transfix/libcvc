@@ -1343,7 +1343,9 @@ bool async_scheduler::park_receiver(int pid, const std::string &path) {
     end_remote_wait(pid);
   proc.recv_path = path;
   proc.recv_deadline.reset();
-  ++proc.recv_seq; // a delivery from another group names the wait it is for (deliver_to)
+  // A delivery from another group names the wait it is for (deliver_to). Drawn from one count
+  // per scheduler, so the lowest is the earliest wait (a requeue's next local waiter, S2b.0a).
+  proc.recv_seq = ++recv_clock_;
   procs_.set_status(proc, process_status::waiting); // indexed under its channel
   return true;
 }
@@ -1381,7 +1383,7 @@ int async_scheduler::deliver_to_receivers(const std::string &path, const value_t
   return deliver_home(path, msg, false);
 }
 
-int async_scheduler::deliver_home(const std::string &path, const value_t &msg, bool requeue) {
+int async_scheduler::deliver_home(const std::string &path, const value_t &msg, bool uncapped) {
   // The processes waiting on `path`, from the receiver index (no scan).
   std::vector<process *> list;
   list.swap(woken_);
@@ -1405,13 +1407,11 @@ int async_scheduler::deliver_home(const std::string &path, const value_t &msg, b
   woken_.swap(list);
   // The remote waiters this home recorded (S2b.4), each by a deliver to its group.
   const std::size_t remote = remote_waiters_.empty() ? 0 : deliver_remote(path, msg, woken > 0);
-  // If no process was waiting, queue for later msg-recv calls: a requeue at the front, past the
-  // cap (S2-Q10); a message past the cap is dropped, and counted.
+  // If no process was waiting, queue for later msg-recv calls. A message past the cap is dropped,
+  // and counted; an uncapped one (rehomed: its old home had accepted it) goes past the cap.
   if (woken == 0 && remote == 0) {
     auto &q = pending_messages_[path];
-    if (requeue)
-      q.push_front(msg);
-    else if (max_pending_messages == 0 || q.size() < max_pending_messages)
+    if (uncapped || max_pending_messages == 0 || q.size() < max_pending_messages)
       q.push_back(msg);
     else
       ingress_counts_.pending_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -1481,7 +1481,11 @@ bool async_scheduler::post_message(const std::string &path, const value_t &msg) 
   // not used here.
   if (router_ && router_->active() && path.find('#') == std::string::npos) {
     group_ref home = router_->home_of(path);
-    if (home && home != route_self_) {
+    // An island (no prefix of its own) keeps the keys no other group's prefix covers (S2b.0a). A
+    // key homed here once its handle closed (its teardown) goes on as a send too: the poster
+    // waits for the forward, so it arrives after what the teardown sends on.
+    const bool island_key = home.is_group0() && !router_->has_prefix(route_self_);
+    if (home && !island_key && (home != route_self_ || route_self_.closed())) {
       detail::route_entry e;
       e.what = detail::route_entry::kind::send;
       e.key = path;
@@ -2533,11 +2537,9 @@ void async_scheduler::entry_threw(ingress_entry &e, bool counted_out) noexcept {
     }
   } else if (detail::route_entry *r = std::get_if<detail::route_entry>(&e);
              r && r->what == detail::route_entry::kind::deliver && !deliver_patched_) {
-    // A deliver that threw before patching its frame goes back to its home as a requeue (the
-    // throw rule, exec_router.h): it was not delivered. (A copy of one a local waiter took is
-    // dropped, as a stale one.)
-    bounce_route(std::move(*r));
-    return;
+    // A deliver that threw before patching its frame (the throw rule, exec_router.h): stale, as
+    // one would be, and its process, which still waits with that seq, subscribes again.
+    deliver_threw(std::move(*r));
   }
   ingress_counts_.throw_dropped.fetch_add(1, std::memory_order_relaxed);
 }

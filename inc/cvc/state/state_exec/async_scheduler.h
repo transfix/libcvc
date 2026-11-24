@@ -865,11 +865,14 @@ private:
         pending_dropped{0}, control_refused{0}, throw_dropped{0}, destroy_dropped{0};
   };
   ingress_counter_set ingress_counts_;
-  /// Channel homes (S2b.4; exec_router.h's protocol), scheduler thread. As a home: the remote
-  /// waiters of its keys, in subscription order (a std::map: its teardown rehomes them in key
-  /// order, DT-4), and its tracked broadcasts by id. As a receiver: its processes' waits on keys
-  /// homed elsewhere, by pid, with the home each subscribed at. The cache of homes (capped,
-  /// checked against the router's epoch), and whether the deliver being applied patched its frame.
+  /// Channel homes (S2b.4; exec_router.h's protocol, as amended in S2b.0a), scheduler thread. As a
+  /// home: the remote waiters of its keys, in subscription order (a std::map: its teardown
+  /// forwards them in key order, DT-4), and its tracked broadcasts by id (unique in the app). As a
+  /// receiver: its processes' waits on keys homed elsewhere, by pid, with the home each subscribed
+  /// at. The park count recv_seq is drawn from (a requeue's next local waiter is the earliest), the
+  /// cache of homes (capped, checked against the router's epoch) with whether this group registered
+  /// a prefix (an island keeps the keys no other prefix covers), and whether the deliver being
+  /// applied patched its frame.
   struct remote_waiter {
     group_ref from;
     int pid = -1;
@@ -884,7 +887,7 @@ private:
     bool taken = false;
   };
   std::unordered_map<std::uint64_t, tracked_broadcast> tracked_;
-  std::uint64_t broadcast_seq_ = 0;
+  std::uint64_t broadcast_seq_ = 0; // ids with no router (never routed: tests' bare schedulers)
   struct remote_wait {
     std::string key;
     std::uint64_t seq = 0;
@@ -895,23 +898,35 @@ private:
   std::size_t remote_timed_waits_ = 0; // the timed ones among them
   /// Erase `it` from remote_waits_, keeping the timed count.
   void forget_remote_wait(std::unordered_map<int, remote_wait>::iterator it);
+  std::uint64_t recv_clock_ = 0;
   mutable std::unordered_map<std::string, group_ref> home_cache_;
   mutable std::uint64_t home_cache_epoch_ = 0;
+  mutable bool home_cache_prefixed_ = false; // this group registered a prefix, as of that epoch
   bool deliver_patched_ = false;
   /// `key`'s home through the cache (router set; not a '#' key).
   group_ref cached_home(const std::string &key) const;
-  /// Whether the router is on and `key` (not '#') is homed in another group, which `home` gets.
+  /// Whether `key` is homed in another group (router on, not '#'; an island's keys no other
+  /// group's prefix covers stay its own), which `home` gets. Scheduler thread.
   bool homed_elsewhere(const std::string &key, group_ref *home) const;
-  /// Post `e` to `home`, any thread; a closed handle is resolved again (exec_router.cpp), and
-  /// `posted_to` gets the home that took it. 1: taken; 0: refused by the home (its cap); -1: no
-  /// home took it.
+  /// Post `e` to `home`, any thread. A closed handle is resolved again (home_of), waiting while
+  /// it is still that closed group (exec_router.cpp). `posted_to` gets the home that took it. 1:
+  /// taken; 0: refused by the home (its cap); -1: no home took it.
   int post_routed(group_ref home, detail::route_entry e, group_ref *posted_to = nullptr) const;
-  /// A message at its home (a local msg-send, a host message, a send or requeue entry): every
-  /// waiter, local at once and remote by a deliver, else the pending FIFO (a requeue at its
-  /// front, past max_pending_messages). The waiters reached.
-  int deliver_home(const std::string &key, const value_t &msg, bool requeue);
-  /// The remote waiters of `key` at this home get `msg` (deliver entries; broadcast tracking).
+  /// A message sent at its home (a local msg-send, a host message, a send entry): every waiter,
+  /// local at once and remote by a deliver, else the back of the pending FIFO (past
+  /// max_pending_messages when `uncapped`: a rehomed message). The waiters reached.
+  int deliver_home(const std::string &key, const value_t &msg, bool uncapped);
+  /// The remote waiters of `key` at this home get `msg` (deliver entries; broadcast tracking);
+  /// nonzero when the message was handed on.
   std::size_t deliver_remote(const std::string &key, const value_t &msg, bool local_took);
+  /// A requeue at its home: the next waiter (the earliest local waiter, else the earliest record),
+  /// else the front of the pending FIFO, past its cap.
+  void give_next(const std::string &key, value_t msg);
+  /// A stale copy back at its home (a requeue entry, or a deliver a closed receiver refused):
+  /// tracked broadcasts by `broadcast`, else give_next.
+  void apply_requeue(const std::string &key, value_t msg, std::uint64_t broadcast);
+  /// A tracked broadcast's id (exec_router::new_broadcast_id).
+  std::uint64_t new_broadcast_id();
   /// receive_message's park (recv_seq moves), and its subscribe at a remote home.
   bool park_receiver(int pid, const std::string &path);
   void subscribe_if_remote(process &proc, const std::string &path);
@@ -922,11 +937,15 @@ private:
   void apply_route(detail::route_entry &e);
   void home_subscribe(detail::route_entry &e);
   void home_unsubscribe(const detail::route_entry &e);
-  void home_requeue(detail::route_entry &e);
   void home_taken(const detail::route_entry &e);
+  void home_adopt(detail::route_entry &e);
   void receiver_deliver(detail::route_entry &e);
-  /// A router entry this scheduler can no longer apply (its teardown, its destructor, a deliver
-  /// that threw before patching) sent on to the key's home, or dropped and counted.
+  /// A deliver that threw before patching its frame (the throw rule): stale, and its wait
+  /// subscribed again with the same seq.
+  void deliver_threw(detail::route_entry &&e) noexcept;
+  /// A router entry this scheduler will not apply (its teardown's queue, its destructor) sent on
+  /// to the key's new home (exec_router::new_home_of), as the teardown rule says, or dropped and
+  /// counted.
   void bounce_route(detail::route_entry &&e) noexcept;
   /// Published info (S2-Q9; S2b.3): the summary's atomics, the rows under their mutex, the
   /// generation they were built at, and when their counters were last refreshed. Written at the

@@ -457,10 +457,11 @@ TEST(RouterR, BroadcastTrackingQueuesOnceOrDrops) {
   EXPECT_EQ(h.counters().requeued, 0u);
 }
 
-// A home's teardown (exec_router.h): its pending messages (in FIFO order), its remote-waiter
-// records (subscribes with the same seq) and its queued router entries go to the keys' new home,
-// here group 0, built for it.
-TEST(RouterR, ATornDownHomeRehomesWhatItHolds) {
+// A home's teardown (exec_router.h, S2b.0a): its pending messages (in FIFO order), its
+// remote-waiter records (subscribes with the same seq), then its queued sends and host posts of
+// keys it homed (uncapped, in queue order), go to the keys' new home, here group 0, built for it:
+// group 0's FIFO keeps the order the dying home took them in, past group 0's own cap.
+TEST(RouterR, ATornDownHomeForwardsWhatItHoldsInOrder) {
   cvc::app app;
   r_world r(app, "r");
   auto g = std::make_unique<r_world>(app, "g", std::vector<std::string>{"g"});
@@ -470,17 +471,131 @@ TEST(RouterR, ATornDownHomeRehomesWhatItHolds) {
   r.pump(); // subscribes at g
   g->pump();
   ASSERT_EQ(g->sched->pending_message_count("g.k"), 2u);
-  ASSERT_TRUE(g->sched->post_route(entry(route_kind::send, "g.q", envelope("q")))); // queued
-  g.reset();
+  ASSERT_TRUE(g->sched->post_route(entry(route_kind::send, "g.k", envelope("q")))); // queued
+  ASSERT_TRUE(g->sched->post_message("g.k", envelope("h")));                        // queued
   se::async_scheduler &g0 = app.exec_scheduler();
+  g0.max_pending_messages = 1; // a rehomed message is never dropped by its move
+  g.reset();
   g0.drain_ingress();
-  EXPECT_EQ(drain_fifo(g0, "g.k"), (std::vector<std::string>{"a", "b"}));
-  EXPECT_EQ(drain_fifo(g0, "g.q"), (std::vector<std::string>{"q"}));
+  EXPECT_EQ(drain_fifo(g0, "g.k"), (std::vector<std::string>{"a", "b", "q", "h"}));
+  EXPECT_EQ(g0.ingress_counters().pending_dropped, 0u);
   // r's wait moved with its record: a message there reaches it.
   ASSERT_TRUE(g0.post_message("g.j", envelope("moved")));
   g0.drain_ingress();
   r.pump();
   EXPECT_EQ(r.result(p), "moved");
+}
+
+// A teardown forwards its broadcast trackers (adopt, S2b.0a): a copy taken and one stale after
+// the home went are answered at the new home, which adopted the tracker, so the stale copy is
+// dropped there, not delivered a second time.
+TEST(RouterR, ATornDownHomesTrackerIsAdopted) {
+  cvc::app app;
+  r_world r1(app, "r1"), r2(app, "r2");
+  auto h = std::make_unique<r_world>(app, "h", std::vector<std::string>{"h"});
+  const int p1 = r1.submit(kReceive), p2 = r2.submit(kReceive);
+  r1.pump();
+  r2.pump();
+  h->pump(); // two records
+  ASSERT_TRUE(h->sched->post_message("h.k", envelope("once")));
+  h->pump(); // a tracked copy to each
+  r2.sched->kill(p2);
+  se::async_scheduler &g0 = app.exec_scheduler();
+  h.reset(); // its tracker goes to group 0 as an adopt
+  r1.pump(); // taken: to h, closed and unregistered, resolved again to group 0
+  r2.pump(); // stale: a requeue, likewise
+  g0.drain_ingress();
+  EXPECT_EQ(r1.result(p1), "once");
+  EXPECT_EQ(g0.total_pending_messages(), 0u) << "the stale copy was queued: a second delivery";
+  EXPECT_EQ(g0.ingress_counters().stale_dropped, 1u);
+  EXPECT_EQ(g0.ingress_counters().requeued, 0u);
+}
+
+// The next waiter for a requeue (S2b.0a) is the earliest local waiter (in park order, whatever
+// the pids), else the earliest record: one waiter, not every one.
+TEST(RouterR, ARequeueGoesToTheEarliestWaiterOnly) {
+  se::async_scheduler s;
+  const int p1 = s.execute(std::string("(+ 1 2)"));
+  const int p2 = s.execute(std::string("(+ 1 2)"));
+  ASSERT_TRUE(s.receive_message(p2, "k")); // parks first
+  ASSERT_TRUE(s.receive_message(p1, "k"));
+  ASSERT_TRUE(s.post_route(entry(route_kind::requeue, "k", str("v"))));
+  s.drain_ingress();
+  EXPECT_EQ(s.get_process_info(p2)->status, se::process_status::ready);
+  EXPECT_EQ(s.get_process_info(p1)->status, se::process_status::waiting);
+  EXPECT_TRUE(s.check_tables());
+
+  cvc::app app;
+  r_world h(app, "h", {"h"}), r1(app, "r1"), r2(app, "r2");
+  const int q1 = r1.submit(kReceive), q2 = r2.submit(kReceive);
+  r2.pump(); // subscribes first
+  r1.pump();
+  h.pump(); // records r2's wait, then r1's
+  ASSERT_TRUE(h.sched->post_route(entry(route_kind::requeue, "h.k", envelope("next"))));
+  h.pump();
+  r1.pump();
+  r2.pump();
+  EXPECT_EQ(r2.result(q2), "next");
+  EXPECT_EQ(r1.status(q1), se::process_status::waiting);
+  EXPECT_EQ(h.sched->pending_message_count("h.k"), 0u);
+}
+
+// A deliver that a receiving group's closed handle refuses is stale at once at the home (S2b.0a):
+// applied there as a requeue (the front of the FIFO, here), not lost.
+TEST(RouterR, ADeliverAClosedReceiverRefusesIsStaleAtOnce) {
+  cvc::app app;
+  r_world h(app, "h", {"h"}), r(app, "r");
+  r.submit(kReceive);
+  r.pump();
+  h.pump();                 // r's record
+  r.group->route().close(); // as its teardown's first step does
+  ASSERT_TRUE(h.sched->post_message("h.k", envelope("kept")));
+  h.pump();
+  EXPECT_EQ(drain_fifo(*h.sched, "h.k"), (std::vector<std::string>{"kept"}));
+  EXPECT_EQ(h.counters().requeued, 1u);
+}
+
+// An uncapped send (a rehomed message, S2b.0a) that finds no waiter joins the FIFO past
+// max_pending_messages; a capped one is dropped there, and counted.
+TEST(RouterR, AnUncappedSendGoesPastTheFifosCap) {
+  se::async_scheduler s;
+  s.max_pending_messages = 1;
+  ASSERT_TRUE(s.post_route(entry(route_kind::send, "k", str("a"))));
+  ASSERT_TRUE(s.post_route(entry(route_kind::send, "k", str("dropped"))));
+  se::detail::route_entry moved = entry(route_kind::send, "k", str("b"));
+  moved.uncapped = true;
+  ASSERT_TRUE(s.post_route(std::move(moved)));
+  s.drain_ingress();
+  EXPECT_EQ(s.ingress_counters().pending_dropped, 1u);
+  EXPECT_EQ(drain_fifo(s, "k"), (std::vector<std::string>{"a", "b"}));
+}
+
+// Islands (S2b.0a): with the router on (a group with a prefix exists), a group that registered no
+// prefix keeps the keys no other group's prefix covers, as today: its own send and receive, and a
+// host's post to it, stay in it, and another island does not see them. A group with a prefix sends
+// such a key to group 0.
+TEST(RouterR, AnIslandKeepsItsOwnKeys) {
+  cvc::app app;
+  r_world p(app, "p", {"p"}), a(app, "a"), b(app, "b");
+  ASSERT_TRUE(app.exec_router().active());
+  const int pa =
+      a.submit(R"((begin (msg-send "a.k" "mine") (get-attr (msg-recv "a.k") "payload")))");
+  const int pb = b.submit(R"((msg-pending "a.k"))");
+  const int pp = p.submit(R"((begin (msg-send "z.k" "to group 0") "sent"))");
+  a.pump();
+  b.pump();
+  p.pump();
+  EXPECT_EQ(a.result(pa), "mine");
+  const std::optional<value_t> nb = b.sched->get_result(pb);
+  ASSERT_TRUE(nb);
+  EXPECT_EQ(se::to_string(*nb), "0");
+  ASSERT_TRUE(a.sched->post_message("a.j", str("host")));
+  a.sched->drain_ingress();
+  EXPECT_EQ(a.sched->pending_message_count("a.j"), 1u);
+  se::async_scheduler &g0 = app.exec_scheduler();
+  g0.drain_ingress();
+  EXPECT_EQ(g0.pending_message_count("z.k"), 1u);
+  EXPECT_EQ(g0.total_pending_messages(), 1u) << "an island's key reached group 0";
 }
 
 // The cache of homes is checked against the router's epoch: a key homed at group 0 is sent to a

@@ -9,6 +9,7 @@
 #include <cvc/state/state_exec/exec_router.h>
 #include <mutex>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -242,12 +243,18 @@ void exec_router::note_remote_waiters(int delta) noexcept {
 
 namespace {
 
-// Post `e` to `home` (exec_router.h, "Teardown and rehoming"): a handle closed meanwhile (its
-// group's teardown unregisters, then closes) is resolved again, and `e` posted to the key's new
-// home, so nothing is lost. Sent on to another home than the first, a requeue's broadcast id (the
-// first home's) is cleared, and a taken is dropped: nothing else tracks it. An empty `home` is
-// resolved first. 1: taken (`posted_to` gets the home); 0: refused by the home (its cap); -1: no
-// home took it (group 0's teardown, or no router to ask).
+// A refused poster's wait for a closed home's teardown to unregister (exec_router.h): it yields
+// this many times at most, then resolves without closed groups. Only a group closed and never
+// unregistered (one torn down outside leave_router) ever reaches it.
+constexpr unsigned kRehomeYields = 1u << 20;
+
+// Post `e` to `home` (exec_router.h, "Teardown and rehoming", S2b.0a). A handle closed meanwhile
+// refuses it: the home is resolved again (home_of), waiting (yielding) while that is still the
+// closed group, whose teardown forwards what it holds and only then unregisters, so `e` arrives at
+// the new home after the forward. A closed group 0 (~app) is never unregistered: no home then.
+// Broadcast ids are unique in the app, so an answer keeps its id (the new home adopted the
+// tracker). An empty `home` is resolved first. 1: taken (`posted_to` gets the home); 0: refused
+// by the home (its cap); -1: no home took it.
 int post_with_rehome(const exec_router *router, group_ref home, detail::route_entry e,
                      detail::lock_fuzz *fuzz, group_ref *posted_to) {
   for (int tries = 0; tries < 16; ++tries) {
@@ -261,12 +268,19 @@ int post_with_rehome(const exec_router *router, group_ref home, detail::route_en
       if (!home.closed())
         return 0; // refused: a capped send at the home's cap
     }
-    if (!router || e.what == detail::route_entry::kind::taken)
+    if (!router)
       return -1;
     group_ref next = router->home_of(e.key);
+    for (unsigned yields = 0; home && next == home; ++yields) {
+      if (home.is_group0() || yields == kRehomeYields) {
+        next = router->new_home_of(e.key);
+        break;
+      }
+      std::this_thread::yield();
+      next = router->home_of(e.key);
+    }
     if (!next || next == home)
-      return -1; // still the closed one: group 0's teardown
-    e.broadcast = 0;
+      return -1;
     home = std::move(next);
   }
   return -1;
@@ -321,6 +335,13 @@ value_t copy_envelope(const value_t &v) {
 
 bool never_routed(const std::string &key) { return key.find('#') != std::string::npos; }
 
+detail::route_entry make_entry(detail::route_entry::kind what, const std::string &key) {
+  detail::route_entry e;
+  e.what = what;
+  e.key = key;
+  return e;
+}
+
 } // namespace
 
 // The host's post (exec_pool::post_message): to the key's home as a send, which counts against
@@ -330,14 +351,12 @@ bool exec_router::post_message(const std::string &key, const value_t &value) {
     return false;
   if (!active() || never_routed(key))
     return app_->exec_scheduler().post_message(key, value);
-  detail::route_entry e;
-  e.what = detail::route_entry::kind::send;
-  e.key = key;
+  detail::route_entry e = make_entry(detail::route_entry::kind::send, key);
   e.value = value;
   return post_with_rehome(this, home_of(key), std::move(e), impl_->fuzz.get(), nullptr) > 0;
 }
 
-// --- async_scheduler's ends of the protocol (S2b.4; exec_router.h) ---
+// --- async_scheduler's ends of the protocol (S2b.4; exec_router.h, as amended in S2b.0a) ---
 
 namespace {
 // The cache of homes is capped (computed keys are unbounded): full, it starts over.
@@ -349,6 +368,7 @@ group_ref async_scheduler::cached_home(const std::string &key) const {
   if (epoch != home_cache_epoch_) {
     home_cache_.clear();
     home_cache_epoch_ = epoch;
+    home_cache_prefixed_ = router_->has_prefix(route_self_); // registrations move the epoch
   }
   if (const auto it = home_cache_.find(key); it != home_cache_.end())
     return it->second;
@@ -366,6 +386,10 @@ bool async_scheduler::homed_elsewhere(const std::string &key, group_ref *home) c
   group_ref h = cached_home(key);
   if (!h || h == route_self_)
     return false;
+  // An island (S2b.0a): a group that registered no prefix keeps the keys no other group's prefix
+  // covers (home_of gives group 0 for those), router on or off, as today.
+  if (h.is_group0() && !home_cache_prefixed_)
+    return false;
   if (home)
     *home = std::move(h);
   return true;
@@ -376,15 +400,17 @@ int async_scheduler::post_routed(group_ref home, detail::route_entry e,
   return post_with_rehome(router_, std::move(home), std::move(e), ingress_fuzz_.get(), posted_to);
 }
 
+std::uint64_t async_scheduler::new_broadcast_id() {
+  return router_ ? router_->new_broadcast_id() : ++broadcast_seq_;
+}
+
 void async_scheduler::subscribe_if_remote(process &proc, const std::string &path) {
   // msg-recv on a key homed elsewhere (td 4.6): the process is parked here with its new recv_seq,
   // and subscribes at the home, which answers from its pending FIFO or records a remote waiter.
   group_ref home;
   if (!homed_elsewhere(path, &home))
     return;
-  detail::route_entry e;
-  e.what = detail::route_entry::kind::subscribe;
-  e.key = path;
+  detail::route_entry e = make_entry(detail::route_entry::kind::subscribe, path);
   e.from = route_self_;
   e.pid = proc.pid;
   e.seq = proc.recv_seq;
@@ -411,9 +437,7 @@ void async_scheduler::end_remote_wait(int pid) noexcept {
     remote_wait w = std::move(it->second);
     forget_remote_wait(it);
     // A record already used means a deliver is in flight: it comes back as a requeue if stale.
-    detail::route_entry e;
-    e.what = detail::route_entry::kind::unsubscribe;
-    e.key = std::move(w.key);
+    detail::route_entry e = make_entry(detail::route_entry::kind::unsubscribe, w.key);
     e.from = route_self_;
     e.pid = pid;
     e.seq = w.seq;
@@ -442,8 +466,8 @@ void async_scheduler::sweep_remote_waits() noexcept {
 void async_scheduler::apply_route(detail::route_entry &e) {
   using kind = detail::route_entry::kind;
   switch (e.what) {
-  case kind::send: // a msg-send (or a host's post) for a key homed here
-    deliver_home(e.key, e.value, false);
+  case kind::send: // a msg-send (or a host's post) for a key homed here; uncapped: rehomed
+    deliver_home(e.key, e.value, e.uncapped);
     break;
   case kind::subscribe:
     home_subscribe(e);
@@ -455,10 +479,13 @@ void async_scheduler::apply_route(detail::route_entry &e) {
     receiver_deliver(e);
     break;
   case kind::requeue:
-    home_requeue(e);
+    apply_requeue(e.key, std::move(e.value), e.broadcast);
     break;
   case kind::taken:
     home_taken(e);
+    break;
+  case kind::adopt:
+    home_adopt(e);
     break;
   }
 }
@@ -484,21 +511,20 @@ std::size_t async_scheduler::deliver_remote(const std::string &key, const value_
   if (live.empty())
     return 0;
   // Broadcast tracking (exec_router.h): a local waiter took it, so a stale copy is dropped; one
-  // remote waiter alone, untracked; k >= 2, tracked here by an id until every copy answers.
+  // remote waiter alone, untracked; k >= 2, tracked here by an id unique in the app until every
+  // copy answers.
   const bool requeue_if_stale = !local_took;
-  const std::uint64_t id = !local_took && live.size() >= 2 ? ++broadcast_seq_ : 0;
+  const std::uint64_t id = !local_took && live.size() >= 2 ? new_broadcast_id() : 0;
   // One envelope copy per receiving group, made at its first record, in subscription order.
   std::vector<std::pair<group_ref, value_t>> copies;
-  std::size_t posted = 0;
+  std::size_t posted = 0, refused = 0;
   for (const remote_waiter *r : live) {
     std::size_t c = 0;
     while (c < copies.size() && copies[c].first != r->from)
       ++c;
     if (c == copies.size())
       copies.emplace_back(r->from, copy_envelope(msg));
-    detail::route_entry d;
-    d.what = detail::route_entry::kind::deliver;
-    d.key = key;
+    detail::route_entry d = make_entry(detail::route_entry::kind::deliver, key);
     d.value = copies[c].second;
     d.from = route_self_;
     d.pid = r->pid;
@@ -508,18 +534,106 @@ std::size_t async_scheduler::deliver_remote(const std::string &key, const value_
     detail::lock_fuzz_point(ingress_fuzz_.get(), detail::lock_fuzz_at::post_enter);
     if (r->from.post(std::move(d)))
       ++posted;
-    else if (local_took) // its group is gone: a stale copy, dropped as one would be
+    else if (local_took) // its group's closed handle refused it: a stale copy at once, dropped
       ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
+    else
+      ++refused;
   }
-  // A copy its group refused (torn down) is a stale one already: the outstanding count is the
-  // copies posted. None posted: the caller queues the message, as with no waiter.
+  // A copy a closed receiver refused is stale at once (S2b.0a): a tracked one counts as answered,
+  // so the tracker waits for the copies posted; with none posted, the message is applied as the
+  // requeue its last stale copy would make.
   if (id != 0 && posted > 0)
     tracked_.emplace(id, tracked_broadcast{key, msg, posted, false});
+  if (posted == 0 && refused > 0) {
+    ingress_counts_.requeued.fetch_add(1, std::memory_order_relaxed);
+    give_next(key, msg);
+    return refused;
+  }
   return posted;
 }
 
+void async_scheduler::give_next(const std::string &key, value_t msg) {
+  // The earliest local waiter: the lowest recv_seq (one count per scheduler, in park order). The
+  // others go back into the receiver index.
+  std::vector<process *> list;
+  list.swap(woken_);
+  procs_.take_receivers(key, list);
+  process *first = nullptr;
+  for (process *p : list)
+    if (!first || p->recv_seq < first->recv_seq)
+      first = p;
+  for (process *p : list)
+    if (p != first)
+      procs_.update(*p);
+  list.clear();
+  woken_.swap(list);
+  if (first) {
+    if (!remote_waits_.empty())
+      end_remote_wait(first->pid); // subscribed elsewhere before this key's home changed
+    deliver_to(first->pid, first->recv_seq, key, msg);
+    return;
+  }
+  // Else the earliest record whose deadline has not passed, by an untracked deliver; one its
+  // closed receiver refuses is stale at once, and the next is tried.
+  const auto it = remote_waiters_.find(key);
+  if (it != remote_waiters_.end()) {
+    std::deque<remote_waiter> &records = it->second;
+    std::optional<clock::time_point> now;
+    bool given = false;
+    while (!given && !records.empty()) {
+      const remote_waiter r = std::move(records.front());
+      records.pop_front();
+      if (router_)
+        router_->note_remote_waiters(-1);
+      if (r.deadline) {
+        if (!now)
+          now = clock::now();
+        if (*r.deadline <= *now)
+          continue; // skipped: its process times out, or did
+      }
+      detail::route_entry d = make_entry(detail::route_entry::kind::deliver, key);
+      d.value = copy_envelope(msg);
+      d.from = route_self_;
+      d.pid = r.pid;
+      d.seq = r.seq;
+      detail::lock_fuzz_point(ingress_fuzz_.get(), detail::lock_fuzz_at::post_enter);
+      given = r.from.post(std::move(d));
+    }
+    if (records.empty())
+      remote_waiters_.erase(it);
+    if (given)
+      return;
+  }
+  pending_messages_[key].push_front(std::move(msg)); // past the cap
+}
+
+void async_scheduler::apply_requeue(const std::string &key, value_t msg, std::uint64_t broadcast) {
+  // A tracked broadcast's stale copy: dropped when another copy was taken; applied once as a
+  // requeue when every copy came back stale (the home's own copy of the message); else it waits for
+  // the others. An id this home does not track is applied as untracked.
+  if (broadcast != 0) {
+    const auto it = tracked_.find(broadcast);
+    if (it != tracked_.end()) {
+      tracked_broadcast &t = it->second;
+      const bool last = --t.outstanding == 0;
+      if (t.taken) {
+        ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
+        if (last)
+          tracked_.erase(it);
+        return;
+      }
+      if (!last)
+        return;
+      msg = std::move(t.value);
+      tracked_.erase(it);
+    }
+  }
+  ingress_counts_.requeued.fetch_add(1, std::memory_order_relaxed);
+  give_next(key, std::move(msg));
+}
+
 void async_scheduler::home_subscribe(detail::route_entry &e) {
-  // A record rehomed here from a torn-down home for a process of this group: its wait is local
+  // A record forwarded here from a torn-down home for a process of this group: its wait is local
   // now (the receiver index has it), and a pending message is given to it at once.
   if (route_self_ && e.from == route_self_) {
     const auto w = remote_waits_.find(e.pid);
@@ -539,22 +653,22 @@ void async_scheduler::home_subscribe(detail::route_entry &e) {
   // A home skips a record whose deadline passed.
   if (e.deadline && *e.deadline <= clock::now())
     return;
-  // The pending FIFO answers first (MS-2): its front, by a deliver, in an envelope of its own.
+  // The pending FIFO answers first (MS-2): its front, by a deliver, in an envelope of its own. A
+  // closed receiver's refusal makes it stale at once: a requeue here.
   const auto pit = pending_messages_.find(e.key);
   if (pit != pending_messages_.end() && !pit->second.empty()) {
-    detail::route_entry d;
-    d.what = detail::route_entry::kind::deliver;
-    d.key = e.key;
-    d.value = copy_envelope(pit->second.front());
+    value_t msg = std::move(pit->second.front());
+    pit->second.pop_front();
+    if (pit->second.empty())
+      pending_messages_.erase(pit);
+    detail::route_entry d = make_entry(detail::route_entry::kind::deliver, e.key);
+    d.value = copy_envelope(msg);
     d.from = route_self_;
     d.pid = e.pid;
     d.seq = e.seq;
     detail::lock_fuzz_point(ingress_fuzz_.get(), detail::lock_fuzz_at::post_enter);
-    if (e.from.post(std::move(d))) { // else its group is gone: the message stays
-      pit->second.pop_front();
-      if (pit->second.empty())
-        pending_messages_.erase(pit);
-    }
+    if (!e.from.post(std::move(d)))
+      apply_requeue(e.key, std::move(msg), 0);
     return;
   }
   remote_waiters_[e.key].push_back(remote_waiter{e.from, e.pid, e.seq, e.deadline});
@@ -580,49 +694,29 @@ void async_scheduler::home_unsubscribe(const detail::route_entry &e) {
     remote_waiters_.erase(it);
 }
 
-void async_scheduler::home_requeue(detail::route_entry &e) {
-  // A tracked broadcast's stale copy: dropped when another copy was taken; queued once when every
-  // copy came back stale (the home's own copy of the message); else it waits for the others. An id
-  // not tracked here (the home was torn down meanwhile) is applied as untracked.
-  value_t msg = std::move(e.value);
-  if (e.broadcast != 0) {
-    const auto it = tracked_.find(e.broadcast);
-    if (it != tracked_.end()) {
-      tracked_broadcast &t = it->second;
-      const bool last = --t.outstanding == 0;
-      if (t.taken) {
-        ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
-        if (last)
-          tracked_.erase(it);
-        return;
-      }
-      if (!last)
-        return;
-      msg = std::move(t.value);
-      tracked_.erase(it);
-    }
-  }
-  // Back at its home: its waiters now, else the front of the pending FIFO, past its cap.
-  ingress_counts_.requeued.fetch_add(1, std::memory_order_relaxed);
-  deliver_home(e.key, msg, true);
-}
-
 void async_scheduler::home_taken(const detail::route_entry &e) {
   const auto it = tracked_.find(e.broadcast);
   if (it == tracked_.end())
-    return; // untracked (torn down and rehomed meanwhile): nothing to do
+    return; // untracked: nothing to do
   it->second.taken = true;
   if (--it->second.outstanding == 0)
     tracked_.erase(it);
 }
 
+void async_scheduler::home_adopt(detail::route_entry &e) {
+  // A tracker a torn-down home forwarded (S2b.0a): tracked here from now on, so its copies' late
+  // answers, which reach this home after it, find it. Its id is unique in the app.
+  if (e.broadcast == 0 || e.outstanding == 0)
+    return;
+  tracked_.insert_or_assign(e.broadcast,
+                            tracked_broadcast{e.key, std::move(e.value), e.outstanding, e.taken});
+}
+
 void async_scheduler::receiver_deliver(detail::route_entry &e) {
-  deliver_patched_ = false; // the throw rule: a deliver that throws before patching goes home
+  deliver_patched_ = false; // the throw rule: a deliver that throws before patching is stale
   if (deliver_to(e.pid, e.seq, e.key, e.value)) {
     if (e.broadcast != 0) { // a tracked copy reached its waiter
-      detail::route_entry t;
-      t.what = detail::route_entry::kind::taken;
-      t.key = std::move(e.key);
+      detail::route_entry t = make_entry(detail::route_entry::kind::taken, e.key);
       t.broadcast = e.broadcast;
       post_routed(std::move(e.from), std::move(t));
     }
@@ -634,26 +728,52 @@ void async_scheduler::receiver_deliver(detail::route_entry &e) {
     ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
     return;
   }
-  detail::route_entry r;
-  r.what = detail::route_entry::kind::requeue;
-  r.key = std::move(e.key);
+  detail::route_entry r = make_entry(detail::route_entry::kind::requeue, e.key);
   r.value = std::move(e.value);
   r.broadcast = e.broadcast;
   if (post_routed(std::move(e.from), std::move(r)) < 0)
     ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed); // no home: ~app
 }
 
+void async_scheduler::deliver_threw(detail::route_entry &&e) noexcept {
+  try {
+    // Its process still waits with that seq, and its record at the home was used: a subscribe for
+    // the wait goes after the stale copy's requeue (S2b.0a).
+    detail::route_entry again = make_entry(detail::route_entry::kind::subscribe, e.key);
+    again.from = route_self_;
+    again.pid = e.pid;
+    again.seq = e.seq;
+    if (const process *p = procs_.find(e.pid))
+      again.deadline = p->recv_deadline;
+    const group_ref home = e.from;
+    if (e.requeue_if_stale) {
+      detail::route_entry r = make_entry(detail::route_entry::kind::requeue, e.key);
+      r.value = std::move(e.value);
+      r.broadcast = e.broadcast;
+      if (post_routed(home, std::move(r)) < 0)
+        ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    group_ref at;
+    if (post_routed(home, std::move(again), &at) > 0) {
+      const auto w = remote_waits_.find(e.pid);
+      if (w != remote_waits_.end() && w->second.seq == e.seq)
+        w->second.home = std::move(at);
+    }
+  } catch (...) {
+  }
+}
+
 void async_scheduler::bounce_route(detail::route_entry &&e) noexcept {
-  // A router entry this scheduler will not apply (its teardown, its destructor; a deliver that
-  // threw before patching): a deliver goes back to its home as a requeue (or is dropped as a stale
-  // copy of one a local waiter took); a send (uncapped now), a subscribe, an unsubscribe and a
-  // requeue go to the key's home, a requeue untracked (its id was this home's); a taken names a
-  // broadcast this home tracked, gone with it. What no home takes is dropped and counted.
+  // As a teardown forwards its queued router entries (exec_router.h): a deliver as a stale one (a
+  // requeue to its home, or dropped when requeue_if_stale is false), a send uncapped, the rest as
+  // they are, to the key's new home resolved without closed groups. What no home takes is dropped
+  // and counted.
   using kind = detail::route_entry::kind;
   try {
     group_ref to;
-    switch (e.what) {
-    case kind::deliver:
+    if (e.what == kind::deliver) {
       if (!e.requeue_if_stale) {
         ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -663,22 +783,11 @@ void async_scheduler::bounce_route(detail::route_entry &&e) noexcept {
       e.from = group_ref();
       e.pid = -1;
       e.seq = 0;
-      break;
-    case kind::taken:
-      ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
-      return;
-    case kind::send:
+    } else if (e.what == kind::send) {
       e.uncapped = true;
-      break;
-    case kind::requeue:
-      e.broadcast = 0;
-      break;
-    case kind::subscribe:
-    case kind::unsubscribe:
-      break;
     }
     if (!to && router_)
-      to = router_->home_of(e.key);
+      to = router_->new_home_of(e.key);
     if (post_routed(std::move(to), std::move(e)) <= 0)
       ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
   } catch (...) {
@@ -689,80 +798,102 @@ void async_scheduler::bounce_route(detail::route_entry &&e) noexcept {
 void async_scheduler::leave_router() {
   if (!router_)
     return;
-  // The keys of its pending messages it is the home of, found before its prefixes go. With the
-  // router off it homes none (it registered no prefix): its FIFO was local messaging, which goes
-  // with it, and nothing is asked of the router (RT-1). '#' keys are never routed.
-  std::vector<std::string> keys;
-  if (router_->active()) {
-    for (const auto &[key, q] : pending_messages_)
-      if (!never_routed(key) && cached_home(key) == route_self_)
-        keys.push_back(key);
-    std::sort(keys.begin(), keys.end()); // no hash order reaches a post order (DT-4)
-  }
-  // (1) Its prefixes go, then its handle closes: a poster refused from now on resolves the key's
-  // home again and finds the new one (exec_router.h, "Teardown and rehoming").
-  router_->unregister(route_self_);
+  // (1) Its handle closes: a post through it is refused from now on, and its poster re-resolves
+  // the home, waiting while that is still this group (exec_router.h, "Teardown and rehoming").
   route_self_.close();
-  // (2) The router entries still queued here leave the queue (its messages and commands stay, for
-  // the destructor to drop or refuse).
-  std::vector<detail::route_entry> queued;
-  {
-    std::lock_guard<std::mutex> lock(ingress_mutex_);
-    std::vector<ingress_entry> kept;
-    kept.reserve(ingress_.size());
-    for (ingress_entry &entry : ingress_) {
-      if (detail::route_entry *r = std::get_if<detail::route_entry>(&entry)) {
-        if (r->what == detail::route_entry::kind::send && !r->uncapped && ingress_capped_ > 0)
-          --ingress_capped_;
-        queued.push_back(std::move(*r));
-      } else {
-        kept.push_back(std::move(entry));
-      }
-    }
-    ingress_.swap(kept);
-  }
-  // (3) The pending messages of the keys it homed, as uncapped sends to their new homes, each
-  // key's in FIFO order, the keys in order.
+  // The keys it homes: only a group with a prefix homes any (an island's messaging goes with it),
+  // found while it is still registered.
+  const bool prefixed = router_->has_prefix(route_self_);
+  const auto homed = [&](const std::string &key) {
+    return prefixed && !never_routed(key) && cached_home(key) == route_self_;
+  };
+  const auto forward = [&](detail::route_entry &&e) {
+    if (post_routed(router_->new_home_of(e.key), std::move(e)) <= 0)
+      ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+  };
+  // (2) What it holds goes to the keys' new homes, resolved without closed groups, in the order it
+  // took it, and in key order where no order was taken (DT-4).
+  // (2a) The pending messages of the keys it homed, as uncapped sends, each key's in FIFO order.
+  std::vector<std::string> keys;
+  for (const auto &[key, q] : pending_messages_)
+    if (homed(key))
+      keys.push_back(key);
+  std::sort(keys.begin(), keys.end());
   for (const std::string &key : keys) {
     const auto it = pending_messages_.find(key);
     const std::deque<value_t> q = std::move(it->second);
     pending_messages_.erase(it);
     for (const value_t &msg : q) {
-      detail::route_entry e;
-      e.what = detail::route_entry::kind::send;
-      e.key = key;
+      detail::route_entry e = make_entry(detail::route_entry::kind::send, key);
       e.value = msg;
       e.uncapped = true;
-      if (post_routed(router_->home_of(key), std::move(e)) <= 0)
-        ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+      forward(std::move(e));
     }
   }
-  // (4) Its remote-waiter records, as subscribes with the same seq, in key and subscription order.
-  // Counted out of the router only once they are posted, so it stays on meanwhile (the new home
-  // counts each in as it records it).
+  // (2b) Its remote-waiter records, as subscribes with the same seq, in subscription order; counted
+  // out of the router once posted (the new home counts each in as it records it).
   std::map<std::string, std::deque<remote_waiter>> records;
   records.swap(remote_waiters_);
   int moved = 0;
   for (const auto &[key, list] : records) {
     moved += static_cast<int>(list.size());
     for (const remote_waiter &r : list) {
-      detail::route_entry e;
-      e.what = detail::route_entry::kind::subscribe;
-      e.key = key;
+      detail::route_entry e = make_entry(detail::route_entry::kind::subscribe, key);
       e.from = r.from;
       e.pid = r.pid;
       e.seq = r.seq;
       e.deadline = r.deadline;
-      if (post_routed(router_->home_of(key), std::move(e)) <= 0)
-        ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+      forward(std::move(e));
     }
   }
   router_->note_remote_waiters(-moved);
-  // Its tracked broadcasts go: a copy answering now reaches the key's new home untracked.
+  // (2c) Its broadcast trackers (adopt), by id: the new home takes each over, and the copies' late
+  // answers, held back by the poster's wait until (3), find it there.
+  std::vector<std::uint64_t> ids;
+  ids.reserve(tracked_.size());
+  for (const auto &[id, t] : tracked_)
+    ids.push_back(id);
+  std::sort(ids.begin(), ids.end());
+  for (const std::uint64_t id : ids) {
+    tracked_broadcast &t = tracked_.at(id);
+    detail::route_entry e = make_entry(detail::route_entry::kind::adopt, t.key);
+    e.value = std::move(t.value);
+    e.broadcast = id;
+    e.outstanding = static_cast<std::uint32_t>(t.outstanding);
+    e.taken = t.taken;
+    forward(std::move(e));
+  }
   tracked_.clear();
-  // (5) The queued entries, in their order. Its kills then unsubscribe its processes' remote waits.
-  for (detail::route_entry &e : queued)
-    bounce_route(std::move(e));
+  // (2d) Its queued messages and router entries, in queue order (taken out under the lock, sent on
+  // outside it): a host post of a key it homed as an uncapped send, the router entries as
+  // bounce_route sends them on; a message of a key it did not home ('#' keys among them) dies with
+  // it, counted. Its commands stay for the destructor to refuse.
+  std::vector<ingress_entry> taken;
+  {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    std::vector<ingress_entry> kept;
+    for (ingress_entry &entry : ingress_)
+      (std::holds_alternative<posted_control>(entry) ? kept : taken).push_back(std::move(entry));
+    ingress_.swap(kept);
+    ingress_capped_ = 0; // what is left counts against no cap: nothing capped stays
+  }
+  for (ingress_entry &entry : taken) {
+    if (posted_message *m = std::get_if<posted_message>(&entry)) {
+      if (!homed(m->key)) {
+        ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      detail::route_entry e = make_entry(detail::route_entry::kind::send, m->key);
+      e.value = std::move(m->value);
+      e.uncapped = true;
+      forward(std::move(e));
+    } else {
+      bounce_route(std::move(std::get<detail::route_entry>(entry)));
+    }
+  }
+  // (3) Only then its prefixes go: a refused poster's wait ends, and it finds the new home, after
+  // everything forwarded. Its kills then unsubscribe its processes' remote waits.
+  router_->unregister(route_self_);
 }
 
 } // namespace cvc::state_exec
