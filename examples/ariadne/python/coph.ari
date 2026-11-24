@@ -22,6 +22,9 @@ meta:
   author: cvc
   min_libcvc: 4.0.0
 
+requires:
+  - {name: raster.bitmap, optional: true}  # the crossing picture in real pixels; else half-blocks
+
 init: |
   (begin
     (state-set "run.ticks" "4")
