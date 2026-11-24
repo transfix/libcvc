@@ -46,6 +46,12 @@
 // unallocated work e . dq of the force it did not take; the learners' shaping jumps; the risk
 // cost dt 4 r; and the allocation residual sqrt(sum |e|^2 / sum |u|^2) over the ticks.
 //
+// While the sim's nav_stats is armed, each apply() also feeds that tick's share of every attached
+// vehicle's account to it (sim_world::feed_coph), so the episode record and its JSON carry the
+// CoPH ledger's items (plant_ledger_coph_vehicle(), D11) for the vehicles CoPH drove. Each sum
+// there is the account's, added in the same order; the shaping jumps are the learner's running
+// total's differences, so theirs agrees to round-off.
+//
 // Without a coph_driver, or with one and no vehicle attached, every run is byte-unchanged.
 //
 // coph_driver.cpp is compiled with -ffp-contract=off.
@@ -55,6 +61,7 @@
 
 #include <cvc/nav/coph_allocation.h>
 #include <cvc/nav/coph_fleet.h>
+#include <cvc/nav/nav_stats.h>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -144,6 +151,8 @@ private:
   std::vector<int> attached_;
   std::vector<car> cars_;
   std::vector<ledger> ledgers_;
+  std::vector<coph_sample> terms_; // this tick's share of each attached vehicle's account
+  std::vector<coph_sample> feed_;  // terms_ by agent, for sim_world::feed_coph
   std::unique_ptr<coph_fleet> fleet_;
 };
 

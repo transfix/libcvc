@@ -303,6 +303,18 @@ struct SceneNode {
   bool has_specular = false;    // gate the specular pair so an unset material keeps GeometryNode's
   float specular = 0.25f;       //   defaults; both applied only when the material states specular
   float specular_power = 24.0f;
+  // material: { pbr: true | { metallic, roughness, emissive, coat } } — physically based shading
+  // (GeometryNode::setPBR) in place of the Phong keys above. `color`, `texture` and per-vertex
+  // colours stay the base colour. metallic 0 (a dielectric) .. 1 (a metal); roughness 0 (a
+  // mirror) .. 1 (matte); emissive the colour it glows with whatever lights it ([0, 0, 0]: none);
+  // coat a clear coat's strength 0..1 and coat_roughness its roughness (`coat: 0.8` or
+  // `coat: { strength, roughness }`). All clamped to 0..1.
+  bool has_pbr = false;
+  float pbr_metallic = 0.0f;
+  float pbr_roughness = 0.5f;
+  float pbr_emissive[3] = {0.0f, 0.0f, 0.0f};
+  float pbr_coat = 0.0f;
+  float pbr_coat_roughness = 0.0f;
 
   // material: { texture: <uri> } — an image sampled through the geometry's UVs (GeometryNode::
   // setTexture). Empty = untextured. Meaningful only for a geometry node whose mesh carries UVs
@@ -389,6 +401,12 @@ struct SceneNode {
   std::string visible_bind;    // visible: <state path> (or, later, an expression)
   bool visible_default = true; // initial visibility when no bind / before first read
 
+  // on_pick: <action> — run when a press in an `input: pick` viewport lands on this node, or on a
+  // descendant with no on_pick: of its own, and again on that press's drags and its release,
+  // wherever they land (§5.18, Picking). A program, with the pick's fields in `event`, or a bare
+  // name for a host handler. It runs in the document's scope, as on_key: does. Empty: none.
+  std::string on_pick;
+
   // repeat: <count> — the node is a template, drawn as `count` copies beside one another (a
   // widget's repeat:, §3). The count is a whole number, a state key holding one (a list's length,
   // as host.set_table writes it), or a read-lane expression (it starts with '('); see
@@ -434,9 +452,9 @@ SceneRepeatCount scene_repeat_count(const std::string &repeat);
 
 // Copy `index` of the repeat: template `n`: `{i}` replaced by the index (0-based) in its id, its
 // `visible:` and `material: { opacity }` binds, its tags, its sources (file, asset, data and item),
-// its texture (an image or a stream), its clips' offset binds and every string in its props, and in
-// its children likewise. The copy's `repeat` is empty. A child that has a repeat: of its own is
-// left as it is, so its copies number themselves, as a nested widget repeat's do.
+// its texture (an image or a stream), its clips' offset binds, its on_pick: and every string in its
+// props, and in its children likewise. The copy's `repeat` is empty. A child that has a repeat: of
+// its own is left as it is, so its copies number themselves, as a nested widget repeat's do.
 SceneNode scene_node_instance(const SceneNode &n, int index);
 
 // A scene light (§9.2). Either an explicit light (kind/pos/target/cone/intensity/
@@ -638,6 +656,15 @@ struct Scene {
   bool background_gradient = false; // false = solid (background_top); true = top→bottom gradient
   float background_top[3] = {0.09f, 0.10f, 0.12f};
   float background_bottom[3] = {0.02f, 0.02f, 0.03f};
+  // environment: { sky, horizon, ground } — the light a pbr: material takes from all around
+  // (SceneGraph::setEnvironment): straight up, at the horizon and straight down, colours 0..1.
+  // A scene with a pbr: node lights it with the default environment when this is unset (or
+  // `environment: true`); `environment: false` (or `none`) lights it with the lights alone.
+  bool has_environment = false;
+  bool environment_off = false;
+  float environment_sky[3] = {0.50f, 0.53f, 0.60f};
+  float environment_horizon[3] = {0.42f, 0.42f, 0.42f};
+  float environment_ground[3] = {0.20f, 0.19f, 0.18f};
   bool any() const {
     return !nodes.empty() || !lights.empty() || has_shadows || has_chrome || has_background ||
            clock.present || physics.present;

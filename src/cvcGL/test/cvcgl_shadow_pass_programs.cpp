@@ -11,8 +11,9 @@
 //
 // Pins (the low-memory mapper forced, as on WebGL):
 //   A. a caster moving every frame bakes every frame, and after the first frames no mapper builds
-//      a shader: each draw puts back its pass set's; with pass programs off, each caster builds
-//      two a frame (the cost this removes);
+//      a shader: each switch of pass set puts back that set's; with pass programs off, each switch
+//      builds one (the cost this removes). The mover switches twice a frame, drawn by the bake and
+//      the view; the others stay in the static casters' maps and on the view's pass set;
 //   B. the frames are those of pass programs off (every draw building its shader afresh), each
 //      compared frame a bake and a view, to two levels a channel (on Apple's GL, a few bytes may
 //      be further out: see kTolerance);
@@ -274,20 +275,27 @@ int main() {
   const std::uint64_t bakes = sg.shadowBakes() - bakes0;
   chk(bakes == static_cast<std::uint64_t>(kFrames),
       std::to_string(bakes) + " bakes in " + std::to_string(kFrames) + " frames (want one each)");
+  // A frame's pass-set switches: the view draws every caster and the bake only the mover, over
+  // the static casters' maps (SceneGraph::setShadowStaticCache), so only the mover goes from one
+  // pass set to the other and back; the static casters stay on the view's.
+  const SceneGraph::shadow_bake_stats bs = sg.shadowBakeStats();
+  const std::uint64_t draws = 2u * bs.moving_casters * kFrames;
+  chk(bs.moving_casters == 1 && bs.static_casters >= 2,
+      "the bake draws the mover over the static casters (" + std::to_string(bs.moving_casters) +
+          " moving, " + std::to_string(bs.static_casters) + " static)");
   const std::uint64_t builds = sum(&LowMemoryPolyDataMapper::Stats::shaderBuilds);
   const std::uint64_t restored = sum(&LowMemoryPolyDataMapper::Stats::passProgramsRestored);
   chk(builds == 0, "pass programs on: " + std::to_string(builds) + " shader builds (want 0)");
-  chk(restored == 2u * mappers.size() * kFrames,
-      "each caster's draw puts back its pass set's shader: " + std::to_string(restored) +
-          " (want " + std::to_string(2u * mappers.size() * kFrames) + ")");
+  chk(restored == draws, "each switch puts back its pass set's shader: " +
+                             std::to_string(restored) + " (want " + std::to_string(draws) + ")");
   LowMemoryPolyDataMapper::setPassProgramsEnabled(app, false);
   step();
   reset();
   for (int i = 0; i < kFrames; ++i)
     step();
   const std::uint64_t buildsOff = sum(&LowMemoryPolyDataMapper::Stats::shaderBuilds);
-  chk(buildsOff == 2u * mappers.size() * kFrames,
-      "pass programs off: " + std::to_string(buildsOff) + " shader builds (two a caster a frame)");
+  chk(buildsOff == draws,
+      "pass programs off: " + std::to_string(buildsOff) + " shader builds (one a switch)");
 
   // Each comparison: the same scene state rendered with pass programs on and off, every frame a
   // bake and a view -- the alternation pass programs serve, and with them off each draw builds its

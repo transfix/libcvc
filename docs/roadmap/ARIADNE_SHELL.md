@@ -569,6 +569,16 @@ meta:
   owner, so the view keeps them. Another document's processes in another execution group come in
   with S2c, which merges the owner's rows across groups. S2 is still at S2a (transfix/libcvc#1404,
   draft).
+- **As built in SH0.** `execute_options::owner_root` and `process::owner_root` hold the owner's
+  root; `process_scope` writes `scope` from it and the chroot, which the Runtime now records in
+  `process::root_path` for every process it starts. Spawned and forked children keep both, the
+  cluster's process rows carry `scope`, and `state_value_codec` carries the owner root. The mirror
+  has `name`, `scope` and `running` (`front`, `asked` and `grants` come with SH6 and SH7); its key
+  is the scope without its `includes` segments, joined by `_` (`fe`, a repeated mount's `cam_0`),
+  and the document's own name is mirrored to `ariadne.name`, from the root widget's `app_name`,
+  which the loader sets to `meta.name`. `processes.ari` is a component like the others in
+  ARIADNE.md §6.5: a document imports it, includes the window and calls `(processes-step ROWS)`
+  from its `on_tick:`.
 
 ### 4.11 Budgets
 

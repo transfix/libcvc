@@ -40,9 +40,14 @@ inline void encode(const cvc::pose_snapshot &in, ::cvc::transport::v1::PoseSnaps
     o->set_qx(e.qx);
     o->set_qy(e.qy);
     o->set_qz(e.qz);
+    o->set_wx(e.wx);
+    o->set_wy(e.wy);
+    o->set_wz(e.wz);
+    o->set_steer(e.steer);
   }
   for (std::uint32_t g : in.gone)
     out->add_gone(g);
+  out->set_carries(in.carries);
 }
 
 inline cvc::pose_snapshot decode(const ::cvc::transport::v1::PoseSnapshot &in) {
@@ -65,9 +70,14 @@ inline cvc::pose_snapshot decode(const ::cvc::transport::v1::PoseSnapshot &in) {
     e.qx = o.qx();
     e.qy = o.qy();
     e.qz = o.qz();
+    e.wx = o.wx();
+    e.wy = o.wy();
+    e.wz = o.wz();
+    e.steer = o.steer();
     out.entries.push_back(std::move(e));
   }
   out.gone.assign(in.gone().begin(), in.gone().end());
+  out.carries = in.carries();
   return out;
 }
 
