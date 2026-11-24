@@ -2473,6 +2473,17 @@ jobs:
   # mt.groups' continuous points are required in all three legs: SAN_REQUIRED_S2A, appended as
   # SAN_REQUIRED_S1A is. Q's state-word model runs in CTest (its quick suite) and in
   # locks-deep.yml (its deep suite), under no sanitizer: it is Python.
+  #
+  # Threaded execution's Stage 2b (the router and process control across groups; S2.md section
+  # 5) adds state_exec_router_test (td 8.4's MS cases, control across groups, pool.kill_owner,
+  # RT-1, DT-3, DT-4) and state_exec_stress_test's short form (ST-1's random programs over 16
+  # groups and ST-2's fuzz seeds; their long forms run nightly, state-exec-stress.yml) to every
+  # leg, the stress binary whole, its Stress suites included (SAN_CXX_RUNS_S2B), and SAN_BENCH
+  # runs mt.cross_group_msg at t=4 k=4: pingpong, fan-out and broadcast between groups through
+  # the router, and the same programs in one group. Stage 2b's cases and mt.cross_group_msg's
+  # cross-group points are required in all three legs: SAN_REQUIRED_S2B, appended as
+  # SAN_REQUIRED_S1A is. The router protocol's model runs in CTest (its quick suite) and in
+  # locks-deep.yml (its deep suite), under no sanitizer: it is Python.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -2486,14 +2497,16 @@ jobs:
           # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
           # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
           # both gcc legs, follow the locks phases'; "(" after a name keeps it from matching a
-          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, Stage 1b's SAN_REQUIRED_S1B's and
-          # Stage 2a's SAN_REQUIRED_S2A's, in every leg. A leg may also name its own C and C++
-          # compilers (cc, cxx; the runner's gcc otherwise), C++ tests (cxx_tests, for
-          # SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH) and how some of its C++ tests run
-          # (cxx_runs, run.sh's SAN_CXX_RUNS): one line a binary of its C++ tests,
+          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, Stage 1b's SAN_REQUIRED_S1B's,
+          # Stage 2a's SAN_REQUIRED_S2A's and Stage 2b's SAN_REQUIRED_S2B's, in every leg. A leg
+          # may also name its own C and C++ compilers (cc, cxx; the runner's gcc otherwise), C++
+          # tests (cxx_tests, for SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH) and how some
+          # of its C++ tests run (cxx_runs, run.sh's SAN_CXX_RUNS, with SAN_CXX_RUNS_S2B's lines
+          # after its own): one line a binary of its C++ tests,
           # `<name>: [VAR=VALUE ...] [--option ...]`, whose variables are set and options passed
           # for that binary's run alone (the others run bare). A --gtest_filter there still leaves
-          # the Stress suites out: run.sh adds *Stress* to its negative patterns.
+          # the Stress suites out: run.sh adds *Stress* to its negative patterns, unless the line
+          # says --keep-stress-suites.
           - name: tsan
             flags: -fsanitize=thread
             required: |
@@ -2647,7 +2660,7 @@ jobs:
               test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
-          # into the interpreter. Its lines are Stage 1a's, 1b's and 2a's only, and of
+          # into the interpreter. Its lines are Stage 1a's, 1b's, 2a's and 2b's only, and of
           # state_exec_stackless_evaluator_test it runs the NativeSite cases alone (Stage 2a's;
           # the gcc legs run the whole binary). Its Ariadne run sizes a pool built from the tree
           # at up to four workers (CVC_EXEC_THREADS; three on the 4-vCPU runner, and a case that
@@ -2669,11 +2682,13 @@ jobs:
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
               ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
               net_engine_test state_exec_coordinator_test state_exec_stackless_evaluator_test
+              state_exec_router_test state_exec_stress_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
               state_exec_stackless_evaluator_test: --gtest_filter=NativeSite.*
             bench: |
               mt.groups --size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size shape=even
+              mt.cross_group_msg --size t=4 --size k=4 --size m=20 --size pump=fork_join,continuous
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -2691,6 +2706,7 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
+        state_exec_router_test state_exec_stress_test
         net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
         skeleton_test pocket_tunnel_test contour_stack_test point_classes_test planar_test
         tiler_test
@@ -2707,10 +2723,17 @@ jobs:
         test_pycvc_point_classes.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file. A scenario's
-      # log is named after it, so each scenario takes one line (mt.groups' both pump modes).
+      # log is named after it, so each scenario takes one line (mt.groups' both pump modes;
+      # mt.cross_group_msg's three patterns, in one group and across groups, in both).
       SAN_BENCH: |
         mt.multi_exec --size t=8 --size runs=1
         mt.groups --size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size shape=even
+        mt.cross_group_msg --size t=4 --size k=4 --size m=20 --size pump=fork_join,continuous
+      # Stage 2b's lines for run.sh's SAN_CXX_RUNS, after each leg's own cxx_runs: the stress
+      # binary's default form is the one for these jobs (ST-1's and ST-2's short forms), so it runs
+      # whole, its Stress suites included, whatever they are called.
+      SAN_CXX_RUNS_S2B: |
+        state_exec_stress_test: --keep-stress-suites
       # Stage 1a's required lines (the matrix's `required` format), the same in every leg: each
       # case of state_exec_groups_test and exec_pool_test (a case added to either adds its line),
       # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
@@ -2954,6 +2977,32 @@ jobs:
         exec_pool_test: OK ] ExecPoolContinuous.ALastGroupDetachedByAnEntryLeavesNoRecord
       # ^ SAN_REQUIRED_S2A ends here. No comment line inside the list: run.sh would read it as a
       # required line.
+      # Stage 2b's required lines (the matrix's `required` format), the same in every leg: the
+      # router test's cases (S2b.0's interface cases; S2.md section 4's MS-12, PL-6..PL-8, KO-3,
+      # RT-1, DT-3 and DT-4), pycvc's OW-1, and mt.cross_group_msg's cross-group points. A case
+      # added to them adds its line.
+      SAN_REQUIRED_S2B: |
+        state_exec_router_test: OK ] RouterInterfaces.AClosedHandleRefusesEveryPost
+        state_exec_router_test: OK ] RouterInterfaces.TheLongestRegisteredPrefixIsTheHome
+        state_exec_router_test: OK ] Router.MS12_SemanticsMatrix
+        state_exec_router_test: OK ] Router.PL06_ControlAcrossGroups
+        state_exec_router_test: OK ] Router.PL07_AnotherOwnersPid
+        state_exec_router_test: OK ] Router.PL08_KillOwnerIsAcknowledged
+        state_exec_router_test: OK ] Router.KO03_KillOwnerSurvivesADyingGroup
+        state_exec_router_test: OK ] Router.RT01_OneGroupNeverRoutes
+        state_exec_router_test: OK ] Router.DT03_DeterministicEqualsThreaded
+        state_exec_router_test: OK ] Router.DT04_CrossGroupOrderRepeats
+        test_pycvc_exec_pool.py: ok: test_ow01_pooled_execs_have_owners
+        mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=fork_join
+        mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=continuous
+        mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=fork_join
+        mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=continuous
+        mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=fork_join
+        mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=continuous
+      # ^ SAN_REQUIRED_S2B ends here (no comment line inside it). TODO(S2b): its other cases, by
+      # their names as they merge: td 8.4's MS-1..MS-10 (Router.MS01_.. to Router.MS10_..), the
+      # router's and the control's own unit tests (state_exec_router_test), Ariadne's S2b cases
+      # (ariadne_runtime_test), and state_exec_stress_test's ST-1 and ST-2 cases.
       # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
       # in every leg: its I/O threads take commands from the test's thread and post events back,
       # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
@@ -3065,13 +3114,16 @@ jobs:
         shell: bash
         env:
           SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
-          SAN_CXX_RUNS: ${{ matrix.cxx_runs }}
+          SAN_CXX_RUNS: |
+            ${{ matrix.cxx_runs }}
+            ${{ env.SAN_CXX_RUNS_S2B }}
           SAN_BENCH: ${{ matrix.bench || env.SAN_BENCH }}
           SAN_REQUIRED: |
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
             ${{ env.SAN_REQUIRED_S1B }}
             ${{ env.SAN_REQUIRED_S2A }}
+            ${{ env.SAN_REQUIRED_S2B }}
             ${{ env.SAN_REQUIRED_NET }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
