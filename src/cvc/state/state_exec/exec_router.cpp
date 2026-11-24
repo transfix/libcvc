@@ -232,6 +232,15 @@ bool exec_router::has_prefix(const group_ref &group) const {
   return false;
 }
 
+bool exec_router::prefix_registered(std::string_view prefix) const {
+  impl &m = *impl_;
+  std::shared_lock<std::shared_mutex> lock(m.mu);
+  for (const impl::registration &r : m.regs)
+    if (r.prefix == prefix && !r.group.is_group0())
+      return true;
+  return false;
+}
+
 std::uint64_t exec_router::new_broadcast_id() noexcept {
   return impl_->broadcasts.fetch_add(1, std::memory_order_relaxed) + 1;
 }

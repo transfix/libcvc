@@ -564,11 +564,10 @@ meta:
   `on_tick:` polls `(ps)` twice a second into its own state, with a cap on the rows. The outermost
   document's rows are named by its `meta.name`.
 - **What it sees.** It runs on its document's scheduler, so it lists that document's processes,
-  every mount's included. Today a document in group 0 also sees the other documents' processes.
-  The threaded plan's S2b limits a process to its owner's; the shell's mounts share the shell's
-  owner, so the view keeps them. Another document's processes in another execution group come in
-  with S2c, which merges the owner's rows across groups. S2 is still at S2a (transfix/libcvc#1404,
-  draft).
+  every mount's included. Since the threaded plan's S2b a process sees only its owner's, in group
+  0 too; the shell's mounts share the shell's owner, so the view keeps them. Another document's
+  processes in another execution group come in with S2c, which merges the owner's rows across
+  groups.
 - **As built in SH0.** `execute_options::owner_root` and `process::owner_root` hold the owner's
   root; `process_scope` writes `scope` from it and the chroot, which the Runtime now records in
   `process::root_path` for every process it starts. Spawned and forked children keep both, the

@@ -343,7 +343,8 @@ public:
   // Stage 2 (S2b, S2-Q10): on an async scheduler in an app whose router is on, a key homed in
   // another group goes through the router (exec_router.h): receive_message parks the process and
   // subscribes at the home; deliver_to_receivers posts a send to the home and returns 0 once the
-  // home took it, or -1 when the home's ingress refused it (its cap: msg-send's "ingress full");
+  // home took it, or -1 when the home's ingress refused it (its cap: msg-send's "ingress full") or
+  // no home is left (~app);
   // pop_pending_message finds nothing and pending_message_count gives 0 for such a key (S2c reads
   // the home's published count, MS-11). Never for a '#' key.
   virtual bool receive_message(int pid, const std::string &path) = 0;

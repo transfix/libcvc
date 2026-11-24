@@ -136,7 +136,7 @@ jobs:
           log=stress-logs/st1.log
           echo "| run | exit | reports |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          CVC_EXEC_STRESS_MINUTES=10 build/bin/state_exec_stress_test 2>&1 | tee "$log"
+          CVC_EXEC_STRESS_MINUTES=10 build/bin/state_exec_stress_test --gtest_filter='RandomPrograms.ST01*' 2>&1 | tee "$log"
           st=${PIPESTATUS[0]}
           reports=$(grep -cE "$SAN_REPORT" "$log" || true)
           echo "| ST-1 (CVC_EXEC_STRESS_MINUTES=10) | $st | $reports |" >> "$GITHUB_STEP_SUMMARY"
@@ -153,7 +153,7 @@ jobs:
           set -uo pipefail
           mkdir -p stress-logs
           log=stress-logs/st2.log
-          CVC_EXEC_STRESS_SEEDS=1000 build/bin/state_exec_stress_test 2>&1 | tee "$log"
+          CVC_EXEC_STRESS_SEEDS=1000 build/bin/state_exec_stress_test --gtest_filter='RandomPrograms.ST02*' 2>&1 | tee "$log"
           st=${PIPESTATUS[0]}
           reports=$(grep -cE "$SAN_REPORT" "$log" || true)
           echo "| ST-2 (CVC_EXEC_STRESS_SEEDS=1000) | $st | $reports |" >> "$GITHUB_STEP_SUMMARY"

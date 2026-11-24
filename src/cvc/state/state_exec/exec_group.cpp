@@ -287,8 +287,8 @@ exec_group::~exec_group() {
   if (m.opts.teardown_hook_for_test)
     step("the teardown hook", [&] { m.opts.teardown_hook_for_test(*this); });
   cvc::detail::detach_end(*this);
-  // (S2b) Its prefixes unregistered and its handle closed, what it holds for the router goes to
-  // the keys' new homes, before the kills post their unsubscribes (exec_router.h).
+  // (S2b) Its handle closed, what it holds for the router goes to the keys' new homes, then its
+  // prefixes are unregistered, before the kills post their unsubscribes (exec_router.h).
   step("leaving the router", [&] { m.sched->leave_router(); });
   step("listing its processes", [&] {
     for (const process_info &p : m.sched->list_processes())

@@ -197,10 +197,12 @@ public:
   exec_router *router() const noexcept { return router_; }
   /// The handle set_router gave (empty with none).
   const group_ref &route_self() const noexcept { return route_self_; }
-  /// The teardown's step (S2b.4; exec_router.h, "Teardown and rehoming"): unregister this group's
-  /// prefixes, close its handle, then send its queued router entries, its remote-waiter records and
-  /// the pending messages of the keys it homed to their new homes. The token holder, after the
-  /// lock port's close and before the kills. Nothing without a router.
+  /// The teardown's step (S2b.4; exec_router.h, "Teardown and rehoming"): close this group's
+  /// handle, send what it holds to the keys' new homes (pending messages, remote-waiter records,
+  /// broadcast trackers, then queued messages and router entries), and only then unregister its
+  /// prefixes. The token holder, before the kills (the lock port's close may come before or not;
+  /// the kills may already have run: Ariadne's move). A second call finds nothing; a throw still
+  /// unregisters. Nothing without a router.
   void leave_router();
   /// Any thread (group_ref::post, which keeps the scheduler alive): push a router entry into the
   /// ordered ingress, as post_message's posts are pushed (a wait or the notifier is woken). False
@@ -226,7 +228,9 @@ public:
     std::uint64_t pending_dropped = 0; ///< messages a full pending FIFO dropped
     std::uint64_t control_refused = 0; ///< commands refused (never applied, or one that threw)
     std::uint64_t throw_dropped = 0;   ///< entries a drain's throw left unapplied, not put back
-    std::uint64_t destroy_dropped = 0; ///< messages and router entries the destructor dropped
+    /// messages and router entries no home took: the destructor's, a teardown's ('#' keys, an
+    /// island's own messages) and a forward that found no home left (~app)
+    std::uint64_t destroy_dropped = 0;
   };
   ingress_stats ingress_counters() const noexcept;
 

@@ -3006,16 +3006,54 @@ jobs:
         state_exec_router_test: OK ] Router.DT04_CrossGroupOrderRepeats
         state_exec_stress_test: OK ] RandomPrograms.ST01_SixteenGroupsLoseAndDuplicateNothing
         state_exec_stress_test: OK ] RandomPrograms.ST02_TheSameUnderFuzzSeeds
+        state_exec_router_test: OK ] RouterR.TheOrderedIngressAppliesInPostOrder
+        state_exec_router_test: OK ] RouterR.TheThrowRuleCountsTheEntryAndRequeuesTheRest
+        state_exec_router_test: OK ] RouterR.TheDestructorBouncesRouterEntries
+        state_exec_router_test: OK ] RouterR.TheIngressCapRefusesCappedEntriesOnly
+        state_exec_router_test: OK ] RouterR.DeliverToIsForOneWaitOnly
+        state_exec_router_test: OK ] RouterR.ARequeueGoesToTheFrontPastTheCap
+        state_exec_router_test: OK ] RouterR.BroadcastTrackingQueuesOnceOrDrops
+        state_exec_router_test: OK ] RouterR.ATornDownHomeForwardsWhatItHoldsInOrder
+        state_exec_router_test: OK ] RouterR.ATornDownHomesTrackerIsAdopted
+        state_exec_router_test: OK ] RouterR.ARequeueGoesToTheEarliestWaiterOnly
+        state_exec_router_test: OK ] RouterR.ADeliverAClosedReceiverRefusesIsStaleAtOnce
+        state_exec_router_test: OK ] RouterR.AnUncappedSendGoesPastTheFifosCap
+        state_exec_router_test: OK ] RouterR.AnIslandKeepsItsOwnKeys
+        state_exec_router_test: OK ] RouterR.AnIslandsTeardownForwardsNothing
+        state_exec_router_test: OK ] RouterR.TheDirectoryAndThePublishFollowTheProcess
+        state_exec_router_test: OK ] RouterR.LeavingTheRouterTwiceAndAfterAMove
+        state_exec_router_test: OK ] RouterR.TheCacheOfHomesFollowsTheEpoch
+        state_exec_router_test: OK ] RouterR.AClosedHomeIsResolvedAgain
+        state_exec_router_test: OK ] RouterR.NoPrefixNoConsultation
+        state_exec_router_test: OK ] RouterR.ARemoteReceiverGetsEveryMessageInOrderOnAPool
+        state_exec_router_test: OK ] ExecDirectory.AddFindRemoveAndGroupsOfAnOwner
+        state_exec_router_test: OK ] ExecDirectory.ThreadsShareTheShards
+        state_exec_router_test: OK ] ExecDirectory.APidIsFoundBetweenItsCreationAndItsGroupsFirstPublish
+        state_exec_router_test: OK ] PublishedInfo.TheGenerationMovesWhereARowWouldChange
+        state_exec_router_test: OK ] PublishedInfo.ARowIsTheProcessAsMakeInfoReadsIt
+        state_exec_router_test: OK ] PublishedInfo.AHoldTakenOrDroppedWithoutAWaitIsPublished
+        state_exec_router_test: OK ] PublishedInfo.RowsAreRebuiltOnGenerationMovesAndCountersRefreshEvery100Ms
+        state_exec_router_test: OK ] OwnerRule.LocalControlIsFilteredForAnOwnedCaller
+        state_exec_router_test: OK ] OwnerRule.AcrossGroupsTheCallersOwnerIsPosted
+        state_exec_router_test: OK ] PoolKillOwner.ForkJoinDrainsEachGroupInline
+        state_exec_router_test: OK ] PoolKillOwner.ContinuousWaitsForEachGroup
+        state_exec_router_test: OK ] PoolKillOwner.AGroupTornDownMeanwhileEndsTheWait
+        state_exec_router_test: OK ] PoolKillOwner.RefusedFromInsideAPumpOfThePool
+        state_exec_router_test: OK ] GroupZeroDriver.AFrameSkipsGroupZeroWhileAnotherThreadHoldsIt
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_AMovedDocumentKeepsReceivingOnItsChannels
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_ADrainSkipsAGroupZeroAnotherThreadHolds
         test_pycvc_exec_pool.py: ok: test_ow01_pooled_execs_have_owners
+        test_pycvc_exec_pool.py: ok: test_s2b7_post_message_returns_bool
+        test_pycvc_exec_pool.py: ok: test_s2b7_a_global_key_meets_across_pooled_execs
         mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=continuous
         mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=continuous
         mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=continuous
-      # ^ SAN_REQUIRED_S2B ends here (no comment line inside it). TODO(S2b): the router's and the
-      # control's own unit tests (state_exec_router_test) and Ariadne's S2b cases
-      # (ariadne_runtime_test), by their names as they merge.
+      # ^ SAN_REQUIRED_S2B ends here (no comment line inside it).
       # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
       # in every leg: its I/O threads take commands from the test's thread and post events back,
       # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)

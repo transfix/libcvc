@@ -5,7 +5,7 @@
  * to by. One of each per app (app::exec_router()), beside its pid source.
  *
  * The rules S2b.0 freezes (S2.md S2-Q7..S2-Q10; change them only through the lead), as amended from
- * the router model's findings (tools/locks_model/router.py; S2b.0a):
+ * the router model's findings (tools/locks_model/router.py; S2b.0a) and the R2 reviews (S2b.R2):
  *
  * - **Homes.** A resolved channel key's home is the group that registered the longest prefix
  *   covering it (the key itself, or the prefix followed by '.'), else group 0, the app scheduler,
@@ -17,7 +17,8 @@
  *   as today; only a key under another group's prefix is routed from it. So a plain group's own
  *   messaging never changes home as the router turns on and off. Two plain groups exchange messages
  *   only on keys a group with a prefix homes (give one a prefix: channel_prefixes). When a prefix's
- *   home goes, its keys come home to group 0 for groups with prefixes and to each island itself;
+ *   home goes, its keys come home to the next covering prefix's group (else group 0) for groups
+ *   with prefixes, and to each island itself;
  *   an island's waits parked at the dying home are rehomed to group 0 and served there, while its
  *   later waits on those keys are its own (a documented gap). An island homes nothing for another
  *   group, so its teardown forwards none of its own keys' messages: they die with it, counted, as a
@@ -29,7 +30,8 @@
  *   commands and router entries share one queue, applied in post order; the lock port's posts come
  *   before it in a drain, and settled async calls after it. A drain that throws puts back what it
  *   had not applied, ahead of later posts (S0.7); the entry that threw is not put back (it may
- *   have half happened) and is counted (throw_dropped): a command still gets done(false), and only
+ *   have half happened) and is counted (throw_dropped): a command still gets done(false) (a kill
+ *   that killed its process before it threw, done(true)), and only
  *   a deliver that did not patch its frame goes back to its home as a stale one does (a requeue,
  *   or dropped when requeue_if_stale is false), with a subscribe for its wait (the same seq): the
  *   process still waits, and its record was used.
@@ -52,9 +54,12 @@
  *   back stale H applies it once as a requeue, and a stale copy of one already taken is dropped. A
  *   home torn down with copies outstanding forwards its tracker (`adopt`), which the new home takes
  *   over, so the copies' late answers find it. So nothing is lost and nothing is delivered twice. A
- *   requeue or taken naming an id its home does not track is applied as untracked.
+ *   requeue or taken naming an id its home does not track is applied as untracked (a documented
+ *   gap: a key whose home changes twice while one of its broadcasts is out, by a teardown and then
+ * a new registration covering it, may see a stale copy of a taken broadcast queued at the newest).
  * - **The cap** (state_exec.groups.ingress_cap, default 65536, 0: none). Only `send` entries and a
- *   host's post_message count; past the cap they are refused (msg-send's {status "error", reason
+ *   host's post_message of a key without '#' count (a '#' key's post is a runtime reply, a
+ *   completion: never capped); past the cap they are refused (msg-send's {status "error", reason
  *   "ingress full"}; post_message returns false). Controls, deliver, requeue, subscribe,
  *   unsubscribe, taken, adopt, uncapped sends (rehomed messages), completions and lock posts never
  *   count. An uncapped send that finds no waiter joins the pending FIFO past max_pending_messages:
@@ -62,33 +67,42 @@
  * - **Teardown and rehoming.** A group's teardown, holding its token after the lock port's close
  *   and before the kills (async_scheduler::leave_router): (1) closes its handle: a post through it
  *   is refused from then on, and its poster re-resolves the home (home_of) and posts again, waiting
- *   (yielding) while the home is still this group; (2) sends what it holds to the keys' new homes,
- *   resolved without it or any other closed group (exec_router::new_home_of), in the order it took
- *   them: the pending messages of the keys it homed (uncapped sends, FIFO order), its remote-waiter
- *   records (subscribes with the same seq), its broadcast trackers (adopt), then its queued
- *   messages and router entries in queue order (a host post of a key it homed and a send as
- *   uncapped sends; a deliver as a stale one: a requeue to its home, or dropped when
- *   requeue_if_stale is false; the rest as they are); a '#' key's message dies with it, counted;
- *   (3) only then unregisters its prefixes, which ends the posters' wait. The forward waits on
- *   nothing, so the wait is bounded. Its kills then post unsubscribes for its processes' remote
+ *   (yielding, then sleeping briefly; no cap) while the home is still this closed, registered
+ *   group; a post made on the thread running that teardown, and one refused by a closed group 0
+ *   (~app, never unregistered), resolve without closed groups at once (new_home_of; none left: the
+ *   entry is dropped, counted); (2) sends what it holds to the keys' new homes, resolved without
+ *   it or any other closed group (exec_router::new_home_of), in the order it took them: the pending
+ *   messages of every key without '#' (uncapped sends, FIFO order), its remote-waiter records
+ *   (subscribes with the same seq), its broadcast trackers (adopt), then its queued messages and
+ *   router entries in queue order (a host post of a key without '#' and a send as uncapped sends;
+ *   a deliver as a stale one: a requeue to its home, or dropped when requeue_if_stale is false; the
+ *   rest as they are); a '#' key's message dies with it, counted. A group that registered a prefix
+ *   forwards so even once unregistered (Ariadne's move unregisters it early) and even for a key a
+ *   longer prefix registered later covers; an island forwards no message (above); (3) only then
+ *   unregisters its prefixes, which ends the posters' wait. The forward waits on nothing, so the
+ *   wait is bounded. A throw still unregisters (no group stays closed and registered), and a second
+ *   leave_router finds nothing to do. Its kills then post unsubscribes for its processes' remote
  *   waits. Group 0's teardown (~app) drops, and counts, whatever is still posted to it.
  * - **Host posts.** async_scheduler::post_message on a key homed elsewhere (router on) forwards
- *   it to the home as a send. exec_pool::post_message posts to the key's home.
+ *   it to the home as a send. exec_pool::post_message posts to the key's home. group_ref's
+ *   post_message posts into that group, unrouted (the caller chose it).
  * - **The owner rule** (S2-Q7, S2-Q8; scheduler_base::control_as). Locally, a caller with owner ""
  *   (an unowned process, a host) sees and controls every process, as today; one with owner X only
  *   X's: kill, pause, resume, ps and inspect. Across groups only a caller with a non-empty owner
  *   reaches a pid the directory gives that owner: kill, pause and resume are posted there and give
- *   #t ("requested"); anything else gives #f, as an unknown pid does.
+ *   #t ("requested"), or #f when that group is being torn down (its handle closed); anything else
+ *   gives #f, as an unknown pid does.
  * - **The directory** is written by the scheduler that issues a pid, at execute, fork and restore
  *   (Stage 3: move), and at reap; a pid is in it from its creation until its reap, so a process
  *   made since its group's last publish is found.
  * - **Published info** (S2-Q9): each scheduler with a router publishes at the end of every run
  *   loop, whichever driver ran it; the rows are rebuilt when the process table's generation moved
- *   (create, reap, status, priority, lock holds), and steps, seconds and memory refresh at most
- *   every 100 ms.
+ *   (create, reap, status, priority, floor) or a process's lock holds differ from its row's
+ *   (compared at each publish), and steps, seconds and memory refresh at most every 100 ms.
  * - **Lock order:** a group_ref's lock, then the target's ingress mutex, then its wake notifier's
- *   lock, then the pool's ready-queue mutex. The router's and the directory's own mutexes are
- *   leaves: nothing is posted, and no scheduler is built, while either is held.
+ *   lock, then the pool's ready-queue mutex; one group_ref lock at a time, never re-entered, and
+ *   nothing is routed while one is held. The router's and the directory's own mutexes are leaves:
+ *   nothing is posted, and no scheduler is built, while either is held.
  */
 #ifndef CVC_STATE_EXEC_EXEC_ROUTER_H
 #define CVC_STATE_EXEC_EXEC_ROUTER_H
@@ -148,8 +162,9 @@ public:
   /// when the handle is closed, or the group refused it (a capped send at its cap). Never waits
   /// for a pump.
   bool post(detail::route_entry e) const;
-  /// async_scheduler::post_message through the handle (a host post: it counts against the cap):
-  /// false once closed, or refused.
+  /// A host's post of `value` on `key` into this group's ingress, unrouted (the caller chose the
+  /// group; a key without '#' counts against its cap): false once closed, or refused. To post to a
+  /// key's home, use exec_router::post_message.
   bool post_message(const std::string &key, const value_t &value) const;
   /// async_scheduler::post_control through the handle: false once closed, and then `cmd`'s done
   /// is never called (the caller knows from the result).
@@ -274,6 +289,11 @@ public:
   /// Whether `group` registered a prefix (group 0's "" counts): a group that did not is an island
   /// (the header's rule), whose keys no other group's prefix covers stay its own.
   bool has_prefix(const group_ref &group) const;
+  /// Whether a group (other than group 0) has registered exactly `prefix` and not unregistered it:
+  /// a host that gives each of its groups a prefix of its own refuses one already taken (pycvc's
+  /// ExecPool). Equal prefixes would leave one key two candidate homes, the first registered
+  /// winning.
+  bool prefix_registered(std::string_view prefix) const;
   /// A tracked broadcast's id, unique in the app (never 0).
   std::uint64_t new_broadcast_id() noexcept;
   /// Whether the router is on (the header's rule): two atomic loads.

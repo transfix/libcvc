@@ -116,9 +116,9 @@ public:
   /// running processes, the run-queue level a pick would take (0 for every process under round
   /// robin, whose one level is 0); nullopt when none is runnable. O(levels).
   std::optional<int> best_runnable() const;
-  /// Stage 2 (S2b, S2-Q9): moves at every change a published row shows (an insert, an erase, a
-  /// status change, a priority change, a lock hold taken or dropped), so a publisher rebuilds its
-  /// rows only when it moved. Owner only.
+  /// Stage 2 (S2b, S2-Q9): moves at an insert, an erase, a status change and a priority or floor
+  /// change (update(), erase(), a floor set), so a publisher rebuilds its rows only when it moved;
+  /// lock holds do not move it (the lock files are frozen: a publish compares them). Owner only.
   std::uint64_t generation() const noexcept { return generation_; }
   void bump_generation() noexcept { ++generation_; }
   /// The round-robin pick (round_robin, and priority_rr within the best priority): the

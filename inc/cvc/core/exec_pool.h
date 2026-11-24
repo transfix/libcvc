@@ -296,8 +296,11 @@ public:
   // attached group is waited for (its done), this thread servicing its host queue meanwhile; a
   // group pumped elsewhere is waited for. A group torn down meanwhile counts as applied (its
   // destructor refuses the command: KO-3). Before the contexts of `owner`'s processes are freed
-  // (Ariadne's, in Stage 3). Not from inside a pump, a host body or a callback of this pool
-  // (std::logic_error).
+  // (Ariadne's, in Stage 3). On the thread that drives the fork-join groups and group 0 (their host
+  // thread, as pump_all's caller), as the other host calls on those groups are: their host touches
+  // them between pumps without their token, so a drain from another thread would race it (S2b R2a
+  // C-M1). Not from inside a pump, a host body or a callback of this pool (std::logic_error,
+  // refused before anything is posted).
   void kill_owner(const std::string &owner);
   // `pid`'s published row (S2-Q9), as its group last published it; nullopt for a pid not in the
   // directory, or not published since its creation (its group publishes at its next run loop's
