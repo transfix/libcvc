@@ -1099,7 +1099,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   bind_live_texture(sg, n, node, bind_prefix, out, warnings); // material: { texture: { stream } }
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node});              // added once every node exists (realize_physics)
-  out.nodes.push_back({n.id, n.tags, node});
+  out.nodes.push_back({n.id, n.tags, node, true, n.on_pick});
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
