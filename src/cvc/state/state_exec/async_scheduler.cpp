@@ -2440,6 +2440,7 @@ bool async_scheduler::set_priority_floor(int pid, int floor) {
     return false;
   p->priority_floor = floor;
   p->priority_floor_explicit = true;
+  procs_.bump_generation(); // S2b.3: the floor is in its published row, and no update() ran
   return true;
 }
 

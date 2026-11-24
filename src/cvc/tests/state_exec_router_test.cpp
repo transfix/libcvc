@@ -621,6 +621,25 @@ TEST(RouterR, AnIslandsTeardownForwardsNothing) {
   }
 }
 
+// C's calls (S2b.2, S2b.3) at R's sites: a pid is in the directory from its creation to its reap,
+// and each run loop publishes; a floor set between run loops moves the table's generation, so the
+// next publish shows it (no update() runs on that path).
+TEST(RouterR, TheDirectoryAndThePublishFollowTheProcess) {
+  cvc::app app;
+  r_world a(app, "a");
+  const int pid = a.submit(R"((get-attr (msg-recv "never") "payload"))");
+  ASSERT_TRUE(app.exec_router().directory().find(pid).has_value());
+  a.pump(); // parks: no status change from here on
+  ASSERT_TRUE(a.sched->published_info(pid).has_value());
+  EXPECT_EQ(a.sched->published_info(pid)->floor, 0);
+  ASSERT_TRUE(a.sched->set_priority_floor(pid, 7));
+  a.pump();
+  EXPECT_EQ(a.sched->published_info(pid)->floor, 7);
+  ASSERT_TRUE(a.sched->kill(pid));
+  ASSERT_TRUE(a.sched->reap(pid));
+  EXPECT_FALSE(app.exec_router().directory().find(pid).has_value());
+}
+
 // The cache of homes is checked against the router's epoch: a key homed at group 0 is sent to a
 // group registered for it since.
 TEST(RouterR, TheCacheOfHomesFollowsTheEpoch) {
