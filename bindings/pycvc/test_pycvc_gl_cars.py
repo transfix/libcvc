@@ -252,6 +252,25 @@ try:
               and (k["coph_steps"] > 10).all(), f"each car's CoPH account ({k})")  # fmt: skip
         check((s.goal_dist < d0 - 5.0).all(), f"CoPH drives both cars toward their goals ({s.goal_dist})")
         check(np.isnan(racers.last_command[0]).all(), "the commands are CoPH's, not a controller's")
+        for _ in range(2000):
+            if s.reached.all():
+                break
+            s = racers.step_coph()
+        check(s.reached.all(), f"both CoPH cars arrive ({s.goal_dist})")
+        s = racers.new_goals([0])
+        d1 = s.goal_dist.copy()
+        for _ in range(300):
+            s = racers.step_coph()
+        check(s.goal_dist[0] < d1[0] - 5.0, f"a new goal after arriving runs the car again ({s.goal_dist})")
+        # CophControl, the same fleet from the cars' state, drives Cars too.
+        cc = C.Cars(flat, 2, "kinematic", starts=[[-30.0, -3.0], [30.0, 3.0]],
+                    goals=[[30.0, -3.0], [-30.0, 3.0]])  # fmt: skip
+        ctl = C.CophControl(seed=5)
+        s = cc.state()
+        for _ in range(400):
+            r = ctl(s)
+            s = cc.step(r[0], r[1])
+        check((s.goal_dist < 60.0 - 5.0).all(), f"CophControl drives Cars ({s.goal_dist})")
         rc = C.run(T.controller, T.PARAMS, argv=["--headless", "--frames", "40", "--world", "flat",
                                                  "--cars", "2", "--controller", "coph", "--log",
                                                  out])  # fmt: skip
@@ -391,6 +410,24 @@ scene:
         z = np.load(out)
         check(z["x"].shape[1] == 2 and json.loads(str(z["meta"]))["world"]["source"] == "gym",
               "and logs it")  # fmt: skip
+        if hasattr(pycvc, "NavCophFleet"):
+            # CoPH on the gym's cars, which are not a sim_world: CophControl from their state.
+            gc = C.GymCars(gym_doc, 2, seed=6)
+            ctl = C.CophControl(seed=6)
+            s = gc.state()
+            d0 = s.goal_dist.copy()
+            for _ in range(200):
+                r = ctl(s)
+                s = gc.step(r[0], r[1])
+            check(set(r[2]["coeffs"]) == {"alloc_residual", "work", "risk_cost", "coph_steps"}
+                  and float(np.min(d0 - s.goal_dist)) > 0.0,
+                  f"CophControl drives the gym's cars toward their goals ({s.goal_dist})")  # fmt: skip
+            rc = C.run(T.controller, T.PARAMS,
+                       argv=["--headless", "--frames", "20", "--gym", gym_doc, "--cars", "2",
+                             "--controller", "coph", "--log", out])  # fmt: skip
+            z = np.load(out)
+            check(rc == 0 and json.loads(str(z["meta"]))["controller"] == "coph"
+                  and "coef_alloc_residual" in z.files, f"--gym --controller coph ({rc})")  # fmt: skip
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
 

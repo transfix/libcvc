@@ -140,6 +140,13 @@ public:
   // Run on the crossing world from tick 0 until every agent is done.
   void run(const coph_crossing_world &world);
 
+  // Agent i, done at its goal (success, not a hit), runs again from the next boundary, as
+  // GRL-SNAM's cars controller clears a car's done when the template gives it a new goal. Its
+  // learner keeps what it learned and takes the next input's goal. That boundary observes without
+  // a transition, as an agent's first does, and records an activation. False, and nothing
+  // changes, when the agent is running or was ended by a hit or by the run's steps.
+  bool resume(int agent);
+
   const std::vector<coph_agent> &agents() const { return agents_; }
   bool done(int agent) const { return done_.at(agent); }
   const coph_state &state(int agent) const { return x_.at(agent); }

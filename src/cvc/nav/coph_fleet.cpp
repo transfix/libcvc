@@ -254,6 +254,18 @@ std::vector<std::optional<coph_vec2>> coph_fleet::boundary(long long tick, doubl
   return out;
 }
 
+bool coph_fleet::resume(int agent) {
+  const std::size_t i = static_cast<std::size_t>(agent);
+  if (agent < 0 || i >= agents_.size())
+    throw std::out_of_range("coph_fleet::resume: no agent " + std::to_string(agent));
+  if (!done_[i] || !success_[i] || hit_[i])
+    return false;
+  done_[i] = false;
+  success_[i] = false;
+  held_[i].reset();
+  return true;
+}
+
 void coph_fleet::run(const coph_crossing_world &world) {
   const std::size_t n = agents_.size();
   const long long dt_us = std::llround(cfg_.cfg.dt * 1e6);

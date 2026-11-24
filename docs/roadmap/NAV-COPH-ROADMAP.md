@@ -558,8 +558,13 @@ run is byte-unchanged.
     arrive, in 37.9 s, with no contact (s = 9.05).
   - The template's headless `--controller coph` run is checked by CI's `pycvc_gl_cars`. This box
     has no cvcGL.
-- **Limits.** A CoPH car that reached its goal brakes and stays: its learner's run is over, so it
-  takes no new goal. It runs on `Cars` only, not `--gym` or `--world-doc`.
+- **New goals and world documents (part 2b).**
+  - A car that reached its goal brakes until the sim gives it a new one, then runs again
+    (`coph_fleet::resume`, as GRL-SNAM's cars controller clears a car's done). Its learner keeps
+    what it learned.
+  - Under `--gym` and `--world-doc` the cars are not a `sim_world`, so `pycvc_gl.cars.CophControl`
+    runs the same fleet over `NavCophFleet` from the cars' state: risk from a constant or a
+    callable, obstacles from the rays.
 - **Next, part 3:** the browser demo (pycvc-gl's wasm build).
 
 ## 5. Golden cases and tiers

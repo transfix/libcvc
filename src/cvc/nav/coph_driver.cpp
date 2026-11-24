@@ -195,13 +195,22 @@ void coph_driver::coph_step(const std::vector<pose> &poses) {
   std::vector<coph_fleet::input> in(n);
   for (int v = 0; v < n; ++v) {
     car &c = cars_[v];
-    if (c.done)
-      continue;
     const pose &p = poses[c.agent];
+    const coph_vec2 g{goals[2 * c.agent], goals[2 * c.agent + 1]};
+    if (c.done) {
+      // _regoal: a car at its goal that the sim gives a new one runs again, its learner keeping
+      // what it learned (coph_fleet::resume). One ended by a hit stays done.
+      if (allclose(g, c.goal) || !fleet_->resume(v))
+        continue;
+      c.done = false;
+      c.x_prev.reset();
+      c.used_sum = {0, 0};
+      c.e_sum = {0, 0};
+      c.held = 0;
+    }
     coph_fleet::input &x = in[v];
     x.x = state(p);
     // _regoal: a new sim goal, or the local goal slid on along the line (D12).
-    const coph_vec2 g{goals[2 * c.agent], goals[2 * c.agent + 1]};
     const bool moved = !allclose(g, c.goal);
     const bool near = hypot2(p.p[0] - c.local[0], p.p[1] - c.local[1]) < 0.5 * cfg_.local_goal &&
                       !allclose(c.local, g);

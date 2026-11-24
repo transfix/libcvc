@@ -14,7 +14,8 @@ CoPH tests read; doubles are raw bits, 16 hex digits):
      CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun runs it: both agents reach their goals
      with no hit, each energy account closes at round-off, and packets were sent and delivered;
   7. the driver (NavCophDriver) on a sim_world: with nothing attached the run is the sim's own, bit
-     for bit; with two RoboRacer-sized cars attached, both pass each other and reach their goals.
+     for bit; with two RoboRacer-sized cars attached, both pass each other and reach their goals,
+     and a car given a new goal after arriving runs again and reaches it.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -271,6 +272,23 @@ if hasattr(pycvc, "NavCophDriver"):
     check(any(e["kind"] == "delivered" for e in drive.events()), "packets between the cars")
     print(f"driver: both cars at their goals after {ticks} ticks ({ticks * 0.06:.1f} s), "
           f"{drive.steps()} CoPH steps")
+    # A new goal after arriving: car 0 runs again (coph_fleet::resume) and reaches it; car 1, whose
+    # goal stays, stays parked.
+    pycvc.nav_sim_world_retarget(sim, 0, (10.0 - cx) * S, (3.0 - cy) * S)
+    resumed, again = False, 0
+    while again < 1500:
+        drive.apply()
+        pycvc.nav_sim_world_step(sim)
+        again += 1
+        resumed = resumed or not drive.done(0)
+        if resumed and drive.done(0):
+            break
+    pos = pycvc.nav_sim_world_snapshot(sim)[0]
+    check(resumed and drive.done(0) and drive.done(1), "car 0 takes a new goal; car 1 stays parked")
+    check(abs(pos[0][0] - 10.0) < 0.5 and abs(pos[0][1] - 3.0) < 0.5, f"car 0 at its new goal: {pos[0]}")
+    check(sum(e["kind"] == "activation" and e["sender"] == 0 for e in drive.events()) == 2,
+          "car 0 activated twice")
+    print(f"driver: car 0 reached its new goal after {again} more ticks")
     try:
         drive.account(2)
     except (RuntimeError, IndexError, ValueError):
