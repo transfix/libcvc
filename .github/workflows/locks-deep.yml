@@ -5,7 +5,8 @@ name: state_exec locks (deep)
 #   - the C++ model check at bounds 4 and 5, and the '+c' variants (coalescing on) at bound 3;
 #   - the `LocksModelStress` and `LocksStress` suites, which ci.yml's STRESS_REGEX keeps off PRs;
 #   - the Linux record of the `lock.cross_thread` bench scenario (information only, no gate);
-#   - the deep suite of the continuous pool's state-word model (threaded execution's S2a, PL-1).
+#   - the deep suite of the continuous pool's state-word model (threaded execution's S2a, PL-1);
+#   - the deep suite of the router protocol's model (threaded execution's S2b), once it lands.
 # It uses a Release Linux build of the lock test targets (and state_exec_bench) only; the model,
 # Python's standard library only, needs no build.
 #
@@ -255,3 +256,24 @@ jobs:
         run: |
           [ -f tools/locks_model/state_word.py ] || { echo "no state-word model on this ref"; exit 0; }
           python3 -I tools/locks_model/state_word.py --suite deep
+
+  # The router protocol's model (tools/locks_model/router.py; S2.md S2-Q15's method for S2b, td
+  # 4.6): its deep suite, every interleaving of a key's home, its receiving groups and senders
+  # through the ordered ingress (sends, subscribes, deliveries by recv_seq, requeues, broadcast
+  # tracking, timeouts, kills, the home's teardown and rehoming) at its deep bounds. The quick
+  # suite runs in CTest (state_exec_router_model_test). No C++ build; a ref without the model
+  # stops at once.
+  # TODO(S2b): the deep suite's command line, time and memory from the model's report; the line
+  # and the timeout below take the state-word model's until then.
+  router-model:
+    name: locks deep / router model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The router model's deep suite
+        shell: bash
+        run: |
+          [ -f tools/locks_model/router.py ] || { echo "no router model on this ref"; exit 0; }
+          python3 -I tools/locks_model/router.py --suite deep
