@@ -210,6 +210,16 @@ needs (JX4), not a fallback.
     terminal, and ask for iOS 27 as Safari on an iPad (a Mac user agent with touch). None of them
     may fetch the module's `.js`, its `.wasm` or `python312.zip`. Every other case is the normal
     run, through the same gate.
+  - **Checked in WebKit (2026-11-23).** Playwright 1.65.1's WebKit is WebKit 27.2 (the WPE
+    MiniBrowser on Linux), and it has JSPI: `WebAssembly.Suspending` and `WebAssembly.promising`
+    are functions. In it, arigl-web 4.0.6's module with the gated loader ran the docset, and
+    `ari.html` drew it. With `WebAssembly.Suspending` deleted, the gate showed and nothing of the
+    module was fetched. cyprty's `main` (cy-pca/cyprty b4ec9fd, staged by its `stage.sh`, which
+    took the gated `arigl-web.js` unchanged) ran in two WebKit pages on the synthetic camera,
+    against a local arisrv 4.0.6. Both joined the room (the relay counted 2 present), each saw the
+    other in Users, in a camera window and as an avatar, and one page's AudioWorklet output got
+    the other's voice stream. This is WebKit's engine on Linux, not Safari on an iPhone, which
+    is still to be tried on a device.
 
 ## 4. Risks
 
