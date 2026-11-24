@@ -18,7 +18,7 @@
 */
 
 // How the vendored tiler is made resumable (VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.9, §3): as the
-// skeleton port is (skeleton/stepping.h, whose step_task, SK_UNIT and SK_RUN it uses). Each long
+// skeleton port is (cocone/stepping.h, whose step_task, SK_UNIT and SK_RUN it uses). Each long
 // stage of a slice pair is a coroutine named <stage>_steps that yields once per contour pair,
 // vertex, OTV pair, chord step or untiled region, its result in an out-parameter; the legacy
 // function of the same name runs it to the end, so the legacy code and tests call it as before.
@@ -34,7 +34,7 @@
 #ifndef CVC_GEOMETRY_TILER_STEPPING_H
 #define CVC_GEOMETRY_TILER_STEPPING_H
 
-#include "../skeleton/stepping.h"
+#include "../cocone/stepping.h"
 
 #include <algorithm>
 #include <cstddef>

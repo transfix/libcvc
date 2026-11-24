@@ -75,6 +75,7 @@ struct SceneRepeatBinding {
   cvc::ariadne::SceneNode spec; // the template, as declared
   cvc::ariadne::SceneRepeatCount source;
   std::string key; // Kind::key: the count's state path, resolved
+  cvc::state_key kept; // `key`, kept resolved between frames (bind_key)
   bool top_level = true;
   std::weak_ptr<GraphicsNode> parent; // the copies' parent, below the top level
   struct Copy {
@@ -1098,7 +1099,7 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
   bind_live_texture(sg, n, node, bind_prefix, out, warnings); // material: { texture: { stream } }
   if (n.body.present && n.source_data.empty()) // a data node's come with its dataset
     bodies.push_back({&n, node});              // added once every node exists (realize_physics)
-  out.nodes.push_back({n.id, n.tags, node});
+  out.nodes.push_back({n.id, n.tags, node, true, n.on_pick});
 
   // Children nest UNDER this node, so each child's transform is local to it.
   for (const auto &c : n.children)
@@ -1143,7 +1144,8 @@ int repeat_count(RealizedScene &out, SceneRepeatBinding &b, std::vector<std::str
     return b.source.literal;
   case Kind::key:
     if (out.app)
-      n = count_of(cvc::ariadne::read_or<std::string>(*out.app, b.key, std::string()));
+      n = count_of(cvc::ariadne::read_or<std::string>(
+          cvc::ariadne::kept_key(b.kept, *out.app, b.key), std::string()));
     break;
   case Kind::expression:
     if (!out.options.count) {
@@ -2144,11 +2146,12 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
 void sync_scene_opacity(RealizedScene &realized) {
   if (!realized.app)
     return;
-  for (const SceneOpacityBinding &b : realized.opacity) {
+  for (SceneOpacityBinding &b : realized.opacity) {
     const std::shared_ptr<GraphicsNode> node = b.node.lock();
     if (!node)
       continue;
-    double a = cvc::ariadne::read_or<double>(*realized.app, b.source, b.fallback);
+    double a = cvc::ariadne::read_or<double>(cvc::ariadne::kept_key(b.key, *realized.app, b.source),
+                                             b.fallback);
     a = std::isfinite(a) ? std::clamp(a, 0.0, 1.0) : b.fallback;
     // GeometryNode::setOpacity writes the node's opacity key, which an unchanged value leaves be.
     auto set = [a](GraphicsNode *g) {

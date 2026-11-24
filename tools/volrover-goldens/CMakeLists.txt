@@ -9,7 +9,9 @@ set(VOLROVER_DIR "" CACHE PATH "A transfix/volrover checkout at the sha in volro
 if(NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp" AND
    NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/SegMed/GVF.cpp" AND
    NOT EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp" AND
-   NOT EXISTS "${VOLROVER_DIR}/src/ContourTiler/tiler.cpp")
+   NOT EXISTS "${VOLROVER_DIR}/src/SecondaryStructures/skel.cpp" AND
+   NOT EXISTS "${VOLROVER_DIR}/src/ContourTiler/tiler.cpp" AND
+   NOT EXISTS "${VOLROVER_DIR}/src/PocketTunnel/pocket_tunnel.cpp")
   message(FATAL_ERROR "VOLROVER_DIR (${VOLROVER_DIR}) is not a volrover checkout with a library "
                       "this directory builds")
 endif()
@@ -147,6 +149,92 @@ if(EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp")
   endif()
 endif()
 
+# SecondaryStructures (src/SecondaryStructures), when the checkout has it and CGAL is found, as for
+# Skeletonization. Every legacy source is compiled (the .back and .junk files are not sources), from
+# copies in the build tree with these patches, each of which must apply, or configuring fails:
+#   - eight CGAL_assertion()s with side effects become plain calls: has_vertex() in tcocone.cpp,
+#     find_acceptor() in u1.cpp and u2.cpp (as for Skeletonization), and get_eid() in skel.cpp's
+#     add_u1_to_skel and add_u2_to_skel, which finds the edge whose polygons and flags the code then
+#     updates: compiled out, it left the index -1, writing before the edge array;
+#   - is_cospherical_pair() returns false when a cell is infinite, as for Skeletonization;
+#   - a chain step between cells with no common facet gets the smaller cell's circumradius as its
+#     width, not its squared circumradius (every other width is a length), as the port does;
+#   - build_cylindrical_helices skips an empty run (a candidate point with no other within the join
+#     distance), which it divided by zero for and read past an empty array, as the port does;
+#   - its variable-length array (a GCC extension MSVC lacks) becomes a std::vector;
+#   - init.cpp's triang.dual(cit) becomes CGAL::circumcenter of the cell's points, which is what
+#     dual() computed in the CGAL it was written for (CGAL 6's asks the cell base for it).
+# helix.cpp calls LAPACK's dsyev_; secondary_dsyev.cpp stands in for it. shim/cvcraw_geometry,
+# shim/Histogram and shim/Contour stand in for the volrover libraries its headers include. The
+# legacy CMakeLists defined HUGE as 1000000, which math.h redefines or rejects; shim/secondary_huge.h,
+# force-included, makes it 1000000 everywhere. The legacy code writes debug files to the current
+# directory, so make_goldens.py runs it in a scratch one.
+if(EXISTS "${VOLROVER_DIR}/src/SecondaryStructures/skel.cpp")
+  find_package(CGAL CONFIG QUIET)
+  find_package(Boost QUIET)
+  if(CGAL_FOUND AND Boost_FOUND)
+    set(_ss_src_dir "${VOLROVER_DIR}/src/SecondaryStructures")
+    set(_ss_out "${CMAKE_CURRENT_BINARY_DIR}/secondary_src")
+    file(MAKE_DIRECTORY "${_ss_out}")
+    set(_ss_files degen helix hfn_util init intersect medax op rcocone robust_cc skel tcocone u1 u2
+      util)
+    # file|old text|new text, with %SEMI% for ';' (a CMake list cannot hold one)
+    set(_ss_patches
+      "tcocone|CGAL_assertion(ch->has_vertex(v, iv) && (iv != -1))%SEMI%|ch->has_vertex(v, iv)%SEMI%"
+      "tcocone|CGAL_assertion(ch->has_vertex(w, iw) && (iw != -1))%SEMI%|ch->has_vertex(w, iw)%SEMI%"
+      "u1|CGAL_assertion(find_acceptor(c, fid, uid, vid, wid))%SEMI%|find_acceptor(c, fid, uid, vid, wid)%SEMI%"
+      "u2|CGAL_assertion(find_acceptor(c0, id, uid, vid, wid))%SEMI%|find_acceptor(c0, id, uid, vid, wid)%SEMI%"
+      "u2|CGAL_assertion(find_acceptor(c, ofid[0], uid, vid, wid))%SEMI%|find_acceptor(c, ofid[0], uid, vid, wid)%SEMI%"
+      "skel|CGAL_assertion(sv.get_eid(uid, eid))%SEMI%|sv.get_eid(uid, eid)%SEMI%"
+      "util|if (triang.side_of_sphere(c[0], c[1]->vertex(id[1])->point())|if (!triang.is_infinite(c[0]) && !triang.is_infinite(c[1]) && triang.side_of_sphere(c[0], c[1]->vertex(id[1])->point())"
+      "skel|chain[j]->cell_radius() : chain[j+1]->cell_radius()%SEMI%|std::sqrt(chain[j]->cell_radius()) : std::sqrt(chain[j+1]->cell_radius())%SEMI%"
+      "init|cit->set_voronoi(triang.dual(cit))%SEMI%|cit->set_voronoi(CGAL::circumcenter(cit->vertex(0)->point(), cit->vertex(1)->point(), cit->vertex(2)->point(), cit->vertex(3)->point()))%SEMI%"
+      "helix|Vector centold(0.0, 0.0, 0.0)%SEMI%|if (curve_comps[i].empty()) continue%SEMI% Vector centold(0.0, 0.0, 0.0)%SEMI%"
+      "helix|double lambda[curve_comps[i].size()]%SEMI%|std::vector<double> lambda(curve_comps[i].size())%SEMI%")
+    set(_ss_sources "")
+    foreach(_f ${_ss_files})
+      set(_in "${_ss_src_dir}/${_f}.cpp")
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_in}")
+      file(READ "${_in}" _text)
+      foreach(_p ${_ss_patches})
+        string(REPLACE "|" ";" _parts "${_p}")
+        list(GET _parts 0 _pf)
+        list(GET _parts 1 _old)
+        list(GET _parts 2 _new)
+        if(_pf STREQUAL _f)
+          string(REPLACE "%SEMI%" ";" _old "${_old}")
+          string(REPLACE "%SEMI%" ";" _new "${_new}")
+          string(FIND "${_text}" "${_old}" _at)
+          if(_at EQUAL -1)
+            message(FATAL_ERROR "volrover-goldens: the patch for SecondaryStructures' ${_f}.cpp "
+                                "does not apply: ${_old}")
+          endif()
+          string(REPLACE "${_old}" "${_new}" _text "${_text}")
+        endif()
+      endforeach()
+      file(WRITE "${_ss_out}/${_f}.cpp" "${_text}")
+      list(APPEND _ss_sources "${_ss_out}/${_f}.cpp")
+    endforeach()
+    add_executable(secondary_legacy secondary_driver.cpp secondary_dsyev.cpp ${_ss_sources})
+    volrover_legacy(secondary_legacy)
+    target_link_libraries(secondary_legacy PRIVATE CGAL::CGAL)
+    target_include_directories(secondary_legacy PRIVATE ${Boost_INCLUDE_DIRS})
+    set_target_properties(secondary_legacy PROPERTIES CXX_STANDARD 17)
+    target_compile_definitions(secondary_legacy PRIVATE _USE_MATH_DEFINES)
+    if(MSVC)
+      target_compile_options(secondary_legacy PRIVATE "/FI${CMAKE_CURRENT_SOURCE_DIR}/shim/secondary_huge.h")
+    else()
+      target_compile_options(secondary_legacy PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/shim/secondary_huge.h")
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(secondary_legacy PRIVATE -frounding-math)
+    endif()
+    message(STATUS "volrover-goldens: SecondaryStructures with CGAL ${CGAL_VERSION}")
+  else()
+    message(STATUS "volrover-goldens: no CGAL or Boost, so no SecondaryStructures")
+  endif()
+endif()
+
 # ContourTiler (src/ContourTiler), when the checkout has it and CGAL is found, as for
 # Skeletonization. Its library sources are compiled as they are, but for its tools (ecs, smfconvert,
 # its command line), contour_graph.cpp (unused; its reader needs ContourFilter) and minkowski.cpp
@@ -236,5 +324,73 @@ if(EXISTS "${VOLROVER_DIR}/src/ContourTiler/tiler.cpp")
     message(STATUS "volrover-goldens: ContourTiler with CGAL ${CGAL_VERSION}")
   else()
     message(STATUS "volrover-goldens: no CGAL or Boost, so no ContourTiler")
+  endif()
+endif()
+
+# PocketTunnel (src/PocketTunnel), when the checkout has it and CGAL is found, as for
+# Skeletonization. Every source but main.cpp.unused is compiled, two of them from patched copies in
+# the build tree; each patch must apply, or configuring fails:
+#   - tcocone.cpp is Skeletonization's, with the same two CGAL_assertion()s whose has_vertex()
+#     calls fill the indices the code then uses (a release build compiles them out): plain calls;
+#   - pocket_tunnel.cpp calls pocket_tunnel_driver_report() (pockettunnel_driver.cpp) after
+#     detect_handle(), so the driver can read the triangulation and clusters the function keeps in
+#     locals. The hook only reads.
+# shim/cvcraw_geometry/cvcgeom.h stands in for the legacy cvcgeom_t, and shim/PEDetection/Timer.h
+# for a header datastruct.h includes and does not use. The legacy build's -DHUGE=1000000 is left
+# out: no source uses it, and it breaks the C runtime's own HUGE (MSVC's math.h).
+if(EXISTS "${VOLROVER_DIR}/src/PocketTunnel/pocket_tunnel.cpp")
+  find_package(CGAL CONFIG QUIET)
+  find_package(Boost QUIET)
+  if(CGAL_FOUND AND Boost_FOUND)
+    set(_pt_dir "${VOLROVER_DIR}/src/PocketTunnel")
+    set(_pt_out "${CMAKE_CURRENT_BINARY_DIR}/pockettunnel_src")
+    file(MAKE_DIRECTORY "${_pt_out}")
+    set(_pt_sources "")
+    set(_pt_in "${_pt_dir}/tcocone.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_pt_in}")
+    file(READ "${_pt_in}" _text)
+    foreach(_v v w)
+      set(_old "CGAL_assertion(ch->has_vertex(${_v}, i${_v}) && (i${_v} != -1));")
+      string(FIND "${_text}" "${_old}" _at)
+      if(_at EQUAL -1)
+        message(FATAL_ERROR "volrover-goldens: the patch for PocketTunnel's tcocone.cpp does not "
+                            "apply: ${_old}")
+      endif()
+      string(REPLACE "${_old}" "ch->has_vertex(${_v}, i${_v});" _text "${_text}")
+    endforeach()
+    file(WRITE "${_pt_out}/tcocone.cpp" "${_text}")
+    set(_pt_in "${_pt_dir}/pocket_tunnel.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_pt_in}")
+    file(READ "${_pt_in}" _text)
+    foreach(_old "#include <PocketTunnel/pocket_tunnel.h>" "detect_handle(triang, cluster_set);")
+      string(FIND "${_text}" "${_old}" _at)
+      if(_at EQUAL -1)
+        message(FATAL_ERROR "volrover-goldens: the patch for PocketTunnel's pocket_tunnel.cpp does "
+                            "not apply: ${_old}")
+      endif()
+    endforeach()
+    string(REPLACE "#include <PocketTunnel/pocket_tunnel.h>"
+      "#include <PocketTunnel/pocket_tunnel.h>\nnamespace PocketTunnel { void pocket_tunnel_driver_report(Triangulation &, map<int, cell_cluster> &, const vector<int> &); }"
+      _text "${_text}")
+    string(REPLACE "detect_handle(triang, cluster_set);"
+      "detect_handle(triang, cluster_set); pocket_tunnel_driver_report(triang, cluster_set, sorted_smax_index_vector);"
+      _text "${_text}")
+    file(WRITE "${_pt_out}/pocket_tunnel.cpp" "${_text}")
+    list(APPEND _pt_sources "${_pt_out}/tcocone.cpp" "${_pt_out}/pocket_tunnel.cpp")
+    foreach(_f handle hfn_util init intersect op rcocone robust_cc smax util)
+      list(APPEND _pt_sources "${_pt_dir}/${_f}.cpp")
+    endforeach()
+    add_executable(pockettunnel_legacy pockettunnel_driver.cpp ${_pt_sources})
+    volrover_legacy(pockettunnel_legacy)
+    target_link_libraries(pockettunnel_legacy PRIVATE CGAL::CGAL)
+    target_include_directories(pockettunnel_legacy PRIVATE ${Boost_INCLUDE_DIRS})
+    set_target_properties(pockettunnel_legacy PROPERTIES CXX_STANDARD 17)
+    target_compile_definitions(pockettunnel_legacy PRIVATE _USE_MATH_DEFINES)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(pockettunnel_legacy PRIVATE -frounding-math)
+    endif()
+    message(STATUS "volrover-goldens: PocketTunnel with CGAL ${CGAL_VERSION}")
+  else()
+    message(STATUS "volrover-goldens: no CGAL or Boost, so no PocketTunnel")
   endif()
 endif()

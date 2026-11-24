@@ -18,7 +18,9 @@
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
+#include <cvc/gl/VolumeRenderNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/state/followed_key.h>
 #include <cvc/state/state.h>
@@ -74,6 +76,12 @@ const void *payload_pointee(const boost::any &d) {
                           const cvc::volume_grid_session, cvc::volume_grid_session>(d);
 }
 
+// Whether a key's data is a volume the planes can cut, without making one: a pointer to one (a
+// data: entry's, a program's data object, a slice_source) or a cvc::volume held by value.
+bool holds_volume(const boost::any &d) {
+  return cvc::volume_payload_pointee(d) != nullptr || boost::any_cast<cvc::volume>(&d) != nullptr;
+}
+
 // The point in object space at plane coordinates (r, u) on the plane `plane` along axis `a`.
 cvc::geometry::point_t at(cvc::slice_axis a, double plane, double r, double u) {
   const std::pair<int, int> ru = cvc::grid_plane_axes(a);
@@ -91,6 +99,7 @@ VolumeGridNode::VolumeGridNode(cvc::app &ctx, const std::string &statePath, cons
   cvc::params_describe_state<cvc::volume_grid_params>(getState("grid"));
   cvc::params_describe_state<cvc::volume_grid_display_params>(getState("grid.display"));
   cvc::params_describe_state<cvc::volume_grid_source_params>(getState("grid.source"));
+  m_contours = std::make_unique<VolumeGridContours>(*this);
 }
 
 VolumeGridNode::~VolumeGridNode() = default;
@@ -146,6 +155,11 @@ void VolumeGridNode::ensureChildren() {
   }
   m_surfaces = addGraphicsChild<NullGraphicNode>("surfaces");
   m_surfaces->setVisible(false); // with the planes: an empty group's box frames no view
+  m_contours->ensureChildren();  // after the planes' own overlays, so it draws over them
+  // The volume in the 3D view (grid.display.render), in the surfaces group the slice views hide,
+  // after the contours' curves and surfaces there; nothing until a renderer is asked for.
+  m_volumeRender = m_surfaces->addGraphicsChild<VolumeRenderNode>("volume");
+  put(m_volumeRender->getState("renderer"), "none");
   // The grey display's model: the planes colour through it instead of the transfer function.
   getState("grey_transfer_function").value(cvc::tf::to_string(cvc::tf::model::preset("grayscale")));
   cvc::job_keys(app().root(), getState("grid").fullName()).idle();
@@ -184,11 +198,13 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
   m_editor.clear_selection();
   m_gestures.reset();
   m_band = cvc::grid_pick_outcome{};
+  m_contours->setFrame(cvc::grid_frame_of(g));
 
   // The volume the transfer function's histogram is taken over: the app's own, published as is.
   if (vol) {
     m_histogramVolume = std::move(vol);
     getState("grid.volume").data(boost::any(m_histogramVolume));
+    m_volumeRender->setVolume(m_histogramVolume); // the 3D view draws the app's volume too
   } else {
     auto stand_in = std::make_shared<cvc::volume>(app());
     try {
@@ -205,6 +221,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
     stand_in->max(m_source->max());
     m_histogramVolume = stand_in;
     getState("grid.volume").data(boost::any());
+    m_volumeRender->setVolume(nullptr); // read plane by plane: no whole volume to draw
   }
   for (const auto &s : m_slices) {
     s->setSource(m_source);
@@ -295,6 +312,52 @@ void VolumeGridNode::followSources() {
   }
 }
 
+// grid.volumes, what the panel's Source combo offers. The document's data: entries are the links
+// under <scope>.data (with no scope that is the store's own node, whose other children are the
+// requests the links point at, so only the links count), and an entry's outputs are the children
+// of the node it points at. Made again only when grid.source.volume, an entry, where it points or
+// its rev changes.
+void VolumeGridNode::publishVolumes() {
+  const std::string current = getState("grid.source.volume").value();
+  cvc::state &root = app().root();
+  cvc::state *data =
+      current.empty()
+          ? nullptr
+          : root.findThroughLinks(m_scope.empty() ? std::string("data")
+                                                  : m_scope + cvc::state::SEPARATOR + "data");
+  std::vector<std::pair<std::string, cvc::state *>> entries;
+  std::string signature = current;
+  if (data)
+    for (const std::string &name : data->childNames()) {
+      cvc::state &link = (*data)(name);
+      if (!link.isLink())
+        continue;
+      const std::string target = link.linkTarget();
+      cvc::state *node = root.findThroughLinks(target);
+      if (!node)
+        continue;
+      cvc::state *rev = root.findThroughLinks(target + cvc::state::SEPARATOR + "rev");
+      signature += '\n' + name + '=' + target + '@' + (rev ? rev->value() : std::string());
+      entries.emplace_back(name, node);
+    }
+  if (signature == m_volumesSignature)
+    return;
+  m_volumesSignature = signature;
+  std::string list;
+  bool listed = current.empty();
+  for (const auto &[name, node] : entries)
+    for (const std::string &out : node->childNames())
+      if (holds_volume((*node)(out).data())) {
+        const std::string path =
+            std::string("data") + cvc::state::SEPARATOR + name + cvc::state::SEPARATOR + out;
+        listed = listed || path == current;
+        list += (list.empty() ? "" : "\n") + path;
+      }
+  if (!listed)
+    list += (list.empty() ? "" : "\n") + current;
+  put(getState("grid.volumes"), list);
+}
+
 void VolumeGridNode::adoptPoints(const boost::any &d, const std::string &from) {
   std::shared_ptr<const cvc::point_classes> p;
   if (const auto *c = boost::any_cast<std::shared_ptr<const cvc::point_classes>>(&d))
@@ -335,6 +398,7 @@ cvc::volume_grid_session VolumeGridNode::session() {
   }
   s.transfer_function = getState("transfer_function").value();
   s.classes = m_editor.classes();
+  s.contours = m_contours->contours();
   return s;
 }
 
@@ -345,15 +409,16 @@ void VolumeGridNode::applySession(const cvc::volume_grid_session &s, const std::
     getState("transfer_function").value(s.transfer_function);
   m_editor.set_classes(s.classes);
   publishPoints(true);
+  m_contours->setContours(s.contours, from);
   ++m_keysVersion;
   status("applied the session from " + from);
 }
 
 // grid.session, rebuilt when what it holds changed: the keys, the classes, the transfer function.
 void VolumeGridNode::publishSession() {
-  const std::string sig = std::to_string(m_editor.version()) + '|' +
-                          std::to_string(m_keysVersion.load()) + '|' +
-                          getState("transfer_function").value();
+  const std::string sig =
+      std::to_string(m_editor.version()) + '|' + std::to_string(m_contours->editor().version()) +
+      '|' + std::to_string(m_keysVersion.load()) + '|' + getState("transfer_function").value();
   if (sig == m_sessionSignature)
     return;
   m_sessionSignature = sig;
@@ -379,7 +444,7 @@ void VolumeGridNode::handleStateChanged(const std::string &child) {
     else if (k == "view" || k == "tool" || k == "classes.current" || starts_with(k, "slice.") ||
              starts_with(k, "display.") || starts_with(k, "source."))
       ++m_keysVersion;
-    else
+    else if (!m_contours || !m_contours->stateChanged(k)) // null while constructing
       read = false;
     if (read)
       if (SceneGraph *sg = getSceneGraph())
@@ -433,6 +498,12 @@ void VolumeGridNode::readKeys() {
     for (const auto &s : m_slices)
       s->setModelKey(key);
   }
+  // What draws the volume in the 3D view.
+  const cvc::grid_render r = m_display.render;
+  put(m_volumeRender->getState("renderer"), r == cvc::grid_render::vtk        ? "vtk"
+                                            : r == cvc::grid_render::volren   ? "volren"
+                                            : r == cvc::grid_render::volslice ? "volslice"
+                                                                              : "none");
   syncSlices();
   fixCurrent();
 }
@@ -588,6 +659,34 @@ void VolumeGridNode::consumePick() {
   p.ijk[static_cast<int>(p.axis)] = m_index[static_cast<int>(p.axis)]; // on the plane shown
   cvc::parse_grid_pick_mods(field("mods"), p);
   cursorFrom("grid.pick");
+  if (m_params.tool == cvc::grid_tool::contours) {
+    // Contours take where the pick met the plane, not a voxel: the plane coordinates of the point
+    // (the voxel's centre for a pick that named only its voxel).
+    double w[3], local[3];
+    const char *coords[3] = {"x", "y", "z"};
+    bool at = true;
+    for (int c = 0; c < 3; ++c)
+      at = at && cvc::param_detail::parse_double(field(coords[c]), w[c]);
+    if (at) {
+      worldToLocal(w, local);
+    } else {
+      const std::int64_t v[3] = {p.ijk[0], p.ijk[1], p.ijk[2]};
+      m_source->grid().voxel_center(v, local);
+    }
+    const std::pair<int, int> ru = cvc::grid_plane_axes(p.axis);
+    cvc::contour_pick cp;
+    cp.phase = static_cast<cvc::contour_pick::phase_t>(p.phase);
+    cp.axis = p.axis;
+    cp.index = m_index[static_cast<int>(p.axis)];
+    cp.r = local[ru.first];
+    cp.u = local[ru.second];
+    cp.inside = p.inside;
+    cp.shift = p.shift;
+    cp.ctrl = p.ctrl;
+    cp.alt = p.alt;
+    m_contours->pick(cp);
+    return;
+  }
 
   long long current = -1;
   cvc::param_detail::parse_integer(getState("grid.classes.current").value(), current);
@@ -615,6 +714,8 @@ void VolumeGridNode::runRequest(const std::string &request) {
   const std::string arg = sp == std::string::npos ? std::string() : trim(line.substr(sp));
   const cvc::slice_grid &g = m_source->grid();
   try {
+    if (m_contours->request(cmd, arg, m_params.tool == cvc::grid_tool::contours))
+      return;
     if (cmd == "delete_selected") {
       const std::size_t n = m_editor.delete_selected();
       status("deleted " + std::to_string(n) + " point" + (n == 1 ? "" : "s"));
@@ -655,7 +756,9 @@ bool VolumeGridNode::tick() {
       put(grid("classes"), "0");
   }
   followSources(); // the app's volume, points and session, as they change
+  publishVolumes(); // what the Source combo offers, while waiting for a volume too
   if (!m_source) {
+    m_contours->tick(m_index); // its keys and its source: the curves wait for the planes
     publishSession();
     return false;
   }
@@ -709,8 +812,10 @@ bool VolumeGridNode::tick() {
     rebuildOverlays();
     changed = true;
   }
+  changed = m_contours->tick(m_index) || changed;
   for (const auto &s : m_slices)
     changed = s->tick() || changed;
+  changed = m_volumeRender->tick() || changed;
   return changed;
 }
 

@@ -125,6 +125,31 @@ users"; ARIADNE.md 9.8.7)::
 * In arisrvx the room is the relay's, the calls are applied on its next room step in order, and what
   the relay would refuse raises ValueError here. The events are JSON: they need no pycvc.
 
+``host.net`` is the host's connection engine (ARIADNE_NET_ENGINE.md 2.7): pycvc's ``net_engine``,
+cvc::net's C++ API as it is, for TCP protocols that are not Ariadne's (an NMDC hub). Its listeners'
+callbacks run on ``host.loop``; ``pycvc.ariadne.net`` holds the same names as pycvc::
+
+    from pycvc.ariadne.net import framing
+
+    hub = host.net.listen(address="0.0.0.0", port=411, frames=framing.delimited(b"|"),
+                          name="nmdc")
+
+    @hub.on_accept                     # may return a reason, which refuses the connection
+    def accepted(conn, info):
+        host.net.join(conn, "all")
+        host.net.send(conn, b"$Lock ...|")
+
+    @hub.on_frames                     # one call a batch: [(conn, [memoryview, ...]), ...]
+    def frames(batch): ...
+
+    @hub.on_close
+    def closed(conn, reason): ...      # "peer_closed", "slow_reader", ...
+
+    host.net.broadcast("all", line)    # one call, any group size; every call only queues
+
+In arisrvx the engine is the relay's (``--net-threads``, 2 by default) and outlives the program;
+under plain ``python`` the Host starts one (``Host(net_threads=2)``) and stops it at shutdown.
+
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
 clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrvx --python main.py
@@ -514,9 +539,11 @@ class Host:
     """The relay's tree and the script thread's loop, for a service's Python. See the module
     docstring."""
 
-    def __init__(self, *, app=None):
+    def __init__(self, *, app=None, net_threads: int = 2):
         """Adopt the server host this program runs in (arisrvx), or, under plain ``python``, keep a
-        tree of its own (``app``: a pycvc app to use instead of a new one)."""
+        tree of its own (``app``: a pycvc app to use instead of a new one) and, once ``host.net``
+        is asked for, a connection engine of its own with ``net_threads`` I/O threads (arisrvx's
+        is ``--net-threads``)."""
         global _current
         if _current is not None and not _current._closed:
             raise RuntimeError("Host(): this program already has its Host; use "
@@ -543,6 +570,8 @@ class Host:
             self._pycvc = pycvc
             self.app = app if app is not None else pycvc.make_app()
         self._served: list[_Served] = []
+        self._net = None  # host.net, once asked for
+        self._net_threads = int(net_threads)
         self._authenticate = None  # host.authenticate's hook
         self._read_scope = None  # host.read_scope's hook
         self._principals: dict[str, dict] = {}  # the latest principal of each id authenticate gave
@@ -769,6 +798,42 @@ class Host:
             log.warning("serve_asgi: the server on %s:%s stopped by itself%s", *served.address,
                         f" ({served.error})" if served.error else "")
             self.stop(1 if served.error else 0)
+
+    # -- connections (ARIADNE_NET_ENGINE.md 2.7) ---------------------------------------------------
+
+    @property
+    def net(self):
+        """The host's connection engine, a ``pycvc.net_engine`` (``pycvc.ariadne.net``): arisrvx's
+        own (``--net-threads``), or under plain ``python`` one this Host starts and, at shutdown,
+        stops. Its listeners' callbacks run on ``host.loop``. Needs pycvc."""
+        if self._net is None:
+            try:
+                import pycvc
+                engine_type = pycvc.net_engine
+            except (ImportError, AttributeError) as exc:
+                where = "beside arisrvx" if self._link is not None else "under this python"
+                raise ImportError(f"host.net needs pycvc {where}, one with its net_engine "
+                                  "(pycvc-cp312, libcvc ARIADNE_NET_ENGINE N2)") from exc
+            if self._link is not None:
+                engine = engine_type.from_capsule(self._link.net())
+            else:
+                engine = engine_type(pycvc.engine_options(io_threads=self._net_threads))
+            engine.attach_loop(self.loop)
+            self._net = engine
+        return self._net
+
+    async def _stop_net(self) -> None:
+        """At shutdown: an engine of this Host's own stops (its connections' closes reach their
+        on_close first); arisrvx's stays the relay's, and only its waker ends."""
+        engine, self._net = self._net, None
+        if engine is None:
+            return
+        if self._link is None:
+            await asyncio.to_thread(engine.stop)
+            waker = _net_waker(engine)
+            if waker is not None and waker.thread is not None:
+                await asyncio.to_thread(waker.thread.join, 2.0)
+        await asyncio.to_thread(engine.detach_loop, 2.0)
 
     @property
     def checking(self) -> bool:
@@ -1124,6 +1189,7 @@ class Host:
                 done, pending = await asyncio.wait(pending, timeout=1.0)
                 for t in pending:
                     t.cancel()
+        await self._stop_net()
         me = asyncio.current_task()
         rest = [t for t in asyncio.all_tasks(self.loop) if t is not me and not t.done()]
         for t in rest:
@@ -2035,6 +2101,49 @@ def _install_testing():
 _install_testing()
 
 
+def _net_waker(engine):
+    """pycvc's asyncio waker for ``engine``, or None."""
+    import pycvc
+
+    return pycvc._net_wakers.get(engine._address())
+
+
+# What pycvc.ariadne.net is: pycvc's own cvc::net names (bindings/pycvc/pycvc_net.i).
+_NET_NAMES = ("net_engine", "engine_options", "listener_options", "framing", "inbound_limits",
+              "conn_info", "net_event", "net_batch", "net_counters", "net_stats", "listener_stats",
+              "thread_stats", "net_listener", "close_reason_name")
+
+
+def _install_net():
+    """pycvc.ariadne.net: the connection engine's names, which are pycvc's (net_engine, framing,
+    listener_options, ...; ARIADNE_NET_ENGINE.md 2.7), looked up when first used, so this module
+    imports with no pycvc beside it."""
+    import types
+
+    me = sys.modules[__name__]
+    net = types.ModuleType("pycvc.ariadne.net",
+                           "cvc::net, the connection engine: pycvc's net_engine and its types, "
+                           "the same objects (host.net is the host's engine).")
+    net.__all__ = list(_NET_NAMES)
+
+    def __getattr__(name):
+        if name in _NET_NAMES or name.startswith("close_reason_"):
+            try:
+                import pycvc
+                return getattr(pycvc, name)
+            except (ImportError, AttributeError):
+                raise AttributeError(f"pycvc.ariadne.net.{name}: needs a pycvc with the connection "
+                                     "engine (pycvc-cp312, libcvc ARIADNE_NET_ENGINE N2)") from None
+        raise AttributeError(f"module 'pycvc.ariadne.net' has no attribute {name!r}")
+
+    net.__getattr__ = __getattr__
+    sys.modules.setdefault("pycvc.ariadne.net", net)
+    me.net = sys.modules["pycvc.ariadne.net"]
+
+
+_install_net()
+
+
 def _install_parent():
     """At arisrvx's boot: `import pycvc.ariadne` binds `pycvc`, so without a pycvc installed beside
     the host a stand-in holds this module. With one, pycvc's own import keeps this module."""
@@ -2140,6 +2249,8 @@ def _serve_program(path, args, options) -> int:
         return 1
     finally:
         _close_loop(prog.loop)
+        if _current is not None and _current._net is not None:  # a program that never shut down
+            _current._net.detach_loop(1.0)
         prog.link.close_events()
         prog.waker.join(timeout=5.0)
 

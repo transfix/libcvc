@@ -27,6 +27,7 @@
 #include <cvc/ariadne/stream/stream.h>     // AR-3b: a producer thread's post on a document's stream
 #include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
 #include <cvc/ariadne/uri.h>               // §13.8 (fetch uri): register a custom scheme handler
+#include <cvc/ariadne/uri_http_cache.h>    // the app's HTTP cache: the http_cache window's Clear
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_task.h>   // launch_pool_task generalization test
@@ -303,8 +304,10 @@ struct MockBackend : Backend {
     return draw_image_ret;
   }
   CustomEdit custom_ret{}; // programmable return for the escape path
+  std::vector<std::string> custom_scopes; // custom_scope() during each custom_widget call
   CustomEdit custom_widget(const char *type, const std::string &current, const Widget &) override {
     rec(std::string("custom_widget:") + type + "=" + current);
+    custom_scopes.push_back(custom_scope());
     return custom_ret;
   }
   void set_image(const std::string &name, const cvc::image &) override { rec("set_image:" + name); }
@@ -2177,6 +2180,27 @@ TEST(AriadneIsolatedDocs, AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad) {
   EXPECT_EQ(calls, 1);
 }
 
+// S2a.5 (S2-Q4): the teardown of a document whose group is attached (Ariadne never attaches one,
+// S2-Q6, but a host may) is not refused as a held group's: it waits for a worker's pump instead
+// (detach_begin), and the group leaves the pool.
+TEST(AriadneIsolatedDocs, AnAttachedGroupsTeardownIsNotRefused) {
+  cvc::app app;
+  isolate_documents(app, 0);
+  MockBackend mb;
+  auto doc = std::make_unique<Runtime>(app, "docs.attached");
+  doc->set_backend(&mb);
+  doc->set_channel_policy({}, {}, true, true);
+  doc->set_root(group({text("attached")}));
+  cvc::state_exec::exec_group *const g = doc->isolated_group();
+  if (!g)
+    GTEST_SKIP() << "not isolated: " << doc->isolation_reason();
+  cvc::exec_pool &pool = app.exec_pool();
+  pool.attach(*g);
+  ASSERT_TRUE(pool.attached(*g));
+  doc.reset();
+  EXPECT_EQ(pool.stats().attached, 0u);
+}
+
 // R1b-mid c-m4, R1b skeptic m2: tearing down a document whose group a pump_all holds is refused in
 // every build: logged, then aborted before anything is touched. Here a group-0 native, run while
 // exec_pump_frame pumps group 0 first, closes an isolated document whose group the same call holds.
@@ -3034,6 +3058,35 @@ TEST(AriadneRuntime, CustomWidgetUncommittedEscapeDoesNotWrite) {
   EXPECT_EQ(cvc::state::instance(app)("c2").value(), "keep"); // uncommitted -> no write
 }
 
+// A custom widget's further events all run, each with its fields; one marked `document` runs at
+// the document's prefix wherever the widget sits (a viewport in a load:ed module raising a scene
+// node's on_pick:), the rest at the widget's own.
+TEST(AriadneRuntime, CustomWidgetEventsRunEachInItsScope) {
+  cvc::app app;
+  Runtime rt(app, "doc");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  mock.custom_ret = CustomEdit{true, false, false, ""};
+  mock.custom_ret.events.push_back(
+      {"(state-set \"who\" (get-attr event \"node\"))", {{"node", "crate"}}, true});
+  mock.custom_ret.events.push_back(
+      {"(state-set \"who\" (get-attr event \"node\"))", {{"node", "lid"}}, false});
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "picker";
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "mod";
+  mount.children = {c};
+  rt.set_root(group({mount}));
+  rt.render();
+  mock.custom_ret = CustomEdit{}; // raised once
+  rt.drain();
+  cvc::state &tree = cvc::state::instance(app);
+  EXPECT_EQ(tree("doc.who").value(), "crate");   // the document's scope
+  EXPECT_EQ(tree("doc.mod.who").value(), "lid"); // the widget's
+}
+
 TEST(AriadneInit, RunawayScriptIsBoundedNotHang) {
   cvc::app app;
   std::vector<std::string> errs;
@@ -3137,6 +3190,29 @@ TEST(AriadneMountScope, BindsResolveAtSubPrefix) {
   // The bind resolved under the mount's sub-prefix, NOT the document prefix.
   EXPECT_EQ(cvc::state::instance(app)("ui.demo.includes.rf.on").value(), "1");
   EXPECT_NE(cvc::state::instance(app)("ui.demo.on").value(), "1");
+}
+
+// A backend's custom widget handler sees the scope the widget's bind: resolves against
+// (Backend::custom_scope): the document's prefix, or the mount's sub-prefix around it, so keys of
+// its own (a viewport's pick:) can resolve there too. Empty outside the call.
+TEST(AriadneMountScope, CustomWidgetSeesItsScope) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget probe;
+  probe.kind = Kind::Custom;
+  probe.custom_type = "probe";
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "includes.rf";
+  mount.children = {probe};
+  rt.set_root(group({probe, mount}));
+  rt.render();
+  ASSERT_EQ(mb.custom_scopes.size(), 2u);
+  EXPECT_EQ(mb.custom_scopes[0], "ui.demo");
+  EXPECT_EQ(mb.custom_scopes[1], "ui.demo.includes.rf");
+  EXPECT_TRUE(mb.custom_scope().empty());
 }
 
 TEST(AriadneMountScope, ReactiveReadsResolveAtSubPrefix) {
@@ -7906,6 +7982,44 @@ TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
     rt.render();
     EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
   }
+  // An empty feed: no bell, unless the document says `notifications: always`.
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    rt.set_root(group({menubar({tray_icon("W")}), tray_bell(true)}));
+    rt.render();
+    EXPECT_FALSE(mb.saw_prefix("tray_menu:\xF0\x9F\x94\x94")) << mb.dump();
+  }
+  {
+    cvc::app app;
+    Runtime rt(app, "ui.demo");
+    TrayBackend mb;
+    rt.set_backend(&mb);
+    Widget always = tray_bell(true);
+    always.bell_always = true;
+    rt.set_root(group({menubar({tray_icon("W")}), always}));
+    rt.render();
+    EXPECT_TRUE(mb.saw("tray_menu:\xF0\x9F\x94\x94||0")) << "shown, no badge\n" << mb.dump();
+  }
+}
+
+// §5.22 a tray icon's icon: (an expression here, giving a host-published picture's name) reaches
+// the backend as the icon's picture; with none it has none.
+TEST(AriadneRuntime, ATrayIconsPictureReachesTheBackend) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("ui.demo.me.pic").value("host-avatar");
+  Widget you = tray_icon("user");
+  you.button_icon = "(state-get \"me.pic\")";
+  rt.set_root(group({menubar({tray_icon("W"), you})}));
+  rt.render();
+  ASSERT_EQ(mb.asked.size(), 2u) << mb.dump();
+  EXPECT_TRUE(mb.asked[0].picture.empty());
+  EXPECT_EQ(mb.asked[1].picture, "host-avatar");
 }
 
 // §5.25 a loaded document with its own menubar, as the loader makes it: a mount (scope, the
@@ -8103,6 +8217,179 @@ TEST(AriadneRuntime, ARepeatedLoadedDocumentIsAnApplicationPerInstance) {
   EXPECT_FALSE(mb.saw("begin_menu:Camera 2")) << mb.dump();
   EXPECT_EQ(mb.times("begin_window:FE(closable)"), 1) << "instance 2's window went";
   EXPECT_FALSE(mb.toggle_shown["Camera 2"]);
+}
+
+// §5.25 a mount's name: names its application, worked out each frame in the loader's scope: one
+// instance each with {i} filled in, and a name given twice told apart by a number. An instance
+// with no name keeps "<name> N".
+TEST(AriadneRuntime, AMountsNameNamesEachInstancesApplication) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget m = fe_lab_mount();
+  m.repeat = "(int 3)";
+  m.scope = "includes.cam";
+  m.app_name = "Camera";
+  m.app_name_bind = "slots.{i}.name";
+  cvc::state &st = cvc::state::instance(app);
+  st("ui.demo.slots.0.name").value(std::string("tx.wtf"));
+  st("ui.demo.slots.1.name").value(std::string("tx.wtf"));
+  rt.set_root(group({menubar({menu("File", {})}), m}));
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:tx.wtf"), log_index(mb, "begin_menu:tx.wtf 2")) << mb.dump();
+  EXPECT_TRUE(mb.saw("begin_menu:Camera 3")) << "no name: its number\n" << mb.dump();
+  st("ui.demo.slots.0.name").value(std::string("ncviz.com"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:ncviz.com"), log_index(mb, "begin_menu:tx.wtf")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:tx.wtf 2")) << "a name once is told apart by nothing";
+  mb.pick = "Quit tx.wtf";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("begin_menu:ncviz.com")) << mb.dump();
+  EXPECT_FALSE(mb.saw("begin_menu:tx.wtf")) << "the second instance quit by its name";
+  EXPECT_EQ(mb.times("begin_window:FE(closable)"), 2) << "the first's and the third's windows";
+
+  // A mount that isn't repeated takes its name: the same way, as an expression too.
+  cvc::app app2;
+  Runtime rt2(app2, "ui.demo");
+  TrayBackend mb2;
+  rt2.set_backend(&mb2);
+  Widget one = fe_lab_mount();
+  one.app_name_bind = "(string.join (list \"Lab\" (state-get \"lab.n\")) \" \")";
+  cvc::state::instance(app2)("ui.demo.lab.n").value(std::string("7"));
+  rt2.set_root(group({menubar({menu("File", {})}), one}));
+  rt2.render();
+  EXPECT_TRUE(mb2.saw("begin_menu:Lab 7")) << mb2.dump();
+}
+
+// The shell's Processes view (docs/roadmap/ARIADNE_SHELL.md 4.10): every process the Runtime starts
+// says whose it is. (ps)'s and (inspect)'s `scope` is its chroot from the document's prefix: "" for
+// the document's own on_tick: and actions, "includes.fe_lab" for a loaded document's on_tick:, its
+// actions and the children they spawn.
+TEST(AriadneRuntime, ProcessRowsSayWhoseTheyAre) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  // A resident writes its own (ps) row's scope, bracketed so that "" shows.
+  const std::string own_row = "(for p (ps) (if (= (get-attr p \"pid\") (self-pid)) (state-set "
+                              "\"seen\" (str-concat \"[\" (get-attr p \"scope\") \"]\")) #f))";
+  // Its Remesh: an action that sleeps, after spawning a child that says it ran and sleeps too.
+  Widget frag = group({menubar({menu("Mesh", {menu_action("Remesh", R"S((begin
+               (spawn "(begin (state-set \"child\" \"ran\") (sleep 600) (state-set \"child\" \"woke\"))"
+                      "child")
+               (state-set "remeshed" "started") (sleep 600) (state-set "remeshed" "woke")))S")})}),
+                       window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  m.tick_script = own_row;
+  rt.set_tick_program(own_row);
+  rt.set_root(group({menubar({menu("File", {})}), m,
+                     window("W", {button("Probe", "(state-set \"probe\" (str-concat \"[\" "
+                                                  "(get-attr (inspect (self-pid)) \"scope\") "
+                                                  "\"]\"))")})}));
+  mb.pick = "Remesh";
+  mb.click_button = "Probe";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.click_button.clear();
+  const auto all_ran = [&] {
+    return sval(app, "ui.demo.seen") == "[]" && sval(app, "ui.demo.probe") == "[]" &&
+           sval(app, "ui.demo.includes.fe_lab.seen") == "[includes.fe_lab]" &&
+           sval(app, "ui.demo.includes.fe_lab.remeshed") == "started" &&
+           sval(app, "ui.demo.includes.fe_lab.child") == "ran";
+  };
+  ASSERT_TRUE(pump_until(rt, all_ran))
+      << sval(app, "ui.demo.seen") << " " << sval(app, "ui.demo.probe") << " "
+      << sval(app, "ui.demo.includes.fe_lab.seen");
+  int own = 0, mounted = 0, children = 0;
+  for (const se::process_info &p : app.exec_scheduler().list_processes()) {
+    if (se::is_finished(p.status))
+      continue;
+    if (p.scope.empty())
+      ++own;
+    else if (p.scope == "includes.fe_lab")
+      ++mounted;
+    else
+      ADD_FAILURE() << "pid " << p.pid << " " << p.name << ": scope '" << p.scope << "'";
+    if (p.name == "child") {
+      EXPECT_EQ(p.scope, "includes.fe_lab") << "a spawned child is its parent's";
+      ++children;
+    }
+  }
+  EXPECT_EQ(own, 1) << "the document's on_tick";
+  EXPECT_EQ(mounted, 3) << "the loaded document's on_tick, its Remesh and the child it spawned";
+  EXPECT_EQ(children, 1);
+}
+
+// The shell's application list (docs/roadmap/ARIADNE_SHELL.md 4.9): the Runtime mirrors each §5.25
+// application under the document's prefix, ariadne.apps.<key>.{name, scope, running}, and the
+// document's own name at ariadne.name. running follows Quit, reopening and Restart; a repeated
+// application has an entry per instance, and one gone from the tree is taken out.
+TEST(AriadneRuntime, TheApplicationsAreMirroredUnderTheDocumentsPrefix) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget root = group({menubar({menu("File", {})}), fe_lab_mount()});
+  root.app_name = "Shell"; // the loader's: the document's meta.name
+  rt.set_root(root);
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.name"), "Shell");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.name"), "FE Lab");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.scope"), "includes.fe_lab");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "1");
+  const auto pick = [&](const char *label) {
+    mb.pick = label;
+    rt.render();
+    rt.drain();
+    mb.pick.clear();
+  };
+  pick("Quit FE Lab");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "0") << "Quit";
+  mb.click_toggle = "FE Lab"; // Windows > Applications > FE Lab
+  rt.render();
+  rt.drain();
+  mb.click_toggle.clear();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "1") << "opened again";
+  pick("Restart FE Lab");
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "1") << "Restart starts it again";
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.name"), "FE Lab")
+      << "Restart drops the application's state, not its entry";
+
+  Widget cam = fe_lab_mount();
+  cam.repeat = "(int 2)";
+  cam.scope = "includes.cam";
+  cam.app_name = "Camera";
+  rt.set_root(group({menubar({menu("File", {})}), cam}));
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_0.name"), "Camera 1");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_1.name"), "Camera 2");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_1.scope"), "includes.cam.1");
+  const std::vector<std::string> keys =
+      cvc::state::instance(app)("ui.demo.ariadne.apps").childNames();
+  EXPECT_EQ(keys, (std::vector<std::string>{"cam_0", "cam_1"})) << "fe_lab is gone from the tree";
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.name"), "") << "the new root has no name";
+
+  // A loader's name: (§5.25) names an entry as it names the menu, worked out each frame.
+  cam.app_name_bind = "slots.{i}.name";
+  cvc::state::instance(app)("ui.demo.slots.0.name").value(std::string("tx.wtf"));
+  rt.set_root(group({menubar({menu("File", {})}), cam}));
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_0.name"), "tx.wtf");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_1.name"), "Camera 2") << "no name: its number";
+  cvc::state::instance(app)("ui.demo.slots.0.name").value(std::string("ncviz.com"));
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_0.name"), "ncviz.com") << "the next frame's name";
 }
 
 // A document with two bars of its own: one clock and one bell, in the first; the loaded documents'
@@ -9444,6 +9731,85 @@ TEST(AriadneAppRuntime, HostMenusLeadEveryDocumentsMenubar) {
   art.set_root(group({text("built in C++")}));
   art.runtime().render();
   EXPECT_GE(menu_at(mb, "Demos"), 0);
+}
+
+// A host's windows (set_host_windows) go in every document it mounts, closed until
+// tree.<id>.open is set, and never beside a window of the document's with the same id. arigl's is
+// the http_cache component, whose Clear button is AppRuntime's http_cache.clear: it empties the
+// app's HTTP cache, which enable_net registered.
+TEST(AriadneAppRuntime, HostWindowsAndTheHttpCacheWindowsClear) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "built without an HTTP backend";
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::is_regular_file(ariadne_dir / "components" / "http_cache.ari"))
+    GTEST_SKIP() << "component sources not found at " << ariadne_dir.string();
+  struct Server : cvc::net::HttpClient {
+    int sends = 0;
+    cvc::net::HttpResponse send(const cvc::net::HttpRequest &req) override {
+      ++sends;
+      return http_ok(200, "body of " + req.url, {"Cache-Control: max-age=300"}, req.url);
+    }
+  };
+  cvc::app app;
+  auto *net = new Server();
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
+  MockBackend mb;
+  AppRuntime art(app, "ui.docs.d");
+  art.set_backend(mb);
+  art.add_component_path(ariadne_dir.string());
+  ASSERT_EQ(art.enable_net(allow({"http://api.test"})), "");
+  ASSERT_TRUE(has_http_cache(app));
+  register_cvc_uri_handler(app, {ariadne_dir.string()});
+  LoadResult win = load_string(
+      app, "import: cvc://components/http_cache.ari\nwindows:\n  - include: http_cache\n");
+  ASSERT_TRUE(win.ok) << win.error;
+  const auto at = std::find_if(win.root.children.begin(), win.root.children.end(),
+                               [](const Widget &c) { return c.kind == Kind::Window; });
+  ASSERT_NE(at, win.root.children.end());
+  art.set_host_windows({*at});
+
+  auto &st = cvc::state::instance(app);
+  EXPECT_EQ(resolve(app, "http://api.test/a").content, "body of http://api.test/a");
+  EXPECT_EQ(resolve(app, "http://api.test/a").content, "body of http://api.test/a");
+  EXPECT_EQ(net->sends, 1) << "the second read came from the cache";
+  EXPECT_EQ(st("sys.net.http_cache.stats.entries").value(), "1");
+
+  art.load(write_doc("host_windows_a.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                           "root:\n"
+                                           "  - text: a feed\n"));
+  EXPECT_EQ(st("ui.docs.d.tree.http_cache.open").value(), "0") << "closed until asked for";
+  art.runtime().render();
+  EXPECT_FALSE(mb.saw("begin_window:Network cache(closable)"));
+
+  st("ui.docs.d.tree.http_cache.open").value(1);
+  mb.log.clear();
+  art.runtime().render();
+  ASSERT_TRUE(mb.saw("begin_window:Network cache(closable)"));
+  EXPECT_TRUE(mb.saw("text_value:Entries=1")) << "it shows the app's cache";
+  EXPECT_TRUE(mb.saw("text_value:Hits=1"));
+  ASSERT_TRUE(mb.saw("button:Clear"));
+
+  mb.click_button = "Clear";
+  art.runtime().render();
+  mb.click_button.clear();
+  art.drain();
+  EXPECT_EQ(st("sys.net.http_cache.stats.entries").value(), "0") << "Clear emptied it";
+  EXPECT_EQ(resolve(app, "http://api.test/a").content, "body of http://api.test/a");
+  EXPECT_EQ(net->sends, 2) << "cleared: fetched again";
+
+  // A document with a window of that id keeps its own; the host's is not added beside it.
+  art.load(write_doc("host_windows_b.ari", "meta: {min_libcvc: 3.4.0}\n"
+                                           "import: cvc://components/http_cache.ari\n"
+                                           "windows:\n"
+                                           "  - include: http_cache\n"
+                                           "    args: { title: Mine }\n"));
+  mb.log.clear();
+  art.runtime().render();
+  EXPECT_TRUE(mb.saw("begin_window:Mine(closable)"));
+  EXPECT_FALSE(mb.saw("begin_window:Network cache(closable)"));
 }
 
 // With document_menus("Document") among the host's menus the bar is the host's and the same for
@@ -12750,6 +13116,90 @@ TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
   rt.render();
   ASSERT_EQ(mb.runs.size(), 1u);
   EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
+}
+
+// The Processes window (components/processes.ari, docs/roadmap/ARIADNE_SHELL.md 4.10): its step,
+// called from on_tick:, lists the document's processes by application (the document's own by its
+// meta.name, a loaded document's by its name in ariadne.apps), and a row's Kill kills that row's
+// process, here the loaded document's sleeping action, and leaves the rest running.
+TEST(AriadneComponents, ProcessesListsByApplicationAndKillsARow) {
+  namespace se = cvc::state_exec;
+  struct KillBackend : TrayBackend {
+    int kill_row = -1; // the row whose Kill reports a click, counted in the frame's Kill buttons
+    int kills = 0;
+    void begin_frame() override {
+      TrayBackend::begin_frame();
+      kills = 0;
+    }
+    bool button(const char *l) override {
+      MockBackend::button(l);
+      return std::string(l) == "Kill" && kills++ == kill_row;
+    }
+  };
+  namespace fs = std::filesystem;
+  const fs::path file =
+      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "components" / "processes.ari";
+  if (!fs::exists(file))
+    GTEST_SKIP() << "component sources not found at " << file.string();
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  KillBackend be;
+  rt.set_backend(&be);
+  LoadResult r =
+      load_string(app, "meta: { name: Shell, min_libcvc: \"0.0.0\" }\nimport: " + file.string() +
+                           "\nwindows:\n  - include: processes\n    args: { rows: procs }\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.root.app_name, "Shell") << "the loader names the root by its meta.name";
+  // A loaded document beside it, whose Remesh sleeps.
+  Widget frag = group({menubar({menu("Mesh", {menu_action("Remesh", R"S((begin
+                                    (state-set "remeshed" "started") (sleep 600)
+                                    (state-set "remeshed" "done")))S")})}),
+                       window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  r.root.children.push_back(std::move(m));
+  cvc::state::instance(app)("ui.demo.procs.every").value("0"); // a poll every tick
+  rt.set_tick_program("(processes-step \"procs\")");
+  rt.set_root(std::move(r.root));
+  be.pick = "Remesh";
+  rt.render();
+  rt.drain();
+  be.pick.clear();
+  const auto field = [&](int row, const char *name) {
+    return sval(app, ("ui.demo.procs." + std::to_string(row) + "." + name).c_str());
+  };
+  // The first row of application `name` that waits on `waits` ("" for any), or -1.
+  const auto row_of = [&](const std::string &name, const char *waits) {
+    const std::string n = sval(app, "ui.demo.procs.count");
+    for (int i = 0; i < (n.empty() ? 0 : std::stoi(n)); ++i)
+      if (field(i, "app") == name && (!*waits || field(i, "waits") == waits))
+        return i;
+    return -1;
+  };
+  ASSERT_TRUE(pump_until(rt, [&] { return row_of("FE Lab", "sleep") >= 0; }))
+      << "count " << sval(app, "ui.demo.procs.count") << ", row 0: " << field(0, "app");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()) << "no rows yet is no warning";
+  ASSERT_GE(row_of("Shell", ""), 0) << "the document's own on_tick, by its meta.name";
+  const int row = row_of("FE Lab", "sleep");
+  EXPECT_EQ(field(row, "scope"), "includes.fe_lab");
+  EXPECT_EQ(field(row, "status"), "waiting");
+  const int pid = std::stoi(field(row, "pid"));
+  const int ticker = std::stoi(field(row_of("Shell", ""), "pid"));
+  be.kill_row = row; // its Kill
+  rt.render();
+  rt.drain();
+  be.kill_row = -1;
+  se::async_scheduler &sched = app.exec_scheduler();
+  ASSERT_TRUE(pump_until(rt, [&] {
+    const std::optional<se::process_info> info = sched.get_process_info(pid);
+    return !info || info->status == se::process_status::killed;
+  }));
+  EXPECT_EQ(sval(app, "ui.demo.includes.fe_lab.remeshed"), "started") << "killed in its sleep";
+  EXPECT_TRUE(pump_until(rt, [&] { return row_of("FE Lab", "") < 0; })) << "its row went";
+  const std::optional<se::process_info> still = sched.get_process_info(ticker);
+  ASSERT_TRUE(still.has_value());
+  EXPECT_FALSE(se::is_finished(still->status)) << "the document's on_tick still runs";
 }
 
 // The conference's Audio window (components/audio_buffers.ari): a name, a graph and a line per

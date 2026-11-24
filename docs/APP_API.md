@@ -31,6 +31,8 @@ threads, and named-mutex hub used throughout libcvc.*
   - [Scoped Locks](#scoped-locks)
   - [Mutex Debugging](#mutex-debugging)
 - [Program Execution (state_exec)](#program-execution-state_exec)
+  - [Continuous mode](#continuous-mode)
+  - [The kernel pools](#the-kernel-pools)
   - [Ariadne hosts and the frame pump](#ariadne-hosts-and-the-frame-pump)
 - [Type Registration](#type-registration)
   - [Registering Type Names](#registering-type-names)
@@ -171,6 +173,18 @@ of data, each a `cvc::file_handler_registry` (`<cvc/core/file_handler_registry.h
 | `app.geometry_handlers()` | `read_geometry(app, file)`, `write_geometry(app, geo, file)`, `geometry::read` / `write` | off, cvc raw, the embedded bunny, Assimp's formats |
 | `app.model_handlers()` | `read_model(app, file)`, `write_model(app, model, file)` | Assimp |
 | `app.image_handlers()` | `read_image(app, file)`, `write_image(app, img, file)`, `image::load` / `save` | stb, ImageMagick |
+
+A model a file reads (`cvc::model`, `<cvc/model/model.h>`) keeps the file's scene graph
+in `model::nodes`: each node's name, its transform relative to its parent (row-major
+4x4), the meshes it draws and its children. `model::instances()` lists every drawn copy
+of a mesh with its transform into the model's space, and `merged()`, `extents()`, the
+flattening geometry handler and `lod::partition_model` place each copy by it. So a glTF,
+FBX or DAE file that positions its meshes through node transforms reads as it was
+authored, and a mesh several nodes draw appears once for each; a mirroring transform
+rewinds the copy's triangles. A model without nodes (one built in code) draws each mesh
+once, as it is. The model stays in the file's own axes and units: assimp's turn of a
+Z-up Collada or FBX file to Y-up, and its Collada unit scaling, are off, and readers turn
+a model themselves (a glTF file is +Y up). `write_model` writes the tree back.
 
 The constructor registers the built-in handlers once, in this app only: two
 apps never see each other's handlers, and making an app changes no other app's
@@ -977,14 +991,15 @@ says which host and lane runs on which scheduler, and
   pids from `exec_pid_source()`.
 - `exec_async_host()`: the async host for `exec_scheduler()`, which it builds first. An async
   function registered with it parks its calling process while the kernel runs on the app's
-  background pool.
+  kernel pools ([below](#the-kernel-pools)).
 - `lock_manager()`: the `with-lock` table that `exec_scheduler()`, Ariadne's `init:` lane,
   pycvc's `Exec`s and every `exec_group` built on the app share. Made at the first call to it, to
   `exec_scheduler()`, to `exec_pool()` asking for threads, or by building an `exec_group` on the
   app, which fixes its mode from `state_exec.locks.threading`.
 - `exec_pool()` and `exec_pool(const pool_options &)` (`<cvc/core/exec_pool.h>`): the app's one
   pool of execution groups, which pumps `exec_group`s fork-join on persistent workers and the
-  calling thread (Ariadne's frame groups from Stage 1b, pycvc's `ExecPool`, a host's own groups).
+  calling thread (Ariadne's frame groups from Stage 1b, pycvc's `ExecPool`, a host's own groups),
+  or, for the groups a host attaches, continuously ([below](#continuous-mode)).
   It is built at the first call, under its own mutex: from the `pool_options` that call gives, else
   from the tree's `state_exec.threads` (a whole number or `auto`; the `CVC_EXEC_THREADS`
   environment variable overrides it), `state_exec.cpu_set` (`performance` or `all`) and
@@ -1061,6 +1076,99 @@ for (;;) {
   // ... read results, render ...
 }
 ```
+
+### Continuous mode
+
+A C++ host that wants its groups pumped whenever they have work, with no frame barrier, attaches
+them to the pool (threaded execution's S2a; [STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.4,
+4.9, 4.12). The thread that calls `attach` is the group's **attaching thread**, its host thread
+from then on:
+
+- `pool.attach(group)`: from now on the pool's workers pump the group whenever it has work (a
+  message, a completed async call, a lock grant, a timer), one pump at a time on the pool's budget
+  (`pool_options::pump_steps`, 20000 steps, and `pump_seconds`, 2 ms). A `group_affinity::host`
+  group, a group on a single lock manager, and every group of a pool with no workers or in
+  deterministic mode are pumped by the attaching thread alone, in `pump_host`. `attach` refuses
+  (`std::logic_error`) a group attached already, one a `pump_all` holds, and one whose scheduler
+  has a wake notifier installed; `pump_all` refuses an attached group.
+- `pool.with_group(group, fn)`: how the host touches an attached group's scheduler (submit, read
+  process info, kill, reap), since a worker may pump it at any time. `fn` runs on this thread under
+  the group's token, once a pump in progress has ended, and the group is woken after it, since what
+  `fn` did posts nothing. `group.execute(...)` called outside `with_group` runs under it by itself.
+  Posts (`group.sched().post_message`, `post_control`) need no token, and wake the group.
+- `pool.pump_host(max_seconds)` and `pool.wait_for_work(seconds)`, the host loop: `pump_host` runs
+  this thread's host queue (the `host_proxied` bodies of its groups, and the `on_complete`
+  callbacks of those a worker pumped), then pumps the groups only it pumps, and never blocks;
+  `wait_for_work` blocks until there is work for `pump_host`, or `seconds` passed, running the
+  queue meanwhile. An exception a body or callback threw is rethrown from them. Keep calling them:
+  a worker whose process waits for a host body (a `host_proxied` call that cannot park) waits until
+  this thread runs it, and is logged after 10 ms.
+- `pool.take_failed()`: this thread's groups whose pump failed (a C++ exception escaped it, and
+  their processes were killed with "internal error"), each once, detached and logged.
+  `wait_for_work` counts one as work until it is taken, so call it in the loop.
+- `pool.detach(group)`: no worker touches the group once it returns, its queued bodies and
+  callbacks have run on this thread, and it is an ordinary group again, which `pump_all` takes.
+  Detach what you attached before the attaching thread exits (nothing checks it, and `~exec_pool`
+  asserts that nothing is attached), or destroy the group attached, on its attaching thread: its
+  destructor leaves the pool first.
+- What would wait for itself is refused: `detach` from inside the group's own pump (a native or
+  callback of a group this thread pumps) or its own waiting body, and `with_group` inside its own
+  waiting body, throw `std::logic_error`; destroying a group inside `with_group`, a host body or a
+  waiting body of it aborts.
+- `pool.attached(group)` asks from any thread; `pool.stats()` adds continuous mode's counters
+  (`wakes`, `timer_wakes`, `requeues`, `parks`, `empty_wakes`, `moves`, `host_pumps`,
+  `long_host_waits`, `attached`, `active_workers`).
+
+```cpp
+cvc::app app;
+cvc::pool_options po;
+po.threads = 4;
+cvc::exec_pool &pool = app.exec_pool(po);  // first: the lock manager is shared
+
+cvc::state_exec::exec_group::options o;
+o.name = "sim";
+o.app = &app;
+cvc::state_exec::exec_group sim(std::move(o));
+bool done = false;
+pool.attach(sim);                          // this thread is sim's attaching thread
+pool.with_group(sim, [&] {                 // under sim's token: a worker may pump it at any time
+  cvc::state_exec::execute_options eo;
+  eo.on_complete = [&done](cvc::state_exec::value_t) { done = true; }; // runs on this thread
+  sim.execute(std::string("(begin (defun fib (n) (if (< n 2) n "
+                          "(+ (fib (- n 1)) (fib (- n 2))))) (fib 25))"),
+              eo);
+});
+while (!done) {
+  if (!pool.pump_host(0.002))              // bodies and callbacks, then groups only it pumps
+    pool.wait_for_work(0.016);             // until work comes, or the next frame is due
+  for (cvc::state_exec::exec_group *g : pool.take_failed())
+    (void)g;                               // failed and detached: log it, destroy or resubmit
+  // ... events: pool.with_group(sim, [&] { /* read, submit, kill, reap */ });
+}
+pool.detach(sim);                          // before this thread exits
+```
+
+### The kernel pools
+
+An async function's kernel (`executor::background()`, the default) runs on the app's kernel pools
+(`trySubmitKernel`; [STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.9). Until this app's exec
+pool is built with workers, that is the background pool (`submitPooled`'s persistent workers),
+for every kernel, as before. Once it has workers the pools split, for the app's life:
+
+- `background_cpu`, max(1, cores - exec workers) persistent workers of its own, started together
+  when its first kernel comes, runs every kernel but an I/O call's, in priority order and FIFO
+  within one, so CPU-bound kernels and the exec workers fill the cores without oversubscribing
+  them;
+- the background pool, `background_io` then, keeps its size and its other tasks, and runs the
+  kernels of I/O calls (`async_options::io`, set by the net and room calls) and `compute_async`'s
+  blocking jobs.
+
+`setThreadPoolSize` ([THREAD_POOL.md](THREAD_POOL.md)) then sizes `background_io` only, and
+`getActiveThreadCount()` and `getPendingThreadCount()` count its tasks only;
+`backgroundCpuPoolSize()` is `background_cpu`'s size (0 until the split), and `kernelPoolHere()`
+says which pool the calling thread works for. `wait_for_threads()` and `~app` interrupt and wait
+for `background_cpu`'s tasks as they do the background pool's. A pool built apart from the app's,
+and an app whose pool has no workers, never split the kernel pools.
 
 ### Ariadne hosts and the frame pump
 

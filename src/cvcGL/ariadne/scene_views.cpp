@@ -190,6 +190,9 @@ struct SceneViews::View {
   std::string pick_key, on_pick;
   bool picking = false; // a left press that picks is down
   long pick_seq = 0;
+  std::string held_on_pick; // the node on_pick: the press that is down landed on: its drags' and
+                            // release's too, wherever they land
+
   // pointer: where the pointer is, written under pointer_key (absolute) as it moves with no
   // button down (phase "hover").
   std::string pointer_key;
@@ -212,13 +215,14 @@ struct SceneViews::View {
     if (hidden.count(p))
       return nullptr;
     // The volumes drawn for the main view: a volslice node's slices face its camera, so a view from
-    // another camera draws slices of its own; a volren node's picture is raycast for the main view
-    // and composited into its pixels, so no view draws it.
+    // another camera draws slices of its own; a volren node's picture is raycast for one camera and
+    // one size, so every view draws a raycast of its own (camera: main too, at its own size). A
+    // volren node takes no override: yet.
     vtkProp *src = p;
     auto vi = volumes.find(p);
     if (vi != volumes.end()) {
       if (vi->second.kind == VolumeKind::raycast)
-        return nullptr;
+        return static_cast<VolRenNode *>(vi->second.node)->viewProp(vp->renderer());
       if (own_eye && vi->second.kind == VolumeKind::slices)
         src = static_cast<VolSliceNode *>(vi->second.node)->viewProp(vp->renderer());
       if (!src)
@@ -508,14 +512,20 @@ bool same_overrides(const std::vector<std::pair<std::string, Look>> &a,
 bool same_start(const ari::SceneCamera &a, const ari::SceneCamera &b) {
   return a.mode == b.mode && a.track == b.track && a.has_azimuth == b.has_azimuth &&
          a.azimuth == b.azimuth && a.has_elevation == b.has_elevation &&
-         a.elevation == b.elevation && a.zoom == b.zoom;
+         a.elevation == b.elevation && a.zoom == b.zoom && a.has_position == b.has_position &&
+         std::equal(a.position, a.position + 3, b.position) && a.has_target == b.has_target &&
+         std::equal(a.target, a.target + 3, b.target) && a.has_up == b.has_up &&
+         std::equal(a.up, a.up + 3, b.up) && a.fov == b.fov && a.near_clip == b.near_clip &&
+         a.far_clip == b.far_clip && a.orthographic == b.orthographic && a.height == b.height;
 }
 
 // Frame `cam` on the bounds b as `s` says: a top-down map, or an orbit (then fly or track) that
 // starts at s's azimuth / elevation / zoom, set through the camera's own state keys (what a drag
-// changes).
+// changes), or at its authored viewpoint (position, target), with its lens (fov, near, far,
+// orthographic, height) and up axis.
 void frame_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
                   SceneGraph &sg, int slice_axis = 2) {
+  cam.setClipRange(s.near_clip, s.far_clip); // 0, 0: fitted, as before
   if (s.mode == "slice") {
     cam.setSliceAxis(slice_axis);
     cam.frameSlice(b[0], b[2], b[4], b[1], b[3], b[5]);
@@ -527,6 +537,12 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
     cam.frameMap(0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3]), hh, hw);
     return;
   }
+  // The up axis and the lens before the pose, which is taken about that axis.
+  if (s.has_up)
+    cam.setUpAxis(s.up[0], s.up[1], s.up[2]);
+  if (s.fov > 0.0)
+    cam.setFieldOfView(s.fov);
+  cam.setOrthographic(s.orthographic);
   cam.frameBounds(b[0], b[2], b[4], b[1], b[3], b[5]);
   cam.setMode(CameraController::Mode::Orbit); // from a map, say
   if (s.has_azimuth)
@@ -535,6 +551,25 @@ void frame_camera(CameraController &cam, const double b[6], const ari::SceneCame
     cam.getState("orbit.elevation").value(s.elevation);
   if (s.zoom > 0.0 && s.zoom != 1.0)
     cam.getState("orbit.distance").value(cam.orbitDistance() / s.zoom);
+  // An authored viewpoint. Both: exactly that. A target alone: the framed view, moved to look at
+  // it from the same angle and distance. A position alone: from there at what the view framed.
+  if (s.has_position || s.has_target) {
+    double e[3], f[3], u[3];
+    cam.getPose(e, f, u);
+    double eye[3], target[3];
+    for (int i = 0; i < 3; ++i) {
+      target[i] = s.has_target ? s.target[i] : f[i];
+      eye[i] = s.has_position ? s.position[i] : target[i] + (e[i] - f[i]);
+    }
+    cam.lookAt(eye, target);
+  }
+  // Orthographic, `height` tall at the target: the orbit's distance that makes it so (the view's
+  // half-height is that distance times tan(fov / 2); 30 degrees is VTK's own field of view).
+  if (s.orthographic && s.height > 0.0) {
+    const double fov = cam.fieldOfView() > 0.0 ? cam.fieldOfView() : 30.0;
+    cam.getState("orbit.distance")
+        .value(0.5 * s.height / std::tan(0.5 * fov * 3.14159265358979 / 180.0));
+  }
   if (s.mode == "fly") {
     cam.setMode(CameraController::Mode::Fly);
   } else if (s.mode == "track" && !s.track.empty()) {
@@ -556,6 +591,23 @@ slices_on(const RealizedScene &rs, int axis) {
       out.emplace_back(t.id, s);
   }
   return out;
+}
+
+// The on_pick: a pick on `node` runs: its own, else that of its nearest ancestor that has one.
+std::string on_pick_of(const RealizedScene &rs, const GraphicsNode *node) {
+  std::unordered_map<const GraphicsNode *, const std::string *> handler;
+  for (const RealizedScene::TaggedNode &t : rs.nodes)
+    if (!t.on_pick.empty())
+      if (const std::shared_ptr<GraphicsNode> g = t.node.lock())
+        handler.emplace(g.get(), &t.on_pick);
+  if (handler.empty())
+    return {};
+  for (const GraphicsNode *p = node; p; p = p->getParentNode()) {
+    const auto it = handler.find(p);
+    if (it != handler.end())
+      return *it->second;
+  }
+  return {};
 }
 
 // The world ray through display point (x, y) of `ren`: the near plane's point and the direction to
@@ -688,6 +740,11 @@ bool shown_bounds(const RealizedScene &rs, const std::vector<std::string> &show,
 }
 
 } // namespace
+
+void frame_scene_camera(CameraController &cam, const double b[6], const ari::SceneCamera &s,
+                        SceneGraph &sg) {
+  frame_camera(cam, b, s, sg);
+}
 
 // A named camera: its own vtkCamera, which every viewport bound to it draws from, and the
 // controller a drag in any of them moves. The controller reads its aspect from the first viewport
@@ -852,21 +909,24 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
         hit = h;
         hit.node = s.first;
         hit.hit = h.voxel;
+        // Past the volume's edge the point is on the plane, not on the node.
+        hit.on_pick = hit.hit ? on_pick_of(*slot.realized, s.second.get()) : std::string();
       }
       if (hit.plane)
         return hit.hit;
     }
   }
-  // What the scene's nodes draw, each node's own props by prop, and an override's stand-in by its
-  // original's: the pick sees only these, never the chrome (grid, axes, bounds).
-  std::unordered_map<vtkProp *, std::string> node_of;
+  // What the scene's nodes draw, each node's own props by prop (with the node), and an override's
+  // stand-in by its original's: the pick sees only these, never the chrome (grid, axes, bounds).
+  std::unordered_map<vtkProp *, std::pair<std::string, const GraphicsNode *>> node_of;
   SceneSlot slot;
   if (scenes_ && scenes_(v.scene, slot) && slot.realized)
     for (const RealizedScene::TaggedNode &t : slot.realized->nodes) {
+      const std::shared_ptr<GraphicsNode> g = t.node.lock();
       std::unordered_set<vtkProp *> own;
-      collect(t.node.lock(), own, false);
+      collect(g, own, false);
       for (vtkProp *p : own)
-        node_of.emplace(p, t.id);
+        node_of.emplace(p, std::make_pair(t.id, g.get()));
     }
   for (const auto &t : v.twins) {
     const auto it = node_of.find(t.first);
@@ -896,8 +956,10 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
   hit.hit = true;
   if (vtkProp *prop = picker->GetViewProp()) {
     const auto n = node_of.find(prop);
-    if (n != node_of.end())
-      hit.node = n->second;
+    if (n != node_of.end()) {
+      hit.node = n->second.first;
+      hit.on_pick = on_pick_of(*slot.realized, n->second.second);
+    }
   }
   // On a volume_slice node: the point on its plane exactly, and the voxel there.
   if (ray && !hit.node.empty() && slot.realized)
@@ -917,14 +979,14 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
   return true;
 }
 
-std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v, const char *phase,
-                                                                         long &seq) const {
+std::vector<std::pair<std::string, std::string>>
+SceneViews::pick_fields(View &v, const char *phase, long &seq, PickHit &hit) const {
+  hit = PickHit{};
 #ifdef CVC_ENABLE_IMGUI
   const ImGuiIO &io = ImGui::GetIO();
   // The pointer in VTK display coordinates: framebuffer pixels from the lower left.
   const double x = io.MousePos.x * io.DisplayFramebufferScale.x;
   const double y = (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y;
-  PickHit hit;
   pick_at(v, x, y, hit);
   std::string mods;
   for (const auto &[on, name] : {std::pair<bool, const char *>{io.KeyShift, "shift"},
@@ -963,7 +1025,8 @@ std::vector<std::pair<std::string, std::string>> SceneViews::pick_fields(View &v
 }
 
 void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
-  std::vector<std::pair<std::string, std::string>> f = pick_fields(v, phase, v.pick_seq);
+  PickHit hit;
+  std::vector<std::pair<std::string, std::string>> f = pick_fields(v, phase, v.pick_seq, hit);
   if (f.empty())
     return;
   SceneSlot slot;
@@ -972,10 +1035,17 @@ void SceneViews::pick(View &v, const char *phase, ari::CustomEdit &edit) {
     for (const auto &kv : f) // seq last: a watcher on it sees the rest written
       ari::write<std::string>(app, v.pick_key + "." + kv.first, kv.second);
   }
-  if (!v.on_pick.empty()) {
-    edit.fire = v.on_pick;
-    edit.fields = std::move(f);
-  }
+  // The node the press landed on keeps the press: its on_pick: runs on the press's drags and its
+  // release too, wherever they land, in the document's scope (the scene's, not this widget's).
+  const std::string ph = phase;
+  if (ph == "down")
+    v.held_on_pick = hit.on_pick;
+  if (!v.held_on_pick.empty())
+    edit.events.push_back({v.held_on_pick, f, /*document=*/true});
+  if (ph == "up")
+    v.held_on_pick.clear();
+  if (!v.on_pick.empty())
+    edit.events.push_back({v.on_pick, std::move(f), /*document=*/false});
 }
 
 void SceneViews::pointer(View &v) {
@@ -983,7 +1053,8 @@ void SceneViews::pointer(View &v) {
   if (v.pointer_key.empty() || !scenes_ || !scenes_(v.scene, slot) || !slot.sg)
     return;
   cvc::app &app = slot.sg->appContext();
-  for (const auto &kv : pick_fields(v, "hover", v.pointer_seq)) // seq last, as a pick's
+  PickHit hit;
+  for (const auto &kv : pick_fields(v, "hover", v.pointer_seq, hit)) // seq last, as a pick's
     ari::write<std::string>(app, v.pointer_key + "." + kv.first, kv.second);
 }
 
@@ -1001,6 +1072,24 @@ CameraController &SceneViews::controller(View &v) {
       return *it->second->ctl;
   }
   return v.vp->camera();
+}
+
+// A viewport's keys resolve as its bind: does, in the scope its widget sits in: the document's
+// prefix, or a load:ed module's <prefix>.includes.<as> (§6.3), so a module's view writes its picks
+// inside its sandbox. A view of a scenes: entry keeps them under that scene's scenes.<id> in that
+// scope, as it always has at the document's. The camera does not follow: it is the viewport's own
+// (<scene prefix>.viewers.<view>.camera, beside the viewer's other keys), one per view name.
+std::string SceneViews::key_scope(const SceneGraph &sg) const {
+  const std::string &own = sg.getStatePrefix();
+  const std::string &doc = view_->scene().getStatePrefix(); // the document's (AriRuntime's prefix)
+  const std::string &scope = backend_->custom_scope();
+  if (scope.empty() || scope == doc)
+    return own; // not in a mount (or drawn outside the walk): the scene's prefix, as always
+  const std::string sep = cvc::state::SEPARATOR;
+  if (own.size() > doc.size() + sep.size() && own.compare(0, doc.size(), doc) == 0 &&
+      own.compare(doc.size(), sep.size(), sep) == 0)
+    return scope + own.substr(doc.size()); // <scope>.scenes.<id>
+  return scope;
 }
 
 SceneViews::View *SceneViews::view_for(const std::string &name, const std::string &scene) {
@@ -1325,7 +1414,9 @@ void SceneViews::update(double dt) {
       c.framed = true;
     }
     c.ctl->update(dt);
-    if (c.driver && c.driver->GetActiveCamera() == c.cam && valid_bounds(whole))
+    double clip_near = 0.0, clip_far = 0.0; // near: and far: fix them instead
+    if (c.driver && c.driver->GetActiveCamera() == c.cam && valid_bounds(whole) &&
+        !c.ctl->clipRange(clip_near, clip_far))
       c.driver->ResetCameraClippingRange(whole);
     c.used = false;
   }
@@ -1371,14 +1462,14 @@ void SceneViews::register_widget() {
         if (v->pick) {
           SceneSlot slot;
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
-            v->pick_key = ari::resolve_bind(slot.sg->getStatePrefix(),
+            v->pick_key = ari::resolve_bind(key_scope(*slot.sg),
                                             w.props.str("pick", "viewers." + name + ".pick"));
         }
         v->pointer_key.clear();
         if (w.props.has("pointer")) {
           SceneSlot slot;
           if (scenes_ && scenes_(v->scene, slot) && slot.sg)
-            v->pointer_key = ari::resolve_bind(slot.sg->getStatePrefix(), w.props.str("pointer"));
+            v->pointer_key = ari::resolve_bind(key_scope(*slot.sg), w.props.str("pointer"));
         }
         // Its camera: `camera: <id>` draws from a named camera (or `main`); otherwise its own,
         // which `mode:` (orbit | fly | map | track), `track:`, `azimuth:`, `elevation:` and `zoom:`
@@ -1398,6 +1489,7 @@ void SceneViews::register_widget() {
         start.has_elevation = w.props.has("elevation");
         start.elevation = w.props.num("elevation", 0.0);
         start.zoom = w.props.num("zoom", 1.0);
+        ari::read_scene_camera_viewpoint(w.props, start); // position, target, up, fov, ...
         if (!same_start(start, v->start)) {
           v->start = start;
           v->framed = false;
@@ -1412,7 +1504,7 @@ void SceneViews::register_widget() {
             if (a->is_map()) {
               SceneSlot slot;
               if (a->has("bind") && scenes_ && scenes_(v->scene, slot) && slot.sg) {
-                v->axis_key = ari::resolve_bind(slot.sg->getStatePrefix(), a->str("bind"));
+                v->axis_key = ari::resolve_bind(key_scope(*slot.sg), a->str("bind"));
                 axis_text = ari::read_or<std::string>(slot.sg->appContext(), v->axis_key, "");
               }
             } else {

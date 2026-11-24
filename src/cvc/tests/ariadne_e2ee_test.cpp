@@ -151,6 +151,8 @@ TEST(AriadneE2ee, BackupAndRestoreThroughTheVerbs) {
   ASSERT_TRUE(store->open());
   cvc::ariadne::register_e2ee_intrinsics(app, store);
   AppRuntime art(app, "ui.dm");
+  // Three Argon2id hashes at MODERATE (256 MB each): ~30 s on a macOS CI runner and past 80 s on a
+  // slow one, so run()'s 60 s is too tight. 240 s stays under the 300 s ctest gives a PR's tests.
   EXPECT_EQ(run(art, R"((begin
     (set a (e2ee-create "me" 1))
     (set b (e2ee-backup "me" "a long passphrase"))
@@ -163,7 +165,8 @@ TEST(AriadneE2ee, BackupAndRestoreThroughTheVerbs) {
     (state-set "restored" (get-attr r "ok"))
     (state-set "same" (= (get-attr (get-attr r "identity") "identity_key_ed25519")
                          (get-attr a "identity_key_ed25519")))
-    (state-set "done" 1)))"),
+    (state-set "done" 1)))",
+                240),
             "");
   EXPECT_EQ(val(app, "ui.dm.ok"), "true");
   EXPECT_EQ(val(app, "ui.dm.kdf"), "argon2id");

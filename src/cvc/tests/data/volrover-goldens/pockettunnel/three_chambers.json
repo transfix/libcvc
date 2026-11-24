@@ -1,0 +1,23 @@
+{
+  "library": "PocketTunnel",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "three_chambers",
+  "input": "tools/volrover-goldens/inputs/pockettunnel/three_chambers.pts",
+  "input_sha256": "e7c3ea25326c9f43e591f13512fabffd7f012c36c2f618bb3368e910d77fcd41",
+  "points": 3487,
+  "parameters": {
+    "num_pockets": 3,
+    "num_tunnels": 3
+  },
+  "counts": {
+    "pockets": 2,
+    "tunnels": 1,
+    "voids": 0,
+    "points": 3487,
+    "triangles": 3088,
+    "debug_files": []
+  },
+  "ptv_sha256": "bcb6a6f789b4ecae9867d28249bc0518f4c63a7e21664143f99825d090ac0edf",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Linux x86_64, Linux-7.0.0-1014-aws-x86_64-with-glibc2.39, Python 3.12.3"
+}

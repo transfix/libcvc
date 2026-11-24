@@ -1981,3 +1981,700 @@ TEST(Groups, GR11_AProxiedCallInAGeneratorBlocksItsWorker) {
     EXPECT_EQ(calls[0].in, &target.g()) << "not inline in the group's pump";
   }
 }
+
+// --- Stage 2a continuous pool (td 8.3, 8.11) ---
+//
+// S2.md section 4's CT cases and ST-3 (S2a.9): attached groups in continuous mode (exec_pool's
+// attach, pump_host, wait_for_work, with_group, detach), against GR-1's oracle, under teardown,
+// with host bodies, on their attaching thread, and churned with kernels in flight. The attaching
+// thread runs exec_pool.h's host loop and reads a group's scheduler only under its token
+// (with_group) or once it is detached.
+
+// clang-format off
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#else
+#include <dirent.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+#endif
+#include <condition_variable>
+// clang-format on
+
+namespace {
+
+#if !defined(_WIN32)
+long s2a_entries(const char *dir) {
+  DIR *d = opendir(dir);
+  if (!d)
+    return -1;
+  long n = 0;
+  while (dirent *e = readdir(d))
+    if (e->d_name[0] != '.')
+      ++n;
+  closedir(d);
+  return n;
+}
+#endif
+
+// This process's threads, or -1 where they can't be counted.
+long s2a_thread_count() {
+#if defined(_WIN32)
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE)
+    return -1;
+  const DWORD self = GetCurrentProcessId();
+  THREADENTRY32 te{};
+  te.dwSize = sizeof te;
+  long n = 0;
+  if (Thread32First(snap, &te)) {
+    do {
+      if (te.th32OwnerProcessID == self)
+        ++n;
+      te.dwSize = sizeof te;
+    } while (Thread32Next(snap, &te));
+  }
+  CloseHandle(snap);
+  return n;
+#elif defined(__APPLE__)
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t n = 0;
+  if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS)
+    return -1;
+  for (mach_msg_type_number_t i = 0; i < n; ++i)
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), n * sizeof(*threads));
+  return static_cast<long>(n);
+#else
+  return s2a_entries("/proc/self/task");
+#endif
+}
+
+// This process's handles (Windows) or open file descriptors, or -1 where they can't be counted.
+long s2a_handle_count() {
+#if defined(_WIN32)
+  DWORD n = 0;
+  return GetProcessHandleCount(GetCurrentProcess(), &n) ? static_cast<long>(n) : -1;
+#else
+#if defined(__APPLE__)
+  const long n = s2a_entries("/dev/fd");
+#else
+  const long n = s2a_entries("/proc/self/fd");
+#endif
+  return n < 0 ? n : n - 1; // the directory stream's own descriptor
+#endif
+}
+
+// pool_app with Stage 2's pump budget: the app's exec_pool built first with `threads` workers and
+// pumps of `pump_steps` steps and `pump_seconds` (infinite: steps only, for the oracles), an async
+// call charged one step and no CPU time.
+struct s2a_app {
+  cvc::app app;
+  cvc::state &tree;
+  cvc::exec_pool &pool;
+
+  s2a_app(unsigned threads, std::uint64_t pump_steps, double pump_seconds = kNoTimeLimit,
+          bool deterministic = false)
+      : tree(cvc::state::instance(app)),
+        pool(build(app, tree, threads, pump_steps, pump_seconds, deterministic)) {}
+
+  static cvc::exec_pool &build(cvc::app &a, cvc::state &t, unsigned threads,
+                               std::uint64_t pump_steps, double pump_seconds, bool deterministic) {
+    t("state_exec.defaults.limits.async_steps_per_cpu_ms").value(std::string("0"));
+    cvc::pool_options opts;
+    opts.threads = threads;
+    opts.pump_steps = pump_steps;
+    opts.pump_seconds = pump_seconds;
+    opts.deterministic = deterministic;
+    return a.exec_pool(opts);
+  }
+};
+
+// group_world for an app given by its parts: an exec_group named, owned and chrooted `name`, with
+// setup_env's environment.
+struct s2a_group {
+  intrinsics_context ictx;
+  environment_ptr env = builtins::make_default_environment();
+  std::unique_ptr<exec_group> group;
+
+  s2a_group(cvc::app &app, cvc::state &tree, const std::string &name,
+            group_affinity affinity = group_affinity::any,
+            const std::function<void(exec_group::options &)> &tweak = {}) {
+    exec_group::options opts;
+    opts.name = name;
+    opts.owner = name;
+    opts.affinity = affinity;
+    opts.app = &app;
+    opts.watch_root = &tree;
+    if (tweak)
+      tweak(opts);
+    group = std::make_unique<exec_group>(std::move(opts));
+    setup_env(ictx, env, group->sched(), group->host(), tree, name);
+  }
+  s2a_group(const s2a_group &) = delete;
+  s2a_group &operator=(const s2a_group &) = delete;
+  ~s2a_group() { env.reset(); }
+
+  exec_group &g() { return *group; }
+  async_scheduler &sched() { return group->sched(); }
+  // Before the group is attached, or under its token (with_group).
+  int submit(const std::string &script, std::function<void(value_t)> on_complete = {}) {
+    execute_options opts;
+    opts.env = environment::extend(env);
+    opts.max_time = kProcessCeiling;
+    opts.on_complete = std::move(on_complete);
+    return group->execute(script, opts);
+  }
+  bool done() {
+    for (const process_info &i : sched().list_processes())
+      if (!is_finished(i.status))
+        return false;
+    return true;
+  }
+  std::string outcome(int pid) { return outcome_of(sched(), pid); }
+};
+
+// The attaching thread's host loop (exec_pool.h): until done(), pump_host(pump_seconds), and
+// wait_for_work(beat) when that had nothing to do. `in_loop`, when given, is set while the thread
+// is inside either. A throw (S2a.0's stubs: "not built") or `ceiling` seconds passing fails the
+// case; true when done() held.
+bool s2a_drive(cvc::exec_pool &pool, const std::function<bool()> &done, double ceiling = 60.0,
+               double beat = 0.01, double pump_seconds = kNoTimeLimit,
+               std::atomic<bool> *in_loop = nullptr) {
+  const auto t0 = clock_type::now();
+  try {
+    while (!done()) {
+      if (seconds_since(t0) > ceiling) {
+        ADD_FAILURE() << "the host loop's ceiling (" << ceiling << " s) passed";
+        return false;
+      }
+      if (in_loop)
+        in_loop->store(true);
+      if (!pool.pump_host(pump_seconds))
+        pool.wait_for_work(beat);
+      if (in_loop)
+        in_loop->store(false);
+    }
+    return true;
+  } catch (const std::exception &e) {
+    if (in_loop)
+      in_loop->store(false);
+    ADD_FAILURE() << "the host loop threw: " << e.what();
+    return false;
+  }
+}
+
+// The groups a case attached, detached when it goes if still attached, so a case that fails or
+// throws leaves nothing attached (~exec_pool asserts so). Declared after the groups.
+class s2a_attached {
+public:
+  explicit s2a_attached(cvc::exec_pool &pool) : pool_(pool) {}
+  ~s2a_attached() { detach_all(); }
+  s2a_attached(const s2a_attached &) = delete;
+  s2a_attached &operator=(const s2a_attached &) = delete;
+
+  void attach(exec_group &g) {
+    pool_.attach(g);
+    groups_.push_back(&g);
+  }
+  // A group the case destroys attached (its teardown detaches it).
+  void forget(exec_group &g) {
+    groups_.erase(std::remove(groups_.begin(), groups_.end(), &g), groups_.end());
+  }
+  void detach_all() noexcept {
+    for (exec_group *g : groups_)
+      try {
+        if (pool_.attached(*g))
+          pool_.detach(*g);
+      } catch (...) {
+      }
+    groups_.clear();
+  }
+
+private:
+  cvc::exec_pool &pool_;
+  std::vector<exec_group *> groups_;
+};
+
+// A kernel that runs until its call is cancelled (its process killed, its host shut down), or
+// kCeiling passes: `at_cancel` runs in the call's on_cancel hook, on the thread that cancels it.
+// `started` and `ended` count the kernels.
+async_kernel s2a_kernel_until_cancelled(std::atomic<int> &started, std::atomic<int> &ended,
+                                        std::function<void()> at_cancel = {}) {
+  return [&started, &ended, at_cancel](async_call &call) -> value_t {
+    struct gate {
+      std::mutex m;
+      std::condition_variable cv;
+      bool cancelled = false;
+    };
+    auto g = std::make_shared<gate>();
+    call.on_cancel([g, at_cancel] {
+      if (at_cancel)
+        at_cancel();
+      std::lock_guard<std::mutex> lock(g->m);
+      g->cancelled = true;
+      g->cv.notify_all();
+    });
+    started.fetch_add(1);
+    {
+      std::unique_lock<std::mutex> lock(g->m);
+      g->cv.wait_for(lock, std::chrono::duration<double>(kCeiling), [&] { return g->cancelled; });
+    }
+    ended.fetch_add(1);
+    return value_t(int64_t(0));
+  };
+}
+
+} // namespace
+
+// CT-1 (S2.md section 4; td 8.3): GR-1's oracle in continuous mode. Each group's programs run alone
+// on this thread with steps-only pumps of 97 steps; then the groups, attached to the app's pool at
+// threads 0, 1, 2, 4 and 8 (the effective count printed), pumped 97 steps at a time with no time
+// budget, run until every process has ended (the host loop, reading each group under its token):
+// every group's processes (results, steps, statuses) and its registry's tracked objects after a
+// final collection equal its solo run. At threads 0 the attaching thread ran every pump (the pump
+// hooks' threads, stats().host_pumps == pumps, no worker pump); with workers, workers pumped.
+TEST(Groups, CT01_ContinuousEqualsSolo) {
+  const int groups = under_sanitizer() ? 4 : 8;
+  const std::vector<unsigned> thread_counts =
+      under_sanitizer() ? std::vector<unsigned>{0, 1, 4} : std::vector<unsigned>{0, 1, 2, 4, 8};
+  const budget_fn budget = [](std::size_t) { return steps_only(97); };
+  const std::vector<group_record> solo = solo_records(groups, budget);
+  bool no_registry_reported = false;
+  for (const unsigned threads : thread_counts) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    s2a_app w(threads, 97);
+    const auto caller = std::this_thread::get_id();
+    pump_threads where;
+    std::vector<std::unique_ptr<s2a_group>> worlds;
+    for (int k = 0; k < groups; ++k) {
+      worlds.push_back(std::make_unique<s2a_group>(
+          w.app, w.tree, "g" + std::to_string(k), group_affinity::any, [&](exec_group::options &o) {
+            o.pump_hook_for_test = [&](exec_group &) { where.note(); };
+          }));
+      for (const std::string &p : oracle_programs(k))
+        worlds.back()->submit(p);
+    }
+    s2a_attached att(w.pool);
+    for (auto &gw : worlds)
+      att.attach(gw->g());
+    std::vector<char> done(groups, 0);
+    const auto t0 = clock_type::now();
+    const bool drove = s2a_drive(w.pool, [&] {
+      bool all = true;
+      for (int k = 0; k < groups; ++k) {
+        if (!done[k]) {
+          bool d = false;
+          w.pool.with_group(worlds[k]->g(), [&] { d = worlds[k]->done(); });
+          done[k] = d;
+        }
+        all = all && done[k];
+      }
+      return all;
+    });
+    att.detach_all();
+    const cvc::pool_stats stats = w.pool.stats();
+    std::printf("CT-1: %d groups at threads %u (effective %u): %llu pumps, %llu on the attaching "
+                "thread, %llu on a worker, %.3f s\n",
+                groups, threads, w.pool.threads(), static_cast<unsigned long long>(stats.pumps),
+                static_cast<unsigned long long>(stats.host_pumps),
+                static_cast<unsigned long long>(stats.worker_pumps), seconds_since(t0));
+    std::fflush(stdout);
+    if (!drove)
+      return;
+    for (int k = 0; k < groups; ++k) {
+      const std::string label =
+          "CT-1 at threads " + std::to_string(threads) + ", group " + std::to_string(k);
+      EXPECT_TRUE(worlds[k]->done()) << label << " never ended";
+      expect_same(record(worlds[k]->sched(), worlds[k]->g().registry()), solo[k], label,
+                  no_registry_reported);
+    }
+    const std::vector<std::thread::id> ids = where.get();
+    EXPECT_FALSE(ids.empty());
+    if (w.pool.threads() == 0) {
+      EXPECT_TRUE(std::all_of(ids.begin(), ids.end(), [&](std::thread::id t) {
+        return t == caller;
+      })) << "a pump ran off the attaching thread with no worker";
+      EXPECT_EQ(stats.worker_pumps, 0u);
+      EXPECT_EQ(stats.host_pumps, stats.pumps);
+      EXPECT_EQ(stats.pumps, static_cast<std::uint64_t>(ids.size()));
+    } else {
+      EXPECT_GT(stats.worker_pumps, 0u) << "no worker pumped a group";
+    }
+  }
+}
+
+// CT-2 (S2.md section 4; S2-Q4): attached groups destroyed while workers re-pump them, under
+// CVC_EXEC_FUZZ, 10^3 rounds (10^2 in Debug and under a sanitizer). Each round attaches four groups
+// (three busy loops and one whose process waits on a background kernel), lets each be pumped twice
+// and the kernel start, then destroys them in a shuffled order while the workers still re-pump the
+// busy ones. Every teardown returns (no hang; debug builds: no assertion); no group is pumped once
+// its teardown holds the token (its teardown hook sets the flag its pump hook reads); and from its
+// detach on no post reaches the pool: in the kernel's cancel hook, which the teardown's kill runs
+// after the detach, the group has no notifier and is not attached, and a post to it there moves no
+// wake counter (stats().wakes: the busy groups are requeued, not woken).
+TEST(Groups, CT02_TeardownDuringContinuousPumps) {
+  scoped_env_var fuzz("CVC_EXEC_FUZZ", "2026");
+  const int rounds = under_sanitizer() || kDebugBuild ? 100 : 1000;
+  s2a_app w(4, 300); // the pool reads CVC_EXEC_FUZZ now, the lock manager at the first group
+  std::mt19937 rng(2026);
+  std::atomic<int> late_pumps{0}, started{0}, ended{0};
+  int checked = 0, with_notifier = 0, still_attached = 0, woke = 0;
+  const auto t0 = clock_type::now();
+  int round = 0;
+  for (; round < rounds && !::testing::Test::HasFailure(); ++round) {
+    constexpr int kGroups = 4;
+    std::vector<std::shared_ptr<std::atomic<bool>>> torn;
+    std::vector<std::shared_ptr<std::atomic<int>>> pumps;
+    std::vector<std::unique_ptr<s2a_group>> gs;
+    for (int k = 0; k < kGroups; ++k) {
+      auto t = std::make_shared<std::atomic<bool>>(false);
+      auto p = std::make_shared<std::atomic<int>>(0);
+      torn.push_back(t);
+      pumps.push_back(p);
+      gs.push_back(std::make_unique<s2a_group>(
+          w.app, w.tree, "ct02g" + std::to_string(k), group_affinity::any,
+          [&late_pumps, t, p](exec_group::options &o) {
+            o.pump_hook_for_test = [&late_pumps, t, p](exec_group &) {
+              p->fetch_add(1);
+              if (t->load())
+                late_pumps.fetch_add(1);
+            };
+            o.teardown_hook_for_test = [t](exec_group &) { t->store(true); };
+          }));
+    }
+    exec_group *const waiter = &gs[kGroups - 1]->g();
+    register_async_fn(gs[kGroups - 1]->env, waiter->host(), "ct02-wait",
+                      [&, waiter](std::span<const value_t>) -> async_kernel {
+                        return s2a_kernel_until_cancelled(started, ended, [&, waiter] {
+                          ++checked;
+                          if (waiter->sched().has_wake_notifier())
+                            ++with_notifier;
+                          if (w.pool.attached(*waiter))
+                            ++still_attached;
+                          const std::uint64_t before = w.pool.stats().wakes;
+                          waiter->sched().post_message("ct02.late", value_t(int64_t(1)));
+                          if (w.pool.stats().wakes != before)
+                            ++woke;
+                        });
+                      });
+    for (int k = 0; k + 1 < kGroups; ++k)
+      gs[k]->submit("(begin (set i 0) (while #t (set i (+ i 1))))");
+    gs[kGroups - 1]->submit("(begin (ct02-wait) \"never\")");
+    // Read before attaching: a worker may start the waiter's kernel as soon as it is attached.
+    const int target = started.load() + 1;
+    s2a_attached att(w.pool);
+    for (auto &gw : gs)
+      att.attach(gw->g());
+    const bool drove = s2a_drive(
+        w.pool,
+        [&] {
+          return started.load() >= target &&
+                 std::all_of(pumps.begin(), pumps.end(),
+                             [](const auto &p) { return p->load() >= 2; });
+        },
+        kCeiling);
+    if (!drove)
+      break; // att detaches them
+    std::vector<int> order(kGroups);
+    for (int k = 0; k < kGroups; ++k)
+      order[k] = k;
+    std::shuffle(order.begin(), order.end(), rng);
+    unsigned left = kGroups;
+    for (const int k : order) {
+      att.forget(gs[k]->g());
+      gs[k].reset(); // attached, with the workers re-pumping it (or the kernel in flight)
+      --left;
+      EXPECT_EQ(w.pool.stats().attached, left)
+          << "round " << round << ": a teardown left it attached";
+    }
+  }
+  std::printf(
+      "CT-2: %d of %d rounds in %.3f s; late pumps %d; cancel hooks %d (with a notifier %d, "
+      "attached %d, a post that woke %d); kernels %d started, %d ended\n",
+      round, rounds, seconds_since(t0), late_pumps.load(), checked, with_notifier, still_attached,
+      woke, started.load(), ended.load());
+  EXPECT_EQ(round, rounds);
+  EXPECT_EQ(late_pumps.load(), 0) << "a group was pumped after its teardown took the token";
+  EXPECT_EQ(checked, round) << "a teardown's kill did not cancel the kernel";
+  EXPECT_EQ(with_notifier, 0) << "a group still had its notifier after its detach";
+  EXPECT_EQ(still_attached, 0) << "a group was still attached at its kills";
+  EXPECT_EQ(woke, 0) << "a post after the detach woke the group in the pool";
+  EXPECT_EQ(started.load(), ended.load());
+  EXPECT_EQ(w.pool.stats().attached, 0u);
+  EXPECT_EQ(detail::live_groups(w.app), 0u);
+}
+
+// CT-3 (S2.md section 4; S2-Q4, S2-Q5): host bodies and the token in continuous mode, the group
+// pumped by workers (an `any` group of a shared manager), a busy process of its own keeping it
+// pumped and queued.
+// - A non-waiting host_proxied body runs on the attaching thread inside its host loop (pump_host or
+//   wait_for_work), under the group's token: not inside a pump (pumping_here() false); no thread
+//   but this one holds the token (pumped_elsewhere() false here, before and after, and true from a
+//   helper thread in between); no pump of the group begins while it runs.
+// - A waiting body (the proxied call in a generator, which cannot park) runs on the attaching
+//   thread while its blocked worker holds the token (pumped_elsewhere() true), and no other pump
+//   begins.
+// - with_group while the busy group is queued: a worker pops it meanwhile and leaves it notified
+//   (the state word's `notified`), no pump begins under with_group, and it is pumped after the
+//   release.
+TEST(Groups, CT03_HostBodiesAndTheToken) {
+  s2a_app w(2, 200);
+  if (w.pool.threads() == 0) {
+    ADD_FAILURE() << "the pool has no worker";
+    return;
+  }
+  const auto caller = std::this_thread::get_id();
+  std::atomic<std::uint64_t> pumps{0};
+  s2a_group gw(w.app, w.tree, "ct03", group_affinity::any, [&](exec_group::options &o) {
+    o.pump_hook_for_test = [&](exec_group &) { pumps.fetch_add(1); };
+  });
+  exec_group &g = gw.g();
+  std::atomic<bool> in_host_loop{false};
+  struct body_view {
+    std::atomic<bool> ran{false};
+    std::thread::id thread;
+    bool in_host_loop = false, pumping_here = true, mine_before = false, mine_after = false,
+         helper_saw_owner = false;
+    std::uint64_t pumps_before = 0, pumps_after = 0;
+  };
+  body_view plain, waiting;
+  const auto observe = [&](body_view &v) {
+    v.thread = std::this_thread::get_id();
+    v.in_host_loop = in_host_loop.load();
+    v.pumping_here = g.pumping_here();
+    v.pumps_before = pumps.load();
+    v.mine_before = !g.sched().pumped_elsewhere();
+    bool seen = false;
+    std::thread([&] { seen = g.sched().pumped_elsewhere(); }).join();
+    v.helper_saw_owner = seen;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2)); // a pump beside it would begin now
+    v.mine_after = !g.sched().pumped_elsewhere();
+    v.pumps_after = pumps.load();
+    v.ran.store(true);
+  };
+  g.install(
+      gw.env, "plain-body",
+      [&](std::span<const value_t>) -> value_t {
+        observe(plain);
+        return value_t(int64_t(1));
+      },
+      provider_affinity::host_proxied);
+  g.install(
+      gw.env, "waiting-body",
+      [&](std::span<const value_t>) -> value_t {
+        observe(waiting);
+        return value_t(int64_t(2));
+      },
+      provider_affinity::host_proxied);
+  const int busy = gw.submit("(begin (set i 0) (while #t (set i (+ i 1))))");
+  const int p1 = gw.submit("(begin (for i (range 50) nil) (+ (plain-body) 10))");
+  const int p2 = gw.submit("(begin (for i (range 50) nil) (set gen (generator (lambda () "
+                           "(yield (waiting-body))))) (+ (next gen) 20))");
+  s2a_attached att(w.pool);
+  att.attach(g);
+  bool drove = s2a_drive(
+      w.pool, [&] { return plain.ran.load() && waiting.ran.load(); }, kCeiling, 0.01, kNoTimeLimit,
+      &in_host_loop);
+  bool notified_seen = false;
+  std::uint64_t held_before = 0, held_after = 0, at_release = 0;
+  if (drove) {
+    try {
+      w.pool.with_group(g, [&] {
+        held_before = pumps.load();
+        const auto t0 = clock_type::now();
+        const auto notified = [&] {
+          return (g.pool_link().state.load() & detail::group_pool_link::notified) != 0;
+        };
+        while (!notified() && seconds_since(t0) < kCeiling)
+          std::this_thread::yield();
+        notified_seen = notified();
+        held_after = pumps.load();
+      });
+      at_release = pumps.load();
+    } catch (const std::exception &e) {
+      ADD_FAILURE() << "with_group threw: " << e.what();
+      drove = false;
+    }
+  }
+  if (drove)
+    drove = s2a_drive(w.pool, [&] { return pumps.load() > at_release; }, kCeiling);
+  if (drove) {
+    w.pool.with_group(g, [&] { g.sched().kill(busy); });
+    drove = s2a_drive(
+        w.pool,
+        [&] {
+          bool d = false;
+          w.pool.with_group(g, [&] { d = finished(g.sched(), p1) && finished(g.sched(), p2); });
+          return d;
+        },
+        kCeiling);
+  }
+  att.detach_all();
+  ASSERT_TRUE(drove);
+  EXPECT_EQ(gw.outcome(p1), "11");
+  EXPECT_EQ(gw.outcome(p2), "22");
+  EXPECT_EQ(plain.thread, caller) << "the plain body ran off the attaching thread";
+  EXPECT_TRUE(plain.in_host_loop) << "the plain body ran outside pump_host and wait_for_work";
+  EXPECT_FALSE(plain.pumping_here) << "the plain body ran inside a pump";
+  EXPECT_TRUE(plain.mine_before && plain.mine_after) << "another thread held the token";
+  EXPECT_TRUE(plain.helper_saw_owner) << "the plain body ran without the group's token";
+  EXPECT_EQ(plain.pumps_after, plain.pumps_before) << "a pump began beside the plain body";
+  EXPECT_EQ(waiting.thread, caller) << "the waiting body ran off the attaching thread";
+  EXPECT_TRUE(waiting.in_host_loop) << "the waiting body ran outside pump_host and wait_for_work";
+  EXPECT_FALSE(waiting.pumping_here);
+  EXPECT_FALSE(waiting.mine_before) << "the waiting body's worker did not hold the token";
+  EXPECT_TRUE(waiting.helper_saw_owner);
+  EXPECT_EQ(waiting.pumps_after, waiting.pumps_before) << "a pump began beside the waiting body";
+  EXPECT_TRUE(notified_seen) << "a worker's pop under with_group did not leave the group notified";
+  EXPECT_EQ(held_after, held_before) << "a pump began under with_group";
+  EXPECT_GT(pumps.load(), at_release) << "not pumped after with_group's release";
+}
+
+// CT-4 (S2.md section 4; S2-Q4, td 4.14): groups that stay on their attaching thread. A pool with
+// four workers, built apart from the apps, has three groups attached: one of an app whose lock
+// manager is single (caller_only), a host-affinity one of an app whose manager is shared, and an
+// `any` group of that app beside them. Each runs a loop over many 200-step pumps; the pump hooks
+// record the threads: the first two were pumped by the attaching thread only, the `any` one by
+// workers only.
+TEST(Groups, CT04_CallerOnlyGroupsStayOnTheirThread) {
+  cvc::pool_options po;
+  po.threads = 4;
+  po.pump_steps = 200;
+  po.pump_seconds = kNoTimeLimit;
+  cvc::exec_pool pool(po);
+  if (pool.threads() == 0) {
+    ADD_FAILURE() << "the pool has no worker";
+    return;
+  }
+  cvc::app single_app, shared_app;
+  cvc::state &single_tree = cvc::state::instance(single_app);
+  cvc::state &shared_tree = cvc::state::instance(shared_app);
+  single_tree("state_exec.locks.threading").value(std::string("single"));
+  shared_tree("state_exec.locks.threading").value(std::string("shared"));
+  pump_threads single_on, host_on, any_on;
+  const auto noting = [](pump_threads &where) {
+    return [&where](exec_group::options &o) {
+      o.pump_hook_for_test = [&where](exec_group &) { where.note(); };
+    };
+  };
+  s2a_group single(single_app, single_tree, "ct04single", group_affinity::any, noting(single_on));
+  s2a_group host(shared_app, shared_tree, "ct04host", group_affinity::host, noting(host_on));
+  s2a_group roaming(shared_app, shared_tree, "ct04any", group_affinity::any, noting(any_on));
+  ASSERT_TRUE(single.g().pool_link().caller_only);
+  ASSERT_FALSE(host.g().pool_link().caller_only);
+  ASSERT_FALSE(roaming.g().pool_link().caller_only);
+  std::atomic<int> completed{0};
+  const auto count = [&](value_t) { completed.fetch_add(1); };
+  const std::string loop = "(begin (set i 0) (while (< i 20000) (set i (+ i 1))) \"done\")";
+  const int ps = single.submit(loop, count), ph = host.submit(loop, count),
+            pa = roaming.submit(loop, count);
+  s2a_attached att(pool);
+  att.attach(single.g());
+  att.attach(host.g());
+  att.attach(roaming.g());
+  const bool drove = s2a_drive(pool, [&] { return completed.load() == 3; }, 60.0, 0.01, 0.05);
+  att.detach_all();
+  const cvc::pool_stats s = pool.stats();
+  const auto caller = std::this_thread::get_id();
+  const std::vector<std::thread::id> si = single_on.get(), hi = host_on.get(), ai = any_on.get();
+  const auto all_caller = [&](const std::vector<std::thread::id> &ids) {
+    return std::all_of(ids.begin(), ids.end(), [&](std::thread::id t) { return t == caller; });
+  };
+  const auto none_caller = [&](const std::vector<std::thread::id> &ids) {
+    return std::none_of(ids.begin(), ids.end(), [&](std::thread::id t) { return t == caller; });
+  };
+  std::printf("CT-4: pumps: single-manager %zu, host-affinity %zu, any %zu; host pumps %llu, "
+              "worker pumps %llu\n",
+              si.size(), hi.size(), ai.size(), static_cast<unsigned long long>(s.host_pumps),
+              static_cast<unsigned long long>(s.worker_pumps));
+  ASSERT_TRUE(drove);
+  EXPECT_EQ(single.outcome(ps), "done");
+  EXPECT_EQ(host.outcome(ph), "done");
+  EXPECT_EQ(roaming.outcome(pa), "done");
+  EXPECT_GT(si.size(), 1u);
+  EXPECT_GT(hi.size(), 1u);
+  EXPECT_TRUE(all_caller(si)) << "a worker pumped the single-manager group";
+  EXPECT_TRUE(all_caller(hi)) << "a worker pumped the host-affinity group";
+  EXPECT_TRUE(none_caller(ai)) << "the attaching thread pumped the any group";
+  EXPECT_GE(s.host_pumps, static_cast<std::uint64_t>(si.size() + hi.size()));
+}
+
+// ST-3 (td 8.8): group churn with kernels in flight. 10^4 groups in Release (500 in Debug, 300
+// under a sanitizer), eight at a time, each attached with one program parked on a background
+// kernel that runs until cancelled, destroyed attached once its kernel has started: the teardown's
+// kill cancels the kernel and its host waits for it. After a warm-up batch (the kernel pool's
+// threads), the process's thread count stays flat (at most 4 more) and its handles too (at most
+// 64 + 1 per 50 groups more), every kernel ended, and no group is left (detail::live_groups) or
+// attached. ASan in CI checks for leaks. The kernels wait on something outside the program, so
+// they are io calls (async_options::io), on background_io, sized here to a batch and two: on
+// background_cpu, max(1, cores - exec workers) (one thread on a 4-core runner), one kernel of a
+// batch would start.
+TEST(Groups, ST03_GroupChurnWithKernelsInFlight) {
+  const int total = under_sanitizer() ? 300 : kDebugBuild ? 500 : 10000;
+  constexpr int kBatch = 8;
+  s2a_app w(4, 2000);
+  w.app.setThreadPoolSize(kBatch + 2);
+  async_options io_call;
+  io_call.io = true;
+  std::atomic<int> started{0}, ended{0};
+  int made = 0;
+  const auto churn = [&](int n) -> bool {
+    for (int done = 0; done < n; done += kBatch) {
+      std::vector<std::unique_ptr<s2a_group>> batch;
+      const int target = started.load() + kBatch;
+      for (int k = 0; k < kBatch; ++k) {
+        batch.push_back(std::make_unique<s2a_group>(w.app, w.tree, "st03g" + std::to_string(k)));
+        s2a_group &gw = *batch.back();
+        register_async_fn(
+            gw.env, gw.g().host(), "st03-wait",
+            [&](std::span<const value_t>) -> async_kernel {
+              return s2a_kernel_until_cancelled(started, ended);
+            },
+            io_call);
+        gw.submit("(begin (st03-wait) \"never\")");
+        w.pool.attach(gw.g());
+        ++made;
+      }
+      if (!s2a_drive(w.pool, [&] { return started.load() >= target; }, kCeiling)) {
+        for (auto &gw : batch)
+          if (w.pool.attached(gw->g()))
+            w.pool.detach(gw->g());
+        return false;
+      }
+      batch.clear(); // destroyed attached, their kernels in flight
+      if (w.pool.stats().attached != 0) {
+        ADD_FAILURE() << "a destroyed group was left attached";
+        return false;
+      }
+    }
+    return true;
+  };
+  ASSERT_TRUE(churn(kBatch)) << "the warm-up batch";
+  const long threads0 = s2a_thread_count(), handles0 = s2a_handle_count();
+  const auto t0 = clock_type::now();
+  const bool churned = churn(total);
+  const double took = seconds_since(t0);
+  const long threads1 = s2a_thread_count(), handles1 = s2a_handle_count();
+  std::printf("ST-3: %d groups (%d with the warm-up) in %.3f s at threads %u; threads %ld -> %ld, "
+              "handles %ld -> %ld; kernels %d started, %d ended\n",
+              total, made, took, w.pool.threads(), threads0, threads1, handles0, handles1,
+              started.load(), ended.load());
+  ASSERT_TRUE(churned);
+  EXPECT_EQ(started.load(), made);
+  EXPECT_EQ(ended.load(), started.load()) << "a kernel outlived its group";
+  EXPECT_EQ(detail::live_groups(w.app), 0u);
+  EXPECT_EQ(w.pool.stats().attached, 0u);
+  if (threads0 >= 0 && threads1 >= 0)
+    EXPECT_LE(threads1, threads0 + 4) << "threads grew with the groups";
+  if (handles0 >= 0 && handles1 >= 0)
+    EXPECT_LE(handles1, handles0 + 64 + total / 50) << "handles grew with the groups";
+}

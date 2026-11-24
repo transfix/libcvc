@@ -1004,7 +1004,8 @@ tf_binding::tf_binding(std::shared_ptr<GraphicsNode> node, tf_target target, con
   d.app = &node->app();
   d.base = node->stateName();
   d.name = node->getName();
-  _model_path = d.model_key = node->stateName("transfer_function");
+  _model_path = d.model_key =
+      d.opt.model_key.empty() ? node->stateName("transfer_function") : d.opt.model_key;
   d.owner = task_owner(*d.app, d.model_key);
   tf_bindings &bindings = d.app->slot<tf_bindings>();
   {
@@ -1132,11 +1133,10 @@ bool tf_binding::wait_overlays(double timeout_s) {
   return finished;
 }
 
-std::shared_ptr<tf_binding> attach_transfer_function(RealizedScene &out,
-                                                     std::shared_ptr<GraphicsNode> node,
-                                                     tf_target target, const cvc::volume &vol,
-                                                     tf_binding_options opt,
-                                                     std::vector<std::string> *warnings) {
+std::shared_ptr<tf_binding> make_transfer_function(std::shared_ptr<GraphicsNode> node,
+                                                   tf_target target, const cvc::volume &vol,
+                                                   tf_binding_options opt,
+                                                   std::vector<std::string> *warnings) {
   if (!node)
     return nullptr;
   std::shared_ptr<tf_binding> b;
@@ -1148,13 +1148,22 @@ std::shared_ptr<tf_binding> attach_transfer_function(RealizedScene &out,
                           "': transfer-function binding failed: " + e.what());
     return nullptr;
   }
-  {
-    tf_bindings &bindings = node->app().slot<tf_bindings>();
-    std::lock_guard<std::mutex> lock(bindings.m);
-    bindings.prune();
-    bindings.live[b->model_path()] = b;
-  }
-  out.custom_ticks.push_back([b](vtkRenderer *) { b->tick(); });
+  tf_bindings &bindings = node->app().slot<tf_bindings>();
+  std::lock_guard<std::mutex> lock(bindings.m);
+  bindings.prune();
+  bindings.live[b->model_path()] = b;
+  return b;
+}
+
+std::shared_ptr<tf_binding> attach_transfer_function(RealizedScene &out,
+                                                     std::shared_ptr<GraphicsNode> node,
+                                                     tf_target target, const cvc::volume &vol,
+                                                     tf_binding_options opt,
+                                                     std::vector<std::string> *warnings) {
+  std::shared_ptr<tf_binding> b =
+      make_transfer_function(std::move(node), target, vol, std::move(opt), warnings);
+  if (b)
+    out.custom_ticks.push_back([b](vtkRenderer *) { b->tick(); });
   return b;
 }
 

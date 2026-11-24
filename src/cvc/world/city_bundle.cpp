@@ -259,8 +259,8 @@ city_bundle load_city_bundle(app &ctx, const city_bundle_reader &read, const std
   return load_city_bundle_impl(ctx, read, label, std::string(), options);
 }
 
-city_bundle load_city_bundle(app &ctx, const std::string &dir, const city_bundle_options &options) {
-  const city_bundle_reader from_dir = [&dir](const std::string &name) {
+city_bundle_reader city_bundle_dir_reader(const std::string &dir) {
+  return [dir](const std::string &name) {
     const fs::path p = fs::path(dir) / name;
     std::error_code ec;
     if (!fs::is_regular_file(p, ec))
@@ -270,7 +270,10 @@ city_bundle load_city_bundle(app &ctx, const std::string &dir, const city_bundle
                                                std::istreambuf_iterator<char>());
     return std::shared_ptr<const std::string>(std::move(bytes));
   };
-  return load_city_bundle_impl(ctx, from_dir, dir, dir, options);
+}
+
+city_bundle load_city_bundle(app &ctx, const std::string &dir, const city_bundle_options &options) {
+  return load_city_bundle_impl(ctx, city_bundle_dir_reader(dir), dir, dir, options);
 }
 
 } // namespace world

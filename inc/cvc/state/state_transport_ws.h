@@ -160,6 +160,12 @@ public:
   // only on a full refresh: once, when it asks (request_full_refresh) -- for state it dropped on
   // its own side, which the relay cannot see.
   //
+  // A path the peer was sent that has left the tree since (deleted, and the live delete never
+  // reached it: filtered, or skipped for backlog) is taken from it with a delete
+  // (state_transport::tree_removal), one per removed subtree, after the call's snapshot frames. A
+  // path that only left the peer's view is forgotten, as before, so it is sent again if it comes
+  // back into view.
+  //
   // Each connection's frame honours the peer registry: it holds only the entries its
   // state_peer_registry::delivery_view passes. Shard snapshots are taken once per call.
   std::size_t broadcast_snapshot();
@@ -318,6 +324,11 @@ public:
   std::uint64_t total_backfilled() const noexcept { return _backfilled.load(); }
   // Snapshot entries broadcast_snapshot has written, summed over connections.
   std::uint64_t total_broadcast_entries() const noexcept { return _broadcast_entries.load(); }
+  // Deletes broadcast_snapshot sent for paths that left the tree, summed over connections.
+  std::uint64_t total_broadcast_deletes() const noexcept { return _broadcast_deletes.load(); }
+  // Deletes repeated to admitted peers after their admit snapshot (state_transport::
+  // missed_deletes), when backfill_on_connect is off.
+  std::uint64_t total_deletes_repeated() const noexcept { return _deletes_repeated.load(); }
 
   // Wait until at least `target` MUTATION frames have been received (Hello frames
   // are not counted) or `timeout` elapses; returns the count reached.
@@ -474,6 +485,8 @@ private:
   std::atomic<std::uint64_t> _delivered{0};
   std::atomic<std::uint64_t> _backfilled{0};
   std::atomic<std::uint64_t> _broadcast_entries{0};
+  std::atomic<std::uint64_t> _broadcast_deletes{0};
+  std::atomic<std::uint64_t> _deletes_repeated{0};
   // broadcast_snapshot's call count: a connection's remembered paths carry the last call that
   // delivered them, so a path the peer no longer gets (or that left the tree) is dropped.
   std::atomic<std::uint64_t> _broadcast_round{0};

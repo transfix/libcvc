@@ -1255,6 +1255,19 @@ object. The thin accessors are exactly read-modify-writes of that:
 | `raycastWidth()` / `raycastHeight()` | the raster of the last **applied** frame | the honest ray count for a readout, not `viewport × scale` re-derived |
 | `invalidateVolumeData()` | deferred `invalidate_device_volumes()` | see below |
 
+**Views.** Another renderer that draws the scene from a camera of its own (an Ariadne
+`viewport`, a thumbnail) asks `viewProp(renderer)` for the node each time it draws: a quad of its
+own showing a raycast of its own, for that renderer's camera at that renderer's size times
+`resolutionScale()`, with that camera's near and far pushed for its depth test at each draw. Each
+view has its own camera, picture, depth map, quad and job slot; the slots take turns on the
+node's one worker thread and raycaster, so views share its thread pool, its cached shadow maps
+(they do not depend on the camera) and the app's CUDA device cache, and one view's camera moving
+never replaces another's job. A view raycasts again only when its own snapshot changes, never while
+it is hidden, and `releaseViewProp(renderer)` (or the renderer going away) drops it. `converged()`
+counts the views drawn since the last `tick()`; `viewStats(renderer)` reports one view's jobs
+launched and frames applied, its raster and whether it has settled. A view's quad casts no shadow:
+a picture raycast for its camera is not what a light sees.
+
 **The composite filters PREMULTIPLIED color.** The node uploads `frame::color`
 **verbatim** — the raycaster's background is forced to black, so its RGB is
 already the volume's color times its own alpha — and a `//VTK::TCoord::Impl`

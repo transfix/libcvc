@@ -172,6 +172,9 @@ struct WorldRT {
   // The sea past a shore-edged world (world::outer_sea), under <id>_water too: made the first time
   // a world has one, emptied for a world that has none.
   std::weak_ptr<GeometryNode> outer_sea;
+  // The rock under a floating world (world::world_underside: the wall and none edges), under
+  // <id>_underside: made the first time a world has one, emptied for a shore-edged world.
+  std::weak_ptr<GeometryNode> underside;
   std::shared_ptr<WorldJob> job; // the running job, or null
   int task = -1;                 // its sliced task's pid
   // A made world going into the scene a piece at a time (put_world_step), or null. The job stays
@@ -611,6 +614,35 @@ void put_outer_sea(SceneGraph &sg, const std::string &id, WorldRT &rt,
   style_water(*n, {}); // after setGeometry, as make_mesh's
 }
 
+// The shown world's rock beneath it (world::world_underside): a floating world (the wall and none
+// edges) has one, lit as the ground's solids are, in its own vertex colours; it casts no shadow
+// (nothing lies below it to take one). A shore-edged world empties the node.
+void put_underside(SceneGraph &sg, const std::string &id, WorldRT &rt,
+                   const world::generated_world &w) {
+  const cvc::geometry g = world::world_underside(w);
+  auto n = rt.underside.lock();
+  if (!n) {
+    if (g.const_points().empty())
+      return;
+    std::shared_ptr<GraphicsNode> group = sg.getGraphics(id + "_underside");
+    if (!group) {
+      group = sg.addGraphics(id + "_underside");
+      group->setVisible(rt.shown); // a hidden world's rock stays hidden
+    }
+    n = std::dynamic_pointer_cast<GeometryNode>(
+        group->createChild<GeometryNode>("rock", cvc::geometry()));
+    rt.underside = n;
+    if (!n)
+      return;
+  }
+  n->setGeometry(g);
+  n->setUseSingleColor(false); // after setGeometry, as make_mesh's: its vertex colours
+  n->setAmbient(0.5);
+  n->setDiffuse(0.7);
+  n->setSpecular(0.0);
+  n->setCastsShadow(false);
+}
+
 // A merged mesh of the new world as a hidden child of its holder; none when the world has none.
 std::weak_ptr<GeometryNode> make_mesh(GeometryNode &holder, const std::string &name,
                                       const cvc::geometry &g,
@@ -695,8 +727,8 @@ void begin_world_install(WorldRT &rt, std::shared_ptr<WorldJob> job) {
 }
 
 // The parts of the world beside the terrain node, which follow its visibility.
-const char *const kWorldParts[] = {"_props",     "_foliage", "_needles",
-                                   "_buildings", "_roads",   "_water"};
+const char *const kWorldParts[] = {"_props", "_foliage", "_needles",  "_buildings",
+                                   "_roads", "_water",   "_underside"};
 
 // A world's nodes on their way out: hidden now, removed later (retire_world_step).
 void retire_world_nodes(SceneGraph &sg, const std::string &id, WorldRT &rt,
@@ -846,6 +878,7 @@ void swap_world(SceneGraph &sg, const std::string &id, WorldRT &rt) {
   rt.color = in.job->color;
   *rt.field = *rt.w->terrain; // the published ground follows the world
   put_outer_sea(sg, id, rt, *rt.w);
+  put_underside(sg, id, rt, *rt.w);
   { // the world shown is the node's dataset: its physics, its grid, generated_world(id). The
     // task wrote a rebuild's bundle; the first world's is written here.
     std::vector<std::string> why;
@@ -931,11 +964,26 @@ bool put_world_step(SceneGraph &sg, const std::string &id, WorldRT &rt, double b
   return false;
 }
 
-// A WorldJob as a sliced task: a rebuild steps a world_builder and then paints the new world's
-// texture; a repaint only paints. Natively each step runs on the background pool, on
-// single-threaded wasm a few milliseconds a frame on the scheduler thread; either way it writes
-// only its job (a repaint reads the shown world, which nothing changes while it runs), and the
-// tick takes the job in once `done` is set. The builder's own stages name the phase.
+// The job's world as its bundle (world::generated_world_bundle), its ground the job's texture when
+// that is the bundle's ground (the material colours at world::world_ground_size), else painted
+// for it.
+world::city_bundle_files generated_world_bundle_of(cvc::app &app, const WorldJob &job, int size) {
+  world::world_ground ground;
+  if (job.color == int(world::surface_color::material) && size == world::world_ground_size &&
+      job.texture.size() == std::size_t(size) * std::size_t(size) * 3) {
+    ground.width = ground.height = size;
+    ground.rgb = job.texture;
+  }
+  return world::generated_world_bundle(app, *job.world, CVC_VERSION_STRING,
+                                       ground.empty() ? nullptr : &ground);
+}
+
+// A WorldJob as a sliced task: a rebuild steps a world_builder, paints the new world's texture,
+// then writes the world as its bundle; a repaint only paints. Natively each step runs on the
+// background pool, on single-threaded wasm a few milliseconds a frame on the scheduler thread;
+// either way it writes only its job (a repaint reads the shown world, which nothing changes while
+// it runs), and the tick takes the job in once `done` is set. The builder's own stages name the
+// phase.
 class WorldTask : public cvc::sliced_job {
 public:
   WorldTask(cvc::app &app, std::shared_ptr<WorldJob> job, const world::generated_world_params &p,
@@ -961,30 +1009,36 @@ public:
         }
         return done();
       }
-      if (!_bundled) {
-        // The world as its bundle, here rather than on the frame thread when it goes in (a 1.2 km
-        // world's is about 30 MB and 1.6 s to write): its dataset is that bundle read back.
-        set("bundle", kBuildShare);
-        try {
-          if (cvc::can_write_model_to_memory(".glb"))
-            _job->bundle = world::generated_world_bundle(*_app, *_job->world, CVC_VERSION_STRING);
-        } catch (const std::exception &e) {
-          _job->bundle_error = e.what();
+      if (!_painted) {
+        if (!_painter)
+          _painter = std::make_unique<world::surface_painter>(
+              *_job->world, world::surface_color(_job->color), _size);
+        const bool ready = _painter->step(budget);
+        const double from = _job->rebuild ? kBuildShare : 0.0, to = _job->rebuild ? kPaintEnd : 1.0;
+        set("paint", from + (to - from) * _painter->progress());
+        if (ready) {
+          _job->texture = _painter->take();
+          _job->water = _painter->take_water();
+          _painter.reset();
+          _painted = true;
+          if (_bundled)
+            finish();
         }
-        _bundled = true;
         return done();
       }
-      if (!_painter)
-        _painter = std::make_unique<world::surface_painter>(
-            *_job->world, world::surface_color(_job->color), _size);
-      const bool ready = _painter->step(budget);
-      const double from = _job->rebuild ? kBuildShare : 0.0, to = _job->rebuild ? kPaintEnd : 1.0;
-      set("paint", from + (to - from) * _painter->progress());
-      if (ready) {
-        _job->texture = _painter->take();
-        _job->water = _painter->take_water();
-        finish();
+      // The world as its bundle, here rather than on the frame thread when it goes in (a 1.2 km
+      // world's is about 30 MB and 1.6 s to write): its dataset is that bundle read back. Its
+      // ground is the texture just painted when that is the bundle's (the material colours at
+      // world_ground_size); in another colour or size it is painted again for the bundle.
+      set("bundle", kPaintEnd);
+      try {
+        if (cvc::can_write_model_to_memory(".glb"))
+          _job->bundle = generated_world_bundle_of(*_app, *_job, _size);
+      } catch (const std::exception &e) {
+        _job->bundle_error = e.what();
       }
+      _bundled = true;
+      finish();
     } catch (const std::exception &e) {
       _job->error = e.what();
       finish();
@@ -1024,7 +1078,7 @@ private:
   std::shared_ptr<WorldJob> _job;
   std::shared_ptr<ari::ResolvedFile> _file;
   int _size;
-  bool _bundled = true;
+  bool _bundled = true, _painted = false;
   std::unique_ptr<world::world_builder> _builder;
   std::unique_ptr<world::surface_painter> _painter;
   std::atomic<const char *> _phase{"terrain"};
@@ -1180,6 +1234,12 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     first->color = rt->color;
     first->texture = painter.take();
     first->water = painter.take_water();
+    try { // its dataset: the world as its bundle, its ground this texture when it can be
+      if (cvc::can_write_model_to_memory(".glb"))
+        first->bundle = generated_world_bundle_of(app, *first, rt->texture_size);
+    } catch (const std::exception &e) {
+      first->bundle_error = e.what();
+    }
     begin_world_install(*rt, first);
     while (!put_world_step(sg, n.id, *rt, 1e9)) {
     }

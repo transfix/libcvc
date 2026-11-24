@@ -1,0 +1,22 @@
+# processes_app.ari — the application processes_component.ari loads: a menubar of its own (so it
+# is an application, docs/ARIADNE.md §5.25) and an on_tick:, whose resident the Processes window
+# lists as this document's.
+
+meta:
+  name: Worker
+  min_libcvc: 4.0.6
+
+menubar:
+  - menu: Work
+    items:
+      - menu_item: Reset
+        on: (state-set "ticks" "0")
+
+on_tick: (state-set "ticks" (str (+ 1 (int (if (is-null (state-get "ticks")) 0 (state-get "ticks"))))))
+
+windows:
+  - window: Worker
+    id: worker
+    children:
+      - text: "ticks"
+        bind: ticks

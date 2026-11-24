@@ -105,7 +105,7 @@ TEST(VolumeGridParams, TheTablesRoundTripThroughTheTree) {
   EXPECT_EQ(grid("slice.x").value(), "3");
   EXPECT_EQ(grid("slice.y").value(), "-1");
   EXPECT_EQ(grid("slice.z").property("unit"), "voxel");
-  EXPECT_EQ(grid("tool").property("choices"), "navigate,points,probe");
+  EXPECT_EQ(grid("tool").property("choices"), "navigate,points,probe,contours");
   const auto back = cvc::params_from_state<cvc::volume_grid_params>(grid);
   ASSERT_TRUE(back.ok()) << back.message();
   EXPECT_EQ(back.value.view, cvc::grid_view::zy);

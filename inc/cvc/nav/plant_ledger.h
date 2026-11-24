@@ -18,6 +18,13 @@
 // applicable, and a reader shows it as such, not as its default. On the kinematic plant none
 // applies.
 //
+// The CoPH ledger's items (coph_tracked: a coph_driver drove the vehicle, D11 of
+// docs/roadmap/NAV-COPH-ROADMAP.md) are their own tables, plant_ledger_coph_vehicle() and
+// plant_ledger_coph_episode(). The JSON and cvcGL's publish_nav_stats write them only for a vehicle
+// (an episode) CoPH drove, so every other run, and every reader that takes a column or a key per
+// item of the first two tables (nav_arms' .cvcrun columns, the panels, pycvc's item lists), is
+// unchanged.
+//
 //   for (const cvc::nav::plant_ledger_item &it : cvc::nav::plant_ledger_vehicle())
 //     if (cvc::nav::plant_ledger_applies(it, v))
 //       show(it.key, it.veh(v), it.unit);
@@ -44,6 +51,7 @@ struct plant_ledger_item {
   enum class source : std::uint8_t {
     energy, // energy_tracked: what the plant's vehicles drew, and their building contacts
     plant,  // plant_tracked: the plant's samples of its vehicles
+    coph,   // coph_tracked: a coph_driver's ledger of the vehicles it drove
   };
   const char *key;     // the JSON's and the state tree's: .veh.<i>.<key>, .episode.<key>
   const char *unit;    // "" a count or flag, "1" a ratio
@@ -59,9 +67,12 @@ struct plant_ledger_item {
 // Each vehicle's items, then the episode's, in their JSON order: constant tables.
 std::span<const plant_ledger_item> plant_ledger_vehicle();
 std::span<const plant_ledger_item> plant_ledger_episode();
+// The CoPH ledger's items (source coph), each vehicle's and the episode's: constant tables.
+std::span<const plant_ledger_item> plant_ledger_coph_vehicle();
+std::span<const plant_ledger_item> plant_ledger_coph_episode();
 
-// Whether `it` has a value for this vehicle (episode): its plant fed its source and measures
-// what it is reduced from. False: not applicable.
+// Whether `it` has a value for this vehicle (episode): its plant (its coph_driver) fed its
+// source and measures what it is reduced from. False: not applicable.
 bool plant_ledger_applies(const plant_ledger_item &it, const veh_nav_stats &v);
 bool plant_ledger_applies(const plant_ledger_item &it, const episode_nav_stats &e);
 

@@ -8,6 +8,12 @@ with its notice exactly as the source carries it. It is installed with the
 documentation by the libcvc and cvcGL installs and ships in the libcvc-examples
 and libcvc-examples-web packages.
 
+The VolumeRover and TexMol library ports are The University of Texas at Austin's
+own code under the same LGPL-2.1, so they need no notice here. Of them, SecondaryStructures
+(`src/cvc/geometry/secondary`) comes from volrover's copy, whose files carry UT's
+LGPL-2.1 header; TexMol's copy carries none. It is LGPL-2.1 like the rest (Joe,
+2026-11-21).
+
 Compiled into libcvc:
 
 - [stb_image / stb_image_write](#stb_image-230-and-stb_image_write-116)
@@ -1337,6 +1343,9 @@ https://creativecommons.org/publicdomain/zero/1.0/. The repository asks that the
   bacterial chaperonin GroEL (4,186 atoms), as distributed in 1995. cvc::mol's tests read it.
 - `src/cvc/tests/data/texmol-goldens/blur/` -- TexMol's blur maps of it and the atoms TexMol's
   parser read from it (`tools/texmol-goldens`), for the blur's parity test.
+- `tools/volrover-goldens/inputs/secondary/1grl.pts` -- the isosurface of its blur map, and
+  `src/cvc/tests/data/volrover-goldens/secondary/1grl.*`, what the legacy SecondaryStructures
+  found on it, for the port's parity test.
 
 Source: the Protein Data Bank, https://www.rcsb.org/structure/1GRL. Described in Braig K,
 Otwinowski Z, Hegde R, Boisvert DC, Joachimiak A, Horwich AL, Sigler PB (1994), "The crystal

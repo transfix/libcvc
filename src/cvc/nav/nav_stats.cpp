@@ -63,11 +63,15 @@ void num_sentinel(std::ostringstream &o, double v) {
     num(o, v);
 }
 // The plant ledger's items from one source (plant_ledger.h), in its order: null where an item is
-// not applicable.
+// not applicable. The CoPH ledger's are their own tables.
 template <class R>
 void ledger_json(std::ostringstream &o, const R &r, plant_ledger_item::source from) {
   constexpr bool veh = std::is_same_v<R, veh_nav_stats>;
-  for (const plant_ledger_item &it : veh ? plant_ledger_vehicle() : plant_ledger_episode()) {
+  const bool coph = from == plant_ledger_item::source::coph;
+  const std::span<const plant_ledger_item> table =
+      veh ? (coph ? plant_ledger_coph_vehicle() : plant_ledger_vehicle())
+          : (coph ? plant_ledger_coph_episode() : plant_ledger_episode());
+  for (const plant_ledger_item &it : table) {
     if (it.from != from)
       continue;
     o << ",\"" << it.key << "\":";
@@ -290,6 +294,23 @@ void nav_stats_collector::step(const float *pos, const float *head, const float 
       if (ps.accel_cmd < 0.0)
         ++brake_n_[i];
     }
+    if (smp.coph && smp.coph[i].attached) { // the CoPH ledger: a coph_driver's terms (D11)
+      const coph_sample &cs = smp.coph[i];
+      v.coph_tracked = true;
+      if (cs.step) {
+        ++v.coph_steps;
+        v.coph_residual_max = std::max(v.coph_residual_max, std::fabs(cs.residual));
+      }
+      v.coph_work += cs.work;
+      v.coph_heat += cs.heat;
+      v.coph_kinetic_change += cs.kinetic_change;
+      v.coph_residual += cs.residual;
+      v.coph_shaping_jumps += cs.shaping_jumps;
+      v.coph_unallocated_work += cs.unallocated_work;
+      v.coph_risk_cost += cs.risk_cost;
+      v.coph_e2 += cs.e2;
+      v.coph_u2 += cs.u2;
+    }
     if (smp.drive) { // drive telemetry: accumulate sums (divided in finish) + running peaks
       const drive_sample &ds = smp.drive[i];
       ++v.drive_steps;
@@ -407,6 +428,8 @@ void nav_stats_collector::finish_vehicle(veh_nav_stats &v, std::size_t i, double
     v.steer_sat_share = steer_sat_n_[i] / pn;
     v.brake_share = brake_n_[i] / pn;
   }
+  if (v.coph_tracked) // the CoPH ledger: the allocation residual from its sums
+    v.coph_allocation_residual = v.coph_u2 > 0 ? std::sqrt(v.coph_e2 / v.coph_u2) : 0.0;
 }
 
 episode_nav_stats nav_stats_collector::finish() const {
@@ -467,6 +490,14 @@ episode_nav_stats nav_stats_collector::finish() const {
         if (ep.first_roll_s < 0 || v.rolled_over_s < ep.first_roll_s)
           ep.first_roll_s = v.rolled_over_s;
       }
+    }
+    if (v.coph_tracked) {
+      ep.coph_tracked = true;
+      ++ep.coph_vehicles;
+      ep.total_coph_work += v.coph_work;
+      ep.total_coph_heat += v.coph_heat;
+      ep.total_coph_unallocated_work += v.coph_unallocated_work;
+      ep.coph_residual_max = std::max(ep.coph_residual_max, v.coph_residual_max);
     }
   }
   ep.arrived = arrived;
@@ -605,6 +636,8 @@ std::string episode_nav_stats::to_json() const {
     o << ",\"total_infeasible_slope_steps\":" << total_infeasible_slope_steps;
   if (plant_tracked)
     ledger_json(o, *this, plant_ledger_item::source::plant);
+  if (coph_tracked)
+    ledger_json(o, *this, plant_ledger_item::source::coph);
   o << ",\"coverage\":{\"explored_frac\":";
   num(o, coverage.explored_frac);
   o << ",\"visible_frac\":";
@@ -701,6 +734,8 @@ std::string episode_nav_stats::to_json() const {
       o << ",\"infeasible_slope_steps\":" << v.infeasible_slope_steps;
     if (v.plant_tracked)
       ledger_json(o, v, plant_ledger_item::source::plant);
+    if (v.coph_tracked)
+      ledger_json(o, v, plant_ledger_item::source::coph);
     o << '}';
   }
   o << "]}";
