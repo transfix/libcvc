@@ -1442,6 +1442,14 @@ add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
 
+# SceneGraph::setShadowStaticCache: while only some casters move, a bake draws just those over a
+# copy of the static casters' maps. A scene with the cache and one without, the same changes to
+# both every frame: the same pictures byte for byte (a moving caster's shadow in the frame it
+# moved, a building's shadow on it), and which bakes were whole. Renders; skips without GL.
+add_executable(cvcgl_shadow_static_cache test/cvcgl_shadow_static_cache.cpp)
+target_link_libraries(cvcgl_shadow_static_cache PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_static_cache COMMAND cvcgl_shadow_static_cache)
+
 # Between bakes (an update interval over 1) a caster that moved is shaded as it stood at the last
 # bake: lowered or tilted, its sunlit top is as bright as under fresh maps, and the props that did
 # not move draw the same. Before, it shadowed itself where it had moved behind its baked surface,
