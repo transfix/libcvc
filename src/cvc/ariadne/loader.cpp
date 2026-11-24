@@ -3939,8 +3939,8 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
     }
   }
   if (const YAML::Node ck = s["clock"]; ck && ck.IsMap()) {
-    // clock: { scale, paused, speed_key, paused_key, time_key, tick_key, hz } — the scene's
-    // simulation clock (SceneClock). All fields optional: a bare `clock: {}` wires to
+    // clock: { scale, paused, speed_key, paused_key, time_key, tick_key, hz, max_lag } — the
+    // scene's simulation clock (SceneClock). All fields optional: a bare `clock: {}` wires to
     // sim_transport.ari with the defaults. An explicit empty string for a *_key disables that lane
     // (no steer / no publish).
     sc.clock.present = true;
@@ -3963,6 +3963,15 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
                  std::to_string(static_cast<int>(cvc::kSimRateMin)) + " to " +
                  std::to_string(static_cast<int>(cvc::kSimRateMax)) + "; the world runs at " +
                  std::to_string(static_cast<int>(cvc::kSimRateDefault)) + " Hz");
+    }
+    if (ck["max_lag"]) { // how far the world may fall behind its clock (SceneClock::max_lag)
+      const double lag = num(ck, "max_lag", 0.0);
+      if (cvc::sim_catchup_valid(lag))
+        sc.clock.max_lag = lag;
+      else
+        ctx.warn("ari: scene: clock: max_lag must be seconds, more than 0 and at most " +
+                 std::to_string(static_cast<int>(cvc::kSimCatchupMax)) +
+                 "; the clock keeps the catch-up its host gave it");
     }
   }
   sc.physics = parse_scene_physics(s["physics"]);

@@ -30,7 +30,8 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/ariadne/node_data.h> // a node's data on the state tree, followed
+#include <cvc/gl/ariadne/entity_view.h> // the world's vehicles at scale (FL2)
+#include <cvc/gl/ariadne/node_data.h>   // a node's data on the state tree, followed
 #include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
@@ -2286,7 +2287,10 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
     // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
     // rate). Pull, advance, push.
-    clock_step = realized.clock_driver->drive(wall_dt);
+    // A world on a worker that has fallen behind holds the clock this frame: it runs slower than
+    // its speed, as a world too heavy for this thread would, rather than further behind.
+    const bool held = realized.world_worker && wall_dt < 0.0 && realized.world_worker->behind();
+    clock_step = held ? realized.clock_driver->hold() : realized.clock_driver->drive(wall_dt);
   }
 
   // physics: step the world by the quanta the clock just ran, then pose the moving bodies' nodes
@@ -2295,7 +2299,16 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     cvc::world_clock &wc = realized.app->world_clock();
     try {
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
-      realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      if (realized.world_worker) {
+        // D3: the worker steps it (and captures its poses); this thread publishes what it ran,
+        // under the frame's lock (AriRuntime::frame), with the world's syncs.
+        if (const std::string failed = realized.world_worker->error(); !failed.empty())
+          throw std::runtime_error(failed);
+        realized.world->publish_due();
+      } else {
+        realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      }
+      update_entity_view(realized, renderer);  // the entity layers, and who is promoted
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
       pose_vehicle_wheels(realized);           // each wheel where its plant has it
       sync_spawn_markers(realized, nullptr);   // the spawn points, as edited

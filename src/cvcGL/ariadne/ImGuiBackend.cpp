@@ -97,17 +97,82 @@ int *cache_int(const char *key, int seed, bool active) {
   return slot;
 }
 
+// §5.28 what a field's context menu asked of it, done once the field has the focus again, in its
+// own callback, so ImGui's undo has it: Cut deletes [a, b) (the whole text when it is empty), Paste
+// puts `text` there, Select all selects it all, Focus only puts the cursor back at b. A Paste in a
+// browser waits for the clipboard's answer first (`ticket`).
+struct FieldAction {
+  enum class Op { None, Focus, Cut, Paste, SelectAll };
+  Op op = Op::None;
+  ImGuiID field = 0; // the field's id
+  int a = 0, b = 0;
+  std::string text;
+  int ticket = 0;
+  int frames = 0; // frames waited for the field to take the focus, which ends at kFocusFrames
+  bool asked = false;
+};
+constexpr int kFocusFrames = 30;
+
+// TEXT without its line breaks (a one-line field's paste), or with CR LF as LF (a multi-line
+// field's).
+std::string paste_text(const std::string &text, bool one_line) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char c : text)
+    if (c != '\r' && (c != '\n' || !one_line))
+      out += c;
+  return out;
+}
+
 // InputText writing straight into a std::string — what imgui_stdlib's std::string overload does,
 // inlined so this TU need not depend on that optional vendored file. CallbackResize grows the
-// string to fit as the user types; the buffer handed to ImGui is the string's own storage.
+// string to fit as the user types; the buffer handed to ImGui is the string's own storage. With
+// `act` (and CallbackAlways), the field does its context menu's action while it is active.
 struct InputTextStr {
   std::string *str;
+  FieldAction *act = nullptr;
+  bool one_line = true;
 };
 int input_text_resize(ImGuiInputTextCallbackData *data) {
+  InputTextStr &u = *static_cast<InputTextStr *>(data->UserData);
   if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
-    std::string *s = static_cast<InputTextStr *>(data->UserData)->str;
+    std::string *s = u.str;
     s->resize(static_cast<std::size_t>(data->BufTextLen));
     data->Buf = s->data();
+  } else if (data->EventFlag == ImGuiInputTextFlags_CallbackAlways && u.act &&
+             u.act->op != FieldAction::Op::None) {
+    FieldAction &f = *u.act;
+    const int len = data->BufTextLen;
+    int a = ImClamp(f.a, 0, len), b = ImClamp(f.b, 0, len);
+    if (a > b)
+      std::swap(a, b);
+    switch (f.op) {
+    case FieldAction::Op::Cut:
+      if (a == b) {
+        a = 0;
+        b = len;
+      }
+      data->DeleteChars(a, b - a);
+      data->CursorPos = a;
+      break;
+    case FieldAction::Op::Paste: {
+      const std::string t = paste_text(f.text, u.one_line);
+      if (b > a)
+        data->DeleteChars(a, b - a);
+      data->InsertChars(a, t.c_str(), t.c_str() + t.size());
+      data->CursorPos = ImMin(a + static_cast<int>(t.size()), data->BufTextLen);
+      break;
+    }
+    case FieldAction::Op::SelectAll:
+      data->CursorPos = len;
+      break;
+    default:
+      data->CursorPos = b;
+      break;
+    }
+    data->SelectionStart = f.op == FieldAction::Op::SelectAll ? 0 : data->CursorPos;
+    data->SelectionEnd = data->CursorPos;
+    f.op = FieldAction::Op::None;
   }
   return 0;
 }
@@ -176,7 +241,434 @@ struct ImGuiBackend::TextViewState {
     }
   }
 };
+
+// §5.28 the context menus. One is open at a time, and what it offers is taken when it opens, so an
+// item that changes under it (a log that grows, a field written from outside) leaves it as it was.
+// The item it opened on begins its popup, at that item's own popup depth (a bell's entry: inside
+// the bell's menu), under an id of its own: a field's comes from the field's id; a text's, from its
+// place among the texts under the same id stack this frame, as a rich text's links are.
+struct ImGuiBackend::ContextMenus {
+  enum class Kind { Text, Field, TextView, Selection };
+  static constexpr float kLongPress = 0.5f; // s a finger stays still for a menu
+
+  // The menu open, and what it offers.
+  ImGuiID host = 0;
+  Kind kind = Kind::Text;
+  std::string copy; // Copy's: a text's; a text view's line under the pointer; a selection's
+  std::string all;  // Select text's (a text view's Copy all's too)
+  // A field's: its id, text and selection [a, b) when the menu opened, whether it is a password's,
+  // and where it is (a refused Paste's hint goes under it).
+  ImGuiID field = 0;
+  std::string text;
+  int a = 0, b = 0;
+  bool masked = false;
+  ImVec2 field_min, field_max;
+  FieldAction action;  // what the menu asked of its field
+  bool pushed = false; // begin() made the menu's items take no click (held)
+
+  // next_item_copy's text, for the next item.
+  std::string next_copy;
+  bool have_next_copy = false;
+
+  // A long press (a finger held still kLongPress s) opens the menu of the item under it. The menu
+  // takes no click until the finger has lifted: the release would pick what opened under it.
+  bool long_press = false;
+  bool held = false;
+
+  // Select text: the text in a read-only field, to select a part of it and copy that.
+  std::string select;
+  bool select_open = false;
+  bool select_focus = false; // it has just opened: it takes the focus
+  bool select_all = false;   // Select all: the field selects all once it has the focus
+
+  // A refused browser Paste: what to do instead, shown under the field until hint_until.
+  std::string hint;
+  double hint_until = -1.0;
+  ImVec2 hint_at;
+
+  // The browser's (clipboard::arm): the menu item under the pointer this frame, and the one the
+  // page was last told of.
+  ImGuiID arm_now = 0, armed = 0;
+  std::string arm_copy;
+  bool arm_has_copy = false, arm_paste = false;
+
+  // The texts drawn this frame, per id-stack key: each one's place among them (text_id).
+  int frame = -1;
+  std::unordered_map<ImGuiID, int> seen;
+
+  ImGuiBackend *be = nullptr; // its context_item_drawn
+
+  const char *mod() const { return ImGui::GetIO().ConfigMacOSXBehaviors ? "Cmd+" : "Ctrl+"; }
+
+  // The item just drawn, labelled LABEL, for a test (context_item_drawn).
+  void drawn(const char *label) const {
+    const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+    const float r[4] = {lo.x, lo.y, hi.x, hi.y};
+    be->context_item_drawn(label, r);
+  }
+  bool item(const char *label, const char *shortcut, bool enabled) const {
+    const bool clicked = ImGui::MenuItem(label, shortcut, false, enabled);
+    drawn(label);
+    return clicked;
+  }
+
+  ImGuiID text_id() {
+    if (frame != ImGui::GetFrameCount()) {
+      frame = ImGui::GetFrameCount();
+      seen.clear();
+    }
+    const ImGuiID key = ImGui::GetID("##cvc.copy");
+    const int nth = seen[key]++;
+    return ImHashData(&nth, sizeof nth, key);
+  }
+
+  // A right-click on the item just drawn (or its window), or a long press on it. A popup over it
+  // does not stop a right-click, so one on another item moves the menu there.
+  bool requested(bool window) const {
+    const ImGuiHoveredFlags f =
+        ImGuiHoveredFlags_AllowWhenBlockedByPopup | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem;
+    const bool over = window ? ImGui::IsWindowHovered(f) : ImGui::IsItemHovered(f);
+    return over && (ImGui::IsMouseReleased(ImGuiMouseButton_Right) || long_press);
+  }
+
+  void open(ImGuiID id) {
+    host = id;
+    ImGui::OpenPopupEx(id);
+    held = long_press;
+    long_press = false; // the item under the finger has it
+  }
+
+  bool begin(ImGuiID id) {
+    if (host != id || !ImGui::IsPopupOpen(id, ImGuiPopupFlags_None))
+      return false;
+    if (!ImGui::BeginPopupEx(id, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
+                                     ImGuiWindowFlags_NoSavedSettings))
+      return false;
+    pushed = held;
+    if (pushed) // looks as it does, but takes no click
+      ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+    // Escape closes it (ImGui does so itself only with its keyboard navigation on, which the
+    // overlay leaves off).
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+      ImGui::CloseCurrentPopup();
+    return true;
+  }
+  void end() {
+    if (pushed)
+      ImGui::PopItemFlag();
+    pushed = false;
+    ImGui::EndPopup();
+  }
+
+  // The item just drawn is under the pointer: what a pointer release over it copies or pastes.
+  void arm_item(const std::string *text, bool paste) {
+    if (!ImGui::IsItemHovered())
+      return;
+    arm_now = ImGui::GetItemID();
+    arm_has_copy = text != nullptr;
+    if (text)
+      arm_copy = *text;
+    arm_paste = paste;
+  }
+
+  // A menu item that copies TEXT.
+  bool copy_item(const char *label, const char *shortcut, const std::string &t, bool enabled) {
+    const bool clicked = item(label, shortcut, enabled);
+    if (enabled)
+      arm_item(&t, false);
+    if (clicked)
+      ImGui::SetClipboardText(t.c_str());
+    return clicked;
+  }
+
+  void open_select(const std::string &t) {
+    select = t;
+    select_open = true;
+    select_focus = true;
+    select_all = false;
+  }
+
+  void start(FieldAction::Op op) {
+    action = FieldAction{};
+    action.op = op;
+    action.field = field;
+    action.a = a;
+    action.b = b;
+  }
+
+  // The open menu's items.
+  void draw() {
+    const std::string m = mod();
+    switch (kind) {
+    case Kind::Field: {
+      const std::string part = b > a ? text.substr(a, b - a) : text; // the selection, else all
+      const bool can = !masked && !part.empty();
+      if (copy_item("Cut", (m + "X").c_str(), part, can))
+        start(FieldAction::Op::Cut);
+      copy_item("Copy", (m + "C").c_str(), part, can);
+      const bool paste = item("Paste", (m + "V").c_str(), clipboard::canPaste());
+      arm_item(nullptr, true);
+      if (paste) {
+        start(FieldAction::Op::Paste);
+        if (clipboard::readIsAsync()) {
+          action.ticket = clipboard::beginRead();
+        } else {
+          const char *t = ImGui::GetClipboardText();
+          action.text = t ? t : "";
+        }
+      }
+      ImGui::Separator();
+      if (item("Select all", (m + "A").c_str(), !text.empty()))
+        start(FieldAction::Op::SelectAll);
+      break;
+    }
+    case Kind::TextView:
+      if (!copy.empty())
+        copy_item("Copy line", nullptr, copy, true);
+      copy_item("Copy all", nullptr, all, !all.empty());
+      ImGui::Separator();
+      if (item("Select text...", nullptr, !all.empty()))
+        open_select(all);
+      break;
+    case Kind::Text:
+      copy_item("Copy", nullptr, copy, !copy.empty());
+      if (item("Select text...", nullptr, !all.empty()))
+        open_select(all);
+      break;
+    case Kind::Selection:
+      copy_item("Copy", (m + "C").c_str(), copy, !copy.empty());
+      if (item("Select all", (m + "A").c_str(), !select.empty()))
+        select_all = true;
+      break;
+    }
+  }
+
+  // A field's menu, after the field (id ID, in state under KEY, showing T).
+  void field_menu(ImGuiID id, const std::string &t, bool pw) {
+    const ImGuiID menu = ImHashStr("##cvc.menu", 0, id);
+    const ImGuiIO &io = ImGui::GetIO();
+    const bool active = ImGui::GetActiveID() == id;
+    const bool keyboard = active && (ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
+                                     (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false)));
+    if (requested(false) || keyboard) {
+      kind = Kind::Field;
+      field = id;
+      text = t;
+      masked = pw;
+      field_min = ImGui::GetItemRectMin();
+      field_max = ImGui::GetItemRectMax();
+      a = b = static_cast<int>(t.size()); // not being edited: after its text
+      if (ImGuiInputTextState *st = active ? ImGui::GetInputTextState(id) : nullptr) {
+        a = st->HasSelection() ? st->GetSelectionStart() : st->GetCursorPos();
+        b = st->HasSelection() ? st->GetSelectionEnd() : a;
+        if (a > b)
+          std::swap(a, b);
+        a = ImClamp(a, 0, static_cast<int>(t.size()));
+        b = ImClamp(b, a, static_cast<int>(t.size()));
+      }
+      open(menu);
+    }
+    if (begin(menu)) {
+      draw();
+      end();
+    }
+  }
+
+  // Before field ID is drawn: the action its menu asked of it, once it can be done (a browser's
+  // Paste: once the clipboard answered), the focus asked back for it. Null: none.
+  FieldAction *field_action(ImGuiID id) {
+    if (action.op == FieldAction::Op::None || action.field != id)
+      return nullptr;
+    if (action.ticket != 0) {
+      std::string t;
+      const clipboard::ReadState st = clipboard::pollRead(action.ticket, t);
+      if (st == clipboard::ReadState::Pending)
+        return nullptr;
+      action.ticket = 0;
+      if (st == clipboard::ReadState::Done) {
+        action.text = t;
+      } else { // refused: the field takes the focus, for the keyboard's paste
+        action.op = FieldAction::Op::Focus;
+        hint = std::string("The browser did not give the clipboard: press ") + mod() + "V to paste";
+        hint_until = ImGui::GetTime() + 5.0;
+        hint_at = ImVec2(field_min.x, field_max.y + 2.0f);
+      }
+    }
+    if (ImGui::GetActiveID() != id) {
+      if (!action.asked) {
+        ImGui::SetKeyboardFocusHere();
+        action.asked = true;
+      }
+      if (++action.frames > kFocusFrames) { // the field never took it (gone, or another took it)
+        action.op = FieldAction::Op::None;
+        return nullptr;
+      }
+    }
+    return &action;
+  }
+
+  // The selection in the Select text field ID, else all of its text.
+  std::string selected(ImGuiID id) const {
+    const ImGuiInputTextState *st = ImGui::GetInputTextState(id);
+    if (!st || !st->HasSelection())
+      return select;
+    int lo = st->GetSelectionStart(), hi = st->GetSelectionEnd();
+    if (lo > hi)
+      std::swap(lo, hi);
+    lo = ImClamp(lo, 0, static_cast<int>(select.size()));
+    hi = ImClamp(hi, lo, static_cast<int>(select.size()));
+    return select.substr(static_cast<std::size_t>(lo), static_cast<std::size_t>(hi - lo));
+  }
+
+  void begin_frame() {
+    const ImGuiIO &io = ImGui::GetIO();
+    if (held && !io.MouseDown[ImGuiMouseButton_Left] && !io.MouseReleased[ImGuiMouseButton_Left])
+      held = false; // lifted a frame ago: the menu takes clicks again
+    long_press = io.MouseSource == ImGuiMouseSource_TouchScreen &&
+                 io.MouseDown[ImGuiMouseButton_Left] &&
+                 io.MouseDownDuration[ImGuiMouseButton_Left] >= kLongPress &&
+                 io.MouseDownDurationPrev[ImGuiMouseButton_Left] < kLongPress &&
+                 !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left);
+  }
+
+  // The Select text window: the text in a read-only field, word-wrapped, with Copy (the selection,
+  // or all of it), Select all and Close, and the same two in the field's own menu.
+  void draw_select() {
+    if (!select_open)
+      return;
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    const ImGuiStyle &st = ImGui::GetStyle();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(
+        ImVec2(ImMin(vp->WorkSize.x * 0.9f, 36.0f * ImGui::GetFontSize()), 0.0f),
+        ImGuiCond_Appearing);
+    if (select_focus)
+      ImGui::SetNextWindowFocus();
+    select_focus = false;
+    bool shown = true; // its X clears it
+    if (ImGui::Begin("Select text###cvc.select", &shown,
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
+      const float w = ImGui::GetContentRegionAvail().x;
+      const float th = ImGui::CalcTextSize(select.c_str(), nullptr, false,
+                                           ImMax(w - 2.0f * st.FramePadding.x - st.ScrollbarSize,
+                                                 ImGui::GetFontSize()))
+                           .y;
+      const float h = ImClamp(th + 2.0f * st.FramePadding.y + ImGui::GetTextLineHeight(),
+                              2.0f * ImGui::GetFrameHeight(), ImMax(vp->WorkSize.y * 0.6f, 1.0f));
+      const ImGuiID id = ImGui::GetID("##cvc.select.text");
+      if (select_all && ImGui::GetActiveID() != id)
+        ImGui::SetKeyboardFocusHere();
+      ImGui::InputTextMultiline("##cvc.select.text", select.data(), select.size() + 1,
+                                ImVec2(-FLT_MIN, h),
+                                ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_WordWrap);
+      if (select_all && ImGui::GetActiveID() == id)
+        if (ImGuiInputTextState *s = ImGui::GetInputTextState(id)) {
+          s->SelectAll();
+          select_all = false;
+        }
+      const ImGuiID menu = ImHashStr("##cvc.menu", 0, id);
+      if (requested(false)) {
+        kind = Kind::Selection;
+        copy = selected(id);
+        open(menu);
+      }
+      if (begin(menu)) {
+        draw();
+        end();
+      }
+      const std::string part = selected(id);
+      if (ImGui::Button("Copy##cvc.select"))
+        ImGui::SetClipboardText(part.c_str());
+      drawn("Copy##cvc.select");
+      arm_item(&part, false);
+      ImGui::SameLine();
+      if (ImGui::Button("Select all##cvc.select"))
+        select_all = true;
+      drawn("Select all##cvc.select");
+      ImGui::SameLine();
+      if (ImGui::Button("Close##cvc.select"))
+        shown = false;
+      drawn("Close##cvc.select");
+      if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+          ImGui::GetActiveID() != id && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        shown = false;
+    }
+    ImGui::End();
+    if (!shown) {
+      select_open = false;
+      select.clear();
+    }
+  }
+
+  void end_frame() {
+    draw_select();
+    if (hint_until > ImGui::GetTime()) {
+      ImGui::SetNextWindowPos(hint_at);
+      if (ImGui::BeginTooltip()) {
+        ImGui::TextUnformatted(hint.c_str());
+        ImGui::EndTooltip();
+      }
+    }
+    if (arm_now != armed) { // the page's pointer release does what the item under it does
+      clipboard::arm(arm_now && arm_has_copy ? &arm_copy : nullptr, arm_now && arm_paste);
+      armed = arm_now;
+    }
+    arm_now = 0;
+  }
+};
+#else
+struct ImGuiBackend::ContextMenus {};
 #endif
+
+ImGuiBackend::ContextMenus &ImGuiBackend::context_menus() {
+  if (!m_menus) {
+    m_menus = std::make_shared<ContextMenus>();
+#ifdef CVC_ENABLE_IMGUI
+    m_menus->be = this;
+#endif
+  }
+  return *m_menus;
+}
+
+void ImGuiBackend::next_item_copy(const std::string &text) {
+#ifdef CVC_ENABLE_IMGUI
+  ContextMenus &cm = context_menus();
+  cm.next_copy = text;
+  cm.have_next_copy = true;
+#else
+  (void)text;
+#endif
+}
+
+void ImGuiBackend::copy_menu(const std::string &shown, bool menu_item) {
+#ifdef CVC_ENABLE_IMGUI
+  ContextMenus &cm = context_menus();
+  const bool given = cm.have_next_copy;
+  cm.have_next_copy = false;
+  if (menu_item && !given)
+    return;
+  const ImGuiID id = cm.text_id();
+  if (cm.requested(false)) {
+    cm.kind = ContextMenus::Kind::Text;
+    cm.copy = given ? cm.next_copy : shown;
+    cm.all = cm.copy;
+    cm.open(id);
+  }
+  if (cm.begin(id)) {
+    cm.draw();
+    cm.end();
+  }
+#else
+  (void)shown;
+  (void)menu_item;
+#endif
+}
+
+void ImGuiBackend::end_frame() {
+#ifdef CVC_ENABLE_IMGUI
+  context_menus().end_frame();
+#endif
+}
 
 ariadne::Capabilities ImGuiBackend::capabilities() const {
   ariadne::Capabilities c;
@@ -1428,20 +1920,27 @@ void ImGuiBackend::fitted_text(const char *text, const float *rgb) {
 #endif
 }
 
-void ImGuiBackend::text_line(const char *text) { fitted_text(text, nullptr); }
+// §5.28 each text has a context menu: Copy (a value's: the value), and Select text...
+void ImGuiBackend::text_line(const char *text) {
+  fitted_text(text, nullptr);
+  copy_menu(text ? text : "");
+}
 void ImGuiBackend::text_value(const char *label, const std::string &value) {
   // A non-empty label prefixes "label: value"; an empty label shows just the value (e.g. a roster
   // name bound with no caption).
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   fitted_text(line.c_str(), nullptr);
+  copy_menu(value);
 }
 void ImGuiBackend::text_line_colored(const char *text, const float rgb[3]) {
   fitted_text(text, rgb);
+  copy_menu(text ? text : "");
 }
 void ImGuiBackend::text_value_colored(const char *label, const std::string &value,
                                       const float rgb[3]) {
   std::string line = (label && *label) ? (std::string(label) + ": " + value) : value;
   fitted_text(line.c_str(), rgb);
+  copy_menu(value);
 }
 void ImGuiBackend::begin_text_color(const float rgb[3]) {
 #ifdef CVC_ENABLE_IMGUI
@@ -1486,6 +1985,10 @@ bool ImGuiBackend::text_runs(const std::vector<cvc::ariadne::TextRun> &runs, con
   ImGui::EndGroup();
   if (rgb)
     ImGui::PopStyleColor();
+  std::string shown; // a picture as its :shortcode:
+  for (const cvc::ariadne::TextRun &r : runs)
+    shown += r.text;
+  copy_menu(shown);
   return true;
 #else
   (void)runs;
@@ -1652,6 +2155,10 @@ cvc::ariadne::RichTextEvent ImGuiBackend::rich_text(const std::vector<ariadne::T
   ImGui::SetCursorScreenPos(origin);
   ImGui::Dummy(ImVec2(std::max(1.0f, layout.width), lh * static_cast<float>(layout.lines.size())));
   ImGui::EndGroup();
+  std::string shown; // §5.28 the paragraph's text, a picture as its :shortcode:
+  for (const ariadne::TextRun &r : runs)
+    shown += r.text;
+  copy_menu(shown);
   return ev;
 #else
   (void)runs;
@@ -1813,7 +2320,11 @@ bool ImGuiBackend::button_with(const char *label, const cvc::ariadne::ButtonLook
   return button(label);
 #endif
 }
-bool ImGuiBackend::menu_item_action(const char *label) { return ui::MenuItemClicked(label); }
+bool ImGuiBackend::menu_item_action(const char *label) {
+  const bool clicked = ui::MenuItemClicked(label);
+  copy_menu(label ? label : "", true); // §5.28 only one next_item_copy gave a menu
+  return clicked;
+}
 // §4.6 widget on_click: was the last-submitted item clicked (left button, released over it)? Works
 // for any item ImGui submitted this frame — the walk queries it right after drawing the widget.
 // Guarded like the other raw-ImGui calls: without imgui the overlay is inert, so no widget clicks.
@@ -2243,7 +2754,10 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   std::string &buf = m_textEdits[key];
   if (!ImGui::IsAnyItemActive())
     buf = current;
-  InputTextStr ud{&buf};
+  ContextMenus &cm = context_menus();
+  const ImGuiID id = ImGui::GetID(label);
+  FieldAction *act = cm.field_action(id); // §5.28 what its context menu asked of it
+  InputTextStr ud{&buf, act, true};
   reserve_label_width(label, in_flow_row());
   // EnterReturnsTrue commits on Enter (a chat box's send); IsItemDeactivatedAfterEdit commits on
   // focus-leave; CallbackResize lets the std::string grow past its initial capacity as typed.
@@ -2251,8 +2765,10 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
   const bool entered =
       ImGui::InputText(label, buf.data(), buf.capacity() + 1,
                        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize |
-                           (masked ? ImGuiInputTextFlags_Password : 0),
+                           (masked ? ImGuiInputTextFlags_Password : 0) |
+                           (act ? ImGuiInputTextFlags_CallbackAlways : 0),
                        input_text_resize, &ud);
+  cm.field_menu(id, buf, masked);
   const bool committed = entered || ImGui::IsItemDeactivatedAfterEdit();
   return {buf != current, committed, buf};
 #else
@@ -2307,7 +2823,11 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
     ImGui::SetKeyboardFocusHere();
     f.refocus = false;
   }
-  InputTextStr ud{&f.text};
+  ContextMenus &cm = context_menus();
+  const ImGuiID id = ImGui::GetID("##message");
+  FieldAction *act = cm.field_action(id); // §5.28 what its context menu asked of it
+  const ImGuiInputTextFlags menu_flags = act ? ImGuiInputTextFlags_CallbackAlways : 0;
+  InputTextStr ud{&f.text, act, !o.multiline};
   bool entered = false;
   if (o.multiline) {
     // As tall as the wrapped text, from one line to max_lines, then it scrolls.
@@ -2324,15 +2844,16 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
         ImVec2(width, rows * lh + 2.0f * st.FramePadding.y),
         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CtrlEnterForNewLine |
             ImGuiInputTextFlags_WordWrap | ImGuiInputTextFlags_NoHorizontalScroll |
-            ImGuiInputTextFlags_CallbackResize,
+            ImGuiInputTextFlags_CallbackResize | menu_flags,
         input_text_resize, &ud);
   } else {
     ImGui::SetNextItemWidth(width);
-    entered =
-        ImGui::InputText("##message", f.text.data(), f.text.capacity() + 1,
-                         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackResize,
-                         input_text_resize, &ud);
+    entered = ImGui::InputText("##message", f.text.data(), f.text.capacity() + 1,
+                               ImGuiInputTextFlags_EnterReturnsTrue |
+                                   ImGuiInputTextFlags_CallbackResize | menu_flags,
+                               input_text_resize, &ud);
   }
+  cm.field_menu(id, f.text, false);
   const bool active = ImGui::IsItemActive();
   const bool left = ImGui::IsItemDeactivatedAfterEdit();
   if (f.text.empty() && !active && !o.hint.empty())
@@ -2456,10 +2977,30 @@ ariadne::TextViewEvent ImGuiBackend::text_view(const char *label, const char *ke
       v.target = -1.0f;
     wheel_up_at_top =
         ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel > 0.0f && v.scroll <= 0.5f;
-    if (ImGui::BeginPopupContextWindow("##text_view_menu")) {
-      if (ImGui::MenuItem("Copy"))
-        ImGui::SetClipboardText(v.text.c_str());
-      ImGui::EndPopup();
+    // §5.28 its context menu: Copy line (the line under the pointer, a chat message), Copy all and
+    // Select text...
+    ContextMenus &cm = context_menus();
+    const ImGuiID menu = ImGui::GetID("##text_view_menu");
+    if (cm.requested(true)) {
+      const float y = ImGui::GetMousePos().y - ImGui::GetWindowPos().y + v.scroll -
+                      st.WindowPadding.y; // in the text's own px, from its top
+      cm.kind = ContextMenus::Kind::TextView;
+      cm.copy.clear();
+      if (y >= 0.0f && y < total) {
+        const std::size_t at = static_cast<std::size_t>(
+            std::upper_bound(v.tops.begin(), v.tops.begin() + static_cast<std::ptrdiff_t>(n), y) -
+            v.tops.begin());
+        if (at > 0) {
+          const auto &ln = v.lines[at - 1];
+          cm.copy = v.text.substr(ln.first, ln.second - ln.first);
+        }
+      }
+      cm.all = v.text;
+      cm.open(menu);
+    }
+    if (cm.begin(menu)) {
+      cm.draw();
+      cm.end();
     }
   }
   ImGui::EndChild();
@@ -2705,6 +3246,9 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
 }
 
 void ImGuiBackend::begin_frame() {
+#ifdef CVC_ENABLE_IMGUI
+  context_menus().begin_frame(); // §5.28 a long press
+#endif
   if (!m_fileDialog)
     return;
   const std::shared_ptr<FileDialog> d = m_fileDialog;

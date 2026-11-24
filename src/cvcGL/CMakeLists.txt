@@ -1194,6 +1194,12 @@ add_test(NAME cvcgl_imgui_fonts COMMAND cvcgl_imgui_fonts)
 add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
 target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The context menus (§5.28): Cut, Copy, Paste and Select all on a field, Copy and Select text... on
+# a text, Copy line on a text view, a notification's whole message, a touch screen's long press.
+# ImGui's own clipboard; no window, no GL.
+add_executable(cvcgl_imgui_context_menu test/cvcgl_imgui_context_menu.cpp)
+target_link_libraries(cvcgl_imgui_context_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
 # The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
 # and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
 add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
@@ -1630,6 +1636,11 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_swarm test/cvcgl_ariadne_swarm.cpp)
   target_link_libraries(cvcgl_ariadne_swarm PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_swarm COMMAND cvcgl_ariadne_swarm)
+  # The entity view (entity_view.h, FL2): a world's vehicles at scale, the nearest promoted to nodes,
+  # an entity_layer of one fleet, the world on a local holon's worker, a relay's entities on a client.
+  add_executable(cvcgl_ariadne_entities test/cvcgl_ariadne_entities.cpp)
+  target_link_libraries(cvcgl_ariadne_entities PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_entities COMMAND cvcgl_ariadne_entities)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})

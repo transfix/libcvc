@@ -2547,6 +2547,40 @@ scene:
     rotation). A parted look's wheels move the same way (above); a one-piece model's wheels are
     the mesh's and do not move. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **At scale: entity layers.** Past 32 entities the world's vehicles are drawn as one mesh per
+    archetype and level of detail, and only the nearest 8 to the camera (and the one it follows)
+    as their own nodes, with their wheels and labels as above (the others' wheels stand still: a
+    parted look's in a tyre's dark)
+    ([`entity_view.h`](../inc/cvc/gl/ariadne/entity_view.h); the fleets roadmap's FL2). A
+    `type: entity_layer` node says how:
+
+    ```yaml
+    - node: city_bodies
+      type: entity_layer
+      of: { fleet: city }                     # or { archetype: humvee } | { team: 3 } | all
+      layer: bodies                           # the bodies (flags, goals, trails, ... are to come)
+      lod: { near_cap: 10, px: [24, 8, 3] }   # or lod: false
+      promote: 8                              # their own nodes: the followed, then the nearest
+      threshold: 32                           # a layer of at most this many: each its own node
+    ```
+
+    - A fitted model look (a file with `fit`, a data look) has four rungs: the model, textured,
+      and three quadric-decimated copies in each entity's colour. An entity on screen takes the
+      finest rung its size there allows (a radius of at least `px` pixels; at most `near_cap` on
+      the finest, 28 and 72 on the next two), and one off screen is drawn by none. A box look is
+      one mesh.
+    - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
+      `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
+      another is a fifth nearer, so a moving camera does not swap them frame by frame.
+    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
+      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
+      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - The meshes are posed from the physics binding's poses, between steps, whether the frame
+      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      entities the same way (`room_view`, from its entity playout, under node `room_entities`),
+      the vehicle it drives among the promoted.
+    - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
+      node, and 800 take 8 ms of drawing, where they took seconds.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
@@ -4212,6 +4246,9 @@ back (a window reopened) keeps its place.
   holds where libcvc has this. `ariadne_ftxui_test`'s `MessageFieldLiveDraftAndACompletion` and
   `cvcgl_imgui_chat_widgets` type into one.
 
+Both have the context menu of §5.28. On a `text_view:` it is Copy line (the message under the
+pointer), Copy all and Select text...; on a `message_input:`, Cut, Copy, Paste and Select all.
+
 ### 5.16 Conference chat: the chat verbs and the chat component
 
 In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
@@ -5263,7 +5300,8 @@ menubar:
   its tone is the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
-  window with every entry (`tree._notifications.open`; its X closes it).
+  window with every entry (`tree._notifications.open`; its X closes it). A right-click on an entry,
+  in the menu or the window, offers Copy, which copies its whole message (§5.28).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
   - A document's top-level `notifications: true|false` overrides the host; `always` is true, the
@@ -5518,6 +5556,91 @@ current one to look pressed:
 `ariadne_loader_test`'s `ButtonIconAndSelectedParse` checks the keys; `ariadne_ftxui_test`'s
 `SelectedButtonIsMarked` the terminal's look; `cvcgl_imgui_group_click` taps a selected
 button with a picture through ImGui's own input.
+
+### 5.28 Copy, cut and paste: the context menu
+
+Text in every host has a context menu, with nothing in the document asking for it. A right-click
+opens it. So does a long press on a touch screen (half a second, the finger still), and Shift+F10
+or the Menu key on the focused widget in a terminal. What it offers depends on what is under the
+pointer:
+
+| Under the pointer | The menu |
+|---|---|
+| A field: `input_text:`, `message_input:` | Cut, Copy, Paste, Select all |
+| A text: `text:`, a bound value, a rich text (§5.20) | Copy, Select text... |
+| A `text_view:` (a chat log, a console) | Copy line, Copy all, Select text... |
+| A notification: the bell's entry, a Notifications window line (§5.24) | Copy |
+
+- **Cut and Copy** take the selection, or the whole text when nothing is selected. A `password:`
+  field has neither.
+- **Paste** puts the clipboard's text at the cursor, over the selection. A one-line field drops
+  the text's line breaks. A multi-line `message_input:` keeps them, as LF.
+- **Copy on a value** (a bound `text:` with a label) copies the value, not "label: value".
+- **Copy line** copies the line under the pointer: in a chat log, the message it is on.
+- **Copy on a notification** copies the whole message, every line of it, not the one line its
+  entry shows.
+- **Select text...** shows the text in a read-only field in a window of its own. Select a part
+  of it there (drag, Shift with the arrows, Ctrl+A or its Select all), then copy it with its
+  Copy, its context menu or Ctrl+C. This is how to copy part of a long message.
+
+On a touch screen the menu opens under the finger. It takes no tap until the finger has lifted,
+so the lift that ends the long press picks nothing.
+
+How each host does it:
+
+- **ImGui, natively** (`arigl`, cvcGL apps): the system clipboard. That is SDL's under cvcGL's
+  window, Wayland included. Under VTK's own window it is the platform's: Win32 through ImGui,
+  NSPasteboard, or an X11 selection. Ctrl+X, Ctrl+C, Ctrl+V and Ctrl+A work in a field as they
+  always did (Cmd on a Mac). The menu edits through the field's own callback, so ImGui's undo
+  (Ctrl+Z) takes back a Cut or a Paste.
+- **The arigl-web page**: the browser's own menu stays off the canvas.
+  - Copy is `navigator.clipboard.writeText`.
+  - Paste is `navigator.clipboard.readText()`, which answers later; the text goes into the field
+    when it does. Chrome asks the user once for the permission. Firefox and Safari show their own
+    Paste button by the pointer each time, which the user clicks.
+  - Safari allows these calls only inside the click itself, and ImGui sees a click a frame after
+    the browser does. So the page makes the call in the pointer release over the menu item
+    (`cvc::gl::clipboard::arm`).
+  - When the browser refuses (the permission denied, its prompt dismissed, an `http://` page),
+    the field takes the focus and a note under it says to press Ctrl+V. Ctrl+V works as it always
+    did, through the page's `paste` event.
+- **FTXUI** (`ari`):
+  - Copy is an OSC 52 escape, as `(clipboard-set)`'s is (§10.7).
+  - Paste asks the terminal for the clipboard with an OSC 52 read
+    (`ESC ] 52 ; c ; ? ESC \`), and the answer is typed into the field. xterm with
+    `allowWindowOps` answers, and foot, kitty and iTerm2 do once the user allows it. Most
+    terminals stay silent, so after 3 seconds the tooltip line says to use the terminal's own
+    paste (Ctrl+Shift+V, Shift+Insert or its menu). That paste types into the focused field as
+    it always did.
+  - A field selects with Shift and the arrows, Home and End. Typing replaces the selection.
+  - For part of a text, use the terminal's own selection. The program has the mouse, so that is
+    Shift+drag in most terminals.
+- **The ari.html page** (xterm.js): it answers the OSC 52 read with
+  `navigator.clipboard.readText()`, as above. While the program has the mouse, a right-click is
+  the program's, not the browser's menu.
+- **tvision** (`ari run --backend tvision`): Copy and Paste use tvision's `TClipboard`. That is
+  the system clipboard on Windows. On Unix it is `wl-copy`, `xsel` or `xclip` when there is a
+  display, else OSC 52. A Paste arrives as a paste of keys into the focused field. The bell's
+  menu is tvision's own menu, which has no context menu, so copy a notification from the
+  Notifications window (Show all...).
+
+For a backend: the core calls `Backend::next_item_copy(TEXT)` just before an item whose Copy is
+not the text it shows (a notification's entry), and the item after it copies what it shows again.
+Each backend draws its own menus. `ImGuiBackend::context_item_drawn` reports each item's rect, for
+a test.
+
+The tests:
+
+- `cvcgl_imgui_context_menu`: ImGui on a bare context, driven by the mouse and the keys.
+- `ariadne_ftxui_test`'s `ARightClickOnATextOffersCopy`, `AFieldsMenuCutsCopiesAndPastes`,
+  `ATextViewsMenuCopiesALineOrAll`, `ANotificationsEntryCopiesItsWholeMessage` and
+  `APasteWithNoTerminalToAskSaysHowToPaste`.
+- `ariadne_term_graphics_test`'s `Osc52ReadsAndItsAnswer`.
+- `ariadne_runtime_test`'s `ANotificationsEntryCopiesItsWholeMessage`.
+- In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs` runs arigl-web in headless Chrome,
+  grants it the clipboard, and right-clicks through the page's own input. It covers Copy, Paste,
+  Cut, and a refused read followed by Ctrl+V. On ari.html it uses Shift+F10 and Paste through the
+  OSC 52 read.
 
 ## 6. Composition: include / import / load
 
@@ -6019,7 +6142,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 `cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
-arigl run      [--terminal] [flags] doc.ari [document args...]
+arigl run      [--terminal] [--world-thread] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
 arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
@@ -6033,6 +6156,29 @@ with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
 frame rather than the wall time, so its frames are reproducible.
+
+**`--world-thread`** (`arigl run` in a window, native builds): the scene's world (its physics and
+its vehicles' navigators) steps on a thread of its own, in a local server-role holon
+(`cvc::ariadne::world_worker`), rather than on the frame's. The holon's clock follows the scene's
+tick for tick, one quantum at a time, so the world takes the same steps in the same order. The
+frame holds the world's lock from its start to its end: it pumps the document, publishes what
+the worker ran (the `physics.stats` and vehicle keys are written on the frame's thread, as
+always), and draws the bodies from the poses the worker captured; the worker steps while the
+frame renders and waits. A world further behind its clock than the scene allows holds the clock,
+so it runs slower than its speed rather than further behind, as it would on the frame's thread.
+How far is a setting, `scene: clock: { max_lag: <s> }`: seconds of world time at 1x, growing with
+the speed as the clock's catch-up does (by ceil(speed) past 1x), more than 0 and at most 10;
+0.25 s (`cvc::kSimCatchup`) by default. A world the holon can't take (no Jolt, a build without
+threads) stays on the frame's thread, and arigl says so once. Snapshots, `--terminal`, the
+browser (single-threaded or not: its main thread must not wait on a worker's step, so arigl says
+so and ignores the flag), the headless hosts, the gym and arisrv step on their own thread as
+before, bit for bit. On the frame's thread (arigl without the flag, snapshots, `--terminal`, the
+browser, the headless `AppRuntime`) `max_lag` is the catch-up one frame may run (the clock's stall
+guard: a stall's time past it is dropped and counted in `sim.dropped`), so the same document
+bounds its world's lag the same way on each of them. The gym runs the steps it is asked for, and
+the relay keeps its holon's own catch-up. It is the fleets roadmap's D3
+([FLEETS_AND_NIGHT_ROADMAP.md](roadmap/FLEETS_AND_NIGHT_ROADMAP.md)), and OW7's first part
+([ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §18.2).
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
@@ -8089,6 +8235,8 @@ screen view. The backend answers them, so they work the same in every host built
   only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
 - `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
   `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
+- The user copies and pastes with the context menu every host has on text (§5.28), with nothing
+  in the document. Its Paste reads the clipboard; a document's programs cannot.
 
 ### 10.8 Picking and sending files: `file-pick` and `http-upload`
 
