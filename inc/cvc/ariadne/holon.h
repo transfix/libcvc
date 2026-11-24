@@ -539,6 +539,14 @@ public:
   // kept); 0 is none. client_pump sets it from its world_replica.
   void set_vehicle_ground(std::function<double(double, double)> ground, std::uint64_t revision);
   std::uint64_t vehicle_ground_revision() const { return _vground_rev; }
+  // The world's water from the step that ends past FROM_TICK on (OW5q): the relay's sea took a new
+  // keyframe, which its storms grew (world_replica::water, after water_from_tick). A boat's model
+  // floats on it from that step, and on the water before it in a replay from before it; one made
+  // later has it too. REVISION names it (world_replica::water_revision); set_statics starts the
+  // water afresh with its own.
+  void set_water(const std::vector<cvc::physics::field> &water, std::uint64_t from_tick,
+                 std::uint64_t revision);
+  std::uint64_t water_revision() const { return _water_rev; }
   // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now (false for the
   // other plant's).
   bool predicts_vehicle(const std::string &pid) const;
@@ -751,6 +759,8 @@ private:
   section_stamp _statics;               // the room scene the statics came from
   std::vector<avatar_static> _statics_list; // ... and the statics themselves (for a detach)
   std::vector<cvc::physics::field> _water;  // ... and the water with them (a boat's model's)
+  std::vector<timed_water> _water_after;    // ... and since, by tick (set_water, OW5q)
+  std::uint64_t _water_rev = 0;
   SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
   const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
   void scene_step();                        // SERVER with a world attached: the due steps

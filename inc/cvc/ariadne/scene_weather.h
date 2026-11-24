@@ -38,6 +38,7 @@
 namespace cvc {
 class app;
 class height_field;
+class world_clock;
 namespace physics {
 class world;
 }
@@ -112,8 +113,10 @@ public:
   bool has_ground() const;
 
   // The keys (the frame's thread, between steps): weather.events, weather.friction and
-  // weather.gust_front (the storm wind's peak, seeded from the `gust_front` prop).
-  void read_keys();
+  // weather.gust_front (the storm wind's peak, seeded from the `gust_front` prop). A new peak goes
+  // in at the start of CLOCK's next period (null: the app's world clock), the clock the world
+  // steps on.
+  void read_keys(const cvc::world_clock *clock = nullptr);
   // Before the physics step that ends on the world clock's tick `tick` (whose quantum is `dt`):
   // the friction on the first step of each kWetPeriod, or at once when weather.friction changed.
   void before_step(cvc::physics::world &w, std::uint64_t tick, double dt);

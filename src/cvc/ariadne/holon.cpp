@@ -500,6 +500,7 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
   _statics = stamp;
   _statics_list = statics;
   _water = water;
+  _water_after.clear();  // the water as it is now, from the start
   if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
   // A jolt vehicle's or a boat's model runs on the statics (OW5i, OW5j), and a dynamic plant's
@@ -522,10 +523,24 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
   }
 }
 
+void holon::set_water(const std::vector<cvc::physics::field> &water, std::uint64_t from_tick,
+                      std::uint64_t revision) {
+  _water_rev = revision;
+  while (!_water_after.empty() && _water_after.back().from_tick >= from_tick)
+    _water_after.pop_back();
+  _water_after.push_back({from_tick, water});
+  if (_water_after.size() > dynamic_vehicle_model::kWaterKept)
+    _water_after.erase(_water_after.begin());
+  for (auto &[pid, p] : _participants)
+    if (p.vdyn && p.vdyn->is_boat())
+      p.vdyn->set_water(water, from_tick);
+}
+
 jolt_vehicle_world holon::jolt_world() const {
   jolt_vehicle_world jw;
   jw.statics = _statics_list;
   jw.water = _water;
+  jw.water_after = _water_after;
   jw.gravity = _applied.physics.gravity;
   // Room for the entities held (OW5o): a box for each, and two more of each size and mass, so one
   // coming into view seldom needs the model made again.

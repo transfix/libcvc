@@ -25,6 +25,7 @@
 #include <cvc/ariadne/holon.h>                      // cvc::ariadne::holon (server_pump)
 #include <cvc/ariadne/holon_sync.h>
 #include <cvc/ariadne/loader.h>         // load_file: the world document
+#include <cvc/ariadne/scene_water.h>    // the relay's seas (OW5q)
 #include <cvc/ariadne/scene_world.h>    // world_replica's world
 #include <cvc/ariadne/uri.h>            // resolve
 #include <cvc/ariadne/world_pack.h>     // world_replica's packs
@@ -457,12 +458,15 @@ void sync_statics(holon &h, cvc::app &app, const std::string &room,
     return;
   // The world document's statics, once this client holds the relay's document (OW5c).
   if (world) {
-    world->pump(app, room);
+    world->pump(app, room, &h.clock()); // on the relay's ticks, as the holon counts them
     if (world->ground_revision() != h.vehicle_ground_revision())
       h.set_vehicle_ground(world->ground(), world->ground_revision()); // OW5g
     if (world->ready()) {
       if (!world->stamp().same(h.statics_stamp()))
         h.set_statics(world->statics(), world->stamp(), world->water());
+      // The relay's sea grew (OW5q): the boat's model floats on it after the tick it went in after.
+      if (world->water_revision() != h.water_revision())
+        h.set_water(world->water(), world->water_from_tick(), world->water_revision());
       return;
     }
   }
@@ -840,6 +844,26 @@ conference::room_world_on world_on_of(const SceneWorld &world) {
     if (world.generated_params(node, g.params))
       on.generated.push_back(std::move(g));
   }
+  // Each water node's sea, its last keyframe (OW5q): a client's replica makes the same sea.
+  for (const std::string &node : world.water_nodes()) {
+    const WaterRuntime *w = world.water(node);
+    const SceneWaterKeyframe k = w ? w->keyframe() : SceneWaterKeyframe{};
+    if (k.keyframe == 0)
+      continue;
+    conference::room_water_sea s;
+    s.node = node;
+    s.keyframe = k.keyframe;
+    s.from_tick = k.from_tick;
+    s.from_speed = k.from.speed_mps;
+    s.from_dir = k.from.dir_rad;
+    s.from_fetch = k.from.fetch_m;
+    s.to_speed = k.to.speed_mps;
+    s.to_dir = k.to.dir_rad;
+    s.to_fetch = k.to.fetch_m;
+    s.t0 = k.t0;
+    s.t1 = k.t1;
+    on.seas.push_back(std::move(s));
+  }
   return on;
 }
 
@@ -865,9 +889,28 @@ void world_replica::follow(cvc::app &app, const std::string &room) {
     _world->set_world(on.world, &warnings);
   for (const conference::room_generated_world &g : on.generated)
     _world->follow_generated(g.node, g.params, &warnings);
+  // The relay's seas (OW5q), each made here as the relay made it; their fields go in at the sync.
+  for (const conference::room_water_sea &s : on.seas) {
+    const WaterRuntime *w = _world->water(s.node);
+    if (!w)
+      continue;
+    SceneWaterKeyframe k;
+    k.from = {s.from_speed, s.from_dir, s.from_fetch};
+    k.to = {s.to_speed, s.to_dir, s.to_fetch};
+    k.t0 = s.t0;
+    k.t1 = s.t1;
+    k.keyframe = s.keyframe;
+    k.from_tick = s.from_tick;
+    if (w->following() && w->keyframe().keyframe == k.keyframe && w->keyframe().t0 == k.t0 &&
+        w->keyframe().t1 == k.t1)
+      continue; // the sea it has
+    _world->follow_sea(s.node, k);
+    _sea_new = true;
+    _sea_from = std::max(_sea_from, k.from_tick);
+  }
 }
 
-void world_replica::pump(cvc::app &app, const std::string &room) {
+void world_replica::pump(cvc::app &app, const std::string &room, const cvc::world_clock *clock) {
   const section_stamp s = conference::room_world_source_stamp(app, room);
   if (!s.same(_source_stamp)) {
     _source_stamp = s;
@@ -934,25 +977,42 @@ void world_replica::pump(cvc::app &app, const std::string &room) {
   }
   if (!_world)
     return;
-  follow(app, room); // the relay's world on, and its generated worlds' params
+  follow(app, room); // the relay's world on, its generated worlds' params and its seas
   std::vector<std::string> warnings;
-  _world->sync(&warnings); // a generated world's colliders, as they become ready
+  if (clock) // a generated world's colliders, as they become ready
+    _world->sync(*clock, &warnings);
+  else
+    _world->sync(&warnings);
   // Ready once every generated world has its colliders (its terrain is the ground); the statics
   // again whenever the world on or a node's colliders change.
-  bool pending = false, changed = !_ready || _world->world_on() != _built_on;
+  // A water node's colliders are its field, not statics: a new sea is the water alone (OW5q).
+  bool pending = false, changed = !_ready || _world->world_on() != _built_on, wet = false;
   for (const std::string &id : _nodes) {
     std::uint64_t rev = 0;
     const bool has = _world->world_geometry(id, &rev) != nullptr;
     if (!has && _world->generated_world(id))
       pending = true;
     const auto it = _taken.find(id);
-    if (has && (it == _taken.end() || it->second != rev))
-      changed = true;
+    if (has && (it == _taken.end() || it->second != rev)) {
+      if (_world->water(id)) {
+        wet = true;
+        _taken[id] = rev;
+      } else {
+        changed = true;
+      }
+    }
   }
   if (pending && !_ready)
     return;
-  if (changed)
-    build_statics(app);
+  if (changed) {
+    build_statics(app); // the water with the statics, under their stamp
+  } else if (wet || _sea_new) {
+    take_water(app); // the water alone: the relay's new sea goes in after its tick (OW5q)
+    _water_from = _sea_new ? _sea_from : 0;
+    ++_water_rev;
+  }
+  _sea_new = false;
+  _sea_from = 0;
   _ready = true;
   refresh_ground();
 }
@@ -1006,7 +1066,9 @@ void world_replica::build_statics(cvc::app &app) {
   for (const std::string &id : _nodes) {
     std::uint64_t rev = 0;
     std::shared_ptr<const cvc::world::world_geometry> g = _world->world_geometry(id, &rev);
-    if (g && !_world->bodies_of(id).empty()) {
+    if (g && _world->water(id)) {
+      _taken[id] = rev; // its field: the water below, not a static
+    } else if (g && !_world->bodies_of(id).empty()) {
       avatar_static s;
       s.type = avatar_static::kind::geometry;
       s.geometry = std::move(g);
@@ -1015,7 +1077,13 @@ void world_replica::build_statics(cvc::app &app) {
       _taken[id] = rev;
     }
   }
+  take_water(app);
+  ++_stamp.rev;
+}
+
+void world_replica::take_water(cvc::app &app) {
   // The water (OW5j): its world's fluid fields, else the still water the relay's boats float on.
+  _water.clear();
   for (const cvc::physics::field_snapshot &f : _world->world().snapshot().fields)
     if (f.desc.kind == cvc::physics::field_kind::fluid)
       _water.push_back(f.desc);
@@ -1026,7 +1094,6 @@ void world_replica::build_statics(cvc::app &app) {
     if (const std::optional<cvc::physics::field> still =
             boat_still_water(app, *grid, _world->world()))
       _water.push_back(*still);
-  ++_stamp.rev;
 }
 
 std::uint64_t propose_intent(holon &h, cvc::app &app, const std::string &room,

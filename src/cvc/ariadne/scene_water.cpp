@@ -46,6 +46,7 @@
 #include <cvc/world/grid.h>
 #include <cvc/world/water_bodies.h>
 #include <cvc/world/world_geometry.h>
+#include <optional>
 
 namespace cvc {
 namespace ariadne {
@@ -287,6 +288,14 @@ SceneWaterCascades scene_water_cascades(const SceneWaterSpec &s) {
 
 double SceneWaterSea::weight(double t) const { return cvc::ocean::crossfade_weight(t, t0, t1); }
 
+bool SceneWaterKeyframe::operator==(const SceneWaterKeyframe &o) const {
+  const auto same = [](const cvc::ocean::sea_wind &a, const cvc::ocean::sea_wind &b) {
+    return a.speed_mps == b.speed_mps && a.dir_rad == b.dir_rad && a.fetch_m == b.fetch_m;
+  };
+  return same(from, o.from) && same(to, o.to) && t0 == o.t0 && t1 == o.t1 &&
+         keyframe == o.keyframe && from_tick == o.from_tick;
+}
+
 struct SceneWaterSeaClock::impl {
   cvc::ocean::sea_lag lag;
   std::shared_ptr<const SceneWaterSea> sea;
@@ -339,6 +348,50 @@ bool SceneWaterSeaClock::advance(double t, const SceneWaterSpec &s,
               ? next->fetch
               : keyframe_fetch(*shore, next->from.dir_rad, next->from.fetch_m);
     }
+  }
+  next->build_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  d.sea = std::move(next);
+  d.shore = shore.get();
+  d.lee = s.lee;
+  return true;
+}
+
+bool SceneWaterSeaClock::follow(const SceneWaterKeyframe &k, const SceneWaterSpec &s,
+                                const std::shared_ptr<const SceneWaterShore> &shore) {
+  impl &d = *_impl;
+  const bool coast = shore.get() != d.shore || s.lee != d.lee;
+  const auto same = [](const cvc::ocean::sea_wind &a, const cvc::ocean::sea_wind &b) {
+    return a.speed_mps == b.speed_mps && a.dir_rad == b.dir_rad && a.fetch_m == b.fetch_m;
+  };
+  if (k.keyframe == 0 || (!coast && d.sea && d.sea->keyframe == k.keyframe && d.sea->t0 == k.t0 &&
+                          d.sea->t1 == k.t1 && same(d.sea->from, k.from) && same(d.sea->to, k.to)))
+    return false; // the sea it has
+  const auto t0 = std::chrono::steady_clock::now();
+  auto next = std::make_shared<SceneWaterSea>();
+  next->from = k.from;
+  next->to = k.to;
+  next->t0 = k.t0;
+  next->t1 = k.t1;
+  next->keyframe = k.keyframe;
+  next->h0 = keyframe_h0(k.to);
+  next->full = keyframe_full(k.to);
+  // The old sea is the last keyframe's whole (advance: a keyframe comes once a crossfade is over),
+  // the lag's `from`; the first keyframe has none.
+  if (k.keyframe > 1) {
+    next->h0_from = keyframe_h0(k.from);
+    next->full_from = keyframe_full(k.from);
+  } else {
+    next->full_from = next->full;
+  }
+  if (s.lee && shore && shore->grid) {
+    next->fetch = keyframe_fetch(*shore, k.to.dir_rad, k.to.fetch_m);
+    if (k.keyframe > 1)
+      next->fetch_from = k.from.dir_rad == k.to.dir_rad && k.from.fetch_m == k.to.fetch_m
+                             ? next->fetch
+                             : keyframe_fetch(*shore, k.from.dir_rad, k.from.fetch_m);
+    else
+      next->fetch_from = next->fetch; // advance's first keyframe: the coast's, both
   }
   next->build_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -404,6 +457,12 @@ struct WaterRuntime::impl {
   // While the scene has storms (SceneColliders::clock_period): the clock period the sea last
   // stepped in (none yet: the largest value).
   std::uint64_t period_done = std::numeric_limits<std::uint64_t>::max();
+  std::uint64_t sea_from_tick = 0; // the last keyframe's from_tick
+  // A sea another host grew, followed in place of the lag (follow_sea, OW5q): the one to make
+  // next, if new, and the last made.
+  bool following = false;
+  std::optional<SceneWaterKeyframe> follow_next;
+  SceneWaterKeyframe followed;
 };
 
 WaterRuntime::WaterRuntime(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
@@ -429,7 +488,30 @@ double WaterRuntime::level() const {
 
 std::shared_ptr<const SceneWaterSea> WaterRuntime::keyframes() const { return _impl->clock.sea(); }
 
-bool WaterRuntime::tick() {
+SceneWaterKeyframe WaterRuntime::keyframe() const {
+  const impl &d = *_impl;
+  SceneWaterKeyframe k;
+  if (const std::shared_ptr<const SceneWaterSea> s = d.clock.sea()) {
+    k.from = s->from;
+    k.to = s->to;
+    k.t0 = s->t0;
+    k.t1 = s->t1;
+    k.keyframe = s->keyframe;
+    k.from_tick = d.sea_from_tick;
+  }
+  return k;
+}
+
+void WaterRuntime::follow_sea(const SceneWaterKeyframe &k) {
+  impl &d = *_impl;
+  d.following = true;
+  if (k != d.followed)
+    d.follow_next = k;
+}
+
+bool WaterRuntime::following() const { return _impl->following; }
+
+bool WaterRuntime::tick(const cvc::world_clock *on) {
   impl &d = *_impl;
   const std::shared_ptr<const cvc::height_field> g = d.ground ? d.ground() : nullptr;
   if (!g || g->rows() < 2 || g->cols() < 2)
@@ -470,8 +552,21 @@ bool WaterRuntime::tick() {
   // the bodies feel each in, are the clock's alone, whatever the frames.
   bool seaNew = false;
   std::uint64_t from_tick = 0;
-  const cvc::world_clock &clock = d.app->world_clock();
-  if (const double period = d.colliders->clock_period; period > 0.0 && d.clock.sea()) {
+  const cvc::world_clock &clock = on ? *on : d.app->world_clock();
+  if (d.following) {
+    // Another host's sea (follow_sea, OW5q): its keyframe, made here as it was made there, and in
+    // after the tick it went in after there. The coast again on this ground when it changed.
+    const SceneWaterKeyframe k = d.follow_next ? *d.follow_next : d.followed;
+    seaNew = d.clock.follow(k, s, d.shore);
+    if (d.follow_next) {
+      d.followed = *d.follow_next;
+      d.follow_next.reset();
+    }
+    if (seaNew) {
+      from_tick = k.from_tick;
+      d.sea_from_tick = k.from_tick;
+    }
+  } else if (const double period = d.colliders->clock_period; period > 0.0 && d.clock.sea()) {
     const std::uint64_t ticks = scene_clock_period_ticks(period, clock.fixed_dt());
     const std::uint64_t k = clock.tick() / ticks;
     if (d.period_done != std::numeric_limits<std::uint64_t>::max() && k < d.period_done)
@@ -485,11 +580,15 @@ bool WaterRuntime::tick() {
       sc.sea_fade = std::max(s.sea_fade, 2.0 * static_cast<double>(ticks) * clock.fixed_dt());
       seaNew = d.clock.advance(static_cast<double>(next) * clock.fixed_dt(), sc, d.shore);
       d.period_done = k;
-      if (seaNew)
+      if (seaNew) {
         from_tick = next;
+        d.sea_from_tick = next;
+      }
     }
   } else {
     seaNew = d.clock.advance(clock.t(), s, d.shore);
+    if (seaNew)
+      d.sea_from_tick = 0;
   }
   if (!groundNew && !seaNew && spec == d.built && d.colliders->geometry)
     return false;

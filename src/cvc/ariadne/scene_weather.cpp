@@ -216,7 +216,7 @@ void WeatherFriction::set_ground(std::shared_ptr<const cvc::height_field> field)
 
 bool WeatherFriction::has_ground() const { return _impl->field != nullptr; }
 
-void WeatherFriction::read_keys() {
+void WeatherFriction::read_keys(const cvc::world_clock *clock_on) {
   impl &d = *_impl;
   if (!d.app)
     return;
@@ -240,7 +240,7 @@ void WeatherFriction::read_keys() {
   const double gust = std::max(0.0, read_or<double>(*d.app, d.gustKey, d.gustPending));
   if (gust != d.gustPending) {
     d.gustPending = gust;
-    const cvc::world_clock &clock = d.app->world_clock();
+    const cvc::world_clock &clock = clock_on ? *clock_on : d.app->world_clock();
     const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
     d.gustFrom = (clock.tick() / ticks + 1) * ticks;
   }

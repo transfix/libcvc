@@ -350,9 +350,12 @@ public:
 
   // One frame: the room's world source (when its stamp moved: resolve, check, load and build),
   // what the relay has on (when its stamp moved, or the world was built again: the world turned
-  // on, the generated worlds asked for), then the world's sync (a generated world's colliders as
-  // they become ready), and the statics again when the world on or any node's colliders changed.
-  void pump(cvc::app &app, const std::string &room);
+  // on, the generated worlds asked for, the relay's seas followed), then the world's sync (a
+  // generated world's colliders as they become ready), and the statics again when the world on
+  // or any node's colliders changed. CLOCK: the relay's clock as this client has it (the holon's,
+  // which counts the server's ticks), which the world's sync times what it times on (its storms'
+  // front); null: the app's.
+  void pump(cvc::app &app, const std::string &room, const cvc::world_clock *clock = nullptr);
   // Whether it holds the relay's document; its statics, and their stamp (its own epoch, a
   // revision more each time they change: holon::set_statics takes it).
   bool ready() const { return _ready; }
@@ -360,8 +363,13 @@ public:
   const section_stamp &stamp() const { return _stamp; }
   // The water with them (OW5j), which a boat's model floats on: the fluid fields its world has
   // (a water node's), else the still water the relay adds for its boats over the world's grid
-  // (boat_still_water). It changes with the statics, under their stamp.
+  // (boat_still_water). It changes with the statics, under their stamp, and on its own when the
+  // relay's sea takes a new keyframe (OW5q: room_world_on's seas, which its storms grow): then
+  // water_revision() moves, and the new water goes in after the relay's tick water_from_tick()
+  // (holon::set_water), as the relay's world puts it in.
   const std::vector<cvc::physics::field> &water() const { return _water; }
+  std::uint64_t water_revision() const { return _water_rev; }
+  std::uint64_t water_from_tick() const { return _water_from; }
   // What it did with the source last: what it built (and from which pack), or why not.
   const std::string &status() const { return _status; }
   // The world it built (null when not ready).
@@ -375,7 +383,11 @@ public:
 
 private:
   void build_statics(cvc::app &app);
+  void take_water(cvc::app &app);
   void follow(cvc::app &app, const std::string &room);
+  bool _sea_new = false; // follow() gave a water node a new sea
+  std::uint64_t _sea_from = 0;
+  std::uint64_t _water_rev = 0, _water_from = 0;
   section_stamp _source_stamp;
   section_stamp _on_stamp; // the room_world_on followed
   std::string _built_on;   // the world on when the statics were built

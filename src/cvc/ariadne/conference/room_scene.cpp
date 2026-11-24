@@ -298,8 +298,15 @@ bool same_params(const cvc::world::generated_world_params &a,
 }
 } // namespace
 
+bool room_water_sea::operator==(const room_water_sea &o) const {
+  return node == o.node && keyframe == o.keyframe && from_tick == o.from_tick &&
+         from_speed == o.from_speed && from_dir == o.from_dir && from_fetch == o.from_fetch &&
+         to_speed == o.to_speed && to_dir == o.to_dir && to_fetch == o.to_fetch && t0 == o.t0 &&
+         t1 == o.t1;
+}
+
 bool room_world_on::operator==(const room_world_on &o) const {
-  if (world != o.world || generated.size() != o.generated.size())
+  if (world != o.world || generated.size() != o.generated.size() || seas != o.seas)
     return false;
   for (std::size_t i = 0; i < generated.size(); ++i)
     if (generated[i].node != o.generated[i].node ||
@@ -340,6 +347,22 @@ section_stamp write_room_world_on(cvc::app &app, const std::string &room_id,
     w.set({g, "terrain_file"}, p.terrain_file);
     w.set({g, "edge"}, std::to_string(p.edge));
   }
+  w.set({"seas"}, std::to_string(on.seas.size()));
+  for (std::size_t i = 0; i < on.seas.size(); ++i) {
+    const std::string s = "s" + std::to_string(i);
+    const room_water_sea &k = on.seas[i];
+    w.set({s, "node"}, k.node);
+    w.set_uint({s, "keyframe"}, k.keyframe);
+    w.set_uint({s, "from_tick"}, k.from_tick);
+    w.set_double({s, "from_speed"}, k.from_speed);
+    w.set_double({s, "from_dir"}, k.from_dir);
+    w.set_double({s, "from_fetch"}, k.from_fetch);
+    w.set_double({s, "to_speed"}, k.to_speed);
+    w.set_double({s, "to_dir"}, k.to_dir);
+    w.set_double({s, "to_fetch"}, k.to_fetch);
+    w.set_double({s, "t0"}, k.t0);
+    w.set_double({s, "t1"}, k.t1);
+  }
   return w.commit(0, epoch);
 }
 
@@ -377,6 +400,24 @@ bool read_room_world_on(cvc::app &app, const std::string &room_id, room_world_on
     p.edge = static_cast<int>(r.number({g, "edge"}, d.edge));
     if (!x.node.empty())
       on.generated.push_back(std::move(x));
+  }
+  const int seas = static_cast<int>(r.number({"seas"}, 0.0));
+  for (int i = 0; i < seas; ++i) {
+    const std::string s = "s" + std::to_string(i);
+    room_water_sea k;
+    k.node = r.text({s, "node"});
+    k.keyframe = std::strtoull(r.text({s, "keyframe"}, "0").c_str(), nullptr, 10);
+    k.from_tick = std::strtoull(r.text({s, "from_tick"}, "0").c_str(), nullptr, 10);
+    k.from_speed = r.number({s, "from_speed"}, 0.0);
+    k.from_dir = r.number({s, "from_dir"}, 0.0);
+    k.from_fetch = r.number({s, "from_fetch"}, 0.0);
+    k.to_speed = r.number({s, "to_speed"}, 0.0);
+    k.to_dir = r.number({s, "to_dir"}, 0.0);
+    k.to_fetch = r.number({s, "to_fetch"}, 0.0);
+    k.t0 = r.number({s, "t0"}, 0.0);
+    k.t1 = r.number({s, "t1"}, 0.0);
+    if (!k.node.empty())
+      on.seas.push_back(std::move(k));
   }
   out = std::move(on);
   return true;

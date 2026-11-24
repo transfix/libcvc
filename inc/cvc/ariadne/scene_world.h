@@ -112,6 +112,7 @@ struct spawn_rules;
 class WorldVehicles;
 class BoatRuntime;
 class WaterRuntime;
+struct SceneWaterKeyframe;
 class WeatherFriction;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
@@ -238,8 +239,15 @@ public:
 
   // Run the generated_world nodes this world runs (a request or an edit makes a new world), take a
   // ready or changed dataset's colliders, and swap the bodies of each node whose colliders changed.
-  // follow() runs it first. Problems warn, naming the node.
+  // follow() runs it first, on the clock it follows. Problems warn, naming the node.
+  //
+  // What the clock times (the water's sea while the scene has storms, the storms' gust front in
+  // wind.front, a new storm-wind peak) is timed on CLOCK: the one this world steps on. Without
+  // one, the app's world clock (a world its host steps on that clock). A holon steps a server
+  // document's world on a clock of its own (holon::attach_world) and the app's is not driven, so
+  // follow() passes the clock it follows (OW5q).
   void sync(std::vector<std::string> *warnings = nullptr);
+  void sync(const cvc::world_clock &clock, std::vector<std::string> *warnings = nullptr);
 
   // Run the steps due on `clock` since the last call and publish the telemetry when any ran. The
   // first call anchors at the clock's tick and runs none. `after_step` is called after the last two
@@ -330,6 +338,11 @@ public:
   BoatRuntime *boat(const std::string &node);
   // A water node's runtime this world runs (from_scene's; a renderer runs its own), or null.
   const WaterRuntime *water(const std::string &node) const;
+  // The water nodes this world runs, in the document's order.
+  std::vector<std::string> water_nodes() const;
+  // Water node NODE's sea is K from now on, another host's (WaterRuntime::follow_sea; a client's
+  // replica follows the relay's, OW5q); its field goes in at the next sync. False for no such node.
+  bool follow_sea(const std::string &node, const SceneWaterKeyframe &k);
   // Take on the scene's wind (scene_wind.h, O14): seed its keys from `scene: wind:` and, while
   // wind.speed is set under bind_prefix, keep a flow field of air (1.225 kg/m^3, C_d 1) whose
   // velocity is that wind (cvc::physics::wind_flow, its profile over the document's wind base)
@@ -371,9 +384,9 @@ private:
   void publish_worlds(bool force);
   // The wind's field after the scene wind's keys (bind_wind) and the weathers' storms.
   void sync_wind();
-  // wind.front: the storms' gust front at the first weather's centre at the start of the clock's
+  // wind.front: the storms' gust front at the first weather's centre at the start of CLOCK's
   // kSceneWindFrontPeriod.
-  void publish_front();
+  void publish_front(const cvc::world_clock &clock);
   struct impl;
   std::unique_ptr<impl> _impl;
 };

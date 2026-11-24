@@ -69,10 +69,13 @@ namespace ariadne {
 
 // A jolt vehicle or a boat as its model keeps it: its world, saved (world::save) at the end of
 // the step; a boat's driver memory too. A boat not yet on the water (no sample has put it there)
-// has no world.
+// has no world. WATER: which of the model's water the world was saved on (OW5q,
+// dynamic_vehicle_model::set_water; 0 the first): a world restores only onto the sea it was saved
+// on, so the model puts that one back first.
 struct jolt_vehicle_saved {
   std::shared_ptr<const std::vector<std::uint8_t>> world;
   cvc::physics::dyn_boat_plant::memory boat;
+  std::uint64_t water = 0;
 };
 
 // The world a jolt vehicle's or a boat's model runs it in: the relay's statics and water, as the
@@ -81,11 +84,19 @@ struct jolt_vehicle_saved {
 // half extents and masses (OW5o; dynamic_vehicle_model::hold_obstacles; their keys and poses do
 // not count), made with the world so its saved states keep the same bodies.
 struct vehicle_obstacle;
+// The world's water from a tick on (OW5q): the relay's sea after a keyframe its storms grew goes in
+// at the first step that ends past FROM_TICK (as SceneWorld puts a sea keyframe's field in).
+struct timed_water {
+  std::uint64_t from_tick = 0;
+  std::vector<cvc::physics::field> water;
+};
+// WATER_AFTER: the water the world's took on since (dynamic_vehicle_model::set_water), in order.
 struct jolt_vehicle_world {
   std::vector<avatar_static> statics;
   std::vector<cvc::physics::field> water;
   cvc::physics::vec3 gravity{0.0, 0.0, -9.80665};
   std::vector<vehicle_obstacle> obstacle_room;
+  std::vector<timed_water> water_after;
 };
 
 // One of the room's vehicles as a client shows it (holon::hold_entity), for a jolt or boat
@@ -201,6 +212,17 @@ public:
   bool is_boat() const { return _drive.plant == "dynamicboat"; }
   const cvc::physics::dyn_boat_plant *boat() const { return _boat.get(); }
 
+  // A BOAT'S WATER FROM A TICK ON (OW5q): the relay's sea took a new keyframe (its storms grew
+  // it), and its world puts the field in at the first step that ends past FROM_TICK. Each step of
+  // the model floats on the water its tick has (the world's field time tells the tick), so one
+  // replayed from a sample before FROM_TICK floats on the old water until it gets there, as the
+  // relay's did. The last kWaterKept are kept; a tick before the first has the first. Nothing on a
+  // model that is not a boat's.
+  static constexpr std::size_t kWaterKept = 8;
+  void set_water(const std::vector<cvc::physics::field> &water, std::uint64_t from_tick);
+  // The water each tick has: what it took on since it was made (with the first, from tick 0).
+  const std::vector<timed_water> &waters() const { return _waters; }
+
   // THE ROOM'S VEHICLES (OW5o), on a jolt or boat model: its world holds a kinematic box for each
   // of jolt_vehicle_world::obstacle_room's sizes, out of the way until held. Before V's next step,
   // the boxes for OBSTACLES go where each is to be at that step's end (one keeps its box while it
@@ -244,6 +266,11 @@ private:
   cvc::physics::world *room_world() const;
   // The chassis's forward speed at its rear axle (m/s), as nav_plant reads it.
   double jolt_speed() const;
+  // A boat's world with the water of the step that ends on TICK (OW5q), and with the water a
+  // state was saved on (by its serial: one no longer kept leaves the water as it is).
+  void water_for(std::uint64_t tick) const;
+  void water_to(std::uint64_t serial) const;
+  void put_water(std::size_t i) const;
 
   dynamic_drive _drive;
   double _dt = 0.0;
@@ -263,7 +290,15 @@ private:
   double _jrear = 0.0;
   mutable double _jreach = 5.0; // m: the chassis's reach in plan from its centre (OW5p)
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jadded;
+  mutable std::uint64_t _jadded_water = 0; // the water it was saved on (OW5q)
   mutable std::shared_ptr<const std::vector<std::uint8_t>> _jlast;
+  // A boat's water by tick (OW5q), the fields its world has them under, and which of them it has
+  // in now (a count of set_water calls: 0 for the first water).
+  std::vector<timed_water> _waters;
+  std::vector<std::uint64_t> _water_serial; // each of _waters'
+  std::uint64_t _water_next = 0;
+  mutable std::vector<cvc::physics::field_id> _water_ids;
+  mutable std::uint64_t _water_on = 0;
   // A dynamic plant's world (OW5p): its statics, the room's boxes and the plant's chassis box, and
   // the saved world it was last left at.
   std::unique_ptr<avatar_world> _dworld;
