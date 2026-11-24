@@ -242,6 +242,12 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.terrain_gen = seed_str("world.terrain", b.terrain);
   k.city = seed_str("world.city", b.city);
   k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
+  // Save: where (the node's save_as prop, else its dataset's name: a directory beside the
+  // document), whether with the exports, and how it went.
+  k.save_file = seed_str("world.save.file", n.props.str("save_as", generated_world_data_name(n)));
+  k.save_exports = seed_key("world.save.exports", 0.0);
+  k.save_status = key("world.save.status");
+  write<std::string>(app, k.save_status, std::string());
   // The generators a panel can offer (a host may have registered its own), one per line.
   write<std::string>(app, key("world.generators.terrain"),
                      joined(world::terrain_generator_names(app)));
@@ -347,6 +353,8 @@ GeneratedWorldPoll poll_generated_world(cvc::app &app, const GeneratedWorldKeys 
     write<std::string>(app, k.request, std::string());
     if (req == "stop") {
       out.stop = true;
+    } else if (req == "save") {
+      out.save = true;
     } else {
       if (req == "randomize") {
         const auto s = static_cast<std::uint64_t>(read_or<double>(app, k.seed, 0.0));
@@ -375,6 +383,27 @@ GeneratedWorldPoll poll_generated_world(cvc::app &app, const GeneratedWorldKeys 
   write<int>(app, k.pending, now != sig ? 1 : 0);
   out.params = std::move(p);
   return out;
+}
+
+bool save_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const std::string &data_path,
+                          const std::string &base_dir) {
+  const std::string file = read_or<std::string>(app, k.save_file, std::string());
+  try {
+    if (data_path.empty())
+      throw std::runtime_error("the world has no dataset yet");
+    DataSaveOptions o;
+    o.exports = read_bool_or(app, k.save_exports, 0) != 0;
+    const DataSaved s = data_save_files(app, data_path, file, base_dir, o);
+    char mb[32];
+    std::snprintf(mb, sizeof mb, "%.1f", double(s.bytes) / (1024.0 * 1024.0));
+    write<std::string>(app, k.save_status,
+                       "saved " + s.where + " (" + std::to_string(s.files) + " files, " + mb +
+                           " MB)");
+    return true;
+  } catch (const std::exception &e) {
+    write<std::string>(app, k.save_status, std::string("error: ") + e.what());
+    return false;
+  }
 }
 
 std::shared_ptr<const world::world_geometry>
@@ -526,6 +555,8 @@ bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
   impl &d = *_impl;
   cvc::app &app = *d.app;
   const GeneratedWorldPoll poll = poll_generated_world(app, d.keys, d.base, d.preset, d.sig);
+  if (poll.save)
+    save_generated_world(app, d.keys, d.data_path, d.base_dir);
   if (!poll.rebuild)
     return false;
   try {

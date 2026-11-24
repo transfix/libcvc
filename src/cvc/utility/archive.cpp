@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <cvc/utility/archive.h>
@@ -19,6 +20,11 @@
 #include <zstd.h>
 
 namespace cvc {
+namespace detail {
+// stb_io.cpp, where stb_image_write's implementation lives: `bytes` as a zlib stream.
+std::string stb_zlib_compress(std::string_view bytes, int quality);
+} // namespace detail
+
 namespace archive {
 
 namespace {
@@ -964,6 +970,93 @@ std::string zstd(std::string_view bytes, int level) {
   if (ZSTD_isError(n))
     fail(std::string("zstd: ") + ZSTD_getErrorName(n));
   out.resize(n);
+  return out;
+}
+
+std::string deflate(std::string_view bytes) {
+  if (bytes.size() > static_cast<std::size_t>(INT_MAX))
+    fail("deflate: more than 2 GiB");
+  // A zlib stream: two header bytes, the raw deflate, four bytes of Adler-32.
+  std::string z = detail::stb_zlib_compress(bytes, 8);
+  if (z.size() < 6)
+    fail("deflate: the encode failed");
+  return z.substr(2, z.size() - 6);
+}
+
+std::string pack_zip(const std::vector<std::pair<std::string, std::string>> &files) {
+  if (files.size() > 0xFFFF)
+    throw std::runtime_error("archive: a zip holds at most 65535 entries without zip64; " +
+                             std::to_string(files.size()) + " given");
+  std::string out, central;
+  const auto put16 = [](std::string &s, std::uint32_t v) {
+    s += static_cast<char>(v & 0xFF);
+    s += static_cast<char>((v >> 8) & 0xFF);
+  };
+  const auto put32 = [&](std::string &s, std::uint32_t v) {
+    put16(s, v & 0xFFFF);
+    put16(s, v >> 16);
+  };
+  const auto room = [](std::uint64_t n) {
+    if (n > 0xFFFFFFFFull)
+      throw std::runtime_error("archive: a zip holds at most 4 GiB without zip64");
+    return static_cast<std::uint32_t>(n);
+  };
+  constexpr std::uint32_t kUtf8 = 1u << 11;
+  constexpr std::uint32_t kDosDate = (0u << 9) | (1u << 5) | 1u; // 1980-01-01; time 00:00
+  std::vector<std::string> seen;
+  for (const auto &[given, data] : files) {
+    const std::string path = safe_path(given);
+    if (path.empty() || path != given)
+      throw std::invalid_argument("archive: pack_zip: an unsafe or unnormalized path: '" + given +
+                                  "'");
+    if (std::find(seen.begin(), seen.end(), path) != seen.end())
+      throw std::invalid_argument("archive: pack_zip: '" + path + "' twice");
+    seen.push_back(path);
+    std::string packed = data.empty() ? std::string() : deflate(data);
+    const bool deflated = !data.empty() && packed.size() < data.size();
+    const std::string &body = deflated ? packed : data;
+    const std::uint32_t crc = crc32(data);
+    const std::uint32_t offset = room(out.size());
+    const auto header = [&](std::string &s, bool local) {
+      put32(s, local ? 0x04034b50u : 0x02014b50u);
+      if (!local)
+        put16(s, 20); // made by: MS-DOS, spec 2.0
+      put16(s, 20);   // needed to extract
+      put16(s, kUtf8);
+      put16(s, deflated ? 8 : 0);
+      put16(s, 0); // time
+      put16(s, kDosDate);
+      put32(s, crc);
+      put32(s, room(body.size()));
+      put32(s, room(data.size()));
+      put16(s, static_cast<std::uint32_t>(path.size()));
+      put16(s, 0); // extra
+      if (!local) {
+        put16(s, 0); // comment
+        put16(s, 0); // disk
+        put16(s, 0); // internal attributes
+        put32(s, 0); // external attributes
+        put32(s, offset);
+      }
+      s += path;
+    };
+    if (path.size() > 0xFFFF)
+      throw std::invalid_argument("archive: pack_zip: a path longer than 65535 bytes");
+    header(out, true);
+    out += body;
+    header(central, false);
+  }
+  const std::uint32_t cd = room(out.size());
+  out += central;
+  put32(out, 0x06054b50u);
+  put16(out, 0); // this disk
+  put16(out, 0); // the central directory's disk
+  put16(out, static_cast<std::uint32_t>(files.size()));
+  put16(out, static_cast<std::uint32_t>(files.size()));
+  put32(out, room(central.size()));
+  put32(out, cd);
+  put16(out, 0); // comment
+  room(out.size());
   return out;
 }
 

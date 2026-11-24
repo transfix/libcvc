@@ -2057,7 +2057,13 @@ every repaint (`world.color`, at once) is a sliced task on the app's scheduler
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
 swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
-follow it, and `world.request: stop` ends it, keeping the world shown. Its trees and rocks draw
+follow it, and `world.request: stop` ends it, keeping the world shown. `world.request: save` (the
+panel's Save) writes the world shown as a bundle to `world.save.file` (the node's `save_as`, else
+its dataset's name): a directory beside the document, or a zip when it ends in `.zip`, in a browser
+a zip download; `world.save.exports` adds `export/` for other software (the terrain as
+`terrain.glb`, a 16-bit `heightmap.png` and `heightmap.json`), and `world.save.status` says where it
+went or why not. The saved world loads again as a `data:` entry (`uri:` it, `as: city_bundle`), the
+same world: the same hash. Its trees and rocks draw
 with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<id>_props`,
 `<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
 full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the
@@ -4536,7 +4542,16 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 
 A relative FILE is the document's directory's. A document whose directory is a URL (an `https://`
 one) writes no file. In a browser the file downloads under its name instead. A host adds encoders
-with `register_data_encoder`. So a node that edits data in memory reads and writes no file itself:
+with `register_data_encoder`.
+
+A whole dataset saves as its files: `(data-save-files NAME TARGET [EXPORTS])`, or a host's
+`data_save_files`, writes every file the store holds for it at its path, as a directory TARGET, or
+one zip when TARGET ends in `.zip` (always a zip download in a browser). A world's bundle saved so
+loads again as the same world. EXPORTS adds a world's files for other software under `export/`
+(`world::city_bundle_exports`): the terrain as `terrain.glb` (a mesh per surface, at most 1025
+samples a side), its heights as a 16-bit grey `heightmap.png` at full size, the north row at the
+top, and `heightmap.json` (the size, bounds, spacing, height range and water level). The bundle's
+hash leaves `export/` out. So a node that edits data in memory reads and writes no file itself:
 a `volume_grid` shows the volume the app loaded, and the app saves the points the grid publishes.
 
 **Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
@@ -4604,6 +4619,9 @@ or host can write as well.
   `/` the root's) holds on its data channel as FILE, through the encoder AS (else the payload's
   type picks one), and returns `#t`; it raises, saying why, when PATH holds nothing, no encoder
   takes it, or the file can't be written.
+- `(data-save-files NAME TARGET [EXPORTS])` saves the dataset's files as a directory TARGET, or a
+  zip for `TARGET.zip` (in a browser, a zip download), with a world's `export/` files when EXPORTS
+  is true, and returns where it wrote; it raises, saying why, when the dataset has no files yet.
 
 **Hosts.** In C++, use `AppRuntime::data_store()`. In Python:
 - `pycvc.data_load` and `data_wait` start and wait for a load;

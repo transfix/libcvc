@@ -12,10 +12,12 @@
 // as a bundle and read back is the same world, a generated world included, and writing what was
 // read gives the same bytes, so its hash is the world's.
 
+#include <boost/property_tree/json_parser.hpp>
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/image/image.h>
+#include <cvc/image/image_decode.h>
 #include <cvc/image/image_encode.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
@@ -28,6 +30,8 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <map>
+#include <optional>
+#include <sstream>
 #include <string>
 
 using namespace cvc::world;
@@ -597,4 +601,103 @@ TEST(CityBundleV2, ABadRendererFileSaysWhy) {
   bad = files;
   bad["ground.png"] = std::make_shared<const std::string>("not a png");
   EXPECT_NE(why(bad).find("ground.png"), std::string::npos) << why(bad);
+}
+
+// A saved world's files for other software (GB4): the terrain as a glb with a mesh per surface its
+// cells use, a 16-bit height map at full size with the north row at the top, and the JSON that
+// reads it; under export/, which the hash leaves out and a directory keeps as a subdirectory.
+TEST(CityBundleV2, AWorldsExportsAreItsTerrainForOtherSoftware) {
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  const world_geometry w = small_world_geometry();
+  const city_bundle_files ex = city_bundle_exports(app, w, 1.5);
+  ASSERT_EQ(ex.size(), 3u);
+  ASSERT_TRUE(ex.count("export/terrain.glb") && ex.count("export/heightmap.png") &&
+              ex.count("export/heightmap.json"));
+  const cvc::height_field &t = *w.terrain();
+  float lo = t.heights().front(), hi = lo;
+  for (float v : t.heights()) {
+    lo = std::min(lo, v);
+    hi = std::max(hi, v);
+  }
+
+  boost::property_tree::ptree j;
+  {
+    std::istringstream in(*ex.at("export/heightmap.json"));
+    boost::property_tree::read_json(in, j);
+  }
+  EXPECT_EQ(j.get<int>("rows"), 5);
+  EXPECT_EQ(j.get<int>("cols"), 6);
+  EXPECT_DOUBLE_EQ(j.get<double>("bounds.min_x"), -10.0);
+  EXPECT_DOUBLE_EQ(j.get<double>("bounds.max_y"), 8.0);
+  EXPECT_DOUBLE_EQ(j.get<double>("min_height_m"), lo);
+  EXPECT_DOUBLE_EQ(j.get<double>("max_height_m"), hi);
+  EXPECT_DOUBLE_EQ(j.get<double>("water_level_m"), 1.5);
+  EXPECT_EQ(j.get<int>("mesh.rows"), 5);
+  EXPECT_EQ(j.get<int>("mesh.cols"), 6);
+
+  // The height map: 6 x 5, row 0 the north row; an 8-bit read gives each sample's high byte.
+  const std::string &png = *ex.at("export/heightmap.png");
+  EXPECT_EQ(static_cast<unsigned char>(png[24]), 16u);
+  const cvc::image img = cvc::decode_image(png.data(), png.size());
+  ASSERT_EQ(img.width(), 6);
+  ASSERT_EQ(img.height(), 5);
+  const auto *px = static_cast<const unsigned char *>(img.data());
+  for (int r = 0; r < 5; ++r)
+    for (int c = 0; c < 6; ++c) {
+      const double u = (t.height_at(r, c) - lo) / (hi - lo);
+      const long v = std::lround(u * 65535.0);
+      EXPECT_EQ(px[((4 - r) * 6 + c) * 4], v >> 8) << r << "," << c;
+    }
+
+  // The mesh: two triangles a cell, a mesh for each of the two surfaces, its material named by it.
+  const std::string &glb = *ex.at("export/terrain.glb");
+  const cvc::model m = cvc::read_model_from_memory(app, glb.data(), glb.size(), ".glb");
+  std::size_t tris = 0;
+  std::map<std::string, std::size_t> materials;
+  for (const auto &mm : m.meshes) {
+    tris += mm.geom.const_tris().size();
+    ASSERT_GE(mm.material, 0);
+    ++materials[m.materials[mm.material].name];
+  }
+  EXPECT_EQ(tris, 4u * 5u * 2u);
+  EXPECT_EQ(m.meshes.size(), 2u);
+  EXPECT_EQ(materials.count("asphalt"), 1u);
+  EXPECT_EQ(materials.count("dirt"), 1u);
+
+  // A mesh cap resamples the mesh over the same extent; the height map stays full size.
+  const city_bundle_files capped = city_bundle_exports(app, w, std::nullopt, 3);
+  {
+    std::istringstream in(*capped.at("export/heightmap.json"));
+    boost::property_tree::ptree s;
+    boost::property_tree::read_json(in, s);
+    EXPECT_EQ(s.get<int>("rows"), 5);
+    EXPECT_EQ(s.get<int>("mesh.rows"), 3);
+    EXPECT_EQ(s.get<int>("mesh.cols"), 3);
+    EXPECT_FALSE(s.get_optional<double>("water_level_m"));
+  }
+  const std::string &sg = *capped.at("export/terrain.glb");
+  const cvc::model sm = cvc::read_model_from_memory(app, sg.data(), sg.size(), ".glb");
+  std::size_t stris = 0;
+  for (const auto &mm : sm.meshes)
+    stris += mm.geom.const_tris().size();
+  EXPECT_EQ(stris, 2u * 2u * 2u);
+
+  // Beside the bundle: the hash is the bundle's, and a directory reads as the same world.
+  city_bundle_files files = city_bundle_bytes(app, w);
+  const std::string hash = city_bundle_hash(files);
+  for (const auto &[name, bytes] : ex)
+    files[name] = bytes;
+  EXPECT_EQ(city_bundle_hash(files), hash);
+  const auto dir = fs::temp_directory_path() / "cvc_city_bundle_v2_exports";
+  fs::remove_all(dir);
+  write_city_bundle(dir.string(), files);
+  EXPECT_TRUE(fs::is_regular_file(dir / "export" / "heightmap.png"));
+  const city_bundle b = load_city_bundle(app, dir.string());
+  EXPECT_EQ(b.hash, hash);
+  EXPECT_EQ(b.geometry.items().size(), 3u);
+  fs::remove_all(dir);
+  EXPECT_THROW(write_city_bundle(dir.string(), {{"../escape", nullptr}}), std::invalid_argument);
+  fs::remove_all(dir);
 }
