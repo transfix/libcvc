@@ -602,7 +602,7 @@ TEST(OwnerRule, AcrossGroupsTheCallersOwnerIsPosted) {
   zero.pump();
   EXPECT_EQ(status_of(a.sched(), spinner), se::process_status::paused);
   EXPECT_EQ(status_of(a.sched(), waiter), se::process_status::killed);
-  EXPECT_EQ(*a.sched().get_process_info(waiter)->exit_error, "killed_by_user");
+  EXPECT_EQ(a.sched().get_process_info(waiter)->exit_error.value_or(""), "killed_by_user");
   EXPECT_EQ(status_of(a.sched(), other), se::process_status::waiting);
   EXPECT_EQ(status_of(app.exec_scheduler(), in0), se::process_status::killed);
   // A resume is #t even where the target would say #f; this one applies.
@@ -780,6 +780,7 @@ TEST(PoolKillOwner, RefusedFromInsideAPumpOfThePool) {
   std::vector<se::exec_group *> gs{&a.g()};
   w.pool().pump_all(gs, kRun, clock_type::time_point::max());
   EXPECT_EQ(seen, "refused");
+  EXPECT_NO_THROW(w.pool().kill_owner("Z")) << "outside a pump it runs";
   for (const kill_world::proc &p : w.procs)
     if (p.owner == "Y")
       EXPECT_FALSE(se::is_finished(status_of(*p.sched, p.pid)));
