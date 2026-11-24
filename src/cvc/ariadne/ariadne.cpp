@@ -1994,12 +1994,12 @@ struct Runtime::Impl {
   // A placement change (ensure_placement) moves the document: move_out kills and reaps its
   // processes where they ran and drops their records, so its residents start again in the new
   // place; the streams it owns are re-pointed there (retarget_document_streams). Its old group, if
-  // any, is retired: unregistered and unpumped, it keeps the contexts taken from it and is
-  // destroyed at a later drain_begin once its host has no kernel in flight (R1b skeptic m1, m5), so
-  // a move never waits for them. Only its own kernels' completions can post to it then: its
-  // processes are gone, no stream names it, the Runtime posts to the new place and its host-call
-  // queue is empty outside a pump. The contexts taken from group 0 stay until ~Impl, for a process
-  // a failed kill left there.
+  // any, is retired: unregistered (as a frame group, and from the router: retire_from_router) and
+  // unpumped, it keeps the contexts taken from it and is destroyed at a later drain_begin once its
+  // host has no kernel in flight (R1b skeptic m1, m5), so a move never waits for them. Only its own
+  // kernels' completions can post to it then: its processes are gone, no stream names it, the
+  // Runtime posts to the new place and its host-call queue is empty outside a pump. The contexts
+  // taken from group 0 stay until ~Impl, for a process a failed kill left there.
   struct RetiredGroup {
     std::unique_ptr<cvc::state_exec::exec_group> group;
     std::vector<std::shared_ptr<ActionContext>> contexts; // go after the group
@@ -2011,6 +2011,11 @@ struct Runtime::Impl {
   std::vector<std::shared_ptr<ActionContext>> move_out();
   // drain_begin: destroy the retired groups whose hosts have no kernel in flight.
   void destroy_idle_retired_groups();
+  // A group the document leaves leaves the app's router at once (S2b), not at its teardown, which
+  // waits for its kernels: its prefix is unregistered and what it holds for the router (pending
+  // messages, waits of other groups, router entries) goes to the keys' new homes. Called once the
+  // document's new group, if any, has registered the prefix. Logs what it throws.
+  void retire_from_router(cvc::state_exec::exec_group &g) noexcept;
   // Late registrations (R1b skeptic m3, the lead's rule): a registration after the placement
   // (refresh_program_names, or the providers' registry moving past placement_generation_) has it
   // decided again only when a move would kill nothing; else it waits for the document's next
@@ -2024,8 +2029,8 @@ struct Runtime::Impl {
   // Kill every process of the owner on `sched` and reap each one the Runtime knows of, each step
   // catching and logging what it throws (`when`: "tearing down", "moving").
   void kill_and_reap(cvc::state_exec::async_scheduler &sched, const char *when) noexcept;
-  // "" when the document may have a group (S1-Q6), else the first rule it fails; `host_affinity`
-  // tells whether that group must be pumped on the host thread.
+  // "" when the document may have a group (S1-Q6, S2-Q16), else the first rule it fails;
+  // `host_affinity` tells whether that group must be pumped on the host thread.
   std::string isolation_verdict(bool &host_affinity) const;
   // Whether a host_only provider binds anything in an action's env (the group is then host).
   bool host_only_bindings() const;
@@ -6215,6 +6220,10 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         o.owner = owner_;
         o.affinity = affinity;
         o.app = &app;
+        // The home of the keys under its prefix, its channels' among them (S2b, S2.md section 0
+        // row 23): the constructor registers it with the app's router, so a message sent on one
+        // from another group comes here.
+        o.channel_prefixes = {prefix};
         group_ = std::make_unique<se::exec_group>(std::move(o));
         frame_handle_ = app.register_frame_group(*group_);
       } catch (const std::exception &e) {
@@ -6240,9 +6249,13 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         }
       }
     }
-    // The old group is retired, with the contexts taken from it, until its kernels end (m1).
-    if (old_group)
+    // The old group is retired, with the contexts taken from it, until its kernels end (m1). It
+    // leaves the router now, after the new group registered the prefix (S2b): nothing pumps it,
+    // so the messages and waits it is the home of go to the new home.
+    if (old_group) {
+      retire_from_router(*old_group);
       retired_groups_.push_back(RetiredGroup{std::move(old_group), std::move(taken)});
+    }
   }
   // Why a document stays in group 0 is logged when the reason changes (a new document's, or a
   // first), and only when the setting asks for isolation; one reason is logged once. Not before a
@@ -6299,18 +6312,37 @@ void Runtime::Impl::destroy_idle_retired_groups() {
   });
 }
 
+void Runtime::Impl::retire_from_router(cvc::state_exec::exec_group &g) noexcept {
+  // As its teardown leaves (exec_router.h, "Teardown and rehoming"), holding its token, which is
+  // free: no pump_all holds the group (refuse_if_held) and the frames pump it no more. The
+  // teardown leaves again later and finds nothing to send. If the token is held elsewhere (a host
+  // attached the group and a worker pumps it), only its prefix goes now, and what it holds goes at
+  // its teardown.
+  try {
+    cvc::state_exec::async_scheduler::pump_owner_scope token(g.sched());
+    g.sched().leave_router();
+    return;
+  } catch (const std::exception &e) {
+    teardown_note("moving", "leaving the router", e.what());
+  } catch (...) {
+    teardown_note("moving", "leaving the router", "an unknown exception");
+  }
+  try {
+    app.exec_router().unregister(g.route());
+  } catch (...) {
+  }
+}
+
 std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
   namespace se = cvc::state_exec;
   host_affinity = false;
   if (!isolate_documents_on(cvc::state::instance(app)))
     return "ariadne.exec.isolate_documents is off";
-  // S1-Q6, in order. No router until Stage 2, so its channels must all resolve under its prefix.
+  // S1-Q6's rules, in order, but its channel rules (S2-Q16): its channels no longer keep it in
+  // group 0, since one outside its prefix (a `/` channel, global: true or not) is homed at group 0
+  // or another document's group and routed (S2b). A '#' key is never routed, so oidc still does.
   if (prefix.empty())
     return "it has no prefix (it runs at the app root)";
-  if (!channel_policy_.enforce)
-    return "it has no channels: block enforced in strict lint mode";
-  if (!channel_policy_.global.empty())
-    return "it declares the global channel '" + channel_policy_.global.front() + "'";
   // The programs it runs as written: its lanes, its key bindings, its functions and every program
   // in its tree (a mount's init:, on_tick: and functions too).
   const Widget &tree = has_pending ? pending : root;
@@ -6330,8 +6362,10 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
       collect(c);
   };
   collect(tree);
-  std::string global_channel, oidc_use;
+  std::string oidc_use;
   for (const std::string *p : programs) {
+    if (!oidc_use.empty())
+      break;
     if (!is_expr(*p))
       continue;
     std::vector<std::string> channels;
@@ -6340,13 +6374,10 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
     } catch (const std::exception &) {
       continue; // its parse error shows when it runs
     }
-    for (const std::string &c : channels) {
-      if (global_channel.empty() && !c.empty() && c.front() == '/')
-        global_channel = c;
+    for (const std::string &c : channels)
       // oidc's completions go to "oidc#NAME" on group 0 (oidc_host.cpp)
       if (oidc_use.empty() && c.rfind("oidc#", 0) == 0)
         oidc_use = "it waits on oidc's channel '" + c + "'";
-    }
     if (oidc_use.empty())
       for (const std::string &name : free_heads(*p))
         if (name.rfind("oidc-", 0) == 0) {
@@ -6354,8 +6385,6 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
           break;
         }
   }
-  if (!global_channel.empty())
-    return "a program uses the app-global channel '" + global_channel + "'";
   if (!oidc_use.empty())
     return oidc_use;
   // A writable link: hole whose target leaves the prefix would write outside it from the group's
@@ -6894,11 +6923,13 @@ cvc::state_exec::async_scheduler *Runtime::Impl::scheduler_to_pump() {
     seen_scheduler_ = exec_scheduler_probe::built(app);
   if (!seen_scheduler_)
     return nullptr; // nothing ever used it: nothing to pump, and it stays unbuilt
-  // Someone else's processes (a scene's overlay tasks, a host verb's): pumped while any is live.
-  // Messages posted while none is live wait in the ingress for the next one, in order.
+  // Someone else's processes (a scene's overlay tasks, a host verb's): pumped while any is live,
+  // and while anything posted waits there (S2.md section 0 row 22): a router entry homed at group
+  // 0, such as an isolated document's send or wait on a `/` channel, would wait for a live process
+  // there, which may never come. A post while none is live joins its pending messages, in order.
   const se::scheduler_stats s = seen_scheduler_->get_stats();
   const int live = s.total_processes - s.terminated - s.killed - s.failed;
-  return live > 0 ? seen_scheduler_ : nullptr;
+  return live > 0 || seen_scheduler_->has_pending_ingress() ? seen_scheduler_ : nullptr;
 }
 
 void Runtime::Impl::sweep_document() {
@@ -7360,9 +7391,9 @@ void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
 
-// A lane's program, the channel policy and the key bindings are read by the isolation rules
-// (S1-Q6): setting one decides the placement again before the next program starts (s-m2). Host
-// thread, outside a pump (they kill residents).
+// A lane's program and the key bindings are read by the isolation rules (S1-Q6), and the channel
+// policy was until S2-Q16: setting one decides the placement again before the next program starts
+// (s-m2). Host thread, outside a pump (they kill residents).
 void Runtime::set_tick_program(std::string script) {
   assert_outside_pump(m_->app, m_->group_.get());
   // Replacing the program kills any running resident so the new body starts fresh next drain.
@@ -7439,7 +7470,7 @@ void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<
   m_->channel_policy_.global = std::move(global);
   m_->channel_policy_.enforce = strict;
   m_->channel_policy_.quiet = quiet;
-  m_->placement_decided_ = false; // the isolation rules read it (s-m2)
+  m_->placement_decided_ = false; // decided again (s-m2); the rules no longer read it (S2-Q16)
 }
 
 void Runtime::post_input(const InputEvent &ev) {
