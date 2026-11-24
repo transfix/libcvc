@@ -1391,95 +1391,146 @@ scene:
   fs::remove_all(dir, ec);
 }
 
-// A wheeled look (`wheel:`): the look's mesh is the chassis and `wheel:` one wheel, fitted to the
-// vehicle's wheels unless fit: false, with the model's own wheelbase: and track:. The wheel is
-// found as the mesh is (beside the document, a model by name, an asset's file, a file in a data
-// look's package), and a look whose wheel cannot be found is drawn as its box. A wheel needs a
-// mesh to go with, and the model's measures are zero (the vehicle's) or more.
-TEST(AriadneWorldVehicles, WheeledLooks) {
+// A look in parts: `chassis:`, `wheel:` and `rig:` (inline, or a rig file: YAML, or JSON) parse to
+// a parted look, on disk or with `data:` in a package; the rig's hubs, its radius, its steering
+// hubs (the front axle's unless steer: names them) and its mirror; its files beside the document;
+// the catalog carries it, an inline rig as its text, which reads back.
+TEST(AriadneWorldVehicles, ALookInPartsTakesAChassisAWheelAndARig) {
   REQUIRE_YAML();
   cvc::app app;
   register_world_block(app);
   LoadResult r = load_string(app, R"(
 data:
-  rigs: { uri: models/rigs, load: lazy }
+  parts: { uri: cvcpkg://example/vehicle-parts, path: share/cvc-scenes/rover, load: lazy }
 world:
   vehicles:
     archetypes:
-      h: { look: { file: humvee/chassis.glb, wheel: humvee/wheel.glb, wheelbase: 3.228, track: 1.8743 } }
-      flat: { look: { file: c.glb, wheel: w.glb, fit: false } }
-      pkg: { look: { data: rigs, file: humvee/chassis.glb, wheel: humvee/wheel.glb } }
-      named: { look: { model: car_chassis, wheel: car_wheel } }
-      lost: { look: { model: car_chassis, wheel: no_such_wheel } }
+      inline:
+        look:
+          chassis: rover/chassis.glb
+          wheel: rover/wheel.glb
+          rig:
+            radius: 0.4
+            hubs: [[1.5, 0.9, 0.4], [1.5, -0.9, 0.4], [-1.5, 0.9, 0.4], [-1.5, -0.9, 0.4]]
+            mirror: reflect
+      named:
+        look:
+          chassis: c.obj
+          wheel: w.obj
+          rig:
+            hubs: { order: [fl, fr, rl, rr], xyz: [[1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0]] }
+            steer: [rl, 3]
+      packed: { look: { data: parts, chassis: chassis.glb, wheel: wheel.glb, rig: rig.json } }
 scene:
   nodes: []
 )");
   ASSERT_TRUE(r.ok) << r.error;
   world_rules rules = default_world_rules();
   ASSERT_NE(find_world_block(r), nullptr);
-  EXPECT_EQ(parse_world_block(*find_world_block(r), rules), "");
-  ASSERT_EQ(rules.vehicles.size(), 5u);
-  const vehicle_look &h = rules.vehicles[0].look;
-  EXPECT_EQ(h.kind, "file");
-  EXPECT_EQ(h.path, "humvee/chassis.glb");
-  EXPECT_EQ(h.wheel, "humvee/wheel.glb");
-  EXPECT_EQ(h.wheelbase, 3.228);
-  EXPECT_EQ(h.track, 1.8743);
-  EXPECT_TRUE(h.fit) << "a wheeled look is fitted unless fit: false";
-  EXPECT_FALSE(rules.vehicles[1].look.fit);
-  EXPECT_EQ(rules.vehicles[1].look.wheelbase, 0.0) << "0: the vehicle's";
-  EXPECT_EQ(rules.vehicles[2].look.kind, "data");
-  EXPECT_EQ(rules.vehicles[2].look.wheel, "humvee/wheel.glb");
+  ASSERT_EQ(parse_world_block(*find_world_block(r), rules), "");
+  ASSERT_EQ(rules.vehicles.size(), 3u);
+  const vehicle_look &in = rules.vehicles[0].look;
+  EXPECT_TRUE(in.parted());
+  EXPECT_EQ(in.kind, "file");
+  EXPECT_TRUE(in.fit);
+  EXPECT_EQ(in.chassis, "rover/chassis.glb");
+  EXPECT_EQ(in.wheel, "rover/wheel.glb");
+  EXPECT_EQ(in.rig_file, "");
+  ASSERT_EQ(in.rig.hubs.size(), 4u);
+  EXPECT_EQ(in.rig.hubs[1], (std::array<double, 3>{1.5, -0.9, 0.4}));
+  EXPECT_EQ(in.rig.radius, 0.4);
+  EXPECT_EQ(in.rig.steers, (std::vector<bool>{true, true, false, false})) << "the front axle's";
+  EXPECT_EQ(in.rig.mirror, "reflect");
+  EXPECT_FALSE(in.rig.y_up);
+  const vehicle_look &named = rules.vehicles[1].look;
+  EXPECT_EQ(named.rig.steers, (std::vector<bool>{false, false, true, true})) << "by name, by index";
+  EXPECT_EQ(named.rig.radius, 0.0) << "none given: the wheel mesh's";
+  EXPECT_EQ(named.rig.mirror, "turn");
+  const vehicle_look &packed = rules.vehicles[2].look;
+  EXPECT_EQ(packed.kind, "data");
+  EXPECT_TRUE(packed.parted());
+  EXPECT_EQ(packed.rig_file, "rig.json");
+  EXPECT_TRUE(packed.rig.hubs.empty()) << "read by the view, from the package";
 
-  // A prefix with the named models where cvcpkg puts them.
-  const fs::path prefix = fs::temp_directory_path() / "ariadne_wheeled_looks_prefix";
-  fs::create_directories(prefix / "share" / "cvc-scenes" / "shared");
-  std::ofstream(prefix / "share" / "cvc-scenes" / "shared" / "car_chassis.glb") << "glb";
-  std::ofstream(prefix / "share" / "cvc-scenes" / "shared" / "car_wheel.glb") << "glb";
-  EnvFor bundle("CVC_NAV_BUNDLE", "");
-  EnvFor env("CVC_PREFIX", prefix.string());
+  // Resolved: files beside the document; a data look's package copied in.
+  const fs::path dir = fs::temp_directory_path() / "ariadne_parted_look";
+  fs::create_directories(dir / "rover");
+  std::ofstream(dir / "rover" / "chassis.glb") << "x";
   std::vector<std::string> warnings;
-  resolve_vehicle_looks(rules.vehicles, (prefix / "doc").string(), r.scene.assets, &warnings,
-                        r.scene.data);
-  EXPECT_EQ(fs::path(rules.vehicles[0].look.path), prefix / "doc" / "humvee" / "chassis.glb");
-  EXPECT_EQ(fs::path(rules.vehicles[0].look.wheel), prefix / "doc" / "humvee" / "wheel.glb");
-  EXPECT_EQ(rules.vehicles[2].look.wheel, "humvee/wheel.glb") << "a file in the package";
-  EXPECT_FALSE(rules.vehicles[2].look.uri.empty());
-  EXPECT_EQ(rules.vehicles[3].look.kind, "file");
-  EXPECT_NE(rules.vehicles[3].look.path.find("car_chassis.glb"), std::string::npos);
-  EXPECT_NE(rules.vehicles[3].look.wheel.find("car_wheel.glb"), std::string::npos);
-  EXPECT_EQ(rules.vehicles[4].look.kind, "box");
-  EXPECT_TRUE(rules.vehicles[4].look.wheel.empty());
-  EXPECT_TRUE(any_contains(warnings, "model 'no_such_wheel' is not installed"));
-  // An asset's wheel is an asset too.
-  std::vector<vehicle_archetype> assets(1);
-  assets[0].id = "a";
-  assets[0].look.kind = "asset";
-  assets[0].look.path = "body";
-  assets[0].look.wheel = "tyre";
-  SceneAsset body, tyre;
-  body.id = "body";
-  body.source.source_file = "body.glb";
-  body.source.base_dir = (prefix / "doc").string();
-  tyre.id = "tyre";
-  tyre.source.source_file = "tyre.glb";
-  tyre.source.base_dir = (prefix / "doc").string();
-  resolve_vehicle_looks(assets, "", {body, tyre}, nullptr);
-  EXPECT_EQ(assets[0].look.kind, "file");
-  EXPECT_EQ(fs::path(assets[0].look.wheel), prefix / "doc" / "tyre.glb");
+  resolve_vehicle_looks(rules.vehicles, dir.string(), r.scene.assets, &warnings, r.scene.data);
+  EXPECT_EQ(fs::path(rules.vehicles[0].look.chassis), dir / "rover" / "chassis.glb");
+  EXPECT_EQ(fs::path(rules.vehicles[0].look.wheel), dir / "rover" / "wheel.glb")
+      << "not there, nor installed: beside the document still";
+  EXPECT_EQ(rules.vehicles[2].look.uri, "cvcpkg://example/vehicle-parts");
+  EXPECT_EQ(rules.vehicles[2].look.subpath, "share/cvc-scenes/rover");
+  EXPECT_EQ(rules.vehicles[2].look.chassis, "chassis.glb") << "in the package";
+  EXPECT_TRUE(warnings.empty());
 
-  // A wheel needs a mesh; the model's measures are not negative.
-  for (const char *bad : {"{ box: {}, wheel: w.glb }", "{ wheel: w.glb }",
-                          "{ file: c.glb, wheel: w.glb, track: -1 }"}) {
-    LoadResult b = load_string(app, std::string("world:\n  vehicles:\n    archetypes:\n      h: "
-                                                "{ look: ") +
-                                        bad + " }\nscene:\n  nodes: []\n");
-    world_rules br = default_world_rules();
-    ASSERT_NE(find_world_block(b), nullptr) << bad;
-    EXPECT_NE(parse_world_block(*find_world_block(b), br), "") << bad;
-  }
+  // The catalog: each part, an inline rig as its text, which reads back whole.
+  cvc::physics::world_config c;
+  c.backend = cvc::physics::backend::null;
+  cvc::physics::world world(c);
+  WorldVehicles v(&app, world, rules.vehicles, "vehicles", "entities");
+  EXPECT_EQ(fs::path(val(app, "vehicles.archetypes.inline.look.chassis")),
+            dir / "rover" / "chassis.glb");
+  EXPECT_EQ(val(app, "vehicles.archetypes.packed.look.rig"), "rig.json");
+  const std::string text = val(app, "vehicles.archetypes.inline.look.rig");
+  EXPECT_EQ(text, vehicle_rig_text(rules.vehicles[0].look.rig));
+  Value back;
+  vehicle_rig again;
+  ASSERT_TRUE(parse_value(text, back));
+  ASSERT_TRUE(parse_vehicle_rig(back, again));
+  EXPECT_EQ(again, rules.vehicles[0].look.rig);
   std::error_code ec;
-  fs::remove_all(prefix, ec);
+  fs::remove_all(dir, ec);
+
+  // A rig file's shape: JSON, with its provenance beside the rig (ignored), the radius under
+  // wheel:, the hubs under hubs: xyz:, glTF's frame.
+  Value json;
+  std::string why;
+  ASSERT_TRUE(parse_value(R"({
+    "source": { "title": "a test rover", "license": "CC0" },
+    "frame": "metres",
+    "wheel": { "radius": 0.35, "width": 0.2 },
+    "hubs": { "order": ["a", "b", "c"], "xyz": [[0.8, 0.3, 1.2], [-0.8, 0.3, 1.2], [0, 0.3, -1]] },
+    "up": "y",
+    "size": [2, 1.5, 3]
+  })",
+                          json, &why))
+      << why;
+  vehicle_rig rig;
+  ASSERT_TRUE(parse_vehicle_rig(json, rig, &why)) << why;
+  EXPECT_EQ(rig.radius, 0.35);
+  EXPECT_TRUE(rig.y_up);
+  EXPECT_EQ(rig.steers, (std::vector<bool>{true, true, false})) << "forward is +z in glTF's frame";
+
+  // What is not a rig, or not a parted look.
+  for (const auto &[bad, says] : std::vector<std::pair<std::string, std::string>>{
+           {"{ hubs: [] }", "hubs:"},
+           {"{ hubs: [[1, 2]] }", "three numbers"},
+           {"{ hubs: [[1, 0, 0]], radius: -1 }", "radius:"},
+           {"{ hubs: [[1, 0, 0]], steer: [front] }", "names no hub"},
+           {"{ hubs: [[1, 0, 0]], mirror: flip }", "mirror:"},
+           {"{ hubs: [[1, 0, 0]], up: x }", "up:"}}) {
+    Value v2;
+    ASSERT_TRUE(parse_value(bad, v2));
+    std::string w;
+    vehicle_rig r2;
+    EXPECT_FALSE(parse_vehicle_rig(v2, r2, &w)) << bad;
+    EXPECT_NE(w.find(says), std::string::npos) << bad << ": " << w;
+  }
+  for (const auto &[look, says] : std::vector<std::pair<std::string, std::string>>{
+           {"{ chassis: c.glb, rig: r.json }", "needs chassis:, wheel: and rig:"},
+           {"{ chassis: c.glb, wheel: w.glb }", "needs chassis:, wheel: and rig:"},
+           {"{ model: humvee, chassis: c.glb, wheel: w.glb, rig: r.json }", "drop model:"},
+           {"{ chassis: c.glb, wheel: w.glb, rig: { hubs: [] } }", "rig: hubs:"}}) {
+    LoadResult bad =
+        load_string(app, "world:\n  vehicles:\n    archetypes:\n      h: { look: " + look +
+                             " }\nscene:\n  nodes: []\n");
+    ASSERT_TRUE(bad.ok) << bad.error;
+    world_rules br = default_world_rules();
+    EXPECT_NE(parse_world_block(*find_world_block(bad), br).find(says), std::string::npos) << look;
+  }
 }
 
 TEST(AriadneWorldVehicles, ArchetypeStatsAndSettings) {
@@ -3276,6 +3327,20 @@ TEST(AriadneWorldVehicles, TheWorldBlockTakesPosesAndThePoseController) {
       parse_poses(text + "\nbad 1 2\n2 1 2 nan 0 0 0 0 0 nan;3 inf 0 0 0 0 0 0 0 nan", back));
   ASSERT_EQ(back.size(), 3u) << "the good ones, the bad two left";
   EXPECT_EQ(back[2].first, "2");
+  // Numbers read as std::stod reads them, in any spelling: a sign, an exponent, hex, separators;
+  // one out of range (or not a number) makes its record bad.
+  EXPECT_TRUE(parse_poses("p +1.5 -2e1 nan 0x10 0 0 0.25 0 nan\r\n", back));
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_EQ(back[0].first, "p");
+  EXPECT_EQ(back[0].second.x, 1.5);
+  EXPECT_EQ(back[0].second.y, -20.0);
+  EXPECT_EQ(back[0].second.heading, 16.0);
+  EXPECT_EQ(back[0].second.speed, 0.25);
+  EXPECT_TRUE(parse_poses("q,1,2,nan,0,0,0,0,0,nan;;", back));
+  ASSERT_EQ(back.size(), 1u);
+  EXPECT_EQ(back[0].second.y, 2.0);
+  EXPECT_FALSE(parse_poses("r 1e400 0 nan 0 0 0 0 0 nan\ns 1 0 nan 0 0 0 0 0x nan", back));
+  EXPECT_TRUE(back.empty());
 }
 
 // Poses on the keys, each frame, with no plant integrating the entity: it is exactly where they
@@ -3930,6 +3995,36 @@ TEST(AriadneWorldVehicles, EveryPlantDrivesInTheScenesWorld) {
   const std::string lines = val(app, "physics.stats.vehicles");
   for (const char *plant : {"  jolt  ", "  dynamic  ", "  dynamic4w  ", "  kinematic  "})
     EXPECT_NE(lines.find(plant), std::string::npos) << plant << " in\n" << lines;
+
+  // Every plant's wheels roll at its speed: over a second, each turns by about the way its
+  // chassis went over its radius (a Jolt wheel by its own rotation, slip and all); each says its
+  // radius and whether its axle steers.
+  const double r0 = cvc::physics::vehicle_desc::humvee().axles.front().wheel_radius;
+  std::array<double, 4> turned{}, rolled{}, spin{}, speed{};
+  for (std::size_t k = 0; k < 4; ++k) {
+    const std::vector<entity_wheel> now = v.wheels(ids[k]);
+    ASSERT_EQ(now.size(), 4u) << kinds[k];
+    for (std::size_t j = 0; j < 4; ++j) {
+      EXPECT_DOUBLE_EQ(now[j].radius, r0) << kinds[k] << " " << j;
+      EXPECT_EQ(now[j].steered, j < 2) << kinds[k] << " " << j << ": the front axle steers";
+    }
+    spin[k] = now[2].spin;
+    speed[k] = entity_of(v, ids[k]).speed;
+  }
+  for (int f = 0; f < 60; ++f) {
+    drive(app, *w, clock, 1);
+    for (std::size_t k = 0; k < 4; ++k) {
+      const double s = v.wheels(ids[k])[2].spin, u = entity_of(v, ids[k]).speed;
+      turned[k] += std::remainder(s - spin[k], 2.0 * 3.14159265358979);
+      rolled[k] += 0.5 * (u + speed[k]) / 60.0 / r0;
+      spin[k] = s;
+      speed[k] = u;
+    }
+  }
+  for (std::size_t k = 0; k < 4; ++k) {
+    EXPECT_GT(std::fabs(rolled[k]), 0.2) << kinds[k] << ": it drove";
+    EXPECT_NEAR(turned[k], rolled[k], 0.2 * std::fabs(rolled[k])) << kinds[k];
+  }
 
   // The four-wheeler's wheels as drawn: on the ground, below its box, the front ones steered.
   const std::uint64_t turning = spawn_one(v, "four", "external", -60.0, -30.0, 0.0);

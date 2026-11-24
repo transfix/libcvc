@@ -1983,6 +1983,23 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/worlds
         FILES_MATCHING PATTERN "*.ari")
 target_compile_definitions(
   cvc PRIVATE CVC_ARIADNE_DATA_DIR="${CMAKE_INSTALL_FULL_DATADIR}/libcvc/ariadne")
+# The .ari schema (docs/ARIADNE.md §14): compiled into the library (ari_schema_json(), what the
+# loader and `ari validate` check against), and installed beside the components for editors and
+# other tools (share/libcvc/ariadne/schema/ari.v1.schema.json).
+set(CVC_ARI_SCHEMA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/ariadne/schema/ari.v1.schema.json)
+set(_cvc_ari_schema_cpp ${CMAKE_CURRENT_BINARY_DIR}/ariadne/ari_schema_text.cpp)
+add_custom_command(
+  OUTPUT ${_cvc_ari_schema_cpp}
+  COMMAND ${CMAKE_COMMAND} -DINPUT=${CVC_ARI_SCHEMA_FILE} -DOUTPUT=${_cvc_ari_schema_cpp}
+          -DNAMESPACE=cvc::ariadne::detail -DSYMBOL=ari_schema_text
+          -P ${PROJECT_SOURCE_DIR}/CMake/CvcEmbedText.cmake
+  DEPENDS ${CVC_ARI_SCHEMA_FILE} ${PROJECT_SOURCE_DIR}/CMake/CvcEmbedText.cmake
+  COMMENT "Embedding the .ari schema"
+  VERBATIM)
+target_sources(cvc PRIVATE ${_cvc_ari_schema_cpp})
+install(FILES ${CVC_ARI_SCHEMA_FILE}
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/libcvc/ariadne/schema
+        COMPONENT libcvc)
 
 # cvc::net HTTP backend selection (roadmap §13.x). Pick the transport for cvc::net at configure time:
 # Emscripten fetch on wasm, libcurl on native. CVC_ARIADNE_HAVE_HTTP stays defined whenever a real
@@ -2272,9 +2289,12 @@ endif()
 # Ariadne .ari Layer-2 JSON-Schema validation — OPTIONAL (roadmap §15). When the
 # json-schema-validator (over nlohmann-json) is present, the loader validates each
 # document against the .ari schema and reports violations as warnings
-# (CVC_ARIADNE_HAVE_JSONSCHEMA); when absent, the schema is still exposed
-# (ari_schema_json) but no runtime validation runs. Needs yaml-cpp too (it
-# validates the parsed document). Its config does find_dependency(nlohmann_json).
+# (CVC_ARIADNE_HAVE_JSONSCHEMA), and validate_string / validate_file / `ari validate` work;
+# when absent, the schema is still exposed (ari_schema_json) but nothing validates. Needs
+# yaml-cpp too (it validates the parsed document). Its config does
+# find_dependency(nlohmann_json). CI's libcvc lanes fail when the ENABLED line below is missing
+# from the configure's output (ci.yml), so a lane that loses the validator does not go on
+# checking nothing.
 find_package(nlohmann_json_schema_validator CONFIG QUIET)
 if(TARGET nlohmann_json_schema_validator::validator)
   target_compile_definitions(cvc PRIVATE CVC_ARIADNE_HAVE_JSONSCHEMA)

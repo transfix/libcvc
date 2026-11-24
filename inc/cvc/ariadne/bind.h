@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cvc/core/app.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <exception>
 #include <iomanip>
 #include <sstream>
@@ -173,6 +174,48 @@ template <typename T> void write(cvc::app &ctx, const std::string &path, const T
   }
 }
 
+// The same reads and writes for a reader of one bind path every frame: `key` keeps the path
+// resolved (cvc::state_key, through links as read_node and write_node see it), and walks it again
+// only once the state tree's shape changed. bind_key(ctx, path) makes one; kept_key rebinds `key`
+// when it names another app or path, so a binding that holds one may change its path.
+inline cvc::state_key bind_key(cvc::app &ctx, const std::string &path) {
+  return cvc::state_key(ctx, path, cvc::state_key::view::through_links);
+}
+inline cvc::state_key &kept_key(cvc::state_key &key, cvc::app &ctx, const std::string &path) {
+  if (key.context() != &ctx || key.path() != path ||
+      key.kind() != cvc::state_key::view::through_links)
+    key = bind_key(ctx, path);
+  return key;
+}
+template <typename T> T read_or(cvc::state_key &key, const T &def) {
+  try {
+    cvc::state *eff = key.find();
+    const std::string v = eff ? eff->value() : std::string();
+    if (v.empty())
+      return def;
+    return boost::lexical_cast<T>(v);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+inline int read_bool_or(cvc::state_key &key, int def) {
+  try {
+    cvc::state *eff = key.find();
+    const std::string v = eff ? eff->value() : std::string();
+    if (v.empty())
+      return def;
+    return to_bool_int(v, def);
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+template <typename T> void write(cvc::state_key &key, const T &v) {
+  try {
+    key.get().value(v);
+  } catch (const std::exception &) {
+  }
+}
+
 // One scene-node visibility binding (§9): mirror `source_path` (the resolved
 // `visible: <path>` bind) into `target_path` (the node's own `<node>.visible` key).
 // Both are absolute state paths resolved once, at realize time — no VTK node pointer
@@ -183,6 +226,9 @@ struct SceneVisibilityBinding {
   std::string source_path;     // resolved bind path some widget layer OWNS (+ seeds)
   std::string target_path;     // the node's `<node-state-path>.visible` key
   bool default_visible = true; // fallback ONLY while the source has no value yet
+  // The two paths kept resolved between polls (bind_key): the poll's own, so a const binding
+  // keeps them too.
+  mutable cvc::state_key source_key, target_key;
 };
 
 // Poll every visibility binding once and mirror source -> node `.visible`. Reads and
@@ -192,12 +238,15 @@ struct SceneVisibilityBinding {
 // seeder — the node's `default_visible` is only a fallback until then, and is never
 // written into the shared source key. Reading as int matches the 0/1 encoding the
 // widgets use; the write to the node key no-ops unless the value actually changed.
-// Call from the owner/render thread so the node's setVisible runs inline the frame.
+// Call from the owner/render thread so the node's setVisible runs inline the frame. Both paths
+// stay resolved between polls (bind_key), so a frame costs no walk from the root while the tree's
+// shape holds still.
 inline void sync_scene_visibility(cvc::app &app,
                                   const std::vector<SceneVisibilityBinding> &bindings) {
   for (const SceneVisibilityBinding &b : bindings) {
-    const int v = read_bool_or(app, b.source_path, b.default_visible ? 1 : 0); // visible = a bool
-    write<int>(app, b.target_path, v);
+    const int v = read_bool_or(kept_key(b.source_key, app, b.source_path),
+                               b.default_visible ? 1 : 0); // visible = a bool
+    write<int>(kept_key(b.target_key, app, b.target_path), v);
   }
 }
 
@@ -213,6 +262,7 @@ struct SceneClipBinding {
     double normal[3] = {0.0, 0.0, 1.0}; // unit
     double offset = 0.0;       // the literal offset; the fallback while offset_source is unset
     std::string offset_source; // resolved bind path (read WITHOUT seeding); empty = literal
+    cvc::state_key offset_key; // `offset_source`, kept resolved between polls (bind_key)
   };
   std::string target_path; // the node's `<node-state-path>.clip_planes` key
   std::vector<Plane> planes;
@@ -244,9 +294,11 @@ inline void sync_scene_clip(cvc::app &app, std::vector<SceneClipBinding> &bindin
   for (SceneClipBinding &b : bindings) {
     std::vector<double> offsets(b.planes.size());
     for (std::size_t i = 0; i < b.planes.size(); ++i) {
-      const SceneClipBinding::Plane &p = b.planes[i];
+      SceneClipBinding::Plane &p = b.planes[i];
       const double v =
-          p.offset_source.empty() ? p.offset : read_or<double>(app, p.offset_source, p.offset);
+          p.offset_source.empty()
+              ? p.offset
+              : read_or<double>(kept_key(p.offset_key, app, p.offset_source), p.offset);
       offsets[i] = std::isfinite(v) ? v : p.offset;
     }
     std::string csv = clip_planes_csv(b.planes, offsets);

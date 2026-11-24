@@ -1386,7 +1386,7 @@ cvc::geometry prop_span_mesh(const cvc::geometry &g, const generated_world::prop
 }
 
 world_geometry generated_world::geometry() const {
-  world_geometry g(model ? model->registry() : surface_registry::builtin());
+  world_geometry g(model ? model->registry() : surfaces ? *surfaces : surface_registry::builtin());
   g.set_edge_walls(params.edge == int(world_edge::wall));
   if (terrain) {
     geometry_item t;
@@ -1803,22 +1803,7 @@ struct world_builder::impl {
     case build_stage::shore: {
       // The bodies of water and the shore grid, from the terrain mesh's samples (the roads graded
       // in), every stride-th one: the shore the mesh draws.
-      const cvc::height_field &t = *w.terrain;
-      const int N = t.rows(), s = water_bodies_stride(N), n = (N - 1) / s + 1;
-      grid_spec g;
-      g.rows = g.cols = n;
-      g.min_x = t.x0();
-      g.min_y = t.y0();
-      g.max_x = t.x0() + t.dx() * (n - 1) * s;
-      g.max_y = t.y0() + t.dy() * (n - 1) * s;
-      std::vector<float> ground(g.count());
-      const std::vector<float> &hs = t.heights();
-      for (int r = 0; r < n; ++r)
-        for (int c = 0; c < n; ++c)
-          ground[std::size_t(r) * n + c] = hs[std::size_t(r) * s * N + std::size_t(c) * s];
-      water_bodies_params wbp;
-      wbp.level_m = p.water_level_m;
-      w.water = build_water_bodies(std::move(ground), g, wbp);
+      w.water = terrain_water_bodies(*w.terrain, p.water_level_m);
       w.terrain_layout = plan_terrain_chunks(*w.terrain);
       w.terrain_chunks.reserve(std::size_t(w.terrain_layout.chunk_rows) *
                                w.terrain_layout.chunk_cols);
@@ -2477,6 +2462,26 @@ int water_resolution(const generated_world &w) {
   return std::max(80, std::min(320, int(std::lround(2.0 * w.params.half_m / 8.0))));
 }
 int water_bodies_stride(int n) { return std::max(1, (n - 1 + 1023) / 1024); }
+
+water_bodies terrain_water_bodies(const cvc::height_field &t, double level) {
+  const int R = t.rows(), C = t.cols(), s = water_bodies_stride(std::max(R, C));
+  const int nr = (R - 1) / s + 1, nc = (C - 1) / s + 1;
+  grid_spec g;
+  g.rows = nr;
+  g.cols = nc;
+  g.min_x = t.x0();
+  g.min_y = t.y0();
+  g.max_x = t.x0() + t.dx() * (nc - 1) * s;
+  g.max_y = t.y0() + t.dy() * (nr - 1) * s;
+  std::vector<float> ground(g.count());
+  const std::vector<float> &hs = t.heights();
+  for (int r = 0; r < nr; ++r)
+    for (int c = 0; c < nc; ++c)
+      ground[std::size_t(r) * nc + c] = hs[std::size_t(r) * s * C + std::size_t(c) * s];
+  water_bodies_params wbp;
+  wbp.level_m = level;
+  return build_water_bodies(std::move(ground), g, wbp);
+}
 
 std::vector<float> water_field(const generated_world &w, double t, int n, int nz) {
   n = std::max(2, n);

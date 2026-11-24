@@ -689,13 +689,30 @@ cycle_stats collect_cycles(exec_context &ctx) {
   return collect(*ctx.registry);
 }
 
+namespace {
+// As many new objects as survived, and at least an eighth of what the last collection walked, so
+// a collection's walk costs a bounded amount per object tracked since the one before.
+bool grown_for_collection(const cycle_registry &r) {
+  return r.since_last >= std::max({kMinCollectionGrowth, r.survivors, r.last_examined / 8});
+}
+// After an exit, a collection is due once anything was tracked, at most this often.
+constexpr auto kExitCollectionThrottle = std::chrono::seconds(1);
+} // namespace
+
 bool cycle_collection_due(const cycle_registry &r) {
-  // As many new objects as survived, and at least an eighth of what the last collection walked,
-  // so a collection's walk costs a bounded amount per object tracked since the one before.
-  if (r.since_last >= std::max({kMinCollectionGrowth, r.survivors, r.last_examined / 8}))
+  if (grown_for_collection(r))
     return true;
   return r.exit_pending && r.since_last > 0 &&
-         std::chrono::steady_clock::now() - r.last_collection >= std::chrono::seconds(1);
+         std::chrono::steady_clock::now() - r.last_collection >= kExitCollectionThrottle;
+}
+
+std::optional<std::chrono::steady_clock::time_point>
+cycle_collection_due_at(const cycle_registry &r) {
+  if (grown_for_collection(r))
+    return std::chrono::steady_clock::time_point::min();
+  if (r.exit_pending && r.since_last > 0)
+    return r.last_collection + kExitCollectionThrottle;
+  return std::nullopt;
 }
 
 void note_process_exit(cycle_registry &r) { r.exit_pending = true; }

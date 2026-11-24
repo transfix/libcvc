@@ -36,6 +36,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h>
 #include <cvc/state/state.h>
+#include <cvc/state/state_key.h>
 #include <cvc/volume/volume.h> // a data node's still water
 #include <cvc/world/generated_world.h>
 #include <cvc/world/world_geometry.h>
@@ -131,11 +132,11 @@ ph::vec3 rotate(const ph::quat &q, const ph::vec3 &v) {
 
 bool near_one(double s) { return std::fabs(s - 1.0) < 1e-6; }
 
+// 17 significant digits, as an ostream at precision(17) writes them (%g), without the stream.
 std::string num(double v) {
-  std::ostringstream o;
-  o.precision(17);
-  o << v;
-  return o.str();
+  char buf[40];
+  std::snprintf(buf, sizeof(buf), "%.17g", v);
+  return buf;
 }
 
 bool is_identity(const std::array<double, 16> &m) {
@@ -386,6 +387,36 @@ struct SceneWorld::impl {
   std::string enabled_key; // <stats_key>.enabled, or ""
   std::string hash_key;    // <stats_key>.hash, or "": "1" publishes the state hash
   std::deque<double> step_history;
+  std::string step_history_text; // step_history as published: each step's ms formatted once
+  // The keys published or read every frame, kept resolved (cvc::state_key): publish_stats' leaves
+  // (made for `stats`), the enabled key and the world's source key.
+  struct stat_keys {
+    std::string base;
+    cvc::state_key tick, time, step_ms, bodies, active, contacts, saturated, history, nodes,
+        vehicles, hash, hash_on;
+  };
+  std::unique_ptr<stat_keys> stat;
+  mutable cvc::state_key enabled, world_source;
+  stat_keys &stat_for(const std::string &base) {
+    if (!stat || stat->base != base) {
+      stat = std::make_unique<stat_keys>();
+      stat->base = base;
+      const auto leaf = [&](const char *l) { return cvc::state_key(*app, base + "." + l); };
+      stat->tick = leaf("tick");
+      stat->time = leaf("time");
+      stat->step_ms = leaf("step_ms");
+      stat->bodies = leaf("bodies");
+      stat->active = leaf("active_bodies");
+      stat->contacts = leaf("contact_events");
+      stat->saturated = leaf("saturated");
+      stat->history = leaf("step_ms_history");
+      stat->nodes = leaf("nodes");
+      stat->vehicles = leaf("vehicles");
+      stat->hash = leaf("hash");
+      stat->hash_on = cvc::state_key(*app, hash_key);
+    }
+    return *stat;
+  }
   // The vehicles (bind_vehicles), on the grid `ground_grid` of the world on.
   std::unique_ptr<WorldVehicles> vehicles;
   std::shared_ptr<const cvc::nav::world_grid> ground_grid;
@@ -489,7 +520,9 @@ struct SceneWorld::impl {
   bool stepping() const {
     if (enabled_key.empty() || !app)
       return true;
-    cvc::state *k = cvc::state::instance(*app).findDescendant(enabled_key);
+    if (enabled.path() != enabled_key || enabled.context() != app)
+      enabled = cvc::state_key(*app, enabled_key);
+    cvc::state *k = enabled.find();
     if (!k)
       return true;
     const std::string v = k->value();
@@ -1026,6 +1059,7 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   d.follower.reset(); // the next follow() anchors on the clock again
   d.last = ph::step_report{};
   d.step_history.clear();
+  d.step_history_text.clear();
   d.wind_field = ph::field_id{}; // the wind's field went with the old world: sync adds it again
   d.wind_applied.reset();
   d.wake_period = std::numeric_limits<std::uint64_t>::max();
@@ -1332,8 +1366,10 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   }
   if (!d.world_key.empty() && d.app) {
     // The source key: another world's name switches to it.
-    cvc::state *k =
-        cvc::state::instance(*d.app).findDescendant(d.world_key + cvc::state::SEPARATOR + "source");
+    const std::string source = d.world_key + cvc::state::SEPARATOR + "source";
+    if (d.world_source.path() != source || d.world_source.context() != d.app)
+      d.world_source = cvc::state_key(*d.app, source);
+    cvc::state *k = d.world_source.find();
     const std::string want = k ? k->value() : std::string();
     if (!want.empty() && want != d.on) {
       if (d.find_world(want)) {
@@ -1921,8 +1957,12 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     if (after_each)
       after_each(tick);
     d.step_history.push_back(d.last.step_ms);
-    if (d.step_history.size() > 120)
+    d.step_history_text += (d.step_history_text.empty() ? "" : ",") + num(d.last.step_ms);
+    if (d.step_history.size() > 120) {
       d.step_history.pop_front();
+      const std::size_t comma = d.step_history_text.find(',');
+      d.step_history_text.erase(0, comma == std::string::npos ? comma : comma + 1);
+    }
     // A view draws between the last two ticks, not the first and the last of a batch.
     if (after_step && i + 1 >= n)
       after_step();
@@ -1943,50 +1983,57 @@ void SceneWorld::publish_stats() {
   impl &d = *_impl;
   if (d.stats.empty() || !d.app)
     return;
-  cvc::state &root = cvc::state::instance(*d.app);
-  const auto put = [&](const char *leaf, const std::string &v) {
-    root(d.stats + "." + leaf).value(v);
+  // Every leaf is kept resolved (impl::stat_for), and each step's ms was formatted once, when it
+  // stepped (step_history_text).
+  impl::stat_keys &k = d.stat_for(d.stats);
+  const auto put = [](cvc::state_key &key, const std::string &v) { key.get().value(v); };
+  put(k.tick, std::to_string(d.world->tick()));
+  put(k.time, num(d.world->time()));
+  put(k.step_ms, num(d.last.step_ms));
+  put(k.bodies, std::to_string(d.world->body_count()));
+  put(k.active, std::to_string(d.last.active_bodies));
+  put(k.contacts, std::to_string(d.last.contacts));
+  put(k.saturated, d.last.saturated ? "true" : "false");
+  put(k.history, d.step_history_text);
+  // A line per node with bodies, in the order they were made: its bodies and the ones awake. A
+  // node's bodies are made together, so a body is counted with the one before it unless its node
+  // differs.
+  struct node_count {
+    const std::string *node;
+    std::size_t bodies = 0, awake = 0;
   };
-  put("tick", std::to_string(d.world->tick()));
-  put("time", num(d.world->time()));
-  put("step_ms", num(d.last.step_ms));
-  put("bodies", std::to_string(d.world->body_count()));
-  put("active_bodies", std::to_string(d.last.active_bodies));
-  put("contact_events", std::to_string(d.last.contacts));
-  put("saturated", d.last.saturated ? "true" : "false");
-  std::string history;
-  for (const double ms : d.step_history)
-    history += (history.empty() ? "" : ",") + num(ms);
-  put("step_ms_history", history);
-  // A line per node with bodies, in the order they were made: its bodies and the ones awake.
-  std::vector<std::string> order;
-  std::map<std::string, std::pair<std::size_t, std::size_t>> per;
+  std::vector<node_count> per;
+  std::map<std::string, std::size_t> at; // a node's entry in `per`
   for (const SceneWorldBody &b : d.bodies) {
-    auto it = per.find(b.node);
-    if (it == per.end()) {
-      order.push_back(b.node);
-      it = per.emplace(b.node, std::make_pair(std::size_t(0), std::size_t(0))).first;
+    std::size_t i = per.size();
+    if (!per.empty() && *per.back().node == b.node) {
+      i = per.size() - 1;
+    } else if (const auto it = at.find(b.node); it != at.end()) {
+      i = it->second;
+    } else {
+      at.emplace(b.node, i);
+      per.push_back({&b.node});
     }
-    ++it->second.first;
+    ++per[i].bodies;
     if (b.moves && d.world->state(b.id).active)
-      ++it->second.second;
+      ++per[i].awake;
   }
   std::string nodes;
-  for (const std::string &node : order)
-    nodes += (nodes.empty() ? "" : "\n") + node + "  " + std::to_string(per[node].first) + "  " +
-             std::to_string(per[node].second);
-  put("nodes", nodes);
+  for (const node_count &n : per)
+    nodes += (nodes.empty() ? "" : "\n") + *n.node + "  " + std::to_string(n.bodies) + "  " +
+             std::to_string(n.awake);
+  put(k.nodes, nodes);
   // A line per vehicle: its speed, power, energy and the wheels' load.
   if (d.vehicles)
-    put("vehicles", d.vehicles->stats_lines());
+    put(k.vehicles, d.vehicles->stats_lines());
   // The world's state hash (physics::world::state_hash, 16 hex digits), while <stats_key>.hash is
   // 1: it saves the whole world, so a test or a check asks for it.
   if (!d.hash_key.empty())
-    if (cvc::state *h = root.findDescendant(d.hash_key); h && h->value() == "1") {
+    if (cvc::state *h = k.hash_on.find(); h && h->value() == "1") {
       char buf[24];
       std::snprintf(buf, sizeof(buf), "%016llx",
                     static_cast<unsigned long long>(d.world->state_hash()));
-      put("hash", buf);
+      put(k.hash, buf);
     }
 }
 
