@@ -392,11 +392,12 @@ constexpr rt_layout kRtLayouts[] = {{"same group", 0, 0, 0},
                                     {"receiver remote", 0, 1, 2},
                                     {"both remote", 1, 2, 3}};
 
-// One cell's world: a fresh app and its groups, driven as `driver` says. pump(n) is one pump of
-// n's group alone: by hand, or a pump_all of it (deterministic: on this thread; threaded: on any
-// thread of the pool, each pump moved to another thread than the last). settle() pumps every group
-// until none has work. Protocol expectations a cell checks on the way (a subscribe, send or deliver
-// posted where the frozen protocol posts it, a counter) are collected in `misses`.
+// One cell's world: a fresh app, its group 0 and its groups, driven as `driver` says. pump(n) is
+// one pump of n's group alone: by hand, or a pump_all of it (deterministic: on this thread;
+// threaded: on any thread of the pool, each pump moved to another thread than the last). settle()
+// pumps every group, group 0 by hand, until none has work. teardown_home() destroys H, whose keys
+// then come home to group 0 (S2b.0a). Protocol expectations a cell checks on the way (a subscribe,
+// send or deliver posted where the frozen protocol posts it, a counter) are collected in `misses`.
 class rt_cell {
 public:
   rt_cell(rt_driver driver, const rt_layout &layout, unsigned threads) : driver_(driver) {
@@ -409,6 +410,7 @@ public:
       po->force_move = true;
     }
     app_ = std::make_unique<rt_app>(po);
+    g0_ = std::make_unique<rt_node>(app_->app);
     const int n = std::max({layout.s, layout.r, layout.q}) + 1;
     for (int i = 0; i < n; ++i) {
       const std::string name = i == 0 ? "h" : "x" + std::to_string(i);
@@ -425,6 +427,7 @@ public:
   ~rt_cell() {
     while (!nodes_.empty())
       nodes_.pop_back();
+    g0_.reset();
   }
 
   rt_node &H() { return *h_; }
@@ -434,7 +437,7 @@ public:
   bool remote(const rt_node &n) const { return &n != h_; }
 
   void pump(rt_node &n) {
-    if (driver_ == rt_driver::hand) {
+    if (driver_ == rt_driver::hand || n.is_group0()) {
       n.pump();
       return;
     }
@@ -456,10 +459,19 @@ public:
         if (!app_->pool().pump_all(gs, {kRtSteps, kRtInf}, kRtNoDeadline).empty())
           misses.push_back("a pump failed");
       }
-      if (std::none_of(nodes_.begin(), nodes_.end(), [](auto &n) { return n->busy(); }))
+      g0_->pump();
+      if (!g0_->busy() &&
+          std::none_of(nodes_.begin(), nodes_.end(), [](auto &n) { return n->busy(); }))
         return;
     }
     misses.push_back("the groups did not settle");
+  }
+  // Destroy H (its teardown forwards what it holds to group 0, S2b.0a). The cell must not touch
+  // H, or S, R or Q where one is H, afterwards.
+  void teardown_home() {
+    nodes_.erase(std::find_if(nodes_.begin(), nodes_.end(),
+                              [this](const auto &n) { return n.get() == h_; }));
+    home_gone_ = true;
   }
   // The frozen protocol posts here now (td 4.6; exec_router.h): `what` names the entry.
   void expect_posted(rt_node &to, const std::string &what) {
@@ -470,18 +482,19 @@ public:
     if (!n.sched().kill(pid))
       misses.push_back("the host's kill of " + std::to_string(pid) + " found nothing");
   }
-  // Where messages on `key` are queued: the home's FIFO, and every other group's (none, in every
-  // layout: only a home queues).
+  // Where messages on `key` are queued: its home's FIFO (H, or group 0 once H is gone), and every
+  // other scheduler's (none, in every layout: only a home queues).
   std::string queues(const std::string &key) {
-    std::size_t elsewhere = 0;
+    rt_node *home = home_gone_ ? g0_.get() : h_;
+    std::size_t elsewhere = home == g0_.get() ? 0 : g0_->sched().total_pending_messages();
     for (auto &n : nodes_)
-      if (n.get() != h_)
+      if (n.get() != home)
         elsewhere += n->sched().total_pending_messages();
-    return "queued at the home " + std::to_string(h_->sched().pending_message_count(key)) +
+    return "queued at the home " + std::to_string(home->sched().pending_message_count(key)) +
            ", elsewhere " + std::to_string(elsewhere);
   }
   std::uint64_t sum(std::uint64_t async_scheduler::ingress_stats::*field) {
-    std::uint64_t n = 0;
+    std::uint64_t n = g0_->sched().ingress_counters().*field;
     for (auto &node : nodes_)
       n += node->sched().ingress_counters().*field;
     return n;
@@ -499,9 +512,11 @@ public:
 
 private:
   rt_driver driver_;
-  std::unique_ptr<rt_app> app_; // before nodes_: the groups go first
+  std::unique_ptr<rt_app> app_; // before g0_ and nodes_: the groups go first, then group 0's node
+  std::unique_ptr<rt_node> g0_;
   std::vector<std::unique_ptr<rt_node>> nodes_;
   rt_node *h_ = nullptr, *s_ = nullptr, *r_ = nullptr, *q_ = nullptr;
+  bool home_gone_ = false;
 };
 
 constexpr char kMsKey[] = "docs.h.k";
@@ -785,6 +800,55 @@ std::vector<std::string> ms12_local_taker(rt_cell &c) {
           c.line("sender", c.S(), s), c.line("next receiver", c.R(), n), c.queues(kMsKey)};
 }
 
+// A tracked broadcast whose home is torn down with its copies outstanding (S2b.0a: the teardown
+// forwards its tracker to the new home, group 0, as `adopt`): no waiter at H, one each in R and Q,
+// the send applied at H (two copies in flight), the sender's outcome read, then Q's waiter killed
+// (and R's too, `all_stale`) and H destroyed before R and Q pump. One taken: R gets it, Q's stale
+// copy is dropped, the next receiver finds nothing (never delivered twice). All stale: the new home
+// applies it once as a requeue, and the next receiver gets it once. One group: the kills before the
+// send, and no teardown (the home is everyone's group).
+std::vector<std::string> ms12_broadcast_home_torn_down(rt_cell &c, bool all_stale) {
+  const int r = c.R().submit(rt_recv(kMsKey));
+  const int q = c.Q().submit(rt_recv(kMsKey));
+  c.pump(c.R());
+  c.pump(c.Q());
+  c.pump(c.H());
+  const bool cross = c.remote(c.R()); // R and Q are both H or neither, in every layout
+  if (!cross) {
+    c.kill(c.Q(), q);
+    if (all_stale)
+      c.kill(c.R(), r);
+  }
+  const int s = c.S().submit(rt_send(kMsKey, "torn-down"));
+  c.pump(c.S());
+  if (c.remote(c.S()))
+    c.pump(c.H());
+  const std::string sender = c.line("sender", c.S(), s);
+  if (cross) {
+    c.expect_posted(c.R(), "H's deliver to R");
+    c.expect_posted(c.Q(), "H's deliver to Q");
+    c.kill(c.Q(), q);
+    if (all_stale)
+      c.kill(c.R(), r);
+    c.teardown_home(); // S too, where S is H: its outcome is read
+  }
+  c.pump(c.R());
+  c.pump(c.Q());
+  c.settle();
+  const int n = c.R().submit(rt_recv(kMsKey));
+  c.settle();
+  const int n2 = c.R().submit(rt_recv(kMsKey));
+  c.settle();
+  return {c.line("R's waiter", c.R(), r),    c.line("Q's waiter", c.Q(), q), sender,
+          c.line("next receiver", c.R(), n), c.line("one after", c.R(), n2), c.queues(kMsKey)};
+}
+std::vector<std::string> ms12_torn_down_one_taken(rt_cell &c) {
+  return ms12_broadcast_home_torn_down(c, false);
+}
+std::vector<std::string> ms12_torn_down_all_stale(rt_cell &c) {
+  return ms12_broadcast_home_torn_down(c, true);
+}
+
 struct ms12_column {
   const char *name;
   std::vector<std::string> (*run)(rt_cell &);
@@ -802,6 +866,8 @@ constexpr ms12_column kMs12Columns[] = {
     {"broadcast, one taken (taker first), one stale", ms12_one_taken_r_first},
     {"broadcast, one taken (stale first), one stale", ms12_one_taken_q_first},
     {"local taker at the home, remote copy stale", ms12_local_taker},
+    {"broadcast, home torn down with copies out, one taken", ms12_torn_down_one_taken},
+    {"broadcast, home torn down with copies out, all stale", ms12_torn_down_all_stale},
 };
 
 // One cell: its outcome, and its protocol misses (prefixed with where they happened) in `misses`.
@@ -1066,10 +1132,65 @@ TEST(Router, MS07_EightGroupsSendingToOneKeyKeepFifoPerSender) {
   }
 }
 
-// MS-8: an app-global key ("/ms8.global" from a document group's chroot) is homed at group 0: a
-// receiver there gets the send. And (S2.md section 0, row 22; async_scheduler::has_pending_ingress)
-// a send homed at group 0 when group 0 has no live process is not stranded: app::exec_pump_frame
-// pumps group 0 for it, and it is queued there.
+// MS-7, across a home's teardown (S2b.0a: the teardown forwards the pending messages of the keys it
+// homed, then its records, then its queued entries, in order, to the keys' new home, group 0, and
+// unregisters last): S sends m0-m4 to H's key with no waiter (H queues them), then m5-m9 (still in
+// H's ingress), and R2's receive on a second key of H's is recorded there. H is destroyed. S then
+// sends m10-m12 (now to group 0). A receiver in R takes m0-m12 in S's order, nothing lost or
+// doubled; and S's send on the second key reaches R2's forwarded wait at group 0.
+TEST(Router, MS07b_FifoPerSenderHoldsAcrossItsHomesTeardown) {
+  rt_app a;
+  rt_node g0(a.app), s(a.app, "s", {"docs.s"}, "s"), r(a.app, "r", {"docs.r"}, "r"),
+      r2(a.app, "r2", {"docs.r2"}, "r2");
+  auto h = std::make_unique<rt_node>(a.app, "h", std::vector<std::string>{"docs.h"}, "h");
+  const auto sends = [&](int from, int to) {
+    std::string body;
+    for (int i = from; i < to; ++i)
+      body += std::string(" (msg-send \"") + kMsKey + "\" \"m" + std::to_string(i) + "\")";
+    return s.submit("(begin" + body + " \"sent\")");
+  };
+  const int first = sends(0, 5);
+  s.pump();
+  h->pump();
+  EXPECT_EQ(h->sched().pending_message_count(kMsKey), 5u);
+  const int second = sends(5, 10);
+  s.pump(); // m5-m9 wait in H's ingress
+  const int w2 = r2.submit(rt_recv("docs.h.k2"));
+  r2.pump();
+  h->pump(); // applies m5-m9 and R2's subscribe: 10 queued, one record
+  const int third_early = sends(10, 12);
+  s.pump(); // m10, m11 queued in H's ingress at its teardown
+  h.reset();
+  EXPECT_TRUE(a.router().home_of(kMsKey).is_group0());
+  const int third = sends(12, 13); // m12, to the key's new home
+  s.pump();
+  std::vector<std::string> got;
+  builtins::register_fn(r.env(), "got", [&](std::span<const value_t> args) -> value_t {
+    got.push_back(std::get<std::string>(args[0].v));
+    return nil_value();
+  });
+  const int w = r.submit(std::string("(begin (for i (range 13) (got ") + rt_recv(kMsKey).c_str() +
+                         ")) \"done\")");
+  const int k2 = s.submit(rt_send("docs.h.k2", "to r2"));
+  EXPECT_TRUE(rt_settle({&g0, &s, &r, &r2}));
+  for (const int pid : {first, second, third_early, third, k2})
+    EXPECT_EQ(s.outcome(pid), "sent");
+  EXPECT_EQ(r.outcome(w), "done");
+  std::vector<std::string> want;
+  for (int i = 0; i < 13; ++i)
+    want.push_back("m" + std::to_string(i));
+  EXPECT_EQ(got, want) << "out of S's order, lost or doubled across the teardown";
+  EXPECT_EQ(r2.outcome(w2), "to r2") << "R2's wait was not forwarded";
+  EXPECT_EQ(g0.sched().total_pending_messages(), 0u);
+}
+
+// MS-8: an app-global key ("/ms8.global" from a document group's chroot) is homed at group 0 for a
+// group with a prefix: a receiver there gets the send. And (S2.md section 0, row 22;
+// async_scheduler::has_pending_ingress) a send homed at group 0 when group 0 has no live process is
+// not stranded: app::exec_pump_frame pumps group 0 for it, and it is queued there. A group with no
+// prefix is an island (S2b.0a): with the router on, its unprefixed keys stay its own (its receiver
+// gets its send, nothing is posted to group 0), while its send on a key under D's prefix is routed
+// to D.
 TEST(Router, MS08_AnAppGlobalKeyIsHomedAtGroupZero) {
   rt_app a;
   rt_node g0(a.app), d(a.app, "d", {"docs.d"}, "d");
@@ -1096,6 +1217,26 @@ TEST(Router, MS08_AnAppGlobalKeyIsHomedAtGroupZero) {
   const int w2 = g0.submit(rt_recv("ms8.later"));
   g0.pump();
   EXPECT_EQ(g0.outcome(w2), "later");
+
+  // An island beside them.
+  rt_node island(a.app, "island", {}, "island");
+  ASSERT_TRUE(a.router().active());
+  EXPECT_FALSE(a.router().has_prefix(island.group()->route()));
+  const int own = island.submit(rt_recv("ms8.island"));
+  const int to_d = d.submit(rt_recv("docs.d.k"));
+  island.pump();
+  d.pump();
+  const int own_send = island.submit(rt_send("ms8.island", "kept"));
+  const int routed = island.submit(rt_send("docs.d.k", "routed"));
+  island.pump();
+  EXPECT_FALSE(g0.posted()) << "an island's own key went to group 0";
+  EXPECT_TRUE(d.posted()) << "an island's send on D's key was not posted to D";
+  EXPECT_TRUE(rt_settle({&g0, &d, &island}));
+  EXPECT_EQ(island.outcome(own_send), "sent");
+  EXPECT_EQ(island.outcome(routed), "sent");
+  EXPECT_EQ(island.outcome(own), "kept");
+  EXPECT_EQ(d.outcome(to_d), "routed");
+  EXPECT_EQ(g0.sched().total_pending_messages(), 0u);
 }
 
 // MS-9: a '#' key is never routed. A receiver in document group D on "docs.d#tick" gets the host's

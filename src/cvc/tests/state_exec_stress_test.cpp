@@ -748,9 +748,8 @@ void st_run::finish() {
 }
 
 // Every message sent: received (by receivers of its key, each at most once), or drained once,
-// never both, never neither. A unicast key's message reaches at most one receiver. A broadcast
-// key whose home was torn down may see a copy requeued at its new home after another copy was
-// taken (exec_router.h: an untracked requeue), so its messages are checked for loss only.
+// never both, never neither. A unicast key's message reaches at most one receiver. That holds for
+// keys whose home was torn down too: the teardown forwards its broadcast trackers (S2b.0a's adopt).
 void st_run::check() {
   std::map<std::string, std::vector<int>> got;
   std::map<std::string, int> drained;
@@ -762,12 +761,11 @@ void st_run::check() {
       ++drained[id];
   }
   std::set<std::string> ids;
-  int lost = 0, both = 0, twice = 0, misrouted = 0, teardown_dups = 0, delivered = 0;
+  int lost = 0, both = 0, twice = 0, misrouted = 0, delivered = 0;
   for (const message &m : sent_) {
     ids.insert(m.id);
     const std::vector<int> &r = got[m.id];
     const int d = drained[m.id];
-    const bool relaxed = keys_[m.key].broadcast && !keys_[m.key].live_home;
     for (const int tag : r)
       if (receivers_[tag].key != m.key && misrouted++ < 5)
         fail(m.id + " reached a receiver of " + keys_[receivers_[tag].key].name);
@@ -782,10 +780,6 @@ void st_run::check() {
                      (!keys_[m.key].broadcast && r.size() > 1);
     if (!dup)
       continue;
-    if (relaxed) {
-      ++teardown_dups;
-      continue;
-    }
     if (!r.empty() && d > 0) {
       if (both++ < 5)
         fail(m.id + " was received and also left queued");
@@ -802,11 +796,9 @@ void st_run::check() {
     if (!ids.count(id) && phantoms++ < 5)
       fail("a drainer found " + id + ", which nobody sent");
   std::printf("%s: %zu messages (%d received, %zu drained), %d passes, %d churns, %d host kills, "
-              "%d receiver kills, %d pauses, %d killers; lost %d, duplicated %d, misrouted %d, "
-              "duplicates the teardown rule allows %d\n",
+              "%d receiver kills, %d pauses, %d killers; lost %d, duplicated %d, misrouted %d\n",
               label().c_str(), sent_.size(), delivered, drained_.size(), frames_, churns_,
-              host_kills_, receiver_kills_, pauses_, killers_, lost, both + twice, misrouted,
-              teardown_dups);
+              host_kills_, receiver_kills_, pauses_, killers_, lost, both + twice, misrouted);
   std::fflush(stdout);
 }
 
