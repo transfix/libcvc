@@ -401,10 +401,13 @@ protected:
   // Each texture holds its unit only for the draw under way: this node's actor
   // releases it once that draw is done. `drawingMapper` is the mapper whose draw
   // fired the event (default: this node's): the units its vertex data takes are
-  // kept clear (LowMemoryPolyDataMapper::arrayTextureUnits).
+  // kept clear (LowMemoryPolyDataMapper::arrayTextureUnits). `bound`, for a draw
+  // of another actor (a view's stand-in with textures of its own): the textures
+  // this activates go there instead, for that actor to release after its draw.
   void bindShaderTextures(vtkShaderProgram *program,
                           const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
-                          vtkObject *drawingMapper = nullptr);
+                          vtkObject *drawingMapper = nullptr,
+                          std::vector<vtkWeakPointer<vtkTextureObject>> *bound = nullptr);
 
   // Shader replacements a SUBCLASS needs for itself. Kept out of reach of the
   // public add*ShaderReplacement / clearShaderReplacements (see there), and
