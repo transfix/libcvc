@@ -205,6 +205,24 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   set_tests_properties(ari_docset PROPERTIES
                        PASS_REGULAR_EXPRESSION "from shared/note.ari"
                        FAIL_REGULAR_EXPRESSION "could not be resolved;unknown unit")
+  # ari validate and ari schema (docs/ARIADNE.md §14): the example documents are valid (their
+  # components included, from the source tree); a document with mistakes is not, each found where
+  # it is, in text and in JSON. Exit 4 (built without json-schema-validator) skips.
+  file(GLOB _ari_examples "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/*.ari")
+  add_test(NAME ari_validate_examples
+           COMMAND ari validate --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   ${_ari_examples})
+  set(_ari_mistakes "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid/validate_mistakes.ari")
+  add_test(NAME ari_validate_mistakes COMMAND ari validate "${_ari_mistakes}")
+  set_tests_properties(ari_validate_mistakes PROPERTIES
+                       PASS_REGULAR_EXPRESSION "validate_mistakes.ari:14:9: /windows/0/children/0: unknown key 'bnd'")
+  add_test(NAME ari_validate_json COMMAND ari validate --json "${_ari_mistakes}")
+  set_tests_properties(ari_validate_json PROPERTIES
+                       PASS_REGULAR_EXPRESSION "\"pointer\": \"/windows/0\", \"message\": \"unknown key 'closeable'\"")
+  set_tests_properties(ari_validate_examples ari_validate_mistakes ari_validate_json PROPERTIES
+                       SKIP_RETURN_CODE 4)
+  add_test(NAME ari_schema COMMAND ari schema)
+  set_tests_properties(ari_schema PROPERTIES PASS_REGULAR_EXPRESSION "\"title\": \"Ariadne .ari document")
   # A URL names a document for the browser page; natively ari says so.
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES

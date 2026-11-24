@@ -71,6 +71,27 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
   return false;
 }
 
+// The loader's own warnings: every one but the schema's ("ari: schema: ...", which a build with
+// the validator adds for the same mistakes; has_schema_issue checks those).
+std::vector<std::string> loader_warnings(const LoadResult &r) {
+  std::vector<std::string> out;
+  for (const std::string &w : r.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      out.push_back(w);
+  return out;
+}
+
+// Whether the schema check reported the value at `pointer` (true without the validator, which
+// checks nothing).
+bool has_schema_issue(const LoadResult &r, const std::string &pointer) {
+  if (!have_jsonschema())
+    return true;
+  for (const SchemaIssue &i : r.schema_issues)
+    if (i.pointer == pointer)
+      return true;
+  return false;
+}
+
 // First widget in the tree whose mount scope equals `scope` (§12 load: wrapper).
 const Widget *find_scope(const Widget &w, const std::string &scope) {
   if (w.scope == scope)
@@ -780,10 +801,12 @@ windows:
   ASSERT_EQ(win->children.size(), 5u);
   EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
   EXPECT_EQ(win->children[3].label, "");
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
             std::string::npos)
-      << r.warnings[0];
+      << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/4/glyphs"));
 }
 
 // text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
@@ -848,10 +871,13 @@ windows:
   EXPECT_TRUE(odd->multiline) << "multi-line by default";
   EXPECT_EQ(odd->max_lines, 4);
   EXPECT_EQ(odd->send, "") << "no send button by default";
-  ASSERT_EQ(r.warnings.size(), 2u);
-  EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
-      << r.warnings[0];
-  EXPECT_NE(r.warnings[1].find("max_lines must be >= 1"), std::string::npos) << r.warnings[1];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 2u);
+  EXPECT_NE(warnings[0].find("message_input 'Odd' has no on:"), std::string::npos) << warnings[0];
+  EXPECT_NE(warnings[1].find("max_lines must be >= 1"), std::string::npos) << warnings[1];
+  // The schema says so too, and that a message_input has no height: (a text_view's).
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3/max_lines"));
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3"));
 }
 
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
@@ -2621,6 +2647,7 @@ scene:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.scene.clock.hz, 60.0);
+  EXPECT_TRUE(r.schema_issues.empty()) << "the schema takes hz too";
   for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
     LoadResult b = fresh_load(
         std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
@@ -2630,6 +2657,7 @@ scene:
     for (const std::string &w : b.warnings)
       warned = warned || w.find("clock: hz") != std::string::npos;
     EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+    EXPECT_TRUE(has_schema_issue(b, "/scene/clock/hz")) << bad;
   }
 }
 
@@ -6405,15 +6433,11 @@ TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
                           "windows: []\n";
   const LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
-  bool flagged = false;
-  for (const std::string &w : r.warnings) {
-    if (w.find("schema:") == std::string::npos)
-      continue;
-    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
-    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
-    flagged = flagged || w.find("'neither'") != std::string::npos;
+  for (const SchemaIssue &i : r.schema_issues) {
+    EXPECT_EQ(i.pointer.rfind("/data/made", 0), std::string::npos) << i.text();
+    EXPECT_EQ(i.pointer.rfind("/data/fetched", 0), std::string::npos) << i.text();
   }
-  EXPECT_TRUE(flagged);
+  EXPECT_TRUE(has_schema_issue(r, "/data/neither"));
 }
 
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
@@ -6646,11 +6670,11 @@ windows:
         default: {a: 1}
 )");
   ASSERT_TRUE(bad.ok) << bad.error;
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/default"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/height"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/interactive_updates"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/layers"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/1/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/height"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/interactive_updates"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/layers"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/1/default"));
 }
 
 // id: names any widget (not only a window), so a backend / the core can key per-instance state.
@@ -7307,8 +7331,10 @@ windows:
         range: data
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("range: 'data'"), std::string::npos) << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/2/range"));
   const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
   const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
   const Widget *odd = find(r.root, Kind::SliderInt, "Odd");

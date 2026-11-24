@@ -1,0 +1,2750 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cvcpkg.org/schemas/ari.v1.schema.json",
+  "title": "Ariadne .ari document, version 1",
+  "description": "The structure of an Ariadne .ari document (docs/ARIADNE.md). Every map is closed: a key the schema does not list is an error, except keys that start with x- (ignored everywhere), a custom widget's or custom scene node's own keys, and top-level blocks a host registers (register_ari_block) or the document declares in customs:.",
+  "$comment": "Written to the draft-7-compatible subset json-schema-validator implements: no unevaluatedProperties or prefixItems, and no assertion beside a $ref. A map whose values all have a schema says so with patternProperties ^.*$, not additionalProperties: the validator reports a value's error under additionalProperties as one message at the map, with no pointer into the value (additionalProperties is false only, closing a map). A widget's type is the first of the loader's type keys present (kBuiltinWidgetTypes order, loader.cpp): $defs/short_widget is that order as an if/else chain. A new widget type needs its w_<type> entry, a link in short_widget at its place in that order, and an entry in typed_widget.",
+  "type": ["object", "array"],
+  "if": {"type": "array"},
+  "then": {"items": {"$ref": "#/$defs/widget"}},
+  "else": {"$ref": "#/$defs/document"},
+  "$defs": {
+    "document": {
+      "type": "object",
+      "description": "A document's top-level blocks.",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "description": "Provenance and the min_libcvc load gate.",
+          "properties": {
+            "name": {"$ref": "#/$defs/scalar"},
+            "author": {"$ref": "#/$defs/scalar"},
+            "description": {"$ref": "#/$defs/scalar"},
+            "version": {"$ref": "#/$defs/scalar"},
+            "min_libcvc": {
+              "type": ["string", "number"],
+              "pattern": "^\\s*[vV]?[0-9]+(\\.[0-9]+){0,2}([-+].*)?$",
+              "description": "The oldest libcvc that may load the document: an older one refuses it."
+            }
+          },
+          "required": ["min_libcvc"],
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "menubar": {"$ref": "#/$defs/widget_list", "description": "The main menu bar's menus."},
+        "menu_collapse": {"$ref": "#/$defs/collapse"},
+        "windows": {"$ref": "#/$defs/widget_list"},
+        "overlays": {"$ref": "#/$defs/widget_list"},
+        "root": {"$ref": "#/$defs/widget_list", "description": "Top-level widgets (alias: children)."},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "windows_menu": {
+          "anyOf": [{"$ref": "#/$defs/flag"}, {"$ref": "#/$defs/string"}],
+          "description": "false turns the built-in Windows menu off; a string renames it."
+        },
+        "clock": {"$ref": "#/$defs/flag", "description": "Show the tray's clock or not."},
+        "notifications": {"anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["always"]}], "description": "Show the tray's bell or not; always shows it with an empty feed too."},
+        "scene": {"$ref": "#/$defs/scene"},
+        "scenes": {"type": "array", "items": {"$ref": "#/$defs/scene_entry"}},
+        "assets": {
+          "type": "object",
+          "description": "Meshes loaded once, shared by every scene: id: { source, fit, ... }.",
+          "patternProperties": {"^.*$": {"$ref": "#/$defs/node"}}
+        },
+        "prototypes": {
+          "type": "object",
+          "description": "Node trees a node's use: stands for (§5.18, Prototypes). Not checked as nodes here: a prototype's values may hold {name} tokens its instances fill in.",
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "properties": {"args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}}}
+            }
+          }
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[^.]+$"},
+          "description": "Datasets: name: URI, or { uri | generate, path, as, params, load }.",
+          "patternProperties": {
+            "^.*$": {
+              "anyOf": [
+                {"$ref": "#/$defs/string"},
+                {
+                  "type": "object",
+                  "properties": {
+                    "uri": {"$ref": "#/$defs/string"},
+                    "path": {"$ref": "#/$defs/string"},
+                    "as": {"$ref": "#/$defs/string"},
+                    "generate": {"$ref": "#/$defs/string"},
+                    "params": {"type": "object"},
+                    "load": {"enum": ["eager", "lazy"]}
+                  },
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false,
+                  "anyOf": [{"required": ["uri"]}, {"required": ["generate"]}]
+                }
+              ]
+            }
+          }
+        },
+        "customs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "widget": {"$ref": "#/$defs/string"},
+              "node": {"$ref": "#/$defs/string"},
+              "block": {"$ref": "#/$defs/string"},
+              "required": {"$ref": "#/$defs/flag"}
+            },
+            "patternProperties": {"^x-": true},
+            "additionalProperties": false,
+            "oneOf": [{"required": ["widget"]}, {"required": ["node"]}, {"required": ["block"]}]
+          },
+          "description": "The custom types the document uses: one of widget:/node:/block: each; required: true refuses to load without it."
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/string"},
+              {
+                "type": "object",
+                "properties": {"name": {"$ref": "#/$defs/string"}, "optional": {"$ref": "#/$defs/flag"}},
+                "required": ["name"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "What the document needs from its host (docs/ARIADNE.md §5.7)."
+        },
+        "init": {"$ref": "#/$defs/program", "description": "Runs once at load."},
+        "on_tick": {"$ref": "#/$defs/program", "description": "Runs every frame."},
+        "on_key": {"$ref": "#/$defs/program", "description": "Runs on each key event."},
+        "on_pointer": {"$ref": "#/$defs/program", "description": "Runs on each pointer event."},
+        "on_signal": {"$ref": "#/$defs/program", "description": "Runs on each signal (Ctrl-C, SIGTERM, ...)."},
+        "keys": {
+          "type": "object",
+          "description": "Rebindable key actions: id: { label, key, on }.",
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "properties": {
+                "label": {"$ref": "#/$defs/scalar"},
+                "key": {"$ref": "#/$defs/strings"},
+                "on": {"$ref": "#/$defs/program"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          }
+        },
+        "units": {
+          "type": "object",
+          "description": "Widget templates include: instantiates. A template is checked as a widget when it is included, after its args are substituted.",
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "properties": {
+                "args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
+                "fallback": {"$ref": "#/$defs/flag"}
+              }
+            }
+          }
+        },
+        "import": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {"$ref": "#/$defs/string"},
+                {
+                  "type": "object",
+                  "properties": {"uri": {"$ref": "#/$defs/string"}, "optional": {"$ref": "#/$defs/flag"}},
+                  "required": ["uri"],
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            },
+            {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {"$ref": "#/$defs/string"},
+                  {
+                    "type": "object",
+                    "properties": {"uri": {"$ref": "#/$defs/string"}, "optional": {"$ref": "#/$defs/flag"}},
+                    "required": ["uri"],
+                    "patternProperties": {"^x-": true},
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          ],
+          "description": "Libraries whose units: and functions: this document uses."
+        },
+        "functions": {
+          "$ref": "#/$defs/program",
+          "description": "(defun name (params) body...) forms every program in the document can call."
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/string"},
+              {
+                "type": "object",
+                "properties": {
+                  "channel": {"$ref": "#/$defs/string"},
+                  "shared": {"$ref": "#/$defs/flag"},
+                  "global": {"$ref": "#/$defs/flag"}
+                },
+                "required": ["channel"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "The message channels the document uses."
+        },
+        "lint": {
+          "type": "object",
+          "properties": {
+            "channels": {"enum": ["strict", "warn", "off", "none", "false"]},
+            "quiet": {"$ref": "#/$defs/flag"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "args": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[A-Za-z][A-Za-z0-9_-]*$", "not": {"const": "help"}},
+          "description": "The document's command line: name: type, or { type, default, help, required, positional }.",
+          "patternProperties": {
+            "^.*$": {
+              "anyOf": [
+                {"type": "null"},
+                {"enum": ["string", "bool", "int", "float"]},
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {"enum": ["string", "bool", "int", "float"]},
+                    "default": {"$ref": "#/$defs/scalar"},
+                    "help": {"$ref": "#/$defs/scalar"},
+                    "required": {"$ref": "#/$defs/flag"},
+                    "positional": {"$ref": "#/$defs/flag"}
+                  },
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "tests": {
+          "anyOf": [
+            {"type": "null"},
+            {"type": "object", "patternProperties": {"^.*$": {"type": "string", "minLength": 1}}}
+          ],
+          "description": "name: program; ari test runs each."
+        },
+        "needs": {
+          "$ref": "#/$defs/strings",
+          "description": "A module's: the link: holes it expects its mount to grant."
+        },
+        "catalog": {
+          "type": "array",
+          "items": {"type": "object"},
+          "description": "Tooling data (the component library's INDEX.ari); not a widget tree."
+        },
+        "python": {"type": ["object", "string"], "description": "Python for a scripting host (arix, ariglx)."},
+        "wasm": {
+          "type": ["object", "string"],
+          "description": "A WebAssembly module for a scripting host: its path alone, or a map with module:."
+        },
+        "server": {
+          "type": ["object", "null"],
+          "description": "For the relay that runs the document (arisrv --doc); a bare server: asks for nothing."
+        },
+        "relay": {
+          "type": ["object", "string"],
+          "description": "For a host that joins a relay: the relay's URL alone, or a map with url:."
+        },
+        "world": {
+          "type": ["object", "null"],
+          "description": "The world's rules (vehicles, spawns, ...), read by the world runtime; a bare world: sets none."
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "string": {"type": "string"},
+    "scalar": {"type": ["string", "number", "boolean"], "description": "A scalar the loader reads as text."},
+    "label": {
+      "type": ["string", "number", "boolean", "null"],
+      "description": "A widget's label: its type key's value (empty is no label)."
+    },
+    "program": {
+      "type": "string",
+      "description": "A state_exec program (an s-expression), or a bare name a host handles."
+    },
+    "predicate": {
+      "type": ["string", "boolean", "number"],
+      "description": "A state_exec predicate the read lane re-evaluates each frame."
+    },
+    "flag": {
+      "description": "A boolean in any spelling the loader reads: true/false, yes/no, on/off, y/n (any case), 1/0.",
+      "anyOf": [
+        {"type": "boolean"},
+        {"enum": [0, 1]},
+        {
+          "type": "string",
+          "pattern": "^([Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy]([Ee][Ss])?|[Nn][Oo]?|[Oo]([Nn]|[Ff][Ff]))$"
+        }
+      ]
+    },
+    "strings": {
+      "anyOf": [{"$ref": "#/$defs/string"}, {"type": "array", "items": {"$ref": "#/$defs/string"}}],
+      "description": "One string or a list of them."
+    },
+    "vec2": {"type": "array", "items": {"type": "number"}, "description": "Two numbers.", "minItems": 2},
+    "vec3": {"type": "array", "items": {"type": "number"}, "description": "Three numbers.", "minItems": 3},
+    "rgb": {
+      "type": "array",
+      "items": {"type": "number"},
+      "description": "[r, g, b], each 0..1.",
+      "minItems": 3
+    },
+    "color": {
+      "description": "A colour: [r, g, b] (0..1), \"#rrggbb\", \"#rgb\", c0..c7, \"r,g,b\", none, { bind: <key> }, or an expression \"(...)\" computed each frame.",
+      "anyOf": [
+        {"$ref": "#/$defs/rgb"},
+        {"type": "string", "pattern": "^\\s*\\("},
+        {
+          "type": "string",
+          "pattern": "^\\s*(#[0-9A-Fa-f]{3}|#[0-9A-Fa-f]{6}|[cC][0-7]|none|default|\\[?\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?[\\s,]+[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?[\\s,]+[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*\\]?)?\\s*$"
+        },
+        {
+          "type": "object",
+          "properties": {"bind": {"$ref": "#/$defs/string"}},
+          "required": ["bind"],
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "option_colors": {
+      "description": "A radio's colour: one for every option, or one an option: a list of colours, or \"c0;c1;...\" text.",
+      "anyOf": [
+        {"$ref": "#/$defs/color"},
+        {"type": "array", "items": {"$ref": "#/$defs/color"}},
+        {
+          "type": "string",
+          "pattern": "^\\s*(#[0-9A-Fa-f]{3}|#[0-9A-Fa-f]{6}|[cC][0-7]|none|default|\\[?\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?[\\s,]+[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?[\\s,]+[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*\\]?)?\\s*(;\\s*(#[0-9A-Fa-f]{3}|#[0-9A-Fa-f]{6}|[cC][0-7]|none|default|\\[?\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?[\\s,]+[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?[\\s,]+[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*\\]?)?\\s*)+$"
+        }
+      ]
+    },
+    "commit": {
+      "enum": ["live", "release"],
+      "description": "live: every change while dragged; release: once, at the end."
+    },
+    "collapse": {
+      "description": "auto (fold the menus into one when they do not fit), never or always; a boolean reads as auto or never.",
+      "anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["auto", "never", "always"]}]
+    },
+    "maximized": {
+      "description": "Start maximized: true, false, or phone (only on a phone).",
+      "anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["phone"]}]
+    },
+    "options": {
+      "description": "The options: a list, or an expression giving one, re-evaluated each frame.",
+      "anyOf": [{"type": "array", "items": {"$ref": "#/$defs/scalar"}}, {"$ref": "#/$defs/string"}]
+    },
+    "pos": {
+      "type": "array",
+      "items": {"type": "number"},
+      "description": "[x, y] in px from the work area's top-left.",
+      "minItems": 2
+    },
+    "extent": {
+      "description": "A size: px, \"N%\", a fraction 0 < v < 1 (a share), 0 or auto (fit).",
+      "anyOf": [
+        {"type": "number"},
+        {
+          "type": "string",
+          "pattern": "^\\s*(auto|[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?%?)?\\s*$"
+        }
+      ]
+    },
+    "size_box": {
+      "description": "[w, h], or { hint: [w, h], min: [w, h], max: [w, h] }; each an extent.",
+      "anyOf": [
+        {"type": "array", "items": {"$ref": "#/$defs/extent"}, "minItems": 2},
+        {
+          "type": "object",
+          "properties": {
+            "hint": {"type": "array", "items": {"$ref": "#/$defs/extent"}, "minItems": 2},
+            "min": {"type": "array", "items": {"$ref": "#/$defs/extent"}, "minItems": 2},
+            "max": {"type": "array", "items": {"$ref": "#/$defs/extent"}, "minItems": 2}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "media_size": {
+      "description": "W (px; the height follows), \"N%\" of the line's width, or [W, H] (H may be auto).",
+      "anyOf": [
+        {"type": "number"},
+        {
+          "type": "string",
+          "pattern": "^\\s*[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?%\\s*$"
+        },
+        {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"type": "number"},
+              {
+                "type": "string",
+                "pattern": "^\\s*(auto|[-+]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][-+]?[0-9]+)?%)\\s*$"
+              }
+            ]
+          },
+          "minItems": 2
+        }
+      ]
+    },
+    "layout": {
+      "type": "object",
+      "description": "How a window, overlay or group lays out its children.",
+      "properties": {
+        "kind": {"enum": ["vertical", "horizontal", "grid"]},
+        "col_widths": {"type": "array", "items": {"$ref": "#/$defs/extent"}},
+        "row_heights": {"type": "array", "items": {"$ref": "#/$defs/extent"}},
+        "resizable": {"$ref": "#/$defs/flag"},
+        "borders": {
+          "type": "object",
+          "properties": {
+            "show": {"enum": ["inner", "outer", "all", "none"]},
+            "color": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 4}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "frame": {
+      "type": "object",
+      "description": "The border width in px.",
+      "properties": {"border": {"type": "number"}},
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "background": {
+      "description": "A window's, overlay's or group's backdrop: a picture's URI or image name, [r, g, b], or a map.",
+      "anyOf": [
+        {"$ref": "#/$defs/string"},
+        {"$ref": "#/$defs/rgb"},
+        {
+          "type": "object",
+          "properties": {
+            "color": {"$ref": "#/$defs/color"},
+            "src": {"$ref": "#/$defs/string"},
+            "bind": {"$ref": "#/$defs/string"},
+            "auth": {"$ref": "#/$defs/string"},
+            "status": {"$ref": "#/$defs/string"},
+            "fit": {"enum": ["contain", "cover", "fill"]},
+            "opacity": {"type": "number", "minimum": 0, "maximum": 1},
+            "terminal": {"enum": ["behind", "banner", "none"]},
+            "banner_rows": {"type": "integer", "minimum": 1, "maximum": 60}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "runs": {
+      "description": "Rich text: a list of runs (a string, or { text, style, href, on_click, tooltip }), or a state path / expression giving one.",
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/scalar"},
+              {
+                "type": "object",
+                "properties": {
+                  "text": {"$ref": "#/$defs/scalar"},
+                  "style": {"$ref": "#/$defs/string"},
+                  "href": {"$ref": "#/$defs/string"},
+                  "on_click": {"$ref": "#/$defs/program"},
+                  "tooltip": {"$ref": "#/$defs/scalar"}
+                },
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        {"$ref": "#/$defs/string"}
+      ]
+    },
+    "repeat": {
+      "description": "A count: a number, a state key or an expression; {i} in the copies' strings is the index.",
+      "type": ["integer", "string"]
+    },
+    "widget_common": {
+      "description": "The keys every widget takes (its own type's keys are listed on its schema).",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/scalar",
+          "description": "The widget's stable identity (its view state persists under tree.<id>)."
+        },
+        "type": {
+          "$ref": "#/$defs/string",
+          "description": "The widget type, when not written as the first key."
+        },
+        "title": {"$ref": "#/$defs/scalar"},
+        "label": {"$ref": "#/$defs/scalar"},
+        "widget": {"$ref": "#/$defs/scalar"},
+        "tab": {"$ref": "#/$defs/scalar", "description": "This child's title in a tabs: widget."},
+        "visible_when": {"$ref": "#/$defs/predicate"},
+        "enabled_when": {"$ref": "#/$defs/predicate"},
+        "disabled_when": {"$ref": "#/$defs/predicate"},
+        "tooltip": {
+          "$ref": "#/$defs/scalar",
+          "description": "Hover text, or an expression \"(...)\" giving it."
+        },
+        "autofocus": {"$ref": "#/$defs/flag"},
+        "repeat": {"$ref": "#/$defs/repeat"},
+        "on_click": {"$ref": "#/$defs/program"},
+        "on_hover": {"$ref": "#/$defs/program"},
+        "on_drag": {"$ref": "#/$defs/program"},
+        "on_drag_start": {"$ref": "#/$defs/program"},
+        "on_drag_end": {"$ref": "#/$defs/program"},
+        "on_hover_end": {"$ref": "#/$defs/program"},
+        "hover": {"enum": ["highlight", "none"]}
+      }
+    },
+    "w_group": {
+      "type": "object",
+      "description": "A group of widgets (also written as a map with only children:).",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "group": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "layout": {"$ref": "#/$defs/layout"},
+        "size": {"$ref": "#/$defs/size_box"},
+        "background": {"$ref": "#/$defs/background"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_panel": {
+      "type": "object",
+      "description": "A panel: drawn as a group.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "panel": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "layout": {"$ref": "#/$defs/layout"},
+        "size": {"$ref": "#/$defs/size_box"},
+        "background": {"$ref": "#/$defs/background"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_menubar": {
+      "type": "object",
+      "description": "A menu bar: its menus, tray icons and the Windows menu.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "menubar": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "items": {"$ref": "#/$defs/widget_list"},
+        "collapse": {"$ref": "#/$defs/collapse"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_menu": {
+      "type": "object",
+      "description": "A menu in a menu bar.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "menu": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "items": {"$ref": "#/$defs/widget_list"},
+        "children": {"$ref": "#/$defs/widget_list"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_menu_item": {
+      "type": "object",
+      "description": "A menu item: an action (on:) or a toggle (bind:).",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "menu_item": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {"$ref": "#/$defs/string", "description": "A toggle item: the boolean key it flips."},
+        "def": {"$ref": "#/$defs/flag"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "color": {"$ref": "#/$defs/color"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_windows_menu": {
+      "type": "object",
+      "description": "The built-in Windows menu, here, titled by its value.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {"windows_menu": {"$ref": "#/$defs/label", "description": "The widget's label."}},
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_tray_icon": {
+      "type": "object",
+      "description": "An icon at the menu bar's right end, with a badge and an optional menu.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "tray_icon": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "badge": {"$ref": "#/$defs/scalar"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "items": {"$ref": "#/$defs/widget_list"},
+        "tone": {"$ref": "#/$defs/string"},
+        "icon": {"$ref": "#/$defs/string", "description": "A picture in place of the glyph: a URI, a published image, or an expression."},
+        "auth": {"$ref": "#/$defs/string", "description": "Credentials for an icon by URL."}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_window": {
+      "type": "object",
+      "description": "A window.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "window": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "A state key or expression giving the visible title."
+        },
+        "pos": {"$ref": "#/$defs/pos"},
+        "size": {"$ref": "#/$defs/size_box"},
+        "layout": {"$ref": "#/$defs/layout"},
+        "frame": {"$ref": "#/$defs/frame"},
+        "closable": {"$ref": "#/$defs/flag"},
+        "maximizable": {"$ref": "#/$defs/flag"},
+        "resizable": {"$ref": "#/$defs/flag"},
+        "maximized": {"$ref": "#/$defs/maximized"},
+        "background": {"$ref": "#/$defs/background"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_overlay": {
+      "type": "object",
+      "description": "An overlay: a window drawn over the scene.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "overlay": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "A state key or expression giving the visible title."
+        },
+        "pos": {"$ref": "#/$defs/pos"},
+        "size": {"$ref": "#/$defs/size_box"},
+        "layout": {"$ref": "#/$defs/layout"},
+        "frame": {"$ref": "#/$defs/frame"},
+        "closable": {"$ref": "#/$defs/flag"},
+        "maximizable": {"$ref": "#/$defs/flag"},
+        "resizable": {"$ref": "#/$defs/flag"},
+        "maximized": {"$ref": "#/$defs/maximized"},
+        "background": {"$ref": "#/$defs/background"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_text": {
+      "type": "object",
+      "description": "Text: its label, or 'label: <value>' with bind:, or rich text with runs:.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "text": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "emoji": {"$ref": "#/$defs/string"},
+        "runs": {"$ref": "#/$defs/runs"},
+        "on_link": {"$ref": "#/$defs/program"},
+        "max_lines": {"type": "number"},
+        "wrap": {"$ref": "#/$defs/flag"},
+        "size": {"anyOf": [{"$ref": "#/$defs/extent"}, {"$ref": "#/$defs/size_box"}]},
+        "color": {"$ref": "#/$defs/color"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_spinner": {
+      "type": "object",
+      "description": "An activity indicator.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "spinner": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "glyphs": {"enum": ["braille", "ascii"]}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_progress": {
+      "type": "object",
+      "description": "A read-only bar: bind's number over [lo, hi].",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "progress": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "lo": {"type": "number"},
+        "hi": {"type": "number"},
+        "overlay": {"$ref": "#/$defs/scalar", "description": "The caption over the bar."}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_plot": {
+      "type": "object",
+      "description": "A read-only line graph of bind's comma-separated numbers.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "plot": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "lo": {"type": "number"},
+        "hi": {"type": "number"},
+        "overlay": {"$ref": "#/$defs/scalar"},
+        "height": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_chart": {
+      "type": "object",
+      "description": "Read-only curves: a plot subtree and/or series:.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "chart": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "series": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/string"},
+              {
+                "type": "object",
+                "properties": {
+                  "bind": {"$ref": "#/$defs/string"},
+                  "label": {"$ref": "#/$defs/scalar"},
+                  "style": {"$ref": "#/$defs/string"}
+                },
+                "required": ["bind"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "log_y": {"anyOf": [{"$ref": "#/$defs/flag"}, {"$ref": "#/$defs/string"}]},
+        "legend": {"enum": ["top", "right", "none"]},
+        "x_label": {"$ref": "#/$defs/scalar"},
+        "cursor": {"$ref": "#/$defs/string"},
+        "pick": {"$ref": "#/$defs/string"},
+        "height": {"type": "number", "exclusiveMinimum": 0},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_heatmap": {
+      "type": "object",
+      "description": "A grid of cells from a subtree, coloured by a ramp.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "heatmap": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "ramp": {
+          "type": "array",
+          "items": {"type": "array", "items": {}, "minItems": 2, "maxItems": 2},
+          "description": "[value, colour] stops."
+        },
+        "cell_size": {"type": "number", "exclusiveMinimum": 0},
+        "gap": {"type": "number", "minimum": 0},
+        "labels": {
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {"enum": ["none"]},
+            {
+              "type": "object",
+              "properties": {"rows": {"$ref": "#/$defs/flag"}, "cols": {"$ref": "#/$defs/flag"}},
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
+        "legend": {"anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["bottom", "right", "none"]}]},
+        "mark_color": {"$ref": "#/$defs/color"},
+        "pick": {"$ref": "#/$defs/string"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_settings": {
+      "type": "object",
+      "description": "An editor for every key under a state subtree, from its metadata.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "settings": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "root": {"$ref": "#/$defs/strings"},
+        "filter": {"$ref": "#/$defs/strings"},
+        "groups": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/scalar"},
+              {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 1,
+                "patternProperties": {
+                  "^.*$": {
+                    "anyOf": [
+                      {"$ref": "#/$defs/scalar"},
+                      {
+                        "type": "object",
+                        "properties": {
+                          "title": {"$ref": "#/$defs/scalar"},
+                          "help": {"$ref": "#/$defs/scalar"},
+                          "open": {"$ref": "#/$defs/flag"}
+                        },
+                        "patternProperties": {"^x-": true},
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "search": {"$ref": "#/$defs/flag"},
+        "readouts": {"$ref": "#/$defs/flag"},
+        "open": {"$ref": "#/$defs/flag"},
+        "commit": {"$ref": "#/$defs/commit"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_checkbox": {
+      "type": "object",
+      "description": "A checkbox bound to a boolean key.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "checkbox": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "def": {"$ref": "#/$defs/flag"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_slider_int": {
+      "type": "object",
+      "description": "An integer slider over [lo, hi].",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "slider_int": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "lo": {"type": "integer"},
+        "hi": {"type": "integer"},
+        "def": {"type": "integer"},
+        "range": {"enum": ["key"]},
+        "commit": {"$ref": "#/$defs/commit"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_slider_float": {
+      "type": "object",
+      "description": "A float slider over [lo, hi].",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "slider_float": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "lo": {"type": "number"},
+        "hi": {"type": "number"},
+        "def": {"type": "number"},
+        "fmt": {"$ref": "#/$defs/string"},
+        "range": {"enum": ["key"]},
+        "log": {"$ref": "#/$defs/flag"},
+        "commit": {"$ref": "#/$defs/commit"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_combo": {
+      "type": "object",
+      "description": "A drop-down choice.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "combo": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "options": {"$ref": "#/$defs/options"},
+        "values": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/scalar"},
+          "description": "A value per option, stored in place of its label."
+        },
+        "default": {"$ref": "#/$defs/scalar"},
+        "def": {"$ref": "#/$defs/scalar"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_radio": {
+      "type": "object",
+      "description": "A choice with every option shown, stacked.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "radio": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "options": {"$ref": "#/$defs/options"},
+        "values": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/scalar"},
+          "description": "A value per option, stored in place of its label."
+        },
+        "default": {"$ref": "#/$defs/scalar"},
+        "def": {"$ref": "#/$defs/scalar"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "color": {"$ref": "#/$defs/option_colors"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_radio_row": {
+      "type": "object",
+      "description": "A choice with every option shown, side by side.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "radio_row": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "options": {"$ref": "#/$defs/options"},
+        "values": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/scalar"},
+          "description": "A value per option, stored in place of its label."
+        },
+        "default": {"$ref": "#/$defs/scalar"},
+        "def": {"$ref": "#/$defs/scalar"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "color": {"$ref": "#/$defs/option_colors"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_tabs": {
+      "type": "object",
+      "description": "A tab bar over its children (each titled by its tab:), or over options:.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "tabs": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "default": {"$ref": "#/$defs/scalar"},
+        "def": {"$ref": "#/$defs/scalar"},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "options": {"$ref": "#/$defs/options"},
+        "values": {"type": "array", "items": {"$ref": "#/$defs/scalar"}}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_list": {
+      "type": "object",
+      "description": "Rows of a state array, one selected, with Add / Remove.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "list": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "field": {"$ref": "#/$defs/string"},
+        "current": {"$ref": "#/$defs/string"},
+        "add": {"$ref": "#/$defs/flag"},
+        "remove": {"$ref": "#/$defs/flag"},
+        "rows": {"type": "integer"},
+        "new_item": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "on_add": {"$ref": "#/$defs/program"},
+        "on_remove": {"$ref": "#/$defs/program"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_input_text": {
+      "type": "object",
+      "description": "A text field.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "input_text": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "default": {"$ref": "#/$defs/scalar"},
+        "def": {"$ref": "#/$defs/scalar"},
+        "password": {"$ref": "#/$defs/flag"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_text_view": {
+      "type": "object",
+      "description": "A scrollable text buffer: bind's text, split into lines.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "text_view": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "on_top": {"$ref": "#/$defs/string"},
+        "height": {"type": "number", "minimum": 0},
+        "follow": {"$ref": "#/$defs/flag"},
+        "wrap": {"$ref": "#/$defs/flag"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_message_input": {
+      "type": "object",
+      "description": "A field to post a message: Enter sends it to on:.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "message_input": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "hint": {"$ref": "#/$defs/scalar"},
+        "multiline": {"$ref": "#/$defs/flag"},
+        "max_lines": {"type": "number", "minimum": 1},
+        "max_length": {"type": "number", "minimum": 0},
+        "send": {"$ref": "#/$defs/string"},
+        "live": {"$ref": "#/$defs/flag"},
+        "on_change": {"$ref": "#/$defs/program"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_input_int": {
+      "type": "object",
+      "description": "An integer field.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "input_int": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "lo": {"type": "integer"},
+        "hi": {"type": "integer"},
+        "def": {"type": "integer"},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_tf_editor": {
+      "type": "object",
+      "description": "A transfer-function editor bound to a cvc::tf::model key (docs/TRANSFER_FUNCTIONS.md).",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "tf_editor": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "default": {"type": ["string", "object"]},
+        "preset": {"$ref": "#/$defs/string"},
+        "interactive_updates": {"$ref": "#/$defs/flag"},
+        "show_color": {"$ref": "#/$defs/flag"},
+        "show_opacity": {"$ref": "#/$defs/flag"},
+        "show_isocontours": {"$ref": "#/$defs/flag"},
+        "log_histogram": {"$ref": "#/$defs/flag"},
+        "info": {"$ref": "#/$defs/flag"},
+        "height": {"type": "number"},
+        "layers": {"type": "array", "items": {"enum": ["histogram", "contour_spectrum", "contour_tree"]}},
+        "color": {"type": "array"},
+        "alpha": {"type": "array"},
+        "isocontours": {"type": "array", "items": {"type": ["number", "object"]}},
+        "domain": {"type": ["string", "array", "object"]},
+        "opacity_cubed": {"$ref": "#/$defs/flag"},
+        "resolution": {"type": "number"},
+        "range": {"$ref": "#/$defs/string"},
+        "histogram": {"$ref": "#/$defs/string"},
+        "contour_spectrum": {"$ref": "#/$defs/string"},
+        "contour_tree": {"$ref": "#/$defs/string"},
+        "interval": {"$ref": "#/$defs/string"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_color": {
+      "type": "object",
+      "description": "An RGB picker bound to an \"r,g,b\" key.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "color": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "default": {"$ref": "#/$defs/string"},
+        "def": {"$ref": "#/$defs/string"},
+        "fmt": {"enum": ["rgb", "hex"], "description": "The picker's fields: one per channel (rgb, the default) or a #rrggbb field beside them (hex)."},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_image": {
+      "type": "object",
+      "description": "A host-published image, or a picture by URI.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "image": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "src": {"$ref": "#/$defs/string"},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "auth": {"$ref": "#/$defs/string"},
+        "status": {"$ref": "#/$defs/string"},
+        "size": {"$ref": "#/$defs/media_size"},
+        "max_height": {"type": "number"},
+        "fit": {"enum": ["contain", "cover", "fill"]},
+        "shape": {"enum": ["rect", "circle"]},
+        "fullscreen": {"$ref": "#/$defs/flag"},
+        "badge": {"$ref": "#/$defs/scalar"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_video": {
+      "type": "object",
+      "description": "A video player.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "video": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "src": {"$ref": "#/$defs/string"},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "auth": {"$ref": "#/$defs/string"},
+        "status": {"$ref": "#/$defs/string"},
+        "size": {"$ref": "#/$defs/media_size"},
+        "max_height": {"type": "number"},
+        "fit": {"enum": ["contain", "cover", "fill"]},
+        "shape": {"enum": ["rect", "circle"]},
+        "fullscreen": {"$ref": "#/$defs/flag"},
+        "badge": {"$ref": "#/$defs/scalar"},
+        "poster": {"$ref": "#/$defs/string"},
+        "controls": {"$ref": "#/$defs/flag"},
+        "autoplay": {"$ref": "#/$defs/flag"},
+        "loop": {"$ref": "#/$defs/flag"},
+        "muted": {"$ref": "#/$defs/flag"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_audio": {
+      "type": "object",
+      "description": "An audio player.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "audio": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "src": {"$ref": "#/$defs/string"},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the widget reads and writes (relative to the document's prefix; a leading / is app-root-absolute), or for a read-only widget an expression."
+        },
+        "auth": {"$ref": "#/$defs/string"},
+        "status": {"$ref": "#/$defs/string"},
+        "size": {"$ref": "#/$defs/media_size"},
+        "max_height": {"type": "number"},
+        "fit": {"enum": ["contain", "cover", "fill"]},
+        "shape": {"enum": ["rect", "circle"]},
+        "fullscreen": {"$ref": "#/$defs/flag"},
+        "badge": {"$ref": "#/$defs/scalar"},
+        "poster": {"$ref": "#/$defs/string"},
+        "controls": {"$ref": "#/$defs/flag"},
+        "autoplay": {"$ref": "#/$defs/flag"},
+        "loop": {"$ref": "#/$defs/flag"},
+        "muted": {"$ref": "#/$defs/flag"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_button": {
+      "type": "object",
+      "description": "A button that runs on:.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "button": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
+        },
+        "icon": {"$ref": "#/$defs/string"},
+        "auth": {"$ref": "#/$defs/string"},
+        "icon_size": {"type": "number", "minimum": 0},
+        "selected": {"anyOf": [{"$ref": "#/$defs/flag"}, {"$ref": "#/$defs/string"}]},
+        "color": {"$ref": "#/$defs/color"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_separator": {
+      "type": "object",
+      "description": "A separator line.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {"separator": {}},
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_custom": {
+      "type": "object",
+      "description": "A custom widget type, written with type: <name>. Its keys are its handler's (Widget::props), so only the shared ones are checked.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "bind": {"$ref": "#/$defs/string"},
+        "on": {"$ref": "#/$defs/program"},
+        "children": {"$ref": "#/$defs/widget_list"},
+        "items": {"$ref": "#/$defs/widget_list"}
+      },
+      "required": ["type"]
+    },
+    "include_site": {
+      "type": "object",
+      "description": "include: <unit> instantiates a units: template, its args substituted (docs/ARIADNE.md §6.1).",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "include": {"$ref": "#/$defs/string"},
+        "args": {
+          "type": "object",
+          "description": "The unit's {name} tokens.",
+          "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}
+        },
+        "slots": {
+          "type": "object",
+          "description": "Widgets for the unit's - slot: NAME items.",
+          "patternProperties": {
+            "^.*$": {
+              "anyOf": [{"$ref": "#/$defs/widget_list"}, {"$ref": "#/$defs/widget"}, {"type": "null"}]
+            }
+          }
+        },
+        "pos": {"$ref": "#/$defs/pos"},
+        "size": {"$ref": "#/$defs/size_box"},
+        "layout": {"$ref": "#/$defs/layout"},
+        "frame": {"$ref": "#/$defs/frame"},
+        "closable": {"$ref": "#/$defs/flag"},
+        "maximizable": {"$ref": "#/$defs/flag"},
+        "resizable": {"$ref": "#/$defs/flag"},
+        "maximized": {"$ref": "#/$defs/maximized"},
+        "background": {"$ref": "#/$defs/background"},
+        "color": {"$ref": "#/$defs/color"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false,
+      "required": ["include"]
+    },
+    "load_site": {
+      "type": "object",
+      "description": "load: <uri> mounts another .ari as an isolated module under includes.<as> (docs/ARIADNE.md §6.3).",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "load": {"$ref": "#/$defs/string"},
+        "args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
+        "as": {"$ref": "#/$defs/scalar"},
+        "name": {"$ref": "#/$defs/string", "description": "A state key or an expression, worked out each frame ({i} its instance under repeat:), that names the application instead when not empty."},
+        "functions": {
+          "$ref": "#/$defs/strings",
+          "description": "The functions it grants the module: names, or \"*\"."
+        },
+        "link": {
+          "type": "object",
+          "description": "Holes into the parent's state: name: target, or { to, mode: ro|rw }.",
+          "patternProperties": {
+            "^.*$": {
+              "anyOf": [
+                {"$ref": "#/$defs/string"},
+                {
+                  "type": "object",
+                  "properties": {"to": {"$ref": "#/$defs/string"}, "mode": {"enum": ["ro", "rw"]}},
+                  "required": ["to"],
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "channels": {
+          "type": "object",
+          "description": "Channels granted to the module, as link:.",
+          "patternProperties": {
+            "^.*$": {
+              "anyOf": [
+                {"$ref": "#/$defs/string"},
+                {
+                  "type": "object",
+                  "properties": {"to": {"$ref": "#/$defs/string"}, "mode": {"enum": ["ro", "rw"]}},
+                  "required": ["to"],
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "background": {"$ref": "#/$defs/background"}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false,
+      "required": ["load"]
+    },
+    "typed_widget": {
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "group"}}}, "then": {"$ref": "#/$defs/w_group"}},
+        {
+          "if": {"properties": {"type": {"const": "menubar"}}},
+          "then": {"$ref": "#/$defs/w_menubar"}
+        },
+        {"if": {"properties": {"type": {"const": "menu"}}}, "then": {"$ref": "#/$defs/w_menu"}},
+        {
+          "if": {"properties": {"type": {"const": "menu_item"}}},
+          "then": {"$ref": "#/$defs/w_menu_item"}
+        },
+        {"if": {"properties": {"type": {"const": "window"}}}, "then": {"$ref": "#/$defs/w_window"}},
+        {
+          "if": {"properties": {"type": {"const": "progress"}}},
+          "then": {"$ref": "#/$defs/w_progress"}
+        },
+        {"if": {"properties": {"type": {"const": "plot"}}}, "then": {"$ref": "#/$defs/w_plot"}},
+        {"if": {"properties": {"type": {"const": "chart"}}}, "then": {"$ref": "#/$defs/w_chart"}},
+        {
+          "if": {"properties": {"type": {"const": "settings"}}},
+          "then": {"$ref": "#/$defs/w_settings"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "overlay"}}},
+          "then": {"$ref": "#/$defs/w_overlay"}
+        },
+        {"if": {"properties": {"type": {"const": "panel"}}}, "then": {"$ref": "#/$defs/w_panel"}},
+        {"if": {"properties": {"type": {"const": "text"}}}, "then": {"$ref": "#/$defs/w_text"}},
+        {
+          "if": {"properties": {"type": {"const": "checkbox"}}},
+          "then": {"$ref": "#/$defs/w_checkbox"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "slider_int"}}},
+          "then": {"$ref": "#/$defs/w_slider_int"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "slider_float"}}},
+          "then": {"$ref": "#/$defs/w_slider_float"}
+        },
+        {"if": {"properties": {"type": {"const": "combo"}}}, "then": {"$ref": "#/$defs/w_combo"}},
+        {"if": {"properties": {"type": {"const": "radio"}}}, "then": {"$ref": "#/$defs/w_radio"}},
+        {
+          "if": {"properties": {"type": {"const": "radio_row"}}},
+          "then": {"$ref": "#/$defs/w_radio_row"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "input_text"}}},
+          "then": {"$ref": "#/$defs/w_input_text"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "input_int"}}},
+          "then": {"$ref": "#/$defs/w_input_int"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "tf_editor"}}},
+          "then": {"$ref": "#/$defs/w_tf_editor"}
+        },
+        {"if": {"properties": {"type": {"const": "image"}}}, "then": {"$ref": "#/$defs/w_image"}},
+        {"if": {"properties": {"type": {"const": "button"}}}, "then": {"$ref": "#/$defs/w_button"}},
+        {
+          "if": {"properties": {"type": {"const": "separator"}}},
+          "then": {"$ref": "#/$defs/w_separator"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "windows_menu"}}},
+          "then": {"$ref": "#/$defs/w_windows_menu"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "spinner"}}},
+          "then": {"$ref": "#/$defs/w_spinner"}
+        },
+        {"if": {"properties": {"type": {"const": "video"}}}, "then": {"$ref": "#/$defs/w_video"}},
+        {"if": {"properties": {"type": {"const": "audio"}}}, "then": {"$ref": "#/$defs/w_audio"}},
+        {
+          "if": {"properties": {"type": {"const": "text_view"}}},
+          "then": {"$ref": "#/$defs/w_text_view"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "message_input"}}},
+          "then": {"$ref": "#/$defs/w_message_input"}
+        },
+        {
+          "if": {"properties": {"type": {"const": "tray_icon"}}},
+          "then": {"$ref": "#/$defs/w_tray_icon"}
+        },
+        {"if": {"properties": {"type": {"const": "tabs"}}}, "then": {"$ref": "#/$defs/w_tabs"}},
+        {"if": {"properties": {"type": {"const": "list"}}}, "then": {"$ref": "#/$defs/w_list"}},
+        {
+          "if": {"properties": {"type": {"const": "heatmap"}}},
+          "then": {"$ref": "#/$defs/w_heatmap"}
+        },
+        {"if": {"properties": {"type": {"const": "color"}}}, "then": {"$ref": "#/$defs/w_color"}}
+      ]
+    },
+    "short_widget": {
+      "if": {"required": ["group"]}, "then": {"$ref": "#/$defs/w_group"}, "else": {
+      "if": {"required": ["menubar"]}, "then": {"$ref": "#/$defs/w_menubar"}, "else": {
+      "if": {"required": ["menu"]}, "then": {"$ref": "#/$defs/w_menu"}, "else": {
+      "if": {"required": ["menu_item"]}, "then": {"$ref": "#/$defs/w_menu_item"}, "else": {
+      "if": {"required": ["window"]}, "then": {"$ref": "#/$defs/w_window"}, "else": {
+      "if": {"required": ["progress"]}, "then": {"$ref": "#/$defs/w_progress"}, "else": {
+      "if": {"required": ["plot"]}, "then": {"$ref": "#/$defs/w_plot"}, "else": {
+      "if": {"required": ["chart"]}, "then": {"$ref": "#/$defs/w_chart"}, "else": {
+      "if": {"required": ["settings"]}, "then": {"$ref": "#/$defs/w_settings"}, "else": {
+      "if": {"required": ["overlay"]}, "then": {"$ref": "#/$defs/w_overlay"}, "else": {
+      "if": {"required": ["panel"]}, "then": {"$ref": "#/$defs/w_panel"}, "else": {
+      "if": {"required": ["text"]}, "then": {"$ref": "#/$defs/w_text"}, "else": {
+      "if": {"required": ["checkbox"]}, "then": {"$ref": "#/$defs/w_checkbox"}, "else": {
+      "if": {"required": ["slider_int"]}, "then": {"$ref": "#/$defs/w_slider_int"}, "else": {
+      "if": {"required": ["slider_float"]}, "then": {"$ref": "#/$defs/w_slider_float"}, "else": {
+      "if": {"required": ["combo"]}, "then": {"$ref": "#/$defs/w_combo"}, "else": {
+      "if": {"required": ["radio"]}, "then": {"$ref": "#/$defs/w_radio"}, "else": {
+      "if": {"required": ["radio_row"]}, "then": {"$ref": "#/$defs/w_radio_row"}, "else": {
+      "if": {"required": ["input_text"]}, "then": {"$ref": "#/$defs/w_input_text"}, "else": {
+      "if": {"required": ["input_int"]}, "then": {"$ref": "#/$defs/w_input_int"}, "else": {
+      "if": {"required": ["tf_editor"]}, "then": {"$ref": "#/$defs/w_tf_editor"}, "else": {
+      "if": {"required": ["image"]}, "then": {"$ref": "#/$defs/w_image"}, "else": {
+      "if": {"required": ["button"]}, "then": {"$ref": "#/$defs/w_button"}, "else": {
+      "if": {"required": ["separator"]}, "then": {"$ref": "#/$defs/w_separator"}, "else": {
+      "if": {"required": ["windows_menu"]}, "then": {"$ref": "#/$defs/w_windows_menu"}, "else": {
+      "if": {"required": ["spinner"]}, "then": {"$ref": "#/$defs/w_spinner"}, "else": {
+      "if": {"required": ["video"]}, "then": {"$ref": "#/$defs/w_video"}, "else": {
+      "if": {"required": ["audio"]}, "then": {"$ref": "#/$defs/w_audio"}, "else": {
+      "if": {"required": ["text_view"]}, "then": {"$ref": "#/$defs/w_text_view"}, "else": {
+      "if": {"required": ["message_input"]}, "then": {"$ref": "#/$defs/w_message_input"}, "else": {
+      "if": {"required": ["tray_icon"]}, "then": {"$ref": "#/$defs/w_tray_icon"}, "else": {
+      "if": {"required": ["tabs"]}, "then": {"$ref": "#/$defs/w_tabs"}, "else": {
+      "if": {"required": ["list"]}, "then": {"$ref": "#/$defs/w_list"}, "else": {
+      "if": {"required": ["heatmap"]}, "then": {"$ref": "#/$defs/w_heatmap"}, "else": {
+      "if": {"required": ["color"]}, "then": {"$ref": "#/$defs/w_color"}, "else": {
+      "if": {"required": ["type"]}, "then": {"$ref": "#/$defs/w_custom"}, "else": {"$ref": "#/$defs/w_group"}
+    }}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}},
+    "widget_map": {
+      "if": {"required": ["include"]},
+      "then": {"$ref": "#/$defs/include_site"},
+      "else": {
+        "if": {"required": ["load"]},
+        "then": {"$ref": "#/$defs/load_site"},
+        "else": {
+          "if": {
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "enum": [
+                  "group",
+                  "menubar",
+                  "menu",
+                  "menu_item",
+                  "window",
+                  "progress",
+                  "plot",
+                  "chart",
+                  "settings",
+                  "overlay",
+                  "panel",
+                  "text",
+                  "checkbox",
+                  "slider_int",
+                  "slider_float",
+                  "combo",
+                  "radio",
+                  "radio_row",
+                  "input_text",
+                  "input_int",
+                  "tf_editor",
+                  "image",
+                  "button",
+                  "separator",
+                  "windows_menu",
+                  "spinner",
+                  "video",
+                  "audio",
+                  "text_view",
+                  "message_input",
+                  "tray_icon",
+                  "tabs",
+                  "list",
+                  "heatmap",
+                  "color"
+                ]
+              }
+            }
+          },
+          "then": {"$ref": "#/$defs/typed_widget"},
+          "else": {"$ref": "#/$defs/short_widget"}
+        }
+      }
+    },
+    "widget": {
+      "description": "A widget: a map whose type is its first known key (slider_int: Speed) or type:, an include: or load: entry, or a bare string (a text label, or separator, windows_menu, clock, bell, spinner).",
+      "type": ["object", "string", "number", "boolean"],
+      "if": {"type": "object"},
+      "then": {"$ref": "#/$defs/widget_map"}
+    },
+    "widget_list": {"type": "array", "items": {"$ref": "#/$defs/widget"}, "description": "A list of widgets."},
+    "transfer_function": {
+      "type": "object",
+      "description": "A transfer function: the model form (docs/TRANSFER_FUNCTIONS.md §10.1) or the legacy points.",
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "value": {"type": "number"},
+              "color": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 4}
+            },
+            "patternProperties": {"^x-": true},
+            "additionalProperties": false
+          },
+          "description": "Legacy: [{value, color: [r, g, b, a]}]."
+        },
+        "window": {
+          "type": "array",
+          "items": {"type": "number"},
+          "description": "Legacy: [min, max].",
+          "minItems": 2
+        },
+        "auto_domain": {"$ref": "#/$defs/flag"},
+        "domain": {
+          "anyOf": [
+            {"enum": ["auto"]},
+            {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            {
+              "type": "object",
+              "properties": {"min": {"type": "number"}, "max": {"type": "number"}},
+              "required": ["min", "max"],
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
+        "opacity_cubed": {"$ref": "#/$defs/flag"},
+        "resolution": {"type": "integer", "minimum": 2, "maximum": 65536},
+        "preset": {"$ref": "#/$defs/string"},
+        "vinay": {"$ref": "#/$defs/string", "description": "A Vinay colour table file (a URI)."},
+        "color": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"type": "array", "items": {"type": "number"}, "minItems": 4},
+              {
+                "type": "object",
+                "properties": {"at": {"type": "number"}, "rgb": {"$ref": "#/$defs/rgb"}},
+                "required": ["at", "rgb"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "[at, r, g, b] or {at, rgb}, at in [0, 1]."
+        },
+        "alpha": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"type": "array", "items": {"type": "number"}, "minItems": 2},
+              {
+                "type": "object",
+                "properties": {"at": {"type": "number"}, "a": {"type": "number"}},
+                "required": ["at", "a"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "[at, a] or {at, a}."
+        },
+        "isocontours": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"type": "number"},
+              {
+                "type": "object",
+                "properties": {
+                  "id": {"$ref": "#/$defs/scalar"},
+                  "at": {"type": "number"},
+                  "rgb": {"$ref": "#/$defs/rgb"},
+                  "opacity": {"type": "number"}
+                },
+                "required": ["at"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "dims": {"const": 1}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "source": {
+      "description": "A node's source: a URI, or a map naming a primitive, a generated or computed field, a dataset or a file.",
+      "anyOf": [
+        {"$ref": "#/$defs/string"},
+        {
+          "type": "object",
+          "properties": {
+            "asset": {"$ref": "#/$defs/string", "description": "A document asset (assets:)."},
+            "plane": {
+              "anyOf": [
+                {"type": "number"},
+                {
+                  "type": "object",
+                  "properties": {"size": {"type": "number"}},
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "box": {
+              "anyOf": [
+                {"type": "number"},
+                {"$ref": "#/$defs/vec3"},
+                {
+                  "type": "object",
+                  "properties": {"size": {"anyOf": [{"type": "number"}, {"$ref": "#/$defs/vec3"}]}},
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "sphere": {
+              "anyOf": [
+                {"type": "number"},
+                {
+                  "type": "object",
+                  "properties": {"radius": {"type": "number"}},
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "sdf": {
+              "type": "object",
+              "properties": {
+                "mesh": {"$ref": "#/$defs/string"},
+                "file": {"$ref": "#/$defs/string"},
+                "dim": {"type": "integer"},
+                "algorithm": {"enum": ["v1", "v2", "igl"]}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            },
+            "heightfield": {"$ref": "#/$defs/heightfield"},
+            "terrain": {"$ref": "#/$defs/heightfield"},
+            "data": {"$ref": "#/$defs/string", "description": "A dataset the data: block names."},
+            "item": {"$ref": "#/$defs/string"},
+            "uri": {"$ref": "#/$defs/string"},
+            "file": {"$ref": "#/$defs/string"},
+            "state": {},
+            "stream": {},
+            "node": {}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "heightfield": {
+      "type": "object",
+      "description": "A displaced grid (heightfield:), or a cvc::world generator's ground (terrain:, or a generator: here).",
+      "properties": {
+        "generator": {"$ref": "#/$defs/string"},
+        "file": {"$ref": "#/$defs/string"},
+        "seed": {"type": "number"},
+        "amp": {"type": "number"},
+        "water_level": {"type": "number"},
+        "preset": {"$ref": "#/$defs/string"},
+        "size": {"type": "number"},
+        "resolution": {"type": "integer"},
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {"$ref": "#/$defs/string"},
+              "type": {"$ref": "#/$defs/string"},
+              "amplitude": {"type": "number"},
+              "radius": {"type": "number"},
+              "wavelength": {"type": "number"},
+              "direction": {"$ref": "#/$defs/vec2"},
+              "phase": {"type": "number"}
+            },
+            "patternProperties": {"^x-": true},
+            "additionalProperties": false
+          }
+        },
+        "colors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "max_height": {"type": "number"},
+              "below": {"type": "number"},
+              "color": {"$ref": "#/$defs/rgb"}
+            },
+            "patternProperties": {"^x-": true},
+            "additionalProperties": false
+          }
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "material": {
+      "type": "object",
+      "description": "How a node is drawn.",
+      "properties": {
+        "color": {"$ref": "#/$defs/rgb"},
+        "ambient": {"type": "number"},
+        "diffuse": {"type": "number"},
+        "single_color": {"$ref": "#/$defs/flag"},
+        "specular": {"type": "number"},
+        "specular_power": {"type": "number"},
+        "texture": {
+          "anyOf": [
+            {"$ref": "#/$defs/string"},
+            {
+              "type": "object",
+              "properties": {
+                "uri": {"$ref": "#/$defs/string"},
+                "file": {"$ref": "#/$defs/string"},
+                "stream": {"$ref": "#/$defs/string"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
+        "uv": {
+          "type": "object",
+          "properties": {
+            "rotate": {"enum": [0, 90, 180, 270, -90, -180, -270]},
+            "flip_u": {"$ref": "#/$defs/flag"},
+            "flip_v": {"$ref": "#/$defs/flag"},
+            "scale": {"anyOf": [{"type": "number"}, {"$ref": "#/$defs/vec2"}]},
+            "offset": {"anyOf": [{"type": "number"}, {"$ref": "#/$defs/vec2"}]}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "opaque": {"$ref": "#/$defs/flag"},
+        "opacity": {
+          "anyOf": [
+            {"type": "number", "minimum": 0, "maximum": 1},
+            {"$ref": "#/$defs/string"},
+            {
+              "type": "object",
+              "properties": {
+                "bind": {"$ref": "#/$defs/string"},
+                "default": {"type": "number", "minimum": 0, "maximum": 1}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "visible": {
+      "description": "true/false, a state key to follow, or { bind, default }.",
+      "anyOf": [
+        {"type": "boolean"},
+        {"$ref": "#/$defs/string"},
+        {
+          "type": "object",
+          "properties": {"bind": {"$ref": "#/$defs/string"}, "default": {"$ref": "#/$defs/flag"}},
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "shader": {
+      "anyOf": [
+        {"$ref": "#/$defs/string"},
+        {
+          "type": "object",
+          "properties": {
+            "preset": {"$ref": "#/$defs/string"},
+            "disable_coord_shift": {"$ref": "#/$defs/flag"},
+            "vertex": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {"at": {"$ref": "#/$defs/string"}, "code": {"$ref": "#/$defs/string"}},
+                "required": ["at"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            },
+            "fragment": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {"at": {"$ref": "#/$defs/string"}, "code": {"$ref": "#/$defs/string"}},
+                "required": ["at"],
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            }
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ],
+      "description": "A shader preset's name, or { preset, disable_coord_shift, vertex/fragment: [{at, code}] } GLSL splices."
+    },
+    "clip": {
+      "type": "object",
+      "description": "Clip planes and a clip box in the node's frame.",
+      "properties": {
+        "box": {
+          "anyOf": [
+            {"type": "array", "items": {"type": "number"}, "minItems": 6},
+            {
+              "type": "object",
+              "properties": {"min": {"$ref": "#/$defs/vec3"}, "max": {"$ref": "#/$defs/vec3"}},
+              "required": ["min", "max"],
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
+        "planes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "origin": {"$ref": "#/$defs/vec3"},
+              "normal": {"$ref": "#/$defs/vec3"},
+              "offset": {
+                "anyOf": [
+                  {"type": "number"},
+                  {"$ref": "#/$defs/string"},
+                  {
+                    "type": "object",
+                    "properties": {"bind": {"$ref": "#/$defs/string"}, "default": {"type": "number"}},
+                    "patternProperties": {"^x-": true},
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "patternProperties": {"^x-": true},
+            "additionalProperties": false
+          }
+        },
+        "children": {"$ref": "#/$defs/flag"}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "body": {
+      "description": "The node's rigid body in the scene's physics world: the motion alone, or a map.",
+      "anyOf": [
+        {"enum": ["dynamic", "kinematic", "static"]},
+        {
+          "type": "object",
+          "properties": {
+            "motion": {"enum": ["dynamic", "kinematic", "static"]},
+            "shape": {"enum": ["auto", "box", "sphere", "hull", "mesh", "terrain"]},
+            "mass": {"type": "number"},
+            "density": {"type": "number"},
+            "material": {"$ref": "#/$defs/string"},
+            "velocity": {"$ref": "#/$defs/vec3"},
+            "angular_velocity": {"$ref": "#/$defs/vec3"},
+            "linear_damping": {"type": "number"},
+            "angular_damping": {"type": "number"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "node_builtin": {
+      "type": "object",
+      "description": "A built-in scene node: every key is checked.",
+      "properties": {
+        "node": {"$ref": "#/$defs/scalar", "description": "The node's id."},
+        "id": {"$ref": "#/$defs/scalar"},
+        "type": {
+          "$ref": "#/$defs/string",
+          "description": "geometry (the default), volume, volren, volslice, group, or a custom node type."
+        },
+        "world": {
+          "$ref": "#/$defs/string",
+          "description": "The world this node belongs to (drawn only while it is on)."
+        },
+        "source": {"$ref": "#/$defs/source"},
+        "material": {"$ref": "#/$defs/material"},
+        "casts_shadow": {"$ref": "#/$defs/flag"},
+        "frame": {
+          "anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["first", "always", "none"]}],
+          "description": "Frame the camera on a source: { data } node's dataset."
+        },
+        "tags": {"$ref": "#/$defs/strings"},
+        "transform": {
+          "type": "object",
+          "properties": {
+            "position": {"$ref": "#/$defs/vec3"},
+            "rotation": {"$ref": "#/$defs/vec3"},
+            "scale": {"anyOf": [{"type": "number"}, {"$ref": "#/$defs/vec3"}]}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "fit": {
+          "type": "object",
+          "description": "Stand a mesh on the ground at a height.",
+          "properties": {
+            "height": {"type": "number"},
+            "up": {"enum": ["x", "y", "z"]},
+            "flip": {"$ref": "#/$defs/flag"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "visible": {"$ref": "#/$defs/visible"},
+        "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
+        "use": {"$ref": "#/$defs/string", "description": "A prototypes: entry this node stands for, its own keys over the prototype's."},
+        "args": {"type": "object", "description": "Values for the prototype's {name} tokens.", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
+        "volren": {
+          "type": "object",
+          "properties": {
+            "shaded": {"$ref": "#/$defs/flag"},
+            "unshaded": {"$ref": "#/$defs/flag"},
+            "distance_field": {"$ref": "#/$defs/flag"},
+            "steps": {"type": "integer"},
+            "ambient": {"type": "number"},
+            "resolution_scale": {"type": "number"},
+            "backend": {"$ref": "#/$defs/string"},
+            "shadows": {
+              "anyOf": [
+                {"$ref": "#/$defs/flag"},
+                {
+                  "type": "object",
+                  "properties": {"enabled": {"$ref": "#/$defs/flag"}, "strength": {"type": "number"}},
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "transfer_function": {"$ref": "#/$defs/transfer_function"},
+            "isosurfaces": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "value": {"type": "number"},
+                  "opacity": {"type": "number"},
+                  "color": {"$ref": "#/$defs/rgb"},
+                  "shininess": {"type": "number"}
+                },
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            },
+            "lights": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {"color": {"$ref": "#/$defs/vec3"}, "direction": {"$ref": "#/$defs/vec3"}},
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            }
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "volslice": {
+          "type": "object",
+          "properties": {
+            "quality": {"type": "number"},
+            "max_planes": {"type": "integer"},
+            "near_plane": {"type": "number"},
+            "filter": {"enum": ["linear", "nearest"]},
+            "opacity_correction": {"$ref": "#/$defs/flag"},
+            "transfer_function": {"$ref": "#/$defs/transfer_function"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "volume": {
+          "type": "object",
+          "properties": {
+            "shaded": {"$ref": "#/$defs/flag"},
+            "transfer_function": {"$ref": "#/$defs/transfer_function"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "shader": {"$ref": "#/$defs/shader"},
+        "clip": {"$ref": "#/$defs/clip"},
+        "body": {"$ref": "#/$defs/body"},
+        "children": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        "repeat": {"$ref": "#/$defs/repeat"},
+        "label": {"description": "A label drawn over the node (scene_labels)."},
+        "model": {"description": "A geometry node's model, drawn in place of its own geometry."},
+        "tint": {
+          "$ref": "#/$defs/string",
+          "description": "satellite: a city's buildings take the aerial image's colours."
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "node_custom": {
+      "type": "object",
+      "description": "A node of a custom type (register_scene_node_type): its own keys are its realizer's (SceneNode::props), so only the built-in ones are checked.",
+      "properties": {
+        "node": {"$ref": "#/$defs/scalar", "description": "The node's id."},
+        "id": {"$ref": "#/$defs/scalar"},
+        "type": {
+          "$ref": "#/$defs/string",
+          "description": "geometry (the default), volume, volren, volslice, group, or a custom node type."
+        },
+        "world": {
+          "$ref": "#/$defs/string",
+          "description": "The world this node belongs to (drawn only while it is on)."
+        },
+        "source": {"$ref": "#/$defs/source"},
+        "material": {"$ref": "#/$defs/material"},
+        "casts_shadow": {"$ref": "#/$defs/flag"},
+        "frame": {
+          "anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["first", "always", "none"]}],
+          "description": "Frame the camera on a source: { data } node's dataset."
+        },
+        "tags": {"$ref": "#/$defs/strings"},
+        "transform": {
+          "type": "object",
+          "properties": {
+            "position": {"$ref": "#/$defs/vec3"},
+            "rotation": {"$ref": "#/$defs/vec3"},
+            "scale": {"anyOf": [{"type": "number"}, {"$ref": "#/$defs/vec3"}]}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "fit": {
+          "type": "object",
+          "description": "Stand a mesh on the ground at a height.",
+          "properties": {
+            "height": {"type": "number"},
+            "up": {"enum": ["x", "y", "z"]},
+            "flip": {"$ref": "#/$defs/flag"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "visible": {"$ref": "#/$defs/visible"},
+        "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
+        "use": {"$ref": "#/$defs/string", "description": "A prototypes: entry this node stands for, its own keys over the prototype's."},
+        "args": {"type": "object", "description": "Values for the prototype's {name} tokens.", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
+        "volren": {
+          "type": "object",
+          "properties": {
+            "shaded": {"$ref": "#/$defs/flag"},
+            "unshaded": {"$ref": "#/$defs/flag"},
+            "distance_field": {"$ref": "#/$defs/flag"},
+            "steps": {"type": "integer"},
+            "ambient": {"type": "number"},
+            "resolution_scale": {"type": "number"},
+            "backend": {"$ref": "#/$defs/string"},
+            "shadows": {
+              "anyOf": [
+                {"$ref": "#/$defs/flag"},
+                {
+                  "type": "object",
+                  "properties": {"enabled": {"$ref": "#/$defs/flag"}, "strength": {"type": "number"}},
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "transfer_function": {"$ref": "#/$defs/transfer_function"},
+            "isosurfaces": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "value": {"type": "number"},
+                  "opacity": {"type": "number"},
+                  "color": {"$ref": "#/$defs/rgb"},
+                  "shininess": {"type": "number"}
+                },
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            },
+            "lights": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {"color": {"$ref": "#/$defs/vec3"}, "direction": {"$ref": "#/$defs/vec3"}},
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            }
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "volslice": {
+          "type": "object",
+          "properties": {
+            "quality": {"type": "number"},
+            "max_planes": {"type": "integer"},
+            "near_plane": {"type": "number"},
+            "filter": {"enum": ["linear", "nearest"]},
+            "opacity_correction": {"$ref": "#/$defs/flag"},
+            "transfer_function": {"$ref": "#/$defs/transfer_function"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "volume": {
+          "type": "object",
+          "properties": {
+            "shaded": {"$ref": "#/$defs/flag"},
+            "transfer_function": {"$ref": "#/$defs/transfer_function"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "shader": {"$ref": "#/$defs/shader"},
+        "clip": {"$ref": "#/$defs/clip"},
+        "body": {"$ref": "#/$defs/body"},
+        "children": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        "repeat": {"$ref": "#/$defs/repeat"},
+        "label": {"description": "A label drawn over the node (scene_labels)."},
+        "model": {"description": "A geometry node's model, drawn in place of its own geometry."},
+        "tint": {
+          "$ref": "#/$defs/string",
+          "description": "satellite: a city's buildings take the aerial image's colours."
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "description": "A scene node (docs/ARIADNE.md §5.4).",
+      "if": {
+        "anyOf": [
+          {"not": {"required": ["type"]}},
+          {"properties": {"type": {"enum": ["geometry", "volume", "volren", "volslice", "group"]}}}
+        ]
+      },
+      "then": {"$ref": "#/$defs/node_builtin"},
+      "else": {"$ref": "#/$defs/node_custom"}
+    },
+    "light": {
+      "type": "object",
+      "description": "A light, or (rig:) a stage-lighting rig and its tuning.",
+      "properties": {
+        "light": {"$ref": "#/$defs/scalar"},
+        "id": {"$ref": "#/$defs/scalar"},
+        "rig": {"enum": ["three_point", "overhead", "dramatic", "flat"]},
+        "kind": {"enum": ["directional", "spot", "fill"]},
+        "pos": {"$ref": "#/$defs/vec3"},
+        "target": {"$ref": "#/$defs/vec3"},
+        "color": {"$ref": "#/$defs/vec3"},
+        "cone": {"type": "number"},
+        "azimuth": {"type": "number"},
+        "elevation": {"type": "number"},
+        "intensity": {"type": "number"},
+        "stage": {
+          "type": "object",
+          "properties": {"center": {"$ref": "#/$defs/vec3"}, "radius": {"type": "number"}},
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "sun": {"$ref": "#/$defs/flag"},
+        "key": {
+          "type": "object",
+          "properties": {
+            "intensity": {"type": "number"},
+            "azimuth": {"type": "number"},
+            "elevation": {"type": "number"},
+            "cone": {"type": "number"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "fill": {"type": "number"},
+        "back": {"type": "number"},
+        "warmth": {"type": "number"},
+        "environment": {"type": "number"},
+        "ambient": {"type": "number"},
+        "wash": {
+          "anyOf": [
+            {"type": "number"},
+            {
+              "type": "object",
+              "properties": {
+                "intensity": {"type": "number"},
+                "count": {"type": "integer"},
+                "height": {"type": "number"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "camera": {
+      "type": "object",
+      "description": "A named camera viewports can use.",
+      "properties": {
+        "camera": {"$ref": "#/$defs/scalar"},
+        "id": {"$ref": "#/$defs/scalar"},
+        "mode": {"enum": ["orbit", "fly", "track", "map", "slice"]},
+        "track": {"$ref": "#/$defs/string"},
+        "azimuth": {"type": "number"},
+        "elevation": {"type": "number"},
+        "zoom": {"type": "number"},
+        "position": {"$ref": "#/$defs/vec3", "description": "The eye, in world coordinates."},
+        "target": {"$ref": "#/$defs/vec3", "description": "The point the eye looks at."},
+        "up": {"$ref": "#/$defs/vec3", "description": "The world's up axis the camera turns about (+z by default)."},
+        "fov": {"type": "number", "description": "The vertical field of view, degrees (0 to 180)."},
+        "near": {"type": "number", "description": "A fixed near clipping distance (with far:)."},
+        "far": {"type": "number", "description": "A fixed far clipping distance (with near:)."},
+        "orthographic": {"$ref": "#/$defs/flag", "description": "A parallel projection in orbit, fly and track."},
+        "height": {"type": "number", "description": "An orthographic view's height at the target, at the start."}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "scene": {
+      "type": "object",
+      "description": "The 3D scene (docs/ARIADNE.md §5.4).",
+      "properties": {
+        "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
+        "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
+        "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
+        "main_view": {
+          "type": "object",
+          "description": "Which tags the main view shows or hides.",
+          "properties": {"show": {"$ref": "#/$defs/strings"}, "hide": {"$ref": "#/$defs/strings"}},
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "shadows": {
+          "type": "object",
+          "properties": {
+            "enabled": {"$ref": "#/$defs/flag"},
+            "resolution": {"type": "integer"},
+            "update_interval": {"type": "integer"},
+            "softness": {"type": "number"},
+            "focus": {
+              "anyOf": [
+                {"enum": ["camera"]},
+                {
+                  "type": "object",
+                  "properties": {
+                    "follow": {"enum": ["camera"]},
+                    "center": {"$ref": "#/$defs/vec3"},
+                    "radius": {"type": "number"},
+                    "min_radius": {"type": "number"},
+                    "max_radius": {"type": "number"},
+                    "per_distance": {"type": "number"},
+                    "lead": {"type": "number"},
+                    "lift": {"type": "number"},
+                    "ground": {"$ref": "#/$defs/string"}
+                  },
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "chrome": {"$ref": "#/$defs/flag"},
+        "background": {
+          "anyOf": [
+            {"$ref": "#/$defs/rgb"},
+            {
+              "type": "object",
+              "properties": {"top": {"$ref": "#/$defs/rgb"}, "bottom": {"$ref": "#/$defs/rgb"}},
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ],
+          "description": "[r, g, b], or a vertical gradient."
+        },
+        "clock": {
+          "type": "object",
+          "description": "The scene's simulation clock.",
+          "properties": {
+            "scale": {"type": "number"},
+            "paused": {"$ref": "#/$defs/flag"},
+            "speed_key": {"$ref": "#/$defs/string"},
+            "paused_key": {"$ref": "#/$defs/string"},
+            "time_key": {"$ref": "#/$defs/string"},
+            "tick_key": {"$ref": "#/$defs/string"},
+            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."},
+            "max_lag": {"type": "number", "exclusiveMinimum": 0, "maximum": 10, "description": "How far the world may fall behind its clock (s of world time at 1x, at least one tick): past it the clock lets the time go. Without it the host's catch-up (0.25 s)."}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "physics": {
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {
+              "type": "object",
+              "properties": {
+                "gravity": {"$ref": "#/$defs/vec3"},
+                "fixed_dt": {"type": "number"},
+                "backend": {"anyOf": [{"enum": ["auto", "jolt", "null", "none"]}, {"type": "null"}]},
+                "materials": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^.*$": {
+                      "type": "object",
+                      "properties": {"friction": {"type": "number"}, "restitution": {"type": "number"}},
+                      "patternProperties": {"^x-": true},
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ],
+          "description": "The scene's rigid-body world (cvc::physics::world)."
+        },
+        "world": {
+          "anyOf": [
+            {"$ref": "#/$defs/string"},
+            {
+              "type": "object",
+              "properties": {
+                "source": {"$ref": "#/$defs/string"},
+                "cell": {"type": "number"},
+                "half": {"type": "number"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ],
+          "description": "Which world is on at the start, and its grid."
+        },
+        "wind": {
+          "type": "object",
+          "properties": {
+            "speed": {"type": "number", "minimum": 0},
+            "dir": {"type": "number"},
+            "gustiness": {"type": "number", "minimum": 0},
+            "base": {"type": "number"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "scene_entry": {
+      "type": "object",
+      "description": "A scene of its own, drawn by the viewports that name it.",
+      "properties": {
+        "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+        "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
+        "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
+        "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
+        "main_view": {
+          "type": "object",
+          "description": "Which tags the main view shows or hides.",
+          "properties": {"show": {"$ref": "#/$defs/strings"}, "hide": {"$ref": "#/$defs/strings"}},
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "shadows": {
+          "type": "object",
+          "properties": {
+            "enabled": {"$ref": "#/$defs/flag"},
+            "resolution": {"type": "integer"},
+            "update_interval": {"type": "integer"},
+            "softness": {"type": "number"},
+            "focus": {
+              "anyOf": [
+                {"enum": ["camera"]},
+                {
+                  "type": "object",
+                  "properties": {
+                    "follow": {"enum": ["camera"]},
+                    "center": {"$ref": "#/$defs/vec3"},
+                    "radius": {"type": "number"},
+                    "min_radius": {"type": "number"},
+                    "max_radius": {"type": "number"},
+                    "per_distance": {"type": "number"},
+                    "lead": {"type": "number"},
+                    "lift": {"type": "number"},
+                    "ground": {"$ref": "#/$defs/string"}
+                  },
+                  "patternProperties": {"^x-": true},
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "chrome": {"$ref": "#/$defs/flag"},
+        "background": {
+          "anyOf": [
+            {"$ref": "#/$defs/rgb"},
+            {
+              "type": "object",
+              "properties": {"top": {"$ref": "#/$defs/rgb"}, "bottom": {"$ref": "#/$defs/rgb"}},
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ],
+          "description": "[r, g, b], or a vertical gradient."
+        },
+        "clock": {
+          "type": "object",
+          "description": "The scene's simulation clock.",
+          "properties": {
+            "scale": {"type": "number"},
+            "paused": {"$ref": "#/$defs/flag"},
+            "speed_key": {"$ref": "#/$defs/string"},
+            "paused_key": {"$ref": "#/$defs/string"},
+            "time_key": {"$ref": "#/$defs/string"},
+            "tick_key": {"$ref": "#/$defs/string"},
+            "hz": {"type": "number", "multipleOf": 1, "minimum": 10, "maximum": 240, "description": "The world's rate, a whole number of ticks a second (ARIADNE_WORLDS.md §18.9). Without it the world runs at 120 Hz."},
+            "max_lag": {"type": "number", "exclusiveMinimum": 0, "maximum": 10, "description": "How far the world may fall behind its clock (s of world time at 1x, at least one tick): past it the clock lets the time go. Without it the host's catch-up (0.25 s)."}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "physics": {
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {
+              "type": "object",
+              "properties": {
+                "gravity": {"$ref": "#/$defs/vec3"},
+                "fixed_dt": {"type": "number"},
+                "backend": {"anyOf": [{"enum": ["auto", "jolt", "null", "none"]}, {"type": "null"}]},
+                "materials": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^.*$": {
+                      "type": "object",
+                      "properties": {"friction": {"type": "number"}, "restitution": {"type": "number"}},
+                      "patternProperties": {"^x-": true},
+                      "additionalProperties": false
+                    }
+                  }
+                }
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ],
+          "description": "The scene's rigid-body world (cvc::physics::world)."
+        },
+        "world": {
+          "anyOf": [
+            {"$ref": "#/$defs/string"},
+            {
+              "type": "object",
+              "properties": {
+                "source": {"$ref": "#/$defs/string"},
+                "cell": {"type": "number"},
+                "half": {"type": "number"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ],
+          "description": "Which world is on at the start, and its grid."
+        },
+        "wind": {
+          "type": "object",
+          "properties": {
+            "speed": {"type": "number", "minimum": 0},
+            "dir": {"type": "number"},
+            "gustiness": {"type": "number", "minimum": 0},
+            "base": {"type": "number"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        },
+        "scene": {"$ref": "#/$defs/scalar"},
+        "id": {"$ref": "#/$defs/scalar"}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    }
+  }
+}
