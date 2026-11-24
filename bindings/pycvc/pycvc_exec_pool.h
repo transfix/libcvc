@@ -7,6 +7,10 @@
 
 #include <memory>
 #include <string>
+#ifndef SWIG
+#include <cvc/state/state_exec/scheduler_base.h> // published_process
+#include <optional>
+#endif
 
 namespace cvc {
 class app;
@@ -31,6 +35,12 @@ public:
   // definitions persist per pooled Exec, unless `fresh_env` gives each program a fresh env. A
   // program parked for `idle_timeout` seconds with nothing pending is killed, as in Exec.run.
   // Anything else, or a negative or NaN idle_timeout, raises ValueError (std::invalid_argument).
+  //
+  // Pooled Exec i's programs run with owner "pycvc:<prefix>.<i>" (S2-Q7), which their spawned and
+  // forked children keep: a program of one pooled Exec cannot kill, pause or resume another's
+  // processes ((kill pid) gives #f). Its group is the home of the channels under its chroot (S2b),
+  // so they stay local; a key outside it ("/k") is homed at the app's exec scheduler (group 0),
+  // which the pool builds now and run_all drains.
   //
   // The pooled Execs are not exposed: no Python thread reaches a pooled scheduler.
   explicit ExecPool(const std::shared_ptr<cvc::app> &app, PyObject *threads = nullptr,
@@ -59,6 +69,12 @@ public:
 
   // The app pool's worker count, the real one (in Python, the read-only property `threads`).
   unsigned threads() const;
+
+#ifndef SWIG
+  // ExecPool.info(pid)'s row (pycvc.i makes the dict): the app pool's exec_pool::info, `pid`'s
+  // row as its group last published it (S2-Q9), or nullopt. Any thread.
+  std::optional<cvc::state_exec::published_process> published(int pid) const;
+#endif
 
   // The pool's run_all counters since it was made, as a dict (S2a.8, S2-Q6): "batch_waits", the
   // times a batch with nothing to pump waited between rounds (once for all its pooled Execs, until
