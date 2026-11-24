@@ -50,6 +50,16 @@
           "description": "Meshes loaded once, shared by every scene: id: { source, fit, ... }.",
           "patternProperties": {"^.*$": {"$ref": "#/$defs/node"}}
         },
+        "prototypes": {
+          "type": "object",
+          "description": "Node trees a node's use: stands for (§5.18, Prototypes). Not checked as nodes here: a prototype's values may hold {name} tokens its instances fill in.",
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "properties": {"args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}}}
+            }
+          }
+        },
         "data": {
           "type": "object",
           "propertyNames": {"pattern": "^[^.]+$"},
@@ -2185,6 +2195,8 @@
         },
         "visible": {"$ref": "#/$defs/visible"},
         "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
+        "use": {"$ref": "#/$defs/string", "description": "A prototypes: entry this node stands for, its own keys over the prototype's."},
+        "args": {"type": "object", "description": "Values for the prototype's {name} tokens.", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
         "volren": {
           "type": "object",
           "properties": {
@@ -2316,6 +2328,8 @@
         },
         "visible": {"$ref": "#/$defs/visible"},
         "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
+        "use": {"$ref": "#/$defs/string", "description": "A prototypes: entry this node stands for, its own keys over the prototype's."},
+        "args": {"type": "object", "description": "Values for the prototype's {name} tokens.", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
         "volren": {
           "type": "object",
           "properties": {
