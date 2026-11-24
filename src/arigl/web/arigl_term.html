@@ -41,6 +41,13 @@
                                  border: 1px solid #2d333b; border-radius: 4px; padding: 1px 8px; }
   header button { cursor: pointer; }
   #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+  /* The browser gate: in place of the terminal, what a browser without JSPI needs. */
+  #needs { flex: 1; max-width: 36em; margin: 0 auto; padding: 40px 16px; box-sizing: border-box;
+           text-align: center; }
+  #needs h1 { font-size: 17px; margin: 0 0 14px; }
+  #needs p { margin: 0 0 10px; }
+  #needs .ua { color: var(--dim); font: 11px/1.45 ui-monospace, monospace;
+               overflow-wrap: anywhere; }
   /* VTK's WebGL canvas: rendered into, read back, never shown. */
   #canvas { position: fixed; left: -100000px; top: 0; width: 640px; height: 384px; }
 </style>
@@ -74,6 +81,44 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-image@0.8.0/lib/addon-image.js"
         integrity="sha384-c8cp6ttBbOCWdIK+9ah6WF5Z9Kl9UMfuRUneie8t3tsEPIBD3TkSP3e5CyNT22kI"
         crossorigin="anonymous"></script>
+<script>
+  // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4), arigl-web.js's check and text,
+  // in a block of its own so that it holds where xterm.js cannot start. arigl_term is built with
+  // wasm exceptions and JSPI and has no fallback, so a browser without JSPI gets what it needs in
+  // place of the terminal (the loader below), and the module never downloads. Every browser on an
+  // iPhone or iPad is WebKit, so there it is iOS 27 whichever browser it is.
+  function missingJspi() {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+        typeof WebAssembly.promising === 'function')
+      return null;
+    const ua = navigator.userAgent || '';
+    const ios = /iPhone|iPad|iPod/.test(ua) ||
+                (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS's desktop UA
+    const versions = 'Chrome 137, Firefox 153 or Safari 27, or later';
+    return ['This page needs a newer browser',
+            'It runs on WebAssembly with JSPI (JavaScript Promise Integration), which this ' +
+                'browser does not have.'].concat(ios ? [
+      'On an iPhone or iPad every browser, Chrome and Firefox included, uses Safari\'s engine, ' +
+          'so it needs iOS 27 or later (iPadOS 27 on an iPad): Settings > General > Software ' +
+          'Update.',
+      'On a computer: ' + versions + '.',
+    ] : ['It needs ' + versions + ' (Edge 137 and other browsers built on Chrome 137 too).']);
+  }
+  const jspiNeeds = missingJspi();
+  function showJspiNeeds() {
+    document.getElementById('status').textContent = 'needs a newer browser';
+    const box = document.createElement('div');
+    box.id = 'needs';
+    for (const [i, text] of jspiNeeds.concat(['This browser: ' + navigator.userAgent]).entries()) {
+      const p = document.createElement(i ? 'p' : 'h1');
+      p.textContent = text;
+      box.append(p);
+    }
+    box.lastChild.className = 'ua';
+    document.getElementById('term').replaceWith(box);
+    document.title = 'Needs a newer browser — ' + document.title;
+  }
+</script>
 <script>
   const statusEl = document.getElementById('status');
   const setStatus = (text) => { statusEl.textContent = text; };
@@ -190,6 +235,10 @@
   // before fit can measure a cell. The glue loads arigl_term.wasm and arigl_term.data (the
   // documents and components) from beside this page.
   window.addEventListener('load', () => document.fonts.ready.then(() => {
+    if (jspiNeeds) {
+      showJspiNeeds();
+      return;
+    }
     fit.fit();
     const script = document.createElement('script');
     script.src = 'arigl_term.js';

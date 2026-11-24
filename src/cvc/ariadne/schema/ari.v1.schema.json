@@ -50,6 +50,16 @@
           "description": "Meshes loaded once, shared by every scene: id: { source, fit, ... }.",
           "patternProperties": {"^.*$": {"$ref": "#/$defs/node"}}
         },
+        "prototypes": {
+          "type": "object",
+          "description": "Node trees a node's use: stands for (§5.18, Prototypes). Not checked as nodes here: a prototype's values may hold {name} tokens its instances fill in.",
+          "patternProperties": {
+            "^.*$": {
+              "type": "object",
+              "properties": {"args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}}}
+            }
+          }
+        },
         "data": {
           "type": "object",
           "propertyNames": {"pattern": "^[^.]+$"},
@@ -1975,6 +1985,36 @@
           "patternProperties": {"^x-": true},
           "additionalProperties": false
         },
+        "pbr": {
+          "description": "Physically based shading (docs/ARIADNE.md §5.4): true for the defaults, or its values.",
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {
+              "type": "object",
+              "properties": {
+                "metallic": {"type": "number", "minimum": 0, "maximum": 1},
+                "roughness": {"type": "number", "minimum": 0, "maximum": 1},
+                "emissive": {"$ref": "#/$defs/rgb"},
+                "coat": {
+                  "anyOf": [
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {
+                      "type": "object",
+                      "properties": {
+                        "strength": {"type": "number", "minimum": 0, "maximum": 1},
+                        "roughness": {"type": "number", "minimum": 0, "maximum": 1}
+                      },
+                      "patternProperties": {"^x-": true},
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
         "opaque": {"$ref": "#/$defs/flag"},
         "opacity": {
           "anyOf": [
@@ -2155,6 +2195,8 @@
         },
         "visible": {"$ref": "#/$defs/visible"},
         "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
+        "use": {"$ref": "#/$defs/string", "description": "A prototypes: entry this node stands for, its own keys over the prototype's."},
+        "args": {"type": "object", "description": "Values for the prototype's {name} tokens.", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
         "volren": {
           "type": "object",
           "properties": {
@@ -2286,6 +2328,8 @@
         },
         "visible": {"$ref": "#/$defs/visible"},
         "on_pick": {"$ref": "#/$defs/program", "description": "A program run when a press lands on the node or on a descendant without one of its own, and on that press's drags and release; in the document's scope."},
+        "use": {"$ref": "#/$defs/string", "description": "A prototypes: entry this node stands for, its own keys over the prototype's."},
+        "args": {"type": "object", "description": "Values for the prototype's {name} tokens.", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
         "volren": {
           "type": "object",
           "properties": {
@@ -2439,6 +2483,43 @@
       "patternProperties": {"^x-": true},
       "additionalProperties": false
     },
+    "animation": {
+      "type": "object",
+      "description": "A scene's keyframed animation over the scene clock (docs/ARIADNE.md §5.4, Animations); its keys are animations.<id>.time, .playing and .speed.",
+      "properties": {
+        "animation": {"$ref": "#/$defs/string"},
+        "id": {"$ref": "#/$defs/string"},
+        "loop": {"anyOf": [{"$ref": "#/$defs/flag"}, {"enum": ["pingpong"]}], "description": "At the end: stop (false), start over (true) or turn back (pingpong)."},
+        "autoplay": {"$ref": "#/$defs/flag"},
+        "speed": {"type": "number", "description": "Seconds of animation a second of the scene clock; below 0, backwards."},
+        "duration": {"type": "number", "minimum": 0, "description": "Its length; its last keyframe's time when 0 or unset."},
+        "tracks": {"type": "array", "items": {"$ref": "#/$defs/animation_track"}}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "animation_track": {
+      "type": "object",
+      "description": "One track: a node's key (node: and key:) or a state key (state:) along its keys: [[seconds, value], ...].",
+      "properties": {
+        "node": {"$ref": "#/$defs/string", "description": "A node id (every node with it) or a path a/b."},
+        "key": {"enum": ["position", "rotation", "scale", "color", "opacity", "visible"]},
+        "state": {"$ref": "#/$defs/string", "description": "A state key, resolved as a bind is."},
+        "interpolation": {"enum": ["linear", "step", "smooth"]},
+        "clip": {"$ref": "#/$defs/scalar", "description": "With node:, the clip (a name, or its number) of the model the node draws, played as the animation's time."},
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": [{"type": "number"}, {"anyOf": [{"type": "number"}, {"type": "array", "items": {"type": "number"}}]}]
+          }
+        }
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
     "camera": {
       "type": "object",
       "description": "A named camera viewports can use.",
@@ -2469,6 +2550,24 @@
         "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
         "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
         "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
+        "animations": {"type": "array", "items": {"$ref": "#/$defs/animation"}},
+        "environment": {
+          "description": "The light pbr: materials take from all round (docs/ARIADNE.md §5.4): a gradient, or false / none for the lights alone.",
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {"enum": ["none"]},
+            {
+              "type": "object",
+              "properties": {
+                "sky": {"$ref": "#/$defs/rgb"},
+                "horizon": {"$ref": "#/$defs/rgb"},
+                "ground": {"$ref": "#/$defs/rgb"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
         "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
         "main_view": {
           "type": "object",
@@ -2603,6 +2702,24 @@
         "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
         "lights": {"type": "array", "items": {"$ref": "#/$defs/light"}},
         "cameras": {"type": "array", "items": {"$ref": "#/$defs/camera"}},
+        "animations": {"type": "array", "items": {"$ref": "#/$defs/animation"}},
+        "environment": {
+          "description": "The light pbr: materials take from all round (docs/ARIADNE.md §5.4): a gradient, or false / none for the lights alone.",
+          "anyOf": [
+            {"$ref": "#/$defs/flag"},
+            {"enum": ["none"]},
+            {
+              "type": "object",
+              "properties": {
+                "sky": {"$ref": "#/$defs/rgb"},
+                "horizon": {"$ref": "#/$defs/rgb"},
+                "ground": {"$ref": "#/$defs/rgb"}
+              },
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        },
         "entity_labels": {"description": "Labels for the world's entities (read by the world runtime)."},
         "main_view": {
           "type": "object",

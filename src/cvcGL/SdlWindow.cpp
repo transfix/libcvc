@@ -160,14 +160,20 @@ void SdlGLRenderWindow::CreateAWindow() {
   if (!video_) {
     // SDL's video is this window's, and it leaves the process as VTK's windows do unless the app
     // said otherwise: the screen still sleeps, Ctrl+C still ends the process, X11's compositor
-    // stays on, a click that focuses the window also acts, and on Windows the process keeps the
-    // DPI awareness it has. (SDL 3 still reads SDL_WINDOWS_DPI_AWARENESS, though SDL_hints.h no
-    // longer names it; with none of its values, "permonitorv2" and so on, it leaves it alone.)
+    // stays on, and a click that focuses the window also acts.
     hint_default(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
     hint_default(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     hint_default(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
     hint_default(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
-    hint_default("SDL_WINDOWS_DPI_AWARENESS", "");
+    // On Windows the process becomes per-monitor DPI aware (v2), so the window is drawn at the
+    // display's own pixels: a DPI-unaware process's window is drawn at 96 dpi and stretched by
+    // Windows on a scaled display (125%, 150%), which blurs its text. The window keeps the size it
+    // would have had (CreateAWindow) and the UI follows the display's scale (displayScale). A
+    // process that already declared its awareness (a manifest, or the app before the first window)
+    // keeps it, and SDL_WINDOWS_DPI_AWARENESS=unaware (the app's hint, or the environment) keeps
+    // the old stretched window. (SDL 3 still reads that hint, though SDL_hints.h no longer names
+    // it.)
+    hint_default("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
       error_ = std::string("SDL_InitSubSystem(VIDEO): ") + SDL_GetError();
       return;
@@ -259,6 +265,23 @@ void SdlGLRenderWindow::CreateAWindow() {
 #endif
   if (this->Position[0] >= 0 && this->Position[1] >= 0)
     SDL_SetWindowPosition(window_, this->Position[0], this->Position[1]);
+#ifdef _WIN32
+  // On Windows the size asked for is in the display's logical pixels (96 dpi), the size a
+  // DPI-unaware window has: the window opens at that times the scale of the display it is on
+  // (2000x1125 pixels for 1600x900 at 125%), so it looks as big as it did, drawn at the display's
+  // own pixels instead of stretched. SDL centred it at the size asked: unless the app placed it,
+  // it is centred again at this one, as a DPI-unaware window of that size is.
+  const float s = this->displayScale();
+  if (s != 1.0f) {
+    SDL_SetWindowSize(window_, std::max(1, static_cast<int>(std::lround(w * s))),
+                      std::max(1, static_cast<int>(std::lround(h * s))));
+    if (this->Position[0] < 0 || this->Position[1] < 0) {
+      const SDL_DisplayID display = SDL_GetDisplayForWindow(window_);
+      const int centred = static_cast<int>(SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+      SDL_SetWindowPosition(window_, centred, centred);
+    }
+  }
+#endif
   if (this->FullScreen)
     SDL_SetWindowFullscreen(window_, true);
   if (this->ShowWindow)
@@ -445,9 +468,37 @@ void SdlGLRenderWindow::SetSize(int width, int height) {
   }
 }
 
+void SdlGLRenderWindow::SetLogicalSize(int width, int height) {
+  // Before the window is made its scale is not known: CreateAWindow applies it.
+  const float s = window_ ? this->displayScale() : 1.0f;
+  this->SetSize(std::max(1, static_cast<int>(std::lround(width * s))),
+                std::max(1, static_cast<int>(std::lround(height * s))));
+}
+
+float SdlGLRenderWindow::displayScale() const {
+#ifdef _WIN32
+  // Per-monitor DPI aware (CreateAWindow), SDL's window is in the display's pixels and its display
+  // scale is the monitor's (1.25 at 125%); a process that stayed DPI-unaware reads 1.
+  if (window_) {
+    const float s = SDL_GetWindowDisplayScale(window_);
+    if (s > 0.0f)
+      return s;
+  }
+#endif
+  return 1.0f;
+}
+
 void SdlGLRenderWindow::syncSizeFromWindow() {
   if (!window_)
     return;
+#ifdef _WIN32
+  // VTK's text (its text actors' font sizes are points at the window's DPI, 72 by default) keeps
+  // its apparent size on a scaled display, as the UI does, and follows the window between
+  // displays.
+  const int dpi = std::max(1, static_cast<int>(std::lround(72.0f * this->displayScale())));
+  if (this->GetDPI() != dpi)
+    this->SetDPI(dpi);
+#endif
   int w = 0, h = 0;
   SDL_GetWindowSizeInPixels(window_, &w, &h);
   if (w < 1 || h < 1)
@@ -995,6 +1046,7 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
     this->ExitCallback(); // TerminateApp() (Done) unless the host observes ExitEvent
     break;
   case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+  case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: // moved to a display of another scale: VTK's DPI
     if (win) {
       win->syncSizeFromWindow();
       const int *size = win->GetSize();

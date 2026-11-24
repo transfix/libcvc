@@ -3,11 +3,14 @@
 #include <boost/any.hpp>
 #include <boost/property_tree/json_parser.hpp> // the sdf generator's params
 #include <boost/property_tree/ptree.hpp>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/data.h> // source: { data } — a dataset of the document's data: block
 #include <cvc/ariadne/scene.h>
+#include <cvc/ariadne/scene_animation.h>
 #include <cvc/ariadne/scene_geometry.h> // a node's mesh from data (core)
 #include <cvc/ariadne/scene_wind.h>     // the scene's one wind (O14)
 #include <cvc/ariadne/scene_world.h>    // the scene's world: physics and bodies (core)
@@ -30,7 +33,8 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/VolSliceNode.h>
 #include <cvc/gl/VolumeNode.h>
-#include <cvc/gl/ariadne/node_data.h> // a node's data on the state tree, followed
+#include <cvc/gl/ariadne/entity_view.h> // the world's vehicles at scale (FL2)
+#include <cvc/gl/ariadne/node_data.h>   // a node's data on the state tree, followed
 #include <cvc/gl/ariadne/scene_labels.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
@@ -40,6 +44,7 @@
 #include <cvc/gl/state_publisher.h>       // a copy's published pose lands before it goes
 #include <cvc/gl/world_geometry_nodes.h>  // a dataset's world_geometry, drawn
 #include <cvc/image/image.h>              // cvc::read_image — material: { texture: <uri> }
+#include <cvc/model/model.h>              // a clip: track poses its node's model
 #include <cvc/physics/world.h>            // physics: the scene's rigid-body world
 #include <cvc/physics/world_geometry.h>   // ... and its bodies (a data node's body:)
 #include <cvc/state/state.h>
@@ -52,6 +57,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -91,6 +97,38 @@ struct SceneRepeatBinding {
   std::vector<Copy> copies;
   bool live = true; // false once its copies went with an outer copy of theirs
   std::set<std::string> warned;
+};
+
+// A scene's animation as it plays (animations:, scene_animation.h): its playhead, moved by the
+// scene clock's step, and its state keys, <prefix>.animations.<id>.time, .playing and .speed:
+// written as it plays and read each frame, so a script seeks, plays, pauses or changes its speed.
+// What it wrote last is kept as text, so a value it reads back that differs is a script's.
+struct SceneAnimationBinding {
+  cvc::ariadne::SceneAnimation anim;
+  cvc::ariadne::SceneAnimationPlayhead head;
+  std::string time_path, playing_path, speed_path;
+  cvc::state_key time_key, playing_key, speed_key;
+  std::string time_written, playing_written;
+  double last_world = std::numeric_limits<double>::quiet_NaN(); // the clock when it last moved
+  double applied = std::numeric_limits<double>::quiet_NaN();    // the time its tracks were set at
+  // What each track moves: the nodes it names (found again when the scene's nodes change), or the
+  // state key it writes and what it wrote there last.
+  struct Target {
+    std::vector<std::weak_ptr<GraphicsNode>> nodes;
+    std::size_t found_among = static_cast<std::size_t>(-1); // RealizedScene::nodes' size then
+    std::string state_path;
+    cvc::state_key state_key;
+    std::string written;
+    // A clip: track: the model its node draws, the clip, and the node's fit:; what it posed last
+    // (the points the nodes take, flattened); whether it has said why a node was not posed.
+    std::shared_ptr<const cvc::model> model;
+    int clip = -1;
+    bool fitted = false;
+    cvc::ariadne::SceneFit fit;
+    std::vector<double> xyz, normal_xyz;
+    std::set<const GraphicsNode *> refused;
+  };
+  std::vector<Target> targets; // one per track
 };
 
 namespace {
@@ -1590,11 +1628,19 @@ void apply_node_material(GeometryNode &g, const cvc::ariadne::SceneNode &n) {
     return;
   g.setUseSingleColor(n.use_single_color);
   g.setColor(n.color[0], n.color[1], n.color[2]);
-  g.setAmbient(n.ambient);
-  g.setDiffuse(n.diffuse);
-  if (n.has_specular) {
-    g.setSpecular(n.specular);
-    g.setSpecularPower(n.specular_power);
+  if (n.has_pbr) { // physically based: the Phong keys do not apply
+    g.setMetallic(n.pbr_metallic);
+    g.setRoughness(n.pbr_roughness);
+    g.setEmissive(n.pbr_emissive[0], n.pbr_emissive[1], n.pbr_emissive[2]);
+    g.setCoat(n.pbr_coat, n.pbr_coat_roughness);
+    g.setPBR(true);
+  } else {
+    g.setAmbient(n.ambient);
+    g.setDiffuse(n.diffuse);
+    if (n.has_specular) {
+      g.setSpecular(n.specular);
+      g.setSpecularPower(n.specular_power);
+    }
   }
   if (n.has_opacity) // see-through below 1, even when forced opaque (GeometryNode::setForceOpaque)
     g.setOpacity(n.opacity);
@@ -1790,6 +1836,340 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
 
 } // namespace
 
+namespace {
+// ---- animations: (scene_animation.h) ------------------------------------------------------------
+
+// The nodes a track names: every realized node with its id; for a path a/b/c, the c under the b
+// under each node a.
+std::vector<std::weak_ptr<GraphicsNode>> animated_nodes(const RealizedScene &r,
+                                                        const std::string &name) {
+  std::vector<std::weak_ptr<GraphicsNode>> out;
+  std::vector<GraphicsNode *> seen;
+  const std::size_t slash = name.find('/');
+  const std::string head = name.substr(0, slash);
+  for (const RealizedScene::TaggedNode &tagged : r.nodes) {
+    if (tagged.id != head)
+      continue;
+    std::shared_ptr<GraphicsNode> n = tagged.node.lock();
+    for (std::size_t at = slash; n && at != std::string::npos;) {
+      const std::size_t next = name.find('/', at + 1);
+      n = n->findChildByName(name.substr(at + 1, next == std::string::npos ? next : next - at - 1));
+      at = next;
+    }
+    if (n && std::find(seen.begin(), seen.end(), n.get()) == seen.end()) {
+      seen.push_back(n.get());
+      out.push_back(n);
+    }
+  }
+  return out;
+}
+
+// A node track's value on one node.
+void set_animated_key(GraphicsNode &n, const std::string &key, const std::vector<double> &v) {
+  if (key == "position") {
+    n.setPosition(v[0], v[1], v[2]);
+  } else if (key == "rotation") {
+    n.setRotation(v[0], v[1], v[2]);
+  } else if (key == "scale") {
+    n.setScale(v[0], v[1], v[2]);
+  } else if (key == "visible") {
+    n.setVisible(v[0] > 0.5);
+  } else { // color or opacity: the node's mesh, or each rung of its LOD ladder
+    const auto set = [&](GraphicsNode *g) {
+      auto *mesh = dynamic_cast<GeometryNode *>(g);
+      if (!mesh)
+        return;
+      if (key == "color")
+        mesh->setColor(std::clamp(v[0], 0.0, 1.0), std::clamp(v[1], 0.0, 1.0),
+                       std::clamp(v[2], 0.0, 1.0));
+      else
+        mesh->setOpacity(std::clamp(v[0], 0.0, 1.0));
+    };
+    set(&n);
+    if (auto *lod = dynamic_cast<LodGraphicsNode *>(&n))
+      for (int k = 0; k < lod->rungCount(); ++k)
+        set(lod->rung(k).get());
+  }
+}
+
+// Numbers as a state value: one as it is, several joined by commas (as a node's position key).
+std::string animation_text(const std::vector<double> &v) {
+  std::string s;
+  char buf[32];
+  for (std::size_t k = 0; k < v.size(); ++k) {
+    std::snprintf(buf, sizeof buf, "%.9g", v[k]);
+    s += (k ? "," : "") + std::string(buf);
+  }
+  return s;
+}
+
+std::string key_text(cvc::state_key &key) {
+  try {
+    cvc::state *s = key.find();
+    return s ? s->value() : std::string();
+  } catch (const std::exception &) {
+    return std::string();
+  }
+}
+
+bool truthy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
+// A clip: track at `time`: its node's model posed that far into its clip, fitted as the node's
+// mesh was, and drawn by every node the track names. A node whose mesh is not the model's (another
+// vertex count: a LOD ladder, a model: in its place) is left as it is, said once.
+void pose_clip_track(RealizedScene &r, const cvc::ariadne::SceneAnimationTrack &tr,
+                     SceneAnimationBinding::Target &tg, double time) {
+  if (!tg.model || tg.clip < 0)
+    return;
+  bool stale = tg.found_among != r.nodes.size();
+  for (const std::weak_ptr<GraphicsNode> &w : tg.nodes)
+    stale = stale || w.expired();
+  if (stale) {
+    tg.nodes = animated_nodes(r, tr.node);
+    tg.found_among = r.nodes.size();
+  }
+  cvc::geometry::points_t points;
+  cvc::geometry::normals_t normals;
+  tg.model->posed(tg.clip, time, points, normals);
+  if (tg.fitted) {
+    cvc::ariadne::apply_scene_fit(tg.fit, points, normals, tg.xyz, tg.normal_xyz);
+  } else {
+    tg.xyz.resize(points.size() * 3);
+    for (std::size_t i = 0; i < points.size(); ++i)
+      for (int a = 0; a < 3; ++a)
+        tg.xyz[3 * i + a] = points[i][a];
+    tg.normal_xyz.resize(normals.size() * 3);
+    for (std::size_t i = 0; i < normals.size(); ++i)
+      for (int a = 0; a < 3; ++a)
+        tg.normal_xyz[3 * i + a] = normals[i][a];
+  }
+  for (const std::weak_ptr<GraphicsNode> &w : tg.nodes) {
+    const std::shared_ptr<GraphicsNode> n = w.lock();
+    auto *mesh = dynamic_cast<GeometryNode *>(n.get());
+    const cvc::geometry *g =
+        mesh && !dynamic_cast<LodGraphicsNode *>(n.get()) ? mesh->getGeometry() : nullptr;
+    if (!g || g->num_points() * 3 != tg.xyz.size()) {
+      if (n && tg.refused.insert(n.get()).second && r.app)
+        r.app->log(1, "ari: scene node '" + tr.node + "': its mesh is not its model's (" +
+                          std::to_string(g ? g->num_points() : 0) + " points, the model " +
+                          std::to_string(tg.xyz.size() / 3) + "): clip '" + tr.clip +
+                          "' does not pose it\n");
+      continue;
+    }
+    mesh->updateVertices(tg.xyz);
+    if (!tg.normal_xyz.empty() && g->const_normals().size() * 3 == tg.normal_xyz.size())
+      mesh->updateNormals(tg.normal_xyz);
+  }
+}
+
+// Set what each track moves to its value at the playhead.
+void apply_animation(RealizedScene &r, SceneAnimationBinding &b) {
+  std::vector<double> v;
+  for (std::size_t i = 0; i < b.anim.tracks.size() && i < b.targets.size(); ++i) {
+    const cvc::ariadne::SceneAnimationTrack &tr = b.anim.tracks[i];
+    SceneAnimationBinding::Target &tg = b.targets[i];
+    if (!tr.clip.empty()) {
+      pose_clip_track(r, tr, tg, b.head.time);
+      continue;
+    }
+    cvc::ariadne::sample_track(tr, b.head.time, v);
+    if (v.empty())
+      continue;
+    if (!tr.state.empty()) {
+      const std::string text = animation_text(v);
+      if (text != tg.written && r.app) {
+        cvc::ariadne::write<std::string>(
+            cvc::ariadne::kept_key(tg.state_key, *r.app, tg.state_path), text);
+        tg.written = text;
+      }
+      continue;
+    }
+    bool stale = tg.found_among != r.nodes.size();
+    for (const std::weak_ptr<GraphicsNode> &w : tg.nodes)
+      stale = stale || w.expired();
+    if (stale) { // the scene's nodes changed (a repeat: copy came or went): find them again
+      tg.nodes = animated_nodes(r, tr.node);
+      tg.found_among = r.nodes.size();
+    }
+    if (static_cast<int>(v.size()) < cvc::ariadne::node_key_width(tr.key))
+      continue;
+    for (const std::weak_ptr<GraphicsNode> &w : tg.nodes)
+      if (std::shared_ptr<GraphicsNode> n = w.lock())
+        set_animated_key(*n, tr.key, v);
+  }
+}
+
+// Write the playhead's time and whether it plays to the animation's keys, where they changed.
+void publish_animation(cvc::app &app, SceneAnimationBinding &b) {
+  const std::string time = animation_text({b.head.time});
+  if (time != b.time_written) {
+    cvc::ariadne::write<std::string>(cvc::ariadne::kept_key(b.time_key, app, b.time_path), time);
+    b.time_written = time;
+  }
+  const std::string playing = b.head.playing ? "1" : "0";
+  if (playing != b.playing_written) {
+    cvc::ariadne::write<std::string>(cvc::ariadne::kept_key(b.playing_key, app, b.playing_path),
+                                     playing);
+    b.playing_written = playing;
+  }
+}
+
+// Whether a declared node, at any depth, has the id `head` (or an id a repeat: fills in later).
+bool declares_node(const std::vector<cvc::ariadne::SceneNode> &nodes, const std::string &head) {
+  for (const cvc::ariadne::SceneNode &n : nodes)
+    if (n.id == head || n.id.find('{') != std::string::npos || declares_node(n.children, head))
+      return true;
+  return false;
+}
+
+// The node a path names as the document declares it: its last segment's id, at any depth.
+const cvc::ariadne::SceneNode *declared_node(const std::vector<cvc::ariadne::SceneNode> &nodes,
+                                             const std::string &id) {
+  for (const cvc::ariadne::SceneNode &n : nodes) {
+    if (n.id == id)
+      return &n;
+    if (const cvc::ariadne::SceneNode *c = declared_node(n.children, id))
+      return c;
+  }
+  return nullptr;
+}
+
+// A clip: track's model (read from the file its node's source: names), its clip and the node's
+// fit:. False, with a warning, when there is no such node, model or clip.
+bool bind_clip(cvc::app &app, const cvc::ariadne::Scene &scene, const std::string &animation,
+               const cvc::ariadne::SceneAnimationTrack &tr, SceneAnimationBinding::Target &tg,
+               std::vector<std::string> *warnings) {
+  const std::string at = "ari: scene animation '" + animation + "': clip '" + tr.clip + "'";
+  const std::size_t slash = tr.node.rfind('/');
+  const cvc::ariadne::SceneNode *n =
+      declared_node(scene.nodes, slash == std::string::npos ? tr.node : tr.node.substr(slash + 1));
+  if (!n)
+    return false; // said: no node to move
+  auto model = std::make_shared<cvc::model>();
+  std::vector<std::string> why;
+  if (!cvc::ariadne::read_scene_node_model(app, *n, *model, &why)) {
+    for (const std::string &w : why) // its own warning, under this one's "ari: "
+      warn(warnings, at + ": " + (w.rfind("ari: ", 0) == 0 ? w.substr(5) : w));
+    return false;
+  }
+  tg.clip = model->find_clip(tr.clip);
+  if (tg.clip < 0) {
+    std::string names;
+    for (const cvc::model::clip &c : model->clips)
+      names += (names.empty() ? "" : ", ") + (c.name.empty() ? std::string("(unnamed)") : c.name);
+    warn(warnings, at + ": node '" + n->id + "''s model has no such clip" +
+                       (names.empty() ? std::string(" (it has none)") : " (it has " + names + ")"));
+    return false;
+  }
+  if (n->has_fit) { // posed points take the fit the node's mesh was drawn with
+    tg.fit = cvc::ariadne::scene_fit(model->merged(), cvc::ariadne::fit_up_axis(*n), n->fit_flip,
+                                     n->fit_height);
+    tg.fitted = true;
+  }
+  tg.model = std::move(model);
+  return true;
+}
+
+// The scene's animations, bound to the keys under `bind_prefix` and set at their start: a scene
+// with any runs on the scene clock (tick_scene drives it, as for `clock: {}`).
+void realize_animations(RealizedScene &out, const cvc::ariadne::Scene &scene,
+                        const std::string &bind_prefix, std::vector<std::string> *warnings) {
+  if (scene.animations.empty() || !out.app)
+    return;
+  out.clock.present = true;
+  for (const cvc::ariadne::SceneAnimation &a : scene.animations) {
+    auto b = std::make_shared<SceneAnimationBinding>();
+    b->anim = a;
+    const std::string base = "animations." + a.id;
+    b->time_path = cvc::ariadne::resolve_bind(bind_prefix, base + ".time");
+    b->playing_path = cvc::ariadne::resolve_bind(bind_prefix, base + ".playing");
+    b->speed_path = cvc::ariadne::resolve_bind(bind_prefix, base + ".speed");
+    b->head.playing = a.autoplay;
+    b->last_world = out.app->world_clock().t(); // the first frame moves it by that frame's step
+    b->targets.resize(a.tracks.size());
+    double clips_end = 0.0;
+    for (std::size_t i = 0; i < a.tracks.size(); ++i) {
+      const cvc::ariadne::SceneAnimationTrack &tr = a.tracks[i];
+      if (!tr.state.empty())
+        b->targets[i].state_path = cvc::ariadne::resolve_bind(bind_prefix, tr.state);
+      else if (!declares_node(scene.nodes, tr.node.substr(0, tr.node.find('/'))))
+        warn(warnings, "ari: scene animation '" + a.id + "': no node '" + tr.node + "' to move");
+      if (!tr.clip.empty() && bind_clip(*out.app, scene, a.id, tr, b->targets[i], warnings))
+        clips_end = std::max(clips_end, b->targets[i].model->clips[b->targets[i].clip].duration);
+    }
+    if (!(b->anim.duration > 0.0) && clips_end > b->anim.length())
+      b->anim.duration = clips_end; // as long as its longest clip
+    cvc::ariadne::write<std::string>(cvc::ariadne::kept_key(b->speed_key, *out.app, b->speed_path),
+                                     animation_text({a.speed}));
+    publish_animation(*out.app, *b);
+    apply_animation(out, *b); // the start pose, playing or not
+    b->applied = b->head.time;
+    out.animations.push_back(std::move(b));
+  }
+}
+
+// Each animation one frame on: a script's writes to its keys taken first (a seek, play or pause, a
+// speed), then its playhead moved by the scene clock's step, published, and its tracks set.
+void tick_scene_animations(RealizedScene &r, const cvc::world_clock::step_result &step) {
+  if (!r.app || r.animations.empty())
+    return;
+  cvc::world_clock &wc = r.app->world_clock();
+  const double now = wc.t() + step.alpha * wc.fixed_dt(); // between quanta, as a body is posed
+  for (const std::shared_ptr<SceneAnimationBinding> &bp : r.animations) {
+    SceneAnimationBinding &b = *bp;
+    const double len = b.anim.length();
+    double speed = cvc::ariadne::read_or<double>(
+        cvc::ariadne::kept_key(b.speed_key, *r.app, b.speed_path), b.anim.speed);
+    if (!std::isfinite(speed))
+      speed = b.anim.speed;
+    const std::string time = key_text(cvc::ariadne::kept_key(b.time_key, *r.app, b.time_path));
+    if (!time.empty() && time != b.time_written) { // a seek
+      try {
+        const double t = std::stod(time);
+        if (std::isfinite(t))
+          b.head.time = std::clamp(t, 0.0, std::max(0.0, len));
+      } catch (const std::exception &) {
+      }
+    }
+    const std::string playing =
+        key_text(cvc::ariadne::kept_key(b.playing_key, *r.app, b.playing_path));
+    if (!playing.empty() && playing != b.playing_written) { // played or paused
+      const bool play = truthy(playing);
+      // A once animation played again from the end it stopped at starts over.
+      if (play && !b.head.playing && b.anim.loop == cvc::ariadne::SceneAnimation::loop_mode::once) {
+        if (speed >= 0.0 && b.head.time >= len)
+          b.head.time = 0.0;
+        else if (speed < 0.0 && b.head.time <= 0.0)
+          b.head.time = len;
+      }
+      b.head.playing = play;
+    }
+    const double dt = std::isnan(b.last_world) || now < b.last_world ? 0.0 : now - b.last_world;
+    b.last_world = now;
+    cvc::ariadne::advance_animation(b.anim, speed, dt, b.head);
+    publish_animation(*r.app, b);
+    if (b.head.time != b.applied) {
+      apply_animation(r, b);
+      b.applied = b.head.time;
+    }
+  }
+}
+} // namespace
+
+namespace {
+// Whether a node, at any depth, has a pbr: material.
+bool scene_has_pbr(const std::vector<cvc::ariadne::SceneNode> &nodes) {
+  for (const cvc::ariadne::SceneNode &n : nodes)
+    if ((n.has_material && n.has_pbr) || scene_has_pbr(n.children))
+      return true;
+  return false;
+}
+} // namespace
+
 RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
                             const std::string &bind_prefix, std::vector<std::string> *warnings) {
   return realize_scene(sg, scene, bind_prefix, warnings, RealizeOptions());
@@ -1916,6 +2296,22 @@ RealizedScene realize_scene(SceneGraph &sg, const cvc::ariadne::Scene &scene,
   }
   if (scene.has_chrome) // strip/show the SceneGraph diagnostic chrome (grid/axis/bbox)
     sg.setDiagnosticChromeVisible(scene.chrome_visible);
+  realize_animations(out, scene, bind_prefix, warnings); // once every node they move exists
+  // The light from all round, for the pbr: materials: the scene's environment:, or the default
+  // one when it has a pbr: node and no environment: (environment: false lights them with the
+  // lights alone).
+  if (scene.environment_off) {
+    sg.setImageBasedLighting(false);
+  } else if (scene.has_environment || scene_has_pbr(scene.nodes)) {
+    double sky[3], horizon[3], ground[3];
+    for (int c = 0; c < 3; ++c) {
+      sky[c] = scene.environment_sky[c];
+      horizon[c] = scene.environment_horizon[c];
+      ground[c] = scene.environment_ground[c];
+    }
+    sg.setEnvironment(sky, horizon, ground);
+    sg.setImageBasedLighting(true);
+  }
   return out;
 }
 
@@ -2253,7 +2649,10 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
     // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
     // rate). Pull, advance, push.
-    clock_step = realized.clock_driver->drive(wall_dt);
+    // A world on a worker that has fallen behind holds the clock this frame: it runs slower than
+    // its speed, as a world too heavy for this thread would, rather than further behind.
+    const bool held = realized.world_worker && wall_dt < 0.0 && realized.world_worker->behind();
+    clock_step = held ? realized.clock_driver->hold() : realized.clock_driver->drive(wall_dt);
   }
 
   // physics: step the world by the quanta the clock just ran, then pose the moving bodies' nodes
@@ -2262,7 +2661,16 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
     cvc::world_clock &wc = realized.app->world_clock();
     try {
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
-      realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      if (realized.world_worker) {
+        // D3: the worker steps it (and captures its poses); this thread publishes what it ran,
+        // under the frame's lock (AriRuntime::frame), with the world's syncs.
+        if (const std::string failed = realized.world_worker->error(); !failed.empty())
+          throw std::runtime_error(failed);
+        realized.world->publish_due();
+      } else {
+        realized.world->follow(wc, [&view] { view.tracker().capture(); });
+      }
+      update_entity_view(realized, renderer);  // the entity layers, and who is promoted
       sync_vehicle_markers(realized, nullptr); // spawned, removed or placed again: drawn again
       pose_vehicle_wheels(realized);           // each wheel where its plant has it
       sync_spawn_markers(realized, nullptr);   // the spawn points, as edited
@@ -2281,6 +2689,10 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   // reads its planes in tick()).
   if (realized.app)
     cvc::ariadne::sync_scene_clip(*realized.app, realized.clip);
+
+  // animations: each playhead moved by the clock's step and its tracks set, before the tickers
+  // (a custom tick may read a node an animation moved).
+  tick_scene_animations(realized, clock_step);
 
   // shadows: { focus: camera }: the maps on a sphere `lead` radii ahead of the focal point, the
   // radius growing with the camera's distance from it (tight behind a chase camera, wide over an

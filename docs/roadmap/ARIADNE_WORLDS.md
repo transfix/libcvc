@@ -71,7 +71,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Part | Today | Where |
 |---|---|---|
 | World geometry | A world document (WD1). `arisrv` runs `cvc://worlds/default.ari` (a 20 m ground plane and a 1 m reference box), `--scene large` runs `cvc://worlds/large.ari` (a 100 m plane and 24 meshes, the built-in bunny), and a `--doc` whose document has a `scene:` is the world instead. The relay publishes it in one revision at start-up. The C++ twins `default_world()` / `large_world()` are the fallback when the file can't be found; a test pins each equal to its document. | `src/cvc/ariadne/worlds/`; `room_world_from_scene`, `write_room_world` in `src/cvc/ariadne/conference/room_scene.cpp`; `src/arisrv/main.cpp` |
-| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{epoch, at, rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`). The scene is a revisioned section (§3): `rev` is written last, beside its writer's `epoch`, and `at` is 0 (it applies on arrival). Each light, object and fit carries the epoch it was written in, so a reader skips what an earlier relay left behind. | `inc/cvc/ariadne/conference/room_scene.h` |
+| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{epoch, at, rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. A removed entry is deleted from the tree (deletes replicate since transfix/libcvc#1473); a reader takes only entries with `present = 1`, which a write sets last. The scene is a revisioned section (§3): `rev` is written last, beside its writer's `epoch`, and `at` is 0 (it applies on arrival). Each light, object and fit carries the epoch it was written in, so a reader skips what an earlier relay left behind. | `inc/cvc/ariadne/conference/room_scene.h` |
 | Look | The world's (Q1, WD1). The world document declares the light rig and the shadows, and the relay publishes them through `scene.env.lights.*` and `scene.env.shadows.*`, which now carry a rig's tuning knobs (stage, key, fill, back, warmth, environment, ambient, wash, sun) and the shadows' re-bake interval. The conference document has no `scene:` block. | `default_room_rig`, `write_scene_env` in `room_scene.cpp`; `src/cvc/ariadne/worlds/default.ari` |
 | Who writes the scene | Only the relay. A client may write only its own participant subtree (bound writes, default on). | `room_write_gate.h` |
 | Client realization | `room_view` rebuilds the scene from the tree whenever the scene's stamp moves (a new `rev`, or a restarted relay's under a new `epoch`), with the same realizer a document's `scene:` uses. The holon's physics statics follow the same stamp. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
@@ -227,7 +227,7 @@ revision, written last, exactly as `avatars.policy` does today.
   the epoch tells them apart, and a new one replaces the old run's schedule. The room scene is
   stamped the same way, so such a client rebuilds its drawn room and its physics statics.
 - **A client keeps what an old relay wrote.** A snapshot deletes nothing, and the new relay never
-  soft-removes an id it never knew, so a client that outlived a relay still holds that relay's
+  removes an id it never knew, so a client that outlived a relay still holds that relay's
   objects and lights. Lists that a reader takes `count` entries of (the rules' sections) are
   immune. Entries keyed by id are not: the scene stamps each light, object and fit with the epoch
   it was written in, and a reader takes only the entries of the scene's own epoch (unstamped ones
@@ -992,6 +992,32 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
 - **Local is the same.** A lab, a gym or a demo with no relay runs a server-role holon in its own
   process: the same world, the same entities, the same code path as the relay. `WorldGym`,
   `HostCars` and the GRL-SNAM hosts move onto it.
+- **As built (OW7, first part: a drawn host's world on a worker; the fleets roadmap's D3).**
+  `cvc::ariadne::world_worker` attaches a scene's `SceneWorld` to a server-role holon of its own
+  (physics on, at the world's rate, `holon_config_at`) and steps it on a thread: the holon's clock
+  is lockstep, and the thread runs it one quantum at a time behind the host's clock, tick for
+  tick, so the world takes the steps the host's own `follow()` would. The world is deferred
+  (`SceneWorld::set_deferred`): a step writes no key, since a state subscriber runs on the thread
+  that writes, and the host calls `publish_due()` (its syncs and telemetry) under the lock the
+  steps take. The host holds that lock for its frame, and the worker yields to a waiting host
+  between steps. A restart (the clock back to tick 0) anchors the world on the holon's clock again
+  at once. A world behind its clock by the scene's `clock: { max_lag }` (0.25 s by default, at 1x
+  and growing with the speed) holds the host's clock (`SceneClockDriver::hold`). On the frame's
+  thread, as every single-threaded host (native or browser) steps it, the same setting is the
+  catch-up one frame may run, so a document bounds its world's lag the same way on every host. arigl runs it with `--world-thread` (`AriRuntime::set_world_thread`);
+  the frame publishes and draws from the poses the worker captured. Tests:
+  `AriadneWorldWorker.StepsTheWorldAsTheHostsFollowWould` (24 kinematic and 4 Jolt vehicles,
+  through a restart, the same poses bit for bit as the host's own follow, the per-entity keys
+  written on the host's thread) and cvcGL's `test_world_worker_drawn` (bodies and their drawn
+  poses as the frame's own follow leaves them). Measured on arigl with 200 kinematic vehicles at
+  3.6x, alternating runs: 58.3 ms a frame against 66.4 on the frame's thread, the world at 3.6x
+  both ways; the rest of the frame is drawing 200 vehicles (the fleets roadmap's FL2). Not yet:
+  avatars and participants in that holon (relay-less arigl has none), the `scenes:` entries'
+  worlds (they step on the frame's thread), the gym and the GRL-SNAM hosts on it, and the drawn
+  host as the holon's client (OW5's entity playout). The fleets roadmap's entity view (FL2,
+  `entity_view.h`) draws a world's vehicles at scale in both holons: a scene's own world, posed
+  by the physics binding whether the frame or this worker steps it, and a relay's entities on a
+  client, posed where its `entity_playout` shows them (`room_view`).
 
 ### 18.3 Contact
 
@@ -1489,7 +1515,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives; OW5p: the room's avatars in it, and the room in a dynamic plant's car; OW5q: a sea the relay's storms grow; OW5r: a sample corrects all of a vehicle's motion). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
-| OW7 | **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**

@@ -1754,6 +1754,30 @@ bool state_transport_grpc::disconnect_connection(std::uint64_t number) {
   return true;
 }
 
+std::size_t state_transport_grpc::reap_idle(std::chrono::milliseconds timeout) {
+  const std::int64_t now = link_now_ns();
+  const std::int64_t to_ns = static_cast<std::int64_t>(timeout.count()) * 1000000;
+  std::vector<std::shared_ptr<connection>> drop;
+  {
+    std::lock_guard<std::mutex> lk(_conns_mu);
+    for (const auto &c : _conns) {
+      if (!c || !c->alive.load())
+        continue;
+      const std::int64_t last = c->last_rx_ns.load(std::memory_order_relaxed);
+      if (last != 0 && now - last > to_ns)
+        drop.push_back(c);
+    }
+  }
+  for (const auto &c : drop) {
+    const std::string *pid = c->peer_id();
+    std::fprintf(stderr, "[grpc] reaping idle connection node='%s' idle=%.1fs\n",
+                 pid ? pid->c_str() : "",
+                 static_cast<double>(now - c->last_rx_ns.load(std::memory_order_relaxed)) * 1e-9);
+    c->abort_io(); // its handler (or reader) ends the stream as any close does
+  }
+  return drop.size();
+}
+
 bool state_transport_grpc::is_local_id(const std::string &id) const {
   if (id == _node_id)
     return true;

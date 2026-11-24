@@ -31,8 +31,10 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>      // vtkStandardNewMacro
 #include <vtkOpenGLRenderWindow.h> // limitTextureUnits: the window's GL state
-#include <vtkOpenGLState.h>        // ... and its texture-unit table
-#include <vtkOutputWindow.h>       // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkOpenGLRenderer.h>
+#include <vtkOpenGLState.h>  // ... and its texture-unit table
+#include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkPBRPrefilterTexture.h>
 #include <vtkPNGWriter.h>
 #include <vtkProp.h>
 #include <vtkPropCollection.h>
@@ -210,6 +212,21 @@ void syncMirrorProps(Viewport &mirror) {
   lights->InitTraversal(lit);
   while (vtkLight *l = lights->GetNextLight(lit))
     dst->AddLight(l);
+  // And its image-based lighting (SceneGraph::setImageBasedLighting), the same environment texture
+  // (each renderer filters its own copy on the GPU once). Set only on a change: a new texture
+  // makes VTK filter it again.
+  const bool ibl = src->GetUseImageBasedLighting();
+  if (ibl && dst->GetEnvironmentTexture() != src->GetEnvironmentTexture()) {
+    auto *ogl = vtkOpenGLRenderer::SafeDownCast(src);
+    dst->SetEnvironmentTexture(src->GetEnvironmentTexture(),
+                               ogl && ogl->GetEnvMapPrefiltered()->GetConvertToLinear());
+  }
+  if (ibl) {
+    dst->SetEnvironmentUp(src->GetEnvironmentUp());
+    dst->SetEnvironmentRight(src->GetEnvironmentRight());
+  }
+  if (dst->GetUseImageBasedLighting() != ibl)
+    dst->SetUseImageBasedLighting(ibl);
 }
 
 // limitTextureUnits: VTK's texture-unit table with `count` units, whatever the GL says (VTK sizes
@@ -273,6 +290,19 @@ struct ViewportManager::Impl {
   void requireOpen() const {
     if (closed || !window)
       throw std::runtime_error("ViewportManager: window is closed");
+  }
+
+  // The size a host asks for: VTK's pixels, except SDL's window on a scaled Windows display, where
+  // it is the display's logical pixels and the window that times the display's scale
+  // (SdlGLRenderWindow::SetLogicalSize). frameWidth()/frameHeight() say the pixels it got.
+  void sizeWindow(int width, int height) {
+#ifdef CVC_ENABLE_SDL
+    if (auto *sdl = SdlGLRenderWindow::SafeDownCast(window)) {
+      sdl->SetLogicalSize(width, height);
+      return;
+    }
+#endif
+    window->SetSize(width, height);
   }
 
   int highestLayer() const {
@@ -471,7 +501,7 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
 #ifdef CVC_ENABLE_SDL
   if (!offscreen && sdl_window_enabled()) {
     auto sdlWin = vtkSmartPointer<SdlGLRenderWindow>::New();
-    sdlWin->SetSize(width, height);
+    sdlWin->SetLogicalSize(width, height); // on Windows, times the display's scale once made
     sdlWin->SetWindowName("cvcGL");
     auto sdlIren = vtkSmartPointer<SdlRenderWindowInteractor>::New();
     sdlIren->SetRenderWindow(sdlWin);
@@ -488,7 +518,7 @@ ViewportManager::ViewportManager(SceneGraph &mainScene, int width, int height, b
   if (!m_impl->window)
     m_impl->window = vtkSmartPointer<vtkRenderWindow>::New();
   m_impl->window->SetOffScreenRendering(offscreen ? 1 : 0);
-  m_impl->window->SetSize(width, height);
+  m_impl->sizeWindow(width, height);
   m_impl->window->SetNumberOfLayers(1);
   if (const char *units = std::getenv("CVCGL_TEXTURE_UNITS"))
     limitTextureUnits(std::atoi(units));
@@ -965,7 +995,7 @@ void ViewportManager::resize(int width, int height) {
   m_impl->requireOpen();
   if (width < 1 || height < 1)
     throw std::invalid_argument("ViewportManager::resize: width and height must be >= 1");
-  m_impl->window->SetSize(width, height);
+  m_impl->sizeWindow(width, height);
 }
 
 void ViewportManager::resetCamera() {

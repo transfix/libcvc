@@ -20,6 +20,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/VolumeGridContours.h>
 #include <cvc/gl/VolumeGridNode.h>
+#include <cvc/gl/VolumeGridSegmentation.h>
 #include <cvc/gl/VolumeRenderNode.h>
 #include <cvc/gl/VolumeSliceNode.h>
 #include <cvc/state/followed_key.h>
@@ -99,6 +100,7 @@ VolumeGridNode::VolumeGridNode(cvc::app &ctx, const std::string &statePath, cons
   cvc::params_describe_state<cvc::volume_grid_params>(getState("grid"));
   cvc::params_describe_state<cvc::volume_grid_display_params>(getState("grid.display"));
   cvc::params_describe_state<cvc::volume_grid_source_params>(getState("grid.source"));
+  m_segmentation = std::make_unique<VolumeGridSegmentation>(*this);
   m_contours = std::make_unique<VolumeGridContours>(*this);
 }
 
@@ -198,6 +200,7 @@ void VolumeGridNode::adopt(std::shared_ptr<cvc::slice_source> src,
   m_editor.clear_selection();
   m_gestures.reset();
   m_band = cvc::grid_pick_outcome{};
+  m_segmentation->volumeChanged(); // the labels of another volume no longer fit
   m_contours->setFrame(cvc::grid_frame_of(g));
 
   // The volume the transfer function's histogram is taken over: the app's own, published as is.
@@ -444,6 +447,8 @@ void VolumeGridNode::handleStateChanged(const std::string &child) {
     else if (k == "view" || k == "tool" || k == "classes.current" || starts_with(k, "slice.") ||
              starts_with(k, "display.") || starts_with(k, "source."))
       ++m_keysVersion;
+    else if (starts_with(k, "segment.") && m_segmentation)
+      m_segmentation->keyChanged(k.substr(8));
     else if (!m_contours || !m_contours->stateChanged(k)) // null while constructing
       read = false;
     if (read)
@@ -714,7 +719,15 @@ void VolumeGridNode::runRequest(const std::string &request) {
   const std::string arg = sp == std::string::npos ? std::string() : trim(line.substr(sp));
   const cvc::slice_grid &g = m_source->grid();
   try {
-    if (m_contours->request(cmd, arg, m_params.tool == cvc::grid_tool::contours))
+    const bool contoursTool = m_params.tool == cvc::grid_tool::contours;
+    if (cmd == "stop") { // ends every job the grid runs: a tile and a segmentation alike
+      const bool tile = m_contours->request(cmd, arg, contoursTool); // true while a tile runs
+      const bool segment = m_segmentation->request(cmd, arg);
+      if (!tile && !segment)
+        status("nothing to stop");
+      return;
+    }
+    if (m_contours->request(cmd, arg, contoursTool))
       return;
     if (cmd == "delete_selected") {
       const std::size_t n = m_editor.delete_selected();
@@ -735,6 +748,8 @@ void VolumeGridNode::runRequest(const std::string &request) {
       const std::int64_t last = static_cast<std::int64_t>(g.count(a)) - 1;
       const std::int64_t to = std::clamp<std::int64_t>(m_index[a] + n, 0, last);
       put(getState("grid")(std::string("slice.") + "xyz"[a]), std::to_string(to));
+    } else if (cmd == "segment") {
+      m_segmentation->request(cmd, arg);
     } else if (!cmd.empty()) {
       throw std::invalid_argument("'" + cmd + "' is not a request");
     }
@@ -754,6 +769,7 @@ bool VolumeGridNode::tick() {
     cvc::params_from_state<cvc::volume_grid_source_params>(grid("source"));
     if (grid("classes").value().empty())
       put(grid("classes"), "0");
+    m_segmentation->seed();
   }
   followSources(); // the app's volume, points and session, as they change
   publishVolumes(); // what the Source combo offers, while waiting for a volume too
@@ -815,6 +831,7 @@ bool VolumeGridNode::tick() {
   changed = m_contours->tick(m_index) || changed;
   for (const auto &s : m_slices)
     changed = s->tick() || changed;
+  changed = m_segmentation->tick() || changed; // after the planes: its layers follow them
   changed = m_volumeRender->tick() || changed;
   return changed;
 }

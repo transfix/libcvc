@@ -1,0 +1,12 @@
+<!DOCTYPE pointclassdoc>
+<pointclassdoc>
+ <pointclass name="spine" color="#ff8c1a" variable="0" timestep="0" radius="2">
+  <point>60 96 120</point>
+ </pointclass>
+ <pointclass name="arm A" color="#33b3ff" variable="0" timestep="0" radius="2">
+  <point>6 82 100</point>
+ </pointclass>
+ <pointclass name="arm B" color="#e64dd9" variable="0" timestep="0" radius="2">
+  <point>120 85 100</point>
+ </pointclass>
+</pointclassdoc>

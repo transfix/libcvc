@@ -399,6 +399,31 @@ void segment_stepper::cancel() {
     _impl->cancel.store(true, std::memory_order_release);
 }
 
+bool segment_stepper::labels_so_far(volume &labels) const {
+  if (!_impl || _impl->finished || _impl->failed)
+    return false;
+  const impl &m = *_impl;
+  const std::string_view ph = m.ctx.phase;
+  // seed_index is whole from the sweep on: before it, GetSeeds is still writing it.
+  if ((ph != "classifying" && ph != "marching") || m.ctx.seed_index.size() == 0)
+    return false;
+  const dimension d(m.in.XDim(), m.in.YDim(), m.in.ZDim());
+  if (labels.voxelType() != UChar || labels.voxel_dimensions() != d) {
+    labels = volume(m.in.ctx(), d, UChar, m.in.boundingBox());
+  } else if (labels.boundingBox() != m.in.boundingBox()) {
+    labels.boundingBox(m.in.boundingBox());
+  }
+  unsigned char *out = labels.data_ptr();
+  const unsigned char *in = m.ctx.seed_index.data();
+  const std::size_t n = m.ctx.seed_index.size();
+  const std::size_t classes = m.names.size();
+  for (std::size_t v = 0; v < n; ++v) {
+    const unsigned char s = in[v];
+    out[v] = s < 254 && s < classes ? s : seeded_segmentation::unlabelled;
+  }
+  return true;
+}
+
 seeded_segmentation segment_stepper::take() {
   if (_impl && _impl->failed)
     std::rethrow_exception(_impl->error);

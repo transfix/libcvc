@@ -63,15 +63,17 @@ namespace conference {
 // TREE, not a document, is the source of truth.
 //
 // AUTHORITY: the server is the sole writer of scene.* (clients only read it), by the same
-// loopback-trusted convention as .pose (H1); enforcement is §5e/H2. Removal is SOFT (present = 0)
-// for the reason room_leave is: a hard subtree delete is resurrected by any peer that still holds
-// it. Ids must not contain cvc::state::SEPARATOR (std::invalid_argument otherwise).
+// loopback-trusted convention as .pose (H1); enforcement is §5e/H2. Removal deletes the entry's
+// subtree: one delete, which every client applies, and whose tombstone keeps a peer that still
+// holds the entry from bringing it back (deletes replicate since transfix/libcvc#1473). A reader
+// still takes only entries with present = 1, which a write sets last. Ids must not contain
+// cvc::state::SEPARATOR (std::invalid_argument otherwise).
 //
 // RUNS (ARIADNE_WORLDS.md §3): a relay's tree starts empty, and a client that stays connected
 // across a relay restart keeps what the old relay wrote. So the scene's stamp carries its writer's
 // epoch (a restarted relay's revision 1 is not the old one's), and every light, object and fit
 // is stamped with the epoch of the write that wrote it. A reader takes only the scene's own run:
-// an entry stamped with another epoch is the old relay's, which the new one never soft-removes
+// an entry stamped with another epoch is the old relay's, which the new one never removes
 // because it never knew its id. An entry with no epoch (a writer from before epochs, or a --set)
 // is taken, and so is everything when the scene has none. A plain light's rig knobs are never
 // read: a rig writes all of them, so only an earlier light under the same id leaves any.
@@ -99,7 +101,7 @@ struct room_scene_env {
   std::vector<cvc::ariadne::SceneLight> lights;
 };
 
-// Write the environment. Lights present before but absent from env.lights are soft-removed.
+// Write the environment. Lights present before but absent from env.lights are removed.
 void write_scene_env(cvc::app &app, const std::string &room_id, const room_scene_env &env);
 
 // Read the environment. Returns false (env untouched) if it was never written.
@@ -113,7 +115,8 @@ bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &e
 void write_scene_object(cvc::app &app, const std::string &room_id,
                         const cvc::ariadne::SceneNode &obj);
 
-// Soft-remove one object (present = 0). A no-op if it was never written.
+// Remove one object from the room tree: one delete, which every client applies, and the revision
+// bump. A no-op if it was never written.
 void remove_scene_object(cvc::app &app, const std::string &room_id, const std::string &id);
 
 // The present objects, in id order.
@@ -175,8 +178,8 @@ struct room_world {
   std::vector<cvc::ariadne::SceneNode> objects;
 };
 
-// Write a whole scene in one revision: the environment, every object, a soft removal for each
-// object present before but absent from WORLD, then the stamp, once and last, under EPOCH (0: this
+// Write a whole scene in one revision: the environment, every object, a removal for each object
+// present before but absent from WORLD, then the stamp, once and last, under EPOCH (0: this
 // process's). Writing the same world again changes nothing but rev. Returns the stamp. Throws
 // std::invalid_argument on a bad id.
 section_stamp write_room_world(cvc::app &app, const std::string &room_id, const room_world &world,

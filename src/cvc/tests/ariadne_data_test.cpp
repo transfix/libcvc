@@ -25,6 +25,8 @@
 #include <cvc/utility/archive.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_info.h>
+#include <cvc/volume/volume_file_io.h>
 #include <cvc/volume/volume_grid.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
@@ -422,6 +424,26 @@ TEST(AriadneData, PointClassesAndSessionsLoadAndSaveThroughTheApp) {
   EXPECT_EQ(vback.XDim(), 4u);
   EXPECT_EQ(vback.ZDim(), 2u);
   EXPECT_DOUBLE_EQ(vback(1, 2, 1), 7.5);
+  // A list of volumes: one file's variables (a volume_grid's segmented classes, as
+  // VolumeGridRover's SegTmp.rawv), named after each volume.
+  cvc::volume w(app, cvc::dimension(4, 3, 2), cvc::Float);
+  w(0, 0, 0, 2.0);
+  v.desc("left");
+  w.desc("right");
+  root("work.classes")
+      .data(boost::any(
+          std::make_shared<const std::vector<cvc::volume>>(std::vector<cvc::volume>{v, w})));
+  EXPECT_EQ(cvc::ariadne::default_data_encoder(root("work.classes").data()), "volume");
+  const std::string rawv = (t.dir / "segments.rawv").generic_string();
+  cvc::ariadne::data_save(app, "work.classes", rawv, "volume");
+  const cvc::volume_file_info info(app, rawv);
+  EXPECT_EQ(info.numVariables(), 2u);
+  EXPECT_EQ(info.name(0), "left");
+  EXPECT_EQ(info.name(1), "right");
+  cvc::volume second(app);
+  cvc::readVolumeFile(app, second, rawv, 1, 0);
+  EXPECT_DOUBLE_EQ(second(0, 0, 0), 2.0);
+  root("work.empty").data(boost::any(std::make_shared<const std::vector<cvc::volume>>()));
   root("work.text").data(boost::any(std::string("hello")));
   cvc::ariadne::data_save(app, "work.text", (t.dir / "t.txt").generic_string());
   std::ifstream tin(t.dir / "t.txt");
@@ -441,6 +463,7 @@ TEST(AriadneData, PointClassesAndSessionsLoadAndSaveThroughTheApp) {
   says("work.none", "x.vgr", "", t.dir.generic_string(), "holds no data");
   root("work.odd").data(boost::any(42));
   says("work.odd", "x.bin", "", t.dir.generic_string(), "no built-in encoder takes");
+  says("work.empty", "x.rawv", "volume", t.dir.generic_string(), "the list of volumes is empty");
   says("work.points", "x.vgr", "nope", t.dir.generic_string(), "no encoder as: nope");
   says("work.points", "x.vgr", "", "https://example.org/docs", "not a local file");
   EXPECT_FALSE(fs::exists(t.dir / "x.vgr"));
