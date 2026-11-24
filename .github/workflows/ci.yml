@@ -3049,6 +3049,15 @@ jobs:
         state_exec_router_test: OK ] PoolKillOwner.AGroupTornDownMeanwhileEndsTheWait
         state_exec_router_test: OK ] PoolKillOwner.RefusedFromInsideAPumpOfThePool
         state_exec_router_test: OK ] GroupZeroDriver.AFrameSkipsGroupZeroWhileAnotherThreadHoldsIt
+        state_exec_router_test: OK ] RouterR.APostThroughAHandleNeverDeadlocksWithItsClose
+        state_exec_router_test: OK ] RouterR.APostThroughAHandleGoesIntoItsGroup
+        state_exec_router_test: OK ] RouterR.AnUnregisterAloneStillForwardsAtTheTeardown
+        state_exec_router_test: OK ] RouterR.ATornDownHomeForwardsAMessageALaterPrefixCovers
+        state_exec_router_test: OK ] RouterR.AnAnswerWaitsForItsClosedHomesForward
+        state_exec_router_test: OK ] RouterR.ATeardownNeverWaitsOnItself
+        state_exec_router_test: OK ] RouterR.AReplyOnAHashKeyIsNeverCapped
+        state_exec_router_test: OK ] PoolKillOwner.TwoAtOnceBothReturn
+        state_exec_router_test: OK ] PoolKillOwner.RefusedInsideAGroupsPumpBeforeActing
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_AMovedDocumentKeepsReceivingOnItsChannels
@@ -3056,6 +3065,7 @@ jobs:
         test_pycvc_exec_pool.py: ok: test_ow01_pooled_execs_have_owners
         test_pycvc_exec_pool.py: ok: test_s2b7_post_message_returns_bool
         test_pycvc_exec_pool.py: ok: test_s2b7_a_global_key_meets_across_pooled_execs
+        test_pycvc_exec_pool.py: ok: test_s2b7_one_prefix_per_pool
         mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=continuous
         mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=fork_join
