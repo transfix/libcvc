@@ -815,7 +815,9 @@ void async_scheduler::leave_router() {
     return prefixed ? h == route_self_ : h && !h.is_group0() && h != route_self_;
   };
   const auto forward = [&](detail::route_entry &&e) {
-    if (post_routed(router_->new_home_of(e.key), std::move(e)) <= 0)
+    // The home first: the arguments' order is unspecified, and the entry is moved from.
+    group_ref to = router_->new_home_of(e.key);
+    if (post_routed(std::move(to), std::move(e)) <= 0)
       ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
   };
   // (2) What it holds goes to the keys' new homes, resolved without closed groups, in the order it
