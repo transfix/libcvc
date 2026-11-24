@@ -143,9 +143,11 @@ TEST(AriTest, FramesAndTimeout) {
   EXPECT_EQ(framed.status, 0) << framed.output;
   const fs::path stuck =
       dir.write("stuck.ari", doc("tests:\n  waits: (set v (msg-recv \"never\"))\n"));
-  const AriRun hung = ari("test --timeout 1 " + quoted(stuck));
+  // The timeout counts from before the document loads, and the message names the test only once
+  // it has started: a Debug build on a slow runner can spend a whole second getting there.
+  const AriRun hung = ari("test --timeout 4 " + quoted(stuck));
   EXPECT_EQ(hung.status, 1) << hung.output;
-  EXPECT_TRUE(has(hung, "timed out after 1 s in test 'waits'")) << hung.output;
+  EXPECT_TRUE(has(hung, "timed out after 4 s in test 'waits'")) << hung.output;
 }
 
 // A program's time backstop under `ari test` is the run's --timeout, not a running app's 0.1 s:
