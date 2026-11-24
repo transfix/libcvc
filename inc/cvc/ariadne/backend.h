@@ -645,6 +645,12 @@ public:
   // `autofocus:`: the next widget drawn takes keyboard focus (if it cannot, the next one that can).
   // The core calls it once when such a widget appears. Default: no keyboard focus to move.
   virtual void focus_next_widget() {}
+  // §5.28 what Copy in the context menu of the next text or menu item puts on the clipboard, when
+  // it is not the text the item shows: a notification's whole message under its one-line entry in
+  // the bell's menu or the Notifications window. A menu item has a context menu only when it is
+  // given one. Called just before the item; the item after it copies what it shows again.
+  // Default: no context menus.
+  virtual void next_item_copy(const std::string &text) { (void)text; }
 
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
