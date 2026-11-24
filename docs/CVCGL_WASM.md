@@ -770,6 +770,9 @@ src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python` runs arigl
 the page, then the Python ones:
 - `numpy.ari`, a `python:` block with numpy and pycvc_gl, which reports the imports' time and
   the loop's;
+- `coph.ari`, CoPH's crossing on pycvc's `NavCophFleet` (libcvc's C++ CoPH, no torch), run 40
+  ticks at a time as a page runs it, which reports its packets and each agent's version and
+  energy residual;
 - `program.py`, a program in place of the document;
 - `python_error.ari`, a block that raises;
 - `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them;

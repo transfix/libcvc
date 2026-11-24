@@ -1,0 +1,85 @@
+# coph.ari — CoPH's crossing demo, natively: two agents cross a corridor maze with doors, each
+# learning its navigation energy online and sharing what it learns as packets (C6 of
+# docs/roadmap/NAV-COPH-ROADMAP.md). coph.py runs it, on pycvc's NavCophFleet (libcvc's C++ CoPH,
+# no torch):
+#
+#   python coph.py                                  # a window
+#   python coph.py --headless --frames 600          # no GL: the readouts only
+#   (in a browser on ariglx-web: ?src=coph.py, with coph.ari preloaded)
+#
+# The document declares the panels; coph.py steps the fleet a few CoPH ticks a frame and publishes:
+# - `crossing`, a top-down picture: the corridors (light), the doors (red), each agent (blue,
+#   amber) with its trail, its sensor's reach and its goal, and a line between the agents for a
+#   moment when a packet arrives;
+# - `stats.*` and `agent0.*`, `agent1.*`: the time, the packets, and each agent's stage, version,
+#   damping, policy and energy account (work, heat, residual);
+# - `dist0`, `dist1`: each agent's distance to its goal, over time.
+# Controls (`run.*`): CoPH ticks per frame, Packets (communication on or off: the demos' two arms),
+# Paused, Restart.
+
+meta:
+  name: CoPH crossing (native)
+  author: cvc
+  min_libcvc: 4.0.0
+
+init: |
+  (begin
+    (state-set "run.ticks" "4")
+    (state-set "run.packets" "1")
+    (state-set "run.paused" "0"))
+
+windows:
+  - window: CoPH crossing
+    id: crossing
+    pos: [16, 30]
+    size: [600, 470]
+    children:
+      - text: "Two learners cross the maze; doors (red) block two corridors."
+      - image: Crossing
+        src: crossing
+        size: 560
+
+  - window: Run
+    id: run
+    pos: [632, 30]
+    size: [300, 210]
+    children:
+      - slider_int: CoPH ticks per frame
+        bind: run.ticks
+        lo: 1
+        hi: 20
+      - checkbox: Packets between the agents
+        bind: run.packets
+        tooltip: "off: each learns alone (restarts the run)"
+      - checkbox: Paused
+        bind: run.paused
+      - button: Restart
+        on: restart
+      - separator
+      - text: "time (s)"
+        bind: stats.time
+      - text: "packets"
+        bind: stats.packets
+      - text: "status"
+        bind: stats.status
+
+  - window: Agents
+    id: agents
+    pos: [632, 252]
+    size: [300, 420]
+    children:
+      - text: "agent 0 (blue)"
+        bind: agent0.summary
+      - text: "  energy"
+        bind: agent0.energy
+      - plot: Agent 0's distance to its goal
+        bind: dist0
+        height: 48
+      - separator
+      - text: "agent 1 (amber)"
+        bind: agent1.summary
+      - text: "  energy"
+        bind: agent1.energy
+      - plot: Agent 1's distance to its goal
+        bind: dist1
+        height: 48
