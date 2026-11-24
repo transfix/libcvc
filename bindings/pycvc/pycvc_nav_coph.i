@@ -2,7 +2,8 @@
 //
 // pycvc_nav_coph.i — Python surface for cvc::nav's CoPH (C6 of docs/roadmap/NAV-COPH-ROADMAP.md):
 // the kernels GRL-SNAM's goldens pin, one learner (NavCophAgent), the packets between learners
-// (NavCophPacket) and the runner's fleet (NavCophFleet). NOT a standalone module: %include'd by
+// (NavCophPacket), the runner's fleet (NavCophFleet) and the driver that runs a fleet on a
+// sim_world's vehicles (NavCophDriver, pycvc_gl.cars' --controller coph). NOT a standalone module: %include'd by
 // pycvc.i. The logic is the library's (cvc/nav/coph_*.h); these functions only marshal.
 //
 // Vectors cross as sequences of floats and come back as lists: a state is (x, y, vx, vy), a force
@@ -26,6 +27,7 @@
 #include <cvc/nav/coph_allocation.h>
 #include <cvc/nav/coph_channel.h>
 #include <cvc/nav/coph_config.h>
+#include <cvc/nav/coph_driver.h>
 #include <cvc/nav/coph_fleet.h>
 #include <cvc/nav/coph_model.h>
 #include <cvc/nav/coph_packet.h>
@@ -475,6 +477,46 @@ PyObject *update_report(const cvc::nav::coph_update_report &r) {
   return d;
 }
 
+// The fleet's controls: [{"tick", "u", "meta": control_meta's dict}, ...]
+PyObject *controls(const std::vector<cvc::nav::coph_fleet::control> &v) {
+  PyObject *l = PyList_New(static_cast<Py_ssize_t>(v.size()));
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    PyObject *d = PyDict_New();
+    put(d, "tick", PyLong_FromLongLong(v[i].tick));
+    put(d, "u", list(v[i].u));
+    put(d, "meta", control_meta(v[i].meta));
+    PyList_SET_ITEM(l, static_cast<Py_ssize_t>(i), d);
+  }
+  return l;
+}
+
+// The fleet's events: [{"kind", "sender", "receiver", "packet", "reason", "bytes",
+// "version_after", "accepted", "time"}, ...]
+PyObject *events(const std::vector<cvc::nav::coph_fleet::event> &v) {
+  PyObject *l = PyList_New(static_cast<Py_ssize_t>(v.size()));
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    const auto &e = v[i];
+    PyObject *d = PyDict_New();
+    put(d, "kind", PyUnicode_FromString(e.kind.c_str()));
+    put(d, "sender", PyLong_FromLong(e.sender));
+    put(d, "receiver", PyLong_FromLong(e.receiver));
+    put(d, "packet", PyUnicode_FromString(e.packet.c_str()));
+    put(d, "reason", PyUnicode_FromString(e.reason.c_str()));
+    put(d, "bytes", PyLong_FromSize_t(e.bytes));
+    if (e.version_after)
+      put(d, "version_after", PyLong_FromLongLong(*e.version_after));
+    else
+      PyDict_SetItemString(d, "version_after", Py_None);
+    if (e.accepted)
+      put(d, "accepted", PyBool_FromLong(*e.accepted));
+    else
+      PyDict_SetItemString(d, "accepted", Py_None);
+    put(d, "time", PyFloat_FromDouble(e.time));
+    PyList_SET_ITEM(l, static_cast<Py_ssize_t>(i), d);
+  }
+  return l;
+}
+
 PyObject *packet_event(const cvc::nav::coph_packet_event &e) {
   return Py_BuildValue("{s:s,s:s,s:s,s:d,s:s,s:s,s:L}", "packet", e.packet.c_str(), "sender",
                        e.sender.c_str(), "recipient", e.recipient.c_str(), "time", e.time, "reason",
@@ -495,6 +537,7 @@ PyObject *packet_event(const cvc::nav::coph_packet_event &e) {
 %ignore pycvc::NavCophPacket::packet;
 %feature("kwargs") pycvc::NavCophAgent::NavCophAgent;
 %feature("kwargs") pycvc::NavCophFleet::NavCophFleet;
+%feature("kwargs") pycvc::NavCophDriver::NavCophDriver;
 %newobject pycvc::NavCophAgent::export_to;
 
 %inline %{
@@ -829,18 +872,7 @@ public:
   }
 
   // [{"tick", "u", "meta": NavCophAgent.last_control()'s dict}, ...]
-  PyObject *controls(int agent) const {
-    const auto &v = f_->controls(check(agent));
-    PyObject *l = PyList_New(static_cast<Py_ssize_t>(v.size()));
-    for (std::size_t i = 0; i < v.size(); ++i) {
-      PyObject *d = PyDict_New();
-      coph::put(d, "tick", PyLong_FromLongLong(v[i].tick));
-      coph::put(d, "u", coph::list(v[i].u));
-      coph::put(d, "meta", coph::control_meta(v[i].meta));
-      PyList_SET_ITEM(l, static_cast<Py_ssize_t>(i), d);
-    }
-    return l;
-  }
+  PyObject *controls(int agent) const { return coph::controls(f_->controls(check(agent))); }
 
   // [{"tick", "packets", "report": NavCophAgent.update()'s dict}, ...]
   PyObject *updates(int agent) const {
@@ -861,31 +893,7 @@ public:
 
   // [{"kind", "sender", "receiver", "packet", "reason", "bytes", "version_after", "accepted",
   // "time"}, ...]: activation, sent, budget_skip or delivered.
-  PyObject *events() const {
-    const auto &v = f_->events();
-    PyObject *l = PyList_New(static_cast<Py_ssize_t>(v.size()));
-    for (std::size_t i = 0; i < v.size(); ++i) {
-      const auto &e = v[i];
-      PyObject *d = PyDict_New();
-      coph::put(d, "kind", PyUnicode_FromString(e.kind.c_str()));
-      coph::put(d, "sender", PyLong_FromLong(e.sender));
-      coph::put(d, "receiver", PyLong_FromLong(e.receiver));
-      coph::put(d, "packet", PyUnicode_FromString(e.packet.c_str()));
-      coph::put(d, "reason", PyUnicode_FromString(e.reason.c_str()));
-      coph::put(d, "bytes", PyLong_FromSize_t(e.bytes));
-      if (e.version_after)
-        coph::put(d, "version_after", PyLong_FromLongLong(*e.version_after));
-      else
-        PyDict_SetItemString(d, "version_after", Py_None);
-      if (e.accepted)
-        coph::put(d, "accepted", PyBool_FromLong(*e.accepted));
-      else
-        PyDict_SetItemString(d, "accepted", Py_None);
-      coph::put(d, "time", PyFloat_FromDouble(e.time));
-      PyList_SET_ITEM(l, static_cast<Py_ssize_t>(i), d);
-    }
-    return l;
-  }
+  PyObject *events() const { return coph::events(f_->events()); }
 
 private:
   int check(int agent) const {
@@ -895,6 +903,99 @@ private:
   }
   std::unique_ptr<cvc::nav::coph_fleet> f_;
   int n_ = 0;
+};
+
+// ── The driver: a fleet on a sim_world's vehicles (coph_driver.h, C5 part 2b) ─────────────────
+
+class NavCophDriver {
+public:
+  // CoPH drives the vehicles of `sim` (a pycvc.nav_sim_world_create handle, kept alive while the
+  // driver lives) that attach() names. config and communication are dicts over the demos'
+  // profile; without a "steps" key the run's length is 1,000,000 CoPH steps. froude is s (D4):
+  // CoPH's lengths are s world units. origin is CoPH's origin in world units (None: the map's
+  // centre), local_goal the sliding goal's distance (D12), base_risk the risk where the sim has no
+  // material layer, seed the readings' uid prefix and the fleet's draws, senders the attached
+  // vehicles (by attachment order) that export (None: all).
+  NavCophDriver(PyObject *sim, PyObject *config = nullptr, PyObject *communication = nullptr,
+                double froude = 1.0, PyObject *origin = nullptr, double local_goal = 30.0,
+                double speed_floor = cvc::nav::coph_speed_floor, double base_risk = 0.02,
+                unsigned seed = 0, PyObject *senders = nullptr) {
+    cvc::nav::sim_world *sw = pycvc::sim_world_from(sim);
+    cvc::nav::coph_driver_config dc;
+    dc.cfg = coph::config(config);
+    if (!coph::item(config, "steps")) {
+      dc.cfg.steps = 1000000;
+      dc.cfg.validate();
+    }
+    dc.comm = coph::communication(communication);
+    for (double v : coph::floats(senders, "senders"))
+      dc.senders.push_back(static_cast<int>(v));
+    dc.froude = froude;
+    if (origin && origin != Py_None)
+      dc.origin = coph::vec2(origin, "origin");
+    dc.local_goal = local_goal;
+    dc.speed_floor = speed_floor;
+    dc.base_risk = base_risk;
+    dc.seed = seed;
+    d_ = std::make_unique<cvc::nav::coph_driver>(*sw, std::move(dc));
+    Py_INCREF(sim);
+    sim_ = sim;
+  }
+  ~NavCophDriver() {
+    d_.reset(); // it refers to the sim_world; the handle goes after it
+    Py_XDECREF(sim_);
+  }
+  NavCophDriver(const NavCophDriver &) = delete;
+  NavCophDriver &operator=(const NavCophDriver &) = delete;
+
+  // Agent i drives by CoPH from the next apply() on: before the first apply(), each once.
+  void attach(int i) { d_->attach(i); }
+  PyObject *attached() const {
+    const std::vector<int> &a = d_->attached();
+    PyObject *l = PyList_New(static_cast<Py_ssize_t>(a.size()));
+    for (std::size_t i = 0; i < a.size(); ++i)
+      PyList_SET_ITEM(l, static_cast<Py_ssize_t>(i), PyLong_FromLong(a[i]));
+    return l;
+  }
+  // Before each nav_sim_world_step: a CoPH step every ticks_per_step() ticks, and each attached
+  // vehicle's command every tick (sim_world::override_command).
+  void apply() { d_->apply(); }
+  int ticks_per_step() const { return d_->ticks_per_step(); }
+  long long steps() const { return d_->steps(); }
+  // Whether the vehicle (its attachment index) reached its goal; it then brakes and stays.
+  bool done(int vehicle) const { return d_->done(check(vehicle)); }
+  // Its account in CoPH's frame: {"work", "heat", "kinetic_change", "residual", "shaping_jumps",
+  // "unallocated_work", "steps", "risk_cost", "max_step_residual", "allocation_residual"}.
+  PyObject *account(int vehicle) const {
+    const cvc::nav::coph_driver::ledger &l = d_->account(check(vehicle));
+    PyObject *d = coph::energy(l.energy);
+    coph::put(d, "risk_cost", PyFloat_FromDouble(l.risk_cost));
+    coph::put(d, "max_step_residual", PyFloat_FromDouble(l.max_step_residual));
+    coph::put(d, "allocation_residual", PyFloat_FromDouble(l.allocation_residual()));
+    return d;
+  }
+  // The fleet's controls for the vehicle and its events (NavCophFleet's), empty before the first
+  // apply().
+  PyObject *controls(int vehicle) const {
+    check(vehicle);
+    if (!d_->fleet())
+      return PyList_New(0);
+    return coph::controls(d_->fleet()->controls(vehicle));
+  }
+  PyObject *events() const {
+    if (!d_->fleet())
+      return PyList_New(0);
+    return coph::events(d_->fleet()->events());
+  }
+
+private:
+  int check(int vehicle) const {
+    if (vehicle < 0 || vehicle >= static_cast<int>(d_->attached().size()))
+      throw std::out_of_range("NavCophDriver: no attached vehicle " + std::to_string(vehicle));
+    return vehicle;
+  }
+  std::unique_ptr<cvc::nav::coph_driver> d_;
+  PyObject *sim_ = nullptr;
 };
 
 } // namespace pycvc

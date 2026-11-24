@@ -1176,6 +1176,12 @@ add_test(NAME cvcgl_imgui_fonts COMMAND cvcgl_imgui_fonts)
 add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
 target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The context menus (§5.28): Cut, Copy, Paste and Select all on a field, Copy and Select text... on
+# a text, Copy line on a text view, a notification's whole message, a touch screen's long press.
+# ImGui's own clipboard; no window, no GL.
+add_executable(cvcgl_imgui_context_menu test/cvcgl_imgui_context_menu.cpp)
+target_link_libraries(cvcgl_imgui_context_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
 # The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
 # and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
 add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
@@ -1329,6 +1335,18 @@ add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
 add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
 target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
+
+# The volume_grid node's Segmentation tab (VolumeGridSegmentation.h, roadmap P9): seeds by scripted
+# picks, `segment` run as a sliced task (the scheduler pumped as a host does), its result on the
+# data channel, the labels on the planes and the class surfaces in 3D, stop, a new volume, two apps;
+# and (offscreen, skipped where nothing rasterises unless CVC_REQUIRE_RENDER=1) the labels drawn.
+# Once more cooperatively, as single-threaded wasm runs it: the labels so far draw while it marches.
+add_executable(cvcgl_volume_grid_segment test/cvcgl_volume_grid_segment.cpp)
+target_link_libraries(cvcgl_volume_grid_segment PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid_segment COMMAND cvcgl_volume_grid_segment)
+add_test(NAME cvcgl_volume_grid_segment_cooperative COMMAND cvcgl_volume_grid_segment)
+set_tests_properties(cvcgl_volume_grid_segment_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative)
 
 # The volume_grid node's contours (VolumeGridContours.h, roadmap P10), headless: picks under the
 # contours tool draw, close, move and select curves; requests; object rows; the contours on the

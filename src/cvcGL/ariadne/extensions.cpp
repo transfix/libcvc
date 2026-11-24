@@ -35,6 +35,7 @@
 #include <cvc/gl/ariadne/volume_render_nodes.h>
 #include <cvc/gl/ariadne/volume_slice_nodes.h>
 #include <cvc/gl/ariadne/world_nodes.h>
+#include <cvc/volume/segmentation_intrinsics.h> // install_segmentation_intrinsics
 #include <cvc/volume/volume_filter_intrinsics.h> // install_volume_filter_intrinsics
 #include <cvc/volume/volume_grid_contour_intrinsics.h>
 
@@ -54,6 +55,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_ribbon_node_types(app);      // "ribbon", "draped_link"
   register_volume_slice_node_type(app); // "volume_slice"
   register_volume_grid_node_type(app);  // "volume_grid" (after volume_slice: it holds three)
+  cvc::install_segmentation_intrinsics(app); // segment.seeded, .critical-points, .surfaces
   cvc::install_grid_contour_intrinsics(app); // grid-contours.* in this app's documents' programs
   register_volume_render_node_type(app); // "volume_render" (vtk / volren / volslice, switchable)
   register_sdf_data_generator(app);     // data: { generate: sdf } (a volume the app holds)

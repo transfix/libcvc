@@ -1312,9 +1312,11 @@ jobs:
   # way a site serves them, from an ordinary path with no COOP/COEP and under a strict
   # Content-Security-Policy (any violation fails): a document set from the page's origin must load
   # and run (on ari's terminal, its text must show), and a cross-origin or missing src must show
-  # the error (src/arigl/web/test/arigl_web_smoke.mjs). xterm.js for ari's page comes from the
-  # prefix's xterm-js packages when installed, else the pinned npm download. Only when the pages,
-  # their document loader, the recipe or this file changed: it builds libcvc and cvcGL for wasm.
+  # the error (src/arigl/web/test/arigl_web_smoke.mjs); and the context menu's Copy, Cut and Paste
+  # must go through the browser's clipboard (arigl_web_clipboard.mjs). xterm.js for ari's page
+  # comes from the prefix's xterm-js packages when installed, else the pinned npm download. Only
+  # when the pages, their document loader, the clipboard, the recipe or this file changed: it
+  # builds libcvc and cvcGL for wasm.
   arigl-web:
     name: arigl-web shell + ari page (wasm, headless Chrome)
     runs-on: ubuntu-24.04
@@ -1348,6 +1350,7 @@ jobs:
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
                    inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
+                   src/cvcGL/Clipboard.cpp src/cvcGL/ariadne/ImGuiBackend.cpp \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -1407,6 +1410,14 @@ jobs:
           "$chrome" --version
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-arigl-web/share/arigl-web \
             --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome"
+
+      - name: Copy, cut and paste through the context menu in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_clipboard.mjs --web stage-arigl-web/share/arigl-web \
+            --chrome "$chrome"
 
       - name: Upload the arigl-web shell
         if: steps.paths.outputs.run == 'true'
@@ -2705,7 +2716,8 @@ jobs:
         tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
-        volume_grid_test volume_grid_contours_test volume_grid_contour_intrinsics_test
+        volume_grid_test class_surfaces_test volume_grid_segment_test volume_grid_contours_test
+        volume_grid_contour_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

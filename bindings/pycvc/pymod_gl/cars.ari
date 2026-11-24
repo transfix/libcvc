@@ -92,8 +92,8 @@ windows:
         tooltip: "rebuilds the run"
       - combo: Controller
         bind: run.controller
-        options: [Yours (cars.py), libcvc's navigator]
-        values: [yours, navigator]
+        options: [Yours (cars.py), libcvc's navigator, CoPH (libcvc's fleet)]
+        values: [yours, navigator, coph]
         tooltip: "rebuilds the run"
       - slider_int: Ticks per frame
         bind: run.ticks

@@ -5,6 +5,7 @@
     python cars.py --vehicle roboracer --world flat   # the lab's 1/10 car, on a flat square
     python cars.py --world generated --set world.seed=3 --set world.amp=20
     python cars.py --controller navigator             # libcvc's navigator, as a baseline
+    python cars.py --controller coph                  # CoPH's learning fleet, natively
     python cars.py --headless --frames 1200 --log run.npz   # a batch run: no GL
 
 Made by ``python -m pycvc_gl.cars --copy DIR``: edit ``controller`` below. Every tick (0.0583 s) it
