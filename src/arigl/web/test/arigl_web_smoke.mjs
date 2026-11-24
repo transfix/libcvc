@@ -553,7 +553,7 @@ if (PYDOCS) {
       name: 'ariglx: CoPH\'s crossing runs natively in the page',
       url: `${ORIGIN}/apps/py/?src=coph.ari`,
       check: v => v.state === 'running' && v.log.some(l =>
-                    /^ariglx-web: coph 120 ticks, [1-9]\d* sent, [1-9]\d* delivered; agent 0 version \d+ residual [^;]*; \d+ ms$/
+                    /^ariglx-web: coph 121 ticks, [1-9]\d* sent, [1-9]\d* delivered; agent 0 version \d+ residual [^;]*; \d+ ms$/
                         .test(l)),
       report: v => v.log.filter(l => /^ariglx-web: coph /.test(l)),
     },
