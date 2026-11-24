@@ -1322,6 +1322,18 @@ add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
 target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
 
+# The volume_grid node's Segmentation tab (VolumeGridSegmentation.h, roadmap P9): seeds by scripted
+# picks, `segment` run as a sliced task (the scheduler pumped as a host does), its result on the
+# data channel, the labels on the planes and the class surfaces in 3D, stop, a new volume, two apps;
+# and (offscreen, skipped where nothing rasterises unless CVC_REQUIRE_RENDER=1) the labels drawn.
+# Once more cooperatively, as single-threaded wasm runs it: the labels so far draw while it marches.
+add_executable(cvcgl_volume_grid_segment test/cvcgl_volume_grid_segment.cpp)
+target_link_libraries(cvcgl_volume_grid_segment PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid_segment COMMAND cvcgl_volume_grid_segment)
+add_test(NAME cvcgl_volume_grid_segment_cooperative COMMAND cvcgl_volume_grid_segment)
+set_tests_properties(cvcgl_volume_grid_segment_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative)
+
 # The volume_grid node's contours (VolumeGridContours.h, roadmap P10), headless: picks under the
 # contours tool draw, close, move and select curves; requests; object rows; the contours on the
 # data channel (followed by a contour_lab); tile as a sliced task into a surface per object, stop

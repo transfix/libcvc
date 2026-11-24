@@ -50,6 +50,19 @@
 // "timestep" are the ones it reads). The result is a data object holding cvc::point_classes: two
 // classes, "feature" then "background" (point-classes.points reads them), ready for segment.seeded
 // or a volume_grid's points.
+//
+// segment.surfaces, cvc::class_surfaces (cvc/volume/class_surfaces.h: each class's surface, for a
+// 3D view), in the same three forms:
+//
+//   (segment.surfaces labels [params])
+//   (segment.surfaces-async labels [params])
+//   (segment.surfaces-start labels [params] target)
+//
+// `labels` is a volume of integer labels (segment.seeded's "labels"); `params` a dict of
+// class_surface_params' fields ("smoothing", "lambda", "mu", "close", "background", "labels"). The
+// result is a dict: "labels" (the labels that have a surface, ascending), "surfaces" (a data object
+// holding each one's cvc::geometry, in that order), "voxels" (each one's voxel count) and
+// "warnings".
 
 #ifndef CVC_VOLUME_SEGMENTATION_INTRINSICS_H
 #define CVC_VOLUME_SEGMENTATION_INTRINSICS_H
@@ -67,9 +80,10 @@ struct intrinsics_context;
 // The ops, for a host that registers ops itself.
 job_op segment_seeded_op(sliced_threading threading = sliced_threading::automatic);
 job_op critical_point_seeds_op(sliced_threading threading = sliced_threading::automatic);
+job_op class_surfaces_op(sliced_threading threading = sliced_threading::automatic);
 
-// segment.seeded's and segment.critical-points' three forms, and job.cancel and params.*, in
-// `env`.
+// segment.seeded's, segment.critical-points' and segment.surfaces' three forms, and job.cancel
+// and params.*, in `env`.
 void register_segmentation_intrinsics(state_exec::environment_ptr env,
                                       state_exec::intrinsics_context &ictx, cvc::app &app);
 

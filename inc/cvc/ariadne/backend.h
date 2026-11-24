@@ -991,6 +991,10 @@ public:
     (void)rgb;
     return {};
   }
+  // The same picker showing the colour as "#rrggbb" beside its swatch rather than one field per
+  // channel (the widget's `fmt: hex`). The default is color(): a backend that draws a colour one
+  // way need not implement it.
+  virtual ColorEdit color_hex(const char *label, const float rgb[3]) { return color(label, rgb); }
 
   // ---- host services: the verbs the core binds from them (§10.7) ----------
   // Put `text` on the system clipboard, for (clipboard-set TEXT) run by a document on `app`: true
