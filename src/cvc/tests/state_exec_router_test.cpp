@@ -1101,9 +1101,12 @@ constexpr rt_layout kRtLayouts[] = {{"same group", 0, 0, 0},
 // pumps every group, group 0 by hand, until none has work. teardown_home() destroys H, whose keys
 // then come home to group 0 (S2b.0a). Protocol expectations a cell checks on the way (a subscribe,
 // send or deliver posted where the frozen protocol posts it, a counter) are collected in `misses`.
+// With `router_off` (the single group only) no group registers a prefix, so the router stays off
+// and is never consulted (check_router_off): today's messaging, the oracle MS-12 compares with.
 class rt_cell {
 public:
-  rt_cell(rt_driver driver, const rt_layout &layout, unsigned threads) : driver_(driver) {
+  rt_cell(rt_driver driver, const rt_layout &layout, unsigned threads, bool router_off = false)
+      : driver_(driver) {
     std::optional<cvc::pool_options> po;
     if (driver == rt_driver::deterministic) {
       po = rt_pool(0, true);
@@ -1117,8 +1120,10 @@ public:
     const int n = std::max({layout.s, layout.r, layout.q}) + 1;
     for (int i = 0; i < n; ++i) {
       const std::string name = i == 0 ? "h" : "x" + std::to_string(i);
-      nodes_.push_back(std::make_unique<rt_node>(app_->app, name,
-                                                 std::vector<std::string>{"docs." + name}, name));
+      std::vector<std::string> prefixes;
+      if (!router_off)
+        prefixes.push_back("docs." + name);
+      nodes_.push_back(std::make_unique<rt_node>(app_->app, name, std::move(prefixes), name));
     }
     h_ = nodes_[0].get();
     s_ = nodes_[layout.s].get();
@@ -1209,6 +1214,14 @@ public:
   // "<role>: <outcome>".
   std::string line(const std::string &role, rt_node &n, int pid) {
     return role + ": " + n.outcome(pid);
+  }
+  // A router-off cell's router was never on nor consulted (RT-1's rule).
+  void check_router_off() {
+    if (app_->router().active())
+      misses.push_back("the router is on with no prefix registered");
+    if (app_->router().consulted() != 0)
+      misses.push_back("the router was consulted " + std::to_string(app_->router().consulted()) +
+                       " times with no prefix registered");
   }
 
   std::vector<std::string> misses;
@@ -1574,19 +1587,22 @@ constexpr ms12_column kMs12Columns[] = {
 };
 
 // One cell: its outcome, and its protocol misses (prefixed with where they happened) in `misses`.
+// `router_off`: the single group with no prefix registered anywhere (rt_cell).
 std::vector<std::string> ms12_run(const ms12_column &column, const rt_layout &layout,
                                   rt_driver driver, unsigned threads,
-                                  std::vector<std::string> &misses) {
+                                  std::vector<std::string> &misses, bool router_off = false) {
   std::vector<std::string> out;
   std::vector<std::string> mine;
   {
-    rt_cell c(driver, layout, threads);
+    rt_cell c(driver, layout, threads, router_off);
     out = column.run(c);
+    if (router_off)
+      c.check_router_off();
     mine = c.misses;
   }
   for (const std::string &m : mine)
-    misses.push_back(std::string(column.name) + ", " + layout.name + ", " + rt_driver_name(driver) +
-                     ": " + m);
+    misses.push_back(std::string(column.name) + ", " + (router_off ? "router off" : layout.name) +
+                     ", " + rt_driver_name(driver) + ": " + m);
   return out;
 }
 
@@ -2022,24 +2038,27 @@ TEST(Router, MS10_AFullIngressRefusesSendsAndPosts) {
 }
 
 // MS-12 (td 8.4; S2.md 4): the semantics matrix. Every column (scenario) in every layout of S, R
-// and H, each outcome equal to the same programs' in one group (requeue order being the documented
-// exception, which no cell depends on: one message in flight at a time); hand-pumped and in the
+// and H, each outcome equal to the same programs' in one group with the router off (no prefix
+// registered anywhere, the router never consulted: today's messaging, R2b S-m7), the requeue order
+// being the documented exception, which no cell depends on (one message in flight at a time). The
+// single group with the router on (the router's local path) equals it too. Hand-pumped and in the
 // pool's deterministic mode (each step a pump_all of one group on this thread), the two equal too.
 TEST(Router, MS12_SemanticsMatrix) {
   std::vector<std::string> misses;
   for (const ms12_column &column : kMs12Columns) {
     std::vector<std::string> hand_oracle;
     for (const rt_driver driver : {rt_driver::hand, rt_driver::deterministic}) {
-      const std::vector<std::string> oracle = ms12_run(column, kRtLayouts[0], driver, 0, misses);
+      const std::vector<std::string> oracle =
+          ms12_run(column, kRtLayouts[0], driver, 0, misses, true);
       if (driver == rt_driver::hand)
         hand_oracle = oracle;
       else
-        EXPECT_EQ(oracle, hand_oracle) << column.name << ": deterministic mode's single group";
-      for (int l = 1; l < 4; ++l) {
+        EXPECT_EQ(oracle, hand_oracle) << column.name << ": deterministic mode's router-off group";
+      for (int l = 0; l < 4; ++l) {
         const std::vector<std::string> got = ms12_run(column, kRtLayouts[l], driver, 0, misses);
         EXPECT_EQ(got, oracle) << column.name << ", " << kRtLayouts[l].name << ", "
                                << rt_driver_name(driver) << ":" << rt_join(got)
-                               << "\n against the single group's:" << rt_join(oracle);
+                               << "\n against one group's with the router off:" << rt_join(oracle);
       }
     }
   }
