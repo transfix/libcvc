@@ -56,6 +56,9 @@ struct execute_options {
   std::string gid;
   std::string root_path; // Chroot: confine to subtree (empty = full tree)
   std::string owner;     // Owner-scope tag (Ariadne document/Runtime); "" = unowned
+  /// The prefix the owner's scopes are written from: process_info::scope is root_path relative to
+  /// it. An Ariadne Runtime gives its document's prefix; "" = the tree's root.
+  std::string owner_root;
   uint64_t max_steps = 0;
   double max_time = 0.0;      // TOTAL run-time seconds (a time_budget: see process::time_left)
   double max_step_time = 0.0; // §13.8 per-STEP time cap (fresh each step); 0 = unlimited
@@ -92,6 +95,10 @@ struct process_info {
   int priority;
   std::string uid;
   std::string gid;
+  /// Whose process it is (docs/roadmap/ARIADNE_SHELL.md 4.10): its chroot relative to its owner's
+  /// root (process_scope). "" for a document's own programs and an unchrooted process,
+  /// "includes.<as>" for a loaded document's.
+  std::string scope;
   uint64_t step_count;
   // What the steps were spent on (step_kind): reading the script a slice at a time
   // (parser.step_tokens), deep-data work a slice at a time (data.step_nodes), evaluating the
@@ -148,6 +155,20 @@ inline void fill_budget_usage(process_info &info, const evaluation_stats &stats)
   info.read_time = stats.step_time(step_kind::read);
   info.eval_time = stats.step_time(step_kind::eval);
   info.data_time = stats.step_time(step_kind::data);
+}
+
+/// A process's scope (process_info::scope): `root_path` relative to `owner_root`, "" when they are
+/// the same. A chroot outside the owner's root is written whole after a '/', as a key outside a
+/// program's chroot is.
+inline std::string process_scope(const std::string &root_path, const std::string &owner_root) {
+  if (owner_root.empty())
+    return root_path;
+  if (root_path == owner_root)
+    return std::string();
+  if (root_path.size() > owner_root.size() && root_path[owner_root.size()] == '.' &&
+      root_path.compare(0, owner_root.size(), owner_root) == 0)
+    return root_path.substr(owner_root.size() + 1);
+  return "/" + root_path;
 }
 
 /// Fill `info`'s async-call fields from the process.

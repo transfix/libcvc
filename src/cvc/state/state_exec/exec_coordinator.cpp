@@ -1397,6 +1397,7 @@ std::string exec_coordinator::serialize_process_info(const process_info &pi) {
   jkv(os, "priority_floor", pi.priority_floor, f);
   jkv(os, "uid", pi.uid, f);
   jkv(os, "gid", pi.gid, f);
+  jkv(os, "scope", pi.scope, f);
   jkv(os, "step_count", pi.step_count, f);
   jkv(os, "elapsed_time", pi.elapsed_time, f);
   jkv(os, "current_memory", pi.current_memory, f);
@@ -1429,6 +1430,7 @@ bool exec_coordinator::deserialize_process_info(const std::string &json, process
   xint(json, "priority_floor", pi.priority_floor);
   xstr(json, "uid", pi.uid);
   xstr(json, "gid", pi.gid);
+  xstr(json, "scope", pi.scope); // "" from a node that sends none
   xu64(json, "step_count", pi.step_count);
   xdbl(json, "elapsed_time", pi.elapsed_time);
   xu64(json, "current_memory", pi.current_memory);
