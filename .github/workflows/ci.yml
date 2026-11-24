@@ -2984,6 +2984,18 @@ jobs:
       SAN_REQUIRED_S2B: |
         state_exec_router_test: OK ] RouterInterfaces.AClosedHandleRefusesEveryPost
         state_exec_router_test: OK ] RouterInterfaces.TheLongestRegisteredPrefixIsTheHome
+        state_exec_router_test: OK ] RouterInterfaces.ATeardownForwardsPastClosedHomes
+        state_exec_router_test: OK ] Router.MS01_ASendReachesAWaiterAtItsHomeOnce
+        state_exec_router_test: OK ] Router.MS02_ASendWithNoWaiterIsTakenFromTheHomesQueue
+        state_exec_router_test: OK ] Router.MS03_AReceiveElsewhereThenASendIsDeliveredOnce
+        state_exec_router_test: OK ] Router.MS04_ABroadcastReachesThreeGroupsEachWithItsOwnEnvelope
+        state_exec_router_test: OK ] Router.MS05_ATimedWaitExpiringWithADeliveryInFlight
+        state_exec_router_test: OK ] Router.MS06_AKilledOrReapedWaiterRequeues
+        state_exec_router_test: OK ] Router.MS07_EightGroupsSendingToOneKeyKeepFifoPerSender
+        state_exec_router_test: OK ] Router.MS07b_FifoPerSenderHoldsAcrossItsHomesTeardown
+        state_exec_router_test: OK ] Router.MS08_AnAppGlobalKeyIsHomedAtGroupZero
+        state_exec_router_test: OK ] Router.MS09_AHashKeyStaysInTheGroupThatResolvesIt
+        state_exec_router_test: OK ] Router.MS10_AFullIngressRefusesSendsAndPosts
         state_exec_router_test: OK ] Router.MS12_SemanticsMatrix
         state_exec_router_test: OK ] Router.PL06_ControlAcrossGroups
         state_exec_router_test: OK ] Router.PL07_AnotherOwnersPid
@@ -2992,6 +3004,8 @@ jobs:
         state_exec_router_test: OK ] Router.RT01_OneGroupNeverRoutes
         state_exec_router_test: OK ] Router.DT03_DeterministicEqualsThreaded
         state_exec_router_test: OK ] Router.DT04_CrossGroupOrderRepeats
+        state_exec_stress_test: OK ] RandomPrograms.ST01_SixteenGroupsLoseAndDuplicateNothing
+        state_exec_stress_test: OK ] RandomPrograms.ST02_TheSameUnderFuzzSeeds
         test_pycvc_exec_pool.py: ok: test_ow01_pooled_execs_have_owners
         mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=continuous
@@ -2999,10 +3013,9 @@ jobs:
         mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=continuous
         mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=continuous
-      # ^ SAN_REQUIRED_S2B ends here (no comment line inside it). TODO(S2b): its other cases, by
-      # their names as they merge: td 8.4's MS-1..MS-10 (Router.MS01_.. to Router.MS10_..), the
-      # router's and the control's own unit tests (state_exec_router_test), Ariadne's S2b cases
-      # (ariadne_runtime_test), and state_exec_stress_test's ST-1 and ST-2 cases.
+      # ^ SAN_REQUIRED_S2B ends here (no comment line inside it). TODO(S2b): the router's and the
+      # control's own unit tests (state_exec_router_test) and Ariadne's S2b cases
+      # (ariadne_runtime_test), by their names as they merge.
       # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
       # in every leg: its I/O threads take commands from the test's thread and post events back,
       # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
