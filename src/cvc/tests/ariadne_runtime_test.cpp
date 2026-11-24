@@ -13452,3 +13452,50 @@ TEST(AriadneRouter, S2b6_AMovedDocumentKeepsReceivingOnItsChannels) {
     EXPECT_FALSE(gate->opened_by_itself()) << "the held call waited out its gate";
   }
 }
+
+// Group 0's token (pycvc's ExecPool.run_all drains group 0's posts under it, on its own thread,
+// S2b.7): while another thread holds it, a Runtime's drain skips group 0, without throwing,
+// and a message posted there waits; once that thread lets go, the next drain delivers it. The
+// document is in group 0 (isolation off), so its drain pumps group 0 every frame. Without the
+// token the drain pumped group 0 under the other thread.
+TEST(AriadneRouter, S2b6_ADrainSkipsAGroupZeroAnotherThreadHolds) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  MockBackend mb;
+  Runtime rt(app, "docs.held0");
+  rt.set_backend(&mb);
+  rt.set_root(group({text("held0")}));
+  std::string how = "running";
+  rt.run_program("(state-set \"got\" (msg-recv \"go\"))", [&](const std::string &h) { how = h; });
+  rt.drain(); // the action starts in group 0 and waits
+  se::async_scheduler &g0 = app.exec_scheduler();
+  std::mutex mu;
+  std::condition_variable cv;
+  bool held = false, let_go = false;
+  std::thread holder([&] {
+    se::async_scheduler::pump_owner_scope token(g0);
+    std::unique_lock<std::mutex> lock(mu);
+    held = true;
+    cv.notify_all();
+    cv.wait(lock, [&] { return let_go; });
+  });
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&] { return held; });
+  }
+  EXPECT_TRUE(
+      g0.post_message(se::resolve_channel_key("docs.held0", "go"), se::value_t(std::string("go"))));
+  EXPECT_NO_THROW(rt.drain());
+  EXPECT_TRUE(g0.has_pending_ingress()) << "the drain pumped group 0 while another thread held it";
+  EXPECT_EQ(how, "running");
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    let_go = true;
+  }
+  cv.notify_all();
+  holder.join();
+  EXPECT_TRUE(frames_until([&] { rt.drain(); }, [&] { return how != "running"; }, 30.0))
+      << "the message never came once group 0 was let go";
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(found_value(app, "docs.held0.got"), "go");
+}

@@ -6952,7 +6952,19 @@ bool Runtime::Impl::starts_frame() {
 
 void Runtime::Impl::pump_frame() {
   namespace se = cvc::state_exec;
-  if (se::async_scheduler *sched = scheduler_to_pump()) {
+  se::async_scheduler *sched = scheduler_to_pump();
+  // Group 0's token while it is pumped here, as exec_pump_frame takes it (S1-Q4). Another thread
+  // may hold it a moment (pycvc's ExecPool.run_all drains group 0's posts under it, S2b): group 0
+  // is skipped for this drain then, and what it has waits for the next.
+  std::optional<se::async_scheduler::pump_owner_scope> token;
+  if (sched) {
+    try {
+      token.emplace(*sched);
+    } catch (const std::runtime_error &) {
+      sched = nullptr;
+    }
+  }
+  if (sched) {
     // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
     // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
     // parked, sync_run would skip stepping and never drain the ingress itself.
@@ -6970,6 +6982,7 @@ void Runtime::Impl::pump_frame() {
     // runaways.
     sched->sync_run(kPumpMaxSteps, kPumpMaxSeconds);
   }
+  token.reset(); // not held across the document's group's pump
   // An isolated document's group, one pump through the app's pool, as exec_pump_frame() would
   // pump it: a host with one Runtime that opts in may keep calling drain() (td 4.12). Its pump
   // drains, wakes the frame-waiters and runs a slice of the same budget.
