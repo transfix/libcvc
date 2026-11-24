@@ -434,8 +434,13 @@ same way. The exceptions:
 - `async_scheduler.post_message()` may come from any thread. It returns `True` once the message is
   queued, and `False`, queueing nothing, when the scheduler refused it: its ingress already holds
   `state_exec.groups.ingress_cap` messages not yet drained (host posts and other groups' sends;
-  65536 by default, 0 for no cap), or the scheduler is being destroyed. A program's `msg-send` its
-  channel's home refuses so gives `{"status": "error", "reason": "ingress full"}`.
+  65536 by default, 0 for no cap), or the scheduler is being destroyed. On a scheduler in an app's
+  routing (the app's exec scheduler, once a group such as a pooled `Exec`'s has a prefix) a key
+  another group is the home of is passed on to that group, whose cap applies; a plain `Exec`'s
+  scheduler routes nothing. A
+  program's `msg-send` its channel's home refuses so gives `{"status": "error", "path": ...,
+  "reason": "ingress full"}`, the only result with a `reason` (`status` alone is the state tree's
+  side, `"error"` whenever no cluster shard is attached).
 - `Exec.set_priority`, `Exec.get_priority` and `Exec.lock_query`, above.
 
 The tree helpers (`pycvc.state_get`, `state_has`, `state_set`, `state_children`,
@@ -586,7 +591,13 @@ pool.close()
   leaves the drain to that thread), so programs of different pooled `Exec`s meet there. A key
   under another pooled `Exec`'s chroot
   (`"/<prefix>.1.inbox"`) goes straight to that `Exec`'s group. A post to group 0 from outside the
-  batch is found at the batch wait's end (at most 50 ms).
+  batch is found at the batch wait's end (at most 50 ms). `msg-pending` on a key another group is
+  the home of gives 0 (the queue is at the home).
+- **One thread for `run_all` and an `AriApp` on one app.** Both drive the app's exec scheduler
+  (group 0): an Ariadne frame pumps it, and its runtime submits programs to it and kills them
+  between frames without taking its pump owner, while `run_all` drains it before each round. On
+  two threads those race (one thread drives a scheduler at a time; nothing checks it), so a
+  program that uses both on one app calls them from one thread (`docs/ARIADNE.md` 2.5).
 - `info(pid)` returns a process's row as its group last published it (each pump ends with a
   publish), any thread, as a dict: `pid`, `name`, `owner`, `uid`, `scope`, `parent_pid`, `status`
   (a `pycvc.process_status`), `base_priority`, `effective_priority`, `floor`, `locks_held` (the
