@@ -1042,6 +1042,13 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
 endif()
 
+# A node's use: of a prototypes: entry, realized with no window: each instance its own node tree
+# at its own transform, every mesh part read once for all instances (in the scene, repeat: copies
+# and a scenes: entry) and drawn from one set of VTK arrays, an arg in a source read per instance.
+add_executable(cvcgl_ariadne_prototypes test/cvcgl_ariadne_prototypes.cpp)
+target_link_libraries(cvcgl_ariadne_prototypes PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_prototypes COMMAND cvcgl_ariadne_prototypes)
+
 # A scene's animations: played with no window on a fixed clock step: the start pose at realize, a
 # once animation's keyframes and its end, a loop's colour and state track, a paused pingpong played
 # by its key and moving every repeat: copy's child, a script's seek, pause, play and speed, and a
@@ -1824,6 +1831,6 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_animation
-                        cvcgl_ari_record
+                        cvcgl_ariadne_prototypes cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
                         cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)
