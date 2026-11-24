@@ -8289,6 +8289,112 @@ TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
   EXPECT_LT(worst, 0.01) << "step for step";
 }
 
+// A kinematic vehicle placed from the relay's samples mid-turn (OW5r): every 4 ticks, as the holon
+// places it, mostly part-way through a navigator tick (12 steps). The relay's box goes on a line
+// between the bicycle's boxes at the tick's ends, its yaw too, so the sample's yaw rate gives the
+// whole tick; a model placed from it turns through the rest of the tick, and its bicycle starts
+// the next tick at the relay's heading. Placed without it (a relay before OW5n), its box goes
+// straight to the tick's end and its next tick starts at the heading the sample had, off by the
+// rest of the tick's turn. The gap a sample finds is measured, through the turns.
+TEST(AriadneOneWorld, AClientPlacesAKinematicVehicleFromSamplesMidTurn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kKinematicDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i)
+    h.advance(dt);
+  cvc::ariadne::kinematic_drive k;
+  ASSERT_TRUE(v.kinematics(id, k));
+  // Through the pose stream, as a client gets it (its angular velocity since OW5n).
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0);
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    return got.empty() ? cvc::physics::body_state{} : got.front().state;
+  };
+  const auto spinless = [](cvc::physics::body_state s) {
+    s.angular_velocity = {};
+    return s;
+  };
+  cvc::physics::body_state now = sample();
+  cvc::ariadne::kinematic_vehicle spun = cvc::ariadne::kinematic_vehicle_at(k, now, h.tick(), dt);
+  cvc::ariadne::kinematic_vehicle straight =
+      cvc::ariadne::kinematic_vehicle_at(k, spinless(now), h.tick(), dt);
+  double worst_spun = 0.0, worst_straight = 0.0, fastest_turn = 0.0;
+  int mid_tick = 0, samples = 0;
+  for (int step = 0; step < 720; ++step) {
+    avatar_intent in;
+    in.steer = step < 120 ? 0.0 : step < 360 ? 0.6 : step < 480 ? -1.0 : 0.3;
+    in.throttle = 1.0;
+    in.brake = 0.0;
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      cvc::ariadne::kinematic_vehicle_step(spun, k, t, dt);
+      command_after(spun, k, in, dt);
+      cvc::ariadne::kinematic_vehicle_step(straight, k, t, dt);
+      command_after(straight, k, in, dt);
+    }
+    if (h.tick() % 4 != 0)
+      continue;
+    // The gap the sample finds, then the model placed from it with the command for the next tick.
+    const cvc::physics::body_state relay = h.state("ann");
+    fastest_turn = std::max(fastest_turn, std::fabs(relay.angular_velocity.z));
+    worst_spun = std::max(
+        worst_spun, std::hypot(spun.box[0] - relay.position.x, spun.box[1] - relay.position.y));
+    worst_straight = std::max(worst_straight, std::hypot(straight.box[0] - relay.position.x,
+                                                         straight.box[1] - relay.position.y));
+    ++samples;
+    now = sample();
+    spun = cvc::ariadne::kinematic_vehicle_at(k, now, h.tick(), dt);
+    straight = cvc::ariadne::kinematic_vehicle_at(k, spinless(now), h.tick(), dt);
+    if (spun.sub != k.tick_steps)
+      ++mid_tick;
+    command_after(spun, k, in, dt);
+    command_after(straight, k, in, dt);
+  }
+  std::printf("  OW5R a kinematic Humvee placed from %d samples (%d mid-tick), turning at up to "
+              "%.2f rad/s: %.4f m off at a sample with the sample's yaw rate, %.4f m without\n",
+              samples, mid_tick, fastest_turn, worst_spun, worst_straight);
+  EXPECT_GT(fastest_turn, 0.3) << "it turned";
+  EXPECT_GT(mid_tick, samples / 2) << "most samples fall part-way through a tick";
+  EXPECT_LT(worst_spun, 0.6 * worst_straight) << "the rest of the tick's turn";
+  EXPECT_LT(worst_spun, 0.01);
+}
+
 namespace {
 // A world whose ground the room scene cannot carry: a 1 m dome of terrain (a heightfield) over a
 // flat slab, which it can.
@@ -10394,6 +10500,53 @@ TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
 // 98 mrad of attitude, 10.5 mrad of heading and up to 10 mm of height off joining mid-turn; with
 // the attitude alone (no spin or steering), 24 to 25 mrad and 10.4 mrad: its wheels started
 // straight, and its roll rate strayed while they turned to the relay's.
+// A client that starts predicting a jolt vehicle the relay is already driving, mid-turn (OW5r):
+// the pose carries the relay's steering angle (OW5n), which the jolt model now puts on its
+// steering actuator (world::set_vehicle_steer), so its wheels turn as the relay's from the first
+// step; before, its spin was the relay's but its wheels straight, and slewed to the command at
+// the actuator's rate: 2.75 mrad of heading and 4.7 of attitude off at worst, now 0.31 and 1.26.
+// A sample places the actuator at its angle (clamped to the lock), and one without a steering
+// angle leaves it as predicted.
+TEST(AriadneOneWorld, AClientJoinsAJoltVehicleMidTurn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kJoltDrivable, "jolt", run, false, false, "humvee", -40.0, 5.0, 0.0, 0,
+                          true, 300);
+  std::printf("  OW5R joining the jolt Humvee mid-turn: %.4f m, %.5f rad of heading, %.5f rad of "
+              "attitude at worst (%.5f a second on)\n",
+              run.worst, run.worst_yaw, run.worst_tilt, run.settled_tilt);
+  EXPECT_LT(run.worst, 0.02);
+  EXPECT_LT(run.worst_yaw, 0.005);
+  EXPECT_LT(run.worst_tilt, 0.02);
+
+  // The actuator at a sample's angle; clamped to the lock; a sample without one keeps it.
+  cvc::ariadne::jolt_vehicle_world jw;
+  cvc::ariadne::dynamic_vehicle_model model(run.drive, 1.0 / 120.0, {}, &jw);
+  ASSERT_NE(model.jolt(), nullptr);
+  cvc::physics::body_state s;
+  s.position = {0.0, 0.0, run.drive.ground + 1.0};
+  s.rotation = {1.0, 0.0, 0.0, 0.0};
+  s.linear_velocity = {5.0, 0.0, 0.0};
+  const auto steer_of = [&](const cvc::ariadne::dynamic_vehicle &) {
+    return const_cast<cvc::ariadne::avatar_world *>(model.jolt())
+        ->world()
+        .vehicle_state(model.jolt_vehicle())
+        .steer;
+  };
+  cvc::ariadne::dynamic_vehicle a = model.at(s, 0, nullptr, 0.2);
+  EXPECT_NEAR(steer_of(a), 0.2, 1e-12) << "the relay's angle";
+  const double lock = const_cast<cvc::ariadne::avatar_world *>(model.jolt())
+                          ->world()
+                          .get_vehicle(model.jolt_vehicle())
+                          .max_steer;
+  cvc::ariadne::dynamic_vehicle b = model.at(s, 0, &a, 5.0);
+  EXPECT_NEAR(steer_of(b), lock, 1e-12) << "clamped to the lock";
+  cvc::ariadne::dynamic_vehicle c = model.at(s, 0, &a, std::nullopt);
+  EXPECT_NEAR(steer_of(c), 0.2, 1e-12) << "an older relay's sample: as predicted";
+}
+
 TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
   REQUIRE_YAML();
   if (!jolt())

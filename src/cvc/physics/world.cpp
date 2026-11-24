@@ -874,6 +874,11 @@ void world::set_controls(vehicle_id id, const vehicle_controls &c) {
   _impl->vehicles.set_controls(id, c);
 }
 
+void world::set_vehicle_steer(vehicle_id id, double steer) {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  _impl->vehicles.set_steer(id, steer);
+}
+
 physics::vehicle_state world::vehicle_state(vehicle_id id) const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   return guarded([&] { return _impl->vehicles.state(*_impl->be, id); });

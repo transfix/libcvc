@@ -77,11 +77,12 @@ struct kinematic_vehicle {
   double steer_cmd = 0.0, accel_cmd = 0.0;
 };
 
-// The vehicle whose chassis is at CHASSIS (its centre, heading and velocity, as the pose stream
-// carries it) at the end of the step ending on clock tick TICK, each step FIXED_DT s. The pose
-// stream carries no angular velocity, so the box is taken as moving straight along its velocity
-// through the tick it is in, and the bicycle at the tick's end as the box's heading there and its
-// speed along it: exact at rest and on a straight line, close otherwise. The command is none.
+// The vehicle whose chassis is at CHASSIS (its centre, heading, velocity and yaw rate, as the pose
+// stream carries them) at the end of the step ending on clock tick TICK, each step FIXED_DT s. The
+// box moves along its velocity, turning at its yaw rate, through the tick it is in (the relay's
+// does, on a line between the bicycle's boxes at the tick's ends: OW5r), and the bicycle at the
+// tick's end is the box's heading there and its speed along it. Without the yaw rate (a relay
+// before OW5n: 0) the box goes straight. The command is none.
 kinematic_vehicle kinematic_vehicle_at(const kinematic_drive &k,
                                        const cvc::physics::body_state &chassis, std::uint64_t tick,
                                        double fixed_dt);
