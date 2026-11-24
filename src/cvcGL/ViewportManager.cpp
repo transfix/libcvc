@@ -31,8 +31,10 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>      // vtkStandardNewMacro
 #include <vtkOpenGLRenderWindow.h> // limitTextureUnits: the window's GL state
-#include <vtkOpenGLState.h>        // ... and its texture-unit table
-#include <vtkOutputWindow.h>       // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkOpenGLRenderer.h>
+#include <vtkOpenGLState.h>  // ... and its texture-unit table
+#include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkPBRPrefilterTexture.h>
 #include <vtkPNGWriter.h>
 #include <vtkProp.h>
 #include <vtkPropCollection.h>
@@ -210,6 +212,21 @@ void syncMirrorProps(Viewport &mirror) {
   lights->InitTraversal(lit);
   while (vtkLight *l = lights->GetNextLight(lit))
     dst->AddLight(l);
+  // And its image-based lighting (SceneGraph::setImageBasedLighting), the same environment texture
+  // (each renderer filters its own copy on the GPU once). Set only on a change: a new texture
+  // makes VTK filter it again.
+  const bool ibl = src->GetUseImageBasedLighting();
+  if (ibl && dst->GetEnvironmentTexture() != src->GetEnvironmentTexture()) {
+    auto *ogl = vtkOpenGLRenderer::SafeDownCast(src);
+    dst->SetEnvironmentTexture(src->GetEnvironmentTexture(),
+                               ogl && ogl->GetEnvMapPrefiltered()->GetConvertToLinear());
+  }
+  if (ibl) {
+    dst->SetEnvironmentUp(src->GetEnvironmentUp());
+    dst->SetEnvironmentRight(src->GetEnvironmentRight());
+  }
+  if (dst->GetUseImageBasedLighting() != ibl)
+    dst->SetUseImageBasedLighting(ibl);
 }
 
 // limitTextureUnits: VTK's texture-unit table with `count` units, whatever the GL says (VTK sizes

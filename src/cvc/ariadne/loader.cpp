@@ -3326,6 +3326,55 @@ SceneClip parse_scene_clip(const YAML::Node &c) {
   return clip;
 }
 
+// A scalar read as a number: false (and `out` untouched) when it is not one.
+bool scalar_num(const YAML::Node &v, double &out) {
+  if (!v || !v.IsScalar())
+    return false;
+  try {
+    out = v.as<double>();
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
+// A number 0..1 under `key`: `dflt` when unset or not a finite number, clamped otherwise, with a
+// warning naming `what` either way it is not used as written.
+float unit_num(Ctx &ctx, const YAML::Node &n, const char *key, float dflt,
+               const std::string &what) {
+  const YAML::Node v = n[key];
+  if (!v)
+    return dflt;
+  double d = 0.0;
+  if (!scalar_num(v, d) || !std::isfinite(d)) {
+    ctx.warn("ari: " + what + " is a number 0..1 — " + std::to_string(dflt) + " used");
+    return dflt;
+  }
+  if (d < 0.0 || d > 1.0)
+    ctx.warn("ari: " + what + " is 0..1, not " + v.Scalar() + " — clamped");
+  return static_cast<float>(std::clamp(d, 0.0, 1.0));
+}
+
+// A colour [r, g, b], each 0..1, into `out`; left as it is (with a warning) unless it is three
+// finite numbers, and clamped to 0..1.
+void unit_rgb(Ctx &ctx, const YAML::Node &v, float out[3], const std::string &what) {
+  double c[3];
+  bool ok = v && v.IsSequence() && v.size() == 3;
+  for (int i = 0; ok && i < 3; ++i)
+    ok = scalar_num(v[i], c[i]) && std::isfinite(c[i]);
+  if (!ok) {
+    ctx.warn("ari: " + what + " is a colour [r, g, b], each 0..1 — not used");
+    return;
+  }
+  bool clamped = false;
+  for (int i = 0; i < 3; ++i) {
+    clamped = clamped || c[i] < 0.0 || c[i] > 1.0;
+    out[i] = static_cast<float>(std::clamp(c[i], 0.0, 1.0));
+  }
+  if (clamped)
+    ctx.warn("ari: " + what + " has a channel outside 0..1 — clamped");
+}
+
 SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   SceneNode sn;
   sn.id = str(n, "node", str(n, "id"));
@@ -3442,6 +3491,35 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       sn.has_specular = true;
       sn.specular = static_cast<float>(num(mat, "specular", sn.specular));
       sn.specular_power = static_cast<float>(num(mat, "specular_power", sn.specular_power));
+    }
+    if (const YAML::Node pbr = mat["pbr"]) {
+      // material: { pbr: true | { metallic, roughness, emissive, coat } } — physically based
+      const std::string at = "scene node '" + sn.id + "': material.pbr";
+      if (pbr.IsMap()) {
+        sn.has_pbr = true;
+        sn.pbr_metallic = unit_num(ctx, pbr, "metallic", sn.pbr_metallic, at + ".metallic");
+        sn.pbr_roughness = unit_num(ctx, pbr, "roughness", sn.pbr_roughness, at + ".roughness");
+        if (const YAML::Node e = pbr["emissive"])
+          unit_rgb(ctx, e, sn.pbr_emissive, at + ".emissive");
+        if (const YAML::Node c = pbr["coat"]) { // coat: <strength> | { strength, roughness }
+          if (c.IsMap()) {
+            sn.pbr_coat = unit_num(ctx, c, "strength", 1.0f, at + ".coat.strength");
+            sn.pbr_coat_roughness =
+                unit_num(ctx, c, "roughness", sn.pbr_coat_roughness, at + ".coat.roughness");
+          } else {
+            sn.pbr_coat = unit_num(ctx, pbr, "coat", sn.pbr_coat, at + ".coat");
+          }
+        }
+      } else if (pbr.IsScalar()) {
+        sn.has_pbr = flag(mat, "pbr", false);
+      } else {
+        ctx.warn("ari: " + at + " is true, false or { metallic, roughness, emissive, coat }");
+      }
+      if (sn.has_pbr &&
+          (mat["ambient"] || mat["diffuse"] || mat["specular"] || mat["specular_power"]))
+        ctx.warn("ari: " + at +
+                 " shades it physically: ambient, diffuse, specular and "
+                 "specular_power are Phong keys, not used");
     }
     if (const YAML::Node tex = mat["texture"]) {
       // material: { texture: <uri> } or { texture: { uri|file: <uri> } }, or a live one,
@@ -3839,6 +3917,25 @@ Scene parse_scene(Ctx &ctx, const YAML::Node &s) {
       if (const YAML::Node bot = bg["bottom"]; bot && bot.IsSequence() && bot.size() >= 3)
         for (int i = 0; i < 3; ++i)
           sc.background_bottom[i] = static_cast<float>(bot[i].as<double>());
+    }
+  }
+  if (const YAML::Node env = s["environment"]) {
+    // environment: { sky, horizon, ground } | false | none — what lights pbr: nodes from all round
+    sc.has_environment = true;
+    if (env.IsMap()) {
+      if (const YAML::Node c = env["sky"])
+        unit_rgb(ctx, c, sc.environment_sky, "scene environment.sky");
+      if (const YAML::Node c = env["horizon"])
+        unit_rgb(ctx, c, sc.environment_horizon, "scene environment.horizon");
+      if (const YAML::Node c = env["ground"])
+        unit_rgb(ctx, c, sc.environment_ground, "scene environment.ground");
+    } else if (env.IsScalar() && env.Scalar() == "none") {
+      sc.environment_off = true;
+    } else if (env.IsScalar() && flag(s, "environment", true) == flag(s, "environment", false)) {
+      sc.environment_off = !flag(s, "environment"); // true: the default environment
+    } else {
+      ctx.warn("ari: scene environment is { sky, horizon, ground }, false or none");
+      sc.has_environment = false;
     }
   }
   if (const YAML::Node ck = s["clock"]; ck && ck.IsMap()) {

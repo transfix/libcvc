@@ -28,6 +28,7 @@
 #include <vtkCameraPass.h>
 #include <vtkDataObject.h>
 #include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkImageData.h>
 #include <vtkLight.h>
 #include <vtkLightCollection.h>
 #include <vtkMapper.h>
@@ -54,6 +55,7 @@
 #include <vtkShaderProgram.h>
 #include <vtkShadowMapBakerPass.h>
 #include <vtkShadowMapPass.h>
+#include <vtkTexture.h>
 #include <vtkTextureObject.h>
 #include <vtkTranslucentPass.h>
 #include <vtkVolumetricPass.h>
@@ -195,6 +197,8 @@ void SceneGraph::setRenderer(vtkRenderer *renderer) {
   const bool moving = renderer != m_renderer;
   if (moving)
     removeShadowPasses();
+  if (moving && m_renderer && m_ibl) // the environment goes with the scene, as its lights do
+    m_renderer->UseImageBasedLightingOff();
 
   if (m_renderer) {
     for (auto &node : m_rootNodes) {
@@ -209,6 +213,7 @@ void SceneGraph::setRenderer(vtkRenderer *renderer) {
       node->addToRenderer(m_renderer);
     }
     applyLights(); // the scene's lighting follows it onto the new renderer
+    applyEnvironment();
     if (moving && m_shadowsEnabled)
       installShadowPasses(); // and so do its shadows
   }
@@ -1092,6 +1097,95 @@ void SceneGraph::clearLights() {
 }
 
 std::size_t SceneGraph::numLights() const { return m_lights.size(); }
+
+namespace {
+double srgbToLinear(double c) { return std::pow(std::clamp(c, 0.0, 1.0), 2.2); }
+
+unsigned char linearToSrgb8(double c) {
+  return static_cast<unsigned char>(
+      std::lround(255.0 * std::pow(std::clamp(c, 0.0, 1.0), 1 / 2.2)));
+}
+
+// The environment as an equirectangular image, its rows from straight down (the first) to
+// straight up: each row is the horizon's colour at the level, blending (in linear light, by the
+// square root of the sine of the elevation) toward the sky's straight up and the ground's
+// straight down. 8-bit sRGB, so WebGL2 filters it without a float-texture extension.
+vtkSmartPointer<vtkTexture> makeEnvironment(const double sky[3], const double horizon[3],
+                                            const double ground[3]) {
+  const int w = 128, h = 64;
+  auto image = vtkSmartPointer<vtkImageData>::New();
+  image->SetDimensions(w, h, 1);
+  image->AllocateScalars(VTK_UNSIGNED_CHAR, 3);
+  auto *px = static_cast<unsigned char *>(image->GetScalarPointer());
+  for (int y = 0; y < h; ++y) {
+    const double s = std::sin(((y + 0.5) / h - 0.5) * vtkMath::Pi());
+    const double *toward = s >= 0.0 ? sky : ground;
+    const double t = std::sqrt(std::abs(s));
+    unsigned char rgb[3];
+    for (int c = 0; c < 3; ++c)
+      rgb[c] = linearToSrgb8(srgbToLinear(horizon[c]) * (1.0 - t) + srgbToLinear(toward[c]) * t);
+    for (int x = 0; x < w; ++x)
+      std::copy(rgb, rgb + 3, px + 3 * (y * w + x));
+  }
+  auto texture = vtkSmartPointer<vtkTexture>::New();
+  texture->SetInputData(image);
+  texture->SetColorModeToDirectScalars();
+  texture->InterpolateOn();
+  texture->MipmapOn();
+  return texture;
+}
+} // namespace
+
+void SceneGraph::setImageBasedLighting(bool on) {
+  if (on == m_ibl)
+    return;
+  m_ibl = on;
+  applyEnvironment();
+  requestRender();
+}
+
+void SceneGraph::setEnvironment(const double sky[3], const double horizon[3],
+                                const double ground[3]) {
+  for (int c = 0; c < 3; ++c) {
+    m_envSky[c] = std::clamp(sky[c], 0.0, 1.0);
+    m_envHorizon[c] = std::clamp(horizon[c], 0.0, 1.0);
+    m_envGround[c] = std::clamp(ground[c], 0.0, 1.0);
+  }
+  m_envTexture = nullptr; // made again from these, when lit
+  applyEnvironment();
+  requestRender();
+}
+
+void SceneGraph::resetEnvironment() {
+  const double sky[3] = {0.50, 0.53, 0.60}, horizon[3] = {0.42, 0.42, 0.42},
+               ground[3] = {0.20, 0.19, 0.18};
+  setEnvironment(sky, horizon, ground);
+}
+
+void SceneGraph::environment(double sky[3], double horizon[3], double ground[3]) const {
+  std::copy(m_envSky, m_envSky + 3, sky);
+  std::copy(m_envHorizon, m_envHorizon + 3, horizon);
+  std::copy(m_envGround, m_envGround + 3, ground);
+}
+
+vtkTexture *SceneGraph::environmentTexture() const { return m_envTexture.Get(); }
+
+void SceneGraph::applyEnvironment() {
+  if (!m_renderer)
+    return;
+  if (!m_ibl) {
+    if (m_renderer->GetUseImageBasedLighting())
+      m_renderer->UseImageBasedLightingOff();
+    return;
+  }
+  if (!m_envTexture)
+    m_envTexture = makeEnvironment(m_envSky, m_envHorizon, m_envGround);
+  if (m_renderer->GetEnvironmentTexture() != m_envTexture.Get())
+    m_renderer->SetEnvironmentTexture(m_envTexture, /*isSRGB=*/true);
+  m_renderer->SetEnvironmentUp(0.0, 0.0, 1.0); // the scene's up, and its east
+  m_renderer->SetEnvironmentRight(1.0, 0.0, 0.0);
+  m_renderer->UseImageBasedLightingOn();
+}
 
 // Free a shadow pass's GL objects against the window they were made in, before
 // the last reference to the pass goes. Only the baker holds any -- its FBO and
