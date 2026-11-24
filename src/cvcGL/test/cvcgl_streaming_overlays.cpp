@@ -647,6 +647,11 @@ void testShadows(cvc::app &app, StreamingMapperKind kind) {
   topView(sr, C, C, 100);
   check(sg.setShadowsEnabled(true), "shadows enabled");
   sr.render();
+  // A frame with a caster moving before the count: the bake's static cache makes its saved map
+  // (SceneGraph::setShadowStaticCache) the first time a caster moves, once.
+  link->setEndpoints(static_cast<float>(C - 60), static_cast<float>(C + 69.5),
+                     static_cast<float>(C + 60), static_cast<float>(C + 69.5));
+  sr.render();
   glcountInstall();
 
   for (int fr = 1; fr <= 3; ++fr) { // one append, one clip step, one link move per frame

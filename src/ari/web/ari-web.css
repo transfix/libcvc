@@ -14,3 +14,10 @@ header a { color: var(--accent); }
 header button { font: inherit; color: var(--fg); background: #1f242c; border: 1px solid #2d333b;
                 border-radius: 4px; padding: 1px 8px; cursor: pointer; }
 #term { flex: 1; min-height: 0; padding: 4px 0 0 6px; }
+/* The browser gate (ari-web.js): in place of the terminal, what a browser without JSPI needs. */
+#needs { flex: 1; max-width: 36em; margin: 0 auto; padding: 40px 16px; box-sizing: border-box;
+         text-align: center; }
+#needs h1 { font-size: 17px; margin: 0 0 14px; }
+#needs p { margin: 0 0 10px; }
+#needs .ua { color: var(--dim); font: 11px/1.45 ui-monospace, monospace;
+             overflow-wrap: anywhere; }

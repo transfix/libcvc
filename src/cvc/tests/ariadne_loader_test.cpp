@@ -2758,6 +2758,33 @@ scene:
   }
 }
 
+// How far the world may fall behind its clock: clock: { max_lag } takes seconds, more than 0 and
+// at most cvc::kSimCatchupMax; anything else is a warning, and the clock keeps its catch-up.
+TEST(AriadneScene, ClockBlockTakesAMaxLag) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: { max_lag: 0.5 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.clock.max_lag, 0.5);
+  LoadResult unset = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: {}\n");
+  ASSERT_TRUE(unset.ok) << unset.error;
+  EXPECT_EQ(unset.scene.clock.max_lag, 0.0) << "unset: the host's catch-up";
+  for (const char *bad : {"0", "-0.25", "11", "slow"}) {
+    LoadResult b =
+        fresh_load(std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { max_lag: ") +
+                   bad + " }\n");
+    ASSERT_TRUE(b.ok) << b.error;
+    EXPECT_EQ(b.scene.clock.max_lag, 0.0) << bad;
+    bool warned = false;
+    for (const std::string &w : b.warnings)
+      warned = warned || w.find("clock: max_lag") != std::string::npos;
+    EXPECT_TRUE(warned) << bad << ": a lag it cannot use is said";
+  }
+}
+
 // A `type: volume` node (the VTK GPU mapper) with a transfer function + shading toggle — the
 // `volume:` block the realizer feeds to VolumeNode::setTransferFunction/setShading.
 TEST(AriadneScene, VolumeTransferFunctionAndShading) {

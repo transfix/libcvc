@@ -181,9 +181,45 @@ needs (JX4), not a fallback.
   - VolRover3.
 
   cypkg and nicotina run the packaged ari-web, so they move with its release.
-- **The browser gate.** A host page checks `typeof WebAssembly.Suspending === "function"` before it
-  loads the module. Without JSPI, it shows the versions it needs (Chrome 137, Firefox 153,
-  Safari 27) instead of failing in the middle of a load.
+- **The browser gate (built).** A host page checks for JSPI (`WebAssembly.Suspending` and
+  `WebAssembly.promising` are functions) before it fetches anything of the module. Without it,
+  the page says what the browser needs in place of a load that would fail part way.
+  - **The pages.** The two stock loaders: `src/arigl/web/arigl-web.js` (arigl-web, and ariglx-web,
+    the same page with `data-module="ariglx"`) and `src/ari/web/ari-web.js` (`ari.html`,
+    `ari_tvision.html`). And the pages with their own inline script: the gallery's demo page
+    (`examples/web/templates/demo.html.in`, whose `?gldiag` report also gets a `jspi` line),
+    `src/arigl/web/arigl_term.html` and `src/arigl/web/cyprty.html`. Not the bench
+    (`src/ariadne_wasm/bench/jspi_bench.html`), which measures JSPI against Asyncify.
+  - **What it says.** "This page needs a newer browser"; that the page runs on WebAssembly with
+    JSPI, which this browser does not have; and Chrome 137, Firefox 153 or Safari 27, or later
+    (Edge 137 and other browsers built on Chrome 137 too). Every browser on an iPhone or iPad is
+    WebKit, so there it asks for iOS 27 (iPadOS 27 on an iPad), whichever browser it is, and gives
+    the computer versions after. It tells an iPhone or iPad by its user agent (`iPhone`, `iPad`,
+    `iPod`), or by a Mac user agent with a touch screen, which is what iPadOS sends. The browser's
+    user agent comes last.
+  - **One copy per page.** Each page carries the check and the text itself, not a shared file:
+    the arigl-web recipe and cyprty's `stage.sh` ship a fixed list of files, and a page that
+    names a file they don't ship would break. So cyprty gets the gate with the arigl-web release
+    that has it, and needs no change.
+  - **State.** arigl-web and `ari.html` set `window.ariadneWeb.state` to `unsupported`, with the
+    text in `ariadneWeb.needs`.
+  - **The test.** `src/arigl/web/test/arigl_web_smoke.mjs` (CI's arigl-web and ariglx-web jobs)
+    deletes `WebAssembly.Suspending` before the page's own script runs. arigl-web (and
+    ariglx-web, through the same page) must name the three browsers and not iOS. As Chrome on an
+    iPhone (its user agent), it must ask for iOS 27. `ari.html` must do the same in place of its
+    terminal, and ask for iOS 27 as Safari on an iPad (a Mac user agent with touch). None of them
+    may fetch the module's `.js`, its `.wasm` or `python312.zip`. Every other case is the normal
+    run, through the same gate.
+  - **Checked in WebKit (2026-11-23).** Playwright 1.65.1's WebKit is WebKit 27.2 (the WPE
+    MiniBrowser on Linux), and it has JSPI: `WebAssembly.Suspending` and `WebAssembly.promising`
+    are functions. In it, arigl-web 4.0.6's module with the gated loader ran the docset, and
+    `ari.html` drew it. With `WebAssembly.Suspending` deleted, the gate showed and nothing of the
+    module was fetched. cyprty's `main` (cy-pca/cyprty b4ec9fd, staged by its `stage.sh`, which
+    took the gated `arigl-web.js` unchanged) ran in two WebKit pages on the synthetic camera,
+    against a local arisrv 4.0.6. Both joined the room (the relay counted 2 present), each saw the
+    other in Users, in a camera window and as an avatar, and one page's AudioWorklet output got
+    the other's voice stream. This is WebKit's engine on Linux, not Safari on an iPhone, which
+    is still to be tried on a device.
 
 ## 4. Risks
 
