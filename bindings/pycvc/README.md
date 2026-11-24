@@ -540,8 +540,11 @@ later different request keeps the built size and logs a warning, and `pool.threa
 count. The pool holds `size` pooled `Exec`s (the real `pool.threads` by default, at least 1),
 each its own group: its own scheduler, async host, cycle registry and `math.random` stream, its
 natives over the one frozen builtins scope, and its context chrooted at `"<prefix>.<i>"`, so its
-programs' state keys, channels and lock keys resolve under it. The pooled `Exec`s are not exposed;
-`info(pid)` reads what their groups publish.
+programs' state keys, channels and lock keys resolve under it. Each live pool of an app has a prefix
+of its own: the default, `"exec_pool"`, takes the first free of `exec_pool`, `exec_pool_2`,
+`exec_pool_3`, ..., and `pool.prefix` says which; any other prefix a live pool of the app already
+uses raises `ValueError` (a closed pool's prefix is free again). The pooled `Exec`s are not
+exposed; `info(pid)` reads what their groups publish.
 
 ```python
 pool = pycvc.ExecPool(app, threads=8)
@@ -579,8 +582,7 @@ pool.close()
   thread, in creation order.
 - **Owners.** Pooled `Exec` `i`'s programs run with the owner tag `"pycvc:<prefix>.<i>"`, which
   their spawned and forked children keep (a plain `Exec`'s programs have owner `""`;
-  `process_info.owner` shows it). Two pools of one app with the same prefix share their tags, as
-  they share their chroots. A program controls only its own owner's processes across groups:
+  `process_info.owner` shows it). A program controls only its own owner's processes across groups:
   a `(kill pid)`, `(pause pid)` or `(resume pid)` of another pooled `Exec`'s process gives `#f` and
   leaves it running, as an unknown pid does (`docs/STATE_EXEC_THREADED.md` 4.5, the owner rule).
   `(lock-query)` in a pooled program shows the pids of its own `Exec`'s holds.
@@ -589,8 +591,9 @@ pool.close()
   the app's exec scheduler (group 0, built by the first such key), which `run_all` drains before
   each round while it has posts (a round where another thread, an Ariadne frame say, is pumping it
   leaves the drain to that thread), so programs of different pooled `Exec`s meet there. A key
-  under another pooled `Exec`'s chroot
-  (`"/<prefix>.1.inbox"`) goes straight to that `Exec`'s group. A post to group 0 from outside the
+  under another pooled `Exec`'s chroot goes straight to that `Exec`'s group: what its
+  `(msg-recv "inbox")` waits on is `"/<prefix>.1.channels.inbox"` (a relative channel resolves under
+  the chroot's `channels`). A post to group 0 from outside the
   batch is found at the batch wait's end (at most 50 ms). `msg-pending` on a key another group is
   the home of gives 0 (the queue is at the home).
 - **One thread for `run_all` and an `AriApp` on one app.** Both drive the app's exec scheduler

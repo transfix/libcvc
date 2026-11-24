@@ -512,21 +512,54 @@ def test_s2b7_post_message_returns_bool():
 def test_s2b7_a_global_key_meets_across_pooled_execs():
     # S2b.7 (exec_router.h's homes): pooled programs meet on an app-global key. "/s2b7.jobs" is
     # homed at group 0, the app's exec scheduler, which run_all drains between rounds: pooled Exec
-    # 0's program receives what pooled Exec 1's sends there. Its reply goes to a key under Exec 1's
-    # chroot ("/s2b7pool.1.reply"), homed at Exec 1's group, where Exec 1's program waits on it as
-    # "reply". Needs the router (S2b.4); without it each key stays in its sender's group and the
-    # receiver is killed at its idle limit.
+    # 0's program receives what pooled Exec 1's sends there (msg-recv gives the envelope; its
+    # "payload" is the string sent). Its reply goes to the key Exec 1's (msg-recv "reply") waits on,
+    # "/s2b7pool.1.channels.reply" (a relative channel resolves under its chroot's "channels"),
+    # homed at Exec 1's group. Needs the router (S2b.4); without it each key stays in its sender's
+    # group and the receiver is killed at its idle limit.
     app = pycvc.make_app()
     pool = pycvc.ExecPool(app, threads=S2B_THREADS, size=2, prefix="s2b7pool",
                           idle_timeout=3 * WAIT)
     try:
         res = pool.run_all([
-            '(begin (set m (msg-recv "/s2b7.jobs")) (msg-send "/s2b7pool.1.reply" (+ m 1)) m)',
-            '(begin (msg-send "/s2b7.jobs" 41) (msg-recv "reply"))',
+            '(begin (set m (get-attr (msg-recv "/s2b7.jobs") "payload")) '
+            '(msg-send "/s2b7pool.1.channels.reply" (str-concat m "+1")) m)',
+            '(begin (msg-send "/s2b7.jobs" "41") (get-attr (msg-recv "reply") "payload"))',
         ])
     finally:
         pool.close()
-    assert res == ["41", "42"], res
+    assert res == ["41", "41+1"], res
+
+
+def test_s2b7_one_prefix_per_pool():
+    # R2b's S-M2: two pools of one app with one prefix would register one channel prefix, homed at
+    # the first pool's groups, which only the first pool's run_all pumps, so the second pool's own
+    # channels would hang. Two default pools take exec_pool and exec_pool_2 (ExecPool.prefix), and
+    # the second's program messages itself on its own channel. An explicit prefix a live pool uses
+    # raises ValueError; once that pool is closed, the prefix is free again.
+    app = pycvc.make_app()
+    first = pycvc.ExecPool(app, threads=S2B_THREADS, size=1, idle_timeout=WAIT)
+    second = pycvc.ExecPool(app, threads=S2B_THREADS, size=1, idle_timeout=WAIT)
+    try:
+        assert (first.prefix, second.prefix) == ("exec_pool", "exec_pool_2")
+        res = second.run_all(['(begin (msg-send "k" "self") (get-attr (msg-recv "k") "payload"))'])
+        assert res == ["self"], res
+        try:
+            pycvc.ExecPool(app, size=1, prefix="exec_pool_2")
+        except ValueError as e:
+            assert "in use" in str(e), e
+        else:
+            raise AssertionError("a pool took a prefix another live pool uses")
+    finally:
+        second.close()
+        first.close()
+    again = pycvc.ExecPool(app, size=1, prefix="exec_pool_2")
+    try:
+        assert again.prefix == "exec_pool_2"
+        res = again.run_all(['(begin (msg-send "k" "again") (get-attr (msg-recv "k") "payload"))'])
+        assert res == ["again"], res
+    finally:
+        again.close()
 
 
 if __name__ == "__main__":

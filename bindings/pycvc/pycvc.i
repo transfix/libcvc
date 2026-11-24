@@ -4853,7 +4853,7 @@ def register_intrinsics(env, ctx):
 // exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
 // raises ValueError. run_all, register_fn, register_async_fn, stats() (a dict of run_all's batch
 // wait counters, S2a.8), info(pid) (a process's published row, S2b) and close() are methods;
-// threads is a read-only property.
+// threads and prefix (the one its pooled Execs use: the default's pick) are read-only properties.
 %feature("kwargs") pycvc::ExecPool::ExecPool;
 %feature("kwargs") pycvc::ExecPool::register_async_fn;
 %exception pycvc::ExecPool::ExecPool {
@@ -4865,6 +4865,7 @@ def register_intrinsics(env, ctx):
   PYCVC_STATE_EXEC_CATCH
 }
 %rename(_threads) pycvc::ExecPool::threads;
+%rename(_prefix) pycvc::ExecPool::prefix;
 %include "pycvc_exec_pool.h"
 %extend pycvc::ExecPool {
   // info(pid): the process's row as its group last published it (S2-Q9; exec_pool::info), a dict
@@ -4919,6 +4920,8 @@ def register_intrinsics(env, ctx):
   %pythoncode %{
     threads = property(lambda self: self._threads(),
                        doc="The app pool's worker count (the real one).")
+    prefix = property(lambda self: self._prefix(),
+                      doc="The prefix its pooled Execs are chrooted under (the default's pick).")
   %}
 }
 
