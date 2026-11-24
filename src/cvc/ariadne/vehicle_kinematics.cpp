@@ -52,18 +52,24 @@ kinematic_vehicle kinematic_vehicle_at(const kinematic_drive &k,
     v.heading = yaw;
     return v;
   }
-  // Through its tick so far, and to its end, along the velocity.
+  // Through its tick so far, and to its end, along the velocity, turning at its yaw rate. The
+  // relay's box goes on a line from the bicycle's box at the tick's start to its box at the end,
+  // its yaw too, so its velocity and yaw rate are the same all through the tick, and the sample's
+  // give both ends (OW5r). A sample without the spin (a relay before OW5n) turns at 0.
   const int n = k.tick_steps;
   const int j = into_tick(k, tick);
   v.sub = j + 1;
   const double back = fixed_dt * static_cast<double>(j + 1);
   const double ahead = fixed_dt * static_cast<double>(n - j - 1);
-  v.from = {v.box[0] - v.vx * back, v.box[1] - v.vy * back, v.z, yaw};
-  v.to = {v.box[0] + v.vx * ahead, v.box[1] + v.vy * ahead, v.z, yaw};
-  v.heading = yaw;
-  v.speed = v.vx * std::cos(yaw) + v.vy * std::sin(yaw);
-  v.rx = v.to[0] + k.rear_x * std::cos(yaw);
-  v.ry = v.to[1] + k.rear_x * std::sin(yaw);
+  const double wz = chassis.angular_velocity.z;
+  v.from = {v.box[0] - v.vx * back, v.box[1] - v.vy * back, v.z, yaw - wz * back};
+  v.to = {v.box[0] + v.vx * ahead, v.box[1] + v.vy * ahead, v.z, yaw + wz * ahead};
+  // The bicycle at the tick's end: the box's heading there, its speed along it.
+  const double end = v.to[3];
+  v.heading = end;
+  v.speed = v.vx * std::cos(end) + v.vy * std::sin(end);
+  v.rx = v.to[0] + k.rear_x * std::cos(end);
+  v.ry = v.to[1] + k.rear_x * std::sin(end);
   return v;
 }
 

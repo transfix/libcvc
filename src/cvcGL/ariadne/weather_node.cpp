@@ -81,10 +81,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_weather.h> // scene_weather_params: the storms' props, as the world reads them
-#include <cvc/ariadne/scene_wind.h>    // the scene's wind: the steering, and the rain's slant
+#include <cvc/ariadne/scene_wind.h>  // the scene's wind: the steering, and the rain's slant
+#include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
@@ -405,6 +407,7 @@ struct WeatherRT {
   std::string prefix; // the scene's state prefix (its wind's keys)
   cvc::world::weather model;
   std::string gustKey; // weather.gust_front: the storm wind's peak (the rain's slant here)
+
   // Its keys (weather.* or the node's keys: root).
   std::string eventsKey, scaleKey, requestKey;
   std::string stateKey, storminessKey, cellsKey, stormsKey, rainKey, deckKey;
@@ -512,9 +515,15 @@ std::string discs(const cvc::world::weather_now &w) {
 void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren);
 void lightning(WeatherRT &r, vtkRenderer *ren);
 
+// The time the storms are drawn at: the scene's shown time (OW5q: a client of a relay draws the
+// relay's storms at the relay's time, shown_clock.h), else the app's world clock's.
+double weather_time(const WeatherRT &r) {
+  return ari::shown_time(*r.app, r.prefix, r.app->world_clock().t());
+}
+
 void tick(WeatherRT &r, vtkRenderer *ren) {
   cvc::app &app = *r.app;
-  const double t = app.world_clock().t();
+  const double t = weather_time(r);
   // The events, when someone else wrote them (a server, a script).
   {
     const std::string text = ari::read_or<std::string>(app, r.eventsKey, std::string());
@@ -683,7 +692,7 @@ void tick(WeatherRT &r, vtkRenderer *ren) {
 // rings, shafts and fog), and the streaks near the camera.
 void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
   cvc::app &app = *r.app;
-  const double t = app.world_clock().t();
+  const double t = weather_time(r);
   const double strength[4] = {std::max(0.0, ari::read_or<double>(app, r.streaksKey, 1.0)),
                               std::max(0.0, ari::read_or<double>(app, r.ringsKey, 1.0)),
                               std::max(0.0, ari::read_or<double>(app, r.fogKey, 1.0)),
@@ -786,7 +795,7 @@ void rain(WeatherRT &r, const cvc::world::weather_now &w, vtkRenderer *ren) {
 constexpr double FLASH_LOOK = 0.8; // world seconds back the strikes are looked for
 void lightning(WeatherRT &r, vtkRenderer *ren) {
   cvc::app &app = *r.app;
-  const double t = app.world_clock().t();
+  const double t = weather_time(r);
   const double ahead = r.flashT >= 0.0 ? std::clamp(t - r.flashT, 0.0, 0.1) : 0.0;
   r.flashT = t;
   const double strength = std::max(0.0, ari::read_or<double>(app, r.lightningKey, 1.0));
@@ -896,6 +905,7 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   rt->rainKey = key(pref, n, "weather.rain");
   rt->deckKey = key(pref, n, "weather.deck");
   rt->gustKey = key(pref, n, "weather.gust_front");
+  ari::seed_shown_clock(app, pref); // its storms at the scene's shown time (OW5q)
   ari::read_or_seed<double>(app, rt->gustKey, p.front_speed);
   ari::read_or_seed<std::string>(app, rt->eventsKey, n.props.str("events"));
   ari::read_or_seed<double>(app, rt->scaleKey, p.rate);

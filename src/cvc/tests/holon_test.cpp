@@ -1955,6 +1955,68 @@ TEST(HolonVehicleTest, ASampleCarriesTheSteeringToTheModel) {
   }
 }
 
+// A sample that puts the vehicle where it was predicted but turned (OW5r): its place is within
+// reconcile_tol, its heading off by more than reconcile_yaw_tol, so the holon places it again
+// from the sample, heading and all; before, it kept its own heading, and the vehicle drove off the
+// relay's line until its place was off by reconcile_tol. A heading within the tolerance, or a
+// tolerance set wide, leaves it as predicted. The same for the speed.
+TEST(HolonVehicleTest, AVehicleTurnedOrSpedUpInPlaceIsPlacedAgain) {
+  const cvc::ariadne::kinematic_drive k = humvee_drive();
+  const double dt = 1.0 / 120.0;
+  struct run {
+    double yaw_off, speed_off, yaw_tol, speed_tol;
+    double heading_after, speed_after; // the predicted vehicle's, right after the sample
+  };
+  const auto sampled = [&](run &r) {
+    cvc::ariadne::holon_config cfg;
+    cfg.reconcile_yaw_tol = r.yaw_tol;
+    cfg.reconcile_speed_tol = r.speed_tol;
+    holon client(holon_role::client, cfg);
+    client.add_participant("A", true);
+    ASSERT_TRUE(client.predict_vehicle("A", k));
+    body_state start;
+    start.position = vec3{-40.0, 0.0, 1.2};
+    start.linear_velocity = vec3{8.0, 0.0, 0.0};
+    cvc::ariadne::kinematic_vehicle relay = cvc::ariadne::kinematic_vehicle_at(k, start, 1000, dt);
+    client.apply_authoritative("A", cvc::ariadne::kinematic_vehicle_state(relay), 1000);
+    avatar_intent in;
+    in.steer = 0.0;
+    in.throttle = 0.0;
+    in.brake = 0.0;
+    client.set_intent("A", in);
+    for (int i = 0; i < 8; ++i) {
+      const std::uint64_t before = client.tick();
+      client.advance(dt);
+      for (std::uint64_t t = before + 1; t <= client.tick(); ++t)
+        relay_step(relay, k, in, t, dt);
+    }
+    // The relay's vehicle where the client has it, turned by YAW_OFF and faster by SPEED_OFF.
+    body_state s = cvc::ariadne::kinematic_vehicle_state(relay);
+    const double yaw = relay.box[3] + r.yaw_off;
+    s.rotation = {std::cos(0.5 * yaw), 0.0, 0.0, std::sin(0.5 * yaw)};
+    const double v = std::hypot(s.linear_velocity.x, s.linear_velocity.y) + r.speed_off;
+    s.linear_velocity = vec3{v * std::cos(yaw), v * std::sin(yaw), 0.0};
+    client.apply_authoritative("A", s, client.tick());
+    cvc::ariadne::kinematic_vehicle now;
+    ASSERT_TRUE(client.predicted_vehicle("A", now));
+    r.heading_after = now.box[3];
+    r.speed_after = std::hypot(now.vx, now.vy);
+  };
+  // A turned sample's velocity is turned too (0.4 m/s off at 8 m/s), so the wide run widens both.
+  run turned{0.05, 0.0, 0.01, 0.05}, slight{0.005, 0.0, 0.01, 0.05}, wide{0.05, 0.0, 1.0, 10.0};
+  run faster{0.0, 0.5, 0.01, 0.05}, barely{0.0, 0.02, 0.01, 0.05};
+  for (run *r : {&turned, &slight, &wide, &faster, &barely})
+    sampled(*r);
+  std::printf("  turned 0.05 rad in place: heading after %.4f (placed again); 0.005: %.4f; with a "
+              "1 rad and 10 m/s tolerance: %.4f; 0.5 m/s faster: %.3f m/s\n",
+              turned.heading_after, slight.heading_after, wide.heading_after, faster.speed_after);
+  EXPECT_NEAR(turned.heading_after, 0.05, 0.002) << "placed again, at the sample's heading";
+  EXPECT_NEAR(slight.heading_after, 0.0, 1e-9) << "within the tolerance: as predicted";
+  EXPECT_NEAR(wide.heading_after, 0.0, 1e-9) << "a wide tolerance: as before OW5r";
+  EXPECT_GT(faster.speed_after, 8.3) << "placed again at the sample's speed";
+  EXPECT_LT(barely.speed_after, 8.01) << "within the tolerance: as predicted";
+}
+
 // The same on the jolt plant (OW5i): its model is a Jolt vehicle in a world of the client's own
 // (here flat ground, as the holon has no statics), and the whole of that world is what a sample
 // takes from the prediction for its tick: the wheels, the powertrain, the driver.

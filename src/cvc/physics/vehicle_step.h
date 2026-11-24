@@ -50,6 +50,8 @@ public:
 
   void drive(vehicle_id id, const drive_command &c);
   void set_controls(vehicle_id id, const vehicle_controls &c);
+  // world::set_vehicle_steer: the actuator's angle, clamped to max_steer.
+  void set_steer(vehicle_id id, double steer);
 
   // `t` is the world's field time, the air's wind is read at (field_set::air_at).
   void pre_step(world_backend &be, const field_set &fields, const world_config &cfg,

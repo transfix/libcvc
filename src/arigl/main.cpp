@@ -1608,6 +1608,8 @@ struct ConferenceSession {
       entities_->pump(*app_, room_, f.wall_dt);
     cvc::ariadne::client_pump(*holon_, *app_, room_, pid_, f.wall_dt, entities_.get(),
                               &world_replica_);
+    // The relay's sea and storms in the document we draw, at the relay's time (OW5q).
+    cvc::ariadne::show_relay_seas(*app_, room_, *holon_, world_replica_, prefix_);
     if (world_replica_.status() != world_status_) {
       world_status_ = world_replica_.status();
       std::fprintf(stderr, "arigl: room: world document: %s\n", world_status_.c_str());

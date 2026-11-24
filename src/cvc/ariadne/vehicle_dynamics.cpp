@@ -104,7 +104,11 @@ dynamic_vehicle_model::dynamic_vehicle_model(const dynamic_drive &drive, double 
       _jolt_statics = true;
     }
     for (const ph::field &f : world->water)
-      _jolt->world().add_field(f);
+      _water_ids.push_back(_jolt->world().add_field(f));
+    _waters.push_back({0, world->water});
+    _water_serial.push_back(_water_next++);
+    for (const timed_water &w : world->water_after) // what the water took on since (OW5q)
+      set_water(w.water, w.from_tick);
     add_obstacle_room(world);
     return;
   }
@@ -259,6 +263,7 @@ void dynamic_vehicle_model::load_jolt(const dynamic_vehicle &v) const {
   if (!s || !s->world)
     throw std::invalid_argument("dynamic_vehicle_model: not a jolt vehicle's state");
   if (s->world != _jlast) {
+    water_to(s->water); // the sea it was saved on: a world restores onto no other (OW5q)
     _jolt->world().restore(*s->world);
     _jlast = s->world;
     if (_boat)
@@ -290,6 +295,7 @@ bool dynamic_vehicle_model::ensure_boat(const ph::body_state &chassis) const {
   if (_bdesc.length_overall > 0.0)
     _jreach = 0.5 * _bdesc.length_overall;
   _jadded = std::make_shared<const std::vector<std::uint8_t>>(_jolt->world().save());
+  _jadded_water = _water_on;
   _jlast = _jadded;
   return true;
 }
@@ -490,7 +496,8 @@ void dynamic_vehicle_model::keep_jolt(dynamic_vehicle &v) const {
   const std::shared_ptr<const std::vector<std::uint8_t>> saved =
       std::make_shared<const std::vector<std::uint8_t>>(w.save());
   _jlast = saved;
-  v.model = jolt_vehicle_saved{saved, _boat ? _boat->remember(0) : ph::dyn_boat_plant::memory{}};
+  v.model = jolt_vehicle_saved{saved, _boat ? _boat->remember(0) : ph::dyn_boat_plant::memory{},
+                               _water_on};
   const ph::body_state s = w.state(_jchassis);
   const ph::quat &q = s.rotation;
   v.box = {s.position.x, s.position.y, s.position.z, yaw_of(q)};
@@ -533,6 +540,7 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
     }
   }
   if (!was) {
+    water_to(_jadded_water);
     w.restore(*_jadded); // the vehicle as it was added, at rest, its command none
     _jlast = _jadded;
     if (_boat)
@@ -569,6 +577,10 @@ dynamic_vehicle dynamic_vehicle_model::at_jolt(const ph::body_state &chassis, st
   if (steer)
     s.angular_velocity = chassis.angular_velocity;
   w.set_state(_jchassis, s);
+  // A jolt vehicle's wheels at the relay's steering angle (OW5r), the actuator's: a client that
+  // joins mid-turn turns with the relay's car from the first step, not from straight wheels.
+  if (steer && !_boat && _jveh.valid())
+    w.set_vehicle_steer(_jveh, *steer);
   keep_jolt(v);
   return v;
 }
@@ -742,6 +754,59 @@ void dynamic_vehicle_model::step_jolt(dynamic_vehicle &v, bool tick) {
   keep_jolt(v);
 }
 
+void dynamic_vehicle_model::set_water(const std::vector<ph::field> &water,
+                                      std::uint64_t from_tick) {
+  if (!is_boat() || !_jolt)
+    return;
+  // In tick order: a sea that goes in no later than one kept replaces it and those after it.
+  while (!_waters.empty() && _waters.size() > 1 && _waters.back().from_tick >= from_tick) {
+    _waters.pop_back();
+    _water_serial.pop_back();
+  }
+  _waters.push_back({from_tick, water});
+  _water_serial.push_back(_water_next++);
+  while (_waters.size() > kWaterKept) {
+    _waters.erase(_waters.begin());
+    _water_serial.erase(_water_serial.begin());
+  }
+}
+
+void dynamic_vehicle_model::water_for(std::uint64_t tick) const {
+  // The newest water in by the step ending on TICK: its from_tick is behind it (SceneWorld puts a
+  // keyframe's field in at the first step that ends past it); before them all, the first.
+  std::size_t i = 0;
+  for (std::size_t j = 0; j < _waters.size(); ++j)
+    if (_waters[j].from_tick == 0 || tick > _waters[j].from_tick)
+      i = j;
+  put_water(i);
+}
+
+void dynamic_vehicle_model::water_to(std::uint64_t serial) const {
+  for (std::size_t i = 0; i < _water_serial.size(); ++i)
+    if (_water_serial[i] == serial) {
+      put_water(i);
+      return;
+    }
+}
+
+void dynamic_vehicle_model::put_water(std::size_t i) const {
+  if (_waters.empty() || i >= _waters.size() || _water_serial[i] == _water_on)
+    return;
+  ph::world &w = _jolt->world();
+  const std::vector<ph::field> &water = _waters[i].water;
+  if (water.size() == _water_ids.size()) {
+    for (std::size_t k = 0; k < water.size(); ++k)
+      w.set_field(_water_ids[k], water[k]);
+  } else {
+    for (const ph::field_id id : _water_ids)
+      w.remove_field(id);
+    _water_ids.clear();
+    for (const ph::field &f : water)
+      _water_ids.push_back(w.add_field(f));
+  }
+  _water_on = _water_serial[i];
+}
+
 void dynamic_vehicle_model::step_boat(dynamic_vehicle &v, bool tick) {
   const jolt_vehicle_saved *s = std::get_if<jolt_vehicle_saved>(&v.model);
   if (!s)
@@ -749,6 +814,9 @@ void dynamic_vehicle_model::step_boat(dynamic_vehicle &v, bool tick) {
   if (!s->world || !_boat)
     return; // not on the water yet: it stays where it is until a sample puts it there
   load_jolt(v);
+  // The water of the tick this step ends on (OW5q): the world's field time is the clock's (at()
+  // set it to the sample's tick's, and each step adds a step).
+  water_for(static_cast<std::uint64_t>(std::llround(_jolt->world().field_time() / _dt)) + 1);
   if (tick) {
     // The navigator's tick: its hold at the plant's speed, then the command to the driver.
     float steer = 0.0f, accel = 0.0f;

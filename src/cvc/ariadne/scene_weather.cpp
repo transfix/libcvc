@@ -216,7 +216,7 @@ void WeatherFriction::set_ground(std::shared_ptr<const cvc::height_field> field)
 
 bool WeatherFriction::has_ground() const { return _impl->field != nullptr; }
 
-void WeatherFriction::read_keys() {
+void WeatherFriction::read_keys(const cvc::world_clock *clock_on) {
   impl &d = *_impl;
   if (!d.app)
     return;
@@ -240,7 +240,7 @@ void WeatherFriction::read_keys() {
   const double gust = std::max(0.0, read_or<double>(*d.app, d.gustKey, d.gustPending));
   if (gust != d.gustPending) {
     d.gustPending = gust;
-    const cvc::world_clock &clock = d.app->world_clock();
+    const cvc::world_clock &clock = clock_on ? *clock_on : d.app->world_clock();
     const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
     d.gustFrom = (clock.tick() / ticks + 1) * ticks;
   }
@@ -311,6 +311,36 @@ double WeatherFriction::applied() const { return _impl->applied; }
 double WeatherFriction::gust_front() const { return _impl->gust; }
 const cvc::world::weather &WeatherFriction::model() const { return _impl->model; }
 std::uint64_t WeatherFriction::revision() const { return _impl->revision; }
+const std::string &WeatherFriction::events_text() const { return _impl->eventsText; }
+std::uint64_t WeatherFriction::gust_from() const { return _impl->gustFrom; }
+
+bool WeatherFriction::follow(const std::string &events, double gust, std::uint64_t gust_from) {
+  impl &d = *_impl;
+  bool changed = false;
+  if (!events.empty() && events != d.eventsText) {
+    std::vector<cvc::world::weather_event> ev;
+    if (cvc::world::parse_weather_events(events, ev)) {
+      d.model.set_events(std::move(ev));
+      d.eventsText = events;
+      d.period = kNever; // the storms' history changed: the wetness again at the next step
+      if (d.app)
+        write<std::string>(*d.app, d.eventsKey, events);
+      changed = true;
+    }
+  }
+  gust = std::max(0.0, gust);
+  if (gust != d.gust || gust != d.gustPending) {
+    d.gust = d.gustPending = gust;
+    d.gustFrom = gust_from;
+    d.params();
+    if (d.app && !d.gustKey.empty())
+      write<double>(*d.app, d.gustKey, gust);
+    changed = true;
+  }
+  if (changed)
+    ++d.revision;
+  return changed;
+}
 
 // ── StormWindFlow ────────────────────────────────────────────────────────────────────────────────
 
