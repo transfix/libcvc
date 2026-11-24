@@ -1912,6 +1912,278 @@ scene:
   EXPECT_TRUE(b->fit_up_y);
 }
 
+// prototypes: and use: (gap item 6): an instance is the prototype's node with the using node's keys
+// over it (material: merged, children: after the prototype's), its {name} args filled in, its
+// mesh parts read once for every instance (hidden assets), nested prototypes expanded, and a cycle
+// or an unknown name refused with a warning.
+TEST(AriadneScene, PrototypesAndUse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+prototypes:
+  lamp:
+    type: group
+    args: { switch: lamps.on, label: plain }
+    tags: ["{label}"]
+    children:
+      - node: pole
+        source: { box: { size: [0.2, 0.2, 5] } }
+        material: { color: [0.2, 0.2, 0.2] }
+      - node: bulb
+        source: { sphere: 0.4 }
+        transform: { position: [0, 0, 5] }
+        visible: "{switch}"
+        material: { color: [1, 0.9, 0.6], ambient: 0.5 }
+      - node: crate
+        source: { box: 1 }
+        body: static
+  shade:
+    source: { sphere: "{radius}" }
+    args: { radius: 0.5 }
+  post:
+    type: group
+    children:
+      - { node: cap, use: shade }
+  loop_a:
+    children: [{ node: inner, use: loop_b }]
+  loop_b:
+    children: [{ node: inner, use: loop_a }]
+scene:
+  nodes:
+    - node: lamp_a
+      use: lamp
+      transform: { position: [1, 2, 3] }
+    - node: lamp_b
+      use: lamp
+      args: { switch: lamps.north, label: north }
+      children:
+        - { node: sign, source: { box: 0.3 } }
+    - { node: big_shade, use: shade, args: { radius: 2 }, material: { color: [0, 1, 0] } }
+    - { node: one_post, use: post }
+    - { node: own_mesh, use: lamp, source: { box: 3 }, type: geometry }
+    - { node: nowhere, use: missing }
+    - { node: looped, use: loop_a }
+scenes:
+  - scene: other
+    nodes:
+      - { node: lamp_c, use: lamp }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+
+  const SceneNode *a = find_scene_node(r.scene.nodes, "lamp_a");
+  ASSERT_NE(a, nullptr);
+  EXPECT_EQ(a->type, "group");
+  EXPECT_FLOAT_EQ(a->position[0], 1.0f);
+  EXPECT_FLOAT_EQ(a->position[2], 3.0f);
+  ASSERT_EQ(a->children.size(), 3u);
+  EXPECT_EQ(a->children[0].id, "pole");
+  EXPECT_EQ(a->children[1].visible_bind, "lamps.on"); // the arg's default
+  ASSERT_EQ(a->tags.size(), 1u);
+  EXPECT_EQ(a->tags[0], "plain");
+
+  // The meshes every instance shares: a hidden asset per part, read once.
+  EXPECT_EQ(a->children[0].source_asset, "prototype:lamp/0");
+  EXPECT_EQ(a->children[1].source_asset, "prototype:lamp/1");
+  EXPECT_TRUE(a->children[2].source_asset.empty()); // a part with a body keeps its own primitive
+  EXPECT_EQ(a->children[2].source_primitive, "box");
+  EXPECT_TRUE(a->children[2].body.present);
+  EXPECT_FLOAT_EQ(a->children[1].color[0], 1.0f); // the part's other keys are its own still
+  EXPECT_FLOAT_EQ(a->children[1].ambient, 0.5f);
+
+  const SceneNode *b = find_scene_node(r.scene.nodes, "lamp_b");
+  ASSERT_NE(b, nullptr);
+  ASSERT_EQ(b->children.size(), 4u); // the prototype's three, then its own
+  EXPECT_EQ(b->children[1].visible_bind, "lamps.north");
+  EXPECT_EQ(b->children[0].source_asset, "prototype:lamp/0"); // the same asset as lamp_a's
+  EXPECT_EQ(b->children[3].id, "sign");
+  EXPECT_EQ(b->children[3].source_primitive, "box"); // the use site's own part: not shared
+  ASSERT_EQ(b->tags.size(), 1u);
+  EXPECT_EQ(b->tags[0], "north");
+  EXPECT_FALSE(b->has_transform);
+
+  // A token in a part's source: each instance reads its own, with its own radius.
+  const SceneNode *s = find_scene_node(r.scene.nodes, "big_shade");
+  ASSERT_NE(s, nullptr);
+  EXPECT_TRUE(s->source_asset.empty());
+  EXPECT_EQ(s->source_primitive, "sphere");
+  EXPECT_FLOAT_EQ(s->sphere_radius, 2.0f);
+  EXPECT_FLOAT_EQ(s->color[1], 1.0f); // the use site's material
+
+  // Nested: post's cap is a shade, with shade's default radius.
+  const SceneNode *cap = find_scene_node(r.scene.nodes, "cap");
+  ASSERT_NE(cap, nullptr);
+  EXPECT_EQ(cap->source_primitive, "sphere");
+  EXPECT_FLOAT_EQ(cap->sphere_radius, 0.5f);
+
+  // A source of the use site's own replaces the prototype's root mesh, and is not shared.
+  const SceneNode *own = find_scene_node(r.scene.nodes, "own_mesh");
+  ASSERT_NE(own, nullptr);
+  EXPECT_EQ(own->type, "geometry");
+  EXPECT_EQ(own->source_primitive, "box");
+  EXPECT_TRUE(own->source_asset.empty());
+  EXPECT_EQ(own->children.size(), 3u);
+
+  EXPECT_TRUE(has_warning(r, "'nowhere': use: 'missing' names no prototype"));
+  EXPECT_NE(find_scene_node(r.scene.nodes, "nowhere"), nullptr); // parsed as written
+  EXPECT_TRUE(has_warning(r, "use: 'loop_a' is within itself"));
+
+  // Each shared part is one asset, in every scene.
+  const auto count = [](const std::vector<SceneAsset> &as, const std::string &id) {
+    return std::count_if(as.begin(), as.end(), [&id](const SceneAsset &x) { return x.id == id; });
+  };
+  EXPECT_EQ(count(r.scene.assets, "prototype:lamp/0"), 1);
+  EXPECT_EQ(count(r.scene.assets, "prototype:lamp/1"), 1);
+  EXPECT_EQ(count(r.scene.assets, "prototype:lamp/2"), 0);
+  ASSERT_EQ(r.scenes.size(), 1u);
+  EXPECT_EQ(count(r.scenes[0].assets, "prototype:lamp/0"), 1);
+  for (const SceneAsset &x : r.scene.assets)
+    if (x.id == "prototype:lamp/1") {
+      EXPECT_EQ(x.source.source_primitive, "sphere");
+      EXPECT_FLOAT_EQ(x.source.sphere_radius, 0.4f);
+    }
+  const SceneNode *c = find_scene_node(r.scenes[0].nodes, "lamp_c");
+  ASSERT_NE(c, nullptr);
+  ASSERT_EQ(c->children.size(), 3u);
+  EXPECT_EQ(c->children[0].source_asset, "prototype:lamp/0");
+}
+
+// scene: animations: (gap item 7): each animation's keys and tracks, keyframes put in time order,
+// and a bad track left out with a warning.
+TEST(AriadneScene, AnimationsParsed) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: door, source: { box: 1 } }
+  animations:
+    - animation: swing
+      loop: pingpong
+      autoplay: false
+      speed: 0.5
+      duration: 4
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[2, [0, 0, 90]], [0, [0, 0, 0]]]
+        - { state: door.angle, interpolation: step, keys: [[0, 0], [2, 90]] }
+        - { node: door, key: wobble, keys: [[0, 1]] }
+        - { node: door, key: position, keys: [[0, [1, 2]]] }
+        - { node: door, state: x, key: scale, keys: [[0, [1, 1, 1]]] }
+        - { state: a.b, keys: [[0, 1], [1, [1, 2]]] }
+    - { animation: spin, loop: true, tracks: [{ node: door, key: opacity, keys: [[0, 1], [1, 0]] }] }
+    - { animation: "bad.id", tracks: [] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.animations.size(), 2u);
+  const SceneAnimation &s = r.scene.animations[0];
+  EXPECT_EQ(s.id, "swing");
+  EXPECT_EQ(s.loop, SceneAnimation::loop_mode::pingpong);
+  EXPECT_FALSE(s.autoplay);
+  EXPECT_DOUBLE_EQ(s.speed, 0.5);
+  EXPECT_DOUBLE_EQ(s.length(), 4.0); // its duration, not its last key's 2
+  ASSERT_EQ(s.tracks.size(), 2u);    // four bad tracks left out
+  const SceneAnimationTrack &rot = s.tracks[0];
+  EXPECT_EQ(rot.node, "door");
+  EXPECT_EQ(rot.key, "rotation");
+  EXPECT_EQ(rot.interpolation, SceneAnimationTrack::interp::smooth);
+  ASSERT_EQ(rot.times.size(), 2u);
+  EXPECT_DOUBLE_EQ(rot.times[0], 0.0); // in time order
+  EXPECT_DOUBLE_EQ(rot.values[1][2], 90.0);
+  EXPECT_EQ(s.tracks[1].state, "door.angle");
+  EXPECT_EQ(s.tracks[1].interpolation, SceneAnimationTrack::interp::step);
+  EXPECT_TRUE(has_warning(r, "track 2: a node's key: is position, rotation"));
+  EXPECT_TRUE(has_warning(r, "track 3: keys: is a list of [seconds, value] with the value 3"));
+  EXPECT_TRUE(has_warning(r, "track 4: names a node: (with a key:) or a state:, one of them"));
+  EXPECT_TRUE(has_warning(r, "track 5: keys: is a list of [seconds, value] with the value one"));
+  const SceneAnimation &spin = r.scene.animations[1];
+  EXPECT_EQ(spin.loop, SceneAnimation::loop_mode::loop);
+  EXPECT_TRUE(spin.autoplay);
+  EXPECT_DOUBLE_EQ(spin.length(), 1.0);
+  EXPECT_TRUE(has_warning(r, "scene animation 'bad.id': its animation: name is a key segment"));
+}
+
+// sample_track: the first value before the first key, the last after the last; linear, step and
+// smooth between (smooth flat at the ends, so a two-key track eases in and out).
+TEST(AriadneScene, AnimationTrackSampling) {
+  SceneAnimationTrack tr;
+  tr.times = {1.0, 3.0, 5.0};
+  tr.values = {{0.0, 10.0}, {4.0, 10.0}, {0.0, 20.0}};
+  std::vector<double> v;
+  sample_track(tr, 0.0, v);
+  ASSERT_EQ(v.size(), 2u);
+  EXPECT_DOUBLE_EQ(v[0], 0.0);
+  sample_track(tr, 9.0, v);
+  EXPECT_DOUBLE_EQ(v[1], 20.0);
+  sample_track(tr, 2.0, v);
+  EXPECT_DOUBLE_EQ(v[0], 2.0); // halfway, linear
+  sample_track(tr, 4.5, v);
+  EXPECT_DOUBLE_EQ(v[1], 17.5);
+  tr.interpolation = SceneAnimationTrack::interp::step;
+  sample_track(tr, 2.9, v);
+  EXPECT_DOUBLE_EQ(v[0], 0.0);
+  sample_track(tr, 3.0, v);
+  EXPECT_DOUBLE_EQ(v[0], 4.0);
+  tr.interpolation = SceneAnimationTrack::interp::smooth;
+  sample_track(tr, 3.0, v); // through every key
+  EXPECT_DOUBLE_EQ(v[0], 4.0);
+  sample_track(tr, 2.0, v); // eases out of the first key: 0 tangent at 1, (0 - 0) / 4 at 3
+  EXPECT_DOUBLE_EQ(v[0], 2.0);
+  SceneAnimationTrack two;
+  two.interpolation = SceneAnimationTrack::interp::smooth;
+  two.times = {0.0, 1.0};
+  two.values = {{0.0}, {1.0}};
+  sample_track(two, 0.25, v);
+  EXPECT_NEAR(v[0], 0.15625, 1e-12); // smoothstep: 3u^2 - 2u^3
+  SceneAnimationTrack none;
+  sample_track(none, 1.0, v);
+  EXPECT_TRUE(v.empty());
+}
+
+// advance_animation: once stops at either end, loop wraps, pingpong turns back; a paused or
+// zero-length animation holds.
+TEST(AriadneScene, AnimationPlayback) {
+  SceneAnimation a;
+  a.duration = 2.0;
+  SceneAnimationPlayhead h;
+  advance_animation(a, 1.0, 0.5, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.5);
+  advance_animation(a, 1.0, 5.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 2.0);
+  EXPECT_FALSE(h.playing); // once: stopped at the end
+  advance_animation(a, 1.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 2.0); // and holds while stopped
+  h.playing = true;
+  advance_animation(a, -2.0, 0.5, h); // backwards
+  EXPECT_DOUBLE_EQ(h.time, 1.0);
+  advance_animation(a, -2.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.0);
+  EXPECT_FALSE(h.playing);
+
+  a.loop = SceneAnimation::loop_mode::loop;
+  h = SceneAnimationPlayhead{};
+  advance_animation(a, 1.0, 5.5, h);
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+  EXPECT_TRUE(h.playing);
+  advance_animation(a, -1.0, 2.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+
+  a.loop = SceneAnimation::loop_mode::pingpong;
+  h = SceneAnimationPlayhead{};
+  advance_animation(a, 1.0, 2.5, h); // there, and half a second back
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+  EXPECT_FALSE(h.forward);
+  advance_animation(a, 1.0, 2.0, h); // back to 0, and half a second out again
+  EXPECT_DOUBLE_EQ(h.time, 0.5);
+  EXPECT_TRUE(h.forward);
+
+  SceneAnimation empty;
+  h = SceneAnimationPlayhead{};
+  advance_animation(empty, 1.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.0);
+}
+
 // material: { pbr: ... } and the scene's environment: (gap item 5): every key read, defaults kept,
 // a bad value clamped or left out with a warning, and the Phong keys beside pbr: warned about.
 TEST(AriadneScene, PbrMaterialAndEnvironment) {

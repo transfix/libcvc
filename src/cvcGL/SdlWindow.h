@@ -62,9 +62,21 @@ public:
   vtkTypeBool IsDirect() override { return 1; }
 
   // Size is the drawable's, in pixels, as VTK's own windows have it: where a window point is
-  // several pixels (macOS, Wayland), the window is that many times smaller in points.
+  // several pixels (macOS, Wayland), the window is that many times smaller in points. On Windows
+  // the size set before the window is made is in the display's logical pixels instead (96 dpi, the
+  // size a DPI-unaware window has): the window opens at that times displayScale(), and Size is
+  // then its pixels.
   void SetSize(int width, int height) override;
   void SetSize(int a[2]) override { this->SetSize(a[0], a[1]); }
+  // A size a host asks for, in the display's logical pixels: SetSize of it times displayScale().
+  // ViewportManager sizes the window this way, so the size a host asks for means the same before
+  // and after the window is made.
+  void SetLogicalSize(int width, int height);
+  // The display's pixels per logical pixel under the window, which the UI scales by
+  // (ImGuiOverlay's pixel ratio) and VTK's DPI follows: on Windows the monitor's scale (1.25 at
+  // 125%), where the process is per-monitor DPI aware (CreateAWindow makes it so); 1 elsewhere and
+  // before the window is made.
+  float displayScale() const;
   void SetPosition(int x, int y) override;
   void SetPosition(int a[2]) override { this->SetPosition(a[0], a[1]); }
   int *GetPosition() VTK_SIZEHINT(2) override;
@@ -101,7 +113,8 @@ public:
   SDL_Window *sdlWindow() const { return window_; }
   // Why the window could not be made (SDL's error), or empty.
   const std::string &lastError() const { return error_; }
-  // The window's size changed (its interactor saw it): VTK's size follows the drawable's.
+  // The window's size or display changed (its interactor saw it): VTK's size follows the
+  // drawable's, and on Windows VTK's DPI the display's scale.
   void syncSizeFromWindow();
   // Window point -> VTK pixel (x right, y down; the interactor flips y).
   void toPixels(float x, float y, int &px, int &py) const;

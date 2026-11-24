@@ -2718,7 +2718,8 @@ jobs:
         tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
-        volume_grid_test volume_grid_contours_test volume_grid_contour_intrinsics_test
+        volume_grid_test class_surfaces_test volume_grid_segment_test volume_grid_contours_test
+        volume_grid_contour_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py

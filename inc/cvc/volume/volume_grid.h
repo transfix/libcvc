@@ -380,10 +380,11 @@ struct volume_grid_session {
 };
 
 // The keys a session keeps: the parameter tables' (grid.view, grid.tool, grid.slice.*,
-// grid.display.*, grid.source.var and grid.source.time, grid.contour.* but its source, and the
-// tiler's grid.tile.*), grid.classes.current and grid.objects.current. Where the data come from
-// (grid.source.volume, points and session, grid.contour.source) is the document's, and transient
-// keys (the cursor, picks, published info and job keys, requests) never go in one.
+// grid.display.*, grid.source.var and grid.source.time, the Segmentation tab's grid.segment.*:
+// cvc/volume/volume_grid_segment.h, grid.contour.* but its source, and the tiler's grid.tile.*),
+// grid.classes.current and grid.objects.current. Where the data come from (grid.source.volume,
+// points and session, grid.contour.source) is the document's, and transient keys (the cursor,
+// picks, published info and job keys, requests) never go in one.
 bool volume_grid_session_key(const std::string &path);
 
 // Write `s` as JSON:

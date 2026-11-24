@@ -111,6 +111,9 @@ public:
   // Composite every visible viewport in one pass (drains each scene's pending
   // graphics events first, like SceneRenderer::render).
   void render();
+  // The window's size, as asked for at construction: pixels, except an onscreen window on a scaled
+  // Windows display, where it is the display's logical pixels and the window that times the
+  // display's scale (1600x900 is 2000x1125 pixels at 125%). frameWidth()/frameHeight() are pixels.
   void resize(int width, int height);
   void resetCamera(); // primary()
   void processUIEvents();

@@ -13,6 +13,9 @@
 #ifdef CVC_ENABLE_IMGUI
 
 #include "ImGuiKeyNames.h" // VTK's key names (X11's, or a browser's) as ImGui keys
+#ifdef CVC_ENABLE_SDL
+#include "SdlWindow.h" // the window's display scale: the UI's pixel ratio natively
+#endif
 
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/Clipboard.h>
@@ -453,12 +456,18 @@ constexpr float kPhoneShortSide = 500.0f;
 
 float clampUiScale(float scale) { return scale < 0.25f ? 0.25f : scale > 4.0f ? 4.0f : scale; }
 
-// Device pixels per logical pixel (see setPixelRatio).
-float detectPixelRatio() {
+// Device pixels per logical pixel (see setPixelRatio): the page's devicePixelRatio in a browser;
+// natively the window's display scale (SdlGLRenderWindow::displayScale: the monitor's on Windows,
+// 1 elsewhere and for VTK's own windows, offscreen ones included).
+float detectPixelRatio([[maybe_unused]] vtkRenderWindow *window) {
 #ifdef __EMSCRIPTEN__
   const double r = cvcgl_device_pixel_ratio();
   return r > 0.0 ? static_cast<float>(r) : 1.0f;
 #else
+#ifdef CVC_ENABLE_SDL
+  if (const auto *sdl = SdlGLRenderWindow::SafeDownCast(window))
+    return sdl->displayScale();
+#endif
   return 1.0f;
 #endif
 }
@@ -646,7 +655,7 @@ struct ImGuiOverlay::Impl {
     lastTime = now;
     // Scale changes (the UI size, the display's pixel ratio) land here, between frames: the style
     // must not change under a frame's widgets, and the open windows come along.
-    pixelRatio = ratioOverride > 0.0f ? ratioOverride : detectPixelRatio();
+    pixelRatio = ratioOverride > 0.0f ? ratioOverride : detectPixelRatio(window);
     applyScale();
     if (windowRescale != 1.0f) {
       rescaleWindows(windowRescale);
@@ -1023,7 +1032,7 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   // the start, so the first frame is already at its size.
   m_impl->touchMode = detectTouchDevice();
   m_impl->uiScale = m_impl->touchMode ? kTouchUiScale : 1.0f;
-  m_impl->pixelRatio = detectPixelRatio();
+  m_impl->pixelRatio = detectPixelRatio(m_impl->window);
   m_impl->applyScale();
 
   // Every UI setting is reachable as cvc::state, like the camera and the HUD.
@@ -1154,7 +1163,7 @@ float ImGuiOverlay::uiScale() const { return m_impl->uiScale; }
 
 void ImGuiOverlay::setPixelRatio(float ratio) {
   m_impl->ratioOverride = ratio > 0.0f ? ratio : 0.0f;
-  m_impl->pixelRatio = ratio > 0.0f ? ratio : detectPixelRatio();
+  m_impl->pixelRatio = ratio > 0.0f ? ratio : detectPixelRatio(m_impl->window);
 }
 float ImGuiOverlay::pixelRatio() const { return m_impl->pixelRatio; }
 

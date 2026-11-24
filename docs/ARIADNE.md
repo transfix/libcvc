@@ -1307,6 +1307,58 @@ and `TerminalScene`) counts an expression on the document's read lane
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
 
+**Animations.** `animations:` in a scene moves its nodes, or writes state keys, along keyframes over
+the scene clock:
+
+```yaml
+scene:
+  animations:
+    - animation: door_open        # its keys: animations.door_open.time / .playing / .speed
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[0, [0, 0, 0]], [1.5, [0, 0, 95]], [2, [0, 0, 90]]]
+    - animation: beacon
+      loop: true                  # false (the default) | true | pingpong
+      tracks:
+        - { node: beacon, key: color, keys: [[0, [1, 0.2, 0]], [0.5, [1, 0.8, 0]], [1, [1, 0.2, 0]]] }
+        - { state: beacon.level, keys: [[0, 0], [0.5, 1], [1, 0]] }
+    - animation: wave
+      loop: pingpong
+      autoplay: false             # waits for animations.wave.playing
+      speed: 0.5
+      tracks:
+        - { node: flag, key: position, keys: [[0, [0, 0, 0]], [1, [0, 0, 0.4]]] }
+        - { node: post_3/flag, key: scale, keys: [[0, [1, 1, 1]], [1, [1.5, 1.5, 1.5]]] }
+```
+
+- **A track** moves one thing along its `keys:`, a list of `[seconds, value]`:
+  - `node: <id>` with `key: position`, `rotation` (degrees about x, then y, then z), `scale` or
+    `color` (each three numbers), `opacity` (0..1) or `visible` (shown above 0.5). The id names
+    every node with it, so `flag` moves each `repeat:` copy's flag and each prototype instance's;
+    a path, `post_3/flag`, names the flag under `post_3` alone.
+  - `state: <path>`, resolved as a bind is: the value written there, a number or numbers joined by
+    commas, for a widget, a program or a node's `visible:` to read.
+  - `interpolation:` `linear` (the default), `step` (each key's value until the next) or `smooth`
+    (a curve through every key, easing in and out at the first and last). Rotation interpolates
+    each angle on its own, so `[0, 0, 0]` to `[0, 0, 360]` is a whole turn.
+  - Before its first key a track holds the first value, after its last the last.
+- **An animation** runs as long as its latest key (`duration:` sets it longer), then stops
+  (`loop: false`), starts over (`true`) or turns back (`pingpong`). `speed:` is seconds of
+  animation a second of the clock; below 0 it plays backwards. `autoplay: false` waits.
+- **Its keys** under the scene's prefix: `animations.<id>.time` (seconds into it), `.playing`
+  (`1` or `0`) and `.speed`. The animation writes them as it plays and reads them every frame, so a
+  program seeks with `(state-set "animations.door_open.time" "0")`, plays and pauses with
+  `.playing`, and changes `.speed`. An animation that stopped at its end and is played again starts
+  over.
+- **The clock.** A scene with an animation runs on the scene clock, as `clock: {}` would make it,
+  so `sim_transport.ari`'s Paused and Speed pause and slow its animations with everything else. At
+  realize every animation sets what it moves to where it starts, playing or not.
+- **One writer a key.** Physics poses a body's node every step and a `visible:` bind writes its
+  node's visibility every frame, so an animation of either is overwritten: animate a node without
+  a body, and the visibility of one without a `visible:`.
+
 **Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
 handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
 descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the
@@ -3055,6 +3107,12 @@ data:                                    # the app loads the data
     - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
   points: { data: seeds }                # point classes (item: classes), or { state: <key> }
   session: { data: last }                # a session to apply (item: session), or { state: <key> }
+  segment:                               # the Segmentation tab's keys (grid.segment.*)
+    t_low: 72                            # cvc::seeded_segmentation_params' fields
+    automatic: none
+    opacity: 0.6                         # cvc::volume_grid_segment_view_params' fields
+    mesh: { smoothing: 8 }               # cvc::class_surface_params' fields
+  request: segment                       # one request, run once the volume is there
   objects:                               # the contour objects it starts with
     - { name: axon, color: [0.2, 0.8, 0.3], interpolation: spline, samples: 5 }
   contours: { data: traced }             # contours the app holds (item: contours), or { state }
@@ -3077,11 +3135,13 @@ seeds its key only while the key is empty:
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
-| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane); the contours': `tile`, `stop_tile` (and `stop` while a tile runs), `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane), `segment` (the Segmentation tab's run, below), `stop` (ends what runs: a segmentation, keeping the last result, and a tile); the contours': `tile`, `stop_tile`, `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `busy`, `stoppable`, `progress`, `phase`, `status`, `stats.work_ms`, `pid` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), while a `segment` runs (a tile's are under `tile.*`) |
+| `segment.*`, `segment.mesh.*` | the Segmentation tab's parameters: `cvc::seeded_segmentation_params` (`t_low`, `t_high`, `gamma`, `automatic`, ...; `variable` and `timestep` written as `source.var` and `time` when a run starts), `cvc::volume_grid_segment_view_params` (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`, `live`) and `cvc::class_surface_params` under `mesh` (`smoothing`, `close`, ...). `t_low`'s and `t_high`'s `min` and `max` properties are the volume's range |
+| `segment.rows`, `segment.rows.<i>.{name,color,visible,voxels,triangles}`, `segment.info.*`, `segment.warnings` | the last result's classes as rows (editing `color` or `visible` recolours or hides that class's labels and surface), and what it labelled |
 | `objects`, `objects.<i>.{name,color,interpolation,samples,visible,curves,points,triangles}`, `objects.current` | the contour objects as rows a `list:` binds (`interpolation` is `linear` or `spline`, `samples` a spline's points per span; `curves`, `points` and `triangles` are written); `current` is the object a click draws |
 | `contour.*`, `contour.{selected,info,active}` | `cvc::volume_grid_contour_params`: `show`, `control_points`, `point_size` (voxels), `line_width`, `snap`, `show_3d`, `show_surfaces`, `surface_opacity`, `auto_tile` and `source` (a key whose data channel holds a `contour_stack` or a `grid_contours`, followed); published: how many control points are selected, a summary, the curve being drawn |
 | `tile.*` | `cvc::tile_params` (lengths in object units) and the tile job's keys (`busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms`, `pid`, `label`, `warnings`): under `tile`, so a tile runs beside the segmentation's job |
-| `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
 
 The point classes, the selection, the session and the volume are on the data channel at
 `grid.points`, `grid.selection` (`std::shared_ptr<const cvc::point_classes>`), `grid.session`
@@ -3107,14 +3167,35 @@ beyond the planes, which the slice views hide: the volume itself, drawn by the r
 `display.render` picks (`none` by default; `vtk`, `volren` or `volslice`, a
 [`VolumeRenderNode`](../inc/cvc/gl/VolumeRenderNode.h) as `volume_render` below has, through the
 grid's transfer function, so one `tf_editor` colours the planes and the volume; the component's
-Transfer function tab picks it), the contours' curves and tiled surfaces, and later phases'.
-Until the first volume arrives the planes and that group are hidden,
+Transfer function tab picks it), the contours' curves and tiled surfaces, and the segmented
+classes. Until the first volume arrives the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
 `cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
 pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
 `test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
+
+**Segmentation** ([`VolumeGridSegmentation.h`](../inc/cvc/gl/VolumeGridSegmentation.h), the
+component's Segmentation tab, roadmap §5). `request: segment` segments the grid's volume, seeded by
+its point classes of the shown variable and timestep (`cvc::segment_seeded`, GenSeg's fast
+marching), then makes each class's surface (`cvc::class_surfaces`), as one sliced task on the app's
+scheduler: the views stay live, the job keys show its progress, and `stop` ends it keeping the last
+result. The labels draw on each plane as a see-through `labels` layer in the classes' colours (the
+point classes' at the run), while the fronts advance (`segment.live`) and then for good; each
+class's surface draws in a `segments` group under `<id>_surfaces`, so a view with
+`show: [surfaces]` shows the classes alone. The result is on the data channel:
+`grid.segment.labels` (a UChar `cvc::volume`, 255 none), `grid.segment.classes` (a
+`std::shared_ptr<const std::vector<cvc::volume>>`, each class's voxels named after it),
+`grid.segment.border` (`cvc::point_classes`) and `grid.segment.surfaces.<n>` (class n's
+`cvc::geometry`). The app saves them: `(data-save "graphics.root.children.grid.grid.segment.classes"
+"segments.rawv" "volume")` writes the classes as one file's variables (VolumeGridRover's
+`SegTmp.rawv`), as the tab's Save classes does. A new volume clears the result. The data side is
+core libcvc ([`volume_grid_segment.h`](../inc/cvc/volume/volume_grid_segment.h),
+[`class_surfaces.h`](../inc/cvc/volume/class_surfaces.h)) with pycvc and `segment.surfaces` in the
+DSL (`volume_grid_segment_test`, `class_surfaces_test`, `cvcgl_volume_grid_segment`,
+`test_pycvc_volume_grid_segment.py`). `examples/ariadne/documents/volume_grid_segment.ari` segments
+the bones of VolRover's Visible Human CT.
 
 **Contours** ([`VolumeGridContours.h`](../inc/cvc/gl/VolumeGridContours.h), P10). With the
 `contours` tool a click adds a point to the current object's curve on that plane: at the end being
@@ -3539,8 +3620,10 @@ How each backend does it:
   wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
   `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
   draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
-  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
-  bar for a document laid out for 600.
+  smaller, its shape kept. A `tabs` bar fits the line's room, left of a vertical scroll bar: tabs
+  that cannot shrink into it scroll there behind arrows, and the ones scrolled out are not the
+  line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
+  little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
@@ -4432,7 +4515,7 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 | encoder | Writes |
 |---|---|
 | `bytes` | the bytes (a `DataBytes` or a string) as they are |
-| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...) |
+| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...); or a `std::vector<cvc::volume>` as one file's variables, in a format that holds several (`.rawv`) |
 | `point_classes` | `cvc::point_classes` as a `.vgr` |
 | `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
 | `contours` | a `cvc::contour_stack` in a one-file format, by FILE's extension: `.cvcc`, `.contour` or `.pcd` (a `.ser` or `.config` writes files beside it, and is refused) |
@@ -4839,6 +4922,55 @@ scene:
     - { node: statue, type: geometry, source: { asset: bunny } }
     - { node: post, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] } }
 ```
+
+**Prototypes.** `prototypes:` names whole nodes, their children, materials and the rest, that a node
+in any of the document's scenes stands in for with `use: <name>`, as VRML/X3D's DEF/USE and USD's
+prototypes do. Assets share a mesh; a prototype shares a node tree.
+
+```yaml
+prototypes:
+  streetlamp:
+    type: group
+    args: { switch: lamps.on }            # defaults for the {name} tokens below
+    children:
+      - node: pole
+        source: { box: { size: [0.2, 0.2, 5] } }
+        transform: { position: [0, 0, 2.5] }
+        material: { color: [0.25, 0.25, 0.27] }
+      - node: lamp
+        source: { sphere: 0.4 }
+        transform: { position: [0, 0, 5.2] }
+        material: { color: [1.0, 0.9, 0.6] }
+        visible: "{switch}"               # quoted: an unquoted {switch} is a YAML map
+scene:
+  nodes:
+    - { node: lamp_a, use: streetlamp, transform: { position: [0, 0, 0] } }
+    - node: lamp_b
+      use: streetlamp
+      args: { switch: lamps.north }       # its own switch
+      transform: { position: [12, 0, 0], rotation: [0, 0, 90] }
+      tags: [north]
+```
+
+- **The instance** is the prototype's node with the using node's keys over it. Each key the
+  using node gives replaces the prototype's: its id, `transform:`, `tags:`, `visible:`, `repeat:`,
+  a `source:` of its own. `material:` is the exception, merged key by key, so `material: { color }`
+  recolours an instance and keeps the rest; and `children:` it gives come after the prototype's.
+- **Args.** `{name}` tokens in the prototype's values are filled in from its own `args:` (the
+  defaults), then the using node's `args:`, as a unit's are (§6.1). An arg is a string, so it
+  fills in a value, not a list or a map. A token neither gives stays as written, so a `{i}`
+  reaches `repeat:`: `use:` on a `repeat:` node makes a copy of the instance per index.
+- **Shared meshes.** Each part of a prototype that draws a file, a URI or a primitive is read and
+  fitted once for all its instances, and drawn from one set of GPU buffers, as an asset's nodes
+  are. Not shared: a part whose source or fit has a `{name}` token (each instance may differ), and
+  a part with a `body:` or a `world:` (physics takes a primitive's shape from its source).
+- **Each instance is its own node**, with its own state under its id (`graphics.root.children.lamp_a`,
+  and its parts under it), its own transform, material and tags, so a script moves or recolours
+  one instance and not the others.
+- **Nesting.** A prototype's nodes may `use:` other prototypes. A prototype within itself, at any
+  depth, is not expanded, with a warning, and so is a name no prototype has.
+- **The schema** (§14) checks a using node as it is written, its `use:` and `args:` with its other
+  keys, and a prototype only for its `args:`: its values may hold tokens its instances fill in.
 
 **Scenes.** `scenes:` declares scenes of their own beside the document's `scene:`. Each entry takes
 the keys `scene:` does: nodes, lights, shadows, background, chrome, cameras. A viewport shows one
@@ -5491,7 +5623,9 @@ colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directl
   group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
   a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
   `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
-  colour.
+  colour. The picker shows a field per channel; with `fmt: hex` it shows one `#rrggbb` field beside
+  its swatch instead (`Backend::color_hex`; a backend without one draws the default picker), as the
+  `volume_grid` component's class tables do. Its key holds `r,g,b` either way.
 
 **Backends.**
 
@@ -5818,7 +5952,8 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |

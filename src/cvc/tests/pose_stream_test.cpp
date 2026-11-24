@@ -433,7 +433,7 @@ TEST(RoomEntities, TheirPidsAreNoParticipants) {
   EXPECT_FALSE(rc::is_entity_pid("alice"));
 }
 
-TEST(RoomEntities, TheSectionCarriesThemAndMarksTheOnesThatWent) {
+TEST(RoomEntities, TheSectionCarriesThemAndRemovesTheOnesThatWent) {
   cvc::app app;
   EXPECT_FALSE(rc::read_room_entities_stamp(app, "r").written());
   const cvc::ariadne::section_stamp first =
@@ -443,13 +443,16 @@ TEST(RoomEntities, TheSectionCarriesThemAndMarksTheOnesThatWent) {
   ASSERT_EQ(got.size(), 2u);
   EXPECT_EQ(got[0], entity(1, "lead"));
   EXPECT_EQ(got[1], entity(3, "wing"));
-  // One goes: it stays in the tree, not present; the revision moves.
+  // One goes: its subtree leaves the tree; the revision moves.
   rc::write_room_entities(app, "r", {entity(3, "wing")});
   const std::vector<rc::room_entity> after = rc::read_room_entities(app, "r");
   ASSERT_EQ(after.size(), 1u);
   EXPECT_EQ(after[0].id, 3u);
   EXPECT_FALSE(rc::read_room_entities_stamp(app, "r").same(first));
-  EXPECT_EQ(cvc::state::instance(app)(rc::room_entities_path("r") + ".e1.present").value(), "0");
+  EXPECT_EQ(app.root().findDescendant(rc::room_entities_path("r") + ".e1"), nullptr);
+  // And it comes back with a later write, present again.
+  rc::write_room_entities(app, "r", {entity(1, "lead"), entity(3, "wing")});
+  EXPECT_EQ(rc::read_room_entities(app, "r").size(), 2u);
 }
 
 // The relay sends every viewer the entities with the participants, each at most every

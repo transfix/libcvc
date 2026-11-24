@@ -1,0 +1,103 @@
+# volume_grid_segment.ari — VolumeGridRover's Segmentation tab as an Ariadne document: VolRover's own
+# Visible Human CT (examples/data/fem/vh4.rawiv, a torso, 128^3 bytes) in a volume_grid node, its
+# bones segmented from three point classes (a seed on the spine and one in each arm) by GenSeg's
+# fast marching (cvc::segment_seeded; Bajaj, Yu and Auer, J. Struct. Biol. 2003), then each class's
+# surface made for the 3D views (cvc::class_surfaces), as a sliced task while the views stay live
+# (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4, §5).
+#
+# The document opens segmented (the node's request: segment). Above 72 (bone; the soft tissue is
+# about 45-70) the fronts fill each bone connected to a seed: the labels draw on the slices in the
+# classes' colours, and the Bones window shows the classes' surfaces alone. In the Segmentation tab,
+# move the thresholds or gamma and press Segment again; the labels draw as the fronts advance.
+# Mark more seeds with the Points tool (the current class in the Point classes tab), or add a
+# class and seed another bone. Save classes writes the classes as one multi-variable volume
+# (VolumeGridRover's SegTmp.rawv) beside this document.
+#
+#   ariadne_hello examples/ariadne/documents/volume_grid_segment.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/volume_grid_segment.ari
+
+meta:
+  name: Volume grid segmentation (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/volume_grid.ari
+
+# The app holds the data: the CT and the seeds. The grid reads no file; it shows those.
+data:
+  ct: ../../data/fem/vh4.rawiv
+  bones: volume_grid_segment.vgr
+
+init: |
+  (state-set "tree.vg_panel.tab" "Segmentation")
+
+# The main view opens on the volume from a little further out than the scene's own bounds.
+on_tick: |
+  (if (!= (state-get "vg.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-40 -40 -40 168 168 168")
+             (state-set "vg.opened" "1")))
+
+keys:
+  grid_next:
+    label: Next plane
+    key: [PageUp]
+    on: (state-set "graphics.root.children.grid.grid.request" "step 1")
+  grid_previous:
+    label: Previous plane
+    key: [PageDown]
+    on: (state-set "graphics.root.children.grid.grid.request" "step -1")
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vg, title: Volume grid, view_size: 300 }
+    pos: [8, 8]
+    size: [1010, 600]
+  # The classes' surfaces alone: a view showing the grid's surfaces group (its `surfaces` tag).
+  - window: Bones
+    id: bones
+    pos: [1026, 8]
+    size: [330, 360]
+    children:
+      - type: viewport
+        view: bones_3d
+        show: [surfaces]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        width: 310
+        height: 310
+        zoom: 0.8
+        caption: "the segmented bones   drag: orbit   wheel: zoom"
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: ct }
+      points: { data: bones }
+      view: xy
+      slice: { z: 100 }
+      segment:
+        t_low: 72
+        t_high: 255
+        automatic: none
+        opacity: 0.6
+        mesh: { smoothing: 8 }
+      request: segment
+      transfer_function:
+        domain: [0, 160]
+        color: [[0, 0, 0, 0], [0.4, 0.45, 0.42, 0.4], [1, 1, 0.98, 0.94]]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

@@ -3,15 +3,19 @@
 // its X11 keysym and the character it types, a click at its pixel with y up, typed text as a
 // CharEvent) and reaches SdlInput too, in SDL's names; a resize sets VTK's size; VTK's timers tick;
 // with two windows open, each window's events reach its own interactor, whichever drains SDL's
-// queue; and an SdlInput that is not attached leaves the window's events alone. On Windows a key
-// message sent to SDL's window goes the OS's way, through SDL's window procedure, to both. With
+// queue; and an SdlInput that is not attached leaves the window's events alone. On Windows the
+// process is per-monitor DPI aware and the window is the logical size asked for at the display's
+// scale, in the display's own pixels, and a key message sent to SDL's window goes the OS's way,
+// through SDL's window procedure, to both. With
 // $CVCGL_SDL_WINDOW=0 the window is VTK's own, and SdlInput reads VTK's key events instead (checked
 // on Windows, where a key message can be sent to VTK's window). Without SDL, or where SDL opens no
 // window, it skips: exit 77, which ctest reports as skipped.
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/gl/ImGuiOverlay.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/SdlInput.h>
@@ -105,6 +109,57 @@ int main() {
     return 77;
   }
   chk(win->GetSize()[0] > 0 && win->GetSize()[1] > 0, "VTK renders into SDL's window");
+
+#ifdef _WIN32
+  // Per-monitor DPI aware, the window is the size asked for in the display's logical pixels times
+  // the display's scale (240x160 is 300x200 pixels at 125%), its client area is those pixels (not
+  // a 96-dpi window Windows stretches), VTK's DPI and the UI's pixel ratio follow the scale, and a
+  // resize asks in logical pixels too. At 100% the scale is 1 and the sizes are the ones asked.
+  {
+    const float s = SDL_GetWindowDisplayScale(sw);
+    const auto px = [s](int v) { return static_cast<int>(std::lround(v * s)); };
+    const std::string scale = " (display scale " + std::to_string(s) + ")";
+    // Windows 10's calls, which the build's _WIN32_WINNT (Windows 7) does not declare.
+    using GetContext = HANDLE(WINAPI *)();
+    using SameContext = BOOL(WINAPI *)(HANDLE, HANDLE);
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    const auto getContext = reinterpret_cast<GetContext>(
+        reinterpret_cast<void *>(GetProcAddress(user32, "GetThreadDpiAwarenessContext")));
+    const auto same = reinterpret_cast<SameContext>(
+        reinterpret_cast<void *>(GetProcAddress(user32, "AreDpiAwarenessContextsEqual")));
+    const HANDLE perMonitorV2 = reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4));
+    chk(getContext && same && same(getContext(), perMonitorV2),
+        "the process is per-monitor DPI aware (v2)");
+    chk(win->GetSize()[0] == px(240) && win->GetSize()[1] == px(160),
+        "a 240x160 window is " + std::to_string(px(240)) + "x" + std::to_string(px(160)) +
+            " pixels" + scale + ": " + std::to_string(win->GetSize()[0]) + "x" +
+            std::to_string(win->GetSize()[1]));
+    const HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(sw), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    RECT rc{};
+    const bool client = hwnd && GetClientRect(hwnd, &rc); // before chk's message reads rc
+    chk(client && rc.right == win->GetSize()[0] && rc.bottom == win->GetSize()[1],
+        "its client area is the framebuffer's pixels: " + std::to_string(rc.right) + "x" +
+            std::to_string(rc.bottom));
+    chk(win->GetDPI() == static_cast<int>(std::lround(72.0f * s)),
+        "VTK's DPI follows the display's scale: " + std::to_string(win->GetDPI()));
+    {
+      cvc::gl::ImGuiOverlay ui(view);
+#ifdef CVC_ENABLE_IMGUI
+      chk(ui.pixelRatio() == s, "the UI's pixel ratio is the display's scale: " +
+                                    std::to_string(ui.pixelRatio()) + scale);
+#endif
+    }
+    view.resize(200, 120);
+    SDL_SyncWindow(sw);
+    view.processUIEvents();
+    int rw = 0, rh = 0;
+    SDL_GetWindowSizeInPixels(sw, &rw, &rh);
+    chk(rw == px(200) && rh == px(120) && win->GetSize()[0] == rw && win->GetSize()[1] == rh,
+        "resize(200, 120) asks in logical pixels too: " + std::to_string(rw) + "x" +
+            std::to_string(rh) + scale);
+  }
+#endif
 
   Seen seen;
   auto cb = seen.observe(iren);
