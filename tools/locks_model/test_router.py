@@ -75,7 +75,9 @@ class Explorer(unittest.TestCase):
         s[rt.HOMES] = tuple(homes)
         s[rt.PROCS] = ((1, rt.DONE, 0, 0), (0, rt.WL, 1, 0), (0, rt.WR, 1, 0))
         s[rt.MSGS] = ((rt.M_SENT, (), 0, 0, rt.F_ASSIGNED),)
-        s[rt.SENT] = ((), (), (), (), (0,))
+        sent = [()] * rt.NG
+        sent[rt.S] = (0,)
+        s[rt.SENT] = tuple(sent)
         ing = list(s[rt.ING])
         ing[rt.H] = (('Q', 0, 0),)
         s[rt.ING] = tuple(ing)
@@ -90,7 +92,8 @@ class Explorer(unittest.TestCase):
         # so every fair schedule reaches an idle state, and the idle checks are the liveness check
         for procs, opts, amend in (('H:s,R1:t,R2:t', dict(kills=1), rt.ALL),
                                    ('S:s,H:r,R1:t', dict(rdie=1, throws=1, choice=1), ()),
-                                   ('S:s,R1:t', dict(islands=1), rt.BUT('router-on-groups'))):
+                                   ('S:s,R1:t', dict(islands=1), rt.BUT('island-rule')),
+                                   ('X:p,R1:t,R2:t', dict(islands=1, rdie=1), rt.ALL)):
             m = rt.Model(rt.make_config(procs, opts, amend))
             succ = {}
             todo = [m.initial()]
