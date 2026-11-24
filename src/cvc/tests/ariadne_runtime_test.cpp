@@ -1967,9 +1967,10 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleDecideNothing) {
 }
 
 // R1b skeptic M1: a move re-points the streams the document owns, and only those. A group-0
-// document nested under a moving document's prefix keeps its stream on group 0, its producer's
-// posts never land in the mover's group, and after the mover's teardown the stream still names
-// group 0, not a destroyed group.
+// document nested under a moving document's prefix (kept there by a writable hole: its channels no
+// longer would, S2-Q16) keeps its stream on group 0, its producer's posts still go to group 0 and
+// reach its resident, and after the mover's teardown the stream still names group 0, not a
+// destroyed group.
 TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   namespace se = cvc::state_exec;
   namespace sx = cvc::ariadne::stream;
@@ -1986,9 +1987,9 @@ TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   outer->set_channel_policy({}, {}, true, true);
   outer->set_root(group({holed})); // a writable hole out of its prefix: group 0 first
   outer->set_tick_program("(state-set \"ticked\" \"1\")");
-  Runtime inner(app, "docs.outer.inner"); // no strict channels: group 0, always
+  Runtime inner(app, "docs.outer.inner"); // a writable hole out of its prefix: group 0, always
   inner.set_backend(&mb);
-  inner.set_root(group({text("inner")}));
+  inner.set_root(group({text("inner"), holed}));
   std::string how = "running";
   inner.run_program(
       "(state-set \"tok\" (get-attr (stream-open (dict \"id\" \"cam\" \"w\" 4 \"h\" 2 "
@@ -2013,12 +2014,19 @@ TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   outer->render();
   se::exec_group *g = outer->isolated_group();
   ASSERT_NE(g, nullptr) << outer->isolation_reason();
-  se::async_scheduler *const gs = &g->sched();
   EXPECT_EQ(s->scheduler_for_test(), g0) << "the mover took a nested document's stream";
-  const std::uint64_t posts0 = gs->ingress_posts_for_test();
-  std::thread producer([s] { s->post_seq(7); }); // inner's producer posts a seq
+  // Inner's producer posts a seq, to group 0 still, and inner's resident, started after the move,
+  // takes it. (With the router the key's home is the mover's group, whose prefix covers inner's:
+  // group 0 passes the post on to it, and it delivers it back to the resident in group 0, S2b.)
+  inner.set_tick_program("(state-set \"seq\" (msg-recv \"streams.cam.seq\"))");
+  std::thread producer([s] { s->post_seq(7); });
   producer.join();
-  EXPECT_EQ(gs->ingress_posts_for_test() - posts0, 0u) << "inner's seq landed in the mover's group";
+  for (int f = 0; f < 2000 && isolated_value(app, "docs.outer.inner.seq") != "7"; ++f) {
+    outer->drain();
+    inner.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(isolated_value(app, "docs.outer.inner.seq"), "7") << "inner's resident missed its seq";
   outer.reset();
   EXPECT_EQ(s->scheduler_for_test(), g0);
 }
@@ -12552,9 +12560,11 @@ TEST(SpawnContext, SP01_AChildOfADeletedChrootWritesTheDetachedNode) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
-// EL-1 (S1-Q6): with ariadne.exec.isolate_documents on, a document gets a group of its own only
-// when it has a prefix, a channels: block enforced strictly, no global channel, no static `/`
-// reference, no oidc use and no writable link: hole whose target leaves its prefix. An ineligible
+// EL-1 (S1-Q6, S2-Q16): with ariadne.exec.isolate_documents on, a document gets a group of its own
+// only when it has a prefix, no oidc use and no writable link: hole whose target leaves its prefix.
+// Its channels no longer matter (S2-Q16 lifted S1-Q6's channel rules: a `/` channel is homed at
+// group 0 and routed): one with no channels: block, a block in warn mode, a global: true channel or
+// a static `/` reference is eligible. An ineligible
 // document stays in group 0 and gives a reason (its wording is not pinned), which the app's log
 // shows once, however many frames it then runs (read through system.log_output; not checked in a
 // log4cplus build). An eligible one's group is affinity::host when its host declared a
@@ -12646,6 +12656,21 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(load("docs.el.stage.doc", strict + text,
                        [](AppRuntime &a) { a.declare_thread_affine_prefix("docs.el.stage"); }),
                   "host", "a thread-affine prefix declared above it");
+  // S1-Q6's channel rules, lifted by S2-Q16.
+  expect_isolated(load("docs.el.nochannels", std::string(kS1bMeta) + text), "any",
+                  "no channels: block");
+  expect_isolated(load("docs.el.warn", std::string(kS1bMeta) +
+                                           "lint:\n  channels: warn\nchannels:\n  - box\n" + text),
+                  "any", "a channels: block in warn mode");
+  expect_isolated(load("docs.el.global", std::string(kS1bMeta) +
+                                             "channels:\n  - channel: app.quit\n"
+                                             "    global: true\n" +
+                                             text),
+                  "any", "a global: true channel");
+  // The load's channel lint does not read a widget's on_click; S1-Q6's rules did.
+  expect_isolated(load("docs.el.slash", strict + "root:\n  - text: Clickable\n"
+                                                 "    on_click: '(msg-send \"/x\" \"y\")'\n"),
+                  "any", "a static / reference");
   register_action_intrinsics(
       app,
       [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
@@ -12659,24 +12684,8 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(native, "host", "a host_only native in its env");
 
   // Ineligible: each stays in group 0.
-  expect_group_zero(load("docs.el.nochannels", std::string(kS1bMeta) + text), "a channels: block");
-  expect_group_zero(
-      load("docs.el.warn",
-           std::string(kS1bMeta) + "lint:\n  channels: warn\nchannels:\n  - box\n" + text),
-      "a channels: block enforced in strict mode");
-  expect_group_zero(load("docs.el.global", std::string(kS1bMeta) +
-                                               "channels:\n  - channel: app.quit\n"
-                                               "    global: true\n" +
-                                               text),
-                    "no global: true channel");
   expect_group_zero(load("docs.el.hole", hole("/shared.level")),
                     "no writable link: hole leaving its prefix");
-  // The load's channel lint does not read a widget's on_click; the placement rules do.
-  AppRuntime &slash = load("docs.el.slash", strict + "root:\n  - text: Clickable\n"
-                                                     "    on_click: '(msg-send \"/x\" \"y\")'\n");
-  expect_group_zero(slash, "no static / reference");
-  EXPECT_NE(slash.runtime().isolation_reason().find("/x"), std::string::npos)
-      << "the reason does not name the static / reference: " << slash.runtime().isolation_reason();
   expect_group_zero(load("", strict + text), "a non-empty prefix");
   if (cvc::net::have_http_backend()) {
     op.emplace();
@@ -13256,4 +13265,237 @@ TEST(AriadneComponents, AudioBuffersDrawsARowPerPerson) {
   ASSERT_EQ(be.charts[1].series.size(), 2u);
   EXPECT_EQ(be.charts[1].series[0].y, (std::vector<double>{100, 0, 40}));
   EXPECT_EQ(be.charts[1].series[1].line, ChartLine::Dashed);
+}
+
+// --- Stage 2b router (S2b.6) ---
+//
+// Threaded S2b.6 (S2.md section 0 rows 21-23, S2-Q16): an isolated document's group is the home of
+// the channels under its prefix, and a `/` channel is homed at group 0 and routed, so its channels
+// no longer keep a document out of a group of its own; group 0 is pumped for what is posted to it
+// even with no live process there. Each case runs at threads 0, 1 and 2 (fork-join: a worker may
+// pump the document's group inside the frame's pump_all), its frames bounded by a 30 s hang guard,
+// never timed.
+
+// S2-Q16, row 23: a document with global channels and a static `/` reference, which S1-Q6 kept in
+// group 0, is isolated now. A group-0 program's send on a global channel reaches the document's
+// action waiting on it (the channel is homed at group 0, the action waits in the document's group),
+// and the document's send on another reaches a group-0 action. Needs the router's routing (S2b.4):
+// on S2b.0's stubs neither message crosses.
+TEST(AriadneRouter, S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup) {
+  namespace se = cvc::state_exec;
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    isolate_documents(app, threads);
+    MockBackend doc_be, host_be;
+    Runtime doc(app, "docs.glob");
+    doc.set_backend(&doc_be);
+    doc.set_channel_policy({}, {"bus", "back"}, /*strict=*/true, /*quiet=*/true);
+    doc.set_root(group({text("glob")}));
+    se::exec_group *const g = doc.isolated_group();
+    ASSERT_NE(g, nullptr) << "a document with global channels stayed in group 0: "
+                          << doc.isolation_reason();
+    EXPECT_EQ(doc.isolation_reason(), "");
+    Runtime host(app, ""); // no prefix: group 0, where a channel is its raw key
+    host.set_backend(&host_be);
+    host.set_root(group({text("host")}));
+    const auto frame = [&] {
+      doc.drain();
+      host.drain();
+    };
+    std::string recv_how = "running", send_how = "running";
+    // A msg-send's message is its envelope; its payload is what was sent.
+    doc.run_program("(state-set \"got\" (get-attr (msg-recv \"/bus\") \"payload\"))",
+                    [&](const std::string &h) { recv_how = h; });
+    host.run_program("(msg-send \"bus\" \"hello\")", [&](const std::string &h) { send_how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return recv_how != "running" && send_how != "running"; }, 30.0))
+        << "group 0's send never reached the document's group";
+    EXPECT_EQ(send_how, "");
+    EXPECT_EQ(recv_how, "");
+    EXPECT_EQ(found_value(app, "docs.glob.got"), "hello");
+    // The reverse: the document sends, a group-0 program receives.
+    recv_how = send_how = "running";
+    host.run_program("(state-set \"back\" (get-attr (msg-recv \"back\") \"payload\"))",
+                     [&](const std::string &h) { recv_how = h; });
+    doc.run_program("(msg-send \"/back\" \"pong\")", [&](const std::string &h) { send_how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return recv_how != "running" && send_how != "running"; }, 30.0))
+        << "the document's send never reached group 0";
+    EXPECT_EQ(send_how, "");
+    EXPECT_EQ(recv_how, "");
+    EXPECT_EQ(found_value(app, "back"), "pong");
+    EXPECT_EQ(doc.isolated_group(), g) << "the document moved";
+  }
+}
+
+// Row 22: group 0 with no live process is pumped by a document's drain while anything posted waits
+// there. First a host's post to group 0: the next drain applies it there (it joins group 0's
+// pending messages), which it did not while no process lived there. Then a document with no
+// channels: block (eligible since S2-Q16) sends on a `/` channel, homed at group 0, and waits on
+// it: the send and the wait's subscription wait in group 0's ingress, and the document's action
+// gets its message back. Nothing runs on group 0. The first half fails without the fix on S2b.0
+// too; the second needs the router's routing (S2b.4), and on S2b.0's stubs passes without it (the
+// send and the wait meet in the document's group).
+TEST(AriadneRouter, S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage) {
+  namespace se = cvc::state_exec;
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    GroupZeroProbeApp app;
+    isolate_documents(app, threads);
+    MockBackend mb;
+    Runtime doc(app, "docs.r22");
+    doc.set_backend(&mb);
+    doc.set_root(group({text("r22")}));
+    ASSERT_NE(doc.isolated_group(), nullptr)
+        << "a document with no channels: block stayed in group 0: " << doc.isolation_reason();
+    se::async_scheduler &g0 = app.exec_scheduler();
+    EXPECT_TRUE(g0.post_message("s2b6.host", se::value_t(std::string("posted"))));
+    ASSERT_TRUE(g0.has_pending_ingress());
+    doc.drain();
+    EXPECT_FALSE(g0.has_pending_ingress()) << "the document's drain did not pump group 0";
+    EXPECT_EQ(g0.pending_message_count("s2b6.host"), 1u);
+    std::string how = "running";
+    doc.run_program("(begin (msg-send \"/r22\" \"ping\")"
+                    " (state-set \"got\" (get-attr (msg-recv \"/r22\") \"payload\")))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(frames_until([&] { doc.drain(); }, [&] { return how != "running"; }, 30.0))
+        << "the routed message never came back: group 0 was not pumped";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.r22.got"), "ping");
+    EXPECT_EQ(g0.process_count(), 0) << "a process ran in group 0";
+  }
+}
+
+// Row 23 across a move: a document moved to a new group (a host verb registered while it runs,
+// bound at its next load, as in AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad) keeps receiving
+// on its channels. Its old group is retired while a call of it still runs (a kernel held at a
+// gate), so it is neither pumped nor destroyed; it leaves the router at the move all the same: a
+// message it held for the document (posted before the move, never received) reaches the
+// document's action in the new group, the home of its prefix now, and so does a host's post to
+// group 0 after the move, both before the old group goes. Needs the router's routing and rehoming
+// (S2b.4): on S2b.0's stubs neither arrives.
+TEST(AriadneRouter, S2b6_AMovedDocumentKeepsReceivingOnItsChannels) {
+  namespace se = cvc::state_exec;
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    isolate_documents(app, threads);
+    const auto gate = std::make_shared<Gate>();
+    register_action_intrinsics(
+        app,
+        [gate](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+          se::register_async_fn(env, *ictx.host, "s2b6-hold",
+                                [gate](std::span<const se::value_t>) -> se::async_kernel {
+                                  return [gate](se::async_call &) -> se::value_t {
+                                    gate->pass(120.0); // past the case's own waits
+                                    return se::value_t(std::string("held"));
+                                  };
+                                });
+        },
+        se::provider_affinity::any);
+    TempDocs paths;
+    const std::string doc =
+        paths.write("s2b6_move", std::string(kS1bMeta) + "root:\n  - text: mv\n");
+    MockBackend mb;
+    AppRuntime art(app, "docs.mv");
+    art.set_backend(mb);
+    GateOpener opener{{gate}}; // after the document: the kernel is let go before it goes
+    art.load(doc);
+    se::exec_group *const first = art.runtime().isolated_group();
+    ASSERT_NE(first, nullptr) << art.runtime().isolation_reason();
+    ASSERT_EQ(first->opts().affinity, se::group_affinity::any);
+    const auto frame = [&] { art.drain(); };
+    std::string held = "running";
+    art.run_program("(s2b6-hold)", [&](const std::string &h) { held = h; });
+    ASSERT_TRUE(frames_until(
+        frame, [&] { return gate->arrivals() > 0; }, 30.0))
+        << "the held call never started";
+    // A message on the document's channel, with nobody waiting, joins the pending messages of its
+    // home, the document's group.
+    const std::string key = se::resolve_channel_key("docs.mv", "wake");
+    ASSERT_TRUE(first->sched().post_message(key, se::value_t(std::string("before"))));
+    frame();
+    // The move: a late host verb, bound at the next load, in a host group.
+    art.register_verb("s2b6-verb", [] {});
+    art.load(doc);
+    se::exec_group *const second = art.runtime().isolated_group();
+    ASSERT_NE(second, nullptr) << art.runtime().isolation_reason();
+    ASSERT_NE(second, first) << "the document did not move";
+    EXPECT_EQ(second->opts().affinity, se::group_affinity::host);
+    EXPECT_EQ(held, "did not complete: the document moved to another group");
+    ASSERT_EQ(se::detail::live_groups(app), 2u) << "the old group is not retired";
+    std::string how = "running";
+    art.run_program("(state-set \"before\" (msg-recv \"wake\"))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return how != "running"; }, 30.0))
+        << "the message the old group held never reached the new group";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.mv.before"), "before");
+    how = "running";
+    art.run_program("(state-set \"after\" (msg-recv \"wake\"))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(app.exec_scheduler().post_message(key, se::value_t(std::string("after"))));
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return how != "running"; }, 30.0))
+        << "a host's post to group 0 after the move never reached the new group";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.mv.after"), "after");
+    EXPECT_EQ(se::detail::live_groups(app), 2u) << "the old group went before its call ended";
+    gate->release();
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return se::detail::live_groups(app) == 1u; }, 30.0))
+        << "the retired group never went";
+    EXPECT_FALSE(gate->opened_by_itself()) << "the held call waited out its gate";
+  }
+}
+
+// Group 0's token (pycvc's ExecPool.run_all drains group 0's posts under it, on its own thread,
+// S2b.7): while another thread holds it, a Runtime's drain skips group 0, without throwing,
+// and a message posted there waits; once that thread lets go, the next drain delivers it. The
+// document is in group 0 (isolation off), so its drain pumps group 0 every frame. Without the
+// token the drain pumped group 0 under the other thread.
+TEST(AriadneRouter, S2b6_ADrainSkipsAGroupZeroAnotherThreadHolds) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  MockBackend mb;
+  Runtime rt(app, "docs.held0");
+  rt.set_backend(&mb);
+  rt.set_root(group({text("held0")}));
+  std::string how = "running";
+  rt.run_program("(state-set \"got\" (msg-recv \"go\"))", [&](const std::string &h) { how = h; });
+  rt.drain(); // the action starts in group 0 and waits
+  se::async_scheduler &g0 = app.exec_scheduler();
+  std::mutex mu;
+  std::condition_variable cv;
+  bool held = false, let_go = false;
+  std::thread holder([&] {
+    se::async_scheduler::pump_owner_scope token(g0);
+    std::unique_lock<std::mutex> lock(mu);
+    held = true;
+    cv.notify_all();
+    cv.wait(lock, [&] { return let_go; });
+  });
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&] { return held; });
+  }
+  EXPECT_TRUE(
+      g0.post_message(se::resolve_channel_key("docs.held0", "go"), se::value_t(std::string("go"))));
+  EXPECT_NO_THROW(rt.drain());
+  EXPECT_TRUE(g0.has_pending_ingress()) << "the drain pumped group 0 while another thread held it";
+  EXPECT_EQ(how, "running");
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    let_go = true;
+  }
+  cv.notify_all();
+  holder.join();
+  EXPECT_TRUE(frames_until([&] { rt.drain(); }, [&] { return how != "running"; }, 30.0))
+      << "the message never came once group 0 was let go";
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(found_value(app, "docs.held0.got"), "go");
 }

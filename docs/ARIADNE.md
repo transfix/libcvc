@@ -392,19 +392,21 @@ reads it from `Runtime::isolation_reason()`, and the app's log shows it once
 (`ari: the document at '<prefix>' runs in group 0: <reason>`).
 
 1. Its prefix is not empty (it does not run at the app root).
-2. It has a `channels:` block, enforced in strict lint mode, which is the default once the block is
-   there (`lint: channels: warn` or `off` keeps the document in group 0): only that proves it uses
-   no app-global channel (§8).
-3. No channel in it is `global: true`.
-4. None of its programs names a `/` channel in a literal: `(msg-send "/x" ...)`, `(msg-recv
-   "/x")` or `(msg-pending "/x")`. Every program counts: the lanes, the key bindings, `functions:`,
-   every widget's `on:`, `on_click`, `on_hover`, `on_drag*` and `on_top`, each module's `init:`,
-   `on_tick:` and functions, and the document's own `init:` and `tests:`. That is more than the
-   load's channel lint reads, which skips the widgets' event handlers.
-5. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, since a sign-in's end is posted
-   where the app's other programs run.
-6. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
+2. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, in any of its programs: the
+   lanes, the key bindings, `functions:`, every widget's `on:`, `on_click`, `on_hover`, `on_drag*`
+   and `on_top`, each module's `init:`, `on_tick:` and functions, and the document's own `init:`
+   and `tests:`. A sign-in's end is posted on a `#` channel where the app's other programs run, and
+   a `#` channel never leaves the group it is used in.
+3. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
    one inside, is fine).
+
+Its channels do not keep it there. A channel under its prefix, its own, lives in its group; any
+other, an app-global `/` channel (`global: true`) among them, lives in group 0 or in the group of
+the document whose prefix covers it, and a message sent on it from another group is passed there
+([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.6). So a document needs no `channels:` block to
+get a group, and one with `global: true` channels or `/` references gets one too. Such a message
+is passed on at the next pump of each group it goes through, so it may take a frame or two where
+one inside a group arrives at once.
 
 A document that passes runs in its group. Its group is pumped on the frame's thread all the same
 when its host declared a thread-affine subscriber at, above or under its prefix (`arigl` declares
@@ -424,8 +426,8 @@ functions; §9.1). Otherwise the pool's workers may pump it.
   frame, so it completes a frame later. `(has? ...)` there answers from what the frame's start saw.
 
 **When it moves.** Where a document runs is decided when it loads, and again after anything that
-rule reads changes: a reload or a new tree, a lane's program, the channel policy, the key bindings,
-or a host's declaration. If the answer changes, the document moves: its actions and the children
+rule reads changes: a reload or a new tree, a lane's program, the key bindings, or a host's
+declaration. If the answer changes, the document moves: its actions and the children
 they spawned, and its residents, are killed where they ran (a host's `run_program` caller is told
 "did not complete: the document moved to another group"), its residents start again in the new
 place at the next frame, and the streams it opened follow it. The move does not wait for the old
