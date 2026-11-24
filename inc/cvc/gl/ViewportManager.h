@@ -95,6 +95,12 @@ public:
   Viewport &addMirrorViewport(const std::string &name, const std::string &sourceViewport,
                               const double region[4], int layer = 2, bool liveSync = true);
 
+  // A live mirror's re-sync now, through its filter (Viewport::setMirrorFilter), as its next draw
+  // would do first: for a caller that reads what it will draw before the render reaches it (a
+  // view framed in the frame it is made). Nothing for a frozen mirror or any other viewport.
+  // Throws for an unknown name.
+  void syncMirror(const std::string &name);
+
   // Remove a viewport at runtime (drop a PiP inset). Detaches its scene so that
   // scene can be added again, drops it from the window, and re-syncs the layer
   // count. Throws for the primary (which owns the main scene), an unknown name,

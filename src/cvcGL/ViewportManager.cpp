@@ -772,6 +772,12 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   return ref;
 }
 
+void ViewportManager::syncMirror(const std::string &name) {
+  Viewport &vp = viewport(name); // checks the manager is open, throws for an unknown name
+  if (vp.isMirror() && vp.mirrorLive())
+    syncMirrorProps(vp);
+}
+
 void ViewportManager::removeViewport(const std::string &name) {
   m_impl->requireOpen();
   if (name == m_impl->name)

@@ -1391,6 +1391,10 @@ void SceneViews::prepare(View &v, double dt) {
   // Framed once it has drawn something: the bounds of what this view shows (the tagged nodes it
   // names, when it names some to show).
   if (!v.framed && v.vp->visible()) {
+    // Its renderer re-syncs as the render reaches it, so a view made in this frame's walk still
+    // holds the main view's props as they were primed: what it leaves out, and a volren's picture
+    // for the main camera instead of its own. Re-synced now, it holds what it will draw.
+    view_->viewportManager().syncMirror(v.vp->name());
     double b[6];
     vtkRenderer *r = v.vp->renderer();
     if (r && r->GetViewProps()->GetNumberOfItems() > 0) {
@@ -1420,8 +1424,24 @@ void SceneViews::prepare(View &v, double dt) {
         int matched = 0;
         if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b, &matched)) {
           wait = matched > 0;
-          if (!wait)
+          if (!wait) {
             r->ComputeVisiblePropBounds(b);
+            // A volren node it draws, by its volumes' box (as VolRenNode's view picture gives its
+            // bounds): that picture joins the renderer only once its first raycast lands, after
+            // the view is framed.
+            for (const auto &[prop, vol] : v.volumes) {
+              if (vol.kind != VolumeKind::raycast || v.hidden.count(prop) || !prop->GetVisibility())
+                continue;
+              const cvc::bounding_box bb = vol.node->getWorldBoundingBox();
+              if (bb.minx > bb.maxx || bb.miny > bb.maxy || bb.minz > bb.maxz)
+                continue;
+              const double vb[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+              for (int i = 0; i < 3; ++i) {
+                b[2 * i] = std::min(b[2 * i], vb[2 * i]);
+                b[2 * i + 1] = std::max(b[2 * i + 1], vb[2 * i + 1]);
+              }
+            }
+          }
         }
       }
       if (!wait && valid_bounds(b)) {
