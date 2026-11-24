@@ -1050,9 +1050,10 @@ void follow_sea(cvc::app &app, WaterRT &rt) {
   rt.sea = rt.seaClock->sea();
 }
 
-// The time its sea is drawn at: the app's world clock's, or another host's (OW5q: water.clock).
+// The time its sea is drawn at: the scene's shown time (OW5q: another host's, shown_clock.h), else
+// the app's world clock's.
 double sea_time(cvc::app &app, const WaterRT &rt) {
-  return ari::scene_water_time(app, rt.node, rt.prefix, app.world_clock().t());
+  return ari::scene_water_time(app, rt.prefix, app.world_clock().t());
 }
 
 // What each cascade takes from the wind (scene_water.h's split), for keyframes k.
@@ -2339,7 +2340,7 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
   }
   place_far(*rt, *far, *near); // the clip for the edge the grid was just built for
 
-  // Its water.sea and water.clock keys, empty: its own sea until a host shows another (OW5q).
+  // Its water.sea and the scene's shown_clock, empty: its own sea and time until a host's (OW5q).
   ari::scene_water_seed_follow(app, n, pref);
   // `body:`: the water's field in the scene's physics world, over the same ground (whose shared
   // height field a regenerated world overwrites in place: the runtime sees its new heights).

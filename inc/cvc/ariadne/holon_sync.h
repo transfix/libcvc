@@ -382,10 +382,10 @@ public:
   std::function<double(double, double)> ground() const;
   std::uint64_t ground_revision() const { return _ground_rev; }
   // The relay's document's water and weather nodes' keys, relative to a bind prefix (node_key:
-  // `water.sea`, `water.clock`; `weather.events`, `weather.gust_front`), by node id (OW5q:
-  // show_relay_seas writes them into a document of the same nodes).
+  // `water.sea`; `weather.events`, `weather.gust_front`), by node id (OW5q: show_relay_seas writes
+  // them into a document of the same nodes).
   struct node_keys {
-    std::string sea, clock, events, gust;
+    std::string sea, events, gust;
   };
   const std::map<std::string, node_keys> &water_keys() const { return _water_keys; }
   const std::map<std::string, node_keys> &weather_keys() const { return _weather_keys; }
@@ -419,15 +419,19 @@ private:
   std::string _status;
 };
 
-// CLIENT (OW5q): the relay's sea and storms in the document this client draws. For each water node
-// of the relay's document (WORLD's) that the room carries a sea for (room_world_on's seas), its
-// `water.sea` key under BIND_PREFIX gets the relay's keyframe and its `water.clock` the relay's
-// time as H's clock counts it (the server's ticks); for each weather node, its `weather.events`
-// and `weather.gust_front` the relay's. Only where the document has that node: its key is there (a
-// water node seeds its keys, scene_water_seed_follow; a weather node seeds its own). So the sea
-// it draws (scene_water.h's followed sea) is the relay's at the relay's time, the one its boat's
-// model floats on, under the relay's storms. Call each frame after client_pump. Returns the keys
-// it wrote.
+// CLIENT (OW5q): the relay's world as the document this client draws shows it. Under BIND_PREFIX
+// (the scene's state prefix):
+//   - `shown_clock` (shown_clock.h) gets the relay's time as H's clock counts it (the server's
+//     ticks), so all the scene draws that moves with time (the water's waves, the storms, the
+//     clouds, the trees' and foliage's sway) is drawn at the relay's time;
+//   - each water node of the relay's document (WORLD's) that the room carries a sea for
+//     (room_world_on's seas) gets the relay's keyframe in its `water.sea`;
+//   - each weather node gets the relay's `weather.events` and `weather.gust_front`;
+//   - the light rig's sun, `lighting.key_azimuth` and `lighting.key_elevation`, gets the relay's
+//     key light's (the room's scene env, which the relay's document lights), which the clouds
+//     and the stage lighting are lit from.
+// Only where the document has them: the key is there (the nodes seed theirs; the rig's are the
+// stage lighting's). Call each frame after client_pump. Returns the keys it wrote.
 std::size_t show_relay_seas(cvc::app &app, const std::string &room, const holon &h,
                             const world_replica &world, const std::string &bind_prefix);
 

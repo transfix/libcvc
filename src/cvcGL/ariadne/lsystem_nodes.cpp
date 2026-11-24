@@ -41,7 +41,8 @@
 #include <cstdint>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
-#include <cvc/ariadne/scene_wind.h> // the scene's one wind (O14)
+#include <cvc/ariadne/scene_wind.h>  // the scene's one wind (O14)
+#include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h> // a storm deck's build: on the pool, or sliced between frames
@@ -277,6 +278,7 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   rt->k.pine_scale = seed_key(app, pref, n, "forest.pine_scale", rt->base.pine_scale);
   rt->k.wind = seed_key(app, pref, n, "forest.wind", windDef);
   rt->prefix = pref;
+  ari::seed_shown_clock(app, pref); // its sway at the scene's shown time (OW5q)
   rt->leanKey = ari::resolve_bind(pref, ari::node_key(n, "forest.lean_dir"));
 
   // Grow the initial forest — ALWAYS with wind records, so enabling wind live later works.
@@ -352,7 +354,8 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
       cvc::state::instance(app)(rt->leanKey).value(lean);
     }
     if (windLive != 0.0 && !rt->wind.trees.empty()) {
-      const double t = rt->app->world_clock().t();
+      // At the time the scene is drawn at (a relay's, when a client shows one: shown_clock.h).
+      const double t = ari::shown_time(*rt->app, rt->prefix, rt->app->world_clock().t());
       rt->workW = rt->woodBind;
       rt->workN = rt->needleBind;
       if (sw) {
@@ -461,13 +464,15 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
   auto frame = std::make_shared<long>(0);
   cvc::app *app = &sg.appContext();
   std::weak_ptr<VolumeNode> wn = vnode;
+  const std::string shownPrefix = sg.getStatePrefix();
+  ari::seed_shown_clock(*app, shownPrefix); // its waves at the scene's shown time (OW5q)
   out.custom_ticks.push_back(
-      [wn, field, bytes, terr, sp, seaTF, frame, app, ampKey, lvlKey](vtkRenderer *) {
+      [wn, field, bytes, terr, sp, seaTF, frame, app, ampKey, lvlKey, shownPrefix](vtkRenderer *) {
         auto v = wn.lock();
         if (!v)
           return;
         const long f = (*frame)++;
-        const double t = app->world_clock().t();
+        const double t = ari::shown_time(*app, shownPrefix, app->world_clock().t());
         if (f % 2 == 0) {
           sp->wave_amp = read_key(*app, ampKey, sp->wave_amp); // live from sea_controls
           sp->sea_level = read_key(*app, lvlKey, sp->sea_level);
@@ -1653,6 +1658,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
   rt->flashKey = ari::resolve_bind(pref, ari::node_key(n, "sky.flash"));
   ari::read_or_seed<std::string>(app0, rt->flashKey, std::string());
   ari::read_or_seed<std::string>(app0, rt->stormsKey, std::string());
+  ari::seed_shown_clock(app0, pref); // its clouds at the scene's shown time (OW5q)
   rt->sunAzKey = ari::resolve_bind(pref, "lighting.key_azimuth"); // the rig's: not seeded here
   rt->sunElKey = ari::resolve_bind(pref, "lighting.key_elevation");
   rt->receivers.push_back(ground);
@@ -1668,8 +1674,9 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
     cvc::app &app = *r.app;
     const long f = r.frame++;
 
-    // The wind and the morph run on the world clock (Paused freezes them), at the live rates.
-    const double t = app.world_clock().t();
+    // The wind and the morph run on the world clock (Paused freezes them), at the live rates; at
+    // the time the scene is drawn at (a relay's, when a client shows one: shown_clock.h).
+    const double t = ari::shown_time(app, r.prefix, app.world_clock().t());
     const double dt = r.lastT < 0.0 ? 0.0 : std::max(0.0, t - r.lastT);
     r.lastT = t;
     // The live sky (F1): the coverage (the cells' targets ranked again; the clouds fade over fade

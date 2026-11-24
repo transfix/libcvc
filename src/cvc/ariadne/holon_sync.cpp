@@ -29,6 +29,7 @@
 #include <cvc/ariadne/scene_water.h>    // the relay's seas (OW5q)
 #include <cvc/ariadne/scene_weather.h>  // the relay's storms (OW5q)
 #include <cvc/ariadne/scene_world.h>    // world_replica's world
+#include <cvc/ariadne/shown_clock.h>    // the relay's time, shown (OW5q)
 #include <cvc/ariadne/uri.h>            // resolve
 #include <cvc/ariadne/world_pack.h>     // world_replica's packs
 #include <cvc/ariadne/world_vehicles.h> // vehicle_ground_height
@@ -985,11 +986,10 @@ void world_replica::pump(cvc::app &app, const std::string &room, const cvc::worl
               [&](const std::vector<SceneNode> &nodes) {
                 for (const SceneNode &n : nodes) {
                   if (n.type == "water" && !n.id.empty())
-                    _water_keys[n.id] = {
-                        node_key(n, "water.sea"), node_key(n, "water.clock"), {}, {}};
+                    _water_keys[n.id] = {node_key(n, "water.sea"), {}, {}};
                   if (n.type == "weather" && !n.id.empty())
                     _weather_keys[n.id] = {
-                        {}, {}, node_key(n, "weather.events"), node_key(n, "weather.gust_front")};
+                        {}, node_key(n, "weather.events"), node_key(n, "weather.gust_front")};
                   keyed(n.children);
                 }
               };
@@ -1157,8 +1157,22 @@ std::size_t show_relay_seas(cvc::app &app, const std::string &room, const holon 
     k->value(value);
     ++wrote;
   };
+  // The scene drawn at the relay's time (shown_clock.h).
   char now[64];
   std::snprintf(now, sizeof(now), "%.17g", h.clock().t());
+  put(kShownClockKey, now);
+  // The sun: the relay's key light (the room's scene env, lit by its document).
+  conference::room_scene_env env;
+  if (conference::read_scene_env(app, room, env))
+    for (const SceneLight &l : env.lights)
+      if (l.has_key) {
+        char az[64], el[64];
+        std::snprintf(az, sizeof(az), "%.17g", static_cast<double>(l.key_azimuth));
+        std::snprintf(el, sizeof(el), "%.17g", static_cast<double>(l.key_elevation));
+        put("lighting.key_azimuth", az);
+        put("lighting.key_elevation", el);
+        break;
+      }
   for (const conference::room_water_sea &s : on.seas) {
     const auto it = world.water_keys().find(s.node);
     if (it == world.water_keys().end())
@@ -1171,7 +1185,6 @@ std::size_t show_relay_seas(cvc::app &app, const std::string &room, const holon 
     k.keyframe = s.keyframe;
     k.from_tick = s.from_tick;
     put(it->second.sea, format_sea_keyframe(k));
-    put(it->second.clock, now);
   }
   for (const conference::room_weather &x : on.weathers) {
     const auto it = world.weather_keys().find(x.node);

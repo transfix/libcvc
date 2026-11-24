@@ -1349,17 +1349,32 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
     takes them at once (`WeatherFriction::follow`, `SceneWorld::follow_weather`: nothing steps
     the replica's world to switch a peak in) and makes its air again, which the holon takes as
     new water after that tick.
-  - **The sea the client draws.** A water node shows another host's sea through two keys under its
-    key root: `water.sea` (a keyframe, `format_sea_keyframe`) in place of its own lag, and
-    `water.clock`, the time it is drawn at (`scene_water_followed`, `scene_water_time`); both the
-    drawn node (with a body or without) and `WaterRuntime` read them, and seed them empty so a
-    host sees the node is there. arigl writes them each frame after `client_pump`
-    (`show_relay_seas`): for each water node of the relay's document its document has, the
-    relay's keyframe and the relay's time as the holon counts it, and its weather nodes' events
-    and peak, so it draws the relay's sea at the relay's time, under the relay's storms. The
-    drawn node's field follows `water.sea` at the next frame (`cvcgl_ariadne_physics`). Not
-    checked: the GPU sea drawn at that time (no GL context in the tests), and the drawn storms,
-    which keep the app's clock.
+  - **What the client draws, at the relay's time.** One key under the scene's state prefix,
+    `shown_clock` (`shown_clock.h`), is the time the scene is drawn at: every drawn node whose look
+    moves with time reads it in place of the app's world clock (the water's waves, the weather
+    node's storms, rain and lightning, the cloud sky's drift and morph, the forest's and a
+    generated world's foliage's sway, a wave_sea), and seeds it empty. A water node also shows
+    another host's sea through its `water.sea` key (a keyframe, `format_sea_keyframe`) in place
+    of its own lag (`scene_water_followed`); the drawn node, with a body or without, and
+    `WaterRuntime` both read it. arigl writes them each frame after `client_pump`
+    (`show_relay_seas`): `shown_clock` the relay's time as the holon counts it; each water node
+    of the relay's document its document has, the relay's keyframe; each weather node, the relay's
+    events and peak; and the sun, `lighting.key_azimuth` and `lighting.key_elevation` (the rig's,
+    which the clouds and the stage lighting are lit from), the relay's key light from the room's
+    scene env. No sun moves with time (there is no day cycle), so the relay's sun is the one its
+    document lights the room with, followed when it changes. The drawn water's field follows
+    `water.sea` at the next frame, and a storm alive at a shown time of 0 is gone 600 s on, 0 again
+    what the app's clock gave (`cvcgl_ariadne_physics`). Checked by hand with `arigl snapshot`: on
+    a lake, the same shown time draws the same image twice, another time other waves, and a
+    25 m/s `water.sea` a rougher, foamier sea; `lsystem_forest.ari` (forest, wave_sea, cloud sky)
+    draws the same image twice at one shown time and another at another. A generated world's
+    foliage was not rendered; the swarm's pulse and the vehicle studio's turntable keep the app's
+    clock (they are not the world's look).
+  - **The fetch map is the last keyframe's.** The relay's sea kept its fetch map when the open
+    fetch alone changed, where a client following the keyframe made the new one; it now makes it
+    again when the fetch moves too (`SceneWaterSeaClock::advance`). A sea followed from each of
+    its keyframes, through a stronger wind, a turn and a shorter fetch, is the grown sea's at every
+    one: the same h0, full fetches and fetch maps (33 keyframes; the last differed before).
 
 ### 18.6 Driving a vehicle, and being one
 

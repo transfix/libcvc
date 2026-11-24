@@ -31,6 +31,7 @@
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
+#include <cvc/ariadne/shown_clock.h>
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_gym.h>
 #include <cvc/ariadne/world_pack.h>
@@ -492,6 +493,78 @@ scene:
 // The physics sea is the drawn one at the coast too (scene_water.h): over a beach the wind sea's
 // cascades fade out as the water shoals, and a swell (swell_height) is in it, smaller where it
 // breaks in the shallows. No renderer, no physics backend: the runtime's sea read directly.
+// Another host makes the same sea from a keyframe (OW5q: SceneWaterSeaClock::follow): a sea grown
+// along its lagged wind over a beach, through a stronger wind, a turn and a shorter open fetch, and
+// one that follows each of its keyframes, have the same keyframes' h0, full fetches and fetch maps
+// at every one. Before, a shorter fetch alone kept the grown sea's map, where the follower made a
+// new one.
+TEST(AriadneSceneWorld, ASeaFollowedFromItsKeyframesIsTheSeaGrown) {
+  const int N = 201;
+  std::vector<float> h(std::size_t(N) * N);
+  for (int r0 = 0; r0 < N; ++r0)
+    for (int c = 0; c < N; ++c)
+      h[std::size_t(r0) * N + c] = float(0.1 * (c - 100)); // a beach rising along +x
+  const cvc::height_field beach(N, N, -200.0, -200.0, 2.0, 2.0, h);
+  SceneWaterSpec s;
+  s.wind_speed = 6.0;
+  s.wind_dir = 0.0;
+  s.fetch = 120000.0;
+  s.sea_lag = 5.0;
+  s.sea_fade = 2.0;
+  const std::shared_ptr<const SceneWaterShore> shore = scene_water_shore(beach, s);
+  ASSERT_NE(shore, nullptr);
+  SceneWaterSeaClock grown, followed;
+  const auto digest = [](const std::shared_ptr<const cvc::ocean::fetch_field> &f) {
+    return f ? f->digest() : std::uint64_t(0);
+  };
+  const auto same_h0 = [](const std::vector<cvc::ocean::h0_field> &a,
+                          const std::vector<cvc::ocean::h0_field> &b) {
+    if (a.size() != b.size())
+      return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      if (a[i].n != b[i].n || a[i].tile_m != b[i].tile_m || a[i].texels != b[i].texels)
+        return false;
+    return true;
+  };
+  std::uint64_t compared = 0, last = 0;
+  double open_at_end = 0.0;
+  for (int i = 0; i <= 400; ++i) {
+    const double t = 0.5 * i;
+    s.wind_speed = t < 60.0 ? 6.0 + 8.0 * t / 60.0 : 14.0;                    // stronger
+    s.wind_dir = t < 60.0 ? 0.0 : t < 90.0 ? 40.0 * (t - 60.0) / 30.0 : 40.0; // a turn
+    s.fetch = t < 120.0 ? 120000.0 : 20000.0;                                 // shorter
+    grown.advance(t, s, shore);
+    const std::shared_ptr<const SceneWaterSea> g = grown.sea();
+    ASSERT_NE(g, nullptr);
+    if (g->keyframe == last)
+      continue;
+    last = g->keyframe;
+    SceneWaterKeyframe k;
+    k.from = g->from;
+    k.to = g->to;
+    k.t0 = g->t0;
+    k.t1 = g->t1;
+    k.keyframe = g->keyframe;
+    EXPECT_TRUE(followed.follow(k, s, shore));
+    const std::shared_ptr<const SceneWaterSea> f = followed.sea();
+    ASSERT_NE(f, nullptr);
+    SCOPED_TRACE("keyframe " + std::to_string(k.keyframe));
+    EXPECT_TRUE(same_h0(f->h0, g->h0));
+    EXPECT_TRUE(same_h0(f->h0_from, g->h0_from));
+    EXPECT_EQ(f->full, g->full);
+    EXPECT_EQ(f->full_from, g->full_from);
+    EXPECT_EQ(digest(f->fetch), digest(g->fetch));
+    EXPECT_EQ(digest(f->fetch_from), digest(g->fetch_from));
+    if (g->fetch)
+      open_at_end = g->fetch->open_m;
+    ++compared;
+  }
+  std::printf("  OW5Q %llu keyframes followed, each the grown sea's\n",
+              static_cast<unsigned long long>(compared));
+  EXPECT_GE(compared, 5u);
+  EXPECT_EQ(open_at_end, 20000.0) << "the grown sea's map is for its last open fetch";
+}
+
 TEST(AriadneSceneWorld, AWaterNodesSeaFadesAtTheShoreAndCarriesTheSwell) {
   REQUIRE_YAML();
   LoadResult r = fresh_load(R"(
@@ -10038,8 +10111,8 @@ TEST(AriadneOneWorld, AClientsReplicaHasTheRelaysWater) {
 // the sea it has. The relay's storms the same way (room_world_on's weathers: a live
 // weather.events, a new storm-wind peak): the replica's air is made again with them. And the
 // document the client draws shows the relay's sea at the relay's time and its storms
-// (show_relay_seas: the water node's water.sea and water.clock, the weather node's keys), where it
-// has those nodes.
+// (show_relay_seas: the scene's shown_clock, the water node's water.sea, the weather node's keys,
+// the sun), where it has those nodes.
 TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   REQUIRE_YAML();
   if (!jolt())
@@ -10165,24 +10238,41 @@ TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
   std::vector<std::string> warnings;
   std::unique_ptr<SceneWorld> drawn = SceneWorld::from_scene(app, r.scene, "drawn", "", &warnings);
   ASSERT_NE(drawn, nullptr);
-  EXPECT_EQ(show_relay_seas(app, room, client, world, "elsewhere"), 0u) << "no such nodes there";
-  EXPECT_GE(show_relay_seas(app, room, client, world, "drawn"), 4u);
-  EXPECT_EQ(show_relay_seas(app, room, client, world, "drawn"), 0u) << "as they are";
   cvc::state &root = cvc::state::instance(app);
+  // The relay's sun: its document's key light in the room's scene env; the drawn document's rig
+  // keys, as its stage lighting has them.
+  conference::room_scene_env env;
+  SceneLight rig;
+  rig.id = "sun";
+  rig.rig = "three_point";
+  rig.has_key = true;
+  rig.key_azimuth = 30.0f;
+  rig.key_elevation = 20.0f;
+  env.lights.push_back(rig);
+  conference::write_scene_env(app, room, env);
+  root("drawn.lighting.key_azimuth").value("-52");
+  root("drawn.lighting.key_elevation").value("34");
+  EXPECT_EQ(show_relay_seas(app, room, client, world, "elsewhere"), 0u) << "no such nodes there";
+  EXPECT_GE(show_relay_seas(app, room, client, world, "drawn"), 6u);
+  EXPECT_EQ(show_relay_seas(app, room, client, world, "drawn"), 0u) << "as they are";
   SceneWaterKeyframe shown;
   ASSERT_TRUE(parse_sea_keyframe(root("drawn.water.sea").value(), shown));
   EXPECT_TRUE(shown == got) << "the relay's keyframe";
-  EXPECT_EQ(std::strtod(root("drawn.water.clock").value().c_str(), nullptr), client.clock().t());
+  EXPECT_EQ(std::strtod(root(std::string("drawn.") + kShownClockKey).value().c_str(), nullptr),
+            client.clock().t())
+      << "the scene drawn at the relay's time";
   EXPECT_EQ(root("drawn.weather.events").value(), events);
+  EXPECT_EQ(std::strtod(root("drawn.lighting.key_azimuth").value().c_str(), nullptr), 30.0)
+      << "the relay's sun";
+  EXPECT_EQ(std::strtod(root("drawn.lighting.key_elevation").value().c_str(), nullptr), 20.0);
   drawn->sync(&warnings);
   const WaterRuntime *drawn_water = drawn->water("water");
   ASSERT_NE(drawn_water, nullptr);
   EXPECT_TRUE(drawn_water->following()) << "its water.sea key";
   EXPECT_TRUE(drawn_water->keyframe() == got);
-  SceneNode wn;
-  wn.id = "water";
-  EXPECT_EQ(scene_water_time(app, wn, "drawn", -1.0), client.clock().t()) << "the relay's time";
-  EXPECT_EQ(scene_water_time(app, wn, "elsewhere", -1.0), -1.0) << "else the app's";
+  EXPECT_EQ(scene_water_time(app, "drawn", -1.0), client.clock().t()) << "the relay's time";
+  EXPECT_EQ(shown_time(app, "drawn", -1.0), client.clock().t());
+  EXPECT_EQ(scene_water_time(app, "elsewhere", -1.0), -1.0) << "else the app's";
   EXPECT_EQ(drawn->weathers().front()->events_text(), events);
   std::error_code ec;
   fs::remove_all(dir, ec);

@@ -216,20 +216,19 @@ struct SceneWaterKeyframe {
 std::string format_sea_keyframe(const SceneWaterKeyframe &k);
 bool parse_sea_keyframe(const std::string &text, SceneWaterKeyframe &out);
 
-// A WATER NODE SHOWING ANOTHER HOST'S SEA (OW5q). Two keys under its key root a host writes:
-// `water.sea`, a keyframe (format_sea_keyframe) its sea is from then on, in place of its own lag
-// (WaterRuntime::tick follows it, and so does the drawn node, with a body or without); and
-// `water.clock`, the other host's clock time (s) its sea is drawn at, in place of the app's world
-// clock's. A client of a relay writes both for its document's water nodes from the room
-// (show_relay_seas), so the sea it draws is the relay's at the relay's time, the sea its boat's
-// model floats on. Unset (or empty): its own.
+// A WATER NODE SHOWING ANOTHER HOST'S SEA (OW5q). Its `water.sea` key, under its key root, a host
+// writes: a keyframe (format_sea_keyframe) its sea is from then on, in place of its own lag
+// (WaterRuntime::tick follows it, and so does the drawn node, with a body or without). The sea is
+// drawn at the scene's shown time (shown_clock.h: the other host's clock, else the app's). A
+// client of a relay writes both from the room (show_relay_seas), so the sea it draws is the
+// relay's at the relay's time, the sea its boat's model floats on. Unset (or empty): its own.
 bool scene_water_followed(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
                           SceneWaterKeyframe &out);
-// Seed both keys empty (a water node's own sea), so a host sees the node is there: a WaterRuntime
-// does at its start, and so does the drawn node.
+// Seed water.sea and the scene's shown_clock empty (its own sea, the app's time), so a host sees
+// the node is there: a WaterRuntime does at its start, and so does the drawn node.
 void scene_water_seed_follow(cvc::app &app, const SceneNode &n, const std::string &bind_prefix);
-double scene_water_time(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
-                        double app_t);
+// The time its sea is drawn at: the scene's shown time under BIND_PREFIX, else APP_T.
+double scene_water_time(cvc::app &app, const std::string &bind_prefix, double app_t);
 
 // Steps a water node's sea along its lagged wind (cvc::ocean::sea_lag). advance() with the spec
 // and coast now and the clock's time: true when the sea changed (a keyframe, or a new coast or lee

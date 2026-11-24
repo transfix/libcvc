@@ -32,6 +32,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_water.h>
 #include <cvc/ariadne/scene_wind.h>
+#include <cvc/ariadne/shown_clock.h> // the time a scene is drawn at (OW5q)
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
@@ -328,19 +329,11 @@ bool scene_water_followed(cvc::app &app, const SceneNode &n, const std::string &
 void scene_water_seed_follow(cvc::app &app, const SceneNode &n, const std::string &bind_prefix) {
   read_or_seed<std::string>(app, resolve_bind(bind_prefix, node_key(n, "water.sea")),
                             std::string());
-  read_or_seed<std::string>(app, resolve_bind(bind_prefix, node_key(n, "water.clock")),
-                            std::string());
+  seed_shown_clock(app, bind_prefix);
 }
 
-double scene_water_time(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
-                        double app_t) {
-  const std::string text = read_or<std::string>(
-      app, resolve_bind(bind_prefix, node_key(n, "water.clock")), std::string());
-  if (text.empty())
-    return app_t;
-  char *end = nullptr;
-  const double t = std::strtod(text.c_str(), &end);
-  return end != text.c_str() && std::isfinite(t) ? t : app_t;
+double scene_water_time(cvc::app &app, const std::string &bind_prefix, double app_t) {
+  return shown_time(app, bind_prefix, app_t);
 }
 
 bool SceneWaterKeyframe::operator==(const SceneWaterKeyframe &o) const {
@@ -389,12 +382,15 @@ bool SceneWaterSeaClock::advance(double t, const SceneWaterSpec &s,
     next->fetch_from = prev ? prev->fetch : nullptr;
     ++next->keyframe;
   }
-  // The fetch maps: the new keyframe's again when its direction moved (or the coast or the lee
-  // switch changed); a change of speed alone keeps them. Both on the same coast.
+  // The fetch maps: the new keyframe's again when its direction or its open fetch moved (or the
+  // coast or the lee switch changed); a change of speed alone keeps them. Both on the same coast.
+  // So the map is always the last keyframe's wind's, as another host makes it from the keyframe
+  // (follow, OW5q).
   if (!s.lee || !shore || !shore->grid) {
     next->fetch = next->fetch_from = nullptr;
   } else {
-    const bool turned = !prev || !prev->fetch || next->to.dir_rad != prev->fetch->dir_rad;
+    const bool turned = !prev || !prev->fetch || next->to.dir_rad != prev->fetch->dir_rad ||
+                        next->to.fetch_m != prev->fetch->open_m;
     if (coast || turned || !next->fetch)
       next->fetch = keyframe_fetch(*shore, next->to.dir_rad, next->to.fetch_m);
     if (coast || !next->fetch_from) {

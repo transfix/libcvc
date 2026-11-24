@@ -29,6 +29,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_water.h>           // a followed sea (OW5q)
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -48,6 +49,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <cvc/world/generated_world.h>
+#include <cvc/world/weather.h> // a storm drawn at another host's time (OW5q)
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -1973,10 +1975,10 @@ scene:
   fs::remove_all(dir, ec);
 }
 
-// A drawn water node shows another host's sea (OW5q): it seeds its water.sea and water.clock keys
-// empty, so a client of a relay sees the node is there (show_relay_seas), and once water.sea holds
-// a keyframe its runtime's field is that sea's at the next frame. (The GPU sea, drawn at
-// water.clock's time, needs a GL context; the frame here has no renderer.)
+// A drawn water node shows another host's sea (OW5q): it seeds its water.sea and the shown_clock
+// keys empty, so a client of a relay sees the node is there (show_relay_seas), and once water.sea
+// holds a keyframe its runtime's field is that sea's at the next frame. (The GPU sea, drawn at the
+// shown time, needs a GL context; the frame here has no renderer.)
 void test_drawn_water_shows_another_hosts_sea() {
   cvc::app app;
   std::printf("test_drawn_water_shows_another_hosts_sea\n");
@@ -2015,7 +2017,8 @@ scene:
   cvc::state &root = cvc::state::instance(app);
   // Its keys under the scene's state prefix, where show_relay_seas writes them (arigl passes it).
   const std::string sea_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "water.sea");
-  const std::string clock_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "water.clock");
+  const std::string clock_key =
+      cvc::ariadne::resolve_bind(sg.getStatePrefix(), cvc::ariadne::kShownClockKey);
   CHECK(root.findDescendant(sea_key) != nullptr);
   CHECK(root.findDescendant(clock_key) != nullptr);
   CHECK(root(sea_key).value().empty());
@@ -2046,12 +2049,71 @@ scene:
   CHECK(it->second->revision != rev);
   CHECK(surface() != own);
   CHECK(it->second->from_tick == 240u);
-  cvc::ariadne::SceneNode wn;
-  wn.id = "water";
-  CHECK(cvc::ariadne::scene_water_time(app, wn, sg.getStatePrefix(), 9.0) == 2.5);
+  CHECK(cvc::ariadne::scene_water_time(app, sg.getStatePrefix(), 9.0) == 2.5);
   std::printf("  the drawn water's field follows water.sea (revision %llu -> %llu)\n",
               static_cast<unsigned long long>(rev),
               static_cast<unsigned long long>(it->second->revision));
+}
+
+// A drawn weather node draws another host's storms at its time (OW5q): it seeds shown_clock
+// empty, and with a time in it the storms it publishes (weather.storms, the discs the sky draws)
+// are that time's: a storm alive at 0 is gone 600 s on (its weather runs 15 times the world's),
+// and 0 again is what the app's own clock, at 0 here, gave.
+void test_drawn_weather_draws_another_hosts_time() {
+  cvc::app app;
+  std::printf("test_drawn_weather_draws_another_hosts_time\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: weather
+      type: weather
+      chance: 0
+      area: 100
+      time_scale: 15
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  cvc::state &root = cvc::state::instance(app);
+  const std::string clock_key =
+      cvc::ariadne::resolve_bind(sg.getStatePrefix(), cvc::ariadne::kShownClockKey);
+  const std::string storms_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "weather.storms");
+  CHECK(root.findDescendant(clock_key) != nullptr);
+  CHECK(root(clock_key).value().empty());
+  cvc::world::weather_event e; // a mature storm over the area at 0, 3000 weather seconds long
+  e.t = 0.0;
+  e.tau = -1500.0;
+  e.x = 0.0;
+  e.y = 0.0;
+  e.radius = 400.0;
+  e.peak = 1.0;
+  e.life = 3000.0;
+  root(cvc::ariadne::resolve_bind(sg.getStatePrefix(), "weather.events"))
+      .value(cvc::world::format_weather_events({e}));
+  const auto frame = [&]() {
+    for (const auto &tick : out.custom_ticks)
+      tick(nullptr);
+    return root(storms_key).value();
+  };
+  const std::string own = frame();
+  root(clock_key).value("600");
+  const std::string later = frame();
+  root(clock_key).value("0");
+  const std::string again = frame();
+  std::printf("  storms at the app's time '%s', at 600 s '%s'\n", own.c_str(), later.c_str());
+  CHECK(!own.empty());
+  CHECK(later != own);
+  CHECK(again == own);
 }
 
 int main() {
@@ -2074,6 +2136,7 @@ int main() {
   test_boat_model_from_data();
   test_node_model_from_data();
   test_drawn_water_shows_another_hosts_sea();
+  test_drawn_weather_draws_another_hosts_time();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;
