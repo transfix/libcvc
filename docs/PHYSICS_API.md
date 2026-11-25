@@ -19,7 +19,7 @@ Roadmap: [`roadmap/NAV-VEHICLE-PHYSICS-ROADMAP.md`](roadmap/NAV-VEHICLE-PHYSICS-
 | `cvc/physics/field.h` | `field` (a `cvc::volume` as water, snow or wind), `field_load`, `water_sample` (`world::water_at`) |
 | `cvc/physics/flow_velocity.h` | `flow_velocity`, a flow field's velocity in space and time (`field::wind`), and `wind_flow`, the scene's wind: `cvc::algo`'s gusts and height profile (below, and OCEAN-AND-WEATHER-ROADMAP.md E5, O14) |
 | `cvc/physics/fluid_surface.h` | `fluid_surface`, a fluid field's free surface (its level, waves and water velocity, read at `world::field_time()`); `still_surface`, `wave_train_surface` (linear Airy trains). A field reads a cell's height and velocity with `height_with` / `velocity_with` and a `surface_memo` it owns, so a surface can share work between the two reads |
-| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`, `loft_hull()` (a closed hull through stations, each a half-section from keel to sheer: a model's hull baked by `tools/boat_hulls/bake_loft.py`), `hull_waterline_box()` (the largest box inside a hull at a waterline, for a renderer's water cut-out): a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming) in place of the body's sample cells |
+| `cvc/physics/hull.h` | `hull_mesh`, `box_hull()`, `loft_hull()` (a closed hull through stations, each a half-section from keel to sheer: a model's hull baked by `tools/boat_hulls/bake_loft.py`), `hull_waterline_box()` (the largest box inside a hull at a waterline, for a renderer's water cut-out): a boat's hull, a closed triangle list apart from the collision shape, that a fluid pushes on triangle by triangle (hydrostatic pressure split at the waterline, ITTC-57 friction, pressure drag, slamming, and an opt-in lift, `lift_coefficient`, for a V's grip and a planing bottom) in place of the body's sample cells |
 | `cvc/physics/immersion.h` | `immersion_body` (a body's outline as the water sees it: its box, sphere or convex hull, or its `hull_mesh`), `immersion_water` (a fluid field's surface, time and box), `immersion_grid`, `add_immersion()`: a body's columns of immersed depth zeta over a grid window's cells, from its shape, its pose and the water, as the field step immerses it. The wake windows' sources (OCEAN-AND-WEATHER-ROADMAP.md C2, O9), computable without a world (a renderer, a client from a replicated pose); the same bits on every platform |
 | `cvc/physics/ocean_surface.h` | `ocean_surface`: a `cvc::ocean::sea_surface` (`cvc/ocean/sea_surface.h`) as a free surface. That is the sea a renderer draws from the same cascades and shore layer, with breakers and the swash. For many floating bodies, `sea_params::source_cell_m` (0.5 m in lsystem_coast) lets their field cells share the sea's inversions, and a cell's height and velocity share one source through the field's memo |
 | `cvc/physics/boat.h` | `boat_desc` (a hull body, `propeller_desc`, `rudder_desc`, the actuators' time constant), `boat_controls`, `boat_state`: a boat whose propeller and rudder (or outboard) the world applies every step |
@@ -214,6 +214,8 @@ The physics headers stay standard-library only by forward-declaring the two type
   description. A world without hulls saves and hashes exactly as before. `restore()` refuses a
   world whose hulls differ from the state's. `PhysicsHull.CrossPlatformGoldenHash` pins a hull
   riding a swell (`2f71a1fe229afa75`, measured on Windows MSVC; to be confirmed by CI on Linux and macOS).
+  The digest has the hull's `lift_coefficient` only when it is not 0, so a hull without lift
+  hashes as it did before the term.
 - **Immersion:** `add_immersion()` (`immersion.h`) is plain IEEE arithmetic and sqrt, built without
   FMA contraction, so a body's columns are the same bits on every platform for the same pose and
   surface. `PhysicsImmersion.IsTheSameOnEveryPlatform` pins four bodies' columns on a swell
@@ -1067,11 +1069,13 @@ cars on land.
   package's patrol boat of 2800 kg on its own V hull, baked from the model into 16 stations of 8
   points (`loft_hull`; 242 vertices, 480 triangles; 6.85 m long, 2.33 m in beam, 7.8 m overall
   with its outboards, `length_overall`), floating 0.49 m over its keel, its collision shape the
-  hull's convex hull; its two outboards one thrust (8 kN ahead, 3.5 kN astern, none past 18 m/s)
-  that swings 0.5 rad, steering by thrust alone, and its rudder a fixed 0.4 m² foil on the keel
-  just aft of its centre of mass: the grip sideways of its keel, chines and strakes, which the
-  hull's triangles barely give a V bottom (their pressure drag goes as the flow's normal component
-  squared), so without it the boat skids and at full lock spins on the spot.
+  hull's convex hull. Its hull has its own lift (`hull_mesh::lift_coefficient` 0.56): the grip
+  sideways of its keel and chines, which the triangles' pressure drag barely gives a V bottom (it
+  goes as the flow's normal component squared), and the dynamic lift that has it rise and trim
+  onto the plane at speed. Its two outboards are one thrust (8 kN ahead, 3.5 kN astern, none past
+  18 m/s) that swings 0.3 rad, and their legs one 0.2 m² rudder at the propellers that swings with
+  them: the hull's side force acts ahead of its centre of mass, so without the legs aft it yaws off
+  its course and spins.
 - **Attach.** Each agent gets a boat (`world::add_boat`) with its hull's origin over its start,
   heading its way, upright and at rest, floating at its draft on the water there:
   `float_height(desc, mass, density)` is how far the origin rides over the waterline when the
@@ -1121,7 +1125,8 @@ Gates (`physics_dyn_boat_plant_test`, Windows MSVC Release):
 
 | Gate | Measured |
 |---|---|
-| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1); the tactical boat 10.5169 m/s, and turns at full lock at 9.230 m/s and 0.2840 rad/s, a 32.50 m radius (10.5, 32.5) |
+| The presets do what they say | The launch tops out at 3.1915 m/s and turns at full rudder and full throttle on a 15.39 m radius (`max_speed` 3.19, `turn_radius` 15.4); the jonboat 4.0054 m/s and 4.12 m (4.0, 4.1); the tactical boat 10.2258 m/s, and turns at full lock at 8.935 m/s and 0.2770 rad/s, a 32.25 m radius (10.2, 32.3) |
+| The tactical hull grips, does not spin and planes | Its lift more than triples the hull's side force as it drifts, and turns it at full lock on 32.25 m where the same boat without the lift needs 48.6 m (the bare hull, without lift or legs, spins); at full lock from throttle 0.15 to full, either way, 19.5-32.3 m at 15-17° of drift; at full throttle it trims 2.8° bow up from rest, rises 0.14 m and runs on 10.2 of its 13.3 m² of bottom, and given 30 kN it planes at 32 m/s on 3.5 m², risen 0.35 m (`TheTacticalHullGripsWithoutAFoil`, `TheTacticalBoatDoesNotSpinAtFullLock`, `TheTacticalHullPlanesAtSpeed`) |
 | A speed and a yaw rate held | Nav's commands for 2.5 m/s, then 2.5 m/s at 0.08 rad/s: 2.5000 m/s and 0.08000 rad/s on calm water for both; on a 0.3 m, 5 s swell, 2.478–2.513 m/s and 0.0795–0.0798 rad/s |
 | The books balance | A weave and a stop astern: the residual 6·10⁻⁸ to 2·10⁻⁷ of the flow on calm water, up to 3.5·10⁻⁵ on the swell. Steady at 2.5 m/s, the thrust's 11 305.28 J go to the water (11 248.80 J) and the rudder (56.25 J) |
 | Nav drives the boats | A launch and a jonboat reach goals 120 m east from rest in 37.9 s, then turn round to goals about 100 m behind them and reach those in 61.0 s |

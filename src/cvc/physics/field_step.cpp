@@ -356,6 +356,8 @@ void compile_hull(const hull_mesh &given, field_hull &out) {
   if (!std::isfinite(h.suction_coefficient) || !(h.suction_coefficient >= 0.0) ||
       !std::isfinite(h.slam_coefficient) || !(h.slam_coefficient >= 0.0))
     bad("suction_coefficient and slam_coefficient must be finite and >= 0");
+  if (!std::isfinite(h.lift_coefficient) || !(h.lift_coefficient >= 0.0))
+    bad("lift_coefficient must be finite and >= 0");
   double volume = 0.0;
   out.normal.clear();
   out.normal.reserve(h.triangles.size());
@@ -389,6 +391,10 @@ void compile_hull(const hull_mesh &given, field_hull &out) {
   const double knobs[4] = {h.length, h.kinematic_viscosity, h.suction_coefficient,
                            h.slam_coefficient};
   out.digest = fnv1a(knobs, sizeof(knobs), d);
+  // The lift only when it is on, so a hull without it keeps the digest (and a world the state
+  // hash) it had before the term.
+  if (h.lift_coefficient > 0.0)
+    out.digest = fnv1a(&h.lift_coefficient, sizeof(h.lift_coefficient), out.digest);
   out.wetted.assign(h.triangles.size(), 0.0);
   out.desc = std::move(desc);
 }
@@ -538,6 +544,13 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
     const double cp = un < 0.0 ? cf.desc.drag_coefficient : h.suction_coefficient;
     if (cp > 0.0 && un != 0.0) {
       const double c = 0.5 * rho * cp * area * std::fabs(un);
+      f = f + n * (un * c);
+      c_sum += c;
+    }
+    // Lift on a face the water meets: a lifting plate's potential normal force, 1/2 rho K |u|^2
+    // sin a cos a, as Polhamus's suction analogy gives it (hull.h).
+    if (h.lift_coefficient > 0.0 && un < 0.0) {
+      const double c = 0.5 * rho * h.lift_coefficient * area * norm(ut);
       f = f + n * (un * c);
       c_sum += c;
     }
