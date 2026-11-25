@@ -1313,11 +1313,12 @@ jobs:
   # Content-Security-Policy (any violation fails): a document set from the page's origin must load
   # and run (on ari's terminal, its text must show), and a cross-origin or missing src must show
   # the error (src/arigl/web/test/arigl_web_smoke.mjs); and the context menu's Copy, Cut and Paste
-  # must go through the browser's clipboard (arigl_web_clipboard.mjs); a picture's Save image...
+  # must go through the browser's clipboard (arigl_web_clipboard.mjs); on a Mac's platform Cmd
+  # must be the shortcut key (arigl_web_mac_keys.mjs); a picture's Save image...
   # and (save-url) must download the file (arigl_web_save.mjs). xterm.js for ari's page
   # comes from the prefix's xterm-js packages when installed, else the pinned npm download. Only
-  # when the pages, their document loader, the clipboard, the recipe or this file changed: it
-  # builds libcvc and cvcGL for wasm.
+  # when the pages, their document loader, the clipboard, the overlay's keys, the recipe or this
+  # file changed: it builds libcvc and cvcGL for wasm.
   arigl-web:
     name: arigl-web shell + ari page (wasm, headless Chrome)
     runs-on: ubuntu-24.04
@@ -1353,6 +1354,7 @@ jobs:
                    inc/cvc/ariadne/media_save.h src/cvc/ariadne/media_save.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    src/cvcGL/Clipboard.cpp src/cvcGL/ariadne/ImGuiBackend.cpp \
+                   src/cvcGL/ImGuiOverlay.cpp src/cvcGL/ImGuiKeyNames.h src/cvcGL/SdlWindow.cpp \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -1419,6 +1421,14 @@ jobs:
           node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
           chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
           "$node" src/arigl/web/test/arigl_web_clipboard.mjs --web stage-arigl-web/share/arigl-web \
+            --chrome "$chrome"
+
+      - name: Cmd as the shortcut key on a Mac in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_mac_keys.mjs --web stage-arigl-web/share/arigl-web \
             --chrome "$chrome"
 
       - name: Save a picture and a video as browser downloads in headless Chrome

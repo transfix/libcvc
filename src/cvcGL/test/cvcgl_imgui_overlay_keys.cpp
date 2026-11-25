@@ -7,6 +7,8 @@
 //  - Cocoa: Cmd's press is a Control_L with the flag set; Cmd+Z types "z" (a CharEvent, which
 //    ImGui must drop); Ctrl+Z types ^Z, which the overlay drops itself;
 //  - X11 and Win32: Ctrl+Z, with ^Z.
+// A Mac sends no key-up for a key let go while Cmd is down (Chrome and Safari; Cocoa, unless the
+// app asks for them): a press under Cmd must be a tap, or Z held down repeats the undo.
 // The interactor is never initialized and the overlay never renders: the test runs ImGui's frames
 // on the overlay's context itself, with no window and no GL.
 #include <cstdio>
@@ -146,6 +148,27 @@ void run(bool mac) {
     k.chord("a", 'a');
     k.type("x");
     chk(k.text() == "x", "Cmd+A selects all, typing no 'a': '" + k.text() + "'" + on);
+    // A Mac sends no key-up for a key let go while Cmd is down (Chrome and Safari; Cocoa, unless
+    // the app asks): under Cmd a press is a tap, so Cmd held a second after Cmd+Z undoes once,
+    // and a second Z while Cmd is still down undoes again.
+    k.type("pq");
+    k.send(true, "Control_L", 1, '\0');
+    k.send(true, "z", 1, 'z'); // and no key-up for it
+    for (int i = 0; i < 60; ++i)
+      k.frame();
+    chk(k.text() == "xp",
+        "Cmd+Z with Cmd held a second and no key-up for Z: one undo: '" + k.text() + "'" + on);
+    k.send(true, "z", 1, 'z');
+    k.frame();
+    chk(k.text() == "x",
+        "a second Z while Cmd is still down undoes again: '" + k.text() + "'" + on);
+    // A key down before Cmd, whose key-up a Mac drops while Cmd is down: Cmd's release lets go.
+    k.send(true, "Right", 0, '\0');
+    k.send(true, "Control_L", 1, '\0');
+    k.send(false, "Control_L", 0, '\0');
+    k.frame(); // ImGui takes the release a frame later: it trickles its queue a key at a time
+    chk(!ImGui::IsKeyDown(ImGuiKey_RightArrow) && !ImGui::IsKeyDown(ImGuiKey_Z),
+        "Cmd's release lets go of a key held from before it" + on);
   } else {
     k.chord("z", '\x1a');
     chk(k.heldCtrl && !k.heldSuper, "VTK's control flag is ImGui's Ctrl" + on);
@@ -157,6 +180,7 @@ void run(bool mac) {
 
   // What the overlay sent before: ImGuiMod_Ctrl, which ImGui's Mac behaviours turn into Super, so
   // Z does not undo there (and does elsewhere).
+  const std::string before = k.text();
   k.type("yz");
   ImGuiIO &io = ImGui::GetIO();
   io.AddKeyEvent(ImGuiMod_Ctrl, true);
@@ -165,9 +189,9 @@ void run(bool mac) {
   io.AddKeyEvent(ImGuiKey_Z, false);
   io.AddKeyEvent(ImGuiMod_Ctrl, false);
   k.frame();
-  chk(k.text() == (mac ? "xyz" : "xy"), std::string("ImGuiMod_Ctrl+Z itself ") +
-                                            (mac ? "does not undo" : "undoes") + ": '" + k.text() +
-                                            "'" + on);
+  chk(k.text() == before + (mac ? "yz" : "y"), std::string("ImGuiMod_Ctrl+Z itself ") +
+                                                   (mac ? "does not undo" : "undoes") + ": '" +
+                                                   k.text() + "'" + on);
 }
 
 #endif

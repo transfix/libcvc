@@ -5776,6 +5776,9 @@ How each host does it:
   - When the browser refuses (the permission denied, its prompt dismissed, an `http://` page),
     the field takes the focus and a note under it says to press Ctrl+V. Ctrl+V works as it always
     did, through the page's `paste` event.
+  - On a Mac the page uses Cmd, as a native app does: Cmd+X, C, V, A and Z, with "Cmd+" in the
+    menus. The page's platform decides, and `?mackeys=0` or `?mackeys=1` overrules it
+    (docs/CVCGL_WASM.md, "The window: SDL's canvas").
 - **FTXUI** (`ari`):
   - Copy is an OSC 52 escape, as `(clipboard-set)`'s is (§10.7).
   - Paste asks the terminal for the clipboard with an OSC 52 read
@@ -5812,7 +5815,10 @@ The tests:
 - In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs` runs arigl-web in headless Chrome,
   grants it the clipboard, and right-clicks through the page's own input. It covers Copy, Paste,
   Cut, and a refused read followed by Ctrl+V. On ari.html it uses Shift+F10 and Paste through the
-  OSC 52 read.
+  OSC 52 read. `arigl_web_mac_keys.mjs` tells Chrome it runs on a Mac and checks Cmd+Z and Cmd+V
+  there, and Ctrl again under `?mackeys=0`.
+- `cvcgl_imgui_overlay_keys`: ImGuiOverlay's keys from VTK's window with ImGui's Mac behaviours
+  on and off, a Mac's missing key-up under Cmd included.
 
 ### 5.29 Saving a picture or a video: Save image..., Save video... and `save-url`
 
