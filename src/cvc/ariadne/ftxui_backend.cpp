@@ -818,8 +818,9 @@ struct FtxuiBackend::Impl {
   };
 
   // §5.28 what a leaf's context menu offers: Copy (a text, a notification's entry), Cut / Copy /
-  // Paste / Select all (a field), Copy line / Copy all (a text view).
-  enum class Menu { None, Text, Field, View };
+  // Paste / Select all (a field), Copy line / Copy all (a text view); §5.29 Save image... or Save
+  // video... (a picture).
+  enum class Menu { None, Text, Field, View, Save };
 
   // One emitted leaf, kept for the next event's focus walk and hit-test.
   struct Item {
@@ -834,6 +835,7 @@ struct FtxuiBackend::Impl {
     Menu ctx = Menu::None;
     std::string copy;
     bool masked = false; // a password field's: no Cut or Copy
+    std::shared_ptr<const MediaSave> save; // §5.29 a picture's: what its Save saves
   };
 
   // What a walk produced, beyond the Element tree.
@@ -901,6 +903,7 @@ struct FtxuiBackend::Impl {
     Menu kind = Menu::None;
     std::string copy, line; // Copy's (a text view's Copy all's), a text view's line
     bool masked = false;
+    std::shared_ptr<const MediaSave> save; // §5.29 Save's
     std::vector<std::string> entries;
     std::vector<bool> enabled;
     int hi = 0;
@@ -1752,6 +1755,7 @@ struct FtxuiBackend::Impl {
     c.kind = it.ctx;
     c.copy = it.copy;
     c.masked = it.masked;
+    c.save = it.save;
     switch (it.ctx) {
     case Menu::Field: {
       const auto e = edits.find(it.id);
@@ -1775,6 +1779,10 @@ struct FtxuiBackend::Impl {
       c.enabled = {!c.line.empty(), !c.copy.empty()};
       break;
     }
+    case Menu::Save: // §5.29 a picture
+      c.entries = {c.save && c.save->video ? "Save video..." : "Save image..."};
+      c.enabled = {c.save != nullptr};
+      break;
     default:
       c.entries = {"Copy"};
       c.enabled = {!c.copy.empty()};
@@ -1786,9 +1794,16 @@ struct FtxuiBackend::Impl {
     ctx = std::move(c);
   }
 
-  // Shift+F10 or the Menu key: the focused leaf's menu, under it.
+  // Shift+F10 or the Menu key: the focused leaf's menu, under it. A focused item group with none
+  // of its own (a picture with fullscreen: true, a clickable card) has its picture's Save.
   bool open_context_focused() {
     const Item *it = find_item(last, focused);
+    if (!it || it->ctx == Menu::None)
+      for (const Item &in : last.items)
+        if (in.group == focused && in.ctx == Menu::Save) {
+          it = &in;
+          break;
+        }
     if (!it || it->ctx == Menu::None)
       return false;
     const auto b = boxes.find(it->id);
@@ -1821,6 +1836,11 @@ struct FtxuiBackend::Impl {
     close_context();
     if (const Item *it = find_item(last, c.on)) // its value now (a commit since it was drawn)
       c.copy = it->copy;
+    if (c.kind == Menu::Save) { // §5.29 the core saves it, from its next drain
+      if (self && c.save)
+        self->media_save_chosen(*c.save);
+      return;
+    }
     if (c.kind != Menu::Field) {
       copy_out(what == "Copy line" ? c.line : c.copy);
       return;
@@ -3441,6 +3461,16 @@ void FtxuiBackend::text_value_colored(const char *label, const std::string &valu
                                       const float rgb[3]) {
   m_->leaf(m_->uid("t|"), false, text_block(labelled(label, value)) | fx::color(rgb_color(rgb)));
   m_->leaf_menu(Impl::Menu::Text, value);
+}
+
+// §5.29 the picture just drawn: Save image... / Save video... in its context menu.
+void FtxuiBackend::item_save(const MediaSave &m) {
+  Impl &m_impl = *m_;
+  if (m_impl.walk.items.empty() || m_impl.walk.items.back().id != m_impl.last_item)
+    return;
+  Impl::Item &it = m_impl.walk.items.back();
+  it.ctx = Impl::Menu::Save;
+  it.save = std::make_shared<const MediaSave>(m);
 }
 
 void FtxuiBackend::next_item_copy(const std::string &text) {
@@ -5153,6 +5183,7 @@ bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false
 bool FtxuiBackend::clipboard_copy(const std::string &) { return false; }
 bool FtxuiBackend::clipboard_request() { return false; }
 void FtxuiBackend::next_item_copy(const std::string &) {}
+void FtxuiBackend::item_save(const MediaSave &) {}
 std::string FtxuiBackend::take_clipboard() { return {}; }
 FullscreenView FtxuiBackend::begin_fullscreen_view() { return {}; }
 void FtxuiBackend::end_fullscreen_view() {}

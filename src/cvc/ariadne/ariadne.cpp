@@ -33,6 +33,7 @@
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
+#include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/requires.h>     // free_heads: the isolation rules' oidc check
@@ -1626,6 +1627,98 @@ struct Runtime::Impl {
   // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
   void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
                        cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
+
+  // §5.29 saving a picture or a video: a context menu's Save image... / Save video..., and
+  // (save-url). A save's bytes are fetched as the widget's are (image_cache().fetch), the file is
+  // named from the URL and what the bytes are, and then the backend's Save dialog asks where (the
+  // file is written there), a browser page downloads it, or it goes into the Downloads folder as a
+  // new file. Each step that answers off the frame (a fetch, a dialog, a write) hands the next one
+  // to the hub, which drain() runs on the drawing thread; one a Runtime that is gone never ran is
+  // abandoned, and its save told why. The hub is shared with the verb, whose program may outlive
+  // this Runtime.
+  struct SaveOutcome {
+    bool ok = false;
+    bool cancelled = false; // the user closed the dialog
+    bool browser = false;   // a browser page downloads it: no path here
+    std::string name;       // the file's name
+    std::string path;       // where it was written (natively)
+    std::uint64_t size = 0;
+    std::string error;
+  };
+  struct SaveJob {
+    MediaSave save;
+    bool menu = false; // a context menu's: a failure is a notification
+    // (save-url)'s program: called once, from any thread, with the outcome.
+    std::function<void(const SaveOutcome &)> done;
+  };
+  struct SaveHub {
+    struct Step {
+      std::function<void()> run;     // on the drawing thread, from drain()
+      std::function<void()> abandon; // when the Runtime goes first: tell the save
+    };
+    std::mutex m;
+    std::vector<SaveJob> asked; // (save-url)'s, from wherever its program runs
+    std::vector<Step> steps;
+    // The drawing thread's alone: a Save dialog is open (one at a time), and where a save with no
+    // dialog goes ("" the Downloads folder).
+    bool dialog_open = false;
+    std::string dir;
+    void post(Step s) {
+      std::lock_guard<std::mutex> lock(m);
+      steps.push_back(std::move(s));
+    }
+    void ask(SaveJob j) {
+      std::lock_guard<std::mutex> lock(m);
+      asked.push_back(std::move(j));
+    }
+    ~SaveHub() {
+      for (Step &s : steps)
+        if (s.abandon)
+          s.abandon();
+      SaveOutcome gone;
+      gone.error = "the document is gone";
+      for (SaveJob &j : asked)
+        if (j.done)
+          j.done(gone);
+    }
+  };
+  std::shared_ptr<SaveHub> saves = std::make_shared<SaveHub>();
+  // A browser page's save a context menu opened on (Backend::media_save_prepare): its bytes are
+  // fetched and staged on the page, so the pointer's release over Save downloads them inside the
+  // click. The saves chosen before they came wait for them.
+  struct PreparedSave {
+    std::string key; // media_save_key
+    long gen = 0;
+    bool staged = false;
+    std::chrono::steady_clock::time_point staged_at; // the page lets it go after two minutes
+    SaveOutcome outcome;                             // what its saves are told (name, size)
+    std::vector<SaveJob> waiting;
+  };
+  std::unique_ptr<PreparedSave> prepared_save;
+  long prepared_gen = 0;
+  void pump_saves();                     // drain(): the saves asked for, and their steps
+  void start_save(SaveJob job);          // fetch the bytes
+  void prepare_save(const MediaSave &m); // a browser page: fetch now, stage on the page
+  void save_fetched(SaveJob job, media::FetchResult r);
+  void save_deliver(SaveJob job, const std::string &name, const std::string &mime,
+                    std::shared_ptr<const std::string> bytes);
+  void save_write(SaveJob job, const std::string &path, const std::string &name,
+                  std::shared_ptr<const std::string> bytes, bool fresh);
+  void finish_save(const SaveJob &job, const SaveOutcome &o);
+  // The file name and type of `bytes` saved for `m` (its own name and mime, else the URL's and
+  // what the bytes are).
+  static void save_naming(const MediaSave &m, const std::string &bytes, std::string &name,
+                          std::string &mime);
+  // §5.29 the picture just drawn for `w` offers Save (unless `save: false`).
+  void offer_save(const Widget &w, const std::string &uri, bool video) {
+    if (!w.save_menu || !media::is_uri(uri))
+      return;
+    MediaSave m;
+    m.url = uri;
+    m.auth = w.media_auth;
+    m.video = video;
+    backend->item_save(m);
+  }
 
   // The document's own program-lane intrinsics (add_program_intrinsics), in order, each with its
   // kind: bound after the app's into every program env this Runtime builds, and into no other
@@ -4003,6 +4096,8 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
                         v.status == media::Status::Ready
                             ? uri
                             : std::string("(") + media::status_name(v.status) + ")");
+  else
+    offer_save(w, uri, /*video=*/false); // §5.29 Save image... in its context menu
   if (v.status == media::Status::Failed)
     backend->set_tooltip((caption + ": " + v.error).c_str());
   write_media_status(w.media_status, v);
@@ -4620,6 +4715,8 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
         b.item_badge(why.c_str());
     }
     emit_badge(w);
+    if (drew && !decorative) // §5.29 Save video... in its context menu (a decorative one has none)
+      offer_save(w, uri, /*video=*/true);
   }
 
   // autoplay: it starts once it can, and until the user (or the document) plays or pauses it, it
@@ -6660,6 +6757,37 @@ FilePickRequest file_pick_request(std::span<const cvc::state_exec::value_t> args
   return req;
 }
 
+// (save-url URL [OPTS])'s arguments (§5.29): the URL, an http(s), file, cvc or state URI, and the
+// options name (the file's name), mime (its type) and auth (a credential name, as image:'s).
+MediaSave save_url_request(std::span<const cvc::state_exec::value_t> args) {
+  namespace se = cvc::state_exec;
+  if (args.empty() || args.size() > 2)
+    throw se::dsl_error("TypeError", "save-url: (save-url URL [OPTS])");
+  const std::string *url = std::get_if<std::string>(&args[0].v);
+  if (!url)
+    throw se::dsl_error("TypeError", "save-url: the URL is a string, not " + args[0].type_name());
+  if (!media::is_uri(*url))
+    throw se::dsl_error("ValueError",
+                        "save-url: \"" + *url + "\" is not an http(s), file, cvc or state URI");
+  MediaSave m;
+  m.url = *url;
+  if (args.size() < 2 || args[1].is_nil())
+    return m;
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&args[1].v);
+  if (!d)
+    throw se::dsl_error("TypeError",
+                        "save-url: the options are a dict, not " + args[1].type_name());
+  for (const auto &[key, v] : **d) {
+    const std::string *s = std::get_if<std::string>(&v.v);
+    if (key != "name" && key != "mime" && key != "auth")
+      throw se::dsl_error("ValueError", "save-url: no option '" + key + "' (name, mime, auth)");
+    if (!s)
+      throw se::dsl_error("TypeError", "save-url: '" + key + "' is a string");
+    (key == "name" ? m.name : key == "mime" ? m.mime : m.auth) = *s;
+  }
+  return m;
+}
+
 std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_t> args) {
   namespace se = cvc::state_exec;
   const std::string *h = args.size() == 1 ? std::get_if<std::string>(&args[0].v) : nullptr;
@@ -6794,6 +6922,337 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
       env, "file-forget", [app_ptr](std::span<const se::value_t> args) -> se::value_t {
         return se::value_t(picked_files(*app_ptr).forget(handle_arg("file-forget", args)));
       });
+  // §5.29 (save-url URL [OPTS]) / (save-url-async ...): save what URL names to a file the user
+  // keeps, as a context menu's Save image... does. The program parks until it is saved, the user
+  // cancelled the dialog, or it failed: {ok cancelled name size error}, never the path. Bound where
+  // there is a backend: (has? "save-url"). The call hands the save to the Runtime's hub, under its
+  // lock, from wherever its program runs; drain() starts it on the drawing thread.
+  const std::weak_ptr<SaveHub> weak_saves = saves;
+  if (backend)
+    se::register_async_fn(
+        env, host, "save-url",
+        [weak_saves, &host](std::span<const se::value_t> args) -> se::async_work {
+          const MediaSave m = save_url_request(args);
+          se::async_work work;
+          work.start = [weak_saves, m,
+                        fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
+            const std::shared_ptr<SaveHub> hub = weak_saves.lock();
+            if (!hub)
+              throw std::runtime_error("save-url: the document is gone");
+            auto settled = std::make_shared<std::atomic<bool>>(false);
+            SaveJob job;
+            job.save = m;
+            job.done = [call, fin, settled](const SaveOutcome &o) {
+              if (settled->exchange(true) || call->cancel_requested())
+                return; // its host may be gone
+              se::value_t value = se::make_dict({
+                  {"ok", se::value_t(o.ok)},
+                  {"cancelled", se::value_t(o.cancelled)},
+                  {"name", se::value_t(o.name)},
+                  {"size", se::value_t(static_cast<int64_t>(o.size))},
+                  {"error", se::value_t(o.error)},
+              });
+              if (call->settle(std::move(value), nullptr))
+                fin.finish(call);
+            };
+            call->on_cancel([settled] { settled->store(true); });
+            hub->ask(std::move(job));
+          };
+          return work;
+        },
+        io);
+}
+
+// ---- §5.29 saving a picture or a video ----------------------------------------------------------
+
+void Runtime::Impl::pump_saves() {
+  std::vector<SaveJob> asked;
+  std::vector<SaveHub::Step> steps;
+  {
+    std::lock_guard<std::mutex> lock(saves->m);
+    asked.swap(saves->asked);
+    steps.swap(saves->steps);
+  }
+  if (backend)
+    for (Backend::MediaSaveAsk &a : backend->take_media_saves()) {
+      if (a.prepare) {
+        prepare_save(a.save);
+        continue;
+      }
+      SaveJob job;
+      job.save = std::move(a.save);
+      job.menu = true;
+      start_save(std::move(job));
+    }
+  for (SaveJob &j : asked)
+    start_save(std::move(j));
+  for (SaveHub::Step &s : steps)
+    s.run();
+}
+
+void Runtime::Impl::save_naming(const MediaSave &m, const std::string &bytes, std::string &name,
+                                std::string &mime) {
+  mime = m.mime;
+  if (mime.empty())
+    mime = sniff_mime(bytes);
+  if (mime.empty()) { // what its name says it is, if anything
+    const std::string guess = guess_mime_type(save_file_name(m.url, m.name, "", m.video));
+    if (guess != "application/octet-stream")
+      mime = guess;
+  }
+  name = save_file_name(m.url, m.name, mime, m.video);
+}
+
+void Runtime::Impl::prepare_save(const MediaSave &m) {
+#ifdef __EMSCRIPTEN__
+  const std::string key = media_save_key(m);
+  const bool fresh = prepared_save && (!prepared_save->staged ||
+                                       std::chrono::steady_clock::now() - prepared_save->staged_at <
+                                           std::chrono::seconds(100));
+  if (prepared_save && ((prepared_save->key == key && fresh) || !prepared_save->waiting.empty()))
+    return; // this one's, or one a save waits for
+  if (prepared_save && prepared_save->staged)
+    browser_save_drop(prepared_save->key);
+  prepared_save = std::make_unique<PreparedSave>();
+  prepared_save->key = key;
+  const long gen = prepared_save->gen = ++prepared_gen;
+  const std::weak_ptr<SaveHub> weak = saves;
+  image_cache().fetch(m.url, m.auth, [this, weak, gen, m](media::FetchResult r) {
+    const std::shared_ptr<SaveHub> hub = weak.lock();
+    if (!hub)
+      return;
+    auto got = std::make_shared<media::FetchResult>(std::move(r));
+    hub->post({[this, gen, m, got] {
+                 if (!prepared_save || prepared_save->gen != gen)
+                   return; // another menu's since
+                 PreparedSave &p = *prepared_save;
+                 std::vector<SaveJob> waiting = std::move(p.waiting);
+                 SaveOutcome o;
+                 if (got->ok) {
+                   std::string name, mime;
+                   save_naming(m, got->bytes, name, mime);
+                   o.name = name;
+                   o.size = got->bytes.size();
+                   p.staged = browser_save_stage(p.key, name, mime, got->bytes);
+                   p.staged_at = std::chrono::steady_clock::now();
+                 }
+                 if (!p.staged) { // a failed fetch: a save asked for again fetches again
+                   prepared_save.reset();
+                   for (SaveJob &j : waiting) {
+                     if (got->ok) {
+                       start_save(std::move(j));
+                       continue;
+                     }
+                     SaveOutcome f;
+                     f.error = got->error;
+                     f.name = save_file_name(j.save.url, j.save.name, j.save.mime, j.save.video);
+                     finish_save(j, f);
+                   }
+                   return;
+                 }
+                 p.outcome = o;
+                 if (waiting.empty())
+                   return; // staged for the pointer's release, or a Save to come
+                 browser_save_commit(p.key);
+                 prepared_save.reset();
+                 o.ok = o.browser = true;
+                 for (SaveJob &j : waiting)
+                   finish_save(j, o);
+               },
+               nullptr});
+  });
+#else
+  (void)m; // natively a Save fetches when it is picked: no click rules to keep
+#endif
+}
+
+void Runtime::Impl::start_save(SaveJob job) {
+  if (!media::is_uri(job.save.url)) {
+    SaveOutcome o;
+    o.error = "it is not a URL (http(s), file, cvc or state)";
+    finish_save(job, o);
+    return;
+  }
+#ifdef __EMSCRIPTEN__
+  // A menu's prepared save: downloaded now if its bytes are staged, else when they come.
+  if (prepared_save && prepared_save->key == media_save_key(job.save)) {
+    if (!prepared_save->staged) {
+      prepared_save->waiting.push_back(std::move(job));
+      return;
+    }
+    const bool done = browser_save_commit(prepared_save->key);
+    SaveOutcome o = prepared_save->outcome;
+    prepared_save.reset();
+    if (done) {
+      o.ok = o.browser = true;
+      finish_save(job, o);
+      return;
+    } // its page let it go: fetch it again
+  }
+#endif
+  const std::weak_ptr<SaveHub> weak = saves;
+  auto held = std::make_shared<SaveJob>(std::move(job));
+  image_cache().fetch(held->save.url, held->save.auth, [this, weak, held](media::FetchResult r) {
+    const std::shared_ptr<SaveHub> hub = weak.lock();
+    if (!hub) {
+      if (held->done) {
+        SaveOutcome o;
+        o.error = "the document is gone";
+        held->done(o);
+      }
+      return;
+    }
+    auto got = std::make_shared<media::FetchResult>(std::move(r));
+    hub->post({[this, held, got] { save_fetched(std::move(*held), std::move(*got)); },
+               [held] {
+                 if (held->done) {
+                   SaveOutcome o;
+                   o.error = "the document is gone";
+                   held->done(o);
+                 }
+               }});
+  });
+}
+
+void Runtime::Impl::save_fetched(SaveJob job, media::FetchResult r) {
+  if (!r.ok) {
+    SaveOutcome o;
+    o.error = r.error.empty() ? std::string("the fetch failed") : r.error;
+    o.name = save_file_name(job.save.url, job.save.name, job.save.mime, job.save.video);
+    finish_save(job, o);
+    return;
+  }
+  std::string name, mime;
+  save_naming(job.save, r.bytes, name, mime);
+  save_deliver(std::move(job), name, mime, std::make_shared<const std::string>(std::move(r.bytes)));
+}
+
+void Runtime::Impl::save_deliver(SaveJob job, const std::string &name, const std::string &mime,
+                                 std::shared_ptr<const std::string> bytes) {
+  // 1. The host's own Save dialog (arigl: the system's), one at a time.
+  if (backend && saves->dialog_open) {
+    SaveOutcome o;
+    o.name = name;
+    o.error = "a Save dialog is open already";
+    finish_save(job, o);
+    return;
+  }
+  if (backend) {
+    SavePathRequest req;
+    req.name = name;
+    req.mime = mime;
+    const std::string major = mime.substr(0, mime.find('/'));
+    req.title = major == "image" ? "Save image" : major == "video" ? "Save video" : "Save file";
+    const std::weak_ptr<SaveHub> weak = saves;
+    auto held = std::make_shared<SaveJob>(job);
+    SavePathDone done = [this, weak, held, name, bytes](std::string path, std::string error) {
+      const std::shared_ptr<SaveHub> hub = weak.lock();
+      if (!hub) {
+        if (held->done) {
+          SaveOutcome o;
+          o.error = "the document is gone";
+          held->done(o);
+        }
+        return;
+      }
+      hub->post({[this, held, name, bytes, path, error] {
+                   saves->dialog_open = false;
+                   SaveOutcome o;
+                   o.name = name;
+                   if (!error.empty()) {
+                     o.error = error;
+                     finish_save(*held, o);
+                   } else if (path.empty()) {
+                     o.cancelled = true;
+                     finish_save(*held, o);
+                   } else {
+                     save_write(std::move(*held), path, name, bytes, /*fresh=*/false);
+                   }
+                 },
+                 nullptr});
+    };
+    if (backend->ask_save_path(req, std::move(done))) {
+      saves->dialog_open = true;
+      return;
+    }
+  }
+  // 2. A browser page: a download.
+  if (browser_save_file(name, mime, *bytes)) {
+    SaveOutcome o;
+    o.ok = o.browser = true;
+    o.name = name;
+    o.size = bytes->size();
+    finish_save(job, o);
+    return;
+  }
+  // 3. A new file in the Downloads folder (or the host's set_save_dir).
+  std::string dir = saves->dir, why;
+  if (dir.empty())
+    dir = downloads_dir(&why);
+  if (dir.empty()) {
+    SaveOutcome o;
+    o.name = name;
+    o.error = why;
+    finish_save(job, o);
+    return;
+  }
+  save_write(std::move(job), dir, name, std::move(bytes), /*fresh=*/true);
+}
+
+void Runtime::Impl::save_write(SaveJob job, const std::string &path, const std::string &name,
+                               std::shared_ptr<const std::string> bytes, bool fresh) {
+  // Off the frame: a video can be tens of MiB. `fresh`: a new file in the folder `path`, never
+  // over one there; else the file `path` the user chose, replaced.
+  const std::weak_ptr<SaveHub> weak = saves;
+  auto held = std::make_shared<SaveJob>(std::move(job));
+  app.submitPooled([this, weak, held, path, name, bytes, fresh] {
+    SaveOutcome o;
+    o.name = name;
+    o.size = bytes->size();
+    std::string error;
+    if (fresh) {
+      o.path = save_new_file(path, name, *bytes, &error);
+      o.ok = !o.path.empty();
+    } else {
+      o.ok = save_file_at(path, *bytes, &error);
+      o.path = path;
+    }
+    if (o.ok) {
+      const std::size_t slash = o.path.find_last_of("/\\");
+      o.name = slash == std::string::npos ? o.path : o.path.substr(slash + 1);
+    } else {
+      o.error = error;
+    }
+    const std::shared_ptr<SaveHub> hub = weak.lock();
+    if (!hub) {
+      if (held->done)
+        held->done(o); // written, or not, all the same
+      return;
+    }
+    hub->post({[this, held, o] { finish_save(*held, o); },
+               [held, o] {
+                 if (held->done)
+                   held->done(o);
+               }});
+  });
+}
+
+void Runtime::Impl::finish_save(const SaveJob &job, const SaveOutcome &o) {
+  // Where a file was written, the user is told where: a terminal shows no download.
+  if (o.ok && !o.browser && !o.path.empty()) {
+    cvc::notification n;
+    n.text = "Saved " + o.name + " to " + o.path;
+    n.path = prefix;
+    cvc::notify(app, std::move(n));
+  } else if (job.menu && !o.ok && !o.cancelled) {
+    cvc::notification n;
+    n.text = "Could not save " + (o.name.empty() ? std::string("it") : o.name) + ": " + o.error;
+    n.level = 2;
+    n.path = prefix;
+    cvc::notify(app, std::move(n));
+  }
+  if (job.done)
+    job.done(o);
 }
 
 cvc::state_exec::spawn_setup
@@ -7352,6 +7811,8 @@ void Runtime::set_media_base(std::string dir) {
     m_->images->set_base(m_->media_base);
 }
 
+void Runtime::set_save_dir(std::string dir) { m_->saves->dir = std::move(dir); }
+
 void Runtime::set_root(Widget root) {
   // Now, not at the swap: a resident submitted in the next drain() runs with these.
   m_->doc_functions = root.functions ? root.functions->prelude : std::string();
@@ -7707,6 +8168,7 @@ void Runtime::drain_begin() {
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
   m.run_key_bindings();
+  m.pump_saves(); // §5.29 the saves asked for since, and the steps of those under way
   if (m.images) // §5.11: a build without threads loads its pictures here, a step per drain
     m.images->pump();
   std::vector<Impl::QueuedAction> events;

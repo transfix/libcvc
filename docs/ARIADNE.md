@@ -3905,6 +3905,8 @@ windows:
   and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
 - **`fullscreen: true`**: a click on the picture shows it alone, filling the window (or the
   terminal), until Esc (§5.13).
+- **Save image...** is in its context menu: the user saves the picture to a file (§5.29).
+  `save: false` leaves it out.
 - **`badge:`** is a label shown over the picture, with the picture dimmed under it. A media
   grid shows "+3" this way on its last tile, for the pictures it leaves out:
 
@@ -4047,6 +4049,7 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
   with `m:ss / m:ss` as its value, Mute and Loop. "Open" is added where the media can't play here.
   They look and work the same in ImGui, FTXUI and tvision.
+- **Save video...** is in the picture's context menu, with controls (§5.29).
 - **Loop** starts checked when `loop: true`. Unchecking it lets the player stop at the end from
   then on, and checking it makes it start again there. A new `src:` for the same widget (a
   repeat's row showing another post) starts as the box is. With `controls: false` there is no box,
@@ -5710,6 +5713,7 @@ pointer:
 | A text: `text:`, a bound value, a rich text (§5.20) | Copy, Select text... |
 | A `text_view:` (a chat log, a console) | Copy line, Copy all, Select text... |
 | A notification: the bell's entry, a Notifications window line (§5.24) | Copy |
+| A picture by URL or file (`image:`), a `video:` | Save image..., Save video... (§5.29) |
 
 - **Cut and Copy** take the selection, or the whole text when nothing is selected. A `password:`
   field has neither.
@@ -5781,6 +5785,128 @@ The tests:
   grants it the clipboard, and right-clicks through the page's own input. It covers Copy, Paste,
   Cut, and a refused read followed by Ctrl+V. On ari.html it uses Shift+F10 and Paste through the
   OSC 52 read.
+
+### 5.29 Saving a picture or a video: Save image..., Save video... and `save-url`
+
+An `image:` whose picture comes from a URL or a file (§5.11) has **Save image...** in its context
+menu (§5.28), and a `video:` has **Save video...**. As with Copy, the document asks for nothing.
+A right-click opens the menu, or a long press on a touch screen. In a terminal, Shift+F10 or the
+Menu key opens it on a picture that takes the focus (`fullscreen: true`, or a clickable group
+around it).
+
+These have no Save: a picture the host published by name, a decorative video (`controls: false`,
+or a video URL in an `image:`), an `audio:`, a `background:`, and a button's or a tray icon's
+picture. `save: false` on an `image:` or a `video:` leaves Save out of its menu:
+
+```yaml
+- image: ""
+  bind: post.media.0.url
+  save: false        # no Save image... in its context menu
+```
+
+**The bytes** are fetched as the widget's own fetch got them. They go through the host's network
+and its allowlist (§10.3), with the widget's `auth:` credential. Without `auth:` they come through
+the app's HTTP cache, as the picture's did, so a picture just drawn is not downloaded again while
+it is fresh.
+
+**The name** is the last part of the URL's path, percent-decoded and without its query. Its
+extension is what the bytes are: a PNG, JPEG, GIF, WebP, AVIF, HEIC, TIFF, BMP or SVG picture, an
+MP4, MOV, WebM, Matroska or Ogg video, or an MP3, FLAC, WAV or Ogg sound.
+
+- txwtf's `/uploads/3f9a` holding a PNG is saved as `3f9a.png`.
+- `photo.jpg` holding a PNG is `photo.png`. An extension of no known type is kept, and the type's
+  is added: `view.php` holding a PNG is `view.php.png`.
+- Characters a file name can't hold become `_`, and so does a dot at the start. A name Windows
+  reserves (`CON`, `NUL`, `COM1`...) gets a `_` in front.
+- A URL with no path part is `image` or `video`. A name is at most 200 bytes, its extension kept.
+
+**Where it goes** depends on the host:
+
+| Host | The save |
+|---|---|
+| ImGui, natively (`arigl`, cvcGL apps) | The system's Save dialog (SDL3's, like `file-pick`'s Open, §10.8). It opens in the Downloads folder, with the name filled in and a filter for its type. The host writes the file where the user chose, off the frame, and a notification says `Saved NAME to PATH`. |
+| The arigl-web page | A browser download: a Blob of the bytes, and a click on an `<a download>` for it. The browser's own downloads list shows it. |
+| The ari.html page | The same download. |
+| FTXUI and tvision (`ari`) | A new file in the user's Downloads folder, never over a file already there (`photo (1).png`), and a notification naming its whole path (§5.24). |
+| A GL window without SDL | As a terminal does. |
+
+- **The Downloads folder.** On Windows it is the Downloads known folder. Elsewhere it is
+  `$XDG_DOWNLOAD_DIR`, else `XDG_DOWNLOAD_DIR` in `user-dirs.dirs` (in `$XDG_CONFIG_HOME`, or
+  `~/.config`), else `~/Downloads`. It is made when it isn't there. Over SSH it is the remote
+  machine's. A host can name another folder (`Runtime::set_save_dir`).
+- **In a browser,** the page fetches the bytes as it fetches the picture, so a picture from
+  another origin needs that origin's CORS, and a Content-Security-Policy needs it in
+  `connect-src`.
+- **Safari's click rule.** A browser counts a download as the user's inside a click. Safari counts
+  only the click itself, and ImGui sees a click a frame after the browser does. So arigl-web fetches
+  the bytes when the menu opens, and the page's own pointer release over Save image... starts the
+  download, as §5.28's clipboard calls are made (`cvc::gl::clipboard::arm`). A download whose
+  bytes come after the release (a long video still loading, a `save-url` from a program, ari.html's
+  menu) starts when they come. Chrome and Firefox allow that. Safari may ask whether to allow
+  downloads from the site.
+- **One Save dialog at a time.** Another save while one is open is refused (`a Save dialog is open
+  already`).
+- **A failure** posts an error notification, `Could not save NAME: WHY`: a 404, an origin the host
+  doesn't allow, the network off, a full disk. A cancelled dialog does nothing.
+
+**`(save-url URL [OPTS])`**, and `save-url-async`, give a document its own Save button. It does
+what the menu's Save does, for any http(s), `file://`, `cvc://` or `state://` URL:
+
+```yaml
+- button: Save
+  visible_when: (has? "save-url")
+  on: (save-url (state-get "view.media.url") (dict "auth" "txwtf"))
+```
+
+| option | what |
+|---|---|
+| `name` | the file's name; its folders are dropped, and the type's extension is added or put in place of another type's. Default: from the URL |
+| `mime` | its MIME type. Default: what the bytes are, else what the name's extension says |
+| `auth` | the credential the URL is fetched with, as `image:`'s `auth:` (§5.11) |
+
+An unknown option, a value that isn't a string, or a URL that isn't one of those is an error at
+the call.
+
+Call it from an action (a button's `on:`), as `file-pick` is called (§10.8): a browser counts a
+download as the user's only after a click or a key. The program waits (parks) until the file is
+saved, the user cancelled, or the save failed. The wait is an I/O call: it costs one step, however
+long the user takes. It returns
+`{ok cancelled name size error}`:
+
+- `name` is the file's name as saved: `photo (1).png` when `photo.png` was taken, or the name the
+  user typed in the dialog.
+- The reply never holds the path, as `file-pick`'s gives no path (§10.8). The notification
+  tells the user where it went.
+- In a browser, `ok` means the download was handed to the browser.
+- A failure is a reply (`ok` `#f`, with `error`), as with the http verbs. It is the program's to
+  show: no notification is posted for it.
+
+`(has? "save-url")` is true wherever the document has a backend, and so somewhere to save. A host
+that has the verb has the menu's Save too. The verb is bound as it is in every group, so it works
+from an isolated document's programs (docs/STATE_EXEC_THREADED.md).
+
+For a backend:
+
+- The core calls `Backend::item_save(MediaSave)` right after a picture that has Save.
+- When the user picks Save, the backend hands the `MediaSave` back with `media_save_chosen`. In a
+  browser, arigl-web also calls `media_save_prepare` when the menu opens. The core takes both each
+  drain (`take_media_saves`).
+- `Backend::ask_save_path(SavePathRequest, SavePathDone)` is the host's own Save dialog: ImGui's is
+  SDL3's. Without one, the core has a browser page download the file
+  (`browser_save_stage`/`browser_save_commit`, [`media_save.h`](../inc/cvc/ariadne/media_save.h)),
+  or else writes a new file in the Downloads folder.
+
+The tests:
+
+- `ariadne_ftxui_test`'s `APicturesMenuSavesItIntoTheDownloadsFolder`: Save image... and Save
+  video..., a new file beside one already there, the notification, `save: false`, a decorative
+  video, and Shift+F10.
+- `ariadne_files_test`'s `AriadneMediaSave.*`: the type, the name, a new file, and the Downloads
+  folder, `user-dirs.dirs` and `$XDG_DOWNLOAD_DIR` included.
+- `ariadne_files_test`'s `AriadneSaveUrl.*`: the verb with a host's dialog (a second dialog
+  refused, a cancel), without one, a failure, misuse, and a credential under the host's policy.
+- `ariadne_runtime_test`'s `AriadneIsolatedDocs.SaveUrlAsksForAPathOnTheFramesThread`.
+- `cvcgl_imgui_context_menu`: Save image... in ImGui, then the dialog, and the file it writes.
 
 ## 6. Composition: include / import / load
 
@@ -8509,6 +8635,9 @@ chunks at the URL its `/social/files/resumable` call returns:
 the picker over a mock, a real FTXUI terminal and tvision's hosted layout, and the uploads blocking
 and started, with a 409, a 503 and a lost reply. `ari_run_file_pick_upload_{ftxui,tvision}`
 pick and send a file in tmux.
+
+The other way, `(save-url URL)` saves what a URL names to a file the user keeps, as a picture's
+context menu does (§5.29).
 
 ---
 

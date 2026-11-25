@@ -1617,6 +1617,67 @@ TEST(AriadneIsolatedDocs, FilePickOpensItsPickerOnTheFramesThread) {
                             [&](std::thread::id t) { return t != frame_thread; }));
 }
 
+// §5.29 (save-url) binds as it is in an `any` group too: its program hands the save to the
+// Runtime from whichever thread pumps it, and the drain starts it on the frame's thread, where the
+// host's Save dialog is asked. The file is written where the dialog says, and the program learns
+// the name and size, never the path.
+TEST(AriadneIsolatedDocs, SaveUrlAsksForAPathOnTheFramesThread) {
+  namespace fs = std::filesystem;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const fs::path dir =
+      fs::temp_directory_path() /
+      ("cvc_runtime_save_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir);
+  std::ofstream(dir / "photo", std::ios::binary) << std::string("GIF89a and the rest", 19);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  struct SaverBackend : MockBackend {
+    std::set<std::thread::id> threads;
+    std::vector<std::string> names;
+    fs::path to;
+    bool ask_save_path(const SavePathRequest &req, SavePathDone done) override {
+      threads.insert(std::this_thread::get_id());
+      names.push_back(req.name);
+      done((to / ("saved-" + std::to_string(names.size()) + ".gif")).string(), std::string());
+      return true;
+    }
+  } sb;
+  sb.to = dir;
+  Runtime rt(app, "docs.saver");
+  rt.set_backend(&sb);
+  rt.set_media_base(dir.string());
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("saver")}));
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, cvc::state_exec::group_affinity::any);
+  for (int run = 0; run < 3; ++run) {
+    std::string how = "running";
+    rt.run_program("(begin (state-set \"has\" (if (has? \"save-url\") \"yes\" \"no\"))"
+                   "  (set r (save-url \"file://photo\"))"
+                   "  (state-set \"ok\" (if (get-attr r \"ok\") \"yes\" \"no\"))"
+                   "  (state-set \"name\" (get-attr r \"name\"))"
+                   "  (state-set \"size\" (get-attr r \"size\")))",
+                   [&](const std::string &h) { how = h; });
+    for (int frame = 0; frame < 2000 && how == "running"; ++frame) {
+      isolated_frame(app, rt);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(how, "") << "run " << run;
+    EXPECT_EQ(isolated_value(app, "docs.saver.has"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.saver.ok"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.saver.name"), "saved-" + std::to_string(run + 1) + ".gif");
+    EXPECT_EQ(isolated_value(app, "docs.saver.size"), "19");
+    EXPECT_TRUE(fs::exists(dir / ("saved-" + std::to_string(run + 1) + ".gif")));
+  }
+  EXPECT_EQ(sb.names, (std::vector<std::string>{"photo.gif", "photo.gif", "photo.gif"}));
+  EXPECT_EQ(sb.threads, std::set<std::thread::id>{frame_thread})
+      << "a Save dialog asked off the frame's thread";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 // A group a move retired still counts for AppRuntime::idle() and wait_idle() while its kernel
 // runs: a host waiting before it lets go of what an async function uses waits for that kernel
 // too. The move here is a thread-affine declaration over the running document (any to host).

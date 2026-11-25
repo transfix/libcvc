@@ -133,6 +133,10 @@ public:
   // §5.11: the directory a picture's relative file:// URI resolves against (the document's own;
   // AppRuntime::load sets it). Empty: the working directory.
   void set_media_base(std::string dir);
+  // §5.29: the folder a Save (a context menu's Save image..., (save-url)) puts a new file in where
+  // the host has no Save dialog and no browser page (ari's terminals). Empty (the default): the
+  // user's Downloads folder (downloads_dir, media_save.h).
+  void set_save_dir(std::string dir);
   // §5.11: whether a picture by URI the document draws is still loading.
   bool media_busy() const;
   // §5.11: whether the last frame drew a picture that was still loading (a placeholder), so a

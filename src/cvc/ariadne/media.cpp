@@ -599,6 +599,18 @@ ImageCache::~ImageCache() = default;
 
 void ImageCache::set_base(std::string dir) { m_->base_dir = std::move(dir); }
 void ImageCache::set_fetcher(Fetcher f) { m_->fetcher = std::move(f); }
+
+void ImageCache::fetch(const std::string &uri, const std::string &auth, FetchDone done) {
+  if (m_->fetcher) {
+    m_->fetcher(uri, auth, std::move(done));
+    return;
+  }
+  cvc::app *const a = &m_->app;
+  const std::string dir = m_->base_dir;
+  if (!kThreaded && start_fetch(*a, uri, auth, dir, done))
+    return;
+  m_->run([a, uri, auth, dir, done = std::move(done)] { done(fetch_bytes(*a, uri, auth, dir)); });
+}
 void ImageCache::set_limits(const Limits &limits) { m_->limits = limits; }
 const ImageCache::Limits &ImageCache::limits() const { return m_->limits; }
 

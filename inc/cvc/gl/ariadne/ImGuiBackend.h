@@ -144,6 +144,15 @@ public:
   void end_frame() override;
   // §5.28 the next text or menu item copies `text` from its context menu.
   void next_item_copy(const std::string &text) override;
+  // §5.29 the picture just drawn offers Save image... / Save video... in its context menu. In a
+  // browser its opening asks the core to fetch the bytes (media_save_prepare), and the page's
+  // pointer release over the item downloads them (browser_save_arm).
+  void item_save(const cvc::ariadne::MediaSave &m) override;
+  // §5.29 SDL3's Save dialog, where SDL's video is up (not in a browser): it opens in the user's
+  // Downloads folder with the name filled in, and answers from begin_frame. False when one is open
+  // already, or there is no SDL: the core then uses the Downloads folder itself.
+  bool ask_save_path(const cvc::ariadne::SavePathRequest &req,
+                     cvc::ariadne::SavePathDone done) override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
@@ -270,6 +279,9 @@ private:
   // §10.8 the file dialog out (pick_files), shared with SDL's callback until it answers.
   struct FileDialog;
   std::shared_ptr<FileDialog> m_fileDialog;
+  // §5.29 the Save dialog out (ask_save_path), shared with SDL's callback until it answers.
+  struct SaveDialog;
+  std::shared_ptr<SaveDialog> m_saveDialog;
 
   // Per-instance tf_editor state (the drag gesture, the working model while a delayed-update drag
   // is in flight, popups), keyed by the editor's `key`. Defined in tf_editor_imgui.cpp; shared_ptr
