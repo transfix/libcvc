@@ -360,6 +360,33 @@ TEST(CophFleet, RefusesConfigurationsOutsideTheProfile) {
   EXPECT_THROW(coph_fleet(fc, crossers()), std::invalid_argument);
 }
 
+// run(world, ticks) goes on from where it stopped: the crossing run 15 ticks at a time is the one
+// run whole, bit for bit.
+TEST(CophFleet, RunsAFewTicksAtATime) {
+  coph_fleet_config fc;
+  fc.cfg = profile(40);
+  fc.comm = coph_communication_profile();
+  fc.senders = {0, 1};
+  coph_fleet whole(fc, crossers()), parts(fc, crossers());
+  const coph_crossing_world w = crossing(fc.cfg);
+  whole.run(w);
+  int calls = 0;
+  for (bool done = false; !done; ++calls) {
+    EXPECT_EQ(parts.tick(), 15LL * calls);
+    done = parts.run(w, 15);
+  }
+  EXPECT_EQ(calls, 3); // 41 ticks: 15, 15 and the last 11
+  EXPECT_EQ(parts.tick(), whole.tick());
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_EQ(parts.state(i), whole.state(i)) << "agent " << i;
+    EXPECT_EQ(parts.controls(i).size(), whole.controls(i).size());
+    EXPECT_EQ(parts.energy(i).work, whole.energy(i).work);
+  }
+  EXPECT_EQ(parts.events().size(), whole.events().size());
+  EXPECT_TRUE(parts.run(w, 5)); // done: nothing more runs
+  EXPECT_EQ(parts.tick(), whole.tick());
+}
+
 // resume() runs again only an agent done at its goal: not one still running, and not one that
 // does not exist. (CophDriver.ACarTakesANewGoalAfterArriving resumes one that arrived.)
 TEST(CophFleet, ResumesOnlyAnAgentAtItsGoal) {

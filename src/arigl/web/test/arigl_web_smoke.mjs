@@ -619,6 +619,15 @@ if (PYDOCS) {
       report: v => v.log.filter(l => /^ariglx-web: console /.test(l)),
     },
     {
+      // libcvc's C++ CoPH from Python in the page (pycvc.NavCophFleet), a few ticks at a time.
+      name: 'ariglx: CoPH\'s crossing runs natively in the page',
+      url: `${ORIGIN}/apps/py/?src=coph.ari`,
+      check: v => v.state === 'running' && v.log.some(l =>
+                    /^ariglx-web: coph 121 ticks, [1-9]\d* sent, [1-9]\d* delivered; agent 0 version \d+ residual [^;]*; \d+ ms$/
+                        .test(l)),
+      report: v => v.log.filter(l => /^ariglx-web: coph /.test(l)),
+    },
+    {
       name: 'ariglx: a Python program in place of the document',
       url: `${ORIGIN}/apps/pyprog/`,
       check: v => v.state === 'running' &&

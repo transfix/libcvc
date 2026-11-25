@@ -538,6 +538,7 @@ PyObject *packet_event(const cvc::nav::coph_packet_event &e) {
 %feature("kwargs") pycvc::NavCophAgent::NavCophAgent;
 %feature("kwargs") pycvc::NavCophFleet::NavCophFleet;
 %feature("kwargs") pycvc::NavCophDriver::NavCophDriver;
+%feature("kwargs") pycvc::NavCophFleet::run_crossing;
 %newobject pycvc::NavCophAgent::export_to;
 
 %inline %{
@@ -753,11 +754,16 @@ public:
 
   int size() const { return n_; }
 
-  // Run from tick 0 until every agent is done, on the crossing world: world is {"damping": 0.85,
-  // "obstacles": [shape, ...] (the doors), "network": "crossing" | "none", "seeds": [...],
-  // "base_risk": 0.02, "patches": [(x, y, sx, sy, amplitude), ...], "noise": f(agent, tick, j)},
-  // all optional. The GIL is released while it runs; noise takes it back for each call.
-  void run_crossing(PyObject *world = nullptr) {
+  // Run on the crossing world until every agent is done, or for at most `ticks` ticks (a page
+  // runs a few a frame), from where the last call stopped; whether every agent is done. world is
+  // {"damping": 0.85, "obstacles": [shape, ...] (the doors), "network": "crossing" | "none",
+  // "seeds": [...], "base_risk": 0.02, "patches": [(x, y, sx, sy, amplitude), ...], "noise":
+  // f(agent, tick, j)}, all optional. The first call builds it and later calls keep it; a world
+  // passed later replaces it, the fleet going on from its tick. The GIL is released while it
+  // runs; noise takes it back for each call.
+  bool run_crossing(PyObject *world = nullptr, long long ticks = -1) {
+    if ((!world || world == Py_None) && world_)
+      return run_ticks(ticks);
     cvc::nav::coph_crossing_world_config wc;
     wc.cfg = f_->agents().empty() ? cvc::nav::coph_profile() : f_->agents()[0].state().cfg;
     if (PyObject *d = coph::item(world, "damping"))
@@ -797,20 +803,11 @@ public:
         return v;
       };
     }
-    const cvc::nav::coph_crossing_world w(std::move(wc));
-    std::string err;
-    Py_BEGIN_ALLOW_THREADS
-    try {
-      f_->run(w);
-    } catch (const std::exception &e) {
-      err = e.what();
-      if (err.empty())
-        err = "NavCophFleet.run_crossing failed";
-    }
-    Py_END_ALLOW_THREADS
-    if (!err.empty())
-      throw std::runtime_error(err);
+    world_ = std::make_unique<cvc::nav::coph_crossing_world>(std::move(wc));
+    return run_ticks(ticks);
   }
+  // The next tick run_crossing runs.
+  long long tick() const { return f_->tick(); }
 
   // One boundary at tick, time now: one input per agent, {"x", "hit", "observation", "obstacles",
   // "u_used", "arrived", "goal"} (see NavCophAgent.observe; the last three optional, a vehicle's).
@@ -904,7 +901,24 @@ private:
       throw std::out_of_range("NavCophFleet: no agent " + std::to_string(agent));
     return agent;
   }
+  bool run_ticks(long long ticks) {
+    std::string err;
+    bool done = false;
+    Py_BEGIN_ALLOW_THREADS
+    try {
+      done = f_->run(*world_, ticks);
+    } catch (const std::exception &e) {
+      err = e.what();
+      if (err.empty())
+        err = "NavCophFleet.run_crossing failed";
+    }
+    Py_END_ALLOW_THREADS
+    if (!err.empty())
+      throw std::runtime_error(err);
+    return done;
+  }
   std::unique_ptr<cvc::nav::coph_fleet> f_;
+  std::unique_ptr<cvc::nav::coph_crossing_world> world_; // run_crossing's
   int n_ = 0;
 };
 

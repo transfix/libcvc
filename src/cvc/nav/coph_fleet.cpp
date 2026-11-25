@@ -266,12 +266,16 @@ bool coph_fleet::resume(int agent) {
   return true;
 }
 
-void coph_fleet::run(const coph_crossing_world &world) {
+bool coph_fleet::run(const coph_crossing_world &world, long long ticks) {
   const std::size_t n = agents_.size();
   const long long dt_us = std::llround(cfg_.cfg.dt * 1e6);
-  for (long long tick = 0;; ++tick) {
-    if (std::all_of(done_.begin(), done_.end(), [](bool d) { return d; }))
-      return;
+  const auto all_done = [&] {
+    return std::all_of(done_.begin(), done_.end(), [](bool d) { return d; });
+  };
+  for (long long k = 0; ticks < 0 || k < ticks; ++k, ++run_tick_) {
+    if (all_done())
+      return true;
+    const long long tick = run_tick_;
     const double now = static_cast<double>(tick * dt_us) / 1e6;
     std::vector<input> in(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -290,6 +294,7 @@ void coph_fleet::run(const coph_crossing_world &world) {
     }
     boundary(tick, now, in);
   }
+  return all_done();
 }
 
 } // namespace nav
