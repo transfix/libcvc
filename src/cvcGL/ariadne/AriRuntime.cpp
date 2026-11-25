@@ -109,8 +109,8 @@ public:
   ~GlSceneAdapter() override { clear_scenes(); }
 
   // A `scenes:` entry: a SceneGraph of its own (its nodes, lights, shadows, background) attached
-  // to a viewport of its own, `anchor`, which the views of it mirror. The anchor is not shown; the
-  // views draw a pixel of it under one of them when its shadows need baking (scene_views.cpp).
+  // to a viewport of its own, `anchor`, which the views of it mirror. The anchor is not shown; it
+  // draws a pixel into a texture of its own when its shadows need baking (scene_views.cpp).
   struct OtherScene {
     std::string id, anchor;
     std::unique_ptr<SceneGraph> sg;

@@ -153,9 +153,10 @@ int main() {
   const auto spot = [&](double wx) {
     ren->SetWorldPoint(wx, 0.0, 0.0, 1.0);
     ren->WorldToDisplay();
-    double d[3];
+    double d[3], w[2];
     ren->GetDisplayPoint(d);
-    return Spot{d[0], d[1], static_cast<float>(d[0]), static_cast<float>(kHeight - d[1])};
+    picker.rendererToWindow(d[0], d[1], w); // the view draws into its texture, shown at its region
+    return Spot{w[0], w[1], static_cast<float>(w[0]), static_cast<float>(kHeight - w[1])};
   };
   const Spot crate = spot(-6.0), jar = spot(-2.0), lid = spot(2.0), post = spot(6.0),
              gap = spot(0.0);
