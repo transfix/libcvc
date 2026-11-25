@@ -88,10 +88,11 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // window chrome's close and maximize glyphs it leaves 7 / 12 on menus / windows but 15 on grid,
 // so grid has one too. On orthoslicer it leaves 1149: the nearest-sampled slices' texel edges and
 // the volren's edges land a pixel apart. So orthoslicer has one as well. The mesh and volume
-// documents added since (2026-11-20 to 11-23) leave 1066-4889 (skeleton, molecule_skeleton,
-// contour_tiler: lines and translucent surfaces; volume_grid, _quad, _contours: texel edges, and
-// on _quad the Probe tab's Min/Max text, the bunny SDF's range a float32 ulp apart on the arm64
-// runner), so they have them too.
+// documents added since (2026-11-20 to 11-24) leave 366-4889 (skeleton, molecule_skeleton,
+// contour_tiler: lines and translucent surfaces; volren_views: box edges and the volren's
+// shading; volume_grid, _quad, _contours, _segment: texel edges, and on _quad the Probe tab's
+// Min/Max text, the bunny SDF's range a float32 ulp apart on the arm64 runner), so they have
+// them too.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).

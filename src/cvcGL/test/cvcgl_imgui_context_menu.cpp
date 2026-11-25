@@ -255,12 +255,15 @@ int main() {
     s.key(ImGuiKey_Enter);
     s.frames(2);
     chk(s.val("name") == "pasted text", "Paste replaces the selection: " + s.val("name"));
-    // ImGui's own undo has it: Ctrl+Z in the field brings back what the paste replaced.
+    // ImGui's own undo has it: Ctrl+Z (Cmd+Z on a Mac) in the field brings back what the paste
+    // replaced. With ConfigMacOSXBehaviors (on Apple), AddKeyEvent swaps Cmd and Ctrl, so the key
+    // a Mac's Cmd arrives as, ImGuiMod_Super, is the one that becomes the shortcut key.
     s.click(s.be.at["field:Name"].mid());
     ImGuiIO &io = ImGui::GetIO();
-    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    const ImGuiKey shortcut = io.ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+    io.AddKeyEvent(shortcut, true);
     s.key(ImGuiKey_Z);
-    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    io.AddKeyEvent(shortcut, false);
     s.key(ImGuiKey_Enter);
     s.frames(2);
     chk(s.val("name") == "pastedline", "and ImGui's undo takes the paste back: " + s.val("name"));

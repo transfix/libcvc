@@ -8770,15 +8770,15 @@ Measured in CI (2026-10-20):
 - The orthoslicer (2026-11-17) had 1,149 pixels beyond 40, all four macOS jobs the same to the
   byte (it fails). Its nearest-sampled slices' texel edges and the volren's edges land a pixel
   apart.
-- The mesh and volume documents added from 2026-11-20 to 11-23 (contour_tiler, skeleton,
-  molecule_skeleton, volume_grid, volume_grid_quad, volume_grid_contours) had 1,066 to 4,889
-  pixels beyond 40, all four macOS jobs the same to the byte (they fail). The skeleton strands,
-  tiled contours and translucent surfaces draw their edges differently. The volume grids' texel
-  edges land a pixel apart. On volume_grid_quad the Probe tab's Min/Max text differs too: the
-  bunny SDF's range is one float32 ulp apart on the arm64 runner (`-26.27533721923828` against
-  llvmpipe's `-26.275339126586914`).
-- So `widgets`, `scene`, `grid`, `orthoslicer` and those six have `<name>.macos.png` goldens, and
-  macOS compares them against its own renderer.
+- The mesh and volume documents added from 2026-11-20 to 11-24 had 366 to 4,889 pixels beyond
+  40, all four macOS jobs the same to the byte (they fail). They are contour_tiler, skeleton,
+  molecule_skeleton, volren_views, volume_grid, volume_grid_quad, volume_grid_contours and
+  volume_grid_segment. The skeleton strands, tiled contours, translucent surfaces and boxes draw
+  their edges differently, and the volume grids' texel edges land a pixel apart. On
+  volume_grid_quad the Probe tab's Min/Max text differs too: the bunny SDF's range is one float32
+  ulp apart on the arm64 runner (`-26.27533721923828` against llvmpipe's `-26.275339126586914`).
+- So `widgets`, `scene`, `grid`, `orthoslicer` and those eight have `<name>.macos.png` goldens,
+  and macOS compares them against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
@@ -8817,8 +8817,8 @@ that directory as the `ari-golden-<OS>-<lane>` artifact.
    jobs that run this test on macOS, so a new document's first macOS comparison would otherwise
    be master's run. Push the branch to `ci/full/<name>`. If its macOS jobs fail on the new
    document, commit the `<name>.macos.png` they upload. Every document with a 3D view (a mesh,
-   lines, a volume) checked so far has needed one. The six documents added from 2026-11-20 to
-   11-23 merged without one, so master's macOS package lanes, and those of the v4.0.3 to v4.0.6
+   lines, a volume) checked so far has needed one. The eight documents added from 2026-11-20 to
+   11-24 merged without one, so master's macOS package lanes, and those of the v4.0.3 to v4.0.8
    tags, failed on them.
 
 The test skips in a build without ImGui (`CVC_ENABLE_IMGUI`) or the YAML loader, without a GL
