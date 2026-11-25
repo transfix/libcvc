@@ -987,12 +987,14 @@ The built-in top-level keys (`is_builtin_block`,
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
 init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
 windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse  notifications
+context_menu
 ```
 
 `tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
 `menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
 the tray's bell or not (§5.24). `assets:` and
-`scenes:` are §5.18's shared meshes and scenes of their own.
+`scenes:` are §5.18's shared meshes and scenes of their own. `context_menu:` adds the document's
+own items to the context menu over the main view (§5.30).
 
 Any **other** top-level key is dispatched to a parser registered via
 `register_ari_block`, or, if none is registered, ignored: a document authored for a newer build
@@ -3540,6 +3542,7 @@ entry warns. An entry is one of:
   | `button.selected` | `button:` takes `selected:`, the chosen button of a row drawn pressed in (§5.27); ImGui, FTXUI and tvision |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
+  | `ui.context_menu` | `context_menu:` on a window, a group, a viewport or the document opens a menu: a right-click or a long press in a window, the Menu key or Shift+F10 in a terminal (§5.30); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `input.on_change` | `message_input:` takes `live: true` and `on_change:` (the draft as it is typed), and a draft the document writes while it is edited (§5.15) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
@@ -4750,6 +4753,8 @@ under the `pick:` key:
 - `node`: the id of the node it hit;
 - `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
   (empty elsewhere), and `axis` (`x`, `y` or `z`), the axis that slice looks down;
+- `tags`: the node's own `tags:`, space-separated (in a context menu's `event`, a list,
+  §5.30);
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
@@ -5774,6 +5779,10 @@ pointer:
 | A notification: the bell's entry, a Notifications window line (§5.24) | Copy |
 | A picture by URL or file (`image:`), a `video:` | Save image..., Save video... (§5.29) |
 
+A document adds items of its own over a window, a group, a viewport or the main view with
+`context_menu:` (§5.30): they follow these entries in the same menu, under a rule, and over
+anything without entries of its own they are the menu.
+
 - **Cut and Copy** take the selection, or the whole text when nothing is selected. A `password:`
   field has neither.
 - **Paste** puts the clipboard's text at the cursor, over the selection. A one-line field drops
@@ -5966,6 +5975,127 @@ The tests:
   refused, a cancel), without one, a failure, misuse, and a credential under the host's policy.
 - `ariadne_runtime_test`'s `AriadneIsolatedDocs.SaveUrlAsksForAPathOnTheFramesThread`.
 - `cvcgl_imgui_context_menu`: Save image... in ImGui, then the dialog, and the file it writes.
+
+### 5.30 A document's own context menu: `context_menu:`
+
+A window, a group, a `viewport` and the document itself can each add items of their own to the
+context menu (§5.28). Its items are a menu's `items:` (`menu_item`, `menu` for a submenu,
+`separator`), and they know where the menu was opened: what it is over, and over a scene, which
+node.
+
+```yaml
+# spawn-at, flatten, remove-node, open-card and move-card: the document's functions: (§6.6)
+context_menu:                     # the document's own: over the main view, where no window is
+  id: scene
+  items:
+    - { menu_item: Spawn here, on: (spawn-at (get-attr event "x") (get-attr event "z")) }
+windows:
+  - window: Map
+    id: map
+    context_menu:                 # over the window, where nothing inside it has a menu
+      - { menu_item: Hide the map, on: (state-set "tree.map.open" "0") }
+    children:
+      - type: viewport
+        view: overview
+        context_menu:             # over the view: its items get the pick under the pointer
+          - menu_item: Flatten here
+            visible_when: (= (get-attr event "node") "terrain")
+            on: (flatten (get-attr event "x") (get-attr event "z"))
+          - menu_item: Remove this crate
+            visible_when: (> (length (collections.filter (lambda (t) (= t "cargo")) (get-attr event "tags"))) 0)
+            on: (remove-node (get-attr event "node"))
+      - group:
+        id: card
+        context_menu:             # over the card, its text and anything in it
+          id: card
+          items:
+            - { menu_item: Open, on: (open-card) }
+            - { menu_item: Pinned, bind: card.pinned }
+            - separator
+            - menu: Move to
+              items: [{ menu_item: Top, on: (move-card "top") }]
+        children: [ ... ]
+```
+
+- **Where it goes:** on a `window:` (and an `overlay:`), a `group:` (and a `panel:`), a
+  `viewport` (any custom widget is one item; a viewport adds its pick), or the document's top
+  level, where it is the main view's. Elsewhere the loader warns and ignores it. A loaded
+  document's top-level one is ignored with a warning (the main view is the outermost
+  document's); its windows and groups keep theirs.
+- **One menu.** A request to open a context menu (a right-click, a long press, the Menu key or
+  Shift+F10) opens one menu. Over a widget that has entries of its own (a field's Cut, Copy,
+  Paste and Select all, a text's Copy, a picture's Save image..., §5.28 and §5.29) those come
+  first, and then, under a rule, the items of the innermost `context_menu:` around it. Over
+  anything else inside one (a viewport, a checkbox, a group's empty space) the menu is that
+  `context_menu:`'s items alone. With no `context_menu:` around it, the menu is §5.28's, as it
+  always was. So a field in a card shows Cut, Copy, Paste and Select all, then the card's items.
+- **Which `context_menu:`:** the innermost around the widget. Over a group in a window, the
+  group's; elsewhere in the window, the window's; over no window, the document's. A window
+  without one adds nothing over its widgets, not the document's.
+- **How it opens:** as §5.28's does, in every host. ImGui: a right-click (one released after a
+  drag opens nothing over a widget without entries of its own, since a right-drag pans a view or
+  turns the main view's camera), a long press on a touch screen (the menu takes no tap until the
+  finger lifts), and the Menu key or Shift+F10 on the focused field, else at the pointer. FTXUI:
+  the Menu key or Shift+F10 on the focused widget (with nothing focused, the document's), the menu
+  hanging under it, and a right-click under the pointer; Up, Down, Enter and Esc work it. tvision:
+  the same keys and clicks, the menu a popup of tvision's own at that place, so a short window
+  does not cut it off; opened by a key, its first entry is lit, so Enter picks it (tvision's own
+  popups light nothing until an arrow key). An item that runs closes the menu.
+- **`event`:** its items' programs (`on:`, and the `on:` of a bound item) and their
+  `visible_when:`, `enabled_when:` and `disabled_when:` see an `event` dict, taken when the menu
+  opened and kept while it stays open:
+
+  | Field | Value |
+  |---|---|
+  | `on` | what the `context_menu:` is on: `group`, `window`, `main`, or a custom widget's type (`viewport`) |
+  | `id` | that widget's `id:` (a window without one: its title; `""` over the main view) |
+  | `menu` | the menu's `id:` (`""` without one) |
+  | `via` | `pointer` (a right-click), `touch` (a long press) or `key` |
+  | `px`, `py` | where it was opened, in px from the top left of the widget (of the window's content, of the screen for the main view); a terminal counts cells times the cell's px from its window's top left; `0` when a key opened it |
+  | `node`, `hit`, `x`, `y`, `z`, `i`, `j`, `k`, `value`, `axis`, `view`, `mods` | over a scene view, the pick at that point, as an `input: pick` viewport writes it (§5.18), strings; over a widget that is no scene view `hit` is `"0"` and the rest `""` |
+  | `tags` | the picked node's own `tags:`, a list (empty when none) |
+
+  The main view's pick comes from the host (`Runtime::set_main_view_pick`; the cvcGL host picks
+  its scene as the main view draws it, `main_view:` taken out), a viewport's from its widget
+  (`CustomEdit::context_pick`). A terminal has no scene view, so there they are empty. Every field
+  is always there, so `(get-attr event "node")` never fails. `visible_when:` reading `event` is
+  worked out anew for each menu, never reused from the last one. Outside a menu's items `event` is
+  `nil`.
+- **`id:`** names the menu (`context_menu: { id: <name>, items: [...] }`) so that a document it
+  loads can add to it with `contributes: context_menus: <name>` (the shell's phase SH9,
+  [roadmap/ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) §4.7). A menu without one takes items from
+  no one. Until SH9 the id is read and kept, and nothing adds to any menu.
+- In a `repeat:`, `{i}` reaches its items: each row's menu acts on its row.
+- `(has? "ui.context_menu")` says whether the backend opens them (§5.7): ImGui, FTXUI and
+  tvision. Elsewhere a document with them still loads; no menu opens.
+- **Mechanism:** the core brackets what a `context_menu:` is over with
+  `Backend::begin_context_area` / `end_context_area` (inside `begin_window` for a window's body)
+  and asks `begin_context_menu` after it, the main view's after the whole walk. While the backend
+  says the open menu holds that area's items, the core emits them (`menu_item_action` and the
+  rest). In ImGui the area is one group (the item drawn last inside it stays the last item, so
+  `on_click:` and tooltips are unchanged); a menu §5.28's entries opened on a widget inside it
+  remembers the innermost area, which appends its items to the same popup, and over the area
+  elsewhere the area opens a popup of its own. In FTXUI each widget records its innermost area,
+  and the one context menu holds the widget's entries and keeps the area's items as rows after
+  them. Hosted on tvision (`Options::host_draws_context_menu`), `hosted_context_menu()` hands the
+  menu to the host, which shows it with `popupMenu` and returns the choice through
+  `pick_context_entry`. A viewport's pick key and its `on_pick:` event gained `tags`
+  (space-separated there).
+
+`ariadne_runtime_test`'s `ARightClickMenusItemRunsWithItsEvent`,
+`ARightClickMenuOverAViewportGetsThePickAndItsVisibleWhenReadsIt`,
+`TheDocumentsMenuIsTheMainViewsAndARepeatedGroupsMenuActsOnItsRow` and
+`UiContextMenuSaysWhetherTheBackendOpensRightClickMenus` check the core; `ariadne_loader_test`'s
+`ContextMenusParseOnWindowsGroupsViewportsAndTheDocument` and
+`AContextMenuInTheWrongPlaceOrShapeWarns` the loader; `ariadne_ftxui_test`'s
+`ShiftF10OpensTheMenuAroundTheFocus`, `TheMenuKeyOpensTheWindowsMenu`,
+`ARightClickOpensTheMenuUnderThePointer`, `ShiftF10WithNothingFocusedOpensTheDocumentsMenu`,
+`AFieldInACardOffersItsOwnEntriesThenTheCards` and `AHostedContextMenuIsAModelForTheHost` the
+terminal; `cvcgl_imgui_document_menu` ImGui's right-click, right-drag, long press and Menu key,
+and a text in a card, through its own input; `cvcgl_ariadne_pick` a right-click on a real
+viewport (the node and its tags in `event`) and on the main view; the `context_menu` golden
+(§12) an open menu; and `ari_run_context_menu_ftxui` / `_tvision` Shift+F10, Down, Enter and Esc
+in a tmux pane (`src/ari/tests/context_menu_test.sh`, Linux CI).
 
 ## 6. Composition: include / import / load
 

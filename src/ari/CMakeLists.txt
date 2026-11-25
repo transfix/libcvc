@@ -372,6 +372,12 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
       set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # A right-click menu (§5.30, tests/context_menu.ari) opened by the key a terminal sends for
+      # Shift+F10, worked with Down, Enter and Esc; an item runs with the menu's event.
+      add_test(NAME ari_run_context_menu_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/context_menu_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/context_menu.ari" ${_backend})
+      set_tests_properties(ari_run_context_menu_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
       # A file picked in the Runtime's own Open file window (a tvision window on the desktop) and
       # sent in chunks to a probe server (tests/file_pick_upload.ari, docs/ARIADNE.md §10.8).
       add_test(NAME ari_run_file_pick_upload_${_backend}

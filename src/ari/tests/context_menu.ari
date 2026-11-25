@@ -1,0 +1,34 @@
+# context_menu.ari — a right-click menu (ARIADNE.md §5.30) on a real terminal, for
+# context_menu_test.sh.
+#
+# Tab puts the focus on the checkbox in the card; Shift+F10 opens the card's menu under it. Enter
+# runs its first item, which writes what the menu's event says (what it was opened over, that
+# widget's id, how) into the line at the top; Down then Enter runs the second.
+
+meta:
+  name: Context menu
+  author: cvc
+  min_libcvc: 4.0.6
+
+init: (state-set "ui.log" "nothing yet")
+
+windows:
+  - window: Cards
+    id: cards
+    pos: [16, 32]
+    size: [400, auto]
+    children:
+      - text: log
+        bind: ui.log
+      - group:
+        id: card
+        context_menu:
+          id: card
+          items:
+            - menu_item: Open card
+              on: (state-set "ui.log" (string.join (list "opened" (get-attr event "on") (get-attr event "id") (get-attr event "via")) " "))
+            - menu_item: Close card
+              on: (state-set "ui.log" "closed card")
+        children:
+          - checkbox: Pinned
+            bind: ui.pinned

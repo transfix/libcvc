@@ -248,8 +248,22 @@ struct ImGuiBackend::TextViewState {
 // the bell's menu), under an id of its own: a field's comes from the field's id; a text's, from its
 // place among the texts under the same id stack this frame, as a rich text's links are.
 struct ImGuiBackend::ContextMenus {
-  enum class Kind { Text, Field, TextView, Selection, Save };
+  // Document: a document's context_menu: (§5.30) over something with no menu of its own, which
+  // offers only the items the core adds.
+  enum class Kind { Text, Field, TextView, Selection, Save, Document };
   static constexpr float kLongPress = 0.5f; // s a finger stays still for a menu
+
+  // §5.30 the document's context_menu: areas open in the walk (begin_context_area), innermost
+  // last, by ImGui id; and the one whose items join the open menu, under a separator (0: none):
+  // the innermost area around the item it opened on, or the area itself when it opened over
+  // nothing with a menu of its own. The frame open() ran in (a frame's one request to open a
+  // menu is then taken), and how and where (the pointer) it opened.
+  std::vector<ImGuiID> areas;
+  ImGuiID area = 0;
+  int opened_frame = -1;
+  const char *via = "pointer";
+  ImVec2 at;
+  bool taken() const { return opened_frame == ImGui::GetFrameCount(); }
 
   // The menu open, and what it offers.
   ImGuiID host = 0;
@@ -341,8 +355,12 @@ struct ImGuiBackend::ContextMenus {
   void open(ImGuiID id) {
     host = id;
     ImGui::OpenPopupEx(id);
+    via = long_press ? "touch" : ImGui::IsMouseReleased(ImGuiMouseButton_Right) ? "pointer" : "key";
     held = long_press;
     long_press = false; // the item under the finger has it
+    area = areas.empty() ? 0 : areas.back(); // §5.30 the document's items around it join it
+    opened_frame = ImGui::GetFrameCount();
+    at = ImGui::GetIO().MousePos;
   }
 
   bool begin(ImGuiID id) {
@@ -446,6 +464,8 @@ struct ImGuiBackend::ContextMenus {
       copy_item("Copy", (m + "C").c_str(), copy, !copy.empty());
       if (item("Select all", (m + "A").c_str(), !select.empty()))
         select_all = true;
+      break;
+    case Kind::Document: // §5.30 only the items the core adds
       break;
     case Kind::Save: { // §5.29 the core saves it, from its next drain
       const bool clicked = item(save.video ? "Save video..." : "Save image...", nullptr, true);
@@ -734,6 +754,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.rich_text = true;
   c.button_icon = true;
   c.button_selected = true;
+  c.context_menu = true;
   return c;
 }
 
@@ -3532,6 +3553,116 @@ void ImGuiBackend::end_item_group() {
     f->dl->AddRectFilled(mn, mx, ImGui::GetColorU32(col), ImGui::GetStyle().FrameRounding);
   }
   f->split.Merge(f->dl);
+#endif
+}
+
+void ImGuiBackend::begin_context_area(const char *id, cvc::ariadne::ContextMenuOver over) {
+#ifdef CVC_ENABLE_IMGUI
+  const bool item = over == cvc::ariadne::ContextMenuOver::Item;
+  m_contextAreas.push_back(item);
+  context_menus().areas.push_back(ImGui::GetID(id)); // a menu opened inside it takes its items
+  if (item)
+    ImGui::BeginGroup();
+#else
+  (void)id;
+  (void)over;
+#endif
+}
+
+void ImGuiBackend::end_context_area() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_contextAreas.empty())
+    return;
+  const bool item = m_contextAreas.back();
+  m_contextAreas.pop_back();
+  ContextMenus &cm = context_menus();
+  if (!cm.areas.empty())
+    cm.areas.pop_back();
+  if (!item)
+    return;
+  // The group makes the area one rect for the menu; the item drawn last inside it stays the last
+  // item, so the core's on_click, on_hover and tooltip after it still see the widget's own.
+  ImGuiContext &g = *ImGui::GetCurrentContext();
+  const ImGuiLastItemData inner = g.LastItemData;
+  ImGui::EndGroup();
+  const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+  m_contextRect[0] = mn.x;
+  m_contextRect[1] = mn.y;
+  m_contextRect[2] = mx.x;
+  m_contextRect[3] = mx.y;
+  g.LastItemData = inner;
+#endif
+}
+
+bool ImGuiBackend::begin_context_menu(const char *id, cvc::ariadne::ContextMenuOver over,
+                                      cvc::ariadne::ContextMenuOpen &opened) {
+#ifdef CVC_ENABLE_IMGUI
+  using cvc::ariadne::ContextMenuOver;
+  ContextMenus &cm = context_menus();
+  const ImGuiID area = ImGui::GetID(id);
+  const ImGuiID popup = ImHashStr("##cvc.area", 0, area);
+  const ImGuiIO &io = ImGui::GetIO();
+  // Where in the area it opened from: its top left (a window's content's; the screen's).
+  ImVec2 origin(0.0f, 0.0f);
+  if (over == ContextMenuOver::Item)
+    origin = ImVec2(m_contextRect[0], m_contextRect[1]);
+  else if (over == ContextMenuOver::Window)
+    origin = ImGui::GetCurrentWindow()->InnerRect.Min;
+  // This frame's one request to open a menu, when nothing inside the area took it (a text's, a
+  // field's own menu): a right-click released where it went down (a right-drag pans a view or
+  // turns the main view's camera, so it opens nothing), a touch screen's long press (the menu
+  // takes no tap until the finger lifts), or the Menu key or Shift+F10 at the pointer. Over this
+  // menu's area, and no window above it (a popup open there included).
+  if (!cm.taken()) {
+    const float slop2 = io.MouseDragThreshold * io.MouseDragThreshold;
+    const bool asked = (io.MouseReleased[ImGuiMouseButton_Right] &&
+                        io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] <= slop2) ||
+                       cm.long_press || ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
+                       (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false));
+    constexpr ImGuiHoveredFlags kWin =
+        ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem;
+    bool over_it = false;
+    if (asked && over == ContextMenuOver::Item)
+      over_it = ImGui::IsWindowHovered(kWin) &&
+                ImGui::IsMouseHoveringRect(origin, ImVec2(m_contextRect[2], m_contextRect[3]));
+    else if (asked && over == ContextMenuOver::Window)
+      over_it = ImGui::IsWindowHovered(kWin);
+    else if (asked) // the main view: wherever no window is
+      over_it = !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow |
+                                        ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+                                        ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+    if (over_it) {
+      cm.kind = ContextMenus::Kind::Document;
+      cm.open(popup);
+      cm.area = area;
+    }
+  }
+  // Open over this area: a menu of its own, or one opened on something inside it, whose own items
+  // come first and this area's after them, under a separator (the same popup, begun again).
+  if (cm.area != area || cm.host == 0 || !cm.begin(cm.host))
+    return false;
+  if (cm.taken()) {
+    opened.now = true;
+    opened.via = cm.via;
+    if (std::strcmp(cm.via, "key") != 0) {
+      opened.x = cm.at.x - origin.x;
+      opened.y = cm.at.y - origin.y;
+    }
+  }
+  if (cm.kind != ContextMenus::Kind::Document)
+    ImGui::Separator();
+  return true;
+#else
+  (void)id;
+  (void)over;
+  (void)opened;
+  return false;
+#endif
+}
+
+void ImGuiBackend::end_context_menu() {
+#ifdef CVC_ENABLE_IMGUI
+  context_menus().end();
 #endif
 }
 

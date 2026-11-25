@@ -125,6 +125,17 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
+  // §5.30 a document's context_menu:, one of the context menus (§5.28): an item's area is an ImGui
+  // group, the item drawn last inside it staying the last item. A menu a text, a field or a
+  // picture inside it opens takes the area's items after its own, under a separator; elsewhere
+  // over the area a right-click released without a drag (a drag pans a view), a long press on a
+  // touch screen, or the Menu key or Shift+F10 opens a menu of the area's items alone. One menu a
+  // frame: the innermost asks first.
+  void begin_context_area(const char *id, cvc::ariadne::ContextMenuOver over) override;
+  void end_context_area() override;
+  bool begin_context_menu(const char *id, cvc::ariadne::ContextMenuOver over,
+                          cvc::ariadne::ContextMenuOpen &opened) override;
+  void end_context_menu() override;
   // (clipboard-set TEXT): cvc::gl::clipboard::set on the document's app (SDL's, the platform's, the
   // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
   // still has it).
@@ -434,6 +445,11 @@ private:
   std::vector<std::shared_ptr<ItemGroupFrame>> m_itemGroups;
   unsigned int m_groupHitId = 0;
   bool m_groupHit = false;
+  // §5.30 the document's context areas open, innermost last (true: an item's, an ImGui group); the
+  // last item area closed, as a screen rect (min x, min y, max x, max y). Which menu is open, and
+  // the areas' ids, are ContextMenus'.
+  std::vector<bool> m_contextAreas;
+  float m_contextRect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   std::function<bool(bool)> m_setFullscreen; // set_fullscreen_handler
   std::function<bool()> m_isFullscreen;
   bool m_inFullscreenView = false; // between begin_ and end_fullscreen_view: an ImGui window open
