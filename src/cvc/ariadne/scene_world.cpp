@@ -1811,20 +1811,9 @@ bool SceneWorld::follow_generated(const std::string &node,
       write<double>(app, k.preset, double(params.preset));
       g->tick(warnings);
     }
-    write<double>(app, k.seed, double(params.seed));
-    write<double>(app, k.half, params.half_m);
-    write<double>(app, k.trees, double(params.trees));
-    write<double>(app, k.rocks, double(params.rocks));
-    write<double>(app, k.buildings, double(params.buildings));
-    write<double>(app, k.tree_gen, double(params.tree_gen));
-    write<double>(app, k.amp, params.amp_m);
-    write<double>(app, k.water_level, params.water_level_m);
-    write<double>(app, k.ontology, double(params.ontology));
-    write<double>(app, k.edge, double(params.edge));
-    write<std::string>(app, k.terrain_gen, params.terrain);
-    write<std::string>(app, k.city, params.city);
-    write<std::string>(app, k.terrain_file, params.terrain_file);
-    write<std::string>(app, k.request, "regenerate");
+    write_generated_world_keys(app, k, params);
+    // A follow, not the panel's Regenerate: never sent on to a relay (GeneratedWorldRelay).
+    write<std::string>(app, k.request, "follow");
     return true;
   }
   return false;

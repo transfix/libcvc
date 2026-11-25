@@ -141,6 +141,38 @@ else()
   message(STATUS "cvcGL: VTK has no FinishEveryRender; volume renders keep VTK's glFinish")
 endif()
 
+# The renderers of a window share its shader programs, and VTK keeps a program's light uniforms
+# with only the time they were set, not whose lights they are, so one renderer can draw with
+# another's lights: the main view with a view's (docs/ARIADNE.md §5.18). cvcpkg's VTK
+# (vtk 9.5.0+cvc.7, written for upstream, cy-pca/cvcpkg#636) adds an opt-in
+# vtkOpenGLRenderer::UpdateLightingUniformsEveryRender, which ViewportManager turns on for every
+# renderer of a window once it has two. Compile-only and run at every configure, as the check above.
+unset(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER CACHE)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES VTK::RenderingOpenGL2)
+set(CMAKE_REQUIRED_QUIET ON)
+set(_cvc_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles("
+#include <vtkNew.h>
+#include <vtkOpenGLRenderer.h>
+int main() {
+  vtkNew<vtkOpenGLRenderer> r;
+  r->UpdateLightingUniformsEveryRenderOn();
+  return r->GetUpdateLightingUniformsEveryRender() ? 0 : 1;
+}" CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_cvc_try_compile_target_type}")
+unset(_cvc_try_compile_target_type)
+cmake_pop_check_state()
+if(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER)
+  target_compile_definitions(cvcGL PRIVATE CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER=1)
+  message(STATUS "cvcGL: VTK has UpdateLightingUniformsEveryRender; a window with two or more "
+                 "viewports turns it on")
+else()
+  message(STATUS "cvcGL: VTK has no UpdateLightingUniformsEveryRender; a view can light the main "
+                 "view's props with its own lights")
+endif()
+
 # libjpeg-turbo: conference video compression (jpeg_codec.cpp / jpeg_encode_source.cpp / the mjpeg
 # stream_view decode path). Optional at build time — where the prefix has no turbojpeg the codec
 # compiles to a no-op (the "mjpeg" path then yields no video); native builds that need it ship it.
@@ -1117,6 +1149,13 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
+# A document's context_menu: (§5.30): a right-click opens the innermost menu under the pointer (a
+# group's, else its window's, else the document's over no window), a right-drag none, a long press
+# on a touch screen, the Menu key at the pointer; over a text the text's own Copy comes first; an
+# item runs with the menu's event. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_document_menu test/cvcgl_imgui_document_menu.cpp)
+target_link_libraries(cvcgl_imgui_document_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_document_menu COMMAND cvcgl_imgui_document_menu)
 # A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
 # on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
 # Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.
@@ -1272,6 +1311,24 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_views test/cvcgl_ariadne_views.cpp)
   target_link_libraries(cvcgl_ariadne_views PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_views COMMAND cvcgl_ariadne_views)
+endif()
+
+# A `viewport` widget's view drawn into a texture and shown as an image in its window (§5.18): a
+# window in front covers it, its window in front of another shows it, its first frame is drawn, a
+# clipped and a scrolled view show the matching part of the same picture, picks land through the
+# scroll. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_view_stacking test/cvcgl_ariadne_view_stacking.cpp)
+  target_link_libraries(cvcgl_ariadne_view_stacking PRIVATE cvcGL)
+  if(CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER) # its lights check holds only then
+    target_compile_definitions(cvcgl_ariadne_view_stacking
+                               PRIVATE CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER=1)
+  endif()
+  add_test(NAME cvcgl_ariadne_view_stacking COMMAND cvcgl_ariadne_view_stacking)
+  # Not a test: what a frame of a document costs offscreen, CPU and GPU, run by hand
+  # (cvcgl_ari_frame_bench doc.ari ...).
+  add_executable(cvcgl_ari_frame_bench test/cvcgl_ari_frame_bench.cpp)
+  target_link_libraries(cvcgl_ari_frame_bench PRIVATE cvcGL)
 endif()
 
 # Computed colours (docs/ARIADNE.md §5.26) in ImGui's pixels: grid cells filled from a palette in
@@ -1836,6 +1893,7 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
+                        cvcgl_ariadne_view_stacking cvcgl_ari_frame_bench
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_animation
                         cvcgl_ariadne_clip
                         cvcgl_ariadne_prototypes cvcgl_ari_record

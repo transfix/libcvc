@@ -92,7 +92,7 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // contour_tiler: lines and translucent surfaces; volren_views: box edges and the volren's
 // shading; volume_grid, _quad, _contours, _segment: texel edges, and on _quad the Probe tab's
 // Min/Max text, the bunny SDF's range a float32 ulp apart on the arm64 runner), so they have
-// them too.
+// them too, as view_stacking does.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).
@@ -115,6 +115,9 @@ const GoldenCase kCases[] = {
      {{1, 22.0f, 10.0f, -1, false}, {2, 22.0f, 10.0f, 0, true}, {3, 22.0f, 10.0f, 0, false}}},
     // Rest over the "Reset" button: its tooltip shows (no hover delay on the backend's tooltips).
     {"widgets", {{1, 52.0f, 391.0f, -1, false}}}, // under the Windows menu bar (§5.9)
+    // Right-click the card (button 1, ImGui's right): its menu opens on the release and stays open.
+    {"context_menu",
+     {{1, 60.0f, 109.0f, -1, false}, {2, 60.0f, 109.0f, 1, true}, {3, 60.0f, 109.0f, 1, false}}},
 };
 
 const GoldenCase *findCase(const std::string &name) {

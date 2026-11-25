@@ -509,7 +509,16 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   # Client identity (docs/roadmap/ARISRV_IDENTITY.md, ID1): stock arisrv keeps a record of each
   # client, answers server.whoami and server.set itself, owns profile.name (room-join asks for
   # it), and never sends a client arisrv.clients. tests/relay_pair.py runs the relay and the
-  # client, as the room-call tests do; it needs only a Python to run it, not arisrvx.
+  # client, as the room-call tests do; it needs only a Python to run it, not arisrvx. Only pycvc
+  # and arisrvx look Python up, so a build with neither (CI's gRPC job) finds an interpreter here,
+  # or these tests, rcon's among them, would silently not exist.
+  if(TARGET ari AND NOT Python3_EXECUTABLE)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+  endif()
+  if(TARGET ari AND NOT Python3_EXECUTABLE)
+    message(STATUS "arisrv: the client identity and rcon tests are off: no Python interpreter "
+                   "to run tests/relay_pair.py")
+  endif()
   if(TARGET ari AND Python3_EXECUTABLE)
     set(_id_pair "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py")
     set(_id_relay --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
@@ -559,8 +568,17 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                      "--relay-arg=${_srv_tests}/client_programs_server.ari" --client-only
                      --client-arg=--relay-room --client-arg=ctest
                      "--client-arg=${_srv_tests}/client_limits.ari")
+    # An admin regenerates the relay's world (ARIADNE_WORLDS section 18.8, GB5): server.regenerate
+    # is refused before server.rcon, and after it the relay's generated world is made again.
+    add_test(NAME arisrv_world_regenerate
+             COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
+                     --scheme grpc ${_id_relay} --relay-arg=--rcon-password-file
+                     "--relay-arg=${_srv_tests}/rcon_password.txt" --relay-arg=--doc
+                     "--relay-arg=${_srv_tests}/world_regen_server.ari" --client-only
+                     --client-arg=--relay-room --client-arg=ctest
+                     "--client-arg=${_srv_tests}/world_regen_client.ari")
     set_tests_properties(arisrv_guest_password arisrv_guest_password_refuses arisrv_rcon
-                         arisrv_client_limits PROPERTIES ENVIRONMENT "PYTHONIOENCODING=utf-8"
+                         arisrv_client_limits arisrv_world_regenerate PROPERTIES ENVIRONMENT "PYTHONIOENCODING=utf-8"
                          SKIP_REGULAR_EXPRESSION "built without yaml-cpp" TIMEOUT 120)
     # rcon's role in arisrvx (ID3): a connection rcon made an admin has the role admin in
     # ctx.principal, so tests/rcon_service.py's @export(roles=["admin"]) answers it; before rcon,

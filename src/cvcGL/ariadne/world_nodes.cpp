@@ -145,6 +145,7 @@ struct WorldRT {
   bool publishes = true;
   bool show_underside = true; // the rock under a floating world (put_underside)
   ari::GeneratedWorldKeys k;
+  ari::GeneratedWorldRelay relay;     // GB5: the relay's world, while joined to one that runs it
   world::generated_world_params base; // the authored props
   std::string base_dir;               // the document's, for a relative terrain_file
   const world::building_library *library = nullptr;
@@ -1368,10 +1369,20 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     // new colour alone repaints the shown world at once, once no rebuild is running (a rebuild
     // paints in the colour asked when it started, and a later change is repainted after it). Save
     // writes the shown world's dataset, at once.
-    const ari::GeneratedWorldPoll poll =
+    // Joined to a relay that runs this node (GB5): the relay's world in, and the panel's rebuild
+    // out to it (ari::GeneratedWorldRelay).
+    rt->relay.follow(app, rt->k, rt->id, rt->preset, rt->sig);
+    const std::string shown = rt->sig;
+    ari::GeneratedWorldPoll poll =
         ari::poll_generated_world(app, rt->k, rt->base, rt->preset, rt->sig);
+    if (poll.rebuild && poll.asked && rt->relay.ask(app, rt->k, rt->id, poll.params)) {
+      rt->sig = shown; // the relay makes it, and world_on brings it back
+      poll.rebuild = false;
+    }
     if (poll.save)
       ari::save_generated_world(app, rt->k, rt->data_path, rt->base_dir);
+    if (poll.rcon)
+      rt->relay.login(app, rt->k);
     if (poll.stop && rt->job) {
       stop_world_job(*rt);
       ari::write<std::string>(app, rt->k.status, "stopped: the previous world is shown");

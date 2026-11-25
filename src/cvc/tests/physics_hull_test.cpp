@@ -197,6 +197,13 @@ TEST(PhysicsHull, MalformedHullsAreRefused) {
   d.hull = viscous;
   EXPECT_THROW(w.add_body(d), cvc::physics_error) << "no viscosity";
 
+  auto sinking = std::make_shared<hull_mesh>(*box_hull({0.5, 0.5, 0.2}));
+  sinking->lift_coefficient = -0.5;
+  d.hull = sinking;
+  EXPECT_THROW(w.add_body(d), cvc::physics_error) << "a negative lift";
+  sinking->lift_coefficient = std::nan("");
+  EXPECT_THROW(w.add_body(d), cvc::physics_error) << "a lift not finite";
+
   EXPECT_EQ(w.body_count(), 0u) << "a refused body is not left behind";
   EXPECT_NO_THROW(w.add_body(slab(500.0, 0.0)));
 }
@@ -380,6 +387,55 @@ TEST(PhysicsHull, TowingResistanceGrowsAsTheSpeedSquared) {
   // The bow's drag, below the centre of mass, trims the hull bow down by about F 0.125 m over
   // rho g I_wp, 0.01 rad at 2 m/s, and its bow then meets about 4 % more water than at rest.
   EXPECT_NEAR(fast, expected(2.0), 0.06 * expected(2.0));
+}
+
+// The lift (hull.h): a flat-bottomed box trimmed bow up and towed at 6 m/s, its 2 x 1 m bottom
+// wet from its leading edge (1 mm under the surface) aft, gains over the same hull without lift
+// a normal pressure of 1/2 rho K V^2 sin t cos t on its bottom: its lift, 1/2 rho K S V^2
+// sin t cos^2 t, and its induced drag, that lift times tan t. With K 0.56 that is the dynamic lift
+// of Savitsky's planing equation for this plate, a wetted length of two beams: within 1 % at 4
+// degrees of trim, 8 % at 2 and 6.
+TEST(PhysicsHull, ATrimmedBottomTowedFastLifts) {
+  REQUIRE_JOLT();
+  constexpr double v = 6.0, k = 0.56, rho = 1000.0, bottom = 2.0;
+  const auto load = [&](double lift, double trim) {
+    world w(jolt_config());
+    w.add_field(water(40.0, 0.0));
+    body_desc d;
+    d.shape = box{{1.0, 0.5, 0.1}};
+    auto h = std::make_shared<hull_mesh>(*box_hull({1.0, 0.5, 0.1}));
+    h->lift_coefficient = lift;
+    d.hull = h;
+    d.mass = 1.0e5; // heavy, so the velocity terms' implicit scale is 1 to within 2e-4
+    d.rotation = {std::cos(-trim / 2), 0.0, std::sin(-trim / 2), 0.0}; // its bow (+x) up
+    d.position = {0.0, 0.0, -0.001 - (std::sin(trim) - 0.1 * std::cos(trim))};
+    const body_id b = w.add_body(d);
+    body_state s = w.state(b);
+    s.linear_velocity = {v, 0.0, 0.0};
+    s.angular_velocity = {};
+    // The pose set before each of two steps, the second's load taken: the triangles' wetted
+    // areas are the pose's, so nothing slams.
+    for (int i = 0; i < 2; ++i) {
+      w.set_state(b, s);
+      w.step();
+    }
+    return w.field_load_on(b).force;
+  };
+  for (const double deg : {2.0, 4.0, 6.0}) {
+    const double t = deg * kPi / 180.0;
+    const vec3 gained = load(k, t) - load(0.0, t);
+    const double lift = 0.5 * rho * k * bottom * v * v * std::sin(t) * std::cos(t) * std::cos(t);
+    // Savitsky (1964): 1/2 rho V^2 b^2 0.0120 tau^1.1 lambda^0.5, tau in degrees; here the beam
+    // b is 1 m and lambda 2.
+    const double savitsky = 0.5 * rho * v * v * 0.0120 * std::pow(deg, 1.1) * std::sqrt(2.0);
+    std::printf("[hull] trimmed %.0f degrees at 6 m/s: the lift gains %.2f N up (expected %.2f, "
+                "Savitsky's %.2f) and %.2f N aft (lift tan t %.2f)\n",
+                deg, gained.z, lift, savitsky, -gained.x, lift * std::tan(t));
+    EXPECT_NEAR(gained.z, lift, 0.01 * lift) << deg;
+    EXPECT_NEAR(-gained.x, lift * std::tan(t), 0.03 * lift * std::tan(t)) << deg;
+    EXPECT_NEAR(gained.y, 0.0, 1e-3 * lift) << deg;
+    EXPECT_NEAR(gained.z, savitsky, (deg == 4.0 ? 0.01 : 0.08) * savitsky) << deg;
+  }
 }
 
 // --- stability ---------------------------------------------------------------------
@@ -576,6 +632,16 @@ TEST(PhysicsHull, TheHullIsInTheStateAndItsHash) {
   EXPECT_NE(swell_scene(box_hull({0.5, 0.5, 0.2}))->state_hash(),
             swell_scene(slammier)->state_hash())
       << "the hull's description is in the hash";
+  auto lifting = std::make_shared<hull_mesh>(*box_hull({0.5, 0.5, 0.2}));
+  lifting->lift_coefficient = 0.56;
+  EXPECT_NE(swell_scene(box_hull({0.5, 0.5, 0.2}))->state_hash(),
+            swell_scene(lifting)->state_hash())
+      << "its lift too";
+  auto unlifted = std::make_shared<hull_mesh>(*box_hull({0.5, 0.5, 0.2}));
+  unlifted->lift_coefficient = 0.0;
+  EXPECT_EQ(swell_scene(box_hull({0.5, 0.5, 0.2}))->state_hash(),
+            swell_scene(unlifted)->state_hash())
+      << "a lift of 0 is none";
   const std::vector<std::uint8_t> saved = a->save();
   auto c = swell_scene(box_hull({0.5, 0.5, 0.2}));
   c->restore(saved);
@@ -584,6 +650,7 @@ TEST(PhysicsHull, TheHullIsInTheStateAndItsHash) {
   c->step(100);
   EXPECT_EQ(c->state_hash(), a->state_hash());
   EXPECT_THROW(swell_scene(slammier)->restore(saved), cvc::physics_error);
+  EXPECT_THROW(swell_scene(lifting)->restore(saved), cvc::physics_error) << "another lift";
   EXPECT_THROW(swell_scene(nullptr)->restore(saved), cvc::physics_error) << "no hull";
   EXPECT_THROW(swell_scene(box_hull({0.5, 0.5, 0.2}))->restore(cells->save()), cvc::physics_error)
       << "a state without the hull";

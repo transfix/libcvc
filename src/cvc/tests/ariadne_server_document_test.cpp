@@ -25,7 +25,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cvc/ariadne/avatar_sim.h> // avatar_intent: the people walking (OW7b)
 #include <cvc/ariadne/conference/room_entities.h>
+#include <cvc/ariadne/holon.h>  // the relay's holon, which runs the document's world (OW7b)
+#include <cvc/ariadne/loader.h> // LoadResult: the load hook that sets the room's rate
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/script_engine.h> // a client guest's engine (client_guests:)
 #include <cvc/ariadne/server_document.h>
@@ -41,6 +44,7 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <random>
 #include <set>
@@ -481,6 +485,127 @@ TEST(ServerDocumentTest, TheStockTrafficWorldRuns) {
   for (std::size_t i = 0; i < later.size(); ++i)
     moving += std::hypot(later[i].x - start[i].x, later[i].y - start[i].y) > 1.0 ? 1 : 0;
   EXPECT_GE(moving, 12) << "most of them drive";
+}
+
+// OW7's second part: the relay hosts the traffic world with people walking among its cars, as
+// arisrv composes it (its main: the server document loaded at the room's rate, the server holon
+// running its world, the runtime stepping it no more), without the transport. Six people walk
+// the streets at 1.4 m/s for a minute, crossing the intersections, among the 18 cars nav@1
+// drives; the holon hands its avatars to the navigators (OW4) and tells the vehicles which bodies
+// are people (OW7b), so a touch counts as a person's. The navigators brake for a person in their
+// lane (OW7c), so no car touches a person while it is moving: the touches left are people, who
+// here walk straight on whatever is in the way, walking into a car stopped for them. Run with
+// the braking off (WorldVehicles::set_brake_for_people), a truck at its 9 m/s runs into a person
+// crossing ahead and carries them off.
+namespace {
+struct traffic_run {
+  int moving = 0, touches = 0, touches_moving = 0;
+  double fastest = 0.0, closest = 1e9, walked_least = 1e9, walked_median = 0.0;
+};
+traffic_run run_traffic(const fs::path &path, bool brake) {
+  traffic_run r;
+  cvc::app app;
+  ari::ServerDocument doc(app, kRoom);
+  // As arisrv: its world on the room's clock (120 Hz), whatever its scene's clock: says.
+  doc.runtime().add_load_hook(
+      [](ari::LoadResult &lr, const std::string &) { lr.scene.clock.hz = 120.0; });
+  for (const std::string &w : doc.load(path.string()))
+    ADD_FAILURE() << "traffic.ari warns: " << w;
+  ari::SceneWorld *world = doc.runtime().scene_world();
+  ari::WorldVehicles *vehicles = world ? world->vehicles() : nullptr;
+  if (!vehicles) {
+    ADD_FAILURE() << "no vehicles";
+    return r;
+  }
+  vehicles->set_brake_for_people(brake);
+  ari::holon_config cfg;
+  cfg.physics = true;
+  ari::holon h(ari::holon_role::server, cfg);
+  std::string why;
+  if (!h.attach_world(world, &why)) {
+    ADD_FAILURE() << why;
+    return r;
+  }
+  doc.runtime().set_world_external(true);
+  // The people: on the streets (x = 0, +-40 and y = 0, +-40 run between the blocks), walking
+  // along them.
+  struct walker {
+    const char *pid;
+    double x, y, vx, vy;
+  };
+  const walker people[] = {{"p1", 0.0, -55.0, 0.0, 1.4},  {"p2", 0.0, 55.0, 0.0, -1.4},
+                           {"p3", -55.0, 0.0, 1.4, 0.0},  {"p4", 55.0, 0.0, -1.4, 0.0},
+                           {"p5", 40.0, -35.0, 0.0, 1.4}, {"p6", -40.0, 35.0, 0.0, -1.4}};
+  for (const walker &p : people) {
+    cvc::physics::body_state feet;
+    feet.position = {p.x, p.y, 0.0};
+    h.add_participant(p.pid, false, feet);
+    ari::avatar_intent in;
+    in.move = {p.vx, p.vy, 0.0};
+    in.yaw = std::atan2(p.vy, p.vx);
+    h.set_intent(p.pid, in);
+  }
+  std::vector<ari::entity_info> start;
+  for (int frame = 0; frame < 60 * 60; ++frame) { // a minute at 60 frames a second
+    h.advance(1.0 / 60.0);
+    doc.step(h.tick(), h.clock().t());
+    const std::vector<ari::entity_info> now = vehicles->entities();
+    if (frame == 60)
+      start = now;
+    for (const ari::entity_info &e : now) {
+      if (!e.placed)
+        continue;
+      if (e.person_contact) {
+        ++r.touches;
+        if (std::fabs(e.speed) > 1.0)
+          ++r.touches_moving;
+        r.fastest = std::max(r.fastest, std::fabs(e.speed));
+      }
+      for (const walker &p : people) {
+        const cvc::physics::body_state s = h.state(p.pid);
+        r.closest = std::min(r.closest, std::hypot(e.x - s.position.x, e.y - s.position.y));
+      }
+    }
+  }
+  const std::vector<ari::entity_info> end = vehicles->entities();
+  for (std::size_t i = 0; i < end.size() && i < start.size(); ++i)
+    r.moving += std::hypot(end[i].x - start[i].x, end[i].y - start[i].y) > 10.0 ? 1 : 0;
+  std::vector<double> walked;
+  for (const walker &p : people) {
+    const cvc::physics::body_state s = h.state(p.pid);
+    walked.push_back((s.position.x - p.x) * (p.vx / 1.4) + (s.position.y - p.y) * (p.vy / 1.4));
+  }
+  std::sort(walked.begin(), walked.end());
+  r.walked_least = walked.front();
+  r.walked_median = 0.5 * (walked[2] + walked[3]);
+  return r;
+}
+} // namespace
+
+TEST(ServerDocumentTest, TheTrafficWorldHostsPeopleWalkingAmongItsCars) {
+  if (!ari::AppRuntime::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  const fs::path path =
+      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "worlds" / "traffic.ari";
+  if (!fs::exists(path))
+    GTEST_SKIP() << "no source tree beside this test: " << path.string();
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  const traffic_run braking = run_traffic(path, true), steering = run_traffic(path, false);
+  for (const auto &[name, r] : {std::pair<const char *, const traffic_run &>{"braking", braking},
+                                {"steering only", steering}})
+    std::printf(
+        "  OW7C the traffic world, 6 people for a minute, %s: %d of 18 cars drove over "
+        "10 m; car-person touches %d (%d while the car moved over 1 m/s), the fastest car at "
+        "a touch %.2f m/s; closest %.2f m (centre to feet); people walked %.1f m at least, "
+        "%.1f the median\n",
+        name, r.moving, r.touches, r.touches_moving, r.fastest, r.closest, r.walked_least,
+        r.walked_median);
+  EXPECT_GE(braking.moving, 12) << "the cars drove among them";
+  EXPECT_EQ(braking.touches_moving, 0) << "no car touched a person while moving";
+  EXPECT_LT(braking.fastest, 1.0);
+  EXPECT_GT(steering.fastest, 5.0) << "steering alone, a car ran into one at speed";
+  EXPECT_GT(braking.walked_median, 40.0) << "most people walked their streets";
 }
 
 // The document's own state is never published, whatever prefix it binds under: an entry that is

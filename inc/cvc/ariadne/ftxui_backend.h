@@ -117,6 +117,10 @@ public:
     // Hosted chrome: draw no window frames and no menu bar, for a host that supplies its own (see
     // "hosted chrome" below).
     bool hosted = false;
+    // Hosted: the host shows the context menu (§5.28, §5.30) as a popup of its own, from
+    // hosted_context_menu(), rather than in the window's body, where a short window cuts it off.
+    // TvisionBackend does.
+    bool host_draws_context_menu = false;
     // The colours the terminal shows. An RGB colour (a widget's `color:`, a group's fill, §5.26; a
     // border's) is drawn as the nearest of them. Auto asks the terminal (FTXUI reads COLORTERM and
     // TERM); the others say, for a host that knows better and for a test. TvisionBackend lays out
@@ -211,6 +215,14 @@ public:
   // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
   void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
   void end_item_group() override;
+  // §5.30 a document's context_menu: joins the context menu (§5.28): the Menu key or Shift+F10
+  // opens the menu of the focused widget and the area around it (with nothing focused, the
+  // document's), a right-click the one under the pointer. The area's items follow the widget's own
+  // entries, under a rule; over a widget with none they are the menu.
+  void begin_context_area(const char *id, ContextMenuOver over) override;
+  void end_context_area() override;
+  bool begin_context_menu(const char *id, ContextMenuOver over, ContextMenuOpen &opened) override;
+  void end_context_menu() override;
   // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
   // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
   // A context menu's Paste queues its OSC 52 read (osc52_query) there too; run() hands the
@@ -360,6 +372,7 @@ public:
     // this way.
     bool submenu = false;
     int depth = 0;
+    bool disabled = false; // shown, but it cannot be chosen (a context menu's Cut with no text)
   };
   struct HostedMenu {
     std::string label;
@@ -379,6 +392,23 @@ public:
   std::vector<HostedTrayIcon> hosted_tray() const;  // its tray, left to right (§5.22)
   bool hosted_root() const;                         // whether body "" has any widgets
   std::string tooltip() const;                      // the focused / hovered widget's tooltip
+  // §5.28 / §5.30 the context menu open, for a host that shows it itself
+  // (Options::host_draws_context_menu): `win`, its window ("" the body outside every window), the
+  // cell it hangs from in that body, and its entries: the leaf's own (ids "ctx#<i>"), then the
+  // document's context_menu: items. `serial` is one more for each menu opened, so the host shows
+  // each once; `by_key`: a key opened it (the Menu key, Shift+F10), so its first entry starts lit.
+  // Not open: `open` false.
+  struct HostedContextMenu {
+    bool open = false;
+    long serial = 0;
+    bool by_key = false;
+    std::string win;
+    int x = 0, y = 0;
+    std::vector<HostedMenuItem> items;
+  };
+  HostedContextMenu hosted_context_menu() const;
+  // The host's context menu closed: entry `id` chosen ("" none, and the menu closes). Runs a walk.
+  void pick_context_entry(Runtime &rt, const std::string &id);
 
   // Lay out window `id`'s body (from the last walk) into width x height cells. Mouse events fed
   // for that window hit-test against this layout.

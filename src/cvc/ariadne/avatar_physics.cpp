@@ -318,6 +318,11 @@ void avatar_world::remove_avatar(const std::string &pid) {
 
 bool avatar_world::has_avatar(const std::string &pid) const { return _avatars.count(pid) != 0; }
 
+ph::body_id avatar_world::body_of(const std::string &pid) const {
+  const auto it = _avatars.find(pid);
+  return it == _avatars.end() ? ph::body_id{} : bid(it->second.id);
+}
+
 void avatar_world::drive(const std::string &pid, const avatar_intent &in) {
   avatar &a = _avatars.at(pid);
   if (!a.dynamic)

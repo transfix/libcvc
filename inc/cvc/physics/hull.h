@@ -33,6 +33,19 @@
 //                         step: the added mass of the water it sets moving,
 //                         slam_coefficient rho l dS/dt, times u_n n, l the cube root of the
 //                         hull's volume
+//   lift                  with lift_coefficient K > 0, on a face the water meets (u_n < 0):
+//                         1/2 rho K S |u_t| u_n n, a normal pressure of 1/2 rho |u|^2 K sin a
+//                         cos a at the angle a the water meets the face at. It is the potential
+//                         part of a lifting plate's normal force in Polhamus's leading-edge
+//                         suction analogy (NASA TN D-3767, 1966); the other, vortex part, in
+//                         sin^2 a, is the pressure drag above. Linear in a where the
+//                         drag is quadratic, it gives a drifting V hull its grip sideways and a
+//                         trimmed bottom its dynamic lift, so a fast hull planes. K 0.56 gives a
+//                         flat plate trimmed tau the dynamic lift of Savitsky's planing equation
+//                         (Marine Technology 1(1), 1964) for a wetted length of two beams,
+//                         0.0120 tau^1.1 lambda^0.5 (tau in degrees) over the beam squared: to
+//                         0.3 % at 4 degrees, 7.3 % over at 2 and 4.9 % under at 6. 0, the
+//                         default, leaves it out.
 //   damping               the field's damping c times the immersed volume, c V_sub as the cells
 //                         give, on the vertical part of u only: the energy a floating hull
 //                         radiates in waves as it heaves, rolls and pitches. It is shared among
@@ -76,6 +89,7 @@ struct hull_mesh {
   double kinematic_viscosity = 1.19e-6; // m^2/s: sea water at 15 C (fresh, 20 C: 1.0e-6)
   double suction_coefficient = 0.0;     // pressure drag on the faces the water leaves
   double slam_coefficient = 0.5;        // 0.5 gives about a flat plate's added mass
+  double lift_coefficient = 0.0;        // the lift on the faces the water meets; 0: none
 };
 
 // A box's hull, centred on the origin: 8 vertices and 12 triangles.
