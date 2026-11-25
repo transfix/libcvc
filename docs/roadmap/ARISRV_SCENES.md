@@ -1,7 +1,8 @@
-# Changing a running server's scene, and where things spawn
+# Changing a running server's scene, what a client inherits, and where things spawn
 
-Status: proposal, 2026-11-24. Nothing here is built yet. It follows GB5 part 1 (transfix/libcvc#1527),
-where an rcon admin's Regenerate remakes the server's generated world.
+Status: proposal, 2026-11-24. The owner answered its questions on 2026-11-25 (section 5), and this
+revision folds those answers in. Nothing here is built yet. It follows GB5 part 1
+(transfix/libcvc#1527), where an rcon admin's Regenerate remakes the server's generated world.
 
 The owner, 2026-11-24: "when we change the terrain, where are the spawn points set for avatars and
 vehicles? do we have a way to set spawn points? Im rethinking how we get the server to change
@@ -33,6 +34,15 @@ scenes, including loading pregenerated data like the austin bundle".
 - arigl draws the document it was started with, plus the room scene. It does not follow
   `world_source`.
 
+**What a client can run from the server today:**
+- A client can call the server's functions (`room-call`).
+- It can run its own DSL program or WebAssembly guest on the server, sandboxed (`room-run`, S3
+  and G4).
+- The server can't hand a client an application, a component or a UI to run on the client's
+  side. The shell (ARIADNE_SHELL.md) mounts documents in a host, runs `remote:` principals
+  sandboxed, and addresses packages by hash. Its section 7 leaves "Relay and conference
+  documents as applications" out of scope.
+
 **Austin** is a `data:` entry, `uri: cvcpkg://cy-pca/scene-austin-south-small`,
 `path: share/cvc-scenes/austin_south`, `as: city_bundle`
 (examples/ariadne/documents/austin_data.ari). Since GB3, a data node whose dataset is a world
@@ -43,7 +53,8 @@ draws with the generated-world renderer. A saved lab world (GB4) loads the same 
   `fixed`, `random`, `round_robin` or `nearest_free` (world_rules.h).
 - They're part of `world_rules`, so the room carries them.
 - `WorldSpawns` checks each point against the grid of the world that's on (free ground, or deep
-  enough water for a boat), and its minimap tools add, remove, tag and suggest points.
+  enough water for a boat), and its minimap tools add, remove, tag and suggest points (along
+  the roads, or over water for a boat).
 - Those tools edit the document running where they are. There's no server call for spawns.
 - The points are fixed x/y positions: a new terrain leaves them where they were. Whether the check
   re-runs after a Regenerate is unverified.
@@ -58,23 +69,39 @@ draws with the generated-world renderer. A saved lab world (GB4) loads the same 
 
 ## 2. Goals
 
-1. An rcon admin can change the room's scene on a running server:
-   - to another document the server is allowed to load;
-   - to a world bundle (Austin, a saved lab world) with no document of its own.
-2. Every client follows: it draws and simulates the new scene. A client without the bytes gets
-   them by content address and checks them.
-3. Spawn points belong to the scene, for avatars as well as vehicles. A spawn lands on the ground
-   of the world that's on, and an admin can edit the points at run time.
+1. **An rcon admin can change the room's scene on a running server:**
+   - pick from a list the server offers (stock worlds, its scene directories, packages);
+   - or push an arbitrary new one onto the server.
+   A scene is everything the server's world is made of:
+   - the document's server-side logic;
+   - the logic, UIs, components and applications clients run;
+   - scene geometry, materials, and datasets such as Austin.
+2. **Every client follows.**
+   - A generated world, a client makes again from the same seeds and settings, which saves
+     bandwidth. It only fetches the bytes when its hash comes out different.
+   - Anything else, it downloads, checks against its hash, and caches.
+3. **A joining client inherits what the server gives it** to interact with the server's world:
+   the server's client-side applications, UIs and components, mounted beside the client's own.
+   It gets whatever it doesn't already hold.
+4. **Spawn points belong to the scene,** for avatars as well as vehicles and boats.
+   - A world can come with preset spawns, like a Quake map.
+   - The terrain generator makes good ones by itself: roads and dirt for vehicles and avatars,
+     water for boats.
+   - A spawn lands on the ground of the world that's on, and an admin can edit the points at
+     run time.
 
 These carry over unchanged:
 - **The rcon rule.** The owner, 2026-11-24: "the client elevates to admin permissions if they
-  have the rcon password, so they can edit the server world". Every call here is an admin call
-  in arisrv's `admin_call` list.
-- **Content is checked by hash.** Nothing a client draws or simulates is taken on a name alone.
+  have the rcon password, so they can edit the server world". Every call that changes the scene,
+  its spawns or what clients inherit is an admin call in arisrv's `admin_call` list.
+- **Content is checked by hash.** Nothing a client draws, simulates or runs is taken on a name
+  alone.
+- **The sandbox.** What a client inherits from a server runs as that server's principal. It is
+  default-deny, as the shell runs a `remote:` document (ARIADNE_SHELL 4.12).
 
 ## 3. Design
 
-### 3.1 Spawns are scene state (SC1, SC2)
+### 3.1 Spawns are scene state (SC1, SC2, SC6)
 
 **Avatars get spawn points.**
 - `world: spawns:` points tagged `archetype: avatar` (or any avatar archetype id) are avatar
@@ -95,12 +122,35 @@ These carry over unchanged:
 - It respawns at a spawn point by the policy, not where it joined, because where it joined may
   be gone after a Regenerate.
 
+**Preset spawns** are a world's own, like a Quake map: the document's `world: spawns:`, or a
+bundle's (below). When a world has them, they're the ones used.
+
+**The terrain generator makes spawns (SC6).**
+- A generated world proposes spawn points as part of what it makes, with the same tags the
+  minimap's suggester uses:
+  - **vehicles and avatars:** points on its roads and dirt, away from buildings and water,
+    spread out (a minimum spacing) and facing along the road;
+  - **boats:** points over water deep enough for the archetype's draft, clear of the shore by
+    half its length.
+- They're deterministic from the seed and settings, like the rest of the world, so a client that
+  makes the world itself gets the same points.
+- They go in the world's bundle (`world.json` `spawns`, below). They're used when the document
+  states none, and the panel can keep, edit or clear them.
+
+**Bundles carry spawns (SC6).** The version 2 manifest (`world.json`) gains an optional `spawns`
+block in the same shape. The lab's Save writes its points, and a bundle used as a scene (3.2)
+brings them.
+
 **After a terrain change** (a Regenerate, a world switch, a scene load):
-- Every point keeps its x and y, and its z comes from the new ground.
+- Preset points keep their x and y, and their z comes from the new ground.
+- A generated world's own points are made again with it.
 - `WorldSpawns` checks each point again and publishes the result: free, in water, inside a
-  building. Points that no longer work show in its status, so an admin can move them or ask for
-  suggestions (the roads suggester exists already).
-- Spawns are not moved automatically, since the author chose where they are.
+  building. Points that no longer work show in its status, for an admin to move.
+
+**Everyone respawns on a change.** The owner, 2026-11-25: "everyone respawns". On a world switch,
+a scene load, or a Regenerate under people:
+- every avatar is placed again at a spawn point;
+- vehicles end, the new scene's `vehicles: start:` are made, and seats and drives end.
 
 **An admin edits spawns at run time (SC2):**
 - `server.spawns.set {points, policy, scope}` replaces the room's spawn rules.
@@ -109,26 +159,39 @@ These carry over unchanged:
 - The minimap's spawn tools, while joined, send their edits as that call, the way GB5 routes the
   lab's Regenerate (`GeneratedWorldRelay`).
 
-**Bundles carry their own spawns (SC6).** The version 2 manifest (`world.json`) gains an optional
-`spawns` block in the same shape. A saved lab world writes the lab's points, and a bundle used as
-a scene (3.2) brings them.
+### 3.2 Loading or pushing a scene on a running server (SC3, SC4, SC8)
 
-### 3.2 Loading a scene on a running server (SC3, SC4)
-
-**The call:** `server.scene.load SOURCE [OPTIONS]`, an admin call.
-- SOURCE is a document or a bundle.
-- **Documents:**
+**From the server's list:** `server.scene.load SOURCE [OPTIONS]`, an admin call.
+- SOURCE is a document or a bundle the server can already reach:
   - a stock world, `cvc://worlds/<name>.ari`;
   - a path under one of the server's `--scene-root DIR`s;
   - a `cvcpkg://owner/package` with `path:`, through the server's `--net-allow`.
-- **Bundles:** a `city_bundle` (Austin, a saved world), by the same three kinds of address, with
-  `as: city_bundle`.
-- **Allow-list:** the server loads nothing outside that list. An admin's call must not become a
-  way to read the server's disk.
-- **Listing:** `server.scene.list` answers what the roots and the stock worlds offer, for a
-  picker.
+- A bundle (Austin, a saved world) is given with `as: city_bundle`.
+- The server reads nothing outside that list on a load. An admin's call must not become a way to
+  read the server's disk; a push (below) is how arbitrary content arrives.
+- `server.scene.list` answers what the list offers, for a picker.
 
-**A bundle with no document gets a wrapper document.**
+**Pushed by an admin (SC8):** `server.scene.push`. An admin client uploads a scene package, and
+the server runs it.
+- **The package.** A world pack (OW5k): the files and a `world-pack.index` (SHA-256, size and
+  path for each).
+  - It holds the document (server-side logic, the scene, its worlds and spawns, the `clients:`
+    block of 3.4).
+  - It also holds what the document names: geometry, materials, textures, components, apps, and
+    datasets such as a bundle.
+- **The upload.**
+  1. The admin sends the index first.
+  2. The server answers which hashes it lacks; it already holds what an earlier scene or package
+     shared.
+  3. The admin sends those in chunks (`server.scene.put HASH OFFSET BYTES`).
+  4. The server checks each file against the index, stores it content-addressed, and loads the
+     document as for `server.scene.load`.
+- **Persistence.** A pushed scene stays in the server's store and can be listed and loaded again
+  until an admin removes it (`server.scene.remove`).
+- **What it may do.** A pushed document's server-side logic runs as the room's document does
+  today, so the pusher (an rcon admin) is trusted with the server, as `--doc` is.
+
+**A bundle with no document gets a wrapper document (SC4).**
 - `scene_for_bundle(uri, options)` writes a small, canonical document: `physics: {}`, one data
   node naming the bundle (`as: city_bundle`, its `body:`), the stock lights, and the bundle's
   spawns.
@@ -138,75 +201,140 @@ a scene (3.2) brings them.
   content hash, `city_bundle_hash`), so a client wraps exactly what the server ran.
 
 **The server swaps at a tick.**
-1. It loads the new scene in the background. Decoding Austin takes a while (the small package;
-   the full city is 117 MB). The old scene keeps running meanwhile, and
-   `conf.rooms.<room>.scene_load.{state, progress, error}` says how far it is.
+1. It loads the new scene in the background (decoding Austin takes a while). The old scene keeps
+   running meanwhile, and `conf.rooms.<room>.scene_load.{state, progress, error}` says how far it
+   is.
 2. Once the new `SceneWorld` is ready, the server picks an activation tick T and, at T:
    - replaces the `ServerDocument` and its world;
-   - rewrites `scene`, `world_source`, `rules` (spawns included), `world_on` and the clock, all
-     stamped for T;
-   - removes the old world's vehicles and spawns the new world's `vehicles: start:`;
-   - respawns every avatar at the new spawns (3.1).
+   - rewrites `scene`, `world_source`, `rules` (spawns included), `world_on`, the clock, and what
+     clients inherit (3.4), all stamped for T;
+   - respawns everyone (3.1).
 3. A load that fails leaves the old scene running, says why in `scene_load.error`, and answers
    the call with the error.
 
-**Clients follow the source.**
+**Clients follow the source.** The owner, 2026-11-25: a joined client "should get whatever it
+needs from the server that it doesnt have client side to interact with its holon".
 - `world_replica` already rebuilds when `world_source`'s stamp moves.
-- The new piece is the drawn document. While joined, arigl (and any host that joins) treats
-  `world_source` as its document: when the stamp moves, it loads the new document. That means the
-  resolved file, a pack entry, or the wrapper it makes itself. It keeps its own windows and
-  panels and drops the old scene's. A host started with `--follow-room off` keeps its own
-  document, as today.
+- While joined, arigl (and any host that joins) also treats the room's scene as its world: when
+  the stamp moves, it loads the new document. That means the resolved file, a cached or fetched
+  copy, or the wrapper it makes itself. What it inherits changes with it (3.4).
+- This is the default. A host started with `--follow-room off` keeps its own document.
 
 ### 3.3 The bytes, by content address (SC5, which is GB5 part 2)
 
-**What a client needs:** the document (by its SHA-256) and the datasets it names (a bundle by
-`city_bundle_hash`). It looks, in order:
-1. wherever the URI resolves here;
-2. its world packs (OW5k);
-3. its cvcpkg cache, or cvcpkg.org itself, when the URI is `cvcpkg://` and the host allows that
-   network;
-4. the relay.
+**Generated worlds come first.** A client makes a generated world itself from `world_on`'s seeds
+and settings (GB5 part 1 does this), which costs no bandwidth. `world_on` gains each generated
+world's dataset hash and revision. A client compares its own hash and fetches the server's bytes
+only on a mismatch: another generator version, another platform's floating point, a generator it
+doesn't have.
+
+**Everything else:** the document (by its SHA-256), the datasets it names (a bundle by
+`city_bundle_hash`), and the files of what the client inherits (3.4). It looks, in order:
+1. its content-addressed cache;
+2. wherever the URI resolves here;
+3. its world packs (OW5k);
+4. cvcpkg (its cache, or cvcpkg.org when the host allows that network);
+5. the relay.
 
 **Fetching from the relay:**
-- `server.fetch HASH [OFFSET LENGTH]` answers the bytes of a file of the scene it is running,
-  never anything else, in chunks under the call result cap.
+- `server.fetch HASH [OFFSET LENGTH]` answers the bytes of any file of the scene the server is
+  running, in chunks under the call result cap.
 - This one is not an admin call: anyone joined may fetch the scene they're in.
+- Large scenes are fine. The owner, 2026-11-25: "large scenes are fine, we have tons of bandwidth
+  and when running on a LAN this isn't a problem". There's no size cap by default; a relay may
+  set one.
 
-**What the client keeps:**
-- It checks what it got against the hash before using it.
-- It keeps it in a content-addressed cache (`<cache>/<sha256>`), so a second join, or a return
-  to a scene, costs nothing.
+**What the client keeps.** It checks every file against its hash before using it, and keeps it in
+`<cache>/<sha256>`, so a second join, or a return to a scene, costs nothing.
 
-**`world_on` carries each generated world's dataset hash and revision.**
-- A client that made its own world (GB5's follow) compares hashes. On a mismatch (another
-  generator version, another platform's floating point), it fetches the server's bytes instead
-  of trusting its own.
-- This is the part that conflicts with transfix/libcvc#1521 (OW5q's `seas` and `weathers` in
-  `room_world_on`); whichever lands second takes the conflict.
+**The conflict.** The hash and revision in `world_on` conflict with transfix/libcvc#1521 (OW5q's
+`seas` and `weathers` in `room_world_on`); whichever lands second takes the conflict.
+
+### 3.4 What a joining client inherits (SC7)
+
+The owner, 2026-11-25: "The server has apps that the client runs basically. The client can run
+it's own apps and UI but when the client connects it inherets what the server gives it to
+interact with the server world".
+
+**The server's document says what clients get:**
+
+```yaml
+clients:
+  apps:
+    - { as: drive, uri: apps/drive_panel.ari, view: window }
+    - { as: map, uri: apps/minimap.ari, args: { follow: me } }
+  components: [components/vehicle_hud.ari]
+  grants: [state.room.read, room-call]      # what they may reach beyond the sandbox (4.12)
+```
+
+**The room carries it.**
+- `conf.rooms.<room>.clients` holds each entry's URI and SHA-256, its args, its view, and the
+  grants, stamped.
+- The files themselves come by content address (3.3).
+
+**A joined host mounts them,** using the shell's mounts (ARIADNE_SHELL 4.2):
+- one mount per app, under `shell.apps.server.<as>` (or the host's equivalent when it isn't the
+  shell);
+- each runs as the principal `relay:<server>/<room>`. That principal is sandboxed and
+  default-deny, as `remote:` is (4.12), plus the grants the document lists, and a host may still
+  refuse any of them;
+- they reach the server's world through the room: its state, `room-call`, `room-run`, and the
+  scene the holon shows.
+
+**The client keeps its own.** Its own documents, apps and UI keep running beside the inherited
+ones. The inherited ones carry the server's badge (4.12's badge for a remote application).
+
+**Changes follow the scene.**
+- When `clients` changes (a scene load, a push), the host unmounts what is gone and mounts what
+  is new.
+- On leaving the room, every inherited mount ends.
+
+**Logic for the client side.** An app's DSL runs on the client as its own processes, under its
+mount, so a server can give clients UIs and client-side behaviour as well as server-side logic.
+
+**Coordination.**
+- This takes up what ARIADNE_SHELL section 7 left out. It needs the shell's mounts (SH phases),
+  its sandbox (SH12) and its badge.
+- It also uses the DSL process work: processes under a mount's scope, and the Processes view
+  showing them.
+- The design of the `relay:` principal belongs with the shell and DSL-process sessions, and
+  should be agreed with them before SC7 starts.
 
 ## 4. Phases
 
 | Phase | What | Size |
 |---|---|---|
-| SC1 | **Avatar spawns:** points tagged for avatars in `world: spawns:`. Newcomers and respawns take them by the policy, put on the ground of the world that's on (the ring when there are none, also on the ground). Respawn is relative to the ground. Spawns are checked again after a terrain change. Tests: on a generated world and on Austin, a joining avatar stands on the ground, and a Regenerate under it re-places it. | M |
+| SC1 | **Avatar spawns:** points tagged for avatars in `world: spawns:`. Newcomers and respawns take them by the policy, put on the ground of the world that's on (the ring when there are none, also on the ground). Respawn is relative to the ground. Everyone respawns on a world change. Tests: on a generated world and on Austin, a joining avatar stands on the ground, and a Regenerate under it re-places it. | M |
 | SC2 | **`server.spawns.set`** (admin): spawns re-published at an activation tick. The minimap's tools send their edits to the server while joined. | S–M |
-| SC3 | **`server.scene.load` for documents** (stock worlds, `--scene-root`, cvcpkg): allow-list, background load, swap at a tick, everything re-published, vehicles and avatars respawned. Joined hosts follow `world_source` (`--follow-room`). `server.scene.list`. | L |
+| SC3 | **`server.scene.load` from the server's list** (stock worlds, `--scene-root`, cvcpkg): background load, swap at a tick, everything re-published, everyone respawned. Joined hosts follow the room's scene by default (`--follow-room off` to opt out). `server.scene.list`. | L |
 | SC4 | **Bundles as scenes:** `scene_for_bundle` wrapper documents, `world_source` by bundle hash, Austin and saved lab worlds loadable. | M |
-| SC5 | **Bytes by content address** (GB5 part 2): `server.fetch`, the cache, the pack and cvcpkg lookups, and the dataset hash and revision in `world_on`. | L |
-| SC6 | **Spawns in the bundle manifest:** `world.json` `spawns`, written by the lab's Save. | S |
+| SC5 | **Bytes by content address** (GB5 part 2): `server.fetch`, the cache, the pack and cvcpkg lookups, and the dataset hash and revision in `world_on` so a generated world is fetched only on a mismatch. | L |
+| SC6 | **Spawns in bundles and from the generator:** `world.json` `spawns`, written by the lab's Save. The terrain generator proposes points on roads and dirt (vehicles, avatars) and over water (boats), deterministic from the seed. | M |
+| SC7 | **What a client inherits:** the document's `clients:` block, `conf.rooms.<room>.clients`, a joined host mounting the server's apps, components and UIs as a sandboxed `relay:` principal beside its own, following scene changes. Needs the shell's mounts and sandbox; design the principal with the shell and DSL-process sessions first. | L |
+| SC8 | **`server.scene.push`:** an admin uploads a scene package (a world pack: document, server and client logic, apps, components, UIs, geometry, materials, datasets), sending only the hashes the server lacks, checked against the index, kept in the server's store, loaded as SC3 does. `server.scene.remove`. | L |
 
-SC1 and SC2 don't depend on the rest and fix the problem visible today. SC3 is the core.
-SC4 and SC5 can go in either order, though without SC5 only clients that already hold Austin
-(cvcpkg cache, a pack) can follow it.
+**Order.** SC1 and SC2 fix the problem visible today and stand alone. SC3 is the core. SC5
+before SC8, since a pushed scene's clients need to fetch it. SC4 and SC6 can go anywhere after
+SC3 and SC1. SC7 waits on the shell's mounts and sandbox.
 
-## 5. Open questions for the owner
+## 5. Decisions (the owner, 2026-11-25), and what's still open
 
-1. **Where may the server load scenes from?** Proposed: the stock worlds, any `--scene-root`
-   directory, and cvcpkg packages when the server runs with `--net-allow https://cvcpkg.org`.
-2. **What happens to people on a scene change?** Proposed: every avatar respawns at the new
-   spawns. Vehicles end, and the new scene's starting vehicles are made. Seats and drives end.
-3. **May clients fetch large scenes from the relay?** Proposed: yes, in chunks, but cvcpkg and
-   packs come first, and a relay may cap it (`--fetch-max-mb`). Austin's full city is 117 MB.
-4. **Should a joined arigl follow the server's document by default?** Proposed: yes; a host that
-   wants its own lab while joined passes `--follow-room off`.
+1. **Where scenes come from:** "a pre-set list is fine but ideally an admin can push an arbitrary
+   new world onto the server and the clients can download it (or regenerate if it's generated to
+   save bandwidth, they just need the seeds and settings to match the world on the server)". The
+   server's document can hold logic for clients as well as for itself, and an admin can push
+   "server/client logic, UIs or components or apps, scene geometry materials etc." That's
+   SC3 and SC8 here, and 3.4 for client logic.
+2. **People on a change:** "everyone respawns". Worlds can have preset spawns, like a Quake map,
+   and the terrain generator could make good ones itself (roads or dirt for vehicles and avatars,
+   water for boats). That's 3.1 and SC6.
+3. **Large scenes from the relay:** yes, with no default cap (3.3).
+4. **A joined client follows the server:** yes; "it should get whatever it needs from the server
+   that it doesnt have client side to interact with its holon" (3.2, 3.4).
+
+Still open:
+- **The `relay:` principal's grants:** which host verbs an inherited app may have by default, and
+  which the document may grant. To settle with the shell and DSL-process sessions (SC7).
+- **The pushed-scene store:** where it lives on the server, and when it is pruned.
+- **A pushed scene after a restart:** does `--doc` become "the last scene pushed", or does a
+  restart go back to `--doc`?
