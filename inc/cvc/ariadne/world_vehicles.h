@@ -296,6 +296,7 @@ struct entity_info {
   // kinematic box's obstacles are its footprint on the grid's blocked cells.
   int obstacle_contacts = 0;
   bool vehicle_contact = false;
+  bool person_contact = false; // with a person's body (set_people), over the same steps
   // The command its plant took on the last navigator tick: rad and m/s^2, as entity_intent's.
   double command_steer = 0.0, command_accel = 0.0;
   entity_intent intent; // as of the last navigator tick
@@ -556,6 +557,11 @@ public:
   // Nothing moves them; kept until set again, empty for none (the default).
   void set_movers(std::vector<std::array<double, 2>> xy);
   const std::vector<std::array<double, 2>> &movers() const;
+  // The bodies in the world that are people (a holon's avatars, which holon::attach_world sets
+  // with the movers): a chassis's contact with one is a person's (entity_info::person_contact),
+  // not an obstacle's. Kept until set again, empty for none (the default).
+  void set_people(std::vector<cvc::physics::body_id> bodies);
+  const std::vector<cvc::physics::body_id> &people() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense

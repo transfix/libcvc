@@ -225,6 +225,7 @@ static PyObject *gym_observation_dict(const cvc::ariadne::gym_observation &o) {
     gym_put(d, "collided", gym_bool(o.collided));
     gym_put(d, "hit_obstacle", gym_bool(o.hit_obstacle));
     gym_put(d, "hit_vehicle", gym_bool(o.hit_vehicle));
+    gym_put(d, "hit_person", gym_bool(o.hit_person));
     gym_put(d, "out", gym_bool(o.out));
     gym_put(d, "range_m", PyFloat_FromDouble(o.range_m));
     // The people in the gym's holon (gym_options::people, OW7a): their feet and velocity.
@@ -402,8 +403,32 @@ public:
   WorldGym(const std::string &document, const std::string &prefix, int count,
            const std::string &world, PyObject *agents, PyObject *set, bool wander,
            unsigned long long max_steps, int rays, double range_m, double ready_timeout,
-           bool regenerate, double tick, bool drive_telemetry, PyObject *fleets) {
+           bool regenerate, double tick, bool drive_telemetry, PyObject *fleets,
+           PyObject *people, bool holon) {
     cvc::ariadne::gym_options o;
+    o.holon = holon;
+    if (people != nullptr && people != Py_None) { // OW7a: avatars in the gym's holon
+      PyObject *seq = PySequence_Fast(people, "people is a list of dicts");
+      if (seq == nullptr) {
+        PyErr_Clear();
+        throw std::invalid_argument("pycvc.WorldGym: people is a list of dicts");
+      }
+      for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(seq); ++i) {
+        PyObject *p = PySequence_Fast_GET_ITEM(seq, i);
+        if (!PyDict_Check(p)) {
+          Py_DECREF(seq);
+          throw std::invalid_argument("pycvc.WorldGym: each person is a dict (x, y, yaw, walk, name)");
+        }
+        cvc::ariadne::gym_person g;
+        g.name = gym_str(p, "name");
+        gym_num(p, "x", g.x);
+        gym_num(p, "y", g.y);
+        gym_num(p, "yaw", g.yaw);
+        gym_num(p, "walk", g.walk);
+        o.people.push_back(g);
+      }
+      Py_DECREF(seq);
+    }
     o.regenerate = regenerate;
     o.tick = tick;
     o.drive_telemetry = drive_telemetry;
@@ -718,7 +743,8 @@ public:
            const std::string &world = "", PyObject *agents = nullptr, PyObject *set = nullptr,
            bool wander = false, unsigned long long max_steps = 1000, int rays = 16,
            double range_m = 60.0, double ready_timeout = 120.0, bool regenerate = false,
-           double tick = 0.0, bool drive_telemetry = true, PyObject *fleets = nullptr);
+           double tick = 0.0, bool drive_telemetry = true, PyObject *fleets = nullptr,
+           PyObject *people = nullptr, bool holon = true);
   ~WorldGym();
   PyObject *reset(unsigned long long seed = 0);
   PyObject *step(PyObject *steer, PyObject *accel);

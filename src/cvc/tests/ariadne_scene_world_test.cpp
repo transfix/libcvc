@@ -5776,10 +5776,11 @@ TEST(AriadneWorldGym, TheGymsWorldRunsInALocalServerHolonAsOnItsOwnClock) {
 }
 
 // People in the gym (OW7a): avatars in its holon's world beside the cars, as on a relay. A car
-// commanded straight at a person standing 15 m ahead shoves them aside and counts the touch as
-// an obstacle; a car on nav@1 driving to a goal past a person steers around them (the holon hands
-// its avatars to the navigators, OW4) and touches no one. A walking person walks. Without the
-// holon there are no people.
+// commanded straight at a person standing 15 m ahead shoves them aside and has hit a person
+// (hit_person, a collision; no obstacle: the holon tells the vehicles which bodies are people); a
+// car on nav@1 driving to a goal past a person steers around them (the holon hands its avatars to
+// the navigators, OW4) and touches no one. A walking person walks. Without the holon there are no
+// people.
 TEST(AriadneWorldGym, PeopleAreInTheGymsWorld) {
   REQUIRE_YAML();
   if (!jolt())
@@ -5802,17 +5803,21 @@ TEST(AriadneWorldGym, PeopleAreInTheGymsWorld) {
     gym_observation obs = gym.reset(1);
     ASSERT_EQ(obs.people, 2u);
     EXPECT_NEAR(obs.person_x[0], 15.0, 1e-9);
-    bool touched = false;
+    bool touched = false, obstacle = false, collided = false;
     for (int i = 0; i < 120; ++i) {
       const gym_step s = gym.step({0.0}, {2.0});
-      touched = touched || s.observation.hit_obstacle[0] != 0;
+      touched = touched || s.observation.hit_person[0] != 0;
+      obstacle = obstacle || s.observation.hit_obstacle[0] != 0;
+      collided = collided || s.observation.collided[0] != 0;
       obs = s.observation;
     }
     const double pushed = std::hypot(obs.person_x[0] - 15.0, obs.person_y[0]);
     std::printf("  OW7A a car commanded at a standing person: it touched them %s; they were "
                 "shoved %.2f m; the walker went %.2f m\n",
                 touched ? "yes" : "no", pushed, obs.person_x[1] + 20.0);
-    EXPECT_TRUE(touched) << "the car met the person";
+    EXPECT_TRUE(touched) << "the car hit the person";
+    EXPECT_FALSE(obstacle) << "a person, not an obstacle";
+    EXPECT_TRUE(collided) << "a collision all the same";
     EXPECT_GT(pushed, 1.0) << "and shoved them";
     EXPECT_NEAR(obs.person_x[1] + 20.0, 1.2 * gym.dt() * 120, 1.0) << "the walker walks";
   }
@@ -5830,7 +5835,7 @@ TEST(AriadneWorldGym, PeopleAreInTheGymsWorld) {
     double closest = 1e9;
     for (int i = 0; i < 400; ++i) {
       const gym_step s = gym.step({kNaN}, {kNaN});
-      touched = touched || s.observation.hit_obstacle[0] != 0;
+      touched = touched || s.observation.hit_person[0] != 0 || s.observation.hit_obstacle[0] != 0;
       obs = s.observation;
       closest =
           std::min(closest, std::hypot(obs.x[0] - obs.person_x[0], obs.y[0] - obs.person_y[0]));

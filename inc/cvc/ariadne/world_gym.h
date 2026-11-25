@@ -92,9 +92,10 @@ struct gym_observation {
   // Its goal, the distance to it, and within `reach` of it.
   std::vector<double> goal_x, goal_y, goal_dist, reach;
   std::vector<std::uint8_t> reached;
-  // Over the last tick: touching the world's bodies other than its ground (hit_obstacle), touching
-  // another vehicle (hit_vehicle), and either (collided).
-  std::vector<std::uint8_t> collided, hit_obstacle, hit_vehicle;
+  // Over the last tick: touching the world's bodies other than its ground and the people
+  // (hit_obstacle), touching another vehicle (hit_vehicle), touching a person (hit_person,
+  // gym_options::people), and any of these (collided).
+  std::vector<std::uint8_t> collided, hit_obstacle, hit_vehicle, hit_person;
   // Out of the world: off its grid, or more than 5 m below the grid's ground under it (fallen off
   // an edge, or through the ground). The episode ends.
   std::vector<std::uint8_t> out;
@@ -180,7 +181,7 @@ struct gym_options {
   // episode, and it ends when every agent is at its own.
   bool wander = false;
   // The people each reset puts in the world (gym_person), after the agents. A car that touches
-  // one counts it as an obstacle (gym_observation::hit_obstacle); the navigators steer around
+  // one has hit a person (gym_observation::hit_person, a collision); the navigators steer around
   // them. Ignored without the local holon (local_holon() null).
   std::vector<gym_person> people;
   // The world in a local server-role holon (OW7a). Off: on the gym's own clock, as before, with

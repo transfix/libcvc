@@ -1030,14 +1030,29 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   - **People.** `gym_options::people` puts avatars in the world at each reset (`gym_person`:
     standing, or walking at a pace along a heading), bodies beside the cars as on a relay: the
     holon drives them and hands them to the navigators to steer around (OW4). The observation has
-    their feet and velocity (`gym_observation::person_*`, in pycvc's dict too), and a car's touch
-    counts as an obstacle. A car commanded straight at a person standing 15 m ahead touches them
-    and carries them off (35 m in 7 s); a car on nav@1 to a goal past a person keeps at least 2.9 m
-    from them (centre to feet), touches no one and gets to its goal; a walker at 1.2 m/s covers
-    8.3 m in 7 s.
-  - **Not yet:** people in pycvc's `WorldGym(...)` and `GymCars` (the observation has them; the
-    constructor does not take them), a `hit_person` apart from obstacles, and arisrv hosting the
-    traffic world with clients walking among the cars (OW7's second part).
+    their feet and velocity (`gym_observation::person_*`). A car commanded straight at a person
+    standing 15 m ahead touches them and carries them off (35 m in 7 s); a car on nav@1 to a goal
+    past a person keeps at least 2.9 m from them (centre to feet), touches no one and gets to its
+    goal; a walker at 1.2 m/s covers 8.3 m in 7 s.
+  - **A person hit is a person's.** The holon tells the vehicles which bodies are its avatars
+    (`WorldVehicles::set_people`, with the movers), so a chassis's contact with one is a
+    person's (`entity_info::person_contact`), not an obstacle's, on a relay as in the gym: the
+    gym's `hit_person`, a collision for its reward.
+  - **From Python.** `pycvc.WorldGym(..., people=[{x, y, yaw, walk}], holon=True)`, and
+    `GymCars(..., people=...)` through it; the observation dict has `people`, `person_*` and
+    `hit_person` (`test_pycvc_gym.py`: the car hits the person, not an obstacle, and shoves them).
+- **As built (OW7b, the relay hosting the traffic world with people among its cars).** Composed
+  as arisrv's main composes it (the server document `traffic.ari` at the room's 120 Hz, the server
+  holon running its world, the runtime stepping it no more), without the transport: six people
+  walk the streets at 1.4 m/s for a minute, crossing intersections, among its 18 cars on nav@1.
+  All 18 drive, and every person walks their street (`ServerDocumentTest`). Found: a navigator
+  only steers around a person (its separation, a nudge of its carrot), and does not brake for one
+  in its lane, so a truck at its 9 m/s runs into a person crossing ahead and carries them off at
+  its speed, and people walk into the cars' sides: about 25 tick-frames of car-person contact a
+  minute, the closest a car comes 0.5 m (centre to feet), one person knocked 7.9 m off their
+  line. Not run live: arisrv needs gRPC, which the Windows workstation's build lacks, so the
+  live check (arisrv with `cvc://worlds/traffic.ari` and arigl clients walking) waits for a host
+  with it.
 
 ### 18.3 Contact
 
@@ -1535,7 +1550,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives; OW5p: the room's avatars in it, and the room in a dynamic plant's car; OW5q: a sea the relay's storms grow; OW5r: a sample corrects all of a vehicle's motion). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
-| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people, from Python too, a person hit a person's; OW7b: the traffic world hosting people among its cars, measured; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**

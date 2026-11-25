@@ -658,8 +658,10 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
     kv.second.last_feet = it->second;
   }
   if (_scene && _scene != world)
-    if (WorldVehicles *v = _scene->vehicles())
+    if (WorldVehicles *v = _scene->vehicles()) {
       v->set_movers({}); // the avatars have left that world
+      v->set_people({});
+    }
   _world = std::move(next);
   _scene = world;
   _scene_world = world ? static_cast<const void *>(&world->world()) : nullptr;
@@ -681,14 +683,19 @@ void holon::scene_step() {
       set_driver(kv.first, kv.second.body);
   // The world's navigators steer around the avatars (section 18.4), where they stood after the
   // last step.
+  // And their bodies are people's: a car's touch on one is a person's, not an obstacle's.
   if (WorldVehicles *v = _scene->vehicles()) {
     std::vector<std::array<double, 2>> movers;
+    std::vector<cvc::physics::body_id> people;
     for (auto &kv : _participants) {
       participant &p = kv.second;
-      if (_world->has_avatar(kv.first))
+      if (_world->has_avatar(kv.first)) {
         movers.push_back({p.last_feet.position.x, p.last_feet.position.y});
+        people.push_back(_world->body_of(kv.first));
+      }
     }
     v->set_movers(std::move(movers));
+    v->set_people(std::move(people));
   }
   // A driver's drive axes in place of its vehicle's controller (section 18.4), after each step:
   // the intent in force at that step's tick and the vehicle as the step left it, for the

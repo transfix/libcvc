@@ -207,7 +207,9 @@ struct WorldGym::impl {
       o.reached.push_back(e.placed && dist < e.reach ? 1 : 0);
       o.hit_obstacle.push_back(e.obstacle_contacts > 0 ? 1 : 0);
       o.hit_vehicle.push_back(e.vehicle_contact ? 1 : 0);
-      o.collided.push_back(o.hit_obstacle.back() || o.hit_vehicle.back() ? 1 : 0);
+      o.hit_person.push_back(e.person_contact ? 1 : 0);
+      o.collided.push_back(
+          o.hit_obstacle.back() || o.hit_vehicle.back() || o.hit_person.back() ? 1 : 0);
       const bool off = grid && e.placed &&
                        (e.x < grid->min_x || e.x > grid->max_x || e.y < grid->min_y ||
                         e.y > grid->max_y || e.z < e.ground_z - kFallen);
