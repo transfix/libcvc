@@ -83,6 +83,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/physics/hull.h
   ../../inc/cvc/physics/immersion.h
   ../../inc/cvc/physics/ocean_surface.h
+  ../../inc/cvc/physics/shore_mask.h
   ../../inc/cvc/physics/vehicle.h
   ../../inc/cvc/physics/boat.h
   ../../inc/cvc/physics/body.h
@@ -434,6 +435,7 @@ set(SOURCE_FILES
   physics/fluid_surface.cpp
   physics/flow_velocity.cpp
   physics/ocean_surface.cpp
+  physics/shore_mask.cpp
   physics/vehicle.cpp
   physics/boat.cpp
   physics/null_backend.cpp
@@ -781,7 +783,7 @@ endif()
 set(_cvc_physics_exact_sources physics/world.cpp physics/vehicle.cpp physics/boat.cpp
     physics/field_step.cpp physics/field_wake.cpp physics/hull.cpp physics/immersion.cpp
     physics/fluid_surface.cpp physics/flow_velocity.cpp physics/ocean_surface.cpp
-    physics/null_backend.cpp
+    physics/shore_mask.cpp physics/null_backend.cpp
     physics/nav_plant.cpp
     physics/dyn_bike_plant.cpp physics/dyn_4w_plant.cpp physics/dyn_boat_plant.cpp
     physics/dyn_world.cpp

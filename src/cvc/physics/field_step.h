@@ -163,9 +163,18 @@ public:
     const auto it = _bodies.find(id.value);
     return it == _bodies.end() ? vec3{} : it->second.center_of_mass;
   }
+  // Which of a fluid's wake's waves water_at adds (field::wake): none, or every body's (`body`
+  // invalid), or the others' as `body` feels them, never its own.
+  struct wake_read {
+    bool on = false;
+    body_id body;
+  };
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
-  // in x and y and reaches below it. False if none does; `out` is then dry and still.
-  bool water_at(const vec3 &p, double t, physics::water_sample &out) const;
+  // in x and y and reaches below it. False if none does; `out` is then dry and still. With
+  // `wake.on` its wake's waves too: their height in the top, their motion at p's depth below it
+  // in the velocity.
+  bool water_at(const vec3 &p, double t, physics::water_sample &out,
+                const wake_read &wake = {}) const;
 
   // The air at `p` at field time `t` for a vehicle's aero: a flow field's density and wind (its
   // flow_velocity's, or its velocity volumes') where one covers `p` (the first, in id order),
@@ -210,7 +219,8 @@ public:
   // wakes differ from the state's). A wake's window and the height of all its waves at (x, y).
   bool has_wakes() const;
   void save_wakes(std::string &out) const;
-  void restore_wakes(const std::string &in, std::size_t &pos);
+  // `version`: the section's (CVCWAKE1 or CVCWAKE2; save_wakes writes 2).
+  void restore_wakes(const std::string &in, std::size_t &pos, int version);
   wake_info wake(field_id id) const;
   double wake_height(field_id id, double x, double y) const;
 

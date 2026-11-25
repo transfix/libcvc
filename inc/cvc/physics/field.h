@@ -98,7 +98,9 @@
 // dh = -(zeta(t) - zeta(t - dt)). Every body
 // reads the sum of the others' waves, never its own: their height adds to the surface's under its
 // cells and hull, their velocity (grad phi sideways, dh/dt up) to the water's, and an inertial
-// fluid's Froude-Krylov push takes their acceleration (-g grad h). A body's own waves read back
+// fluid's Froude-Krylov push takes their acceleration (-g grad h), the velocity and the push
+// decaying with the depth they are read at (field_wake below). With a shore (wake_shore below)
+// the waves reflect off the coast and soak into its beaches. A body's own waves read back
 // would cancel its heave's restoring force as it moves (its source lowers the water it presses
 // down, at once, and the waves take a while to refill it) and price its wave-making twice (the
 // hull's drag stands for it). So boats feel each other's wakes and the debris' rings, and the
@@ -106,8 +108,10 @@
 // so a world with another wake refuses the state) and hashed. restore() reads every wake's
 // section whole before any wake takes it, so a failure in it leaves the wakes as they were (the
 // world's restore as a whole is not transactional: the engine and the sections before the
-// wakes' are taken first). The section is versioned only by its magic (CVCWAKE1). What reads
-// the water at a point (world::water_at: a boat's propeller and rudder) reads it without the wake.
+// wakes' are taken first). The section is versioned only by its magic (CVCWAKE2, which adds each
+// wake's shore digest and the depths its motion is kept at; CVCWAKE1 states, from before, restore
+// as wakes without shores). What reads the water at a point (world::water_at) reads the wake's
+// waves too, at the point's depth: a boat's propeller and rudder the others' waves, never its own.
 //
 // Sleeping bodies are not pushed: the forces were in balance when the body fell
 // asleep. add_field and set_field wake the bodies inside the field's box, and a wake wakes a body
@@ -140,6 +144,20 @@ enum class field_kind : std::uint8_t {
   flow,   // moving air: drag only
 };
 
+// A wake's coast (field_wake::shore; OCEAN-AND-WEATHER-ROADMAP.md C6): where its window's waves
+// meet land. mask(x, y) is 1 in open water and 0 on land, a wall the waves reflect off crest for
+// crest (cvc::ocean::ewave's no-flux wall) and never run over; between them is a beach, which
+// absorbs at 10 (1 - m) /s. Like a fluid_surface it must be deterministic and the same on every
+// platform, and immutable once a field holds it; digest() names everything mask() depends on,
+// and a world folds it into the wake's section of save() and state_hash(). shore_mask.h has one
+// made from a shore grid (cvc::world::water_bodies), as the drawn wake window masks.
+class wake_shore {
+public:
+  virtual ~wake_shore() = default;
+  virtual double mask(double x, double y) const = 0;
+  virtual std::uint64_t digest() const = 0;
+};
+
 // A fluid's wake (field::wake): the window its floating bodies' waves are stepped on. `cells` 0 is
 // no wake (the default). The window (cells x cells of `cell` metres, one water depth) sits on a
 // grid of whole cells from the world's origin where it holds the most bodies in the water, a boat
@@ -152,20 +170,30 @@ enum class field_kind : std::uint8_t {
 // with it and the strip that enters flat. Bodies in the water outside it make and feel no waves
 // (wake_info::outside counts them): two groups farther apart than the window cannot share it. The
 // waves step every `period` seconds of world time, in whole physics steps (at least one), and the
-// bodies read them at every step. A sponge at the window's edge takes the waves that leave, and
-// the window has no shores: a wake runs on over land, where nothing floats to feel it, and does
-// not reflect off the coast. At most `sources` awake bodies make waves, each holding a slot: a
-// body that falls asleep, leaves the window or leaves the world gives its slot up and its waves
-// fade on; a body awake in the window without one takes a free slot, boats first, then the
-// nearest the window's centre (by id among equals).
+// bodies read them at every step. A sponge at the window's edge takes the waves that leave. With
+// no `shore` the window is open water: a wake runs on over land, where nothing floats to feel it,
+// and does not reflect off the coast. With one, the window is masked from it wherever it goes
+// (C6): its waves reflect off steep shores crest for crest, soak into beaches and never run over
+// land, and a pond inside the window reflects off all its banks (the window's step is then
+// cvc::ocean::ewave's no-flux step, one substep of the waves' step). At most `sources` awake
+// bodies make waves, each holding a slot: a body that falls asleep, leaves the window or leaves
+// the world gives its slot up and its waves fade on; a body awake in the window without one takes
+// a free slot, boats first, then the nearest the window's centre (by id among equals).
+//
+// The waves' motion decays with depth as in linear theory, each wavenumber k on its own
+// (e^{-k d} in deep water; cosh and sinh over the window's depth otherwise), d below the water's
+// top where it is read: a body deep down feels less of them than one afloat. Their height is the
+// surface's and does not decay.
 //
 // Memory and cost: each body that makes waves holds a state of 80 cells^2 bytes (320 KiB at 64,
 // 1.25 MiB at 128), at most sources + 4 states (the 4 fading), and saves 32 cells^2 bytes of it
 // (so a save and a state_hash() grow by that each). A wave step costs about one
 // cvc::ocean::ewave step per state with waves in it: 0.16-0.22 ms at 64^2, 0.6-1.0 ms at 128^2
-// (ocean_ewave_test), every `period`; the reads are bilinear lookups. The limits below keep a
-// window at most 128 cells and 16 sources: 20 states of 1.25 MiB, wave steps of about 20 ms at
-// worst.
+// (ocean_ewave_test), every `period`; the reads are bilinear lookups. Depth adds, per state, its
+// motion at 1 to 5 depths below the top (cells / 2, 1, 2, 4 and 8 cells down, as deep as the
+// bodies in the window reach): 40 cells^2 bytes and about one and a half inverse FFTs a depth,
+// two forward FFTs a state. The limits below keep a window at most 128 cells and 16 sources: 20
+// states of 1.25 MiB (and 3.1 MiB of depths at the deepest), wave steps of about 20 ms at worst.
 struct field_wake {
   int cells = 0;            // cells a side (0: no wake; else a power of two, 8 .. 128)
   double cell = 1.0;        // m: a cell's side (0.05 .. 100)
@@ -177,12 +205,18 @@ struct field_wake {
   double sponge_rate = 2.0; // 1/s: its damping at the edge
   int samples = 2;          // sub-columns a side in each cell for a body's immersed depth (1 .. 8)
   int sources = 8;          // the most bodies that make waves (1 .. 16)
+  // The coast the window is masked from (wake_shore above; null: open water, the default). Two
+  // wakes with shores of one digest are the same wake.
+  std::shared_ptr<const wake_shore> shore;
   bool on() const { return cells > 0; }
+  // The shore's digest, 0 for none.
+  std::uint64_t shore_digest() const { return shore ? shore->digest() : 0; }
   friend bool operator==(const field_wake &a, const field_wake &b) {
     return a.cells == b.cells && a.cell == b.cell && a.depth == b.depth && a.period == b.period &&
            a.damping_k2 == b.damping_k2 && a.damping == b.damping &&
            a.sponge_cells == b.sponge_cells && a.sponge_rate == b.sponge_rate &&
-           a.samples == b.samples && a.sources == b.sources;
+           a.samples == b.samples && a.sources == b.sources && !a.shore == !b.shore &&
+           a.shore_digest() == b.shore_digest();
   }
   friend bool operator!=(const field_wake &a, const field_wake &b) { return !(a == b); }
 };
@@ -275,7 +309,9 @@ struct field_load {
 };
 
 // The water at a point (world::water_at): the first fluid field, in id order, whose box holds the
-// point in x and y and reaches below it. A boat's propeller and rudder read it too.
+// point in x and y and reaches below it. A boat's propeller and rudder read it too. With a wake
+// (field::wake) its waves' height is in the top and their motion, at the point's depth, in the
+// velocity: all the bodies' waves, or for a body that reads it (a boat), the others'.
 struct water_sample {
   bool wet = false;     // under the fluid's top and above its bottom, at a density > 0
   double depth = 0.0;   // m below the top: the free surface's height, or the box's top

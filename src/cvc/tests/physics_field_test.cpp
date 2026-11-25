@@ -31,8 +31,10 @@
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/physics/ocean_surface.h>
+#include <cvc/physics/shore_mask.h>
 #include <cvc/physics/world.h>
 #include <cvc/volume/volume.h>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <utility>
@@ -1137,11 +1139,13 @@ body_desc crate_at(double x, double y, double z) {
 
 // A crate dropped from 1.2 m at the origin beside one afloat at rest `apart` metres off along x
 // (which falls asleep), for `steps` steps of 0.01 s: the resting one's largest heave, drift and
-// tilt, the run's hash, the wake at the end and the largest wave 2 m off the drop.
+// tilt, the run's hash, the wake at the end, the most sources it had and the largest wave 2 m off
+// the drop.
 struct drop_run {
   double heave = 0.0, drift = 0.0, rolled = 0.0;
   std::uint64_t hash = 0;
   wake_info info;
+  std::size_t most_sources = 0;
   double ring = 0.0;
   double fields_ms = 0.0; // the fields' push a step (step_report::fields_ms), the mean
 };
@@ -1161,6 +1165,7 @@ drop_run drop_beside(bool wake, double apart, int steps, int threads = 0) {
     out.drift = std::max(out.drift, std::hypot(s.position.x - p0.x, s.position.y - p0.y));
     out.rolled = std::max(out.rolled, tilt(s.rotation));
     out.ring = std::max(out.ring, std::fabs(w.field_wake_height(water, 0.0, 2.0)));
+    out.most_sources = std::max(out.most_sources, w.field_wake_info(water).sources.size());
   }
   out.hash = w.state_hash();
   out.info = w.field_wake_info(water);
@@ -1270,7 +1275,9 @@ TEST(PhysicsFieldWake, ADroppedCratesRingRocksItsNeighbour) {
   EXPECT_GT(on.heave, 5e-3) << "the ring lifts it";
   EXPECT_GT(on.heave, 10.0 * off.heave);
   EXPECT_NE(on.hash, off.hash);
-  EXPECT_EQ(on.info.sources.size(), 2u);
+  // Both make waves. (Not checked at the end: the dropped crate falls asleep and the neighbour's
+  // waves wake it again and again, so whether it holds a slot at the last step is timing.)
+  EXPECT_EQ(on.most_sources, 2u);
 }
 
 // The wake is world state: a save restores its waves, so the run goes on to the same hash; its
@@ -1489,11 +1496,12 @@ TEST(PhysicsFieldWake, AWindowOutOfRangeIsRefused) {
   w.add_body(crate_at(0.0, 0.0, 1.2));
   w.step(20);
   std::vector<std::uint8_t> saved = w.save();
-  static const char magic[] = "CVCWAKE1";
+  static const char magic[] = "CVCWAKE2";
   const auto at = std::search(saved.begin(), saved.end(), magic, magic + 8);
   ASSERT_NE(at, saved.end());
-  // After the magic: the field's id (4 bytes), its parameters (3 ints, 7 doubles), placed (1).
-  const std::size_t ci = std::size_t(at - saved.begin()) + 8 + 4 + 12 + 56 + 1;
+  // After the magic: the field's id (4 bytes), its parameters (3 ints, 7 doubles), its shore (a
+  // flag and a digest, 9), placed (1).
+  const std::size_t ci = std::size_t(at - saved.begin()) + 8 + 4 + 12 + 56 + 9 + 1;
   ASSERT_LE(ci + 8, saved.size());
   EXPECT_NO_THROW(w.restore(saved));
   const std::int64_t away = std::int64_t(1) << 62;
@@ -1751,5 +1759,404 @@ TEST(PhysicsFieldWake, CrossPlatformGoldenHash) {
   std::printf("[wake] golden: %zu sources, state hash 0x%016llx\n",
               w.field_wake_info(water).sources.size(), static_cast<unsigned long long>(h));
   EXPECT_EQ(w.field_wake_info(water).sources.size(), 3u);
-  EXPECT_EQ(h, 0x7a5a40b81d1d2433ull) << std::hex << "wake world state hash 0x" << h;
+  // Re-pinned for depth (the others' waves' motion and push decay below the top); before it
+  // 0x7a5a40b81d1d2433, and first 0x8052b235300e8e23.
+  EXPECT_EQ(h, 0xc72e26b4ef0f764aull) << std::hex << "wake world state hash 0x" << h;
+}
+
+// --- wakes: shores, depth and the water at a point (C5's gaps; C6) -------------------------------
+
+namespace {
+
+// A coast for a wake: a shore grid of 1 m over (-64, -64) .. (64, 64) whose signed distance to the
+// shore is dist(x, y) (+ offshore), the ground's slope (rise over run) `slope` everywhere.
+std::shared_ptr<const shore_grid_mask> coast(const std::function<double(double, double)> &dist,
+                                             double slope) {
+  auto g = std::make_shared<cvc::ocean::shore_grid>();
+  g->rows = g->cols = 129;
+  g->min_x = g->min_y = -64.0;
+  g->cell = 1.0;
+  g->depth.resize(g->count());
+  g->shore_m.resize(g->count());
+  for (int r = 0; r < g->rows; ++r)
+    for (int c = 0; c < g->cols; ++c) {
+      const double s = dist(g->x(c), g->y(r));
+      const std::size_t i = std::size_t(r) * std::size_t(g->cols) + std::size_t(c);
+      g->shore_m[i] = float(s);
+      g->depth[i] = float(s > 0.0 ? std::min(8.0, 0.5 + s) : -1.0);
+    }
+  return std::make_shared<shore_grid_mask>(g, std::vector<float>(g->count(), float(slope)));
+}
+
+// A crate dropped at the origin from 1.2 m on wake_water with `shore` (null: open water), for
+// `steps` steps of 0.01 s: the wake's height at each probe after every step, and the crate's path.
+struct ring_run {
+  std::vector<std::vector<double>> h; // [probe][step]
+  std::vector<vec3> path;
+  double fields_ms = 0.0; // the fields' push a step, the mean
+};
+ring_run ring_by(std::shared_ptr<const wake_shore> shore, const std::vector<vec3> &probes,
+                 int steps) {
+  world w(jolt_config());
+  field f = wake_water(true);
+  f.wake.shore = std::move(shore);
+  const field_id water = w.add_field(f);
+  const body_id b = w.add_body(crate_at(0.0, 0.0, 1.2));
+  ring_run out;
+  out.h.assign(probes.size(), {});
+  for (int i = 0; i < steps; ++i) {
+    out.fields_ms += w.step().fields_ms / steps;
+    out.path.push_back(w.state(b).position);
+    for (std::size_t p = 0; p < probes.size(); ++p)
+      out.h[p].push_back(w.field_wake_height(water, probes[p].x, probes[p].y));
+  }
+  return out;
+}
+
+double rms_of(const std::vector<double> &a, std::size_t from = 0) {
+  double s = 0.0;
+  for (std::size_t i = from; i < a.size(); ++i)
+    s += a[i] * a[i];
+  return a.size() > from ? std::sqrt(s / double(a.size() - from)) : 0.0;
+}
+
+double largest(const std::vector<double> &a) {
+  double m = 0.0;
+  for (const double v : a)
+    m = std::max(m, std::fabs(v));
+  return m;
+}
+
+double correlation_of(const std::vector<double> &a, const std::vector<double> &b) {
+  double ab = 0.0, aa = 0.0, bb = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    ab += a[i] * b[i];
+    aa += a[i] * a[i];
+    bb += b[i] * b[i];
+  }
+  return aa > 0.0 && bb > 0.0 ? ab / std::sqrt(aa * bb) : 0.0;
+}
+
+std::vector<double> minus(const std::vector<double> &a, const std::vector<double> &b) {
+  std::vector<double> d(a.size());
+  for (std::size_t i = 0; i < a.size(); ++i)
+    d[i] = a[i] - b[i];
+  return d;
+}
+
+vec3 crossed(const vec3 &a, const vec3 &b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+// v turned by the unit quaternion q.
+vec3 turned(const quat &q, const vec3 &v) {
+  const vec3 u{q.x, q.y, q.z};
+  const vec3 t = crossed(u, v) * 2.0;
+  return v + t * q.w + crossed(u, t);
+}
+
+// A launch with a propeller and a rudder 0.2 m under its waterline at the stern (the skiff of
+// physics_boat_test on box_hull): 4 x 1.5 x 0.6 m, 900 kg.
+boat_desc wake_skiff() {
+  boat_desc d;
+  const vec3 half{2.0, 0.75, 0.3};
+  d.hull.shape = box{half};
+  d.hull.hull = box_hull(half);
+  d.hull.mass = 900.0;
+  d.hull.linear_damping = 0.0;
+  d.hull.angular_damping = 0.0;
+  d.hull.allow_sleeping = false;
+  d.propeller.position = {-2.1, 0.0, -0.35};
+  d.propeller.max_thrust = 2000.0;
+  d.propeller.max_inflow_speed = 8.0;
+  d.rudder.position = {-2.3, 0.0, -0.35};
+  d.rudder.area = 0.12;
+  d.actuator_time_constant = 0.5;
+  return d;
+}
+
+} // namespace
+
+// C6: a wake's waves reflect off a steep shore crest for crest and soak into a beach, and never run
+// over the land. A crate dropped 6 m from a straight coast (land from x = 6, the no-flux face at
+// x = 5.5), on open water, under a cliff and behind a beach: between the drop and the coast, the
+// cliff's run less the open water's is the reflection, the open water's ring at the image's
+// distance (9 m) in shape and sign; the beach's is a fraction of it. On the land the wake is 0 at
+// every step. The crate never feels its own reflected waves: its path is the same in all three.
+TEST(PhysicsFieldWakeShore, AWakeReflectsOffACliffAndSoaksIntoABeach) {
+  REQUIRE_JOLT();
+  const std::vector<vec3> probes{{2.0, 0.0, 0.0}, {-9.0, 0.0, 0.0},  {6.0, 0.0, 0.0},
+                                 {8.0, 3.0, 0.0}, {12.0, -4.0, 0.0}, {20.0, 0.0, 0.0}};
+  const auto wall = [](double x, double) { return 6.0 - x; };
+  const int steps = 1600;
+  const ring_run open = ring_by(nullptr, probes, steps);
+  const ring_run cliff = ring_by(coast(wall, 1.0), probes, steps);
+  const ring_run beach = ring_by(coast(wall, 0.0), probes, steps);
+  const std::vector<double> back = minus(cliff.h[0], open.h[0]);
+  const std::vector<double> soaked = minus(beach.h[0], open.h[0]);
+  const double image = rms_of(open.h[1]);
+  const double r = correlation_of(back, open.h[1]);
+  std::printf("[wake shore] 2 m from the drop: the cliff's reflection %.4f m rms against the open "
+              "ring's %.4f m at 9 m (%.0f %%), correlated %.3f; the beach's %.4f m (%.0f %% of "
+              "the cliff's)\n",
+              rms_of(back), image, 100.0 * rms_of(back) / image, r, rms_of(soaked),
+              100.0 * rms_of(soaked) / rms_of(back));
+  double over_open = 0.0, over_land = 0.0;
+  for (std::size_t p = 2; p <= 5; ++p) {
+    over_open = std::max(over_open, largest(open.h[p]));
+    over_land = std::max(over_land, std::max(largest(cliff.h[p]), largest(beach.h[p])));
+  }
+  std::printf("[wake shore] on the land: up to %.4f m on open water, %.4f m under the cliff or "
+              "behind the beach. The fields' push a step: %.3f ms on open water, %.3f ms with the "
+              "cliff (the no-flux step)\n",
+              over_open, over_land, open.fields_ms, cliff.fields_ms);
+  EXPECT_GT(r, 0.8) << "a crest comes back a crest";
+  EXPECT_GT(rms_of(back), 0.6 * image);
+  EXPECT_LT(rms_of(back), 1.4 * image);
+  EXPECT_LT(rms_of(soaked), 0.5 * rms_of(back)) << "the beach takes most of it";
+  EXPECT_GT(over_open, 1e-3) << "without a shore the ring runs over the land";
+  EXPECT_EQ(over_land, 0.0) << "nothing crosses the coast";
+  for (std::size_t i = 0; i < open.path.size(); ++i) {
+    ASSERT_EQ(cliff.path[i].x, open.path[i].x) << "step " << i;
+    ASSERT_EQ(cliff.path[i].z, open.path[i].z) << "step " << i;
+    ASSERT_EQ(beach.path[i].z, open.path[i].z) << "step " << i;
+  }
+}
+
+// C6: a pond inside the window reflects off all its banks, and its waves stay in it. A pond of 7 m
+// round the drop, ringed by 8 m of land and the sea past that: halfway to each bank the ring
+// keeps coming back long after it has left open water; the land holds no wave at any step; the
+// sea past the land gets almost none.
+TEST(PhysicsFieldWakeShore, APondReflectsOffAllItsBanks) {
+  REQUIRE_JOLT();
+  std::vector<vec3> probes{{4.0, 0.0, 0.0}, {-4.0, 0.0, 0.0}, {0.0, 4.0, 0.0}, {0.0, -4.0, 0.0}};
+  for (int k = 0; k < 8; ++k) { // the land
+    const double a = k * 0.7853981633974483;
+    probes.push_back({9.0 * std::cos(a), 9.0 * std::sin(a), 0.0});
+    probes.push_back({13.0 * std::cos(a), 13.0 * std::sin(a), 0.0});
+  }
+  for (int k = 0; k < 4; ++k) { // the sea
+    const double a = 0.4 + k * 1.5707963267948966;
+    probes.push_back({20.0 * std::cos(a), 20.0 * std::sin(a), 0.0});
+  }
+  const auto pond = [](double x, double y) {
+    const double r = std::sqrt(x * x + y * y);
+    return r < 11.0 ? 7.0 - r : r - 15.0;
+  };
+  const int steps = 2000, late = 800; // the last 12 s
+  const ring_run open = ring_by(nullptr, probes, steps);
+  const ring_run banked = ring_by(coast(pond, 1.0), probes, steps);
+  double peak = 0.0, weakest = 1e9;
+  for (int p = 0; p < 4; ++p) {
+    peak = std::max(peak, largest(banked.h[p]));
+    weakest = std::min(weakest, rms_of(banked.h[p], late) / rms_of(open.h[p], late));
+  }
+  double land = 0.0, sea = 0.0;
+  for (std::size_t p = 4; p < 20; ++p)
+    land = std::max(land, largest(banked.h[p]));
+  for (std::size_t p = 20; p < probes.size(); ++p)
+    sea = std::max(sea, largest(banked.h[p]));
+  std::printf("[wake shore] a pond of 7 m: late in the run its waves halfway to the banks are at "
+              "least %.1f times open water's; the land holds %.4f m; the sea past 8 m of land "
+              "%.5f m (%.2f %% of the pond's %.3f m)\n",
+              weakest, land, sea, 100.0 * sea / peak, peak);
+  EXPECT_GT(weakest, 3.0) << "every bank sends the ring back";
+  EXPECT_EQ(land, 0.0);
+  EXPECT_LT(sea, 0.03 * peak);
+}
+
+// The waves' motion decays with depth (e^{-k d}, each wavenumber on its own): two neutrally buoyant
+// 1 m cubes 5 m either side of a crate dropped from 1.2 m, one just under the surface and one 3.5
+// m down, the ring the same toward each. The deep one is pushed a small part as hard, and moves
+// less (by less than the push: what reaches it is the ring's longer waves, which decay least and
+// push longest); read at the surface's values (as before) the two moved alike. The water read at
+// a point decays too.
+TEST(PhysicsFieldWakeDepth, ADeepBodyFeelsLessOfTheWavesThanOneAfloat) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  w.add_field(wake_water(true));
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  const auto cube = [](double x, double z) {
+    body_desc d;
+    d.shape = box{{0.5, 0.5, 0.5}};
+    d.density = 1000.0;
+    d.position = {x, 0.0, z};
+    d.linear_damping = 0.0;
+    d.allow_sleeping = false;
+    return d;
+  };
+  const body_id shallow = w.add_body(cube(5.0, -0.65)), deep = w.add_body(cube(-5.0, -4.0));
+  const vec3 s0 = w.state(shallow).position, d0 = w.state(deep).position;
+  double moved[2] = {0.0, 0.0}, pushed[2] = {0.0, 0.0}, top = 0.0, down = 0.0;
+  for (int i = 0; i < 1000; ++i) {
+    w.step();
+    const vec3 s = w.state(shallow).position, d = w.state(deep).position;
+    moved[0] = std::max(moved[0], std::hypot(s.x - s0.x, s.y - s0.y));
+    moved[1] = std::max(moved[1], std::hypot(d.x - d0.x, d.y - d0.y));
+    const vec3 fs = w.field_load_on(shallow).force, fd = w.field_load_on(deep).force;
+    pushed[0] = std::max(pushed[0], std::hypot(fs.x, fs.y));
+    pushed[1] = std::max(pushed[1], std::hypot(fd.x, fd.y));
+    // The water 3 m off the drop, at its top and 3 m below it.
+    const double surface = w.water_at({3.0, 0.0, 5.0}).depth + 5.0;
+    const vec3 a = w.water_at({3.0, 0.0, surface - 0.02}).velocity;
+    const vec3 b = w.water_at({3.0, 0.0, surface - 3.0}).velocity;
+    top = std::max(top, std::hypot(a.x, a.z));
+    down = std::max(down, std::hypot(b.x, b.z));
+  }
+  std::printf("[wake depth] a cube under the surface moved %.4f m (push up to %.2f N); one 3.5 m "
+              "down %.4f m (%.2f N). The water 3 m off the drop: up to %.4f m/s at its top, %.4f "
+              "m/s 3 m down\n",
+              moved[0], pushed[0], moved[1], pushed[1], top, down);
+  EXPECT_GT(moved[0], 0.01) << "the ring moves the shallow cube";
+  EXPECT_LT(moved[1], 0.5 * moved[0]);
+  EXPECT_LT(pushed[1], 0.25 * pushed[0]);
+  EXPECT_LT(down, 0.25 * top);
+}
+
+// The wake in world::water_at: a moored launch's propeller, in the wake of another launch passing
+// at full throttle 5 m off, reads that wake's orbital motion (none without a wake: the water is
+// still), and the launch's own step reads the same (its inflow is the propeller's motion through
+// it). The launch under way finds its own waves at its propeller in water_at without a body, never
+// as it feels them.
+TEST(PhysicsFieldWakeWaterAt, APropellerInAnotherBoatsWakeReadsItsOrbitalMotion) {
+  REQUIRE_JOLT();
+  double reads[2] = {0.0, 0.0}, own_all = 0.0, own_felt = 0.0, worst = 0.0;
+  for (int k = 0; k < 2; ++k) {
+    world w(jolt_config());
+    w.add_field(wake_water(k == 1));
+    const boat_id moored = w.add_boat(wake_skiff(), {0.0, 0.0, 0.15});
+    const boat_id runner = w.add_boat(wake_skiff(), {-30.0, 5.0, 0.15});
+    w.set_boat_controls(runner, {1.0, 0.0});
+    const boat_desc d = wake_skiff();
+    for (int i = 0; i < 2000; ++i) {
+      const boat_state before = w.boat_state(moored);
+      w.step();
+      const body_state &s = before.body;
+      const vec3 prop = s.position + turned(s.rotation, d.propeller.position);
+      const vec3 water = w.water_at(prop, before.hull).velocity;
+      reads[k] = std::max(reads[k], std::sqrt(dot(water, water)));
+      // Its step read the water there with the wake as it is after the step's fields.
+      const vec3 dir = turned(s.rotation, {1.0, 0.0, 0.0});
+      const vec3 at = s.linear_velocity + crossed(s.angular_velocity, prop - s.position);
+      worst = std::max(worst, std::fabs(dot(at - water, dir) - w.boat_state(moored).inflow));
+      if (k == 1) {
+        const boat_state r = w.boat_state(runner);
+        const vec3 rp = r.body.position + turned(r.body.rotation, d.propeller.position);
+        const vec3 all = w.water_at(rp).velocity, felt = w.water_at(rp, r.hull).velocity;
+        own_all = std::max(own_all, std::sqrt(dot(all, all)));
+        own_felt = std::max(own_felt, std::sqrt(dot(felt, felt)));
+      }
+    }
+  }
+  std::printf("[wake water_at] the moored launch's propeller reads up to %.4f m/s of the "
+              "runner's wake (%.4f without a wake); the runner's own propeller %.4f m/s of all the "
+              "waves, %.4f of the others'; the inflow off by at most %.2g m/s\n",
+              reads[1], reads[0], own_all, own_felt, worst);
+  EXPECT_EQ(reads[0], 0.0);
+  EXPECT_GT(reads[1], 0.02) << "the propeller is in the runner's wake";
+  EXPECT_LT(own_felt, 0.25 * own_all) << "a boat does not read its own waves";
+  EXPECT_LT(worst, 1e-9) << "the boat's step reads what water_at reads";
+}
+
+// A shore is part of the wake: a save restores into a world with the same coast (another object of
+// one digest) and runs on to the same hash; a world with another coast, or with none, refuses it;
+// set_field with the same coast keeps the waves, with another starts afresh.
+TEST(PhysicsFieldWakeShore, AShoreIsPartOfTheWakesState) {
+  REQUIRE_JOLT();
+  const auto wall = [](double x, double) { return 6.0 - x; };
+  const auto make = [](std::shared_ptr<const wake_shore> shore, world &w) {
+    field f = wake_water(true);
+    f.wake.shore = std::move(shore);
+    const field_id id = w.add_field(f);
+    w.add_body(crate_at(0.0, 0.0, 1.2));
+    w.add_body(crate_at(3.0, 1.0, 0.0));
+    return id;
+  };
+  world a(jolt_config());
+  const field_id water = make(coast(wall, 1.0), a);
+  a.step(150);
+  const std::vector<std::uint8_t> saved = a.save();
+  a.step(200);
+  const std::uint64_t straight = a.state_hash();
+  world b(jolt_config());
+  make(coast(wall, 1.0), b);
+  b.restore(saved);
+  b.step(200);
+  EXPECT_EQ(b.state_hash(), straight) << "the same coast, another object";
+  world other(jolt_config());
+  make(coast([](double x, double) { return 7.0 - x; }, 1.0), other);
+  EXPECT_THROW(other.restore(saved), cvc::physics_error);
+  world none(jolt_config());
+  make(nullptr, none);
+  EXPECT_THROW(none.restore(saved), cvc::physics_error);
+  EXPECT_THROW(a.restore(none.save()), cvc::physics_error);
+  const double before = a.field_wake_height(water, 2.0, 0.0);
+  ASSERT_NE(before, 0.0);
+  field f = wake_water(true);
+  f.wake.shore = coast(wall, 1.0);
+  a.set_field(water, f);
+  EXPECT_EQ(a.field_wake_height(water, 2.0, 0.0), before);
+  f.wake.shore = coast(wall, 0.0);
+  a.set_field(water, f);
+  EXPECT_EQ(a.field_wake_height(water, 2.0, 0.0), 0.0);
+}
+
+// A state saved before shores and depths (CVCWAKE1: no shore digest, no count of depths) restores
+// into a world whose wake has no shore, and steps on; into one with a shore it is refused.
+TEST(PhysicsFieldWakeShore, AStateFromBeforeShoresRestores) {
+  REQUIRE_JOLT();
+  const auto make = [](std::shared_ptr<const wake_shore> shore, world &w) {
+    field f = wake_water(true);
+    f.wake.shore = std::move(shore);
+    w.add_field(f);
+    w.add_body(crate_at(0.0, 0.0, 1.2));
+    w.add_body(crate_at(4.0, 1.0, 0.0));
+  };
+  world w(jolt_config());
+  make(nullptr, w);
+  w.step(150);
+  const std::vector<std::uint8_t> v2 = w.save();
+  static const char magic[] = "CVCWAKE2";
+  const auto at = std::search(v2.begin(), v2.end(), magic, magic + 8);
+  ASSERT_NE(at, v2.end());
+  // Version 1's layout: the magic's last byte, no shore (9 bytes after the parameters) and no
+  // count of depths (4 bytes after the bodies outside the window).
+  const std::size_t m = std::size_t(at - v2.begin());
+  const std::size_t shore = m + 8 + 4 + 12 + 56, depths = shore + 9 + 1 + 8 + 8 + 8 + 4;
+  std::vector<std::uint8_t> v1(v2.begin(), v2.begin() + std::ptrdiff_t(shore));
+  v1.insert(v1.end(), v2.begin() + std::ptrdiff_t(shore + 9), v2.begin() + std::ptrdiff_t(depths));
+  v1.insert(v1.end(), v2.begin() + std::ptrdiff_t(depths + 4), v2.end());
+  v1[m + 7] = '1';
+  world b(jolt_config());
+  make(nullptr, b);
+  EXPECT_NO_THROW(b.restore(v1));
+  EXPECT_NO_THROW(b.step(50));
+  world c(jolt_config());
+  make(coast([](double x, double) { return 6.0 - x; }, 1.0), c);
+  EXPECT_THROW(c.restore(v1), cvc::physics_error);
+}
+
+// The golden hash of a wake with a coast: two crates and a launch under way off a point with a
+// steep face and gentler flanks, in a two-train swell, 400 steps. Measured on Windows; CI checks
+// the other platforms.
+TEST(PhysicsFieldWakeShore, CrossPlatformGoldenHash) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  field f = wake_water(true);
+  f.surface = std::make_shared<wave_train_surface>(
+      0.0, 20.0, std::vector<wave_train>{{0.2, 6.0, 0.4, 0.0}, {0.05, 2.5, 1.2, 1.0}});
+  f.wake.shore = coast([](double x, double y) { return 7.0 - x - 0.2 * std::fabs(y); }, 0.4);
+  const field_id water = w.add_field(f);
+  w.add_body(crate_at(0.0, 0.0, 1.2));
+  w.add_body(crate_at(4.0, 1.0, 0.0));
+  const body_id boat = w.add_body(boat_at(-8.0, -6.0));
+  for (int i = 0; i < 400; ++i) {
+    w.add_force(boat, {1500.0, 300.0, 0.0});
+    w.step();
+  }
+  const std::uint64_t h = w.state_hash();
+  std::printf("[wake shore] golden: %zu sources, state hash 0x%016llx\n",
+              w.field_wake_info(water).sources.size(), static_cast<unsigned long long>(h));
+  EXPECT_EQ(w.field_wake_info(water).sources.size(), 3u);
+  EXPECT_EQ(h, 0x89789ba92fbd1853ull) << std::hex << "wake world state hash 0x" << h;
 }

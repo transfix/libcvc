@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/algo/det_math.h>
 #include <cvc/core/exception.h>
 #include <limits>
 #include <stdexcept>
@@ -27,6 +28,10 @@ namespace physics {
 namespace detail {
 
 namespace {
+
+namespace det = ::cvc::algo::det; // the same bits on every platform (det_math.h)
+
+constexpr double kTwoPi = 6.283185307179586476925286766559;
 
 void need(bool ok, const std::string &what) {
   if (!ok)
@@ -51,7 +56,10 @@ const field_wake &checked(const field_wake &p) {
   return p;
 }
 
-ocean::ewave_params engine_params(const field_wake &p, double gravity) {
+// The engine's parameters. Without a shore: open water, the exact step. With one: no-flux walls
+// over every wall cell the image reaches, stepped in whole substeps of the wave step T (the most
+// the walls' stability allows, fewest first), so the substeps carry nothing over between states.
+ocean::ewave_params engine_params(const field_wake &p, double gravity, double T) {
   ocean::ewave_params e;
   e.n = p.cells;
   e.dx = p.cell;
@@ -63,6 +71,17 @@ ocean::ewave_params engine_params(const field_wake &p, double gravity) {
   e.sponge_rate = p.sponge_rate;
   e.walls = ocean::ewave_walls::zero; // no mask: open water, the exact step
   e.ghost_cells = 0;
+  if (p.shore) {
+    e.walls = ocean::ewave_walls::no_flux;
+    e.ghost_cells = ocean::ewave_params().ghost_cells;
+    if (T > 0.0) {
+      ocean::ewave_params probe = e;
+      probe.substep = 1.0;
+      const double most = ocean::ewave_substep(probe);
+      const double count = std::max(1.0, std::ceil(T / most - 1e-9));
+      e.substep = std::min(T / count, most);
+    }
+  }
   return e;
 }
 
@@ -97,6 +116,41 @@ bool quiet(const std::vector<double> &a, const std::vector<double> &b) {
     if (a[c] != 0.0 || b[c] != 0.0)
       return false;
   return true;
+}
+
+// Where (x, y) falls on a window of n cells of dx whose cell (0, 0) is at (x0, y0): its four
+// cells and their bilinear weights, as sample() has always taken them. False outside.
+struct corners {
+  std::size_t c[4];
+  double w[4];
+};
+bool corners_of(int n, double dx, double x0, double y0, double x, double y, corners &k) {
+  const double fx = (x - x0) / dx, fy = (y - y0) / dx;
+  if (!(fx >= 0.0) || !(fy >= 0.0) || !(fx <= n - 1.0) || !(fy <= n - 1.0))
+    return false;
+  const int i = std::min(int(fx), n - 2), j = std::min(int(fy), n - 2);
+  const double tx = fx - i, ty = fy - j;
+  const std::size_t un = std::size_t(n), c = std::size_t(j) * un + std::size_t(i);
+  k.c[0] = c;
+  k.c[1] = c + 1;
+  k.c[2] = c + un;
+  k.c[3] = c + un + 1;
+  k.w[0] = (1.0 - tx) * (1.0 - ty);
+  k.w[1] = tx * (1.0 - ty);
+  k.w[2] = (1.0 - tx) * ty;
+  k.w[3] = tx * ty;
+  return true;
+}
+
+// Channel q of (total - own) at the corners, `stride` values a cell, weighted.
+double bilinear(const corners &k, const double *t, const double *o, std::size_t stride, int q) {
+  double s[4];
+  for (int m = 0; m < 4; ++m) {
+    s[m] = t[k.c[m] * stride + q];
+    if (o)
+      s[m] -= o[k.c[m] * stride + q];
+  }
+  return s[0] * k.w[0] + s[1] * k.w[1] + s[2] * k.w[2] + s[3] * k.w[3];
 }
 
 // What a body floats in, to cut its columns against: the sea held at the step's time, and on it the
@@ -137,15 +191,81 @@ private:
 
 fluid_wake::fluid_wake(const field_wake &p, double gravity)
     : _p(checked(p)), _n(p.cells), _dx(p.cell), _gravity(gravity),
-      _engine(std::make_unique<ocean::ewave>(engine_params(p, gravity))) {
+      _engine(std::make_unique<ocean::ewave>(engine_params(p, gravity, 0.0))), _fft(p.cells) {
   _total.assign(std::size_t(_n) * std::size_t(_n) * kQ, 0.0);
 }
 
 void fluid_wake::set_gravity(double gravity) {
   if (gravity == _gravity)
     return;
-  _engine = std::make_unique<ocean::ewave>(engine_params(_p, gravity));
   _gravity = gravity;
+  remake();
+}
+
+void fluid_wake::remake() {
+  _engine = std::make_unique<ocean::ewave>(engine_params(_p, _gravity, _T));
+  if (!_mask.empty())
+    _engine->set_mask(_mask);
+}
+
+void fluid_wake::remask() {
+  if (!_p.shore)
+    return;
+  if (!_placed) {
+    if (!_mask.empty()) {
+      _mask.clear();
+      remake();
+    }
+    return;
+  }
+  // Each cell's world point from its world cell, so a cell keeps its value as the window moves
+  // (and the states, moved with it, keep their walls at 0).
+  const int n = _n;
+  const std::size_t un = std::size_t(n);
+  _mask.assign(un * un, 0.0);
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < n; ++i) {
+      const double m =
+          _p.shore->mask(double(_ci + std::int64_t(i)) * _dx, double(_cj + std::int64_t(j)) * _dx);
+      _mask[std::size_t(j) * un + std::size_t(i)] = finite(m) ? std::clamp(m, 0.0, 1.0) : 0.0;
+    }
+  _engine->set_mask(_mask);
+}
+
+double fluid_wake::layer_depth(int l) const {
+  const double d = 0.5 * _dx * std::ldexp(1.0, l - 1);
+  return _p.depth > 0.0 ? std::min(d, _p.depth) : d;
+}
+
+const std::vector<double> &fluid_wake::decay(int l, bool up) {
+  std::vector<double> &out = _decay[up ? 1 : 0][l - 1];
+  if (!out.empty())
+    return out;
+  const int n = _n;
+  const std::size_t un = std::size_t(n);
+  const double inv = 1.0 / (double(n) * double(n)); // the inverse FFT's (exact: a power of two)
+  const double d = layer_depth(l), D = _p.depth;
+  const double dk = kTwoPi / (double(n) * _dx);
+  out.resize(un * un);
+  for (int j = 0; j < n; ++j) {
+    const double ky = dk * double(j < n / 2 ? j : j - n);
+    for (int i = 0; i < n; ++i) {
+      const double kx = dk * double(i < n / 2 ? i : i - n);
+      const double k = std::sqrt(kx * kx + ky * ky);
+      double c;
+      if (!(D > 0.0) || k * D > 20.0) { // deep water: e^{-k d} for both
+        c = det::exp(-k * d);
+      } else if (!(k > 0.0)) { // the mean: no sideways motion to decay; dh/dt falls to 0 at the bed
+        c = up ? 1.0 - d / D : 1.0;
+      } else { // cosh(k (D - d)) / cosh(k D) sideways, sinh(k (D - d)) / sinh(k D) up
+        const double a = det::exp(-k * d), b = det::exp(-k * (2.0 * D - d)),
+                     e = det::exp(-2.0 * k * D);
+        c = up ? (a - b) / (1.0 - e) : (a + b) / (1.0 + e);
+      }
+      out[std::size_t(j) * un + std::size_t(i)] = c * inv;
+    }
+  }
+  return out;
 }
 
 int fluid_wake::own(std::uint32_t id) const {
@@ -161,6 +281,26 @@ bool fluid_wake::cell_of(double v, std::int64_t &out) const {
   return true;
 }
 
+namespace {
+
+// Central differences of a and b at cell c along `step` (1: x, n: y), into *da and *db. A wall
+// neighbour (mask 0) is taken as the cell's own value, the no-flux wall's mirror image; a cell
+// between two walls has none. Without a mask, the plain central difference.
+void differences(const std::vector<double> &mask, const double *a, const double *b, std::size_t c,
+                 std::size_t step, double inv, double *da, double *db) {
+  if (mask.empty()) {
+    *da = (a[c + step] - a[c - step]) * inv;
+    *db = (b[c + step] - b[c - step]) * inv;
+    return;
+  }
+  const std::size_t lo = mask[c - step] > 0.0 ? c - step : c;
+  const std::size_t hi = mask[c + step] > 0.0 ? c + step : c;
+  *da = (a[hi] - a[lo]) * inv;
+  *db = (b[hi] - b[lo]) * inv;
+}
+
+} // namespace
+
 void fluid_wake::derive(state &s) const {
   const int n = _n;
   const std::size_t un = std::size_t(n);
@@ -169,23 +309,98 @@ void fluid_wake::derive(state &s) const {
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < n; ++i) {
       const std::size_t c = std::size_t(j) * un + std::size_t(i);
+      if (!_mask.empty() && !(_mask[c] > 0.0))
+        continue; // land: no waves
       double *f = s.f.data() + c * kQ;
       f[0] = s.h[c];
       f[3] = s.w[c];
       // Central differences inside; the border cells (deep in the sponge) give none.
-      if (i > 0 && i < n - 1) {
-        f[1] = (s.phi[c + 1] - s.phi[c - 1]) * inv;
-        f[4] = (s.h[c + 1] - s.h[c - 1]) * inv;
-      }
-      if (j > 0 && j < n - 1) {
-        f[2] = (s.phi[c + un] - s.phi[c - un]) * inv;
-        f[5] = (s.h[c + un] - s.h[c - un]) * inv;
-      }
+      if (i > 0 && i < n - 1)
+        differences(_mask, s.phi.data(), s.h.data(), c, 1, inv, &f[1], &f[4]);
+      if (j > 0 && j < n - 1)
+        differences(_mask, s.phi.data(), s.h.data(), c, un, inv, &f[2], &f[5]);
     }
+}
+
+void fluid_wake::deepen(state &s) {
+  const int n = _n, L = _layers;
+  const std::size_t un = std::size_t(n), cells = un * un;
+  s.deep.assign(std::size_t(L) * cells * 5, 0.0);
+  if (L == 0 || (quiet(s.h, s.phi) && quiet(s.w, s.w)))
+    return;
+  // phi + i h and dh/dt over the window, extended past the walls: water cells as they are, each
+  // ghost the mirror image the ewave steps with (its weighted corners), other walls 0. So a
+  // wall's image decays with the water it mirrors and the wall stays no-flux at every depth.
+  std::vector<double> &a = _work[0], &b = _work[1];
+  a.assign(cells * 2, 0.0);
+  b.assign(cells * 2, 0.0);
+  for (std::size_t c = 0; c < cells; ++c) {
+    a[c * 2] = s.phi[c];
+    a[c * 2 + 1] = s.h[c];
+    b[c * 2] = s.w[c];
+  }
+  if (!_mask.empty())
+    for (const ocean::ewave_ghost &g : _engine->ghosts()) {
+      const std::size_t q[4] = {g.corner, g.corner + 1, g.corner + un, g.corner + un + 1};
+      const std::size_t at = std::size_t(g.cell) * 2;
+      a[at] =
+          g.w[0] * s.phi[q[0]] + g.w[1] * s.phi[q[1]] + g.w[2] * s.phi[q[2]] + g.w[3] * s.phi[q[3]];
+      a[at + 1] = g.w[0] * s.h[q[0]] + g.w[1] * s.h[q[1]] + g.w[2] * s.h[q[2]] + g.w[3] * s.h[q[3]];
+      b[at] = g.w[0] * s.w[q[0]] + g.w[1] * s.w[q[1]] + g.w[2] * s.w[q[2]] + g.w[3] * s.w[q[3]];
+    }
+  _fft.run_2d(a.data(), -1);
+  _fft.run_2d(b.data(), -1);
+  // dh/dt at every depth first, two depths an inverse transform (each spectrum is a real field's).
+  std::vector<double> z(cells * 2), up(std::size_t(L) * cells);
+  for (int l = 1; l <= L; l += 2) {
+    const std::vector<double> &c0 = decay(l, true);
+    const std::vector<double> *c1 = l + 1 <= L ? &decay(l + 1, true) : nullptr;
+    for (std::size_t c = 0; c < cells; ++c) {
+      const double br = b[c * 2], bi = b[c * 2 + 1];
+      const double k1 = c1 ? (*c1)[c] : 0.0;
+      z[c * 2] = br * c0[c] - bi * k1;
+      z[c * 2 + 1] = bi * c0[c] + br * k1;
+    }
+    _fft.run_2d(z.data(), +1);
+    for (std::size_t c = 0; c < cells; ++c) {
+      up[std::size_t(l - 1) * cells + c] = z[c * 2];
+      if (c1)
+        up[std::size_t(l) * cells + c] = z[c * 2 + 1];
+    }
+  }
+  // Then phi and h at each depth, and what a reader takes of them.
+  const double inv = 1.0 / (2.0 * _dx);
+  std::vector<double> phi(cells), h(cells);
+  for (int l = 1; l <= L; ++l) {
+    const std::vector<double> &side = decay(l, false);
+    for (std::size_t c = 0; c < cells; ++c) {
+      z[c * 2] = a[c * 2] * side[c];
+      z[c * 2 + 1] = a[c * 2 + 1] * side[c];
+    }
+    _fft.run_2d(z.data(), +1);
+    for (std::size_t c = 0; c < cells; ++c) {
+      phi[c] = z[c * 2];
+      h[c] = z[c * 2 + 1];
+    }
+    double *out = s.deep.data() + std::size_t(l - 1) * cells * 5;
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < n; ++i) {
+        const std::size_t c = std::size_t(j) * un + std::size_t(i);
+        if (!_mask.empty() && !(_mask[c] > 0.0))
+          continue; // land
+        double *f = out + c * 5;
+        f[2] = up[std::size_t(l - 1) * cells + c];
+        if (i > 0 && i < n - 1)
+          differences(_mask, phi.data(), h.data(), c, 1, inv, &f[0], &f[3]);
+        if (j > 0 && j < n - 1)
+          differences(_mask, phi.data(), h.data(), c, un, inv, &f[1], &f[4]);
+      }
+  }
 }
 
 void fluid_wake::sum() {
   std::fill(_total.begin(), _total.end(), 0.0);
+  _deepTotal.assign(std::size_t(_layers) * std::size_t(_n) * std::size_t(_n) * 5, 0.0);
   _ids.clear();
   _byIndex.clear();
   for (const auto &e : _states) { // id order
@@ -194,6 +409,10 @@ void fluid_wake::sum() {
     const std::vector<double> &f = e.second.f;
     for (std::size_t c = 0; c < _total.size(); ++c)
       _total[c] += f[c];
+    const std::vector<double> &d = e.second.deep;
+    if (d.size() == _deepTotal.size())
+      for (std::size_t c = 0; c < _deepTotal.size(); ++c)
+        _deepTotal[c] += d[c];
   }
 }
 
@@ -229,6 +448,10 @@ bool fluid_wake::begin_step(double fixed_dt, double &dt) {
   const bool due = _count % k == 0;
   ++_count;
   dt = static_cast<double>(k) * fixed_dt;
+  if (_p.shore && dt != _T) { // the no-flux engine's substep divides the wave step
+    _T = dt;
+    remake();
+  }
   return due;
 }
 
@@ -253,19 +476,27 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     return;
   }
 
-  // Which bodies are in the water: over the field's box, reaching below its top there.
+  // Which bodies are in the water: over the field's box, reaching below its top there (and how
+  // far, for the depths the waves' motion is kept at).
   const fluid_surface *surface = sea();
-  for (wake_body &b : bodies) {
+  std::vector<double> below(bodies.size(), 0.0);
+  for (std::size_t k = 0; k < bodies.size(); ++k) {
+    wake_body &b = bodies[k];
     b.in_water = false;
     if (!b.over)
       continue;
     surface_memo memo;
     const double top = std::min(hi.z, surface->height_with(b.position.x, b.position.y, t, memo));
     b.in_water = b.lo[2] < top && b.hi[2] > lo.z;
+    below[k] = top - b.lo[2];
   }
 
   // The states move on by T, one after another through the engine, and give dh/dt over it; one
-  // whose waves are all below kFaded is let go (zeroed: it steps no more until a source).
+  // whose waves are all below kFaded is let go (zeroed: it steps no more until a source). Between
+  // walls the engine runs whole substeps of T: the time given it is their count times the substep,
+  // so it carries no remainder from one state to the next.
+  const double run =
+      _engine->ghosts().empty() ? T : double(_engine->substeps(T)) * _engine->substep();
   for (auto &e : _states) {
     state &s = e.second;
     if (quiet(s.h, s.phi)) {
@@ -273,7 +504,7 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
       continue;
     }
     _engine->set_state(s.h, s.phi);
-    _engine->step(T);
+    _engine->step(run);
     const std::vector<double> &h2 = _engine->height();
     double largest = 0.0;
     for (std::size_t c = 0; c < cells; ++c) {
@@ -368,6 +599,7 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
         _placed = true;
         _ci = ti;
         _cj = tj;
+        remask();
       } else if (std::llabs(ti - _ci) > n / 8 || std::llabs(tj - _cj) > n / 8) {
         if (std::llabs(ti - _ci) >= n || std::llabs(tj - _cj) >= n) { // nothing carries over
           for (auto &e : _states) {
@@ -387,6 +619,7 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
           sj0 = std::max(0, -dj);
           sj1 = std::min(n, n - dj);
         }
+        remask(); // each cell keeps its world cell's value, so the waves that came keep their walls
       }
     }
   }
@@ -451,7 +684,8 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
         const bool kept = i >= si0 && i < si1 && j >= sj0 && j < sj1;
         dh[c] = kept ? -(zeta[c] - s.zeta[c]) : 0.0;
       }
-    // [1 2 1] / 4 along x, then y: the volume kept, edges under two cells taken out.
+    // [1 2 1] / 4 along x, then y: the volume kept, edges under two cells taken out. Times the
+    // mask with a shore, as the ewave's sources: none on land, less on a beach.
     for (int j = 0; j < n; ++j)
       for (int i = 0; i < n; ++i) {
         const std::size_t c = std::size_t(j) * un + std::size_t(i);
@@ -460,8 +694,9 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     for (int j = 0; j < n; ++j)
       for (int i = 0; i < n; ++i) {
         const std::size_t c = std::size_t(j) * un + std::size_t(i);
-        s.h[c] +=
+        const double add =
             0.5 * tmp[c] + 0.25 * ((j > 0 ? tmp[c - un] : 0.0) + (j < n - 1 ? tmp[c + un] : 0.0));
+        s.h[c] += _mask.empty() ? add : add * _mask[c];
       }
     s.zeta.swap(zeta);
     zeta.resize(cells);
@@ -537,8 +772,24 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
       ++it;
   }
 
-  for (auto &e : _states)
+  // The depths the motion is kept at: down past the deepest point a body in the water and the
+  // window reaches below the top, by half again (the bodies move between the waves' steps).
+  double reach = 0.0;
+  for (std::size_t k = 0; k < bodies.size(); ++k)
+    if (bodies[k].in_water && inside(bodies[k]))
+      reach = std::max(reach, below[k]);
+  _layers = 0;
+  if (reach > 0.0) {
+    _layers = 1;
+    while (_layers < kMaxLayers && layer_depth(_layers) < 1.5 * reach &&
+           !(_p.depth > 0.0 && layer_depth(_layers) >= _p.depth))
+      ++_layers;
+  }
+
+  for (auto &e : _states) {
     derive(e.second);
+    deepen(e.second);
+  }
   sum();
 
   // The sleeping bodies in the water the others' waves reach.
@@ -588,6 +839,78 @@ void fluid_wake::sample(int own, double x, double y, wake_sample &out) const {
   out.gy = v[5];
 }
 
+double fluid_wake::height(int own, double x, double y) const {
+  corners k;
+  if (!_placed || !corners_of(_n, _dx, double(_ci) * _dx, double(_cj) * _dx, x, y, k))
+    return 0.0;
+  const double *o =
+      own >= 0 && std::size_t(own) < _byIndex.size() ? _byIndex[own]->f.data() : nullptr;
+  return bilinear(k, _total.data(), o, kQ, 0);
+}
+
+void fluid_wake::motion(int own, double x, double y, double depth, wake_sample &out) const {
+  out = wake_sample{};
+  corners k;
+  if (!_placed || !corners_of(_n, _dx, double(_ci) * _dx, double(_cj) * _dx, x, y, k))
+    return;
+  const bool mine = own >= 0 && std::size_t(own) < _byIndex.size();
+  const std::size_t cells = std::size_t(_n) * std::size_t(_n);
+  // Layer l's five (u, v, w, gx, gy) here: l 0 is the top's.
+  const auto layer = [&](int l, double v[5]) {
+    if (l == 0) {
+      const double *o = mine ? _byIndex[own]->f.data() : nullptr;
+      for (int q = 0; q < 5; ++q)
+        v[q] = bilinear(k, _total.data(), o, kQ, q + 1);
+      return;
+    }
+    const std::size_t at = std::size_t(l - 1) * cells * 5;
+    const std::vector<double> *od = mine ? &_byIndex[own]->deep : nullptr;
+    const double *o = od && od->size() == _deepTotal.size() ? od->data() + at : nullptr;
+    for (int q = 0; q < 5; ++q)
+      v[q] = bilinear(k, _deepTotal.data() + at, o, 5, q);
+  };
+  double v[5];
+  const int L = _layers;
+  if (!(depth > 0.0)) { // at the top
+    layer(0, v);
+    out.u = v[0];
+    out.v = v[1];
+    out.w = v[2];
+    out.gx = v[3];
+    out.gy = v[4];
+    return;
+  }
+  double d = depth;
+  if (_p.depth > 0.0)
+    d = std::min(d, _p.depth); // the bed's below it
+  const double deepest = L > 0 ? layer_depth(L) : 0.0;
+  if (d >= deepest) {
+    // At or past the deepest layer: it, decayed further as the window's longest wave would.
+    layer(L, v);
+    if (d > deepest) {
+      const double f = det::exp(-(kTwoPi / (double(_n) * _dx)) * (d - deepest));
+      for (double &q : v)
+        q *= f;
+    }
+  } else {
+    int l = 0;
+    while (l + 1 < L && layer_depth(l + 1) <= d)
+      ++l;
+    const double d0 = l == 0 ? 0.0 : layer_depth(l), d1 = layer_depth(l + 1);
+    double a[5], b[5];
+    layer(l, a);
+    layer(l + 1, b);
+    const double s = (d - d0) / (d1 - d0);
+    for (int q = 0; q < 5; ++q)
+      v[q] = a[q] + (b[q] - a[q]) * s;
+  }
+  out.u = v[0];
+  out.v = v[1];
+  out.w = v[2];
+  out.gx = v[3];
+  out.gy = v[4];
+}
+
 wake_info fluid_wake::info() const {
   wake_info w;
   w.placed = _placed;
@@ -612,6 +935,7 @@ void fluid_wake::save(std::string &out) const {
   put(out, _cj);
   put(out, _count);
   put(out, std::int32_t(_outside));
+  put(out, std::int32_t(_layers));
   put(out, std::uint32_t(_states.size()));
   for (const auto &e : _states) {
     put(out, e.first);
@@ -623,20 +947,24 @@ void fluid_wake::save(std::string &out) const {
   }
 }
 
-std::shared_ptr<fluid_wake::saved> fluid_wake::parse(const std::string &in,
-                                                     std::size_t &pos) const {
+std::shared_ptr<fluid_wake::saved> fluid_wake::parse(const std::string &in, std::size_t &pos,
+                                                     int version) const {
   const std::size_t cells = std::size_t(_n) * std::size_t(_n);
   auto out = std::make_shared<saved>();
   std::uint8_t placed = 0;
-  std::int32_t outside = 0;
+  std::int32_t outside = 0, layers = 0;
   std::uint32_t count = 0;
   get(in, pos, placed);
   get(in, pos, out->ci);
   get(in, pos, out->cj);
   get(in, pos, out->count);
   get(in, pos, outside);
+  if (version >= 2)
+    get(in, pos, layers);
   get(in, pos, count);
-  need(placed <= 1 && outside >= 0, "the saved wake is not one");
+  need(placed <= 1 && outside >= 0 && layers >= 0 && layers <= kMaxLayers,
+       "the saved wake is not one");
+  out->layers = layers;
   // A window placed so far off that moving it would overflow its cells' arithmetic is no wake's:
   // cell_of places none beyond kFar.
   need(out->ci >= -kFarCell && out->ci <= kFarCell && out->cj >= -kFarCell && out->cj <= kFarCell,
@@ -658,8 +986,7 @@ std::shared_ptr<fluid_wake::saved> fluid_wake::parse(const std::string &in,
     get_values(in, pos, s.phi, cells);
     get_values(in, pos, s.w, cells);
     get_values(in, pos, s.zeta, cells);
-    derive(s);
-    const std::uint32_t id = s.body;
+    const std::uint32_t id = s.body; // what it gives a reader is worked out in commit (the mask)
     need(out->states.emplace(id, std::move(s)).second, "the saved wake names a body twice");
   }
   need(sources <= _p.sources, "the saved wake has more sources than it allows");
@@ -672,7 +999,13 @@ void fluid_wake::commit(saved &s) {
   _cj = s.cj;
   _count = s.count;
   _outside = s.outside; // as the last wave step counted them (it needs the bodies and the sea)
+  _layers = s.layers;
   _states.swap(s.states);
+  remask(); // the window's mask at its saved place, then what each state gives a reader
+  for (auto &e : _states) {
+    derive(e.second);
+    deepen(e.second);
+  }
   sum();
 }
 

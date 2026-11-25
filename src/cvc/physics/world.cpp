@@ -159,7 +159,10 @@ constexpr char kRutMagic[8] = {'C', 'V', 'C', 'R', 'U', 'T', 'S', '1'};
 constexpr char kSurfaceMagic[8] = {'C', 'V', 'C', 'S', 'U', 'R', 'F', '1'};
 constexpr char kHullMagic[8] = {'C', 'V', 'C', 'H', 'U', 'L', 'L', '1'};
 constexpr char kBoatMagic[8] = {'C', 'V', 'C', 'B', 'O', 'A', 'T', '1'};
-constexpr char kWakeMagic[8] = {'C', 'V', 'C', 'W', 'A', 'K', 'E', '1'};
+constexpr char kWakeMagic[8] = {'C', 'V', 'C', 'W', 'A', 'K', 'E', '2'};
+// The wakes' section from before shores and depths (each wake's shore and the depths kept): its
+// states restore as wakes without shores.
+constexpr char kWakeMagic1[8] = {'C', 'V', 'C', 'W', 'A', 'K', 'E', '1'};
 
 struct state_header {
   char magic[8];
@@ -945,7 +948,19 @@ field_load world::field_load_on(body_id id) const {
 water_sample world::water_at(const vec3 &p) const {
   std::lock_guard<std::mutex> lock(_impl->mutex);
   water_sample out;
-  _impl->fields.water_at(p, _impl->field_time(), out);
+  detail::field_set::wake_read wake;
+  wake.on = true; // every body's waves
+  _impl->fields.water_at(p, _impl->field_time(), out, wake);
+  return out;
+}
+
+water_sample world::water_at(const vec3 &p, body_id self) const {
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  water_sample out;
+  detail::field_set::wake_read wake;
+  wake.on = true;
+  wake.body = self; // the others' waves, as self feels them
+  _impl->fields.water_at(p, _impl->field_time(), out, wake);
   return out;
 }
 
@@ -1095,10 +1110,11 @@ void world::restore(const std::vector<std::uint8_t> &state) {
     _impl->boats.restore(rest, pos);
   }
   if (want_wakes) {
-    if (!section(pos, kWakeMagic))
+    const int version = section(pos, kWakeMagic) ? 2 : section(pos, kWakeMagic1) ? 1 : 0;
+    if (version == 0)
       throw cvc::physics_error("restore: this world's wakes differ from the state's");
     pos += sizeof(kWakeMagic);
-    _impl->fields.restore_wakes(rest, pos);
+    _impl->fields.restore_wakes(rest, pos, version);
   }
   if (pos != rest.size())
     throw cvc::physics_error("restore: the state's length does not match its sections");

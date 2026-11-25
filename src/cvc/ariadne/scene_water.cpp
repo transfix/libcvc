@@ -42,6 +42,7 @@
 #include <cvc/ocean/spectrum.h>
 #include <cvc/physics/field.h>
 #include <cvc/physics/ocean_surface.h>
+#include <cvc/physics/shore_mask.h>
 #include <cvc/volume/volume.h>
 #include <cvc/world/grid.h>
 #include <cvc/world/water_bodies.h>
@@ -403,6 +404,9 @@ struct WaterRuntime::impl {
   std::shared_ptr<const SceneWaterShore> shore;
   std::shared_ptr<const cvc::ocean::sea_surface> sea;
   std::shared_ptr<const cvc::physics::field> field;
+  // With wake_push: the wake's mask from the coast (C6). It keeps its shore grid, so a new coast
+  // never shares that grid's address.
+  std::shared_ptr<const cvc::physics::shore_grid_mask> wakeShore;
   const float *groundData = nullptr; // the ground the field was built over (a regenerate swaps it)
   std::size_t groundSize = 0;
   // While the scene has storms (SceneColliders::clock_period): the clock period the sea last
@@ -537,11 +541,23 @@ bool WaterRuntime::tick() {
   item.field.damping = 1.0e4;
   item.field.inertial = true;
   item.field.surface = std::make_shared<cvc::physics::ocean_surface>(d.sea);
-  // C5: the floating bodies' waves push the others (field.h, field_wake), when asked for.
+  // C5: the floating bodies' waves push the others (field.h, field_wake), when asked for, masked
+  // from the coast (C6): they reflect off its steep shores, soak into its beaches and stay off the
+  // land, a lake's or a pond's on all its banks; the drawn window's mask (shore_mask.h). The same
+  // coast keeps the same mask (one digest), so a new keyframe of the sea keeps the waves.
   if (s.wake_push) {
     item.field.wake.cells = s.wake_push_cells;
     item.field.wake.cell = s.wake_push_cell;
     item.field.wake.depth = s.wake_push_depth;
+    const cvc::ocean::shore_grid *grid = d.shore ? d.shore->grid.get() : nullptr;
+    if (grid && grid->rows >= 2 && grid->cols >= 2 && grid->shore_m.size() == grid->count()) {
+      if (!d.wakeShore || &d.wakeShore->grid() != grid)
+        d.wakeShore = std::make_shared<const cvc::physics::shore_grid_mask>(
+            d.shore->grid,
+            d.shore->slope.size() == grid->count() ? d.shore->slope : std::vector<float>{},
+            d.shore->layer);
+      item.field.wake.shore = d.wakeShore;
+    }
   }
   d.field = std::make_shared<const cvc::physics::field>(item.field);
   auto geo = std::make_shared<cvc::world::world_geometry>();
