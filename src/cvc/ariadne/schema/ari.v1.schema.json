@@ -1328,7 +1328,8 @@
         "fit": {"enum": ["contain", "cover", "fill"]},
         "shape": {"enum": ["rect", "circle"]},
         "fullscreen": {"$ref": "#/$defs/flag"},
-        "badge": {"$ref": "#/$defs/scalar"}
+        "badge": {"$ref": "#/$defs/scalar"},
+        "save": {"$ref": "#/$defs/flag", "description": "false: no Save image... in the picture's context menu (§5.29)."}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -1359,7 +1360,8 @@
         "controls": {"$ref": "#/$defs/flag"},
         "autoplay": {"$ref": "#/$defs/flag"},
         "loop": {"$ref": "#/$defs/flag"},
-        "muted": {"$ref": "#/$defs/flag"}
+        "muted": {"$ref": "#/$defs/flag"},
+        "save": {"$ref": "#/$defs/flag", "description": "false: no Save video... in the picture's context menu (§5.29)."}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,

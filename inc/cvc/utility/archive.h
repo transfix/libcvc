@@ -81,6 +81,17 @@ std::string pack_tar(const std::vector<std::pair<std::string, std::string>> &fil
 std::string gzip(std::string_view bytes);
 std::string zstd(std::string_view bytes, int level = 3);
 
+// A zip of (path, bytes) pairs, in the order given (a saved world: ARIADNE_WORLDS section 18.8).
+// Each entry is deflated (`deflate` below) when that makes it smaller, else stored; names are
+// UTF-8 and every entry is dated 1980-01-01 00:00, so the same files make the same bytes. Throws
+// std::invalid_argument for an unsafe or duplicate path (safe_path), and std::runtime_error past
+// what a zip without its 64-bit extension holds (65535 entries, 4 GiB).
+std::string pack_zip(const std::vector<std::pair<std::string, std::string>> &files);
+
+// `bytes` as one raw deflate stream (RFC 1951, as a zip entry holds it), by stb_image_write's
+// compressor (the one its PNGs use). Throws std::runtime_error past 2 GiB or on a failed encode.
+std::string deflate(std::string_view bytes);
+
 // The CRC-32 (ISO-HDLC, as gzip and zip use) of `bytes`, continuing from `crc`.
 std::uint32_t crc32(std::string_view bytes, std::uint32_t crc = 0);
 

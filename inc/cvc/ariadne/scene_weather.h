@@ -38,6 +38,7 @@
 namespace cvc {
 class app;
 class height_field;
+class world_clock;
 namespace physics {
 class world;
 }
@@ -112,8 +113,10 @@ public:
   bool has_ground() const;
 
   // The keys (the frame's thread, between steps): weather.events, weather.friction and
-  // weather.gust_front (the storm wind's peak, seeded from the `gust_front` prop).
-  void read_keys();
+  // weather.gust_front (the storm wind's peak, seeded from the `gust_front` prop). A new peak goes
+  // in at the start of CLOCK's next period (null: the app's world clock), the clock the world
+  // steps on.
+  void read_keys(const cvc::world_clock *clock = nullptr);
   // Before the physics step that ends on the world clock's tick `tick` (whose quantum is `dt`):
   // the friction on the first step of each kWetPeriod, or at once when weather.friction changed.
   void before_step(cvc::physics::world &w, std::uint64_t tick, double dt);
@@ -135,6 +138,16 @@ public:
   // Counts the changes to model() (its events, or its area once the ground came): what the scene's
   // air (StormWindFlow) is made again on.
   std::uint64_t revision() const;
+
+  // ANOTHER HOST'S WEATHER (OW5q). What model() was made from: the storms' events as last parsed
+  // (weather.events, the `events` prop until the key changes them) and the clock tick the
+  // storm-wind peak (gust_front()) went in after (0: from the start). A relay publishes them
+  // (conference::room_world_on), and a client's replica follows them here: EVENTS (empty: keep its
+  // own) and GUST go into model() at once, nothing stepping the replica's world; the keys take
+  // them too, so read_keys() keeps them. True when model() changed.
+  const std::string &events_text() const;
+  std::uint64_t gust_from() const;
+  bool follow(const std::string &events, double gust, std::uint64_t gust_from);
 
 private:
   struct impl;

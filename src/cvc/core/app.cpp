@@ -38,6 +38,7 @@
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/exec_router.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/stdlib.h>
@@ -214,6 +215,14 @@ struct app::exec_group0_state {
   cvc::state_exec::cycle_registry_ptr registry = cvc::state_exec::make_cycle_registry();
   cvc::state_exec::random_stream random;
   std::shared_ptr<std::atomic<int>> pids = std::make_shared<std::atomic<int>>(1);
+  // The router and pid directory (S2b), made with the app at the first call (app::exec_router());
+  // this state goes after every scheduler, so the router outlives them.
+  std::unique_ptr<cvc::state_exec::exec_router> router;
+  cvc::state_exec::exec_router &router_for(cvc::app *app) {
+    if (!router)
+      router = std::make_unique<cvc::state_exec::exec_router>(app);
+    return *router;
+  }
 };
 
 // The app's file handler tables (app.h: volume_handlers() and the rest).
@@ -432,6 +441,10 @@ app::~app() {
       }
     }
   }
+  // Group 0 (S2b) goes with the members: its scheduler closes its router handle first thing, after
+  // the async host (declared after it) and before group 0's state, whose router and directory
+  // outlive it. By then every group, the pool, the hosts and the app's threads are gone, so nothing
+  // posts to it after the close; a post through the closed handle would be refused.
 }
 
 data_map app::data() {
@@ -1499,6 +1512,15 @@ cvc::state_exec::async_scheduler &app::exec_scheduler() {
       _execScheduler->set_cycle_registry(_execGroup0->registry.get());
       _execScheduler->set_random_stream(&_execGroup0->random);
       _execScheduler->set_pid_source(_execGroup0->pids);
+      // Group 0 in the app's routing (S2b): the default home, "" (exec_router.h). The router's own
+      // lock is a leaf, so registering under this mutex is safe.
+      {
+        cvc::state_exec::exec_router &router = _execGroup0->router_for(this);
+        const cvc::state_exec::group_ref self =
+            cvc::state_exec::group_ref::make(*_execScheduler, nullptr);
+        _execScheduler->set_router(&router, self);
+        router.register_prefix(self, std::string());
+      }
       // The long-step monitor (S2a.7, S2-Q11) logs through the app. It is off unless the tree
       // sets state_exec.long_step_ms: group 0 is pumped on its host's thread, not by the pool.
       _execScheduler->set_long_step_sink([this](const std::string &native, double seconds) {
@@ -1650,7 +1672,7 @@ cvc::exec_pool &app::exec_pool(const pool_options &opts) {
           o.threads = 0;
         }
       }
-      _execPool = std::make_unique<cvc::exec_pool>(o);
+      _execPool = std::make_unique<cvc::exec_pool>(o, this);
       _execPoolBuilt.store(_execPool.get(), std::memory_order_release); // trySubmitKernel's read
       for (std::string &text : _execPool->take_notes())
         notes.emplace_back(1, std::move(text));
@@ -1660,6 +1682,11 @@ cvc::exec_pool &app::exec_pool(const pool_options &opts) {
   for (const auto &[level, text] : notes)
     log(level, text);
   return *pool;
+}
+
+cvc::state_exec::async_scheduler *app::exec_scheduler_probe() {
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  return _execScheduler.get();
 }
 
 cvc::exec_pool *app::exec_pool_probe() const {
@@ -1672,6 +1699,13 @@ std::shared_ptr<std::atomic<int>> app::exec_pid_source() {
   if (!_execGroup0)
     _execGroup0 = std::make_unique<exec_group0_state>();
   return _execGroup0->pids;
+}
+
+cvc::state_exec::exec_router &app::exec_router() {
+  boost::mutex::scoped_lock lock(_execSchedulerMutex);
+  if (!_execGroup0)
+    _execGroup0 = std::make_unique<exec_group0_state>();
+  return _execGroup0->router_for(this);
 }
 
 void app::exec_pump_frame() {
@@ -1699,10 +1733,23 @@ void app::exec_pump_frame() {
     if (_execGroup0)
       group0_stream = &_execGroup0->random;
   }
+  // Or while anything posted to it waits (S2b, S2.md section 0 row 22): a router entry homed there,
+  // a command (pool.kill_owner's), a message for a process to come. Read under its token, tried:
+  // another thread may hold it (pycvc's ExecPool.run_all drains group 0 on its own thread,
+  // pool.kill_owner drains it inline), and group 0 is then skipped this frame, never a throw.
   if (group0) {
-    const se::scheduler_stats s = group0->get_stats();
-    if (s.total_processes - s.terminated - s.killed - s.failed <= 0)
-      group0 = nullptr;
+    std::optional<se::async_scheduler::pump_owner_scope> token;
+    try {
+      token.emplace(*group0);
+    } catch (const std::runtime_error &) {
+      group0 = nullptr; // held by another thread: next frame
+    }
+    if (group0) {
+      const se::scheduler_stats s = group0->get_stats();
+      if (s.total_processes - s.terminated - s.killed - s.failed <= 0 &&
+          !group0->has_pending_ingress())
+        group0 = nullptr;
+    }
   }
   // Deterministic mode (td 4.4) reaches group 0 as it does the frame groups: slices fixed in
   // steps, no deadline, and its stream seeded from a fixed name. The pool's flag when there is a
@@ -1726,7 +1773,14 @@ void app::exec_pump_frame() {
     group0_stream->seed = h;
   }
   const auto pump_group0 = [group0, deadline, deterministic] {
-    se::async_scheduler::pump_owner_scope token(*group0); // the token, as a group's pump takes
+    // The token, as a group's pump takes it; another thread's since the look above, group 0 is
+    // skipped this frame (as above).
+    std::optional<se::async_scheduler::pump_owner_scope> token;
+    try {
+      token.emplace(*group0);
+    } catch (const std::runtime_error &) {
+      return;
+    }
     group0->drain_ingress();
     group0->wake_awaiting();
     if (deterministic) {

@@ -214,6 +214,22 @@ for i in range(2):
           f"heat {e['heat']:.6g}, residual {e['residual']:.3g}")
 kinds = {ev["kind"] for ev in fleet.events()}
 check({"sent", "delivered"} <= kinds, f"packets were sent and delivered: {kinds}")
+# The same run a few hundred ticks at a time (run_crossing(ticks=), as a page runs it a few ticks a
+# frame) is the one run whole.
+parts = pycvc.NavCophFleet({"steps": 2000}, {},
+                           [{"initial": [0.0, 4.0, 0.0, 0.0], "goal": [12.0, 4.0]},
+                            {"initial": [12.0, 4.0, 0.0, 0.0], "goal": [0.0, 4.0]}],
+                           senders=[0, 1], seed=7)
+done = parts.run_crossing({"obstacles": [nums(o) for o in world["obstacles"]],
+                           "seeds": [152000, 152001],
+                           "noise": lambda agent, tick, j:
+                           0.003 * (((7 * tick + 13 * j + 5 * agent) % 11) - 5) / 5.0}, 300)
+check(not done and parts.tick() == 300, f"300 ticks, then it stops ({parts.tick()})")
+while not done:
+    done = parts.run_crossing(ticks=300)
+check(parts.tick() == fleet.tick() and all(parts.state(i) == fleet.state(i)
+                                           and parts.energy(i) == fleet.energy(i) for i in range(2))
+      and len(parts.events()) == len(fleet.events()), "in parts, the same run, bit for bit")
 check(fleet.samples(0)[-1]["done"] and fleet.updates(0), "the samples and updates")
 
 # 7. The driver (NavCophDriver, coph_driver.h): CoPH drives a sim_world's cars through

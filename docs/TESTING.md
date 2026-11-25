@@ -1188,7 +1188,7 @@ status.
 | Variable | Read by | Effect |
 |---|---|---|
 | `CVC_STATE_EXEC_CHECK=1` | libcvc, as each lock manager is made | every lock manager runs `check()`, the protocol's manager-side invariants, after every operation. `state_exec_locks_test`, `state_exec_priority_test`, `ariadne_runtime_test` and `state_exec_coordinator_test` set it during static initialization; the pycvc script sets it unless the environment already does (`CVC_STATE_EXEC_CHECK=0` runs it without) |
-| `CVC_EXEC_FUZZ=<seed>` | libcvc, as each lock manager is made (the seed is the manager's) | yields at the lock protocol's points (phase L3.7; LT-4): after a manager operation and before its notifications are delivered, in a port's `post` before and after its critical section, in a home's port drain between two posts, and in a home's destruction between its port's close and its detach. At each point the manager's stream, mixed with the seed, runs on, yields, or yields for 0-50 us. The seed is decimal or `0x` hex, and any other non-empty text is hashed; unset, empty or 0 is off, and then a point costs one relaxed load. `lock_manager::set_fuzz_seed(seed)` sets it for that manager only (0: off; LT-4 sets each of its seeds on its run's manager), `fuzz_seed()` reads it, and `fuzz_hits()` counts the manager's points reached with a seed in effect. Threaded execution's S2a (S2-Q15) adds two readers of the same seed, the same draw and the same costs: each `exec_pool`, read when it is built, yields at the continuous pool's points (after `wake(g)`'s `fetch_or` and before the ready-queue mutex, between a pop and its pump, in a release before its CAS, between the eventcount's prepare and its commit, and between a host hold and its token; `pool_stats::fuzz_points` counts those reached with a seed), and each async scheduler, read as it is made, yields in every ingress post between the push and the wake, under the ingress mutex. PL-2 and CT-2 set a seed for the pools they build; any suite may be run under one (`CVC_EXEC_FUZZ=7`, say) |
+| `CVC_EXEC_FUZZ=<seed>` | libcvc, as each lock manager is made (the seed is the manager's) | yields at the lock protocol's points (phase L3.7; LT-4): after a manager operation and before its notifications are delivered, in a port's `post` before and after its critical section, in a home's port drain between two posts, and in a home's destruction between its port's close and its detach. At each point the manager's stream, mixed with the seed, runs on, yields, or yields for 0-50 us. The seed is decimal or `0x` hex, and any other non-empty text is hashed; unset, empty or 0 is off, and then a point costs one relaxed load. `lock_manager::set_fuzz_seed(seed)` sets it for that manager only (0: off; LT-4 sets each of its seeds on its run's manager), `fuzz_seed()` reads it, and `fuzz_hits()` counts the manager's points reached with a seed in effect. Threaded execution's S2a (S2-Q15) adds two readers of the same seed, the same draw and the same costs: each `exec_pool`, read when it is built, yields at the continuous pool's points (after `wake(g)`'s `fetch_or` and before the ready-queue mutex, between a pop and its pump, in a release before its CAS, between the eventcount's prepare and its commit, and between a host hold and its token; `pool_stats::fuzz_points` counts those reached with a seed), and each async scheduler, read as it is made, yields in every ingress post between the push and the wake, under the ingress mutex. PL-2 and CT-2 set a seed for the pools they build; any suite may be run under one (`CVC_EXEC_FUZZ=7`, say). Threaded execution's S2b adds the router's posts, with the same draw: an app's router, read when it is made, yields before each post a host's `pool.post_message` makes with the router on, and each async scheduler before each router entry it posts to another group (a send, a subscribe, a deliver, a requeue, an answer, a forward). ST-2 sets the seed while its pool and schedulers are built |
 | `CVC_LOCKS_SANITIZER=1` | `state_exec_locks_test`, `state_exec_locks_model_test`, the pycvc script | the sanitizer jobs' smaller sizes, among them: the model at bound 2 and 2*10^3 random steps; LT-4 20 seeds and LT-10 2*10^3 operations; pycvc's LT-1 10^4 sections an `Exec`, LT-10 smoke about 2*10^3 sections, and PR-8's `lock_query` monitor 10^3 runs |
 | `CVC_LOCKS_MODEL_BOUND` | `state_exec_locks_model_test` | the model check's search bound. Regular: 3 in Release and 2 in Debug and under the sanitizers, with L3's own per-configuration bounds (`wide` 2 in Release; `attach`, `splitpost` and `splitpost2` 3 in Debug); `LocksModelStress`: 4 for one home, 3 for `Homes*`. The table is in tools/locks_model/README.md, "Sizes" |
 | `CVC_LOCKS_MODEL_COALESCE=1` | `LocksModelStress.Homes*` | the `+c` variants: relevel coalescing on in every two-home configuration (otherwise only `coalesce` has it, as `explore.py` sets it) |
@@ -1209,9 +1209,9 @@ pycvc's state_exec scripts with the sanitizer runtime preloaded into the interpr
 
 | Leg | Compiler, flags | Runs |
 |---|---|---|
-| `tsan` | the runner's gcc 13, `-fsanitize=thread` | every binary in `SAN_CXX_TESTS` (the lock, scheduler, async, coordinator, Ariadne and hazards suites, Stage 0's state_exec suites, `state_exec_groups_test`, `exec_pool_test`, `stream_test`, `net_ws_client_test`, `ariadne_host_test`), every script in `SAN_PY_TESTS`, `mt.multi_exec`, and `mt.groups` in both pump modes |
+| `tsan` | the runner's gcc 13, `-fsanitize=thread` | every binary in `SAN_CXX_TESTS` (the lock, scheduler, async, coordinator, Ariadne and hazards suites, Stage 0's state_exec suites, `state_exec_groups_test`, `exec_pool_test`, `state_exec_router_test`, `state_exec_stress_test`, `stream_test`, `net_ws_client_test`, `ariadne_host_test`), every script in `SAN_PY_TESTS`, `mt.multi_exec`, `mt.groups` in both pump modes, and `mt.cross_group_msg` |
 | `asan-ubsan` | the runner's gcc 13, `-fsanitize=address,undefined` | the same |
-| `clang-tsan` | the runner's clang (S1-Q9), `-fsanitize=thread` | `state_exec_groups_test`, `exec_pool_test`, `state_exec_hazards_test`, the scheduler, async, async-call, lane, thread-pool and lock binaries, `ariadne_runtime_test` with `CVC_EXEC_THREADS=4` and `--gtest_filter=-AppLockManager.*`, `state_lifetime_stress_test`, `stream_test`, `net_ws_client_test`, `state_exec_coordinator_test`, `state_exec_stackless_evaluator_test`'s `NativeSite` cases (Stage 2a), every script in `SAN_PY_TESTS`, and `mt.groups` in both pump modes |
+| `clang-tsan` | the runner's clang (S1-Q9), `-fsanitize=thread` | `state_exec_groups_test`, `exec_pool_test`, `state_exec_hazards_test`, the scheduler, async, async-call, lane, thread-pool and lock binaries, `ariadne_runtime_test` with `CVC_EXEC_THREADS=4` and `--gtest_filter=-AppLockManager.*`, `state_lifetime_stress_test`, `stream_test`, `net_ws_client_test`, `state_exec_coordinator_test`, `state_exec_stackless_evaluator_test`'s `NativeSite` cases (Stage 2a), `state_exec_router_test` and `state_exec_stress_test` (Stage 2b), every script in `SAN_PY_TESTS`, `mt.groups` in both pump modes, and `mt.cross_group_msg` |
 
 Each C++ binary runs bare (`--gtest_filter=-*Stress*`), unless the leg's `cxx_runs` (run.sh's
 `SAN_CXX_RUNS`) gives it variables and options of its own, one line a binary, `<name>: [VAR=VALUE
@@ -1222,19 +1222,25 @@ sizes its own pool keeps it) and the lock manager's `auto` mode shared (the `App
 assert the single one and are left out, as in CTest's `ariadne_runtime_test_threads_auto`); its
 `state_exec_stackless_evaluator_test: --gtest_filter=NativeSite.*` runs only the long-step
 monitor's name cases there (the gcc legs run the whole binary). `run.sh` adds `*Stress*` to such a
-filter's negative patterns. `SAN_BENCH` takes a scenario once, with all its sizes on its line
+filter's negative patterns, unless the line says `--keep-stress-suites` (an option `run.sh` takes
+and does not pass on), which runs the binary's Stress suites too, under its own filter or none:
+every leg appends Stage 2b's `SAN_CXX_RUNS_S2B` to its `cxx_runs`, whose one line,
+`state_exec_stress_test: --keep-stress-suites`, runs the stress binary whole, since its default
+size is the sanitizer jobs' short form (its suite, `RandomPrograms`, has no "Stress" in its name,
+so the option is a safeguard). `SAN_BENCH` takes a scenario once, with all its sizes on its line
 (`mt.groups ... --size pump=fork_join,continuous`): a scenario's log is named after it, so
 `run.sh` refuses one named twice.
 
 gcc links its sanitizer runtimes as shared libraries, which `run.sh` finds with `ldd` and preloads;
 clang links TSan's into each executable, so for the interpreter `run.sh` preloads clang's shared
 `libclang_rt.tsan`. Suppressions go in `.github/sanitizers/*.supp`, each naming the race it hides
-and why it is not a bug; phase L3 and threaded execution's Stages 0, 1a, 1b and 2a added none.
+and why it is not a bug; phase L3 and threaded execution's Stages 0, 1a, 1b, 2a and 2b added
+none.
 Each job names the cases it is there for, one `<run>: <text>` line each that the run's log must
 contain (gtest's `OK ]` line, the pycvc script's `ok:` line, a bench point's params), so a case
 renamed, skipped or filtered out fails the job instead of leaving it green: the matrix's
-`required`, per leg, and Stage 1a's `SAN_REQUIRED_S1A`, Stage 1b's `SAN_REQUIRED_S1B` and Stage
-2a's `SAN_REQUIRED_S2A`, which every leg appends to its own.
+`required`, per leg, and Stage 1a's `SAN_REQUIRED_S1A`, Stage 1b's `SAN_REQUIRED_S1B`, Stage
+2a's `SAN_REQUIRED_S2A` and Stage 2b's `SAN_REQUIRED_S2B`, which every leg appends to its own.
 
 | Work | Legs | Required |
 |---|---|---|
@@ -1244,6 +1250,7 @@ renamed, skipped or filtered out fails the job instead of leaving it green: the 
 | Threaded Stage 1a (S1.md 4) | `tsan`, `clang-tsan`, `asan-ubsan` | every case of `state_exec_groups_test`, 28 (RX-1..RX-3, BF-1, BF-1a, PO-2, GR-1..GR-12, RB-1, AS-1, OC-1, DT-1, DT-2, GL-1, GL-2, PA-1, FF-1, FF-2), and of `exec_pool_test`, 34 (the pool, the group and the app's pool, with the review rounds' regression cases, its three `ExecGroupDeathTest` cases among them): a case added to either adds its line; KO-1 and KO-2 (`state_exec_async_test`); the foreign-future cases of `state_exec_async_calls_test` (another scheduler's threaded future raises, its inline one is its value, `await-all` refuses one before it waits, a gone scheduler's raises); pycvc's GR-5, IS-2, AR-4, FF-3 and PO-1 (`test_pycvc_exec_pool.py`), `test_pycvc_exec.py`'s `ExecPool` cases (order, async functions and the first failure; the idle limit; `close()` and the calls refused during a batch; frame yields keeping a program alive; the size following the pool's threads; frame waiters waiting for the frame) and its registry case (`Exec.collect_cycles`), and `test_pycvc_state_exec_locks.py`'s pump-owner cases (`run()` holds the owner to its return); `mt.groups`' three points at `t=8 groups=8` (`pump=fork_join` since Stage 2a) |
 | Threaded Stage 1b (S1.md 4) | `tsan`, `clang-tsan`, `asan-ubsan` | every Stage 1b case of `ariadne_runtime_test`, `state_lifetime_stress_test` and `state_exec_async_calls_test`, 40 (a case added to them adds its line): in `ariadne_runtime_test`, section 4's IS-1b, AR-1, AR-2, AR-3, AR-3b (so in both TSan legs), SP-1, EL-1, FF-3's init half and HZ-8 (the teardown reap, S1-Q8; once a leg, moved from Stage 0's lists), and the implementers' own: one pump of group 0 a frame, the init lane's registry, a reload's reaped resident, providers by kind, isolated documents (`idle` and `wait_idle`, eligibility, moves and the streams that follow them, late host verbs, teardown) with the three `AriadneIsolatedDocsDeathTest` refusals, net's cancelled transfer and started requests, and streams posting to their opener's group; PIN-1's two in `state_lifetime_stress_test` (`uri_state`'s chains and a stream's descriptor pins release the leaf first); a started call's finisher and a shutdown's cancel hook in `state_exec_async_calls_test`. Plus the two cross-thread Stage 1b cases of binaries no leg ran before: `stream_test`'s producer-thread posts to the opener's group and `net_ws_client_test`'s two threads sending whole messages on one connection. `ariadne_host_test` runs in the gcc legs for ASan, with no required line |
 | Threaded Stage 2a (S2.md 4, 5) | `tsan`, `clang-tsan`, `asan-ubsan` | the continuous pool's cases, in binaries the legs already run whole (a case added to them adds its line): section 4's PL-2..PL-5, PL-9 and PL-10 (`exec_pool_test`), CT-1..CT-4 and ST-3 (`state_exec_groups_test`), LG-1, LG-2, LG-6 and LG-7 (`state_exec_locks_test`) and RA-1 (`test_pycvc_exec_pool.py`, with its batch-wait twin); the implementers' own: the pool's `ExecPoolContinuous` cases and `ExecGroupTeardown` (`exec_pool_test`), the wake notifier, the pump's report and the long-step monitor (`state_exec_async_test`), the split kernel pools and group 0's long-step line (`state_exec_async_calls_test`), and the evaluator's native names (`state_exec_stackless_evaluator_test`'s `NativeSite`, which the clang leg runs alone); and `mt.groups`' three points at `t=8 groups=8 ... pump=continuous`. The death tests stay out of the list: under TSan a death test forks a multi-threaded process |
+| Threaded Stage 2b (S2.md 4, 5) | `tsan`, `clang-tsan`, `asan-ubsan` | `state_exec_router_test`'s `RouterInterfaces` cases (the handle, the longest prefix, a forward past closed homes) and section 4's plan-named cases in its `Router` suite: MS-1..MS-10, MS-7b, MS-12, PL-6..PL-8, KO-3, RT-1, DT-3 and DT-4; `state_exec_stress_test`'s short form, ST-1 and ST-2 (`RandomPrograms`); pycvc's OW-1 (`test_pycvc_exec_pool.py`); and `mt.cross_group_msg`'s six cross-group points at `t=4 k=4 m=20` (three patterns, both pump modes). The router's and the control's own unit tests and Ariadne's S2b cases run in binaries the legs run whole, with no required line yet (ci.yml's TODO). The router protocol's model is Python and runs under no sanitizer: its quick suite in CTest (`state_exec_router_model_test`), its deep one in `locks-deep.yml` |
 
 The death tests use gtest's `threadsafe` style: the child re-runs the binary for its one case,
 and gtest itself (a cvcpkg dependency) is not instrumented. The sanitizers leave `SIGABRT` alone
@@ -1274,6 +1281,7 @@ the checkout.
 | `homes-bound-3` | the `+c` variants of `LocksModelStress.Homes*` at bound 3 (`CVC_LOCKS_MODEL_COALESCE=1`); `RandomHomes` and `PortMatchesPythonStateCountsHomes*` |
 | `stress` | `LocksStress` (LK-18, LT-4's 1000 seeds, LT-10's 10^5 operations), then the Linux `lock.cross_thread` record |
 | `state-word-model` | the continuous pool's state-word model (threaded execution's S2a, PL-1; [tools/locks_model/README.md](../tools/locks_model/README.md), "The state-word model"): `python3 -I tools/locks_model/state_word.py --suite deep`, the quick checks and then the deep ones, on ubuntu-24.04 with no C++ build, 45 minutes at most (about 12 minutes on the Windows builder, its largest check about 2.5 GB). CTest runs the quick suite on every build that finds a Python 3, as `state_exec_state_word_model_test` (about 30 s) |
+| `router-model` | the router protocol's model (threaded execution's S2b, S2-Q15; [tools/locks_model/README.md](../tools/locks_model/README.md), "The router model"): `python3 -I tools/locks_model/router.py --suite deep`, the quick checks and then the deep ones (42 checks, about 13 minutes on the Windows builder, its largest about 1.5 GB), on ubuntu-24.04 with no C++ build, 45 minutes at most; a ref without the model stops at once. CTest runs the quick suite as `state_exec_router_model_test` (about 25 s) |
 
 The Linux `lock.cross_thread` record ([STATE_EXEC_LOCKS.md](STATE_EXEC_LOCKS.md) 11.3) is 5 reps
 of the scenario, kept as the `lock-cross-thread-linux` artifact. There is no Linux bench host, so
@@ -1281,6 +1289,28 @@ it is not gated: the hot key's handoff p50 at t = 4 is printed against the desig
 whose result never fails the job. A failed run does fail it. The Windows gates, in recorded quiet
 windows, are the ones that decide ([STATE_EXEC_BENCH.md](STATE_EXEC_BENCH.md), "The phase L3
 gates").
+
+### The Nightly Stress Lane (state-exec-stress.yml)
+
+`.github/workflows/state-exec-stress.yml` runs threaded execution's ST-1 and ST-2
+([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 8.8) at their long sizes: daily on master
+(05:23 UTC), and by hand on a branch (`gh workflow run state-exec-stress.yml --ref <branch>`; a
+ref without `state_exec_stress_test.cpp` stops after the checkout). It posts no llm-gate check, as
+the other scheduled workflows post none. `state_exec_stress_test`'s random programs run messages
+across 16 groups through the router, kills, pauses, timed receives, broadcasts and group churn,
+and check that nothing is lost or duplicated, nothing hangs and nothing crashes. Two lanes, each
+built as the sanitizer legs build (the same cvcpkg deps and tools and configure flags, without
+pycvc), building `state_exec_stress_test` alone:
+
+| Lane | Build | Runs |
+|---|---|---|
+| `tsan` | gcc's `-fsanitize=thread`, RelWithDebInfo, the legs' TSan options and suppressions; a printed report fails the run | ST-1 with `CVC_EXEC_STRESS_MINUTES=10` (45 minutes at most), then ST-2 with `CVC_EXEC_STRESS_SEEDS=1000` (240 minutes), which runs even when ST-1 failed; the job 330 minutes |
+| `release` | Release | the same, ST-1 in 30 minutes at most and ST-2 in 90; the job 150 minutes |
+
+Each run sets one of the two variables, so the binary's other case runs at its short size beside
+it. The logs are kept as an artifact. The short forms run in CTest (`state_exec_stress_test`, a
+900 s timeout) and in every sanitizer leg (above); `CVC_EXEC_STRESS_LOCAL=1` runs the generator's
+self-check, every key's receivers in its home group, which needs no router.
 
 ## Continuous Integration
 

@@ -585,7 +585,27 @@ run is byte-unchanged.
   - Under `--gym` and `--world-doc` the cars are not a `sim_world`, so `pycvc_gl.cars.CophControl`
     runs the same fleet over `NavCophFleet` from the cars' state: risk from a constant or a
     callable, obstacles from the rays.
-- **Next, part 3:** the browser demo (pycvc-gl's wasm build).
+
+**Landed in part 3: the crossing demo, natively and in the browser.**
+`examples/ariadne/python/coph.py` and `coph.ari` run the crossing demo on `NavCophFleet`, a few
+CoPH ticks a frame.
+- **What it adds.**
+  - `coph_fleet::run(world, ticks)` and `tick()`: a run that stops after `ticks` and goes on from
+    there.
+  - `NavCophFleet.run_crossing(world, ticks)`, which keeps its world between calls.
+- **What the demo shows.** A top-down picture of the maze, its doors, the agents' trails and
+  sensors, and a flash when a packet arrives; each agent's version, policy and energy; and a
+  Packets switch, the demos' two arms.
+- **Where it runs.** It has no `scene:`, so it runs headless, in a window, and in a browser on
+  ariglx-web (`?src=coph.py`, with `coph.ari` preloaded).
+- **Checked.**
+  - CI's ariglx-web job runs `src/arigl/web/test/python/coph.ari` in headless Chrome: the
+    crossing on the page's own pycvc, 40 ticks at a time.
+  - `pycvc_gl_ariadne_host` runs the example offscreen.
+  - Run in parts (15 ticks at a time in C++, 300 in Python), the fleet is the one run whole, bit
+    for bit.
+- **Next:** a public page, once a libcvc release has the bindings. GRL-SNAM's pages pin a release
+  (v4.0.0 today) and build ariglx-web from it.
 
 ## 5. Golden cases and tiers
 

@@ -81,6 +81,12 @@ struct holon_config {
 
   cvc::world_clock::config clock; // the holon's own quantum / scale / mode
   double reconcile_tol = 0.05;    // metres; the client's snap threshold (slice 2)
+  // CLIENT: a predicted vehicle is placed again from a sample also when its heading or its
+  // velocity is off what was predicted for that tick by more than these (rad, m/s), not only its
+  // place (OW5r): a heading a little off, its place still within reconcile_tol, carries it off
+  // line.
+  double reconcile_yaw_tol = 0.01;
+  double reconcile_speed_tol = 0.05;
   // CLIENT: how far (in ticks) the replica's clock may drift from the server's tick before
   // apply_authoritative re-aligns it. 60 = 0.5 s at the default 120 Hz. See apply_authoritative.
   std::uint64_t max_skew_ticks = 60;
@@ -499,8 +505,16 @@ public:
   bool held_entity_state(std::uint64_t id, cvc::physics::body_state &out) const;
   // The entities held as the vehicle the local participant drives meets them (OW5o): a jolt or
   // boat model holds their boxes in its world (dynamic_vehicle_model::hold_obstacles), each where
-  // it is at the end of the coming step. How many times a model was made again for room for more.
+  // it is at the end of the coming step; so does a dynamic plant's model, in a world made for its
+  // chassis box with the statics (OW5p). How many times a model was made again for room for more.
+  // With them, the peers' avatars (OW5p): each peer the walker's world holds, as a frictionless
+  // box of the avatar body's size and mass where it is shown, so the car shoves it as the relay's
+  // shoves that avatar -- but not one aboard a vehicle (set_aboard), whose pose is the vehicle's.
   std::vector<vehicle_obstacle> held_obstacles() const;
+  // CLIENT: peer PID rides a vehicle the room shows (drives it, or is it): its pose is that
+  // vehicle's, so the car the local participant drives meets the vehicle, not an avatar there
+  // (held_obstacles). holon_sync's client_pump sets it from the room's entities.
+  void set_aboard(const std::string &pid, bool aboard);
   std::uint64_t vehicle_rebuilds() const { return _vehicle_rebuilds; }
 
   // THE VEHICLE IT DRIVES, PREDICTED (section 18.5, OW5b). CLIENT: the local avatar PID drives (or
@@ -531,6 +545,14 @@ public:
   // kept); 0 is none. client_pump sets it from its world_replica.
   void set_vehicle_ground(std::function<double(double, double)> ground, std::uint64_t revision);
   std::uint64_t vehicle_ground_revision() const { return _vground_rev; }
+  // The world's water from the step that ends past FROM_TICK on (OW5q): the relay's sea took a new
+  // keyframe, which its storms grew (world_replica::water, after water_from_tick). A boat's model
+  // floats on it from that step, and on the water before it in a replay from before it; one made
+  // later has it too. REVISION names it (world_replica::water_revision); set_statics starts the
+  // water afresh with its own.
+  void set_water(const std::vector<cvc::physics::field> &water, std::uint64_t from_tick,
+                 std::uint64_t revision);
+  std::uint64_t water_revision() const { return _water_rev; }
   // Whether PID's vehicle is predicted (predict_vehicle), and its model as of now (false for the
   // other plant's).
   bool predicts_vehicle(const std::string &pid) const;
@@ -557,6 +579,10 @@ private:
     cvc::physics::body_state last_feet;
     // CLIENT: its pose is real (added with one, or a sample has arrived); see add_participant.
     bool pose_known = true;
+    // CLIENT peer: aboard a vehicle the room shows (set_aboard), and the key its avatar's box has
+    // in the car the local participant drives (held_obstacles; apart from the entities' ids).
+    bool aboard = false;
+    std::uint64_t obstacle_key = 0;
     avatar_sim sim;       // server authoritative integrator
     avatar_intent intent; // latest intent (server input / client-local input)
     // SERVER: stamped intents waiting for their tick (queue_intent), in tick order.
@@ -653,6 +679,7 @@ private:
   };
   std::map<std::uint64_t, held> _held;
   std::uint64_t _vehicle_rebuilds = 0; // models made again for room for the room's vehicles
+  std::uint64_t _next_obstacle_key = std::uint64_t{1} << 63; // a peer's avatar box's (OW5p)
   bool world_reconcile(const std::string &pid, participant &p, const cvc::physics::body_state &auth,
                        std::uint64_t server_tick);
   // CLIENT: the predicted vehicle one quantum at TICK on IN (its step, then the command for the
@@ -660,6 +687,10 @@ private:
   void vehicle_step(participant &p, const avatar_intent &in, std::uint64_t tick);
   void vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
                          std::uint64_t server_tick, std::optional<double> steer);
+  // Whether a vehicle predicted at heading YAW and velocity (VX, VY) moves as the sample AUTH does:
+  // within reconcile_yaw_tol and reconcile_speed_tol (OW5r).
+  bool moves_as_predicted(double yaw, double vx, double vy,
+                          const cvc::physics::body_state &auth) const;
   void dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
                          std::uint64_t server_tick, std::optional<double> steer);
   // The world a jolt vehicle or a boat is predicted in: the statics, the water and the gravity
@@ -738,6 +769,8 @@ private:
   section_stamp _statics;               // the room scene the statics came from
   std::vector<avatar_static> _statics_list; // ... and the statics themselves (for a detach)
   std::vector<cvc::physics::field> _water;  // ... and the water with them (a boat's model's)
+  std::vector<timed_water> _water_after;    // ... and since, by tick (set_water, OW5q)
+  std::uint64_t _water_rev = 0;
   SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
   const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
   void scene_step();                        // SERVER with a world attached: the due steps

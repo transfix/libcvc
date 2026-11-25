@@ -304,8 +304,20 @@ bool same_params(const cvc::world::generated_world_params &a,
 }
 } // namespace
 
+bool room_water_sea::operator==(const room_water_sea &o) const {
+  return node == o.node && keyframe == o.keyframe && from_tick == o.from_tick &&
+         from_speed == o.from_speed && from_dir == o.from_dir && from_fetch == o.from_fetch &&
+         to_speed == o.to_speed && to_dir == o.to_dir && to_fetch == o.to_fetch && t0 == o.t0 &&
+         t1 == o.t1;
+}
+
+bool room_weather::operator==(const room_weather &o) const {
+  return node == o.node && events == o.events && gust == o.gust && gust_from == o.gust_from;
+}
+
 bool room_world_on::operator==(const room_world_on &o) const {
-  if (world != o.world || generated.size() != o.generated.size())
+  if (world != o.world || generated.size() != o.generated.size() || seas != o.seas ||
+      weathers != o.weathers)
     return false;
   for (std::size_t i = 0; i < generated.size(); ++i)
     if (generated[i].node != o.generated[i].node ||
@@ -346,6 +358,31 @@ section_stamp write_room_world_on(cvc::app &app, const std::string &room_id,
     w.set({g, "terrain_file"}, p.terrain_file);
     w.set({g, "edge"}, std::to_string(p.edge));
   }
+  w.set({"seas"}, std::to_string(on.seas.size()));
+  for (std::size_t i = 0; i < on.seas.size(); ++i) {
+    const std::string s = "s" + std::to_string(i);
+    const room_water_sea &k = on.seas[i];
+    w.set({s, "node"}, k.node);
+    w.set_uint({s, "keyframe"}, k.keyframe);
+    w.set_uint({s, "from_tick"}, k.from_tick);
+    w.set_double({s, "from_speed"}, k.from_speed);
+    w.set_double({s, "from_dir"}, k.from_dir);
+    w.set_double({s, "from_fetch"}, k.from_fetch);
+    w.set_double({s, "to_speed"}, k.to_speed);
+    w.set_double({s, "to_dir"}, k.to_dir);
+    w.set_double({s, "to_fetch"}, k.to_fetch);
+    w.set_double({s, "t0"}, k.t0);
+    w.set_double({s, "t1"}, k.t1);
+  }
+  w.set({"weathers"}, std::to_string(on.weathers.size()));
+  for (std::size_t i = 0; i < on.weathers.size(); ++i) {
+    const std::string s = "w" + std::to_string(i);
+    const room_weather &x = on.weathers[i];
+    w.set({s, "node"}, x.node);
+    w.set({s, "events"}, x.events);
+    w.set_double({s, "gust"}, x.gust);
+    w.set_uint({s, "gust_from"}, x.gust_from);
+  }
   return w.commit(0, epoch);
 }
 
@@ -383,6 +420,35 @@ bool read_room_world_on(cvc::app &app, const std::string &room_id, room_world_on
     p.edge = static_cast<int>(r.number({g, "edge"}, d.edge));
     if (!x.node.empty())
       on.generated.push_back(std::move(x));
+  }
+  const int seas = static_cast<int>(r.number({"seas"}, 0.0));
+  for (int i = 0; i < seas; ++i) {
+    const std::string s = "s" + std::to_string(i);
+    room_water_sea k;
+    k.node = r.text({s, "node"});
+    k.keyframe = std::strtoull(r.text({s, "keyframe"}, "0").c_str(), nullptr, 10);
+    k.from_tick = std::strtoull(r.text({s, "from_tick"}, "0").c_str(), nullptr, 10);
+    k.from_speed = r.number({s, "from_speed"}, 0.0);
+    k.from_dir = r.number({s, "from_dir"}, 0.0);
+    k.from_fetch = r.number({s, "from_fetch"}, 0.0);
+    k.to_speed = r.number({s, "to_speed"}, 0.0);
+    k.to_dir = r.number({s, "to_dir"}, 0.0);
+    k.to_fetch = r.number({s, "to_fetch"}, 0.0);
+    k.t0 = r.number({s, "t0"}, 0.0);
+    k.t1 = r.number({s, "t1"}, 0.0);
+    if (!k.node.empty())
+      on.seas.push_back(std::move(k));
+  }
+  const int weathers = static_cast<int>(r.number({"weathers"}, 0.0));
+  for (int i = 0; i < weathers; ++i) {
+    const std::string s = "w" + std::to_string(i);
+    room_weather x;
+    x.node = r.text({s, "node"});
+    x.events = r.text({s, "events"});
+    x.gust = r.number({s, "gust"}, 0.0);
+    x.gust_from = std::strtoull(r.text({s, "gust_from"}, "0").c_str(), nullptr, 10);
+    if (!x.node.empty())
+      on.weathers.push_back(std::move(x));
   }
   out = std::move(on);
   return true;

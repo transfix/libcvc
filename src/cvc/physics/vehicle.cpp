@@ -655,6 +655,13 @@ void vehicle_set::drive(vehicle_id id, const drive_command &c) {
   v.command = c;
 }
 
+void vehicle_set::set_steer(vehicle_id id, double steer) {
+  if (!std::isfinite(steer))
+    throw cvc::physics_error("set_vehicle_steer: the angle must be finite");
+  rt &v = at(id);
+  v.steer = clamp(steer, -v.desc.max_steer, v.desc.max_steer);
+}
+
 void vehicle_set::set_controls(vehicle_id id, const vehicle_controls &c) {
   if (!std::isfinite(c.steer) || !std::isfinite(c.throttle) || !std::isfinite(c.brake) ||
       !std::isfinite(c.hand_brake))

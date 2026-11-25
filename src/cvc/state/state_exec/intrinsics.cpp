@@ -953,25 +953,37 @@ value_t intrinsic_self_uid(intrinsics_context *ctx, std::span<const value_t> arg
   return value_t(ctx->uid);
 }
 
+namespace {
+// Whose a control intrinsic's call is (S2-Q8, exec_router.h's owner rule): the stepping process's
+// owner, else the context's own process's, else "" (a host's context): "" sees and controls every
+// process of its scheduler, as before, and nothing in another group.
+std::string acting_owner(const intrinsics_context *ctx) {
+  const process *p = running_process(ctx);
+  return p ? p->owner : std::string();
+}
+} // namespace
+
+// kill, pause and resume under the owner rule (scheduler_base::control_as): another owner's pid is
+// unknown; a pid in another group of the caller's owner is posted there, #t for "requested".
 value_t intrinsic_kill(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "kill");
   require_sched(ctx, "kill");
   int pid = static_cast<int>(as_int(args[0], "kill"));
-  return value_t(ctx->sched->kill(pid));
+  return value_t(ctx->sched->control_as(acting_owner(ctx), pid, control_cmd::kind::kill));
 }
 
 value_t intrinsic_pause(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "pause");
   require_sched(ctx, "pause");
   int pid = static_cast<int>(as_int(args[0], "pause"));
-  return value_t(ctx->sched->pause(pid));
+  return value_t(ctx->sched->control_as(acting_owner(ctx), pid, control_cmd::kind::pause));
 }
 
 value_t intrinsic_resume(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 1, "resume");
   require_sched(ctx, "resume");
   int pid = static_cast<int>(as_int(args[0], "resume"));
-  return value_t(ctx->sched->resume(pid));
+  return value_t(ctx->sched->control_as(acting_owner(ctx), pid, control_cmd::kind::resume));
 }
 
 value_t intrinsic_sleep(intrinsics_context *ctx, std::span<const value_t> args) {
@@ -1154,9 +1166,13 @@ value_t intrinsic_ps(intrinsics_context *ctx, std::span<const value_t> args) {
   expect_exact(args, 0, "ps");
   require_sched(ctx, "ps");
   auto procs = ctx->sched->list_processes();
+  // The owner rule (S2-Q8): an owned caller lists only its owner's processes.
+  const std::string owner = acting_owner(ctx);
   std::vector<value_t> result;
   result.reserve(procs.size());
   for (auto &pi : procs) {
+    if (!owner.empty() && pi.owner != owner)
+      continue;
     // Each process → dict with key fields
     std::vector<std::pair<std::string, value_t>> entries;
     entries.emplace_back("pid", value_t(static_cast<int64_t>(pi.pid)));
@@ -1195,6 +1211,9 @@ value_t intrinsic_inspect(intrinsics_context *ctx, std::span<const value_t> args
   int pid = static_cast<int>(as_int(args[0], "inspect"));
   auto info = ctx->sched->get_process_info(pid);
   if (!info)
+    return nil_value();
+  // The owner rule (S2-Q8): another owner's process is unknown to an owned caller.
+  if (const std::string owner = acting_owner(ctx); !owner.empty() && info->owner != owner)
     return nil_value();
   std::vector<std::pair<std::string, value_t>> entries;
   entries.emplace_back("pid", value_t(static_cast<int64_t>(info->pid)));
@@ -1548,27 +1567,31 @@ value_t intrinsic_msg_send(intrinsics_context *ctx, std::span<const value_t> arg
       result.status == cvc::state::send_message_result::status_kind::delivered ? "delivered"
                                                                                : "error";
 
-  // Return value to the SENDER: {status, path} — unchanged contract (callers/tests rely on this).
-  std::vector<std::pair<std::string, value_t>> ret_entries;
-  ret_entries.emplace_back("status", value_t(status_str));
-  ret_entries.emplace_back("path", value_t(result.resolved_path));
-  auto ret = make_dict(std::move(ret_entries));
-
   // Deliver an ENVELOPE to receivers on this channel: {status, path, content_type, payload}. The
   // payload keeps the ORIGINAL value type — a string stays a string, bytes stay bytes — so a
   // (msg-recv) on this channel gets the actual binary/text data (not just the {status,path} ack it
   // used to get). The SCHEDULER key is chroot-scoped (resolve_channel); the state-side sendMessage
   // above stays on the raw path — the two buses are independent, as before.
+  bool refused = false;
   if (ctx->sched) {
     std::vector<std::pair<std::string, value_t>> env_entries;
     env_entries.emplace_back("status", value_t(status_str));
     env_entries.emplace_back("path", value_t(result.resolved_path));
     env_entries.emplace_back("content_type", value_t(content_type));
     env_entries.emplace_back("payload", args[1]); // original value_t — binary preserved
-    ctx->sched->deliver_to_receivers(resolve_channel(ctx, path), make_dict(std::move(env_entries)));
+    // -1: the key's home, in another group, refused it at its ingress cap (S2-Q10).
+    refused = ctx->sched->deliver_to_receivers(resolve_channel(ctx, path),
+                                               make_dict(std::move(env_entries))) == -1;
   }
 
-  return ret;
+  // Return value to the SENDER: {status, path} — unchanged contract (callers/tests rely on this),
+  // and {status "error", path, reason "ingress full"} when the home refused it (S2-Q10, MS-10).
+  std::vector<std::pair<std::string, value_t>> ret_entries;
+  ret_entries.emplace_back("status", value_t(refused ? std::string("error") : status_str));
+  ret_entries.emplace_back("path", value_t(result.resolved_path));
+  if (refused)
+    ret_entries.emplace_back("reason", value_t(std::string("ingress full")));
+  return make_dict(std::move(ret_entries));
 }
 
 value_t intrinsic_msg_recv(intrinsics_context *ctx, call_args args) {

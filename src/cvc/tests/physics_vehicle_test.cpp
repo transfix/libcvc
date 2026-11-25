@@ -189,6 +189,32 @@ TEST(PhysicsVehicle, TheSteerSlewsAtItsRateAndTheWheelsFollowAckermann) {
   EXPECT_NEAR(w.vehicle_state(v).steer, d.max_steer, 1e-12);
 }
 
+// The actuator put at an angle (world::set_vehicle_steer, ARIADNE_WORLDS.md OW5r): the state
+// reads it at once, the wheels take its Ackermann angles at the next step, and it slews on from
+// there toward the command at its rate. Clamped to the lock; a non-finite angle is refused.
+TEST(PhysicsVehicle, TheSteerCanBePutAtAnAngle) {
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  flat_ground(w, 0.9);
+  const vehicle_id v = settled_humvee(w);
+  const vehicle_desc d = vehicle_desc::humvee();
+  w.drive(v, {0.0, 0.0}); // the command: straight
+  w.set_vehicle_steer(v, 0.3);
+  EXPECT_NEAR(w.vehicle_state(v).steer, 0.3, 1e-12) << "the actuator there at once";
+  w.step();
+  const vehicle_state s = w.vehicle_state(v);
+  const double rate = d.max_steer_rate * w.config().fixed_dt;
+  EXPECT_NEAR(s.steer, 0.3 - rate, 1e-12) << "one step's slew back toward straight";
+  ASSERT_EQ(s.wheels.size(), 4u);
+  EXPECT_GT(s.wheels[0].steer, 0.25) << "the front wheels turned from it, not from straight";
+  EXPECT_EQ(s.wheels[2].steer, 0.0);
+  w.set_vehicle_steer(v, 5.0);
+  EXPECT_NEAR(w.vehicle_state(v).steer, d.max_steer, 1e-12) << "clamped to the lock";
+  w.set_vehicle_steer(v, -5.0);
+  EXPECT_NEAR(w.vehicle_state(v).steer, -d.max_steer, 1e-12);
+  EXPECT_THROW(w.set_vehicle_steer(v, std::nan("")), cvc::physics_error);
+}
+
 // --- the driver ------------------------------------------------------------------------
 
 // Gate (2): whatever a_cmd does, the driver presses the throttle or the brake, never both.

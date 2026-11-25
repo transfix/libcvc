@@ -516,6 +516,9 @@ struct Widget {
   // `badge:` on an image: or a video: (§5.11): a text (or an expression giving one) drawn over the
   // picture, dimmed under it: a media grid's "+3" on its last tile.
   std::string badge;
+  // §5.29 an image: by URL or file, or a video:, offers Save image... / Save video... in its
+  // context menu; `save: false` leaves it out.
+  bool save_menu = true;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.

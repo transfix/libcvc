@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cvc/core/thread_class.h>
+#include <cvc/state/state_exec/exec_router.h>    // group_ref (S2b)
 #include <cvc/state/state_exec/heap.h>           // cycle_registry
 #include <cvc/state/state_exec/intrinsics.h>     // provider_affinity
 #include <cvc/state/state_exec/scheduler_base.h> // execute_options
@@ -206,6 +207,10 @@ public:
     std::optional<double> slice_seconds;
     /// Declared for L4 and Stage 2; ignored in Stage 1.
     cvc::thread_class thread_class = cvc::thread_class::normal;
+    /// Stage 2 (S2b, S2-Q10): the resolved key prefixes this group is the home of, registered with
+    /// its app's router by the constructor (exec_router::register_prefix), unregistered by its
+    /// teardown: Ariadne gives a document group its document prefix, a pooled Exec its chroot. A
+    /// key no group's prefix covers is homed at group 0. Ignored without an app.
     std::vector<std::string> channel_prefixes;
     /// Tests: called inside each pump, holding the token (GR-12 throws from it).
     std::function<void(exec_group &)> pump_hook_for_test;
@@ -289,6 +294,10 @@ public:
   /// of it).
   bool pumping_here() const;
   const options &opts() const;
+  /// Stage 2 (S2b): the handle the app's router and directory name this group by (its scheduler's
+  /// route_self()); empty for a group with no app. Its teardown closes it (S2-Q10's rehoming),
+  /// right after the lock port's close and before the kills.
+  const group_ref &route() const noexcept;
 
 private:
   struct impl;

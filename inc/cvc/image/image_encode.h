@@ -21,7 +21,8 @@
 namespace cvc {
 
 // `img` as PNG, its first row at the top. Grey, grey + alpha, RGB and RGBA u8 keep their channels;
-// any other format or type is converted to RGBA u8 first. Throws std::runtime_error on an empty
+// grey u16 is written at 16 bits (a height map: a world bundle's export/heightmap.png); any other
+// format or type is converted to RGBA u8 first. Throws std::runtime_error on an empty
 // image or a failed encode. Thread-safe.
 std::string encode_png(const image &img);
 

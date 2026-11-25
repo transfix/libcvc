@@ -1579,6 +1579,56 @@ TEST(HolonSyncTest, TheClientPumpHoldsTheVehiclesWeShow) {
   EXPECT_TRUE(client.held_entities().empty()) << "gone from the room, let go";
 }
 
+// The room's avatars for the car we drive (OW5p): client_pump marks a peer aboard when a vehicle
+// the room shows carries it, so the holon holds the avatars on foot for the car to meet and not
+// one whose pose is its vehicle's.
+TEST(HolonSyncTest, TheClientPumpTellsTheAvatarsOnFootFromThoseAboard) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::seed_default_scene(app, room);
+  for (const char *pid : {"ann", "bob", "cat"})
+    conf::room_join(app, room, pid);
+  body_state ann, bob, cat;
+  ann.position = vec3{-6.0, 5.0, 0.0};
+  bob.position = vec3{2.0, -5.0, 0.0};
+  cat.position = vec3{4.0, 0.0, 0.75}; // driving: its vehicle's pose
+  cvc::ariadne::write_pose(app, room, "ann", ann, 100);
+  cvc::ariadne::write_pose(app, room, "bob", bob, 100);
+  cvc::ariadne::write_pose(app, room, "cat", cat, 100);
+  conf::room_entity driven;
+  driven.id = 1;
+  driven.archetype = "humvee";
+  driven.size = {4.5, 2.0, 1.5};
+  driven.driver = "cat";
+  conf::write_room_entities(app, room, {driven});
+  cvc::ariadne::entity_playout playout;
+  ASSERT_TRUE(playout.apply(conf::entity_pid(1), cat, 100));
+  holon client(holon_role::client, cvc::ariadne::room_holon_config());
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  std::vector<cvc::ariadne::vehicle_obstacle> avatars;
+  for (const cvc::ariadne::vehicle_obstacle &o : client.held_obstacles())
+    if (o.mass > 0.0)
+      avatars.push_back(o);
+  ASSERT_EQ(avatars.size(), 1u) << "bob on foot; not cat, aboard its vehicle; not ann";
+  EXPECT_NEAR(avatars[0].at.position.x, 2.0, 0.05);
+  EXPECT_NEAR(avatars[0].at.position.y, -5.0, 0.05);
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{1}) << "cat's vehicle is held";
+
+  conf::room_entity parked = driven; // cat gets out
+  parked.driver.clear();
+  conf::write_room_entities(app, room, {parked});
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  std::size_t n = 0;
+  for (const cvc::ariadne::vehicle_obstacle &o : client.held_obstacles())
+    n += o.mass > 0.0 ? 1 : 0;
+  EXPECT_EQ(n, 2u) << "out, cat is on foot too";
+}
+
 // The vehicle we drive, predicted (section 18.5, OW5b): with the room's entities saying how it
 // runs (the kinematic plant's numbers, room_entity::drive), client_pump keeps us local and the
 // holon predicts it; a vehicle on another plant is played out as before; out, the walker again.

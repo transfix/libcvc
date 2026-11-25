@@ -886,6 +886,11 @@ Exec::Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &
   exec_group::options opts;
   opts.name = name;
   opts.app = app.get();
+  // Its programs' owner tag (S2-Q7), which their spawned and forked children keep: one pooled Exec
+  // controls none of another's processes (exec_router.h, the owner rule). Its chroot is its group's
+  // channel prefix (S2.md section 0, row 23), so its channels are homed here and stay local.
+  opts.owner = "pycvc:" + name;
+  opts.channel_prefixes = {name};
   impl_ = std::make_shared<ExecImpl>(std::make_unique<exec_group>(std::move(opts)));
   impl_->app = app;
   impl_->root = &root;
@@ -1278,17 +1283,18 @@ PyObject *Exec::lock_query(const std::string &prefix) {
     abs = cvc::state_exec::detail::resolve_lock_key(ctx, prefix, "Exec.lock_query");
   // Straight to the manager, from any thread (docs/STATE_EXEC_LOCKS.md 7.4): it never waits for
   // run() or the control mutex, only for the manager's mutex, which nothing holds while it waits
-  // for the GIL. The home is the viewer (only this Exec's pids show, owner ""): its manager and id
-  // are copied while the GIL is held, and the home itself is never touched without it. The GIL is
-  // released for the query and taken back once it has returned, and only then are Python objects
-  // made.
+  // for the GIL. The home is the viewer, with the owner its programs run as (a pooled Exec's tag,
+  // S2-Q7; a plain Exec's ""), so only this Exec's pids show: its manager and id are copied while
+  // the GIL is held, and the home itself is never touched without it. The GIL is released for the
+  // query and taken back once it has returned, and only then are Python objects made.
   const lock_home &home = *impl->sched.locks();
   const std::shared_ptr<lock_manager> manager = home.manager_ptr();
   const cvc::state_exec::detail::home_id viewer = home.id();
+  const std::string owner = impl->group ? impl->group->opts().owner : std::string();
   lock_query_result r;
   {
     gil_released nogil;
-    r = manager->table().query(abs, viewer, "");
+    r = manager->table().query(abs, viewer, owner);
   }
   return value_to_py(lock_query_value(r, ctx.root_path));
 }
@@ -1343,7 +1349,8 @@ void batch_notify(void *ctx) noexcept {
 
 std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                                  std::span<const std::string> programs,
-                                                 bool fresh_env, batch_control &control) {
+                                                 bool fresh_env, batch_control &control,
+                                                 cvc::app &app) {
   using clock = std::chrono::steady_clock;
   // A group's slice per round, as run()'s.
   static constexpr uint64_t kSliceSteps = 2000000;
@@ -1470,6 +1477,44 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
     }
     return false;
   };
+  // Group 0, the home of the pooled programs' keys outside every chroot (exec_router.h's homes),
+  // which no pooled pump drains. Once it exists (app::exec_scheduler_probe, which never builds it),
+  // this thread drains it before each round while it has posts, so what the batch posted there (a
+  // send, a subscribe) is applied and its deliveries reach the pooled groups. Its own processes are
+  // not stepped. Its pump owner is taken, not checked first: held by another thread (an Ariadne
+  // frame, kill_owner, another pool's batch), the take throws kPumpedElsewhereError and this round
+  // skips the drain, which that thread's pump does. Never from inside one of its own steps (run_all
+  // called by a host function of it), where a drain would apply posts under the step: the batch
+  // leaves it then.
+  async_scheduler *group0 = nullptr;
+  bool leave_group0 = false;
+  const auto group0_now = [&]() -> async_scheduler * {
+    if (group0 == nullptr)
+      group0 = app.exec_scheduler_probe(); // once built, it lives as long as the app
+    return leave_group0 ? nullptr : group0;
+  };
+  // Posts there this thread could drain now (not another thread's to drain): a reason to round.
+  const auto group0_posted = [&] {
+    async_scheduler *const g = group0_now();
+    return g != nullptr && g->has_pending_ingress() && !g->pumped_elsewhere();
+  };
+  const auto drain_group0 = [&] {
+    async_scheduler *const g = group0_now();
+    if (g == nullptr || !g->has_pending_ingress())
+      return;
+    std::optional<async_scheduler::pump_owner_scope> owner;
+    try {
+      owner.emplace(*g);
+    } catch (const std::runtime_error &e) {
+      if (std::string_view(e.what()) != kPumpedElsewhereError)
+        throw;
+      return;
+    }
+    if (g->current_pid() >= 0)
+      leave_group0 = true;
+    else
+      g->drain_ingress();
+  };
   // The batch wait (S2-Q6): for the batch, a post to any pooled group calls batch_notify. Every
   // notifier is cleared on each way out, after the last kernel has ended, before the batch returns.
   control.posted.store(false, std::memory_order_relaxed);
@@ -1497,6 +1542,7 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
           try {
             execute_options opts;
             opts.name = "pycvc";
+            opts.owner = s.impl->group->opts().owner; // its pooled Exec's tag (S2-Q7)
             opts.env = fresh_env ? environment::extend(s.impl->natives) : s.impl->env;
             s.pid = s.impl->group->execute(programs[s.prog], opts);
             s.idle_deadline =
@@ -1506,6 +1552,7 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
           }
         }
       }
+      drain_group0();
       groups.clear();
       for (slot &s : slots)
         if (s.pid >= 0) {
@@ -1534,13 +1581,15 @@ std::vector<Exec::batch_outcome> Exec::run_batch(cvc::exec_pool &pool, std::span
         continue;
       // Pump again at once only for what a pump would do now: a runnable process, a program to
       // start, a post since the round began (the batch flag: a message, a kernel's result, a
-      // control or a lock post, to any group), or a deadline of a group's run report already
-      // passed. Otherwise the batch waits once for all its groups (S2-Q6), until the earliest of
-      // their reports' deadlines (a timer, a call's timeout or charge, the 1 ms beat of a process
-      // waiting for the next frame, as run() beats it, a collection falling due) and their idle
-      // limits, at most kMaxBatchWait. The reports are read here, after the join, as the round's
-      // other state is; no group's wait_for_work blocks while the batch's notifier is installed.
-      bool work = false;
+      // control or a lock post, to any group; or a post to group 0 this thread drains), or a
+      // deadline of a group's run report already passed. Otherwise the batch waits once for all
+      // its groups (S2-Q6), until the earliest of their reports' deadlines (a timer, a call's
+      // timeout or charge, the 1 ms beat of a process waiting for the next frame, as run() beats
+      // it, a collection falling due) and their idle limits, at most kMaxBatchWait. The reports are
+      // read here, after the join, as the round's other state is; no group's wait_for_work blocks
+      // while the batch's notifier is installed. (Group 0 gets no notifier: a post to it from
+      // outside the batch is found at the wait's end.)
+      bool work = group0_posted();
       std::size_t parked = 0;
       clock::time_point until = clock::now() + kMaxBatchWait;
       bool precise = false; // `until` is a sleeper's or a timed wait's (wakeup::wait_until)

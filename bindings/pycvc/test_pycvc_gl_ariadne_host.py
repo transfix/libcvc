@@ -295,7 +295,8 @@ def run_example(name, argv):
         if not self._closed:
             captured.update({k: self.get(k) for k in ("clicks", "stats", "spread.n", "learn.s",
                                                        "stats.trips", "stats.time",
-                                                       "stats.plant", "stats.world")})
+                                                       "stats.plant", "stats.world",
+                                                       "stats.status")})
         _real(self)
 
     Host.close = keep
@@ -453,6 +454,14 @@ def gl_child(tmp):
             check(captured[expect[0]] == expect[1], f"example {name}: {expect} ({captured})")
             if name == "data_feed":
                 check(captured["learn.s"] == "3", f"data_feed charts three series ({captured})")
+        import pycvc
+
+        if hasattr(pycvc, "NavCophFleet"):  # coph: CoPH's crossing, natively, drawn as a picture
+            png = os.path.join(tmp, "coph.png")
+            got = run_example("coph", ["--offscreen", "--frames", "60", "--png", png])
+            check(got["rc"] == 0 and os.path.getsize(png) > 0, "example coph ran offscreen")
+            check(float(got["stats.time"]) > 20.0 and got["stats.status"] == "running",
+                  f"example coph stepped its fleet ({got})")
         for plant in ("kinematic", "jolt"):  # nav: the fleet, the routes, the readouts, drawn
             png = os.path.join(tmp, f"nav_{plant}.png")
             got = run_example("nav", ["--offscreen", "--frames", "60", "--png", png, "--no-bundle",

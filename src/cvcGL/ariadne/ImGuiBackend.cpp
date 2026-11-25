@@ -248,7 +248,7 @@ struct ImGuiBackend::TextViewState {
 // the bell's menu), under an id of its own: a field's comes from the field's id; a text's, from its
 // place among the texts under the same id stack this frame, as a rich text's links are.
 struct ImGuiBackend::ContextMenus {
-  enum class Kind { Text, Field, TextView, Selection };
+  enum class Kind { Text, Field, TextView, Selection, Save };
   static constexpr float kLongPress = 0.5f; // s a finger stays still for a menu
 
   // The menu open, and what it offers.
@@ -269,6 +269,11 @@ struct ImGuiBackend::ContextMenus {
   // next_item_copy's text, for the next item.
   std::string next_copy;
   bool have_next_copy = false;
+
+  // §5.29 a picture's: what its Save saves; and in a browser, whether its Save item is under the
+  // pointer this frame, and whether the page was last told it is (browser_save_arm).
+  cvc::ariadne::MediaSave save;
+  bool save_arm_now = false, save_armed = false;
 
   // A long press (a finger held still kLongPress s) opens the menu of the item under it. The menu
   // takes no click until the finger has lifted: the release would pick what opened under it.
@@ -312,12 +317,14 @@ struct ImGuiBackend::ContextMenus {
     return clicked;
   }
 
-  ImGuiID text_id() {
+  ImGuiID text_id() { return nth_id("##cvc.copy"); }
+  ImGuiID save_id() { return nth_id("##cvc.save"); } // §5.29 a picture's, as a text's
+  ImGuiID nth_id(const char *what) {
     if (frame != ImGui::GetFrameCount()) {
       frame = ImGui::GetFrameCount();
       seen.clear();
     }
-    const ImGuiID key = ImGui::GetID("##cvc.copy");
+    const ImGuiID key = ImGui::GetID(what);
     const int nth = seen[key]++;
     return ImHashData(&nth, sizeof nth, key);
   }
@@ -440,6 +447,14 @@ struct ImGuiBackend::ContextMenus {
       if (item("Select all", (m + "A").c_str(), !select.empty()))
         select_all = true;
       break;
+    case Kind::Save: { // §5.29 the core saves it, from its next drain
+      const bool clicked = item(save.video ? "Save video..." : "Save image...", nullptr, true);
+      if (ImGui::IsItemHovered())
+        save_arm_now = true; // a browser page's release over it downloads it, inside the click
+      if (clicked)
+        be->media_save_chosen(save);
+      break;
+    }
     }
   }
 
@@ -614,6 +629,14 @@ struct ImGuiBackend::ContextMenus {
       armed = arm_now;
     }
     arm_now = 0;
+#ifdef __EMSCRIPTEN__
+    if (save_arm_now != save_armed) { // §5.29 so does it over a Save item
+      const std::string key = cvc::ariadne::media_save_key(save);
+      cvc::ariadne::browser_save_arm(save_arm_now ? &key : nullptr);
+      save_armed = save_arm_now;
+    }
+#endif
+    save_arm_now = false;
   }
 };
 #else
@@ -637,6 +660,27 @@ void ImGuiBackend::next_item_copy(const std::string &text) {
   cm.have_next_copy = true;
 #else
   (void)text;
+#endif
+}
+
+void ImGuiBackend::item_save(const cvc::ariadne::MediaSave &m) {
+#ifdef CVC_ENABLE_IMGUI
+  ContextMenus &cm = context_menus();
+  const ImGuiID id = cm.save_id();
+  if (cm.requested(false)) {
+    cm.kind = ContextMenus::Kind::Save;
+    cm.save = m;
+    cm.open(id);
+#ifdef __EMSCRIPTEN__
+    media_save_prepare(m); // the page fetches it while the pointer goes to Save
+#endif
+  }
+  if (cm.begin(id)) {
+    cm.draw();
+    cm.end();
+  }
+#else
+  (void)m;
 #endif
 }
 
@@ -3367,10 +3411,98 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
 #endif
 }
 
+// §5.29 the Save dialog: what SDL answers (on its thread, under `m`), and what it needs until then.
+struct ImGuiBackend::SaveDialog {
+  std::mutex m;
+  bool answered = false;
+  std::string path, error;
+  cvc::ariadne::SavePathDone done; // the drawing thread's
+  std::string filter_name, filter_pattern, location, title;
+#ifdef CVC_IMGUI_FILE_DIALOG
+  SDL_DialogFileFilter filter{nullptr, nullptr};
+#endif
+};
+
+bool ImGuiBackend::ask_save_path(const cvc::ariadne::SavePathRequest &req,
+                                 cvc::ariadne::SavePathDone done) {
+#ifdef CVC_IMGUI_FILE_DIALOG
+  if (SDL_WasInit(SDL_INIT_VIDEO) == 0 || m_saveDialog)
+    return false;
+  auto d = std::make_shared<SaveDialog>();
+  d->done = std::move(done);
+  const std::string ext = cvc::ariadne::mime_extension(req.mime);
+  if (!ext.empty()) {
+    const std::string major = req.mime.substr(0, req.mime.find('/'));
+    d->filter_name = major == "image" ? "Image" : major == "video" ? "Video" : "File";
+    d->filter_name += " (." + ext + ")";
+    d->filter_pattern = ext;
+    d->filter = SDL_DialogFileFilter{d->filter_name.c_str(), d->filter_pattern.c_str()};
+  }
+  // In the Downloads folder, the name filled in, as a browser asks; the system's choice of folder
+  // when there is none.
+  const std::string dir = cvc::ariadne::downloads_dir();
+#ifdef _WIN32
+  d->location = dir.empty() ? req.name : dir + "\\" + req.name;
+#else
+  d->location = dir.empty() ? req.name : dir + "/" + req.name;
+#endif
+  d->title = req.title;
+  m_saveDialog = d;
+  auto *keep = new std::shared_ptr<SaveDialog>(d);
+  const SDL_PropertiesID props = SDL_CreateProperties();
+  if (!d->filter_pattern.empty()) {
+    SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, &d->filter);
+    SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
+  }
+  SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, SDL_GetKeyboardFocus());
+  SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, d->location.c_str());
+  if (!d->title.empty())
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, d->title.c_str());
+  SDL_ShowFileDialogWithProperties(
+      SDL_FILEDIALOG_SAVEFILE,
+      [](void *userdata, const char *const *filelist, int) {
+        std::unique_ptr<std::shared_ptr<SaveDialog>> held(
+            static_cast<std::shared_ptr<SaveDialog> *>(userdata));
+        SaveDialog &st = **held;
+        std::lock_guard<std::mutex> lock(st.m);
+        if (!filelist) {
+          const char *why = SDL_GetError();
+          st.error = why && *why ? why : "the save dialog failed";
+        } else if (*filelist) {
+          st.path = *filelist; // none: the user cancelled
+        }
+        st.answered = true;
+      },
+      keep, props);
+  SDL_DestroyProperties(props);
+  return true;
+#else
+  (void)req;
+  (void)done;
+  return false;
+#endif
+}
+
 void ImGuiBackend::begin_frame() {
 #ifdef CVC_ENABLE_IMGUI
   context_menus().begin_frame(); // §5.28 a long press
 #endif
+  if (m_saveDialog) { // §5.29 the Save dialog's answer, to the core
+    const std::shared_ptr<SaveDialog> d = m_saveDialog;
+    std::string path, error;
+    bool answered = false;
+    {
+      std::lock_guard<std::mutex> lock(d->m);
+      answered = d->answered;
+      path = std::move(d->path);
+      error = std::move(d->error);
+    }
+    if (answered) {
+      m_saveDialog.reset();
+      if (d->done)
+        d->done(std::move(path), std::move(error));
+    }
+  }
   if (!m_fileDialog)
     return;
   const std::shared_ptr<FileDialog> d = m_fileDialog;

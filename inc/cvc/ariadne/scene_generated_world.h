@@ -133,6 +133,8 @@ struct GeneratedWorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
       color, request, status, props, building_count, occupied, terrain, water, terrain_gen, city,
       terrain_file, edge, busy, progress, phase, autoregen, pending;
+  // Save (a "save" request): world.save.file, world.save.exports, world.save.status.
+  std::string save_file, save_exports, save_status;
 };
 
 // The keys for node n under `bind_prefix`, each seeded from `base` (and `color`, a
@@ -178,12 +180,21 @@ void publish_generated_world_stats(cvc::app &app, const GeneratedWorldKeys &k,
 // request key is cleared.
 struct GeneratedWorldPoll {
   bool stop = false;    // a "stop" request
+  bool save = false;    // a "save" request: save_generated_world
   bool rebuild = false; // make a new world from `params`
   cvc::world::generated_world_params params;
 };
 GeneratedWorldPoll poll_generated_world(cvc::app &app, const GeneratedWorldKeys &k,
                                         const cvc::world::generated_world_params &base, int &preset,
                                         std::string &sig);
+
+// A "save" request (world_controls' Save, ARIADNE_WORLDS section 18.8, GB4): the node's dataset at
+// `data_path`, the world shown, saved as world.save.file (data_save_files: a directory beside the
+// document, or a zip when it ends in .zip; in a browser a zip download), with its files for other
+// software (export/: the terrain as a glb, a 16-bit height map) when world.save.exports is on.
+// world.save.status says where it went, or "error: " and why. Returns true when it saved.
+bool save_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const std::string &data_path,
+                          const std::string &base_dir);
 
 // The world's colliders: its terrain and its buildings (cvc::world::generated_world::geometry, the
 // collide items).
