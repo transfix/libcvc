@@ -3780,6 +3780,7 @@ TEST(AriadneFtxuiHosted, AHostedContextMenuIsAModelForTheHost) {
   t.draw();
   FtxuiBackend::HostedContextMenu m = t.be.hosted_context_menu();
   ASSERT_TRUE(m.open);
+  EXPECT_TRUE(m.by_key) << "Shift+F10 opened it: the host lights its first entry";
   EXPECT_EQ(m.win, "cards");
   ASSERT_EQ(m.items.size(), 2u) << "the checkbox has no entries of its own: the card's two";
   EXPECT_EQ(m.items[0].label, "Open card");

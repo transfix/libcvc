@@ -396,10 +396,12 @@ public:
   // (Options::host_draws_context_menu): `win`, its window ("" the body outside every window), the
   // cell it hangs from in that body, and its entries: the leaf's own (ids "ctx#<i>"), then the
   // document's context_menu: items. `serial` is one more for each menu opened, so the host shows
-  // each once. Not open: `open` false.
+  // each once; `by_key`: a key opened it (the Menu key, Shift+F10), so its first entry starts lit.
+  // Not open: `open` false.
   struct HostedContextMenu {
     bool open = false;
     long serial = 0;
+    bool by_key = false;
     std::string win;
     int x = 0, y = 0;
     std::vector<HostedMenuItem> items;

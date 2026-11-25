@@ -14,6 +14,7 @@
 //     close box -> close_window. Destroying a window waits for the next sync, which runs only
 //     after the event that asked for it has finished, so no view is deleted under its own feet.
 
+#include <algorithm> // min: a context popup kept on the desktop
 #include <chrono>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
@@ -36,7 +37,9 @@
 #define Uses_TKeys
 #define Uses_TMenu
 #define Uses_TMenuBar
+#define Uses_TMenuBox
 #define Uses_TMenuItem
+#define Uses_TMenuPopup
 #define Uses_TPalette
 #define Uses_TProgram
 #define Uses_TRect
@@ -316,6 +319,47 @@ constexpr const char *kTrayMore = "##tray.more"; // the overflow icon's id
 constexpr ushort cmAriTrayBase = 30000;          // tray popup item k: cmAriTrayBase + k
 constexpr ushort cmAriContextBase = 40000;       // context menu item k: cmAriContextBase + k
 
+// §5.28 / §5.30 a context menu's popup: tvision's TMenuPopup, except that one a key opened has its
+// first entry lit, as the terminal backend's list has, so Enter picks it at once (tvision's own
+// popups light nothing until an arrow key).
+class ContextPopup : public TMenuPopup {
+public:
+  ContextPopup(const TRect &r, TMenu *m, bool lit) : TMenuPopup(r, m), lit_(lit) {}
+  ushort execute() override {
+    menu->deflt = nullptr;
+    if (lit_)
+      for (TMenuItem *i = menu->items; i; i = i->next)
+        if (i->name && !i->disabled) {
+          menu->deflt = i;
+          break;
+        }
+    return TMenuBox::execute(); // TMenuView's loop, past TMenuPopup's unlit start
+  }
+
+private:
+  bool lit_;
+};
+
+// popupMenu with a ContextPopup: placed as tvision places its popups (below `where`, absolute, kept
+// inside the desktop's bottom right), run, disposed. Owns `items`. Returns the command chosen, 0
+// for none.
+ushort context_popup(TPoint where, TMenuItem &items, bool lit) {
+  TGroup *app = TProgram::application;
+  if (!app)
+    return 0;
+  const TPoint p = app->makeLocal(where);
+  auto *popup = new ContextPopup(TRect(p, p), new TMenu(items), lit);
+  TRect r = popup->getBounds();
+  const TPoint d = app->size - p;
+  r.move(std::min(popup->size.x, d.x), std::min(popup->size.y + 1, d.y));
+  if (r.contains(p) && r.b.y - r.a.y < p.y)
+    r.move(0, -(r.b.y - p.y));
+  popup->setBounds(r);
+  const ushort res = app->execView(popup);
+  TObject::destroy(popup); // and its menu, the items with it
+  return res;
+}
+
 class App : public TApplication {
 public:
   explicit App(Host &host)
@@ -530,8 +574,7 @@ struct Host {
     }
     const TPoint where = body ? body->makeGlobal(TPoint{cm.x, cm.y}) : TPoint{cm.x, cm.y};
     in_context = true;
-    // popupMenu owns the items it is given: it builds its menu from them and frees them after.
-    const ushort c = popupMenu(where, *first, nullptr);
+    const ushort c = context_popup(where, *first, cm.by_key);
     in_context = false;
     const bool picked =
         c >= cmAriContextBase && static_cast<std::size_t>(c - cmAriContextBase) < ids.size();

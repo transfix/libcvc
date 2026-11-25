@@ -2974,6 +2974,7 @@ FtxuiBackend::HostedContextMenu FtxuiBackend::hosted_context_menu() const {
     return h;
   h.open = true;
   h.serial = m.ctx_serial;
+  h.by_key = m.ctx.via == "key";
   h.win = m.ctx.win;
   h.x = m.ctx.x;
   h.y = m.ctx.y;

@@ -6013,7 +6013,8 @@ windows:
   the Menu key or Shift+F10 on the focused widget (with nothing focused, the document's), the menu
   hanging under it, and a right-click under the pointer; Up, Down, Enter and Esc work it. tvision:
   the same keys and clicks, the menu a popup of tvision's own at that place, so a short window
-  does not cut it off. An item that runs closes the menu.
+  does not cut it off; opened by a key, its first entry is lit, so Enter picks it (tvision's own
+  popups light nothing until an arrow key). An item that runs closes the menu.
 - **`event`:** its items' programs (`on:`, and the `on:` of a bound item) and their
   `visible_when:`, `enabled_when:` and `disabled_when:` see an `event` dict, taken when the menu
   opened and kept while it stays open:
