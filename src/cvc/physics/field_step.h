@@ -128,6 +128,15 @@ private:
   std::exception_ptr _error;
 };
 
+// Which of a fluid's wake's waves field_set::water_at adds (field::wake): none, or every body's
+// (`body` invalid), or the others' as `body` feels them, never its own. Outside field_set, so
+// water_at can default it: a nested class's member initializers are not usable in a default
+// argument inside the enclosing class (GCC and Clang refuse it; MSVC takes it).
+struct water_wake_read {
+  bool on = false;
+  body_id body;
+};
+
 class field_set {
 public:
   // Throw cvc::physics_error for a field world::add_field refuses.
@@ -163,12 +172,7 @@ public:
     const auto it = _bodies.find(id.value);
     return it == _bodies.end() ? vec3{} : it->second.center_of_mass;
   }
-  // Which of a fluid's wake's waves water_at adds (field::wake): none, or every body's (`body`
-  // invalid), or the others' as `body` feels them, never its own.
-  struct wake_read {
-    bool on = false;
-    body_id body;
-  };
+  using wake_read = water_wake_read;
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
   // in x and y and reaches below it. False if none does; `out` is then dry and still. With
   // `wake.on` its wake's waves too: their height in the top, their motion at p's depth below it
