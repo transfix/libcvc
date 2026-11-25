@@ -14,7 +14,7 @@
 
 #include "ImGuiKeyNames.h" // VTK's key names (X11's, or a browser's) as ImGui keys
 #ifdef CVC_ENABLE_SDL
-#include "SdlWindow.h" // the window's display scale: the UI's pixel ratio natively
+#include "SdlWindow.h" // the window's display scale (the UI's pixel ratio natively), its Cmd key
 #endif
 
 #include <cvc/gl/CameraController.h>
@@ -935,12 +935,34 @@ struct ImGuiOverlay::Impl {
       // or code-editor panel). Without this ImGui never receives keys, so an
       // active InputText sets WantCaptureKeyboard yet no character ever lands.
       // VTK exposes only aggregate modifier state (no left/right split), so feed
-      // ImGui the combined mods; it derives io.KeyCtrl/Shift/Alt from these.
+      // ImGui the combined mods; it derives io.KeyCtrl/Shift/Alt/Super from these.
       const bool down = (eid == vtkCommand::KeyPressEvent);
-      io.AddKeyEvent(ImGuiMod_Ctrl, interactor->GetControlKey() != 0);
+      const bool ctrl = interactor->GetControlKey() != 0;
+      ImGuiKey key = imguiKeyForVtkKeySym(interactor->GetKeySym());
+#ifdef CVC_ENABLE_SDL
+      if (const auto *sdl = SdlRenderWindowInteractor::SafeDownCast(interactor)) {
+        // SDL's window tells Ctrl from the GUI key (Cmd on a Mac). ImGui gets each as it is, as
+        // imgui_impl_sdl3 hands them over, and on a Mac swaps them itself.
+        io.AddKeyEvent(ImGuiMod_Ctrl, ctrl);
+        io.AddKeyEvent(ImGuiMod_Super, sdl->GetSuperKey() != 0);
+      } else
+#endif
+      {
+        // VTK's own window has one control flag, which its Cocoa view sets for Cmd or Ctrl
+        // (vtkCocoaGLView.mm). ImGui with ConfigMacOSXBehaviors (its default on Apple) swaps Cmd
+        // and Ctrl in AddKeyEvent, so there the flag goes in as Super and comes out as ImGui's
+        // shortcut key: Cmd+Z, C, V, X and A work in a field. Sent as Ctrl it came out as Super,
+        // and Cmd+Z did nothing and Cmd+C typed a "c". The Control_L the view reports for the flag
+        // goes in as Super too.
+        const bool mac = io.ConfigMacOSXBehaviors;
+        io.AddKeyEvent(mac ? ImGuiMod_Super : ImGuiMod_Ctrl, ctrl);
+        if (mac && key == ImGuiKey_LeftCtrl)
+          key = ImGuiKey_LeftSuper;
+        else if (mac && key == ImGuiKey_RightCtrl)
+          key = ImGuiKey_RightSuper;
+      }
       io.AddKeyEvent(ImGuiMod_Shift, interactor->GetShiftKey() != 0);
       io.AddKeyEvent(ImGuiMod_Alt, interactor->GetAltKey() != 0);
-      const ImGuiKey key = imguiKeyForVtkKeySym(interactor->GetKeySym());
       if (key != ImGuiKey_None)
         io.AddKeyEvent(key, down);
       break;

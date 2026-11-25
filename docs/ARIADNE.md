@@ -4745,7 +4745,8 @@ under the `pick:` key:
 - `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
   (empty elsewhere), and `axis` (`x`, `y` or `z`), the axis that slice looks down;
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
-  `drag` or `up`) and `view`;
+  `drag` or `up`) and `view`. The mods are ImGui's, so on a Mac `ctrl` is Cmd, the shortcut key,
+  and `super` is Control. VTK's own window reports both keys as one flag, which is `ctrl`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
 
 `on_pick:` then runs with those fields in `event`. `(get-attr event "node")` is the node, for

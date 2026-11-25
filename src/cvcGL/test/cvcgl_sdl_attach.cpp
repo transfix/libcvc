@@ -19,6 +19,7 @@
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/SdlInput.h>
+#include <cvc/gl/ariadne/ImGuiBackend.h> // setImGuiContext: cvcGL's imgui sees this context
 #include <string>
 #include <vector>
 #include <vtkCallbackCommand.h>
@@ -27,7 +28,12 @@
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 #ifdef CVC_ENABLE_SDL
+#include "../SdlWindow.h" // SdlRenderWindowInteractor::GetSuperKey
+
 #include <SDL3/SDL.h>
+#endif
+#ifdef CVC_ENABLE_IMGUI
+#include <imgui.h>
 #endif
 #ifdef _WIN32
 #include <windows.h>
@@ -247,6 +253,108 @@ int main() {
     view.processUIEvents();
   chk(timer != 0 && seen.has("timer:" + std::to_string(timer)), "a VTK timer ticks");
   iren->DestroyTimer(timer);
+
+  // Ctrl and the GUI key (Cmd on a Mac) stay apart: Ctrl is VTK's control flag, the GUI key the
+  // interactor's GetSuperKey (VTK has no flag for it). ImGuiOverlay hands ImGui each as it is, and
+  // ImGui's Mac behaviours make Cmd its shortcut key: Cmd+Z undoes in a field there, Ctrl+Z
+  // elsewhere.
+  {
+    auto *sdlIren = cvc::gl::SdlRenderWindowInteractor::SafeDownCast(iren);
+    int at[2] = {-1, -1}; // the control flag and GetSuperKey at the last press of Z
+    auto mods = vtkSmartPointer<vtkCallbackCommand>::New();
+    mods->SetClientData(at);
+    mods->SetCallback([](vtkObject *caller, unsigned long, void *at, void *) {
+      auto *sdl = static_cast<cvc::gl::SdlRenderWindowInteractor *>(caller);
+      if (sdl->GetKeySym() && std::string(sdl->GetKeySym()) == "z") {
+        static_cast<int *>(at)[0] = sdl->GetControlKey();
+        static_cast<int *>(at)[1] = sdl->GetSuperKey();
+      }
+    });
+    iren->AddObserver(vtkCommand::KeyPressEvent, mods);
+    key(id, SDLK_Z, true, SDL_KMOD_LGUI);
+    view.processUIEvents();
+    chk(sdlIren && at[0] == 0 && at[1] == 1, "GUI+Z: the GUI key is GetSuperKey, not Ctrl");
+    key(id, SDLK_Z, false, SDL_KMOD_LGUI);
+    key(id, SDLK_Z, true, SDL_KMOD_LCTRL);
+    view.processUIEvents();
+    chk(at[0] == 1 && at[1] == 0, "Ctrl+Z: Ctrl is the control flag, not GetSuperKey");
+    key(id, SDLK_Z, false, SDL_KMOD_LCTRL);
+    view.processUIEvents();
+    iren->RemoveObserver(mods);
+
+#ifdef CVC_ENABLE_IMGUI
+    // The overlay never renders here: the test runs ImGui's frames on its context, no GL.
+    for (const bool mac : {true, false}) {
+      const std::string on = mac ? " (Mac behaviours on)" : " (Mac behaviours off)";
+      cvc::gl::ImGuiOverlay ui(view);
+      ui.setTouchMode(false);
+      cvc::gl::ImGuiBackend::setImGuiContext(ui.imguiContext());
+      ImGuiIO &io = ImGui::GetIO();
+      io.ConfigMacOSXBehaviors = mac;
+      io.DisplaySize = ImVec2(240.0f, 160.0f);
+      // As the overlay's renderer does: the fonts (added at size 0) are baked as they are drawn.
+      // No GL: nothing uploads them.
+      io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+      char buf[32] = {};
+      bool focus = true, ctrl = false, super = false;
+      const auto frame = [&] {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+        ImGui::Begin("Keys");
+        if (focus)
+          ImGui::SetKeyboardFocusHere();
+        focus = false;
+        ImGui::InputText("##field", buf, sizeof buf);
+        ImGui::End();
+        ImGui::Render();
+        ctrl = io.KeyCtrl;
+        super = io.KeySuper;
+      };
+      const auto pump = [&] {
+        view.processUIEvents();
+        frame();
+      };
+      frame();
+      for (const char *c : {"a", "b"}) {
+        SDL_Event t{};
+        t.type = SDL_EVENT_TEXT_INPUT;
+        t.text.windowID = id;
+        t.text.text = c; // a literal: it outlives the queue
+        SDL_PushEvent(&t);
+        pump();
+      }
+      chk(std::string(buf) == "ab",
+          "typed text reaches the overlay's field: '" + std::string(buf) + "'" + on);
+      // The shortcut key: Cmd (GUI) on a Mac, Ctrl elsewhere.
+      const SDL_Keycode held = mac ? SDLK_LGUI : SDLK_LCTRL;
+      const SDL_Keymod mod = mac ? SDL_KMOD_LGUI : SDL_KMOD_LCTRL;
+      key(id, held, true, mod);
+      key(id, SDLK_Z, true, mod);
+      pump();
+      chk(ctrl && !super,
+          std::string(mac ? "Cmd" : "Ctrl") + " is ImGui's shortcut key (io.KeyCtrl)" + on);
+      key(id, SDLK_Z, false, mod);
+      key(id, held, false);
+      pump();
+      chk(std::string(buf) == "a", std::string(mac ? "Cmd" : "Ctrl") +
+                                       "+Z undoes the last character: '" + std::string(buf) + "'" +
+                                       on);
+      // The other one is Super, which undoes nothing.
+      const SDL_Keycode other = mac ? SDLK_LCTRL : SDLK_LGUI;
+      const SDL_Keymod otherMod = mac ? SDL_KMOD_LCTRL : SDL_KMOD_LGUI;
+      key(id, other, true, otherMod);
+      key(id, SDLK_Z, true, otherMod);
+      pump();
+      chk(super && !ctrl, std::string(mac ? "Ctrl" : "the GUI key") + " is ImGui's Super" + on);
+      key(id, SDLK_Z, false, otherMod);
+      key(id, other, false);
+      pump();
+      chk(std::string(buf) == "a", "and Super+Z undoes nothing: '" + std::string(buf) + "'" + on);
+      cvc::gl::ImGuiBackend::setImGuiContext(nullptr);
+    }
+#endif
+  }
 
   // A second SDL window: SDL has one queue, and each window's events reach its own interactor,
   // whichever interactor drains it.
