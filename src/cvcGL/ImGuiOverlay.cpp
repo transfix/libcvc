@@ -1073,6 +1073,7 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
     impl->clipboardText = cvc::gl::clipboard::get(*impl->app);
     return impl->clipboardText.c_str();
   };
+  cvc::gl::clipboard::install(); // in a browser, before the first Ctrl+V
 #ifdef __EMSCRIPTEN__
   // The system keyboard, for a phone (see the header): ImGui reports here, at the end of each
   // frame where it changed, whether a text field wants text and where its caret is.
