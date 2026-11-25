@@ -154,6 +154,7 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
   for (std::uint32_t id : _statics)
     _world->remove_body(bid(id));
   _statics.clear();
+  _ground.clear();
   for (const ph::field_id f : _static_fields)
     _world->remove_field(f);
   _static_fields.clear();
@@ -162,8 +163,15 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
       if (!s.geometry)
         continue;
       const ph::world_bodies made = ph::add_world_geometry(*_world, *s.geometry);
-      for (const auto &b : made.bodies)
+      for (const auto &b : made.bodies) {
         _statics.push_back(b.second.value);
+        if (s.ground) // its terrain, as SceneWorld marks a node's colliders
+          for (const cvc::world::geometry_item &it : s.geometry->items())
+            if (it.name == b.first && it.height_field()) {
+              _ground.push_back(b.second);
+              break;
+            }
+      }
       for (const auto &f : made.fields)
         _static_fields.push_back(f.second);
       continue;
@@ -201,7 +209,10 @@ void avatar_world::set_statics(const std::vector<avatar_static> &statics) {
       d.rotation = s.rotation;
     }
     d.motion = ph::motion_type::static_;
-    _statics.push_back(_world->add_body(d).value);
+    const ph::body_id made = _world->add_body(d);
+    _statics.push_back(made.value);
+    if (s.ground)
+      _ground.push_back(made);
   }
   for (auto &kv : _avatars)
     kv.second.id = create_avatar(kept[kv.first], kv.second.dynamic, kv.second.mass);

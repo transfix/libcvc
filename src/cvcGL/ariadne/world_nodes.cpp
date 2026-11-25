@@ -44,6 +44,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, dataset
 #include <cvc/ariadne/scene_wind.h>            // the scene's one wind, which the trees lean in
+#include <cvc/ariadne/shown_clock.h>           // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -452,7 +453,7 @@ void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
   if (on) {
     constexpr double kPi = 3.14159265358979323846, kSwayPeriod = 2.0 * kPi / 1.3;
     const double rad = sw->mean_dir() * kPi / 180.0, u = sw->mean_speed() / 9.0,
-                 t = app.world_clock().t();
+                 t = ari::shown_time(app, rt.prefix, app.world_clock().t()); // shown_clock.h
     const double lean = std::min(0.03 * u * u * strength, 0.3);
     const double sway = std::min(0.02 * u * strength, 0.2);
     in.f3["uFwDir"] = {float(std::cos(rad)), float(std::sin(rad)), 0.0f};
@@ -1308,6 +1309,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   // The trees in the scene's wind: world.sway (its strength, from the `sway` prop, 1), and the way
   // they lean published at world.lean_dir.
   rt->prefix = sg.getStatePrefix();
+  ari::seed_shown_clock(sg.appContext(), rt->prefix); // its foliage sways at the shown time (OW5q)
   rt->sway_key = ari::resolve_bind(rt->prefix, ari::node_key(n, "world.sway"));
   rt->lean_key = ari::resolve_bind(rt->prefix, ari::node_key(n, "world.lean_dir"));
   ari::read_or_seed<double>(app, rt->sway_key, n.props.num("sway", 1.0));
