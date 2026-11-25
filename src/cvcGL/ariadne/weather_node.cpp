@@ -85,8 +85,8 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_weather.h> // scene_weather_params: the storms' props, as the world reads them
-#include <cvc/ariadne/scene_wind.h>  // the scene's wind: the steering, and the rain's slant
-#include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
+#include <cvc/ariadne/scene_wind.h>    // the scene's wind: the steering, and the rain's slant
+#include <cvc/ariadne/shown_clock.h>   // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
