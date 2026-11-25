@@ -103,11 +103,13 @@ target_link_libraries(nav_compute PRIVATE cvcGL ${VTK_LIBRARIES})
 vtk_module_autoinit(TARGETS nav_compute MODULES ${VTK_LIBRARIES})
 
 # nav_scrub — watch a policy learn: cvc::nav's checkpoint scrubber on a C++ Ariadne host
-# (docs/NAV_LAB.md). It trains a short coef_trainer run (or reads --history), deploys every
-# checkpoint on the built-in blocks scenario and shows checkpoint k beside step 0 in nav_scrub.ari,
-# whose windows are libcvc's nav_lab_scrub, nav_lab_stats and nav_lab_ledger components. In the
-# gallery (the wasm build below) the document and the component library are in its file system,
-# and the training and the deploys run in the page.
+# (docs/NAV_SCRUB.md). It trains a short coef_trainer run (or reads --history), deploys every
+# checkpoint on the document's world (south Austin from its bundle, a generated world, a flat
+# square, or the built-in blocks) and shows checkpoint k beside step 0 in nav_scrub.ari, whose
+# windows are libcvc's nav_lab_scrub, nav_lab_stats and nav_lab_ledger components, and whose
+# vehicles are the Humvee model. In the gallery (the wasm build below) the document, the component
+# library and the Austin bundle are in its file system, and the training and the deploys run in
+# the page.
 add_executable(nav_scrub ariadne/nav_scrub/nav_scrub.cpp)
 cvc_document_host_stack(nav_scrub)
 target_link_libraries(nav_scrub PRIVATE cvcGL ${VTK_LIBRARIES})
@@ -246,6 +248,7 @@ if(EMSCRIPTEN)
   # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
   # synthetic city.
   set(_nav_swarm_bundle_flags "")
+  set(_nav_scrub_bundle_flags "") # the bundle and the shared Humvee, not the weights
   if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
     message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
     list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
@@ -254,6 +257,7 @@ if(EMSCRIPTEN)
       message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
       list(APPEND _nav_swarm_bundle_flags "--preload-file=${_parent}/shared@/shared")
     endif()
+    set(_nav_scrub_bundle_flags ${_nav_swarm_bundle_flags})
   endif()
   # Preload the trained CoefMLP weights (cvcpkg grl-snam-weights / coef_sdf.cvcnav) so the
   # in-browser swarm drives with the PUBLISHED trained policy. nav_city_swarm loads
@@ -292,11 +296,13 @@ if(EMSCRIPTEN)
     if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
       target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
     endif()
-    # nav_scrub reads its document and the component library from the page's file system.
+    # nav_scrub reads its document, the component library and the Austin bundle (its world, and
+    # the Humvee) from the page's file system; without the bundle it runs on the generated world.
     if("${_wt}" STREQUAL "nav_scrub")
       target_link_options(${_wt} PRIVATE
         "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/ariadne/nav_scrub/nav_scrub.ari@/nav_scrub/nav_scrub.ari"
-        "--preload-file=${_cvc_root}/src/cvc/ariadne/components@/components")
+        "--preload-file=${_cvc_root}/src/cvc/ariadne/components@/components"
+        ${_nav_scrub_bundle_flags})
     endif()
     # The browser-side speedups: state shim (--pre-js) + mimalloc on wasm-mt.
     cvcgl_wasm_app(${_wt})

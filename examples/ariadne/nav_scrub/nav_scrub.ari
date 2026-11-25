@@ -1,8 +1,24 @@
 # nav_scrub.ari — watch a policy learn: every checkpoint of a training run deployed, checkpoint k
-# beside step 0 (cvc::nav's scrubber, docs/NAV_LAB.md). nav_scrub.cpp trains (or reads a history),
-# deploys the checkpoints, draws the world and the ghosts; cvc::nav::scrub_view writes every window.
+# beside step 0 (cvc::nav's scrubber, docs/NAV_SCRUB.md). nav_scrub.cpp trains (or reads a history),
+# deploys the checkpoints on this document's world, and draws the two runs; cvc::nav::scrub_view
+# writes every window.
 #
-#   nav_scrub nav_scrub.ari --component-path <repo>/src/cvc/ariadne
+#   nav_scrub nav_scrub.ari --component-path <repo>/src/cvc/ariadne --bundle <austin_south>
+#   nav_scrub nav_scrub.ari --net-allow https://cvcpkg.org      # Austin from cvcpkg.org
+#   nav_scrub nav_scrub.ari --world generated                   # or flat, or blocks
+#
+# The world is the scene's (ARIADNE_WORLDS.md section 14): one node per world, `world: <name>`, and
+# the host puts the one it runs on (--world) and reads it back from the world runtime, its grid for
+# the navigator and its geometry for the plant, in metres, at its real size:
+# - city: south Austin, the data: block's bundle (its terrain wearing the aerial image, its
+#   buildings), cut to a 320 m square round its centre for the physics and the navigator;
+# - generated: a generated world (terrain, buildings, trees), for a host with no Austin;
+# - flat: a flat walled square;
+# - blocks (no node): the built-in 120 m square of nine buildings, which the host draws itself.
+# The agents start 12 m apart on free ground, each to a goal across the world. Each run's vehicle
+# is the Humvee model at its true size (the bundle's Humvee.glb, or the vehicle-humvee package's),
+# checkpoint k's opaque in orange and step 0's translucent in blue, each with its trail behind it;
+# a box where neither model is here.
 #
 # - Scrub: the plant (the Jolt Humvee, which stops against a building, or nav's kinematic bicycle,
 #   which drives through one), the checkpoint (a combo, a slider, Previous and Next, or a click on
@@ -23,7 +39,19 @@ import:
   - cvc://components/nav_lab_ledger.ari
 
 requires:
+  - gl.scene                        # a scene renderer realizes the scene: block (the world)
   - {name: chart, optional: true}   # the charts (libcvc 3.7.14); the tables show the numbers too
+  - {name: net, optional: true}     # Austin from cvcpkg.org; without it a local bundle, or another world
+
+customs:
+  - node: generated_world
+    required: true
+
+data:
+  city:
+    uri: cvcpkg://cy-pca/scene-austin-south-small
+    path: share/cvc-scenes/austin_south
+    as: city_bundle
 
 init: |
   (begin
@@ -57,3 +85,40 @@ windows:
   - include: nav_lab_ledger
     pos: [1040, 362]
     size: [600, 540]
+
+scene:
+  chrome: false
+  background: { top: [0.66, 0.78, 0.92], bottom: [0.30, 0.42, 0.58] }
+  world: { source: city, cell: 2 }
+  lights:
+    - light: sun
+      rig: three_point
+      sun: true
+      stage: { center: [0, 0, 20], radius: 400 }
+      key: { intensity: 1.2, azimuth: -42, elevation: 52, cone: 62 }
+      fill: 0.5
+      back: 0
+      wash: 0
+      ambient: 0.35
+  nodes:
+    - node: city
+      world: city
+      source: { data: city }
+      tint: satellite
+      region: [-160, -160, 160, 160]   # the physics' and the navigator's world; all of it drawn
+      body: static
+    - node: land
+      world: generated
+      type: generated_world
+      seed: 5
+      half: 160
+      trees: 40
+      rocks: 12
+      buildings: 24
+      body: {}
+    - node: square
+      world: flat
+      source: { box: { size: [240, 240, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      material: { color: [0.60, 0.63, 0.56] }
+      body: static
