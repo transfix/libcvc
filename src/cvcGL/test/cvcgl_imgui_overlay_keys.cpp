@@ -55,6 +55,9 @@ struct Keys {
     ui = std::make_unique<cvc::gl::ImGuiOverlay>(view);
     ui->setTouchMode(false);
     ui->setVisible(true);
+    // This test's imgui and cvcGL's: on Windows each binary links its own, with its own current
+    // context.
+    ImGui::SetCurrentContext(ui->imguiContext());
     cvc::gl::ImGuiBackend::setImGuiContext(ui->imguiContext());
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigMacOSXBehaviors = mac;
@@ -64,7 +67,10 @@ struct Keys {
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
     frame();
   }
-  ~Keys() { cvc::gl::ImGuiBackend::setImGuiContext(nullptr); }
+  ~Keys() {
+    ImGui::SetCurrentContext(nullptr);
+    cvc::gl::ImGuiBackend::setImGuiContext(nullptr);
+  }
 
   void frame() {
     ImGuiIO &io = ImGui::GetIO();

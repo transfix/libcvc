@@ -288,6 +288,9 @@ int main() {
       const std::string on = mac ? " (Mac behaviours on)" : " (Mac behaviours off)";
       cvc::gl::ImGuiOverlay ui(view);
       ui.setTouchMode(false);
+      // This test's imgui and cvcGL's: on Windows each binary links its own, with its own
+      // current context.
+      ImGui::SetCurrentContext(ui.imguiContext());
       cvc::gl::ImGuiBackend::setImGuiContext(ui.imguiContext());
       ImGuiIO &io = ImGui::GetIO();
       io.ConfigMacOSXBehaviors = mac;
@@ -351,6 +354,7 @@ int main() {
       key(id, other, false);
       pump();
       chk(std::string(buf) == "a", "and Super+Z undoes nothing: '" + std::string(buf) + "'" + on);
+      ImGui::SetCurrentContext(nullptr);
       cvc::gl::ImGuiBackend::setImGuiContext(nullptr);
     }
 #endif
