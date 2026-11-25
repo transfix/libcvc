@@ -5701,6 +5701,163 @@ TEST(AriadneWorldGym, ResetStepAndObserve) {
   EXPECT_EQ(gym.world().world().tick(), held);
 }
 
+// Local is the same (OW7a): the gym runs its world in a server-role holon of its own, as a relay
+// runs its world, and the world takes the steps it took on the gym's own clock, to the bit: two
+// agents, one steered and one on nav@1, toward the wall, for two episodes (the reset in between
+// takes the holon's clock back to tick 0). Every body's state is the same at the end of each
+// episode, run in the holon or not, and on a second run in the holon. (The holon adds the
+// avatars' material to the world, which its saved state counts; the bodies are what moved.)
+namespace {
+struct gym_run_result {
+  std::vector<cvc::physics::body_state> end1, end2;
+  std::uint64_t tick = 0;
+  bool in_holon = false;
+};
+std::vector<cvc::physics::body_state> bodies_of(const cvc::physics::world &w) {
+  std::vector<cvc::physics::body_state> out;
+  for (const cvc::physics::body_snapshot &b : w.snapshot().bodies)
+    out.push_back(b.state);
+  return out;
+}
+bool same_bodies(const std::vector<cvc::physics::body_state> &a,
+                 const std::vector<cvc::physics::body_state> &b) {
+  if (a.size() != b.size())
+    return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    const cvc::physics::body_state &p = a[i], &q = b[i];
+    if (p.position.x != q.position.x || p.position.y != q.position.y ||
+        p.position.z != q.position.z || p.rotation.w != q.rotation.w ||
+        p.rotation.x != q.rotation.x || p.rotation.y != q.rotation.y ||
+        p.rotation.z != q.rotation.z || p.linear_velocity.x != q.linear_velocity.x ||
+        p.linear_velocity.y != q.linear_velocity.y || p.linear_velocity.z != q.linear_velocity.z ||
+        p.angular_velocity.x != q.angular_velocity.x ||
+        p.angular_velocity.y != q.angular_velocity.y ||
+        p.angular_velocity.z != q.angular_velocity.z)
+      return false;
+  }
+  return true;
+}
+gym_run_result run_the_gym(bool in_holon) {
+  gym_run_result r;
+  gym_options o = agents(2);
+  o.holon = in_holon;
+  WorldGym gym(write_doc("gym_run", gym_doc(true, true)).string(), o);
+  r.in_holon = gym.local_holon() != nullptr;
+  gym.reset(3);
+  for (int i = 0; i < 120; ++i)
+    gym.step({0.15, kNaN}, {2.0, kNaN});
+  r.end1 = bodies_of(gym.world().world());
+  gym.reset(5);
+  for (int i = 0; i < 90; ++i)
+    gym.step({-0.1, kNaN}, {1.5, kNaN});
+  r.end2 = bodies_of(gym.world().world());
+  r.tick = gym.world().world().tick();
+  return r;
+}
+} // namespace
+
+TEST(AriadneWorldGym, TheGymsWorldRunsInALocalServerHolonAsOnItsOwnClock) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const gym_run_result held = run_the_gym(true), again = run_the_gym(true),
+                       own = run_the_gym(false);
+  std::printf("  OW7A the gym's world in its holon: %zu bodies, tick %llu; the same as on its own "
+              "clock: %s, %s\n",
+              held.end2.size(), static_cast<unsigned long long>(held.tick),
+              same_bodies(held.end1, own.end1) ? "yes" : "no",
+              same_bodies(held.end2, own.end2) ? "yes" : "no");
+  EXPECT_TRUE(held.in_holon) << "the world in the gym's holon";
+  EXPECT_FALSE(own.in_holon) << "gym_options::holon off";
+  EXPECT_EQ(held.tick, own.tick);
+  EXPECT_TRUE(same_bodies(held.end1, own.end1)) << "the first episode, to the bit";
+  EXPECT_TRUE(same_bodies(held.end2, own.end2)) << "after the reset, to the bit";
+  EXPECT_TRUE(same_bodies(held.end2, again.end2)) << "and every run";
+}
+
+// People in the gym (OW7a): avatars in its holon's world beside the cars, as on a relay. A car
+// commanded straight at a person standing 15 m ahead shoves them aside and counts the touch as
+// an obstacle; a car on nav@1 driving to a goal past a person steers around them (the holon hands
+// its avatars to the navigators, OW4) and touches no one. A walking person walks. Without the
+// holon there are no people.
+TEST(AriadneWorldGym, PeopleAreInTheGymsWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string doc = write_doc("gym_people", gym_doc(true, false)).string();
+  // Commanded straight at a person standing in its way.
+  {
+    gym_options o = agents(1);
+    gym_person p;
+    p.x = 15.0;
+    p.y = 0.0;
+    o.people.push_back(p);
+    gym_person walker;
+    walker.x = -20.0;
+    walker.y = 40.0;
+    walker.walk = 1.2;
+    o.people.push_back(walker);
+    WorldGym gym(doc, o);
+    ASSERT_NE(gym.local_holon(), nullptr);
+    gym_observation obs = gym.reset(1);
+    ASSERT_EQ(obs.people, 2u);
+    EXPECT_NEAR(obs.person_x[0], 15.0, 1e-9);
+    bool touched = false;
+    for (int i = 0; i < 120; ++i) {
+      const gym_step s = gym.step({0.0}, {2.0});
+      touched = touched || s.observation.hit_obstacle[0] != 0;
+      obs = s.observation;
+    }
+    const double pushed = std::hypot(obs.person_x[0] - 15.0, obs.person_y[0]);
+    std::printf("  OW7A a car commanded at a standing person: it touched them %s; they were "
+                "shoved %.2f m; the walker went %.2f m\n",
+                touched ? "yes" : "no", pushed, obs.person_x[1] + 20.0);
+    EXPECT_TRUE(touched) << "the car met the person";
+    EXPECT_GT(pushed, 1.0) << "and shoved them";
+    EXPECT_NEAR(obs.person_x[1] + 20.0, 1.2 * gym.dt() * 120, 1.0) << "the walker walks";
+  }
+  // On nav@1 to a goal past a person: around them.
+  {
+    gym_options o = agents(1);
+    gym_person p;
+    p.x = 20.0;
+    p.y = 0.0;
+    o.people.push_back(p);
+    WorldGym gym(doc, o);
+    gym_observation obs = gym.reset(1);
+    ASSERT_TRUE(gym.set_goal(obs.id[0], 45.0, 0.0));
+    bool touched = false;
+    double closest = 1e9;
+    for (int i = 0; i < 400; ++i) {
+      const gym_step s = gym.step({kNaN}, {kNaN});
+      touched = touched || s.observation.hit_obstacle[0] != 0;
+      obs = s.observation;
+      closest =
+          std::min(closest, std::hypot(obs.x[0] - obs.person_x[0], obs.y[0] - obs.person_y[0]));
+      if (s.terminated)
+        break;
+    }
+    const double pushed = std::hypot(obs.person_x[0] - 20.0, obs.person_y[0]);
+    std::printf("  OW7A nav@1 past a person: closest %.2f m (centre to feet), touched %s, at its "
+                "goal %s, the person moved %.3f m\n",
+                closest, touched ? "yes" : "no", obs.reached[0] ? "yes" : "no", pushed);
+    EXPECT_FALSE(touched) << "steered around them";
+    EXPECT_LT(pushed, 0.05);
+    EXPECT_TRUE(obs.reached[0]) << "and got to its goal";
+  }
+  // Without the holon: no people.
+  {
+    gym_options o = agents(1);
+    o.holon = false;
+    gym_person p;
+    p.x = 15.0;
+    o.people.push_back(p);
+    WorldGym gym(doc, o);
+    EXPECT_EQ(gym.local_holon(), nullptr);
+    EXPECT_EQ(gym.reset(1).people, 0u);
+  }
+}
+
 TEST(AriadneWorldGym, OneSeedAndOneListOfCommandsGiveOneWorld) {
   REQUIRE_YAML();
   if (!jolt())

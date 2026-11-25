@@ -227,6 +227,13 @@ static PyObject *gym_observation_dict(const cvc::ariadne::gym_observation &o) {
     gym_put(d, "hit_vehicle", gym_bool(o.hit_vehicle));
     gym_put(d, "out", gym_bool(o.out));
     gym_put(d, "range_m", PyFloat_FromDouble(o.range_m));
+    // The people in the gym's holon (gym_options::people, OW7a): their feet and velocity.
+    gym_put(d, "people", PyLong_FromSize_t(o.people));
+    const std::pair<const char *, const std::vector<double> *> people[] = {
+        {"person_x", &o.person_x}, {"person_y", &o.person_y}, {"person_z", &o.person_z},
+        {"person_vx", &o.person_vx}, {"person_vy", &o.person_vy}};
+    for (const auto &c : people)
+      gym_put(d, c.first, gym_f64(*c.second));
     npy_intp dims[2] = {static_cast<npy_intp>(o.n), static_cast<npy_intp>(o.ray_angles.size())};
     PyObject *r = PyArray_SimpleNew(2, dims, NPY_FLOAT);
     if (r && !o.ranges.empty())
