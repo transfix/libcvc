@@ -271,33 +271,37 @@ dyn_boat_desc dyn_boat_desc::tactical() {
       s.section.push_back({row[1 + 2 * k], row[2 + 2 * k]});
     stations.push_back(std::move(s));
   }
-  b.hull.hull = loft_hull(stations);
+  // The hull's own lift (hull.h): its V and chines grip as it drifts, and its bottom lifts it as
+  // it trims at speed, so it planes. 0.56 is the Savitsky-calibrated plate's.
+  auto mesh = std::make_shared<hull_mesh>(*loft_hull(stations));
+  mesh->lift_coefficient = 0.56;
+  b.hull.hull = mesh;
   b.hull.shape = convex_hull{b.hull.hull->vertices};
   b.hull.mass = 2800.0;
   b.hull.linear_damping = 0.0;
   b.hull.angular_damping = 0.0;
   b.hull.allow_sleeping = false;
   // Twin outboards on brackets 0.5 m aft of the transom, as one thrust at their propellers, 0.2 m
-  // over their skegs: they steer by thrust alone.
+  // over their skegs, swinging 0.3 rad to steer.
   b.propeller.position = {-3.6, 0.0, -0.357};
   b.propeller.max_thrust = 8000.0;
   b.propeller.max_reverse_thrust = 3500.0;
   b.propeller.max_inflow_speed = 18.0;
-  b.propeller.outboard_max_angle = 0.5;
-  // The rudder is the hull's own grip sideways: its keel, chines and strakes as one fixed foil
-  // (max_angle 0) on the keel just aft of the centre of mass. The hull's triangles push back on
-  // sideways flow by its normal component squared, which a 20-degree V bottom barely has, so
-  // without it the boat skids, and at full lock spins on the spot. Sized and placed by measuring
-  // (physics_dyn_boat_plant_test): from 0.4 m^2 at x -0.8 it turns at full lock in 21 m at
-  // 4.5 m/s to 32 m at 9.2 m/s, 8-11 degrees of drift; further forward it spins, further aft
-  // or larger it turns no tighter than 45-70 m.
-  b.rudder.position = {-0.8, 0.0, -0.5};
-  b.rudder.area = 0.4;
-  b.rudder.max_angle = 0.0;
+  b.propeller.outboard_max_angle = 0.3;
+  // The rudder is the outboards' legs (their gearcases and skegs, about 0.1 m^2 each under the
+  // hull's bottom), swinging with them. The hull's side force as it drifts acts ahead of its
+  // centre of mass (its bow's pressure drag 0.7 m ahead, its lift 0.2 m; measured by
+  // TheTacticalHullGripsWithoutAFoil in physics_dyn_boat_plant_test), so the hull alone yaws off
+  // a straight course and spins; the legs far aft hold it straight, as an outboard boat's do.
+  // With them and the motors' 0.3 rad it turns at full lock in 19 m at 2.6 m/s to 32 m at
+  // 8.9 m/s, at about 16 degrees of drift: the circles the fixed keel foil it had before gave it.
+  b.rudder.position = {-3.6, 0.0, -0.42};
+  b.rudder.area = 0.2;
+  b.rudder.max_angle = 0.3;
   b.actuator_time_constant = 0.5;
   d.length_overall = 7.8;
-  d.max_speed = 10.5;
-  d.turn_radius = 32.5;
+  d.max_speed = 10.2;
+  d.turn_radius = 32.3;
   return d;
 }
 
