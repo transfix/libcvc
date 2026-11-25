@@ -2278,6 +2278,38 @@
         "tint": {
           "$ref": "#/$defs/string",
           "description": "satellite: a city's buildings take the aerial image's colours."
+        },
+        "look": {
+          "enum": ["soft", "classic"],
+          "description": "A world dataset's look, as on generated_world: soft (matte daylight) or classic."
+        },
+        "water": {
+          "$ref": "#/$defs/flag",
+          "description": "Draw a world dataset's water (default 1)."
+        },
+        "underside": {
+          "$ref": "#/$defs/flag",
+          "description": "Draw the rock under a world dataset with no shore (default 0)."
+        },
+        "texture": {
+          "type": "integer",
+          "description": "A world dataset's water texture size in texels (default 2048; clamped to 256-4096)."
+        },
+        "sway": {
+          "type": "number",
+          "minimum": 0,
+          "description": "How far a world dataset's trees sway in the scene's wind (default 1; 0 holds them)."
+        },
+        "region": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "[min_x, min_y, max_x, max_y] in world metres: the cut a source: { data } node's world takes before the physics and the navigator see it."
+        },
+        "water_level": {
+          "type": "number",
+          "description": "A source: { data } node's still water level (m), in place of its dataset's."
         }
       },
       "patternProperties": {"^x-": true},
