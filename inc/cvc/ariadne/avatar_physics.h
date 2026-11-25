@@ -217,6 +217,8 @@ public:
   void add_avatar(const std::string &pid, const cvc::physics::body_state &feet, bool dynamic);
   void remove_avatar(const std::string &pid);
   bool has_avatar(const std::string &pid) const;
+  // Its body in the world (invalid for no such avatar).
+  cvc::physics::body_id body_of(const std::string &pid) const;
 
   // Before a step: drive a dynamic avatar from its intent through its controller, paying from its
   // reserve (see above).

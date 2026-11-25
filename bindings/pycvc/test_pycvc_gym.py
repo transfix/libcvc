@@ -207,6 +207,26 @@ check(pycvc.SIM_QUANTUM == 1.0 / 120.0 and pycvc.SIM_TICK_QUANTA == 7
       and abs(pycvc.SIM_TICK - 7.0 / 120.0) < 1e-15 and pycvc.SIM_CATCHUP == 0.25,
       f"the shared tick ({pycvc.SIM_TICK}, {pycvc.SIM_QUANTUM}, {pycvc.SIM_CATCHUP})")
 check(abs(g3.dt() - pycvc.SIM_TICK) < 1e-12, f"the gym's tick is the shared one ({g3.dt()})")
+# People in the gym (OW7a): avatars in its local server-role holon, beside the cars. A car
+# commanded at a person standing in its way hits them (hit_person, a collision, not an obstacle)
+# and shoves them; a walker walks; without the holon there are none.
+gp = pycvc.WorldGym(doc, agents=[{"controller": "none", "x": 0.0, "y": 0.0, "yaw": 0.0}],
+                    people=[{"x": 15.0, "y": 0.0}, {"x": -20.0, "y": 30.0, "walk": 1.2}])
+po = gp.reset(seed=1)
+check(po["people"] == 2, "two people")
+check(abs(po["person_x"][0] - 15.0) < 1e-9, "the first where it was put")
+hit = obstacle = False
+for _ in range(120):
+    po, _, _, _, _ = gp.step([0.0], [2.0])
+    hit = hit or bool(po["hit_person"][0])
+    obstacle = obstacle or bool(po["hit_obstacle"][0])
+check(hit, "the car hit the person")
+check(not obstacle, "a person, not an obstacle")
+check(math.hypot(po["person_x"][0] - 15.0, po["person_y"][0]) > 1.0, "and shoved them")
+check(abs(po["person_x"][1] + 20.0 - 1.2 * gp.dt() * 120) < 1.0, "the walker walks")
+check(pycvc.WorldGym(doc, people=[{"x": 15.0, "y": 0.0}], holon=False).reset(seed=1)["people"] == 0,
+      "no people without the holon")
+
 g5 = pycvc.WorldGym(doc, tick=0.05, agents=[{"plant": "kinematic", "controller": "none"}])
 g5.reset(0)
 check(abs(g5.dt() - 0.05) < 1e-12, f"tick=0.05 ({g5.dt()})")
