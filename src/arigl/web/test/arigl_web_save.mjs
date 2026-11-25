@@ -261,11 +261,15 @@ try {
          `inside the pointer's release: ${JSON.stringify(links)}`);
   }
 
-  // 2. The button's (save-url URL (dict "name" ...)).
+  // 2. The button's (save-url URL (dict "name" ...)), found by clicking down the window's first
+  // lines until a download begins (a click beside it does nothing).
   {
     const from = browser.events.length;
-    await click(80, 335);
-    const d = await downloaded(from);
+    let d = null;
+    for (let y = 318; y < 390 && !d; y += 6) {
+      await click(90, y);
+      d = await downloaded(from, 2500);
+    }
     step(d && d.name === 'the clip.webm', `(save-url) downloads under its name: ${d && d.name}`);
     step(d && d.bytes && d.bytes.equals(WEBM), 'with the server\'s bytes');
     const said = await until('the program hears', async () =>
