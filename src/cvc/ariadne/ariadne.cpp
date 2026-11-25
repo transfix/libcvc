@@ -3674,7 +3674,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string cur = read_or_seed<std::string>(app, path, dflt);
     float rgb[3] = {1.0f, 1.0f, 1.0f};
     parse_rgb3(cur, rgb); // leaves the 1,1,1 default on a parse failure
-    const ColorEdit e = b.color(label, rgb);
+    const ColorEdit e = w.fmt == "hex" ? b.color_hex(label, rgb) : b.color(label, rgb);
     if (!e.drawn) {
       b.text_value(label, cur); // a backend with no colour widget -> show the "r,g,b" value
       break;

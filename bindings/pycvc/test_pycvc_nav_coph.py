@@ -12,7 +12,10 @@ CoPH tests read; doubles are raw bits, 16 hex digits):
      updates, and a packet it exports is the JSON it counts, which a second learner assimilates;
   6. the fleet (NavCophFleet) on the crossing with G12's world and noise, as libcvc's
      CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun runs it: both agents reach their goals
-     with no hit, each energy account closes at round-off, and packets were sent and delivered.
+     with no hit, each energy account closes at round-off, and packets were sent and delivered;
+  7. the driver (NavCophDriver) on a sim_world: with nothing attached the run is the sim's own, bit
+     for bit; with two RoboRacer-sized cars attached, both pass each other and reach their goals,
+     and a car given a new goal after arriving runs again and reaches it.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -212,5 +215,85 @@ for i in range(2):
 kinds = {ev["kind"] for ev in fleet.events()}
 check({"sent", "delivered"} <= kinds, f"packets were sent and delivered: {kinds}")
 check(fleet.samples(0)[-1]["done"] and fleet.updates(0), "the samples and updates")
+
+# 7. The driver (NavCophDriver, coph_driver.h): CoPH drives a sim_world's cars through
+# override_command, as libcvc's CophDriver.TwoCarsCrossTheField: two RoboRacer-sized cars (s = 1)
+# pass each other on a walled 20 m x 12 m field of 0.1 m cells.
+if hasattr(pycvc, "NavCophDriver"):
+    import numpy as np
+
+    W, H, CELL, S = 20.0, 12.0, 0.1, 0.1
+    rows, cols = int(H / CELL) + 1, int(W / CELL) + 1
+    occ = np.zeros((rows, cols), np.uint8)
+    occ[0, :] = occ[-1, :] = occ[:, 0] = occ[:, -1] = 1
+    cx, cy = W / 2, H / 2
+
+    def field_sim():
+        starts = np.array([[3.0, 5.0], [17.0, 7.0]])
+        goals = np.array([[17.0, 5.4], [3.0, 6.6]])
+        on = ((starts - [cx, cy]) * S).astype(np.float32)
+        goal = ((goals - [cx, cy]) * S).astype(np.float32)
+        sim = pycvc.nav_sim_world_create(
+            occ, occ, "", on, goal, np.ones((2, 3), np.float32), rows, cols, 0.0, 0.0, W, H, cx, cy,
+            S, 60.0, 120, 2 * math.pi, 0.25 * S, 0.35, 0.06, 3.0 * S, 0.33 * S, 0.42, 3.0 * S,
+            0.8 * 9.80665 * S, 0.8, 6, 1, 0.3 * S, 4, 1, 2.2, -1.4, 8.0, 1, 0.5, 0.15, 4.0)
+        pycvc.nav_sim_world_set_pose(sim, 0, float(on[0, 0]), float(on[0, 1]), 0.0)
+        pycvc.nav_sim_world_set_pose(sim, 1, float(on[1, 0]), float(on[1, 1]), math.pi)
+        return sim
+
+    # Nothing attached: the run is the sim's own, bit for bit.
+    plain, with_driver = field_sim(), field_sim()
+    idle = pycvc.NavCophDriver(with_driver, {}, {}, seed=31)
+    same = True
+    for _ in range(60):
+        pycvc.nav_sim_world_step(plain)
+        idle.apply()
+        pycvc.nav_sim_world_step(with_driver)
+        a, b = pycvc.nav_sim_world_snapshot(plain)[:3], pycvc.nav_sim_world_snapshot(with_driver)[:3]
+        same = same and all(np.array_equal(x, y) for x, y in zip(a, b))
+    check(same and idle.steps() == 0 and idle.attached() == [], "a driver with nothing attached")
+
+    sim = field_sim()
+    drive = pycvc.NavCophDriver(sim, None, None, froude=1.0, seed=31)
+    drive.attach(0)
+    drive.attach(1)
+    check(drive.attached() == [0, 1] and drive.ticks_per_step() == 2, "CoPH's cadence at s = 1")
+    ticks = 0
+    while ticks < 3000 and not (drive.done(0) and drive.done(1)):
+        drive.apply()
+        pycvc.nav_sim_world_step(sim)
+        ticks += 1
+    for v in range(2):
+        acc = drive.account(v)
+        check(drive.done(v), f"car {v} reaches its goal ({ticks} ticks)")
+        check(acc["steps"] > 10 and acc["work"] > 0.0 and 0.0 < acc["allocation_residual"] < 1.0,
+              f"car {v}'s account: {acc}")
+        check(drive.controls(v) and drive.controls(v)[-1]["meta"]["reason"] != "", f"car {v}'s controls")
+    check(any(e["kind"] == "delivered" for e in drive.events()), "packets between the cars")
+    print(f"driver: both cars at their goals after {ticks} ticks ({ticks * 0.06:.1f} s), "
+          f"{drive.steps()} CoPH steps")
+    # A new goal after arriving: car 0 runs again (coph_fleet::resume) and reaches it; car 1, whose
+    # goal stays, stays parked.
+    pycvc.nav_sim_world_retarget(sim, 0, (10.0 - cx) * S, (3.0 - cy) * S)
+    resumed, again = False, 0
+    while again < 1500:
+        drive.apply()
+        pycvc.nav_sim_world_step(sim)
+        again += 1
+        resumed = resumed or not drive.done(0)
+        if resumed and drive.done(0):
+            break
+    pos = pycvc.nav_sim_world_snapshot(sim)[0]
+    check(resumed and drive.done(0) and drive.done(1), "car 0 takes a new goal; car 1 stays parked")
+    check(abs(pos[0][0] - 10.0) < 0.5 and abs(pos[0][1] - 3.0) < 0.5, f"car 0 at its new goal: {pos[0]}")
+    check(sum(e["kind"] == "activation" and e["sender"] == 0 for e in drive.events()) == 2,
+          "car 0 activated twice")
+    print(f"driver: car 0 reached its new goal after {again} more ticks")
+    try:
+        drive.account(2)
+    except (RuntimeError, IndexError, ValueError):
+        checks += 1
+    else:
+        raise AssertionError("an unattached vehicle's account did not raise")
 
 print(f"pycvc nav coph: {checks} checks passed")

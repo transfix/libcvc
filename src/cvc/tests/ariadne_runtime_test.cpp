@@ -295,6 +295,13 @@ struct MockBackend : Backend {
     rec(std::string("color:") + l);
     return color_ret;
   }
+  ColorEdit color_hex(const char *l, const float rgb[3]) override {
+    last_color[0] = rgb[0];
+    last_color[1] = rgb[1];
+    last_color[2] = rgb[2];
+    rec(std::string("color_hex:") + l);
+    return color_ret;
+  }
   bool draw_image_ret =
       false;              // whether the mock "drew" the image (else the core falls back to text)
   std::string last_image; // the image name the core resolved (src or bound key)
@@ -4409,6 +4416,46 @@ TEST(AriadneRuntime, ColorWidgetReadsAndWritesCsv) {
   mb.color_ret = ColorEdit{true, true, true, {0.1f, 0.5f, 0.9f}};
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
+}
+
+// fmt: hex draws the picker as one "#rrggbb" field (Backend::color_hex), reading and writing the
+// same "r,g,b" key; fmt: rgb (the default) the per-channel picker; another fmt warns.
+TEST(AriadneRuntime, ColorWidgetFmtHexDrawsTheHexPicker) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("tint").value(std::string("0.2,0.4,0.6"));
+  const LoadResult r =
+      load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: W\n    children:\n"
+                       "      - color: Hex\n        bind: tint\n        fmt: hex\n"
+                       "      - color: Rgb\n        bind: tint\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty());
+  mb.color_ret = ColorEdit{true, true, true, {0.1f, 0.5f, 0.9f}};
+  rt.set_root(r.root);
+  rt.render();
+  EXPECT_TRUE(mb.saw("color_hex:Hex"));
+  EXPECT_FALSE(mb.saw("color:Hex"));
+  EXPECT_TRUE(mb.saw("color:Rgb"));
+  EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
+  const LoadResult bad =
+      load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: W\n    children:\n"
+                       "      - color: Odd\n        bind: tint\n        fmt: hsv\n");
+  ASSERT_TRUE(bad.ok) << bad.error;
+  // The loader's own warning; a build with the schema validator flags the same fmt as well.
+  std::vector<std::string> loader_warnings;
+  for (const std::string &w : bad.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      loader_warnings.push_back(w);
+  ASSERT_EQ(loader_warnings.size(), 1u);
+  EXPECT_NE(loader_warnings[0].find("not rgb or hex"), std::string::npos) << loader_warnings[0];
+  if (cvc::ariadne::have_jsonschema()) {
+    bool flagged = false;
+    for (const cvc::ariadne::SchemaIssue &i : bad.schema_issues)
+      flagged = flagged || i.pointer == "/windows/0/children/0/fmt";
+    EXPECT_TRUE(flagged);
+  }
 }
 
 TEST(AriadneRuntime, ColorWidgetFallsBackToTextWhenBackendCantDraw) {

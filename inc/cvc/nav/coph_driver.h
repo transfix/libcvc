@@ -33,7 +33,9 @@
 //     (visible_obstacles: on its plane's last-visible cells, or on the truth under freeze_sense).
 //     The fleet's boundary follows: the held step completes with the mean force the vehicle took
 //     (D5), the vehicle is done when the sim says it reached its goal, packets go out on the
-//     update cadence, and each vehicle updates and acts: the force it holds to the next step.
+//     update cadence, and each vehicle updates and acts: the force it holds to the next step. A
+//     vehicle that is done runs again once the sim gives it a new goal (coph_fleet::resume, as
+//     GRL-SNAM's cars controller does), its learner keeping what it learned.
 //   - Every tick, each vehicle not done allocates its held force (coph_allocate, §3.3.2: the
 //     acceleration along the heading and the steer, with its wheelbase, the steer lock and its
 //     acceleration limit) and drives with it through sim_world::override_command. A vehicle that
@@ -115,6 +117,7 @@ public:
     double allocation_residual() const;
   };
   const ledger &account(int vehicle) const { return ledgers_.at(vehicle); }
+  // Whether the vehicle is at its goal: it brakes until the sim gives it a new one.
   bool done(int vehicle) const;
 
 private:

@@ -561,7 +561,31 @@ run is byte-unchanged.
   - The fleet on G12's crossing world and noise matches libcvc's
     `CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun`: both agents reach their goals (767
     and 784 steps), with residuals of 7.5e-15 and 7.0e-15.
-- **Next, part 2:** `--controller coph` in the cars template, then the browser demo.
+
+**Landed in part 2: `--controller coph`.** `pycvc.NavCophDriver` binds C5's `coph_driver` to a
+`nav_sim_world_create` handle. `pycvc_gl.cars` uses it: `Cars(..., coph={...})` and
+`step_coph()`, the template's `--controller coph` and the Run panel's CoPH choice (docs/CARS.md,
+"CoPH, natively").
+- **The Froude scale.** By default it is the car's length over a RoboRacer's: 1 for a RoboRacer,
+  about 9 for a Humvee (D3, D4). `--coph-scale` sets it.
+- **The coefficient plots.** They show each car's account: the allocation residual, the work, the
+  risk cost and the CoPH steps.
+- **Results on Windows.**
+  - From Python, the driver's two cars pass each other and arrive in 485 ticks, as
+    `CophDriver.TwoCarsCrossTheField` does in C++. With nothing attached, the run is the sim's
+    own, bit for bit.
+  - Two Humvee-sized cars on nav's bicycle cross 60 m of the flat world past each other and both
+    arrive, in 37.9 s, with no contact (s = 9.05).
+  - The template's headless `--controller coph` run is checked by CI's `pycvc_gl_cars`. This box
+    has no cvcGL.
+- **New goals and world documents (part 2b).**
+  - A car that reached its goal brakes until the sim gives it a new one, then runs again
+    (`coph_fleet::resume`, as GRL-SNAM's cars controller clears a car's done). Its learner keeps
+    what it learned.
+  - Under `--gym` and `--world-doc` the cars are not a `sim_world`, so `pycvc_gl.cars.CophControl`
+    runs the same fleet over `NavCophFleet` from the cars' state: risk from a constant or a
+    callable, obstacles from the rays.
+- **Next, part 3:** the browser demo (pycvc-gl's wasm build).
 
 ## 5. Golden cases and tiers
 

@@ -360,6 +360,23 @@ TEST(CophFleet, RefusesConfigurationsOutsideTheProfile) {
   EXPECT_THROW(coph_fleet(fc, crossers()), std::invalid_argument);
 }
 
+// resume() runs again only an agent done at its goal: not one still running, and not one that
+// does not exist. (CophDriver.ACarTakesANewGoalAfterArriving resumes one that arrived.)
+TEST(CophFleet, ResumesOnlyAnAgentAtItsGoal) {
+  coph_fleet_config fc;
+  fc.cfg = profile(40);
+  fc.comm = coph_communication_profile();
+  coph_fleet f(fc, crossers());
+  EXPECT_FALSE(f.resume(0)); // not started
+  f.run(crossing(fc.cfg));   // 40 ticks: neither reaches its goal
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_TRUE(f.done(i));
+    EXPECT_FALSE(f.success(i));
+    EXPECT_FALSE(f.resume(i)) << "agent " << i << " ended by the run's steps";
+  }
+  EXPECT_THROW(f.resume(2), std::out_of_range);
+}
+
 TEST(CophFleet, TheEnergyAccountStaysAtRoundOffOverALongRun) {
   // The crossing until both agents are done (at most 2,000 ticks), with the fleet's own draws.
   const coph_config cfg = profile(2000);

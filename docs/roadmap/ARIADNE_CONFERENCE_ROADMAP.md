@@ -881,8 +881,9 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
     closes one silent for `--idle-timeout-s` (10 s) on both transports, so a peer gone without
     closing (a crash behind NAT, a suspended phone) departs like one that closed. arigl and
     `relay_session` do the same for their link to the relay, so they dial again.
-  - **Scene objects, lights and avatar options** the relay drops are removed from the tree (a
-    delete each), not marked `present = 0`.
+  - **Scene objects, lights, avatar options and world entities** the relay drops are removed
+    from the tree (a delete each), not marked `present = 0`; a revisioned section removes an
+    entry with `section_writer::remove`, before the revision that covers it.
 * A video subscription matching visible cam tiles, simulcast/resolution tiers, inter codecs, stereo
   panning, an "out of range" tile placeholder; peer-staleness hiding (reconciled with the 5 s outer
   refresh) → **Phase 7**.

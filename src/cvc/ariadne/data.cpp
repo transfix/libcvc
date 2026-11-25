@@ -523,12 +523,19 @@ std::string encode_bytes(const DataEncode &e) {
 }
 
 std::string encode_volume(const DataEncode &e) {
-  const std::shared_ptr<const cvc::volume> v = held<cvc::volume>(e.payload);
-  if (!v)
+  // A volume, or a list of them written as one file's variables (a format that holds several,
+  // such as .rawv: a volume_grid's segmented classes, as VolumeGridRover's SegTmp.rawv).
+  std::shared_ptr<const std::vector<cvc::volume>> vols = held<std::vector<cvc::volume>>(e.payload);
+  if (!vols)
+    if (const std::shared_ptr<const cvc::volume> v = held<cvc::volume>(e.payload))
+      vols = std::make_shared<const std::vector<cvc::volume>>(1, *v);
+  if (!vols)
     fail("volume: the data are not a volume");
+  if (vols->empty())
+    fail("volume: the list of volumes is empty");
   temp_dir tmp;
   const std::string p = tmp.path() + "/" + basename(e.file);
-  cvc::writeVolumeFile(e.app, std::vector<cvc::volume>{*v}, p);
+  cvc::writeVolumeFile(e.app, *vols, p);
   return read_whole(p);
 }
 
@@ -995,7 +1002,7 @@ std::vector<std::string> data_encoders(cvc::app &app) {
 }
 
 std::string default_data_encoder(const boost::any &payload) {
-  if (held<cvc::volume>(payload))
+  if (held<cvc::volume>(payload) || held<std::vector<cvc::volume>>(payload))
     return "volume";
   if (held<cvc::point_classes>(payload))
     return "point_classes";

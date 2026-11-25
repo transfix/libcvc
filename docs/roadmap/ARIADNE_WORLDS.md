@@ -71,7 +71,7 @@ Checked against master 797ba4d9; the lab's rows, from "Vehicles and their naviga
 | Part | Today | Where |
 |---|---|---|
 | World geometry | A world document (WD1). `arisrv` runs `cvc://worlds/default.ari` (a 20 m ground plane and a 1 m reference box), `--scene large` runs `cvc://worlds/large.ari` (a 100 m plane and 24 meshes, the built-in bunny), and a `--doc` whose document has a `scene:` is the world instead. The relay publishes it in one revision at start-up. The C++ twins `default_world()` / `large_world()` are the fallback when the file can't be found; a test pins each equal to its document. | `src/cvc/ariadne/worlds/`; `room_world_from_scene`, `write_room_world` in `src/cvc/ariadne/conference/room_scene.cpp`; `src/arisrv/main.cpp` |
-| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{epoch, at, rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. Removal is soft (`present = 0`). The scene is a revisioned section (§3): `rev` is written last, beside its writer's `epoch`, and `at` is 0 (it applies on arrival). Each light, object and fit carries the epoch it was written in, so a reader skips what an earlier relay left behind. | `inc/cvc/ariadne/conference/room_scene.h` |
+| Wire format | Scalar leaves under `conf.rooms.<room>.scene.{epoch, at, rev, env.*, objects.<id>.*}`: a subset of the document's `Scene` / `SceneNode` / `SceneLight`. Meshes go by `source.uri`. A removed entry is deleted from the tree (deletes replicate since transfix/libcvc#1473); a reader takes only entries with `present = 1`, which a write sets last. The scene is a revisioned section (§3): `rev` is written last, beside its writer's `epoch`, and `at` is 0 (it applies on arrival). Each light, object and fit carries the epoch it was written in, so a reader skips what an earlier relay left behind. | `inc/cvc/ariadne/conference/room_scene.h` |
 | Look | The world's (Q1, WD1). The world document declares the light rig and the shadows, and the relay publishes them through `scene.env.lights.*` and `scene.env.shadows.*`, which now carry a rig's tuning knobs (stage, key, fill, back, warmth, environment, ambient, wash, sun) and the shadows' re-bake interval. The conference document has no `scene:` block. | `default_room_rig`, `write_scene_env` in `room_scene.cpp`; `src/cvc/ariadne/worlds/default.ari` |
 | Who writes the scene | Only the relay. A client may write only its own participant subtree (bound writes, default on). | `room_write_gate.h` |
 | Client realization | `room_view` rebuilds the scene from the tree whenever the scene's stamp moves (a new `rev`, or a restarted relay's under a new `epoch`), with the same realizer a document's `scene:` uses. The holon's physics statics follow the same stamp. | `src/cvcGL/ariadne/room_view.cpp` (`sync_scene`) |
@@ -227,7 +227,7 @@ revision, written last, exactly as `avatars.policy` does today.
   the epoch tells them apart, and a new one replaces the old run's schedule. The room scene is
   stamped the same way, so such a client rebuilds its drawn room and its physics statics.
 - **A client keeps what an old relay wrote.** A snapshot deletes nothing, and the new relay never
-  soft-removes an id it never knew, so a client that outlived a relay still holds that relay's
+  removes an id it never knew, so a client that outlived a relay still holds that relay's
   objects and lights. Lists that a reader takes `count` entries of (the rules' sections) are
   immune. Entries keyed by id are not: the scene stamps each light, object and fit with the epoch
   it was written in, and a reader takes only the entries of the scene's own epoch (unstamped ones
@@ -1468,8 +1468,13 @@ becomes shorthand for a `data-generate` and its data node, so documents that use
 `vehicles`) does not change; `generated_world(id)` reads the dataset.
 
 **One renderer.** cvcGL's generated-world renderer (terrain LOD, the props' cells and rungs, roads,
-the painted ground, cloud shade) draws any world dataset, a city's included, and the data node's
-simpler world draw goes.
+the painted ground, cloud shade) draws any world dataset, a city's included. A `source: { data }`
+node whose dataset is a world makes the drawn world from it with `world_from_bundle` off the frame
+thread and puts it in a piece at a time, under the node (world_nodes.h's DataWorldView); a reload
+replaces the shown world once the new one is in. The ground is the bundle's `ground.png`, else a
+city's `satellite.png` at its own width and height. The data node's plain draw (each item a mesh,
+the aerial image draped) is left for a terrain that takes a live texture
+(`material: { texture: { stream } }`) and for datasets that are not worlds.
 
 **Getting it to a client.** The server sends the bundle's bytes, content-addressed and cached
 (§12, AD1), and a client builds the same world from them, with no generator determinism to pin
@@ -1485,7 +1490,7 @@ a mesh (`terrain.glb`) and a 16-bit height map PNG.
 |---|---|---|
 | GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
-| GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: cvcGL draws a world dataset, a city's included, with the generated-world renderer. | L |
+| GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: a data node whose dataset is a world (Austin, a saved or made world) draws with the generated-world renderer: the terrain's LOD chunks on the bundle's ground (a non-square aerial image included), the props' cells, the buildings, roads and water, made in a sliced job and put in a piece at a time. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
 | GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
 
