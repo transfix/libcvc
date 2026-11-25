@@ -155,10 +155,12 @@
 #include <cvc/physics/field.h>
 #include <cvc/physics/immersion.h>
 #include <cvc/physics/pose_tracker.h>
+#include <cvc/physics/shore_mask.h> // the wake's mask from the coast, the physics wake's
 #include <cvc/physics/world.h>
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <vtkCamera.h>
@@ -977,12 +979,14 @@ struct WaterRT {
   // ground, its surface the sea drawn here, rebuilt as the wind or the ground changes.
   std::unique_ptr<cvc::ariadne::WaterRuntime> physics;
   // The bodies' waves (with body:, once the cascades are up): the window, its sources, where it is
-  // and the coast its mask was made from, the world time it was stepped to, and each body's outline
-  // by the description it was made from.
+  // and the coast its mask was made from (held, so a new coast is never taken for it) with that
+  // mask, the world time it was stepped to, and each body's outline by the description it was made
+  // from.
   std::unique_ptr<EWave> wake;
   std::unique_ptr<WakeSource> wakeSrc;
   bool wakePlaced = false;
-  const ari::SceneWaterShore *wakeShore = nullptr;
+  std::shared_ptr<const ari::SceneWaterShore> wakeShore;
+  std::shared_ptr<const cvc::physics::shore_grid_mask> wakeMask;
   double wakeT = -1.0;
   std::vector<double> wakeDh;
   std::map<const cvc::physics::body_desc *,
@@ -1475,46 +1479,39 @@ void follow_shore(cvc::app &app, WaterRT &rt) {
 
 // ── the wake ─────────────────────────────────────────────────────────────────────────────────
 
-// A plane of the shore grid at (x, y), bilinear, clamped to the grid (sea_surface's grid_sample).
-double grid_sample(const cvc::ocean::shore_grid &g, const std::vector<float> &f, double x,
-                   double y) {
-  const double fc = std::clamp((x - g.min_x) / g.cell, 0.0, double(g.cols - 1));
-  const double fr = std::clamp((y - g.min_y) / g.cell, 0.0, double(g.rows - 1));
-  const int c0 = std::min(g.cols - 2, int(std::floor(fc))),
-            r0 = std::min(g.rows - 2, int(std::floor(fr)));
-  const double u = fc - c0, v = fr - r0;
-  const std::size_t i = std::size_t(r0) * std::size_t(g.cols) + std::size_t(c0);
-  return (f[i] * (1 - u) + f[i + 1] * u) * (1 - v) +
-         (f[i + std::size_t(g.cols)] * (1 - u) + f[i + std::size_t(g.cols) + 1] * u) * v;
+// The window's mask over coast sh: the physics wake's (cvc::physics::shore_grid_mask,
+// OCEAN-AND-WEATHER-ROADMAP.md C6, lsystem_coast's seaWakeMask), so the waves drawn here meet the
+// shores the waves that push the bodies do. Null when the coast's grid can't make one.
+std::shared_ptr<const cvc::physics::shore_grid_mask> coast_mask(const ari::SceneWaterShore &sh) {
+  const cvc::ocean::shore_grid *g = sh.grid.get();
+  if (!g)
+    return nullptr;
+  try {
+    return std::make_shared<const cvc::physics::shore_grid_mask>(
+        sh.grid, sh.slope.size() == g->count() ? sh.slope : std::vector<float>{}, sh.layer);
+  } catch (const std::invalid_argument &) {
+    return nullptr; // under 2 x 2 samples, or without a shore distance on each
+  }
 }
 
-// The window's mask (lsystem_coast's seaWakeMask, OCEAN-AND-WEATHER-ROADMAP.md C6): 0 on land; in
-// the water a ramp over the last 3 m to the shore from 1 down to 0.5 at the waterline, so beaches
-// absorb; where the shore is steep (the shore layer's reflection, or the ground's slope from 0.25
-// to 0.6), 1 up to the waterline, so it reflects. And the window's mean water depth.
-std::vector<double> wake_mask(const ari::SceneWaterShore &sh, const cvc::ocean::ewave_params &p,
-                              double &meanDepth) {
-  const cvc::ocean::shore_grid &g = *sh.grid;
-  const cvc::ocean::shore_layer *L = sh.layer.get();
-  const double W = 3.0, mb = 0.5;
+// The window's mask at each of its cells (0 on land; in the water a ramp over the last 3 m to the
+// shore from 1 down to 0.5 at the waterline, so beaches absorb; 1 up to the waterline where the
+// shore is steep, so it reflects), and the window's mean water depth over its wet cells.
+std::vector<double> wake_mask(const cvc::physics::shore_grid_mask &shore,
+                              const cvc::ocean::ewave_params &p, double &meanDepth) {
+  const cvc::ocean::shore_grid &g = shore.grid();
+  const bool hasDepth = g.depth.size() == g.count();
   std::vector<double> m(std::size_t(p.n) * p.n, 0.0);
   double dsum = 0.0;
   int dn = 0;
   for (int j = 0; j < p.n; ++j)
     for (int i = 0; i < p.n; ++i) {
       const double x = p.origin_x + i * p.dx, y = p.origin_y + j * p.dx;
-      const double s = grid_sample(g, g.shore_m, x, y);
-      if (!(s > 0.0))
-        continue; // land
-      const double kr = L && !L->empty() ? L->sample_field(L->reflection, x, y) : 0.0;
-      const double slope = sh.slope.size() == g.count() ? grid_sample(g, sh.slope, x, y) : 0.0;
-      const double ss = std::clamp((slope - 0.25) / 0.35, 0.0, 1.0);
-      const double steep =
-          std::min(1.0, std::max(std::isfinite(kr) ? kr : 0.0, ss * ss * (3.0 - 2.0 * ss)));
-      const double r = std::min(1.0, s / W);
-      const double beach = mb + (1.0 - mb) * r * r * (3.0 - 2.0 * r);
-      m[std::size_t(j) * p.n + i] = beach + (1.0 - beach) * steep;
-      const double d = grid_sample(g, g.depth, x, y);
+      const double v = shore.mask(x, y);
+      m[std::size_t(j) * p.n + i] = v;
+      if (!(v > 0.0) || !hasDepth)
+        continue; // land (the mask is 0.5 or more in the water)
+      const double d = shore.sample(g.depth, x, y);
       if (d > 0.0)
         dsum += d, ++dn;
     }
@@ -1532,7 +1529,7 @@ void place_wake(WaterRT &rt, double tx, double ty) {
   const long ci = std::lround(p.origin_x / p.dx), cj = std::lround(p.origin_y / p.dx);
   const long di = wi - ci, dj = wj - cj;
   const bool move = !rt.wakePlaced || std::labs(di) >= 16 || std::labs(dj) >= 16;
-  if (!move && rt.wakeShore == rt.shore.get())
+  if (!move && rt.wakeShore == rt.shore)
     return;
   if (move) {
     const int si = int(std::clamp(di, -100000L, 100000L));
@@ -1541,10 +1538,13 @@ void place_wake(WaterRT &rt, double tx, double ty) {
     rt.wakeSrc->shift(si, sj);
     rt.wakePlaced = true;
   }
-  rt.wakeShore = rt.shore.get();
-  if (rt.shore && rt.shore->grid) {
+  if (rt.wakeShore != rt.shore) {
+    rt.wakeShore = rt.shore;
+    rt.wakeMask = rt.shore ? coast_mask(*rt.shore) : nullptr;
+  }
+  if (rt.wakeMask) {
     double depth = 5.0;
-    rt.wake->setMask(wake_mask(*rt.shore, rt.wake->params(), depth));
+    rt.wake->setMask(wake_mask(*rt.wakeMask, rt.wake->params(), depth));
     rt.wake->setDepth(std::max(0.5, depth));
   }
 }
@@ -1689,7 +1689,8 @@ bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells) {
   rt.wake = std::make_unique<EWave>(wp);
   rt.wakeSrc.reset();
   rt.wakePlaced = false;
-  rt.wakeShore = nullptr;
+  rt.wakeShore.reset();
+  rt.wakeMask.reset();
   rt.wakeT = -1.0;
   if (!ow || !rt.wake->init(ow)) {
     rt.wake.reset();
