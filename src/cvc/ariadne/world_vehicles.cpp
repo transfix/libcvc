@@ -837,6 +837,7 @@ struct WorldVehicles::impl {
   bool avoid = true;       // vehicles steer around each other (set_avoid)
   std::vector<std::array<double, 2>> movers; // what else they steer around (set_movers), m
   std::vector<ph::body_id> people;           // the bodies that are people (set_people)
+  bool brake_people = true;                  // the navigators brake for the movers (OW7c)
   std::string sense = "known"; // what the navigators know: known or fog (set_sense)
   bool drive_tel = false;  // the navigators capture their drive (set_drive_telemetry)
 
@@ -2881,6 +2882,25 @@ struct WorldVehicles::impl {
           if (fleet_of(e) == f.get())
             if (const int i = index(e); i >= 0)
               f->from[static_cast<std::size_t>(i)] = bicycle_box(*f, i, e.desc);
+      // The movers are people (a holon's avatars), whom the navigators brake for in their lanes
+      // (OW7c) as well as steering round.
+      if (brake_people && !movers.empty()) {
+        std::vector<float> xy;
+        for (const std::array<double, 2> &m : movers) {
+          xy.push_back(nx(m[0]));
+          xy.push_back(ny(m[1]));
+        }
+        f->sim->set_people(std::move(xy));
+        cvc::nav::sim_world::people_brake pb;
+        pb.on = true;
+        pb.person_r = static_cast<float>(0.4 * kScale);
+        pb.person_speed = static_cast<float>(1.5 * kScale);
+        pb.reaction_s = 0.3f;
+        pb.gap = static_cast<float>(1.0 * kScale);
+        f->sim->set_people_brake(pb);
+      } else if (!f->sim->people().empty()) {
+        f->sim->set_people({});
+      }
       // The other plants' vehicles, the `pose` entities and the world's other movers (a
       // holon's avatars), for this fleet's separation to steer around.
       if (avoid && (fleets.size() > 1 || posed_placed() || !movers.empty())) {
@@ -3975,6 +3995,9 @@ void WorldVehicles::set_avoid(bool avoid) {
 }
 
 bool WorldVehicles::avoid() const { return _impl->avoid; }
+
+void WorldVehicles::set_brake_for_people(bool on) { _impl->brake_people = on; }
+bool WorldVehicles::brakes_for_people() const { return _impl->brake_people; }
 
 void WorldVehicles::set_people(std::vector<ph::body_id> bodies) {
   _impl->people = std::move(bodies);

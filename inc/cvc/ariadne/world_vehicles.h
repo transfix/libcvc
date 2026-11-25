@@ -562,6 +562,12 @@ public:
   // not an obstacle's. Kept until set again, empty for none (the default).
   void set_people(std::vector<cvc::physics::body_id> bodies);
   const std::vector<cvc::physics::body_id> &people() const;
+  // Whether the navigators brake for the movers (people) in their lanes (OW7c,
+  // cvc::nav::sim_world::people_brake: a person's radius 0.4 m, people stepping in at up to
+  // 1.5 m/s, a 0.3 s reaction, stopping 1 m short), as well as steering round them. On by
+  // default. A vehicle a participant or a gym commands is its commander's to brake.
+  void set_brake_for_people(bool on);
+  bool brakes_for_people() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense

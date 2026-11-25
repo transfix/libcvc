@@ -8071,7 +8071,7 @@ namespace {
 struct mover_pass {
   double closest = 1e9, car_x = 0.0, avatar_moved = 0.0;
 };
-mover_pass pass_avatar(bool avoid) {
+mover_pass pass_avatar(bool avoid, bool brake = true) {
   LoadResult r = load_vehicles(kAvoid);
   EXPECT_TRUE(r.ok) << r.error;
   cvc::app app;
@@ -8082,6 +8082,7 @@ mover_pass pass_avatar(bool avoid) {
     return out;
   WorldVehicles *v = w->vehicles();
   v->set_avoid(avoid);
+  v->set_brake_for_people(brake);
   v->set_wander(false);
   w->sync(&warnings);
   entity_spec a;
@@ -8115,19 +8116,25 @@ mover_pass pass_avatar(bool avoid) {
 } // namespace
 
 // The navigators steer around the avatars (section 18.4): a car on nav@1 swings past a person
-// standing in its lane and drives on to its goal, where without avoiding it drives into them.
+// standing in its lane and drives on to its goal. Not steering around them, it brakes for them
+// (OW7c) and stops short; doing neither, it drives into them.
 TEST(AriadneOneWorld, ANavigatedCarSteersAroundAnAvatar) {
   REQUIRE_YAML();
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
-  const mover_pass on = pass_avatar(true), off = pass_avatar(false);
+  const mover_pass on = pass_avatar(true), braking = pass_avatar(false),
+                   off = pass_avatar(false, false);
   std::printf("  past an avatar: avoiding, closest %.2f m, the car ends at x %.1f, the avatar "
-              "moved %.2f m; not avoiding, %.2f m, x %.1f, moved %.2f m\n",
-              on.closest, on.car_x, on.avatar_moved, off.closest, off.car_x, off.avatar_moved);
+              "moved %.2f m; braking alone, %.2f m, x %.1f, moved %.2f m; neither, %.2f m, x "
+              "%.1f, moved %.2f m\n",
+              on.closest, on.car_x, on.avatar_moved, braking.closest, braking.car_x,
+              braking.avatar_moved, off.closest, off.car_x, off.avatar_moved);
   EXPECT_LT(on.car_x, -20.0) << "the car got past";
   EXPECT_GT(on.closest, 2.0) << "with room to spare";
   EXPECT_LT(on.avatar_moved, 0.1) << "and never touched the avatar";
-  EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "without avoiding, it drove into them";
+  EXPECT_GT(braking.car_x, 0.0) << "braking alone, it stopped short of them";
+  EXPECT_LT(braking.avatar_moved, 0.1) << "and never touched them";
+  EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "doing neither, it drove into them";
 }
 
 // Generic entities (section 18.4): a participant gets into a vehicle and drives it with its
