@@ -1468,8 +1468,13 @@ becomes shorthand for a `data-generate` and its data node, so documents that use
 `vehicles`) does not change; `generated_world(id)` reads the dataset.
 
 **One renderer.** cvcGL's generated-world renderer (terrain LOD, the props' cells and rungs, roads,
-the painted ground, cloud shade) draws any world dataset, a city's included, and the data node's
-simpler world draw goes.
+the painted ground, cloud shade) draws any world dataset, a city's included. A `source: { data }`
+node whose dataset is a world makes the drawn world from it with `world_from_bundle` off the frame
+thread and puts it in a piece at a time, under the node (world_nodes.h's DataWorldView); a reload
+replaces the shown world once the new one is in. The ground is the bundle's `ground.png`, else a
+city's `satellite.png` at its own width and height. The data node's plain draw (each item a mesh,
+the aerial image draped) is left for a terrain that takes a live texture
+(`material: { texture: { stream } }`) and for datasets that are not worlds.
 
 **Getting it to a client.** The server sends the bundle's bytes, content-addressed and cached
 (§12, AD1), and a client builds the same world from them, with no generator determinism to pin
@@ -1485,7 +1490,7 @@ a mesh (`terrain.glb`) and a 16-bit height map PNG.
 |---|---|---|
 | GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
-| GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: cvcGL draws a world dataset, a city's included, with the generated-world renderer. | L |
+| GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: a data node whose dataset is a world (Austin, a saved or made world) draws with the generated-world renderer: the terrain's LOD chunks on the bundle's ground (a non-square aerial image included), the props' cells, the buildings, roads and water, made in a sliced job and put in a piece at a time. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
 | GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
 

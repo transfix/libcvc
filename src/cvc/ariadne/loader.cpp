@@ -4049,9 +4049,24 @@ std::vector<SceneAnimation> parse_scene_animations(Ctx &ctx, const YAML::Node &l
       tr.node = str(tn, "node");
       tr.state = str(tn, "state");
       tr.key = str(tn, "key");
+      tr.clip = str(tn, "clip");
       const std::string tat = at + " track " + std::to_string(ti);
       if (tr.node.empty() == tr.state.empty()) {
-        ctx.warn(tat + ": names a node: (with a key:) or a state:, one of them — left out");
+        ctx.warn(tat +
+                 ": names a node: (with a key: or a clip:) or a state:, one of them — left out");
+        continue;
+      }
+      if (!tr.clip.empty()) { // the node's model's own clip: no key, no keyframes
+        if (tr.node.empty()) {
+          ctx.warn(tat + ": a clip: plays a node's model's clip, and names no node: — left out");
+          continue;
+        }
+        if (!tr.state.empty() || tn["key"] || tn["keys"])
+          ctx.warn(tat + ": a clip: track plays the node's model's clip: its key:, keys: and " +
+                   "state: are not used");
+        tr.state.clear();
+        tr.key.clear();
+        an.tracks.push_back(std::move(tr));
         continue;
       }
       const int width = tr.node.empty() ? 0 : node_key_width(tr.key);

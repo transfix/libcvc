@@ -1004,7 +1004,7 @@ bundle_world world_from_bundle(app &ctx, const city_bundle &b, const city_bundle
 
   // The meshes, by name; any other mesh item draws with the buildings.
   for (const geometry_item &it : b.geometry.items()) {
-    if (it.height_field() || !it.geometry)
+    if (it.height_field() || !it.geometry || !it.has(role_render)) // a collider alone is not drawn
       continue;
     cvc::geometry *to = it.name == "buildings"  ? &w->buildings
                         : it.name == "roads"    ? &w->roads
