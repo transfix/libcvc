@@ -248,6 +248,8 @@ public:
   void focus_next_widget() override;
   // §5.28 the next text or menu item copies `text` from its context menu.
   void next_item_copy(const std::string &text) override;
+  // §5.29 the picture just drawn offers Save image... / Save video... in its context menu.
+  void item_save(const MediaSave &m) override;
   bool draw_image(const char *name, float width) override;
   // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),
   // or the picture as a banner row above it (pixels where the terminal has them).

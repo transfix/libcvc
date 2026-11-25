@@ -152,6 +152,11 @@ public:
   void set_base(std::string dir);
   // Replace how bytes are fetched (a test's fake, a host's own transport). Null: fetch_bytes.
   void set_fetcher(Fetcher f);
+  // §5.29 the encoded bytes of `uri` under credential `auth`, fetched as this cache fetches a
+  // picture (its fetcher, else fetch_bytes against its base: through the app's HTTP cache without
+  // `auth`), for a Save: off the frame, on the app's background pool, or started in a browser build
+  // without threads. `done` is called once, on any thread. Never kept in the cache.
+  void fetch(const std::string &uri, const std::string &auth, FetchDone done);
   void set_limits(const Limits &limits);
   const Limits &limits() const;
 

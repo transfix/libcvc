@@ -18,8 +18,11 @@
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h> // §10 the tf_editor's model
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -2423,6 +2426,102 @@ TEST(AriadneFtxui, ANotificationsEntryCopiesItsWholeMessage) {
   ASSERT_TRUE(t.rclick("build failed")) << t.screen;
   ASSERT_TRUE(t.click(" Copy ")) << t.screen;
   EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy(n.text));
+}
+
+// §5.29 a picture by URL or file has Save image... in its context menu. A terminal has no Save
+// dialog, so the picture goes into the save folder (the Downloads folder unless the host says
+// otherwise) as a new file, never over one there, and a notification says where. A video: has
+// Save video...; a picture with save: false, and a decorative video (a video URL in an image:),
+// have none. Shift+F10 on a picture that takes the focus (fullscreen: true) opens its menu too.
+TEST(AriadneFtxui, APicturesMenuSavesItIntoTheDownloadsFolder) {
+  REQUIRE_FTXUI();
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() /
+      ("cvc_ftxui_save_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir / "dl");
+  const std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + "the picture's own bytes";
+  std::ofstream(dir / "cat.png", std::ios::binary) << png;
+  std::ofstream(dir / "dl" / "cat.png", std::ios::binary) << "already there";
+  std::ofstream(dir / "clip.webm", std::ios::binary)
+      << std::string("\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm", 16);
+
+  Widget pic = image_widget("pic", "file://cat.png", 64);
+  Widget kept = image_widget("kept", "file://cat.png", 64);
+  kept.save_menu = false;
+  Widget avatar = image_widget("avatar", "file://clip.webm", 64); // a decorative video
+  Widget clip;
+  clip.kind = Kind::Video;
+  clip.label = "clip";
+  clip.src = "file://clip.webm";
+  clip.img_size = 64;
+  clip.img_h = 36;
+  Widget open = image_widget("open", "file://cat.png", 64);
+  open.fullscreen_control = true;
+  Term t(group({text("first"), pic, text("second"), kept, text("third"), avatar, text("fourth"),
+                clip, text("fifth"), open}));
+  t.rt.set_media_base(dir.string());
+  t.rt.set_save_dir((dir / "dl").string());
+  t.draw();
+  // The cell under a caption: its picture's first row.
+  const auto under = [&](const char *caption) {
+    int x = 0, y = 0;
+    if (!find_cell(t.screen, caption, x, y))
+      return false;
+    t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x, y + 1, 3));
+    t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x, y + 1, 3));
+    t.draw();
+    return true;
+  };
+  const auto saved = [&](const fs::path &p) {
+    for (int i = 0; i < 2000 && !fs::exists(p); ++i) {
+      t.rt.drain();
+      t.draw();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (int i = 0; i < 5; ++i) // the notification comes from the drain after the write
+      t.rt.drain();
+    return fs::exists(p);
+  };
+
+  ASSERT_TRUE(under("first")) << t.screen;
+  ASSERT_TRUE(t.shows(" Save image... ")) << "its menu\n" << t.screen;
+  ASSERT_TRUE(t.click(" Save image... "));
+  EXPECT_FALSE(t.shows(" Save image... ")) << "picked: closed\n" << t.screen;
+  ASSERT_TRUE(saved(dir / "dl" / "cat (1).png")) << "a new file beside the one there";
+  {
+    std::ifstream in(dir / "dl" / "cat (1).png", std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), png);
+  }
+  const std::vector<cvc::notification_entry> notes = cvc::notifications(t.app);
+  ASSERT_FALSE(notes.empty());
+  EXPECT_EQ(notes.back().text, "Saved cat (1).png to " + (dir / "dl" / "cat (1).png").string());
+
+  ASSERT_TRUE(under("second"));
+  EXPECT_FALSE(t.shows(" Save image... ")) << "save: false: none\n" << t.screen;
+  ASSERT_TRUE(under("third"));
+  EXPECT_FALSE(t.shows(" Save ")) << "a decorative video: none\n" << t.screen;
+  ASSERT_TRUE(under("fourth"));
+  ASSERT_TRUE(t.shows(" Save video... ")) << "a video's\n" << t.screen;
+  ASSERT_TRUE(t.click(" Save video... "));
+  ASSERT_TRUE(saved(dir / "dl" / "clip.webm"));
+
+  // The keyboard: Tab to the picture that opens full screen, then Shift+F10.
+  for (int i = 0; i < 12 && !t.shows(" Save image... "); ++i) {
+    t.key("Tab");
+    t.key("F10", /*shift=*/true);
+    t.draw();
+    if (!t.shows(" Save image... ")) {
+      t.key("Escape");
+      t.draw();
+    }
+  }
+  EXPECT_TRUE(t.shows(" Save image... ")) << "Shift+F10 on the focused picture\n" << t.screen;
+  t.key("Escape");
+  t.draw();
+  std::error_code ec;
+  fs::remove_all(dir, ec);
 }
 
 // §5.28 hosted, there is no terminal to ask for the clipboard: Paste says to paste with the

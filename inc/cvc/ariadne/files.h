@@ -67,6 +67,9 @@ std::filesystem::path utf8_path(const std::string &utf8);
 // The MIME type a file name's extension says; "application/octet-stream" when it is not one of the
 // common ones (pictures, video, audio, text, PDF, archives).
 std::string guess_mime_type(const std::string &name);
+// The extension a MIME type's files take, lowercase, without the dot ("image/jpeg" -> "jpg"); ""
+// when it is not one of guess_mime_type's types. Parameters (";charset=...") are ignored.
+std::string mime_extension(const std::string &type);
 
 // What a program asked a picker for (file-pick's options).
 struct FilePickRequest {

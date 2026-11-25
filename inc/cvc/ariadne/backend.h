@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/files.h>  // pick_files: FilePickRequest / FilePickDone (§10.8)
+#include <cvc/ariadne/media_save.h>
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
@@ -651,6 +652,32 @@ public:
   // given one. Called just before the item; the item after it copies what it shows again.
   // Default: no context menus.
   virtual void next_item_copy(const std::string &text) { (void)text; }
+  // §5.29 the item just drawn (an image:'s picture by URL or file, a video:'s picture) offers
+  // "Save image..." (or, `m.video`, "Save video...") in its context menu. The core calls it right
+  // after the picture, as it calls set_tooltip. When the user picks it, the backend hands `m` back
+  // with media_save_chosen, and the core saves it. Default: no such menu.
+  virtual void item_save(const MediaSave &m) { (void)m; }
+  // §5.29 the host's own Save dialog, for a save the user asked for (the menu's, or (save-url)):
+  // true when it asked the user, and then `done` is called once, on the thread that draws, in a
+  // later frame (from begin_frame, say), with the path chosen, "" when the user cancelled. The core
+  // writes the file there. False when it has none: the core then has a browser page download it,
+  // or else puts it in the user's Downloads folder. Default: none.
+  virtual bool ask_save_path(const SavePathRequest &req, SavePathDone done) {
+    (void)req;
+    (void)done;
+    return false;
+  }
+  // §5.29 what the user asked of item_save's menus since the core last took them (each drain): a
+  // Save picked, or (`prepare`) a menu offering one just opened, so a browser page fetches the
+  // bytes while the pointer goes to the item and can download them inside the click (Safari counts
+  // only that as the user's). A backend calls these on the thread that draws.
+  struct MediaSaveAsk {
+    MediaSave save;
+    bool prepare = false;
+  };
+  void media_save_chosen(const MediaSave &m) { media_saves_.push_back({m, false}); }
+  void media_save_prepare(const MediaSave &m) { media_saves_.push_back({m, true}); }
+  std::vector<MediaSaveAsk> take_media_saves() { return std::exchange(media_saves_, {}); }
 
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
@@ -1058,6 +1085,7 @@ public:
 
 private:
   std::string custom_scope_;
+  std::vector<MediaSaveAsk> media_saves_; // §5.29 take_media_saves
 };
 
 } // namespace ariadne

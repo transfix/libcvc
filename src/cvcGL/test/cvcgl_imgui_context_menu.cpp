@@ -23,6 +23,9 @@
 // text..., whose window copies a part; on a text view, Copy line and Copy all; on the bell's entry
 // and the Notifications window's line, the whole message. On a touch screen a long press opens the
 // menu, and the finger's release does not pick an item. The clipboard is ImGui's own, in memory.
+// On a picture (§5.29), Save image..., which asks the host's Save dialog where, and the file is
+// written there.
+#include <chrono>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/widget.h>
@@ -30,8 +33,12 @@
 #include <cvc/core/notify.h>
 #include <cvc/gl/ariadne/ImGuiBackend.h>
 #include <cvc/state/state.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
+#include <thread>
 #ifdef CVC_ENABLE_IMGUI
 #include <imgui.h>
 #endif
@@ -105,6 +112,20 @@ struct RecordingBackend : cvc::gl::ImGuiBackend {
     const bool clicked = ImGuiBackend::menu_item_action(label);
     record(std::string("menu:") + label);
     return clicked;
+  }
+  // §5.29 a picture is laid out as a box of its size rather than uploaded (there is no GL here),
+  // and the Save dialog is the test's: it keeps the request and answers when told.
+  bool draw_image(const char *, float width) override {
+    ImGui::Dummy(ImVec2(width, width * 0.5f));
+    record("image");
+    return true;
+  }
+  ari::SavePathRequest save_req;
+  ari::SavePathDone save_done;
+  bool ask_save_path(const ari::SavePathRequest &req, ari::SavePathDone done) override {
+    save_req = req;
+    save_done = std::move(done);
+    return true;
   }
 };
 
@@ -380,6 +401,48 @@ int main() {
     s.menu_on(line);
     s.pick("Copy");
     chk(clip() == n.text, "its line copies the whole message too: " + clip());
+  }
+
+  // ---- §5.29 a picture: Save image..., the host's Save dialog, the file written there ----
+  {
+    namespace fs = std::filesystem;
+    const fs::path dir =
+        fs::temp_directory_path() /
+        ("cvcgl_imgui_save_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(dir);
+    const std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + "the picture's own bytes";
+    std::ofstream(dir / "upload", std::ios::binary) << png;
+    Session s(placed(ari::window("Post", {ari::image_widget("pic", "file://upload", 96)}), 20, 20,
+                     300, 200));
+    s.rt.set_media_base(dir.string());
+    s.frames(3);
+    chk(s.be.at.count("image") != 0, "the picture is drawn");
+    s.menu_on("image");
+    chk(s.has_item("Save image..."), "a right-click on a picture: Save image...");
+    s.pick("Save image...");
+    for (int i = 0; i < 1000 && !s.be.save_done; ++i) {
+      s.frame();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    chk(static_cast<bool>(s.be.save_done), "the host's Save dialog is asked, once the bytes came");
+    chk(s.be.save_req.name == "upload.png",
+        "the name from the URL, the extension from the bytes: " + s.be.save_req.name);
+    chk(s.be.save_req.title == "Save image", "titled Save image: " + s.be.save_req.title);
+    const fs::path chosen = dir / "mine.png";
+    if (s.be.save_done)
+      s.be.save_done(chosen.string(), "");
+    for (int i = 0; i < 1000 && !fs::exists(chosen); ++i) {
+      s.frame();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    {
+      std::ifstream in(chosen, std::ios::binary);
+      const std::string got{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+      chk(got == png, "the file is written where the user chose");
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
   }
 
   std::printf("%s (%d failure%s)\n", failures ? "FAILED" : "passed", failures,
