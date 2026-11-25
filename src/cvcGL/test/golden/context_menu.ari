@@ -1,0 +1,52 @@
+# context_menu.ari — golden: a document's context_menu: (docs/ARIADNE.md §5.30) open over a group
+# in a window. cvcgl_ari_golden right-clicks the card's text (its pointer script for this
+# document), so the capture shows one menu: the text's own Copy and Select text... (§5.28), then
+# under a rule the card's items, not the window's or the document's: an action, a ticked toggle,
+# a separator, a submenu, and the item whose visible_when: reads the menu's event (shown: it was
+# opened over a group), while the one for a scene node (event.hit) stays hidden.
+#
+# There is no menubar:, but a window with a close button gets one holding the built-in Windows
+# menu (§5.9), and every pos: is measured from below it.
+
+meta:
+  name: golden context menu
+  min_libcvc: 4.0.6
+
+init: |
+  (state-set "card.pinned" "1")
+
+context_menu:
+  id: scene
+  items:
+    - { menu_item: Spawn here, on: (state-set "log" "spawn") }
+
+windows:
+  - window: Scene tools
+    id: tools
+    pos: [24, 24]
+    size: [380, 170]
+    context_menu:
+      - { menu_item: Window settings, on: (state-set "log" "window") }
+    children:
+      - text: "Right-click the card for its menu."
+      - separator
+      - group:
+        id: card
+        context_menu:
+          id: card
+          items:
+            - { menu_item: Open card, on: (state-set "log" "open") }
+            - { menu_item: Pinned, bind: card.pinned }
+            - separator
+            - menu: Move to
+              items:
+                - { menu_item: Top, on: (state-set "log" "top") }
+            - menu_item: Over a group
+              visible_when: (= (get-attr event "on") "group")
+              on: (state-set "log" "group")
+            - menu_item: Over a scene node
+              visible_when: (= (get-attr event "hit") "1")
+              on: (state-set "log" "node")
+        children:
+          - text: "A card, one item"
+          - text: "with two lines."

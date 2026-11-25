@@ -10,7 +10,8 @@
 
 // cvc::physics::dyn_boat_plant (dyn_boat_plant.h; docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md D4,
 // O12): nav's agents on boats as their live plant. With Jolt:
-//   (1) the presets' envelopes are what the boats do;
+//   (1) the presets' envelopes are what the boats do; the tactical boat's hull grips sideways by
+//       its own lift, without a fixed foil, turns at full lock without spinning, and planes;
 //   (2) through the driver, a commanded speed and yaw rate are held on calm water and on a swell;
 //   (3) the energy books balance, the integrator's residual a small part of the flow;
 //   (4) nav drives the boats to their goals on open water, and turns them round to new ones;
@@ -200,13 +201,17 @@ TEST(DynBoatPlant, FloatsAtTheDraftItsHullGives) {
 // The tactical preset is its model's own hull (the vehicle-tactical-boat package's TacticalBoat,
 // baked into 16 stations): a closed V hull, 6.85 m long and 2.33 m in beam, 7.8 m overall, that
 // floats 0.49 m over its keel at 2800 kg; its collision shape the hull's convex hull; its water
-// cut-out inside it at that waterline.
+// cut-out inside it at that waterline. The hull has its own lift; its rudder is its outboards'
+// legs, at their propellers aft of the transom, swinging with them.
 TEST(DynBoatPlant, TheTacticalBoatIsItsModelsHull) {
   const dyn_boat_desc d = dyn_boat_desc::tactical();
   ASSERT_TRUE(d.boat.hull.hull);
   const hull_mesh &h = *d.boat.hull.hull;
   EXPECT_EQ(h.vertices.size(), 242u);
   EXPECT_EQ(h.triangles.size(), 480u);
+  EXPECT_DOUBLE_EQ(h.lift_coefficient, 0.56);
+  EXPECT_EQ(d.boat.rudder.position.x, d.boat.propeller.position.x);
+  EXPECT_EQ(d.boat.rudder.max_angle, d.boat.propeller.outboard_max_angle);
   EXPECT_TRUE(std::holds_alternative<convex_hull>(d.boat.hull.shape));
   EXPECT_DOUBLE_EQ(d.length_overall, 7.8);
   double lo[3] = {1e300, 1e300, 1e300}, hi[3] = {-1e300, -1e300, -1e300};
@@ -231,6 +236,7 @@ TEST(DynBoatPlant, TheTacticalBoatIsItsModelsHull) {
   EXPECT_GE(box->x - box->half_length, lo[0] - 1e-9);
   EXPECT_LT(box->x + box->half_length, hi[0]) << "short of its bow";
   EXPECT_GT(box->half_length, 2.0);
+  EXPECT_LT(d.boat.rudder.position.x, lo[0]) << "the legs are aft of the transom";
 }
 
 TEST(DynBoatPlant, RefusesBadParametersAndStartsWithoutWater) {
@@ -377,6 +383,343 @@ TEST(DynBoatPlant, PresetsDoWhatTheySay) {
     EXPECT_NEAR(top, preset_of(k).max_speed, 0.03 * preset_of(k).max_speed) << name_of(k);
     EXPECT_NEAR(radius, preset_of(k).turn_radius, 0.1 * preset_of(k).turn_radius) << name_of(k);
   }
+}
+
+// --- the tactical hull's lift (Jolt) -------------------------------------------------------
+
+namespace {
+
+constexpr double kDeg = 57.29577951308232;
+
+vec3 cross_of(const vec3 &a, const vec3 &b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+// v rotated by the unit quaternion q.
+vec3 rotated(const quat &q, const vec3 &v) {
+  const vec3 u{q.x, q.y, q.z};
+  const vec3 t = cross_of(u, v) * 2.0;
+  return v + t * q.w + cross_of(u, t);
+}
+
+// The tactical boat with its hull's lift_coefficient `lift` (0: none), with its legs or without.
+dyn_boat_desc tactical_with(double lift, bool legs = true) {
+  dyn_boat_desc d = dyn_boat_desc::tactical();
+  auto m = std::make_shared<hull_mesh>(*d.boat.hull.hull);
+  m->lift_coefficient = lift;
+  d.boat.hull.hull = m;
+  if (!legs)
+    d.boat.rudder.area = 0.0;
+  return d;
+}
+
+// Still water 40 km square, for runs at speed.
+field open_water() {
+  field f = water();
+  f.volume = uniform(1000.0, {-20000, -20000, -10}, {20000, 20000, 0});
+  return f;
+}
+
+struct turned_run {
+  double straight = 0.0, speed = 0.0, rate = 0.0, drift = 0.0;
+  double radius() const { return speed / std::fabs(rate); }
+  double lateral() const { return speed * std::fabs(rate); } // m/s^2
+};
+
+// A boat at `throttle` on calm water, 30 s straight and then 48 s at full lock (`lock` +1 to
+// port): its straight speed, and over the turn's last 18 s its mean speed, yaw rate and drift
+// (the angle its course makes with its heading, + to port).
+turned_run full_lock(const dyn_boat_desc &d, double throttle, double lock) {
+  auto w = water_world(water());
+  dyn_boat_plant_options o;
+  o.physics = w.get();
+  dyn_boat_plant p({d}, o);
+  const cvc::nav::plant_state s0 = at(0.0f, 0.0f);
+  p.attach(1, &s0, si_frame(), 0.06);
+  p.hold_controls(0, {throttle, 0.0});
+  for (int t = 0; t < 500; ++t)
+    p.advance();
+  turned_run r;
+  r.straight = p.boat_state(0).speed;
+  p.hold_controls(0, {throttle, lock});
+  std::vector<double> speed, rate, drift;
+  for (int t = 0; t < 800; ++t) {
+    p.advance();
+    if (t >= 500) {
+      const cvc::physics::boat_state b = p.boat_state(0);
+      speed.push_back(std::hypot(b.speed, b.sway));
+      rate.push_back(b.yaw_rate);
+      drift.push_back(std::atan2(b.sway, b.speed));
+    }
+  }
+  r.speed = mean(speed);
+  r.rate = mean(rate);
+  r.drift = mean(drift);
+  return r;
+}
+
+// The tactical hull alone (no boat), floating level at its draft and moving at 8 m/s ahead and
+// `beta` (rad) to port: the water's load on it. The pose is set before each of two steps and the
+// second step's load taken, so the triangles' wetted areas are the pose's and nothing slams.
+field_load drifting(const hull_mesh &mesh, double beta) {
+  const dyn_boat_desc d = dyn_boat_desc::tactical();
+  world w(config());
+  w.add_field(water());
+  body_desc b = d.boat.hull;
+  b.hull = std::make_shared<hull_mesh>(mesh);
+  b.position = {0.0, 0.0, dyn_boat_plant::float_height(d.boat, b.mass, 1000.0)};
+  const body_id id = w.add_body(b);
+  body_state s = w.state(id);
+  s.linear_velocity = {8.0 * std::cos(beta), 8.0 * std::sin(beta), 0.0};
+  for (int k = 0; k < 2; ++k) {
+    w.set_state(id, s);
+    w.step();
+  }
+  return w.field_load_on(id);
+}
+
+} // namespace
+
+// The tactical boat grips without a fixed foil: its hull's lift is its keel's and chines' grip.
+//   (1) Drifting at 8 m/s from its level float, the lift more than triples the hull's side force
+//       per radian of drift, growing about as the drift (where the pressure drag's grows faster):
+//       its own share 0.2 m ahead of the centre of mass, the pressure drag's 0.7 m ahead, on the
+//       bow. The hull's side force is ahead of its centre of mass either way, so the hull alone
+//       yaws away from its course: the boat's legs, far aft, hold it straight.
+//   (2) At full lock and full throttle it turns tighter, at more lateral acceleration and less
+//       drift, than the same boat without the lift.
+//   (3) Without the lift and the legs (the bare hull, as before its foil) it spins.
+TEST(DynBoatPlant, TheTacticalHullGripsWithoutAFoil) {
+  REQUIRE_JOLT();
+  const dyn_boat_desc d = dyn_boat_desc::tactical();
+  ASSERT_GT(d.boat.hull.hull->lift_coefficient, 0.0);
+  hull_mesh bare = *d.boat.hull.hull;
+  bare.lift_coefficient = 0.0;
+  const double b2 = 2.0 / kDeg, b4 = 4.0 / kDeg;
+  const field_load on_p2 = drifting(*d.boat.hull.hull, b2),
+                   on_m2 = drifting(*d.boat.hull.hull, -b2),
+                   on_p4 = drifting(*d.boat.hull.hull, b4);
+  const field_load off_p2 = drifting(bare, b2), off_m2 = drifting(bare, -b2),
+                   off_p4 = drifting(bare, b4);
+  // Per radian, from +-2 degrees; the yaw moment's lever, N_z / Y.
+  const double y_on = (on_p2.force.y - on_m2.force.y) / (2.0 * b2);
+  const double y_off = (off_p2.force.y - off_m2.force.y) / (2.0 * b2);
+  const double n_on = (on_p2.torque.z - on_m2.torque.z) / (2.0 * b2);
+  const double n_off = (off_p2.torque.z - off_m2.torque.z) / (2.0 * b2);
+  const double y_lift = y_on - y_off, x_lift = (n_on - n_off) / y_lift, x_drag = n_off / y_off;
+  const double lift2 = on_p2.force.y - off_p2.force.y, lift4 = on_p4.force.y - off_p4.force.y;
+  std::printf("[boat] tactical hull drifting at 8 m/s: side force %.0f N/rad without its lift "
+              "(%+.2f m from its centre of mass), %.0f N/rad with it; the lift's %.0f N/rad at "
+              "%+.2f m; from 2 to 4 degrees the lift's grows %.3f times, the pressure drag's "
+              "%.3f\n",
+              y_off, x_drag, y_on, y_lift, x_lift, lift4 / lift2, off_p4.force.y / off_p2.force.y);
+  EXPECT_LT(y_off, 0.0) << "the water pushes back on a drift";
+  EXPECT_LT(y_on, 3.0 * y_off) << "the lift more than triples the grip";
+  EXPECT_GT(lift4 / lift2, 1.8) << "about as the drift";
+  EXPECT_LT(lift4 / lift2, 2.6);
+  EXPECT_LT(lift4 / lift2, off_p4.force.y / off_p2.force.y);
+  EXPECT_GT(x_drag, 0.5) << "the pressure drag's side force is on the bow";
+  EXPECT_LT(x_lift, 0.5 * x_drag) << "the lift's nearer the centre of mass";
+
+  const turned_run lifted = full_lock(d, 1.0, 1.0),
+                   unlifted = full_lock(tactical_with(0.0), 1.0, 1.0);
+  const turned_run bare_hull = full_lock(tactical_with(0.0, false), 1.0, 1.0);
+  const auto show = [](const char *what, const turned_run &r) {
+    std::printf("  %s: %.3f m/s straight; full lock %.3f m/s at %.4f rad/s, radius %.2f m, %.2f "
+                "m/s^2, drift %.2f deg\n",
+                what, r.straight, r.speed, r.rate, r.radius(), r.lateral(), r.drift * kDeg);
+  };
+  show("with its lift", lifted);
+  show("without", unlifted);
+  show("bare hull", bare_hull);
+  EXPECT_LT(lifted.radius(), 0.8 * unlifted.radius());
+  EXPECT_GT(lifted.lateral(), 1.25 * unlifted.lateral());
+  EXPECT_LT(std::fabs(lifted.drift), std::fabs(unlifted.drift));
+  EXPECT_LT(bare_hull.radius(), 2.0) << "the bare hull spins on the spot";
+}
+
+// At full lock either way, from a crawl to full throttle, the tactical boat turns on a steady
+// circle without spinning: 15-40 m across its range, under 20 degrees of drift, keeping most of
+// its speed; to starboard as to port (the loft's quads are split the same way on both sides, so
+// its triangles are not quite each other's mirror: the drift differs by a few per cent).
+TEST(DynBoatPlant, TheTacticalBoatDoesNotSpinAtFullLock) {
+  REQUIRE_JOLT();
+  const dyn_boat_desc d = dyn_boat_desc::tactical();
+  for (const double throttle : {0.15, 0.5, 1.0}) {
+    const turned_run r = full_lock(d, throttle, 1.0);
+    std::printf("  throttle %.2f: %.3f m/s straight; full lock %.3f m/s at %.4f rad/s, radius "
+                "%.2f m, drift %.2f deg\n",
+                throttle, r.straight, r.speed, r.rate, r.radius(), r.drift * kDeg);
+    EXPECT_GT(r.rate, 0.0) << "to port";
+    EXPECT_GT(r.radius(), 15.0) << throttle;
+    EXPECT_LT(r.radius(), 40.0) << throttle;
+    EXPECT_LT(std::fabs(r.drift), 20.0 / kDeg) << throttle;
+    EXPECT_GT(r.speed, 0.75 * r.straight) << throttle;
+    if (throttle == 1.0) {
+      const turned_run s = full_lock(d, throttle, -1.0);
+      std::printf("  to starboard: %.3f m/s at %.4f rad/s, radius %.2f m, drift %.2f deg\n",
+                  s.speed, s.rate, s.radius(), s.drift * kDeg);
+      EXPECT_LT(s.rate, 0.0);
+      EXPECT_NEAR(s.radius(), r.radius(), 0.02 * r.radius());
+      EXPECT_NEAR(s.drift, -r.drift, 0.06 * std::fabs(r.drift));
+    }
+  }
+}
+
+namespace {
+
+struct planing_point {
+  double speed = 0.0, thrust = 0.0, trim = 0.0, rise = 0.0, area = 0.0, length = 0.0;
+};
+
+// The hull's wetted area and the length along it of its wetted part, under calm water at z = 0.
+void wetted(const hull_mesh &h, const body_state &s, double &area, double &length) {
+  std::vector<vec3> wv(h.vertices.size());
+  for (std::size_t i = 0; i < h.vertices.size(); ++i)
+    wv[i] = s.position + rotated(s.rotation, h.vertices[i]);
+  double x0 = 1e300, x1 = -1e300;
+  area = 0.0;
+  for (const auto &t : h.triangles) {
+    // The triangle clipped to z < 0, and the body x of its corners there.
+    vec3 q[4];
+    int n = 0;
+    const auto corner = [&](std::uint32_t ia, std::uint32_t ib, double f) {
+      q[n++] = wv[ia] + (wv[ib] - wv[ia]) * f;
+      const double x = h.vertices[ia].x + (h.vertices[ib].x - h.vertices[ia].x) * f;
+      x0 = std::min(x0, x);
+      x1 = std::max(x1, x);
+    };
+    for (int k = 0; k < 3; ++k) {
+      const std::uint32_t ia = t[k], ib = t[(k + 1) % 3];
+      const bool ina = wv[ia].z < 0.0, inb = wv[ib].z < 0.0;
+      if (ina)
+        corner(ia, ib, 0.0);
+      if (ina != inb)
+        corner(ia, ib, wv[ia].z / (wv[ia].z - wv[ib].z));
+    }
+    for (int k = 1; k + 1 < n; ++k) {
+      const vec3 c = cross_of(q[k] - q[0], q[k + 1] - q[0]);
+      area += 0.5 * std::sqrt(dot(c, c));
+    }
+  }
+  length = x1 - x0;
+}
+
+// A boat on calm water at rest for 12 s, then at each throttle in turn for 36 s: at rest and at
+// the end of each, the means over 3 s of its speed, thrust, trim (bow up), the rise of its hull's
+// centroid and its wetted area and length. The trims and rises are from rest.
+std::vector<planing_point> sweep(const dyn_boat_desc &d, const std::vector<double> &throttles) {
+  auto w = water_world(open_water());
+  dyn_boat_plant_options o;
+  o.physics = w.get();
+  dyn_boat_plant p({d}, o);
+  const cvc::nav::plant_state s0 = at(-5000.0f, 0.0f);
+  p.attach(1, &s0, si_frame(), 0.06);
+  const hull_mesh &h = *d.boat.hull.hull;
+  vec3 centroid;
+  double volume = 0.0;
+  for (const auto &t : h.triangles) {
+    const vec3 &a = h.vertices[t[0]], &b = h.vertices[t[1]], &c = h.vertices[t[2]];
+    const double v6 =
+        dot(a, vec3{b.y * c.z - b.z * c.y, b.z * c.x - b.x * c.z, b.x * c.y - b.y * c.x});
+    volume += v6 / 6.0;
+    centroid = centroid + (a + b + c) * (v6 / 24.0);
+  }
+  centroid = centroid * (1.0 / volume);
+  const auto measure = [&](int ticks) {
+    planing_point m;
+    for (int t = 0; t < ticks; ++t) {
+      p.advance();
+      const cvc::physics::boat_state b = p.boat_state(0);
+      double area = 0.0, length = 0.0;
+      wetted(h, b.body, area, length);
+      m.speed += b.speed / ticks;
+      m.thrust += b.thrust / ticks;
+      m.trim += std::asin(rotated(b.body.rotation, {1.0, 0.0, 0.0}).z) / ticks;
+      m.rise += (b.body.position.z + rotated(b.body.rotation, centroid).z) / ticks;
+      m.area += area / ticks;
+      m.length += length / ticks;
+    }
+    return m;
+  };
+  p.hold_controls(0, {0.0, 0.0});
+  for (int t = 0; t < 150; ++t)
+    p.advance();
+  std::vector<planing_point> out{measure(50)};
+  for (const double throttle : throttles) {
+    p.hold_controls(0, {throttle, 0.0});
+    for (int t = 0; t < 550; ++t)
+      p.advance();
+    out.push_back(measure(50));
+    out.back().trim -= out.front().trim;
+    out.back().rise -= out.front().rise;
+  }
+  out.front().trim = out.front().rise = 0.0;
+  return out;
+}
+
+void print_sweep(const char *what, const dyn_boat_desc &d, const std::vector<double> &throttles,
+                 const std::vector<planing_point> &s) {
+  const double weight = d.boat.hull.mass * 9.80665;
+  std::printf("  %s, %.0f kN: throttle, speed (m/s), Fn_vol, thrust/weight, trim (deg), rise "
+              "(m), wetted area (m^2), wetted length (m)\n",
+              what, d.boat.propeller.max_thrust / 1000.0);
+  for (std::size_t i = 0; i < s.size(); ++i)
+    std::printf("    %4.2f  %6.3f  %5.2f  %.4f  %6.3f  %6.4f  %6.3f  %5.3f\n",
+                i ? throttles[i - 1] : 0.0, s[i].speed,
+                s[i].speed / std::sqrt(9.80665 * std::cbrt(d.boat.hull.mass / 1000.0)),
+                s[i].thrust / weight, s[i].trim * kDeg, s[i].rise, s[i].area, s[i].length);
+}
+
+} // namespace
+
+// The tactical hull planes: as it goes faster it trims bow up, rises and runs on less of its
+// bottom, by its lift. At its own 8 kN it is rising onto the plane at its top speed, where the
+// hull without the lift barely rises; given 30 kN (and no thrust falloff short of 40 m/s) it planes
+// on a third of its bottom, its trim levelling off and its resistance no longer growing as the
+// speed squared. The triangle model has no wave-making resistance, so there is no hump in the
+// resistance as such: it rises to a knee and flattens.
+TEST(DynBoatPlant, TheTacticalHullPlanesAtSpeed) {
+  REQUIRE_JOLT();
+  const dyn_boat_desc d = dyn_boat_desc::tactical();
+  const std::vector<double> throttles{0.1, 0.3, 0.6, 1.0};
+  const std::vector<planing_point> s = sweep(d, throttles);
+  print_sweep("tactical", d, throttles, s);
+  for (std::size_t i = 1; i < s.size(); ++i) {
+    EXPECT_GT(s[i].speed, s[i - 1].speed) << i;
+    EXPECT_GT(s[i].rise, s[i - 1].rise) << i;
+    EXPECT_GT(s[i].trim, s[i - 1].trim) << i;
+    EXPECT_LT(s[i].area, s[i - 1].area) << i;
+    EXPECT_LT(s[i].length, s[i - 1].length) << i;
+  }
+  const planing_point &top = s.back(), &rest = s.front();
+  EXPECT_GT(top.rise, 0.10);
+  EXPECT_GT(top.trim, 2.0 / kDeg);
+  EXPECT_LT(top.trim, 4.0 / kDeg);
+  EXPECT_LT(top.area, 0.82 * rest.area);
+  EXPECT_LT(top.length, 0.95 * rest.length);
+  const std::vector<double> full{1.0};
+  const std::vector<planing_point> u = sweep(tactical_with(0.0), full);
+  print_sweep("without its lift", tactical_with(0.0), full, u);
+  EXPECT_LT(u.back().rise, 0.5 * top.rise);
+  EXPECT_GT(u.back().area, 0.9 * rest.area);
+
+  dyn_boat_desc fast = d;
+  fast.boat.propeller.max_thrust = 30000.0;
+  fast.boat.propeller.max_inflow_speed = 40.0;
+  const std::vector<double> more{0.1, 0.2, 0.4, 0.7, 1.0};
+  const std::vector<planing_point> f = sweep(fast, more);
+  print_sweep("tactical", fast, more, f);
+  const planing_point &a = f[1], &b = f.back();
+  EXPECT_GT(b.speed, 25.0);
+  EXPECT_GT(b.rise, 0.3) << "most of its 0.49 m draft";
+  EXPECT_LT(b.area, 0.35 * rest.area);
+  EXPECT_LT(b.length, 0.8 * rest.length);
+  EXPECT_NEAR(b.trim, f[f.size() - 2].trim, 0.15 / kDeg) << "the trim levels off";
+  const double ra = a.thrust / (a.speed * a.speed), rb = b.thrust / (b.speed * b.speed);
+  std::printf("  resistance over speed squared: %.3f N s^2/m^2 at %.2f m/s, %.3f at %.2f m/s\n", ra,
+              a.speed, rb, b.speed);
+  EXPECT_LT(rb, 0.2 * ra) << "planing, it no longer resists as the speed squared";
 }
 
 // --- the driver (Jolt) ---------------------------------------------------------------------

@@ -109,19 +109,25 @@ std::string val(cvc::app &app, const std::string &path) {
   return cvc::state::instance(app)(path).value();
 }
 
-// World point -> VTK display coordinates in `ren`.
-void to_display(vtkRenderer *ren, double x, double y, double z, double &dx, double &dy) {
+// World point -> the window's VTK display coordinates where view `vp` shows it: its renderer draws
+// into its texture, which the window shows at its region.
+void to_display(cvc::gl::Viewport &vp, double x, double y, double z, double &dx, double &dy) {
+  vtkRenderer *ren = vp.renderer();
   ren->SetWorldPoint(x, y, z, 1.0);
   ren->WorldToDisplay();
-  double d[3];
+  double d[3], w[2];
   ren->GetDisplayPoint(d);
-  dx = d[0];
-  dy = d[1];
+  vp.rendererToWindow(d[0], d[1], w);
+  dx = w[0];
+  dy = w[1];
 }
 
-// Display -> world on the plane the view looks at (its focal plane: a parallel view).
-void to_world(vtkRenderer *ren, double dx, double dy, double out[3]) {
-  ren->SetDisplayPoint(dx, dy, 0.5);
+// Window display -> world on the plane view `vp` looks at (its focal plane: a parallel view).
+void to_world(cvc::gl::Viewport &vp, double wx, double wy, double out[3]) {
+  vtkRenderer *ren = vp.renderer();
+  double d[2];
+  vp.windowToRenderer(wx, wy, d);
+  ren->SetDisplayPoint(d[0], d[1], 0.5);
   ren->DisplayToWorld();
   double w[4];
   ren->GetWorldPoint(w);
@@ -219,7 +225,7 @@ int main() {
 
   // SceneViews::pick at voxel (3, 4) of the z slice: the plane, the voxel, its value.
   double dx = 0.0, dy = 0.0;
-  to_display(ren, 3.0, 4.0, 2.0, dx, dy);
+  to_display(slicer, 3.0, 4.0, 2.0, dx, dy);
   cvc::gl::ariadne::SceneViews::PickHit hit;
   const bool picked = rt.views().pick("slicer", dx, dy, hit);
   check(picked && hit.voxel && hit.node == "s_z" && hit.ijk[0] == 3 && hit.ijk[1] == 4 &&
@@ -229,7 +235,7 @@ int main() {
             std::to_string(hit.ijk[2]) + " = " + std::to_string(hit.value));
   check(std::fabs(hit.world[2] - 2.0) < 1e-9, "exactly on the plane");
   double ox = 0.0, oy = 0.0;
-  to_display(ren, 9.5, 2.0, 2.0, ox, oy); // past the volume's edge, still in the view
+  to_display(slicer, 9.5, 2.0, 2.0, ox, oy); // past the volume's edge, still in the view
   cvc::gl::ariadne::SceneViews::PickHit past;
   check(!rt.views().pick("slicer", ox, oy, past) && past.plane && !past.voxel &&
             std::fabs(past.world[0] - 9.5) < 1e-6,
@@ -257,12 +263,12 @@ int main() {
   // The wheel zooms about the pointer.
   {
     double before[3], after[3];
-    to_world(ren, dx, dy, before);
+    to_world(slicer, dx, dy, before);
     const double s0 = ren->GetActiveCamera()->GetParallelScale();
     io.AddMouseWheelEvent(0.0f, 2.0f);
     for (int f = 0; f < 40; ++f)
       rt.step(kDt); // the glide settles
-    to_world(ren, dx, dy, after);
+    to_world(slicer, dx, dy, after);
     const double s1 = ren->GetActiveCamera()->GetParallelScale();
     check(s1 < s0, "the wheel zooms in", std::to_string(s0) + " -> " + std::to_string(s1));
     check(std::fabs(after[0] - before[0]) < 1e-6 && std::fabs(after[1] - before[1]) < 1e-6,
@@ -282,7 +288,7 @@ int main() {
             std::fabs(focal[2] - 1.5) < 1e-6,
         "framed on the y slice",
         std::to_string(focal[0]) + " " + std::to_string(focal[1]) + " " + std::to_string(focal[2]));
-  to_display(ren, 6.0, 3.0, 1.0, dx, dy);
+  to_display(slicer, 6.0, 3.0, 1.0, dx, dy);
   const bool picked_y = rt.views().pick("slicer", dx, dy, hit);
   check(picked_y && hit.node == "s_y" && hit.ijk[0] == 6 && hit.ijk[1] == 3 && hit.ijk[2] == 1 &&
             hit.value == 6 + 30 + 100,
@@ -292,8 +298,7 @@ int main() {
 
   // An orbit view: a pick that hits a slice node writes its voxel too.
   if (vm.hasViewport("orbit")) {
-    vtkRenderer *oren = vm.viewport("orbit").renderer();
-    to_display(oren, 2.0, 1.0, 2.0, dx, dy); // on s_z, away from the other slices
+    to_display(vm.viewport("orbit"), 2.0, 1.0, 2.0, dx, dy); // on s_z, away from the other slices
     cvc::gl::ariadne::SceneViews::PickHit oh;
     const bool got = rt.views().pick("orbit", dx, dy, oh);
     check(got && oh.node == "s_z" && oh.voxel && oh.ijk[0] == 2 && oh.ijk[1] == 1 && oh.ijk[2] == 2,

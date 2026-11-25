@@ -735,6 +735,16 @@ void sim_world::step(int num_threads) {
 
   lap(prof_.gate);
 
+  // Braking for people on the kinematic arm (people_brake): the agents' start of tick, to brake
+  // from after the drive has moved them its own way.
+  const bool people_on = people_cfg_.on && people_.size() >= 2 && n_ > 0;
+  std::vector<plant_state> people_start;
+  if (people_on && !plant_) {
+    people_start.resize(static_cast<std::size_t>(n_));
+    for (int i = 0; i < n_; ++i)
+      people_start[i] = {o_[2 * i], o_[2 * i + 1], th_[i], sp_[i]};
+  }
+
   // override_command on the kinematic arm: the agents' start of tick, to integrate from after
   // the drive has moved them its own way.
   std::vector<plant_state> ov_start;
@@ -930,6 +940,73 @@ void sim_world::step(int num_threads) {
         sp_[i] = s.speed;
       }
     }
+  }
+
+  // ── PEOPLE IN THE WAY (people_brake): an agent the drive drives brakes for a person in its
+  // lane ahead within its stopping distance, keeping the drive's steering ──
+  if (people_on) {
+    people_braked_.assign(static_cast<std::size_t>(n_), 0);
+    const float dt = cfg_.veh.dt;
+    const int np = static_cast<int>(people_.size() / 2);
+    for (int i = 0; i < n_; ++i) {
+      if ((ov_any_ && ov_on_[i]) || parked_[i])
+        continue;
+      const plant_state s0 = plant_ ? pl_start_[i] : people_start[i];
+      const float v = s0.speed;
+      if (v < 0.0f)
+        continue; // backing up: not toward what is ahead
+      const float L = cfg_.veh.L_col ? cfg_.veh.L_col[i] : cfg_.veh.L;
+      const float rr = cfg_.veh.rr_col ? cfg_.veh.rr_col[i] : cfg_.veh.rr;
+      const float a_max_i = cfg_.veh.a_max_col ? cfg_.veh.a_max_col[i] : cfg_.veh.a_max;
+      const float a_b = plant_ ? (pl_a_brake_[i] > 0.0f ? pl_a_brake_[i] : pl_a_max_[i]) : a_max_i;
+      if (!(a_b > 0.0f))
+        continue;
+      const float t_stop = people_cfg_.reaction_s + v / a_b;
+      const float reach = v * people_cfg_.reaction_s + v * v / (2.0f * a_b) + people_cfg_.gap;
+      const float lane = rr + people_cfg_.person_r + people_cfg_.person_speed * t_stop;
+      const float front = L + rr;
+      const float ch = std::cos(s0.heading), sh = std::sin(s0.heading);
+      float nearest = -1.0f; // the gap to the nearest person in the lane within reach
+      for (int j = 0; j < np; ++j) {
+        const float dx = people_[2 * j] - s0.x, dy = people_[2 * j + 1] - s0.y;
+        const float ahead = dx * ch + dy * sh, across = std::fabs(dy * ch - dx * sh);
+        if (ahead <= 0.0f || across >= lane)
+          continue;
+        const float gap = std::max(0.0f, ahead - front - people_cfg_.person_r);
+        if (gap < reach && (nearest < 0.0f || gap < nearest))
+          nearest = gap;
+      }
+      if (nearest < 0.0f)
+        continue;
+      // As hard as stopping `gap` short of the person needs, up to its braking; a stop held.
+      const float room = nearest - people_cfg_.gap;
+      const float need = room > 1e-4f ? v * v / (2.0f * room) : a_b;
+      const float brake = -std::min(std::min(need, a_b), v / dt);
+      people_braked_[i] = 1;
+      if (plant_) {
+        pl_accel_cmd_[i] = std::min(pl_accel_cmd_[i], brake);
+        continue;
+      }
+      // The kinematic arm: the tick again from its start, at the drive's turn (the steer its
+      // heading change took at its mean speed) and the brake in place of its acceleration.
+      const float vmax_i = cfg_.veh.vmax_col ? cfg_.veh.vmax_col[i] : cfg_.veh.vmax;
+      const float sp_min = cfg_.veh.allow_reverse ? -0.25f * vmax_i : 0.0f;
+      const float turned = std::remainder(th_[i] - s0.heading, 6.283185307179586f);
+      const float mean_v = 0.5f * (v + sp_[i]);
+      float steer = 0.0f;
+      if (std::fabs(mean_v) > 1e-5f && L > 0.0f)
+        steer = std::atan(L * turned / (mean_v * dt));
+      steer = std::min(std::max(steer, -cfg_.veh.delta_max), cfg_.veh.delta_max);
+      const float acc = std::min(brake, (sp_[i] - v) / dt);
+      const plant_state s1 =
+          kinematic_step(s0, steer, acc, L, dt, std::max(1, cfg_.veh.nsub), sp_min, vmax_i);
+      o_[2 * i] = s1.x;
+      o_[2 * i + 1] = s1.y;
+      th_[i] = s1.heading;
+      sp_[i] = s1.speed;
+    }
+  } else if (!people_braked_.empty()) {
+    people_braked_.clear();
   }
 
   // ── park_hold (kinematic arm): a parked agent brakes to a stop at a_max and holds, straight

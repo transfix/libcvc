@@ -16,16 +16,20 @@
 #include <cstdint>
 #include <cvc/core/app.h>
 #include <cvc/core/exception.h>
+#include <cvc/geometry/geometry.h>
+#include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/nav_scrub.h>
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/plant_host.h>
 #include <cvc/physics/scrub_plant.h>
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
+#include <cvc/world/world_geometry.h>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <memory>
@@ -235,6 +239,60 @@ TEST(ScrubPlant, WallsTheBuildingsInAndTheHumveeStaysOutOfThem) {
   cvc::nav::coef_mlp::default_biased().save(blob);
   s.plant = "humvee";
   const cvc::nav::run_log l = cvc::nav::deploy_checkpoint(s, blob, "default", lib, "{}", hook);
+  EXPECT_EQ(l.header().plant, "humvee");
+  EXPECT_EQ(l.ticks(), 300);
+  EXPECT_EQ(cvc::nav::metrics_of(l).pen_steps, 0.0);
+  EXPECT_GT(cvc::nav::metrics_of(l).path_m, 1.0);
+}
+
+TEST(ScrubPlant, OnAWorldsGeometryTheHumveeDrivesItsGroundAndMissesItsBuildings) {
+  // a flat 120 m square of terrain 5 m up (a vehicle started at ground_z 0 would be under it) with
+  // a 20 m building, 10 m tall, in its middle, in metres
+  const auto make_town = [] {
+    auto town = std::make_shared<cvc::world::world_geometry>();
+    town->add({"terrain", std::make_shared<cvc::height_field>(61, 61, -60.0, -60.0, 2.0, 2.0,
+                                                              std::vector<float>(61 * 61, 5.0f))});
+    auto block = std::make_shared<cvc::geometry>();
+    for (int k = 0; k < 8; ++k)
+      block->points().push_back(
+          {{(k & 1) ? 10.0 : -10.0, (k & 2) ? 10.0 : -10.0, (k & 4) ? 15.0 : 5.0}});
+    const int idx[36] = {0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4,
+                         2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5};
+    for (int t = 0; t < 12; ++t)
+      block->tris().push_back(
+          {{static_cast<cvc::index_t>(idx[3 * t]), static_cast<cvc::index_t>(idx[3 * t + 1]),
+            static_cast<cvc::index_t>(idx[3 * t + 2])}});
+    town->add({"block", block, town->surfaces().by_name("building_concrete")});
+    return town;
+  };
+  std::shared_ptr<const cvc::world::world_geometry> town = make_town();
+  const cvc::nav::world_grid g = cvc::nav::make_grid(*town, 2.0);
+  cvc::nav::scrub_scenario s = cvc::nav::grid_scenario(g, 2, 3, 300, "town");
+  EXPECT_THROW(scrub_plant(std::shared_ptr<const cvc::world::world_geometry>{}),
+               std::invalid_argument);
+  cvc::nav::policy_library lib;
+  {
+    const std::weak_ptr<const cvc::world::world_geometry> held = town;
+    cvc::nav::scrub_plant_fn hook = scrub_plant(town);
+    town.reset();
+    EXPECT_FALSE(held.expired()); // the hook keeps the geometry
+    sim_world w = cvc::nav::world_from_trace(s.world, lib);
+    EXPECT_THROW(hook(w, "no such vehicle"), cvc::physics_error);
+    cvc::nav::scrub_plant_attached on = hook(w, "kinematic");
+    hook = nullptr;
+    EXPECT_FALSE(held.expired()); // and so does a run
+    w.set_plant(nullptr);
+    on.owner.reset();
+    EXPECT_TRUE(held.expired());
+  }
+  REQUIRE_JOLT();
+  // deployed on the Humvee on the town's own colliders: no tick ends with a centre in the building
+  const std::string blob =
+      (std::filesystem::path(::testing::TempDir()) / "scrub_plant_town.cvcnav").string();
+  cvc::nav::coef_mlp::default_biased().save(blob);
+  s.plant = "humvee";
+  const cvc::nav::run_log l =
+      cvc::nav::deploy_checkpoint(s, blob, "default", lib, "{}", scrub_plant(make_town()));
   EXPECT_EQ(l.header().plant, "humvee");
   EXPECT_EQ(l.ticks(), 300);
   EXPECT_EQ(cvc::nav::metrics_of(l).pen_steps, 0.0);

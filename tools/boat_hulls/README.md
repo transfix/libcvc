@@ -38,9 +38,10 @@ To re-bake, replace `kTacticalLoft` in `src/cvc/physics/dyn_boat_plant.cpp` with
    - build `loft_hull(stations)`;
    - use `convex_hull{vertices}` as the collision shape;
    - set the mass, propeller, rudder and `length_overall`.
-4. Give it grip sideways. The hull's triangles push back on sideways flow by its normal component squared, so a V bottom gets almost none, and an outboard boat on its loft alone skids and, at full lock, spins.
-   - `tactical()` uses its rudder slot as the hull's keel, chines and strakes: a fixed foil (`max_angle` 0) on the keel, just aft of the centre of mass.
-   - Find the area and place by measuring. Further forward, the boat spins. Further aft or larger, it barely turns.
+4. Give it grip sideways. The hull's pressure drag pushes back on sideways flow by its normal component squared, so a V bottom gets almost none from it, and an outboard boat on its loft alone skids and, at full lock, spins.
+   - Set the hull's `lift_coefficient` (`hull.h`): 0.56, as `tactical()` has, is a planing plate's (Savitsky's dynamic lift at a wetted length of two beams). It gives the V and chines their grip and has the boat rise and trim onto the plane at speed.
+   - Give the outboards' legs (or a shaft boat's rudder and skeg) the rudder slot, at the propellers. A hull's side force acts ahead of its centre of mass (its bow's pressure drag), so the hull alone yaws off its course; the legs far aft hold it straight. `tactical()`'s are 0.2 m² swinging 0.3 rad with the motors (`max_angle` equal to `outboard_max_angle`).
+   - Measure the turns. Larger legs or a wider swing turn tighter, with more drift; `physics_dyn_boat_plant_test`'s `TheTacticalBoatDoesNotSpinAtFullLock` is the check that it holds a circle.
 5. Measure it as above.
 
 For a boat with no model, or many boats of one kind, a parametric hull (a generated V of given length, beam, deadrise and chine) would do as well. None is written yet.

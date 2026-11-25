@@ -30,6 +30,7 @@
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
+#include <functional>           // CustomEdit::context_pick (§5.30)
 #include <string>
 #include <utility> // move (set_custom_scope)
 #include <vector>
@@ -140,6 +141,11 @@ struct CustomEdit {
     bool document = false;
   };
   std::vector<Event> events;
+  // §5.30 a scene view's pick at the pointer, for a right-click menu over it: the fields an
+  // `input: pick` view writes (x, y, z, hit, node, i, j, k, value, axis, view, mods) and the node's
+  // tags (space-separated). The core calls it in the same frame, only when the menu opens. Empty:
+  // the widget is not a scene view.
+  std::function<std::vector<std::pair<std::string, std::string>>()> context_pick;
 };
 // An RGB colour edit (§ G7). `drawn` is the backend's signal that it actually rendered a colour
 // widget (false on a backend that has none — the core then shows the value as text). `rgb` is the
@@ -440,6 +446,22 @@ struct Capabilities {
   bool rich_text = false;       // rich_text draws styles and links that can be activated: text.runs
   bool button_icon = false;     // button_with draws ButtonLook::icon on the button: button.icon
   bool button_selected = false; // button_with draws a chosen button pressed in: button.selected
+  bool context_menu = false;    // begin_context_menu opens right-click menus: ui.context_menu
+};
+
+// §5.30 what a right-click menu (`context_menu:`) is over: an item (a group, a viewport), a
+// window, or the main view (the document's top level: wherever no window is).
+enum class ContextMenuOver { Item, Window, Main };
+
+// What the backend says about a right-click menu it has open (Backend::begin_context_menu).
+// `now`: it opened this frame, so the core takes the menu's `event` now and keeps it while the menu
+// stays open. `x`, `y`: where it was opened, in px from the top left of the item (of the window's
+// content, of the screen for the main view); 0 when it was opened by a key. `via`: how,
+// "pointer" (a right-click), "touch" (a long press) or "key" (the Menu key, Shift+F10).
+struct ContextMenuOpen {
+  bool now = false;
+  float x = 0.0f, y = 0.0f;
+  std::string via;
 };
 
 // §5.27 how button_with draws a button: `icon`, a published image's name (set_image; empty for
@@ -835,6 +857,33 @@ public:
   // Whether the LAST item drawn shows in its window, not scrolled out of view or clipped away. An
   // autoplaying video plays while it does (§5.13). Default true: a backend that draws everything.
   virtual bool item_visible() { return true; }
+
+  // §5.30 right-click menus (`context_menu:`). For a group or a viewport (`over` Item), the core
+  // brackets what the menu is over with begin_context_area / end_context_area and then asks
+  // begin_context_menu; for a window (Window), the same around its body, inside begin_window. For
+  // the main view (Main) it asks begin_context_menu alone, after the whole walk. `id` is stable per
+  // menu instance (under the push_id path). The area lets a backend that opens menus on an item
+  // make the area one item (ImGui), and one that opens them by key tell which menu holds the focus
+  // (the terminals). Areas nest, innermost last; the innermost menu under the pointer or around the
+  // focus is the one that opens. Balanced, like begin_item_group.
+  virtual void begin_context_area(const char *id, ContextMenuOver over) {
+    (void)id;
+    (void)over;
+  }
+  virtual void end_context_area() {}
+  // Whether menu `id` is open this frame: opening it when the user asks for it here (a right-click
+  // on its area, a long press, the Menu key or Shift+F10 with the focus in it), as a popup or a
+  // list where it was asked for. While it is open the core emits its items (menu_item_action,
+  // menu_item_toggle, begin_menu for a submenu, separator) and then calls end_context_menu; an
+  // item that runs closes it. `opened` says whether it opened this frame, where and how.
+  // Default: it never opens (Capabilities::context_menu false).
+  virtual bool begin_context_menu(const char *id, ContextMenuOver over, ContextMenuOpen &opened) {
+    (void)id;
+    (void)over;
+    (void)opened;
+    return false;
+  }
+  virtual void end_context_menu() {}
 
   // §5.11 a picture or a player that fills the width (`size: "N%"`): the width, in the document's
   // px, the next widget has on its line. In a window that sizes itself to its content, where the

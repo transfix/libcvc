@@ -1018,6 +1018,56 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   `entity_view.h`) draws a world's vehicles at scale in both holons: a scene's own world, posed
   by the physics binding whether the frame or this worker steps it, and a relay's entities on a
   client, posed where its `entity_playout` shows them (`room_view`).
+- **As built (OW7a, the gym in a local server-role holon).** `WorldGym` runs its world in a
+  server-role holon of its own (`WorldGym::local_holon`), as a relay runs its world: physics on, at
+  the world's rate (`holon_config_at`), its clock lockstep, so each step advances it one physics
+  step at a time and the world takes the steps the gym's own clock gave it. The runtime steps it no
+  more (`set_world_external`). A reset lets the holon go while the restart replaces the physics
+  world, then attaches it again at tick 0. Run in the holon or on the gym's own clock
+  (`gym_options::holon` off), every body's state is the same at the end of two episodes, to the
+  bit, and the same on every run (`AriadneWorldGym`). `GymCars` (pycvc_gl.cars), and the GRL-SNAM
+  hosts on it, run on the holon through it.
+  - **People.** `gym_options::people` puts avatars in the world at each reset (`gym_person`:
+    standing, or walking at a pace along a heading), bodies beside the cars as on a relay: the
+    holon drives them and hands them to the navigators to steer around (OW4). The observation has
+    their feet and velocity (`gym_observation::person_*`). A car commanded straight at a person
+    standing 15 m ahead touches them and carries them off (35 m in 7 s); a car on nav@1 to a goal
+    past a person keeps at least 2.9 m from them (centre to feet), touches no one and gets to its
+    goal; a walker at 1.2 m/s covers 8.3 m in 7 s.
+  - **A person hit is a person's.** The holon tells the vehicles which bodies are its avatars
+    (`WorldVehicles::set_people`, with the movers), so a chassis's contact with one is a
+    person's (`entity_info::person_contact`), not an obstacle's, on a relay as in the gym: the
+    gym's `hit_person`, a collision for its reward.
+  - **From Python.** `pycvc.WorldGym(..., people=[{x, y, yaw, walk}], holon=True)`, and
+    `GymCars(..., people=...)` through it; the observation dict has `people`, `person_*` and
+    `hit_person` (`test_pycvc_gym.py`: the car hits the person, not an obstacle, and shoves them).
+- **As built (OW7b, the relay hosting the traffic world with people among its cars).** Composed
+  as arisrv's main composes it (the server document `traffic.ari` at the room's 120 Hz, the server
+  holon running its world, the runtime stepping it no more), without the transport: six people
+  walk the streets at 1.4 m/s for a minute, crossing intersections, among its 18 cars on nav@1.
+  All 18 drive (`ServerDocumentTest`). It found that a navigator only steered around a person
+  (its separation, a nudge of its carrot) and never braked for one in its lane: a truck at its
+  9 m/s ran into a person crossing ahead and carried them off at its speed (25 tick-frames of
+  car-person contact a minute, all at speed; the closest a car came, 0.5 m centre to feet). Not
+  run live: arisrv needs gRPC, which the Windows workstation's build lacks, so the live check
+  (arisrv with `cvc://worlds/traffic.ari` and arigl clients walking) waits for a host with it.
+- **As built (OW7c, cars brake for people).** The navigator brakes for a person in its lane
+  (`cvc::nav::sim_world::set_people`, `people_brake`), after the drive, keeping the drive's
+  steering: its lane is its half-width (its footprint's rr) and the person's radius, widened by
+  how far a person walking at up to 1.5 m/s gets while it stops (a 0.3 s reaction and its
+  braking); its front a wheelbase and its half-width ahead of its rear axle. It brakes as hard as
+  stopping 1 m short needs, up to its braking (a plant's, or the kinematic arm's a_max, the tick
+  run again from its start at the drive's turn), and holds a stop while the person is there. A
+  vehicle a participant or a gym commands is its commander's to brake (an override_command), as
+  is a parked one. `WorldVehicles` hands each fleet the holon's avatars as people with the movers
+  (`set_brake_for_people`, on by default). Off, or with no people, the navigator is byte-unchanged.
+  In the traffic world with six people for a minute: no car touches a person while moving (0
+  touches over 1 m/s; the fastest car at a touch 0.12 m/s, the closest 1.44 m centre to feet),
+  where steering alone ran into one at 9 m/s; all 18 cars still drive (`ServerDocumentTest`). The
+  touches left are people walking into a car stopped for them: the test's people walk straight on
+  whatever is in the way, and one stood against a stopped car most of the minute (15.8 m walked;
+  the median 63 m). In the gym a car on nav@1 still keeps 3.1 m from a person and reaches its goal,
+  and a car the gym commands still hits one.
 
 ### 18.3 Contact
 
@@ -1515,7 +1565,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives; OW5p: the room's avatars in it, and the room in a dynamic plant's car; OW5q: a sea the relay's storms grow; OW5r: a sample corrects all of a vehicle's motion). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
-| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people, from Python too, a person hit a person's; OW7b: the traffic world hosting people among its cars, measured; OW7c: cars brake for people; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
 
 **Open:**
@@ -1628,13 +1678,27 @@ level). The content hash leaves `export/` out, so a saved world, with or without
 loads back (`uri:` it, `as: city_bundle`) with the hash it was saved with. The save runs on the
 frame thread, at once.
 
+Done (GB5, part 1: the lab in One World): a lab joined to a relay whose document runs the same
+generated_world node edits the relay's world, which is the room's. The owner, 2026-11-24: "the
+client elevates to admin permissions if they have the rcon password, so they can edit the server
+world". `GeneratedWorldRelay` (both hosts,
+cvcGL's node and the headless one) makes the world the relay's `world_on` names (a "follow" request,
+never sent back), and sends the panel's Regenerate, Randomize and `world.auto` edits to the relay
+as `server.regenerate` instead of making them. arisrv answers it only for a connection `server.rcon`
+made an admin (ARISRV_IDENTITY 2.5); the world is made at the relay's next sync, and
+`publish_world_on` takes its params to every client, whose labs and replicas then make it.
+`world_controls` has an admin password field, "Log in as admin" (`world.request: rcon`) and the
+server status. Still open in GB5: the dataset's hash and revision in `world_on`, so a client
+checks the world it made against the relay's, and fetches the bytes by content address when they
+differ or it has no generator; a regenerated world going in at a tick (`SceneColliders.from_tick`).
+
 | Phase | What | Size |
 |---|---|---|
 | GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
 | GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: a data node whose dataset is a world (Austin, a saved or made world) draws with the generated-world renderer: the terrain's LOD chunks on the bundle's ground (a non-square aerial image included), the props' cells, the buildings, roads and water, made in a sliced job and put in a piece at a time. | L |
 | GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. Done: `world.request: save`, `data_save_files`, `archive::pack_zip`, `city_bundle_exports` (`export/`, outside the hash), 16-bit grey `encode_png`. | M |
-| GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
+| GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. Part 1 done: a joined lab follows the relay's world, and an rcon admin's Regenerate makes it (`server.regenerate`, `GeneratedWorldRelay`). | M |
 
 ### 18.9 A world's rate: the server chooses, the clients follow
 

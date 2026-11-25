@@ -55,6 +55,8 @@ public:
   // Placement. region is normalized [x0, y0, x1, y1] in VTK's y-up window space;
   // {0,0,1,1} is the whole window. Stored normalized, so it survives a resize and
   // is re-applied to the renderer; move it every frame to track a draggable inset.
+  // A viewport drawn into a texture (setTextureSize) is shown elsewhere: region() is
+  // where it shows, and may run past the window's edges.
   void setRegion(double x0, double y0, double x1, double y1);
   void region(double out[4]) const;
 
@@ -124,11 +126,48 @@ public:
   // not count). For tests and measurements.
   long draws() const;
 
+  // Drawn into a texture of its own instead of into its rect of the window. With a size (pixels),
+  // the viewport draws its scene into a colour texture that size, in the window's render, and
+  // draws nothing into the window: something else shows the texture where region() says, a UI's
+  // image (an Ariadne `viewport` widget), so the UI's windows stack over it, clip it and scroll it
+  // as they do any of their content. 0 x 0 (the default) draws into the window. The texture is no
+  // larger than the window: a larger size draws at the window's (the image stretches it).
+  //
+  // It draws at the window's own multisampling and is resolved as the window's pixels are (with
+  // VTK's gamma-correct resolve where the window shows its frame, with a blit where its pixels are
+  // read back: an offscreen window), so it looks as it would have in the window. Its renderer's
+  // viewport is the texture's rect at the
+  // window's lower left, so its display coordinates are texture pixels (windowToRenderer). A
+  // throttled one (setRefreshHz) keeps its last picture in the texture between draws, and draws at
+  // once on a new size or when it is shown again; moving it does not draw it. A mirror re-syncs
+  // its props on the renders it draws, as the render reaches it, so a show or a size set during
+  // the frame (a UI walk inside the render) takes effect in that frame.
+  void setTextureSize(int w, int h);
+  bool textured() const;
+  void textureSize(int out[2]) const; // the size it draws at: the requested one, within the window
+  // The GL name of its texture, for a UI to draw (0 when it is not textured, or the window has no
+  // GL context yet). Made or resized here, at the size setTextureSize asked for, so it can be
+  // handed to a UI image before the window draws; it makes the window's context current. Its
+  // rows run bottom-up (GL's): an image that shows it flips v.
+  unsigned int texture();
+  // Window display coordinates (pixels from the lower left) to its renderer's: pixels of its
+  // texture by region() when it is textured, the same point otherwise. For a pick or a zoom about
+  // the pointer at a place on screen.
+  void windowToRenderer(double x, double y, double out[2]) const;
+  // ... and back: where a point of its renderer's display (a world point's WorldToDisplay) shows in
+  // the window.
+  void rendererToWindow(double x, double y, double out[2]) const;
+
 private:
   friend class ViewportManager; // the manager constructs and owns Viewports
   // Manager-only, once per render() before the window draws: whether this viewport draws its scene
-  // in this render (true) or shows its last pixels (false; a hidden viewport draws nothing).
+  // in this render (true) or shows its last pixels (false; a hidden viewport draws nothing). A
+  // textured viewport decides as it draws (beforeDraw).
   bool beginRender();
+  // Manager-only: what a textured viewport runs before each draw of its scene (a mirror's re-sync).
+  void setBeforeDraw(std::function<void()> fn);
+  // Manager-only: free its GL objects while the window's context is still there.
+  void releaseGraphics();
   // `managed` (default) builds the eager CameraController + ViewportLayout state
   // this viewport normally owns. `managed == false` builds it BARE — no
   // controller and no ".viewers.<name>.layout" state at construction; camera()

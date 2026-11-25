@@ -484,6 +484,30 @@ public:
   // them is byte-unchanged.
   void set_foreign_agents(std::vector<float> xy) { foreign_ = std::move(xy); }
   const std::vector<float> &foreign_agents() const { return foreign_; }
+
+  // PEOPLE IN THE WAY (ARIADNE_WORLDS.md OW7c): points (x, y pairs, normalized) that are people
+  // (a holon's avatars), and how the agents brake for them. With people_brake::on, an agent the
+  // drive drives (not one an override_command commands, which is its caller's to brake, nor a
+  // parked one) brakes for a person in its lane ahead within its stopping distance, keeping the
+  // drive's steering. Its lane is its half-width (the footprint's rr) and the person's radius,
+  // widened by how far a person walking at `person_speed` gets while it stops; its front is a
+  // wheelbase and its half-width ahead of its rear axle. It brakes as hard as stopping `gap` short
+  // of the person needs, up to its braking (on a plant the plant's, on the kinematic arm a_max),
+  // and holds a stop while the person is there. Off, or with no people (the defaults):
+  // byte-unchanged.
+  struct people_brake {
+    bool on = false;
+    float person_r = 0.0f;     // normalized: a person's radius
+    float person_speed = 0.0f; // normalized / s: how fast a person may step into the lane
+    float reaction_s = 0.3f;   // s before the brake takes
+    float gap = 0.0f;          // normalized: how far short of the person it means to stop
+  };
+  void set_people(std::vector<float> xy) { people_ = std::move(xy); }
+  const std::vector<float> &people() const { return people_; }
+  void set_people_brake(const people_brake &c) { people_cfg_ = c; }
+  const people_brake &people_brake_settings() const { return people_cfg_; }
+  // Which agents braked for a person in the last step (1), [n].
+  const std::vector<std::uint8_t> &braked_for_people() const { return people_braked_; }
   const yield_config &yield_settings() const { return yield_cfg_; }
   // Agent i's priority (higher goes first; all 0 by default) and team (a convoy; 0 by default),
   // as its intent carries them.
@@ -888,6 +912,9 @@ private:
   std::vector<float> o_, goal_, th_, sp_, color_, wall_entry_, pos_hist_;
   std::vector<float> carrot_; // [n*2] last tick's FSM steering target (for renderers)
   std::vector<float> foreign_; // [m*2] set_foreign_agents: points the separation steers from
+  std::vector<float> people_;  // [m*2] set_people: points the agents brake for (people_brake)
+  people_brake people_cfg_{};
+  std::vector<std::uint8_t> people_braked_; // [n] the last step's
   // Yielding (set_yield): its settings, channel (null = the perfect one below), resolver, each
   // agent's priority / team / announced path override, and the last tick's intents and shifts.
   yield_config yield_cfg_{};

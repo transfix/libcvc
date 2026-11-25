@@ -11,6 +11,7 @@
 #include "../core/input_trace_json.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cvc/core/config.h> // CVC_VERSION_STRING
@@ -20,6 +21,7 @@
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
+#include <cvc/nav/world_grid.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
 #include <filesystem>
 #include <fstream>
@@ -260,17 +262,11 @@ training_history read_training_history(const std::string &path, int run) {
 
 // ── the scenario ────────────────────────────────────────────────────────────────────────────────
 
-scrub_scenario default_scenario(int agents, unsigned seed, long ticks) {
-  if (agents < 1)
-    throw std::invalid_argument(std::string(kWho) + "a scenario needs an agent");
-  constexpr int n = 121;                  // 1 m cells over 120 m
-  constexpr double half = 60.0, S = 0.05; // the nav demos' frame: 1 unit = 20 m
-  std::mt19937 rng(seed);
-  const std::vector<std::uint8_t> occ = blocks(n, rng);
-  sim_world::config c;
-  c.rows = c.cols = n;
-  c.min_x = c.min_y = -half;
-  c.max_x = c.max_y = half;
+namespace {
+
+// The scrubber's vehicle on nav's bicycle, in metres, at `scale` normalized units per metre: a
+// Humvee's footprint disc and wheelbase, 8 m/s, 2 m/s^2, 0.05 s a tick, the map known.
+void scrub_vehicle(sim_world::config &c, double S) {
   c.scale = S;
   c.veh.rr = static_cast<float>(1.2 * S);
   c.veh.d_hat = static_cast<float>(3.0 * S);
@@ -282,33 +278,142 @@ scrub_scenario default_scenario(int agents, unsigned seed, long ticks) {
   c.n_rays = 120;
   c.freeze_sense = true; // the map is known: the scenario is the policy's, not the sensor's
   c.reach_tol = static_cast<float>(3.0 * S);
-  const auto lane = [&rng] { // a lane in [-52, 52] m, the same on every library
-    return -half + 8.0 + (2.0 * half - 16.0) * (static_cast<double>(rng()) / 4294967296.0);
-  };
-  std::vector<float> o, goal, color;
-  for (int i = 0; i < agents; ++i) {
-    const double y0 = lane(), y1 = lane();
-    o.insert(o.end(), {static_cast<float>(-50.0 * S), static_cast<float>(y0 * S)});
-    goal.insert(goal.end(), {static_cast<float>(50.0 * S), static_cast<float>(y1 * S)});
+}
+
+// A scenario of `occ` under `c`, its agents from `start` to `goal` (world metres, [n*2]) facing
+// their goals.
+scrub_scenario make_scenario(const sim_world::config &c, const std::vector<std::uint8_t> &occ,
+                             const std::vector<double> &start, const std::vector<double> &goal,
+                             std::uint64_t seed, const std::string &world_id,
+                             const std::string &meta, long ticks, std::string name) {
+  const int n = static_cast<int>(start.size() / 2);
+  std::vector<float> o, g, color;
+  for (int i = 0; i < n; ++i) {
+    o.insert(o.end(), {static_cast<float>((start[2 * i] - c.cx) * c.scale),
+                       static_cast<float>((start[2 * i + 1] - c.cy) * c.scale)});
+    g.insert(g.end(), {static_cast<float>((goal[2 * i] - c.cx) * c.scale),
+                       static_cast<float>((goal[2 * i + 1] - c.cy) * c.scale)});
     color.insert(color.end(), {1.0f, 1.0f, 1.0f});
   }
-  sim_world w(c, occ.data(), occ.data(), coef_mlp::default_biased(), o.data(), goal.data(),
-              color.data(), agents);
-  for (int i = 0; i < agents; ++i) // facing their goals
-    w.set_pose(
-        i, o[2 * i], o[2 * i + 1],
-        static_cast<float>(std::atan2(goal[2 * i + 1] - o[2 * i + 1], goal[2 * i] - o[2 * i])));
+  sim_world w(c, occ.data(), occ.data(), coef_mlp::default_biased(), o.data(), g.data(),
+              color.data(), n);
+  for (int i = 0; i < n; ++i) // facing their goals
+    w.set_pose(i, o[2 * i], o[2 * i + 1],
+               static_cast<float>(std::atan2(g[2 * i + 1] - o[2 * i + 1], g[2 * i] - o[2 * i])));
   trace_options t;
-  t.world_id = "nav-lab:blocks";
+  t.world_id = world_id;
   t.seed = seed;
   t.policies[0] = policy_ref{};
-  t.meta = "{\"scenario\":\"blocks\",\"agents\":" + std::to_string(agents) + "}";
+  t.meta = meta;
   scrub_scenario s;
   s.world = trace_header(w, t);
   s.ticks = ticks;
-  s.name = "blocks, " + std::to_string(agents) + (agents == 1 ? " agent" : " agents") + ", seed " +
-           std::to_string(seed);
+  s.name = std::move(name);
   return s;
+}
+
+std::string agents_text(int agents) {
+  return std::to_string(agents) + (agents == 1 ? " agent" : " agents");
+}
+
+} // namespace
+
+scrub_scenario default_scenario(int agents, unsigned seed, long ticks) {
+  if (agents < 1)
+    throw std::invalid_argument(std::string(kWho) + "a scenario needs an agent");
+  constexpr int n = 121;                  // 1 m cells over 120 m
+  constexpr double half = 60.0, S = 0.05; // the nav demos' frame: 1 unit = 20 m
+  std::mt19937 rng(seed);
+  const std::vector<std::uint8_t> occ = blocks(n, rng);
+  sim_world::config c;
+  c.rows = c.cols = n;
+  c.min_x = c.min_y = -half;
+  c.max_x = c.max_y = half;
+  scrub_vehicle(c, S);
+  // Each agent's lane in [-52, 52] m, the same on every library, and at least `sep` m from the
+  // others' (so no two cars start or end on top of each other); 104 m holds 13 lanes 8 m apart.
+  const double sep = std::min(8.0, (2.0 * half - 16.0) / std::max(agents, 1));
+  const auto lanes = [&rng, sep, agents] {
+    std::vector<double> y;
+    for (int i = 0; i < agents; ++i) {
+      double v = 0.0;
+      for (int tries = 0; tries < 400; ++tries) {
+        v = -half + 8.0 + (2.0 * half - 16.0) * (static_cast<double>(rng()) / 4294967296.0);
+        bool clear = true;
+        for (double u : y)
+          clear = clear && std::abs(u - v) >= sep;
+        if (clear)
+          break;
+      }
+      y.push_back(v);
+    }
+    return y;
+  };
+  const std::vector<double> y0 = lanes(), y1 = lanes();
+  std::vector<double> start, goal;
+  for (int i = 0; i < agents; ++i) {
+    start.insert(start.end(), {-50.0, y0[static_cast<std::size_t>(i)]});
+    goal.insert(goal.end(), {50.0, y1[static_cast<std::size_t>(i)]});
+  }
+  return make_scenario(c, occ, start, goal, seed, "nav-lab:blocks",
+                       "{\"scenario\":\"blocks\",\"agents\":" + std::to_string(agents) + "}", ticks,
+                       "blocks, " + agents_text(agents) + ", seed " + std::to_string(seed));
+}
+
+scrub_scenario grid_scenario(const world_grid &g, int agents, std::uint64_t seed, long ticks,
+                             const std::string &world, double scale) {
+  if (agents < 1)
+    throw std::invalid_argument(std::string(kWho) + "a scenario needs an agent");
+  if (!(scale > 0.0))
+    throw std::invalid_argument(std::string(kWho) + "a scenario needs a scale above 0");
+  sim_world::config c;
+  configure(c, g, scale);
+  scrub_vehicle(c, scale);
+  const std::vector<float> sdf = signed_distance(g);
+  const double span = std::min(g.max_x - g.min_x, g.max_y - g.min_y);
+  // starts 12 m apart (two and a half Humvees), 4 m clear of anything blocked; goals from a pool
+  // drawn the same way, each the first at least 0.3 of the span from its start (else the farthest)
+  constexpr double clear = 4.0, sep = 12.0;
+  const std::vector<std::array<double, 2>> starts = free_points(g, sdf, seed, agents, clear, sep);
+  const std::vector<std::array<double, 2>> pool =
+      free_points(g, sdf, seed ^ 0x9e3779b97f4a7c15ull, 8 * agents, clear, sep);
+  std::vector<bool> used(pool.size(), false);
+  std::vector<double> start, goal;
+  for (const std::array<double, 2> &p : starts) {
+    int pick = -1, farthest = -1;
+    double far_d = -1.0;
+    for (int k = 0; k < static_cast<int>(pool.size()); ++k) {
+      if (used[static_cast<std::size_t>(k)])
+        continue;
+      bool off_starts = true; // no goal on or beside a start: the car there may not have left it
+      for (const std::array<double, 2> &q : starts)
+        off_starts = off_starts && std::hypot(pool[k][0] - q[0], pool[k][1] - q[1]) >= sep;
+      if (!off_starts)
+        continue;
+      const double d = std::hypot(pool[k][0] - p[0], pool[k][1] - p[1]);
+      if (d >= 0.3 * span) {
+        pick = k;
+        break;
+      }
+      if (d > far_d) {
+        far_d = d;
+        farthest = k;
+      }
+    }
+    const int k = pick >= 0 ? pick : farthest;
+    if (k < 0)
+      throw std::runtime_error(std::string(kWho) + "no goal for every agent on " + world);
+    used[static_cast<std::size_t>(k)] = true;
+    start.insert(start.end(), {p[0], p[1]});
+    goal.insert(goal.end(),
+                {pool[static_cast<std::size_t>(k)][0], pool[static_cast<std::size_t>(k)][1]});
+  }
+  std::string meta = "{\"scenario\":";
+  cvc::trace_json::append_string(meta, world);
+  meta += ",\"agents\":" + std::to_string(agents) +
+          ",\"cell_m\":" + cvc::trace_json::number(g.cell()) + "}";
+  return make_scenario(c, g.occupancy, start, goal, seed, "nav-lab:" + world, meta, ticks,
+                       world + ", " + agents_text(agents) + ", seed " + std::to_string(seed));
 }
 
 scrub_scenario scenario_from_trace(const std::string &trace_path, long ticks) {

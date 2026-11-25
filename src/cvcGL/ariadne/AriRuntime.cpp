@@ -109,8 +109,8 @@ public:
   ~GlSceneAdapter() override { clear_scenes(); }
 
   // A `scenes:` entry: a SceneGraph of its own (its nodes, lights, shadows, background) attached
-  // to a viewport of its own, `anchor`, which the views of it mirror. The anchor is not shown; the
-  // views draw a pixel of it under one of them when its shadows need baking (scene_views.cpp).
+  // to a viewport of its own, `anchor`, which the views of it mirror. The anchor is not shown; it
+  // draws a pixel into a texture of its own when its shadows need baking (scene_views.cpp).
   struct OtherScene {
     std::string id, anchor;
     std::unique_ptr<SceneGraph> sg;
@@ -496,6 +496,8 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
       r->render();
       v->end_walk();
     });
+    // §5.30 the document's right-click menu over the main view picks the main scene.
+    r->set_main_view_pick([v] { return v->main_pick_fields(); });
   }
 
   // cvcGL's custom scene node types and shader presets (forest_trees, mesh_lab, ...), so a
@@ -527,6 +529,7 @@ AriRuntime::~AriRuntime() {
   // so a stray render during Python GC can't call rt.render() on a half-torn-down Runtime.
   if (overlay_)
     overlay_->setDrawCallback([] {});
+  app_rt_.runtime().set_main_view_pick({}); // it picks through views_
   views_->clear(); // the viewports, while the view they are in is still the host's
 }
 

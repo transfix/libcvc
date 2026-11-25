@@ -95,6 +95,7 @@
 #endif
 #include <cvc/state/state_exec/exceptions.h> // set_field: a call's principal
 #include <cvc/state/state_exec/types.h>
+#include <cvc/world/generated_world.h> // server.regenerate's params
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
@@ -1993,9 +1994,100 @@ int main(int argc, char **argv) {
     const bool admin_call = r.fn == "server.clients" || r.fn == "server.client" ||
                             r.fn == "server.kick" || r.fn == "server.ban" ||
                             r.fn == "server.unban" || r.fn == "server.rename" ||
-                            r.fn == "server.limits";
+                            r.fn == "server.limits" || r.fn == "server.regenerate";
     if (admin_call && !clients.is_admin(r.pid)) {
       calls->fail(r, "forbidden", r.fn + " is an admin's: log in with server.rcon first");
+      return;
+    }
+    if (r.fn == "server.regenerate") {
+      // (room-call "server.regenerate" NODE PARAMS) (ARIADNE_WORLDS section 18.8, GB5): the
+      // document's generated_world NODE made again from PARAMS, a JSON object's text or a dict of
+      // generated_world_params_json's fields, any left out the world's own now. A joined lab's
+      // Regenerate sends it (GeneratedWorldRelay). The world is made at the document's next sync,
+      // and publish_world_on takes its params to every client.
+      cvc::ariadne::SceneWorld *w = serverDoc ? serverDoc->runtime().scene_world() : nullptr;
+      if (!w) {
+        calls->fail(r, "unavailable", "this relay's document runs no world (--doc with a scene:)");
+        return;
+      }
+      const std::string node = arg_str(0);
+      const std::vector<std::string> nodes = w->generated_nodes();
+      if (node.empty() || std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+        std::string names;
+        for (const std::string &n : nodes)
+          names += (names.empty() ? "" : ", ") + n;
+        calls->fail(r, "invalid",
+                    "server.regenerate takes a generated_world node of the document first (" +
+                        (names.empty() ? std::string("it has none") : names) + ")");
+        return;
+      }
+      cvc::world::generated_world_params now;
+      if (!w->generated_params(node, now)) {
+        calls->fail(r, "unavailable", node + " has no world yet");
+        return;
+      }
+      // The params: a JSON object's text, or a dict of numbers, booleans and strings.
+      std::string text = arg_str(1);
+      if (text.empty()) {
+        const se::list_ptr *l = std::get_if<se::list_ptr>(&r.args.v);
+        const se::value_t *a = l && *l && (*l)->size() > 1 ? &(**l)[1] : nullptr;
+        if (const se::dict_ptr *pd = a ? std::get_if<se::dict_ptr>(&a->v) : nullptr; pd && *pd) {
+          const auto quoted = [](const std::string &s) {
+            std::string q = "\"";
+            for (const char ch : s) {
+              if (ch == '"' || ch == '\\')
+                q += '\\';
+              if (static_cast<unsigned char>(ch) >= 0x20)
+                q += ch;
+            }
+            return q + "\"";
+          };
+          text = "{";
+          for (const auto &[k, v] : **pd) {
+            std::string val;
+            if (const bool *b = std::get_if<bool>(&v.v))
+              val = *b ? "true" : "false";
+            else if (const std::int64_t *i = std::get_if<std::int64_t>(&v.v))
+              val = std::to_string(*i);
+            else if (const double *d = std::get_if<double>(&v.v)) {
+              char buf[64];
+              std::snprintf(buf, sizeof buf, "%.17g", *d);
+              val = buf;
+            } else if (const std::string *s = std::get_if<std::string>(&v.v))
+              val = quoted(*s);
+            else {
+              calls->fail(r, "invalid", "server.regenerate: " + k + " is not a number or a string");
+              return;
+            }
+            text += (text.size() > 1 ? "," : "") + quoted(k) + ":" + val;
+          }
+          text += "}";
+        } else if (a) {
+          calls->fail(r, "invalid", "server.regenerate takes the params second: JSON or a dict");
+          return;
+        } else {
+          text = "{}";
+        }
+      }
+      cvc::world::generated_world_params p;
+      try {
+        p = cvc::world::generated_world_params_from_json(text, now);
+      } catch (const std::exception &e) {
+        calls->fail(r, "invalid", std::string("server.regenerate: ") + e.what());
+        return;
+      }
+      std::vector<std::string> warnings;
+      const bool asked = w->follow_generated(node, p, &warnings);
+      for (const std::string &m : warnings)
+        std::fprintf(stderr, "arisrv: %s\n", m.c_str());
+      std::printf("[arisrv] rcon: client %s regenerates %s (seed %llu)%s\n",
+                  clients.identity_key(r.pid).c_str(), node.c_str(),
+                  static_cast<unsigned long long>(p.seed), asked ? "" : ": already that world");
+      std::fflush(stdout);
+      calls->result(r.pid, r.id,
+                    se::make_dict({{"node", se::value_t(node)},
+                                   {"asked", se::value_t(asked)},
+                                   {"seed", se::value_t(static_cast<std::int64_t>(p.seed))}}));
       return;
     }
     if (r.fn == "server.clients") {

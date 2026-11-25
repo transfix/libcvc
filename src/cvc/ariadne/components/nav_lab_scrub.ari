@@ -22,7 +22,7 @@
 #                     scrub.table
 #   nav_lab_training  scrub.curve_name over scrub.curve_names, the chart scrub.curve (log y when
 #                     scrub.curve_log is 1), scrub.curve_text
-#   nav_lab_episode   play.title, play.pos, play.time, the camera
+#   nav_lab_episode   play.title, play.pos, play.time, the camera (view.camera: follow, orbit)
 
 units:
   nav_lab_scrub:
@@ -151,4 +151,5 @@ units:
       - combo: Camera
         bind: view.camera
         options: [Follow the arm, Orbit]
+        values: [follow, orbit]
         values: [follow, orbit]

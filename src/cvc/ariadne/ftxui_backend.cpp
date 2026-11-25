@@ -828,6 +828,7 @@ struct FtxuiBackend::Impl {
     std::string win;   // owning window id; "" = the root layer
     std::string menu;  // owning dropdown; "" = none
     std::string group; // the item group (begin_item_group) it is inside, innermost; "" = none
+    std::string area;  // §5.30 the context area (begin_context_area) it is in, innermost; "" none
     bool focusable = false;
     // §5.20 a rich text: where its links are (its link k is the item `<id>/k`), as last drawn.
     std::shared_ptr<RichHits> rich;
@@ -849,6 +850,11 @@ struct FtxuiBackend::Impl {
     std::set<std::string> maximizable;                          // ... with a maximize marker
     std::string menu_popup;                                     // dropdown drawn, if any
     std::string combo_popup;                                    // combo list drawn, if any
+    // §5.30 the document's context_menu: areas: each window's own (its area's key), the
+    // document's over the main view, and every area whose menu was asked for.
+    std::map<std::string, std::string> window_menus;
+    std::string main_menu;
+    std::set<std::string> menu_areas; // the areas whose begin_context_menu ran
     int combo_n = 0;
     bool has_menubar = false;
     // The bar so far this walk (§5.22): a document's second bar continues it, after its menus and
@@ -907,7 +913,21 @@ struct FtxuiBackend::Impl {
     std::vector<std::string> entries;
     std::vector<bool> enabled;
     int hi = 0;
+    // §5.30 the document's context_menu: whose items follow the leaf's own (or, with no leaf, are
+    // the menu): its context area's key ("" none); how and where it was asked for, told to the
+    // core once; its items as the core emits them, built in a walk and shown from the last; and
+    // the one picked, which the next walk runs.
+    std::string area;
+    std::string via = "pointer";
+    float px = 0.0f, py = 0.0f;
+    bool told = false;
+    std::vector<FtxuiBackend::HostedMenuItem> rows, rows_next;
+    std::string pick;
   } ctx;
+  long ctx_serial = 0;      // one more for each menu opened (hosted_context_menu)
+  bool ctx_collect = false; // the core is emitting the open menu's document items
+  int ctx_depth = 0;        // ... in this many submenus
+  bool ctx_ran = false;     // ... and one of them was picked: the walk's end closes the menu
   std::string next_copy; // next_item_copy, for the next leaf
   bool have_next_copy = false;
   // A Paste asked of the clipboard for this field, answered as typed text until paste_until; after
@@ -925,6 +945,8 @@ struct FtxuiBackend::Impl {
   bool in_tray_menu = false;
   int hosted_depth = 0;                 // hosted: the submenus the items being emitted are in
   std::vector<std::string> item_groups; // the item groups open in the walk, innermost last
+  std::vector<std::string> ctx_areas;   // §5.30 the context areas open in the walk, innermost last
+  std::string area_now() const { return ctx_areas.empty() ? std::string() : ctx_areas.back(); }
   // The last item group closed, and whether this walk's press or key fired it (item_clicked).
   std::string group_hit_id;
   bool group_hit = false;
@@ -1266,6 +1288,7 @@ struct FtxuiBackend::Impl {
     it.win = wins.empty() ? std::string() : wins.back();
     it.menu = cur_menu;
     it.group = item_groups.empty() ? std::string() : item_groups.back();
+    it.area = area_now();
     it.focusable = focusable && !is_disabled();
     if (!text_colors.empty())
       el = el | fx::color(text_colors.back());
@@ -1648,6 +1671,83 @@ struct FtxuiBackend::Impl {
     focused = focus_before_menu;
   }
 
+  // ---- §5.30 a document's context_menu: areas -------------------------------------------------
+
+  // A context area's key: the core's id under the push_id path, so a repeated group's are apart.
+  std::string ctx_key(const char *id) const {
+    std::string key;
+    for (const std::string &s : ids) {
+      key += s;
+      key += '/';
+    }
+    return key + (id ? id : "");
+  }
+
+  // The document's context_menu: a menu at `it` (a leaf, or null) in window `win` takes: the
+  // innermost area around it, else its window's, else over no window the document's, as walk `w`
+  // drew them; "" none.
+  static std::string area_for(const Item *it, const std::string &win, const Walk &w) {
+    if (it && !it->area.empty())
+      return it->area;
+    if (!win.empty()) {
+      const auto m = w.window_menus.find(win);
+      return m != w.window_menus.end() ? m->second : std::string();
+    }
+    return w.main_menu;
+  }
+
+  // Open the context menu at cell (x, y) of window `win`: leaf's own entries (none without one),
+  // then area's items (none for ""), asked for `via` the pointer or a key; (px, py) is where, as
+  // the core hears it.
+  void open_menu_of(const Item *leaf, const std::string &area, const std::string &win, int x, int y,
+                    const char *via, float px, float py) {
+    if (leaf) {
+      open_context(*leaf, x, y);
+    } else {
+      ctx = ContextMenu{};
+      ctx.win = win;
+      ctx.x = x;
+      ctx.y = y;
+    }
+    ctx.area = area;
+    ctx.via = via;
+    ctx.px = px;
+    ctx.py = py;
+    ++ctx_serial;
+  }
+
+  // A document item of the open menu, as the core emits it in the walk (collecting: between
+  // begin_context_menu and end_context_menu): kept as a row, and true when it is the one picked.
+  bool ctx_row(const std::string &label, bool toggle, bool checked, bool sep = false,
+               bool submenu = false) {
+    FtxuiBackend::HostedMenuItem r;
+    r.id = uid("cx|" + label);
+    r.label = label;
+    r.toggle = toggle;
+    r.checked = checked;
+    r.separator = sep;
+    r.submenu = submenu;
+    r.depth = ctx_depth;
+    const bool hit = !sep && !submenu && !ctx.pick.empty() && ctx.pick == r.id;
+    if (hit) {
+      ctx.pick.clear();
+      ctx_ran = true; // the walk's end closes the menu
+    }
+    ctx.rows_next.push_back(std::move(r));
+    return hit;
+  }
+  // The open menu's entries: its leaf's own, then its document rows.
+  int ctx_count() const { return static_cast<int>(ctx.entries.size() + ctx.rows.size()); }
+  bool ctx_selectable(int i) const {
+    const int e = static_cast<int>(ctx.entries.size());
+    if (i < 0 || i >= ctx_count())
+      return false;
+    if (i < e)
+      return ctx.enabled[static_cast<std::size_t>(i)];
+    const FtxuiBackend::HostedMenuItem &r = ctx.rows[static_cast<std::size_t>(i - e)];
+    return !r.separator && !r.submenu;
+  }
+
   std::string window_at(int x, int y) const {
     std::string best;
     long best_z = -1;
@@ -1741,7 +1841,7 @@ struct FtxuiBackend::Impl {
     return found;
   }
 
-  bool context_open() const { return !ctx.on.empty(); }
+  bool context_open() const { return !ctx.on.empty() || !ctx.area.empty(); }
   void close_context() { ctx = ContextMenu{}; }
 
   // Open IT's menu at cell (x, y).
@@ -1795,20 +1895,38 @@ struct FtxuiBackend::Impl {
   }
 
   // Shift+F10 or the Menu key: the focused leaf's menu, under it. A focused item group with none
-  // of its own (a picture with fullscreen: true, a clickable card) has its picture's Save.
+  // of its own (a picture with fullscreen: true, a clickable card) has its picture's Save. The
+  // document's context_menu: around the focus (§5.30) adds its items, or with no leaf menu is the
+  // menu; with nothing focused, the window the input is for (hosted) or the document's own.
   bool open_context_focused() {
-    const Item *it = find_item(last, focused);
+    const Item *focus = focused.empty() ? nullptr : find_item(last, focused);
+    const Item *it = focus;
     if (!it || it->ctx == Menu::None)
       for (const Item &in : last.items)
         if (in.group == focused && in.ctx == Menu::Save) {
           it = &in;
           break;
         }
-    if (!it || it->ctx == Menu::None)
+    const Item *leaf = it && it->ctx != Menu::None ? it : nullptr;
+    const std::string win = focus ? focus->win : (opt.hosted ? host_window : std::string());
+    const std::string area = area_for(focus, win, last);
+    if (!leaf && area.empty())
       return false;
-    const auto b = boxes.find(it->id);
-    open_context(*it, b != boxes.end() ? b->second.x_min : 0,
-                 b != boxes.end() ? b->second.y_max + 1 : 0);
+    int x = 0, y = top_row();
+    if (const Item *at = leaf ? leaf : focus) {
+      const auto b = boxes.find(at->id);
+      if (b != boxes.end()) {
+        x = b->second.x_min;
+        y = b->second.y_max + 1;
+      }
+    } else if (!win.empty() && !opt.hosted) {
+      const auto b = boxes.find("win|" + win);
+      if (b != boxes.end()) {
+        x = b->second.x_min + 1;
+        y = b->second.y_min + 1;
+      }
+    }
+    open_menu_of(leaf, area, win, x, y, "key", 0.0f, 0.0f);
     return true;
   }
 
@@ -1827,7 +1945,12 @@ struct FtxuiBackend::Impl {
 
   // Entry I of the open menu, picked.
   void context_pick(int i) {
-    if (i < 0 || i >= static_cast<int>(ctx.entries.size()) || !ctx.enabled[i]) {
+    const int own = static_cast<int>(ctx.entries.size());
+    if (i >= own && ctx_selectable(i)) { // §5.30 a document item: the next walk runs it
+      ctx.pick = ctx.rows[static_cast<std::size_t>(i - own)].id;
+      return;
+    }
+    if (i < 0 || i >= own || !ctx.enabled[i]) {
       close_context();
       return;
     }
@@ -1883,12 +2006,12 @@ struct FtxuiBackend::Impl {
   // A key while the menu is open: Up / Down move along it, Return or Space picks, anything else
   // closes it (and is swallowed).
   void route_context_key(const TermEvent &e) {
-    const int n = static_cast<int>(ctx.entries.size());
-    if (e.key == "Up" || e.key == "Down") {
+    const int n = ctx_count();
+    if ((e.key == "Up" || e.key == "Down") && n > 0) {
       const int d = e.key == "Up" ? -1 : 1;
       for (int k = 1; k <= n; ++k) {
         const int i = ((ctx.hi + d * k) % n + n) % n;
-        if (ctx.enabled[static_cast<std::size_t>(i)]) {
+        if (ctx_selectable(i)) {
           ctx.hi = i;
           break;
         }
@@ -1903,7 +2026,7 @@ struct FtxuiBackend::Impl {
 
   // The menu's entry at cell (x, y), or -1.
   int context_entry_at(int x, int y) const {
-    for (std::size_t i = 0; i < ctx.entries.size(); ++i) {
+    for (int i = 0; i < ctx_count(); ++i) {
       const auto b = boxes.find("ctx|" + std::to_string(i));
       if (b != boxes.end() && inside(b->second, x, y))
         return static_cast<int>(i);
@@ -1912,23 +2035,49 @@ struct FtxuiBackend::Impl {
   }
 
   // The open menu, drawn over its window (end_frame): a bordered list at the cell it opened at,
-  // kept inside the screen or the window's body.
+  // kept inside the screen or the window's body: the leaf's own entries, then under a rule the
+  // document's items (§5.30), a submenu's title over its items, indented. A host that shows the
+  // menu as a popup of its own (Options::host_draws_context_menu) gets it from
+  // hosted_context_menu() instead.
   void draw_context() {
-    if (!context_open())
+    if (!context_open() || (opt.hosted && opt.host_draws_context_menu))
       return;
     fx::Elements rows;
-    for (std::size_t i = 0; i < ctx.entries.size(); ++i) {
-      fx::Element row = fx::text(" " + ctx.entries[i] + " ");
-      if (!ctx.enabled[i])
-        row = row | fx::dim;
-      else if (static_cast<int>(i) == ctx.hi)
-        row = row | fx::inverted;
-      rows.push_back(row | fx::reflect(boxes["ctx|" + std::to_string(i)]));
-    }
-    const int n = static_cast<int>(rows.size());
     int w = 0;
-    for (const std::string &e : ctx.entries)
-      w = std::max(w, fx::string_width(e) + 4);
+    const auto add = [&](int i, const std::string &text, bool enabled) {
+      fx::Element row = fx::text(" " + text + " ");
+      if (!enabled)
+        row = row | fx::dim;
+      else if (i == ctx.hi)
+        row = row | fx::inverted;
+      if (enabled)
+        row = row | fx::reflect(boxes["ctx|" + std::to_string(i)]);
+      rows.push_back(std::move(row));
+      w = std::max(w, fx::string_width(text) + 4);
+    };
+    const int e = static_cast<int>(ctx.entries.size());
+    for (int i = 0; i < e; ++i)
+      add(i, ctx.entries[static_cast<std::size_t>(i)], ctx.enabled[static_cast<std::size_t>(i)]);
+    if (e > 0 && !ctx.rows.empty())
+      rows.push_back(fx::separator());
+    for (std::size_t j = 0; j < ctx.rows.size(); ++j) {
+      const FtxuiBackend::HostedMenuItem &r = ctx.rows[j];
+      if (r.separator) {
+        rows.push_back(fx::separator());
+        continue;
+      }
+      const std::string indent(static_cast<std::size_t>(2 * r.depth), ' ');
+      if (r.submenu) {
+        rows.push_back(fx::text(" " + indent + r.label + " ▸ ") | fx::bold);
+        w = std::max(w, fx::string_width(indent + r.label) + 6);
+        continue;
+      }
+      add(e + static_cast<int>(j),
+          indent + (r.toggle ? (r.checked ? "[x] " : "[ ] ") : "") + r.label, true);
+    }
+    if (rows.empty())
+      rows.push_back(fx::text(" (empty) ") | fx::dim);
+    const int n = static_cast<int>(rows.size());
     const auto bh = body_h.find(ctx.win);
     const int room_h = opt.hosted && bh != body_h.end() ? bh->second : term_h;
     const int x = std::clamp(ctx.x, 0, std::max(0, term_w - w));
@@ -1939,8 +2088,8 @@ struct FtxuiBackend::Impl {
       popups.push_back(std::move(list));
     else if (ctx.win.empty())
       win_popups[""].push_back(std::move(list));
-    else if (auto b = walk.bodies.find(ctx.win); b != walk.bodies.end())
-      b->second.popups.push_back(std::move(list));
+    else if (auto bd = walk.bodies.find(ctx.win); bd != walk.bodies.end())
+      bd->second.popups.push_back(std::move(list));
   }
 
   // ---- routing (step 1 of feed) ----------------------------------------------------------------
@@ -1954,7 +2103,8 @@ struct FtxuiBackend::Impl {
       route_context_key(e);
       return;
     }
-    // §5.28 Shift+F10 or the Menu key: the focused leaf's context menu.
+    // §5.28 Shift+F10 or the Menu key: the focused leaf's context menu, with the document's items
+    // around it (§5.30).
     if (e.kind == TermEvent::Kind::Key && ((e.key == "F10" && e.shift) || e.key == "Menu")) {
       if (open_context_focused())
         use();
@@ -2059,9 +2209,23 @@ struct FtxuiBackend::Impl {
       const auto dd = boxes.find("menud|" + open_menu);
       const bool in_dropdown = !open_menu.empty() && shown.menu_popup == open_menu &&
                                dd != boxes.end() && inside(dd->second, e.x, e.y);
-      if (const Item *it = in_dropdown ? menu_item_at(e.x, e.y, "", open_menu)
-                                       : menu_item_at(e.x, e.y, win, "")) {
-        open_context(*it, e.x, e.y);
+      const Item *leaf =
+          in_dropdown ? menu_item_at(e.x, e.y, "", open_menu) : menu_item_at(e.x, e.y, win, "");
+      // §5.30 the document's context_menu: under the pointer adds its items (a dropdown's entry
+      // has none); where it opened, as the core hears it: px from the window's inside (the
+      // screen's).
+      const Item *under = leaf ? leaf : item_at(e.x, e.y, win, "");
+      const std::string area = in_dropdown ? std::string() : area_for(under, win, shown);
+      if (leaf || !area.empty()) {
+        int ox = 0, oy = 0;
+        if (!opt.hosted && !win.empty())
+          if (const auto b = boxes.find("win|" + win); b != boxes.end()) {
+            ox = b->second.x_min + 1;
+            oy = b->second.y_min + 1;
+          }
+        open_menu_of(leaf, area, leaf ? leaf->win : win, e.x, e.y, "pointer",
+                     static_cast<float>((e.x - ox) * opt.cell_px_w),
+                     static_cast<float>((e.y - oy) * opt.cell_px_h));
         consumed = true;
         return;
       }
@@ -2366,6 +2530,7 @@ Capabilities FtxuiBackend::capabilities() const {
   c.badge = true;                      // on the line under the picture
   c.rich_text = true;                  // a paragraph; Tab reaches each link, Enter activates it
   c.button_selected = true;            // [>label<], bold
+  c.context_menu = true;               // §5.30 the Menu key, Shift+F10, a right-click
   return c;
 }
 
@@ -2386,6 +2551,7 @@ void FtxuiBackend::begin_frame() {
   m.tooltip.clear();
   m.last_item.clear();
   m.item_groups.clear();
+  m.ctx_areas.clear();
   m.group_hit_id.clear();
   m.have_geom = false;
   m.have_tracks = false;
@@ -2403,8 +2569,29 @@ void FtxuiBackend::end_frame() {
       m.add(std::move(e));
   }
   // §5.28 the context menu, over everything in its window; a Paste the clipboard did not answer.
-  if (m.context_open() && !m.find_item(m.walk, m.ctx.on))
+  m.ctx_collect = false;
+  m.ctx_depth = 0;
+  if (m.context_open() && !m.ctx.on.empty() && !m.find_item(m.walk, m.ctx.on))
     m.close_context(); // its leaf is gone
+  // §5.30 its document items, as this walk emitted them; an item that ran closes it, and so does
+  // its area going (a menu with no leaf of its own) or showing nothing.
+  if (m.context_open() && !m.ctx.area.empty()) {
+    if (m.ctx_ran || (m.ctx.on.empty() && !m.walk.menu_areas.count(m.ctx.area))) {
+      m.close_context();
+    } else {
+      m.ctx.rows = std::move(m.ctx.rows_next);
+      m.ctx.rows_next.clear();
+      if (m.ctx.on.empty() && m.ctx.rows.empty())
+        m.close_context();
+      else if (!m.ctx_selectable(m.ctx.hi))
+        for (int i = 0; i < m.ctx_count(); ++i)
+          if (m.ctx_selectable(i)) {
+            m.ctx.hi = i;
+            break;
+          }
+    }
+  }
+  m.ctx_ran = false;
   m.draw_context();
   const auto now = std::chrono::steady_clock::now();
   if (!m.paste_field.empty() && now > m.paste_until) {
@@ -2466,6 +2653,11 @@ void FtxuiBackend::end_main_menu_bar() {
 
 bool FtxuiBackend::begin_menu(const char *label) {
   Impl &m = *m_;
+  if (m.ctx_collect) { // §5.30 a submenu in a context menu: its title, its items under it
+    m.ctx_row(label, false, false, false, true);
+    ++m.ctx_depth;
+    return true;
+  }
   if (m.top().type == Impl::Frame::Type::Menubar && m.opt.hosted) {
     // Hosted: every menu is "open" to the walk, so its items are emitted (and so can be activated)
     // and recorded into the model; nothing is drawn.
@@ -2515,6 +2707,10 @@ bool FtxuiBackend::begin_menu(const char *label) {
 
 void FtxuiBackend::end_menu() {
   Impl &m = *m_;
+  if (m.ctx_collect) {
+    m.ctx_depth = std::max(0, m.ctx_depth - 1);
+    return;
+  }
   Impl::Frame f = m.pop();
   if (f.type == Impl::Frame::Type::Menu && m.opt.hosted) {
     m.cur_menu.clear();
@@ -2675,6 +2871,8 @@ bool FtxuiBackend::menus_fit(const std::vector<std::string> &titles,
 
 bool FtxuiBackend::menu_item_action(const char *label) {
   Impl &m = *m_;
+  if (m.ctx_collect) // §5.30 a context menu's document item
+    return m.ctx_row(label, false, false);
   const std::string id = m.uid("mi|" + m.cur_menu + "/" + label);
   const bool hit = m.activated(id);
   fx::Element el = fx::text(std::string(" ") + label + " ");
@@ -2691,6 +2889,15 @@ bool FtxuiBackend::menu_item_action(const char *label) {
 
 BoolEdit FtxuiBackend::menu_item_toggle(const char *label, bool current) {
   Impl &m = *m_;
+  if (m.ctx_collect) { // §5.30 a context menu's document item
+    BoolEdit t;
+    t.value = current;
+    if (m.ctx_row(label, true, current)) {
+      t.value = !current;
+      t.changed = t.committed = true;
+    }
+    return t;
+  }
   const std::string id = m.uid("mt|" + m.cur_menu + "/" + label);
   BoolEdit e;
   e.value = current;
@@ -2707,6 +2914,101 @@ BoolEdit FtxuiBackend::menu_item_toggle(const char *label, bool current) {
   if (m.opt.hosted && !m.cur_menu.empty())
     m.hosted_add(HostedMenuItem{id, label, true, e.value, false});
   return e;
+}
+
+// ---- a document's context_menu: (§5.30)
+// --------------------------------------------------------------------------
+
+void FtxuiBackend::begin_context_area(const char *id, ContextMenuOver over) {
+  Impl &m = *m_;
+  const std::string key = m.ctx_key(id);
+  m.ctx_areas.push_back(key);
+  if (over == ContextMenuOver::Window && !m.wins.empty())
+    m.walk.window_menus[m.wins.back()] = key;
+}
+
+void FtxuiBackend::end_context_area() {
+  Impl &m = *m_;
+  if (!m.ctx_areas.empty())
+    m.ctx_areas.pop_back();
+}
+
+// The open context menu (§5.28) holds this area's items: the core emits them now, and the menu
+// keeps them as rows after the leaf's own entries (Impl::ctx_row); nothing is drawn here.
+bool FtxuiBackend::begin_context_menu(const char *id, ContextMenuOver over,
+                                      ContextMenuOpen &opened) {
+  Impl &m = *m_;
+  const std::string key = m.ctx_key(id);
+  m.walk.menu_areas.insert(key);
+  if (over == ContextMenuOver::Main)
+    m.walk.main_menu = key;
+  if (!m.context_open() || m.ctx.area != key || m.ctx_collect)
+    return false;
+  if (!m.ctx.told) {
+    m.ctx.told = true;
+    opened.now = true;
+    opened.via = m.ctx.via;
+    opened.x = m.ctx.px;
+    opened.y = m.ctx.py;
+  }
+  m.ctx_collect = true;
+  m.ctx_depth = 0;
+  m.ctx.rows_next.clear();
+  m.stack.emplace_back(); // anything else the items draw goes nowhere
+  return true;
+}
+
+void FtxuiBackend::end_context_menu() {
+  Impl &m = *m_;
+  if (!m.ctx_collect)
+    return;
+  m.ctx_collect = false;
+  if (m.stack.size() > 1)
+    m.pop();
+}
+
+FtxuiBackend::HostedContextMenu FtxuiBackend::hosted_context_menu() const {
+  const Impl &m = *m_;
+  HostedContextMenu h;
+  if (!m.context_open())
+    return h;
+  h.open = true;
+  h.serial = m.ctx_serial;
+  h.by_key = m.ctx.via == "key";
+  h.win = m.ctx.win;
+  h.x = m.ctx.x;
+  h.y = m.ctx.y;
+  for (std::size_t i = 0; i < m.ctx.entries.size(); ++i) {
+    HostedMenuItem it;
+    it.id = "ctx#" + std::to_string(i);
+    it.label = m.ctx.entries[i];
+    it.disabled = !m.ctx.enabled[i];
+    h.items.push_back(std::move(it));
+  }
+  if (!m.ctx.entries.empty() && !m.ctx.rows.empty()) {
+    HostedMenuItem sep;
+    sep.separator = true;
+    h.items.push_back(std::move(sep));
+  }
+  h.items.insert(h.items.end(), m.ctx.rows.begin(), m.ctx.rows.end());
+  return h;
+}
+
+void FtxuiBackend::pick_context_entry(Runtime &rt, const std::string &id) {
+  Impl &m = *m_;
+  m.ev_live = false;
+  m.consumed = false;
+  if (!m.context_open()) {
+    return;
+  } else if (id.rfind("ctx#", 0) == 0) { // one of the leaf's own
+    m.context_pick(std::atoi(id.c_str() + 4));
+  } else if (!id.empty()) { // a document item: the walk runs it
+    m.ctx.pick = id;
+  } else {
+    m.close_context();
+  }
+  rt.render();
+  m.end_event();
 }
 
 // ---- windows
@@ -3400,6 +3702,7 @@ void FtxuiBackend::end_item_group() {
   it.win = m.wins.empty() ? std::string() : m.wins.back();
   it.menu = m.cur_menu;
   it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+  it.area = m.area_now();
   it.focusable = f.focusable;
   m.add(el | fx::reflect(m.boxes[gid]));
   m.walk.items.push_back(std::move(it));
@@ -3534,6 +3837,7 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
     it.win = m.wins.empty() ? std::string() : m.wins.back();
     it.menu = m.cur_menu;
     it.group = m.item_groups.empty() ? std::string() : m.item_groups.back();
+    it.area = m.area_now();
     it.focusable = !m.is_disabled();
     if (it.focusable) {
       if (m.focus_next && m.cur_menu.empty()) {
@@ -3576,6 +3880,10 @@ RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &runs, const Ri
 
 void FtxuiBackend::separator() {
   Impl &m = *m_;
+  if (m.ctx_collect) { // §5.30 in a context menu's document items
+    m.ctx_row("", false, false, true);
+    return;
+  }
   if (m.opt.hosted && !m.cur_menu.empty())
     m.hosted_add(HostedMenuItem{"", "", false, false, true});
   m.add(fx::separator());
@@ -5179,6 +5487,12 @@ bool FtxuiBackend::item_clicked() { return false; }
 bool FtxuiBackend::item_hovered() { return false; }
 void FtxuiBackend::begin_item_group(const char *, const ItemGroupOptions &) {}
 void FtxuiBackend::end_item_group() {}
+void FtxuiBackend::begin_context_area(const char *, ContextMenuOver) {}
+void FtxuiBackend::end_context_area() {}
+bool FtxuiBackend::begin_context_menu(const char *, ContextMenuOver, ContextMenuOpen &) {
+  return false;
+}
+void FtxuiBackend::end_context_menu() {}
 bool FtxuiBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
 bool FtxuiBackend::clipboard_copy(const std::string &) { return false; }
 bool FtxuiBackend::clipboard_request() { return false; }
@@ -5257,6 +5571,8 @@ std::string FtxuiBackend::tooltip() const { return {}; }
 TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {}; }
 bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
 void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
+FtxuiBackend::HostedContextMenu FtxuiBackend::hosted_context_menu() const { return {}; }
+void FtxuiBackend::pick_context_entry(Runtime &, const std::string &) {}
 void FtxuiBackend::close_window(Runtime &, const std::string &) {}
 void FtxuiBackend::set_window_geometry(const std::string &, int, int, int, int, bool) {}
 void FtxuiBackend::set_screen_size(int, int) {}

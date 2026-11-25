@@ -1,0 +1,13 @@
+# The relay's document for ctest arisrv_world_regenerate (ARIADNE_WORLDS section 18.8, GB5): a small
+# generated world, which a client rcon made an admin makes again with server.regenerate.
+meta: { name: arisrv generated world, min_libcvc: 4.0.6 }
+scene:
+  physics: {}
+  nodes:
+    - node: land
+      type: generated_world
+      seed: 5
+      half: 100
+      trees: 2
+      rocks: 1
+      buildings: 2

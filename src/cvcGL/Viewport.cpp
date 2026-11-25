@@ -8,8 +8,11 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib> // getenv: VTK_FORCE_MSAA, as the window reads it
+#include <cstring>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/SceneGraph.h>
@@ -20,17 +23,69 @@
 #include <vtkCommand.h>
 #include <vtkObjectFactory.h>
 #include <vtkOpenGLFramebufferObject.h>
+#include <vtkOpenGLQuadHelper.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLShaderCache.h>
 #include <vtkOpenGLState.h>
 #include <vtkRenderer.h>
 #include <vtkRendererDelegate.h>
+#include <vtkShaderProgram.h>
 #include <vtkSmartPointer.h>
 #include <vtkTextureObject.h>
 #include <vtk_glad.h> // GL_DRAW_FRAMEBUFFER_BINDING, GL_COLOR_BUFFER_BIT
 
 namespace {
-// Shows a throttled viewport's last pixels in place of its scene (Viewport::setRefreshHz). While
-// it is Used, vtkRenderer::Render() calls it instead of rendering, before even its Draw check.
+// A textured viewport's multisampled draw, resolved into the texture a UI shows as VTK 9.5 resolves
+// the window's frame when it shows it (vtkOpenGLRenderWindow::ResolveFlipRenderFramebuffer): each
+// pixel's samples averaged in gamma 2.2, so its anti-aliased edges are the ones the window would
+// have drawn.
+constexpr char kResolveShader[] = R"***(//VTK::System::Dec
+  in vec2 texCoord;
+  uniform sampler2DMS tex;
+  uniform int samplecount;
+  //VTK::Output::Dec
+
+  void main()
+  {
+    float gamma = 2.2;
+    ivec2 itexcoords = ivec2(floor(textureSize(tex) * texCoord));
+    vec3 accumulate = vec3(0.0,0.0,0.0);
+    float alpha = 0.0;
+    for (int i = 0; i < samplecount; i++)
+    {
+      vec4 sampleValue = texelFetch(tex, itexcoords, i);
+      accumulate += pow(sampleValue.rgb, vec3(gamma));
+      alpha += sampleValue.a;
+    }
+    accumulate /= float(samplecount);
+    gl_FragData[0] = vec4(pow(accumulate, vec3(1.0/gamma)), alpha/float(samplecount));
+  }
+  )***";
+
+// Whether the window's pixels reach their reader through that shader, as VTK 9.5 decides it. The
+// window shows its frame through it (Frame(): a multisampled colour texture, unless $VTK_FORCE_MSAA
+// says otherwise or the driver is one whose multisampled textures VTK does not trust), but a read
+// of its pixels (GetPixelData: a capture, an offscreen window's frame) resolves them with a blit.
+// So an offscreen window's views blit too, and its captures are what they were when the views drew
+// into the window.
+bool resolvesWithShader(vtkOpenGLRenderWindow *rw, int samples, bool colorTexture) {
+  if (samples <= 1 || !colorTexture || rw->GetOffScreenRendering())
+    return false;
+  if (const char *env = std::getenv("VTK_FORCE_MSAA"))
+    return std::strlen(env) ? std::atoi(env) == 1 : true;
+  vtkOpenGLState *st = rw->GetState();
+  static const char *const kBug[][3] = {
+      {"Intel", "", "Mesa Intel"}, {"X.Org", "", "AMD"}, {"Mesa", "", "NV"}};
+  for (const auto &b : kBug)
+    if (st->GetVendor().find(b[0]) == 0 && st->GetVersion().find(b[1]) == 0 &&
+        st->GetRenderer().find(b[2]) == 0)
+      return false;
+  return true;
+}
+
+// Shows a throttled viewport's last pixels in place of its scene (Viewport::setRefreshHz), and
+// draws a textured one into its texture (Viewport::setTextureSize). While it is Used,
+// vtkRenderer::Render() calls it instead of rendering, before even its Draw check.
 class LastPixels : public vtkRendererDelegate {
 public:
   static LastPixels *New();
@@ -86,13 +141,233 @@ struct Viewport::Impl {
   vtkSmartPointer<vtkCallbackCommand> onEnd; // the renderer's EndEvent: drawn()
   unsigned long onEndTag = 0;
 
+  // setTextureSize: drawn into a texture of its own. `shown` is what a UI shows (one sample a
+  // pixel, its GL name stable across sizes and sample counts); `target` is what the scene is drawn
+  // into, at the window's samples, and `resolved` writes `shown`.
+  int texAsk[2] = {0, 0};  // the size asked for (0: drawn into the window)
+  int texSize[2] = {0, 0}; // the size it draws at: the asked one within the window
+  bool texDrawn = false;   // `shown` holds a draw at texSize
+  int texSamples = -1;     // the samples `target` was made with
+  vtkSmartPointer<vtkTextureObject> shown;
+  vtkSmartPointer<vtkOpenGLFramebufferObject> target, resolved;
+  std::unique_ptr<vtkOpenGLQuadHelper> resolveQuad;
+  std::function<void()> beforeDraw; // the manager's: a mirror's re-sync
+
+  bool textured() const { return texAsk[0] > 0; }
+
+  // The delegate a rate or a texture needs, made once.
+  void ensureDelegate() {
+    if (lastPixels)
+      return;
+    lastPixels = vtkSmartPointer<LastPixels>::New();
+    lastPixels->UsedOff();
+    lastPixels->show = [this](vtkRenderer *r) {
+      if (textured())
+        drawTextured(r);
+      else
+        show(r);
+    };
+    renderer->SetDelegate(lastPixels);
+  }
+
   void applyVisible(bool on) {
     if (on && !visible)
       dirty = true; // what it kept is stale
     visible = on;
     renderer->SetDraw(on ? 1 : 0); // skipped in the composite when off
-    if (!on && lastPixels)
-      lastPixels->UsedOff(); // the delegate runs before VTK's Draw check
+    if (lastPixels)                // the delegate runs before VTK's Draw check
+      lastPixels->SetUsed(on && textured() ? 1 : 0);
+  }
+
+  // texSize from the asked size and the window's, and the renderer's viewport on it: the
+  // texture's rect at the window's lower left, so its display coordinates are texture pixels.
+  void fitTexture() {
+    vtkRenderWindow *win = renderer->GetRenderWindow();
+    const int *ws = win ? win->GetSize() : nullptr;
+    if (!textured() || !ws || ws[0] <= 0 || ws[1] <= 0)
+      return;
+    texSize[0] = std::clamp(texAsk[0], 1, ws[0]);
+    texSize[1] = std::clamp(texAsk[1], 1, ws[1]);
+    const double vx = static_cast<double>(texSize[0]) / ws[0];
+    const double vy = static_cast<double>(texSize[1]) / ws[1];
+    const double *now = renderer->GetViewport();
+    if (now[0] != 0.0 || now[1] != 0.0 || now[2] != vx || now[3] != vy)
+      renderer->SetViewport(0.0, 0.0, vx, vy);
+  }
+
+  // `shown` at texSize: made, or resized (its picture is then gone). Needs the window's context.
+  bool ensureShown(vtkOpenGLRenderWindow *rw) {
+    if (!rw || !textured())
+      return false;
+    fitTexture();
+    if (shown && shown->GetHandle() && static_cast<int>(shown->GetWidth()) == texSize[0] &&
+        static_cast<int>(shown->GetHeight()) == texSize[1])
+      return true;
+    if (!rw->GetInitialized())
+      return false;
+    rw->MakeCurrent();
+    if (!rw->IsCurrent())
+      return false;
+    if (!shown) {
+      shown = vtkSmartPointer<vtkTextureObject>::New();
+      shown->SetContext(rw);
+      shown->SetWrapS(vtkTextureObject::ClampToEdge);
+      shown->SetWrapT(vtkTextureObject::ClampToEdge);
+      shown->SetMinificationFilter(vtkTextureObject::Nearest);
+      shown->SetMagnificationFilter(vtkTextureObject::Nearest);
+    }
+    if (!shown->GetHandle())
+      shown->Allocate2D(texSize[0], texSize[1], 4, VTK_UNSIGNED_CHAR);
+    else
+      shown->Resize(texSize[0], texSize[1]);
+    texDrawn = false;
+    return shown->GetHandle() != 0;
+  }
+
+  // The framebuffers a draw needs: `target` as the window's own render framebuffer is made
+  // (vtkOpenGLRenderWindow::CreateFramebuffers: its samples, depth bits and stencil), at texSize,
+  // and `resolved` over `shown`. Inside the window's render, where its framebuffers exist.
+  bool ensureTarget(vtkOpenGLRenderWindow *rw) {
+    if (!ensureShown(rw))
+      return false;
+    vtkOpenGLState *st = rw->GetState();
+    vtkOpenGLFramebufferObject *frame = rw->GetRenderFramebuffer();
+    const int samples = frame ? frame->GetMultiSamples() : 0;
+    if (target && samples != texSamples) {
+      target->ReleaseGraphicsResources(rw);
+      target = nullptr;
+    }
+    if (!target) {
+      target = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
+      target->SetContext(rw);
+#ifdef GL_TEXTURE_2D_MULTISAMPLE
+      const bool textures = true;
+#else
+      const bool textures = samples == 0;
+#endif
+      st->PushFramebufferBindings();
+      const bool ok = target->PopulateFramebuffer(
+          texSize[0], texSize[1], textures, 1, VTK_UNSIGNED_CHAR, /*wantDepthAttachment=*/true,
+          rw->GetRenderBufferTargetDepthSize(), samples, rw->GetStencilCapable() != 0);
+      st->PopFramebufferBindings();
+      if (!ok) {
+        target->ReleaseGraphicsResources(rw);
+        target = nullptr;
+        return false;
+      }
+      texSamples = samples;
+    } else if (target->GetLastSize()[0] != texSize[0] || target->GetLastSize()[1] != texSize[1]) {
+      target->Resize(texSize[0], texSize[1]);
+    }
+    if (!resolved) {
+      resolved = vtkSmartPointer<vtkOpenGLFramebufferObject>::New();
+      resolved->SetContext(rw);
+      st->PushFramebufferBindings();
+      resolved->Bind();
+      resolved->AddColorAttachment(0, shown);
+      resolved->ActivateDrawBuffer(0);
+      st->PopFramebufferBindings();
+    } else if (resolved->GetLastSize()[0] != texSize[0] ||
+               resolved->GetLastSize()[1] != texSize[1]) {
+      resolved->Resize(texSize[0], texSize[1]);
+    }
+    return true;
+  }
+
+  // `target` into `shown`, as the window resolves its frame, and `shown` made opaque: a view's
+  // alpha is the scene's, not coverage, and a UI blends what it shows.
+  void resolve(vtkOpenGLRenderWindow *rw) {
+    vtkOpenGLState *st = rw->GetState();
+    const int w = texSize[0], h = texSize[1];
+    vtkOpenGLState::ScopedglEnableDisable scissor(st, GL_SCISSOR_TEST);
+    vtkOpenGLState::ScopedglEnableDisable depthTest(st, GL_DEPTH_TEST);
+    vtkOpenGLState::ScopedglEnableDisable blend(st, GL_BLEND);
+    vtkOpenGLState::ScopedglViewport viewport(st);
+    st->vtkglDisable(GL_SCISSOR_TEST);
+    st->vtkglDisable(GL_DEPTH_TEST);
+    st->vtkglDisable(GL_BLEND);
+    st->vtkglViewport(0, 0, w, h);
+    resolved->Bind(GL_DRAW_FRAMEBUFFER);
+    resolved->ActivateDrawBuffer(0);
+    vtkTextureObject *ms = target->GetColorAttachmentAsTextureObject(0);
+    bool done = false;
+    if (resolvesWithShader(rw, texSamples, ms != nullptr)) {
+      // Made once; where it does not compile (a GL without multisampled samplers) it blits, as
+      // the window does, without trying again each draw.
+      if (!resolveQuad)
+        resolveQuad.reset(new vtkOpenGLQuadHelper(rw, nullptr, kResolveShader, ""));
+      else if (resolveQuad->Program && resolveQuad->Program->GetCompiled())
+        rw->GetShaderCache()->ReadyShaderProgram(resolveQuad->Program);
+      if (resolveQuad->Program && resolveQuad->Program->GetCompiled()) {
+        ms->Activate();
+        resolveQuad->Program->SetUniformi("samplecount", texSamples);
+        resolveQuad->Program->SetUniformi("tex", ms->GetTextureUnit());
+        resolveQuad->Render();
+        ms->Deactivate();
+        done = true;
+      }
+    }
+    if (!done) {
+      target->Bind(GL_READ_FRAMEBUFFER);
+      target->ActivateReadBuffer(0);
+      st->vtkglBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    st->vtkglColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+    st->vtkglClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    st->vtkglClear(GL_COLOR_BUFFER_BIT);
+    st->vtkglColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  }
+
+  // A textured viewport's turn in the window's render: draw its scene into its texture when it is
+  // due, else leave the last picture there.
+  void drawTextured(vtkRenderer *r) {
+    auto *rw = vtkOpenGLRenderWindow::SafeDownCast(r->GetRenderWindow());
+    if (!rw || !visible)
+      return;
+    const auto now = std::chrono::steady_clock::now();
+    fitTexture();
+    const bool sized = shown && static_cast<int>(shown->GetWidth()) == texSize[0] &&
+                       static_cast<int>(shown->GetHeight()) == texSize[1];
+    const bool due = dirty || !texDrawn || !sized || refreshHz <= 0.0 ||
+                     std::chrono::duration<double>(now - lastDraw).count() >= 1.0 / refreshHz;
+    if (!due)
+      return;
+    if (beforeDraw)
+      beforeDraw();
+    if (!ensureTarget(rw))
+      return;
+    dirty = false;
+    lastDraw = now;
+    vtkOpenGLState *st = rw->GetState();
+    st->PushFramebufferBindings();
+    target->Bind();
+    target->ActivateDrawBuffer(0);
+    target->ActivateReadBuffer(0);
+    lastPixels->UsedOff(); // the renderer's own Render(), this once
+    r->Render();
+    lastPixels->UsedOn();
+    resolve(rw);
+    st->PopFramebufferBindings();
+    texDrawn = true;
+  }
+
+  void releaseTexture() {
+    auto *rw = vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow());
+    if (rw && (shown || target || resolved || resolveQuad))
+      rw->MakeCurrent();
+    if (resolveQuad)
+      resolveQuad->ReleaseGraphicsResources(rw);
+    resolveQuad.reset();
+    if (resolved)
+      resolved->ReleaseGraphicsResources(rw);
+    if (target)
+      target->ReleaseGraphicsResources(rw);
+    if (shown)
+      shown->ReleaseGraphicsResources(rw);
+    resolved = target = nullptr;
+    shown = nullptr;
+    texDrawn = false;
+    texSamples = -1;
   }
 
   // The renderer finished drawing its scene: count it, and keep its pixels if it is throttled.
@@ -242,7 +517,8 @@ Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraSt
     for (int i = 0; i < 4; ++i)
       impl->region[i] = v.region[i];
     impl->layer = v.layer;
-    impl->renderer->SetViewport(v.region[0], v.region[1], v.region[2], v.region[3]);
+    if (!impl->textured()) // a textured one's renderer draws at its texture's rect
+      impl->renderer->SetViewport(v.region[0], v.region[1], v.region[2], v.region[3]);
     impl->renderer->SetLayer(v.layer);
     impl->applyVisible(v.visible); // sets visible, and marks a throttled one stale when shown
   }));
@@ -265,7 +541,8 @@ void Viewport::setRegion(double x0, double y0, double x1, double y1) {
   m_impl->region[1] = y0;
   m_impl->region[2] = x1;
   m_impl->region[3] = y1;
-  m_impl->renderer->SetViewport(x0, y0, x1, y1);
+  if (!m_impl->textured()) // a textured one's renderer draws at its texture's rect
+    m_impl->renderer->SetViewport(x0, y0, x1, y1);
   m_impl->writeLayout();
 }
 
@@ -321,13 +598,9 @@ bool Viewport::inputEnabled() const { return m_impl->inputEnabled; }
 void Viewport::setRefreshHz(double hz) {
   Impl &m = *m_impl;
   m.refreshHz = std::isfinite(hz) && hz > 0.0 ? hz : 0.0;
-  if (m.refreshHz > 0.0 && !m.lastPixels) {
-    m.lastPixels = vtkSmartPointer<LastPixels>::New();
-    Impl *impl = m_impl.get();
-    m.lastPixels->show = [impl](vtkRenderer *r) { impl->show(r); };
-    m.renderer->SetDelegate(m.lastPixels);
-  }
-  if (m.lastPixels && m.refreshHz == 0.0)
+  if (m.refreshHz > 0.0)
+    m.ensureDelegate();
+  if (m.lastPixels && m.refreshHz == 0.0 && !m.textured())
     m.lastPixels->UsedOff();
   m.dirty = true;
 }
@@ -335,11 +608,99 @@ double Viewport::refreshHz() const { return m_impl->refreshHz; }
 void Viewport::invalidate() { m_impl->dirty = true; }
 long Viewport::draws() const { return m_impl->draws; }
 
+void Viewport::setTextureSize(int w, int h) {
+  Impl &m = *m_impl;
+  if (w <= 0 || h <= 0)
+    w = h = 0;
+  if (w == m.texAsk[0] && h == m.texAsk[1])
+    return;
+  const bool was = m.textured();
+  m.texAsk[0] = w;
+  m.texAsk[1] = h;
+  m.dirty = true;
+  if (m.textured()) {
+    m.ensureDelegate();
+    m.lastPixels->SetUsed(m.visible ? 1 : 0); // it draws the scene into the texture
+    m.kept = false;                           // the window's pixels it kept are no longer its
+    m.fitTexture();
+  } else if (was) { // back into the window, where region() says
+    m.renderer->SetViewport(m.region[0], m.region[1], m.region[2], m.region[3]);
+    m.lastPixels->UsedOff();
+    m.releaseTexture();
+  }
+}
+
+bool Viewport::textured() const { return m_impl->textured(); }
+
+void Viewport::textureSize(int out[2]) const {
+  const Impl &m = *m_impl;
+  out[0] = out[1] = 0;
+  if (!m.textured())
+    return;
+  vtkRenderWindow *win = m.renderer->GetRenderWindow();
+  const int *ws = win ? win->GetSize() : nullptr;
+  out[0] = ws && ws[0] > 0 ? std::min(m.texAsk[0], ws[0]) : m.texAsk[0];
+  out[1] = ws && ws[1] > 0 ? std::min(m.texAsk[1], ws[1]) : m.texAsk[1];
+}
+
+unsigned int Viewport::texture() {
+  Impl &m = *m_impl;
+  auto *rw = vtkOpenGLRenderWindow::SafeDownCast(m.renderer->GetRenderWindow());
+  return m.ensureShown(rw) ? m.shown->GetHandle() : 0u;
+}
+
+void Viewport::windowToRenderer(double x, double y, double out[2]) const {
+  const Impl &m = *m_impl;
+  out[0] = x;
+  out[1] = y;
+  vtkRenderWindow *win = m.renderer->GetRenderWindow();
+  const int *ws = win ? win->GetSize() : nullptr;
+  if (!m.textured() || !ws || ws[0] <= 0 || ws[1] <= 0)
+    return;
+  const double w = (m.region[2] - m.region[0]) * ws[0], h = (m.region[3] - m.region[1]) * ws[1];
+  if (!(w > 0.0) || !(h > 0.0))
+    return;
+  int ts[2];
+  textureSize(ts);
+  out[0] = (x - m.region[0] * ws[0]) * ts[0] / w;
+  out[1] = (y - m.region[1] * ws[1]) * ts[1] / h;
+}
+
+void Viewport::rendererToWindow(double x, double y, double out[2]) const {
+  const Impl &m = *m_impl;
+  out[0] = x;
+  out[1] = y;
+  vtkRenderWindow *win = m.renderer->GetRenderWindow();
+  const int *ws = win ? win->GetSize() : nullptr;
+  int ts[2];
+  textureSize(ts);
+  if (!m.textured() || !ws || ws[0] <= 0 || ws[1] <= 0 || ts[0] <= 0 || ts[1] <= 0)
+    return;
+  const double w = (m.region[2] - m.region[0]) * ws[0], h = (m.region[3] - m.region[1]) * ws[1];
+  out[0] = m.region[0] * ws[0] + x * w / ts[0];
+  out[1] = m.region[1] * ws[1] + y * h / ts[1];
+}
+
+void Viewport::setBeforeDraw(std::function<void()> fn) { m_impl->beforeDraw = std::move(fn); }
+
+void Viewport::releaseGraphics() {
+  Impl &m = *m_impl;
+  m.releaseTexture();
+  if (m.cache) {
+    m.cache->ReleaseGraphicsResources(m.renderer->GetRenderWindow());
+    m.cache = nullptr;
+    m.kept = false;
+    m.keptWindow[0] = m.keptWindow[1] = 0;
+  }
+}
+
 bool Viewport::beginRender() {
   Impl &m = *m_impl;
   m.drawing = false;
   if (!m.visible)
     return false;
+  if (m.textured()) // it decides as the render reaches it (drawTextured)
+    return true;
   vtkRenderWindow *win = m.renderer->GetRenderWindow();
   // Throttled: a rate, a window, and an opaque rect (a translucent one draws over a picture that
   // changes under it).

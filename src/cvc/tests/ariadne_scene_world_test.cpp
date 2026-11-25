@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/conference/room_calls.h> // GB5: a joined lab's room_call_client
 #include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_scene.h> // room_world_source
@@ -54,6 +55,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // wet_friction
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h> // GB5: a joined lab's room_call_client
 #include <cvc/world/surface.h>
 #include <cvc/world/weather.h>
 #include <cvc/world/world_geometry.h>
@@ -5701,6 +5703,168 @@ TEST(AriadneWorldGym, ResetStepAndObserve) {
   EXPECT_EQ(gym.world().world().tick(), held);
 }
 
+// Local is the same (OW7a): the gym runs its world in a server-role holon of its own, as a relay
+// runs its world, and the world takes the steps it took on the gym's own clock, to the bit: two
+// agents, one steered and one on nav@1, toward the wall, for two episodes (the reset in between
+// takes the holon's clock back to tick 0). Every body's state is the same at the end of each
+// episode, run in the holon or not, and on a second run in the holon. (The holon adds the
+// avatars' material to the world, which its saved state counts; the bodies are what moved.)
+namespace {
+struct gym_run_result {
+  std::vector<cvc::physics::body_state> end1, end2;
+  std::uint64_t tick = 0;
+  bool in_holon = false;
+};
+std::vector<cvc::physics::body_state> bodies_of(const cvc::physics::world &w) {
+  std::vector<cvc::physics::body_state> out;
+  for (const cvc::physics::body_snapshot &b : w.snapshot().bodies)
+    out.push_back(b.state);
+  return out;
+}
+bool same_bodies(const std::vector<cvc::physics::body_state> &a,
+                 const std::vector<cvc::physics::body_state> &b) {
+  if (a.size() != b.size())
+    return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    const cvc::physics::body_state &p = a[i], &q = b[i];
+    if (p.position.x != q.position.x || p.position.y != q.position.y ||
+        p.position.z != q.position.z || p.rotation.w != q.rotation.w ||
+        p.rotation.x != q.rotation.x || p.rotation.y != q.rotation.y ||
+        p.rotation.z != q.rotation.z || p.linear_velocity.x != q.linear_velocity.x ||
+        p.linear_velocity.y != q.linear_velocity.y || p.linear_velocity.z != q.linear_velocity.z ||
+        p.angular_velocity.x != q.angular_velocity.x ||
+        p.angular_velocity.y != q.angular_velocity.y ||
+        p.angular_velocity.z != q.angular_velocity.z)
+      return false;
+  }
+  return true;
+}
+gym_run_result run_the_gym(bool in_holon) {
+  gym_run_result r;
+  gym_options o = agents(2);
+  o.holon = in_holon;
+  WorldGym gym(write_doc("gym_run", gym_doc(true, true)).string(), o);
+  r.in_holon = gym.local_holon() != nullptr;
+  gym.reset(3);
+  for (int i = 0; i < 120; ++i)
+    gym.step({0.15, kNaN}, {2.0, kNaN});
+  r.end1 = bodies_of(gym.world().world());
+  gym.reset(5);
+  for (int i = 0; i < 90; ++i)
+    gym.step({-0.1, kNaN}, {1.5, kNaN});
+  r.end2 = bodies_of(gym.world().world());
+  r.tick = gym.world().world().tick();
+  return r;
+}
+} // namespace
+
+TEST(AriadneWorldGym, TheGymsWorldRunsInALocalServerHolonAsOnItsOwnClock) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const gym_run_result held = run_the_gym(true), again = run_the_gym(true),
+                       own = run_the_gym(false);
+  std::printf("  OW7A the gym's world in its holon: %zu bodies, tick %llu; the same as on its own "
+              "clock: %s, %s\n",
+              held.end2.size(), static_cast<unsigned long long>(held.tick),
+              same_bodies(held.end1, own.end1) ? "yes" : "no",
+              same_bodies(held.end2, own.end2) ? "yes" : "no");
+  EXPECT_TRUE(held.in_holon) << "the world in the gym's holon";
+  EXPECT_FALSE(own.in_holon) << "gym_options::holon off";
+  EXPECT_EQ(held.tick, own.tick);
+  EXPECT_TRUE(same_bodies(held.end1, own.end1)) << "the first episode, to the bit";
+  EXPECT_TRUE(same_bodies(held.end2, own.end2)) << "after the reset, to the bit";
+  EXPECT_TRUE(same_bodies(held.end2, again.end2)) << "and every run";
+}
+
+// People in the gym (OW7a): avatars in its holon's world beside the cars, as on a relay. A car
+// commanded straight at a person standing 15 m ahead shoves them aside and has hit a person
+// (hit_person, a collision; no obstacle: the holon tells the vehicles which bodies are people); a
+// car on nav@1 driving to a goal past a person steers around them (the holon hands its avatars to
+// the navigators, OW4) and touches no one. A walking person walks. Without the holon there are no
+// people.
+TEST(AriadneWorldGym, PeopleAreInTheGymsWorld) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string doc = write_doc("gym_people", gym_doc(true, false)).string();
+  // Commanded straight at a person standing in its way.
+  {
+    gym_options o = agents(1);
+    gym_person p;
+    p.x = 15.0;
+    p.y = 0.0;
+    o.people.push_back(p);
+    gym_person walker;
+    walker.x = -20.0;
+    walker.y = 40.0;
+    walker.walk = 1.2;
+    o.people.push_back(walker);
+    WorldGym gym(doc, o);
+    ASSERT_NE(gym.local_holon(), nullptr);
+    gym_observation obs = gym.reset(1);
+    ASSERT_EQ(obs.people, 2u);
+    EXPECT_NEAR(obs.person_x[0], 15.0, 1e-9);
+    bool touched = false, obstacle = false, collided = false;
+    for (int i = 0; i < 120; ++i) {
+      const gym_step s = gym.step({0.0}, {2.0});
+      touched = touched || s.observation.hit_person[0] != 0;
+      obstacle = obstacle || s.observation.hit_obstacle[0] != 0;
+      collided = collided || s.observation.collided[0] != 0;
+      obs = s.observation;
+    }
+    const double pushed = std::hypot(obs.person_x[0] - 15.0, obs.person_y[0]);
+    std::printf("  OW7A a car commanded at a standing person: it touched them %s; they were "
+                "shoved %.2f m; the walker went %.2f m\n",
+                touched ? "yes" : "no", pushed, obs.person_x[1] + 20.0);
+    EXPECT_TRUE(touched) << "the car hit the person";
+    EXPECT_FALSE(obstacle) << "a person, not an obstacle";
+    EXPECT_TRUE(collided) << "a collision all the same";
+    EXPECT_GT(pushed, 1.0) << "and shoved them";
+    EXPECT_NEAR(obs.person_x[1] + 20.0, 1.2 * gym.dt() * 120, 1.0) << "the walker walks";
+  }
+  // On nav@1 to a goal past a person: around them.
+  {
+    gym_options o = agents(1);
+    gym_person p;
+    p.x = 20.0;
+    p.y = 0.0;
+    o.people.push_back(p);
+    WorldGym gym(doc, o);
+    gym_observation obs = gym.reset(1);
+    ASSERT_TRUE(gym.set_goal(obs.id[0], 45.0, 0.0));
+    bool touched = false;
+    double closest = 1e9;
+    for (int i = 0; i < 400; ++i) {
+      const gym_step s = gym.step({kNaN}, {kNaN});
+      touched = touched || s.observation.hit_person[0] != 0 || s.observation.hit_obstacle[0] != 0;
+      obs = s.observation;
+      closest =
+          std::min(closest, std::hypot(obs.x[0] - obs.person_x[0], obs.y[0] - obs.person_y[0]));
+      if (s.terminated)
+        break;
+    }
+    const double pushed = std::hypot(obs.person_x[0] - 20.0, obs.person_y[0]);
+    std::printf("  OW7A nav@1 past a person: closest %.2f m (centre to feet), touched %s, at its "
+                "goal %s, the person moved %.3f m\n",
+                closest, touched ? "yes" : "no", obs.reached[0] ? "yes" : "no", pushed);
+    EXPECT_FALSE(touched) << "steered around them";
+    EXPECT_LT(pushed, 0.05);
+    EXPECT_TRUE(obs.reached[0]) << "and got to its goal";
+  }
+  // Without the holon: no people.
+  {
+    gym_options o = agents(1);
+    o.holon = false;
+    gym_person p;
+    p.x = 15.0;
+    o.people.push_back(p);
+    WorldGym gym(doc, o);
+    EXPECT_EQ(gym.local_holon(), nullptr);
+    EXPECT_EQ(gym.reset(1).people, 0u);
+  }
+}
+
 TEST(AriadneWorldGym, OneSeedAndOneListOfCommandsGiveOneWorld) {
   REQUIRE_YAML();
   if (!jolt())
@@ -7909,7 +8073,7 @@ namespace {
 struct mover_pass {
   double closest = 1e9, car_x = 0.0, avatar_moved = 0.0;
 };
-mover_pass pass_avatar(bool avoid) {
+mover_pass pass_avatar(bool avoid, bool brake = true) {
   LoadResult r = load_vehicles(kAvoid);
   EXPECT_TRUE(r.ok) << r.error;
   cvc::app app;
@@ -7920,6 +8084,7 @@ mover_pass pass_avatar(bool avoid) {
     return out;
   WorldVehicles *v = w->vehicles();
   v->set_avoid(avoid);
+  v->set_brake_for_people(brake);
   v->set_wander(false);
   w->sync(&warnings);
   entity_spec a;
@@ -7953,19 +8118,25 @@ mover_pass pass_avatar(bool avoid) {
 } // namespace
 
 // The navigators steer around the avatars (section 18.4): a car on nav@1 swings past a person
-// standing in its lane and drives on to its goal, where without avoiding it drives into them.
+// standing in its lane and drives on to its goal. Not steering around them, it brakes for them
+// (OW7c) and stops short; doing neither, it drives into them.
 TEST(AriadneOneWorld, ANavigatedCarSteersAroundAnAvatar) {
   REQUIRE_YAML();
   if (!jolt())
     GTEST_SKIP() << "no Jolt in this build";
-  const mover_pass on = pass_avatar(true), off = pass_avatar(false);
+  const mover_pass on = pass_avatar(true), braking = pass_avatar(false),
+                   off = pass_avatar(false, false);
   std::printf("  past an avatar: avoiding, closest %.2f m, the car ends at x %.1f, the avatar "
-              "moved %.2f m; not avoiding, %.2f m, x %.1f, moved %.2f m\n",
-              on.closest, on.car_x, on.avatar_moved, off.closest, off.car_x, off.avatar_moved);
+              "moved %.2f m; braking alone, %.2f m, x %.1f, moved %.2f m; neither, %.2f m, x "
+              "%.1f, moved %.2f m\n",
+              on.closest, on.car_x, on.avatar_moved, braking.closest, braking.car_x,
+              braking.avatar_moved, off.closest, off.car_x, off.avatar_moved);
   EXPECT_LT(on.car_x, -20.0) << "the car got past";
   EXPECT_GT(on.closest, 2.0) << "with room to spare";
   EXPECT_LT(on.avatar_moved, 0.1) << "and never touched the avatar";
-  EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "without avoiding, it drove into them";
+  EXPECT_GT(braking.car_x, 0.0) << "braking alone, it stopped short of them";
+  EXPECT_LT(braking.avatar_moved, 0.1) << "and never touched them";
+  EXPECT_GT(off.avatar_moved, on.avatar_moved + 0.5) << "doing neither, it drove into them";
 }
 
 // Generic entities (section 18.4): a participant gets into a vehicle and drives it with its
@@ -9315,6 +9486,106 @@ TEST(AriadneOneWorld, AClientFollowsTheRelaysWorldSwitch) {
   EXPECT_NEAR(world.ground()(0.0, 0.0), 1.0, 0.05) << "the dome's top";
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+// A lab joined to a relay that runs the same generated_world node (ARIADNE_WORLDS section 18.8,
+// GB5): it makes the world the relay's world_on names, its Regenerate goes to the relay (here none
+// answers: the call ends unavailable when the client fails its calls, and the panel says so) and
+// makes nothing itself, and the
+// world the relay then makes comes back through world_on. A follow is never sent on. Joined to no
+// relay, or to one that runs no such node, the lab makes its worlds itself.
+TEST(AriadneOneWorld, AJoinedLabShowsTheRelaysWorldAndSendsItsRegenerate) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> lab = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(lab, nullptr);
+  ASSERT_NE(lab->generated_world("world"), nullptr);
+  ASSERT_EQ(lab->generated_world("world")->params.seed, 5u);
+  const auto seed_shown = [&] { return lab->generated_world("world")->params.seed; };
+
+  // The relay's world_on: the same node, from seed 9. Not joined yet, so the lab ignores it.
+  const std::string room = "lab";
+  cvc::world::generated_world_params relay_params;
+  ASSERT_TRUE(lab->generated_params("world", relay_params));
+  relay_params.seed = 9;
+  conference::room_world_on on;
+  on.generated.push_back({"world", relay_params});
+  conference::write_room_world_on(app, room, on);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 5u) << "not joined: its own world";
+
+  // Joined (a room_call_client with no transport: its calls wait until fail_all ends them, as a
+  // lost relay does).
+  cvc::app host;
+  cvc::state_cluster_shard shard(host, "conf", "node");
+  const auto calls = std::make_shared<conference::room_call_client>(shard, room, "ann");
+  conference::room_call_client::install(app, calls);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 9u) << "the relay's world";
+  EXPECT_EQ(val(app, "world.seed"), "9") << "the panel shows it";
+  EXPECT_EQ(val(app, "world.server.status"), "the server's world (seed 9)");
+  EXPECT_EQ(val(app, "world.pending"), "0");
+
+  // Regenerate from seed 11: sent to the relay, not made here.
+  cvc::state::instance(app)("world.seed").value("11");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 9u) << "the relay makes it, not the lab";
+  EXPECT_EQ(val(app, "world.server.status"), "asking the server for a new world");
+  calls->fail_all("no relay here");
+  lab->sync(&warnings); // the reply lands
+  EXPECT_EQ(val(app, "world.server.status"), "error: unavailable: no relay here")
+      << val(app, "world.server.status");
+  EXPECT_EQ(val(app, "world.pending"), "1") << "the settings are not the world shown";
+  EXPECT_EQ(seed_shown(), 9u);
+
+  // The relay made it: world_on brings it, and the lab shows it.
+  relay_params.seed = 11;
+  on.generated[0].params = relay_params;
+  conference::write_room_world_on(app, room, on);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 11u);
+  EXPECT_EQ(val(app, "world.pending"), "0");
+  EXPECT_EQ(val(app, "world.server.status"), "the server's world (seed 11)");
+
+  // A follow (SceneWorld::follow_generated, as a client's replica follows) is made here, never
+  // sent on.
+  cvc::world::generated_world_params mine = relay_params;
+  mine.seed = 12;
+  ASSERT_TRUE(lab->follow_generated("world", mine, &warnings));
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 12u);
+
+  // Log in as an admin: the password goes and its key is cleared; here the call ends unavailable.
+  cvc::state::instance(app)("world.server.password").value("secret");
+  cvc::state::instance(app)("world.request").value("rcon");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.password"), "");
+  EXPECT_EQ(val(app, "world.server.status"), "logging in");
+  calls->fail_all("no relay here");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.status"), "refused: no relay here");
+
+  // A relay that runs no such node: the lab makes its own.
+  on.generated[0].node = "elsewhere";
+  conference::write_room_world_on(app, room, on);
+  cvc::state::instance(app)("world.seed").value("13");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 13u);
+
+  // Joined to none: the same.
+  conference::room_call_client::install(app, nullptr);
+  cvc::state::instance(app)("world.request").value("rcon");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.status"), "not joined to a server");
+  cvc::state::instance(app)("world.seed").value("14");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 14u);
 }
 
 // A Regenerate on the relay (OW5f): the params each generated world of the world on was made from

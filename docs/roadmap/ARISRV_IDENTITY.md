@@ -217,6 +217,11 @@ arisrv.clients.<client_id>.
     - There's no `fuel`: gas is charged as steps. There's no `concurrency`: one program or guest at
       a time per client is by design, and #1290's residents get their own count. ID4c adds
       `python`.
+  - `server.regenerate` NODE PARAMS: the relay document's generated_world NODE made again from
+    PARAMS (a JSON object's text, or a dict of `generated_world_params_json`'s fields; the rest
+    stay the world's), at the document's next sync, and published to every client through
+    `world_on` (ARIADNE_WORLDS section 18.8, GB5). Answers `{node, asked, seed}`; `asked` is false
+    when it is already that world. A joined terrain lab's Regenerate sends it.
   - Rotating the guest password at run time waits on the transports (2.4).
 - The rate limit is `rcon_guard`, beside `client_registry` in `client_registry.h`. Its lock
   starts at 30 s and doubles, up to an hour. A right password clears it.

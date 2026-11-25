@@ -233,7 +233,9 @@ it starts. Headless, no world is built.
 ## The scrubber
 
 The scrubber is for watching a policy learn. It deploys every checkpoint a training history names
-on one scenario, headless, and shows checkpoint k beside step 0.
+on one scenario, headless, and shows checkpoint k beside step 0. [NAV_SCRUB.md](NAV_SCRUB.md)
+covers its view (the world, the two runs, every window) and how learning is, and is not,
+demonstrated with it.
 
 ```bash
 cvc nav scrub run/history.jsonl                           # every checkpoint, a table
@@ -264,7 +266,13 @@ How the scrubber reads one:
 - **The built-in one** is a walled 120 m square with a 3 x 3 grid of buildings and streets between
   them, each building nudged and sized by `--seed`. `--agents` agents (4 by default) start on its
   west side and drive to goals on its east, at a scale of 0.05 normalized units per metre and
-  0.05 s a tick, with the map known. Their start and goal lanes come from `--seed`.
+  0.05 s a tick, with the map known. Their start and goal lanes come from `--seed`, 8 m apart
+  where they fit, so no two cars start or end on top of each other.
+- **`grid_scenario`** (C++, `cvc/nav/nav_scrub.h`) puts one on a world as the navigator sees it,
+  a `cvc::nav::world_grid`: a data bundle's city, a generated world or a flat square, at its real
+  size in metres. Its agents start 12 m apart on free ground, 4 m clear of anything blocked, each
+  to a goal 12 m from every start and every other goal and at least 0.3 of the world's span
+  away. `nav_scrub` runs its document's world this way (NAV_SCRUB.md).
 - **`--scenario TRACE`** uses a recorded input trace's world and agents. Its inputs are not
   replayed.
 
@@ -280,8 +288,10 @@ How the scrubber reads one:
 
 nav does not depend on physics, so the plant reaches the scrubber through a hook:
 `scrub_scenario::plant` names it, and `scrub_options::plant` attaches it to each deployed world.
-`cvc::physics::scrub_plant()` (`cvc/physics/scrub_plant.h`) is the hook the CLI, the Python view
-and the browser page use.
+`cvc::physics::scrub_plant()` (`cvc/physics/scrub_plant.h`) is the hook the CLI and the Python
+view use. On a real world, `scrub_plant(geometry)` gives each plant that world's own colliders
+(its terrain and buildings, `cvc::world::world_geometry`) in place of the boxes, and starts each
+vehicle on its terrain.
 
 Each checkpoint's blob replaces the world's own policy for every agent, and the run is an arms run
 with one arm. So checkpoint 0 deployed here is the untrained policy's arm anywhere else, tick for
@@ -339,23 +349,28 @@ side by side as two arms, step 0 blue and k orange. The Stats and Ledger windows
 play head, and the play head keeps its time when another checkpoint is picked.
 
 **In a browser.** `examples/ariadne/nav_scrub` is a C++ Ariadne host for the scrubber, and
-libcvc's demo gallery (https://transfix.github.io/libcvc/nav_scrub/) runs it in the page. With no
-`--history`, it first trains cvc::nav's own coef_trainer for 60 steps on the built-in blocks' map,
-in that map's frame, saving a checkpoint every 6 steps. It then deploys the 11 checkpoints on each
-`--plant` (by default the Humvee, then the kinematic bicycle to compare; the Plant combo switches)
-and shows `examples/ariadne/nav_scrub/nav_scrub.ari`: the same windows, written by the same
-`scrub_view`. The training, the deploys and the view all run in the page (single-threaded wasm,
-same-origin, nothing fetched); natively the whole sequence takes under 3 s. The document and the
-component library are preloaded into the page's file system.
+libcvc's demo gallery (https://transfix.github.io/libcvc/nav_scrub/) runs it in the page. Its
+world is the document's: south Austin from its bundle by default, at its real size, or a
+generated world, a flat square or the built-in blocks (`--world`). Each run's vehicles are the
+Humvee model. With no `--history`, it first trains cvc::nav's own coef_trainer for 60 steps on
+the world's own map, in that map's frame, saving a checkpoint every 6 steps. It then deploys the
+11 checkpoints on each `--plant` (by default the Humvee, then the kinematic bicycle to compare;
+the Plant combo switches) and shows `examples/ariadne/nav_scrub/nav_scrub.ari`: the same
+windows, written by the same `scrub_view`. The training, the deploys and the view all run in the
+page (single-threaded wasm, same-origin, nothing fetched); natively the whole sequence takes
+about 10 s on Austin. The document, the component library and the Austin bundle are preloaded
+into the page's file system. [NAV_SCRUB.md](NAV_SCRUB.md) has its world, its vehicles and every
+window.
 
 ![The scrubber in a browser page](img/nav-lab/scrub_web.jpg)
 
 *The gallery page in headless Chrome (software WebGL), after it trained and deployed in the page,
-captured on the kinematic bicycle before the Humvee was the default: the same numbers as the
-native run (step 60: path 88.8 m, 0 ticks penetrating, 53.6 m to go).*
+captured on the blocks and the kinematic bicycle before the page ran on Austin's world: the same
+numbers as the native run (step 60: path 88.8 m, 0 ticks penetrating, 53.6 m to go).*
 
 ```bash
-nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --component-path src/cvc/ariadne
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --component-path src/cvc/ariadne --bundle <austin_south>
+nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --world generated     # no Austin here
 nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --history run/history.jsonl --agents 8
 nav_scrub examples/ariadne/nav_scrub/nav_scrub.ari --plant humvee   # the Humvee alone
 ```

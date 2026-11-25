@@ -30,6 +30,7 @@ namespace ariadne {
 
 class AppRuntime;
 class SceneWorld;
+class holon;
 
 // ----------------
 // The gym: a world document driven by reset, step and observe (ARIADNE_WORLDS.md §14, L4)
@@ -59,6 +60,23 @@ class SceneWorld;
 //
 // Keys, under `<prefix>.gym`: episode, step, time, return (the reward summed over the agents and
 // the episode), done (1 once terminated or truncated), agents, status.
+//
+// LOCAL IS THE SAME (ARIADNE_WORLDS.md §18.2, OW7a). The world runs in a server-role holon of the
+// gym's own (local_holon()), as a relay's runs in its holon: the same world, the same entities,
+// the same code path. Its clock is lockstep, and a step advances it one physics step at a time;
+// the world takes the steps the gym's own clock would have given it, to the bit. So people can be
+// in it (gym_options::people): avatars, bodies in the world beside the vehicles, which the cars
+// shove and are slowed by and which the navigators steer around, as on the relay. A build without
+// the holon's avatar physics (no Jolt) steps the world on the gym's clock, without people.
+
+// A person in the gym's world (gym_options::people): an avatar standing at (x, y) facing `yaw`
+// (rad), walking at `walk` m/s along it from the reset on (0: standing). Its body is the room's
+// rules' avatar body (a 70 kg, 0.5 x 0.5 x 1.7 m box), on the world's ground under it.
+struct gym_person {
+  std::string name; // its participant id in the holon ("" person <i>)
+  double x = 0.0, y = 0.0, yaw = 0.0;
+  double walk = 0.0;
+};
 
 // Every agent at one tick, as flat arrays of `n` (SI: m, rad, m/s), in spawn order.
 struct gym_observation {
@@ -74,9 +92,10 @@ struct gym_observation {
   // Its goal, the distance to it, and within `reach` of it.
   std::vector<double> goal_x, goal_y, goal_dist, reach;
   std::vector<std::uint8_t> reached;
-  // Over the last tick: touching the world's bodies other than its ground (hit_obstacle), touching
-  // another vehicle (hit_vehicle), and either (collided).
-  std::vector<std::uint8_t> collided, hit_obstacle, hit_vehicle;
+  // Over the last tick: touching the world's bodies other than its ground and the people
+  // (hit_obstacle), touching another vehicle (hit_vehicle), touching a person (hit_person,
+  // gym_options::people), and any of these (collided).
+  std::vector<std::uint8_t> collided, hit_obstacle, hit_vehicle, hit_person;
   // Out of the world: off its grid, or more than 5 m below the grid's ground under it (fallen off
   // an edge, or through the ground). The episode ends.
   std::vector<std::uint8_t> out;
@@ -88,6 +107,9 @@ struct gym_observation {
   // Each agent's body and envelope: the chassis's length and width, its wheelbase, the steering's
   // lock (rad), its acceleration and braking (m/s^2), its top speed (m/s; 0 unlimited).
   std::vector<double> length, width, wheelbase, max_steer, max_accel, max_decel, max_speed;
+  // The people (gym_options::people, in that order): their feet and velocity in the world.
+  std::size_t people = 0;
+  std::vector<double> person_x, person_y, person_z, person_vx, person_vy;
 };
 
 // The world as a differentiable twin of it reads it (fields(); ARIADNE_WORLDS.md §14, L4's twin):
@@ -158,6 +180,13 @@ struct gym_options {
   // Whether an agent at its goal gets another (nav@1's wandering). Off: goals are held for the
   // episode, and it ends when every agent is at its own.
   bool wander = false;
+  // The people each reset puts in the world (gym_person), after the agents. A car that touches
+  // one has hit a person (gym_observation::hit_person, a collision); the navigators steer around
+  // them. Ignored without the local holon (local_holon() null).
+  std::vector<gym_person> people;
+  // The world in a local server-role holon (OW7a). Off: on the gym's own clock, as before, with
+  // no people; the world takes the same steps either way.
+  bool holon = true;
   std::uint64_t max_steps = 1000; // steps per episode (58.3 s at the default tick); 0 unlimited
   // The navigator's tick (s): one step of the gym. 0: cvc::kSimTick (7/120 s), the one simulation
   // tick every host shares (cvc/core/sim_tick.h). A whole number of the physics world's steps
@@ -234,6 +263,8 @@ public:
   AppRuntime &runtime();
   SceneWorld &world();
   WorldVehicles &vehicles();
+  // The server-role holon the world runs in (OW7a), null in a build without its avatar physics.
+  holon *local_holon();
 
 private:
   struct impl;
