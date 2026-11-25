@@ -430,6 +430,138 @@ def test_ra01_a_post_ends_the_batch_wait():
         pool.close()
 
 
+# --- Stage 2b (S2b.7) ---
+
+# The pool's workers for this block's cases (the first ExecPool of each case's app sets them): run
+# them at 1 and 2 too, as the S2b rules ask of a concurrent case.
+S2B_THREADS = int(os.environ.get("CVC_PYCVC_S2B_THREADS", "2"))
+
+
+def test_ow01_pooled_execs_have_owners():
+    # OW-1 (S2.md section 4; S2-Q7): a plain Exec's programs have owner "" (process_info.owner);
+    # each pooled Exec's run with its tag, "pycvc:<prefix>.<i>", read from the rows its group
+    # publishes (ExecPool.info). Pooled Exec 1's program notes its pid and parks on a Python async
+    # function gated by an event. Pooled Exec 0's program gets that pid: (kill pid) gives #f (one
+    # pooled Exec cannot kill another's process) and (inspect pid) nil; inside a with-lock its
+    # (lock-query) lists its own hold with its pid. Then both programs' rows are read (program 1's
+    # once its group has published it: a status awaited, not a time), and the gate opens: program
+    # 1 runs on to its result. The rows need the directory and the publication (S2b.2, S2b.3).
+    app = pycvc.make_app()
+    ex = pycvc.Exec(app)
+    ex.register_fn(
+        "ow01owner", lambda: ex.scheduler().get_process_info(ex.scheduler().current_pid()).owner
+    )
+    assert ex.run("(ow01owner)") == ""
+
+    pool = pycvc.ExecPool(app, threads=S2B_THREADS, size=2, prefix="ow01pool")
+    gate = threading.Event()
+    noted = threading.Event()
+    box = {}
+
+    def note(i, pid):
+        box[i] = pid
+        if i == 1:
+            noted.set()
+        return pid
+
+    def check(pid, killed, inspected, held):
+        try:
+            box.update(killed=killed, inspected=inspected, held=held)
+            end = time.monotonic() + WAIT
+            while pool.info(pid) is None and time.monotonic() < end:
+                time.sleep(0.001)
+            box["rows"] = [pool.info(box[i]) for i in (0, 1)]
+        finally:
+            gate.set()
+        return True
+
+    try:
+        pool.register_fn("ow01note", note)
+        pool.register_fn("ow01check", check)
+        pool.register_async_fn("ow01target", lambda: noted.wait(6 * WAIT) and box[1])
+        pool.register_async_fn("ow01gate", lambda: gate.wait(6 * WAIT) and 7)
+        res = pool.run_all([
+            '(begin (ow01note 0 (self-pid)) (set p (ow01target)) '
+            '(with-lock "k" (ow01check p (kill p) (inspect p) (lock-query "k"))) "done")',
+            '(begin (ow01note 1 (self-pid)) (ow01gate) "alive")',
+        ])
+    finally:
+        gate.set()
+        noted.set()
+        pool.close()
+    print(f"  pids {box.get(0)}, {box.get(1)}; rows {box.get('rows')}")
+    assert res == ["done", "alive"], res
+    assert box["killed"] is False, box
+    assert box["inspected"] is None, box
+    held = box["held"]["held"]
+    assert len(held) == 1 and held[0]["key"] == "k" and held[0]["pids"] == [box[0]], held
+    for i, row in enumerate(box["rows"]):
+        assert row is not None, f"program {i} (pid {box[i]}): no published row (ExecPool.info)"
+        assert row["pid"] == box[i], row
+        assert row["owner"] == f"pycvc:ow01pool.{i}", row
+
+
+def test_s2b7_post_message_returns_bool():
+    # S2b.7 (S2-Q10): async_scheduler.post_message returns whether the scheduler queued the post
+    # (False at its ingress cap), and a queued post is delivered as before.
+    ex = pycvc.Exec(pycvc.make_app())
+    assert ex.scheduler().post_message("s2b7.x", 1) is True
+    assert ex.run('(msg-recv "s2b7.x")') == "1"
+
+
+def test_s2b7_a_global_key_meets_across_pooled_execs():
+    # S2b.7 (exec_router.h's homes): pooled programs meet on an app-global key. "/s2b7.jobs" is
+    # homed at group 0, the app's exec scheduler, which run_all drains between rounds: pooled Exec
+    # 0's program receives what pooled Exec 1's sends there (msg-recv gives the envelope; its
+    # "payload" is the string sent). Its reply goes to the key Exec 1's (msg-recv "reply") waits on,
+    # "/s2b7pool.1.channels.reply" (a relative channel resolves under its chroot's "channels"),
+    # homed at Exec 1's group. Needs the router (S2b.4); without it each key stays in its sender's
+    # group and the receiver is killed at its idle limit.
+    app = pycvc.make_app()
+    pool = pycvc.ExecPool(app, threads=S2B_THREADS, size=2, prefix="s2b7pool",
+                          idle_timeout=3 * WAIT)
+    try:
+        res = pool.run_all([
+            '(begin (set m (get-attr (msg-recv "/s2b7.jobs") "payload")) '
+            '(msg-send "/s2b7pool.1.channels.reply" (str-concat m "+1")) m)',
+            '(begin (msg-send "/s2b7.jobs" "41") (get-attr (msg-recv "reply") "payload"))',
+        ])
+    finally:
+        pool.close()
+    assert res == ["41", "41+1"], res
+
+
+def test_s2b7_one_prefix_per_pool():
+    # R2b's S-M2: two pools of one app with one prefix would register one channel prefix, homed at
+    # the first pool's groups, which only the first pool's run_all pumps, so the second pool's own
+    # channels would hang. Two default pools take exec_pool and exec_pool_2 (ExecPool.prefix), and
+    # the second's program messages itself on its own channel. An explicit prefix a live pool uses
+    # raises ValueError; once that pool is closed, the prefix is free again.
+    app = pycvc.make_app()
+    first = pycvc.ExecPool(app, threads=S2B_THREADS, size=1, idle_timeout=WAIT)
+    second = pycvc.ExecPool(app, threads=S2B_THREADS, size=1, idle_timeout=WAIT)
+    try:
+        assert (first.prefix, second.prefix) == ("exec_pool", "exec_pool_2")
+        res = second.run_all(['(begin (msg-send "k" "self") (get-attr (msg-recv "k") "payload"))'])
+        assert res == ["self"], res
+        try:
+            pycvc.ExecPool(app, size=1, prefix="exec_pool_2")
+        except ValueError as e:
+            assert "in use" in str(e), e
+        else:
+            raise AssertionError("a pool took a prefix another live pool uses")
+    finally:
+        second.close()
+        first.close()
+    again = pycvc.ExecPool(app, size=1, prefix="exec_pool_2")
+    try:
+        assert again.prefix == "exec_pool_2"
+        res = again.run_all(['(begin (msg-send "k" "again") (get-attr (msg-recv "k") "payload"))'])
+        assert res == ["again"], res
+    finally:
+        again.close()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

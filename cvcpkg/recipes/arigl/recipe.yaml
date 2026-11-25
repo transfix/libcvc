@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arigl
-  upstream_version: "4.0.6"
+  upstream_version: "4.0.8"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -42,9 +42,9 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.6"
+      version: "==4.0.8"
     - name: cvcgl
-      version: "==4.0.6"
+      version: "==4.0.8"
     # arigl itself links VTK's RenderingUI and IOImage modules (its window and --png), beyond
     # what cvcGL links.
     - name: vtk
@@ -53,9 +53,9 @@ depends:
     - name: sdl3
   runtime:
     - name: libcvc
-      version: "==4.0.6"
+      version: "==4.0.8"
     - name: cvcgl
-      version: "==4.0.6"
+      version: "==4.0.8"
     - name: vtk
     - name: imgui-w32
     - name: sdl3

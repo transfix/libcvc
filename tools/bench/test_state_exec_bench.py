@@ -337,6 +337,27 @@ class CompareExit(unittest.TestCase):
         self.assertEqual(self.run("compare", base, cand, "--same-pin")[0], 1)
         self.assertEqual(self.run("compare", base, base, "--same-pin")[0], 0)
 
+    def test_pair_span_pins_cross_group_steps_to_one_groups(self):
+        # Stage 2b (state_exec_bench_gates.cmake): mt.cross_group_msg's programs take the same
+        # steps across groups as in one group, point by point; a cross-group point that failed its
+        # checks (routing off: S2b.0's stubs) or took another number fails the pin.
+        def point(span, steps, pump="fork_join", ok=True):
+            return reps("mt.cross_group_msg", {"pattern": "pingpong", "span": span, "t": 2,
+                                               "k": 2, "m": 10, "pump": pump},
+                        [steps], metric="steps_total", ok=ok)
+        pin = ["--pair", "span=one:cross", "--metric", "steps_total", "--threshold", "0",
+               "--fail-on-change"]
+        run = self.run.write(point("one", 1040) + point("cross", 1040) +
+                             point("one", 1040, "continuous") + point("cross", 1040, "continuous"))
+        code, out = self.run("compare", run, run, *pin)
+        self.assertEqual(code, 0, out)
+        off = self.run.write(point("one", 1040) + point("cross", 1041))
+        self.assertEqual(self.run("compare", off, off, *pin)[0], 1)
+        failed = self.run.write(point("one", 1040) + point("cross", 0, ok=False))
+        self.assertEqual(self.run("compare", failed, failed, *pin)[0], 1)
+        unpaired = self.run.write(point("one", 1040))
+        self.assertEqual(self.run("compare", unpaired, unpaired, *pin)[0], 1)
+
     def test_bad_pair_is_a_usage_error(self):
         f = self.run.write(reps("eval.fib", {"n": 1}, [1]))
         self.assertEqual(self.run("compare", f, f, "--pair", "op=set:set")[0], 2)
@@ -687,6 +708,60 @@ class Gate(unittest.TestCase):
         recs = p(4, [0, 0], moves=0)
         code, out = self.gate(recs, "--scenario", "mt.groups.move", "--metric", "extra.moves_on",
                               "--min", "1")
+        self.assertEqual(code, 0, out)
+
+    # mt.cross_group_msg: wake latency p50 under 50 us across groups (S2b), judged on one pair's
+    # pingpong across two groups; a point that timed no receipt is vacuous.
+    @staticmethod
+    def cross_point(values, pattern="pingpong", span="cross", k=1, t=2, pump="continuous",
+                    receipts=400):
+        out = []
+        for i, v in enumerate(values):
+            r = rec("mt.cross_group_msg", {"pattern": pattern, "span": span, "t": t, "k": k,
+                                           "m": 200, "pump": pump}, rep=i, wall_ns=1)
+            r["extra"] = {"wake_p50_ns": v, "wake_p99_ns": 4 * v, "ns_per_msg": 2 * v}
+            if receipts is not None:
+                r["extra"]["receipts"] = receipts
+            out.append(r)
+        return out
+
+    WAKE_GATE = ["--scenario", "mt.cross_group_msg", "--metric", "extra.wake_p50_ns", "--max",
+                 "50000"]
+
+    def test_cross_group_wake_gate_judges_one_pairs_pingpong_across_groups(self):
+        p = self.cross_point
+        run = p([9000, 9500, 9100]) + p([30000, 31000, 30500], pump="fork_join", t=4)
+        code, out = self.gate(run, *self.WAKE_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("PASS"), 2, out)
+        self.assertEqual(self.gate(run + p([60000, 61000, 60500], t=1), *self.WAKE_GATE)[0], 1)
+        # One group (the router off), fan-out, broadcast and several pairs are recorded only,
+        # whatever their latency.
+        others = (p([90000] * 3, span="one") + p([90000] * 3, pattern="fanout", k=4) +
+                  p([90000] * 3, pattern="broadcast", k=4) + p([90000] * 3, k=8))
+        code, out = self.gate(run + others, *self.WAKE_GATE)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("n/a ("), 4, out)
+        self.assertIn("n/a (k=4: recorded, not gated)", out)
+        self.assertIn("n/a (span=one: recorded, not gated)", out)
+        # A gate on those alone judged nothing: it fails.
+        code, out = self.gate(others, *self.WAKE_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("every point is n/a", out)
+        # No receipt timed: a p50 of 0 would pass, so the point fails as vacuous.
+        code, out = self.gate(run + p([0, 0, 0], receipts=0), *self.WAKE_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: extra.receipts 0 below 1", out)
+        code, out = self.gate(run + p([10, 10], receipts=None), *self.WAKE_GATE)
+        self.assertEqual(code, 1, out)
+        self.assertIn("vacuous: no extra.receipts", out)
+        # A cross-group point that failed its checks (routing off) fails the gate.
+        bad = p([5000, 5000])
+        bad[0]["ok"] = False
+        self.assertEqual(self.gate(run + bad, *self.WAKE_GATE)[0], 1)
+        # The scenario's other metrics take no guard.
+        code, out = self.gate(others, "--scenario", "mt.cross_group_msg", "--metric",
+                              "extra.ns_per_msg", "--max", "1000000")
         self.assertEqual(code, 0, out)
 
     # Stage 1b's gate: mt.ariadne_docs' small frames wake no helper (GATE_GUARDS). A point's

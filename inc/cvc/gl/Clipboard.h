@@ -59,6 +59,30 @@ std::string get(cvc::app &app);
 bool canCopy();
 bool canPaste();
 
+// A Copy or Paste chosen from a context menu (docs/ARIADNE.md §5.28), in a browser. Natively
+// get() and set() answer at once, so a menu calls them and none of this is needed: readIsAsync()
+// is false there, and the rest do nothing.
+//
+// In a browser a menu's Paste cannot use get(): no paste event came with it. It asks
+// navigator.clipboard.readText() instead, which answers later. Chrome asks the user once for the
+// permission; Firefox and Safari show their own Paste button each time, and Safari answers only
+// within the click itself. ImGui sees a click a frame after the browser does, so arm() says what
+// the item under the pointer is (a Copy and the text it copies, or a Paste), and a page listener
+// makes the call inside the pointer release over it. beginRead() then takes the read that release
+// started, or starts one (still within the click's user activation, which is enough for Chrome
+// and Firefox), and pollRead() says when it answered. set() skips a text the release has just
+// written.
+enum class ReadState { Pending, Done, Failed };
+bool readIsAsync();
+// `copy`: the text a Copy under the pointer copies (null: none); `paste`: a Paste is under it.
+// Call it when the item under the pointer changes, and with (nullptr, false) when there is none.
+void arm(const std::string *copy, bool paste);
+// A read's ticket, for pollRead (0 natively).
+int beginRead();
+// Pending until the browser answers; then Done with `text` filled, or Failed (the permission or
+// the prompt refused, no clipboard API, an insecure page). The ticket is spent once it answers.
+ReadState pollRead(int ticket, std::string &text);
+
 } // namespace clipboard
 } // namespace gl
 } // namespace cvc

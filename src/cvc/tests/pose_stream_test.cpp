@@ -114,6 +114,58 @@ TEST(PoseStream, ASlotIsNamedOnceThenSentAsDifferences) {
   EXPECT_NEAR(out[0].state.linear_velocity.x, 4.0, 1e-9);
 }
 
+// A vehicle's angular velocity and steering angle ride the stream with its pose (OW5n): absolute
+// in its first entry, then as differences like the rest, a change of steering alone an entry of
+// its own. The snapshot says it carries them; one that does not (an older relay's) gives samples
+// whose angular velocity is not known (zero) and steering unset.
+TEST(PoseStream, AVehiclesSpinAndSteeringRideTheStream) {
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  std::vector<cvc::ariadne::pose_sample> out;
+  body_state car = walking(10.0, 5.0, 8.0, 0.5, 0.3);
+  car.angular_velocity = {0.1, -0.2, 0.35};
+  pose_subject s = subject("entity:7", car);
+  s.steer = 0.123456;
+  const cvc::pose_snapshot s1 = enc.encode(50, {s}, 120);
+  enc.commit();
+  EXPECT_EQ(s1.carries, cvc::pose_snapshot::kCarriesMotion);
+  ASSERT_EQ(s1.entries.size(), 1u);
+  EXPECT_EQ(s1.entries[0].wx, 100) << "mrad/s";
+  EXPECT_EQ(s1.entries[0].wy, -200);
+  EXPECT_EQ(s1.entries[0].wz, 350);
+  EXPECT_EQ(s1.entries[0].steer, 123456) << "microradians";
+  ASSERT_TRUE(dec.decode(s1, out));
+  ASSERT_EQ(out.size(), 1u);
+  ASSERT_TRUE(out[0].steer.has_value());
+  EXPECT_NEAR(*out[0].steer, 0.123456, 1e-9);
+  EXPECT_NEAR(dist(out[0].state.angular_velocity, car.angular_velocity), 0.0, 1e-9);
+
+  // The wheels turn a little further, nothing else changes: an entry with that alone.
+  s.steer = 0.133456;
+  const cvc::pose_snapshot s2 = enc.encode(52, {s}, 120);
+  enc.commit();
+  ASSERT_EQ(s2.entries.size(), 1u) << "a change of steering is a change";
+  EXPECT_EQ(s2.entries[0].steer, 10000);
+  EXPECT_EQ(s2.entries[0].x, 0);
+  EXPECT_EQ(s2.entries[0].wz, 0);
+  out.clear();
+  ASSERT_TRUE(dec.decode(s2, out));
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_NEAR(*out[0].steer, 0.133456, 1e-9);
+  EXPECT_NEAR(out[0].state.angular_velocity.z, 0.35, 1e-9);
+
+  // From a relay before OW5n: no kCarriesMotion, so neither is known.
+  car.position.x += 0.1;
+  cvc::pose_snapshot old = enc.encode(54, {subject("entity:7", car)}, 120);
+  old.carries = 0;
+  out.clear();
+  ASSERT_TRUE(dec.decode(old, out));
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_FALSE(out[0].steer.has_value());
+  EXPECT_EQ(dist(out[0].state.angular_velocity, vec3{}), 0.0);
+  EXPECT_NEAR(out[0].state.position.x, 10.1, 1e-9);
+}
+
 // A participant standing still is sent an empty entry once per heartbeat: still there, at this
 // tick.
 TEST(PoseStream, AStillParticipantGetsAHeartbeat) {
@@ -381,7 +433,7 @@ TEST(RoomEntities, TheirPidsAreNoParticipants) {
   EXPECT_FALSE(rc::is_entity_pid("alice"));
 }
 
-TEST(RoomEntities, TheSectionCarriesThemAndMarksTheOnesThatWent) {
+TEST(RoomEntities, TheSectionCarriesThemAndRemovesTheOnesThatWent) {
   cvc::app app;
   EXPECT_FALSE(rc::read_room_entities_stamp(app, "r").written());
   const cvc::ariadne::section_stamp first =
@@ -391,13 +443,16 @@ TEST(RoomEntities, TheSectionCarriesThemAndMarksTheOnesThatWent) {
   ASSERT_EQ(got.size(), 2u);
   EXPECT_EQ(got[0], entity(1, "lead"));
   EXPECT_EQ(got[1], entity(3, "wing"));
-  // One goes: it stays in the tree, not present; the revision moves.
+  // One goes: its subtree leaves the tree; the revision moves.
   rc::write_room_entities(app, "r", {entity(3, "wing")});
   const std::vector<rc::room_entity> after = rc::read_room_entities(app, "r");
   ASSERT_EQ(after.size(), 1u);
   EXPECT_EQ(after[0].id, 3u);
   EXPECT_FALSE(rc::read_room_entities_stamp(app, "r").same(first));
-  EXPECT_EQ(cvc::state::instance(app)(rc::room_entities_path("r") + ".e1.present").value(), "0");
+  EXPECT_EQ(app.root().findDescendant(rc::room_entities_path("r") + ".e1"), nullptr);
+  // And it comes back with a later write, present again.
+  rc::write_room_entities(app, "r", {entity(1, "lead"), entity(3, "wing")});
+  EXPECT_EQ(rc::read_room_entities(app, "r").size(), 2u);
 }
 
 // The relay sends every viewer the entities with the participants, each at most every

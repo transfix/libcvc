@@ -26,7 +26,9 @@
 //      counted at the driver);
 //   E. the scene re-opened in a new window: its shadows follow it (no baker is
 //      left on the closed window's renderer), the new chain takes resolution
-//      changes, and closing the old window logs nothing.
+//      changes, and closing the old window logs nothing;
+//   F. (before E) a moving caster's static maps (setShadowStaticCache): made
+//      once, re-made at a new resolution, freed with the cache or shadows off.
 // Renders for real and skips where nothing rasterises (fatal under
 // CVC_REQUIRE_RENDER=1). Desktop GL only (the GL counter swaps glad pointers).
 #include "gl_call_counter.h"
@@ -201,8 +203,10 @@ int main() {
     sg.setDiagnosticChromeVisible(false);
     auto ground = sg.getGraphicsRoot()->addGraphicsChild<GeometryNode>("ground");
     ground->setGeometry(box(-20, -20, -1, 20, 20, 0));
+    std::vector<std::shared_ptr<cvc::gl::GraphicsNode>> boxes;
     for (int i = 0; i < 3; ++i)
-      sg.addGraphics("box" + std::to_string(i), box(-8 + 6 * i, -2, 0, -6 + 6 * i, 2, 4));
+      boxes.push_back(
+          sg.addGraphics("box" + std::to_string(i), box(-8 + 6 * i, -2, 0, -6 + 6 * i, 2, 4)));
     sg.processEvents();
 
     auto open = [&]() {
@@ -300,6 +304,49 @@ int main() {
     chk(VtkMessages::count() == messages0,
         "no VTK errors in C (" + std::to_string(VtkMessages::count() - messages0) + ")");
     chk(mapSize(findBaker(ren->GetPass())) == 1024, "re-enabled at the set resolution");
+
+    std::printf("F. the static casters' maps\n");
+    // A box moving makes a second map, framebuffer and depth buffer for the static casters
+    // (setShadowStaticCache); a resolution change re-makes them, the cache off or shadows off
+    // frees them.
+    double x = 0.0;
+    auto drive = [&](int n) {
+      for (int i = 0; i < n; ++i) {
+        x += 0.2;
+        boxes[0]->setPosition(x, 0.0, 0.0);
+        frames(1);
+      }
+    };
+    auto plusStatic = [&](const Live &l) {
+      return l.textures == base.textures + 1 && l.framebuffers == base.framebuffers + 1 &&
+             l.renderbuffers == base.renderbuffers + 1;
+    };
+    drive(4);
+    const Live moving = Live::now();
+    chk(plusStatic(moving) && sg.shadowBakeStats().moving_casters == 1,
+        "a moving box: the static map, its framebuffer and depth buffer (" + moving.str() + ", " +
+            std::to_string(sg.shadowBakeStats().moving_casters) + " moving)");
+    sg.setShadowResolution(512);
+    drive(3);
+    const Live remade = Live::now();
+    chk(plusStatic(remade), "a new resolution re-makes them, the old ones freed: " + remade.str());
+    sg.setShadowResolution(1024);
+    drive(3);
+    sg.setShadowStaticCache(false);
+    drive(2);
+    const Live uncached = Live::now();
+    chk(uncached == base, "the cache off frees them: " + uncached.str());
+    sg.setShadowStaticCache(true);
+    drive(3);
+    chk(plusStatic(Live::now()), "on again, made again: " + Live::now().str());
+    sg.setShadowsEnabled(false);
+    frames(2);
+    sg.setShadowsEnabled(true);
+    frames(2);
+    const Live afterF = Live::now();
+    chk(afterF == base, "shadows off and on frees them: " + afterF.str());
+    chk(VtkMessages::count() == messages0,
+        "no VTK errors in F (" + std::to_string(VtkMessages::count() - messages0) + ")");
 
     std::printf("E. a new window\n");
     view.reset(); // detaches the scene, then finalizes the window

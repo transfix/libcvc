@@ -92,6 +92,7 @@
 namespace cvc {
 class app;
 class height_field;
+class world_clock;
 namespace ocean {
 struct shore_grid;
 class shore_layer;
@@ -194,6 +195,41 @@ struct SceneWaterSea {
   bool fading(double t) const { return t >= t0 && t < t1; }
 };
 
+// A sea's last keyframe, all another host needs to make the same sea (OW5q): the winds of its
+// old and new keyframes, the crossfade between them (clock seconds), its count (1: the first, with
+// no old sea to fade from), and the clock tick its field goes in after (0: at once). A relay
+// publishes its water nodes' (conference::room_world_on), and a client's replica follows them
+// (WaterRuntime::follow_sea), since a sea lags its wind and a client that came later cannot grow
+// the same one from the document: its storms' fronts moved the wind before it came.
+struct SceneWaterKeyframe {
+  cvc::ocean::sea_wind from, to;
+  double t0 = 0.0, t1 = 0.0;
+  std::uint64_t keyframe = 0;  // 0: none yet
+  std::uint64_t from_tick = 0; // the tick its field goes in after (SceneColliders::from_tick)
+  bool operator==(const SceneWaterKeyframe &o) const;
+  bool operator!=(const SceneWaterKeyframe &o) const { return !(*this == o); }
+};
+
+// A keyframe as text and back (17 digits: to the bit), the `water.sea` key's: "keyframe from_tick
+// from_speed from_dir from_fetch to_speed to_dir to_fetch t0 t1". parse is false (OUT untouched)
+// for anything else.
+std::string format_sea_keyframe(const SceneWaterKeyframe &k);
+bool parse_sea_keyframe(const std::string &text, SceneWaterKeyframe &out);
+
+// A WATER NODE SHOWING ANOTHER HOST'S SEA (OW5q). Its `water.sea` key, under its key root, a host
+// writes: a keyframe (format_sea_keyframe) its sea is from then on, in place of its own lag
+// (WaterRuntime::tick follows it, and so does the drawn node, with a body or without). The sea is
+// drawn at the scene's shown time (shown_clock.h: the other host's clock, else the app's). A
+// client of a relay writes both from the room (show_relay_seas), so the sea it draws is the
+// relay's at the relay's time, the sea its boat's model floats on. Unset (or empty): its own.
+bool scene_water_followed(cvc::app &app, const SceneNode &n, const std::string &bind_prefix,
+                          SceneWaterKeyframe &out);
+// Seed water.sea and the scene's shown_clock empty (its own sea, the app's time), so a host sees
+// the node is there: a WaterRuntime does at its start, and so does the drawn node.
+void scene_water_seed_follow(cvc::app &app, const SceneNode &n, const std::string &bind_prefix);
+// The time its sea is drawn at: the scene's shown time under BIND_PREFIX, else APP_T.
+double scene_water_time(cvc::app &app, const std::string &bind_prefix, double app_t);
+
 // Steps a water node's sea along its lagged wind (cvc::ocean::sea_lag). advance() with the spec
 // and coast now and the clock's time: true when the sea changed (a keyframe, or a new coast or lee
 // switch that rebuilt the fetch maps).
@@ -203,6 +239,11 @@ public:
   ~SceneWaterSeaClock();
   bool advance(double t, const SceneWaterSpec &s,
                const std::shared_ptr<const SceneWaterShore> &shore);
+  // The sea of keyframe K, made as advance() made it where it was made (its h0 and fetch maps from
+  // its winds, the old one's too after the first), on this coast. Its own lag stops: from here on
+  // the sea is the one given. True when the sea changed (a new keyframe, a new coast).
+  bool follow(const SceneWaterKeyframe &k, const SceneWaterSpec &s,
+              const std::shared_ptr<const SceneWaterShore> &shore);
   std::shared_ptr<const SceneWaterSea> sea() const; // null before the first advance
 
 private:
@@ -251,8 +292,10 @@ public:
 
   const std::string &node() const;
   const std::shared_ptr<SceneColliders> &colliders() const;
-  // Read the keys and the ground; rebuild the field when either changed. True when it was.
-  bool tick();
+  // Read the keys and the ground; rebuild the field when either changed. True when it was. The
+  // sea's keyframes are timed on CLOCK, the one the world the field is in steps on (null: the
+  // app's world clock).
+  bool tick(const cvc::world_clock *clock = nullptr);
 
   // As last built (null before the first build): the coast, the sea a body feels, and the field
   // (for a wake: cvc::physics::immersion_water::of(field, t)).
@@ -263,6 +306,16 @@ public:
   double level() const;
   // The sea's keyframes (O13), which the drawn node draws too.
   std::shared_ptr<const SceneWaterSea> keyframes() const;
+
+  // The sea's last keyframe, and the tick its field goes in after (OW5q; keyframe 0: none yet).
+  SceneWaterKeyframe keyframe() const;
+  // From now on the sea is K's, not this runtime's own lag: a client's replica of the relay's
+  // document follows the relay's sea, which its storms grew (OW5q). The field is made again at the
+  // next tick() when K is another keyframe; K.from_tick is the colliders' from_tick then. tick()
+  // does the same with the node's `water.sea` key when it holds one (scene_water_followed).
+  // Whether the runtime follows a sea now.
+  void follow_sea(const SceneWaterKeyframe &k);
+  bool following() const;
 
 private:
   struct impl;

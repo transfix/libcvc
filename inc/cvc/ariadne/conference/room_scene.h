@@ -63,15 +63,17 @@ namespace conference {
 // TREE, not a document, is the source of truth.
 //
 // AUTHORITY: the server is the sole writer of scene.* (clients only read it), by the same
-// loopback-trusted convention as .pose (H1); enforcement is §5e/H2. Removal is SOFT (present = 0)
-// for the reason room_leave is: a hard subtree delete is resurrected by any peer that still holds
-// it. Ids must not contain cvc::state::SEPARATOR (std::invalid_argument otherwise).
+// loopback-trusted convention as .pose (H1); enforcement is §5e/H2. Removal deletes the entry's
+// subtree: one delete, which every client applies, and whose tombstone keeps a peer that still
+// holds the entry from bringing it back (deletes replicate since transfix/libcvc#1473). A reader
+// still takes only entries with present = 1, which a write sets last. Ids must not contain
+// cvc::state::SEPARATOR (std::invalid_argument otherwise).
 //
 // RUNS (ARIADNE_WORLDS.md §3): a relay's tree starts empty, and a client that stays connected
 // across a relay restart keeps what the old relay wrote. So the scene's stamp carries its writer's
 // epoch (a restarted relay's revision 1 is not the old one's), and every light, object and fit
 // is stamped with the epoch of the write that wrote it. A reader takes only the scene's own run:
-// an entry stamped with another epoch is the old relay's, which the new one never soft-removes
+// an entry stamped with another epoch is the old relay's, which the new one never removes
 // because it never knew its id. An entry with no epoch (a writer from before epochs, or a --set)
 // is taken, and so is everything when the scene has none. A plain light's rig knobs are never
 // read: a rig writes all of them, so only an earlier light under the same id leaves any.
@@ -99,7 +101,7 @@ struct room_scene_env {
   std::vector<cvc::ariadne::SceneLight> lights;
 };
 
-// Write the environment. Lights present before but absent from env.lights are soft-removed.
+// Write the environment. Lights present before but absent from env.lights are removed.
 void write_scene_env(cvc::app &app, const std::string &room_id, const room_scene_env &env);
 
 // Read the environment. Returns false (env untouched) if it was never written.
@@ -113,7 +115,8 @@ bool read_scene_env(cvc::app &app, const std::string &room_id, room_scene_env &e
 void write_scene_object(cvc::app &app, const std::string &room_id,
                         const cvc::ariadne::SceneNode &obj);
 
-// Soft-remove one object (present = 0). A no-op if it was never written.
+// Remove one object from the room tree: one delete, which every client applies, and the revision
+// bump. A no-op if it was never written.
 void remove_scene_object(cvc::app &app, const std::string &room_id, const std::string &id);
 
 // The present objects, in id order.
@@ -175,8 +178,8 @@ struct room_world {
   std::vector<cvc::ariadne::SceneNode> objects;
 };
 
-// Write a whole scene in one revision: the environment, every object, a soft removal for each
-// object present before but absent from WORLD, then the stamp, once and last, under EPOCH (0: this
+// Write a whole scene in one revision: the environment, every object, a removal for each object
+// present before but absent from WORLD, then the stamp, once and last, under EPOCH (0: this
 // process's). Writing the same world again changes nothing but rev. Returns the stamp. Throws
 // std::invalid_argument on a bad id.
 section_stamp write_room_world(cvc::app &app, const std::string &room_id, const room_world &world,
@@ -226,16 +229,46 @@ std::string file_sha256(const std::string &path);
 // its statics stay the relay's after a switch or a Regenerate. The relay writes it whenever it
 // changes (publish_world_on).
 //
+// And each water node's sea as its last keyframe (OW5q; SceneWaterKeyframe): the winds of the old
+// and new keyframes (m/s, rad, m), the crossfade (clock seconds), the keyframe's count and the
+// clock tick its field went in after. A sea lags its wind, and a storm's front moves the wind on
+// the clock, so a client that came later cannot grow the relay's sea from the document; its
+// replica makes the relay's from these (WaterRuntime::follow_sea). The doubles are written to 17
+// digits, so they come back to the bit.
+//
+// And each weather node's storms as the relay has them now (OW5q): its events (weather.events, a
+// live key on the relay) and its storm-wind peak with the tick it went in after, from which a
+// client's replica makes the same air (the storms' gust fronts) and so the same sea.
+//
 //   conf.rooms.<room>.world_on.{world, generated, g<i>.{node, seed, half, trees, rocks, buildings,
 //     tree_gen, amp, water_level, preset, ontology, cell, max_terrain_n, raster_n, sliver,
-//     terrain, city, terrain_file, edge}}, stamped {epoch, at, rev} (section.h)
+//     terrain, city, terrain_file, edge}, seas, s<i>.{node, keyframe, from_tick, from_speed,
+//     from_dir, from_fetch, to_speed, to_dir, to_fetch, t0, t1}, weathers, w<i>.{node, events,
+//     gust, gust_from}}, stamped {epoch, at, rev} (section.h)
 struct room_generated_world {
   std::string node;
   cvc::world::generated_world_params params;
 };
+struct room_water_sea {
+  std::string node;
+  std::uint64_t keyframe = 0, from_tick = 0;
+  double from_speed = 0.0, from_dir = 0.0, from_fetch = 0.0;
+  double to_speed = 0.0, to_dir = 0.0, to_fetch = 0.0;
+  double t0 = 0.0, t1 = 0.0;
+  bool operator==(const room_water_sea &o) const;
+};
+struct room_weather {
+  std::string node;
+  std::string events; // the storms' events, cvc::world::format_weather_events' text
+  double gust = 0.0;  // the storm-wind peak, m/s (WeatherFriction::gust_front)
+  std::uint64_t gust_from = 0;
+  bool operator==(const room_weather &o) const;
+};
 struct room_world_on {
   std::string world;
   std::vector<room_generated_world> generated; // in the world's node order
+  std::vector<room_water_sea> seas;            // the water nodes', in the document's order
+  std::vector<room_weather> weathers;          // the weather nodes', in the document's order
   bool operator==(const room_world_on &o) const;
 };
 std::string room_world_on_path(const std::string &room_id);

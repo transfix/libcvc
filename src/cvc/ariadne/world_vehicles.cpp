@@ -14,6 +14,7 @@
 */
 
 #include <algorithm>
+#include <cassert>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -28,7 +29,7 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h> // training_scene: the trainer's vehicle (a fleet's metric)
-#include <cvc/nav/dyn_4w.h> // dyn4_params_of
+#include <cvc/nav/dyn_4w.h>     // dyn4_params_of
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/world_grid.h>
@@ -868,6 +869,9 @@ struct WorldVehicles::impl {
     // kinematic: vehicles came or went since kinematics() last ran. It runs once, before the
     // navigator next steps (only its step reads them), not at each: placing n is then linear.
     bool kin_stale = false;
+    // Bumped when an agent comes or goes: an index past a removed one drops by one
+    // (sim_world::remove_agent), so a vehicle's kept index (entity::slot) is good while it holds.
+    std::uint64_t agents_rev = 0;
   };
   // A navigator's key, "<plant>" or a named fleet's "<plant>/<fleet>" (fleet_group::key), as its
   // parts: fleets is searched by it without building the string. fleet_of() runs for each vehicle
@@ -906,6 +910,12 @@ struct WorldVehicles::impl {
     ph::vehicle_desc desc;
     std::string plant;                     // its spec's, else its archetype's
     std::uint64_t agent = 0;               // its fleet navigator's id (0: not placed)
+    // The fleet that navigator is, while it is placed (agent set): fleet_of() reads it there and
+    // searches `fleets` only for an entity not placed. Set and cleared with `agent`.
+    fleet *nav = nullptr;
+    // Its index in that navigator as of the fleet's agents_rev `slot_rev` (index() keeps it).
+    mutable int slot = -1;
+    mutable std::uint64_t slot_rev = ~std::uint64_t{0};
     double sx = 0.0, sy = 0.0, syaw = 0.0; // where it starts (resolved at its first placing)
     bool started = false;
     double gx = 0.0, gy = 0.0; // its goal
@@ -1094,12 +1104,27 @@ struct WorldVehicles::impl {
   fleet *fleet_of(const entity &e) const {
     if (e.posed) // a `pose` entity is no plant's
       return nullptr;
-    const auto it = fleets.find(nav_key(e));
-    return it == fleets.end() ? nullptr : it->second.get();
+    // A placed entity's is the one it was placed in: a fleet outlives its vehicles in it (they
+    // are taken out before `fleets` drops it) and an entity's key doesn't change while placed.
+    const auto find = [&]() -> fleet * {
+      const auto it = fleets.find(nav_key(e));
+      return it == fleets.end() ? nullptr : it->second.get();
+    };
+    assert(!e.nav || e.nav == find());
+    return e.nav ? e.nav : find();
   }
   int index(const entity &e) const {
     const fleet *f = fleet_of(e);
-    return f && f->sim && e.agent ? f->sim->index_of(e.agent) : -1;
+    if (!f || !f->sim || !e.agent)
+      return -1;
+    // Kept from the last call while no agent came or went (a search of the navigator's ids
+    // otherwise, for each vehicle many times a tick).
+    if (e.nav != f || e.slot_rev != f->agents_rev) {
+      e.slot = f->sim->index_of(e.agent);
+      e.slot_rev = e.nav == f ? f->agents_rev : ~std::uint64_t{0};
+    }
+    assert(e.slot == f->sim->index_of(e.agent));
+    return e.slot;
   }
   double ground_height(double x, double y) const {
     return ground_at(grid.get(), terrain.get(), x, y);
@@ -1393,31 +1418,10 @@ struct WorldVehicles::impl {
   // ground, added once per grid and world (it needs the app for its volume; without one the boats
   // find no water and are refused).
   void ensure_water() {
-    if (still_water.valid() || !grid || !grid->has_water() || !app)
+    if (still_water.valid() || !grid || !app)
       return;
-    const double h = grid->cell();
-    for (std::size_t i = 0; i < grid->water_depth.size(); ++i)
-      if (grid->water_depth[i] > 0.5) {
-        const double x = grid->min_x + static_cast<double>(i % grid->cols) * h,
-                     y = grid->min_y + static_cast<double>(i / grid->cols) * h;
-        if (world->water_at({x, y, grid->water_level - 0.25}).density > 0.0)
-          return; // the world has water there
-        break;
-      }
-    double lowest = grid->water_level;
-    for (const float z : grid->height)
-      lowest = std::min(lowest, static_cast<double>(z));
-    auto box = std::make_shared<cvc::volume>(*app, cvc::dimension(2, 2, 2), cvc::Float,
-                                             cvc::bounding_box(grid->min_x, grid->min_y,
-                                                               lowest - 1.0, grid->max_x,
-                                                               grid->max_y, grid->water_level));
-    box->fill(1000.0); // kg/m^3
-    ph::field f;
-    f.kind = ph::field_kind::fluid;
-    f.volume = box;
-    f.drag_coefficient = 1.0;
-    f.damping = 1.0e4;
-    still_water = world->add_field(f);
+    if (const std::optional<ph::field> f = boat_still_water(*app, *grid, *world))
+      still_water = world->add_field(*f);
   }
   void drop_still_water() {
     if (still_water.valid())
@@ -1480,7 +1484,9 @@ struct WorldVehicles::impl {
       f->to.erase(f->to.begin() + i);
     }
     f->sim->remove_agent(e.agent);
+    ++f->agents_rev;
     e.agent = 0;
+    e.nav = nullptr;
     if (f->plant == "kinematic")
       f->kin_stale = true;
   }
@@ -1800,6 +1806,8 @@ struct WorldVehicles::impl {
           a.plane = (e.rally >= 0 ? e.rally : std::max(0, e.member)) % n;
       }
       e.agent = f.sim->add_agent(a);
+      ++f.agents_rev;
+      e.nav = &f;
       const int i = f.sim->index_of(e.agent);
       for (const auto &[k, v] : e.spec.metadata)
         f.sim->set_metadata(i, k, v);
@@ -1818,9 +1826,12 @@ struct WorldVehicles::impl {
         f.kin_stale = true;
       }
     } catch (const std::exception &ex) {
-      if (made && e.agent)
+      if (made && e.agent) {
         made->sim->remove_agent(e.agent);
+        ++made->agents_rev;
+      }
       e.agent = 0;
+      e.nav = nullptr;
       return ex.what();
     }
     e.odometer = false;
@@ -2167,6 +2178,7 @@ struct WorldVehicles::impl {
       }
       for (entity &e : ents) {
         e.agent = 0;
+        e.nav = nullptr;
         e.box = ph::body_id{};
         e.from = e.to; // a `pose` entity goes back in at its last pose, at once
         e.span = 0.0;
@@ -4219,7 +4231,7 @@ bool WorldVehicles::dynamics(std::uint64_t id, dynamic_drive &out) const {
     cvc::nav::sim_world::plant_plan plan;
     if (!f || i < 0 ||
         !((f->plant == "dynamic" && f->bike) || (f->plant == "dynamic4w" && f->four) ||
-          (f->plant == "jolt" && f->jolt)))
+          (f->plant == "jolt" && f->jolt) || (f->plant == "dynamicboat" && f->boat)))
       return false;
     if (!f->sim->plant_plan_of(i, plan))
       return false;
@@ -4255,6 +4267,35 @@ double WorldVehicles::ground_height(double x, double y) const { return _impl->gr
 double vehicle_ground_height(const nav::world_grid *grid, const cvc::height_field *terrain,
                              double x, double y) {
   return ground_at(grid, terrain, x, y);
+}
+
+std::optional<ph::field> boat_still_water(cvc::app &app, const nav::world_grid &grid,
+                                          const ph::world &world) {
+  if (!grid.has_water())
+    return std::nullopt;
+  const double h = grid.cell();
+  for (std::size_t i = 0; i < grid.water_depth.size(); ++i)
+    if (grid.water_depth[i] > 0.5) {
+      const double x = grid.min_x + static_cast<double>(i % grid.cols) * h,
+                   y = grid.min_y + static_cast<double>(i / grid.cols) * h;
+      if (world.water_at({x, y, grid.water_level - 0.25}).density > 0.0)
+        return std::nullopt; // the world has water there
+      break;
+    }
+  double lowest = grid.water_level;
+  for (const float z : grid.height)
+    lowest = std::min(lowest, static_cast<double>(z));
+  auto box =
+      std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                    cvc::bounding_box(grid.min_x, grid.min_y, lowest - 1.0,
+                                                      grid.max_x, grid.max_y, grid.water_level));
+  box->fill(1000.0); // kg/m^3
+  ph::field f;
+  f.kind = ph::field_kind::fluid;
+  f.volume = box;
+  f.drag_coefficient = 1.0;
+  f.damping = 1.0e4;
+  return f;
 }
 
 void WorldVehicles::set_tick(double seconds) {
@@ -4459,6 +4500,22 @@ navigator_params WorldVehicles::navigator() const {
 }
 
 const std::vector<float> &WorldVehicles::sdf() const { return _impl->sdf; }
+
+const ph::world &WorldVehicles::world() const { return *_impl->world; }
+
+ph::body_state entity_ride(const entity_info &e, const ph::world *world) {
+  ph::body_state s;
+  s.position = {e.x, e.y, e.z};
+  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
+  s.linear_velocity = {e.vx, e.vy, 0.0};
+  if (world && e.chassis.valid() && world->contains(e.chassis)) {
+    const ph::body_state b = world->state(e.chassis);
+    s.rotation = b.rotation;
+    s.linear_velocity.z = b.linear_velocity.z;
+    s.angular_velocity = b.angular_velocity;
+  }
+  return s;
+}
 
 std::vector<entity_info> WorldVehicles::entities() const {
   const impl &d = *_impl;

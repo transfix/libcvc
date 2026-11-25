@@ -8,7 +8,8 @@
   License version 2.1 as published by the Free Software Foundation.
 */
 
-// segment.seeded (cvc/volume/segmentation_intrinsics.h), the GenSeg port in the DSL: the
+// segment.seeded, segment.critical-points and segment.surfaces (cvc/volume/
+// segmentation_intrinsics.h), the GenSeg port and its class surfaces in the DSL: the
 // VolumeRover ports' T10 rows (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.6, §1.7). The
 // three forms on the app's scheduler, cooperative and threaded; a bad parameter raising at the
 // call; job.cancel and a kill part-way through; params.defaults; and an Ariadne document starting
@@ -25,6 +26,7 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/job_intrinsics.h>
+#include <cvc/geometry/geometry.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_host.h>
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -32,6 +34,7 @@
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/memory_tracker.h>
 #include <cvc/state/state_exec/process.h>
+#include <cvc/volume/class_surfaces.h>
 #include <cvc/volume/point_class_intrinsics.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/segmentation.h>
@@ -99,6 +102,7 @@ protected:
     se::register_intrinsics(env, &ictx);
     cvc::register_job_op(env, ictx, app, cvc::segment_seeded_op(GetParam()));
     cvc::register_job_op(env, ictx, app, cvc::critical_point_seeds_op(GetParam()));
+    cvc::register_job_op(env, ictx, app, cvc::class_surfaces_op(GetParam()));
     cvc::register_job_intrinsics(env, app);
     cvc::register_point_class_intrinsics(env, ictx, app);
     vol.emplace(bumps(app, 20));
@@ -303,6 +307,62 @@ TEST_P(SegmentationIntrinsics, SegmentSeededWithCriticalPointsNeedsNoClasses) {
   EXPECT_EQ(exit_error(pid), "");
   EXPECT_NE(key("r.names").find("background"), std::string::npos) << key("r.names");
   EXPECT_EQ(key("r.feature"), std::to_string(want.class_voxels.at(0)));
+}
+
+// ---- segment.surfaces: each class's surface of the labels
+// -----------------------------------------
+
+TEST_P(SegmentationIntrinsics, SurfacesInTheThreeForms) {
+  app.root()("doc.labels").data(boost::any(expected->labels));
+  cvc::class_surface_params p;
+  p.smoothing = 3;
+  const cvc::class_surface_result want = cvc::class_surfaces(expected->labels, p);
+  ASSERT_EQ(want.labels, (std::vector<int>{0, 1}));
+  // The waiting form, on the labels segment.seeded made (a data object) and on a state path.
+  const int pid =
+      run(std::string("(let ((s (segment.seeded \"doc.volume\" \"doc.seeds\" ") + params_dict +
+          "))) (let ((m (segment.surfaces (get-attr s \"labels\") (dict \"smoothing\" 3))))"
+          "  (state-set \"r.labels\" (str (get-attr m \"labels\")))"
+          "  (state-set \"r.voxels\" (nth (get-attr m \"voxels\") 1))"
+          "  (state-data-set \"r.surface0\" (nth (get-attr m \"surfaces\") 0))))");
+  ASSERT_TRUE(pump_until([&] { return finished(pid); }));
+  EXPECT_EQ(exit_error(pid), "");
+  EXPECT_NE(key("r.labels").find("0"), std::string::npos) << key("r.labels");
+  EXPECT_EQ(key("r.voxels"), std::to_string(want.voxels[1]));
+  {
+    const boost::any a = app.root()("r.surface0").data();
+    const se::value_t *v = boost::any_cast<se::value_t>(&a);
+    ASSERT_NE(v, nullptr);
+    const se::data_object_ptr *obj = std::get_if<se::data_object_ptr>(&v->v);
+    ASSERT_TRUE(obj && *obj);
+    EXPECT_EQ((*obj)->type_name, "cvc::geometry");
+    const auto *g = boost::any_cast<cvc::geometry>(&(*obj)->payload);
+    ASSERT_NE(g, nullptr);
+    EXPECT_EQ(g->tris(), want.surfaces[0].tris());
+    EXPECT_EQ(g->points(), want.surfaces[0].points());
+  }
+  // The async form, and the start form landing its result at target.result.
+  const int apid = run("(let ((f (segment.surfaces-async \"doc.labels\" (dict \"smoothing\" 3))))"
+                       "  (state-set \"r.between\" \"ran\")"
+                       "  (state-set \"r.n\" (length (get-attr (await f) \"surfaces\"))))");
+  ASSERT_TRUE(pump_until([&] { return finished(apid); }));
+  EXPECT_EQ(exit_error(apid), "");
+  EXPECT_EQ(key("r.between"), "ran");
+  EXPECT_EQ(key("r.n"), "2");
+  const int caller = run("(state-set \"r.spid\" (segment.surfaces-start \"doc.labels\" nil "
+                         "\"surfjob\"))");
+  ASSERT_TRUE(pump_until([&] { return finished(caller); }, 5.0)) << "-start returns at once";
+  EXPECT_EQ(exit_error(caller), "");
+  ASSERT_TRUE(pump_until([&] { return !app.root()("surfjob.result").data().empty(); }))
+      << "status: " << key("surfjob.status");
+  // A bad parameter raises at the call, naming it; params.defaults lists the table.
+  const int bad = run("(segment.surfaces \"doc.labels\" (dict \"smoothing\" -2))");
+  ASSERT_TRUE(pump_until([&] { return finished(bad); }));
+  EXPECT_NE(exit_error(bad).find("smoothing"), std::string::npos) << exit_error(bad);
+  const int defaults = run("(state-set \"r.smoothing\" (get-attr (params.defaults "
+                           "\"segment.surfaces\") \"smoothing\"))");
+  ASSERT_TRUE(pump_until([&] { return finished(defaults); }));
+  EXPECT_EQ(key("r.smoothing"), "10");
 }
 
 INSTANTIATE_TEST_SUITE_P(Modes, SegmentationIntrinsics,

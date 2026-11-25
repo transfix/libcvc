@@ -205,6 +205,24 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   set_tests_properties(ari_docset PROPERTIES
                        PASS_REGULAR_EXPRESSION "from shared/note.ari"
                        FAIL_REGULAR_EXPRESSION "could not be resolved;unknown unit")
+  # ari validate and ari schema (docs/ARIADNE.md §14): the example documents are valid (their
+  # components included, from the source tree); a document with mistakes is not, each found where
+  # it is, in text and in JSON. Exit 4 (built without json-schema-validator) skips.
+  file(GLOB _ari_examples "${CMAKE_CURRENT_SOURCE_DIR}/../../examples/ariadne/documents/*.ari")
+  add_test(NAME ari_validate_examples
+           COMMAND ari validate --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   ${_ari_examples})
+  set(_ari_mistakes "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid/validate_mistakes.ari")
+  add_test(NAME ari_validate_mistakes COMMAND ari validate "${_ari_mistakes}")
+  set_tests_properties(ari_validate_mistakes PROPERTIES
+                       PASS_REGULAR_EXPRESSION "validate_mistakes.ari:14:9: /windows/0/children/0: unknown key 'bnd'")
+  add_test(NAME ari_validate_json COMMAND ari validate --json "${_ari_mistakes}")
+  set_tests_properties(ari_validate_json PROPERTIES
+                       PASS_REGULAR_EXPRESSION "\"pointer\": \"/windows/0\", \"message\": \"unknown key 'closeable'\"")
+  set_tests_properties(ari_validate_examples ari_validate_mistakes ari_validate_json PROPERTIES
+                       SKIP_RETURN_CODE 4)
+  add_test(NAME ari_schema COMMAND ari schema)
+  set_tests_properties(ari_schema PROPERTIES PASS_REGULAR_EXPRESSION "\"title\": \"Ariadne .ari document")
   # A URL names a document for the browser page; natively ari says so.
   add_test(NAME ari_url_document COMMAND ari check https://example.invalid/app/main.ari)
   set_tests_properties(ari_url_document PROPERTIES
@@ -233,7 +251,14 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
                    "-DEXPECT6=opened: nothing"
                    "-DREJECT1=last words here"
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
-  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_rich_text PROPERTIES
+  # The Processes window's DSL (components/processes.ari): its rows by application, from (ps)'s
+  # scope and the ariadne.apps mirror of the application it loads (tests/processes_app.ari).
+  add_test(NAME ari_processes_component
+           COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/processes_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(ari_docset ari_url_document ari_chat_component ari_processes_component
+                       ari_rich_text PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 
@@ -347,7 +372,7 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
       set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
-      # A right-click menu (§5.28, tests/context_menu.ari) opened by the key a terminal sends for
+      # A right-click menu (§5.30, tests/context_menu.ari) opened by the key a terminal sends for
       # Shift+F10, worked with Down, Enter and Esc; an item runs with the menu's event.
       add_test(NAME ari_run_context_menu_${_backend}
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/context_menu_test.sh" $<TARGET_FILE:ari>

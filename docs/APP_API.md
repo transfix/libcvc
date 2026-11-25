@@ -32,6 +32,7 @@ threads, and named-mutex hub used throughout libcvc.*
   - [Mutex Debugging](#mutex-debugging)
 - [Program Execution (state_exec)](#program-execution-state_exec)
   - [Continuous mode](#continuous-mode)
+  - [Messaging and control across groups](#messaging-and-control-across-groups)
   - [The kernel pools](#the-kernel-pools)
   - [Ariadne hosts and the frame pump](#ariadne-hosts-and-the-frame-pump)
 - [Type Registration](#type-registration)
@@ -1014,12 +1015,20 @@ says which host and lane runs on which scheduler, and
   (`hardware_concurrency() - 1`, the affinity mask) and any worker that failed to start are logged
   once.
 - `exec_pool_probe()`: the pool if it has been built, else null. It never builds it.
+- `exec_scheduler_probe()`: group 0 if it has been built, else null. It never builds it (a host
+  that drains group 0 only once it exists, as pycvc's `ExecPool.run_all` does).
+- `exec_router()`: the app's router and pid directory (`<cvc/state/state_exec/exec_router.h>`,
+  threaded execution's S2b; [below](#messaging-and-control-across-groups)), made with group 0's
+  state at its first call and kept until the app goes. `exec_scheduler()` registers group 0 with
+  it, and each `exec_group` built on the app its channel prefixes.
 - `exec_pump_frame()`: one frame's pump of the app's groups, on the host thread, outside a pump:
   a single `exec_pool().pump_all` with a 0.1 s deadline from its entry and Ariadne's budget (200000
   steps and 0.1 s per group) over every registered frame group, with group 0 (`exec_scheduler()`,
-  once it is built and holds a live process; never built here) pumped first on the calling thread
-  as a host-affinity group: its token taken, `drain_ingress`, `wake_awaiting` and
-  `sync_run_steps`. A frame group the deadline skipped last frame starts before group 0 whenever
+  once it is built and holds a live process or has anything posted to it; never built here)
+  pumped first on the calling thread as a host-affinity group: its token taken, `drain_ingress`,
+  `wake_awaiting` and `sync_run_steps`. The token is taken in a try: while another thread holds it
+  (`ExecPool.run_all` draining group 0, `kill_owner` draining it inline) group 0 waits for the next
+  frame. A frame group the deadline skipped last frame starts before group 0 whenever
   the calling thread pumps it, so a busy group 0 delays it by one frame at most. In deterministic
   mode (the pool's, or with no pool the tree's `state_exec.deterministic` and
   `CVC_EXEC_DETERMINISTIC`) group 0 is pumped with steps only and no deadline, and its
@@ -1148,6 +1157,57 @@ while (!done) {
 pool.detach(sim);                          // before this thread exits
 ```
 
+### Messaging and control across groups
+
+Since threaded execution's S2b ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.5, 4.6) the
+groups of an app exchange messages and control each other's processes through the app's router.
+A group is the home of the channel keys under its `exec_group::options::channel_prefixes` (an
+isolated Ariadne document's group its prefix, a pooled pycvc `Exec` its chroot), registered when it
+is built; group 0 is the home of every key no prefix covers. While a group other than group 0 has
+a prefix, a program's `msg-send` on a key homed elsewhere goes to the home, and a `msg-recv` parks
+and subscribes there; a `#` key never moves. With no prefix registered nothing changes, and a group
+with no prefix keeps every key no prefix covers, as before.
+
+The pool's calls (`app.exec_pool()`, which is built with the app; any thread):
+
+- `pool.post_message(channel, value)`: post on `channel`, a resolved key (no chroot is applied), to
+  its home group. False when the home refused it: its ingress already holds
+  `state_exec.groups.ingress_cap` posts and sends not yet drained (65536 by default, 0 for none).
+  The value is moved in, as any post's.
+- `pool.post_control(pid, cmd)`: `cmd` (`kill`, `pause`, `resume`, `signal` or `set_priority`, a
+  host's, unchecked) to the group `pid` is in. True when that group took it, and its `done` is then
+  called once, where it is applied; false, `done` never called, for a pid the app does not know or a
+  group being destroyed. It never blocks.
+- `pool.kill_owner(owner)`: kill every process of `owner` in every group of the app, group 0
+  included, and return once every group has done it. The groups this thread may pump are drained
+  here; the others are waited for, this thread servicing its host queue meanwhile. Not from inside
+  a pump, a host body or a callback of the pool (`std::logic_error`).
+- `pool.info(pid)`: the process's row as its group last published it (`published_process`: pid,
+  name, owner, uid, scope, parent pid, status, priorities, floor, locks held, what it waits on,
+  steps, run seconds and memory, the last three up to 100 ms old), or `nullopt` for a pid the app
+  does not know or one not published since it was made. A group publishes at the end of each run
+  loop.
+
+`async_scheduler::post_message` returns `bool` too: false, posting nothing, past the cap (or while
+the scheduler is destroyed). With the router on it forwards a key homed in another group there,
+so a post to `exec_scheduler()` on an isolated document's channel reaches the document (one hop
+more than a post to its group). A program's `kill`, `pause` and `resume` reach a process in
+another group only when it has the program's own, non-empty, owner (`#t` for "requested"); a
+program with an owner sees only its owner's processes in its own group too, and owner `""` (a
+plain host's programs) has no rights across groups.
+
+```cpp
+cvc::exec_pool &pool = app.exec_pool();
+const bool posted =                           // false: its home's ingress is full
+    pool.post_message("docs.d1.inbox", cvc::state_exec::value_t(std::string("hello")));
+cvc::state_exec::control_cmd cmd;
+cmd.what = cvc::state_exec::control_cmd::kind::pause;
+pool.post_control(pid, std::move(cmd));       // to whichever group runs pid
+pool.kill_owner("ari#3:docs.d1");             // before freeing what its contexts point at
+if (auto row = pool.info(pid))
+  std::cout << row->name << ' ' << row->steps << '\n';
+```
+
 ### The kernel pools
 
 An async function's kernel (`executor::background()`, the default) runs on the app's kernel pools
@@ -1180,7 +1240,8 @@ document's own when the app tree's `ariadne.exec.isolate_documents` isolates it
 - `Runtime::drain()` is `drain_begin()` then `drain_end()`. `drain_begin()` is the frame's host
   work (the queued events and key bindings, the actions and residents submitted, the frame's tick
   posted) and notes `exec_pump_generation()`. `drain_end()` pumps the document's scheduler (group
-  0 a bounded slice, when the document used it or anything lives on it; the document's group, if
+  0 a bounded slice, when the document used it, anything lives on it or anything is posted to it,
+  under its token, left for the next drain while another thread holds it; the document's group, if
   it has one, through `exec_pool().pump_all`, 200000 steps and a 0.1 s deadline) unless
   `exec_pump_generation()` moved since this Runtime's `drain_begin()`, that is, unless the host
   called `exec_pump_frame()` in between; then it sweeps what finished. `drain_end()` alone runs

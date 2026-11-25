@@ -1128,7 +1128,7 @@ TEST(AsyncPostControl, KillPauseResumeSignalFromAnyThread) {
 }
 
 // has_pending_control() is about commands only: a posted message is not one. A drain applies its
-// messages and completions before its commands, whatever order they were posted in (S0.7).
+// messages and commands in the order they were posted (S2b.1, S2-Q10), its settled calls after.
 TEST(AsyncPostControl, HasPendingControlCountsCommandsOnly) {
   async_scheduler sched;
   const int pid = sched.execute(std::string("(+ 1 2)"));
@@ -1139,12 +1139,13 @@ TEST(AsyncPostControl, HasPendingControlCountsCommandsOnly) {
   query.query = [&](scheduler_base &s) { seen = s.get_process_info(pid)->status; };
   sched.post_message("other", value_t(int64_t(1)));
   EXPECT_FALSE(sched.has_pending_control()) << "a message counted as a command";
-  sched.post_control(pid, std::move(query)); // posted before the message it will see delivered
+  sched.post_control(pid, std::move(query)); // posted before the message: applied before it
   sched.post_message("chan", value_t(int64_t(2)));
   EXPECT_TRUE(sched.has_pending_control());
   sched.drain_ingress();
   EXPECT_FALSE(sched.has_pending_control());
-  EXPECT_EQ(seen, process_status::ready); // the message was delivered first
+  EXPECT_EQ(seen, process_status::waiting); // the message was delivered after it
+  EXPECT_EQ(sched.get_process_info(pid)->status, process_status::ready);
 }
 
 TEST(AsyncPostControl, AThrowingCommandRequeuesTheRest) {

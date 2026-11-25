@@ -14,8 +14,10 @@
 
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h>
+#include <cvc/geometry/geometry.h>
 #include <cvc/state/state_exec/intrinsics.h>
 #include <cvc/state/state_exec/types.h>
+#include <cvc/volume/class_surfaces.h>
 #include <cvc/volume/point_class_intrinsics.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/segmentation.h>
@@ -102,10 +104,46 @@ job_op critical_point_seeds_op(sliced_threading threading) {
   return op;
 }
 
+job_op class_surfaces_op(sliced_threading threading) {
+  job_op op = make_job_op<class_surface_params, class_surface_result>(
+      "segment.surfaces", 1,
+      [](const job_call &c, const class_surface_params &p) {
+        return class_surfaces_job(*c.input_as<volume>(0), p);
+      },
+      [](class_surface_result &&r) {
+        std::vector<se::value_t> labels, surfaces, voxels, warnings;
+        for (int l : r.labels)
+          labels.push_back(se::value_t(std::int64_t(l)));
+        for (geometry &g : r.surfaces) {
+          auto obj = std::make_shared<se::data_object>();
+          obj->payload = std::move(g);
+          obj->type_name = "cvc::geometry";
+          surfaces.push_back(se::value_t(std::move(obj)));
+        }
+        for (std::size_t v : r.voxels)
+          voxels.push_back(se::value_t(std::int64_t(v)));
+        for (std::string &w : r.warnings)
+          warnings.push_back(se::value_t(std::move(w)));
+        return se::make_dict({
+            {"labels", se::make_list(std::move(labels))},
+            {"surfaces", se::make_list(std::move(surfaces))},
+            {"voxels", se::make_list(std::move(voxels))},
+            {"warnings", se::make_list(std::move(warnings))},
+        });
+      },
+      [](const job_call &c, const class_surface_params &) {
+        const std::string *path = std::get_if<std::string>(&c.input(0).v);
+        return path ? *path : std::string("labels");
+      });
+  op.threading = threading;
+  return op;
+}
+
 void register_segmentation_intrinsics(se::environment_ptr env, se::intrinsics_context &ictx,
                                       cvc::app &app) {
   register_job_op(env, ictx, app, segment_seeded_op());
   register_job_op(env, ictx, app, critical_point_seeds_op());
+  register_job_op(env, ictx, app, class_surfaces_op());
   register_job_intrinsics(env, app);
 }
 

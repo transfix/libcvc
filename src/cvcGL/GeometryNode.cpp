@@ -302,6 +302,18 @@ void GeometryNode::handleStateChanged(const std::string &childState) {
       if (m_forceOpaque) // a forced-opaque mesh made see-through draws translucent, until it is 1
         m_actor->SetForceOpaque(opacity >= 1.0);
     });
+  } else if (childState == "pbr") {
+    runOnMainThread([this]() {
+      // setPBR writes 1 or 0; a script may write true, yes or on (anything else is off)
+      std::string v = getState("pbr").value<std::string>();
+      std::transform(v.begin(), v.end(), v.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      applyPBR(v == "1" || v == "true" || v == "yes" || v == "on");
+    });
+  } else if (childState == "metallic" || childState == "roughness" || childState == "coat" ||
+             childState == "coat_roughness" || childState == "emissive_r" ||
+             childState == "emissive_g" || childState == "emissive_b") {
+    runOnMainThread([this, childState]() { applyPBRValue(childState); });
   } else if (childState == "point_size") {
     runOnMainThread([this]() {
       if (!m_actor)
@@ -449,6 +461,112 @@ void GeometryNode::setOpacity(double value) { getState("opacity").value(value); 
 void GeometryNode::setPointSize(double size) { getState("point_size").value(size); }
 
 void GeometryNode::setLineWidth(double width) { getState("line_width").value(width); }
+
+void GeometryNode::setPBR(bool on) {
+  if (on)
+    getState("diffuse").value(1.0); // VTK's base colour is the colour times diffuse
+  getState("pbr").value(on);
+}
+
+void GeometryNode::setMetallic(double value) { getState("metallic").value(value); }
+
+void GeometryNode::setRoughness(double value) { getState("roughness").value(value); }
+
+void GeometryNode::setEmissive(double r, double g, double b) {
+  getState("emissive_r").value(r);
+  getState("emissive_g").value(g);
+  getState("emissive_b").value(b);
+}
+
+void GeometryNode::setCoat(double strength, double roughness) {
+  getState("coat_roughness").value(roughness);
+  getState("coat").value(strength);
+}
+
+namespace {
+// A PBR surface's shader, after VTK has written it (post replacements, which VTK's poly-data
+// mapper and its low-memory one both apply). Each line is one VTK 9.5 writes the same in both
+// (vtkOpenGLPolyDataMapper::ReplaceShaderLight, vtkGLSLModLight); a line not found is left out.
+const std::pair<const char *, const char *> kPBRShaderEdits[] = {
+    // The base colour, sRGB as a Phong surface takes it, made linear: VTK takes it as linear and
+    // writes pow(color, 1/2.2), which turned a saturated colour pale.
+    {"vec3 albedo = diffuseColor;",
+     "vec3 albedo = pow(max(diffuseColor, vec3(0.0)), vec3(2.2)); // cvc: sRGB base colour"},
+    // VTK reads its emissive factor only through an emissive texture; with none it glows at the
+    // factor (setEmissive, made linear).
+    {"vec3 emissiveColor = vec3(0.0);", "vec3 emissiveColor = emissiveFactorUniform;"},
+    // The lights' sum, times pi: VTK's diffuse and specular terms carry a 1/pi a light of
+    // intensity 1 does not make up for, so a PBR surface lit as a Phong one came out a third as
+    // bright.
+    {"color += Lo;", "color += 3.14159265 * Lo; // cvc: a light's intensity, as a Phong surface's"},
+};
+
+double unit_value(cvc::state &s, double dflt) {
+  try {
+    const double v = s.value<double>();
+    return std::isfinite(v) ? std::clamp(v, 0.0, 1.0) : dflt;
+  } catch (...) {
+    return dflt;
+  }
+}
+} // namespace
+
+void GeometryNode::applyPBR(bool on) {
+  if (!m_actor)
+    return;
+  vtkProperty *p = m_actor->GetProperty();
+  if (on != m_pbr) {
+    if (on) {
+      m_interpolationWithoutPBR = p->GetInterpolation();
+      p->SetInterpolationToPBR();
+    } else {
+      p->SetInterpolation(m_interpolationWithoutPBR);
+    }
+    m_pbr = on;
+  }
+  for (const auto &edit : kPBRShaderEdits) {
+    const ShaderReplKey key{2, edit.first};
+    if (on)
+      m_internalShaderRepl[key] = edit.second;
+    else
+      m_internalShaderRepl.erase(key);
+    installShaderReplacement(key);
+  }
+  if (on) // the values set before the switch
+    for (const char *k : {"metallic", "roughness", "coat", "emissive_r"})
+      applyPBRValue(k);
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
+}
+
+void GeometryNode::applyPBRValue(const std::string &key) {
+  if (!m_actor)
+    return;
+  vtkProperty *p = m_actor->GetProperty();
+  // A key not set yet keeps its default, and reading it must not make it (getState would).
+  const std::vector<std::string> names = getState().childNames();
+  const auto has = [&names](const char *k) {
+    return std::find(names.begin(), names.end(), k) != names.end();
+  };
+  if (key == "metallic" && has("metallic")) {
+    p->SetMetallic(unit_value(getState("metallic"), 0.0));
+  } else if (key == "roughness" && has("roughness")) {
+    p->SetRoughness(unit_value(getState("roughness"), 0.5));
+  } else if ((key == "coat" || key == "coat_roughness") && has("coat")) {
+    p->SetCoatStrength(unit_value(getState("coat"), 0.0));
+    p->SetCoatRoughness(has("coat_roughness") ? unit_value(getState("coat_roughness"), 0.0) : 0.0);
+  } else if (key.rfind("emissive_", 0) == 0 && has("emissive_r")) {
+    double c[3];
+    const char *keys[3] = {"emissive_r", "emissive_g", "emissive_b"};
+    for (int i = 0; i < 3; ++i) // sRGB to linear, as the shader takes the base colour
+      c[i] = std::pow(has(keys[i]) ? unit_value(getState(keys[i]), 0.0) : 0.0, 2.2);
+    p->SetEmissiveFactor(c);
+  } else {
+    return;
+  }
+  if (SceneGraph *sg = getSceneGraph())
+    sg->requestRender();
+}
 
 void GeometryNode::setUseSingleColor(bool useSingleColor) {
   if (m_useSingleColor == useSingleColor)
@@ -1584,7 +1702,7 @@ void GeometryNode::onUpdateShader(vtkObject *caller, unsigned long, void *client
 void GeometryNode::bindShaderTextures(
     vtkShaderProgram *program,
     const std::vector<std::pair<std::string, vtkTextureObject *>> &textures,
-    vtkObject *drawingMapper) {
+    vtkObject *drawingMapper, std::vector<vtkWeakPointer<vtkTextureObject>> *bound) {
   if (!program)
     return;
   // Bind our custom textures onto units the mapper won't reuse. The wasm
@@ -1631,8 +1749,10 @@ void GeometryNode::bindShaderTextures(
   // held a unit, and a scene with enough of them ran out: WebGL2 gives VTK 16 units, the
   // low-memory mapper takes some for each draw, and every draw after that failed and logged
   // (terrain_lab with its water, in the browser). One already active (someone else's) is left as
-  // it was.
+  // it was. A draw of another actor that keeps its own list (`bound`) releases them itself.
   auto *actor = GeometryActor::SafeDownCast(m_actor);
+  if (!bound && actor)
+    bound = &actor->Bound;
   for (auto &kv : textures) {
     if (kv.second && kv.second->GetContext() && program->IsUniformUsed(kv.first.c_str())) {
       const bool wasActive = kv.second->GetTextureUnit() >= 0;
@@ -1652,8 +1772,8 @@ void GeometryNode::bindShaderTextures(
         continue;
       }
       program->SetUniformi(kv.first.c_str(), unit);
-      if (!wasActive && actor)
-        actor->Bound.emplace_back(kv.second);
+      if (!wasActive && bound)
+        bound->emplace_back(kv.second);
     }
   }
   if (tum)

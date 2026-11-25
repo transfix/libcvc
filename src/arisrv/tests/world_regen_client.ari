@@ -1,0 +1,23 @@
+# The client for ctest arisrv_world_regenerate (ARIADNE_WORLDS section 18.8, GB5): the relay's
+# document runs the generated world `land`; server.regenerate makes it again, for a connection rcon
+# made an admin and for no other. A joined lab's Regenerate sends the same call
+# (GeneratedWorldRelay).
+meta: { name: an admin regenerates the relay's world, min_libcvc: 4.0.6 }
+tests:
+  a_it_is_an_admins: |
+    (assert (= (try (begin (room-call "server.regenerate" "land" (dict "seed" 4242)) "no error")
+                    (catch (PermissionError e) (get-attr e "code")))
+               "forbidden"))
+  b_an_admin_makes_the_world_again: |
+    (assert (get-attr (room-call "server.rcon" "rcon test password") "admin"))
+    (let ((r (room-call "server.regenerate" "land" (dict "seed" 4242))))
+      (assert (= (get-attr r "node") "land") r)
+      (assert (= (get-attr r "seed") 4242) r)
+      (assert (get-attr r "asked") r))
+  c_the_relay_made_it: |
+    (sleep 3)
+    (assert (not (get-attr (room-call "server.regenerate" "land" "{\"seed\": 4242}") "asked")))
+  d_a_node_it_does_not_run_is_invalid: |
+    (assert (= (try (begin (room-call "server.regenerate" "nowhere" (dict)) "no error")
+                    (catch (RuntimeError e) (get-attr e "code")))
+               "invalid"))

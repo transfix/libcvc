@@ -54,6 +54,8 @@
 // browser downloaded. So a node that edits data in memory (a volume_grid's point classes) reads
 // and writes no file itself: the app loads its data onto the tree, and saves it from there.
 #include <boost/any.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <cvc/utility/archive.h>
 #include <functional>
 #include <memory>
@@ -145,9 +147,10 @@ using DataEncoder = std::function<std::string(const DataEncode &)>;
 
 // Register (or replace) `app`'s encoder named `as` (an empty encoder removes it). Every app starts
 // with: bytes (DataBytes or a std::string), volume (a cvc::volume, in any format libcvc writes, by
-// the file's extension), point_classes (cvc::point_classes as .vgr), volume_grid_session (its
-// JSON) and contours (a cvc::contour_stack in a one-file format: .cvcc, .contour or .pcd). Each
-// takes the payload as a std::shared_ptr<const T>, a std::shared_ptr<T> or a T.
+// the file's extension; or a std::vector<cvc::volume> as one file's variables, in a format that
+// holds several, such as .rawv), point_classes (cvc::point_classes as .vgr), volume_grid_session
+// (its JSON) and contours (a cvc::contour_stack in a one-file format: .cvcc, .contour or .pcd).
+// Each takes the payload as a std::shared_ptr<const T>, a std::shared_ptr<T> or a T.
 // Thread-safe and per app, as the decoders are.
 void register_data_encoder(cvc::app &app, const std::string &as, DataEncoder encoder);
 bool has_data_encoder(cvc::app &app, const std::string &as);
@@ -164,6 +167,32 @@ std::string default_data_encoder(const boost::any &payload);
 // own error, or the file not written.
 void data_save(cvc::app &app, const std::string &path, const std::string &file,
                const std::string &as = std::string(), const std::string &base = std::string());
+
+// Save a whole dataset as its files (ARIADNE_WORLDS section 18.8, GB4: the terrain lab's Save): the
+// files the store holds for the dataset at `path` (a store path or a document's link to one), each
+// at its path, as a directory `target` (made when absent), or one zip (archive::pack_zip) when
+// `target` ends in .zip. A relative target is the document's directory's (`base`), as for
+// data_save, and a document whose directory is a URL saves nothing. In a browser it is always a
+// zip, downloaded under target's name (.zip added when it has none). A world's bundle saved this
+// way loads again as `data: { <name>: { uri: <target>, as: city_bundle } }`, the same world.
+//
+// With `exports`, a world's files for other software go in too, under export/
+// (world::city_bundle_exports: the terrain as a glb, a 16-bit height map and its JSON), made from
+// the dataset's `world` and `water_level`.
+struct DataSaveOptions {
+  bool exports = false;
+};
+struct DataSaved {
+  std::string where;       // the directory or zip written, or in a browser the download's name
+  std::size_t files = 0;   // how many files
+  std::uint64_t bytes = 0; // their bytes, before any compression
+};
+// Throws std::runtime_error saying why: no dataset at `path`, one with no files (not loaded yet,
+// or made by a build that writes no bundle), exports asked of a dataset with no world, the
+// document not local, or a write failing.
+DataSaved data_save_files(cvc::app &app, const std::string &path, const std::string &target,
+                          const std::string &base = std::string(),
+                          const DataSaveOptions &options = {});
 
 // The store key of a request: a slug of its source and a hash of the request (uri, path, as).
 std::string data_key(const DataSpec &spec);

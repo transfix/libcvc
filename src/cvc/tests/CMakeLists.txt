@@ -9,6 +9,7 @@ add_executable(thread_pool_test thread_pool_test.cpp)
 add_executable(thread_class_test thread_class_test.cpp)
 add_executable(text_test text_test.cpp)
 add_executable(ariadne_loader_test ariadne_loader_test.cpp)
+add_executable(ariadne_schema_test ariadne_schema_test.cpp)
 add_executable(ariadne_doc_fetch_test ariadne_doc_fetch_test.cpp)
 add_executable(ariadne_scene_tf_test ariadne_scene_tf_test.cpp)
 add_executable(ariadne_runtime_test ariadne_runtime_test.cpp)
@@ -146,6 +147,8 @@ add_executable(state_exec_hazards_test state_exec_hazards_test.cpp)
 # Threaded execution, Stage 1 (docs/STATE_EXEC_THREADED.md 8.2): execution groups and the pool.
 add_executable(state_exec_groups_test state_exec_groups_test.cpp)
 add_executable(exec_pool_test exec_pool_test.cpp)
+add_executable(state_exec_router_test state_exec_router_test.cpp)
+add_executable(state_exec_stress_test state_exec_stress_test.cpp)
 if(NOT WIN32)
   add_executable(state_exec_multiprocess_test state_exec_multiprocess_test.cpp)
 endif()
@@ -430,6 +433,7 @@ set(TEST_TARGETS
   thread_class_test
   text_test
   ariadne_loader_test
+  ariadne_schema_test
   ariadne_doc_fetch_test
   ariadne_scene_tf_test
   ariadne_runtime_test
@@ -737,6 +741,8 @@ list(APPEND TEST_TARGETS
   state_exec_hazards_test
   state_exec_groups_test
   exec_pool_test
+  state_exec_router_test
+  state_exec_stress_test
 )
 if(NOT WIN32)
   list(APPEND TEST_TARGETS state_exec_multiprocess_test)
@@ -853,6 +859,23 @@ target_link_libraries(ariadne_loader_test
     GTest::gtest
     GTest::gtest_main
 )
+
+# The .ari schema's tests (docs/ARIADNE.md §14) read the source tree's documents and schema file.
+# Those that look inside the schema itself need a JSON parser: nlohmann_json, which a build with
+# the validator has (its config finds it).
+target_link_libraries(ariadne_schema_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_definitions(ariadne_schema_test
+  PRIVATE CVC_SCHEMA_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+find_package(nlohmann_json CONFIG QUIET)
+if(TARGET nlohmann_json::nlohmann_json)
+  target_link_libraries(ariadne_schema_test PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_definitions(ariadne_schema_test PRIVATE CVC_SCHEMA_TEST_HAVE_JSON)
+endif()
 
 target_link_libraries(ariadne_doc_fetch_test
   PRIVATE
@@ -2147,6 +2170,20 @@ target_link_libraries(exec_pool_test
     GTest::gtest_main
 )
 
+target_link_libraries(state_exec_router_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(state_exec_stress_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
 target_link_libraries(state_exec_builtins_test
   PRIVATE
     cvc
@@ -3015,6 +3052,8 @@ target_compile_features(state_exec_data_steps_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_hazards_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_groups_test PRIVATE cxx_std_20)
 target_compile_features(exec_pool_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_router_test PRIVATE cxx_std_20)
+target_compile_features(state_exec_stress_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_builtins_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_evaluator_test PRIVATE cxx_std_20)
 target_compile_features(state_exec_stackless_evaluator_test PRIVATE cxx_std_20)
@@ -3267,6 +3306,7 @@ cvc_discover_tests(thread_pool_test)
 cvc_discover_tests(thread_class_test)
 cvc_discover_tests(text_test)
 cvc_discover_tests(ariadne_loader_test)
+cvc_discover_tests(ariadne_schema_test)
 cvc_discover_tests(ariadne_doc_fetch_test)
 cvc_discover_tests(ariadne_scene_tf_test)
 cvc_discover_tests(ariadne_runtime_test)
@@ -3627,6 +3667,10 @@ cvc_discover_tests(state_exec_data_steps_test)
 cvc_discover_tests(state_exec_hazards_test)
 cvc_discover_tests(state_exec_groups_test)
 cvc_discover_tests(exec_pool_test)
+cvc_discover_tests(state_exec_router_test)
+# ST-1 and ST-2 (S2.md 4): the short form; the nightly lane sets CVC_EXEC_STRESS_MINUTES and
+# CVC_EXEC_STRESS_SEEDS for the long ones.
+cvc_discover_tests(state_exec_stress_test PROPERTIES TIMEOUT 900)
 cvc_discover_tests(state_exec_builtins_test)
 cvc_discover_tests(state_exec_evaluator_test)
 cvc_discover_tests(state_exec_stackless_evaluator_test)
@@ -3841,6 +3885,11 @@ if(_cvc_bench_python)
     add_test(NAME state_exec_state_word_model_test
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/locks_model/test_state_word.py")
+    # The router protocol's model (tools/locks_model/test_router.py; S2b, S2-Q15): its quick
+    # suite and checks of its explorer, about 25 s, standard library only.
+    add_test(NAME state_exec_router_model_test
+             COMMAND "${_cvc_bench_python}" -I
+                     "${PROJECT_SOURCE_DIR}/tools/locks_model/test_router.py")
   endif()
 endif()
 # The deterministic bench gates (state_exec_bench_gates.cmake): 0 steps and 0 allocations per

@@ -28,6 +28,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 11. [Caveats — what is not yet wired](#11-caveats--what-is-not-yet-wired)
 12. [Golden-image tests](#12-golden-image-tests)
 13. [Testing a document: `quit`, `assert` and `ari test`](#13-testing-a-document-quit-assert-and-ari-test)
+14. [Validating a document: the `.ari` schema and `ari validate`](#14-validating-a-document-the-ari-schema-and-ari-validate)
 
 ---
 
@@ -391,19 +392,32 @@ reads it from `Runtime::isolation_reason()`, and the app's log shows it once
 (`ari: the document at '<prefix>' runs in group 0: <reason>`).
 
 1. Its prefix is not empty (it does not run at the app root).
-2. It has a `channels:` block, enforced in strict lint mode, which is the default once the block is
-   there (`lint: channels: warn` or `off` keeps the document in group 0): only that proves it uses
-   no app-global channel (§8).
-3. No channel in it is `global: true`.
-4. None of its programs names a `/` channel in a literal: `(msg-send "/x" ...)`, `(msg-recv
-   "/x")` or `(msg-pending "/x")`. Every program counts: the lanes, the key bindings, `functions:`,
-   every widget's `on:`, `on_click`, `on_hover`, `on_drag*` and `on_top`, each module's `init:`,
-   `on_tick:` and functions, and the document's own `init:` and `tests:`. That is more than the
-   load's channel lint reads, which skips the widgets' event handlers.
-5. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, since a sign-in's end is posted
-   where the app's other programs run.
-6. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
+2. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, in any of its programs: the
+   lanes, the key bindings, `functions:`, every widget's `on:`, `on_click`, `on_hover`, `on_drag*`
+   and `on_top`, each module's `init:`, `on_tick:` and functions, and the document's own `init:`
+   and `tests:`. A sign-in's end is posted on a `#` channel where the app's other programs run, and
+   a `#` channel never leaves the group it is used in.
+3. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
    one inside, is fine).
+
+Its channels do not keep it there. A channel under its prefix, its own, lives in its group; any
+other, an app-global `/` channel (`global: true`) among them, lives in group 0 or in the group of
+the document whose prefix covers it, and a message sent on it from another group is passed there
+([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.6). So a document needs no `channels:` block to
+get a group, and one with `global: true` channels or `/` references gets one too. Such a message
+is passed on at the next pump of each group it goes through, so it may take a frame or two where
+one inside a group arrives at once.
+
+The host's posts follow the same homes. A post to `app.exec_scheduler()` on one of an isolated
+document's channels (a done channel under its prefix, say) is passed on to the document's group by
+the app's router, one hop more than a post to the group itself (`ictx.host->parking_scheduler()`,
+which a provider uses: §9.1); a `#` channel is never passed on, so a post on one stays in the
+scheduler it was posted to. Group 0 is pumped for what is posted to it as well as for its live
+processes: the Runtime's drain and `app.exec_pump_frame()` pump it while anything posted waits
+there (a message an isolated document sent on a `/` channel, a wait it subscribed there), so such
+a message is delivered even when no program lives in group 0. Each takes group 0's token, and
+while another thread holds it (pycvc's `ExecPool.run_all` drains group 0 on its own thread) it
+leaves group 0 for that frame and pumps it at the next.
 
 A document that passes runs in its group. Its group is pumped on the frame's thread all the same
 when its host declared a thread-affine subscriber at, above or under its prefix (`arigl` declares
@@ -417,14 +431,20 @@ functions; §9.1). Otherwise the pool's workers may pump it.
   runtime posts it (ticks, keys, pointer events, signals) goes there. Its streams post their events
   there, and its async calls complete there.
 - It gets its own budget per frame (200000 steps and 0.1 s), not a share of the app's.
-- `ps`, `inspect` and `kill` see only its own processes; pids stay unique across the app.
+- `ps`, `inspect` and `kill` see only its own processes; pids stay unique across the app. A
+  document in group 0 sees only its own too: every process a Runtime starts carries its owner tag,
+  the documents it loads included, and a program with an owner lists, inspects, kills, pauses and
+  resumes only its owner's processes ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.5). A
+  `kill`, `pause` or `resume` of one of its own processes in another group (a sliced task in group
+  0, for an isolated document) is passed there and returns `#t` for "requested"; another
+  document's pid gives `#f`, as an unknown one does.
 - When a worker pumps it, an action that calls a verb the host must run itself (`quit`, the
   `data-*` verbs, `open-url`, the room and chat verbs) parks at the call and resumes at the next
   frame, so it completes a frame later. `(has? ...)` there answers from what the frame's start saw.
 
 **When it moves.** Where a document runs is decided when it loads, and again after anything that
-rule reads changes: a reload or a new tree, a lane's program, the channel policy, the key bindings,
-or a host's declaration. If the answer changes, the document moves: its actions and the children
+rule reads changes: a reload or a new tree, a lane's program, the key bindings, or a host's
+declaration. If the answer changes, the document moves: its actions and the children
 they spawned, and its residents, are killed where they ran (a host's `run_program` caller is told
 "did not complete: the document moved to another group"), its residents start again in the new
 place at the next frame, and the streams it opened follow it. The move does not wait for the old
@@ -438,6 +458,14 @@ something of it runs, the document stays where it is, at the latest until its ne
 the pool's workers may pump, a host verb that must run on the host thread is unknown to its
 programs (a `NameError`) meanwhile, and the app's log says so once. A host registers before
 `load()`, or before the first frame, to avoid that.
+
+**Limits.** An `AriApp` (or any Ariadne host) and a pycvc `ExecPool.run_all` on one app run on one
+thread: both drive group 0, and the Runtime submits programs to group 0 and kills them there
+between its pumps without taking its token, which a `run_all` on another thread would race (one
+thread drives a scheduler at a time; nothing checks it). And a document that moves from group 0
+into a group of its own leaves behind, in group 0, what was parked there for its channels: a
+message another group sent on one of them that no program had received, and another group's
+program waiting on one of them. Its own programs restart in its group and receive from then on.
 
 ---
 
@@ -945,6 +973,11 @@ An `.ari` file is a YAML document. `load_file` / `load_string` parse it via `loa
 `cvc::state` and never runs the DSL. The host runs the scripts (§9). This separation is
 why the same `LoadResult` can be driven by different hosts.
 
+The structure a document may have, every key and the values it takes, is the `.ari` schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)).
+The loader stays lenient, loading what it understands, but a build with the validator checks
+every document against the schema as it loads and warns about each place that breaks it (§14).
+
 ### 5.1 Top-level keys
 
 The built-in top-level keys (`is_builtin_block`,
@@ -960,13 +993,15 @@ context_menu
 `tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
 `menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
 the tray's bell or not (§5.24). `assets:` and
-`scenes:` are §5.18's shared meshes and scenes of their own. `context_menu:` is the right-click
-menu over the main view (§5.28).
+`scenes:` are §5.18's shared meshes and scenes of their own. `context_menu:` adds the document's
+own items to the context menu over the main view (§5.30).
 
 Any **other** top-level key is dispatched to a parser registered via
-`register_ari_block`, or — if none is registered — **silently ignored**. This is
-deliberate forward-compatibility: a document authored for a newer build still loads the
-parts an older build understands.
+`register_ari_block`, or, if none is registered, ignored: a document authored for a newer build
+still loads the parts an older build understands. It is not silent, though: the schema check
+(§14) warns about a key that is neither the schema's nor a registered block, unless the
+document declares the block in `customs:` (`- block: <name>`). The blocks the scripting hosts
+and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in the schema.
 
 ### 5.2 `meta:` and the `min_libcvc` gate
 
@@ -1277,7 +1312,7 @@ scene:
 - **Each copy** is the template with `{i}`, its 0-based index, filled in: in its id (`marker_0`,
   `marker_1`, ...), its `visible:` bind, its tags, its `source:` (a file, an asset, a dataset and
   its item), its `material: { texture }` (an image, or a live texture's `stream:`), its clips'
-  bound offsets, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
+  bound offsets, its `on_pick:`, every string in its props (a custom type's keys), and its children's. An id without `{i}` gets `_{i}`. A copy keeps the
   template's `transform:`, `tags:`, `visible:`, material, `shader:` and children.
 - **The count is live.** At each frame `tick_scene` counts every repeated node again and adds or
   removes copies to match, the last copies going first, without a reload. A copy that goes takes
@@ -1300,6 +1335,87 @@ and `TerminalScene`) counts an expression on the document's read lane
 (`SceneAdapter::set_count_fn`, `Runtime::eval_count`). A host calling `realize_scene` itself passes
 `RealizeOptions::count`. Without one a number or a key still counts, and an expression draws no
 copies and warns.
+
+**Animations.** `animations:` in a scene moves its nodes, or writes state keys, along keyframes over
+the scene clock:
+
+```yaml
+scene:
+  animations:
+    - animation: door_open        # its keys: animations.door_open.time / .playing / .speed
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[0, [0, 0, 0]], [1.5, [0, 0, 95]], [2, [0, 0, 90]]]
+    - animation: beacon
+      loop: true                  # false (the default) | true | pingpong
+      tracks:
+        - { node: beacon, key: color, keys: [[0, [1, 0.2, 0]], [0.5, [1, 0.8, 0]], [1, [1, 0.2, 0]]] }
+        - { state: beacon.level, keys: [[0, 0], [0.5, 1], [1, 0]] }
+    - animation: wave
+      loop: pingpong
+      autoplay: false             # waits for animations.wave.playing
+      speed: 0.5
+      tracks:
+        - { node: flag, key: position, keys: [[0, [0, 0, 0]], [1, [0, 0, 0.4]]] }
+        - { node: post_3/flag, key: scale, keys: [[0, [1, 1, 1]], [1, [1.5, 1.5, 1.5]]] }
+```
+
+- **A track** moves one thing along its `keys:`, a list of `[seconds, value]`:
+  - `node: <id>` with `key: position`, `rotation` (degrees about x, then y, then z), `scale` or
+    `color` (each three numbers), `opacity` (0..1) or `visible` (shown above 0.5). The id names
+    every node with it, so `flag` moves each `repeat:` copy's flag and each prototype instance's;
+    a path, `post_3/flag`, names the flag under `post_3` alone.
+  - `state: <path>`, resolved as a bind is: the value written there, a number or numbers joined by
+    commas, for a widget, a program or a node's `visible:` to read.
+  - `interpolation:` `linear` (the default), `step` (each key's value until the next) or `smooth`
+    (a curve through every key, easing in and out at the first and last). Rotation interpolates
+    each angle on its own, so `[0, 0, 0]` to `[0, 0, 360]` is a whole turn.
+  - Before its first key a track holds the first value, after its last the last.
+- **A model's own clip.** `{ node: robot, clip: walk }` plays a clip of the model the node
+  draws, the glTF, FBX or Collada file its `source:` names: at the animation's time `t` the node
+  draws the model posed `t` seconds into the clip. That is the file's own animation: its nodes'
+  translation, rotation and scale keys, its skins (each vertex following its bones) and its morph
+  targets' weights.
+  - `clip:` is the clip's name, or its number (`"0"` the first).
+  - An animation with no `duration:` lasts as long as its longest clip. `loop:`, `speed:`, the
+    keys and a script's seek and pause work as for any track.
+  - The model is posed on the CPU each frame and its points are written into the node's mesh in
+    place, the node's `fit:` kept. Normals follow, from the file's own.
+  - A clip the model does not have, or a node with no model file, warns at realize, naming the
+    clips the model has.
+  - The node's mesh must be its file's: a node drawn as an LOD ladder, or with a `model:` in place
+    of its own geometry, is left as it is, with a note in the log.
+- **An animation** runs as long as its latest key (`duration:` sets it longer), then stops
+  (`loop: false`), starts over (`true`) or turns back (`pingpong`). `speed:` is seconds of
+  animation a second of the clock; below 0 it plays backwards. `autoplay: false` waits.
+- **Its keys** under the scene's prefix: `animations.<id>.time` (seconds into it), `.playing`
+  (`1` or `0`) and `.speed`. The animation writes them as it plays and reads them every frame, so a
+  program seeks with `(state-set "animations.door_open.time" "0")`, plays and pauses with
+  `.playing`, and changes `.speed`. An animation that stopped at its end and is played again starts
+  over.
+- **The clock.** A scene with an animation runs on the scene clock, as `clock: {}` would make it,
+  so `sim_transport.ari`'s Paused and Speed pause and slow its animations with everything else. At
+  realize every animation sets what it moves to where it starts, playing or not.
+- **One writer a key.** Physics poses a body's node every step and a `visible:` bind writes its
+  node's visibility every frame, so an animation of either is overwritten: animate a node without
+  a body, and the visibility of one without a `visible:`.
+
+**Picking a node.** `on_pick:` on a node is an action, a program or a bare name for a host
+handler, that runs when a press in an `input: pick` viewport lands on the node, or on a
+descendant without an `on_pick:` of its own. It gets the pick's fields in `event`, as the
+viewport's `on_pick:` does, and runs in the document's scope. The press's drags and release run
+it too, wherever they land (§5.18, Picking):
+
+```yaml
+scene:
+  nodes:
+    - node: crate_{i}
+      repeat: 4
+      source: { box: 1 }
+      on_pick: (if (= (get-attr event "phase") "down") (state-set "selected" "crate_{i}"))
+```
 
 **Textures.** `material: { texture: <uri> }` drapes an image over a geometry node through its
 mesh's UVs. UV (0, 0) is the image's bottom-left corner. A `source: { data }` city's terrain wears
@@ -1421,6 +1537,56 @@ scene:
       source: { box: { size: [50, 30, 10] } }
       material: { color: [0.2, 0.8, 0.3], opacity: { bind: zone.alpha, default: 0.4 } }
 ```
+
+**Physically based materials.** `material: { pbr: ... }` shades a geometry node physically, with
+VTK's PBR, in place of the Phong keys. The scene's `environment:` is the light that reaches it
+from all round:
+
+```yaml
+scene:
+  environment:                    # optional: the light from all round
+    sky: [0.55, 0.62, 0.75]       # straight up
+    horizon: [0.45, 0.45, 0.45]
+    ground: [0.18, 0.16, 0.14]    # straight down
+  nodes:
+    - node: body
+      source: { file: car.glb }
+      material:
+        color: [0.75, 0.05, 0.05] # the base colour
+        pbr: { metallic: 0.6, roughness: 0.35, coat: { strength: 1, roughness: 0.05 } }
+    - node: lamp
+      source: { sphere: 0.2 }
+      material: { color: [0, 0, 0], pbr: { emissive: [1.0, 0.85, 0.5] } }
+    - node: rail
+      source: { box: 1 }
+      material: { pbr: { metallic: 1, roughness: 0.1 } }
+```
+
+- **The keys.** `pbr: true` takes the defaults. Each value is 0..1, clamped with a warning.
+  - `metallic`: 0 (the default) a dielectric, such as paint, plastic or stone; 1 a metal.
+  - `roughness`: 0 a mirror, 1 matte; 0.5 by default.
+  - `emissive: [r, g, b]`: the colour the node glows with, lit or not. None by default.
+  - `coat`: a clear coat over the surface, such as car paint's or varnish. Either its strength,
+    or `{ strength, roughness }` (strength 1 and roughness 0 when left out).
+- **The base colour** is what the node shows when Phong-shaded: its `color`, its `texture` or its
+  mesh's own colours, read as sRGB.
+- **The lights** light it face on as brightly as a Phong surface with `diffuse: 1`. VTK's BRDF
+  divides a light by π; libcvc multiplies it back, as three.js's legacy light units did.
+- **The Phong keys** (`ambient`, `diffuse`, `specular`, `specular_power`) do not apply, and warn
+  beside `pbr:`.
+- **The environment** is image-based lighting from a gradient: `sky` straight up, through
+  `horizon`, to `ground` straight down, about +z. It lights every side of a `pbr:` node and is
+  what a metal reflects. Phong nodes ignore it.
+  - A scene with a `pbr:` node and no `environment:` gets the default: sky
+    `[0.50, 0.53, 0.60]`, horizon `[0.42, 0.42, 0.42]`, ground `[0.20, 0.19, 0.18]`, about as
+    bright as Phong's `ambient: 0.2`.
+  - `environment: false` (or `none`) leaves the lights alone, and a side they miss is black.
+  - The first frame after it is set filters it on the GPU, once per view.
+- **Where it applies.** The main view and every `viewport` widget are lit by the environment.
+  The material reaches whatever the node draws: its mesh, its `model:`, every rung of an LOD
+  ladder, and a dataset's meshes.
+- **Not yet:** metallic, roughness, normal and emissive textures; an image as the environment;
+  the materials a glTF model carries.
 
 **Volumes and shadows.** A volume node (`volume`, `volren`, `volslice`) casts nothing into the
 scene's shadow maps (`shadows:`): its picture is no surface the maps can hold. A `volren` node's
@@ -1920,7 +2086,19 @@ every repaint (`world.color`, at once) is a sliced task on the app's scheduler
 and `surface_painter` step it a few rows at a time, on the background pool natively and a few
 milliseconds a frame on single-threaded wasm, so the old world stays on screen until the new one is
 swapped in. `world.busy`, `world.progress` (0–100) and `world.phase` (the stage and its percent)
-follow it, and `world.request: stop` ends it, keeping the world shown. Its trees and rocks draw
+follow it, and `world.request: stop` ends it, keeping the world shown. `world.request: save` (the
+panel's Save) writes the world shown as a bundle to `world.save.file` (the node's `save_as`, else
+its dataset's name): a directory beside the document, or a zip when it ends in `.zip`, in a browser
+a zip download; `world.save.exports` adds `export/` for other software (the terrain as
+`terrain.glb`, a 16-bit `heightmap.png` and `heightmap.json`), and `world.save.status` says where it
+went or why not. The saved world loads again as a `data:` entry (`uri:` it, `as: city_bundle`), the
+same world: the same hash. Joined to a relay whose document runs the same node (its
+`conf.rooms.<room>.world_on` lists it; `GeneratedWorldRelay`), the node makes the world the relay
+has, and its Regenerate, Randomize and `world.auto` edits go to the relay as
+`(room-call "server.regenerate" NODE PARAMS)` instead of being made here: the relay makes them for
+a connection `server.rcon` made an admin and refuses anyone else, and the world it makes comes back
+to every client through `world_on`. `world.request: rcon` sends `world.server.password` as
+`server.rcon` (and clears it), and `world.server.status` says what the relay did. Its trees and rocks draw
 with level of detail: a `LodGraphicsNode` ladder per 128 m ground cell (under `<id>_props`,
 `<id>_foliage` and `<id>_needles`), chosen each frame by screen error. Every rung is the same
 full-maturity tree, coarser further off: rung 1 from 260 m (three-sided tubes, none under 5 cm, the
@@ -2476,6 +2654,40 @@ scene:
     rotation). A parted look's wheels move the same way (above); a one-piece model's wheels are
     the mesh's and do not move. A `type: vehicle_preview` node (props `vehicles:`, the catalog's root, and
     `spin:` in degrees a second) draws the selected archetype in the spawn's colours.
+  - **At scale: entity layers.** Past 32 entities the world's vehicles are drawn as one mesh per
+    archetype and level of detail, and only the nearest 8 to the camera (and the one it follows)
+    as their own nodes, with their wheels and labels as above (the others' wheels stand still: a
+    parted look's in a tyre's dark)
+    ([`entity_view.h`](../inc/cvc/gl/ariadne/entity_view.h); the fleets roadmap's FL2). A
+    `type: entity_layer` node says how:
+
+    ```yaml
+    - node: city_bodies
+      type: entity_layer
+      of: { fleet: city }                     # or { archetype: humvee } | { team: 3 } | all
+      layer: bodies                           # the bodies (flags, goals, trails, ... are to come)
+      lod: { near_cap: 10, px: [24, 8, 3] }   # or lod: false
+      promote: 8                              # their own nodes: the followed, then the nearest
+      threshold: 32                           # a layer of at most this many: each its own node
+    ```
+
+    - A fitted model look (a file with `fit`, a data look) has four rungs: the model, textured,
+      and three quadric-decimated copies in each entity's colour. An entity on screen takes the
+      finest rung its size there allows (a radius of at least `px` pixels; at most `near_cap` on
+      the finest, 28 and 72 on the next two), and one off screen is drawn by none. A box look is
+      one mesh.
+    - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
+      `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
+      another is a fifth nearer, so a moving camera does not swap them frame by frame.
+    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
+      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
+      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - The meshes are posed from the physics binding's poses, between steps, whether the frame
+      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      entities the same way (`room_view`, from its entity playout, under node `room_entities`),
+      the vehicle it drives among the promoted.
+    - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
+      node, and 800 take 8 ms of drawing, where they took seconds.
   - **The panel.** `vehicle_selector.ari`: the vehicle, its stats, a preview viewport onto a
     `scenes:` entry holding a `vehicle_preview` node (its header shows one), the settings, the
     controller and policy, the identity, Spawn, and the spawned vehicles with Remove and Clear.
@@ -2950,6 +3162,12 @@ data:                                    # the app loads the data
     - { name: membrane, color: [1, 0.2, 0.2], radius: 2 }
   points: { data: seeds }                # point classes (item: classes), or { state: <key> }
   session: { data: last }                # a session to apply (item: session), or { state: <key> }
+  segment:                               # the Segmentation tab's keys (grid.segment.*)
+    t_low: 72                            # cvc::seeded_segmentation_params' fields
+    automatic: none
+    opacity: 0.6                         # cvc::volume_grid_segment_view_params' fields
+    mesh: { smoothing: 8 }               # cvc::class_surface_params' fields
+  request: segment                       # one request, run once the volume is there
   objects:                               # the contour objects it starts with
     - { name: axon, color: [0.2, 0.8, 0.3], interpolation: spline, samples: 5 }
   contours: { data: traced }             # contours the app holds (item: contours), or { state }
@@ -2972,11 +3190,13 @@ seeds its key only while the key is empty:
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
-| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane); the contours': `tile`, `stop_tile` (and `stop` while a tile runs), `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane), `segment` (the Segmentation tab's run, below), `stop` (ends what runs: a segmentation, keeping the last result, and a tile); the contours': `tile`, `stop_tile`, `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
+| `busy`, `stoppable`, `progress`, `phase`, `status`, `stats.work_ms`, `pid` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), while a `segment` runs (a tile's are under `tile.*`) |
+| `segment.*`, `segment.mesh.*` | the Segmentation tab's parameters: `cvc::seeded_segmentation_params` (`t_low`, `t_high`, `gamma`, `automatic`, ...; `variable` and `timestep` written as `source.var` and `time` when a run starts), `cvc::volume_grid_segment_view_params` (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`, `live`) and `cvc::class_surface_params` under `mesh` (`smoothing`, `close`, ...). `t_low`'s and `t_high`'s `min` and `max` properties are the volume's range |
+| `segment.rows`, `segment.rows.<i>.{name,color,visible,voxels,triangles}`, `segment.info.*`, `segment.warnings` | the last result's classes as rows (editing `color` or `visible` recolours or hides that class's labels and surface), and what it labelled |
 | `objects`, `objects.<i>.{name,color,interpolation,samples,visible,curves,points,triangles}`, `objects.current` | the contour objects as rows a `list:` binds (`interpolation` is `linear` or `spline`, `samples` a spline's points per span; `curves`, `points` and `triangles` are written); `current` is the object a click draws |
 | `contour.*`, `contour.{selected,info,active}` | `cvc::volume_grid_contour_params`: `show`, `control_points`, `point_size` (voxels), `line_width`, `snap`, `show_3d`, `show_surfaces`, `surface_opacity`, `auto_tile` and `source` (a key whose data channel holds a `contour_stack` or a `grid_contours`, followed); published: how many control points are selected, a summary, the curve being drawn |
 | `tile.*` | `cvc::tile_params` (lengths in object units) and the tile job's keys (`busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms`, `pid`, `label`, `warnings`): under `tile`, so a tile runs beside the segmentation's job |
-| `busy`, `stoppable`, `progress`, `phase`, `stats.work_ms` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), for the jobs later phases add |
 
 The point classes, the selection, the session and the volume are on the data channel at
 `grid.points`, `grid.selection` (`std::shared_ptr<const cvc::point_classes>`), `grid.session`
@@ -3002,14 +3222,35 @@ beyond the planes, which the slice views hide: the volume itself, drawn by the r
 `display.render` picks (`none` by default; `vtk`, `volren` or `volslice`, a
 [`VolumeRenderNode`](../inc/cvc/gl/VolumeRenderNode.h) as `volume_render` below has, through the
 grid's transfer function, so one `tf_editor` colours the planes and the volume; the component's
-Transfer function tab picks it), the contours' curves and tiled surfaces, and later phases'.
-Until the first volume arrives the planes and that group are hidden,
+Transfer function tab picks it), the contours' curves and tiled surfaces, and the segmented
+classes. Until the first volume arrives the planes and that group are hidden,
 so a view frames once there is something to show, and the scene has work pending while a dataset
 the node follows is loading. The editing itself is core libcvc
 ([`volume_grid.h`](../inc/cvc/volume/volume_grid.h): `cvc::point_class_editor`,
 `cvc::point_class_gestures`, the rows and the session format), the same natively, in wasm and from
 pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
 `test_pycvc_volume_grid.py`). `examples/ariadne/documents/volume_grid.ari` is the demo.
+
+**Segmentation** ([`VolumeGridSegmentation.h`](../inc/cvc/gl/VolumeGridSegmentation.h), the
+component's Segmentation tab, roadmap §5). `request: segment` segments the grid's volume, seeded by
+its point classes of the shown variable and timestep (`cvc::segment_seeded`, GenSeg's fast
+marching), then makes each class's surface (`cvc::class_surfaces`), as one sliced task on the app's
+scheduler: the views stay live, the job keys show its progress, and `stop` ends it keeping the last
+result. The labels draw on each plane as a see-through `labels` layer in the classes' colours (the
+point classes' at the run), while the fronts advance (`segment.live`) and then for good; each
+class's surface draws in a `segments` group under `<id>_surfaces`, so a view with
+`show: [surfaces]` shows the classes alone. The result is on the data channel:
+`grid.segment.labels` (a UChar `cvc::volume`, 255 none), `grid.segment.classes` (a
+`std::shared_ptr<const std::vector<cvc::volume>>`, each class's voxels named after it),
+`grid.segment.border` (`cvc::point_classes`) and `grid.segment.surfaces.<n>` (class n's
+`cvc::geometry`). The app saves them: `(data-save "graphics.root.children.grid.grid.segment.classes"
+"segments.rawv" "volume")` writes the classes as one file's variables (VolumeGridRover's
+`SegTmp.rawv`), as the tab's Save classes does. A new volume clears the result. The data side is
+core libcvc ([`volume_grid_segment.h`](../inc/cvc/volume/volume_grid_segment.h),
+[`class_surfaces.h`](../inc/cvc/volume/class_surfaces.h)) with pycvc and `segment.surfaces` in the
+DSL (`volume_grid_segment_test`, `class_surfaces_test`, `cvcgl_volume_grid_segment`,
+`test_pycvc_volume_grid_segment.py`). `examples/ariadne/documents/volume_grid_segment.ari` segments
+the bones of VolRover's Visible Human CT.
 
 **Contours** ([`VolumeGridContours.h`](../inc/cvc/gl/VolumeGridContours.h), P10). With the
 `contours` tool a click adds a point to the current object's curve on that plane: at the end being
@@ -3301,7 +3542,7 @@ entry warns. An entry is one of:
   | `button.selected` | `button:` takes `selected:`, the chosen button of a row drawn pressed in (§5.27); ImGui, FTXUI and tvision |
   | `input.mouse`, `input.keyboard` | pointer input; key and text input |
   | `ui.group_click` | a group with `on_click:` is one item over its whole area, and `hover: highlight` lights it (§5.19); ImGui, FTXUI and tvision |
-  | `ui.context_menu` | `context_menu:` on a window, a group, a viewport or the document opens a menu: a right-click or a long press in a window, the Menu key or Shift+F10 in a terminal (§5.28); ImGui, FTXUI and tvision |
+  | `ui.context_menu` | `context_menu:` on a window, a group, a viewport or the document opens a menu: a right-click or a long press in a window, the Menu key or Shift+F10 in a terminal (§5.30); ImGui, FTXUI and tvision |
   | `raster.bitmap` | images show in real pixels (a GL window, or a kitty or Sixel terminal) |
   | `input.on_change` | `message_input:` takes `live: true` and `on_change:` (the draft as it is typed), and a draft the document writes while it is edited (§5.15) |
   | `term`, `term.kitty`, `term.sixel` | a text terminal; one that speaks kitty graphics; one that draws Sixel |
@@ -3435,8 +3676,10 @@ How each backend does it:
   wherever it opened (one opened near the right edge is moved in, not wrapped there). A plain
   `text:` of several words wider than it wraps at a word there; one that fits, or a single word,
   draws as always. A picture with a fixed `size:` (an `image:`, a video's box) wider than it is drawn
-  smaller, its shape kept. So a phone's window, a little over 400 px wide, has no horizontal scroll
-  bar for a document laid out for 600.
+  smaller, its shape kept. A `tabs` bar fits the line's room, left of a vertical scroll bar: tabs
+  that cannot shrink into it scroll there behind arrows, and the ones scrolled out are not the
+  line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
+  little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
   and cascade new windows instead of flowing them. A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
@@ -3698,6 +3941,8 @@ windows:
   and `status:` says `unsupported` (or `remote`, `failed`) where a picture would say `ready`.
 - **`fullscreen: true`**: a click on the picture shows it alone, filling the window (or the
   terminal), until Esc (§5.13).
+- **Save image...** is in its context menu: the user saves the picture to a file (§5.29).
+  `save: false` leaves it out.
 - **`badge:`** is a label shown over the picture, with the picture dimmed under it. A media
   grid shows "+3" this way on its last tile, for the pictures it leaves out:
 
@@ -3840,6 +4085,7 @@ has loaded, or when it failed, nothing is drawn behind the content.
 - **The controls** are drawn with the widgets every backend has: Play / Pause, a seek slider
   with `m:ss / m:ss` as its value, Mute and Loop. "Open" is added where the media can't play here.
   They look and work the same in ImGui, FTXUI and tvision.
+- **Save video...** is in the picture's context menu, with controls (§5.29).
 - **Loop** starts checked when `loop: true`. Unchecking it lets the player stop at the end from
   then on, and checking it makes it start again there. A new `src:` for the same widget (a
   repeat's row showing another post) starts as the box is. With `controls: false` there is no box,
@@ -4142,6 +4388,9 @@ back (a window reopened) keeps its place.
   holds where libcvc has this. `ariadne_ftxui_test`'s `MessageFieldLiveDraftAndACompletion` and
   `cvcgl_imgui_chat_widgets` type into one.
 
+Both have the context menu of §5.28. On a `text_view:` it is Copy line (the message under the
+pointer), Copy all and Select text...; on a `message_input:`, Cut, Copy, Paste and Select all.
+
 ### 5.16 Conference chat: the chat verbs and the chat component
 
 In a conference, the relay (arisrv) keeps the chat. Each client is pushed what it may read:
@@ -4325,14 +4574,23 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 | encoder | Writes |
 |---|---|
 | `bytes` | the bytes (a `DataBytes` or a string) as they are |
-| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...) |
+| `volume` | a `cvc::volume`, in the format FILE's extension names (`.rawiv`, `.mrc`, ...); or a `std::vector<cvc::volume>` as one file's variables, in a format that holds several (`.rawv`) |
 | `point_classes` | `cvc::point_classes` as a `.vgr` |
 | `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
 | `contours` | a `cvc::contour_stack` in a one-file format, by FILE's extension: `.cvcc`, `.contour` or `.pcd` (a `.ser` or `.config` writes files beside it, and is refused) |
 
 A relative FILE is the document's directory's. A document whose directory is a URL (an `https://`
 one) writes no file. In a browser the file downloads under its name instead. A host adds encoders
-with `register_data_encoder`. So a node that edits data in memory reads and writes no file itself:
+with `register_data_encoder`.
+
+A whole dataset saves as its files: `(data-save-files NAME TARGET [EXPORTS])`, or a host's
+`data_save_files`, writes every file the store holds for it at its path, as a directory TARGET, or
+one zip when TARGET ends in `.zip` (always a zip download in a browser). A world's bundle saved so
+loads again as the same world. EXPORTS adds a world's files for other software under `export/`
+(`world::city_bundle_exports`): the terrain as `terrain.glb` (a mesh per surface, at most 1025
+samples a side), its heights as a 16-bit grey `heightmap.png` at full size, the north row at the
+top, and `heightmap.json` (the size, bounds, spacing, height range and water level). The bundle's
+hash leaves `export/` out. So a node that edits data in memory reads and writes no file itself:
 a `volume_grid` shows the volume the app loaded, and the app saves the points the grid publishes.
 
 **Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
@@ -4400,6 +4658,9 @@ or host can write as well.
   `/` the root's) holds on its data channel as FILE, through the encoder AS (else the payload's
   type picks one), and returns `#t`; it raises, saying why, when PATH holds nothing, no encoder
   takes it, or the file can't be written.
+- `(data-save-files NAME TARGET [EXPORTS])` saves the dataset's files as a directory TARGET, or a
+  zip for `TARGET.zip` (in a browser, a zip download), with a world's `export/` files when EXPORTS
+  is true, and returns where it wrote; it raises, saying why, when the dataset has no files yet.
 
 **Hosts.** In C++, use `AppRuntime::data_store()`. In Python:
 - `pycvc.data_load` and `data_wait` start and wait for a load;
@@ -4469,7 +4730,7 @@ windows:
 | `caption` | A label in the view's top-left corner. |
 | `input` | `false` makes the view ignore the mouse. Otherwise a drag orbits its camera (the middle or right button pans), the wheel zooms, and a double-click puts the camera back where it started. `pick` makes the left button pick instead of orbiting (below); the middle and right buttons still pan, and the wheel still zooms. The view is outlined while the pointer is over it. |
 | `pick` | With `input: pick`, the state key a pick writes under (bound like `bind:`). Defaults to `viewers.<view>.pick`. |
-| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. |
+| `on_pick` | With `input: pick`, an action run on each pick (a program, or a bare name for a host handler), with an `event` dict of the same fields. The picked node's own `on_pick:` (below) runs as well. |
 | `pointer` | A state key (bound like `bind:`) the view writes a pick's fields under, with `phase` `hover` and `button` 0, whenever the pointer moves over it with no button down: a probe that follows the pointer. In an orbit view each move costs a cell pick. |
 | `refresh_hz` | Draw the scene at most this many times a second, and show the last picture in between (below). `0` or unset: every frame. |
 
@@ -4492,8 +4753,8 @@ under the `pick:` key:
 - `node`: the id of the node it hit;
 - `i`, `j`, `k` and `value`: on a `volume_slice` node, the voxel the point lies in and its value
   (empty elsewhere), and `axis` (`x`, `y` or `z`), the axis that slice looks down;
-- `tags`: the node's own `tags:`, space-separated (in a right-click menu's `event`, a list,
-  §5.28);
+- `tags`: the node's own `tags:`, space-separated (in a context menu's `event`, a list,
+  §5.30);
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`;
 - `seq` last: one more on each pick, so a watcher sees two identical clicks.
@@ -4502,6 +4763,25 @@ under the `pick:` key:
 example, so a tool such as a spawn-point editor is a program. A host can ask for the same hit test
 at any point with `SceneViews::pick(view, x, y, hit)`. A terrain, a generated world and a body are
 nodes like any other, so a click on the ground gives a point on it. (`cvcgl_ariadne_pick`.)
+
+**A node's own `on_pick:`.** A node can carry an `on_pick:` (§5.4), so the scene says what a
+click on each thing does and the view need not sort picks by node:
+
+- **Which node's.** A press runs the `on_pick:` of the node it hits or, when that node has none,
+  of its nearest ancestor that has one: a group's handler covers its children, and a child's own
+  replaces it. A press that hits no such node runs none. In a slice view a press past the
+  volume's edge lands on the plane, not on the node.
+- **The press is the node's.** The node a press lands on keeps it: its `on_pick:` runs again on
+  each `drag` and on the `up`, wherever they land, with the same fields. `node` and `hit` say what
+  is under the pointer then, and `x`, `y` and `z` where, so a program can drag what it picked.
+- **Scope.** It runs in the document's scope, as `on_key:` does (§6.3): its keys resolve against
+  the document's prefix and it calls the document's functions, wherever the viewport sits, a
+  `load:`ed module's included.
+- **With the view's.** The view's own `on_pick:` runs too, in the view's scope. The two are
+  separate programs, so neither waits for the other: do not count on which runs first.
+  `SceneViews::pick` reports the node's in `PickHit::on_pick`.
+
+(`cvcgl_ariadne_node_pick`.)
 
 **Slice views.** `mode: slice` is a parallel view straight down one axis with no rotation
 (`CameraController::Mode::Slice`): the plane a `volume_slice` node (§5.4) lies in, with the
@@ -4608,8 +4888,20 @@ second `vtkVolume` with its own property and its own mapper, which uploads the v
 time: a GPU volume mapper keeps one set of transfer-function tables, for the property it last drew.
 A `volslice` node's slices face the camera they were swept for. A view from a camera of its own
 draws slices of its own, swept for its camera, over the node's shaders, textures and transfer
-function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own. A `volren` node's
-picture is raycast for the main view and composited into its pixels, so it is in the main view only.
+function (`VolSliceNode::viewProp`); a `camera: main` view draws the node's own.
+A `volren` node draws in every view, `camera: main` ones too. Its picture is raycast for one camera
+at one size, so each view raycasts the volume for its own camera at its own size times
+`volren.resolution_scale` (`VolRenNode::viewProp`), and draws it on a quad of its own, depth-tested
+against what the view draws with that camera's near and far. A view raycasts again only when its
+camera or size, the node's transform or clip planes, or the node's settings change (every frame it
+draws, with `volren.continuous`), never while it is hidden, and no more often than it draws, so a
+view with `refresh_hz` raycasts at most that many times a second. Each view that shows the node
+costs a raycast of its own at its raster: a 360 x 270 view at the default scale of 0.5 casts
+180 x 135 rays each time, beside the main view's. The jobs share the node's raycaster and take turns
+on its worker thread, so views add latency rather than threads; on CUDA they share the device and
+the volume uploaded to it once, and a volume's shadow maps are built once for all of them. A view
+draws the scene without the volume until its first raycast lands. A `volren` node takes no
+`override:` yet.
 `examples/ariadne/documents/viewer_looks.ari` draws one scene four ways: wireframe, X-ray, a plan of
 one layer, and a clay model. `viewer_grid.ari` is four independent cameras on one scene.
 
@@ -4704,6 +4996,55 @@ scene:
     - { node: post, type: geometry, source: { asset: pillar }, transform: { position: [7, 7, 3] } }
 ```
 
+**Prototypes.** `prototypes:` names whole nodes, their children, materials and the rest, that a node
+in any of the document's scenes stands in for with `use: <name>`, as VRML/X3D's DEF/USE and USD's
+prototypes do. Assets share a mesh; a prototype shares a node tree.
+
+```yaml
+prototypes:
+  streetlamp:
+    type: group
+    args: { switch: lamps.on }            # defaults for the {name} tokens below
+    children:
+      - node: pole
+        source: { box: { size: [0.2, 0.2, 5] } }
+        transform: { position: [0, 0, 2.5] }
+        material: { color: [0.25, 0.25, 0.27] }
+      - node: lamp
+        source: { sphere: 0.4 }
+        transform: { position: [0, 0, 5.2] }
+        material: { color: [1.0, 0.9, 0.6] }
+        visible: "{switch}"               # quoted: an unquoted {switch} is a YAML map
+scene:
+  nodes:
+    - { node: lamp_a, use: streetlamp, transform: { position: [0, 0, 0] } }
+    - node: lamp_b
+      use: streetlamp
+      args: { switch: lamps.north }       # its own switch
+      transform: { position: [12, 0, 0], rotation: [0, 0, 90] }
+      tags: [north]
+```
+
+- **The instance** is the prototype's node with the using node's keys over it. Each key the
+  using node gives replaces the prototype's: its id, `transform:`, `tags:`, `visible:`, `repeat:`,
+  a `source:` of its own. `material:` is the exception, merged key by key, so `material: { color }`
+  recolours an instance and keeps the rest; and `children:` it gives come after the prototype's.
+- **Args.** `{name}` tokens in the prototype's values are filled in from its own `args:` (the
+  defaults), then the using node's `args:`, as a unit's are (§6.1). An arg is a string, so it
+  fills in a value, not a list or a map. A token neither gives stays as written, so a `{i}`
+  reaches `repeat:`: `use:` on a `repeat:` node makes a copy of the instance per index.
+- **Shared meshes.** Each part of a prototype that draws a file, a URI or a primitive is read and
+  fitted once for all its instances, and drawn from one set of GPU buffers, as an asset's nodes
+  are. Not shared: a part whose source or fit has a `{name}` token (each instance may differ), and
+  a part with a `body:` or a `world:` (physics takes a primitive's shape from its source).
+- **Each instance is its own node**, with its own state under its id (`graphics.root.children.lamp_a`,
+  and its parts under it), its own transform, material and tags, so a script moves or recolours
+  one instance and not the others.
+- **Nesting.** A prototype's nodes may `use:` other prototypes. A prototype within itself, at any
+  depth, is not expanded, with a warning, and so is a name no prototype has.
+- **The schema** (§14) checks a using node as it is written, its `use:` and `args:` with its other
+  keys, and a prototype only for its `args:`: its values may hold tokens its instances fill in.
+
 **Scenes.** `scenes:` declares scenes of their own beside the document's `scene:`. Each entry takes
 the keys `scene:` does: nodes, lights, shadows, background, chrome, cameras. A viewport shows one
 with `scene: <id>`, from its own camera or a named camera that scene declares. Each scene is a
@@ -4738,8 +5079,8 @@ drawn: a closed or collapsed window, another tab. Every AriRuntime host (arigl, 
 widget. A terminal backend shows its placeholder. A new document removes the last one's views.
 
 Limits:
-- A `volren` node is in the main view only. A `volslice` node takes `transform` but no restyling;
-  a `type: volume` node takes `opacity` and `transform`.
+- A `volren` node takes no restyling: no `override:` entry applies to it. A `volslice` node takes
+  `transform` but no restyling; a `type: volume` node takes `opacity` and `transform`.
 - The view lies under the whole UI. Another window behind the viewport's window still draws over
   the view.
 - A view's shadows come from the main view's maps, unless it bakes its own. A node a view leaves
@@ -5138,7 +5479,8 @@ menubar:
   its tone is the worst unread level. Its menu lists the newest 8 entries: an unread mark, the level's icon,
   the source, the text's first line and the time. A click on an entry marks it read and runs its
   ON. Then come *Mark all read*, *Clear all*, and *Show all...*, which opens the Notifications
-  window with every entry (`tree._notifications.open`; its X closes it).
+  window with every entry (`tree._notifications.open`; its X closes it). A right-click on an entry,
+  in the menu or the window, offers Copy, which copies its whole message (§5.28).
   - The host decides whether it shows by default (`Runtime::set_notifications`, on unless a host
     turns it off).
   - A document's top-level `notifications: true|false` overrides the host; `always` is true, the
@@ -5223,10 +5565,27 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
   their instances, each with a per-instance copy of its bar. The walk skips a menubar in place when
   it is drawn in an application's scope.
+- **Mirrored in the state tree:** the Runtime writes the list under the document's prefix, as the
+  feed mirrors itself to `notify.*` (§5.24), for a Processes window or a launcher to read:
+  `ariadne.apps.<key>.name` (as the menu names it, a loader's `name:` included), `.scope` (its
+  prefix from the document's: `includes.fe_lab`) and `.running` (1, or 0 while it is quit), and
+  `ariadne.name`, the document's own `meta.name`.
+  `<key>` is the scope without its `includes` segments, joined by `_`: `fe_lab`, a repeated
+  mount's `cam_0`, a nested mount's `outer_inner`. It is written as the list changes, Quit and
+  reopening included; an application gone from the tree is taken out (`mirror_apps`).
+- **Whose a process is:** every process the Runtime starts records its context's chroot and the
+  document's prefix, so `(ps)` and `(inspect)` give it a `scope` from the document's prefix: `""`
+  for the document's own `on_tick:`, actions and tests, `includes.fe_lab` for the application's,
+  the children they spawn included (STATE_EXEC_DEVELOPER_GUIDE.md, "Whose a process is").
+  `components/processes.ari` lists them by application (§6.5). With its chroot recorded, an
+  action's async calls post their progress under its chroot, as
+  [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) 3.10 says they do.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
-  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart` and
-  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`, and the loader's
-  `ALoadedDocumentIsNamedByItsMeta`, check it. `examples/ariadne/documents/apps_demo.ari` loads
+  `QuitKeepsALoadedDocumentsStateAndRestartResetsIt`, `TwoMountsOfOneDocumentAreToldApart`,
+  `ADocumentWithoutAMenubarShowsItsLoadedDocumentsMenus`,
+  `TheApplicationsAreMirroredUnderTheDocumentsPrefix`, `ProcessRowsSayWhoseTheyAre` and
+  `ProcessesListsByApplicationAndKillsARow`, the loader's `ALoadedDocumentIsNamedByItsMeta`, and
+  `ari test src/ari/tests/processes_component.ari` (ctest `ari_processes_component`) check it. `examples/ariadne/documents/apps_demo.ari` loads
   `tray_demo.ari` and `apps/counter.ari` twice.
 
 ### 5.26 Colours from state: `color:` and `background: { color: }`
@@ -5311,7 +5670,9 @@ colour off. A `color` picker's key (`"r,g,b"`) can colour another widget directl
   group, a window or an overlay. A `combo` doesn't take one. The colour picker (`color: Tint`),
   a `tf_editor`'s `color:` and a custom type's `color:` are their own keys, as before. Since
   `color` is the last widget type the loader looks for, `color:` beside `button:` is that button's
-  colour.
+  colour. The picker shows a field per channel; with `fmt: hex` it shows one `#rrggbb` field beside
+  its swatch instead (`Backend::color_hex`; a backend without one draws the default picker), as the
+  `volume_grid` component's class tables do. Its key holds `r,g,b` either way.
 
 **Backends.**
 
@@ -5377,10 +5738,222 @@ current one to look pressed:
 `SelectedButtonIsMarked` the terminal's look; `cvcgl_imgui_group_click` taps a selected
 button with a picture through ImGui's own input.
 
-### 5.28 Right-click menus: `context_menu:`
+### 5.28 Copy, cut and paste: the context menu
 
-A window, a group, a `viewport` and the document itself can each have a menu that a right-click
-opens where the pointer is. Its items are a menu's `items:` (`menu_item`, `menu` for a submenu,
+Text in every host has a context menu, with nothing in the document asking for it. A right-click
+opens it. So does a long press on a touch screen (half a second, the finger still), and Shift+F10
+or the Menu key on the focused widget in a terminal. What it offers depends on what is under the
+pointer:
+
+| Under the pointer | The menu |
+|---|---|
+| A field: `input_text:`, `message_input:` | Cut, Copy, Paste, Select all |
+| A text: `text:`, a bound value, a rich text (§5.20) | Copy, Select text... |
+| A `text_view:` (a chat log, a console) | Copy line, Copy all, Select text... |
+| A notification: the bell's entry, a Notifications window line (§5.24) | Copy |
+| A picture by URL or file (`image:`), a `video:` | Save image..., Save video... (§5.29) |
+
+A document adds items of its own over a window, a group, a viewport or the main view with
+`context_menu:` (§5.30): they follow these entries in the same menu, under a rule, and over
+anything without entries of its own they are the menu.
+
+- **Cut and Copy** take the selection, or the whole text when nothing is selected. A `password:`
+  field has neither.
+- **Paste** puts the clipboard's text at the cursor, over the selection. A one-line field drops
+  the text's line breaks. A multi-line `message_input:` keeps them, as LF.
+- **Copy on a value** (a bound `text:` with a label) copies the value, not "label: value".
+- **Copy line** copies the line under the pointer: in a chat log, the message it is on.
+- **Copy on a notification** copies the whole message, every line of it, not the one line its
+  entry shows.
+- **Select text...** shows the text in a read-only field in a window of its own. Select a part
+  of it there (drag, Shift with the arrows, Ctrl+A or its Select all), then copy it with its
+  Copy, its context menu or Ctrl+C. This is how to copy part of a long message.
+
+On a touch screen the menu opens under the finger. It takes no tap until the finger has lifted,
+so the lift that ends the long press picks nothing.
+
+How each host does it:
+
+- **ImGui, natively** (`arigl`, cvcGL apps): the system clipboard. That is SDL's under cvcGL's
+  window, Wayland included. Under VTK's own window it is the platform's: Win32 through ImGui,
+  NSPasteboard, or an X11 selection. Ctrl+X, Ctrl+C, Ctrl+V and Ctrl+A work in a field as they
+  always did (Cmd on a Mac). The menu edits through the field's own callback, so ImGui's undo
+  (Ctrl+Z) takes back a Cut or a Paste.
+- **The arigl-web page**: the browser's own menu stays off the canvas.
+  - Copy is `navigator.clipboard.writeText`.
+  - Paste is `navigator.clipboard.readText()`, which answers later; the text goes into the field
+    when it does. Chrome asks the user once for the permission. Firefox and Safari show their own
+    Paste button by the pointer each time, which the user clicks.
+  - Safari allows these calls only inside the click itself, and ImGui sees a click a frame after
+    the browser does. So the page makes the call in the pointer release over the menu item
+    (`cvc::gl::clipboard::arm`).
+  - When the browser refuses (the permission denied, its prompt dismissed, an `http://` page),
+    the field takes the focus and a note under it says to press Ctrl+V. Ctrl+V works as it always
+    did, through the page's `paste` event.
+- **FTXUI** (`ari`):
+  - Copy is an OSC 52 escape, as `(clipboard-set)`'s is (§10.7).
+  - Paste asks the terminal for the clipboard with an OSC 52 read
+    (`ESC ] 52 ; c ; ? ESC \`), and the answer is typed into the field. xterm with
+    `allowWindowOps` answers, and foot, kitty and iTerm2 do once the user allows it. Most
+    terminals stay silent, so after 3 seconds the tooltip line says to use the terminal's own
+    paste (Ctrl+Shift+V, Shift+Insert or its menu). That paste types into the focused field as
+    it always did.
+  - A field selects with Shift and the arrows, Home and End. Typing replaces the selection.
+  - For part of a text, use the terminal's own selection. The program has the mouse, so that is
+    Shift+drag in most terminals.
+- **The ari.html page** (xterm.js): it answers the OSC 52 read with
+  `navigator.clipboard.readText()`, as above. While the program has the mouse, a right-click is
+  the program's, not the browser's menu.
+- **tvision** (`ari run --backend tvision`): Copy and Paste use tvision's `TClipboard`. That is
+  the system clipboard on Windows. On Unix it is `wl-copy`, `xsel` or `xclip` when there is a
+  display, else OSC 52. A Paste arrives as a paste of keys into the focused field. The bell's
+  menu is tvision's own menu, which has no context menu, so copy a notification from the
+  Notifications window (Show all...).
+
+For a backend: the core calls `Backend::next_item_copy(TEXT)` just before an item whose Copy is
+not the text it shows (a notification's entry), and the item after it copies what it shows again.
+Each backend draws its own menus. `ImGuiBackend::context_item_drawn` reports each item's rect, for
+a test.
+
+The tests:
+
+- `cvcgl_imgui_context_menu`: ImGui on a bare context, driven by the mouse and the keys.
+- `ariadne_ftxui_test`'s `ARightClickOnATextOffersCopy`, `AFieldsMenuCutsCopiesAndPastes`,
+  `ATextViewsMenuCopiesALineOrAll`, `ANotificationsEntryCopiesItsWholeMessage` and
+  `APasteWithNoTerminalToAskSaysHowToPaste`.
+- `ariadne_term_graphics_test`'s `Osc52ReadsAndItsAnswer`.
+- `ariadne_runtime_test`'s `ANotificationsEntryCopiesItsWholeMessage`.
+- In a browser: `src/arigl/web/test/arigl_web_clipboard.mjs` runs arigl-web in headless Chrome,
+  grants it the clipboard, and right-clicks through the page's own input. It covers Copy, Paste,
+  Cut, and a refused read followed by Ctrl+V. On ari.html it uses Shift+F10 and Paste through the
+  OSC 52 read.
+
+### 5.29 Saving a picture or a video: Save image..., Save video... and `save-url`
+
+An `image:` whose picture comes from a URL or a file (§5.11) has **Save image...** in its context
+menu (§5.28), and a `video:` has **Save video...**. As with Copy, the document asks for nothing.
+A right-click opens the menu, or a long press on a touch screen. In a terminal, Shift+F10 or the
+Menu key opens it on a picture that takes the focus (`fullscreen: true`, or a clickable group
+around it).
+
+These have no Save: a picture the host published by name, a decorative video (`controls: false`,
+or a video URL in an `image:`), an `audio:`, a `background:`, and a button's or a tray icon's
+picture. `save: false` on an `image:` or a `video:` leaves Save out of its menu:
+
+```yaml
+- image: ""
+  bind: post.media.0.url
+  save: false        # no Save image... in its context menu
+```
+
+**The bytes** are fetched as the widget's own fetch got them. They go through the host's network
+and its allowlist (§10.3), with the widget's `auth:` credential. Without `auth:` they come through
+the app's HTTP cache, as the picture's did, so a picture just drawn is not downloaded again while
+it is fresh.
+
+**The name** is the last part of the URL's path, percent-decoded and without its query. Its
+extension is what the bytes are: a PNG, JPEG, GIF, WebP, AVIF, HEIC, TIFF, BMP or SVG picture, an
+MP4, MOV, WebM, Matroska or Ogg video, or an MP3, FLAC, WAV or Ogg sound.
+
+- txwtf's `/uploads/3f9a` holding a PNG is saved as `3f9a.png`.
+- `photo.jpg` holding a PNG is `photo.png`. An extension of no known type is kept, and the type's
+  is added: `view.php` holding a PNG is `view.php.png`.
+- Characters a file name can't hold become `_`, and so does a dot at the start. A name Windows
+  reserves (`CON`, `NUL`, `COM1`...) gets a `_` in front.
+- A URL with no path part is `image` or `video`. A name is at most 200 bytes, its extension kept.
+
+**Where it goes** depends on the host:
+
+| Host | The save |
+|---|---|
+| ImGui, natively (`arigl`, cvcGL apps) | The system's Save dialog (SDL3's, like `file-pick`'s Open, §10.8). It opens in the Downloads folder, with the name filled in and a filter for its type. The host writes the file where the user chose, off the frame, and a notification says `Saved NAME to PATH`. |
+| The arigl-web page | A browser download: a Blob of the bytes, and a click on an `<a download>` for it. The browser's own downloads list shows it. |
+| The ari.html page | The same download. |
+| FTXUI and tvision (`ari`) | A new file in the user's Downloads folder, never over a file already there (`photo (1).png`), and a notification naming its whole path (§5.24). |
+| A GL window without SDL | As a terminal does. |
+
+- **The Downloads folder.** On Windows it is the Downloads known folder. Elsewhere it is
+  `$XDG_DOWNLOAD_DIR`, else `XDG_DOWNLOAD_DIR` in `user-dirs.dirs` (in `$XDG_CONFIG_HOME`, or
+  `~/.config`), else `~/Downloads`. It is made when it isn't there. Over SSH it is the remote
+  machine's. A host can name another folder (`Runtime::set_save_dir`).
+- **In a browser,** the page fetches the bytes as it fetches the picture, so a picture from
+  another origin needs that origin's CORS, and a Content-Security-Policy needs it in
+  `connect-src`.
+- **Safari's click rule.** A browser counts a download as the user's inside a click. Safari counts
+  only the click itself, and ImGui sees a click a frame after the browser does. So arigl-web fetches
+  the bytes when the menu opens, and the page's own pointer release over Save image... starts the
+  download, as §5.28's clipboard calls are made (`cvc::gl::clipboard::arm`). A download whose
+  bytes come after the release (a long video still loading, a `save-url` from a program, ari.html's
+  menu) starts when they come. Chrome and Firefox allow that. Safari may ask whether to allow
+  downloads from the site.
+- **One Save dialog at a time.** Another save while one is open is refused (`a Save dialog is open
+  already`).
+- **A failure** posts an error notification, `Could not save NAME: WHY`: a 404, an origin the host
+  doesn't allow, the network off, a full disk. A cancelled dialog does nothing.
+
+**`(save-url URL [OPTS])`**, and `save-url-async`, give a document its own Save button. It does
+what the menu's Save does, for any http(s), `file://`, `cvc://` or `state://` URL:
+
+```yaml
+- button: Save
+  visible_when: (has? "save-url")
+  on: (save-url (state-get "view.media.url") (dict "auth" "txwtf"))
+```
+
+| option | what |
+|---|---|
+| `name` | the file's name; its folders are dropped, and the type's extension is added or put in place of another type's. Default: from the URL |
+| `mime` | its MIME type. Default: what the bytes are, else what the name's extension says |
+| `auth` | the credential the URL is fetched with, as `image:`'s `auth:` (§5.11) |
+
+An unknown option, a value that isn't a string, or a URL that isn't one of those is an error at
+the call.
+
+Call it from an action (a button's `on:`), as `file-pick` is called (§10.8): a browser counts a
+download as the user's only after a click or a key. The program waits (parks) until the file is
+saved, the user cancelled, or the save failed. The wait is an I/O call: it costs one step, however
+long the user takes. It returns
+`{ok cancelled name size error}`:
+
+- `name` is the file's name as saved: `photo (1).png` when `photo.png` was taken, or the name the
+  user typed in the dialog.
+- The reply never holds the path, as `file-pick`'s gives no path (§10.8). The notification
+  tells the user where it went.
+- In a browser, `ok` means the download was handed to the browser.
+- A failure is a reply (`ok` `#f`, with `error`), as with the http verbs. It is the program's to
+  show: no notification is posted for it.
+
+`(has? "save-url")` is true wherever the document has a backend, and so somewhere to save. A host
+that has the verb has the menu's Save too. The verb is bound as it is in every group, so it works
+from an isolated document's programs (docs/STATE_EXEC_THREADED.md).
+
+For a backend:
+
+- The core calls `Backend::item_save(MediaSave)` right after a picture that has Save.
+- When the user picks Save, the backend hands the `MediaSave` back with `media_save_chosen`. In a
+  browser, arigl-web also calls `media_save_prepare` when the menu opens. The core takes both each
+  drain (`take_media_saves`).
+- `Backend::ask_save_path(SavePathRequest, SavePathDone)` is the host's own Save dialog: ImGui's is
+  SDL3's. Without one, the core has a browser page download the file
+  (`browser_save_stage`/`browser_save_commit`, [`media_save.h`](../inc/cvc/ariadne/media_save.h)),
+  or else writes a new file in the Downloads folder.
+
+The tests:
+
+- `ariadne_ftxui_test`'s `APicturesMenuSavesItIntoTheDownloadsFolder`: Save image... and Save
+  video..., a new file beside one already there, the notification, `save: false`, a decorative
+  video, and Shift+F10.
+- `ariadne_files_test`'s `AriadneMediaSave.*`: the type, the name, a new file, and the Downloads
+  folder, `user-dirs.dirs` and `$XDG_DOWNLOAD_DIR` included.
+- `ariadne_files_test`'s `AriadneSaveUrl.*`: the verb with a host's dialog (a second dialog
+  refused, a cancel), without one, a failure, misuse, and a credential under the host's policy.
+- `ariadne_runtime_test`'s `AriadneIsolatedDocs.SaveUrlAsksForAPathOnTheFramesThread`.
+- `cvcgl_imgui_context_menu`: Save image... in ImGui, then the dialog, and the file it writes.
+
+### 5.30 A document's own context menu: `context_menu:`
+
+A window, a group, a `viewport` and the document itself can each add items of their own to the
+context menu (§5.28). Its items are a menu's `items:` (`menu_item`, `menu` for a submenu,
 `separator`), and they know where the menu was opened: what it is over, and over a scene, which
 node.
 
@@ -5418,27 +5991,36 @@ windows:
         children: [ ... ]
 ```
 
-- **Where it goes:** on a `window:` (and an `overlay:`), a `group:`, a `viewport` (any custom
-  widget is one item; a viewport adds its pick), or the document's top level, where it is the
-  main view's. Elsewhere the loader warns and ignores it. A loaded document's top-level one is
-  ignored with a warning (the main view is the outermost document's); its windows and groups keep
-  theirs.
-- **Which one opens:** the innermost under the pointer. Over a group in a window, the group's;
-  elsewhere in the window, the window's; over no window, the document's. A window without one
-  opens nothing over its widgets, not the document's.
-- **How it opens:** ImGui opens it on a right-click released where it went down (a right-drag
-  pans a view, so it opens nothing), on a touch screen's long press when the finger lifts, and on
-  the Menu key or Shift+F10 at the pointer. FTXUI and tvision open it on the Menu key or
-  Shift+F10, around the focused widget (with nothing focused, the document's), hanging under it,
-  and on a right-click under the pointer; Up, Down, Enter and Esc work it as they work a dropdown.
-  An item that runs closes it.
+- **Where it goes:** on a `window:` (and an `overlay:`), a `group:` (and a `panel:`), a
+  `viewport` (any custom widget is one item; a viewport adds its pick), or the document's top
+  level, where it is the main view's. Elsewhere the loader warns and ignores it. A loaded
+  document's top-level one is ignored with a warning (the main view is the outermost
+  document's); its windows and groups keep theirs.
+- **One menu.** A request to open a context menu (a right-click, a long press, the Menu key or
+  Shift+F10) opens one menu. Over a widget that has entries of its own (a field's Cut, Copy,
+  Paste and Select all, a text's Copy, a picture's Save image..., §5.28 and §5.29) those come
+  first, and then, under a rule, the items of the innermost `context_menu:` around it. Over
+  anything else inside one (a viewport, a checkbox, a group's empty space) the menu is that
+  `context_menu:`'s items alone. With no `context_menu:` around it, the menu is §5.28's, as it
+  always was. So a field in a card shows Cut, Copy, Paste and Select all, then the card's items.
+- **Which `context_menu:`:** the innermost around the widget. Over a group in a window, the
+  group's; elsewhere in the window, the window's; over no window, the document's. A window
+  without one adds nothing over its widgets, not the document's.
+- **How it opens:** as §5.28's does, in every host. ImGui: a right-click (one released after a
+  drag opens nothing over a widget without entries of its own, since a right-drag pans a view or
+  turns the main view's camera), a long press on a touch screen (the menu takes no tap until the
+  finger lifts), and the Menu key or Shift+F10 on the focused field, else at the pointer. FTXUI:
+  the Menu key or Shift+F10 on the focused widget (with nothing focused, the document's), the menu
+  hanging under it, and a right-click under the pointer; Up, Down, Enter and Esc work it. tvision:
+  the same keys and clicks, the menu a popup of tvision's own at that place, so a short window
+  does not cut it off. An item that runs closes the menu.
 - **`event`:** its items' programs (`on:`, and the `on:` of a bound item) and their
   `visible_when:`, `enabled_when:` and `disabled_when:` see an `event` dict, taken when the menu
   opened and kept while it stays open:
 
   | Field | Value |
   |---|---|
-  | `on` | what it was opened over: `group`, `window`, `main`, or a custom widget's type (`viewport`) |
+  | `on` | what the `context_menu:` is on: `group`, `window`, `main`, or a custom widget's type (`viewport`) |
   | `id` | that widget's `id:` (a window without one: its title; `""` over the main view) |
   | `menu` | the menu's `id:` (`""` without one) |
   | `via` | `pointer` (a right-click), `touch` (a long press) or `key` |
@@ -5459,13 +6041,19 @@ windows:
 - In a `repeat:`, `{i}` reaches its items: each row's menu acts on its row.
 - `(has? "ui.context_menu")` says whether the backend opens them (§5.7): ImGui, FTXUI and
   tvision. Elsewhere a document with them still loads; no menu opens.
-- **Mechanism:** the core brackets what a menu is over with `Backend::begin_context_area` /
-  `end_context_area` (inside `begin_window` for a window's body) and asks `begin_context_menu`
-  after it, the main view's after the whole walk. ImGui makes an item's area one group (the item
-  drawn last inside it stays the last item, so `on_click:` and tooltips are unchanged) and opens a
-  popup over it, the innermost area claiming the frame's request first; the terminals record each
-  widget's innermost area and open the one the focus or the pointer is in. `CustomEdit::fields`
-  for a viewport's `on_pick:` and the pick key gained `tags` (space-separated there).
+- **Mechanism:** the core brackets what a `context_menu:` is over with
+  `Backend::begin_context_area` / `end_context_area` (inside `begin_window` for a window's body)
+  and asks `begin_context_menu` after it, the main view's after the whole walk. While the backend
+  says the open menu holds that area's items, the core emits them (`menu_item_action` and the
+  rest). In ImGui the area is one group (the item drawn last inside it stays the last item, so
+  `on_click:` and tooltips are unchanged); a menu §5.28's entries opened on a widget inside it
+  remembers the innermost area, which appends its items to the same popup, and over the area
+  elsewhere the area opens a popup of its own. In FTXUI each widget records its innermost area,
+  and the one context menu holds the widget's entries and keeps the area's items as rows after
+  them. Hosted on tvision (`Options::host_draws_context_menu`), `hosted_context_menu()` hands the
+  menu to the host, which shows it with `popupMenu` and returns the choice through
+  `pick_context_entry`. A viewport's pick key and its `on_pick:` event gained `tags`
+  (space-separated there).
 
 `ariadne_runtime_test`'s `ARightClickMenusItemRunsWithItsEvent`,
 `ARightClickMenuOverAViewportGetsThePickAndItsVisibleWhenReadsIt`,
@@ -5474,12 +6062,13 @@ windows:
 `ContextMenusParseOnWindowsGroupsViewportsAndTheDocument` and
 `AContextMenuInTheWrongPlaceOrShapeWarns` the loader; `ariadne_ftxui_test`'s
 `ShiftF10OpensTheMenuAroundTheFocus`, `TheMenuKeyOpensTheWindowsMenu`,
-`ARightClickOpensTheMenuUnderThePointer` and `ShiftF10WithNothingFocusedOpensTheDocumentsMenu`
-the terminal; `cvcgl_imgui_context_menu` ImGui's right-click, right-drag, long press and Menu key
-through its own input; `cvcgl_ariadne_pick` a right-click on a real viewport (the node and its
-tags in `event`) and on the main view; the `context_menu` golden (§12) an open menu; and
-`ari_run_context_menu_ftxui` / `_tvision` Shift+F10, Down, Enter and Esc in a tmux pane
-(`src/ari/tests/context_menu_test.sh`, Linux CI).
+`ARightClickOpensTheMenuUnderThePointer`, `ShiftF10WithNothingFocusedOpensTheDocumentsMenu`,
+`AFieldInACardOffersItsOwnEntriesThenTheCards` and `AHostedContextMenuIsAModelForTheHost` the
+terminal; `cvcgl_imgui_document_menu` ImGui's right-click, right-drag, long press and Menu key,
+and a text in a card, through its own input; `cvcgl_ariadne_pick` a right-click on a real
+viewport (the node and its tags in `event`) and on the main view; the `context_menu` golden
+(§12) an open menu; and `ari_run_context_menu_ftxui` / `_tvision` Shift+F10, Down, Enter and Esc
+in a tmux pane (`src/ari/tests/context_menu_test.sh`, Linux CI).
 
 ## 6. Composition: include / import / load
 
@@ -5657,8 +6246,10 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours and Transfer function tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -5980,7 +6571,7 @@ standalone configure refuses an SDK without gRPC. For a build of your own, gRPC 
 `cvcpkg install grpc protobuf --prefix <p>`, with `<p>` on `CMAKE_PREFIX_PATH`.
 
 ```
-arigl run      [--terminal] [flags] doc.ari [document args...]
+arigl run      [--terminal] [--world-thread] [flags] doc.ari [document args...]
 arigl snapshot --png out.png [flags] doc.ari [document args...]       # offscreen window frame
 arigl snapshot --mp4 out.mp4 --seconds S [flags] doc.ari [...]        # the scene running, recorded
 arigl snapshot --terminal [--ansi] [--png scene.png] doc.ari [...]    # a terminal frame as text
@@ -5994,6 +6585,29 @@ with `--terminal`). In both modes it routes OS signals to `on_signal:` and exits
 for one the document does not handle. A snapshot's frames run at `--fps` (20 by default),
 so a live stream delivers into them; in a window the scene clock steps a fixed 1/30 s a
 frame rather than the wall time, so its frames are reproducible.
+
+**`--world-thread`** (`arigl run` in a window, native builds): the scene's world (its physics and
+its vehicles' navigators) steps on a thread of its own, in a local server-role holon
+(`cvc::ariadne::world_worker`), rather than on the frame's. The holon's clock follows the scene's
+tick for tick, one quantum at a time, so the world takes the same steps in the same order. The
+frame holds the world's lock from its start to its end: it pumps the document, publishes what
+the worker ran (the `physics.stats` and vehicle keys are written on the frame's thread, as
+always), and draws the bodies from the poses the worker captured; the worker steps while the
+frame renders and waits. A world further behind its clock than the scene allows holds the clock,
+so it runs slower than its speed rather than further behind, as it would on the frame's thread.
+How far is a setting, `scene: clock: { max_lag: <s> }`: seconds of world time at 1x, growing with
+the speed as the clock's catch-up does (by ceil(speed) past 1x), more than 0 and at most 10;
+0.25 s (`cvc::kSimCatchup`) by default. A world the holon can't take (no Jolt, a build without
+threads) stays on the frame's thread, and arigl says so once. Snapshots, `--terminal`, the
+browser (single-threaded or not: its main thread must not wait on a worker's step, so arigl says
+so and ignores the flag), the headless hosts, the gym and arisrv step on their own thread as
+before, bit for bit. On the frame's thread (arigl without the flag, snapshots, `--terminal`, the
+browser, the headless `AppRuntime`) `max_lag` is the catch-up one frame may run (the clock's stall
+guard: a stall's time past it is dropped and counted in `sim.dropped`), so the same document
+bounds its world's lag the same way on each of them. The gym runs the steps it is asked for, and
+the relay keeps its holon's own catch-up. It is the fleets roadmap's D3
+([FLEETS_AND_NIGHT_ROADMAP.md](roadmap/FLEETS_AND_NIGHT_ROADMAP.md)), and OW7's first part
+([ARIADNE_WORLDS.md](roadmap/ARIADNE_WORLDS.md) §18.2).
 
 **The camera from the command line.** The main view's camera is state under
 `viewers.main.camera` (`CameraController.h`): `mode` (0 orbit, 1 fly, 2 track, 3 map), the orbit
@@ -6310,8 +6924,9 @@ event wait that yields with `emscripten_sleep`. Both pages are in the gallery.
 
 What differs from a real terminal:
 
-- The loop yields with `emscripten_sleep`, so the build links `-sASYNCIFY`. A hidden
-  tab throttles timers, which slows redraws and `on_tick`.
+- The loop yields with `emscripten_sleep`, which suspends `main` under JSPI (`-sJSPI`, so the
+  page needs a browser with it: §9.4). A hidden tab throttles timers, which slows redraws and
+  `on_tick`.
 - Ctrl-C reaches the document's `on_signal:` as SIGINT, as in a terminal. Only keys
   the browser lets a page see get through: Ctrl-W / Ctrl-T / Ctrl-N belong to the
   browser. Ctrl-Z is ignored, because a page has no job control.
@@ -6363,6 +6978,7 @@ through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 | [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture, a live video stream and a learning run on a log-y `chart:` (three series, a band, a gap, markers, a play-head), and reads the document's controls |
 | [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
 | [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
+| [`coph.py`](../examples/ariadne/python/coph.py) | (none) | CoPH's crossing demo on pycvc's `NavCophFleet`, libcvc's C++ CoPH with no torch: two learners cross a maze with doors, a few CoPH ticks a frame, sharing packets or not (the Packets checkbox); a top-down picture, each agent's version, policy and energy account, and its distance to goal. No `scene:`, so it runs headless, and in a browser on ariglx-web (`?src=coph.py`) |
 
 Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and
 `--png PATH`; off a window it presses its own buttons and prints what the document shows.
@@ -6551,9 +7167,24 @@ they do on disk ([`web_document.h`](../inc/cvc/ariadne/web_document.h),
 document must be on the page's own origin. The page's `ariadne.config.json` names the
 document, any other origins it may come from, the host flags (the network flags `--net` and `--net-allow`, ...), and
 the extra data files to fetch; both pages read the same file. The URL can only add document
-arguments. A failed load shows what the runtime printed: an error page in arigl-web, the
-terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
+arguments. A download that breaks off (the module, its Python zip, the document or a file it
+names) is fetched twice more past the browser's cache (`cache: 'reload'`); one that still breaks
+fails the load with its name and how much of it arrived. A failed load shows what the runtime
+printed: an error page in arigl-web, the terminal itself in `ari.html`. [CVCGL_WASM.md](CVCGL_WASM.md#arigl-web-the-stock-browser-host)
 has the details, the sizes, and what wasm-mt needs.
+
+**Which browsers.** Every browser build (arigl-web, `ari.html`, ariglx-web, and the gallery's
+demos and `arigl_term`) is built with wasm exceptions and JSPI (JavaScript Promise Integration),
+with no Asyncify fallback ([WASM_JSPI_EXCEPTIONS.md](roadmap/WASM_JSPI_EXCEPTIONS.md)). They
+run in Chrome 137, Firefox 153 or Safari 27, or later. On an iPhone or iPad every browser,
+Chrome and Firefox included, is WebKit, so there they need iOS 27 (iPadOS 27). Each page checks
+for JSPI (`WebAssembly.Suspending` and `WebAssembly.promising`) before it fetches anything of
+the module. Without it, the page says what the browser needs, in place of a load that would
+fail part way: those versions, or iOS 27 on an iPhone or iPad (told by the user agent, and an
+iPad's Mac user agent by its touch screen), and the browser's own user agent.
+`window.ariadneWeb.state` is then `unsupported` and `ariadneWeb.needs` holds the text.
+`arigl_web_smoke.mjs` checks the gate in headless Chrome with `WebAssembly.Suspending` deleted
+before the page's script runs, as Chrome, on an iPhone and on an iPad.
 
 A path the document hands a scene source or a data reader (`source: { file: ... }`) is
 relative to the working directory, not to the document. The browser shell runs in the
@@ -6931,6 +7562,9 @@ on_tick: |
   - Writes reach clients in the order a program makes them. So a live view can watch one key:
     write a section's fields, then its `rev`, and a client holds those fields by the time it
     sees `rev` move.
+- **`server: leave_grace_s:`** is how long the relay keeps a departed participant's subtree in the
+  room tree, in whole seconds (default 300; 0 removes it as its connection ends). One that joins
+  again in time finds what it published still there. `arisrv --leave-grace-s` overrides it.
 - **Rasters.** `(raster-open (dict ... "mirror" "fog.tint"))` with `fog` published keeps its frames
   where every client is sent them; a subscribing client's node wears it with
   `material: { texture: { stream: fog.tint } }` (§5.4, "Live textures").
@@ -8031,6 +8665,8 @@ screen view. The backend answers them, so they work the same in every host built
   only larger. For one picture or video shown alone, use `fullscreen: true` on it (§5.13).
 - `ariadne_ftxui_test`'s `ClipboardSetIsAnOsc52Escape`, `cvcgl_imgui_fullscreen` and
   `MediaPlayer.AFullscreenVideoIsShownAloneAndComesBack` check them.
+- The user copies and pastes with the context menu every host has on text (§5.28), with nothing
+  in the document. Its Paste reads the clipboard; a document's programs cannot.
 
 ### 10.8 Picking and sending files: `file-pick` and `http-upload`
 
@@ -8161,6 +8797,9 @@ chunks at the URL its `/social/files/resumable` call returns:
 the picker over a mock, a real FTXUI terminal and tvision's hosted layout, and the uploads blocking
 and started, with a 409, a 503 and a lost reply. `ari_run_file_pick_upload_{ftxui,tvision}`
 pick and send a file in tmux.
+
+The other way, `(save-url URL)` saves what a URL names to a file the user keeps, as a picture's
+context menu does (§5.29).
 
 ---
 
@@ -8605,3 +9244,115 @@ Interactive behaviour, keys and both terminal backends are tested by driving `ar
 as `src/ari/tests/run_in_tmux_test.sh` (transfix/libcvc#883) does. Scripted input for `snapshot` and `test`, and file
 descriptors as state channels, are on the agenda (transfix/libcvc#894).
 
+---
+
+## 14. Validating a document: the `.ari` schema and `ari validate`
+
+### 14.1 The schema
+
+The `.ari` schema is a JSON Schema
+([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)):
+every top-level block, every built-in widget type and scene node, and the keys and values each
+takes, each described. It is the definition of a document's structure; where this guide and the
+schema disagree, the schema (with the loader beside it) is right. The library carries it
+compiled in (`cvc::ariadne::ari_schema_json()`; `ari schema` prints it), and an install puts it
+at `share/libcvc/ariadne/schema/ari.v1.schema.json`, so an editor can check a document as it is
+written. With the YAML language server (VS Code's YAML extension), a modeline does it:
+
+```yaml
+# yaml-language-server: $schema=../../src/cvc/ariadne/schema/ari.v1.schema.json
+```
+
+What the schema holds a document to:
+
+- **Every map is closed.** A key it does not list is an error: a misspelt key (`bnd:`), a
+  misspelt widget type (`slider_itn:`), a key on the wrong widget (a `commit:` on a button), a
+  misspelt block (`widnows:`). Three things stay open: a key that starts with `x-`, anywhere,
+  which is the author's or a tool's own; a custom widget's keys (`type: gauge`) and a custom
+  scene node's (`type: forest_trees`), which are their handler's; and a top-level block an app
+  registered (`register_ari_block`) or the document declares in `customs:`.
+- **Every value has its type**: a number where the loader reads one, one of the values an enum
+  key takes (`commit: live | release`), a colour in one of the forms §5.26 lists, `[x, y, z]`
+  for a position.
+- **A widget's type is its first type key**, in the loader's order
+  (`builtin_widget_types()`): a `progress:` with an `overlay:` caption is a progress. Two type
+  keys that are not such a pair are an error: in `{button: Go, text: x}` the text wins, and the
+  `button:` is an unknown key.
+- **What it cannot see**: inside a program (`on:`, `init:`, `visible_when:`, ...) it checks
+  only that it is text, and a `bind:` the same; a custom type's own keys not at all. The loader
+  and the runtime check the rest (a program that does not parse, a state key no one writes).
+
+Flags take every spelling the loader reads (`true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+A value written in YAML as `1.5` is a number, and `"1.5"` too: the schema types scalars as the
+loader reads them, not by their quotes.
+
+### 14.2 When a document is checked
+
+A build with the validator (json-schema-validator over nlohmann-json; `have_jsonschema()`,
+`ari info`'s *json_schema*) checks every document it loads:
+
+- the document itself, before anything else reads it;
+- each library it `import:`s, and each fragment it `load:`s (after the mount's `args:`);
+- each `include:` expansion, as a widget, after its args are substituted and its slots filled.
+  A problem there is reported in the unit's own file and line, with the context
+  `include <unit>`.
+
+Each problem is a warning, `ari: schema: <file>:<line>:<column>: <context>: <pointer>:
+<message>`, and a `SchemaIssue` in `LoadResult::schema_issues`. The load goes on: the loader is
+lenient, and a host decides how strict to be. `ari test` fails a document that warns, so a
+tested document is a valid one.
+
+`validate_string(app, yaml)` and `validate_file(app, path)` check a document without loading
+it: its structure, and each of its own `units:` instantiated with the args it declares (a
+`{name}` token only an include site fills is not checked). They resolve nothing.
+
+A build without the validator checks nothing: `validate_*` say so (`checked` is false) and
+loads report no schema issues. CI's libcvc lanes fail when their configure did not find it.
+
+### 14.3 `ari validate`
+
+```
+ari validate [--structural-only] [--strict] [--json] doc.ari...
+ari validate -              # a document on stdin
+ari schema                  # print the schema
+```
+
+`ari validate` checks each document: its structure and units (`validate_file`), then a load
+without running anything (no `init:`, no frame, no network), which checks what the load reaches
+and lists the loader's own warnings. Each problem is a line of its own, file first, as a
+compiler writes them:
+
+```
+doc.ari:11:5: /windows/0: unknown key 'closeable'
+doc.ari:14:9: /windows/0/children/0: unknown key 'bnd'
+doc.ari:16:13: /windows/0/children/0/hi: 'fast' is the wrong type here
+doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or write state
+```
+
+- `--structural-only`: the document and its units alone, nothing resolved (no imports, no
+  fragments): what an editor or a pre-commit hook wants.
+- `--strict`: a loader warning fails the document too.
+- `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
+  column, context, pointer, message), its load error and its warnings.
+
+The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
+the `cvc://` component library, `--component-path`). A document for arigl may name widget types
+`ari` does not have (`viewport`); the load warns about them, and the document is still valid.
+The exit code is 0 when every document is valid, 1 for a schema problem, 2 when a load fails
+(or warns, with `--strict`) or on a usage error, 3 when the YAML does not parse, and 4 when this
+`ari` was built without the validator.
+
+### 14.4 Changing the schema
+
+A key the loader reads goes in the schema in the same change: the test that every shipped
+document is valid (`ariadne_schema_test`'s `EveryShippedDocumentIsValid`) fails until it does.
+The schema keeps to what json-schema-validator implements (draft 7's keywords: no
+`unevaluatedProperties`, no `prefixItems`, no assertion beside a `$ref`), which
+`KeepsToWhatTheValidatorImplements` checks. A map whose every value has a schema (`keys:`,
+`data:`, ...) says so with `patternProperties: {"^.*$": ...}`, never a schema-valued
+`additionalProperties`: the validator reports an error in such a value as one message at the
+map, with no pointer into the value. `additionalProperties` is only ever `false`, closing a map.
+A widget type's schema, `w_<type>`, lists its own
+keys and takes the shared ones by the one pattern every type carries
+(`EveryWidgetTakesTheSharedKeys`); a new widget type also needs its link in `short_widget`, in
+the loader's order, and its entry in `typed_widget` (`EveryBuiltinWidgetTypeHasItsSchema`).

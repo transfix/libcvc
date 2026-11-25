@@ -332,6 +332,11 @@ bool publish_world_on(cvc::app &app, const std::string &room, const SceneWorld &
 // whose hash differs, leaves it not ready, and the statics stay the room scene's. It follows what
 // the relay has on (room_world_on, OW5f): the same world turned on, the same generated worlds
 // made, and the statics again from them.
+//
+// Where the URI does not give the relay's bytes here, it looks for the document by its SHA-256 in
+// the world packs it is pointed at (OW5k, world_pack.h: CVC_WORLD_PACKS when it is made, then
+// add_pack), in that order, and loads it from the first pack that lists it and whose files all
+// match its index; the document's assets resolve inside that pack.
 class world_replica {
 public:
   world_replica();
@@ -339,17 +344,34 @@ public:
   world_replica(const world_replica &) = delete;
   world_replica &operator=(const world_replica &) = delete;
 
+  // A world pack directory to look in after those it has (OW5k). The next source change uses it.
+  void add_pack(const std::string &dir);
+  const std::vector<std::string> &packs() const { return _packs; }
+
   // One frame: the room's world source (when its stamp moved: resolve, check, load and build),
   // what the relay has on (when its stamp moved, or the world was built again: the world turned
-  // on, the generated worlds asked for), then the world's sync (a generated world's colliders as
-  // they become ready), and the statics again when the world on or any node's colliders changed.
-  void pump(cvc::app &app, const std::string &room);
+  // on, the generated worlds asked for, the relay's seas followed), then the world's sync (a
+  // generated world's colliders as they become ready), and the statics again when the world on
+  // or any node's colliders changed. CLOCK: the relay's clock as this client has it (the holon's,
+  // which counts the server's ticks), which the world's sync times what it times on (its storms'
+  // front); null: the app's.
+  void pump(cvc::app &app, const std::string &room, const cvc::world_clock *clock = nullptr);
   // Whether it holds the relay's document; its statics, and their stamp (its own epoch, a
   // revision more each time they change: holon::set_statics takes it).
   bool ready() const { return _ready; }
   const std::vector<avatar_static> &statics() const { return _statics; }
   const section_stamp &stamp() const { return _stamp; }
-  // What it did with the source last: what it built, or why not.
+  // The water with them (OW5j), which a boat's model floats on: the fluid fields its world has
+  // (a water node's), else the still water the relay adds for its boats over the world's grid
+  // (boat_still_water); then its air, the scene's wind with the storms' fronts (OW5q), which blows
+  // on a hull. It changes with the statics, under their stamp, and on its own when the relay's sea
+  // takes a new keyframe or its storms change (OW5q: room_world_on's seas and weathers): then
+  // water_revision() moves, and the new water goes in after the relay's tick water_from_tick()
+  // (holon::set_water), as the relay's world puts it in.
+  const std::vector<cvc::physics::field> &water() const { return _water; }
+  std::uint64_t water_revision() const { return _water_rev; }
+  std::uint64_t water_from_tick() const { return _water_from; }
+  // What it did with the source last: what it built (and from which pack), or why not.
   const std::string &status() const { return _status; }
   // The world it built (null when not ready).
   const SceneWorld *world() const { return _world.get(); }
@@ -359,10 +381,24 @@ public:
   // either. client_pump gives it to the holon (holon::set_vehicle_ground).
   std::function<double(double, double)> ground() const;
   std::uint64_t ground_revision() const { return _ground_rev; }
+  // The relay's document's water and weather nodes' keys, relative to a bind prefix (node_key:
+  // `water.sea`; `weather.events`, `weather.gust_front`), by node id (OW5q: show_relay_seas writes
+  // them into a document of the same nodes).
+  struct node_keys {
+    std::string sea, events, gust;
+  };
+  const std::map<std::string, node_keys> &water_keys() const { return _water_keys; }
+  const std::map<std::string, node_keys> &weather_keys() const { return _weather_keys; }
 
 private:
-  void build_statics();
+  void build_statics(cvc::app &app);
+  void take_water(cvc::app &app);
   void follow(cvc::app &app, const std::string &room);
+  bool _sea_new = false; // follow() gave a water node a new sea
+  std::uint64_t _sea_from = 0;
+  std::uint64_t _water_rev = 0, _water_from = 0;
+  std::map<std::string, node_keys> _water_keys, _weather_keys;
+  std::shared_ptr<const cvc::physics::flow_velocity> _air; // the air taken with the water
   section_stamp _source_stamp;
   section_stamp _on_stamp; // the room_world_on followed
   std::string _built_on;   // the world on when the statics were built
@@ -375,9 +411,29 @@ private:
   bool _ready = false;
   std::map<std::string, std::uint64_t> _taken; // node -> the colliders' revision taken
   std::vector<avatar_static> _statics;
+  std::vector<cvc::physics::field> _water;
   section_stamp _stamp;
+  std::vector<std::string> _packs;
+  // The document with this SHA-256 in the packs, its path ("" when none has it); why not in WHY.
+  std::string from_packs(const std::string &sha256, std::string &why) const;
   std::string _status;
 };
+
+// CLIENT (OW5q): the relay's world as the document this client draws shows it. Under BIND_PREFIX
+// (the scene's state prefix):
+//   - `shown_clock` (shown_clock.h) gets the relay's time as H's clock counts it (the server's
+//     ticks), so all the scene draws that moves with time (the water's waves, the storms, the
+//     clouds, the trees' and foliage's sway) is drawn at the relay's time;
+//   - each water node of the relay's document (WORLD's) that the room carries a sea for
+//     (room_world_on's seas) gets the relay's keyframe in its `water.sea`;
+//   - each weather node gets the relay's `weather.events` and `weather.gust_front`;
+//   - the light rig's sun, `lighting.key_azimuth` and `lighting.key_elevation`, gets the relay's
+//     key light's (the room's scene env, which the relay's document lights), which the clouds
+//     and the stage lighting are lit from.
+// Only where the document has them: the key is there (the nodes seed theirs; the rig's are the
+// stage lighting's). Call each frame after client_pump. Returns the keys it wrote.
+std::size_t show_relay_seas(cvc::app &app, const std::string &room, const holon &h,
+                            const world_replica &world, const std::string &bind_prefix);
 
 // Propose the local avatar's intent (client side): the client holon predicts with it from its next
 // tick, and it is written to <self>.intent stamped with that tick, for the server to validate and

@@ -428,6 +428,9 @@ struct Widget {
   bool resizable = true;
 
   bool literal_text = false; // Text: `label` is a literal caption, not a path
+  // Text: what Copy in its context menu puts on the clipboard (§5.28), when not what it shows. The
+  // core sets it on the lines it builds itself (the Notifications window: each entry's message).
+  std::string copy;
 
   // §G? Text COLOUR (severity styling). A Kind::Text (literal OR bound) may carry a fixed RGB
   // tint; the walker then emits the *_colored backend leaf instead of the plain one. Backends
@@ -513,6 +516,9 @@ struct Widget {
   // `badge:` on an image: or a video: (§5.11): a text (or an expression giving one) drawn over the
   // picture, dimmed under it: a media grid's "+3" on its last tile.
   std::string badge;
+  // §5.29 an image: by URL or file, or a video:, offers Save image... / Save video... in its
+  // context menu; `save: false` leaves it out.
+  bool save_menu = true;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
@@ -577,7 +583,8 @@ struct Widget {
   std::string on_change;
 
   // §5.25 a mount's application name: the loaded document's meta.name ("" leaves it to the mount
-  // id). Its menubar becomes one menu of the outer bar under this name.
+  // id). Its menubar becomes one menu of the outer bar under this name. On a document's root, the
+  // document's own meta.name, which the Runtime mirrors to ariadne.name.
   std::string app_name;
   // ... and the load: node's own `name:`, which the loader's scope works out each frame: a state
   // key, or an expression on the read lane, with `{i}` the instance under `repeat:`. Its value,
@@ -627,7 +634,7 @@ struct Widget {
 
   std::vector<Widget> children;
 
-  // §5.28 `context_menu:` the menu a right-click, a long press or the Menu key opens over this
+  // §5.30 `context_menu:` the menu a right-click, a long press or the Menu key opens over this
   // window, group or viewport (on the document's root: over the main view). `context_items` are
   // its items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
   // `contributes: context_menus:` adds to (a menu without one takes items from no one).
@@ -637,7 +644,7 @@ struct Widget {
   std::vector<Widget> context_items;
 };
 
-// §5.28 `w` with a right-click menu of `items` (named `id`, "" for none).
+// §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).
 inline Widget with_context_menu(Widget w, std::vector<Widget> items, std::string id = {}) {
   w.context_menu = true;
   w.context_menu_id = std::move(id);

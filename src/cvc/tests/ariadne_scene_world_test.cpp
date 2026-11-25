@@ -8,12 +8,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/conference/room_calls.h> // GB5: a joined lab's room_call_client
 #include <cvc/ariadne/conference/room_entities.h>
 #include <cvc/ariadne/conference/room_intrinsics.h>
 #include <cvc/ariadne/conference/room_scene.h> // room_world_source
@@ -30,11 +32,14 @@
 #include <cvc/ariadne/scene_wind.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/server_document.h>
+#include <cvc/ariadne/shown_clock.h>
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_gym.h>
+#include <cvc/ariadne/world_pack.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
+#include <cvc/ariadne/world_worker.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sim_tick.h>
 #include <cvc/core/world_clock.h>
@@ -50,9 +55,11 @@
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // wet_friction
 #include <cvc/state/state.h>
+#include <cvc/state/state_cluster_shard.h> // GB5: a joined lab's room_call_client
 #include <cvc/world/surface.h>
 #include <cvc/world/weather.h>
 #include <cvc/world/world_geometry.h>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -542,6 +549,78 @@ scene:
 // The physics sea is the drawn one at the coast too (scene_water.h): over a beach the wind sea's
 // cascades fade out as the water shoals, and a swell (swell_height) is in it, smaller where it
 // breaks in the shallows. No renderer, no physics backend: the runtime's sea read directly.
+// Another host makes the same sea from a keyframe (OW5q: SceneWaterSeaClock::follow): a sea grown
+// along its lagged wind over a beach, through a stronger wind, a turn and a shorter open fetch, and
+// one that follows each of its keyframes, have the same keyframes' h0, full fetches and fetch maps
+// at every one. Before, a shorter fetch alone kept the grown sea's map, where the follower made a
+// new one.
+TEST(AriadneSceneWorld, ASeaFollowedFromItsKeyframesIsTheSeaGrown) {
+  const int N = 201;
+  std::vector<float> h(std::size_t(N) * N);
+  for (int r0 = 0; r0 < N; ++r0)
+    for (int c = 0; c < N; ++c)
+      h[std::size_t(r0) * N + c] = float(0.1 * (c - 100)); // a beach rising along +x
+  const cvc::height_field beach(N, N, -200.0, -200.0, 2.0, 2.0, h);
+  SceneWaterSpec s;
+  s.wind_speed = 6.0;
+  s.wind_dir = 0.0;
+  s.fetch = 120000.0;
+  s.sea_lag = 5.0;
+  s.sea_fade = 2.0;
+  const std::shared_ptr<const SceneWaterShore> shore = scene_water_shore(beach, s);
+  ASSERT_NE(shore, nullptr);
+  SceneWaterSeaClock grown, followed;
+  const auto digest = [](const std::shared_ptr<const cvc::ocean::fetch_field> &f) {
+    return f ? f->digest() : std::uint64_t(0);
+  };
+  const auto same_h0 = [](const std::vector<cvc::ocean::h0_field> &a,
+                          const std::vector<cvc::ocean::h0_field> &b) {
+    if (a.size() != b.size())
+      return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+      if (a[i].n != b[i].n || a[i].tile_m != b[i].tile_m || a[i].texels != b[i].texels)
+        return false;
+    return true;
+  };
+  std::uint64_t compared = 0, last = 0;
+  double open_at_end = 0.0;
+  for (int i = 0; i <= 400; ++i) {
+    const double t = 0.5 * i;
+    s.wind_speed = t < 60.0 ? 6.0 + 8.0 * t / 60.0 : 14.0;                    // stronger
+    s.wind_dir = t < 60.0 ? 0.0 : t < 90.0 ? 40.0 * (t - 60.0) / 30.0 : 40.0; // a turn
+    s.fetch = t < 120.0 ? 120000.0 : 20000.0;                                 // shorter
+    grown.advance(t, s, shore);
+    const std::shared_ptr<const SceneWaterSea> g = grown.sea();
+    ASSERT_NE(g, nullptr);
+    if (g->keyframe == last)
+      continue;
+    last = g->keyframe;
+    SceneWaterKeyframe k;
+    k.from = g->from;
+    k.to = g->to;
+    k.t0 = g->t0;
+    k.t1 = g->t1;
+    k.keyframe = g->keyframe;
+    EXPECT_TRUE(followed.follow(k, s, shore));
+    const std::shared_ptr<const SceneWaterSea> f = followed.sea();
+    ASSERT_NE(f, nullptr);
+    SCOPED_TRACE("keyframe " + std::to_string(k.keyframe));
+    EXPECT_TRUE(same_h0(f->h0, g->h0));
+    EXPECT_TRUE(same_h0(f->h0_from, g->h0_from));
+    EXPECT_EQ(f->full, g->full);
+    EXPECT_EQ(f->full_from, g->full_from);
+    EXPECT_EQ(digest(f->fetch), digest(g->fetch));
+    EXPECT_EQ(digest(f->fetch_from), digest(g->fetch_from));
+    if (g->fetch)
+      open_at_end = g->fetch->open_m;
+    ++compared;
+  }
+  std::printf("  OW5Q %llu keyframes followed, each the grown sea's\n",
+              static_cast<unsigned long long>(compared));
+  EXPECT_GE(compared, 5u);
+  EXPECT_EQ(open_at_end, 20000.0) << "the grown sea's map is for its last open fetch";
+}
+
 TEST(AriadneSceneWorld, AWaterNodesSeaFadesAtTheShoreAndCarriesTheSwell) {
   REQUIRE_YAML();
   LoadResult r = fresh_load(R"(
@@ -5184,6 +5263,9 @@ TEST(AriadneBoatNode, TheWakesPushIsTheSameAtAnyFramePacing) {
     cvc::state::instance(app)("runner.throttle").value(1.0);
     cvc::state::instance(app)("runner.rudder").value(0.3);
     SceneClockDriver clock(app, resolved_clock(r.scene));
+    // Anchored at t = 0, as a drawn scene's first frame (its clock driven 0 s): the world's field
+    // time, which the wake's waves are read at and its state hash holds, is the clock's from there.
+    w->follow(app.world_clock());
     int frame = 0;
     while (app.world_clock().t() < seconds) {
       clock.drive(frame_dt);
@@ -6723,10 +6805,8 @@ scene:
       body: { mass: 1 }
 )";
 
-LoadResult storm_scene(double cx, double cy, double rate, bool storm = true,
-                       const char *doc = kStormAir) {
-  LoadResult r = fresh_load(doc);
-  EXPECT_TRUE(r.ok) << r.error;
+// The weather node with that storm (or none), added to R's scene.
+void add_storm(LoadResult &r, double cx, double cy, double rate, bool storm = true) {
   std::string events;
   if (storm) {
     // Born 1500 weather seconds before t = 0 (mature then), where the steering has carried it to
@@ -6757,6 +6837,13 @@ LoadResult storm_scene(double cx, double cy, double rate, bool storm = true,
     wn.props.entries.emplace_back(k, sv);
   }
   r.scene.nodes.push_back(wn);
+}
+
+LoadResult storm_scene(double cx, double cy, double rate, bool storm = true,
+                       const char *doc = kStormAir) {
+  LoadResult r = fresh_load(doc);
+  EXPECT_TRUE(r.ok) << r.error;
+  add_storm(r, cx, cy, rate, storm);
   return r;
 }
 
@@ -6771,13 +6858,16 @@ struct storm_run {
   // outside the world passes, mujoco_robot::set_wind), the weathers at the clock's time (the storms
   // drawn), and the air read at the clock's time (the doubled offset a caller must not pass).
   double front_field = 0.0, front_clock = 0.0, front_doubled = 0.0;
+  double field_gap = 0.0;      // the world's field time less the clock's time, at the end
   std::uint64_t keyframes = 0; // the water's sea keyframes, when the scene has a water node
 };
 
 // Each frame drives the clock, then the world follows it. The world anchors on the clock at its
 // first follow: at t = 0, as a drawn scene's first frame (its clock driven 0 s), unless `late`.
+// With `own_clock` the world follows a clock of its own, as a holon runs it (holon::attach_world,
+// arisrv): the app's clock is never driven.
 storm_run run_storm(const LoadResult &r, double frame_dt, double seconds, bool late = false,
-                    const char *body = "ball") {
+                    const char *body = "ball", bool own_clock = false) {
   storm_run out;
   cvc::app app;
   std::vector<std::string> warnings;
@@ -6787,15 +6877,24 @@ storm_run run_storm(const LoadResult &r, double frame_dt, double seconds, bool l
     return out;
   }
   SceneClockDriver clock(app, resolved_clock(r.scene));
+  cvc::world_clock::config hc;
+  hc.fixed_dt = app.world_clock().fixed_dt();
+  hc.max_steps_per_advance = 60;
+  cvc::world_clock holon_clock(hc);
+  const cvc::world_clock &followed = own_clock ? holon_clock : app.world_clock();
   if (!late)
-    w->follow(app.world_clock());
-  while (app.world_clock().t() < seconds) {
-    clock.drive(frame_dt);
-    w->follow(app.world_clock());
-    out.frames.emplace_back(app.world_clock().tick(), w->world().state(w->body(body)));
+    w->follow(followed);
+  while (followed.t() < seconds) {
+    if (own_clock)
+      holon_clock.advance(frame_dt);
+    else
+      clock.drive(frame_dt);
+    w->follow(followed);
+    out.frames.emplace_back(followed.tick(), w->world().state(w->body(body)));
     out.hashes.push_back(w->world().state_hash());
   }
   out.end = w->world().state(w->body(body));
+  out.field_gap = w->world().field_time() - app.world_clock().t();
   if (w->wind_field().valid())
     if (const auto *storm =
             dynamic_cast<const StormWindFlow *>(w->world().get_field(w->wind_field()).wind.get())) {
@@ -6905,19 +7004,22 @@ TEST(AriadneSceneWeather, TheGustFrontIsInTheStepOnTheClocksTime) {
   }
   EXPECT_GT(compared, 10);
   // A world that anchored on the clock late (its first follow after a 0.137 s frame) reads the
-  // storms at the clock's time all the same: its air's offset is the clock's time there.
+  // storms at the clock's time all the same: its field time is the clock's from its first follow
+  // (SceneWorld::follow, as world::follow; OW5l), so its air needs no offset.
   const storm_run late = run_storm(r, 0.137, 0.5, true);
+  EXPECT_GT(late.frames.front().first, 0u) << "it anchored late";
   EXPECT_EQ(fine.offset, 0.0);
-  EXPECT_NEAR(late.offset, late.frames.front().first * probe.world_clock().fixed_dt(), 1e-12);
-  EXPECT_GT(late.offset, 0.05);
+  EXPECT_EQ(late.offset, 0.0);
+  EXPECT_NEAR(fine.field_gap, 0.0, 1e-9);
+  EXPECT_NEAR(late.field_gap, 0.0, 1e-9) << "its field time is the clock's";
   // What a body outside the world reads (a MuJoCo robot: the air at the world's field time) is the
-  // storms at the clock's time; the air read at the clock's time would add the offset twice.
+  // storms at the clock's time, and so is the air read at the clock's time.
   std::printf("[storm] a late world's front at (-300, 0): %.6f m/s read at its field time, %.6f at "
-              "the clock's (the storms drawn), %.6f with the offset twice\n",
+              "the clock's (the storms drawn), %.6f its air read at the clock's time\n",
               late.front_field, late.front_clock, late.front_doubled);
   EXPECT_GT(late.front_clock, 1.0);
   EXPECT_NEAR(late.front_field, late.front_clock, 1e-9 * std::fabs(late.front_clock));
-  EXPECT_GT(std::fabs(late.front_doubled - late.front_clock), 1e-4);
+  EXPECT_NEAR(late.front_doubled, late.front_clock, 1e-9 * std::fabs(late.front_clock));
 }
 
 // The water reads the storm's front through its sea's lag (E4, F4): its spec's wind is the scene's
@@ -7145,6 +7247,34 @@ TEST(AriadneSceneWeather, TheFrontsSeaFloatsBodiesAlikeAtEveryFrameRate) {
   }
   EXPECT_GT(compared, 30);
   EXPECT_EQ(differ, 0) << "of " << compared << " ticks both looked at";
+}
+
+// The same on the clock a holon runs the world on (OW5q): the relay's holon steps its document's
+// world on its own clock (holon::attach_world), and the app's clock is not driven. The sea's
+// keyframes, the storms' front and the gust are timed on the clock the world follows, so the
+// front grows the relay's sea as it grows a drawn scene's, and the crate floats alike to the bit.
+TEST(AriadneSceneWeather, TheFrontsSeaGrowsOnTheClockAHolonRunsTheWorldOn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const LoadResult r = storm_scene(-1200.0, 0.0, 15.0, true, kStormLake);
+  cvc::app probe;
+  const double dt = probe.world_clock().fixed_dt();
+  const storm_run app_clock = run_storm(r, dt, 9.0);
+  const storm_run holons = run_storm(r, dt, 9.0, false, "ball", true);
+  std::printf("[storm] the lake on the holon's clock: %zu sea keyframes (%zu on the app's); the "
+              "front %s (%s)\n",
+              holons.keyframes, app_clock.keyframes, holons.front.c_str(), app_clock.front.c_str());
+  EXPECT_GE(holons.keyframes, 2u) << "the front grew the sea";
+  EXPECT_EQ(holons.keyframes, app_clock.keyframes);
+  EXPECT_EQ(holons.front, app_clock.front) << "wind.front, timed on the world's clock";
+  ASSERT_EQ(holons.frames.size(), app_clock.frames.size());
+  int differ = 0;
+  for (std::size_t k = 0; k < holons.frames.size(); ++k)
+    if (holons.frames[k].first != app_clock.frames[k].first ||
+        holons.hashes[k] != app_clock.hashes[k])
+      ++differ;
+  EXPECT_EQ(differ, 0) << "of " << holons.frames.size() << " frames";
 }
 
 // A body asleep where a front arrives is woken, so the front pushes it (F6): the crate rests and
@@ -8292,6 +8422,178 @@ TEST(AriadneWorldGym, FleetBench) {
       fleet_doc_bench(bundle ? bundle : "", n, keys, 50);
 }
 
+// D3 (FLEETS_AND_NIGHT_ROADMAP.md) as OW7's first part: a world_worker steps the scene's world in a
+// local server-role holon on a thread of its own, its clock tick for tick behind the host's. It
+// runs the steps the host's own follow() would: the same vehicles at the same poses, bit for bit,
+// through a restart (the clock back to tick 0); what they publish, the host's thread writes.
+TEST(AriadneWorldWorker, StepsTheWorldAsTheHostsFollowWould) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "a holon's world needs Jolt";
+  if (!world_worker::available())
+    GTEST_SKIP() << "no threads: the world steps on its host's frame";
+  std::string doc = fleet_bench_doc("");
+  const std::string arch = "      humvee: { vehicle: humvee, controllers: [nav@1, none] }\n";
+  doc.insert(
+      doc.find(arch) + arch.size(),
+      "    start:\n"
+      "      - { fleet: kin, archetype: humvee, plant: kinematic, count: 24, spawn: opposed, "
+      "seed: 3, rally: { count: 4 }, policy: builtin, keys: all }\n"
+      "      - { fleet: rig, archetype: humvee, plant: jolt, count: 4, seed: 5, "
+      "policy: builtin, keys: summary }\n");
+  doc.insert(doc.find("scene:\n") + 7, "  clock: { paused: true }\n");
+  const fs::path path = write_doc("world_worker", doc);
+  struct result {
+    std::vector<entity_info> ents;
+    std::string stats, x0;
+    std::uint64_t steps = 0;
+    int captures = 0;
+  };
+  const auto go = [&](bool threaded) {
+    result r;
+    cvc::app app;
+    AppRuntime art(app, "");
+    art.load(path.string());
+    art.drain(); // anchors the world on the clock
+    SceneWorld *w = art.scene_world();
+    if (!w || !w->vehicles()) {
+      ADD_FAILURE() << "no world";
+      return r;
+    }
+    art.set_world_external(true); // this test steps it: here, or on the worker
+    cvc::world_clock &wc = app.world_clock();
+    std::atomic<int> captures{0};
+    std::unique_ptr<world_worker> ww;
+    if (threaded) {
+      world_worker::options o;
+      o.capture = [&captures] { ++captures; };
+      ww = std::make_unique<world_worker>(*w, wc, o);
+      EXPECT_TRUE(w->deferred());
+      EXPECT_EQ(ww->local_holon().tick(), wc.tick());
+    }
+    const auto tick = [&] {
+      wc.advance_ticks(cvc::kSimTickQuanta);
+      if (ww) {
+        EXPECT_TRUE(ww->wait_caught_up(60.0)) << ww->error();
+        world_worker::frame_lock held = ww->lock();
+        w->publish_due();
+        art.drain();
+      } else {
+        w->follow(wc);
+        art.drain();
+      }
+    };
+    for (int i = 0; i < 20; ++i)
+      tick();
+    const std::string key = "entities." + std::to_string(w->vehicles()->entities().at(0).id);
+    r.x0 = read_or<std::string>(app, key + ".x", "");
+    if (ww) { // the restart, as sim.restart makes it: the clock back to 0, the world rebuilt and
+      world_worker::frame_lock held = ww->lock(); // anchored at once on the holon's clock
+      art.restart_world();
+    } else {
+      art.restart_world();
+      w->follow(wc); // anchored at once, as the worker anchors it
+    }
+    for (int i = 0; i < 20; ++i)
+      tick();
+    r.ents = w->vehicles()->entities();
+    r.stats = read_or<std::string>(app, "physics.stats.vehicles", "");
+    if (ww) {
+      EXPECT_EQ(ww->error(), "");
+      r.steps = ww->steps();
+      r.captures = captures.load();
+      ww.reset();
+      EXPECT_FALSE(w->deferred()); // handed back synchronous
+    }
+    return r;
+  };
+  const result plain = go(false), threaded = go(true);
+  ASSERT_EQ(plain.ents.size(), 28u);
+  ASSERT_EQ(threaded.ents.size(), plain.ents.size());
+  for (std::size_t i = 0; i < plain.ents.size(); ++i) {
+    const entity_info &a = plain.ents[i], &b = threaded.ents[i];
+    EXPECT_EQ(a.id, b.id);
+    EXPECT_TRUE(a.placed && b.placed) << a.id;
+    EXPECT_EQ(a.x, b.x) << a.id; // bit for bit
+    EXPECT_EQ(a.y, b.y) << a.id;
+    EXPECT_EQ(a.yaw, b.yaw) << a.id;
+    EXPECT_EQ(a.speed, b.speed) << a.id;
+  }
+  EXPECT_NE(plain.x0, "");
+  EXPECT_EQ(threaded.x0, plain.x0); // keys: all, written on this thread by publish_due
+  EXPECT_EQ(threaded.stats, plain.stats);
+  EXPECT_EQ(threaded.steps, 40u * cvc::kSimTickQuanta);
+  EXPECT_GE(threaded.captures, static_cast<int>(threaded.steps));
+}
+
+// A scene's clock: { max_lag } on the frame's thread (every single-threaded host, native or
+// browser): the catch-up one frame may run, at 1x and growing with the speed, the rest of a
+// stall dropped and said. Unset, the clock keeps the catch-up its host gave it.
+TEST(AriadneSceneWorld, TheScenesMaxLagIsTheCatchUpAFrameMayRun) {
+  const auto stall = [](double max_lag, double scale) {
+    cvc::app app;
+    SceneClock c;
+    c.present = true;
+    c.scale = scale;
+    c.max_lag = max_lag;
+    SceneClockDriver clock(app, c);
+    clock.drive(0.0);        // binds the clock
+    return clock.drive(1.0); // a frame a second late
+  };
+  const cvc::world_clock::step_result at1 = stall(0.1, 1.0);
+  EXPECT_EQ(at1.steps, 12) << "0.1 s at 120 Hz";
+  EXPECT_EQ(at1.steps + at1.dropped_steps, 120u);
+  const cvc::world_clock::step_result fast = stall(0.1, 3.6);
+  EXPECT_EQ(fast.steps, 48) << "four times as many at 3.6x";
+  EXPECT_GT(fast.dropped_steps, 0u);
+  EXPECT_EQ(stall(0.0, 1.0).steps, cvc::world_clock::config{}.max_steps_per_advance)
+      << "unset: the clock's own";
+}
+
+// The same max_lag on a worker: how far the world may trail its clock before behind() tells the
+// host to hold its clock, growing with the speed. A lag that is no catch-up is refused, and the
+// world stays on its host's thread; so does every world in a build without threads.
+TEST(AriadneWorldWorker, TheWorldMayTrailItsClockByMaxLag) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "a holon's world needs Jolt";
+  LoadResult r = fresh_load(kScene);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", nullptr);
+  ASSERT_NE(w, nullptr);
+  cvc::world_clock &wc = app.world_clock();
+  if (!world_worker::available()) {
+    EXPECT_THROW({ world_worker none(*w, wc); }, std::runtime_error);
+    EXPECT_FALSE(w->deferred());
+    GTEST_SKIP() << "no threads: the world steps on its host's frame";
+  }
+  for (const double bad : {0.0, -1.0, cvc::kSimCatchupMax + 1.0, std::nan("")}) {
+    world_worker::options o;
+    o.max_lag = bad;
+    EXPECT_THROW({ world_worker refused(*w, wc, o); }, std::runtime_error) << bad;
+    EXPECT_FALSE(w->deferred()) << "a refused worker leaves the world on its host";
+  }
+  world_worker::options o;
+  o.max_lag = 0.05;
+  world_worker ww(*w, wc, o);
+  EXPECT_EQ(ww.max_lag_quanta(), 6u) << "0.05 s at 120 Hz";
+  {
+    const world_worker::frame_lock held = ww.lock(); // the worker steps nothing while it is held
+    wc.advance_ticks(5);
+    EXPECT_EQ(ww.lag(), 5u);
+    EXPECT_FALSE(ww.behind());
+    wc.advance_ticks(1);
+    EXPECT_TRUE(ww.behind()) << "6 quanta behind: the host holds its clock";
+    wc.set_scale(3.6);
+    EXPECT_EQ(ww.max_lag_quanta(), 24u) << "four times as many at 3.6x";
+    EXPECT_FALSE(ww.behind());
+  }
+  EXPECT_TRUE(ww.wait_caught_up(60.0)) << ww.error();
+  EXPECT_EQ(ww.lag(), 0u);
+  EXPECT_EQ(ww.steps(), 6u);
+}
+
 TEST(AriadneWorldGym, KinematicBoxesTouchWhenTheyOverlap) {
   REQUIRE_YAML();
   // Two kinematic boxes make no contact in the physics world: entities() finds their overlaps
@@ -8457,6 +8759,112 @@ TEST(AriadneOneWorld, AClientRunsTheVehicleItDrivesAsTheWorldDoes) {
   EXPECT_LT(worst, 0.01) << "step for step";
 }
 
+// A kinematic vehicle placed from the relay's samples mid-turn (OW5r): every 4 ticks, as the holon
+// places it, mostly part-way through a navigator tick (12 steps). The relay's box goes on a line
+// between the bicycle's boxes at the tick's ends, its yaw too, so the sample's yaw rate gives the
+// whole tick; a model placed from it turns through the rest of the tick, and its bicycle starts
+// the next tick at the relay's heading. Placed without it (a relay before OW5n), its box goes
+// straight to the tick's end and its next tick starts at the heading the sample had, off by the
+// rest of the tick's turn. The gap a sample finds is measured, through the turns.
+TEST(AriadneOneWorld, AClientPlacesAKinematicVehicleFromSamplesMidTurn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kKinematicDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i)
+    h.advance(dt);
+  cvc::ariadne::kinematic_drive k;
+  ASSERT_TRUE(v.kinematics(id, k));
+  // Through the pose stream, as a client gets it (its angular velocity since OW5n).
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0);
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    return got.empty() ? cvc::physics::body_state{} : got.front().state;
+  };
+  const auto spinless = [](cvc::physics::body_state s) {
+    s.angular_velocity = {};
+    return s;
+  };
+  cvc::physics::body_state now = sample();
+  cvc::ariadne::kinematic_vehicle spun = cvc::ariadne::kinematic_vehicle_at(k, now, h.tick(), dt);
+  cvc::ariadne::kinematic_vehicle straight =
+      cvc::ariadne::kinematic_vehicle_at(k, spinless(now), h.tick(), dt);
+  double worst_spun = 0.0, worst_straight = 0.0, fastest_turn = 0.0;
+  int mid_tick = 0, samples = 0;
+  for (int step = 0; step < 720; ++step) {
+    avatar_intent in;
+    in.steer = step < 120 ? 0.0 : step < 360 ? 0.6 : step < 480 ? -1.0 : 0.3;
+    in.throttle = 1.0;
+    in.brake = 0.0;
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      cvc::ariadne::kinematic_vehicle_step(spun, k, t, dt);
+      command_after(spun, k, in, dt);
+      cvc::ariadne::kinematic_vehicle_step(straight, k, t, dt);
+      command_after(straight, k, in, dt);
+    }
+    if (h.tick() % 4 != 0)
+      continue;
+    // The gap the sample finds, then the model placed from it with the command for the next tick.
+    const cvc::physics::body_state relay = h.state("ann");
+    fastest_turn = std::max(fastest_turn, std::fabs(relay.angular_velocity.z));
+    worst_spun = std::max(
+        worst_spun, std::hypot(spun.box[0] - relay.position.x, spun.box[1] - relay.position.y));
+    worst_straight = std::max(worst_straight, std::hypot(straight.box[0] - relay.position.x,
+                                                         straight.box[1] - relay.position.y));
+    ++samples;
+    now = sample();
+    spun = cvc::ariadne::kinematic_vehicle_at(k, now, h.tick(), dt);
+    straight = cvc::ariadne::kinematic_vehicle_at(k, spinless(now), h.tick(), dt);
+    if (spun.sub != k.tick_steps)
+      ++mid_tick;
+    command_after(spun, k, in, dt);
+    command_after(straight, k, in, dt);
+  }
+  std::printf("  OW5R a kinematic Humvee placed from %d samples (%d mid-tick), turning at up to "
+              "%.2f rad/s: %.4f m off at a sample with the sample's yaw rate, %.4f m without\n",
+              samples, mid_tick, fastest_turn, worst_spun, worst_straight);
+  EXPECT_GT(fastest_turn, 0.3) << "it turned";
+  EXPECT_GT(mid_tick, samples / 2) << "most samples fall part-way through a tick";
+  EXPECT_LT(worst_spun, 0.6 * worst_straight) << "the rest of the tick's turn";
+  EXPECT_LT(worst_spun, 0.01);
+}
+
 namespace {
 // A world whose ground the room scene cannot carry: a 1 m dome of terrain (a heightfield) over a
 // flat slab, which it can.
@@ -8551,6 +8959,126 @@ TEST(AriadneOneWorld, AClientBuildsTheWorldFromTheRelaysDocument) {
   EXPECT_NE(differs.status.find("SHA-256"), std::string::npos) << differs.status;
   EXPECT_NEAR(differs.z, 0.0, 0.1) << "not the relay's document: the room scene's statics";
   std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A world pack (OW5k, section 12): a directory with an index of its files' SHA-256 and sizes. A
+// client that does not ship the relay's document finds it there by the hash the room names, and
+// builds the same world from it. A pack whose files do not match its index is refused, whatever
+// it holds.
+TEST(AriadneOneWorld, AClientFindsTheRelaysDocumentInAWorldPack) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5k_world_pack";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  const fs::path pack = dir / "pack";
+  fs::create_directories(pack / "worlds");
+  {
+    std::ofstream out(pack / "worlds" / "dome.ari", std::ios::binary);
+    out << kDomeWorld;
+  }
+  {
+    std::ofstream out(pack / "README.txt", std::ios::binary);
+    out << "the dome, as the relay runs it\n";
+  }
+  const std::string sha = conference::file_sha256((pack / "worlds" / "dome.ari").string());
+  ASSERT_EQ(write_world_pack_index(pack.string()), 2u);
+  {
+    const world_pack p(pack.string());
+    ASSERT_EQ(p.entries().size(), 2u);
+    EXPECT_EQ(p.entries()[0].path, "README.txt") << "sorted by path";
+    EXPECT_EQ(p.entries()[1].path, "worlds/dome.ari");
+    EXPECT_EQ(p.entries()[1].sha256, sha);
+    EXPECT_EQ(p.entries()[1].size, std::string(kDomeWorld).size());
+    const std::string found = p.find(sha);
+    EXPECT_TRUE(fs::equivalent(found, pack / "worlds" / "dome.ari"));
+    std::string upper = sha;
+    for (char &c : upper)
+      c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    EXPECT_EQ(p.find(upper), found) << "either case";
+    EXPECT_EQ(p.find(std::string(64, '0')), "");
+    std::string why;
+    EXPECT_TRUE(p.verify(&why)) << why;
+  }
+
+  // The room names a document this client does not ship (no such stock world here).
+  cvc::app app;
+  register_world_block(app);
+  const std::string room = "dome";
+  conference::write_room_world_source(app, room, {"cvc://worlds/ow5k-unshipped-dome.ari", sha});
+  const auto pump = [&](world_replica &w) {
+    for (int i = 0; i < 5 && !w.ready(); ++i)
+      w.pump(app, room);
+  };
+  {
+    world_replica none;
+    pump(none);
+    EXPECT_FALSE(none.ready()) << none.status();
+    EXPECT_NE(none.status().find("not here"), std::string::npos) << none.status();
+  }
+  world_replica packed;
+  packed.add_pack((dir / "elsewhere").string()); // not a pack: passed over
+  packed.add_pack(pack.string());
+  pump(packed);
+  std::printf("  from a world pack: %s (%zu statics)\n", packed.status().c_str(),
+              packed.statics().size());
+  ASSERT_TRUE(packed.ready()) << packed.status();
+  EXPECT_NE(packed.status().find("from a world pack"), std::string::npos) << packed.status();
+  EXPECT_FALSE(packed.statics().empty()) << "the dome's terrain";
+
+  // A file that is not what the index says: the pack is refused, and the replica says why.
+  {
+    std::ofstream out(pack / "README.txt", std::ios::binary | std::ios::app);
+    out << "edited\n";
+  }
+  {
+    std::string why;
+    EXPECT_FALSE(world_pack(pack.string()).verify(&why));
+    EXPECT_NE(why.find("README.txt"), std::string::npos) << why;
+  }
+  world_replica tampered;
+  tampered.add_pack(pack.string());
+  pump(tampered);
+  EXPECT_FALSE(tampered.ready());
+  EXPECT_NE(tampered.status().find("README.txt"), std::string::npos) << tampered.status();
+
+  // Indexes it refuses: a path out of the pack, a bad hash, no index at all.
+  const fs::path bad = dir / "bad";
+  fs::create_directories(bad);
+  const auto index = [&](const std::string &text) {
+    std::ofstream out(bad / world_pack::kIndex, std::ios::binary | std::ios::trunc);
+    out << text;
+  };
+  index(sha + " 10 ../outside.ari\n");
+  EXPECT_THROW(world_pack(bad.string()), std::runtime_error) << "a path out of the pack";
+  index("abc 10 a.ari\n");
+  EXPECT_THROW(world_pack(bad.string()), std::runtime_error) << "not a SHA-256";
+  index("# only a comment\n\n");
+  EXPECT_TRUE(world_pack(bad.string()).entries().empty());
+  EXPECT_THROW(world_pack((dir / "elsewhere").string()), std::runtime_error) << "no pack there";
+
+  // CVC_WORLD_PACKS names packs as PATH names directories.
+#ifdef _WIN32
+  _putenv_s("CVC_WORLD_PACKS", "C:/packs/a;;C:/packs/b");
+  const std::vector<std::string> want{"C:/packs/a", "C:/packs/b"};
+#else
+  setenv("CVC_WORLD_PACKS", "/packs/a::/packs/b", 1);
+  const std::vector<std::string> want{"/packs/a", "/packs/b"};
+#endif
+  EXPECT_EQ(world_pack_dirs_from_env(), want);
+  {
+    world_replica from_env;
+    EXPECT_EQ(from_env.packs(), want);
+  }
+#ifdef _WIN32
+  _putenv_s("CVC_WORLD_PACKS", "");
+#else
+  unsetenv("CVC_WORLD_PACKS");
+#endif
+  EXPECT_TRUE(world_pack_dirs_from_env().empty());
   fs::remove_all(dir, ec);
 }
 
@@ -8791,6 +9319,106 @@ TEST(AriadneOneWorld, AClientFollowsTheRelaysWorldSwitch) {
   fs::remove_all(dir, ec);
 }
 
+// A lab joined to a relay that runs the same generated_world node (ARIADNE_WORLDS section 18.8,
+// GB5): it makes the world the relay's world_on names, its Regenerate goes to the relay (here none
+// answers: the call ends unavailable when the client fails its calls, and the panel says so) and
+// makes nothing itself, and the
+// world the relay then makes comes back through world_on. A follow is never sent on. Joined to no
+// relay, or to one that runs no such node, the lab makes its worlds itself.
+TEST(AriadneOneWorld, AJoinedLabShowsTheRelaysWorldAndSendsItsRegenerate) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> lab = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(lab, nullptr);
+  ASSERT_NE(lab->generated_world("world"), nullptr);
+  ASSERT_EQ(lab->generated_world("world")->params.seed, 5u);
+  const auto seed_shown = [&] { return lab->generated_world("world")->params.seed; };
+
+  // The relay's world_on: the same node, from seed 9. Not joined yet, so the lab ignores it.
+  const std::string room = "lab";
+  cvc::world::generated_world_params relay_params;
+  ASSERT_TRUE(lab->generated_params("world", relay_params));
+  relay_params.seed = 9;
+  conference::room_world_on on;
+  on.generated.push_back({"world", relay_params});
+  conference::write_room_world_on(app, room, on);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 5u) << "not joined: its own world";
+
+  // Joined (a room_call_client with no transport: its calls wait until fail_all ends them, as a
+  // lost relay does).
+  cvc::app host;
+  cvc::state_cluster_shard shard(host, "conf", "node");
+  const auto calls = std::make_shared<conference::room_call_client>(shard, room, "ann");
+  conference::room_call_client::install(app, calls);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 9u) << "the relay's world";
+  EXPECT_EQ(val(app, "world.seed"), "9") << "the panel shows it";
+  EXPECT_EQ(val(app, "world.server.status"), "the server's world (seed 9)");
+  EXPECT_EQ(val(app, "world.pending"), "0");
+
+  // Regenerate from seed 11: sent to the relay, not made here.
+  cvc::state::instance(app)("world.seed").value("11");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 9u) << "the relay makes it, not the lab";
+  EXPECT_EQ(val(app, "world.server.status"), "asking the server for a new world");
+  calls->fail_all("no relay here");
+  lab->sync(&warnings); // the reply lands
+  EXPECT_EQ(val(app, "world.server.status"), "error: unavailable: no relay here")
+      << val(app, "world.server.status");
+  EXPECT_EQ(val(app, "world.pending"), "1") << "the settings are not the world shown";
+  EXPECT_EQ(seed_shown(), 9u);
+
+  // The relay made it: world_on brings it, and the lab shows it.
+  relay_params.seed = 11;
+  on.generated[0].params = relay_params;
+  conference::write_room_world_on(app, room, on);
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 11u);
+  EXPECT_EQ(val(app, "world.pending"), "0");
+  EXPECT_EQ(val(app, "world.server.status"), "the server's world (seed 11)");
+
+  // A follow (SceneWorld::follow_generated, as a client's replica follows) is made here, never
+  // sent on.
+  cvc::world::generated_world_params mine = relay_params;
+  mine.seed = 12;
+  ASSERT_TRUE(lab->follow_generated("world", mine, &warnings));
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 12u);
+
+  // Log in as an admin: the password goes and its key is cleared; here the call ends unavailable.
+  cvc::state::instance(app)("world.server.password").value("secret");
+  cvc::state::instance(app)("world.request").value("rcon");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.password"), "");
+  EXPECT_EQ(val(app, "world.server.status"), "logging in");
+  calls->fail_all("no relay here");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.status"), "refused: no relay here");
+
+  // A relay that runs no such node: the lab makes its own.
+  on.generated[0].node = "elsewhere";
+  conference::write_room_world_on(app, room, on);
+  cvc::state::instance(app)("world.seed").value("13");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 13u);
+
+  // Joined to none: the same.
+  conference::room_call_client::install(app, nullptr);
+  cvc::state::instance(app)("world.request").value("rcon");
+  lab->sync(&warnings);
+  EXPECT_EQ(val(app, "world.server.status"), "not joined to a server");
+  cvc::state::instance(app)("world.seed").value("14");
+  cvc::state::instance(app)("world.request").value("regenerate");
+  lab->sync(&warnings);
+  EXPECT_EQ(seed_shown(), 14u);
+}
+
 // A Regenerate on the relay (OW5f): the params each generated world of the world on was made from
 // go with what it has on, and the client's replica makes the same world from them, a new preset
 // included, so its ground is the relay's new ground to the millimetre where the old one was not.
@@ -8992,6 +9620,39 @@ scene:
       body: static
 )";
 
+// A launch on the dynamicboat plant (OW5j), drivable, on a calm lake: the terrain's 6 m bowl and
+// the water node's water at -1 m over it (about 107 m across, 5 m deep in the middle), no wind and
+// no waves, so the water is still.
+const char *kBoatDrivable = R"(
+world:
+  vehicles:
+    archetypes:
+      launch:
+        plant: dynamicboat:launch
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: lakeside, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lakeside
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0
+      wave_amp: 0
+      body: {}
+)";
+
 // The command the relay sets after a step for a driver's next navigator tick (holon's drive).
 void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic_drive &k,
                    const avatar_intent &in, double dt) {
@@ -9015,15 +9676,36 @@ void command_after(cvc::ariadne::dynamic_vehicle &m, const cvc::ariadne::dynamic
 struct client_run {
   double worst = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0, climb = 0.0;
   double end_speed = 0.0; // the model's, at the end
+  double heave = 0.0;     // the relay's vehicle's highest less its lowest over the run (m)
+  double phase_z = 0.0;   // the worst height gap of a model given samples SKEW ticks off (m)
+  // worst_yaw and worst_tilt from the second second on: once a model that started at rest (level,
+  // where the relay's hull may be riding a wave) has settled on the vehicle's attitude.
+  double settled_yaw = 0.0, settled_tilt = 0.0;
+  // The worst angle between the driver's pose (the relay's ride) and its vehicle's chassis body:
+  // the pose carries the chassis's attitude (OW5m).
+  double ride_gap = 0.0;
+  // The same for the vehicle's own entry in the relay's stream of the room's entities
+  // (conference::entity_pose_subjects), which every client draws it by.
+  double entity_gap = 0.0;
   cvc::ariadne::dynamic_drive drive;
 };
 
 // A drivable Humvee on PLANT in DOC's world, driven through throttle, a turn, the brake and
 // reverse, against the client's model of it on the same drive axes. ON_GROUND: the model drives on
 // the world's ground as a client building the same document has it (SceneWorld::vehicle_ground),
-// else flat; CHECK: the model must keep to the relay's vehicle.
+// else flat; CHECK: the model must keep to the relay's vehicle. ARCHETYPE: the vehicle (its preset
+// the same name), spawned at (X, 0) heading +x; TOP: the speed it reaches at least (m/s).
+// RELAY_RAN: the seconds the relay's holon ran before its world was attached (its clock that far
+// on, the world's own field time not). SKEW: also run a second model whose samples name a tick
+// SKEW ticks later (its water read that far off), for client_run::phase_z. SAMPLED: correct the
+// model by the relay's samples every 4 ticks on any plant (a jolt or boat model always is). JOIN:
+// the step at which the client starts its model, from the relay's vehicle as it is then (the
+// relay driving it alone before); the gaps are measured from there, the settled ones a second on.
 void drive_as_the_world_does(const char *doc, const std::string &plant, client_run &result,
-                             bool on_ground = false, bool check = true) {
+                             bool on_ground = false, bool check = true,
+                             const std::string &archetype = "humvee", double x = -40.0,
+                             double top_at_least = 5.0, double relay_ran = 0.0, int skew = 0,
+                             bool sampled_too = false, int join = 0) {
   cvc::app app;
   register_world_block(app);
   LoadResult r = load_string(app, doc);
@@ -9040,12 +9722,14 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   ASSERT_NE(w, nullptr);
   WorldVehicles &v = *w->vehicles();
   w->sync(&warnings);
-  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  const std::uint64_t id = spawn_kind(v, archetype, x, 0.0);
   holon h(holon_role::server, one_world_holon());
+  for (int i = 0; i < static_cast<int>(std::lround(relay_ran * 60.0)); ++i)
+    h.advance(1.0 / 60.0);
   std::string why;
   ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
   cvc::physics::body_state feet;
-  feet.position = {-40.0, 3.0, 0.0};
+  feet.position = {x, 3.0, 0.0};
   h.add_participant("ann", false, feet);
   for (int i = 0; i < 30; ++i)
     h.advance(1.0 / 60.0);
@@ -9053,13 +9737,16 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   const double dt = h.clock().fixed_dt();
   for (int i = 0; i < 20; ++i) // the driver's command set, the navigator ticked on a clock tick
     h.advance(dt);
+  // The world's field time follows the holon's clock from the first step (SceneWorld::follow), so
+  // its water is read at the tick's time however long the holon ran before (OW5l).
+  EXPECT_NEAR(w->world().field_time(), static_cast<double>(h.tick()) * dt, 1e-9);
 
   cvc::ariadne::kinematic_drive not_kinematic;
   EXPECT_FALSE(v.kinematics(id, not_kinematic)) << "not the kinematic plant";
   cvc::ariadne::dynamic_drive k;
   ASSERT_TRUE(v.dynamics(id, k));
   EXPECT_TRUE(k.valid());
-  EXPECT_EQ(k.preset, "humvee");
+  EXPECT_EQ(k.preset, archetype);
   EXPECT_EQ(k.plant, plant);
   EXPECT_EQ(k.tick_steps, v.steps_per_tick());
   bool carried = false;
@@ -9092,9 +9779,12 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     }
   }
   // A jolt vehicle's model runs in a world of the client's own with the client's statics: each
-  // static body of the same document's world, on its surface (world_replica's statics).
+  // static body of the same document's world, on its surface (world_replica's statics); a boat's
+  // with its water too (world_replica's water: the world's fluid fields, else the still water the
+  // relay adds for its boats).
   cvc::ariadne::jolt_vehicle_world jw;
-  if (plant == "jolt") {
+  const bool own_world = plant == "jolt" || plant == "dynamicboat";
+  if (own_world) {
     Scene copy = r.scene;
     copy.vehicles.clear();
     mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
@@ -9111,10 +9801,48 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
       }
     jw.gravity = mine->world().config().gravity;
     EXPECT_FALSE(jw.statics.empty()) << "the document's ground";
+    if (plant == "dynamicboat") {
+      for (const cvc::physics::field_snapshot &f : mine->world().snapshot().fields)
+        if (f.desc.kind == cvc::physics::field_kind::fluid)
+          jw.water.push_back(f.desc);
+      std::shared_ptr<const cvc::nav::world_grid> g;
+      std::shared_ptr<const cvc::height_field> t;
+      mine->vehicle_ground(g, t);
+      if (g)
+        if (const auto still = cvc::ariadne::boat_still_water(app, *g, mine->world()))
+          jw.water.push_back(*still);
+      EXPECT_FALSE(jw.water.empty()) << "the document's water";
+    }
   }
-  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, plant == "jolt" ? &jw : nullptr);
-  EXPECT_EQ(model.on_ground(), on_ground || plant == "jolt");
-  cvc::ariadne::dynamic_vehicle m = model.at(h.state("ann"), h.tick());
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, ground, own_world ? &jw : nullptr);
+  EXPECT_EQ(model.on_ground(), on_ground || own_world);
+  // The relay's sample of its driver as the client gets it: through the pose stream (quantized),
+  // with its vehicle's angular velocity and steering angle (OW5n).
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    s.steer = h.steer("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0); // an entry even when still
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    EXPECT_EQ(got.size(), 1u);
+    return got.empty() ? pose_sample{} : got.front();
+  };
+  pose_sample now = sample();
+  EXPECT_TRUE(now.steer.has_value()) << "the stream carries the steering";
+  cvc::ariadne::dynamic_vehicle m = model.at(now.state, h.tick(), nullptr, now.steer);
+  std::unique_ptr<cvc::ariadne::dynamic_vehicle_model> off;
+  cvc::ariadne::dynamic_vehicle mo;
+  if (skew != 0) {
+    off = std::make_unique<cvc::ariadne::dynamic_vehicle_model>(k, dt, ground,
+                                                                own_world ? &jw : nullptr);
+    mo = off->at(now.state, h.tick() + skew, nullptr, now.steer);
+  }
+  double phase_z = 0.0;
   const auto axes = [](int step) {
     avatar_intent in;
     in.steer = 0.0;
@@ -9136,21 +9864,37 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     return in;
   };
   double worst = 0.0, top = 0.0, worst_yaw = 0.0, worst_z = 0.0, worst_tilt = 0.0;
+  double settled_yaw = 0.0, settled_tilt = 0.0, ride_gap = 0.0, entity_gap = 0.0;
   const cvc::physics::vec3 start = h.state("ann").position;
-  const bool sampled = plant == "jolt";
-  double climb = 0.0;
+  const bool sampled = own_world || sampled_too;
+  double climb = 0.0, lowest = start.z, highest = start.z;
   for (int step = 0; step < 1080; ++step) {
     const avatar_intent in = axes(step);
     h.set_intent("ann", in);
     const std::uint64_t before = h.tick();
     h.advance(dt);
+    if (step < join)
+      continue;
+    if (step == join && join > 0) { // the client starts here, from the vehicle as the relay has it
+      now = sample();
+      m = model.at(now.state, h.tick(), nullptr, now.steer);
+      if (off)
+        mo = off->at(now.state, h.tick() + skew, nullptr, now.steer);
+      continue;
+    }
     for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
       model.step(m, t);
       command_after(m, k, in, dt);
+      if (off) {
+        off->step(mo, t);
+        command_after(mo, k, in, dt);
+      }
     }
     const cvc::physics::body_state relay = h.state("ann");
     worst = std::max(worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
-    const double yaw = 2.0 * std::atan2(relay.rotation.z, relay.rotation.w);
+    const cvc::physics::quat &rq = relay.rotation;
+    const double yaw =
+        std::atan2(2.0 * (rq.w * rq.z + rq.x * rq.y), 1.0 - 2.0 * (rq.y * rq.y + rq.z * rq.z));
     worst_yaw = std::max(worst_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
     top = std::max(top, std::hypot(relay.linear_velocity.x, relay.linear_velocity.y));
     // The box's height and attitude, which on dynamic4w are the suspension's. The driver's pose
@@ -9161,15 +9905,49 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
     for (const entity_info &e : v.entities())
       if (e.id == id && e.chassis.valid())
         body = w->world().state(e.chassis).rotation;
+    // An angle from the chassis's, the dot product over both norms (a float quaternion's norm is 1
+    // only to 1e-7, which acos would read as 1 mrad).
+    const auto from_body = [&body](const cvc::physics::quat &a) {
+      const double na = std::sqrt(a.w * a.w + a.x * a.x + a.y * a.y + a.z * a.z);
+      const double nb =
+          std::sqrt(body.w * body.w + body.x * body.x + body.y * body.y + body.z * body.z);
+      const double d =
+          std::fabs(a.w * body.w + a.x * body.x + a.y * body.y + a.z * body.z) / (na * nb);
+      return 2.0 * std::acos(std::min(1.0, d));
+    };
+    ride_gap = std::max(ride_gap, from_body(rq));
+    bool listed = false;
+    for (const pose_subject &e : conference::entity_pose_subjects(v))
+      if (e.pid == conference::entity_pid(id)) {
+        listed = true;
+        entity_gap = std::max(entity_gap, from_body(e.state.rotation));
+      }
+    if (!listed)
+      entity_gap = 10.0; // not in the stream at all
     const double q = std::fabs(mine.rotation.w * body.w + mine.rotation.x * body.x +
                                mine.rotation.y * body.y + mine.rotation.z * body.z);
     worst_tilt = std::max(worst_tilt, 2.0 * std::acos(std::min(1.0, q)));
+    if (step >= join + 120) {
+      settled_yaw =
+          std::max(settled_yaw, std::fabs(std::remainder(m.box[3] - yaw, 6.283185307179586)));
+      settled_tilt = std::max(settled_tilt, 2.0 * std::acos(std::min(1.0, q)));
+    }
     climb = std::max(climb, relay.position.z - start.z);
-    // A jolt vehicle's gear, clutch and engine are not in the pose stream, so its model is
-    // corrected by the relay's samples as the holon corrects it: every 4 ticks the sample, the rest
-    // of its world as predicted for that tick. What is measured is the gap a sample finds.
-    if (sampled && h.tick() % 4 == 0)
-      m = model.at(relay, h.tick(), &m);
+    lowest = std::min(lowest, relay.position.z);
+    highest = std::max(highest, relay.position.z);
+    // A jolt vehicle's gear, clutch and engine are not in the pose stream, nor a boat's driver, so
+    // its model is corrected by the relay's samples as the holon corrects it: every 4 ticks the
+    // sample, the rest of its world as predicted for that tick. What is measured is the gap a
+    // sample finds.
+    if (off)
+      phase_z = std::max(phase_z, std::fabs(cvc::ariadne::dynamic_vehicle_state(mo).position.z -
+                                            relay.position.z));
+    if (sampled && h.tick() % 4 == 0) {
+      now = sample();
+      m = model.at(now.state, h.tick(), &m, now.steer);
+      if (off)
+        mo = off->at(now.state, h.tick() + skew, &mo, now.steer);
+    }
   }
   const cvc::physics::body_state end = h.state("ann");
   std::printf("  the %s model on the relay's vehicle: %.6f m and %.6f rad at worst over 9 s; "
@@ -9186,9 +9964,15 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   result.worst_z = worst_z;
   result.worst_tilt = worst_tilt;
   result.climb = climb;
+  result.heave = highest - lowest;
+  result.phase_z = phase_z;
+  result.settled_yaw = settled_yaw;
+  result.settled_tilt = settled_tilt;
+  result.ride_gap = ride_gap;
+  result.entity_gap = entity_gap;
   result.end_speed = cvc::ariadne::dynamic_vehicle_model::speed(m);
   result.drive = k;
-  EXPECT_GT(top, 5.0) << "it drove";
+  EXPECT_GT(top, top_at_least) << "it drove";
   if (!check)
     return;
   EXPECT_LT(cvc::ariadne::dynamic_vehicle_model::speed(m), -0.5) << "and backed up at the end";
@@ -9198,6 +9982,325 @@ void drive_as_the_world_does(const char *doc, const std::string &plant, client_r
   result.worst_tilt = worst_tilt;
 }
 } // namespace
+
+namespace {
+// A drivable Humvee on DRIVES (jolt, or a dynamic plant: OW5p) and a parked vehicle of PLANT in
+// its way (OW5o), on the square.
+std::string ram_drivable(const std::string &plant, const std::string &drives = "jolt") {
+  return std::string(R"(
+world:
+  vehicles:
+    archetypes:
+      humvee:
+        vehicle: humvee
+        plant: )") +
+         drives + R"(
+        controllers: [nav@1, none, external]
+        drivable: true
+      parked:
+        vehicle: humvee
+        plant: )" +
+         plant + R"(
+        controllers: [external]
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)";
+}
+
+// What ram_parked found.
+struct ram_run {
+  double worst = 0.0;        // the model's worst gap from the relay's vehicle at a sample (m)
+  double stopped_at = -1e9;  // the furthest the relay's vehicle got along x (m)
+  double parked_moved = 0.0; // how far the relay pushed the parked vehicle (m)
+  std::size_t held = 0;      // the boxes the model held at the end
+  double mass = 0.0;         // the parked vehicle's, as the room carries it (0: kinematic)
+  double box_off = 0.0;      // the worst the model's box got from the relay's body (m, in plan)
+};
+
+// The relay's driver at full throttle straight at a parked vehicle of PLANT 30 m ahead, and the
+// client's jolt model of the car, corrected by the relay's samples every 4 ticks through the pose
+// stream. HOLD: the model holds the parked vehicle's box where the relay has it (OW5o); else it
+// meets only the statics. PLANT "avatar": in its place a participant standing there, held as
+// holon::held_obstacles holds a peer (OW5p). DELAY: the box is where the relay had it that many
+// ticks before (a playout's delay; 0, where it is).
+// WALK: an avatar's box gets its walker when knocked loose (vehicle_obstacle::walk_force).
+// BRAKE: the driver brakes once its car is 3 m short of where the parked one stood, so what it hit
+// flies on alone. DRIVES: the driven car's plant (OW5p: a dynamic plant's model meets the room in
+// a world of its own).
+void ram_parked(const std::string &plant, bool hold, ram_run &out, int delay = 0, bool walk = true,
+                bool brake = false, const std::string &drives = "jolt") {
+  const bool avatar = plant == "avatar";
+  cvc::app app;
+  register_world_block(app);
+  const std::string doc = ram_drivable(avatar ? "kinematic" : plant, drives);
+  LoadResult r = load_string(app, doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  const std::uint64_t parked = avatar ? 0 : spawn_kind(v, "parked", -10.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  if (avatar) {
+    cvc::physics::body_state stands;
+    stands.position = {-10.0, 0.0, 0.0};
+    h.add_participant("bob", false, stands);
+  }
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i)
+    h.advance(dt);
+  cvc::ariadne::dynamic_drive k;
+  ASSERT_TRUE(v.dynamics(id, k));
+
+  // The parked vehicle as the room carries it: its box's size, and its pose in the relay's stream.
+  std::array<double, 3> size{};
+  double mass = 0.0; // as holon_sync holds it: its model's mass when the relay can push it
+  for (const conference::room_entity &e : conference::room_entities_of(v))
+    if (e.id == parked) {
+      size = e.size;
+      mass = e.dynamics.valid() ? e.dynamics.mass : 0.0;
+    }
+  const cvc::ariadne::avatar_body body = h.rules().avatar().body;
+  if (avatar) { // as holon::held_obstacles holds a peer
+    size = {body.width, body.width, body.height};
+    mass = body.mass;
+  }
+  ASSERT_GT(size[0], 0.0);
+  const cvc::physics::vec3 half{0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
+  const auto parked_now = [&]() {
+    if (avatar) { // its box's centre, over its feet
+      cvc::physics::body_state s = h.state("bob");
+      s.position.z += 0.5 * body.height;
+      return s;
+    }
+    for (const pose_subject &e : conference::entity_pose_subjects(v))
+      if (e.pid == conference::entity_pid(parked))
+        return e.state;
+    ADD_FAILURE() << "the parked vehicle is in the stream";
+    return cvc::physics::body_state{};
+  };
+  std::deque<cvc::physics::body_state> seen; // the relay's, the newest last
+  const auto shown_now = [&]() {
+    seen.push_back(parked_now());
+    while (seen.size() > static_cast<std::size_t>(delay) + 1)
+      seen.pop_front();
+    return seen.front();
+  };
+  const cvc::physics::vec3 parked_start = parked_now().position;
+
+  // The client's model on the client's statics, with room for the parked vehicle's box.
+  Scene copy = r.scene;
+  copy.vehicles.clear();
+  std::unique_ptr<SceneWorld> mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+  ASSERT_NE(mine, nullptr);
+  mine->sync(&warnings);
+  cvc::ariadne::jolt_vehicle_world jw;
+  const std::vector<cvc::physics::body_id> ground = mine->ground_bodies();
+  for (const SceneWorldBody &b : mine->bodies())
+    if (!b.moves && b.desc) {
+      cvc::ariadne::avatar_static s;
+      s.type = cvc::ariadne::avatar_static::kind::body;
+      s.body = b.desc;
+      s.material = std::make_shared<const cvc::physics::material>(
+          mine->world().get_material(b.desc->material));
+      for (const cvc::physics::body_id g : ground) // as world_replica marks it (OW5p)
+        s.ground = s.ground || g.value == b.id.value;
+      jw.statics.push_back(std::move(s));
+    }
+  jw.gravity = mine->world().config().gravity;
+  cvc::ariadne::vehicle_obstacle room;
+  room.half_extents = half;
+  room.mass = mass;
+  jw.obstacle_room = {room, room};
+  cvc::ariadne::dynamic_vehicle_model model(k, dt, {}, &jw);
+  EXPECT_EQ(model.obstacle_room(), 2u);
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    s.steer = h.steer("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0);
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    return got.empty() ? pose_sample{} : got.front();
+  };
+  pose_sample now = sample();
+  cvc::ariadne::dynamic_vehicle m = model.at(now.state, h.tick(), nullptr, now.steer);
+  avatar_intent in;
+  in.throttle = 1.0;
+  in.steer = 0.0;
+  in.brake = 0.0;
+  for (int step = 0; step < 720; ++step) {
+    if (brake && h.state("ann").position.x > -10.0 - 3.0 - 2.25) {
+      in.throttle = 0.0;
+      in.brake = 1.0;
+    }
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    // Where the client shows the parked vehicle: where the relay has it now (or DELAY ticks
+    // before), at its velocity.
+    const cvc::physics::body_state shown = shown_now();
+    h.advance(dt);
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      if (hold) {
+        cvc::ariadne::vehicle_obstacle o;
+        o.key = avatar ? 1 : parked;
+        o.half_extents = half;
+        o.mass = mass;
+        o.walk_force = avatar && walk ? h.rules().policy.energy.force_max : 0.0;
+        o.at = shown;
+        o.at.position =
+            shown.position + shown.linear_velocity * (static_cast<double>(t - before) * dt);
+        EXPECT_TRUE(model.hold_obstacles(m, {o}));
+      }
+      model.step(m, t);
+      command_after(m, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    out.stopped_at = std::max(out.stopped_at, relay.position.x);
+    cvc::physics::body_state box;
+    if (hold && model.obstacle_state(avatar ? 1 : parked, box)) {
+      const cvc::physics::vec3 there = parked_now().position;
+      out.box_off =
+          std::max(out.box_off, std::hypot(box.position.x - there.x, box.position.y - there.y));
+    }
+    if (h.tick() % 4 == 0) {
+      out.worst =
+          std::max(out.worst, std::hypot(m.box[0] - relay.position.x, m.box[1] - relay.position.y));
+      now = sample();
+      m = model.at(now.state, h.tick(), &m, now.steer);
+    }
+  }
+  const cvc::physics::vec3 d = parked_now().position - parked_start;
+  out.parked_moved = std::sqrt(cvc::physics::dot(d, d));
+  out.held = model.obstacles_held();
+  out.mass = mass;
+}
+} // namespace
+
+// The room's vehicles in a client's jolt model (OW5o): the relay's driver rams a parked vehicle.
+// The client shows it, and its model holds its box where it is shown, so the client's car meets it
+// as the relay's does; without the box it drives on into it between samples, each sample pulling
+// it back. A kinematic-plant vehicle is a kinematic box on the relay too, so the client's box is
+// what the relay's car meets. A parked jolt vehicle is a body of its own mass there, shoved by the
+// car; the client's box does not move but as the samples of its pose move it.
+TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsVehicles) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *plant : {"kinematic", "jolt"}) {
+    SCOPED_TRACE(plant);
+    ram_run held, through;
+    ram_parked(plant, true, held);
+    ram_parked(plant, false, through);
+    std::printf("  OW5O %s: relay's car got to x %.2f, pushed the parked one %.3f m; the model "
+                "%.4f m off at a sample holding its box (mass %.0f kg), %.4f m without\n",
+                plant, held.stopped_at, held.parked_moved, held.worst, held.mass, through.worst);
+    EXPECT_EQ(held.held, 1u);
+    EXPECT_EQ(through.held, 0u);
+    EXPECT_LT(held.stopped_at, -10.0 + 2.0) << "the relay's car met the parked vehicle";
+    EXPECT_LT(held.worst, 0.01) << "holding its box, the model meets it as the relay's car does";
+    EXPECT_GT(through.worst, 3.0 * held.worst) << "without, it drives into it between samples";
+  }
+}
+
+// The room's avatars in a client's jolt model (OW5p): the relay's driver runs down a participant
+// standing in its way. The model holds the avatar as holon::held_obstacles holds a peer, a
+// frictionless box of the avatar body's mass where it is shown, so the client's car is slowed by
+// it as the relay's is; without it, the car drives through the avatar between samples. Shown a
+// playout's delay (12 ticks) behind the relay, the avatar it knocks is left where the knock sent
+// it rather than put back where it stood; so is the parked jolt Humvee OW5o's test shoves.
+TEST(AriadneOneWorld, AClientsCarMeetsTheRoomsAvatars) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  struct ram_case {
+    const char *what;
+    int delay;
+    double within; // m: the most the model may be off at a sample, holding it
+  };
+  for (const ram_case c :
+       {ram_case{"avatar", 0, 0.005}, ram_case{"avatar", 12, 0.005}, ram_case{"jolt", 12, 0.012}}) {
+    SCOPED_TRACE(std::string(c.what) + " " + std::to_string(c.delay));
+    ram_run held, through;
+    ram_parked(c.what, true, held, c.delay);
+    ram_parked(c.what, false, through, c.delay);
+    std::printf("  OW5P %s, shown %d ticks behind: relay's car got to x %.2f, moved it %.3f m; the "
+                "model %.4f m off at a sample holding its box (%.0f kg), %.4f m without\n",
+                c.what, c.delay, held.stopped_at, held.parked_moved, held.worst, held.mass,
+                through.worst);
+    EXPECT_EQ(held.held, 1u);
+    EXPECT_GT(held.parked_moved, 1.0) << "the relay's car knocked it";
+    EXPECT_LT(held.worst, c.within) << "the model meets it as the relay's car does";
+    EXPECT_LT(held.worst, through.worst);
+  }
+  // Its walker, knocked loose: the relay's walker brings the avatar it knocks back to rest. The
+  // model's box, without one, slides on where the knock sent it until where it is shown catches
+  // up with it; with one it stops as the relay's avatar does.
+  ram_run walks, slides;
+  ram_parked("avatar", true, walks, 12, true, true);
+  ram_parked("avatar", true, slides, 12, false, true);
+  std::printf(
+      "  OW5P the avatar knocked by a braking car (knocked %.2f m): its box at worst %.3f m "
+      "from the relay's with its walker, %.3f m without\n",
+      walks.parked_moved, walks.box_off, slides.box_off);
+  EXPECT_LT(walks.box_off, 0.5 * slides.box_off) << "its walker stops it as the relay's does";
+}
+
+// The room in a dynamic plant's model (OW5p): on the relay a dynamic or dynamic4w vehicle's
+// chassis box is in the world, and what it hits goes back into its plant; the client's model has
+// its box in a world of its own with the statics and the room's boxes, so it meets the parked
+// vehicle and the avatar as the relay's does. Without them it drives on into them between
+// samples. The square it drives on is ground: touching it is not a hit.
+TEST(AriadneOneWorld, AClientsDynamicCarMeetsTheRoom) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  for (const char *drives : {"dynamic", "dynamic4w"})
+    for (const char *what : {"kinematic", "avatar"}) {
+      SCOPED_TRACE(std::string(drives) + " into " + what);
+      ram_run held, through;
+      ram_parked(what, true, held, 0, true, false, drives);
+      ram_parked(what, false, through, 0, true, false, drives);
+      std::printf("  OW5Q %s into a parked %s: relay's car got to x %.2f, moved it %.3f m; the "
+                  "model %.4f m off at a sample holding its box, %.4f m without\n",
+                  drives, what, held.stopped_at, held.parked_moved, held.worst, through.worst);
+      EXPECT_EQ(held.held, 1u);
+      EXPECT_LT(held.worst, 0.002) << "holding its box, the model meets it as the relay's does";
+      EXPECT_LT(held.worst, through.worst);
+      if (std::string(what) == "kinematic") {
+        EXPECT_LT(held.stopped_at, -10.0 + 2.0) << "the relay's car met the parked vehicle";
+        EXPECT_GT(through.worst, 0.1) << "without, it drives into it between samples";
+      }
+    }
+}
 
 TEST(AriadneOneWorld, AClientRunsTheDynamicVehicleItDrivesAsTheWorldDoes) {
   REQUIRE_YAML();
@@ -9250,12 +10353,701 @@ TEST(AriadneOneWorld, AClientRunsTheJoltVehicleItDrivesAsTheWorldDoes) {
   EXPECT_EQ(run.drive.plant, "jolt");
   EXPECT_GT(over.climb, 0.5) << "up the hill, on the client's statics";
   for (const client_run *c : {&run, &over}) {
+    EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the chassis's attitude";
+    EXPECT_LT(c->entity_gap, 1e-6) << "and so is the room's entity's, which clients draw";
     EXPECT_LT(c->end_speed, -0.5) << "and backed up at the end";
     EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
     EXPECT_LT(c->worst_yaw, 0.005);
     EXPECT_LT(c->worst_z, 0.02) << "the ride height";
     EXPECT_LT(c->worst_tilt, 0.05) << "the body's pitch and roll";
   }
+}
+
+// The same on the dynamicboat plant (OW5j): the client's model is the relay's boat plant in a
+// world of its own made as the relay's is, on the same document's statics and water, so it keeps
+// to the relay's launch, its height and attitude afloat included, through throttle, a turn,
+// astern and reverse on the lake.
+TEST(AriadneOneWorld, AClientRunsTheBoatItDrivesAsTheWorldDoes) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kBoatDrivable, "dynamicboat", run, false, false, "launch", -25.0, 2.0);
+  EXPECT_EQ(run.drive.plant, "dynamicboat");
+  // A launch's propeller astern is slow to stop it: 2 s astern and 2 s reversing take it from
+  // 3.1 m/s to under 1 (a car would be backing up by then).
+  EXPECT_LT(run.end_speed, 1.5) << "astern slowed it";
+  EXPECT_LT(run.worst, 0.02) << "within a sample's 4 ticks";
+  EXPECT_LT(run.worst_yaw, 0.005);
+  EXPECT_LT(run.worst_z, 0.02) << "afloat at the relay's height";
+  EXPECT_LT(run.worst_tilt, 0.05) << "the hull's pitch and roll";
+}
+
+// A lake with a wind sea on it (OW5l): kBoatDrivable's made wider and deeper (12 m at its
+// middle, so the waves do not fade over its shallows), the wind at 14 m/s over a long fetch, no
+// lee.
+const char *kBoatWaves = R"(
+world:
+  vehicles:
+    archetypes:
+      launch:
+        plant: dynamicboat:launch
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  world: { source: lakeside, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lakeside
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -13, radius: 110 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 14
+      fetch: 20000
+      lee: 0
+      body: {}
+)";
+
+// The same boat on a lake with waves (OW5l). The relay reads its water's waves at the clock's time
+// (SceneWorld::follow anchors its world's field time there), and the client's model reads them at
+// the sample's tick's time, so the client's boat rides the relay's waves, here with the relay's
+// holon 7 s on before its world was attached. The driver's pose carries the hull's attitude and
+// vertical speed (OW5m), so the model takes them from each sample, from the first.
+TEST(AriadneOneWorld, AClientsBoatRidesTheRelaysWaves) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run still, waves;
+  drive_as_the_world_does(kBoatDrivable, "dynamicboat", still, false, false, "launch", -25.0, 2.0,
+                          7.0);
+  drive_as_the_world_does(kBoatWaves, "dynamicboat", waves, false, false, "launch", -25.0, 2.0, 7.0,
+                          120);
+  std::printf(
+      "  the relay's launch heaved %.3f m on still water, %.3f m on the waves; a model "
+      "reading the waves a second off is %.3f m off its height; from the second second, "
+      "%.4f rad of heading and %.4f of attitude at worst (%.4f in the first); the driver's pose "
+      "%.2g rad from the hull's attitude\n",
+      still.heave, waves.heave, waves.phase_z, waves.settled_yaw, waves.settled_tilt,
+      waves.worst_tilt, waves.ride_gap);
+  EXPECT_GT(waves.heave, 2.0 * still.heave + 0.1) << "the waves move it";
+  // Each sample puts the hull at the relay's height, attitude and spin (OW5m, OW5n), so a model
+  // reading the waves a second off has only 4 ticks to drift from them; it still drifts 2.5 x as
+  // far (half a second off drifts only 2.3 x: 8 mm).
+  EXPECT_GT(waves.phase_z, 2.5 * waves.worst_z) << "on the relay's waves, not others";
+  for (const client_run *c : {&still, &waves}) {
+    EXPECT_LT(c->ride_gap, 1e-6) << "the driver's pose is the hull's attitude";
+    EXPECT_LT(c->entity_gap, 1e-6) << "and so is the room's entity's, which clients draw";
+    EXPECT_LT(c->worst, 0.02) << "within a sample's 4 ticks";
+    EXPECT_LT(c->worst_z, 0.02) << "afloat at the relay's height";
+    EXPECT_LT(c->worst_yaw, 0.01);
+    EXPECT_LT(c->worst_tilt, 0.02) << "the hull's pitch and roll, from the first sample";
+    EXPECT_LT(c->settled_tilt, 0.01) << "from the second second";
+  }
+}
+
+// A launch on a lake in a 6 m/s wind (OW5q), the water's sea grown by the scene's wind, and a
+// storm (add_storm, time-lapsed by 15) whose front reaches the lake a few seconds in.
+const char *kStormBoat = R"(
+world:
+  vehicles:
+    archetypes:
+      launch:
+        plant: dynamicboat:launch
+        controllers: [nav@1, none, external]
+        drivable: true
+scene:
+  physics: {}
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  world: { source: lakeside, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lakeside
+      source:
+        heightfield:
+          size: 400
+          resolution: 201
+          layers:
+            - { kind: dome, amplitude: -30, radius: 150 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: 0
+      wave_amp: 0.3
+      lee: 0
+      body: {}
+)";
+
+// The fluid fields WORLD has (a water node's), and with AIR its flow fields after them (the scene's
+// wind with the storms' fronts), as world_replica takes them (OW5q).
+std::vector<cvc::physics::field> water_of(const SceneWorld &world, bool air = false) {
+  std::vector<cvc::physics::field> out;
+  for (const cvc::physics::field_snapshot &f : world.world().snapshot().fields)
+    if (f.desc.kind == cvc::physics::field_kind::fluid)
+      out.push_back(f.desc);
+  if (air)
+    for (const cvc::physics::field_snapshot &f : world.world().snapshot().fields)
+      if (f.desc.kind == cvc::physics::field_kind::flow)
+        out.push_back(f.desc);
+  return out;
+}
+
+// A sea the relay's storms grow (OW5q). The relay's holon runs its world on its own clock, so the
+// sea's keyframes are timed on it, and the storm's front grows the sea under the relay's launch as
+// it crosses the lake. The relay publishes each water node's last keyframe (world_on_of's seas),
+// and a client's world from the same document makes the same sea from it (SceneWorld::follow_sea),
+// which its boat's model floats on from the tick the relay's went in after (set_water). One that
+// keeps its document's sea floats on another sea once the front is over the lake.
+TEST(AriadneOneWorld, AClientsBoatRidesTheSeaTheRelaysStormsGrow) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kStormBoat);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  add_storm(r, -1200.0, 0.0, 15.0);
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "launch", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  const double dt = h.clock().fixed_dt();
+  for (int i = 0; i < 20; ++i)
+    h.advance(dt);
+  cvc::ariadne::dynamic_drive k;
+  ASSERT_TRUE(v.dynamics(id, k));
+  ASSERT_EQ(k.plant, "dynamicboat");
+
+  // The client's world from the same document, on the relay's ticks (world_replica's), and two
+  // models of the launch on its statics and water: one follows the relay's sea, one does not.
+  Scene copy = r.scene;
+  copy.vehicles.clear();
+  std::unique_ptr<SceneWorld> mine = SceneWorld::from_scene(app, copy, "client", "", &warnings);
+  ASSERT_NE(mine, nullptr);
+  mine->sync(h.clock(), &warnings);
+  cvc::ariadne::jolt_vehicle_world jw;
+  for (const SceneWorldBody &b : mine->bodies())
+    if (!b.moves && b.desc) {
+      cvc::ariadne::avatar_static s;
+      s.type = cvc::ariadne::avatar_static::kind::body;
+      s.body = b.desc;
+      s.material = std::make_shared<const cvc::physics::material>(
+          mine->world().get_material(b.desc->material));
+      jw.statics.push_back(std::move(s));
+    }
+  jw.gravity = mine->world().config().gravity;
+  jw.water = water_of(*mine);
+  ASSERT_EQ(jw.water.size(), 1u) << "the water node's field";
+  cvc::ariadne::jolt_vehicle_world aired = jw;
+  aired.water = water_of(*mine, true);
+  ASSERT_EQ(aired.water.size(), 2u) << "and the air, the scene's wind with the storm's front";
+  // FOLLOWS: the relay's sea and its air (world_replica's); STILL: the relay's sea, no air; KEEPS:
+  // its document's sea, no air.
+  cvc::ariadne::dynamic_vehicle_model follows(k, dt, {}, &aired), still(k, dt, {}, &jw),
+      keeps(k, dt, {}, &jw);
+  pose_stream_encoder enc;
+  pose_stream_decoder dec;
+  const auto sample = [&]() {
+    pose_subject s;
+    s.pid = "ann";
+    s.state = h.state("ann");
+    s.steer = h.steer("ann");
+    const cvc::pose_snapshot snap = enc.encode(h.tick(), {s}, 0);
+    enc.commit();
+    std::vector<pose_sample> got;
+    EXPECT_TRUE(dec.decode(snap, got));
+    return got.empty() ? pose_sample{} : got.front();
+  };
+  pose_sample now = sample();
+  cvc::ariadne::dynamic_vehicle mf = follows.at(now.state, h.tick(), nullptr, now.steer);
+  cvc::ariadne::dynamic_vehicle mk = keeps.at(now.state, h.tick(), nullptr, now.steer);
+  cvc::ariadne::dynamic_vehicle ms = still.at(now.state, h.tick(), nullptr, now.steer);
+  double xy_s = 0.0, tilt_s = 0.0, z_s = 0.0;
+  std::map<std::string, SceneWaterKeyframe> had;
+  int taken = 0;
+  double worst_f = 0.0, worst_k = 0.0, heave_lo = 1e9, heave_hi = -1e9;
+  double tilt_f = 0.0, tilt_k = 0.0, xy_f = 0.0, xy_k = 0.0;
+  // The angle between the model's hull and the relay's.
+  const auto apart = [](const cvc::physics::quat &a, const cvc::physics::quat &b) {
+    const double na = std::sqrt(a.w * a.w + a.x * a.x + a.y * a.y + a.z * a.z);
+    const double nb = std::sqrt(b.w * b.w + b.x * b.x + b.y * b.y + b.z * b.z);
+    const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z) / (na * nb);
+    return 2.0 * std::acos(std::min(1.0, d));
+  };
+  avatar_intent in;
+  in.throttle = 0.6;
+  in.steer = 0.15;
+  for (int step = 0; step < 1080; ++step) {
+    h.set_intent("ann", in);
+    const std::uint64_t before = h.tick();
+    h.advance(dt);
+    // The relay's seas as the room carries them, and the client's world after them.
+    std::uint64_t from = 0;
+    bool fresh = false;
+    for (const conference::room_water_sea &s : world_on_of(*w).seas) {
+      SceneWaterKeyframe kf;
+      kf.from = {s.from_speed, s.from_dir, s.from_fetch};
+      kf.to = {s.to_speed, s.to_dir, s.to_fetch};
+      kf.t0 = s.t0;
+      kf.t1 = s.t1;
+      kf.keyframe = s.keyframe;
+      kf.from_tick = s.from_tick;
+      if (had[s.node] == kf)
+        continue;
+      had[s.node] = kf;
+      EXPECT_TRUE(mine->follow_sea(s.node, kf));
+      fresh = true;
+      from = std::max(from, kf.from_tick);
+    }
+    mine->sync(h.clock(), &warnings);
+    if (fresh) {
+      follows.set_water(water_of(*mine, true), from);
+      still.set_water(water_of(*mine), from);
+      ++taken;
+    }
+    for (std::uint64_t t = before + 1; t <= h.tick(); ++t) {
+      follows.step(mf, t);
+      command_after(mf, k, in, dt);
+      keeps.step(mk, t);
+      command_after(mk, k, in, dt);
+      still.step(ms, t);
+      command_after(ms, k, in, dt);
+    }
+    const cvc::physics::body_state relay = h.state("ann");
+    heave_lo = std::min(heave_lo, relay.position.z);
+    heave_hi = std::max(heave_hi, relay.position.z);
+    if (step >= 120) {
+      const cvc::physics::body_state f = cvc::ariadne::dynamic_vehicle_state(mf);
+      const cvc::physics::body_state g = cvc::ariadne::dynamic_vehicle_state(mk);
+      worst_f = std::max(worst_f, std::fabs(f.position.z - relay.position.z));
+      worst_k = std::max(worst_k, std::fabs(g.position.z - relay.position.z));
+      tilt_f = std::max(tilt_f, apart(f.rotation, relay.rotation));
+      tilt_k = std::max(tilt_k, apart(g.rotation, relay.rotation));
+      xy_f = std::max(xy_f,
+                      std::hypot(f.position.x - relay.position.x, f.position.y - relay.position.y));
+      xy_k = std::max(xy_k,
+                      std::hypot(g.position.x - relay.position.x, g.position.y - relay.position.y));
+      const cvc::physics::body_state e = cvc::ariadne::dynamic_vehicle_state(ms);
+      z_s = std::max(z_s, std::fabs(e.position.z - relay.position.z));
+      tilt_s = std::max(tilt_s, apart(e.rotation, relay.rotation));
+      xy_s = std::max(xy_s,
+                      std::hypot(e.position.x - relay.position.x, e.position.y - relay.position.y));
+    }
+    if (h.tick() % 4 == 0) {
+      now = sample();
+      mf = follows.at(now.state, h.tick(), &mf, now.steer);
+      mk = keeps.at(now.state, h.tick(), &mk, now.steer);
+      ms = still.at(now.state, h.tick(), &ms, now.steer);
+    }
+  }
+  const SceneWaterKeyframe relays = w->water("water")->keyframe();
+  const SceneWaterKeyframe clients = mine->water("water")->keyframe();
+  std::printf("  OW5Q the relay's sea: %llu keyframes (the last in after tick %llu), the client's "
+              "%llu (%d taken); the launch heaved %.3f m; the model off its height, attitude and "
+              "place by %.4f m, %.4f rad, %.4f m following the relay's sea, %.4f m, %.4f rad, "
+              "%.4f m on its document's\n",
+              static_cast<unsigned long long>(relays.keyframe),
+              static_cast<unsigned long long>(relays.from_tick),
+              static_cast<unsigned long long>(clients.keyframe), taken, heave_hi - heave_lo,
+              worst_f, tilt_f, xy_f, worst_k, tilt_k, xy_k);
+  std::printf("  OW5Q without the relay's air on the hull: %.4f m, %.4f rad, %.4f m\n", z_s, tilt_s,
+              xy_s);
+  // The client's air is the relay's to the bit, the storm's front in it, at the clock's time.
+  ASSERT_TRUE(w->wind_field().valid());
+  const cvc::physics::field relay_air = w->world().get_field(w->wind_field());
+  const cvc::physics::field client_air = water_of(*mine, true).back();
+  ASSERT_TRUE(relay_air.wind && client_air.wind);
+  int air_off = 0;
+  double strongest = 0.0;
+  for (double t : {0.0, 3.0, 6.0, 9.0})
+    for (double x : {-300.0, -100.0, -40.0, 0.0, 60.0}) {
+      const cvc::physics::vec3 p{x, 5.0, 2.0};
+      const cvc::physics::vec3 a = relay_air.wind->velocity(p, t),
+                               b = client_air.wind->velocity(p, t);
+      if (a.x != b.x || a.y != b.y || a.z != b.z)
+        ++air_off;
+      strongest = std::max(strongest, std::hypot(a.x, a.y));
+    }
+  EXPECT_EQ(air_off, 0) << "the client's air, the relay's";
+  EXPECT_GT(strongest, 8.0) << "a front in it (the wind is 6 m/s)";
+  EXPECT_LE(xy_f, xy_s + 1e-4) << "the air on the hull, as on the relay's";
+  EXPECT_GE(relays.keyframe, 2u) << "the front grew the relay's sea";
+  EXPECT_EQ(clients.keyframe, relays.keyframe);
+  EXPECT_TRUE(clients == relays) << "the same keyframe, the same tick";
+  EXPECT_GE(taken, 2);
+  EXPECT_LT(worst_f, 0.5 * worst_k) << "on the relay's sea, not its document's";
+}
+
+// The water a client's boat floats on (OW5j): the replica of the relay's document carries its
+// world's water (the water node's field) with the statics, and the holon has it from client_pump.
+// A world without water of its own over the grid's lake gets the still water the relay adds for
+// its boats (boat_still_water); one with it, none.
+TEST(AriadneOneWorld, AClientsReplicaHasTheRelaysWater) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5j_water";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "lake.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << "meta: { name: lake, min_libcvc: \"0.0.0\" }" << kBoatDrivable;
+  }
+  cvc::app app;
+  register_world_block(app);
+  const std::string room = "lake";
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  world_replica world;
+  for (int i = 0; i < 5 && !world.ready(); ++i)
+    world.pump(app, room);
+  ASSERT_TRUE(world.ready()) << world.status();
+  ASSERT_EQ(world.water().size(), 1u) << "the water node's field";
+  EXPECT_EQ(world.water()[0].kind, cvc::physics::field_kind::fluid);
+  // The same document's world, as the replica builds it: its grid's lake under the water node.
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.vehicles.clear();
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> mine = SceneWorld::from_scene(app, r.scene, "mine", "", &warnings);
+  ASSERT_NE(mine, nullptr);
+  mine->sync(&warnings);
+  std::shared_ptr<const cvc::nav::world_grid> grid;
+  std::shared_ptr<const cvc::height_field> terrain;
+  mine->vehicle_ground(grid, terrain);
+  ASSERT_NE(grid, nullptr);
+  ASSERT_TRUE(grid->has_water());
+  EXPECT_FALSE(cvc::ariadne::boat_still_water(app, *grid, mine->world()).has_value())
+      << "the world has its own water there";
+  cvc::physics::world dry;
+  const std::optional<cvc::physics::field> still = cvc::ariadne::boat_still_water(app, *grid, dry);
+  ASSERT_TRUE(still.has_value()) << "a world without water over the lake";
+  dry.add_field(*still);
+  EXPECT_DOUBLE_EQ(dry.water_at({0.0, 0.0, -2.0}).density, 1000.0) << "under the level";
+  EXPECT_FALSE(dry.water_at({0.0, 0.0, -0.5}).wet) << "over it";
+
+  // The holon has it with the statics.
+  holon client(holon_role::client, room_holon_config());
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {60.0, 0.0, 1.0};
+  write_pose(app, room, "ann", feet, 100);
+  client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  EXPECT_TRUE(client.statics_stamp().same(world.stamp()));
+  vehicle_archetype launch;
+  launch.id = "launch";
+  launch.plant = "dynamicboat";
+  launch.preset = "launch";
+  const cvc::physics::vehicle_desc d = vehicle_desc_of(launch);
+  cvc::ariadne::dynamic_drive k;
+  k.plant = "dynamicboat";
+  k.preset = "launch";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_steer = d.max_steer;
+  k.vmax = d.max_speed;
+  k.tick_steps = 12;
+  EXPECT_TRUE(client.predict_vehicle("ann", k)) << "a boat's model, on that water";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// The relay's sea through the room (OW5q): the relay publishes each water node's last keyframe with
+// what it has on (room_world_on's seas), and a client's replica of its document makes the same sea
+// (WaterRuntime::follow_sea) and hands the holon the new water with the tick it goes in after
+// (world_replica::water_revision, water_from_tick; holon::set_water). The same keyframe again is
+// the sea it has. The relay's storms the same way (room_world_on's weathers: a live
+// weather.events, a new storm-wind peak): the replica's air is made again with them. And the
+// document the client draws shows the relay's sea at the relay's time and its storms
+// (show_relay_seas: the scene's shown_clock, the water node's water.sea, the weather node's keys,
+// the sun), where it has those nodes.
+TEST(AriadneOneWorld, AClientsReplicaFollowsTheRelaysSea) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_ow5q_sea";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "sea.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << "meta: { name: sea, min_libcvc: \"0.0.0\" }" << kStormBoat
+        << "    - node: weather\n      type: weather\n      chance: 0\n      area: 100\n";
+  }
+  cvc::app app;
+  register_world_block(app);
+  const std::string room = "sea";
+  conference::write_room_world_source(app, room,
+                                      {doc.string(), conference::file_sha256(doc.string())});
+  world_replica world;
+  for (int i = 0; i < 5 && !world.ready(); ++i)
+    world.pump(app, room);
+  ASSERT_TRUE(world.ready()) << world.status();
+  ASSERT_EQ(world.water().size(), 2u) << "the water node's field, then the air";
+  EXPECT_EQ(world.water()[0].kind, cvc::physics::field_kind::fluid);
+  EXPECT_EQ(world.water()[1].kind, cvc::physics::field_kind::flow);
+  const cvc::physics::field grown = world.water()[0];
+  EXPECT_EQ(world.water_revision(), 0u);
+  const section_stamp built = world.stamp();
+  world.pump(app, room);
+  EXPECT_TRUE(world.stamp().same(built)) << "a frame with nothing new builds nothing";
+  const WaterRuntime *water = world.world()->water("water");
+  ASSERT_NE(water, nullptr);
+  EXPECT_FALSE(water->following()) << "its own sea until the relay's comes";
+  const double fetch = water->keyframe().to.fetch_m;
+
+  // The relay's sea: its third keyframe, 6 m/s grown to 9, its field in after tick 600.
+  conference::room_world_on on;
+  on.world = world.world()->world_on();
+  conference::room_water_sea s;
+  s.node = "water";
+  s.keyframe = 3;
+  s.from_tick = 600;
+  s.from_speed = 6.0;
+  s.from_dir = 0.0;
+  s.from_fetch = fetch;
+  s.to_speed = 9.0;
+  s.to_dir = 0.2;
+  s.to_fetch = fetch;
+  s.t0 = 5.0;
+  s.t1 = 9.0;
+  on.seas.push_back(s);
+  conference::write_room_world_on(app, room, on);
+  conference::room_world_on back;
+  ASSERT_TRUE(conference::read_room_world_on(app, room, back));
+  EXPECT_TRUE(back == on) << "the seas come back to the bit";
+  world.pump(app, room);
+  EXPECT_TRUE(water->following());
+  const SceneWaterKeyframe got = water->keyframe();
+  EXPECT_EQ(got.keyframe, 3u);
+  EXPECT_EQ(got.from_tick, 600u);
+  EXPECT_EQ(got.to.speed_mps, 9.0);
+  EXPECT_EQ(got.to.dir_rad, 0.2);
+  EXPECT_EQ(got.t0, 5.0);
+  EXPECT_EQ(got.t1, 9.0);
+  EXPECT_EQ(world.water_revision(), 1u) << "the new sea";
+  EXPECT_EQ(world.water_from_tick(), 600u);
+  ASSERT_EQ(world.water().size(), 2u);
+  EXPECT_NE(world.water()[0].surface.get(), grown.surface.get()) << "its field made again";
+  world.pump(app, room);
+  EXPECT_EQ(world.water_revision(), 1u) << "the sea it has";
+  EXPECT_TRUE(world.stamp().same(built)) << "the statics are as they were";
+
+  // The relay's storms: a storm its live weather.events put over the lake, and a storm-wind peak
+  // of 24 m/s from tick 300.
+  cvc::world::weather_event e;
+  e.t = 0.0;
+  e.tau = -1500.0;
+  e.x = -1200.0;
+  e.y = 0.0;
+  e.radius = 400.0;
+  e.peak = 1.0;
+  e.life = 3000.0;
+  const std::string events = cvc::world::format_weather_events({e});
+  ASSERT_FALSE(world.world()->weathers().empty());
+  const WeatherFriction &replica_weather = *world.world()->weathers().front();
+  EXPECT_NE(replica_weather.events_text(), events);
+  const void *calm_air = world.water()[1].wind.get();
+  conference::room_weather x;
+  x.node = "weather";
+  x.events = events;
+  x.gust = 24.0;
+  x.gust_from = 300;
+  on.weathers.push_back(x);
+  conference::write_room_world_on(app, room, on);
+  ASSERT_TRUE(conference::read_room_world_on(app, room, back));
+  EXPECT_TRUE(back == on) << "the weathers come back";
+  world.pump(app, room);
+  EXPECT_EQ(replica_weather.events_text(), events) << "the relay's storms";
+  EXPECT_EQ(replica_weather.gust_front(), 24.0);
+  EXPECT_EQ(replica_weather.gust_from(), 300u);
+  EXPECT_EQ(world.water_revision(), 2u) << "the air made again with them";
+  EXPECT_EQ(world.water_from_tick(), 300u);
+  ASSERT_EQ(world.water().size(), 2u);
+  EXPECT_NE(world.water()[1].wind.get(), calm_air);
+  world.pump(app, room);
+  EXPECT_EQ(world.water_revision(), 2u) << "the storms it has";
+
+  // The holon takes it from client_pump.
+  holon client(holon_role::client, room_holon_config());
+  conference::room_join(app, room, "ann");
+  cvc::physics::body_state feet;
+  feet.position = {0.0, 0.0, 1.0};
+  write_pose(app, room, "ann", feet, 100);
+  client_pump(client, app, room, "ann", 1.0 / 60.0, nullptr, &world);
+  EXPECT_TRUE(client.statics_stamp().same(world.stamp()));
+  EXPECT_EQ(client.water_revision(), 2u);
+
+  // The document the client draws, the same one under its own prefix: its water node shows the
+  // relay's sea at the relay's time, and its weather node the relay's storms.
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.vehicles.clear();
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> drawn = SceneWorld::from_scene(app, r.scene, "drawn", "", &warnings);
+  ASSERT_NE(drawn, nullptr);
+  cvc::state &root = cvc::state::instance(app);
+  // The relay's sun: its document's key light in the room's scene env; the drawn document's rig
+  // keys, as its stage lighting has them.
+  conference::room_scene_env env;
+  SceneLight rig;
+  rig.id = "sun";
+  rig.rig = "three_point";
+  rig.has_key = true;
+  rig.key_azimuth = 30.0f;
+  rig.key_elevation = 20.0f;
+  env.lights.push_back(rig);
+  conference::write_scene_env(app, room, env);
+  root("drawn.lighting.key_azimuth").value("-52");
+  root("drawn.lighting.key_elevation").value("34");
+  EXPECT_EQ(show_relay_seas(app, room, client, world, "elsewhere"), 0u) << "no such nodes there";
+  EXPECT_GE(show_relay_seas(app, room, client, world, "drawn"), 6u);
+  EXPECT_EQ(show_relay_seas(app, room, client, world, "drawn"), 0u) << "as they are";
+  SceneWaterKeyframe shown;
+  ASSERT_TRUE(parse_sea_keyframe(root("drawn.water.sea").value(), shown));
+  EXPECT_TRUE(shown == got) << "the relay's keyframe";
+  EXPECT_EQ(std::strtod(root(std::string("drawn.") + kShownClockKey).value().c_str(), nullptr),
+            client.clock().t())
+      << "the scene drawn at the relay's time";
+  EXPECT_EQ(root("drawn.weather.events").value(), events);
+  EXPECT_EQ(std::strtod(root("drawn.lighting.key_azimuth").value().c_str(), nullptr), 30.0)
+      << "the relay's sun";
+  EXPECT_EQ(std::strtod(root("drawn.lighting.key_elevation").value().c_str(), nullptr), 20.0);
+  drawn->sync(&warnings);
+  const WaterRuntime *drawn_water = drawn->water("water");
+  ASSERT_NE(drawn_water, nullptr);
+  EXPECT_TRUE(drawn_water->following()) << "its water.sea key";
+  EXPECT_TRUE(drawn_water->keyframe() == got);
+  EXPECT_EQ(scene_water_time(app, "drawn", -1.0), client.clock().t()) << "the relay's time";
+  EXPECT_EQ(shown_time(app, "drawn", -1.0), client.clock().t());
+  EXPECT_EQ(scene_water_time(app, "elsewhere", -1.0), -1.0) << "else the app's";
+  EXPECT_EQ(drawn->weathers().front()->events_text(), events);
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// A boat's model floats on the water its tick has (OW5q): water from a tick on goes in at the step
+// that ends past it, and a replay from before it floats on the water before it, so two models
+// stepped from the same state across the tick agree with one stepped without the change up to it,
+// and differ after. The water before is kept (kWaterKept).
+TEST(AriadneOneWorld, ABoatsModelTakesTheWaterAtItsTick) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kStormBoat);
+  ASSERT_TRUE(r.ok) << r.error;
+  r.scene.vehicles.clear();
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> mine = SceneWorld::from_scene(app, r.scene, "client", "", &warnings);
+  ASSERT_NE(mine, nullptr);
+  mine->sync(&warnings);
+  cvc::ariadne::jolt_vehicle_world jw;
+  for (const SceneWorldBody &b : mine->bodies())
+    if (!b.moves && b.desc) {
+      cvc::ariadne::avatar_static st;
+      st.type = cvc::ariadne::avatar_static::kind::body;
+      st.body = b.desc;
+      jw.statics.push_back(std::move(st));
+    }
+  jw.water = water_of(*mine);
+  ASSERT_EQ(jw.water.size(), 1u);
+  // A rougher sea: the same node's after a 14 m/s keyframe.
+  const double fetch = mine->water("water")->keyframe().to.fetch_m;
+  SceneWaterKeyframe kf;
+  kf.from = {6.0, 0.0, fetch};
+  kf.to = {14.0, 0.0, fetch};
+  kf.keyframe = 1;
+  kf.from_tick = 130;
+  ASSERT_TRUE(mine->follow_sea("water", kf));
+  mine->sync(&warnings);
+  const std::vector<cvc::physics::field> rough = water_of(*mine);
+  ASSERT_EQ(rough.size(), 1u);
+  vehicle_archetype launch;
+  launch.id = "launch";
+  launch.plant = "dynamicboat";
+  launch.preset = "launch";
+  const cvc::physics::vehicle_desc d = vehicle_desc_of(launch);
+  cvc::ariadne::dynamic_drive k;
+  k.plant = "dynamicboat";
+  k.preset = "launch";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_steer = d.max_steer;
+  k.vmax = d.max_speed;
+  k.tick_steps = 12;
+  const double dt = 1.0 / 120.0;
+  cvc::ariadne::dynamic_vehicle_model calm(k, dt, {}, &jw), changes(k, dt, {}, &jw);
+  changes.set_water(rough, 130);
+  ASSERT_EQ(changes.waters().size(), 2u);
+  // A model made with the change in its world has it too.
+  cvc::ariadne::jolt_vehicle_world later = jw;
+  later.water_after.push_back({130, rough});
+  cvc::ariadne::dynamic_vehicle_model made(k, dt, {}, &later);
+  EXPECT_EQ(made.waters().size(), 2u);
+  cvc::physics::body_state at;
+  at.position = {-40.0, 0.0, 0.0};
+  at.rotation = {1.0, 0.0, 0.0, 0.0};
+  cvc::ariadne::dynamic_vehicle a = calm.at(at, 100, nullptr);
+  cvc::ariadne::dynamic_vehicle b = changes.at(at, 100, nullptr);
+  cvc::ariadne::dynamic_vehicle c = made.at(at, 100, nullptr);
+  std::vector<double> za, zb, zc;
+  for (std::uint64_t t = 101; t <= 200; ++t) {
+    calm.step(a, t);
+    changes.step(b, t);
+    made.step(c, t);
+    za.push_back(cvc::ariadne::dynamic_vehicle_state(a).position.z);
+    zb.push_back(cvc::ariadne::dynamic_vehicle_state(b).position.z);
+    zc.push_back(cvc::ariadne::dynamic_vehicle_state(c).position.z);
+  }
+  // Up to tick 130 the same water; from 131 the rougher one.
+  for (std::size_t i = 0; i < 30; ++i)
+    EXPECT_EQ(za[i], zb[i]) << "tick " << 101 + i;
+  double apart = 0.0;
+  for (std::size_t i = 30; i < za.size(); ++i)
+    apart = std::max(apart, std::fabs(za[i] - zb[i]));
+  EXPECT_GT(apart, 1e-4) << "on the rougher sea from tick 131";
+  for (std::size_t i = 0; i < za.size(); ++i)
+    EXPECT_EQ(zb[i], zc[i]) << "a model made with it floats alike, tick " << 101 + i;
+  // Replayed from tick 100 again after it has floated on the rough sea: the calm water first.
+  cvc::ariadne::dynamic_vehicle again = changes.at(at, 100, nullptr);
+  for (std::uint64_t t = 101; t <= 130; ++t) {
+    changes.step(again, t);
+    EXPECT_EQ(cvc::ariadne::dynamic_vehicle_state(again).position.z, za[t - 101])
+        << "the water before it, tick " << t;
+  }
+  std::printf("  OW5Q a boat's model on a 14 m/s keyframe from tick 131: %.4f m off the one on its "
+              "first water by tick 200\n",
+              apart);
 }
 
 TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
@@ -9267,4 +11059,129 @@ TEST(AriadneOneWorld, AClientRunsTheFourWheelVehicleItDrivesAsTheWorldDoes) {
   EXPECT_NEAR(run.drive.ground, 0.0, 1e-6) << "the square's top";
   EXPECT_LT(run.worst_z, 0.01) << "the ride height";
   EXPECT_LT(run.worst_tilt, 0.01) << "the body's pitch and roll";
+}
+
+// A client that starts predicting a four-wheel vehicle the relay is already driving (OW5n): on
+// flat ground and on the relay's dome, mid-turn (2.5 s in, steering at half lock) and while it
+// accelerates (1 s in), with the relay's samples every 4 ticks through the pose stream. The pose
+// carries the chassis's attitude (OW5m), its angular velocity and the plant's steering angle
+// (OW5n), so the model starts from the relay's suspension, spin and front wheels and is put back
+// on them at each sample, not settled at rest with its wheels straight. Before, it was 94 to
+// 98 mrad of attitude, 10.5 mrad of heading and up to 10 mm of height off joining mid-turn; with
+// the attitude alone (no spin or steering), 24 to 25 mrad and 10.4 mrad: its wheels started
+// straight, and its roll rate strayed while they turned to the relay's.
+// A client that starts predicting a jolt vehicle the relay is already driving, mid-turn (OW5r):
+// the pose carries the relay's steering angle (OW5n), which the jolt model now puts on its
+// steering actuator (world::set_vehicle_steer), so its wheels turn as the relay's from the first
+// step; before, its spin was the relay's but its wheels straight, and slewed to the command at
+// the actuator's rate: 2.75 mrad of heading and 4.7 of attitude off at worst, now 0.31 and 1.26.
+// A sample places the actuator at its angle (clamped to the lock), and one without a steering
+// angle leaves it as predicted.
+TEST(AriadneOneWorld, AClientJoinsAJoltVehicleMidTurn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  client_run run;
+  drive_as_the_world_does(kJoltDrivable, "jolt", run, false, false, "humvee", -40.0, 5.0, 0.0, 0,
+                          true, 300);
+  std::printf("  OW5R joining the jolt Humvee mid-turn: %.4f m, %.5f rad of heading, %.5f rad of "
+              "attitude at worst (%.5f a second on)\n",
+              run.worst, run.worst_yaw, run.worst_tilt, run.settled_tilt);
+  EXPECT_LT(run.worst, 0.02);
+  EXPECT_LT(run.worst_yaw, 0.005);
+  EXPECT_LT(run.worst_tilt, 0.02);
+
+  // The actuator at a sample's angle; clamped to the lock; a sample without one keeps it.
+  cvc::ariadne::jolt_vehicle_world jw;
+  cvc::ariadne::dynamic_vehicle_model model(run.drive, 1.0 / 120.0, {}, &jw);
+  ASSERT_NE(model.jolt(), nullptr);
+  cvc::physics::body_state s;
+  s.position = {0.0, 0.0, run.drive.ground + 1.0};
+  s.rotation = {1.0, 0.0, 0.0, 0.0};
+  s.linear_velocity = {5.0, 0.0, 0.0};
+  const auto steer_of = [&](const cvc::ariadne::dynamic_vehicle &) {
+    return const_cast<cvc::ariadne::avatar_world *>(model.jolt())
+        ->world()
+        .vehicle_state(model.jolt_vehicle())
+        .steer;
+  };
+  cvc::ariadne::dynamic_vehicle a = model.at(s, 0, nullptr, 0.2);
+  EXPECT_NEAR(steer_of(a), 0.2, 1e-12) << "the relay's angle";
+  const double lock = const_cast<cvc::ariadne::avatar_world *>(model.jolt())
+                          ->world()
+                          .get_vehicle(model.jolt_vehicle())
+                          .max_steer;
+  cvc::ariadne::dynamic_vehicle b = model.at(s, 0, &a, 5.0);
+  EXPECT_NEAR(steer_of(b), lock, 1e-12) << "clamped to the lock";
+  cvc::ariadne::dynamic_vehicle c = model.at(s, 0, &a, std::nullopt);
+  EXPECT_NEAR(steer_of(c), 0.2, 1e-12) << "an older relay's sample: as predicted";
+}
+
+TEST(AriadneOneWorld, AClientJoinsAFourWheelVehicleMidTurn) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const std::string hill = hill_drivable("dynamic4w");
+  struct {
+    const char *doc;
+    bool on_ground;
+    int join;
+    double tilt, z; // the worst gaps allowed (rad, m)
+  } runs[] = {{kDynamic4wDrivable, false, 300, 0.002, 0.002},
+              {hill.c_str(), true, 300, 0.002, 0.003},
+              {hill.c_str(), true, 120, 0.002, 0.002}};
+  cvc::ariadne::dynamic_drive drive;
+  for (const auto &c : runs) {
+    SCOPED_TRACE(std::string(c.on_ground ? "on the dome" : "on flat ground") +
+                 ", joining at step " + std::to_string(c.join));
+    client_run run;
+    drive_as_the_world_does(c.doc, "dynamic4w", run, c.on_ground, false, "humvee", -40.0, 5.0, 0.0,
+                            0, true, c.join);
+    EXPECT_LT(run.ride_gap, 1e-6) << "the pose is the chassis's attitude";
+    EXPECT_LT(run.worst_tilt, c.tilt);
+    EXPECT_LT(run.settled_tilt, 0.002) << "a second on";
+    EXPECT_LT(run.worst_z, c.z) << "height, the pose stream's millimetres";
+    EXPECT_LT(run.worst_yaw, 0.001) << "the heading, with the relay's yaw rate";
+    EXPECT_LT(run.worst, 0.005);
+    drive = run.drive;
+  }
+
+  // A rolled sample puts the model's suspension on its roll; a heading-only one (a relay before
+  // OW5m) leaves the roll LIKE's.
+  cvc::ariadne::dynamic_vehicle_model model(drive, 1.0 / 120.0);
+  cvc::physics::body_state s;
+  s.rotation = {std::cos(0.2), 0.0, 0.0, std::sin(0.2)}; // heading 0.4
+  const cvc::ariadne::dynamic_vehicle level = model.at(s, 0);
+  EXPECT_NEAR(level.roll, 0.0, 0.01) << "settled at rest";
+  const double h = 0.05; // a roll of 0.1 about x, then the heading
+  s.rotation = {std::cos(0.2) * std::cos(h), std::cos(0.2) * std::sin(h),
+                std::sin(0.2) * std::sin(h), std::sin(0.2) * std::cos(h)};
+  const cvc::ariadne::dynamic_vehicle rolled = model.at(s, 0, &level);
+  EXPECT_NEAR(rolled.roll, 0.1, 1e-9);
+  EXPECT_NEAR(rolled.box[3], 0.4, 1e-9);
+  s.rotation = {std::cos(0.2), 0.0, 0.0, std::sin(0.2)};
+  const cvc::ariadne::dynamic_vehicle kept = model.at(s, 0, &rolled);
+  EXPECT_NEAR(kept.roll, 0.1, 1e-9) << "the model's roll";
+  EXPECT_NEAR(kept.box[3], 0.4, 1e-9);
+
+  // A sample that carries its angular velocity and steering angle (OW5n) puts the model's front
+  // wheels and its yaw, roll and pitch rates on them: the box spins as the plant puts it,
+  // (c phid - s thd, s phid + c thd, r) at heading psi. One that does not keeps LIKE's.
+  const auto body_of = [](const cvc::ariadne::dynamic_vehicle &dv) {
+    return std::get<cvc::physics::dyn_4w_saved>(dv.model).body;
+  };
+  const double c = std::cos(0.4), sn = std::sin(0.4), phid = 0.3, thd = -0.1;
+  s.angular_velocity = {c * phid - sn * thd, sn * phid + c * thd, 0.25};
+  const cvc::ariadne::dynamic_vehicle spun = model.at(s, 0, &kept, 0.2);
+  EXPECT_NEAR(body_of(spun).delta, 0.2, 1e-12);
+  EXPECT_NEAR(body_of(spun).r, 0.25, 1e-12);
+  EXPECT_NEAR(spun.wz, 0.25, 1e-12);
+  EXPECT_NEAR(body_of(spun).phid, phid, 1e-12);
+  EXPECT_NEAR(body_of(spun).thd, thd, 1e-12);
+  const cvc::ariadne::dynamic_vehicle unspun = model.at(s, 0, &spun);
+  EXPECT_NEAR(body_of(unspun).delta, 0.2, 1e-12) << "LIKE's";
+  EXPECT_NEAR(body_of(unspun).r, 0.25, 1e-12) << "LIKE's";
+  const cvc::ariadne::dynamic_vehicle fresh = model.at(s, 0);
+  EXPECT_EQ(body_of(fresh).delta, 0.0) << "none known: straight";
+  EXPECT_EQ(body_of(fresh).r, 0.0);
 }

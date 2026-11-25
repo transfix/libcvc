@@ -26,10 +26,11 @@
 #include <cstdint>
 #include <cstdio>               // snprintf (plot_lines' text sparkline)
 #include <cvc/ariadne/files.h>  // pick_files: FilePickRequest / FilePickDone (§10.8)
+#include <cvc/ariadne/media_save.h>
 #include <cvc/ariadne/widget.h> // Size / Layout / Extent (§3.0.3b) passed to the backend
 #include <cvc/tf/editor.h>      // tf_editor: the model + view the backend edits
 #include <cvc/tf/overlays.h>    // tf_editor: the histogram / contour spectrum / tree layers
-#include <functional>           // CustomEdit::context_pick (§5.28)
+#include <functional>           // CustomEdit::context_pick (§5.30)
 #include <string>
 #include <utility> // move (set_custom_scope)
 #include <vector>
@@ -126,10 +127,21 @@ struct CustomEdit {
   bool committed = false;
   std::string value;
   // An event the widget raises this frame (a program, or a bare name for a host handler), and the
-  // fields a program reads from its `event` dict (a viewport's on_pick:). Empty: none.
+  // fields a program reads from its `event` dict. Empty: none.
   std::string fire;
   std::vector<std::pair<std::string, std::string>> fields;
-  // §5.28 a scene view's pick at the pointer, for a right-click menu over it: the fields an
+  // More events this frame, queued after `fire` in this order, each with fields of its own (each
+  // program runs as a process of its own, so not necessarily in this order). One with `document`
+  // runs in the document's own scope (its prefix and functions), as on_key: does, wherever the
+  // widget sits: a viewport raises a scene node's on_pick:, which is the scene's, that way, and
+  // its own on_pick: as a plain one.
+  struct Event {
+    std::string fire;
+    std::vector<std::pair<std::string, std::string>> fields;
+    bool document = false;
+  };
+  std::vector<Event> events;
+  // §5.30 a scene view's pick at the pointer, for a right-click menu over it: the fields an
   // `input: pick` view writes (x, y, z, hit, node, i, j, k, value, axis, view, mods) and the node's
   // tags (space-separated). The core calls it in the same frame, only when the menu opens. Empty:
   // the widget is not a scene view.
@@ -437,7 +449,7 @@ struct Capabilities {
   bool context_menu = false;    // begin_context_menu opens right-click menus: ui.context_menu
 };
 
-// §5.28 what a right-click menu (`context_menu:`) is over: an item (a group, a viewport), a
+// §5.30 what a right-click menu (`context_menu:`) is over: an item (a group, a viewport), a
 // window, or the main view (the document's top level: wherever no window is).
 enum class ContextMenuOver { Item, Window, Main };
 
@@ -656,6 +668,38 @@ public:
   // `autofocus:`: the next widget drawn takes keyboard focus (if it cannot, the next one that can).
   // The core calls it once when such a widget appears. Default: no keyboard focus to move.
   virtual void focus_next_widget() {}
+  // §5.28 what Copy in the context menu of the next text or menu item puts on the clipboard, when
+  // it is not the text the item shows: a notification's whole message under its one-line entry in
+  // the bell's menu or the Notifications window. A menu item has a context menu only when it is
+  // given one. Called just before the item; the item after it copies what it shows again.
+  // Default: no context menus.
+  virtual void next_item_copy(const std::string &text) { (void)text; }
+  // §5.29 the item just drawn (an image:'s picture by URL or file, a video:'s picture) offers
+  // "Save image..." (or, `m.video`, "Save video...") in its context menu. The core calls it right
+  // after the picture, as it calls set_tooltip. When the user picks it, the backend hands `m` back
+  // with media_save_chosen, and the core saves it. Default: no such menu.
+  virtual void item_save(const MediaSave &m) { (void)m; }
+  // §5.29 the host's own Save dialog, for a save the user asked for (the menu's, or (save-url)):
+  // true when it asked the user, and then `done` is called once, on the thread that draws, in a
+  // later frame (from begin_frame, say), with the path chosen, "" when the user cancelled. The core
+  // writes the file there. False when it has none: the core then has a browser page download it,
+  // or else puts it in the user's Downloads folder. Default: none.
+  virtual bool ask_save_path(const SavePathRequest &req, SavePathDone done) {
+    (void)req;
+    (void)done;
+    return false;
+  }
+  // §5.29 what the user asked of item_save's menus since the core last took them (each drain): a
+  // Save picked, or (`prepare`) a menu offering one just opened, so a browser page fetches the
+  // bytes while the pointer goes to the item and can download them inside the click (Safari counts
+  // only that as the user's). A backend calls these on the thread that draws.
+  struct MediaSaveAsk {
+    MediaSave save;
+    bool prepare = false;
+  };
+  void media_save_chosen(const MediaSave &m) { media_saves_.push_back({m, false}); }
+  void media_save_prepare(const MediaSave &m) { media_saves_.push_back({m, true}); }
+  std::vector<MediaSaveAsk> take_media_saves() { return std::exchange(media_saves_, {}); }
 
   // ---- leaves -------------------------------------------------------------
   virtual void text_line(const char *text) = 0;                             // literal caption
@@ -814,7 +858,7 @@ public:
   // autoplaying video plays while it does (§5.13). Default true: a backend that draws everything.
   virtual bool item_visible() { return true; }
 
-  // §5.28 right-click menus (`context_menu:`). For a group or a viewport (`over` Item), the core
+  // §5.30 right-click menus (`context_menu:`). For a group or a viewport (`over` Item), the core
   // brackets what the menu is over with begin_context_area / end_context_area and then asks
   // begin_context_menu; for a window (Window), the same around its body, inside begin_window. For
   // the main view (Main) it asks begin_context_menu alone, after the whole walk. `id` is stable per
@@ -1023,6 +1067,10 @@ public:
     (void)rgb;
     return {};
   }
+  // The same picker showing the colour as "#rrggbb" beside its swatch rather than one field per
+  // channel (the widget's `fmt: hex`). The default is color(): a backend that draws a colour one
+  // way need not implement it.
+  virtual ColorEdit color_hex(const char *label, const float rgb[3]) { return color(label, rgb); }
 
   // ---- host services: the verbs the core binds from them (§10.7) ----------
   // Put `text` on the system clipboard, for (clipboard-set TEXT) run by a document on `app`: true
@@ -1086,6 +1134,7 @@ public:
 
 private:
   std::string custom_scope_;
+  std::vector<MediaSaveAsk> media_saves_; // §5.29 take_media_saves
 };
 
 } // namespace ariadne

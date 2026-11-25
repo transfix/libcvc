@@ -316,6 +316,12 @@ cvc::world_clock::step_result SceneClockDriver::drive(double wall_dt) {
       wc.set_mode(cvc::world_clock::mode::paused);
     else if (wc.current_mode() == cvc::world_clock::mode::paused)
       wc.set_mode(cvc::world_clock::mode::live);
+    // The scene's max_lag is the catch-up one frame may run, at 1x and growing with the speed; a
+    // world on a worker trails the clock by as much at most (world_worker::options::max_lag).
+    if (d.clock.max_lag > 0.0) {
+      wc.set_max_steps_per_advance(cvc::sim_catchup_quanta(d.clock.max_lag, wc.fixed_dt()));
+      wc.set_cap_scales_with_rate(true);
+    }
     d.binding = std::make_unique<cvc::world_clock_binding>(d.app, wc, scene_clock_keys(d.clock));
   }
   // Wall delta: a caller's fixed dt (deterministic capture, a test) when non-negative, else the
@@ -329,6 +335,13 @@ cvc::world_clock::step_result SceneClockDriver::drive(double wall_dt) {
   }
   // pull (speed / paused / mode / lockstep / step requests), advance, push (time, tick, ...).
   return d.binding->drive(dt);
+}
+
+cvc::world_clock::step_result SceneClockDriver::hold() {
+  impl &d = *_impl;
+  d.last = std::chrono::steady_clock::now(); // what passed until now is not booked
+  d.primed = true;
+  return drive(0.0);
 }
 
 // ── SceneWorld ───────────────────────────────────────────────────────────────────────────────────
@@ -347,6 +360,11 @@ struct SceneWorld::impl {
   std::string stats; // "<stats_key>.stats", or empty
   std::optional<cvc::clock_follower> follower;
   ph::step_report last;
+  // set_deferred: follow() steps, publish_due() syncs and publishes on the host's thread.
+  bool deferred = false;
+  std::function<void()> capture;   // after each step while deferred (a view's pose_tracker)
+  std::function<void()> restarted; // at the end of a restart() while deferred
+  std::uint64_t unpublished = 0;   // steps run while deferred since the last publish_due()
 
   // A node whose colliders come at run time: a generated world's, or a dataset's.
   struct tracked {
@@ -745,6 +763,8 @@ ph::world &SceneWorld::world() { return *_impl->world; }
 const ph::world &SceneWorld::world() const { return *_impl->world; }
 const std::vector<SceneWorldBody> &SceneWorld::bodies() const { return _impl->bodies; }
 
+std::vector<ph::body_id> SceneWorld::ground_bodies() const { return _impl->ground_bodies(); }
+
 ph::body_id SceneWorld::body(const std::string &id) const {
   for (const SceneWorldBody &b : _impl->bodies)
     if (b.node == id)
@@ -1070,6 +1090,8 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
   for (const auto &wf : d.weathers) // and its materials, dry: the friction again at the next step
     wf->world_gone();
   publish_stats();
+  if (d.deferred && d.restarted)
+    d.restarted(); // its stepper anchors it again (set_deferred)
 }
 
 void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
@@ -1336,6 +1358,15 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
 }
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {
+  if (_impl->app) {
+    sync(_impl->app->world_clock(), warnings);
+  } else {
+    const cvc::world_clock none;
+    sync(none, warnings);
+  }
+}
+
+void SceneWorld::sync(const cvc::world_clock &clock, std::vector<std::string> *warnings) {
   impl &d = *_impl;
   // The weather nodes: each its ground's height field once there is one (the storms' area), then
   // its keys. The friction itself is set in follow(), inside the physics step. First, so the wind
@@ -1351,10 +1382,10 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
       if (field)
         wf->set_ground(std::move(field));
     }
-    wf->read_keys();
+    wf->read_keys(&clock);
   }
-  sync_wind();     // the scene wind's field, before anything steps in it
-  publish_front(); // and the storms' gust front, before the water reads its wind
+  sync_wind();          // the scene wind's field, before anything steps in it
+  publish_front(clock); // and the storms' gust front, before the water reads its wind
   // With storms, the runtimes whose changes follow the clock (the water's sea) make them on its
   // periods, and the world puts them in on the clock (SceneColliders::clock_period, from_tick).
   {
@@ -1383,7 +1414,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   for (const auto &g : d.generated)
     g->tick(warnings);
   for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
-    w->tick();
+    w->tick(&clock);
   for (impl::tracked &t : d.tracked_nodes) {
     d.take_dataset(t, warnings); // a dataset that is ready and new: its colliders
     // A change timed on the clock goes in at its step (follow), unless that step has gone by.
@@ -1553,6 +1584,30 @@ const WaterRuntime *SceneWorld::water(const std::string &node) const {
   return nullptr;
 }
 
+std::vector<std::string> SceneWorld::water_nodes() const {
+  std::vector<std::string> out;
+  for (const auto &w : _impl->waters)
+    out.push_back(w->node());
+  return out;
+}
+
+bool SceneWorld::follow_weather(const std::string &node, const std::string &events, double gust,
+                                std::uint64_t gust_from) {
+  for (const auto &wf : _impl->weathers)
+    if (wf->node() == node)
+      return wf->follow(events, gust, gust_from);
+  return false;
+}
+
+bool SceneWorld::follow_sea(const std::string &node, const SceneWaterKeyframe &k) {
+  for (const auto &w : _impl->waters)
+    if (w->node() == node) {
+      w->follow_sea(k);
+      return true;
+    }
+  return false;
+}
+
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
 
@@ -1640,7 +1695,7 @@ void SceneWorld::sync_wind() {
     d.vehicles->set_wind(d.wind_flow);
 }
 
-void SceneWorld::publish_front() {
+void SceneWorld::publish_front(const cvc::world_clock &clock) {
   impl &d = *_impl;
   if (!d.wind_bound || !d.app || d.weathers.empty())
     return; // a scene without a weather node never writes wind.front
@@ -1651,7 +1706,6 @@ void SceneWorld::publish_front() {
   double fx = 0.0, fy = 0.0;
   if (const auto *storm = dynamic_cast<const StormWindFlow *>(d.wind_flow.get())) {
     const cvc::world::weather_params &p = d.weathers.front()->model().params();
-    const cvc::world_clock &clock = d.app->world_clock();
     const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
     const double t = static_cast<double>(clock.tick() / ticks * ticks) * clock.fixed_dt();
     for (const cvc::world::weather &m : storm->weathers()) {
@@ -1757,20 +1811,9 @@ bool SceneWorld::follow_generated(const std::string &node,
       write<double>(app, k.preset, double(params.preset));
       g->tick(warnings);
     }
-    write<double>(app, k.seed, double(params.seed));
-    write<double>(app, k.half, params.half_m);
-    write<double>(app, k.trees, double(params.trees));
-    write<double>(app, k.rocks, double(params.rocks));
-    write<double>(app, k.buildings, double(params.buildings));
-    write<double>(app, k.tree_gen, double(params.tree_gen));
-    write<double>(app, k.amp, params.amp_m);
-    write<double>(app, k.water_level, params.water_level_m);
-    write<double>(app, k.ontology, double(params.ontology));
-    write<double>(app, k.edge, double(params.edge));
-    write<std::string>(app, k.terrain_gen, params.terrain);
-    write<std::string>(app, k.city, params.city);
-    write<std::string>(app, k.terrain_file, params.terrain_file);
-    write<std::string>(app, k.request, "regenerate");
+    write_generated_world_keys(app, k, params);
+    // A follow, not the panel's Regenerate: never sent on to a relay (GeneratedWorldRelay).
+    write<std::string>(app, k.request, "follow");
     return true;
   }
   return false;
@@ -1884,15 +1927,25 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
                                  const std::function<void()> &after_step,
                                  const step_hook &before_each, const step_hook &after_each) {
   impl &d = *_impl;
-  sync(&d.warnings);
+  // What the clock times, on the clock this world steps on (OW5q). Deferred, publish_due() syncs
+  // on the host's thread instead, on the host's clock, which a world_worker's holon follows tick
+  // for tick.
+  if (!d.deferred)
+    sync(clock, &d.warnings);
+  // Deferred, the world's own capture follows each step a holon runs (it gives no after_step).
+  const std::function<void()> &capture = after_step || !d.deferred ? after_step : d.capture;
   if (!d.follower) {
     d.follower = cvc::clock_follower::for_step(clock, d.world->config().fixed_dt);
-    // The world's steps follow the clock from here: the storms in its air are read at the clock's
-    // time, as the drawn ones are (StormWindFlow's offset), however late it anchored.
+    // The world's steps follow the clock from here, and so does its field time, as world::follow
+    // anchors it: its water's waves are read at the clock's time (the step ending on tick T at
+    // T x fixed_dt), as the drawn sea is, however late it anchored. So a holon's client reads the
+    // relay's waves at a tick from the tick alone (OW5l). The storms in its air are read at the
+    // clock's time too (StormWindFlow's offset, now 0 from here).
+    d.world->set_field_time(clock.t());
     d.clock_offset = clock.t() - d.world->field_time();
     sync_wind();
-    if (after_step)
-      after_step();
+    if (capture)
+      capture();
     return 0;
   }
   const std::uint64_t last_tick = d.follower->last_tick();
@@ -1958,18 +2011,48 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
       d.step_history_text.erase(0, comma == std::string::npos ? comma : comma + 1);
     }
     // A view draws between the last two ticks, not the first and the last of a batch.
-    if (after_step && i + 1 >= n)
-      after_step();
+    if (capture && i + 1 >= n)
+      capture();
   }
-  if (n > 0) {
-    publish_stats();
-    if (d.vehicles)
-      d.vehicles->publish();
-    for (const auto &b : d.boats)
-      b->publish();
-    for (const auto &wf : d.weathers)
-      wf->publish();
+  if (n > 0 && d.deferred)
+    d.unpublished += n; // publish_due() writes them, on the host's thread
+  else if (n > 0)
+    publish_steps();
+  return n;
+}
+
+void SceneWorld::publish_steps() {
+  impl &d = *_impl;
+  publish_stats();
+  if (d.vehicles)
+    d.vehicles->publish();
+  for (const auto &b : d.boats)
+    b->publish();
+  for (const auto &wf : d.weathers)
+    wf->publish();
+}
+
+void SceneWorld::set_deferred(bool on, std::function<void()> capture,
+                              std::function<void()> restarted) {
+  impl &d = *_impl;
+  d.deferred = on;
+  d.capture = on ? std::move(capture) : nullptr;
+  d.restarted = on ? std::move(restarted) : nullptr;
+  if (!on && d.unpublished > 0) { // what ran deferred is published now
+    d.unpublished = 0;
+    publish_steps();
   }
+}
+
+bool SceneWorld::deferred() const { return _impl->deferred; }
+
+std::uint64_t SceneWorld::publish_due(std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  sync(warnings ? warnings : &d.warnings);
+  const std::uint64_t n = d.unpublished;
+  d.unpublished = 0;
+  if (n > 0)
+    publish_steps();
   return n;
 }
 

@@ -42,6 +42,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -523,12 +524,19 @@ std::string encode_bytes(const DataEncode &e) {
 }
 
 std::string encode_volume(const DataEncode &e) {
-  const std::shared_ptr<const cvc::volume> v = held<cvc::volume>(e.payload);
-  if (!v)
+  // A volume, or a list of them written as one file's variables (a format that holds several,
+  // such as .rawv: a volume_grid's segmented classes, as VolumeGridRover's SegTmp.rawv).
+  std::shared_ptr<const std::vector<cvc::volume>> vols = held<std::vector<cvc::volume>>(e.payload);
+  if (!vols)
+    if (const std::shared_ptr<const cvc::volume> v = held<cvc::volume>(e.payload))
+      vols = std::make_shared<const std::vector<cvc::volume>>(1, *v);
+  if (!vols)
     fail("volume: the data are not a volume");
+  if (vols->empty())
+    fail("volume: the list of volumes is empty");
   temp_dir tmp;
   const std::string p = tmp.path() + "/" + basename(e.file);
-  cvc::writeVolumeFile(e.app, std::vector<cvc::volume>{*v}, p);
+  cvc::writeVolumeFile(e.app, *vols, p);
   return read_whole(p);
 }
 
@@ -995,7 +1003,7 @@ std::vector<std::string> data_encoders(cvc::app &app) {
 }
 
 std::string default_data_encoder(const boost::any &payload) {
-  if (held<cvc::volume>(payload))
+  if (held<cvc::volume>(payload) || held<std::vector<cvc::volume>>(payload))
     return "volume";
   if (held<cvc::point_classes>(payload))
     return "point_classes";
@@ -1027,6 +1035,75 @@ void data_save(cvc::app &app, const std::string &path, const std::string &file,
     fail("no encoder as: " + name + " (known: " + known + ")");
   }
   write_saved(encoder(DataEncode{app, payload, file}), file, base);
+}
+
+DataSaved data_save_files(cvc::app &app, const std::string &path, const std::string &target,
+                          const std::string &base, const DataSaveOptions &options) {
+  if (target.empty())
+    fail("no file or directory to save " + path + " as");
+  cvc::state &root = cvc::state::instance(app);
+  if (!root.findThroughLinks(path))
+    fail("no dataset at " + path);
+  // The dataset's files in its order, then the exports, each path once (a later one wins).
+  std::vector<std::pair<std::string, std::string>> files;
+  std::map<std::string, std::size_t> at;
+  const auto add = [&](const std::string &name, const std::string &bytes) {
+    const auto hit = at.find(name);
+    if (hit != at.end()) {
+      files[hit->second].second = bytes;
+      return;
+    }
+    at[name] = files.size();
+    files.emplace_back(name, bytes);
+  };
+  for (const std::string &f : data_files(app, path))
+    if (const DataBytes b = data_file(app, path, f))
+      add(f, *b);
+  if (files.empty())
+    fail(path + " holds no files to save (status: " + data_status(app, path) + ")");
+  if (options.exports) {
+    const std::shared_ptr<const cvc::world::world_geometry> w = dataset_world(app, path);
+    if (!w)
+      fail(path + " holds no world to export");
+    std::optional<double> level;
+    if (cvc::state *n = root.findThroughLinks(join(path, "water_level"))) {
+      try {
+        if (!n->value().empty())
+          level = std::stod(n->value());
+      } catch (const std::exception &) {
+      }
+    }
+    for (const auto &[name, bytes] : cvc::world::city_bundle_exports(app, *w, level))
+      add(name, bytes ? *bytes : std::string());
+  }
+  DataSaved out;
+  out.files = files.size();
+  for (const auto &f : files)
+    out.bytes += f.second.size();
+#if defined(__EMSCRIPTEN__)
+  out.where = basename(extension(target) == ".zip" ? target : target + ".zip");
+  write_saved(cvc::archive::pack_zip(files), out.where, base);
+#else
+  if (base.find("://") != std::string::npos)
+    fail("cannot save " + target + ": the document is not a local file (" + base + ")");
+  fs::path p(target);
+  if (p.is_relative() && !base.empty())
+    p = fs::path(base) / p;
+  out.where = p.string();
+  if (extension(target) == ".zip") {
+    write_saved(cvc::archive::pack_zip(files), p.string(), std::string());
+    return out;
+  }
+  cvc::world::city_bundle_files dir;
+  for (auto &f : files)
+    dir[f.first] = std::make_shared<const std::string>(std::move(f.second));
+  try {
+    cvc::world::write_city_bundle(p.string(), dir);
+  } catch (const std::exception &e) {
+    fail(std::string("cannot save ") + target + ": " + e.what());
+  }
+#endif
+  return out;
 }
 
 std::string data_key(const DataSpec &spec) {

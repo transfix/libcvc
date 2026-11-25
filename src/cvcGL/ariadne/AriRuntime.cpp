@@ -138,6 +138,7 @@ public:
 
   void realize(const ari::Scene &scene, const std::string &prefix,
                std::vector<std::string> *warns) override {
+    stop_world_thread(); // the old world's worker goes before the world does
     // A reload rebuilds every node, so drop the imperative (gl-bind-stream) bindings now (render
     // thread) rather than letting them tick a stale node for a frame. They are runtime-only state
     // tied to the previous node graph, not part of the document, so they do NOT survive a reload;
@@ -214,6 +215,7 @@ public:
   // and free lights, then the RealizedScene (a rig's own lights leave with its StageLighting, the
   // physics world with its bodies). The view goes back to how the host set it up.
   void clear() override {
+    stop_world_thread(); // the world's worker goes before the world does
     verb_bindings_.clear();
     clear_scenes();
     assets_ = SceneAssetCache{};
@@ -251,6 +253,51 @@ public:
 
   const RealizedScene *realized() const { return haveScene_ ? &realized_ : nullptr; }
   void set_tick_dt(double dt) { tick_dt_ = dt; } // < 0: the scene clock measures wall time
+
+  // D3 (AriRuntime::set_world_thread): the main scene's world on a world_worker.
+  void set_world_thread(bool on) {
+    world_thread_ = on;
+    if (!on)
+      stop_world_thread();
+  }
+  // At a frame's start, before its lock: a worker whose step threw goes (tick_scene stopped the
+  // physics when it saw it), and a scene with a world gets one, once, when `live` (no fixed clock).
+  void start_world_thread(bool live) {
+    if (world_worker_ && !world_worker_->error().empty()) {
+      realized_.world_worker = nullptr;
+      world_worker_.reset();
+    }
+    if (!world_thread_ || !live || world_thread_tried_ || !haveScene_ || !realized_.world ||
+        !realized_.physics_binding || !realized_.app)
+      return;
+    world_thread_tried_ = true;
+    RealizedScene *r = &realized_; // the adapter's: it doesn't move while the worker runs
+    ari::world_worker::options o;
+    if (realized_.clock.max_lag > 0.0) // the scene's clock: { max_lag }, else kSimCatchup
+      o.max_lag = realized_.clock.max_lag;
+    o.capture = [r] { // on the worker, under the lock: the binding may be a restart's new one
+      if (r->physics_binding)
+        r->physics_binding->tracker().capture();
+    };
+    try {
+      world_worker_ =
+          std::make_unique<ari::world_worker>(*realized_.world, realized_.app->world_clock(), o);
+      realized_.world_worker = world_worker_.get();
+      realized_.app->log(1,
+                         "ari: the scene's world steps on a thread of its own, in a local holon\n");
+    } catch (const std::exception &e) {
+      realized_.app->log(1, std::string("ari: the scene's world steps on the frame's thread: ") +
+                                e.what() + "\n");
+    }
+  }
+  void stop_world_thread() {
+    realized_.world_worker = nullptr;
+    world_worker_.reset();
+    world_thread_tried_ = false;
+  }
+  ari::world_worker::frame_lock lock_world() {
+    return world_worker_ ? world_worker_->lock() : ari::world_worker::frame_lock{};
+  }
 
   void sync_visibility(cvc::app &app) override {
     if (haveScene_)
@@ -359,6 +406,10 @@ private:
   std::vector<std::string> lights_; // the realized free (non-rig) lights, which clear() removes
   SceneAssetCache assets_;          // the document's assets, read once for all its scenes
   std::vector<std::unique_ptr<OtherScene>> scenes_; // the document's scenes: entries
+  // D3: the main scene's world on a worker (set_world_thread), declared after realized_ so it goes
+  // first; realize() and clear() stop it before they replace the scene.
+  bool world_thread_ = false, world_thread_tried_ = false;
+  std::unique_ptr<ari::world_worker> world_worker_;
   // The view before the first realize(): what clear() restores.
   bool viewSaved_ = false;
   double background_[3] = {0.0, 0.0, 0.0};
@@ -445,7 +496,7 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
       r->render();
       v->end_walk();
     });
-    // §5.28 the document's right-click menu over the main view picks the main scene.
+    // §5.30 the document's right-click menu over the main view picks the main scene.
     r->set_main_view_pick([v] { return v->main_pick_fields(); });
   }
 
@@ -622,6 +673,11 @@ void AriRuntime::tickQuality(double frame_s) {
 
 void AriRuntime::frame(double dt_seconds) {
   FrameGuard guard(inFrame_, "frame");
+  // D3: the scene's world on a worker (set_world_thread) is this frame's from here to its end:
+  // the input, the pump and the scene's tick reach it, and the worker steps while it renders.
+  auto *adapter = static_cast<GlSceneAdapter *>(scene_.get());
+  adapter->start_world_thread(!fixedClock_);
+  const ari::world_worker::frame_lock world = adapter->lock_world();
   const bool timed = !fixedClock_ && lastFrameAt_ >= 0.0; // a wall time since the last frame
   const double moveDt = frameDt(dt_seconds); // the camera's and the views' time step
   if (timed)
@@ -687,6 +743,10 @@ bool AriRuntime::post_signal(const std::string &signal, const std::string &sourc
 
 void AriRuntime::set_input_pump(std::function<void()> pump) { inputPump_ = std::move(pump); }
 void AriRuntime::set_fixed_clock(bool fixed) { fixedClock_ = fixed; }
+
+void AriRuntime::set_world_thread(bool on) {
+  static_cast<GlSceneAdapter *>(scene_.get())->set_world_thread(on);
+}
 
 ari::AppRuntime &AriRuntime::app_runtime() { return app_rt_; }
 cvc::gl::ImGuiBackend &AriRuntime::backend() { return backend_; }

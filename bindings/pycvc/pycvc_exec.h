@@ -180,8 +180,8 @@ public:
   // The app's locks under `prefix`, as (lock-query prefix) in this Exec's programs returns them
   // (docs/STATE_EXEC_LOCKS.md 4.1, 7.4): {"held": [{"key", "mode", "pids", "count", "generation",
   // "abandoned"}], "waiting": [{"key", "mode", "pid"}]}. "" is every key. Counts include every
-  // Exec's holds; pids are shown only for this Exec's processes (its owner "" ones), since pids
-  // repeat across Execs.
+  // Exec's holds; pids are shown only for this Exec's processes (those of the owner its programs
+  // run as: "" for an Exec, its tag for a pooled one), since pids repeat across Execs.
   //
   // THREADS: any thread may call it, and it never waits for run(): it reads the app's lock
   // manager directly, under the manager's own mutex, with the GIL released.
@@ -226,7 +226,9 @@ private:
   struct pooled_tag {};
   // Pooled Exec `name`, an Exec in group mode: its scheduler, async host, cycle registry and
   // random stream are an exec_group's (the app pool's pid source, the app's lock manager), its
-  // natives extend the frozen builtins (td 4.2), and its context is chrooted at `name`.
+  // natives extend the frozen builtins (td 4.2), and its context is chrooted at `name`. Its
+  // programs run with owner "pycvc:<name>" (S2-Q7), and its group is the home of the channels
+  // under `name` (its channel_prefixes, S2b).
   Exec(pooled_tag, const std::shared_ptr<cvc::app> &app, const std::string &name,
        double idle_timeout);
   // A pooled Exec's group.
@@ -242,10 +244,12 @@ private:
   // rounds until every program has ended or passed its idle limit, then waits for their kernels.
   // With nothing to pump between rounds it waits once for the batch, on `control`'s wakeup, which
   // its groups' posts notify for the batch (S2-Q6). Once `control.closing` is set, what runs is
-  // killed and what has not started is not started.
+  // killed and what has not started is not started. `app`'s group 0 (its exec scheduler), the home
+  // of the programs' keys outside their chroots, is drained before each round, once it is built,
+  // while it has posts and no other thread holds its pump owner (S2b, exec_router.h's homes).
   static std::vector<batch_outcome> run_batch(cvc::exec_pool &pool, std::span<Exec *const> execs,
                                               std::span<const std::string> programs, bool fresh_env,
-                                              batch_control &control);
+                                              batch_control &control, cvc::app &app);
 #endif
 };
 

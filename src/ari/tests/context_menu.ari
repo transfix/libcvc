@@ -1,4 +1,4 @@
-# context_menu.ari — a right-click menu (ARIADNE.md §5.28) on a real terminal, for
+# context_menu.ari — a right-click menu (ARIADNE.md §5.30) on a real terminal, for
 # context_menu_test.sh.
 #
 # Tab puts the focus on the checkbox in the card; Shift+F10 opens the card's menu under it. Enter

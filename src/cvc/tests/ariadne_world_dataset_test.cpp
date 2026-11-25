@@ -31,8 +31,12 @@
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/world_geometry.h>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -409,4 +413,160 @@ TEST(WorldDataset, ADataNodesWaterLevelIsItsWater) {
       data_node_world(dry_app, "      water_level: -5000\n", dry_warnings);
   ASSERT_NE(dry, nullptr);
   EXPECT_EQ(dry->world_geometry("city")->find_volume("water"), nullptr);
+}
+
+namespace {
+
+// A fresh directory under the system's temp directory, removed afterwards.
+struct SaveDir {
+  std::filesystem::path dir;
+  SaveDir() {
+    std::random_device rd;
+    dir = std::filesystem::temp_directory_path() /
+          ("cvc-world-save-" + std::to_string(rd()) + std::to_string(rd()));
+    std::filesystem::create_directories(dir);
+  }
+  ~SaveDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+  }
+  std::string at(const std::string &rel) const { return (dir / rel).generic_string(); }
+};
+
+// The hash a dataset's own files give (city_bundle_hash over data_files).
+std::string files_hash(cvc::app &app, const std::string &path) {
+  cvc::world::city_bundle_files files;
+  for (const std::string &f : data_files(app, path))
+    files[f] = data_file(app, path, f);
+  return cvc::world::city_bundle_hash(files);
+}
+
+} // namespace
+
+// The terrain lab's Save (GB4, data_save_files): a world's dataset saved as a directory and as a
+// zip, each the dataset's files, loads again as the same world (the same hash, the same terrain);
+// with the exports it also holds export/, which the hash leaves out.
+TEST(WorldDataset, ASavedWorldLoadsAgainAsTheSameWorld) {
+  if (!glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  cvc::app app;
+  std::shared_ptr<DataStore> store = DataStore::of(app);
+  DataSpec spec;
+  spec.name = "world";
+  spec.generate = "generated_world";
+  spec.params = kParams;
+  store->bind("", spec);
+  ASSERT_TRUE(store->wait("data.world", 300.0)) << val(app, "data.world.error");
+  const std::string hash = val(app, "data.world.hash");
+  const std::vector<std::string> names = data_files(app, "data.world");
+  SaveDir d;
+
+  const DataSaved dir = data_save_files(app, "data.world", "saved", d.dir.string());
+  EXPECT_EQ(std::filesystem::path(dir.where), d.dir / "saved");
+  EXPECT_EQ(dir.files, names.size());
+  for (const std::string &n : names)
+    EXPECT_TRUE(std::filesystem::is_regular_file(d.dir / "saved" / n)) << n;
+  const DataSaved zip = data_save_files(app, "data.world", d.at("saved.zip"));
+  EXPECT_EQ(zip.files, names.size());
+  EXPECT_EQ(zip.bytes, dir.bytes);
+  std::string zbytes;
+  {
+    std::ifstream in(d.dir / "saved.zip", std::ios::binary);
+    zbytes.assign(std::istreambuf_iterator<char>(in), {});
+  }
+  const std::vector<cvc::archive::file> unpacked = cvc::archive::unpack(zbytes);
+  ASSERT_EQ(unpacked.size(), names.size());
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    EXPECT_EQ(unpacked[i].path, names[i]);
+    EXPECT_EQ(*unpacked[i].bytes, *data_file(app, "data.world", names[i])) << names[i];
+  }
+
+  std::shared_ptr<const cvc::world::world_geometry> made = dataset_world(app, "data.world");
+  for (const char *what : {"saved", "saved.zip"}) {
+    DataSpec back;
+    back.name = std::string("back_") + (what[5] ? "zip" : "dir");
+    back.uri = d.at(what);
+    back.as = "city_bundle";
+    store->bind("", back);
+    const std::string at = "data." + back.name;
+    ASSERT_TRUE(store->wait(at, 120.0)) << what << ": " << val(app, at + ".error");
+    EXPECT_EQ(val(app, at + ".hash"), hash) << what;
+    EXPECT_EQ(files_hash(app, at), hash) << what;
+    std::shared_ptr<const cvc::world::world_geometry> w = dataset_world(app, at);
+    ASSERT_NE(w, nullptr) << what;
+    EXPECT_EQ(w->terrain()->heights(), made->terrain()->heights()) << what;
+    EXPECT_EQ(collide_items(*w), collide_items(*made)) << what;
+  }
+
+  DataSaveOptions o;
+  o.exports = true;
+  const DataSaved ex = data_save_files(app, "data.world", d.at("exported"), "", o);
+  EXPECT_EQ(ex.files, names.size() + 3);
+  for (const char *f : {"terrain.glb", "heightmap.png", "heightmap.json"})
+    EXPECT_TRUE(std::filesystem::is_regular_file(d.dir / "exported" / "export" / f)) << f;
+  DataSpec back;
+  back.name = "back_exported";
+  back.uri = d.at("exported");
+  back.as = "city_bundle";
+  store->bind("", back);
+  ASSERT_TRUE(store->wait("data.back_exported", 120.0)) << val(app, "data.back_exported.error");
+  EXPECT_EQ(val(app, "data.back_exported.hash"), hash);
+  EXPECT_EQ(files_hash(app, "data.back_exported"), hash);
+
+  EXPECT_THROW(data_save_files(app, "data.nothing", d.at("x")), std::runtime_error);
+  EXPECT_THROW(data_save_files(app, "data.world", ""), std::runtime_error);
+  EXPECT_THROW(data_save_files(app, "data.world", "x", "https://example.com/docs"),
+               std::runtime_error);
+}
+
+// A generated_world node saves the world shown on a "save" request (world_controls' Save): to
+// world.save.file, with export/ when world.save.exports is on; world.save.status says where, or
+// why not.
+TEST(WorldDataset, AGeneratedWorldNodeSavesOnRequest) {
+  REQUIRE_YAML();
+  if (!glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  cvc::app app;
+  LoadResult r = load_string(app, R"(
+scene:
+  physics: {}
+  nodes:
+    - node: world
+      type: generated_world
+      seed: 5
+      half: 150
+      trees: 6
+      rocks: 3
+      buildings: 6
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(val(app, "world.save.file"), "world"); // its dataset's name
+  EXPECT_EQ(val(app, "world.save.status"), "");
+  const std::string seed = val(app, "data.world.generator.seed");
+  SaveDir d;
+
+  write<std::string>(app, "world.save.file", d.at("lab.zip"));
+  write<std::string>(app, "world.request", "save");
+  w->sync(&warnings);
+  EXPECT_EQ(val(app, "world.save.status").rfind("saved ", 0), 0u) << val(app, "world.save.status");
+  EXPECT_TRUE(std::filesystem::is_regular_file(d.dir / "lab.zip"));
+  EXPECT_EQ(val(app, "world.request"), "");
+  EXPECT_EQ(val(app, "data.world.generator.seed"), seed); // a save is not a rebuild
+
+  write<std::string>(app, "world.save.file", d.at("lab"));
+  write<double>(app, "world.save.exports", 1);
+  write<std::string>(app, "world.request", "save");
+  w->sync(&warnings);
+  EXPECT_TRUE(std::filesystem::is_regular_file(d.dir / "lab" / "world.json"));
+  EXPECT_TRUE(std::filesystem::is_regular_file(d.dir / "lab" / "export" / "heightmap.png"));
+
+  // A file in the way: the status says why.
+  { std::ofstream(d.dir / "in_the_way") << "x"; }
+  write<std::string>(app, "world.save.file", d.at("in_the_way/lab"));
+  write<std::string>(app, "world.request", "save");
+  w->sync(&warnings);
+  EXPECT_EQ(val(app, "world.save.status").rfind("error: ", 0), 0u) << val(app, "world.save.status");
 }

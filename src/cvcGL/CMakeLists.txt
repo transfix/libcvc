@@ -882,6 +882,13 @@ add_executable(cvcgl_renderer test/cvcgl_renderer.cpp)
 target_link_libraries(cvcgl_renderer PRIVATE cvcGL)
 add_test(NAME cvcgl_renderer COMMAND cvcgl_renderer)
 
+# Physically based shading: GeometryNode::setPBR (the base colour made linear, the lights times
+# pi, emissive without a texture) and SceneGraph's image-based lighting, checked by pixel against
+# VTK's BRDF in closed form. Offscreen.
+add_executable(cvcgl_pbr_material test/cvcgl_pbr_material.cpp)
+target_link_libraries(cvcgl_pbr_material PRIVATE cvcGL)
+add_test(NAME cvcgl_pbr_material COMMAND cvcgl_pbr_material)
+
 # SceneRenderer is now a facade over ViewportManager: pin its state-footprint
 # parity (no viewer camera/layout state) and the HostStyle host-input contract.
 add_executable(cvcgl_scene_renderer_facade test/cvcgl_scene_renderer_facade.cpp)
@@ -1035,6 +1042,27 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_repeat COMMAND cvcgl_ariadne_repeat)
 endif()
 
+# A node's use: of a prototypes: entry, realized with no window: each instance its own node tree
+# at its own transform, every mesh part read once for all instances (in the scene, repeat: copies
+# and a scenes: entry) and drawn from one set of VTK arrays, an arg in a source read per instance.
+add_executable(cvcgl_ariadne_prototypes test/cvcgl_ariadne_prototypes.cpp)
+target_link_libraries(cvcgl_ariadne_prototypes PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_prototypes COMMAND cvcgl_ariadne_prototypes)
+
+# A scene's animations: played with no window on a fixed clock step: the start pose at realize, a
+# once animation's keyframes and its end, a loop's colour and state track, a paused pingpong played
+# by its key and moving every repeat: copy's child, a script's seek, pause, play and speed, and a
+# paused scene clock.
+add_executable(cvcgl_ariadne_animation test/cvcgl_ariadne_animation.cpp)
+target_link_libraries(cvcgl_ariadne_animation PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_animation COMMAND cvcgl_ariadne_animation)
+
+# A model's own clip in an animation ({ node, clip }): a skinned glTF bar posed by realize_scene and
+# tick_scene with no window, its fit: kept, a missing clip and a node with no model refused.
+add_executable(cvcgl_ariadne_clip test/cvcgl_ariadne_clip.cpp)
+target_link_libraries(cvcgl_ariadne_clip PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_clip COMMAND cvcgl_ariadne_clip)
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1089,13 +1117,13 @@ add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
 add_executable(cvcgl_imgui_group_click test/cvcgl_imgui_group_click.cpp)
 target_link_libraries(cvcgl_imgui_group_click PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_group_click COMMAND cvcgl_imgui_group_click)
-# Right-click menus (§5.28): a right-click opens the innermost menu under the pointer (a group's,
-# else its window's, else the document's over no window), a right-drag none, a long press on a
-# touch screen when the finger lifts, the Menu key at the pointer; an item runs with the menu's
-# event. Clicked through ImGui's own input. No window, no GL.
-add_executable(cvcgl_imgui_context_menu test/cvcgl_imgui_context_menu.cpp)
-target_link_libraries(cvcgl_imgui_context_menu PRIVATE cvcGL)
-add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
+# A document's context_menu: (§5.30): a right-click opens the innermost menu under the pointer (a
+# group's, else its window's, else the document's over no window), a right-drag none, a long press
+# on a touch screen, the Menu key at the pointer; over a text the text's own Copy comes first; an
+# item runs with the menu's event. Clicked through ImGui's own input. No window, no GL.
+add_executable(cvcgl_imgui_document_menu test/cvcgl_imgui_document_menu.cpp)
+target_link_libraries(cvcgl_imgui_document_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_document_menu COMMAND cvcgl_imgui_document_menu)
 # A text: with runs: (§5.20): it wraps at its size:, a tap on a link runs on_link (not the card's
 # on_click around it), a tap on its plain text is the card's, a press that drags is nobody's, and
 # Tab then Enter activates the link. Clicked through ImGui's own input. No window, no GL.
@@ -1162,6 +1190,12 @@ add_test(NAME cvcgl_imgui_fonts COMMAND cvcgl_imgui_fonts)
 add_executable(cvcgl_imgui_chat_widgets test/cvcgl_imgui_chat_widgets.cpp)
 target_link_libraries(cvcgl_imgui_chat_widgets PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_chat_widgets COMMAND cvcgl_imgui_chat_widgets)
+# The context menus (§5.28): Cut, Copy, Paste and Select all on a field, Copy and Select text... on
+# a text, Copy line on a text view, a notification's whole message, a touch screen's long press.
+# ImGui's own clipboard; no window, no GL.
+add_executable(cvcgl_imgui_context_menu test/cvcgl_imgui_context_menu.cpp)
+target_link_libraries(cvcgl_imgui_context_menu PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
 # The keys ImGuiOverlay hands ImGui under both of VTK's names for them: X11's (its own windows)
 # and a browser's (KeyboardEvent.key: Enter, Backspace, ArrowLeft). No window, no GL.
 add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
@@ -1265,6 +1299,25 @@ if(NOT EMSCRIPTEN)
   add_test(NAME cvcgl_ariadne_pick COMMAND cvcgl_ariadne_pick)
 endif()
 
+# material: { pbr: } and the scene's environment: through AriRuntime (the main view and a
+# viewport's mirror lit by the environment, an emissive node's glow) and realize_scene alone (the
+# default environment, environment: false). Offscreen; the runtime half skips where nothing
+# rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_pbr test/cvcgl_ariadne_pbr.cpp)
+  target_link_libraries(cvcgl_ariadne_pbr PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_pbr COMMAND cvcgl_ariadne_pbr)
+endif()
+
+# A node's own on_pick: (its nearest ancestor's when it has none) run by a press that lands on it,
+# and by that press's drags and release wherever they land, in the document's scope, beside the
+# view's own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
+if(NOT EMSCRIPTEN)
+  add_executable(cvcgl_ariadne_node_pick test/cvcgl_ariadne_node_pick.cpp)
+  target_link_libraries(cvcgl_ariadne_node_pick PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_node_pick COMMAND cvcgl_ariadne_node_pick)
+endif()
+
 # Authored viewpoints: a scene camera's position:, target:, fov:, near:, far: and orthographic:
 # with height:, on the main view (a `cameras:` entry named main), a named camera and a viewport's
 # own. Offscreen; skips where nothing rasterises unless CVC_REQUIRE_RENDER=1.
@@ -1296,6 +1349,18 @@ add_test(NAME cvcgl_volume_slice COMMAND cvcgl_volume_slice)
 add_executable(cvcgl_volume_grid test/cvcgl_volume_grid.cpp)
 target_link_libraries(cvcgl_volume_grid PRIVATE cvcGL)
 add_test(NAME cvcgl_volume_grid COMMAND cvcgl_volume_grid)
+
+# The volume_grid node's Segmentation tab (VolumeGridSegmentation.h, roadmap P9): seeds by scripted
+# picks, `segment` run as a sliced task (the scheduler pumped as a host does), its result on the
+# data channel, the labels on the planes and the class surfaces in 3D, stop, a new volume, two apps;
+# and (offscreen, skipped where nothing rasterises unless CVC_REQUIRE_RENDER=1) the labels drawn.
+# Once more cooperatively, as single-threaded wasm runs it: the labels so far draw while it marches.
+add_executable(cvcgl_volume_grid_segment test/cvcgl_volume_grid_segment.cpp)
+target_link_libraries(cvcgl_volume_grid_segment PRIVATE cvcGL)
+add_test(NAME cvcgl_volume_grid_segment COMMAND cvcgl_volume_grid_segment)
+add_test(NAME cvcgl_volume_grid_segment_cooperative COMMAND cvcgl_volume_grid_segment)
+set_tests_properties(cvcgl_volume_grid_segment_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative)
 
 # The volume_grid node's contours (VolumeGridContours.h, roadmap P10), headless: picks under the
 # contours tool draw, close, move and select curves; requests; object rows; the contours on the
@@ -1422,6 +1487,14 @@ add_test(NAME cvcgl_shadow_caster_growth COMMAND cvcgl_shadow_caster_growth)
 add_executable(cvcgl_shadow_casters test/cvcgl_shadow_casters.cpp)
 target_link_libraries(cvcgl_shadow_casters PRIVATE cvcGL)
 add_test(NAME cvcgl_shadow_casters COMMAND cvcgl_shadow_casters)
+
+# SceneGraph::setShadowStaticCache: while only some casters move, a bake draws just those over a
+# copy of the static casters' maps. A scene with the cache and one without, the same changes to
+# both every frame: the same pictures byte for byte (a moving caster's shadow in the frame it
+# moved, a building's shadow on it), and which bakes were whole. Renders; skips without GL.
+add_executable(cvcgl_shadow_static_cache test/cvcgl_shadow_static_cache.cpp)
+target_link_libraries(cvcgl_shadow_static_cache PRIVATE cvcGL)
+add_test(NAME cvcgl_shadow_static_cache COMMAND cvcgl_shadow_static_cache)
 
 # Between bakes (an update interval over 1) a caster that moved is shaded as it stood at the last
 # bake: lowered or tilted, its sunlit top is as bright as under fresh maps, and the props that did
@@ -1553,6 +1626,11 @@ if(NOT EMSCRIPTEN)
   add_executable(cvcgl_ariadne_swarm test/cvcgl_ariadne_swarm.cpp)
   target_link_libraries(cvcgl_ariadne_swarm PRIVATE cvcGL)
   add_test(NAME cvcgl_ariadne_swarm COMMAND cvcgl_ariadne_swarm)
+  # The entity view (entity_view.h, FL2): a world's vehicles at scale, the nearest promoted to nodes,
+  # an entity_layer of one fleet, the world on a local holon's worker, a relay's entities on a client.
+  add_executable(cvcgl_ariadne_entities test/cvcgl_ariadne_entities.cpp)
+  target_link_libraries(cvcgl_ariadne_entities PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_entities COMMAND cvcgl_ariadne_entities)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(cvcgl_streaming_races test/cvcgl_streaming_races.cpp)
     target_link_libraries(cvcgl_streaming_races PRIVATE cvcGL ${CMAKE_DL_LIBS})
@@ -1765,6 +1843,8 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ari_record
+                        cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_animation
+                        cvcgl_ariadne_clip
+                        cvcgl_ariadne_prototypes cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
                         cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)

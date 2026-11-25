@@ -155,6 +155,20 @@ std::string guess_mime_type(const std::string &name) {
   return kOctets;
 }
 
+std::string mime_extension(const std::string &type) {
+  std::string t = lower(type.substr(0, type.find(';')));
+  while (!t.empty() && (t.back() == ' ' || t.back() == '\t'))
+    t.pop_back();
+  if (t == "image/jpg" || t == "image/pjpeg") // names servers give JPEG too
+    t = "image/jpeg";
+  else if (t == "audio/x-wav" || t == "audio/wave")
+    t = "audio/wav";
+  for (const MimeEntry &e : kMimeTypes) // a type's first extension is its usual one
+    if (t == e.type)
+      return e.ext;
+  return std::string();
+}
+
 std::shared_ptr<FileSource> local_file_source(const std::string &path, std::string *error) {
   std::error_code ec;
   const std::filesystem::path p = utf8_path(path);

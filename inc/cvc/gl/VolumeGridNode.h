@@ -39,7 +39,7 @@
 // `surfaces` is the group for what the 3D view shows beyond the planes, which the slice views
 // hide: `volume`, a VolumeRenderNode drawing the volume by the renderer grid.display.render picks
 // (none by default), the contours' curves and their tiled surfaces (VolumeGridContours), and P9's
-// segmented classes.
+// segmented classes (`segments`, with a `labels` layer on each plane).
 //
 // KEYS, under the node's state path (all strings, as everywhere on the tree):
 //   grid.view, grid.tool, grid.slice.{x,y,z}   cvc::volume_grid_params: the switch's view, what a
@@ -76,9 +76,11 @@
 //   grid.selection.count  published: how many points are selected
 //   grid.request   one command, consumed (written back as ""): delete_selected | select_all |
 //                  select_none | undo | step <n> (the shown view's plane, n planes on; Left /
-//                  Right step 1 and PageUp / PageDown 5 in the legacy), and the contours'
-//                  (VolumeGridContours.h: tile, close_curve, ...; with the contours tool the
-//                  first four act on the contours)
+//                  Right step 1 and PageUp / PageDown 5 in the legacy), segment | stop (the
+//                  Segmentation tab's run, cvc/gl/VolumeGridSegmentation.h; stop also ends a
+//                  tile), and the contours' (VolumeGridContours.h: tile, close_curve, ...; with
+//                  the contours tool the first four act on the contours)
+//   grid.segment.* the Segmentation tab: its parameters, rows and info (VolumeGridSegmentation.h)
 //   grid.objects, grid.contour.*, grid.tile.*   the contours' (VolumeGridContours.h)
 //   grid.busy, stoppable, progress, phase, status, stats.work_ms   the §1.9 job keys
 //                  (cvc/core/job_keys.h); status says what the last request or gesture did
@@ -113,6 +115,7 @@ namespace gl {
 
 class GeometryNode;
 class VolumeGridContours;
+class VolumeGridSegmentation;
 class VolumeRenderNode;
 class VolumeSliceNode;
 
@@ -179,6 +182,10 @@ public:
   // How many times the overlays were rebuilt (for tests).
   std::size_t overlayBuilds() const { return m_overlayBuilds; }
 
+  // The Segmentation tab: the `segment` run, its labels on the planes and its class surfaces
+  // (cvc/gl/VolumeGridSegmentation.h).
+  VolumeGridSegmentation &segmentation() { return *m_segmentation; }
+
 protected:
   void handleStateChanged(const std::string &childState) override;
 
@@ -241,6 +248,7 @@ private:
   std::uint64_t m_pointsVersionShown = 0, m_selectionVersionShown = 0;
   std::string m_overlaySignature;
   std::size_t m_overlayBuilds = 0;
+  std::unique_ptr<VolumeGridSegmentation> m_segmentation;
 };
 
 } // namespace gl

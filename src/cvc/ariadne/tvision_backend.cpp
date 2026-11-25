@@ -62,6 +62,7 @@ TvisionBackend::TvisionBackend() : TvisionBackend(Options{}) {}
 TvisionBackend::TvisionBackend(Options opts)
     : FtxuiBackend([&] {
         opts.hosted = true;
+        opts.host_draws_context_menu = true; // a popup of tvision's own (Host::show_context)
         // Bodies at full colour: tvision draws each as the nearest the terminal has (§5.26).
         if (opts.palette == Options::Palette::Auto)
           opts.palette = Options::Palette::TrueColor;
@@ -165,7 +166,6 @@ bool key_event(const KeyDownEvent &k, TermEvent &out) {
     const char *name;
     bool shift, ctrl;
   };
-  // Shift+F10 opens the focus's right-click menu (§5.28); F10 itself is the desktop's menu bar.
   static const Named kNamed[] = {
       {kbTab, "Tab", false, false},        {kbShiftTab, "Tab", true, false},
       {kbEnter, "Return", false, false},   {kbEsc, "Escape", false, false},
@@ -180,7 +180,7 @@ bool key_event(const KeyDownEvent &k, TermEvent &out) {
       {kbF4, "F4", false, false},          {kbF5, "F5", false, false},
       {kbF7, "F7", false, false},          {kbF8, "F8", false, false},
       {kbF9, "F9", false, false},          {kbF11, "F11", false, false},
-      {kbF12, "F12", false, false},        {kbShiftF10, "F10", true, false},
+      {kbF12, "F12", false, false},        {kbShiftF10, "F10", true, false}, // §5.28 a menu
   };
   for (const Named &n : kNamed)
     if (k.keyCode == n.code) {
@@ -314,6 +314,7 @@ private:
 };
 constexpr const char *kTrayMore = "##tray.more"; // the overflow icon's id
 constexpr ushort cmAriTrayBase = 30000;          // tray popup item k: cmAriTrayBase + k
+constexpr ushort cmAriContextBase = 40000;       // context menu item k: cmAriContextBase + k
 
 class App : public TApplication {
 public:
@@ -358,6 +359,10 @@ struct Host {
   TrayView *tray = nullptr; // §5.22, made at the first sync with a tray
   TPoint mouse{-1, -1};     // where the pointer last was (screen), for the tray's tooltip
   bool dirty = true; // a sync is due (after input, or the redraw tick)
+  // §5.28 / §5.30 the context menu last shown (FtxuiBackend::HostedContextMenu::serial), whether
+  // its popup is up now (its own event loop runs then; the redraw tick still syncs).
+  long context_shown = 0;
+  bool in_context = false;
   std::chrono::steady_clock::time_point last_sync{};
   std::chrono::steady_clock::time_point burst_start{};
   int burst = 0;
@@ -409,8 +414,9 @@ struct Host {
     dirty = true;
   }
 
-  // One walk, then make the desktop match it.
-  void sync() {
+  // One walk, then make the desktop match it. `may_popup`: after an event, where a context menu
+  // the event opened is shown (show_context); not from the idle tick.
+  void sync(bool may_popup = false) {
     TDeskTop *desk = TProgram::deskTop;
     // Report the windows' current bounds first, so a move / resize persists in this walk. Only
     // the user's size is the window's own (FtxuiBackend::set_window_geometry).
@@ -496,6 +502,41 @@ struct Host {
       w->content->drawView();
     if (background)
       background->drawView();
+    if (may_popup && !in_context)
+      show_context();
+  }
+
+  // §5.28 / §5.30 a context menu the last walk opened, as a popup of tvision's own at the cell it
+  // hangs from in its window (not inside the window's body, which a short window would cut off):
+  // its entries, the leaf's own and the document's items, worked by tvision (the arrows, Enter,
+  // Esc, the mouse). The entry chosen, or none, goes back to the backend.
+  void show_context() {
+    const FtxuiBackend::HostedContextMenu cm = be.hosted_context_menu();
+    if (!cm.open || cm.serial == context_shown)
+      return;
+    context_shown = cm.serial;
+    std::vector<std::string> ids;
+    TMenuItem *first = nullptr, **next = &first;
+    std::size_t k = 0;
+    menu_items_of(cm.items, k, 0, cmAriContextBase, ids, next);
+    if (!first) {
+      be.pick_context_entry(rt, "");
+      return;
+    }
+    TView *body = background;
+    if (!cm.win.empty()) {
+      const auto w = windows.find(cm.win);
+      body = w != windows.end() ? w->second->content : nullptr;
+    }
+    const TPoint where = body ? body->makeGlobal(TPoint{cm.x, cm.y}) : TPoint{cm.x, cm.y};
+    in_context = true;
+    // popupMenu owns the items it is given: it builds its menu from them and frees them after.
+    const ushort c = popupMenu(where, *first, nullptr);
+    in_context = false;
+    const bool picked =
+        c >= cmAriContextBase && static_cast<std::size_t>(c - cmAriContextBase) < ids.size();
+    be.pick_context_entry(rt, picked ? ids[c - cmAriContextBase] : std::string());
+    dirty = true;
   }
 
   void sync_menus() {
@@ -615,6 +656,7 @@ struct Host {
       } else {
         const std::string label = (i.toggle ? (i.checked ? "[x] " : "[ ] ") : "") + i.label;
         *next = new TMenuItem(label, static_cast<ushort>(base + ids.size()), kbNoKey);
+        (*next)->disabled = i.disabled;
         ids.push_back(i.id);
       }
       next = &(*next)->next;
@@ -819,7 +861,7 @@ void App::handleEvent(TEvent &ev) {
   }
   TApplication::handleEvent(ev);
   if (host_.dirty) // after the event has finished with every view, so a dropped window can go
-    host_.sync();
+    host_.sync(/*may_popup=*/true);
 }
 
 void App::idle() {
@@ -870,7 +912,16 @@ TvisionBackend::run_desktop(Runtime &rt, const RunOptions &opts, const std::func
 bool TvisionBackend::available() { return true; }
 
 bool TvisionBackend::set_clipboard(cvc::app &, const std::string &text) {
+  return clipboard_copy(text);
+}
+
+bool TvisionBackend::clipboard_copy(const std::string &text) {
   TClipboard::setText(TStringView(text.data(), text.size())); // it reports nothing back
+  return true;
+}
+
+bool TvisionBackend::clipboard_request() {
+  TClipboard::requestText(); // the text comes as a paste of keys to the focused view
   return true;
 }
 
@@ -886,6 +937,8 @@ FtxuiBackend::RunExit TvisionBackend::run_desktop(Runtime &, const RunOptions &,
 bool TvisionBackend::available() { return false; }
 
 bool TvisionBackend::set_clipboard(cvc::app &, const std::string &) { return false; }
+bool TvisionBackend::clipboard_copy(const std::string &) { return false; }
+bool TvisionBackend::clipboard_request() { return false; }
 
 #endif
 

@@ -119,10 +119,15 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
     return;
 
   // Every participant's pose once.
-  std::vector<std::pair<std::string, cvc::physics::body_state>> poses;
+  struct pose_of {
+    std::string pid;
+    cvc::physics::body_state state;
+    double steer; // a driver's vehicle's (OW5n)
+  };
+  std::vector<pose_of> poses;
   poses.reserve(pids.size());
   for (const std::string &pid : pids)
-    poses.emplace_back(pid, server.state(pid));
+    poses.push_back(pose_of{pid, server.state(pid), server.steer(pid)});
   const std::uint64_t tick = server.tick();
 
   std::vector<pose_subject> subjects;
@@ -148,10 +153,12 @@ void room_pose_relay::step(const holon &server, std::uint64_t step, const aoi_sn
     if (key)
       v.enc.reset(); // every participant it sees, named and absolute
     subjects.clear();
-    for (const auto &[subject, state] : poses) {
+    for (const pose_of &each : poses) {
+      const std::string &subject = each.pid;
       pose_subject s;
       s.pid = subject;
-      s.state = state;
+      s.state = each.state;
+      s.steer = each.steer;
       const aoi_tier tier = aoi ? aoi->tier(pid, subject) : aoi_tier::inner;
       if (!key && tier != aoi_tier::inner) {
         const std::uint64_t last = v.enc.last_sent_tick(subject);

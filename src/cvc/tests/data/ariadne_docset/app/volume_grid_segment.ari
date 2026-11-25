@@ -1,0 +1,57 @@
+# The browser smoke test's volume grid segmentation (src/arigl/web/test/arigl_web_smoke.mjs): the
+# volume_grid component over a volume_grid node on the bunny's 32^3 signed distance field (negative
+# inside), its Segmentation tab's run on the page. Once the planes are up it writes one click as a
+# slice view writes it (a down, then an up, a frame apart), a seed outside the bunny, then the
+# `segment` request; the voxels at or above 0 (outside the surface) are one class, segmented and
+# surfaced as a sliced task on the page's scheduler. Once it is done it prints one line the test
+# waits for: the component, the node, the segmentation and the class surfaces in wasm.
+meta: {min_libcvc: 4.0.0}
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
+import:
+  - cvc://components/volume_grid.ari
+init: (state-set "seg.step" "start")
+on_tick: |
+  (if (and (= (state-get "seg.step") "start")
+           (= (state-get "graphics.root.children.grid.grid.info.dims") "32 32 32"))
+      (begin
+        (state-set "graphics.root.children.grid.grid.pick.phase" "down")
+        (state-set "graphics.root.children.grid.grid.pick.i" "1")
+        (state-set "graphics.root.children.grid.grid.pick.j" "1")
+        (state-set "graphics.root.children.grid.grid.pick.k" "16")
+        (state-set "graphics.root.children.grid.grid.pick.axis" "z")
+        (state-set "graphics.root.children.grid.grid.pick.seq" "1")
+        (state-set "seg.step" "down"))
+      (if (= (state-get "seg.step") "down")
+          (begin
+            (state-set "graphics.root.children.grid.grid.pick.phase" "up")
+            (state-set "graphics.root.children.grid.grid.pick.seq" "2")
+            (state-set "seg.step" "up"))
+          (if (and (= (state-get "seg.step") "up")
+                   (= (state-get "graphics.root.children.grid.grid.classes.0.points") "1"))
+              (begin
+                (state-set "graphics.root.children.grid.grid.request" "segment")
+                (state-set "seg.step" "running"))
+              (if (and (= (state-get "seg.step") "running")
+                       (= (state-get "graphics.root.children.grid.grid.segment.rows") "1")
+                       (= (state-get "graphics.root.children.grid.grid.busy") "0"))
+                  (begin
+                    (print (str-concat "volume_grid segment: "
+                                       (state-get "graphics.root.children.grid.grid.status")))
+                    (state-set "seg.step" "done"))))))
+windows:
+  - include: volume_grid
+    args: { node: grid, id: vg, title: Volume grid, view_size: 240 }
+    pos: [8, 8]
+    size: [900, 440]
+scene:
+  nodes:
+    - node: grid
+      type: volume_grid
+      source: { data: bunny }
+      slice: { z: 16 }
+      segment: { t_low: 0, t_high: 1000, gamma: -0.02, automatic: none, mesh: { smoothing: 2 } }
+      classes:
+        - { name: outside, color: [0.3, 0.7, 1], radius: 1 }

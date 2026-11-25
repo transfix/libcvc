@@ -26,7 +26,10 @@
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene_boat.h>
+#include <cvc/ariadne/scene_generated_world.h> // SceneColliders
+#include <cvc/ariadne/scene_water.h>           // a followed sea (OW5q)
 #include <cvc/ariadne/scene_world.h>
+#include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -46,6 +49,7 @@
 #include <cvc/physics/world.h>
 #include <cvc/state/state.h>
 #include <cvc/world/generated_world.h>
+#include <cvc/world/weather.h> // a storm drawn at another host's time (OW5q)
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -1971,6 +1975,231 @@ scene:
   fs::remove_all(dir, ec);
 }
 
+// A drawn water node shows another host's sea (OW5q): it seeds its water.sea and the shown_clock
+// keys empty, so a client of a relay sees the node is there (show_relay_seas), and once water.sea
+// holds a keyframe its runtime's field is that sea's at the next frame. (The GPU sea, drawn at the
+// shown time, needs a GL context; the frame here has no renderer.)
+void test_drawn_water_shows_another_hosts_sea() {
+  cvc::app app;
+  std::printf("test_drawn_water_shows_another_hosts_sea\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: {}
+  nodes:
+    - node: terrain
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 40 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 4
+      body: {}
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  cvc::state &root = cvc::state::instance(app);
+  // Its keys under the scene's state prefix, where show_relay_seas writes them (arigl passes it).
+  const std::string sea_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "water.sea");
+  const std::string clock_key =
+      cvc::ariadne::resolve_bind(sg.getStatePrefix(), cvc::ariadne::kShownClockKey);
+  CHECK(root.findDescendant(sea_key) != nullptr);
+  CHECK(root.findDescendant(clock_key) != nullptr);
+  CHECK(root(sea_key).value().empty());
+  const auto it = out.colliders.find("water");
+  CHECK(it != out.colliders.end() && it->second && it->second->geometry);
+  if (it == out.colliders.end() || !it->second || !it->second->geometry)
+    return;
+  const auto surface = [&]() -> const void * {
+    for (const cvc::world::volume_item &v : it->second->geometry->volumes())
+      return v.field.surface.get();
+    return nullptr;
+  };
+  for (const auto &tick : out.custom_ticks)
+    tick(nullptr);
+  const void *own = surface();
+  const std::uint64_t rev = it->second->revision;
+  cvc::ariadne::SceneWaterKeyframe k;
+  k.from = {4.0, 0.0, 5000.0};
+  k.to = {12.0, 0.5, 5000.0};
+  k.t0 = 1.0;
+  k.t1 = 3.0;
+  k.keyframe = 2;
+  k.from_tick = 240;
+  root(sea_key).value(cvc::ariadne::format_sea_keyframe(k));
+  root(clock_key).value("2.5");
+  for (const auto &tick : out.custom_ticks)
+    tick(nullptr);
+  CHECK(it->second->revision != rev);
+  CHECK(surface() != own);
+  CHECK(it->second->from_tick == 240u);
+  CHECK(cvc::ariadne::scene_water_time(app, sg.getStatePrefix(), 9.0) == 2.5);
+  std::printf("  the drawn water's field follows water.sea (revision %llu -> %llu)\n",
+              static_cast<unsigned long long>(rev),
+              static_cast<unsigned long long>(it->second->revision));
+}
+
+// A drawn weather node draws another host's storms at its time (OW5q): it seeds shown_clock
+// empty, and with a time in it the storms it publishes (weather.storms, the discs the sky draws)
+// are that time's: a storm alive at 0 is gone 600 s on (its weather runs 15 times the world's),
+// and 0 again is what the app's own clock, at 0 here, gave.
+void test_drawn_weather_draws_another_hosts_time() {
+  cvc::app app;
+  std::printf("test_drawn_weather_draws_another_hosts_time\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::gl::ariadne::register_cvcgl_extensions(app);
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: weather
+      type: weather
+      chance: 0
+      area: 100
+      time_scale: 15
+)";
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  cvc::state &root = cvc::state::instance(app);
+  const std::string clock_key =
+      cvc::ariadne::resolve_bind(sg.getStatePrefix(), cvc::ariadne::kShownClockKey);
+  const std::string storms_key = cvc::ariadne::resolve_bind(sg.getStatePrefix(), "weather.storms");
+  CHECK(root.findDescendant(clock_key) != nullptr);
+  CHECK(root(clock_key).value().empty());
+  cvc::world::weather_event e; // a mature storm over the area at 0, 3000 weather seconds long
+  e.t = 0.0;
+  e.tau = -1500.0;
+  e.x = 0.0;
+  e.y = 0.0;
+  e.radius = 400.0;
+  e.peak = 1.0;
+  e.life = 3000.0;
+  root(cvc::ariadne::resolve_bind(sg.getStatePrefix(), "weather.events"))
+      .value(cvc::world::format_weather_events({e}));
+  const auto frame = [&]() {
+    for (const auto &tick : out.custom_ticks)
+      tick(nullptr);
+    return root(storms_key).value();
+  };
+  const std::string own = frame();
+  root(clock_key).value("600");
+  const std::string later = frame();
+  root(clock_key).value("0");
+  const std::string again = frame();
+  std::printf("  storms at the app's time '%s', at 600 s '%s'\n", own.c_str(), later.c_str());
+  CHECK(!own.empty());
+  CHECK(later != own);
+  CHECK(again == own);
+}
+
+// D3: the drawn world on a world_worker (a local holon on a thread of its own), as arigl
+// --world-thread runs it: each frame's tick_scene, under the frame's lock, drives the clock and
+// publishes what the worker ran, and draws from the poses the worker captured. The bodies end where
+// the frame's own follow() leaves them, bit for bit, and are drawn there.
+void test_world_worker_drawn() {
+  std::printf("test_world_worker_drawn\n");
+  if (!cvc::ariadne::have_yaml() || !cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no YAML or no Jolt in this build\n");
+    return;
+  }
+  if (!cvc::ariadne::world_worker::available()) {
+    std::printf("  skipped: no threads (the world steps on the frame's thread)\n");
+    return;
+  }
+  struct result {
+    cvc::physics::vec3 crate, ball;
+    double drawn_z = 0.0;
+    std::uint64_t steps = 0, ticks = 0;
+  };
+  const auto go = [](bool threaded) {
+    result res;
+    cvc::ariadne::LoadResult r = fresh_load(kScene);
+    CHECK(r.ok);
+    if (!r.ok)
+      return res;
+    cvc::app app;
+    SceneGraph sg(app);
+    std::vector<std::string> warnings;
+    ari::RealizedScene out = ari::realize_scene(sg, r.scene, sg.getStatePrefix(), &warnings);
+    CHECK(out.physics != nullptr && out.world != nullptr);
+    if (!out.physics || !out.world)
+      return res;
+    ari::tick_scene(out, nullptr, 1.0 / 60.0); // anchors the world on the clock
+    const std::uint64_t t0 = app.world_clock().tick();
+    std::unique_ptr<cvc::ariadne::world_worker> ww;
+    if (threaded) {
+      cvc::ariadne::world_worker::options o;
+      ari::RealizedScene *rs = &out;
+      o.capture = [rs] {
+        if (rs->physics_binding)
+          rs->physics_binding->tracker().capture();
+      };
+      ww = std::make_unique<cvc::ariadne::world_worker>(*out.world, app.world_clock(), o);
+      out.world_worker = ww.get();
+      CHECK(out.world->deferred());
+    }
+    const auto frame = [&](double dt) {
+      if (!ww) {
+        ari::tick_scene(out, nullptr, dt);
+        return;
+      }
+      {
+        const cvc::ariadne::world_worker::frame_lock held = ww->lock();
+        ari::tick_scene(out, nullptr, dt);
+      }
+      CHECK(ww->wait_caught_up(30.0));
+    };
+    for (int i = 0; i < 180; ++i)
+      frame(1.0 / 60.0);
+    frame(0.0); // what the last steps ran, published and drawn
+    res.ticks = app.world_clock().tick() - t0;
+    res.crate = out.physics->state(out.body("crate")).position;
+    res.ball = out.physics->state(out.body("ball")).position;
+    if (auto crate = sg.getGraphics("crate"))
+      res.drawn_z = crate->getTransform()->GetElement(2, 3);
+    if (ww) {
+      CHECK(ww->error().empty());
+      res.steps = ww->steps();
+      out.world_worker = nullptr;
+      ww.reset();
+      CHECK(!out.world->deferred());
+    }
+    return res;
+  };
+  const result plain = go(false), threaded = go(true);
+  CHECK(threaded.ticks > 0 && threaded.steps == threaded.ticks);
+  CHECK(plain.ticks == threaded.ticks);
+  CHECK(threaded.crate.x == plain.crate.x && threaded.crate.y == plain.crate.y &&
+        threaded.crate.z == plain.crate.z);
+  CHECK(threaded.ball.x == plain.ball.x && threaded.ball.z == plain.ball.z);
+  CHECK(plain.crate.z < 3.9); // it fell
+  CHECK(near(threaded.drawn_z, plain.drawn_z, 1e-9));
+}
+
 int main() {
   test_crate_lands_on_the_drawn_ground();
   test_null_backend_places_and_holds();
@@ -1990,6 +2219,9 @@ int main() {
   test_boat_models_drawn();
   test_boat_model_from_data();
   test_node_model_from_data();
+  test_drawn_water_shows_another_hosts_sea();
+  test_drawn_weather_draws_another_hosts_time();
+  test_world_worker_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

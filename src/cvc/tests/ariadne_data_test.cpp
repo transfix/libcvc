@@ -11,12 +11,16 @@
 
 #include <atomic>
 #include <boost/any.hpp>
+#include <cstdint>
 #include <cstdlib>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/core/app.h>
 #include <cvc/geometry/contours.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/image/image.h>
+#include <cvc/image/image_decode.h>
+#include <cvc/image/image_encode.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/net/http_client.h>
@@ -25,6 +29,8 @@
 #include <cvc/utility/archive.h>
 #include <cvc/volume/point_classes.h>
 #include <cvc/volume/volume.h>
+#include <cvc/volume/volume_file_info.h>
+#include <cvc/volume/volume_file_io.h>
 #include <cvc/volume/volume_grid.h>
 #include <cvc/world/world_geometry.h>
 #include <filesystem>
@@ -32,6 +38,7 @@
 #include <gtest/gtest.h>
 #include <random>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 namespace ar = cvc::archive;
@@ -278,6 +285,92 @@ TEST(Archive, ZipStoredAndDeflatedEntries) {
   EXPECT_EQ(*files[1].bytes, std::string("\x00\x01\x02stored", 9));
 }
 
+// pack_zip (a saved world, GB4): what it packs unpacks to the same files in the same order, a
+// file that packs small deflated and one that does not stored, the same files to the same bytes.
+TEST(Archive, PackZipRoundTripsDeflatedAndStoredEntries) {
+  std::string text;
+  for (int i = 0; i < 400; ++i)
+    text += "row " + std::to_string(i % 7) + " of a height map\n";
+  std::string noise(3000, '\0');
+  std::uint32_t s = 12345;
+  for (char &c : noise) {
+    s = s * 1664525u + 1013904223u;
+    c = static_cast<char>(s >> 24);
+  }
+  const std::vector<std::pair<std::string, std::string>> in = {
+      {"world.json", "{}\n"}, {"export/terrain.txt", text}, {"noise.bin", noise}, {"empty", ""}};
+  const std::string zip = ar::pack_zip(in);
+  EXPECT_EQ(ar::classify(zip), ar::kind::zip);
+  EXPECT_EQ(ar::pack_zip(in), zip);
+  EXPECT_LT(zip.size(), text.size()); // the text deflated
+  const auto out = ar::unpack(zip);
+  ASSERT_EQ(out.size(), in.size());
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    EXPECT_EQ(out[i].path, in[i].first);
+    EXPECT_EQ(*out[i].bytes, in[i].second) << in[i].first;
+  }
+  // The deflate stream alone, inflated by the gzip reader around it.
+  const std::string raw = ar::deflate(text);
+  std::string gz("\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\xFF", 10);
+  gz += raw;
+  for (std::uint32_t v : {ar::crc32(text), static_cast<std::uint32_t>(text.size())})
+    for (int k = 0; k < 4; ++k)
+      gz += static_cast<char>((v >> (8 * k)) & 0xFF);
+  EXPECT_EQ(ar::decompress(gz), text);
+
+  EXPECT_THROW(ar::pack_zip({{"../out", "x"}}), std::invalid_argument);
+  EXPECT_THROW(ar::pack_zip({{"/abs", "x"}}), std::invalid_argument);
+  EXPECT_THROW(ar::pack_zip({{"a", "x"}, {"a", "y"}}), std::invalid_argument);
+}
+
+// encode_png keeps a grey u16 image at 16 bits (a world's export/heightmap.png): the header says
+// 16-bit grey, the rows inflate to the Sub-filtered big-endian samples, and an 8-bit reader reads
+// their high bytes.
+TEST(ImageEncode, AGrey16PngKeepsItsSamples) {
+  const int w = 5, h = 3;
+  const std::vector<std::uint16_t> px = {0,    1,    255,   256,   65535, 1000,  2000, 3000,
+                                         4000, 5000, 40000, 30000, 20000, 10000, 0};
+  const cvc::image img(w, h, cvc::image::pixel_format::GRAY, cvc::image::data_type::u16, px.data());
+  const std::string png = cvc::encode_png(img);
+  ASSERT_GT(png.size(), 33u);
+  EXPECT_EQ(png.substr(0, 8), std::string("\x89PNG\r\n\x1A\n", 8));
+  EXPECT_EQ(png.substr(12, 4), "IHDR");
+  EXPECT_EQ(static_cast<unsigned char>(png[24]), 16u); // bit depth
+  EXPECT_EQ(static_cast<unsigned char>(png[25]), 0u);  // grey
+  // The IDAT's zlib stream, as a gzip of what the rows should be.
+  const std::size_t at = png.find("IDAT");
+  ASSERT_NE(at, std::string::npos);
+  const std::size_t len = (std::size_t(static_cast<unsigned char>(png[at - 4])) << 24) |
+                          (std::size_t(static_cast<unsigned char>(png[at - 3])) << 16) |
+                          (std::size_t(static_cast<unsigned char>(png[at - 2])) << 8) |
+                          std::size_t(static_cast<unsigned char>(png[at - 1]));
+  const std::string z = png.substr(at + 4, len);
+  std::string rows;
+  for (int y = 0; y < h; ++y) {
+    rows += '\x01';
+    std::uint16_t prev = 0;
+    for (int x = 0; x < w; ++x) {
+      const std::uint16_t v = px[std::size_t(y) * w + x];
+      rows += static_cast<char>(((v >> 8) - (prev >> 8)) & 0xFF);
+      rows += static_cast<char>((v - prev) & 0xFF);
+      prev = v;
+    }
+  }
+  std::string gz("\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\xFF", 10);
+  gz += z.substr(2, z.size() - 6);
+  for (std::uint32_t v : {ar::crc32(rows), static_cast<std::uint32_t>(rows.size())})
+    for (int k = 0; k < 4; ++k)
+      gz += static_cast<char>((v >> (8 * k)) & 0xFF);
+  EXPECT_EQ(ar::decompress(gz), rows);
+  std::string why;
+  const cvc::image back = cvc::decode_image(png.data(), png.size(), &why);
+  ASSERT_EQ(back.width(), w) << why;
+  ASSERT_EQ(back.height(), h);
+  const auto *rgba = static_cast<const unsigned char *>(back.data());
+  for (int i = 0; i < w * h; ++i)
+    EXPECT_EQ(rgba[i * 4], px[i] >> 8) << i;
+}
+
 // ── the store ────────────────────────────────────────────────────────────────────────────────────
 
 TEST(AriadneData, ADirectoryLoadsItsFilesIntoTheTree) {
@@ -422,6 +515,26 @@ TEST(AriadneData, PointClassesAndSessionsLoadAndSaveThroughTheApp) {
   EXPECT_EQ(vback.XDim(), 4u);
   EXPECT_EQ(vback.ZDim(), 2u);
   EXPECT_DOUBLE_EQ(vback(1, 2, 1), 7.5);
+  // A list of volumes: one file's variables (a volume_grid's segmented classes, as
+  // VolumeGridRover's SegTmp.rawv), named after each volume.
+  cvc::volume w(app, cvc::dimension(4, 3, 2), cvc::Float);
+  w(0, 0, 0, 2.0);
+  v.desc("left");
+  w.desc("right");
+  root("work.classes")
+      .data(boost::any(
+          std::make_shared<const std::vector<cvc::volume>>(std::vector<cvc::volume>{v, w})));
+  EXPECT_EQ(cvc::ariadne::default_data_encoder(root("work.classes").data()), "volume");
+  const std::string rawv = (t.dir / "segments.rawv").generic_string();
+  cvc::ariadne::data_save(app, "work.classes", rawv, "volume");
+  const cvc::volume_file_info info(app, rawv);
+  EXPECT_EQ(info.numVariables(), 2u);
+  EXPECT_EQ(info.name(0), "left");
+  EXPECT_EQ(info.name(1), "right");
+  cvc::volume second(app);
+  cvc::readVolumeFile(app, second, rawv, 1, 0);
+  EXPECT_DOUBLE_EQ(second(0, 0, 0), 2.0);
+  root("work.empty").data(boost::any(std::make_shared<const std::vector<cvc::volume>>()));
   root("work.text").data(boost::any(std::string("hello")));
   cvc::ariadne::data_save(app, "work.text", (t.dir / "t.txt").generic_string());
   std::ifstream tin(t.dir / "t.txt");
@@ -441,6 +554,7 @@ TEST(AriadneData, PointClassesAndSessionsLoadAndSaveThroughTheApp) {
   says("work.none", "x.vgr", "", t.dir.generic_string(), "holds no data");
   root("work.odd").data(boost::any(42));
   says("work.odd", "x.bin", "", t.dir.generic_string(), "no built-in encoder takes");
+  says("work.empty", "x.rawv", "volume", t.dir.generic_string(), "the list of volumes is empty");
   says("work.points", "x.vgr", "nope", t.dir.generic_string(), "no encoder as: nope");
   says("work.points", "x.vgr", "", "https://example.org/docs", "not a local file");
   EXPECT_FALSE(fs::exists(t.dir / "x.vgr"));

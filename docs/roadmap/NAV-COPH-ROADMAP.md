@@ -498,10 +498,30 @@ demos' runner with two `CrossingLearner` agents for 60 ticks of the crossing, co
     mass would (a 0.74 m turning radius, and almost no lateral force at low speed). It stops
     0.21 m short, where the router finds no clear start, and never touches the block. Turning
     that stop into a way round is the allocation research §3.3.2 leaves open.
-- **Next, part 2c:** the `plant_ledger` items (D11). They need their own table, printed only with
-  CoPH attached, because adding rows to the plant table changes every run's output (the
-  `.cvcrun` columns, the panels, pycvc's item list and cvcGL's publish tests). sim_world's stats
-  collector also needs a public hook for the driver's terms.
+
+**Landed in part 2c: the CoPH ledger's items (D11).** The episode record carries each driven car's
+account. Tested by `nav_stats_test` (`NavStats.CophLedger`) and `nav_coph_driver_test`.
+- **Where they come from.** While the sim's `nav_stats` is armed, each `coph_driver::apply()` feeds
+  that tick's share of every attached car's account to `sim_world::feed_coph`. The next `step()`
+  folds it into the collector as `nav_samplers::coph` (`coph_sample`: a CoPH step's work, heat,
+  kinetic change, residual, shaping jump, unallocated work and risk cost, and every tick's `|e|²dt`
+  and `|u|²dt`).
+- **What the record holds.** A car CoPH drove (`coph_tracked`) gets `coph_steps`, `coph_work`,
+  `coph_heat`, `coph_kinetic_change`, `coph_residual`, `coph_residual_max`, `coph_shaping_jumps`,
+  `coph_unallocated_work`, `coph_risk_cost` and `coph_allocation_residual`. The episode gets
+  `coph_vehicles` and the fleet's sums.
+- **Their own tables.** `plant_ledger_coph_vehicle()` and `plant_ledger_coph_episode()` list the
+  items, with `source::coph`. The JSON and cvcGL's `publish_nav_stats` write them only for what CoPH
+  drove. Every other run's output is unchanged, including every reader that takes a column or key
+  per item of the plant tables (`.cvcrun` columns, the panels, pycvc's item lists).
+- **Results on Windows.**
+  - Each of a car's sums in the record equals its account bit for bit. The shaping jumps are
+    differences of the learner's running total, so they agree to round-off.
+  - With `nav_stats` armed and a driver that drives nothing, the record is byte-unchanged and has
+    no CoPH key.
+- **Left out:** the cross-episode scorecard (`aggregate_nav`), and the CoPH items in nav_arms'
+  `.cvcrun` columns and pycvc's lists. Each can take them from the new tables when a reader needs
+  them.
 
 `coph_fleet` lives outside `sim_world`, as `route_follower` does (D10). Before each `step()`, it:
 - reads each attached agent's pose, heading and speed;
@@ -520,6 +540,72 @@ run is byte-unchanged.
 - **Native controller.** The cars template gains `--controller coph`, which runs the fleet
   natively. pycvc-gl's wasm build then runs the CoPH demo in the browser, without torch.
 - **Live parity.** GRL-SNAM's parity test can check the native fleet against the torch one.
+
+**Landed in part 1: the bindings.** `bindings/pycvc/pycvc_nav_coph.i`, tested by `pycvc_nav_coph`
+(`test_pycvc_nav_coph.py`).
+- **The kernels.** `nav_coph_flow`, `nav_coph_balance`, `nav_coph_risk`, `nav_coph_potential`,
+  `nav_coph_grad_potential`, `nav_coph_command`, `nav_coph_shaping` and `nav_coph_allocate`. A
+  packet's bytes are `NavCophPacket.bytes()`, the length of its `json()`.
+- **The configurations.** Dicts over the demos' profile, with `coph_config`'s field names.
+  `nav_coph_profile()` and `nav_coph_communication_profile()` return the whole of each, and an
+  unknown key is an error.
+- **`NavCophAgent`.** One learner, a crossing one or a car's (`network="none"`): observe, advance,
+  action, update, `export_to` (a `NavCophPacket`) and assimilate.
+- **`NavCophFleet`.** The runner's fleet:
+  - `run_crossing()` on the crossing world; its sensor noise may be a Python callable;
+  - `boundary()` for a world of the caller's;
+  - the samples, controls, updates, events and energy accounts.
+- **Results on Windows.**
+  - G2, G3 and G11 come within the golden's tier from Python, through the same file libcvc's C++
+    tests read.
+  - The fleet on G12's crossing world and noise matches libcvc's
+    `CophFleet.TheEnergyAccountStaysAtRoundOffOverALongRun`: both agents reach their goals (767
+    and 784 steps), with residuals of 7.5e-15 and 7.0e-15.
+
+**Landed in part 2: `--controller coph`.** `pycvc.NavCophDriver` binds C5's `coph_driver` to a
+`nav_sim_world_create` handle. `pycvc_gl.cars` uses it: `Cars(..., coph={...})` and
+`step_coph()`, the template's `--controller coph` and the Run panel's CoPH choice (docs/CARS.md,
+"CoPH, natively").
+- **The Froude scale.** By default it is the car's length over a RoboRacer's: 1 for a RoboRacer,
+  about 9 for a Humvee (D3, D4). `--coph-scale` sets it.
+- **The coefficient plots.** They show each car's account: the allocation residual, the work, the
+  risk cost and the CoPH steps.
+- **Results on Windows.**
+  - From Python, the driver's two cars pass each other and arrive in 485 ticks, as
+    `CophDriver.TwoCarsCrossTheField` does in C++. With nothing attached, the run is the sim's
+    own, bit for bit.
+  - Two Humvee-sized cars on nav's bicycle cross 60 m of the flat world past each other and both
+    arrive, in 37.9 s, with no contact (s = 9.05).
+  - The template's headless `--controller coph` run is checked by CI's `pycvc_gl_cars`. This box
+    has no cvcGL.
+- **New goals and world documents (part 2b).**
+  - A car that reached its goal brakes until the sim gives it a new one, then runs again
+    (`coph_fleet::resume`, as GRL-SNAM's cars controller clears a car's done). Its learner keeps
+    what it learned.
+  - Under `--gym` and `--world-doc` the cars are not a `sim_world`, so `pycvc_gl.cars.CophControl`
+    runs the same fleet over `NavCophFleet` from the cars' state: risk from a constant or a
+    callable, obstacles from the rays.
+
+**Landed in part 3: the crossing demo, natively and in the browser.**
+`examples/ariadne/python/coph.py` and `coph.ari` run the crossing demo on `NavCophFleet`, a few
+CoPH ticks a frame.
+- **What it adds.**
+  - `coph_fleet::run(world, ticks)` and `tick()`: a run that stops after `ticks` and goes on from
+    there.
+  - `NavCophFleet.run_crossing(world, ticks)`, which keeps its world between calls.
+- **What the demo shows.** A top-down picture of the maze, its doors, the agents' trails and
+  sensors, and a flash when a packet arrives; each agent's version, policy and energy; and a
+  Packets switch, the demos' two arms.
+- **Where it runs.** It has no `scene:`, so it runs headless, in a window, and in a browser on
+  ariglx-web (`?src=coph.py`, with `coph.ari` preloaded).
+- **Checked.**
+  - CI's ariglx-web job runs `src/arigl/web/test/python/coph.ari` in headless Chrome: the
+    crossing on the page's own pycvc, 40 ticks at a time.
+  - `pycvc_gl_ariadne_host` runs the example offscreen.
+  - Run in parts (15 ticks at a time in C++, 300 in Python), the fleet is the one run whole, bit
+    for bit.
+- **Next:** a public page, once a libcvc release has the bindings. GRL-SNAM's pages pin a release
+  (v4.0.0 today) and build ariglx-web from it.
 
 ## 5. Golden cases and tiers
 

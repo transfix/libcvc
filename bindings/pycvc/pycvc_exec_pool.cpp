@@ -15,6 +15,7 @@
 #include <cvc/core/exec_pool.h>
 #include <cvc/state/state_exec/async_scheduler.h> // kernel_runs_here
 #include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/exec_router.h> // prefix_registered
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,9 @@
 namespace pycvc {
 
 namespace {
+
+// ExecPool's default prefix (pycvc_exec_pool.h), the first of the default family.
+constexpr const char *kDefaultPrefix = "exec_pool";
 
 // `o` as a whole number of at least `min`, or nullopt for None (or no argument). Anything else is
 // a ValueError (std::invalid_argument).
@@ -52,6 +56,7 @@ std::optional<unsigned> optional_count(PyObject *o, long long min, const char *w
 struct ExecPool::ExecPoolImpl {
   std::shared_ptr<cvc::app> app; // keeps the app (and its pool) alive
   cvc::exec_pool *pool = nullptr;
+  std::string prefix; // the one its pooled Execs are chrooted under (the default's pick)
   bool fresh_env = false;
   // The pooled Execs; empty once closed. Destroyed with the GIL held (~Exec releases it while
   // its kernels finish).
@@ -104,6 +109,21 @@ ExecPool::ExecPool(const std::shared_ptr<cvc::app> &app, PyObject *threads, PyOb
         "pycvc.ExecPool: idle_timeout must be a number of seconds, 0 or more");
   if (prefix.empty())
     throw std::invalid_argument("pycvc.ExecPool: prefix must not be empty");
+  // One prefix per live pool of the app (R2b S-M2): its pooled Execs' chroots are their groups'
+  // channel prefixes, and of equal prefixes the first registered is the home, so a second pool's
+  // own channels would wait in the first's groups (its tags and state keys would collide too). The
+  // default takes the first free of exec_pool, exec_pool_2, exec_pool_3, ...; any other prefix in
+  // use is refused. A pool's first chroot, "<prefix>.0", stands for its prefix.
+  const cvc::state_exec::exec_router &router = app->exec_router();
+  const auto taken = [&router](const std::string &p) { return router.prefix_registered(p + ".0"); };
+  std::string chosen = prefix;
+  if (prefix == kDefaultPrefix) {
+    for (unsigned k = 2; taken(chosen); ++k)
+      chosen = prefix + "_" + std::to_string(k);
+  } else if (taken(prefix)) {
+    throw std::invalid_argument("pycvc.ExecPool: prefix '" + prefix +
+                                "' is in use by another pool of this app");
+  }
   auto impl = std::make_shared<ExecPoolImpl>();
   impl->app = app;
   const std::optional<unsigned> want_threads = optional_count(threads, 0, "threads");
@@ -123,7 +143,8 @@ ExecPool::ExecPool(const std::shared_ptr<cvc::app> &app, PyObject *threads, PyOb
   impl->execs.reserve(n);
   for (unsigned i = 0; i < n; ++i)
     impl->execs.push_back(std::unique_ptr<Exec>(
-        new Exec(Exec::pooled_tag{}, app, prefix + "." + std::to_string(i), idle_timeout)));
+        new Exec(Exec::pooled_tag{}, app, chosen + "." + std::to_string(i), idle_timeout)));
+  impl->prefix = std::move(chosen);
   impl_ = std::move(impl);
 }
 
@@ -166,7 +187,7 @@ PyObject *ExecPool::run_all(PyObject *programs) {
       PyThreadState *ts;
       ~gil_back() { PyEval_RestoreThread(ts); }
     } restore{ts};
-    out = Exec::run_batch(*p.pool, execs, sources, p.fresh_env, p.batch);
+    out = Exec::run_batch(*p.pool, execs, sources, p.fresh_env, p.batch, *p.app);
   }
   // The first failing program's error, in program order, once every program has ended.
   for (Exec::batch_outcome &o : out)
@@ -204,6 +225,12 @@ void ExecPool::register_async_fn(const std::string &name, PyObject *callable, bo
 }
 
 unsigned ExecPool::threads() const { return impl_->pool->threads(); }
+
+std::string ExecPool::prefix() const { return impl_->prefix; }
+
+std::optional<cvc::state_exec::published_process> ExecPool::published(int pid) const {
+  return impl_->pool->info(pid);
+}
 
 PyObject *ExecPool::stats() const {
   const batch_control &b = impl_->batch;

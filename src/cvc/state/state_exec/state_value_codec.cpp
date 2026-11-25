@@ -1226,6 +1226,8 @@ void encode_process(cvc::state &node, const process &proc) {
   node("gid").value(proc.gid);
   node("root_path").value(proc.root_path);
   node("owner").value(proc.owner);
+  if (!proc.owner_root.empty()) // the root its scope is written from (process_scope)
+    node("owner_root").value(proc.owner_root);
   node("parent_pid").value(std::to_string(proc.parent_pid));
 
   auto &limits = node("limits");
@@ -1287,6 +1289,7 @@ process_ptr decode_process(cvc::state &node, exec_context *ctx) {
   proc->gid = child_text(node, "gid");
   proc->root_path = child_text(node, "root_path");
   proc->owner = child_text(node, "owner");
+  proc->owner_root = child_text(node, "owner_root");
   const std::string parent = child_text(node, "parent_pid");
   proc->parent_pid =
       parent.empty() ? -1 : static_cast<int>(std::strtol(parent.c_str(), nullptr, 10));

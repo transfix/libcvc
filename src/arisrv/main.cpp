@@ -49,7 +49,7 @@
 #include <cvc/ariadne/conference/room_calls.h> // room-call: clients' calls, run in arisrvx's Python
 #include <cvc/ariadne/conference/room_chat.h>  // room chat and direct messages
 #include <cvc/ariadne/conference/room_entities.h>   // room_entity_relay (the document's vehicles)
-#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave (retract a departed peer)
+#include <cvc/ariadne/conference/room_intrinsics.h> // room_leave, room_departures
 #include <cvc/ariadne/conference/room_lane.h>       // the pose lane + lane signaling
 #include <cvc/ariadne/conference/room_media_intrinsics.h> // room_relay_tick
 #include <cvc/ariadne/conference/room_net.h>        // per-participant + room link-quality stats
@@ -95,6 +95,7 @@
 #endif
 #include <cvc/state/state_exec/exceptions.h> // set_field: a call's principal
 #include <cvc/state/state_exec/types.h>
+#include <cvc/world/generated_world.h> // server.regenerate's params
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
@@ -233,6 +234,16 @@ int main(int argc, char **argv) {
   //   --admission-hold-ms N      hold a joiner's bootstrap until the area of interest has its
   //                              filter, so its admit snapshot is filtered too; at most N ms, then
   //                              unfiltered (default 2000; 0 = off; only with an area of interest)
+  //   --leave-grace-s N          remove a departed participant's subtree from the room tree once
+  //                              it has been away N s without joining again (default: the --doc
+  //                              document's server: leave_grace_s:, else 300; 0 = as its
+  //                              connection ends). Until then it is only marked left. A
+  //                              participant marked left that keeps its connection (a document's
+  //                              (room-leave)) is removed after N s too
+  //   --idle-timeout-s N         close a connection that has sent nothing for N s, as a dropped one
+  //                              closes, so its participant departs (default 10; 0 = never). Every
+  //                              link is probed each 2 s, so only a peer gone without closing (a
+  //                              crash behind NAT, a suspended phone) is silent that long
   //   --scene default|large      the world the room starts in: cvc://worlds/default.ari (the 20 m
   //                              room) or cvc://worlds/large.ari (a 100 m plane of LOD meshes).
   //                              A --doc whose document has a scene: is the world instead
@@ -401,11 +412,12 @@ int main(int argc, char **argv) {
   bool devicePinsFlag = false; // --device-pins was given (even with no path)
   std::string adaptArg = "on", videoMaxArg = "full", videoFloorArg = "thumb", viewerKbpsArg = "0";
   std::string aoiVideoMaxArg = "0", mediaStallArg = "40", mediaDelayArg = "100",
-              admissionHoldArg = "2000";
+              admissionHoldArg = "2000", leaveGraceArg, idleTimeoutArg = "10";
   std::string laneListen, laneAdvertise, laneMediaArg = "off";
   std::string avatarEnergyArg, avatarEmptyArg; // "": the world's
   std::string simHzArg;                        // --sim-hz ("": the world's)
   bool sceneFlag = false; // --scene was given (a --doc with a scene: is the world instead)
+  bool leaveGraceFlag = false; // --leave-grace-s was given (it overrides the document's)
   std::string docPath;
   std::string docUri; // --doc as given (a cvc:// URI before it resolves to a file)
   bool docFlag = false;                                       // --doc was given (even with no path)
@@ -467,6 +479,11 @@ int main(int argc, char **argv) {
       mediaDelayArg = next("");
     else if (!std::strcmp(a, "--admission-hold-ms"))
       admissionHoldArg = next("");
+    else if (!std::strcmp(a, "--leave-grace-s")) {
+      leaveGraceArg = next("");
+      leaveGraceFlag = true;
+    } else if (!std::strcmp(a, "--idle-timeout-s"))
+      idleTimeoutArg = next("");
     else if (!std::strcmp(a, "--scene")) {
       scene = next("default");
       sceneFlag = true;
@@ -578,11 +595,14 @@ int main(int argc, char **argv) {
       (!avatarEmptyArg.empty() &&
        !check_choice("--avatar-empty", avatarEmptyArg, {"rest", "stop"})))
     return 2;
-  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000;
+  long aoiVideoMaxN = 0, mediaStallMs = 40, mediaDelayMs = 100, admissionHoldMs = 2000,
+       leaveGraceS = -1, idleTimeoutS = 10; // leaveGraceS -1: the document's, else 300
   if (!check_count("--aoi-video-max", aoiVideoMaxArg, aoiVideoMaxN) ||
       !check_count("--media-stall-ms", mediaStallArg, mediaStallMs) ||
       !check_count("--media-delay-ms", mediaDelayArg, mediaDelayMs) ||
-      !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs))
+      !check_count("--admission-hold-ms", admissionHoldArg, admissionHoldMs) ||
+      (leaveGraceFlag && !check_count("--leave-grace-s", leaveGraceArg, leaveGraceS)) ||
+      !check_count("--idle-timeout-s", idleTimeoutArg, idleTimeoutS))
     return 2;
   long viewerKbps = 0, callResultMax = 0, clientsMax = 0, clientLogMax = 0;
   if (!check_count("--viewer-kbps-max", viewerKbpsArg, viewerKbps) ||
@@ -1221,12 +1241,20 @@ int main(int argc, char **argv) {
 #endif
 
   // Presence: when a client's connection ends -- a native (gRPC) client exits, or a browser (WS)
-  // tab closes -- retract it from the room so the roster and the avatar holon do not accumulate
-  // ghosts. Both transports report the departed node id the same way, on their own threads, so the
-  // id is only queued here; the main loop below applies room_leave (where every other room-tree
-  // write happens) and the retraction rides the normal pump + relay forwarding to the others.
+  // tab closes -- mark it left so the roster and the avatar holon drop it at once, and remove its
+  // subtree from the room tree once it has been away --leave-grace-s (room_departures), so the tree
+  // does not keep a ghost of everyone who ever joined. A client back in time (a reconnect keeps its
+  // pid) finds what it published still there. Both transports report the departed node id the same
+  // way, on their own threads, so the id is only queued here; the main loop below applies it (where
+  // every other room-tree write happens), and the writes ride the normal pump + relay forwarding.
   std::mutex departed_mu;
   std::vector<std::string> departed;
+  // The grace: --leave-grace-s, else the document's server: leave_grace_s:, else 5 minutes.
+  if (leaveGraceS < 0)
+    leaveGraceS =
+        serverDoc && serverDoc->block().leave_grace_s >= 0 ? serverDoc->block().leave_grace_s : 300;
+  cvc::ariadne::conference::room_departures departures{std::chrono::seconds(leaveGraceS)};
+  auto nextReap = std::chrono::steady_clock::now(); // departures.reap, about once a second
   const auto on_departed = [&](const std::string &node_id) {
     std::lock_guard<std::mutex> lk(departed_mu);
     departed.push_back(node_id);
@@ -1966,9 +1994,100 @@ int main(int argc, char **argv) {
     const bool admin_call = r.fn == "server.clients" || r.fn == "server.client" ||
                             r.fn == "server.kick" || r.fn == "server.ban" ||
                             r.fn == "server.unban" || r.fn == "server.rename" ||
-                            r.fn == "server.limits";
+                            r.fn == "server.limits" || r.fn == "server.regenerate";
     if (admin_call && !clients.is_admin(r.pid)) {
       calls->fail(r, "forbidden", r.fn + " is an admin's: log in with server.rcon first");
+      return;
+    }
+    if (r.fn == "server.regenerate") {
+      // (room-call "server.regenerate" NODE PARAMS) (ARIADNE_WORLDS section 18.8, GB5): the
+      // document's generated_world NODE made again from PARAMS, a JSON object's text or a dict of
+      // generated_world_params_json's fields, any left out the world's own now. A joined lab's
+      // Regenerate sends it (GeneratedWorldRelay). The world is made at the document's next sync,
+      // and publish_world_on takes its params to every client.
+      cvc::ariadne::SceneWorld *w = serverDoc ? serverDoc->runtime().scene_world() : nullptr;
+      if (!w) {
+        calls->fail(r, "unavailable", "this relay's document runs no world (--doc with a scene:)");
+        return;
+      }
+      const std::string node = arg_str(0);
+      const std::vector<std::string> nodes = w->generated_nodes();
+      if (node.empty() || std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+        std::string names;
+        for (const std::string &n : nodes)
+          names += (names.empty() ? "" : ", ") + n;
+        calls->fail(r, "invalid",
+                    "server.regenerate takes a generated_world node of the document first (" +
+                        (names.empty() ? std::string("it has none") : names) + ")");
+        return;
+      }
+      cvc::world::generated_world_params now;
+      if (!w->generated_params(node, now)) {
+        calls->fail(r, "unavailable", node + " has no world yet");
+        return;
+      }
+      // The params: a JSON object's text, or a dict of numbers, booleans and strings.
+      std::string text = arg_str(1);
+      if (text.empty()) {
+        const se::list_ptr *l = std::get_if<se::list_ptr>(&r.args.v);
+        const se::value_t *a = l && *l && (*l)->size() > 1 ? &(**l)[1] : nullptr;
+        if (const se::dict_ptr *pd = a ? std::get_if<se::dict_ptr>(&a->v) : nullptr; pd && *pd) {
+          const auto quoted = [](const std::string &s) {
+            std::string q = "\"";
+            for (const char ch : s) {
+              if (ch == '"' || ch == '\\')
+                q += '\\';
+              if (static_cast<unsigned char>(ch) >= 0x20)
+                q += ch;
+            }
+            return q + "\"";
+          };
+          text = "{";
+          for (const auto &[k, v] : **pd) {
+            std::string val;
+            if (const bool *b = std::get_if<bool>(&v.v))
+              val = *b ? "true" : "false";
+            else if (const std::int64_t *i = std::get_if<std::int64_t>(&v.v))
+              val = std::to_string(*i);
+            else if (const double *d = std::get_if<double>(&v.v)) {
+              char buf[64];
+              std::snprintf(buf, sizeof buf, "%.17g", *d);
+              val = buf;
+            } else if (const std::string *s = std::get_if<std::string>(&v.v))
+              val = quoted(*s);
+            else {
+              calls->fail(r, "invalid", "server.regenerate: " + k + " is not a number or a string");
+              return;
+            }
+            text += (text.size() > 1 ? "," : "") + quoted(k) + ":" + val;
+          }
+          text += "}";
+        } else if (a) {
+          calls->fail(r, "invalid", "server.regenerate takes the params second: JSON or a dict");
+          return;
+        } else {
+          text = "{}";
+        }
+      }
+      cvc::world::generated_world_params p;
+      try {
+        p = cvc::world::generated_world_params_from_json(text, now);
+      } catch (const std::exception &e) {
+        calls->fail(r, "invalid", std::string("server.regenerate: ") + e.what());
+        return;
+      }
+      std::vector<std::string> warnings;
+      const bool asked = w->follow_generated(node, p, &warnings);
+      for (const std::string &m : warnings)
+        std::fprintf(stderr, "arisrv: %s\n", m.c_str());
+      std::printf("[arisrv] rcon: client %s regenerates %s (seed %llu)%s\n",
+                  clients.identity_key(r.pid).c_str(), node.c_str(),
+                  static_cast<unsigned long long>(p.seed), asked ? "" : ": already that world");
+      std::fflush(stdout);
+      calls->result(r.pid, r.id,
+                    se::make_dict({{"node", se::value_t(node)},
+                                   {"asked", se::value_t(asked)},
+                                   {"seed", se::value_t(static_cast<std::int64_t>(p.seed))}}));
       return;
     }
     if (r.fn == "server.clients") {
@@ -2254,13 +2373,19 @@ int main(int argc, char **argv) {
     return !signals.stop_requested();
   };
   while (relay_running()) {
+    // Reap ghosts (~every second): a peer gone without closing its connection (a tab that
+    // navigated or reloaded away, a crash behind NAT, a suspended phone) sends nothing more, while
+    // a live one answers the 2 s probe at least; reap_idle closes such a connection after
+    // --idle-timeout-s, so its on-close retraction fires and it departs like any other.
+    const bool reapTick = ++reapticks % 5 == 0;
+    if (reapTick && idleTimeoutS > 0)
+      state_tp.reap_idle(std::chrono::seconds(idleTimeoutS));
 #if CVC_ENABLE_WS
-    // Reap ghosts (~every second): a tab that navigated or reloaded away without a clean WebSocket
-    // close stops streaming media; reap_idle shuts such a connection down after ~10 s so its
-    // on-close retraction fires and the roster does not accumulate ghosts. A live client streams
-    // continuously.
-    if (++reapticks % 5 == 0) {
-      ws_tp.reap_idle(std::chrono::seconds(10));
+    if (reapTick) {
+      if (idleTimeoutS > 0)
+        ws_tp.reap_idle(std::chrono::seconds(idleTimeoutS));
+      else
+        ws_tp.reap_idle(std::chrono::hours(24 * 365)); // only its sweep of finished readers
       // Re-broadcast the room/scene snapshot to every client (~1s). A client-to-client live re-fan
       // is single-shot with no retry, so a join that races an already-connected peer's socket is
       // otherwise lost for good (an established client never sees a later joiner). This idempotent
@@ -2289,10 +2414,34 @@ int main(int argc, char **argv) {
         shaper.forget_publisher(nid);
         if (laneRelay)
           laneRelay->forget(nid);
+        departures.left(nid, std::chrono::steady_clock::now());
         std::printf("[arisrv] participant left: %s\n", nid.c_str());
       }
       if (!gone.empty())
         std::fflush(stdout);
+    }
+    // A departed participant still away after the grace goes from the room tree: one delete, which
+    // every client applies. One whose connection is back has the whole grace to join again.
+    if (const auto t = std::chrono::steady_clock::now(); t >= nextReap) {
+      nextReap = t + std::chrono::seconds(1);
+      std::set<std::string> connected;
+      for (const cvc::state_link_report &r : state_tp.link_reports())
+        if (r.holds_id)
+          connected.insert(r.remote_node_id);
+#if CVC_ENABLE_WS
+      for (const cvc::state_link_report &r : ws_tp.link_reports())
+        if (r.holds_id)
+          connected.insert(r.remote_node_id);
+#endif
+      for (const std::string &pid : departures.reap(app, room, connected, t)) {
+        // Its streams went with it: one it publishes again after a rejoin is relayed afresh
+        // (room_relay_tick marks it ready again).
+        for (auto it = relayed.lower_bound(pid + "/");
+             it != relayed.end() && it->rfind(pid + "/", 0) == 0;)
+          it = relayed.erase(it);
+        std::printf("[arisrv] participant removed: %s\n", pid.c_str());
+        std::fflush(stdout);
+      }
     }
     cvc::ariadne::conference::room_relay_tick(app, room, relay, relayed);
     // Advance the authoritative avatar holon and write each participant's pose, then fan them out

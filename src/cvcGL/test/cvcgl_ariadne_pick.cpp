@@ -226,7 +226,7 @@ int main() {
   check(val(app, key + ".hit") == "1" && val(app, key + ".node") == "crate", "with the crate hit",
         val(app, key + ".node"));
   check(val(app, key + ".tags") == "cargo heavy", "and the node's tags",
-        val(app, key + ".tags")); // §5.28
+        val(app, key + ".tags")); // §5.30
   check(!val(app, key + ".x").empty() && val(app, key + ".button") == "1",
         "the point and the button");
   check(val(app, "pick.picked") == "crate" && val(app, "pick.picked_phase") == "down",
@@ -357,7 +357,7 @@ int main() {
     rt.step(kDt);
   }
 
-  // §5.28 a right-click on the pick view over the crate opens its menu with the pick in `event`
+  // §5.30 a right-click on the pick view over the crate opens its menu with the pick in `event`
   // (node, tags, view), so the item for crates shows; a right-click (ImGui's button 1) neither
   // picks nor turns the camera. Its item sits just inside the popup, which opens at the pointer.
   {

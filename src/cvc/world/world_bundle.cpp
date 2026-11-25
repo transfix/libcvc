@@ -28,6 +28,7 @@
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
+#include <cvc/utility/archive.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/surface.h>
@@ -444,7 +445,7 @@ city_bundle_files city_bundle_bytes(app &ctx, const world_geometry &world,
 std::string city_bundle_hash(const city_bundle_files &files) {
   std::string list;
   for (const auto &[name, b] : files) { // a std::map: name order
-    if (name == "world.json")
+    if (name == "world.json" || name.rfind("export/", 0) == 0)
       continue;
     list += name;
     list.push_back('\0');
@@ -454,13 +455,114 @@ std::string city_bundle_hash(const city_bundle_files &files) {
   return sha256_of(list);
 }
 
+city_bundle_files city_bundle_exports(app &ctx, const world_geometry &world,
+                                      std::optional<double> water_level, int max_samples) {
+  const geometry_item *item = nullptr;
+  for (const geometry_item &it : world.items())
+    if (!item && it.height_field())
+      item = &it;
+  if (!item)
+    throw std::invalid_argument("city_bundle_exports: the world has no terrain (a height field)");
+  const std::shared_ptr<const cvc::height_field> t = item->height_field();
+  const int rows = t->rows(), cols = t->cols();
+  max_samples = std::max(2, max_samples);
+
+  // The mesh: the terrain itself, or resampled over its extent to at most max_samples a side,
+  // each cell taking the surface of the source cell under its centre.
+  std::shared_ptr<const cvc::height_field> mesh = t;
+  if (rows > max_samples || cols > max_samples) {
+    const int mr = std::min(rows, max_samples), mc = std::min(cols, max_samples);
+    const double sx = (t->max_x() - t->x0()) / (mc - 1), sy = (t->max_y() - t->y0()) / (mr - 1);
+    const auto clamp_x = [&](double x) { return std::min(std::max(x, t->x0()), t->max_x()); };
+    const auto clamp_y = [&](double y) { return std::min(std::max(y, t->y0()), t->max_y()); };
+    std::vector<float> h(static_cast<std::size_t>(mr) * mc);
+    for (int r = 0; r < mr; ++r)
+      for (int c = 0; c < mc; ++c)
+        h[static_cast<std::size_t>(r) * mc + c] =
+            static_cast<float>(t->height(clamp_x(t->x0() + c * sx), clamp_y(t->y0() + r * sy)));
+    std::vector<cvc::face_material_t> cells;
+    if (!t->cell_materials().empty()) {
+      cells.resize(static_cast<std::size_t>(mr - 1) * (mc - 1));
+      for (int r = 0; r + 1 < mr; ++r)
+        for (int c = 0; c + 1 < mc; ++c) {
+          const int sr = std::min(t->cell_rows() - 1, int(((r + 0.5) * sy) / t->dy()));
+          const int sc = std::min(t->cell_cols() - 1, int(((c + 0.5) * sx) / t->dx()));
+          cells[static_cast<std::size_t>(r) * (mc - 1) + c] = t->cell_material(sr, sc);
+        }
+    }
+    mesh = std::make_shared<const cvc::height_field>(mr, mc, t->x0(), t->y0(), sx, sy, std::move(h),
+                                                     std::move(cells));
+  }
+  geometry_item as_mesh;
+  as_mesh.name = "terrain";
+  as_mesh.geometry = mesh;
+  as_mesh.surface = item->surface;
+
+  city_bundle_files files;
+  files["export/terrain.glb"] = bytes_of(item_glb(ctx, as_mesh, world.surfaces()));
+
+  // The height map: full size, north row at the top, the finite heights over 0..65535.
+  double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+  for (const float v : t->heights())
+    if (std::isfinite(v)) {
+      lo = std::min(lo, double(v));
+      hi = std::max(hi, double(v));
+    }
+  if (!(lo <= hi))
+    lo = hi = 0.0;
+  cvc::image img(cols, rows, cvc::image::pixel_format::GRAY, cvc::image::data_type::u16);
+  auto *px = reinterpret_cast<std::uint16_t *>(img.data());
+  const double span = hi - lo;
+  for (int r = 0; r < rows; ++r)
+    for (int c = 0; c < cols; ++c) {
+      const float v = t->heights()[static_cast<std::size_t>(r) * cols + c];
+      const double u = std::isfinite(v) && span > 0.0 ? (double(v) - lo) / span : 0.0;
+      px[static_cast<std::size_t>(rows - 1 - r) * cols + c] =
+          static_cast<std::uint16_t>(std::lround(std::min(1.0, std::max(0.0, u)) * 65535.0));
+    }
+  files["export/heightmap.png"] = bytes_of(encode_png(img));
+
+  std::vector<std::pair<std::string, std::string>> j = {
+      {"format", jstr("cvc.heightmap")},
+      {"image", jstr("heightmap.png")},
+      {"rows", jint(rows)},
+      {"cols", jint(cols)},
+      {"north_first", jbool(true)},
+      {"bounds", jobj({{"min_x", jnum(t->x0())},
+                       {"min_y", jnum(t->y0())},
+                       {"max_x", jnum(t->max_x())},
+                       {"max_y", jnum(t->max_y())}},
+                      "  ")},
+      {"spacing", jarr({jnum(t->dx()), jnum(t->dy())})},
+      {"min_height_m", jnum(lo)},
+      {"max_height_m", jnum(hi)},
+      {"height", jstr("min_height_m + value / 65535 * (max_height_m - min_height_m)")}};
+  if (water_level)
+    j.push_back({"water_level_m", jnum(*water_level)});
+  j.push_back({"mesh", jobj({{"file", jstr("terrain.glb")},
+                             {"rows", jint(mesh->rows())},
+                             {"cols", jint(mesh->cols())}},
+                            "  ")});
+  files["export/heightmap.json"] = bytes_of(jobj(j) + "\n");
+  return files;
+}
+
 void write_city_bundle(const std::string &dir, const city_bundle_files &files) {
   std::error_code ec;
   fs::create_directories(dir, ec);
   if (ec)
     throw std::runtime_error("write_city_bundle: cannot make " + dir + ": " + ec.message());
-  for (const auto &[name, b] : files) {
-    const fs::path p = fs::path(dir) / name;
+  for (const auto &[given, b] : files) {
+    const std::string name = cvc::archive::safe_path(given);
+    if (name.empty())
+      throw std::invalid_argument("write_city_bundle: '" + given + "' is not a path in the bundle");
+    const fs::path p = fs::path(dir) / fs::path(name);
+    if (name.find('/') != std::string::npos) {
+      fs::create_directories(p.parent_path(), ec);
+      if (ec)
+        throw std::runtime_error("write_city_bundle: cannot make " + p.parent_path().string() +
+                                 ": " + ec.message());
+    }
     std::ofstream out(p, std::ios::binary);
     if (b)
       out.write(b->data(), static_cast<std::streamsize>(b->size()));
@@ -1004,7 +1106,7 @@ bundle_world world_from_bundle(app &ctx, const city_bundle &b, const city_bundle
 
   // The meshes, by name; any other mesh item draws with the buildings.
   for (const geometry_item &it : b.geometry.items()) {
-    if (it.height_field() || !it.geometry)
+    if (it.height_field() || !it.geometry || !it.has(role_render)) // a collider alone is not drawn
       continue;
     cvc::geometry *to = it.name == "buildings"  ? &w->buildings
                         : it.name == "roads"    ? &w->roads

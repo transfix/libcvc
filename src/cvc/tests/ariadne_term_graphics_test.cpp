@@ -217,6 +217,25 @@ TEST(TermGraphics, Base64MatchesRfc4648) {
   EXPECT_EQ(enc("foobar"), "Zm9vYmFy");
 }
 
+// §5.28 OSC 52 both ways: the read a context menu's Paste asks, and the terminal's answer (BEL- or
+// ST-ended, any selection), its base64 decoded; anything else is not an answer.
+TEST(TermGraphics, Osc52ReadsAndItsAnswer) {
+  EXPECT_EQ(gfx::osc52_query(), "\x1b]52;c;?\x1b\\");
+  std::string text;
+  ASSERT_TRUE(gfx::osc52_reply("\x1b]52;c;aGVsbG8gd29ybGQ=\x1b\\", text));
+  EXPECT_EQ(text, "hello world");
+  ASSERT_TRUE(gfx::osc52_reply("\x1b]52;p;Zm9vYg==\x07", text));
+  EXPECT_EQ(text, "foob");
+  const std::string round = "line one\nline two \xe2\x80\xa2";
+  ASSERT_TRUE(gfx::osc52_reply(gfx::osc52_copy(round), text)) << "what osc52_copy sends";
+  EXPECT_EQ(text, round);
+  EXPECT_FALSE(gfx::osc52_reply("\x1b]52;c;?\x1b\\", text)) << "a query is no answer";
+  EXPECT_FALSE(gfx::osc52_reply("\x1b]52;c;\x07", text)) << "nor an empty one";
+  EXPECT_FALSE(gfx::osc52_reply("\x1b]11;rgb:0000/0000/0000\x07", text)) << "nor another OSC";
+  EXPECT_FALSE(gfx::osc52_reply("\x1b]52;c;aGk=", text)) << "nor one not ended";
+  EXPECT_FALSE(gfx::osc52_reply("\x1b]52;c;a$b=\x07", text)) << "nor one not base64";
+}
+
 TEST(TermGraphics, KittyPlaceholderIsTheBaseCharacterWithRowAndColumnDiacritics) {
   EXPECT_EQ(gfx::kitty_diacritic(0), 0x0305u);
   EXPECT_EQ(gfx::kitty_diacritic(1), 0x030Du);

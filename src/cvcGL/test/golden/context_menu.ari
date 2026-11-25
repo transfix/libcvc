@@ -1,6 +1,7 @@
-# context_menu.ari — golden: a right-click menu (docs/ARIADNE.md §5.28) open over a group in a
-# window. cvcgl_ari_golden right-clicks the card (its pointer script for this document), so the
-# capture shows the card's menu, not the window's or the document's: an action, a ticked toggle,
+# context_menu.ari — golden: a document's context_menu: (docs/ARIADNE.md §5.30) open over a group
+# in a window. cvcgl_ari_golden right-clicks the card's text (its pointer script for this
+# document), so the capture shows one menu: the text's own Copy and Select text... (§5.28), then
+# under a rule the card's items, not the window's or the document's: an action, a ticked toggle,
 # a separator, a submenu, and the item whose visible_when: reads the menu's event (shown: it was
 # opened over a group), while the one for a scene node (event.hit) stays hidden.
 #

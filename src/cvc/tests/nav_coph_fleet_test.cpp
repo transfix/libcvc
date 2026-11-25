@@ -360,6 +360,50 @@ TEST(CophFleet, RefusesConfigurationsOutsideTheProfile) {
   EXPECT_THROW(coph_fleet(fc, crossers()), std::invalid_argument);
 }
 
+// run(world, ticks) goes on from where it stopped: the crossing run 15 ticks at a time is the one
+// run whole, bit for bit.
+TEST(CophFleet, RunsAFewTicksAtATime) {
+  coph_fleet_config fc;
+  fc.cfg = profile(40);
+  fc.comm = coph_communication_profile();
+  fc.senders = {0, 1};
+  coph_fleet whole(fc, crossers()), parts(fc, crossers());
+  const coph_crossing_world w = crossing(fc.cfg);
+  whole.run(w);
+  int calls = 0;
+  for (bool done = false; !done; ++calls) {
+    EXPECT_EQ(parts.tick(), 15LL * calls);
+    done = parts.run(w, 15);
+  }
+  EXPECT_EQ(calls, 3); // 41 ticks: 15, 15 and the last 11
+  EXPECT_EQ(parts.tick(), whole.tick());
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_EQ(parts.state(i), whole.state(i)) << "agent " << i;
+    EXPECT_EQ(parts.controls(i).size(), whole.controls(i).size());
+    EXPECT_EQ(parts.energy(i).work, whole.energy(i).work);
+  }
+  EXPECT_EQ(parts.events().size(), whole.events().size());
+  EXPECT_TRUE(parts.run(w, 5)); // done: nothing more runs
+  EXPECT_EQ(parts.tick(), whole.tick());
+}
+
+// resume() runs again only an agent done at its goal: not one still running, and not one that
+// does not exist. (CophDriver.ACarTakesANewGoalAfterArriving resumes one that arrived.)
+TEST(CophFleet, ResumesOnlyAnAgentAtItsGoal) {
+  coph_fleet_config fc;
+  fc.cfg = profile(40);
+  fc.comm = coph_communication_profile();
+  coph_fleet f(fc, crossers());
+  EXPECT_FALSE(f.resume(0)); // not started
+  f.run(crossing(fc.cfg));   // 40 ticks: neither reaches its goal
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_TRUE(f.done(i));
+    EXPECT_FALSE(f.success(i));
+    EXPECT_FALSE(f.resume(i)) << "agent " << i << " ended by the run's steps";
+  }
+  EXPECT_THROW(f.resume(2), std::out_of_range);
+}
+
 TEST(CophFleet, TheEnergyAccountStaysAtRoundOffOverALongRun) {
   // The crossing until both agents are done (at most 2,000 ticks), with the fleet's own draws.
   const coph_config cfg = profile(2000);

@@ -341,6 +341,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_tiler:test_pycvc_tiler.py
              pycvc_volume_slice:test_pycvc_volume_slice.py
              pycvc_volume_grid:test_pycvc_volume_grid.py
+             pycvc_volume_grid_segment:test_pycvc_volume_grid_segment.py
              pycvc_volume_grid_contours:test_pycvc_volume_grid_contours.py
              pycvc_image:test_pycvc_image.py
              pycvc_model:test_pycvc_model.py
@@ -369,6 +370,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_input_trace:test_pycvc_input_trace.py
              pycvc_nav_lab:test_pycvc_nav_lab.py
              pycvc_ph:test_pycvc_ph.py
+             pycvc_nav_coph:test_pycvc_nav_coph.py
              pycvc_world_units:test_pycvc_world_units.py
              pycvc_dataprep:test_pycvc_dataprep.py
              pycvc_volslice:test_pycvc_volslice.py

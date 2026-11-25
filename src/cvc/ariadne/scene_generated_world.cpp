@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/conference/room_calls.h> // GeneratedWorldRelay: server.regenerate
+#include <cvc/ariadne/conference/room_scene.h> // GeneratedWorldRelay: room_world_on
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h>
 #include <cvc/ariadne/uri.h>
@@ -242,6 +244,16 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.terrain_gen = seed_str("world.terrain", b.terrain);
   k.city = seed_str("world.city", b.city);
   k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
+  // Save: where (the node's save_as prop, else its dataset's name: a directory beside the
+  // document), whether with the exports, and how it went.
+  k.save_file = seed_str("world.save.file", n.props.str("save_as", generated_world_data_name(n)));
+  k.save_exports = seed_key("world.save.exports", 0.0);
+  k.save_status = key("world.save.status");
+  write<std::string>(app, k.save_status, std::string());
+  k.server_status = key("world.server.status");
+  write<std::string>(app, k.server_status, std::string());
+  k.server_password = key("world.server.password");
+  write<std::string>(app, k.server_password, std::string());
   // The generators a panel can offer (a host may have registered its own), one per line.
   write<std::string>(app, key("world.generators.terrain"),
                      joined(world::terrain_generator_names(app)));
@@ -347,7 +359,12 @@ GeneratedWorldPoll poll_generated_world(cvc::app &app, const GeneratedWorldKeys 
     write<std::string>(app, k.request, std::string());
     if (req == "stop") {
       out.stop = true;
+    } else if (req == "save") {
+      out.save = true;
+    } else if (req == "rcon") {
+      out.rcon = true;
     } else {
+      out.asked = req != "follow";
       if (req == "randomize") {
         const auto s = static_cast<std::uint64_t>(read_or<double>(app, k.seed, 0.0));
         write<double>(app, k.seed,
@@ -369,12 +386,173 @@ GeneratedWorldPoll poll_generated_world(cvc::app &app, const GeneratedWorldKeys 
   const std::string now = generated_world_signature(p);
   const bool live = read_bool_or(app, k.autoregen, 0) != 0;
   if (force || (live && now != sig)) {
+    if (!force)
+      out.asked = true; // an edit with world.auto on
     sig = now;
     out.rebuild = true;
   }
   write<int>(app, k.pending, now != sig ? 1 : 0);
   out.params = std::move(p);
   return out;
+}
+
+void write_generated_world_keys(cvc::app &app, const GeneratedWorldKeys &k,
+                                const world::generated_world_params &p) {
+  write<double>(app, k.seed, double(p.seed));
+  write<double>(app, k.half, p.half_m);
+  write<double>(app, k.trees, double(p.trees));
+  write<double>(app, k.rocks, double(p.rocks));
+  write<double>(app, k.buildings, double(p.buildings));
+  write<double>(app, k.tree_gen, double(p.tree_gen));
+  write<double>(app, k.amp, p.amp_m);
+  write<double>(app, k.water_level, p.water_level_m);
+  write<double>(app, k.ontology, double(p.ontology));
+  write<double>(app, k.edge, double(p.edge));
+  write<std::string>(app, k.terrain_gen, p.terrain);
+  write<std::string>(app, k.city, p.city);
+  write<std::string>(app, k.terrain_file, p.terrain_file);
+}
+
+// ── GB5: a generated world while this host is joined to a relay ─────────────────────────────────
+
+struct GeneratedWorldRelay::impl {
+  section_stamp on_stamp; // the world_on last looked at
+  std::string room;       // ... in this room
+  // The relay's reply to the last ask, from a reader thread; follow() writes it.
+  std::mutex mu;
+  std::string reply;
+  bool replied = false;
+};
+
+GeneratedWorldRelay::GeneratedWorldRelay() : _impl(std::make_shared<impl>()) {}
+GeneratedWorldRelay::~GeneratedWorldRelay() = default;
+
+namespace {
+// The relay's params for `node`, when this host is joined to a relay whose world_on lists it.
+bool relay_runs(cvc::app &app, const std::string &node, std::string *room,
+                conference::room_generated_world *out) {
+  const std::shared_ptr<conference::room_call_client> c =
+      conference::room_call_client::for_app(app);
+  if (!c || node.empty())
+    return false;
+  conference::room_world_on on;
+  if (!conference::read_room_world_on(app, c->room(), on))
+    return false;
+  for (conference::room_generated_world &g : on.generated)
+    if (g.node == node) {
+      if (room)
+        *room = c->room();
+      if (out)
+        *out = std::move(g);
+      return true;
+    }
+  return false;
+}
+} // namespace
+
+bool GeneratedWorldRelay::follow(cvc::app &app, const GeneratedWorldKeys &k,
+                                 const std::string &node, int &preset, const std::string &sig) {
+  impl &d = *_impl;
+  {
+    std::lock_guard<std::mutex> lk(d.mu);
+    if (d.replied) {
+      d.replied = false;
+      write<std::string>(app, k.server_status, d.reply);
+    }
+  }
+  const std::shared_ptr<conference::room_call_client> c =
+      conference::room_call_client::for_app(app);
+  if (!c)
+    return false;
+  const section_stamp s = conference::room_world_on_stamp(app, c->room());
+  if (c->room() == d.room && s.same(d.on_stamp))
+    return false;
+  d.room = c->room();
+  d.on_stamp = s;
+  conference::room_generated_world g;
+  if (!relay_runs(app, node, nullptr, &g) || generated_world_signature(g.params) == sig)
+    return false;
+  // The preset first, moved along with the poll's, so it does not quick-set the counts over these.
+  write<double>(app, k.preset, double(g.params.preset));
+  preset = g.params.preset;
+  write_generated_world_keys(app, k, g.params);
+  write<std::string>(app, k.request, "follow");
+  write<std::string>(app, k.server_status,
+                     "the server's world (seed " + std::to_string(g.params.seed) + ")");
+  return true;
+}
+
+bool GeneratedWorldRelay::ask(cvc::app &app, const GeneratedWorldKeys &k, const std::string &node,
+                              const world::generated_world_params &p) {
+  if (!relay_runs(app, node, nullptr, nullptr))
+    return false;
+  const std::shared_ptr<conference::room_call_client> c =
+      conference::room_call_client::for_app(app);
+  if (!c)
+    return false;
+  namespace se = cvc::state_exec;
+  write<std::string>(app, k.server_status, "asking the server for a new world");
+  const std::weak_ptr<impl> self = _impl;
+  c->call("server.regenerate",
+          se::make_list({se::value_t(node), se::value_t(world::generated_world_params_json(p))}),
+          se::make_dict({}), std::string(), 30.0,
+          [self](const conference::room_call_client::outcome &o) {
+            const std::shared_ptr<impl> d = self.lock();
+            if (!d)
+              return;
+            std::lock_guard<std::mutex> lk(d->mu);
+            d->reply = o.ok ? std::string("the server is making the new world")
+                            : (o.code == "forbidden" ? "refused: " : "error: " + o.code + ": ") +
+                                  o.message;
+            d->replied = true;
+          });
+  return true;
+}
+
+bool GeneratedWorldRelay::login(cvc::app &app, const GeneratedWorldKeys &k) {
+  const std::string pw = read_or<std::string>(app, k.server_password, std::string());
+  write<std::string>(app, k.server_password, std::string());
+  const std::shared_ptr<conference::room_call_client> c =
+      conference::room_call_client::for_app(app);
+  if (!c) {
+    write<std::string>(app, k.server_status, "not joined to a server");
+    return false;
+  }
+  namespace se = cvc::state_exec;
+  write<std::string>(app, k.server_status, "logging in");
+  const std::weak_ptr<impl> self = _impl;
+  c->call("server.rcon", se::make_list({se::value_t(pw)}), se::make_dict({}), std::string(), 30.0,
+          [self](const conference::room_call_client::outcome &o) {
+            const std::shared_ptr<impl> d = self.lock();
+            if (!d)
+              return;
+            std::lock_guard<std::mutex> lk(d->mu);
+            d->reply = o.ok ? std::string("an admin of this server: Regenerate makes its world")
+                            : "refused: " + o.message;
+            d->replied = true;
+          });
+  return true;
+}
+
+bool save_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const std::string &data_path,
+                          const std::string &base_dir) {
+  const std::string file = read_or<std::string>(app, k.save_file, std::string());
+  try {
+    if (data_path.empty())
+      throw std::runtime_error("the world has no dataset yet");
+    DataSaveOptions o;
+    o.exports = read_bool_or(app, k.save_exports, 0) != 0;
+    const DataSaved s = data_save_files(app, data_path, file, base_dir, o);
+    char mb[32];
+    std::snprintf(mb, sizeof mb, "%.1f", double(s.bytes) / (1024.0 * 1024.0));
+    write<std::string>(app, k.save_status,
+                       "saved " + s.where + " (" + std::to_string(s.files) + " files, " + mb +
+                           " MB)");
+    return true;
+  } catch (const std::exception &e) {
+    write<std::string>(app, k.save_status, std::string("error: ") + e.what());
+    return false;
+  }
 }
 
 std::shared_ptr<const world::world_geometry>
@@ -470,6 +648,7 @@ struct GeneratedWorldRuntime::impl {
   std::shared_ptr<SceneColliders> colliders = std::make_shared<SceneColliders>();
   std::string sig;
   int preset = 0;
+  GeneratedWorldRelay relay; // GB5: the relay's world, while joined to one that runs this node
 
   // A new world: its dataset, and the colliders its world.
   void take(std::shared_ptr<const world::generated_world> w, std::vector<std::string> *warnings) {
@@ -525,9 +704,19 @@ const std::string &GeneratedWorldRuntime::data_path() const { return _impl->data
 bool GeneratedWorldRuntime::tick(std::vector<std::string> *warnings) {
   impl &d = *_impl;
   cvc::app &app = *d.app;
+  d.relay.follow(app, d.keys, d.node, d.preset, d.sig);
+  const std::string shown = d.sig;
   const GeneratedWorldPoll poll = poll_generated_world(app, d.keys, d.base, d.preset, d.sig);
+  if (poll.save)
+    save_generated_world(app, d.keys, d.data_path, d.base_dir);
+  if (poll.rcon)
+    d.relay.login(app, d.keys);
   if (!poll.rebuild)
     return false;
+  if (poll.asked && d.relay.ask(app, d.keys, d.node, poll.params)) {
+    d.sig = shown; // the relay makes it, and world_on brings it back
+    return false;
+  }
   try {
     ResolvedFile f;
     auto w = std::make_shared<world::generated_world>(world::generate_world(

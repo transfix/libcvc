@@ -289,6 +289,57 @@ std::string osc52_copy(const std::string &text) {
          base64_encode(reinterpret_cast<const unsigned char *>(text.data()), text.size()) + "\x07";
 }
 
+std::string osc52_query() { return "\x1b]52;c;?\x1b\\"; }
+
+bool osc52_reply(const std::string &seq, std::string &text) {
+  if (seq.rfind("\x1b]52;", 0) != 0)
+    return false;
+  std::size_t end = seq.size();
+  if (end > 0 && seq[end - 1] == '\x07')
+    end -= 1;
+  else if (end > 1 && seq[end - 2] == '\x1b' && seq[end - 1] == '\\')
+    end -= 2;
+  else
+    return false;
+  const std::size_t semi = seq.find(';', 5); // after "ESC ] 52 ;": the selection, then ';'
+  if (semi == std::string::npos || semi >= end)
+    return false;
+  const std::string b64 = seq.substr(semi + 1, end - semi - 1);
+  return !b64.empty() && b64 != "?" && base64_decode(b64, text);
+}
+
+bool base64_decode(const std::string &b64, std::string &out) {
+  out.clear();
+  std::uint32_t acc = 0;
+  int bits = 0;
+  for (const char c : b64) {
+    int v;
+    if (c >= 'A' && c <= 'Z')
+      v = c - 'A';
+    else if (c >= 'a' && c <= 'z')
+      v = c - 'a' + 26;
+    else if (c >= '0' && c <= '9')
+      v = c - '0' + 52;
+    else if (c == '+')
+      v = 62;
+    else if (c == '/')
+      v = 63;
+    else if (c == '=')
+      break;
+    else if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
+      continue;
+    else
+      return false;
+    acc = (acc << 6) | static_cast<std::uint32_t>(v);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out += static_cast<char>((acc >> bits) & 0xFF);
+    }
+  }
+  return true;
+}
+
 std::string base64_encode(const unsigned char *d, std::size_t n) {
   static const char kAlphabet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

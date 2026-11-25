@@ -117,6 +117,10 @@ public:
     // Hosted chrome: draw no window frames and no menu bar, for a host that supplies its own (see
     // "hosted chrome" below).
     bool hosted = false;
+    // Hosted: the host shows the context menu (§5.28, §5.30) as a popup of its own, from
+    // hosted_context_menu(), rather than in the window's body, where a short window cuts it off.
+    // TvisionBackend does.
+    bool host_draws_context_menu = false;
     // The colours the terminal shows. An RGB colour (a widget's `color:`, a group's fill, §5.26; a
     // border's) is drawn as the nearest of them. Auto asks the terminal (FTXUI reads COLORTERM and
     // TERM); the others say, for a host that knows better and for a test. TvisionBackend lays out
@@ -211,16 +215,18 @@ public:
   // on_click takes focus (Tab, a click), Enter or Space firing it; a gutter column marks it lit.
   void begin_item_group(const char *id, const ItemGroupOptions &opts) override;
   void end_item_group() override;
-  // §5.28 right-click menus: the Menu key or Shift+F10 opens the one around the focused widget
-  // (with nothing focused, the document's), a right-click the one under the pointer. It is a
-  // bordered list hanging under the focus or from the pointer, worked as a dropdown is (Up, Down,
-  // Enter, Esc); hosted, in its window's cells.
+  // §5.30 a document's context_menu: joins the context menu (§5.28): the Menu key or Shift+F10
+  // opens the menu of the focused widget and the area around it (with nothing focused, the
+  // document's), a right-click the one under the pointer. The area's items follow the widget's own
+  // entries, under a rule; over a widget with none they are the menu.
   void begin_context_area(const char *id, ContextMenuOver over) override;
   void end_context_area() override;
   bool begin_context_menu(const char *id, ContextMenuOver over, ContextMenuOpen &opened) override;
   void end_context_menu() override;
   // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
   // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
+  // A context menu's Paste queues its OSC 52 read (osc52_query) there too; run() hands the
+  // terminal's answer to the focused field as typed text (a TermEvent::text_event of all of it).
   bool set_clipboard(cvc::app &app, const std::string &text) override;
   std::string take_clipboard();
   // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
@@ -252,6 +258,10 @@ public:
   TextViewEvent text_view(const char *label, const char *key, const std::string &text,
                           const TextViewOptions &opts) override;
   void focus_next_widget() override;
+  // §5.28 the next text or menu item copies `text` from its context menu.
+  void next_item_copy(const std::string &text) override;
+  // §5.29 the picture just drawn offers Save image... / Save video... in its context menu.
+  void item_save(const MediaSave &m) override;
   bool draw_image(const char *name, float width) override;
   // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),
   // or the picture as a banner row above it (pixels where the terminal has them).
@@ -362,6 +372,7 @@ public:
     // this way.
     bool submenu = false;
     int depth = 0;
+    bool disabled = false; // shown, but it cannot be chosen (a context menu's Cut with no text)
   };
   struct HostedMenu {
     std::string label;
@@ -381,6 +392,21 @@ public:
   std::vector<HostedTrayIcon> hosted_tray() const;  // its tray, left to right (§5.22)
   bool hosted_root() const;                         // whether body "" has any widgets
   std::string tooltip() const;                      // the focused / hovered widget's tooltip
+  // §5.28 / §5.30 the context menu open, for a host that shows it itself
+  // (Options::host_draws_context_menu): `win`, its window ("" the body outside every window), the
+  // cell it hangs from in that body, and its entries: the leaf's own (ids "ctx#<i>"), then the
+  // document's context_menu: items. `serial` is one more for each menu opened, so the host shows
+  // each once. Not open: `open` false.
+  struct HostedContextMenu {
+    bool open = false;
+    long serial = 0;
+    std::string win;
+    int x = 0, y = 0;
+    std::vector<HostedMenuItem> items;
+  };
+  HostedContextMenu hosted_context_menu() const;
+  // The host's context menu closed: entry `id` chosen ("" none, and the menu closes). Runs a walk.
+  void pick_context_entry(Runtime &rt, const std::string &id);
 
   // Lay out window `id`'s body (from the last walk) into width x height cells. Mouse events fed
   // for that window hit-test against this layout.
@@ -462,6 +488,14 @@ protected:
   // run(AppRuntime&) does: keys as a press + release pair with SDL's modifier bits, pointer events
   // at the cell's centre in px.
   void forward_to_document(AppRuntime &app, const TermEvent &e) const;
+  // §5.28 the clipboard of the context menus (a right-click, Shift+F10 or the Menu key: Cut, Copy,
+  // Paste and Select all in a field, Copy on a text or a notification, Copy line and Copy all in a
+  // text view). clipboard_copy puts `text` on it: here an OSC 52 escape, as set_clipboard sends
+  // (none hosted). clipboard_request asks for its text, which comes back as typed text to the
+  // focused field: here an OSC 52 read, answered by a terminal that allows it (false hosted, where
+  // there is no terminal to ask). TvisionBackend uses tvision's clipboard for both.
+  virtual bool clipboard_copy(const std::string &text);
+  virtual bool clipboard_request();
 
 private:
   struct Impl;

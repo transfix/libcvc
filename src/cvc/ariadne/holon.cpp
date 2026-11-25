@@ -141,6 +141,7 @@ void holon::add_participant(const std::string &pid, bool local,
   p.predicted = predicted_avatar(start);
   p.newest = start;
   p.spawn = start;
+  p.obstacle_key = _next_obstacle_key++;
   _participants[pid] = p;
   // In the world: the server simulates everyone, a client its own avatar; a client's peers are
   // kinematic, held where they are shown -- once there is somewhere to show them (a peer whose
@@ -172,12 +173,14 @@ void holon::remove_participant(const std::string &pid) {
 }
 
 namespace {
-cvc::physics::body_state ride_of(const entity_info &e) {
-  cvc::physics::body_state s;
-  s.position = {e.x, e.y, e.z};
-  s.rotation = {std::cos(0.5 * e.yaw), 0.0, 0.0, std::sin(0.5 * e.yaw)};
-  s.linear_velocity = {e.vx, e.vy, 0.0};
-  return s;
+// A driver's pose and the entities' (entity_ride), in SCENE's world when there is one.
+cvc::physics::body_state ride_of(const entity_info &e, const SceneWorld *scene) {
+  return entity_ride(e, scene ? &scene->world() : nullptr);
+}
+
+// The heading of a rotation (about z, from x), whatever its pitch and roll.
+double heading_of(const cvc::physics::quat &q) {
+  return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
 }
 bool find_entity(const WorldVehicles &v, std::uint64_t id, entity_info &out) {
   for (const entity_info &e : v.entities())
@@ -226,7 +229,8 @@ bool holon::set_driver(const std::string &pid, std::uint64_t id, std::string *wh
   }
   v->set_driver(id, pid);
   p.drives = id;
-  p.ride = ride_of(e);
+  p.ride = ride_of(e, _scene);
+  p.ride_steer = e.steer;
   // The envelope its drive axes are shares of (avatar_intent).
   p.envelope = drive_envelope{};
   for (const vehicle_archetype &a : v->archetypes())
@@ -454,7 +458,8 @@ void holon::update_rides() {
       continue;
     for (const entity_info &e : all)
       if (e.id == p.drives) {
-        p.ride = ride_of(e);
+        p.ride = ride_of(e, _scene);
+        p.ride_steer = e.steer;
         break;
       }
   }
@@ -484,26 +489,32 @@ std::vector<holon::entity> holon::entities() const {
       e.owner = info.spec.driver.empty() ? "server" : info.spec.driver;
       e.policy = info.spec.policy;
       e.in_world = info.placed;
-      e.state = ride_of(info);
+      e.state = ride_of(info, _scene);
       out.push_back(std::move(e));
     }
   return out;
 }
 
-void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp) {
+void holon::set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp,
+                        const std::vector<cvc::physics::field> &water) {
   _statics = stamp;
   _statics_list = statics;
+  _water = water;
+  _water_after.clear();  // the water as it is now, from the start
   if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
-  // A jolt vehicle's model runs on the statics (OW5i): its world again, the vehicle where it is.
+  // A jolt vehicle's or a boat's model runs on the statics (OW5i, OW5j), and a dynamic plant's
+  // meets them (OW5p): its world again, the vehicle where it is (a dynamic plant's with its drive
+  // as it was).
   for (auto &[pid, p] : _participants) {
-    if (!p.vdyn || !p.vdyn->jolt())
+    if (!p.vdyn)
       continue;
     try {
       const jolt_vehicle_world jw = jolt_world();
       auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
                                                            _vground, &jw);
-      p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick());
+      p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick(),
+                         p.vdyn->jolt() ? nullptr : &p.dnow);
       p.dprev = p.dnow;
       p.vlog.clear();
       p.vdyn = std::move(model);
@@ -512,11 +523,87 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
   }
 }
 
+void holon::set_water(const std::vector<cvc::physics::field> &water, std::uint64_t from_tick,
+                      std::uint64_t revision) {
+  _water_rev = revision;
+  while (!_water_after.empty() && _water_after.back().from_tick >= from_tick)
+    _water_after.pop_back();
+  _water_after.push_back({from_tick, water});
+  if (_water_after.size() > dynamic_vehicle_model::kWaterKept)
+    _water_after.erase(_water_after.begin());
+  for (auto &[pid, p] : _participants)
+    if (p.vdyn && p.vdyn->is_boat())
+      p.vdyn->set_water(water, from_tick);
+}
+
 jolt_vehicle_world holon::jolt_world() const {
   jolt_vehicle_world jw;
   jw.statics = _statics_list;
+  jw.water = _water;
+  jw.water_after = _water_after;
   jw.gravity = _applied.physics.gravity;
+  // Room for the entities held (OW5o): a box for each, and two more of each size and mass, so one
+  // coming into view seldom needs the model made again.
+  std::vector<std::pair<vehicle_obstacle, int>> sizes;
+  for (const vehicle_obstacle &o : held_obstacles()) {
+    auto it = std::find_if(sizes.begin(), sizes.end(), [&](const auto &s) {
+      const cvc::physics::vec3 &a = s.first.half_extents, &b = o.half_extents;
+      return std::fabs(a.x - b.x) < 1e-6 && std::fabs(a.y - b.y) < 1e-6 &&
+             std::fabs(a.z - b.z) < 1e-6 && std::fabs(s.first.mass - o.mass) < 1e-6;
+    });
+    if (it == sizes.end())
+      sizes.emplace_back(o, 1);
+    else
+      ++it->second;
+  }
+  for (const auto &[o, n] : sizes)
+    for (int i = 0; i < n + 2; ++i)
+      jw.obstacle_room.push_back(o);
   return jw;
+}
+
+std::vector<vehicle_obstacle> holon::held_obstacles() const {
+  std::vector<vehicle_obstacle> out;
+  for (const auto &kv : _held) {
+    const held &e = kv.second;
+    vehicle_obstacle o;
+    o.key = kv.first;
+    o.half_extents = e.half_extents;
+    o.mass = e.mass;
+    o.at = e.at;
+    // On from where it was shown, along its velocity, as the walker's world holds it.
+    o.at.position =
+        e.at.position + e.at.linear_velocity * (static_cast<double>(e.steps) * _clock.fixed_dt());
+    out.push_back(o);
+  }
+  // The peers' avatars (OW5p), as the walker's world holds them (world_step_client): where each is
+  // shown, its box upright over its feet, moving at its newest sample's velocity. On the relay an
+  // avatar is a frictionless box of the avatar body's mass that a car shoves; so is this one.
+  if (_role != holon_role::client || !_world)
+    return out;
+  const avatar_body &body = _applied.avatar().body;
+  for (const auto &[pid, p] : _participants) {
+    if (p.local || p.aboard || !_world->has_avatar(pid))
+      continue;
+    const cvc::physics::pose feet = display_pose(pid);
+    vehicle_obstacle o;
+    o.key = p.obstacle_key;
+    o.half_extents = cvc::physics::vec3{0.5 * body.width, 0.5 * body.width, 0.5 * body.height};
+    o.mass = body.mass;
+    o.walk_force = _applied.policy.energy.force_max;
+    o.at.position = feet.position + cvc::physics::vec3{0.0, 0.0, 0.5 * body.height};
+    o.at.rotation = feet.rotation;
+    if (all_finite(p.newest.linear_velocity))
+      o.at.linear_velocity = p.newest.linear_velocity;
+    out.push_back(o);
+  }
+  return out;
+}
+
+void holon::set_aboard(const std::string &pid, bool aboard) {
+  auto it = _participants.find(pid);
+  if (it != _participants.end())
+    it->second.aboard = aboard;
 }
 
 bool holon::attach_world(SceneWorld *world, std::string *why) {
@@ -620,10 +707,11 @@ void holon::scene_step() {
         continue;
       for (const entity_info &e : all)
         if (e.id == p.drives) {
-          p.ride = ride_of(e);
+          p.ride = ride_of(e, _scene);
+          p.ride_steer = e.steer;
           break;
         }
-      const double yaw = 2.0 * std::atan2(p.ride.rotation.z, p.ride.rotation.w);
+      const double yaw = heading_of(p.ride.rotation);
       const double speed =
           p.ride.linear_velocity.x * std::cos(yaw) + p.ride.linear_velocity.y * std::sin(yaw);
       const drive_cmd c = drive_command(p.intent, p.envelope, speed, v.tick_seconds());
@@ -663,10 +751,11 @@ void holon::scene_step() {
   update_rides();
 }
 
-void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision) {
+void holon::set_statics(const std::vector<avatar_static> &statics, std::uint64_t revision,
+                        const std::vector<cvc::physics::field> &water) {
   section_stamp s;
   s.rev = revision;
-  set_statics(statics, s);
+  set_statics(statics, s, water);
 }
 
 std::uint64_t holon::left_tick(const std::string &pid) const {
@@ -1029,7 +1118,7 @@ void holon::read_clock(std::uint64_t server_tick) {
 }
 
 void holon::apply_authoritative(const std::string &pid, const cvc::physics::body_state &auth,
-                                std::uint64_t server_tick) {
+                                std::uint64_t server_tick, std::optional<double> steer) {
   if (_role != holon_role::client)
     return; // the server IS the authority; nothing to apply
   auto it = _participants.find(pid);
@@ -1052,7 +1141,7 @@ void holon::apply_authoritative(const std::string &pid, const cvc::physics::body
 
   participant &p = it->second;
   if (p.local && p.vehicle) {
-    vehicle_reconcile(p, auth, server_tick);
+    vehicle_reconcile(p, auth, server_tick, steer);
   } else if (p.local && _world) {
     world_reconcile(pid, p, auth, server_tick);
   } else if (p.local) {
@@ -1358,14 +1447,14 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
                                        [](const auto &kv) { return kv.second.local; });
         if (self == _participants.end())
           continue;
+        for (auto &kv : _held) // each held entity a step on along its velocity
+          ++kv.second.steps;
         if (self->second.vehicle) { // driving: the vehicle's step, not the walker's
           vehicle_step(self->second, self->second.intent, tick);
           continue;
         }
         self->second.render_prev = _world->state(self->first);
         self->second.have_render_prev = true;
-        for (auto &kv : _held)
-          ++kv.second.steps;
         participant::logged e;
         e.reserve_before = _world->energy(self->first).reserve;
         world_step_client(self->first, self->second.intent, tick);
@@ -1415,7 +1504,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
 }
 
 bool holon::hold_entity(std::uint64_t id, const std::array<double, 3> &size,
-                        const cvc::physics::body_state &at) {
+                        const cvc::physics::body_state &at, double mass) {
   if (_role != holon_role::client || !_world)
     return false;
   for (double d : size)
@@ -1425,6 +1514,7 @@ bool holon::hold_entity(std::uint64_t id, const std::array<double, 3> &size,
   e.half_extents = cvc::physics::vec3{0.5 * size[0], 0.5 * size[1], 0.5 * size[2]};
   e.at = at;
   e.steps = 0;
+  e.mass = std::isfinite(mass) && mass > 0.0 ? mass : 0.0;
   _world->hold_obstacle(id, e.half_extents, cvc::physics::pose{at.position, at.rotation});
   return true;
 }
@@ -1481,10 +1571,11 @@ bool holon::predict_vehicle(const std::string &pid, const dynamic_drive &drive) 
     return true;
   std::shared_ptr<dynamic_vehicle_model> model;
   try {
-    const jolt_vehicle_world jw = jolt_world(); // a jolt vehicle's statics and gravity (OW5i)
+    // A jolt vehicle's or a boat's statics, water and gravity (OW5i, OW5j).
+    const jolt_vehicle_world jw = jolt_world();
     model = std::make_shared<dynamic_vehicle_model>(drive, _clock.fixed_dt(), _vground, &jw);
   } catch (const std::exception &) {
-    return false; // a preset this build does not know, or a jolt vehicle without Jolt
+    return false; // a preset this build does not know, Jolt not in it, a boat without water
   }
   // As the kinematic plant's: on from where it is, or where it stands until a sample places it.
   const cvc::physics::body_state now = state(pid);
@@ -1508,11 +1599,19 @@ void holon::set_vehicle_ground(std::function<double(double, double)> ground,
   // Each model on the new ground, its vehicle's state kept (a dynamic4w model's heights are from
   // the relay's datum on any ground).
   for (auto &[pid, p] : _participants) {
-    if (!p.vdyn || p.vdyn->jolt()) // a jolt vehicle drives on the statics
+    if (!p.vdyn || p.vdyn->jolt()) // a jolt vehicle or a boat goes on the statics
       continue;
     try {
-      p.vdyn =
-          std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(), _vground);
+      // With the statics and the room it meets (OW5p), its world placed where it is.
+      const jolt_vehicle_world jw = jolt_world();
+      auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
+                                                           _vground, &jw);
+      if (model->meets_world()) {
+        p.dnow = model->at(dynamic_vehicle_state(p.dnow), _clock.tick(), &p.dnow);
+        p.dprev = p.dnow;
+        p.vlog.clear();
+      }
+      p.vdyn = std::move(model);
     } catch (const std::exception &) {
     }
   }
@@ -1592,6 +1691,28 @@ void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t 
   participant::vlogged e;
   if (p.vdyn) {
     p.dprev = p.dnow;
+    // A jolt vehicle or a boat meets the room's vehicles as the client shows them (OW5o), and so
+    // does a dynamic plant's (OW5p): their boxes in its model's world. Without room for them (a
+    // dynamic plant's model made without a world has none), the model again with room, the
+    // vehicle where it is (as a change of statics does).
+    {
+      const std::vector<vehicle_obstacle> obstacles = held_obstacles();
+      if (!p.vdyn->hold_obstacles(p.dnow, obstacles)) {
+        try {
+          const jolt_vehicle_world jw = jolt_world();
+          auto model = std::make_shared<dynamic_vehicle_model>(p.vdyn->drive(), _clock.fixed_dt(),
+                                                               _vground, &jw);
+          p.dnow = model->at(dynamic_vehicle_state(p.dnow), tick - 1,
+                             p.vdyn->jolt() ? nullptr : &p.dnow);
+          p.dprev = p.dnow;
+          p.vlog.clear();
+          p.vdyn = std::move(model);
+          ++_vehicle_rebuilds;
+          p.vdyn->hold_obstacles(p.dnow, obstacles);
+        } catch (const std::exception &) {
+        }
+      }
+    }
     step_vehicle(p.dnow, *p.vdyn, in, tick);
     e.dafter = p.dnow;
   } else {
@@ -1606,14 +1727,26 @@ void holon::vehicle_step(participant &p, const avatar_intent &in, std::uint64_t 
     p.vlog.pop_front();
 }
 
+bool holon::moves_as_predicted(double yaw, double vx, double vy,
+                               const cvc::physics::body_state &auth) const {
+  const cvc::physics::quat &q = auth.rotation;
+  const double auth_yaw =
+      std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  if (std::fabs(std::remainder(yaw - auth_yaw, 2.0 * 3.14159265358979323846)) >
+      _cfg.reconcile_yaw_tol)
+    return false;
+  const double dvx = vx - auth.linear_velocity.x, dvy = vy - auth.linear_velocity.y;
+  return dvx * dvx + dvy * dvy <= _cfg.reconcile_speed_tol * _cfg.reconcile_speed_tol;
+}
+
 void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &auth,
-                              std::uint64_t server_tick) {
+                              std::uint64_t server_tick, std::optional<double> steer) {
   if (p.acked && server_tick <= p.last_acked)
     return;
   p.acked = true;
   p.last_acked = server_tick;
   if (p.vdyn) {
-    dynamic_reconcile(p, auth, server_tick);
+    dynamic_reconcile(p, auth, server_tick, steer);
     return;
   }
   const double dt = _clock.fixed_dt();
@@ -1623,7 +1756,8 @@ void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &au
   for (const participant::vlogged &e : p.vlog)
     if (e.tick == server_tick) {
       const double dx = e.after.box[0] - auth.position.x, dy = e.after.box[1] - auth.position.y;
-      if (dx * dx + dy * dy <= tol2) {
+      if (dx * dx + dy * dy <= tol2 &&
+          moves_as_predicted(e.after.box[3], e.after.vx, e.after.vy, auth)) {
         while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
           p.vlog.pop_front();
         return;
@@ -1670,17 +1804,19 @@ void holon::vehicle_reconcile(participant &p, const cvc::physics::body_state &au
 }
 
 void holon::dynamic_reconcile(participant &p, const cvc::physics::body_state &auth,
-                              std::uint64_t server_tick) {
+                              std::uint64_t server_tick, std::optional<double> steer) {
   const double tol2 = _cfg.reconcile_tol * _cfg.reconcile_tol;
   dynamic_vehicle_model &m = *p.vdyn;
   // The input in force at the sample's tick, and the model as predicted for it: what the pose
-  // stream does not carry (the yaw rate, the steering, the driver) comes from there.
+  // stream does not carry (the driver; the spin and the steering from a relay before OW5n) comes
+  // from there.
   avatar_intent at = p.intent;
   const dynamic_vehicle *like = p.vehicle_placed ? &p.dnow : nullptr;
   for (const participant::vlogged &e : p.vlog)
     if (e.tick == server_tick) {
       const double dx = e.dafter.box[0] - auth.position.x, dy = e.dafter.box[1] - auth.position.y;
-      if (dx * dx + dy * dy <= tol2) {
+      if (dx * dx + dy * dy <= tol2 &&
+          moves_as_predicted(e.dafter.box[3], e.dafter.vx, e.dafter.vy, auth)) {
         while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
           p.vlog.pop_front();
         return;
@@ -1691,7 +1827,7 @@ void holon::dynamic_reconcile(participant &p, const cvc::physics::body_state &au
     }
   const cvc::physics::vec3 before = dynamic_vehicle_state(p.dnow).position;
   // From the sample, with the command it left for the next tick...
-  dynamic_vehicle v = m.at(auth, server_tick, like);
+  dynamic_vehicle v = m.at(auth, server_tick, like, steer);
   command_vehicle(v, m.drive(), at, m.fixed_dt());
   while (!p.vlog.empty() && p.vlog.front().tick <= server_tick)
     p.vlog.pop_front();
@@ -1746,6 +1882,11 @@ cvc::physics::body_state holon::state(const std::string &pid) const {
   if (p.local)
     return p.predicted.state();
   return p.newest;
+}
+
+double holon::steer(const std::string &pid) const {
+  const participant &p = _participants.at(pid);
+  return p.drives != 0 ? p.ride_steer : 0.0;
 }
 
 cvc::physics::pose holon::display_pose(const std::string &pid) const {

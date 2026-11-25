@@ -71,6 +71,27 @@ bool has_warning(const LoadResult &r, const std::string &needle) {
   return false;
 }
 
+// The loader's own warnings: every one but the schema's ("ari: schema: ...", which a build with
+// the validator adds for the same mistakes; has_schema_issue checks those).
+std::vector<std::string> loader_warnings(const LoadResult &r) {
+  std::vector<std::string> out;
+  for (const std::string &w : r.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      out.push_back(w);
+  return out;
+}
+
+// Whether the schema check reported the value at `pointer` (true without the validator, which
+// checks nothing).
+bool has_schema_issue(const LoadResult &r, const std::string &pointer) {
+  if (!have_jsonschema())
+    return true;
+  for (const SchemaIssue &i : r.schema_issues)
+    if (i.pointer == pointer)
+      return true;
+  return false;
+}
+
 // First widget in the tree whose mount scope equals `scope` (§12 load: wrapper).
 const Widget *find_scope(const Widget &w, const std::string &scope) {
   if (w.scope == scope)
@@ -780,10 +801,12 @@ windows:
   ASSERT_EQ(win->children.size(), 5u);
   EXPECT_EQ(win->children[3].kind, Kind::Spinner) << "a bare spinner";
   EXPECT_EQ(win->children[3].label, "");
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("spinner 'Odd': glyphs 'emoji' is not braille or ascii"),
             std::string::npos)
-      << r.warnings[0];
+      << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/4/glyphs"));
 }
 
 // text_view: a scrollable text buffer (height, follow, wrap, on_top); message_input: a field to
@@ -848,10 +871,13 @@ windows:
   EXPECT_TRUE(odd->multiline) << "multi-line by default";
   EXPECT_EQ(odd->max_lines, 4);
   EXPECT_EQ(odd->send, "") << "no send button by default";
-  ASSERT_EQ(r.warnings.size(), 2u);
-  EXPECT_NE(r.warnings[0].find("message_input 'Odd' has no on:"), std::string::npos)
-      << r.warnings[0];
-  EXPECT_NE(r.warnings[1].find("max_lines must be >= 1"), std::string::npos) << r.warnings[1];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 2u);
+  EXPECT_NE(warnings[0].find("message_input 'Odd' has no on:"), std::string::npos) << warnings[0];
+  EXPECT_NE(warnings[1].find("max_lines must be >= 1"), std::string::npos) << warnings[1];
+  // The schema says so too, and that a message_input has no height: (a text_view's).
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3/max_lines"));
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/3"));
 }
 
 // radio: and radio_row: take a combo's keys (options, values, def, on) and build Kind::Radio,
@@ -1886,6 +1912,406 @@ scene:
   EXPECT_TRUE(b->fit_up_y);
 }
 
+// prototypes: and use: (gap item 6): an instance is the prototype's node with the using node's keys
+// over it (material: merged, children: after the prototype's), its {name} args filled in, its
+// mesh parts read once for every instance (hidden assets), nested prototypes expanded, and a cycle
+// or an unknown name refused with a warning.
+TEST(AriadneScene, PrototypesAndUse) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+prototypes:
+  lamp:
+    type: group
+    args: { switch: lamps.on, label: plain }
+    tags: ["{label}"]
+    children:
+      - node: pole
+        source: { box: { size: [0.2, 0.2, 5] } }
+        material: { color: [0.2, 0.2, 0.2] }
+      - node: bulb
+        source: { sphere: 0.4 }
+        transform: { position: [0, 0, 5] }
+        visible: "{switch}"
+        material: { color: [1, 0.9, 0.6], ambient: 0.5 }
+      - node: crate
+        source: { box: 1 }
+        body: static
+  shade:
+    source: { sphere: "{radius}" }
+    args: { radius: 0.5 }
+  post:
+    type: group
+    children:
+      - { node: cap, use: shade }
+  loop_a:
+    children: [{ node: inner, use: loop_b }]
+  loop_b:
+    children: [{ node: inner, use: loop_a }]
+scene:
+  nodes:
+    - node: lamp_a
+      use: lamp
+      transform: { position: [1, 2, 3] }
+    - node: lamp_b
+      use: lamp
+      args: { switch: lamps.north, label: north }
+      children:
+        - { node: sign, source: { box: 0.3 } }
+    - { node: big_shade, use: shade, args: { radius: 2 }, material: { color: [0, 1, 0] } }
+    - { node: one_post, use: post }
+    - { node: own_mesh, use: lamp, source: { box: 3 }, type: geometry }
+    - { node: nowhere, use: missing }
+    - { node: looped, use: loop_a }
+scenes:
+  - scene: other
+    nodes:
+      - { node: lamp_c, use: lamp }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+
+  const SceneNode *a = find_scene_node(r.scene.nodes, "lamp_a");
+  ASSERT_NE(a, nullptr);
+  EXPECT_EQ(a->type, "group");
+  EXPECT_FLOAT_EQ(a->position[0], 1.0f);
+  EXPECT_FLOAT_EQ(a->position[2], 3.0f);
+  ASSERT_EQ(a->children.size(), 3u);
+  EXPECT_EQ(a->children[0].id, "pole");
+  EXPECT_EQ(a->children[1].visible_bind, "lamps.on"); // the arg's default
+  ASSERT_EQ(a->tags.size(), 1u);
+  EXPECT_EQ(a->tags[0], "plain");
+
+  // The meshes every instance shares: a hidden asset per part, read once.
+  EXPECT_EQ(a->children[0].source_asset, "prototype:lamp/0");
+  EXPECT_EQ(a->children[1].source_asset, "prototype:lamp/1");
+  EXPECT_TRUE(a->children[2].source_asset.empty()); // a part with a body keeps its own primitive
+  EXPECT_EQ(a->children[2].source_primitive, "box");
+  EXPECT_TRUE(a->children[2].body.present);
+  EXPECT_FLOAT_EQ(a->children[1].color[0], 1.0f); // the part's other keys are its own still
+  EXPECT_FLOAT_EQ(a->children[1].ambient, 0.5f);
+
+  const SceneNode *b = find_scene_node(r.scene.nodes, "lamp_b");
+  ASSERT_NE(b, nullptr);
+  ASSERT_EQ(b->children.size(), 4u); // the prototype's three, then its own
+  EXPECT_EQ(b->children[1].visible_bind, "lamps.north");
+  EXPECT_EQ(b->children[0].source_asset, "prototype:lamp/0"); // the same asset as lamp_a's
+  EXPECT_EQ(b->children[3].id, "sign");
+  EXPECT_EQ(b->children[3].source_primitive, "box"); // the use site's own part: not shared
+  ASSERT_EQ(b->tags.size(), 1u);
+  EXPECT_EQ(b->tags[0], "north");
+  EXPECT_FALSE(b->has_transform);
+
+  // A token in a part's source: each instance reads its own, with its own radius.
+  const SceneNode *s = find_scene_node(r.scene.nodes, "big_shade");
+  ASSERT_NE(s, nullptr);
+  EXPECT_TRUE(s->source_asset.empty());
+  EXPECT_EQ(s->source_primitive, "sphere");
+  EXPECT_FLOAT_EQ(s->sphere_radius, 2.0f);
+  EXPECT_FLOAT_EQ(s->color[1], 1.0f); // the use site's material
+
+  // Nested: post's cap is a shade, with shade's default radius.
+  const SceneNode *cap = find_scene_node(r.scene.nodes, "cap");
+  ASSERT_NE(cap, nullptr);
+  EXPECT_EQ(cap->source_primitive, "sphere");
+  EXPECT_FLOAT_EQ(cap->sphere_radius, 0.5f);
+
+  // A source of the use site's own replaces the prototype's root mesh, and is not shared.
+  const SceneNode *own = find_scene_node(r.scene.nodes, "own_mesh");
+  ASSERT_NE(own, nullptr);
+  EXPECT_EQ(own->type, "geometry");
+  EXPECT_EQ(own->source_primitive, "box");
+  EXPECT_TRUE(own->source_asset.empty());
+  EXPECT_EQ(own->children.size(), 3u);
+
+  EXPECT_TRUE(has_warning(r, "'nowhere': use: 'missing' names no prototype"));
+  EXPECT_NE(find_scene_node(r.scene.nodes, "nowhere"), nullptr); // parsed as written
+  EXPECT_TRUE(has_warning(r, "use: 'loop_a' is within itself"));
+
+  // Each shared part is one asset, in every scene.
+  const auto count = [](const std::vector<SceneAsset> &as, const std::string &id) {
+    return std::count_if(as.begin(), as.end(), [&id](const SceneAsset &x) { return x.id == id; });
+  };
+  EXPECT_EQ(count(r.scene.assets, "prototype:lamp/0"), 1);
+  EXPECT_EQ(count(r.scene.assets, "prototype:lamp/1"), 1);
+  EXPECT_EQ(count(r.scene.assets, "prototype:lamp/2"), 0);
+  ASSERT_EQ(r.scenes.size(), 1u);
+  EXPECT_EQ(count(r.scenes[0].assets, "prototype:lamp/0"), 1);
+  for (const SceneAsset &x : r.scene.assets)
+    if (x.id == "prototype:lamp/1") {
+      EXPECT_EQ(x.source.source_primitive, "sphere");
+      EXPECT_FLOAT_EQ(x.source.sphere_radius, 0.4f);
+    }
+  const SceneNode *c = find_scene_node(r.scenes[0].nodes, "lamp_c");
+  ASSERT_NE(c, nullptr);
+  ASSERT_EQ(c->children.size(), 3u);
+  EXPECT_EQ(c->children[0].source_asset, "prototype:lamp/0");
+}
+
+// scene: animations: (gap item 7): each animation's keys and tracks, keyframes put in time order,
+// and a bad track left out with a warning.
+TEST(AriadneScene, AnimationsParsed) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: door, source: { box: 1 } }
+  animations:
+    - animation: swing
+      loop: pingpong
+      autoplay: false
+      speed: 0.5
+      duration: 4
+      tracks:
+        - node: door
+          key: rotation
+          interpolation: smooth
+          keys: [[2, [0, 0, 90]], [0, [0, 0, 0]]]
+        - { state: door.angle, interpolation: step, keys: [[0, 0], [2, 90]] }
+        - { node: door, key: wobble, keys: [[0, 1]] }
+        - { node: door, key: position, keys: [[0, [1, 2]]] }
+        - { node: door, state: x, key: scale, keys: [[0, [1, 1, 1]]] }
+        - { state: a.b, keys: [[0, 1], [1, [1, 2]]] }
+    - { animation: spin, loop: true, tracks: [{ node: door, key: opacity, keys: [[0, 1], [1, 0]] }] }
+    - { animation: "bad.id", tracks: [] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.animations.size(), 2u);
+  const SceneAnimation &s = r.scene.animations[0];
+  EXPECT_EQ(s.id, "swing");
+  EXPECT_EQ(s.loop, SceneAnimation::loop_mode::pingpong);
+  EXPECT_FALSE(s.autoplay);
+  EXPECT_DOUBLE_EQ(s.speed, 0.5);
+  EXPECT_DOUBLE_EQ(s.length(), 4.0); // its duration, not its last key's 2
+  ASSERT_EQ(s.tracks.size(), 2u);    // four bad tracks left out
+  const SceneAnimationTrack &rot = s.tracks[0];
+  EXPECT_EQ(rot.node, "door");
+  EXPECT_EQ(rot.key, "rotation");
+  EXPECT_EQ(rot.interpolation, SceneAnimationTrack::interp::smooth);
+  ASSERT_EQ(rot.times.size(), 2u);
+  EXPECT_DOUBLE_EQ(rot.times[0], 0.0); // in time order
+  EXPECT_DOUBLE_EQ(rot.values[1][2], 90.0);
+  EXPECT_EQ(s.tracks[1].state, "door.angle");
+  EXPECT_EQ(s.tracks[1].interpolation, SceneAnimationTrack::interp::step);
+  EXPECT_TRUE(has_warning(r, "track 2: a node's key: is position, rotation"));
+  EXPECT_TRUE(has_warning(r, "track 3: keys: is a list of [seconds, value] with the value 3"));
+  EXPECT_TRUE(
+      has_warning(r, "track 4: names a node: (with a key: or a clip:) or a state:, one of them"));
+  EXPECT_TRUE(has_warning(r, "track 5: keys: is a list of [seconds, value] with the value one"));
+  const SceneAnimation &spin = r.scene.animations[1];
+  EXPECT_EQ(spin.loop, SceneAnimation::loop_mode::loop);
+  EXPECT_TRUE(spin.autoplay);
+  EXPECT_DOUBLE_EQ(spin.length(), 1.0);
+  EXPECT_TRUE(has_warning(r, "scene animation 'bad.id': its animation: name is a key segment"));
+}
+
+// sample_track: the first value before the first key, the last after the last; linear, step and
+// smooth between (smooth flat at the ends, so a two-key track eases in and out).
+TEST(AriadneScene, AnimationTrackSampling) {
+  SceneAnimationTrack tr;
+  tr.times = {1.0, 3.0, 5.0};
+  tr.values = {{0.0, 10.0}, {4.0, 10.0}, {0.0, 20.0}};
+  std::vector<double> v;
+  sample_track(tr, 0.0, v);
+  ASSERT_EQ(v.size(), 2u);
+  EXPECT_DOUBLE_EQ(v[0], 0.0);
+  sample_track(tr, 9.0, v);
+  EXPECT_DOUBLE_EQ(v[1], 20.0);
+  sample_track(tr, 2.0, v);
+  EXPECT_DOUBLE_EQ(v[0], 2.0); // halfway, linear
+  sample_track(tr, 4.5, v);
+  EXPECT_DOUBLE_EQ(v[1], 17.5);
+  tr.interpolation = SceneAnimationTrack::interp::step;
+  sample_track(tr, 2.9, v);
+  EXPECT_DOUBLE_EQ(v[0], 0.0);
+  sample_track(tr, 3.0, v);
+  EXPECT_DOUBLE_EQ(v[0], 4.0);
+  tr.interpolation = SceneAnimationTrack::interp::smooth;
+  sample_track(tr, 3.0, v); // through every key
+  EXPECT_DOUBLE_EQ(v[0], 4.0);
+  sample_track(tr, 2.0, v); // eases out of the first key: 0 tangent at 1, (0 - 0) / 4 at 3
+  EXPECT_DOUBLE_EQ(v[0], 2.0);
+  SceneAnimationTrack two;
+  two.interpolation = SceneAnimationTrack::interp::smooth;
+  two.times = {0.0, 1.0};
+  two.values = {{0.0}, {1.0}};
+  sample_track(two, 0.25, v);
+  EXPECT_NEAR(v[0], 0.15625, 1e-12); // smoothstep: 3u^2 - 2u^3
+  SceneAnimationTrack none;
+  sample_track(none, 1.0, v);
+  EXPECT_TRUE(v.empty());
+}
+
+// advance_animation: once stops at either end, loop wraps, pingpong turns back; a paused or
+// zero-length animation holds.
+TEST(AriadneScene, AnimationPlayback) {
+  SceneAnimation a;
+  a.duration = 2.0;
+  SceneAnimationPlayhead h;
+  advance_animation(a, 1.0, 0.5, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.5);
+  advance_animation(a, 1.0, 5.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 2.0);
+  EXPECT_FALSE(h.playing); // once: stopped at the end
+  advance_animation(a, 1.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 2.0); // and holds while stopped
+  h.playing = true;
+  advance_animation(a, -2.0, 0.5, h); // backwards
+  EXPECT_DOUBLE_EQ(h.time, 1.0);
+  advance_animation(a, -2.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.0);
+  EXPECT_FALSE(h.playing);
+
+  a.loop = SceneAnimation::loop_mode::loop;
+  h = SceneAnimationPlayhead{};
+  advance_animation(a, 1.0, 5.5, h);
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+  EXPECT_TRUE(h.playing);
+  advance_animation(a, -1.0, 2.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+
+  a.loop = SceneAnimation::loop_mode::pingpong;
+  h = SceneAnimationPlayhead{};
+  advance_animation(a, 1.0, 2.5, h); // there, and half a second back
+  EXPECT_DOUBLE_EQ(h.time, 1.5);
+  EXPECT_FALSE(h.forward);
+  advance_animation(a, 1.0, 2.0, h); // back to 0, and half a second out again
+  EXPECT_DOUBLE_EQ(h.time, 0.5);
+  EXPECT_TRUE(h.forward);
+
+  SceneAnimation empty;
+  h = SceneAnimationPlayhead{};
+  advance_animation(empty, 1.0, 1.0, h);
+  EXPECT_DOUBLE_EQ(h.time, 0.0);
+}
+
+// A clip: track (gap item 8) names a node and its model's clip, with no key or keys; one with no
+// node is left out, and one with keys or a state: keeps the clip and says the rest is not used.
+TEST(AriadneScene, AnimationClipTracks) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: robot, source: { file: robot.glb } }
+  animations:
+    - animation: walk
+      loop: true
+      tracks:
+        - { node: robot, clip: walk }
+        - { node: robot, clip: 2, keys: [[0, 1]] }
+        - { state: a.b, clip: wave }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.animations.size(), 1u);
+  const SceneAnimation &a = r.scene.animations[0];
+  ASSERT_EQ(a.tracks.size(), 2u);
+  EXPECT_EQ(a.tracks[0].node, "robot");
+  EXPECT_EQ(a.tracks[0].clip, "walk");
+  EXPECT_TRUE(a.tracks[0].key.empty());
+  EXPECT_TRUE(a.tracks[0].times.empty());
+  EXPECT_EQ(a.tracks[1].clip, "2");
+  EXPECT_TRUE(a.tracks[1].times.empty()); // its keys are not used
+  EXPECT_DOUBLE_EQ(a.length(), 0.0);      // the clip's length is known once the scene reads it
+  EXPECT_TRUE(has_warning(r, "track 1: a clip: track plays the node's model's clip"));
+  EXPECT_TRUE(has_warning(r, "track 2: a clip: plays a node's model's clip, and names no node:"));
+}
+
+// material: { pbr: ... } and the scene's environment: (gap item 5): every key read, defaults kept,
+// a bad value clamped or left out with a warning, and the Phong keys beside pbr: warned about.
+TEST(AriadneScene, PbrMaterialAndEnvironment) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  environment: { sky: [0.6, 0.7, 0.9], ground: [0.1, 0.1, 0.1] }
+  nodes:
+    - node: car
+      source: { box: 1 }
+      material:
+        color: [0.8, 0.1, 0.1]
+        pbr: { metallic: 0.9, roughness: 0.3, emissive: [1, 0.5, 0], coat: { strength: 1, roughness: 0.1 } }
+    - node: plain
+      source: { box: 1 }
+      material: { pbr: true }
+    - node: off
+      source: { box: 1 }
+      material: { pbr: false, specular: 0.5 }
+    - node: bad
+      source: { box: 1 }
+      material: { specular: 0.5, pbr: { metallic: 1.5, roughness: x, emissive: [1, 2], coat: 0.4 } }
+    - node: phong
+      source: { box: 1 }
+      material: { color: [1, 1, 1] }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const SceneNode *car = find_scene_node(r.scene.nodes, "car");
+  ASSERT_NE(car, nullptr);
+  EXPECT_TRUE(car->has_pbr);
+  EXPECT_FLOAT_EQ(car->pbr_metallic, 0.9f);
+  EXPECT_FLOAT_EQ(car->pbr_roughness, 0.3f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[0], 1.0f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[1], 0.5f);
+  EXPECT_FLOAT_EQ(car->pbr_emissive[2], 0.0f);
+  EXPECT_FLOAT_EQ(car->pbr_coat, 1.0f);
+  EXPECT_FLOAT_EQ(car->pbr_coat_roughness, 0.1f);
+  EXPECT_FLOAT_EQ(car->color[0], 0.8f); // still the base colour
+
+  const SceneNode *plain = find_scene_node(r.scene.nodes, "plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_TRUE(plain->has_pbr);
+  EXPECT_FLOAT_EQ(plain->pbr_metallic, 0.0f);
+  EXPECT_FLOAT_EQ(plain->pbr_roughness, 0.5f);
+  EXPECT_FLOAT_EQ(plain->pbr_emissive[0], 0.0f);
+  EXPECT_FLOAT_EQ(plain->pbr_coat, 0.0f);
+
+  const SceneNode *off = find_scene_node(r.scene.nodes, "off");
+  ASSERT_NE(off, nullptr);
+  EXPECT_FALSE(off->has_pbr);
+  EXPECT_TRUE(off->has_specular);
+  EXPECT_FALSE(has_warning(r, "'off': material.pbr shades it physically"));
+
+  const SceneNode *bad = find_scene_node(r.scene.nodes, "bad");
+  ASSERT_NE(bad, nullptr);
+  EXPECT_TRUE(bad->has_pbr);
+  EXPECT_FLOAT_EQ(bad->pbr_metallic, 1.0f);    // clamped
+  EXPECT_FLOAT_EQ(bad->pbr_roughness, 0.5f);   // not a number: the default
+  EXPECT_FLOAT_EQ(bad->pbr_emissive[0], 0.0f); // two channels: not used
+  EXPECT_FLOAT_EQ(bad->pbr_coat, 0.4f);
+  EXPECT_FLOAT_EQ(bad->pbr_coat_roughness, 0.0f);
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.metallic is 0..1, not 1.5"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.roughness is a number 0..1"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr.emissive is a colour"));
+  EXPECT_TRUE(has_warning(r, "'bad': material.pbr shades it physically"));
+
+  const SceneNode *phong = find_scene_node(r.scene.nodes, "phong");
+  ASSERT_NE(phong, nullptr);
+  EXPECT_FALSE(phong->has_pbr);
+
+  EXPECT_TRUE(r.scene.has_environment);
+  EXPECT_FALSE(r.scene.environment_off);
+  EXPECT_FLOAT_EQ(r.scene.environment_sky[2], 0.9f);
+  EXPECT_FLOAT_EQ(r.scene.environment_horizon[0], 0.42f); // unset: the default
+  EXPECT_FLOAT_EQ(r.scene.environment_ground[1], 0.1f);
+
+  for (const char *spelling : {"false", "none", "true", "[1, 2]"}) {
+    LoadResult e = fresh_load(std::string(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  environment: )") + spelling +
+                              R"(
+  nodes:
+    - node: n
+      source: { box: 1 }
+)");
+    ASSERT_TRUE(e.ok) << e.error;
+    const std::string s = spelling;
+    EXPECT_EQ(e.scene.has_environment, s != "[1, 2]") << s;
+    EXPECT_EQ(e.scene.environment_off, s == "false" || s == "none") << s;
+    EXPECT_EQ(has_warning(e, "scene environment is"), s == "[1, 2]") << s;
+  }
+}
+
 // A volren/volslice volume declared as the signed distance field of a MESH:
 // source: { sdf: { mesh: <uri>, dim: N } } — no pre-baked volume asset.
 TEST(AriadneScene, VolumeSdfMeshSource) {
@@ -2486,6 +2912,7 @@ scene:
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_EQ(r.scene.clock.hz, 60.0);
+  EXPECT_TRUE(r.schema_issues.empty()) << "the schema takes hz too";
   for (const char *bad : {"7", "241", "59.5", "-60", "fast"}) {
     LoadResult b = fresh_load(
         std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { hz: ") + bad + " }\n");
@@ -2495,6 +2922,34 @@ scene:
     for (const std::string &w : b.warnings)
       warned = warned || w.find("clock: hz") != std::string::npos;
     EXPECT_TRUE(warned) << bad << ": a rate it cannot run at is said";
+    EXPECT_TRUE(has_schema_issue(b, "/scene/clock/hz")) << bad;
+  }
+}
+
+// How far the world may fall behind its clock: clock: { max_lag } takes seconds, more than 0 and
+// at most cvc::kSimCatchupMax; anything else is a warning, and the clock keeps its catch-up.
+TEST(AriadneScene, ClockBlockTakesAMaxLag) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: { max_lag: 0.5 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.scene.clock.max_lag, 0.5);
+  LoadResult unset = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: {}\n");
+  ASSERT_TRUE(unset.ok) << unset.error;
+  EXPECT_EQ(unset.scene.clock.max_lag, 0.0) << "unset: the host's catch-up";
+  for (const char *bad : {"0", "-0.25", "11", "slow"}) {
+    LoadResult b =
+        fresh_load(std::string("meta: { min_libcvc: \"0.0.0\" }\nscene:\n  clock: { max_lag: ") +
+                   bad + " }\n");
+    ASSERT_TRUE(b.ok) << b.error;
+    EXPECT_EQ(b.scene.clock.max_lag, 0.0) << bad;
+    bool warned = false;
+    for (const std::string &w : b.warnings)
+      warned = warned || w.find("clock: max_lag") != std::string::npos;
+    EXPECT_TRUE(warned) << bad << ": a lag it cannot use is said";
   }
 }
 
@@ -3044,6 +3499,36 @@ scene:
   ASSERT_EQ(r.scene.nodes.size(), 1u);
   EXPECT_EQ(r.scene.nodes[0].material_texture_stream, "fog.tile{i}");
   EXPECT_EQ(scene_node_instance(r.scene.nodes[0], 2).material_texture_stream, "fog.tile2");
+}
+
+// A node's on_pick: is its own (not a custom type's prop), at any depth, and a copy's names it.
+TEST(AriadneScene, OnPickParsedOntoNodeAndCopies) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - node: shelf
+      on_pick: shelf_clicked
+      children:
+        - node: jar
+          source: { box: 1 }
+    - node: crate_{i}
+      repeat: 3
+      source: { box: 1 }
+      on_pick: (state-set "selected" "crate_{i}")
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    ADD_FAILURE() << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  EXPECT_EQ(r.scene.nodes[0].on_pick, "shelf_clicked");
+  EXPECT_EQ(r.scene.nodes[0].props.find("on_pick"), nullptr);
+  ASSERT_EQ(r.scene.nodes[0].children.size(), 1u);
+  EXPECT_EQ(r.scene.nodes[0].children[0].on_pick, "");
+  EXPECT_EQ(r.scene.nodes[1].on_pick, "(state-set \"selected\" \"crate_{i}\")");
+  EXPECT_EQ(scene_node_instance(r.scene.nodes[1], 2).on_pick,
+            "(state-set \"selected\" \"crate_2\")");
 }
 
 // A copy has no body and no world (both are built once from the declared nodes), and a nested
@@ -6270,15 +6755,11 @@ TEST(AriadneLoader, ADataEntryNamesAUriOrAGenerator) {
                           "windows: []\n";
   const LoadResult r = fresh_load(doc);
   ASSERT_TRUE(r.ok) << r.error;
-  bool flagged = false;
-  for (const std::string &w : r.warnings) {
-    if (w.find("schema:") == std::string::npos)
-      continue;
-    EXPECT_EQ(w.find("'made'"), std::string::npos) << w;
-    EXPECT_EQ(w.find("'fetched'"), std::string::npos) << w;
-    flagged = flagged || w.find("'neither'") != std::string::npos;
+  for (const SchemaIssue &i : r.schema_issues) {
+    EXPECT_EQ(i.pointer.rfind("/data/made", 0), std::string::npos) << i.text();
+    EXPECT_EQ(i.pointer.rfind("/data/fetched", 0), std::string::npos) << i.text();
   }
-  EXPECT_TRUE(flagged);
+  EXPECT_TRUE(has_schema_issue(r, "/data/neither"));
 }
 
 // ---- §10 tf_editor: the transfer-function editor widget, and the loader seams it needs ---------
@@ -6511,11 +6992,11 @@ windows:
         default: {a: 1}
 )");
   ASSERT_TRUE(bad.ok) << bad.error;
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/default"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/height"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/interactive_updates"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/0/layers"));
-  EXPECT_TRUE(has_warning(bad, "schema: /windows/0/children/1/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/default"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/height"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/interactive_updates"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/0/layers"));
+  EXPECT_TRUE(has_schema_issue(bad, "/windows/0/children/1/default"));
 }
 
 // id: names any widget (not only a window), so a backend / the core can key per-instance state.
@@ -7172,8 +7653,10 @@ windows:
         range: data
 )");
   ASSERT_TRUE(r.ok) << r.error;
-  ASSERT_EQ(r.warnings.size(), 1u);
-  EXPECT_NE(r.warnings[0].find("range: 'data'"), std::string::npos) << r.warnings[0];
+  const std::vector<std::string> warnings = loader_warnings(r);
+  ASSERT_EQ(warnings.size(), 1u);
+  EXPECT_NE(warnings[0].find("range: 'data'"), std::string::npos) << warnings[0];
+  EXPECT_TRUE(has_schema_issue(r, "/windows/0/children/2/range"));
   const Widget *plane = find(r.root, Kind::SliderInt, "Plane");
   const Widget *scale = find(r.root, Kind::SliderFloat, "Scale");
   const Widget *odd = find(r.root, Kind::SliderInt, "Odd");
@@ -7415,7 +7898,7 @@ TEST(AriadneFunctions, GrantsChainThroughNestedMounts) {
   EXPECT_EQ(names_of(inner->functions->defs), (std::vector<std::string>{"double"}));
 }
 
-// §5.28 context_menu: on a window, a group, a viewport and the document's top level: its items as a
+// §5.30 context_menu: on a window, a group, a viewport and the document's top level: its items as a
 // menu's, its id kept for contributes: (SH9), a list or { id, items }.
 TEST(AriadneLoader, ContextMenusParseOnWindowsGroupsViewportsAndTheDocument) {
   SKIP_WITHOUT_YAML();

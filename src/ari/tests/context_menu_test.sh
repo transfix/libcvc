@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # context_menu_test.sh ARI DOC BACKEND
 #
-# A right-click menu (ARIADNE.md §5.28) on a real terminal: DOC (context_menu.ari) runs with
+# A right-click menu (ARIADNE.md §5.30) on a real terminal: DOC (context_menu.ari) runs with
 # `ari run --backend BACKEND` (ftxui or tvision) in a 100x30 tmux pane, driven by its keys.
 #   1. Tab focuses the checkbox in the card; Shift+F10 (tmux's S-F10, which the terminal sends as
 #      CSI 21;2~) opens the card's menu: both its items show. Enter runs the first, which writes

@@ -112,6 +112,7 @@ struct spawn_rules;
 class WorldVehicles;
 class BoatRuntime;
 class WaterRuntime;
+struct SceneWaterKeyframe;
 class WeatherFriction;
 
 // Whether a scene has a world to run: a `physics:` block, a `world:` block, or a node (at any
@@ -140,6 +141,10 @@ public:
   // Pull the clock's keys (speed, pause, mode, step requests), advance by `wall_dt` seconds (< 0:
   // the real time since the last call, 0 on the first), push its time and tick.
   cvc::world_clock::step_result drive(double wall_dt);
+  // As drive(), but the clock runs no time and the wall time since the last call is let go: a
+  // world stepped on a worker that has fallen behind (world_worker::behind) runs slower than its
+  // speed, as one too heavy for the frame's thread would, instead of further behind.
+  cvc::world_clock::step_result hold();
 
 private:
   struct impl;
@@ -209,6 +214,9 @@ public:
   physics::world &world();
   const physics::world &world() const;
   const std::vector<SceneWorldBody> &bodies() const;
+  // The ground its vehicles drive on: the bodies of the world on's nodes that are ground
+  // (SceneWorldBody::ground), as they are now.
+  std::vector<physics::body_id> ground_bodies() const;
   // The body node `id` declared (an invalid id when it has none); a node with colliders has a
   // body per collider, and this is the first.
   physics::body_id body(const std::string &id) const;
@@ -235,13 +243,22 @@ public:
 
   // Run the generated_world nodes this world runs (a request or an edit makes a new world), take a
   // ready or changed dataset's colliders, and swap the bodies of each node whose colliders changed.
-  // follow() runs it first. Problems warn, naming the node.
+  // follow() runs it first, on the clock it follows. Problems warn, naming the node.
+  //
+  // What the clock times (the water's sea while the scene has storms, the storms' gust front in
+  // wind.front, a new storm-wind peak) is timed on CLOCK: the one this world steps on. Without
+  // one, the app's world clock (a world its host steps on that clock). A holon steps a server
+  // document's world on a clock of its own (holon::attach_world) and the app's is not driven, so
+  // follow() passes the clock it follows (OW5q).
   void sync(std::vector<std::string> *warnings = nullptr);
+  void sync(const cvc::world_clock &clock, std::vector<std::string> *warnings = nullptr);
 
   // Run the steps due on `clock` since the last call and publish the telemetry when any ran. The
   // first call anchors at the clock's tick and runs none. `after_step` is called after the last two
   // steps of a batch (and once on the first call), where a view captures the poses it draws
-  // between (pose_tracker::capture). Returns the steps run.
+  // between (pose_tracker::capture). Returns the steps run. The first call also sets the world's
+  // field time to the clock's time (world::set_field_time), as world::follow does, so its water's
+  // waves are read at the clock's time from then on.
   std::uint64_t follow(const cvc::world_clock &clock,
                        const std::function<void()> &after_step = nullptr);
   // The same, with `before_each` called before each step (after the vehicles, boats and weather
@@ -251,6 +268,21 @@ public:
   using step_hook = std::function<void(std::uint64_t tick)>;
   std::uint64_t follow(const cvc::world_clock &clock, const std::function<void()> &after_step,
                        const step_hook &before_each, const step_hook &after_each);
+
+  // Stepped on a thread of its own (world_worker, a drawn host's D3): follow() then only steps. It
+  // runs no sync() and writes no key, since a state subscriber runs on the thread that writes, and
+  // after each step it calls `capture` when it is given no after_step of its own (a holon's follow
+  // gives none), where a view's pose_tracker captures. The host's thread calls publish_due() in
+  // their place, under the lock the steps take. `restarted` runs at the end of each restart() (on
+  // the host's thread), where the stepper anchors the world on its own clock again: the host's
+  // clock went back (sim.restart), and may be past where it was by the time the stepper looks. Off
+  // (the default), follow() does all of it.
+  void set_deferred(bool on, std::function<void()> capture = nullptr,
+                    std::function<void()> restarted = nullptr);
+  bool deferred() const;
+  // While deferred, on the host's thread: sync(), then the telemetry follow() leaves out when any
+  // step ran since the last call. Returns how many ran.
+  std::uint64_t publish_due(std::vector<std::string> *warnings = nullptr);
 
   // Rebuild the world as build() made it: the same object, a fresh physics world with the same
   // config and materials, each node's body where the document put it (at rest unless it declared
@@ -325,6 +357,16 @@ public:
   BoatRuntime *boat(const std::string &node);
   // A water node's runtime this world runs (from_scene's; a renderer runs its own), or null.
   const WaterRuntime *water(const std::string &node) const;
+  // The water nodes this world runs, in the document's order.
+  std::vector<std::string> water_nodes() const;
+  // Water node NODE's sea is K from now on, another host's (WaterRuntime::follow_sea; a client's
+  // replica follows the relay's, OW5q); its field goes in at the next sync. False for no such node.
+  bool follow_sea(const std::string &node, const SceneWaterKeyframe &k);
+  // Weather node NODE's storms are another host's from now on (WeatherFriction::follow; a client's
+  // replica follows the relay's, OW5q); the air is made again with them at the next sync. True when
+  // they changed.
+  bool follow_weather(const std::string &node, const std::string &events, double gust,
+                      std::uint64_t gust_from);
   // Take on the scene's wind (scene_wind.h, O14): seed its keys from `scene: wind:` and, while
   // wind.speed is set under bind_prefix, keep a flow field of air (1.225 kg/m^3, C_d 1) whose
   // velocity is that wind (cvc::physics::wind_flow, its profile over the document's wind base)
@@ -358,6 +400,8 @@ public:
 
 private:
   SceneWorld();
+  // The telemetry of steps that ran: the stats, the vehicles', the boats' and the weathers' keys.
+  void publish_steps();
   // The world on's first grid and the world its node makes (its terrain, its roads), as the
   // vehicles take them.
   void ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> &grid,
@@ -366,9 +410,9 @@ private:
   void publish_worlds(bool force);
   // The wind's field after the scene wind's keys (bind_wind) and the weathers' storms.
   void sync_wind();
-  // wind.front: the storms' gust front at the first weather's centre at the start of the clock's
+  // wind.front: the storms' gust front at the first weather's centre at the start of CLOCK's
   // kSceneWindFrontPeriod.
-  void publish_front();
+  void publish_front(const cvc::world_clock &clock);
   struct impl;
   std::unique_ptr<impl> _impl;
 };

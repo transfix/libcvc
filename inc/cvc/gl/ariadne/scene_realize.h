@@ -25,6 +25,7 @@
 #include <cvc/ariadne/loader.h>      // LoadResult / CustomRequirement (verify_scene_customs)
 #include <cvc/ariadne/scene.h>       // SceneClock (RealizedScene holds the resolved clock by value)
 #include <cvc/ariadne/scene_world.h> // RealizedScene runs the scene's world (core libcvc)
+#include <cvc/ariadne/world_worker.h> // RealizedScene::world_worker (D3)
 #include <cvc/core/types.h>          // cvc::sdf_algorithm (sdf_volume_from_mesh)
 #include <cvc/core/world_clock.h>    // tick_scene returns the frame's world_clock::step_result
 #include <cvc/core/world_clock_binding.h> // RealizedScene drives the clock through a binding
@@ -60,6 +61,7 @@ class GeometryNode; // ShaderPreset applies to a GeometryNode (forward-decl: use
 class LodGraphicsNode;
 namespace ariadne {
 class LiveTextureBinding; // stream_texture_binding.h: a node's live texture
+class DataWorldView; // world_nodes.h: a world dataset drawn with the generated world's renderer
 } // namespace ariadne
 class LodPyramidCache;
 class VolRenNode;
@@ -71,6 +73,13 @@ namespace ariadne {
 // and tick_scene (sync_scene_data) rebuilds its children from the dataset whenever the dataset's
 // rev, or the store node its link points at, changes: its first load, a reload, a replacement.
 // Until then the node is empty, so a download never holds up a frame.
+//
+// A dataset that is a world (its `world`: a city bundle's, a saved world's) is drawn with the
+// generated world's renderer (`world`, world_nodes.h's DataWorldView): its terrain LOD chunks
+// wearing the dataset's ground, its props, buildings, roads and water, made from the dataset off
+// the frame thread and put in a piece at a time. The plain draw (each item a mesh, the aerial image
+// draped on the terrain) is left for a node whose terrain takes a live texture
+// (material: { texture: { stream } }), and for every dataset that is not a world.
 struct SceneDataBinding {
   cvc::ariadne::SceneNode spec;                     // the node as the document declared it
   std::string path;                                 // the dataset: <prefix>.data.<name>
@@ -83,6 +92,8 @@ struct SceneDataBinding {
   // material: { texture: { stream } }: the terrain's live texture, bound again with each drawing
   // and ticked by tick_scene.
   std::shared_ptr<LiveTextureBinding> texture;
+  // The world renderer for a world dataset, made at realize; ticked by tick_scene.
+  std::shared_ptr<DataWorldView> world;
 };
 
 // A node whose material: { opacity: <path> } (or { bind, default }) follows state. tick_scene
@@ -141,6 +152,10 @@ struct RealizeOptions {
 // now (defined in scene_realize.cpp).
 struct SceneRepeatBinding;
 
+// A scene's animation (animations:, scene_animation.h) as it plays: its playhead, its state keys
+// and what each track moves (defined in scene_realize.cpp).
+struct SceneAnimationBinding;
+
 // The result of realizing a Scene: the top-level node ids created (the scene's nodes, and any a
 // custom node type added beside its own), the visibility
 // bindings the host must poll each frame (empty when no node uses `visible: <path>`),
@@ -185,6 +200,7 @@ struct RealizedScene {
     std::vector<std::string> tags;
     std::weak_ptr<GraphicsNode> node;
     bool subtree = true; // false: the tags are the node's own props', not its children's
+    std::string on_pick; // the node's on_pick: (realize_node's entry; a part's is empty)
   };
   std::vector<TaggedNode> nodes;
   // The scene's named cameras (`cameras:`), which viewport widgets bind by id.
@@ -255,6 +271,11 @@ struct RealizedScene {
   std::unique_ptr<cvc::ariadne::SceneWorld> world;
   cvc::physics::world *physics = nullptr;
   std::unique_ptr<cvc::gl::physics_scene_binding> physics_binding;
+  // D3: the worker that steps `world` off the frame's thread, in a local holon, when the host runs
+  // one (GlSceneAdapter owns it and stops it before this scene goes); null, and tick_scene steps
+  // the world itself. With it, tick_scene publishes what the worker ran (SceneWorld::publish_due)
+  // under the frame's lock, and holds the clock while the world is behind.
+  cvc::ariadne::world_worker *world_worker = nullptr;
   std::vector<std::pair<std::string, cvc::physics::body_id>> bodies;
   // The nodes the moving bodies draw, by node id: restart_scene_world binds them again.
   std::map<std::string, std::shared_ptr<GraphicsNode>> body_nodes;
@@ -265,6 +286,10 @@ struct RealizedScene {
   // struct's lists (created, visibility, clip, opacity, the tickers, nodes, custom_ticks,
   // height_fields, data_nodes) come with it and go with it.
   std::vector<std::shared_ptr<SceneRepeatBinding>> repeats;
+  // The scene's animations. tick_scene moves each one's playhead by the scene clock's step (the
+  // scene runs on the clock once it has one), publishes it at <prefix>.animations.<id>.time and
+  // .playing, takes a script's writes to .time, .playing and .speed, and sets what its tracks move.
+  std::vector<std::shared_ptr<SceneAnimationBinding>> animations;
   // What a copy made after realize_scene is realized with: its options (an assets cache of the
   // scene's own, own_assets, when they named none) and the document's assets.
   RealizeOptions options;
@@ -286,6 +311,10 @@ struct RealizedScene {
   // A vehicle drawn as its box while its look's data package loads: the vehicles are drawn again
   // once none is loading (sync_vehicle_markers).
   bool vehicle_models_pending = false;
+  // The world's entities drawn at scale (entity_view.h, FL2): its entity_layer nodes' view, and
+  // the physics binding's group that poses it. Made by the first entity_layer node, else by
+  // update_entity_view (the implicit layer over every entity).
+  std::shared_ptr<struct scene_entities> entities;
   // The document's data: entries (Scene::data), which a node's model names (a boat's `model:`).
   std::vector<cvc::ariadne::SceneData> data;
   // The spawn points as drawn (their node ids), as of the spawn points' revision `spawns_rev`.
@@ -339,6 +368,10 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 // (SceneDataBinding): tick_scene calls it first every frame; a host that does not tick may call
 // it itself. Call it on the scene's owner thread. Returns how many nodes it rebuilt.
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
+// Run every data node's world draw (a world dataset's job and install, SceneDataBinding::world)
+// to its end now: for tests and hosts that need the drawn world without ticking frames. Returns
+// how many data nodes show a world.
+int finish_scene_data(RealizedScene &realized);
 
 // Write each bound material: { opacity: <path> } into the meshes its node draws
 // (SceneOpacityBinding): tick_scene calls it every frame, after sync_scene_data; a host that does
