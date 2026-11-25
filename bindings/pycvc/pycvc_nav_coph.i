@@ -843,6 +843,9 @@ public:
   }
 
   bool done(int agent) const { return f_->done(check(agent)); }
+  // An agent done at its goal runs again from the next boundary, keeping what it learned and
+  // taking that input's "goal" (coph_fleet::resume). False when it is running or ended otherwise.
+  bool resume(int agent) { return f_->resume(check(agent)); }
   bool success(int agent) const { return f_->success(check(agent)); }
   bool hit(int agent) const { return f_->hit(check(agent)); }
   PyObject *state(int agent) const { return coph::list(f_->state(check(agent))); }

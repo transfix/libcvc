@@ -97,8 +97,12 @@ no torch.
   sets it.
 - The coefficient plots show each car's account: the allocation residual (the share of CoPH's
   force the car could not take), the work, the risk cost and the CoPH steps.
-- A car that reaches its goal brakes and stays. Its learner's run is over, so it takes no new
-  goal (Known limits).
+- A car that reaches its goal brakes until it gets a new one (`run.regoal`, New goals), then runs
+  again. Its learner keeps what it learned.
+- With `--gym` or `--world-doc` the cars are the world document's, not a `sim_world`, so CoPH runs
+  as a controller over their state: `C.CophControl`. It senses the risk as a constant (or a
+  `risk(x, y)` you give it) and the obstacles from the cars' rays. On the template's own worlds
+  the native driver senses the world's grid and material layer instead.
 
 ## The world
 
@@ -386,7 +390,8 @@ log.save("run.npz")
 ```
 
 `Cars(..., coph={"froude": 1.0})` with `step_coph()` has CoPH's fleet drive the cars, and
-`cars.coph_coeffs()` reads each car's account.
+`cars.coph_coeffs()` reads each car's account. `ctl = C.CophControl()` is the same fleet as a
+controller for any cars (`s = cars.step(*ctl(s)[:2])`), from their state alone.
 `C.world_from_data(app, "<prefix>.data.city")` reads a city from an app's data store.
 `C.flat_world(unit)` gives a flat square. `Cars(..., navigator=True)` with `step_navigator()`
 runs libcvc's navigator. `nav_weights=` gives it a `.cvcnav` policy and `scale=` the frame
@@ -496,9 +501,10 @@ are built this way.
 - **One shared steering lock and wheelbase on the bicycle.** With a mixed list of presets, nav's
   bicycle (for the navigator) uses one wheelbase and lock: the mean wheelbase and the smallest
   lock. Each vehicle on a plant has its own.
-- **CoPH's cars take no new goal after they arrive, and run only on `Cars`.** A CoPH car that
-  reached its goal brakes and stays, whatever `run.regoal` says, because its learner's run ended
-  there. `--controller coph` drives the template's own worlds, not `--gym` or `--world-doc`.
+- **CoPH on a world document senses less.** Under `--gym` or `--world-doc`, `CophControl` sees
+  obstacles only where the cars' rays hit them, and reads a constant risk unless given a
+  `risk(x, y)`. The native driver on the template's own worlds reads the grid and the material
+  layer.
 - **The navigator is tuned for its policy's bodies.** As a baseline on vehicles it often does
   worse than a controller made for them. GRL-SNAM's docs/PLANTS.md says why.
 - **The template hides the unused world itself.** Before transfix/libcvc#1037, a scene node's
