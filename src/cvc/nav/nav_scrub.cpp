@@ -380,7 +380,7 @@ scrub_scenario grid_scenario(const world_grid &g, int agents, std::uint64_t seed
   std::vector<bool> used(pool.size(), false);
   std::vector<double> start, goal;
   for (const std::array<double, 2> &p : starts) {
-    int pick = -1, far = -1;
+    int pick = -1, farthest = -1;
     double far_d = -1.0;
     for (int k = 0; k < static_cast<int>(pool.size()); ++k) {
       if (used[static_cast<std::size_t>(k)])
@@ -397,10 +397,10 @@ scrub_scenario grid_scenario(const world_grid &g, int agents, std::uint64_t seed
       }
       if (d > far_d) {
         far_d = d;
-        far = k;
+        farthest = k;
       }
     }
-    const int k = pick >= 0 ? pick : far;
+    const int k = pick >= 0 ? pick : farthest;
     if (k < 0)
       throw std::runtime_error(std::string(kWho) + "no goal for every agent on " + world);
     used[static_cast<std::size_t>(k)] = true;
