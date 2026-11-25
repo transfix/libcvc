@@ -392,19 +392,32 @@ reads it from `Runtime::isolation_reason()`, and the app's log shows it once
 (`ari: the document at '<prefix>' runs in group 0: <reason>`).
 
 1. Its prefix is not empty (it does not run at the app root).
-2. It has a `channels:` block, enforced in strict lint mode, which is the default once the block is
-   there (`lint: channels: warn` or `off` keeps the document in group 0): only that proves it uses
-   no app-global channel (§8).
-3. No channel in it is `global: true`.
-4. None of its programs names a `/` channel in a literal: `(msg-send "/x" ...)`, `(msg-recv
-   "/x")` or `(msg-pending "/x")`. Every program counts: the lanes, the key bindings, `functions:`,
-   every widget's `on:`, `on_click`, `on_hover`, `on_drag*` and `on_top`, each module's `init:`,
-   `on_tick:` and functions, and the document's own `init:` and `tests:`. That is more than the
-   load's channel lint reads, which skips the widgets' event handlers.
-5. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, since a sign-in's end is posted
-   where the app's other programs run.
-6. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
+2. It uses no oidc: no `oidc-*` call and no `"oidc#..."` channel, in any of its programs: the
+   lanes, the key bindings, `functions:`, every widget's `on:`, `on_click`, `on_hover`, `on_drag*`
+   and `on_top`, each module's `init:`, `on_tick:` and functions, and the document's own `init:`
+   and `tests:`. A sign-in's end is posted on a `#` channel where the app's other programs run, and
+   a `#` channel never leaves the group it is used in.
+3. No writable `link:` hole of a module points outside the document's prefix (a read-only one, or
    one inside, is fine).
+
+Its channels do not keep it there. A channel under its prefix, its own, lives in its group; any
+other, an app-global `/` channel (`global: true`) among them, lives in group 0 or in the group of
+the document whose prefix covers it, and a message sent on it from another group is passed there
+([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.6). So a document needs no `channels:` block to
+get a group, and one with `global: true` channels or `/` references gets one too. Such a message
+is passed on at the next pump of each group it goes through, so it may take a frame or two where
+one inside a group arrives at once.
+
+The host's posts follow the same homes. A post to `app.exec_scheduler()` on one of an isolated
+document's channels (a done channel under its prefix, say) is passed on to the document's group by
+the app's router, one hop more than a post to the group itself (`ictx.host->parking_scheduler()`,
+which a provider uses: §9.1); a `#` channel is never passed on, so a post on one stays in the
+scheduler it was posted to. Group 0 is pumped for what is posted to it as well as for its live
+processes: the Runtime's drain and `app.exec_pump_frame()` pump it while anything posted waits
+there (a message an isolated document sent on a `/` channel, a wait it subscribed there), so such
+a message is delivered even when no program lives in group 0. Each takes group 0's token, and
+while another thread holds it (pycvc's `ExecPool.run_all` drains group 0 on its own thread) it
+leaves group 0 for that frame and pumps it at the next.
 
 A document that passes runs in its group. Its group is pumped on the frame's thread all the same
 when its host declared a thread-affine subscriber at, above or under its prefix (`arigl` declares
@@ -418,14 +431,20 @@ functions; §9.1). Otherwise the pool's workers may pump it.
   runtime posts it (ticks, keys, pointer events, signals) goes there. Its streams post their events
   there, and its async calls complete there.
 - It gets its own budget per frame (200000 steps and 0.1 s), not a share of the app's.
-- `ps`, `inspect` and `kill` see only its own processes; pids stay unique across the app.
+- `ps`, `inspect` and `kill` see only its own processes; pids stay unique across the app. A
+  document in group 0 sees only its own too: every process a Runtime starts carries its owner tag,
+  the documents it loads included, and a program with an owner lists, inspects, kills, pauses and
+  resumes only its owner's processes ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.5). A
+  `kill`, `pause` or `resume` of one of its own processes in another group (a sliced task in group
+  0, for an isolated document) is passed there and returns `#t` for "requested"; another
+  document's pid gives `#f`, as an unknown one does.
 - When a worker pumps it, an action that calls a verb the host must run itself (`quit`, the
   `data-*` verbs, `open-url`, the room and chat verbs) parks at the call and resumes at the next
   frame, so it completes a frame later. `(has? ...)` there answers from what the frame's start saw.
 
 **When it moves.** Where a document runs is decided when it loads, and again after anything that
-rule reads changes: a reload or a new tree, a lane's program, the channel policy, the key bindings,
-or a host's declaration. If the answer changes, the document moves: its actions and the children
+rule reads changes: a reload or a new tree, a lane's program, the key bindings, or a host's
+declaration. If the answer changes, the document moves: its actions and the children
 they spawned, and its residents, are killed where they ran (a host's `run_program` caller is told
 "did not complete: the document moved to another group"), its residents start again in the new
 place at the next frame, and the streams it opened follow it. The move does not wait for the old
@@ -439,6 +458,14 @@ something of it runs, the document stays where it is, at the latest until its ne
 the pool's workers may pump, a host verb that must run on the host thread is unknown to its
 programs (a `NameError`) meanwhile, and the app's log says so once. A host registers before
 `load()`, or before the first frame, to avoid that.
+
+**Limits.** An `AriApp` (or any Ariadne host) and a pycvc `ExecPool.run_all` on one app run on one
+thread: both drive group 0, and the Runtime submits programs to group 0 and kills them there
+between its pumps without taking its token, which a `run_all` on another thread would race (one
+thread drives a scheduler at a time; nothing checks it). And a document that moves from group 0
+into a group of its own leaves behind, in group 0, what was parked there for its channels: a
+message another group sent on one of them that no program had received, and another group's
+program waiting on one of them. Its own programs restart in its group and receive from then on.
 
 ---
 
@@ -6087,7 +6114,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
-| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. In execution group 0 it lists the other documents' processes there too |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |

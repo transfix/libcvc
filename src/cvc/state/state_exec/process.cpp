@@ -284,7 +284,7 @@ const process_ptr &process_table::insert(process_ptr p) {
   (void)inserted;
   if (!is_finished(proc.status))
     assign_slot(proc, &it->second);
-  update(proc);
+  update(proc); // moves the generation
   return it->second;
 }
 
@@ -294,10 +294,15 @@ bool process_table::erase(int pid) {
     return false;
   update(*it->second); // out of every index (it already is, unless a field changed since)
   map_.erase(it);
+  ++generation_;
   return true;
 }
 
 void process_table::update(process &p) {
+  // S2-Q9: every status change but ready <-> running (set_status), and every priority change (a
+  // set-priority, a relevel), comes through here, so a publisher rebuilds its rows only when this
+  // moved. One that changed nothing a row shows moves it too: a rebuild costs nothing wrong.
+  ++generation_;
   process::table_entry &e = p.table;
   const bool finished = is_finished(p.status);
 

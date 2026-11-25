@@ -1,0 +1,171 @@
+name: state_exec stress (nightly)
+
+# Threaded execution's ST-1 and ST-2 at their long sizes (docs/STATE_EXEC_THREADED.md 8.8; S2.md
+# sections 4 and 5): state_exec_stress_test's random programs over 16 groups (messages across
+# groups through the router, kills and pauses, timed receives, broadcasts, group churn), checked
+# for no loss, no duplicate, no hang and no crash. ci.yml's sanitizer legs run its short form on
+# every PR. This workflow runs, in each of two builds, gcc's TSan and Release:
+#   - ST-1's long form (CVC_EXEC_STRESS_MINUTES=10);
+#   - ST-2 over 1000 CVC_EXEC_FUZZ seeds (CVC_EXEC_STRESS_SEEDS=1000).
+# Each run sets one of the two variables, so the binary's other cases run at their short size
+# beside it.
+#
+# A lane builds as ci.yml's sanitizer legs do (the same cvcpkg deps and tools, the same configure
+# flags, without pycvc, which nothing here runs) and builds state_exec_stress_test alone. The TSan
+# lane reads the legs' suppressions file, which stays empty, and a run that prints a sanitizer
+# report fails, as run.sh's do. The logs are kept as an artifact.
+#
+# It runs daily on master. On a branch, by hand: gh workflow run state-exec-stress.yml --ref <ref>.
+# GitHub dispatches only workflows on the default branch, so this file lands before the test; a ref
+# without src/cvc/tests/state_exec_stress_test.cpp stops after the checkout. It posts no llm-gate
+# check: it makes no commit, and the repository's other scheduled workflows (nightly.yml,
+# locks-deep.yml) post none.
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: state-exec-stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    name: state_exec stress / ${{ matrix.lane }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # timeout: the job's minutes; st1 and st2: each run's. The rest is the deps and the build
+        # (about 25 minutes under TSan, which also runs the programs several times slower). ST-2's
+        # time is 1000 times a seed's, which the short form's few seeds show: tune st2 from the
+        # first runs.
+        include:
+          - lane: tsan
+            flags: -fsanitize=thread
+            build_type: RelWithDebInfo
+            timeout: 330
+            st1: 45
+            st2: 240
+          - lane: release
+            flags: ''
+            build_type: Release
+            timeout: 150
+            st1: 30
+            st2: 90
+    env:
+      # ci.yml's sanitizer legs' TSan options and a report's first line (run.sh's), with their
+      # suppressions file.
+      TSAN_OPTIONS: 'suppressions=${{ github.workspace }}/.github/sanitizers/tsan.supp:second_deadlock_stack=1:history_size=4:exitcode=66'
+      SAN_REPORT: 'WARNING: ThreadSanitizer|ERROR: AddressSanitizer|ERROR: LeakSanitizer|\.(c|cc|cpp|cxx|h|hh|hpp|hxx|ipp|inl):[0-9]+:[0-9]+: runtime error:'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look for the stress test
+        id: have
+        shell: bash
+        run: |
+          if [ -f src/cvc/tests/state_exec_stress_test.cpp ]; then
+            echo "test=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::${{ github.ref }} has no state_exec_stress_test; nothing to run"
+          fi
+
+      - name: Fetch cvcpkg
+        if: steps.have.outputs.test == 'yes'
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Install build tools (cvcpkg)
+        if: steps.have.outputs.test == 'yes'
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # As in ci.yml's sanitizer legs: ubuntu-24.04's kernel randomizes mmap with 32 bits, more
+      # than gcc 13's sanitizer runtimes can map around.
+      - name: Narrow mmap randomization for the sanitizer runtime
+        if: steps.have.outputs.test == 'yes' && matrix.lane == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      # ci.yml's sanitizer configure, at the lane's build type and flags, without pycvc.
+      - name: Configure
+        if: steps.have.outputs.test == 'yes'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          echo "LD_LIBRARY_PATH=$deps/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          flags="${{ matrix.flags }} -fno-omit-frame-pointer"
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_PREFIX_PATH="$deps" \
+            -DCMAKE_C_FLAGS="$flags" \
+            -DCMAKE_CXX_FLAGS="$flags" \
+            -DCMAKE_EXE_LINKER_FLAGS="$flags" \
+            -DCMAKE_SHARED_LINKER_FLAGS="$flags" \
+            -DCMAKE_MODULE_LINKER_FLAGS="$flags" \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ENABLE_OPENMP=OFF \
+            -DCVC_BUILD_PYCVC=OFF \
+            -DCVC_BUILD_PYCVC_GL=OFF
+
+      - name: Build
+        id: build
+        if: steps.have.outputs.test == 'yes'
+        run: cmake --build build --parallel --target state_exec_stress_test
+
+      # One run a step, so a run that fails or outlasts its time leaves the other's result. Each
+      # fails on a non-zero exit or a sanitizer report.
+      - name: ST-1, 10 minutes
+        if: steps.have.outputs.test == 'yes'
+        timeout-minutes: ${{ matrix.st1 }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p stress-logs
+          log=stress-logs/st1.log
+          echo "| run | exit | reports |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          CVC_EXEC_STRESS_MINUTES=10 build/bin/state_exec_stress_test --gtest_filter='RandomPrograms.ST01*' 2>&1 | tee "$log"
+          st=${PIPESTATUS[0]}
+          reports=$(grep -cE "$SAN_REPORT" "$log" || true)
+          echo "| ST-1 (CVC_EXEC_STRESS_MINUTES=10) | $st | $reports |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$st" -ne 0 ] || [ "$reports" -ne 0 ]; then
+            echo "::error::ST-1: exit $st, $reports sanitizer report(s) (the stress-${{ matrix.lane }}-logs artifact)"
+            exit 1
+          fi
+
+      - name: ST-2, 1000 seeds
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: ${{ matrix.st2 }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p stress-logs
+          log=stress-logs/st2.log
+          CVC_EXEC_STRESS_SEEDS=1000 build/bin/state_exec_stress_test --gtest_filter='RandomPrograms.ST02*' 2>&1 | tee "$log"
+          st=${PIPESTATUS[0]}
+          reports=$(grep -cE "$SAN_REPORT" "$log" || true)
+          echo "| ST-2 (CVC_EXEC_STRESS_SEEDS=1000) | $st | $reports |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$st" -ne 0 ] || [ "$reports" -ne 0 ]; then
+            echo "::error::ST-2: exit $st, $reports sanitizer report(s) (the stress-${{ matrix.lane }}-logs artifact)"
+            exit 1
+          fi
+
+      - name: Upload the stress logs
+        if: always() && steps.have.outputs.test == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-${{ matrix.lane }}-logs
+          path: stress-logs/
+          if-no-files-found: ignore

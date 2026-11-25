@@ -44,6 +44,16 @@ std::optional<double> parse_slice_seconds(const std::string &s) {
   return v;
 }
 
+// A whole number, 0 included, or nullopt (the ingress cap).
+std::optional<std::size_t> parse_count(const std::string &s) {
+  if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos || s.size() > 18)
+    return std::nullopt;
+  return static_cast<std::size_t>(std::stoull(s));
+}
+
+// state_exec.groups.ingress_cap's default (S2-Q10, Q14's name).
+constexpr std::size_t kDefaultIngressCap = 65536;
+
 // CVC_EXEC_SLICE_STEPS, read whenever a scheduler is made (no process-wide copy), so a test
 // sets it for the schedulers it makes and whole suites run at 256 unchanged; 1 when unset or
 // not a whole number above 0.
@@ -143,6 +153,18 @@ void async_scheduler::refresh_slice() {
   else if (const auto v = parse_slice_seconds(*ms))
     long_step_tree_ = *v > 0.0 ? *v / 1e3 : 0.0;
   long_step_seconds_ = long_step_tree_.value_or(long_step_default_);
+  // The ingress cap (S2-Q10), unless set_ingress_cap was called: state_exec.groups.ingress_cap, a
+  // whole number (0: none); missing or empty, 65536. Written under the ingress mutex, where a post
+  // from another thread reads it.
+  if (!ingress_cap_set_) {
+    const auto v = detail::setting_value(*watch_root_, "state_exec.groups.ingress_cap");
+    const std::optional<std::size_t> cap =
+        !v || v->empty() ? std::optional<std::size_t>(kDefaultIngressCap) : parse_count(*v);
+    if (cap) {
+      std::lock_guard<std::mutex> lock(ingress_mutex_);
+      ingress_cap_.store(*cap, std::memory_order_relaxed);
+    }
+  }
 }
 
 void async_scheduler::set_cycle_registry(cycle_registry *r) {
@@ -269,26 +291,38 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 } // namespace
 
 async_scheduler::~async_scheduler() {
+  // No post reaches it through its router handle from here on (exec_router.h; group 0's teardown:
+  // an app's groups closed theirs in leave_router).
+  route_self_.close();
   home_.reset();
-  // Commands posted and never applied: their done gets false, each counted out first. Taken under
-  // the lock, so a post that returned before the destruction began is seen. A done that posts
-  // again (only a done may post to a scheduler being destroyed) is queued for refusal, never
-  // applied, and refused by the next round here: the refusals iterate, and never nest, however
-  // often a done posts again. A done that posts again every time it is refused never ends this.
-  std::vector<std::pair<int, control_cmd>> left;
+  // What the ingress holds, never applied (S2b.1): commands refused, done(false), each counted out
+  // first; plain messages dropped and counted; router entries bounced to their homes (S2-Q10).
+  // Taken under the lock, so a post that returned before the destruction began is seen. A done
+  // that posts again (only a done may post to a scheduler being destroyed) is queued for refusal,
+  // never applied, and refused by the next round here: the refusals iterate, and never nest,
+  // however often a done posts again. A done that posts again every time it is refused never ends
+  // this. Messages and router entries posted from here on are refused (post_message, post_route).
+  std::vector<ingress_entry> left;
   {
     std::lock_guard<std::mutex> lock(ingress_mutex_);
     destroying_ = true;
-    left.swap(controls_);
+    left.swap(ingress_);
+    ingress_capped_ = 0;
   }
   while (!left.empty()) {
-    for (auto &entry : left) {
-      controls_waiting_.fetch_sub(1, std::memory_order_release);
-      refuse_control(entry.second);
-    }
+    for (ingress_entry &entry : left)
+      refuse_entry(entry);
     left.clear();
     std::lock_guard<std::mutex> lock(ingress_mutex_);
-    left.swap(controls_);
+    left.swap(ingress_);
+  }
+  if (router_) {
+    // The remote waiters recorded here go with it (group 0's teardown; a group rehomed its own in
+    // leave_router), and its processes leave the directory, which no reap will now erase.
+    for (const auto &[key, records] : remote_waiters_)
+      router_->note_remote_waiters(-static_cast<int>(records.size()));
+    for (const auto &[pid, p] : procs_.all())
+      router_->directory().remove(pid);
   }
 }
 
@@ -429,6 +463,8 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.state.data_step_nodes = set.data_step_nodes;
   proc.state.stats.start();
   procs_.insert(std::move(pp));
+  if (router_) // the app's directory, from its creation until its reap (exec_router.h)
+    router_->directory().add(pid, route_self_, opts.owner);
   return pid;
 }
 
@@ -472,6 +508,8 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.state.data_step_nodes = set.data_step_nodes;
   proc.state.stats.start();
   procs_.insert(std::move(pp));
+  if (router_) // the app's directory, from its creation until its reap (exec_router.h)
+    router_->directory().add(pid, route_self_, opts.owner);
   return pid;
 }
 
@@ -786,45 +824,39 @@ void async_scheduler::drain(bool in_step) {
   // Cross-thread posts and settled calls, when there are any: the flag spares an empty ingress
   // the lock.
   if (ingress_pending_.load(std::memory_order_acquire)) {
-    std::vector<std::pair<std::string, value_t>> batch;
+    std::vector<ingress_entry> batch;
     std::vector<std::shared_ptr<async_call>> finished;
-    std::vector<std::pair<int, control_cmd>> controls;
     {
       std::lock_guard<std::mutex> lock(ingress_mutex_);
       batch.swap(ingress_);
       finished.swap(completions_);
-      controls.swap(controls_);
+      ingress_capped_ = 0; // the batch is out of the queue: the cap counts what is posted next
       ingress_pending_.store(false, std::memory_order_relaxed);
       // The batch's commands stay counted as waiting, each until it is applied or refused.
     }
     chain_valid_ = false;
-    // On the scheduler thread now: deliver_to_receivers mutates process state, which is safe
-    // here (no other thread touches the scheduler). A message with no waiter falls into the
-    // per-path pending FIFO, exactly as an on-thread msg-send would. Then the settled calls, then
-    // the commands posted from other threads (post_control), each in the order they came. One at
-    // a time: a call's finish or a kill can throw (a tree write's slots), and what was not yet
-    // applied then goes back to the ingress before the exception propagates (S0.7).
-    std::size_t m = 0, f = 0, c = 0;
+    // On the scheduler thread now: delivering mutates process state, which is safe here (no
+    // other thread touches the scheduler). The ordered queue first (S2b.1): messages, commands
+    // and router entries in the order they were posted, a message with no waiter falling into the
+    // per-path pending FIFO, exactly as an on-thread msg-send would; then the settled calls. One
+    // at a time: a delivery, a call's finish or a kill can throw (a tree write's slots), and what
+    // was not yet applied then goes back to the ingress before the exception propagates (S0.7).
+    std::size_t m = 0, f = 0;
     bool counted_out = false; // the command being applied no longer counts as waiting
     try {
       while (m < batch.size()) {
-        auto &[path, msg] = batch[m++];
-        deliver_to_receivers(path, msg);
+        counted_out = false;
+        apply_entry(batch[m++], counted_out);
       }
       while (f < finished.size())
         finish_async_call(finished[f++]);
-      while (c < controls.size()) {
-        auto &[pid, cmd] = controls[c++];
-        counted_out = false;
-        apply_control(pid, cmd, counted_out);
-      }
     } catch (...) {
-      if (c > 0) { // a command threw: it is refused, unless its done was called already
-        if (!counted_out)
-          controls_waiting_.fetch_sub(1, std::memory_order_release);
-        refuse_control(controls[c - 1].second);
-      }
-      requeue_ingress(batch, m, finished, f, controls, c);
+      // The entry or call that threw is not put back (it may have half happened), and is counted.
+      if (f > 0)
+        ingress_counts_.throw_dropped.fetch_add(1, std::memory_order_relaxed);
+      else if (m > 0)
+        entry_threw(batch[m - 1], counted_out);
+      requeue_ingress(batch, m, finished, f);
       throw;
     }
   }
@@ -840,6 +872,9 @@ void async_scheduler::drain(bool in_step) {
       try {
         if (procs_.wake_due(now, &lock_expired_) > 0) {
           chain_valid_ = false; // the wakes are no step's time
+          // A timed wait on a key homed elsewhere that ran out unsubscribes at its home (S2b.4).
+          if (remote_timed_waits_ > 0)
+            sweep_remote_waits();
           if (!lock_expired_.empty() && home_)
             home_->wait_expired(lock_expired_);
         }
@@ -868,13 +903,16 @@ int async_scheduler::step_once() {
   struct reap_guard {
     detail::process_table &procs;
     int &pid;
+    exec_router *router; // the directory: a reap erases its entry (exec_router.h)
     ~reap_guard() {
       if (pid >= 0) {
         procs.erase(pid);
+        if (router)
+          router->directory().remove(pid);
         pid = -1;
       }
     }
-  } reap_deferred{procs_, reap_after_step_};
+  } reap_deferred{procs_, reap_after_step_, router_};
   execute_process_step(*pp);
   ++total_steps_;
   return 1;
@@ -980,13 +1018,16 @@ int async_scheduler::step_run(uint64_t budget) {
   struct reap_guard {
     detail::process_table &procs;
     int &pid;
+    exec_router *router; // the directory: a reap erases its entry (exec_router.h)
     ~reap_guard() {
       if (pid >= 0) {
         procs.erase(pid);
+        if (router)
+          router->directory().remove(pid);
         pid = -1;
       }
     }
-  } reap_deferred{procs_, reap_after_step_};
+  } reap_deferred{procs_, reap_after_step_, router_};
   // A process with a per-step cap keeps one step a pick (its guard is per step), and so does one
   // with max_memory: its heap is measured and charged step by step (heap_after_step), and a run
   // would let a short action allocate past its budget before any measurement began.
@@ -1083,8 +1124,16 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   // earliest live timer (precise, as wait_for_work keeps it), the calls' next timeout or charge,
   // the frame waiters' beat (a coarse 1 ms, as Exec.run's), and the idle collection falling due.
   // The clock is read only for a beat.
-  if (!wakeup_->has_notifier())
-    return taken;
+  if (wakeup_->has_notifier())
+    fill_run_report();
+  // Published info (S2-Q9): every run loop of a scheduler in an app's routing, whichever driver
+  // ran it.
+  if (router_)
+    publish_info();
+  return taken;
+}
+
+void async_scheduler::fill_run_report() {
   run_report_.runnable = has_runnable();
   run_report_.best_runnable = procs_.best_runnable();
   run_report_.awaiting_frame = procs_.awaiting_count() > 0;
@@ -1117,7 +1166,6 @@ uint64_t async_scheduler::run_loop(std::optional<uint64_t> max_steps,
   }
   run_report_.next_deadline = next;
   run_report_.precise = precise;
-  return taken;
 }
 
 task<std::unordered_map<int, value_t>> async_scheduler::run(std::optional<uint64_t> max_steps,
@@ -1279,8 +1327,7 @@ int async_scheduler::wake_awaiting() {
   return woken;
 }
 
-bool async_scheduler::receive_message(int pid, const std::string &path) {
-  check_not_in_kernel("async_scheduler::receive_message");
+bool async_scheduler::park_receiver(int pid, const std::string &path) {
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
     return false;
@@ -1291,23 +1338,52 @@ bool async_scheduler::receive_message(int pid, const std::string &path) {
     auto now = std::chrono::steady_clock::now();
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
   }
+  // A wait left from before (a remote one whose end no check saw) is over: this is a new one.
+  if (!remote_waits_.empty())
+    end_remote_wait(pid);
   proc.recv_path = path;
   proc.recv_deadline.reset();
+  // A delivery from another group names the wait it is for (deliver_to). Drawn from one count
+  // per scheduler, so the lowest is the earliest wait (a requeue's next local waiter, S2b.0a).
+  proc.recv_seq = ++recv_clock_;
   procs_.set_status(proc, process_status::waiting); // indexed under its channel
   return true;
 }
 
+bool async_scheduler::receive_message(int pid, const std::string &path) {
+  check_not_in_kernel("async_scheduler::receive_message");
+  if (!park_receiver(pid, path))
+    return false;
+  subscribe_if_remote(*procs_.find(pid), path); // S2b.4: a key homed elsewhere
+  return true;
+}
+
 bool async_scheduler::receive_message_until(int pid, const std::string &path, double seconds) {
-  if (!receive_message(pid, path))
+  check_not_in_kernel("async_scheduler::receive_message");
+  if (!park_receiver(pid, path))
     return false;
   process &proc = *procs_.find(pid);
   proc.recv_deadline = detail::time_after(std::chrono::steady_clock::now(), seconds);
-  procs_.update(proc); // a timer for the deadline
+  procs_.update(proc);             // a timer for the deadline
+  subscribe_if_remote(proc, path); // with the deadline, which its home skips a record past
   return true;
 }
 
 int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
   check_not_in_kernel("async_scheduler::deliver_to_receivers");
+  // S2b.4: a key homed in another group goes there as a send (exec_router.h), refused at its cap.
+  group_ref home;
+  if (homed_elsewhere(path, &home)) {
+    detail::route_entry e;
+    e.what = detail::route_entry::kind::send;
+    e.key = path;
+    e.value = msg;
+    return post_routed(std::move(home), std::move(e)) > 0 ? 0 : -1;
+  }
+  return deliver_home(path, msg, false);
+}
+
+int async_scheduler::deliver_home(const std::string &path, const value_t &msg, bool uncapped) {
   // The processes waiting on `path`, from the receiver index (no scan).
   std::vector<process *> list;
   list.swap(woken_);
@@ -1322,31 +1398,69 @@ int async_scheduler::deliver_to_receivers(const std::string &path, const value_t
         !proc->state.stack.back().results.empty())
       proc->state.stack.back().results.back() = msg;
     procs_.set_status(*proc, process_status::ready);
+    // One subscribed at another home before this key's home changed: its wait there is over.
+    if (!remote_waits_.empty())
+      end_remote_wait(proc->pid);
   }
   const int woken = static_cast<int>(list.size());
   list.clear();
   woken_.swap(list);
-  // If no process was waiting, queue for later msg-recv calls.
-  if (woken == 0) {
+  // The remote waiters this home recorded (S2b.4), each by a deliver to its group.
+  const std::size_t remote = remote_waiters_.empty() ? 0 : deliver_remote(path, msg, woken > 0);
+  // If no process was waiting, queue for later msg-recv calls. A message past the cap is dropped,
+  // and counted; an uncapped one (rehomed: its old home had accepted it) goes past the cap.
+  if (woken == 0 && remote == 0) {
     auto &q = pending_messages_[path];
-    if (max_pending_messages == 0 || q.size() < max_pending_messages)
-      q.push(msg);
+    if (uncapped || max_pending_messages == 0 || q.size() < max_pending_messages)
+      q.push_back(msg);
+    else
+      ingress_counts_.pending_dropped.fetch_add(1, std::memory_order_relaxed);
   }
-  return woken;
+  return woken + static_cast<int>(remote);
+}
+
+bool async_scheduler::deliver_to(int pid, std::uint64_t seq, const std::string &key,
+                                 const value_t &msg) {
+  // Only the wait it was meant for (td 4.6): the same process, still waiting on `key` with that
+  // recv_seq; else stale.
+  process *const p = procs_.find(pid);
+  if (!p || p->status != process_status::waiting || !p->recv_path || p->recv_seq != seq ||
+      *p->recv_path != key)
+    return false;
+  // The frame first, then the wait (S2b.R2, C-m3): a throw while patching leaves the wait whole,
+  // for the throw rule's resubscribe.
+  p->state.result = msg;
+  if (!deliver_await(p->state, msg) && !p->state.stack.empty() &&
+      !p->state.stack.back().results.empty())
+    p->state.stack.back().results.back() = msg;
+  deliver_patched_ = true; // the throw rule: from here on it is delivered
+  p->recv_path.reset();
+  p->recv_deadline.reset();
+  procs_.set_status(*p, process_status::ready);
+  if (!remote_waits_.empty()) {
+    const auto w = remote_waits_.find(pid);
+    if (w != remote_waits_.end() && w->second.seq == seq)
+      forget_remote_wait(w); // answered: its home used the record
+  }
+  return true;
 }
 
 std::optional<value_t> async_scheduler::pop_pending_message(const std::string &path) {
+  if (homed_elsewhere(path, nullptr))
+    return std::nullopt; // its FIFO is at its home: a receive subscribes there (S2b.4)
   auto it = pending_messages_.find(path);
   if (it == pending_messages_.end() || it->second.empty())
     return std::nullopt;
   auto msg = std::move(it->second.front());
-  it->second.pop();
+  it->second.pop_front();
   if (it->second.empty())
     pending_messages_.erase(it);
   return msg;
 }
 
 std::size_t async_scheduler::pending_message_count(const std::string &path) const {
+  if (homed_elsewhere(path, nullptr))
+    return 0; // at its home (S2c reads the home's published count, MS-11)
   auto it = pending_messages_.find(path);
   if (it == pending_messages_.end())
     return 0;
@@ -1360,19 +1474,96 @@ std::size_t async_scheduler::total_pending_messages() const {
   return total;
 }
 
-void async_scheduler::post_message(const std::string &path, const value_t &msg) {
+bool async_scheduler::post_message(const std::string &path, const value_t &msg) {
   // Callable from any thread — the ONLY thread-safe entry point into messaging. Just enqueue
   // under the lock; delivery happens on the scheduler thread in drain_ingress(). A driver
   // blocked in wait_for_work() wakes.
+  // S2b.4: a key the router homes in another group goes there as a send, the home's cap applying
+  // (exec_router.h, "Host posts"). The router's lookup is thread-safe; the cache is not, and is
+  // not used here.
+  if (router_ && router_->active() && path.find('#') == std::string::npos) {
+    // An island (no prefix of its own) keeps the keys no other group's prefix covers (S2b.0a): it
+    // asks only for a covering prefix, never building group 0. A key homed here once its handle
+    // closed (its teardown) goes on as a send too: the poster waits for the forward, so it arrives
+    // after what the teardown sends on.
+    const bool island = !router_->has_prefix(route_self_);
+    group_ref home = island ? router_->prefix_home_of(path) : router_->home_of(path);
+    if (home && (home != route_self_ || route_self_.closed())) {
+      detail::route_entry e;
+      e.what = detail::route_entry::kind::send;
+      e.key = path;
+      e.value = msg;
+      return post_routed(std::move(home), std::move(e), nullptr, true) > 0;
+    }
+  }
+  // A '#' key's post is a runtime reply (a kernel's, a task's, a lane's): a completion, never
+  // capped (S2b.R2, S-M1); its waiter would wait for good.
+  const bool capped = path.find('#') == std::string::npos;
+  return push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), capped);
+}
+
+bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
   // The wait is notified under the lock: once the poster lets go of it, it touches the scheduler
   // no more, so a scheduler thread that drains this post may destroy the scheduler.
   std::lock_guard<std::mutex> lock(ingress_mutex_);
+  if (destroying_)
+    return false; // the destructor took the queue: nothing posted now would be applied
+  // The cap (S2-Q10) counts the capped entries in the queue; a drain empties it.
+  if (capped) {
+    const std::size_t cap = ingress_cap_.load(std::memory_order_relaxed);
+    if (cap != 0 && ingress_capped_ >= cap) {
+      ingress_counts_.ingress_refused.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    ++ingress_capped_;
+  }
   // The posts are serialized by the lock: a plain load and store, no locked read-modify-write.
-  ingress_posts_.store(ingress_posts_.load(std::memory_order_relaxed) + 1,
-                       std::memory_order_relaxed);
-  ingress_.emplace_back(path, msg);
+  if (std::holds_alternative<posted_message>(e))
+    ingress_posts_.store(ingress_posts_.load(std::memory_order_relaxed) + 1,
+                         std::memory_order_relaxed);
+  ingress_.push_back(std::move(e));
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
+  return true;
+}
+
+// --- Stage 2: the router (S2b; exec_router.h). The protocol's ends are in exec_router.cpp. ---
+
+void async_scheduler::set_router(exec_router *router, group_ref self) {
+  router_ = router;
+  route_self_ = std::move(self);
+  // exec_group registers its prefixes before this (S2b.R2, C-M4): a group that had one forwards
+  // what it holds at its teardown even once unregistered.
+  if (router_ && route_self_ && router_->has_prefix(route_self_))
+    prefixed_once_ = true;
+}
+
+bool async_scheduler::post_route(detail::route_entry e) {
+  // Only a send counts against the cap, unless it is a rehomed one (S2-Q10).
+  const bool capped = e.what == detail::route_entry::kind::send && !e.uncapped;
+  return push_capped(ingress_entry(std::in_place_type<detail::route_entry>, std::move(e)), capped);
+}
+
+void async_scheduler::set_ingress_cap(std::size_t cap) {
+  std::lock_guard<std::mutex> lock(ingress_mutex_); // a post reads it under the lock
+  ingress_cap_.store(cap, std::memory_order_relaxed);
+  ingress_cap_set_ = true;
+}
+
+async_scheduler::ingress_stats async_scheduler::ingress_counters() const noexcept {
+  const auto get = [](const std::atomic<std::uint64_t> &a) {
+    return a.load(std::memory_order_relaxed);
+  };
+  const ingress_counter_set &c = ingress_counts_;
+  ingress_stats s;
+  s.ingress_refused = get(c.ingress_refused);
+  s.requeued = get(c.requeued);
+  s.stale_dropped = get(c.stale_dropped);
+  s.pending_dropped = get(c.pending_dropped);
+  s.control_refused = get(c.control_refused);
+  s.throw_dropped = get(c.throw_dropped);
+  s.destroy_dropped = get(c.destroy_dropped);
+  return s;
 }
 
 void async_scheduler::drain_ingress() {
@@ -1714,7 +1905,9 @@ int async_scheduler::restore(process_ptr proc) {
   proc->lock_expired_pending = false;
   proc->inherited_priority = INT_MAX;
   proc->create_time = std::chrono::steady_clock::now();
-  procs_.insert(std::move(proc));
+  const process_ptr &added = procs_.insert(std::move(proc));
+  if (router_) // the app's directory, from its creation until its reap (exec_router.h)
+    router_->directory().add(pid, route_self_, added->owner);
   return pid;
 }
 
@@ -1986,6 +2179,10 @@ void async_scheduler::kill_process(process &proc, const std::string &reason) {
     p->state.stats.mark_complete();
     release_if_idle(*p);
   }
+  // A killed process waiting on a key homed elsewhere unsubscribes there (S2b.4; a group's
+  // teardown's kills, after leave_router).
+  if (!remote_waits_.empty())
+    end_remote_wait(pid);
   if (cancel_error)
     std::rethrow_exception(cancel_error);
 }
@@ -2175,6 +2372,8 @@ int async_scheduler::fork(int pid) {
   child->state.result = value_t(static_cast<int64_t>(0));
 
   procs_.insert(std::move(child));
+  if (router_) // the app's directory, from its creation until its reap (exec_router.h)
+    router_->directory().add(child_pid, route_self_, parent.owner);
   return child_pid;
 }
 
@@ -2252,6 +2451,7 @@ bool async_scheduler::set_priority_floor(int pid, int floor) {
     return false;
   p->priority_floor = floor;
   p->priority_floor_explicit = true;
+  procs_.bump_generation(); // S2b.3: the floor is in its published row, and no update() ran
   return true;
 }
 
@@ -2261,11 +2461,12 @@ void async_scheduler::note_priority_clamped() {
 }
 
 bool async_scheduler::post_control(int pid, control_cmd cmd) {
-  // Any thread. Queued with the ingress and applied by the next drain, on the scheduler thread
-  // (apply_control): the posting thread may not read procs_, so an unknown pid is found, and
-  // refused, there. Notified under the lock, as post_message is.
+  // Any thread. Queued in the ordered ingress, in post order with the messages and router entries
+  // (S2b.1), and applied by the next drain, on the scheduler thread (apply_control): the posting
+  // thread may not read procs_, so an unknown pid is found, and refused, there. Never capped.
+  // Notified under the lock, as post_message is.
   std::lock_guard<std::mutex> lock(ingress_mutex_);
-  controls_.emplace_back(pid, std::move(cmd));
+  ingress_.emplace_back(std::in_place_type<posted_control>, pid, std::move(cmd));
   controls_waiting_.fetch_add(1, std::memory_order_release);
   if (destroying_)
     return false; // a done the destructor calls posted this: the destructor refuses it next
@@ -2310,6 +2511,10 @@ void async_scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out
     case control_cmd::kind::signal:
       applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
       break;
+    case control_cmd::kind::kill_owner:
+      kill_owner(cmd.owner); // S2b (S2-Q8): pool.kill_owner's command; the pid is not read
+      applied = true;
+      break;
     }
   } catch (...) {
     // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
@@ -2324,40 +2529,99 @@ void async_scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out
   settle(applied);
 }
 
-void async_scheduler::requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch,
-                                      std::size_t m,
+void async_scheduler::apply_entry(ingress_entry &e, bool &counted_out) {
+  if (posted_message *m = std::get_if<posted_message>(&e)) {
+    deliver_home(m->key, m->value, false); // a host's message for a key homed here (or '#')
+  } else if (posted_control *c = std::get_if<posted_control>(&e)) {
+    apply_control(c->pid, c->cmd, counted_out);
+  } else {
+    apply_route(std::get<detail::route_entry>(e));
+  }
+}
+
+void async_scheduler::entry_threw(ingress_entry &e, bool counted_out) noexcept {
+  if (posted_control *c = std::get_if<posted_control>(&e)) {
+    // A command that threw is refused, unless its call returned (its done was called already).
+    if (!counted_out) {
+      controls_waiting_.fetch_sub(1, std::memory_order_release);
+      refuse_control(c->cmd);
+      ingress_counts_.control_refused.fetch_add(1, std::memory_order_relaxed);
+    }
+  } else if (detail::route_entry *r = std::get_if<detail::route_entry>(&e);
+             r && r->what == detail::route_entry::kind::deliver) {
+    if (!deliver_patched_) {
+      // A deliver that threw before patching its frame (the throw rule, exec_router.h): stale, as
+      // one would be, and its process, which still waits with that seq, subscribes again.
+      deliver_threw(std::move(*r));
+    } else if (r->broadcast != 0) {
+      // Delivered, then threw: a tracked copy still answers taken, or its tracker would wait for
+      // good (S2b.R2, C-m3).
+      try {
+        detail::route_entry t;
+        t.what = detail::route_entry::kind::taken;
+        t.key = r->key;
+        t.broadcast = r->broadcast;
+        post_routed(r->from, std::move(t));
+      } catch (...) {
+      }
+    }
+  }
+  ingress_counts_.throw_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
+void async_scheduler::refuse_entry(ingress_entry &e) noexcept {
+  if (posted_control *c = std::get_if<posted_control>(&e)) {
+    controls_waiting_.fetch_sub(1, std::memory_order_release);
+    refuse_control(c->cmd);
+    ingress_counts_.control_refused.fetch_add(1, std::memory_order_relaxed);
+  } else if (detail::route_entry *r = std::get_if<detail::route_entry>(&e)) {
+    bounce_route(std::move(*r)); // to its home, or dropped and counted
+  } else {
+    ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void async_scheduler::requeue_ingress(std::vector<ingress_entry> &batch, std::size_t m,
                                       std::vector<std::shared_ptr<async_call>> &finished,
-                                      std::size_t f,
-                                      std::vector<std::pair<int, control_cmd>> &controls,
-                                      std::size_t c) noexcept {
+                                      std::size_t f) noexcept {
   // The entry that threw is not put back: a delivery or a finish may have half happened, and the
   // command was refused.
   try {
+    std::size_t capped = 0; // what goes back counts against the cap again
+    for (std::size_t i = m; i < batch.size(); ++i) {
+      if (std::holds_alternative<posted_message>(batch[i]))
+        ++capped;
+      else if (const auto *r = std::get_if<detail::route_entry>(&batch[i]))
+        capped += r->what == detail::route_entry::kind::send && !r->uncapped ? 1 : 0;
+    }
     std::lock_guard<std::mutex> lock(ingress_mutex_);
     ingress_pending_.store(true, std::memory_order_seq_cst); // the next drain looks again
     // An insert that fails (no memory) leaves its queue as it was.
     ingress_.insert(ingress_.begin(), std::make_move_iterator(batch.begin() + m),
                     std::make_move_iterator(batch.end()));
+    m = batch.size(); // back in the queue: its commands still waiting
+    ingress_capped_ += capped;
     completions_.insert(completions_.begin(), std::make_move_iterator(finished.begin() + f),
                         std::make_move_iterator(finished.end()));
     f = finished.size();
-    if (c < controls.size()) { // back in the queue: still waiting
-      controls_.insert(controls_.begin(), std::make_move_iterator(controls.begin() + c),
-                       std::make_move_iterator(controls.end()));
-      c = controls.size();
-    }
   } catch (...) {
     // No memory to queue them again. A settled call left behind still wakes who waits for it: the
-    // waiter's outcome() finishes the call. The commands left are refused rather than lost.
+    // waiter's outcome() finishes the call. The commands left are refused rather than lost; the
+    // messages and router entries left are counted.
     for (; f < finished.size(); ++f) {
       try {
         wake_async_waiters(finished[f]->channel());
       } catch (...) {
       }
     }
-    for (; c < controls.size(); ++c) {
-      controls_waiting_.fetch_sub(1, std::memory_order_release);
-      refuse_control(controls[c].second);
+    for (; m < batch.size(); ++m) {
+      if (posted_control *c = std::get_if<posted_control>(&batch[m])) {
+        controls_waiting_.fetch_sub(1, std::memory_order_release);
+        refuse_control(c->cmd);
+        ingress_counts_.control_refused.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        ingress_counts_.throw_dropped.fetch_add(1, std::memory_order_relaxed);
+      }
     }
   }
 }
@@ -2415,6 +2679,7 @@ process_info async_scheduler::make_info(const process &proc) const {
   info.uid = proc.uid;
   info.gid = proc.gid;
   info.scope = process_scope(proc.root_path, proc.owner_root);
+  info.owner = proc.owner;
   info.step_count = proc.step_count();
   fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();
@@ -2511,10 +2776,14 @@ bool async_scheduler::reap(int pid, process_ptr *released) {
   // Its env, state, watch_handlers and captured values (including any Python holders) all live on
   // the process object, so erasing it frees them, or `released` takes them to free later. The
   // process stepping now (its on_complete reaping it) is erased once its step is over.
+  if (!remote_waits_.empty())
+    end_remote_wait(pid); // a wait no kill ended (S2b.4)
   if (pid == current_pid_) {
     reap_after_step_ = pid;
   } else {
     procs_.erase(pid);
+    if (router_) // the directory: from its creation until its reap (exec_router.h)
+      router_->directory().remove(pid);
     if (released)
       *released = std::move(proc);
   }

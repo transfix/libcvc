@@ -678,11 +678,20 @@ the next `run()` applies the grant (LT-2).
 - **Self.** Lowering (a higher number) is always allowed; raising, down to the floor. A process
   that demoted itself can come back, never above what its host gave it.
 - **Another process.** It must be live, have the caller's `owner` (unowned hosts count `""` as one
-  owner), and either have the caller's `uid` or descend from the caller by `parent_pid` (at most
-  64 hops). Otherwise the call returns `#f`, as for an unknown pid (Q5's "looks unknown"), and
-  `get-priority` returns `nil`. Forked and spawned children keep their parent's `owner` (L1,
-  L1b), so a program reaches its own children and never another document's. Lowering it is always
-  allowed; raising it, down to `max(target floor, caller floor)`.
+  owner within a scheduler), and either have the caller's `uid` or descend from the caller by
+  `parent_pid` (at most 64 hops). Otherwise the call returns `#f`, as for an unknown pid (Q5's
+  "looks unknown"), and `get-priority` returns `nil`. Forked and spawned children keep their
+  parent's `owner` (L1, L1b), so a program reaches its own children and never another document's.
+  Lowering it is always allowed; raising it, down to `max(target floor, caller floor)`.
+- **Owners across groups** (threaded execution's S2-Q7, built in its S2b). The rule is per
+  process, not per group: group 0 holds processes of several owners (a document's sliced tasks
+  beside other documents'). Each pooled pycvc `Exec` runs its programs as `pycvc:<prefix>.<i>`,
+  its chroot, so two pooled `Exec`s are two owners; a plain `Exec` keeps `""`. Owner `""` still
+  counts as one owner within a scheduler, but has no rights across groups: a caller with owner
+  `""` reaches no process in another group, whatever its owner. The same owner rule governs a
+  program's `kill`, `pause`, `resume`, `ps` and `inspect`
+  ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.5): an owned caller sees only its owner's
+  processes, in its own group too.
 - **A refusal raises `PermissionError`**, never a silent no-op. **Host calls are unchecked**.
 - **`spawn`'s priority argument.** Under `priority` and `priority_rr`, a value better than the
   caller's floor is clamped to it, logged once and counted (`priority_clamped`). Under
@@ -824,22 +833,32 @@ the next `run()` applies the grant (LT-2).
 
 ### 7.5 Groups
 
-- **Another group's process** (td Stage 2). `set-priority` on a pid in another group applies 7.2
-  to the target's published info, which carries its `owner`, `uid`, `parent_pid` and floor (td
-  4.5): the same owner, then the caller's `uid` or descent, walked over the pool's published
-  `parent_pid`s (pids are pool-wide, at most 64 hops), then the floor. A pid that fails the first
-  two returns `#f` (Q5), a refused raise raises `PermissionError`, and otherwise the call posts
-  `control{set_priority, p, caller}` through `pool.post_control`, `caller` carrying the caller's
-  pid, `owner`, `uid` and floor, and returns `#t`. The target re-applies the whole rule with
+- **What S2b built.** The pid directory (each pid's group and owner, from its creation until its
+  reap), each group's published rows (owner, uid, parent pid, floor, priorities, locks held and the
+  rest, rebuilt when its process table changes, td 4.5), and `kill`, `pause` and `resume` across
+  groups: posted to the target's group when the directory gives the pid the caller's non-empty
+  owner, returning `#t` for "requested"; `#f` otherwise. Owner `""` has no rights across groups
+  (7.2). `set-priority` and `get-priority` across groups, below, are S2c's and not built: on a pid
+  in another group they return `#f` and `nil`, as for an unknown pid.
+- **Another group's process** (td Stage 2, S2c). `set-priority` on a pid in another group applies
+  7.2 to the target's published info, which carries its `owner`, `uid`, `parent_pid` and floor (td
+  4.5): the same non-empty owner, then the caller's `uid` or descent, walked over the pool's
+  published `parent_pid`s (pids are pool-wide, at most 64 hops; descent cannot cross groups until
+  Stage 3 moves processes), then the floor. A pid that fails the first two returns `#f` (Q5), a
+  refused raise raises `PermissionError`, and otherwise the call posts `control{set_priority, p,
+  caller}` through `pool.post_control`, `caller` carrying the caller's pid, `owner`, `uid` and
+  floor, and returns `#t`. The target re-applies the whole rule with
   `detail::check_priority_change`, against its authoritative process and the carried caller, the
-  descent walked as before; a refusal there is counted and logged.
+  descent walked as before; a refusal there is silent and counted, and `PermissionError` comes only
+  from the caller's side (S2-Q8).
 - **A group's place in the pool follows its priorities.** At the end of each pump a group publishes
   `best_runnable`, the best effective priority among its runnable processes, boosts included.
   Under a priority policy, Stage 2's ready queue advances the group's virtual time by
   `pump_time / weight(best_runnable)`, with CFS weights (1024 at 0, about 1.25x per step): a group
   holding a -10 process gets about 9x the pump share of a nice-0 group, and none starves. Weights
   matter only while runnable groups outnumber workers. `state_exec.groups.priority_weights`
-  (default on) turns it off; it ships on only after `prio.groups_weighted` passes (11.2).
+  switches it; S2a ships it off (`pool_options::priority_weights` false), and S2c builds the
+  weights and turns them on only after `prio.groups_weighted` passes (11.2; S2-Q13).
 - **Fork-join (Stage 1)** keeps its LPT order, with ties broken by `best_runnable`.
 
 ### 7.6 OS thread and process priority (host-only)

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cvc/state/state_exec/async_stackless_evaluator.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
+#include <cvc/state/state_exec/exec_router.h> // group_ref, route_entry (S2b)
 #include <cvc/state/state_exec/heap.h> // cycle_registry
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/memory_tracker.h>
@@ -23,7 +24,10 @@
 #include <cvc/state/state_exec/scheduler_base.h>
 #include <cvc/state/state_exec/task.h>
 #include <cvc/state/state_exec/types.h>
+#include <deque>
 #include <functional>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +36,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace cvc {
@@ -179,6 +184,72 @@ public:
   /// The steps (or windows) the monitor caught since the scheduler was made (any thread).
   std::uint64_t long_steps() const noexcept { return long_steps_.load(std::memory_order_relaxed); }
 
+  // --- Stage 2: the router and process control across groups (S2b; td 4.5, 4.6; S2-Q7..S2-Q10;
+  // the rules are exec_router.h's) ---
+
+  /// Join the app's routing as the group `self` names: exec_group's constructor (an app's group)
+  /// and app::exec_scheduler() (group 0). From then on messaging on a key homed in another group
+  /// goes through `router` while it is active, the pids this scheduler issues are written to its
+  /// directory at their creation and erased at their reap, and each run loop publishes the
+  /// processes' rows. Once, before the first process. A scheduler never given one (a plain pycvc
+  /// Exec, a bare scheduler, a group with no app) never routes, writes or publishes anything.
+  void set_router(exec_router *router, group_ref self);
+  exec_router *router() const noexcept { return router_; }
+  /// The handle set_router gave (empty with none).
+  const group_ref &route_self() const noexcept { return route_self_; }
+  /// The teardown's step (S2b.4; exec_router.h, "Teardown and rehoming"): close this group's
+  /// handle, send what it holds to the keys' new homes (pending messages, remote-waiter records,
+  /// broadcast trackers, then queued messages and router entries), and only then unregister its
+  /// prefixes. The token holder, before the kills (the lock port's close may come before or not;
+  /// the kills may already have run: Ariadne's move). A second call finds nothing; a throw still
+  /// unregisters. Nothing without a router.
+  void leave_router();
+  /// Any thread (group_ref::post, which keeps the scheduler alive): push a router entry into the
+  /// ordered ingress, as post_message's posts are pushed (a wait or the notifier is woken). False
+  /// when the scheduler is being destroyed, or `e` is a send (not uncapped) and the ingress holds
+  /// ingress_cap() capped entries (counted in ingress_counters().ingress_refused).
+  bool post_route(detail::route_entry e);
+  /// Per-pid delivery (td 4.6's deliver; S2b.1): when `pid` waits on `key` with recv_seq `seq`,
+  /// give it `msg` as deliver_to_receivers gives a waiter its message, ready it, and return true;
+  /// else false (stale). Scheduler thread.
+  bool deliver_to(int pid, std::uint64_t seq, const std::string &key, const value_t &msg);
+
+  /// The ingress cap (S2-Q10): the capped entries (send entries and host post_message posts) the
+  /// ingress may hold undrained; 0: none. The tree's state_exec.groups.ingress_cap, else 65536; a
+  /// value set here wins over the tree's. Scheduler thread.
+  void set_ingress_cap(std::size_t cap);
+  std::size_t ingress_cap() const noexcept { return ingress_cap_; }
+  /// The ingress's counters since the scheduler was made (td 4.17, S2-Q10), any thread.
+  struct ingress_stats {
+    std::uint64_t ingress_refused = 0; ///< capped entries refused at the cap
+    std::uint64_t requeued = 0;        ///< messages a requeue gave back to this home
+    std::uint64_t stale_dropped =
+        0; ///< stale deliveries dropped (a waiter already had the message)
+    std::uint64_t pending_dropped = 0; ///< messages a full pending FIFO dropped
+    std::uint64_t control_refused = 0; ///< commands refused (never applied, or one that threw)
+    std::uint64_t throw_dropped = 0;   ///< entries a drain's throw left unapplied, not put back
+    /// messages and router entries no home took: the destructor's, a teardown's ('#' keys, an
+    /// island's own messages) and a forward that found no home left (~app)
+    std::uint64_t destroy_dropped = 0;
+  };
+  ingress_stats ingress_counters() const noexcept;
+
+  /// What the last run loop published (S2-Q9), any thread. Zero before the first publish, and
+  /// always for a scheduler with no router.
+  struct published_summary {
+    bool runnable = false;
+    std::chrono::steady_clock::time_point next_deadline =
+        std::chrono::steady_clock::time_point::max();
+    std::optional<int> best_runnable;
+    int processes = 0;           ///< its live processes (not ended ones awaiting their reap)
+    std::uint64_t publishes = 0; ///< run loops that published so far
+  };
+  published_summary published() const noexcept;
+  /// `pid`'s published row, any thread; nullopt for a pid the last publish did not have.
+  std::optional<published_process> published_info(int pid) const;
+  /// Every published row, in pid order, any thread (S2c's cross-group ps filters them by owner).
+  std::vector<published_process> published_rows() const;
+
   // --- Process submission ---
 
   int execute(const std::string &script, const execute_options &opts = {}) override;
@@ -283,7 +354,10 @@ public:
   /// the next step (drain_ingress → deliver_to_receivers), so no scheduler state is
   /// mutated off-thread. deliver_to_receivers itself is NOT thread-safe — external
   /// threads must use this, only the scheduler thread may call deliver_to_receivers.
-  void post_message(const std::string &path, const value_t &msg);
+  /// Stage 2 (S2b, S2-Q10): it counts against the ingress cap, and returns false, posting nothing,
+  /// once the cap is reached (or the scheduler is being destroyed); and on a key the router homes
+  /// in another group it forwards the message there as a send (the home's cap then applies).
+  bool post_message(const std::string &path, const value_t &msg);
 
   /// Block the calling (scheduler) thread until there is work for the next drain_ingress() and
   /// run: a post_message() or a settled async call (from any thread), a post to the lock port
@@ -362,6 +436,10 @@ public:
   /// null for none. Returns the new pid.
   int restore(cvc::state &node, environment_ptr natives = nullptr);
 
+  /// S2b (S2-Q8): the local half as scheduler_base's, plus the directory's: a pid in another group
+  /// of the caller's (non-empty) owner is posted there.
+  bool control_as(const std::string &caller_owner, int pid, control_cmd::kind what) override;
+
   bool set_priority(int pid, int priority) override;
   std::optional<priority_info> get_priority(int pid) const override;
   priority_change set_priority_checked(int caller_pid, int pid, int priority) override;
@@ -370,8 +448,9 @@ public:
   void note_priority_clamped() override;
   /// Thread-safe: `cmd` for process `pid`, applied between steps on the scheduler's thread by the
   /// next drain (a step's, or drain_ingress()'s), as post_message's posts are; a driver blocked
-  /// in wait_for_work() wakes. Commands are applied one at a time, first in, first out, after the
-  /// drain's messages and completions, whatever the order they were all posted in (S0.7). kill,
+  /// in wait_for_work() wakes. Commands are applied one at a time in the order they were posted
+  /// with the messages and router entries (the ordered ingress, S2b.1), before the drain's settled
+  /// calls (S0.7's throw rule is kept). kill,
   /// pause, resume, signal and set_priority are the direct calls' host paths, unchecked (kill's
   /// reason is killed_by_user; signal "SIGKILL" kills); an unknown pid is found, and refused,
   /// then. Each one's `done`, when set, gets what its call returned (a kill that throws has still
@@ -384,6 +463,13 @@ public:
   /// Thread-safe: whether a posted command waits for a drain (a posted message is no command).
   bool has_pending_control() const noexcept {
     return controls_waiting_.load(std::memory_order_acquire) != 0;
+  }
+  /// Thread-safe (S2b): whether anything posted waits for a drain: a message, a command, a router
+  /// entry or a settled call. A driver that pumps a scheduler only while it has live processes
+  /// (group 0's) pumps it for this too, so a router entry homed there is never stranded (S2.md
+  /// section 0, row 22).
+  bool has_pending_ingress() const noexcept {
+    return ingress_pending_.load(std::memory_order_acquire);
   }
   bool set_max_steps(int pid, uint64_t max_steps);
   bool set_max_time(int pid, double seconds);
@@ -627,17 +713,31 @@ private:
 
   const process_ptr no_process_; // null: current_process() while none is stepped
 
-  /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler).
-  std::unordered_map<std::string, std::queue<value_t>> pending_messages_;
+  /// Per-path FIFO for messages sent when no receiver is waiting (mirrors sync scheduler). A deque:
+  /// a requeue goes to its front (S2b.4).
+  std::unordered_map<std::string, std::deque<value_t>> pending_messages_;
 
-  /// Thread-safe ingress for cross-thread post_message(): guarded by ingress_mutex_, drained
-  /// on the scheduler thread by drain_ingress() (public) and applied via deliver_to_receivers.
+  /// The ordered ingress (S2b.1; exec_router.h): post_message's messages, post_control's commands
+  /// and router entries in one queue, applied in post order by a drain, after the lock port's posts
+  /// and before the settled calls. Guarded by ingress_mutex_.
+  struct posted_message {
+    posted_message(std::string k, value_t v) : key(std::move(k)), value(std::move(v)) {}
+    std::string key;
+    value_t value;
+  };
+  struct posted_control {
+    posted_control(int p, control_cmd c) : pid(p), cmd(std::move(c)) {}
+    int pid;
+    control_cmd cmd;
+  };
+  using ingress_entry = std::variant<posted_message, posted_control, detail::route_entry>;
   std::mutex ingress_mutex_;
-  std::vector<std::pair<std::string, value_t>> ingress_;
+  std::vector<ingress_entry> ingress_;
+  /// The capped entries in ingress_ (host messages and sends not uncapped), against ingress_cap_.
+  std::size_t ingress_capped_ = 0;
   std::vector<std::shared_ptr<async_call>> completions_; // settled calls, guarded likewise
-  std::vector<std::pair<int, control_cmd>> controls_;    // post_control's, guarded likewise
-  /// Set (under ingress_mutex_) while ingress_, completions_ or controls_ holds something, so a
-  /// drain finds an empty ingress without the lock.
+  /// Set (under ingress_mutex_) while ingress_ or completions_ holds something, so a drain finds
+  /// an empty ingress without the lock.
   std::atomic<bool> ingress_pending_{false};
   /// post_message() and post_async_completion() calls taken (ingress_posts_for_test()).
   std::atomic<std::uint64_t> ingress_posts_{0};
@@ -688,12 +788,25 @@ private:
   void drain(bool in_step);
   // Apply one post_control command (scheduler thread), then tell its done what the call returned.
   void apply_control(int pid, control_cmd &cmd, bool &counted_out);
-  // A drain that threw: what it had not applied (batch[m..], finished[f..], controls[c..]) goes
-  // back to the front of the ingress, ahead of what was posted since (S0.7).
-  void requeue_ingress(std::vector<std::pair<std::string, value_t>> &batch, std::size_t m,
-                       std::vector<std::shared_ptr<async_call>> &finished, std::size_t f,
-                       std::vector<std::pair<int, control_cmd>> &controls, std::size_t c) noexcept;
+  // Apply one entry of the ordered ingress (drain); `counted_out` as apply_control's.
+  void apply_entry(ingress_entry &e, bool &counted_out);
+  // The entry that threw in a drain (the throw rule, exec_router.h): not put back, and counted; a
+  // command refused unless its call returned; a deliver that patched nothing goes home as a
+  // requeue.
+  void entry_threw(ingress_entry &e, bool counted_out) noexcept;
+  // A drain that threw: what it had not applied (batch[m..], finished[f..]) goes back to the front
+  // of the ingress, ahead of what was posted since (S0.7).
+  void requeue_ingress(std::vector<ingress_entry> &batch, std::size_t m,
+                       std::vector<std::shared_ptr<async_call>> &finished, std::size_t f) noexcept;
+  // The destructor's end of an entry never applied: a command refused, a message dropped and
+  // counted, a router entry bounced to its home (bounce_route).
+  void refuse_entry(ingress_entry &e) noexcept;
+  // Push a message or router entry into the ingress under ingress_mutex_: false when it is being
+  // destroyed, or `capped` and the cap is reached (counted).
+  bool push_capped(ingress_entry &&e, bool capped);
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
+  // The run loop's report (run_report_), at its end, while a wake notifier is installed.
+  void fill_run_report();
   // The tree's state_exec.slice_steps and slice_seconds, read at a run's start when a setting
   // under state_exec may have changed (settings_changes), each unless its own setter
   // (set_slice_steps, set_slice_seconds, or set_slice for both) was called.
@@ -743,6 +856,122 @@ private:
   /// CVC_EXEC_FUZZ's yields at the ingress posts (S2-Q15), read as the scheduler is made; null
   /// when it is off.
   std::unique_ptr<detail::lock_fuzz> ingress_fuzz_;
+
+  /// Stage 2 (S2b): the app's router and this scheduler's handle (set_router; null and empty:
+  /// none), the ingress cap and whether a host set it, and the ingress's counters
+  /// (ingress_counters()). The ordered queue itself, its home records (remote waiters, tracked
+  /// broadcasts) and the cache of homes are S2b.1's and S2b.4's, beside the members they replace.
+  exec_router *router_ = nullptr;
+  group_ref route_self_;
+  std::atomic<std::size_t> ingress_cap_{65536}; // written under ingress_mutex_ (S2b.R2, C-m7)
+  bool ingress_cap_set_ = false;
+  struct ingress_counter_set {
+    std::atomic<std::uint64_t> ingress_refused{0}, requeued{0}, stale_dropped{0},
+        pending_dropped{0}, control_refused{0}, throw_dropped{0}, destroy_dropped{0};
+  };
+  ingress_counter_set ingress_counts_;
+  /// Channel homes (S2b.4; exec_router.h's protocol, as amended in S2b.0a), scheduler thread. As a
+  /// home: the remote waiters of its keys, in subscription order (a std::map: its teardown
+  /// forwards them in key order, DT-4), and its tracked broadcasts by id (unique in the app). As a
+  /// receiver: its processes' waits on keys homed elsewhere, by pid, with the home each subscribed
+  /// at. The park count recv_seq is drawn from (a requeue's next local waiter is the earliest), the
+  /// cache of homes (capped, checked against the router's epoch) with whether this group registered
+  /// a prefix (an island keeps the keys no other prefix covers), and whether the deliver being
+  /// applied patched its frame.
+  struct remote_waiter {
+    group_ref from;
+    int pid = -1;
+    std::uint64_t seq = 0;
+    std::optional<clock::time_point> deadline;
+  };
+  std::map<std::string, std::deque<remote_waiter>> remote_waiters_;
+  struct tracked_broadcast {
+    std::string key;
+    value_t value;
+    std::size_t outstanding = 0; // copies not yet answered (taken or requeue)
+    bool taken = false;
+  };
+  std::unordered_map<std::uint64_t, tracked_broadcast> tracked_;
+  std::uint64_t broadcast_seq_ = 0; // ids with no router (never routed: tests' bare schedulers)
+  struct remote_wait {
+    std::string key;
+    std::uint64_t seq = 0;
+    group_ref home;
+    bool timed = false; // a timed wait, which a timer pass may end (sweep_remote_waits)
+  };
+  std::unordered_map<int, remote_wait> remote_waits_;
+  std::size_t remote_timed_waits_ = 0; // the timed ones among them
+  /// Erase `it` from remote_waits_, keeping the timed count.
+  void forget_remote_wait(std::unordered_map<int, remote_wait>::iterator it);
+  std::uint64_t recv_clock_ = 0;
+  mutable std::unordered_map<std::string, group_ref> home_cache_;
+  mutable std::uint64_t home_cache_epoch_ = 0;
+  mutable bool home_cache_prefixed_ = false; // this group registered a prefix, as of that epoch
+  /// It registered a prefix once (S2b.R2, C-M4): its teardown forwards what it holds even once
+  /// unregistered. Set by set_router (exec_group registers its prefixes first) and the cache.
+  mutable bool prefixed_once_ = false;
+  bool deliver_patched_ = false;
+  /// `key`'s home through the cache (router set; not a '#' key).
+  group_ref cached_home(const std::string &key) const;
+  /// Whether `key` is homed in another group (router on, not '#'; an island's keys no other
+  /// group's prefix covers stay its own), which `home` gets. Scheduler thread.
+  bool homed_elsewhere(const std::string &key, group_ref *home) const;
+  /// Post `e` to `home`. A closed handle is resolved again (home_of), waiting while it is still
+  /// that closed group (exec_router.cpp), unless the poster is this scheduler's teardown (its
+  /// handle closed, and not `host`: a host's post from another thread). `posted_to` gets the home
+  /// that took it. 1: taken; 0: refused by the home (its cap); -1: no home took it.
+  int post_routed(group_ref home, detail::route_entry e, group_ref *posted_to = nullptr,
+                  bool host = false) const;
+  /// A message sent at its home (a local msg-send, a host message, a send entry): every waiter,
+  /// local at once and remote by a deliver, else the back of the pending FIFO (past
+  /// max_pending_messages when `uncapped`: a rehomed message). The waiters reached.
+  int deliver_home(const std::string &key, const value_t &msg, bool uncapped);
+  /// The remote waiters of `key` at this home get `msg` (deliver entries; broadcast tracking);
+  /// nonzero when the message was handed on.
+  std::size_t deliver_remote(const std::string &key, const value_t &msg, bool local_took);
+  /// A requeue at its home: the next waiter (the earliest local waiter, else the earliest record),
+  /// else the front of the pending FIFO, past its cap.
+  void give_next(const std::string &key, value_t msg);
+  /// A stale copy back at its home (a requeue entry, or a deliver a closed receiver refused):
+  /// tracked broadcasts by `broadcast`, else give_next.
+  void apply_requeue(const std::string &key, value_t msg, std::uint64_t broadcast);
+  /// A tracked broadcast's id (exec_router::new_broadcast_id).
+  std::uint64_t new_broadcast_id();
+  /// receive_message's park (recv_seq moves), and its subscribe at a remote home.
+  bool park_receiver(int pid, const std::string &path);
+  void subscribe_if_remote(process &proc, const std::string &path);
+  /// `pid`'s remote wait ended (a timeout, a kill, a reap, a local delivery): unsubscribe.
+  void end_remote_wait(int pid) noexcept;
+  /// After timed waits expired: unsubscribe the remote waits that no longer wait.
+  void sweep_remote_waits() noexcept;
+  void apply_route(detail::route_entry &e);
+  void home_subscribe(detail::route_entry &e);
+  void home_unsubscribe(const detail::route_entry &e);
+  void home_taken(const detail::route_entry &e);
+  void home_adopt(detail::route_entry &e);
+  void receiver_deliver(detail::route_entry &e);
+  /// A deliver that threw before patching its frame (the throw rule): stale, and its wait
+  /// subscribed again with the same seq.
+  void deliver_threw(detail::route_entry &&e) noexcept;
+  /// A router entry this scheduler will not apply (its teardown's queue, its destructor) sent on
+  /// to the key's new home (exec_router::new_home_of), as the teardown rule says, or dropped and
+  /// counted.
+  void bounce_route(detail::route_entry &&e) noexcept;
+  /// Published info (S2-Q9; S2b.3): the summary's atomics, the rows under their mutex, the
+  /// generation they were built at, and when their counters were last refreshed. Written at the
+  /// run loop's end (publish_info), read by any thread.
+  std::atomic<bool> pub_runnable_{false};
+  std::atomic<std::int64_t> pub_deadline_{std::numeric_limits<std::int64_t>::max()};
+  std::atomic<int> pub_best_{std::numeric_limits<int>::min()}; // min(): none
+  std::atomic<int> pub_processes_{0};
+  std::atomic<std::uint64_t> pub_count_{0};
+  mutable std::mutex pub_mu_;
+  std::vector<published_process> pub_rows_; // in pid order, under pub_mu_
+  std::uint64_t pub_generation_ = ~std::uint64_t{0};
+  clock::time_point pub_refreshed_{};
+  /// Publish at the run loop's end (S2-Q9): the summary always; the rows when the table's
+  /// generation moved, their counters at most every 100 ms. Pump owner; nothing without a router.
+  void publish_info();
   /// The long-step monitor (S2a.7): the threshold in force in seconds (0: off), the tree's
   /// state_exec.long_step_ms in seconds while it is set (else the default applies), when the step
   /// or the run's window being timed began, and when each native was last reported.

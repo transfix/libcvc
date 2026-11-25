@@ -122,6 +122,9 @@ struct process {
   // to the matching path the scheduler pushes a dict into `inbox`
   // and wakes the process.
   std::optional<std::string> recv_path;
+  /// Stage 2 (S2b, td 4.6): moves at every receive_message park, so a delivery from another group
+  /// (a deliver entry, async_scheduler::deliver_to) patches only the wait it was meant for.
+  std::uint64_t recv_seq = 0;
   std::queue<value_t> inbox;
   /// A wait on recv_path with a time limit ((await f seconds)): past it the waiting call raises
   /// TimeoutError (expire_await).
