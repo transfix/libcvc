@@ -1486,12 +1486,24 @@ server's; on a mismatch it takes the bytes.
 browser a zip handed to the browser as a download. A save for other software adds the terrain as
 a mesh (`terrain.glb`) and a 16-bit height map PNG.
 
+Done (GB4): `world_controls`' Save sends `world.request: save`, and the node (cvcGL's and the
+headless one alike, `save_generated_world`) saves the world shown, its dataset, with
+`data_save_files` (`(data-save-files NAME TARGET [EXPORTS])` in a program): each of the dataset's
+files at its path, as a directory, or a zip (`archive::pack_zip`, deflated by stb_image_write's
+compressor) when the name ends in `.zip` and always in a browser. "With terrain mesh and height
+map" adds `export/` (`world::city_bundle_exports`): `terrain.glb` (a mesh per surface, resampled to
+at most 1025 samples a side), `heightmap.png` (16-bit grey, full size, north at the top: `encode_png`
+now writes grey u16 at 16 bits) and `heightmap.json` (size, bounds, spacing, height range, water
+level). The content hash leaves `export/` out, so a saved world, with or without its exports,
+loads back (`uri:` it, `as: city_bundle`) with the hash it was saved with. The save runs on the
+frame thread, at once.
+
 | Phase | What | Size |
 |---|---|---|
 | GB1 | **The bundle, version 2:** the manifest, glb export through assimp, `write_city_bundle` from a `world_geometry` and a generated world's extras, `load_city_bundle` reading version 2 (items, cell surfaces, water level, region, edge walls, hash). Tests: a world written and read back has the same terrain, cell surfaces, items and face surfaces, and writes the same bytes again; two loads simulate to the same state hash. | M |
 | GB2 | **One path in:** `data-generate`; a generated world as a dataset; `SceneWorld` reads only data nodes; `generated_world` as shorthand; the region and the water level on the data node. | L |
 | GB3 | **One renderer** for any world dataset. Part 1: everything the renderer draws is in the bundle (the props' rungs and cells, `streets.json`, `ground.png`), and `world_from_bundle` makes the drawn world from any bundle, version 1 included, rebuilding the terrain chunks and the water. Part 2: a data node whose dataset is a world (Austin, a saved or made world) draws with the generated-world renderer: the terrain's LOD chunks on the bundle's ground (a non-square aerial image included), the props' cells, the buildings, roads and water, made in a sliced job and put in a piece at a time. | L |
-| GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. | M |
+| GB4 | **Save in the terrain lab:** a directory or zip natively, a zip download in the browser, the terrain mesh and height map for other software. Done: `world.request: save`, `data_save_files`, `archive::pack_zip`, `city_bundle_exports` (`export/`, outside the hash), 16-bit grey `encode_png`. | M |
 | GB5 | **Clients:** a world's bytes by content address, cached; a seed and a hash compare as the shortcut. After OW2 and with WD5, AD1. | M |
 
 ### 18.9 A world's rate: the server chooses, the clients follow

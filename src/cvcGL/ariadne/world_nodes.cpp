@@ -1362,11 +1362,14 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     if (rt->terrain.expired())
       return;
     cvc::app &app = *rt->app;
-    // Regenerate, Randomize and Stop, a new preset, and world.auto (poll_generated_world). A new
-    // colour alone repaints the shown world at once, once no rebuild is running (a rebuild paints
-    // in the colour asked when it started, and a later change is repainted after it).
+    // Regenerate, Randomize, Stop and Save, a new preset, and world.auto (poll_generated_world). A
+    // new colour alone repaints the shown world at once, once no rebuild is running (a rebuild
+    // paints in the colour asked when it started, and a later change is repainted after it). Save
+    // writes the shown world's dataset, at once.
     const ari::GeneratedWorldPoll poll =
         ari::poll_generated_world(app, rt->k, rt->base, rt->preset, rt->sig);
+    if (poll.save)
+      ari::save_generated_world(app, rt->k, rt->data_path, rt->base_dir);
     if (poll.stop && rt->job) {
       stop_world_job(*rt);
       ari::write<std::string>(app, rt->k.status, "stopped: the previous world is shown");
