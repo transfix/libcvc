@@ -1089,6 +1089,12 @@ add_executable(cvcgl_ariadne_animation test/cvcgl_ariadne_animation.cpp)
 target_link_libraries(cvcgl_ariadne_animation PRIVATE cvcGL)
 add_test(NAME cvcgl_ariadne_animation COMMAND cvcgl_ariadne_animation)
 
+# A model's own clip in an animation ({ node, clip }): a skinned glTF bar posed by realize_scene and
+# tick_scene with no window, its fit: kept, a missing clip and a node with no model refused.
+add_executable(cvcgl_ariadne_clip test/cvcgl_ariadne_clip.cpp)
+target_link_libraries(cvcgl_ariadne_clip PRIVATE cvcGL)
+add_test(NAME cvcgl_ariadne_clip COMMAND cvcgl_ariadne_clip)
+
 # H1 slice 6: the conference room in 3D (room scene realize + avatar markers + key -> intent).
 add_executable(cvcgl_room_view test/cvcgl_room_view.cpp)
 target_link_libraries(cvcgl_room_view PRIVATE cvcGL)
@@ -1882,6 +1888,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
                         cvcgl_ariadne_view_stacking cvcgl_ari_frame_bench
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_animation
+                        cvcgl_ariadne_clip
                         cvcgl_ariadne_prototypes cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
                         cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)

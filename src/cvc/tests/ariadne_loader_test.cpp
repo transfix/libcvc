@@ -2095,7 +2095,8 @@ scene:
   EXPECT_EQ(s.tracks[1].interpolation, SceneAnimationTrack::interp::step);
   EXPECT_TRUE(has_warning(r, "track 2: a node's key: is position, rotation"));
   EXPECT_TRUE(has_warning(r, "track 3: keys: is a list of [seconds, value] with the value 3"));
-  EXPECT_TRUE(has_warning(r, "track 4: names a node: (with a key:) or a state:, one of them"));
+  EXPECT_TRUE(
+      has_warning(r, "track 4: names a node: (with a key: or a clip:) or a state:, one of them"));
   EXPECT_TRUE(has_warning(r, "track 5: keys: is a list of [seconds, value] with the value one"));
   const SceneAnimation &spin = r.scene.animations[1];
   EXPECT_EQ(spin.loop, SceneAnimation::loop_mode::loop);
@@ -2182,6 +2183,38 @@ TEST(AriadneScene, AnimationPlayback) {
   h = SceneAnimationPlayhead{};
   advance_animation(empty, 1.0, 1.0, h);
   EXPECT_DOUBLE_EQ(h.time, 0.0);
+}
+
+// A clip: track (gap item 8) names a node and its model's clip, with no key or keys; one with no
+// node is left out, and one with keys or a state: keeps the clip and says the rest is not used.
+TEST(AriadneScene, AnimationClipTracks) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: robot, source: { file: robot.glb } }
+  animations:
+    - animation: walk
+      loop: true
+      tracks:
+        - { node: robot, clip: walk }
+        - { node: robot, clip: 2, keys: [[0, 1]] }
+        - { state: a.b, clip: wave }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.scene.animations.size(), 1u);
+  const SceneAnimation &a = r.scene.animations[0];
+  ASSERT_EQ(a.tracks.size(), 2u);
+  EXPECT_EQ(a.tracks[0].node, "robot");
+  EXPECT_EQ(a.tracks[0].clip, "walk");
+  EXPECT_TRUE(a.tracks[0].key.empty());
+  EXPECT_TRUE(a.tracks[0].times.empty());
+  EXPECT_EQ(a.tracks[1].clip, "2");
+  EXPECT_TRUE(a.tracks[1].times.empty()); // its keys are not used
+  EXPECT_DOUBLE_EQ(a.length(), 0.0);      // the clip's length is known once the scene reads it
+  EXPECT_TRUE(has_warning(r, "track 1: a clip: track plays the node's model's clip"));
+  EXPECT_TRUE(has_warning(r, "track 2: a clip: plays a node's model's clip, and names no node:"));
 }
 
 // material: { pbr: ... } and the scene's environment: (gap item 5): every key read, defaults kept,

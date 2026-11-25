@@ -338,8 +338,9 @@ struct bundle_world {
   world_ground ground; // ground.png, else satellite.png; empty when it has neither
 };
 // The world in a loaded bundle `b` (load_city_bundle), its other files read through `read`:
-//   - the terrain and every mesh item: buildings, roads, props, foliage, needles, props_r1 and
-//     props_r2 by name; any other mesh item is drawn with the buildings, its placement applied;
+//   - the terrain and every mesh item that is drawn (role_render): buildings, roads, props,
+//     foliage, needles, props_r1 and props_r2 by name; any other is drawn with the buildings, its
+//     placement applied;
 //   - the props' cells (props.json; their runs of points are the ones their faces use), the
 //     streets and the city's counts (streets.json);
 //   - the params: the generator's for a generated world, else a world over the terrain's extent

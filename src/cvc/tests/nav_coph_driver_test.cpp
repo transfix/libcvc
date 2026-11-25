@@ -279,6 +279,47 @@ TEST(CophDriver, ABlockSensedLateIsNeverHit) {
   EXPECT_GT(closest, 0.1); // its body (0.25 m radius) stays off the block
 }
 
+// A car that reached its goal brakes until the sim gives it a new one, then runs again
+// (coph_fleet::resume), its learner keeping what it learned: east 5 m to (8, 6), then on to (14,
+// 6).
+TEST(CophDriver, ACarTakesANewGoalAfterArriving) {
+  const field f(false);
+  sim_world sim = make(f, {{3.0, 6.0, 0.0, 8.0, 6.0}});
+  coph_driver drive(sim, driver_config());
+  drive.attach(0);
+  int ticks = 0;
+  for (; ticks < 1500 && !drive.done(0); ++ticks) {
+    drive.apply();
+    sim.step();
+  }
+  ASSERT_TRUE(drive.done(0)) << "the first goal";
+  const long long version = drive.fleet()->agents()[0].state().version;
+  const long long steps = drive.account(0).energy.steps;
+  const sim_world::config &c = sim.current_config();
+  sim.retarget(0, static_cast<float>((14.0 - c.cx) * kS), static_cast<float>((6.0 - c.cy) * kS));
+  int resumed = -1;
+  for (int t = 0; t < 1500; ++t, ++ticks) {
+    drive.apply();
+    sim.step();
+    if (resumed < 0 && !drive.done(0))
+      resumed = t;
+    if (resumed >= 0 && drive.done(0))
+      break;
+  }
+  EXPECT_GE(resumed, 0) << "it runs again";
+  ASSERT_TRUE(drive.done(0)) << "the second goal";
+  const frame fr = snap(sim);
+  EXPECT_NEAR(fr.pos[0], 14.0, 0.5);
+  EXPECT_GE(drive.fleet()->agents()[0].state().version, version); // what it learned stays
+  EXPECT_GT(drive.account(0).energy.steps, steps);
+  int activations = 0;
+  for (const coph_fleet::event &e : drive.fleet()->events())
+    activations += e.kind == "activation" && e.sender == 0;
+  EXPECT_EQ(activations, 2);
+  std::printf("the car reached (8, 6), then (14, 6) at (%.2f, %.2f), %d ticks in all\n", fr.pos[0],
+              fr.pos[1], ticks);
+}
+
 // With the sim's nav_stats armed, the episode record carries the CoPH ledger of the car CoPH
 // drives (D11): car 0, while the sim's own drive moves car 1. Each of car 0's sums is its account's
 // bit for bit (the shaping jumps to round-off), and the JSON has every CoPH item for car 0 and the

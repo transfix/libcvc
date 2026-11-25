@@ -61,6 +61,7 @@ class GeometryNode; // ShaderPreset applies to a GeometryNode (forward-decl: use
 class LodGraphicsNode;
 namespace ariadne {
 class LiveTextureBinding; // stream_texture_binding.h: a node's live texture
+class DataWorldView; // world_nodes.h: a world dataset drawn with the generated world's renderer
 } // namespace ariadne
 class LodPyramidCache;
 class VolRenNode;
@@ -72,6 +73,13 @@ namespace ariadne {
 // and tick_scene (sync_scene_data) rebuilds its children from the dataset whenever the dataset's
 // rev, or the store node its link points at, changes: its first load, a reload, a replacement.
 // Until then the node is empty, so a download never holds up a frame.
+//
+// A dataset that is a world (its `world`: a city bundle's, a saved world's) is drawn with the
+// generated world's renderer (`world`, world_nodes.h's DataWorldView): its terrain LOD chunks
+// wearing the dataset's ground, its props, buildings, roads and water, made from the dataset off
+// the frame thread and put in a piece at a time. The plain draw (each item a mesh, the aerial image
+// draped on the terrain) is left for a node whose terrain takes a live texture
+// (material: { texture: { stream } }), and for every dataset that is not a world.
 struct SceneDataBinding {
   cvc::ariadne::SceneNode spec;                     // the node as the document declared it
   std::string path;                                 // the dataset: <prefix>.data.<name>
@@ -84,6 +92,8 @@ struct SceneDataBinding {
   // material: { texture: { stream } }: the terrain's live texture, bound again with each drawing
   // and ticked by tick_scene.
   std::shared_ptr<LiveTextureBinding> texture;
+  // The world renderer for a world dataset, made at realize; ticked by tick_scene.
+  std::shared_ptr<DataWorldView> world;
 };
 
 // A node whose material: { opacity: <path> } (or { bind, default }) follows state. tick_scene
@@ -358,6 +368,10 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
 // (SceneDataBinding): tick_scene calls it first every frame; a host that does not tick may call
 // it itself. Call it on the scene's owner thread. Returns how many nodes it rebuilt.
 int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings = nullptr);
+// Run every data node's world draw (a world dataset's job and install, SceneDataBinding::world)
+// to its end now: for tests and hosts that need the drawn world without ticking frames. Returns
+// how many data nodes show a world.
+int finish_scene_data(RealizedScene &realized);
 
 // Write each bound material: { opacity: <path> } into the meshes its node draws
 // (SceneOpacityBinding): tick_scene calls it every frame, after sync_scene_data; a host that does
