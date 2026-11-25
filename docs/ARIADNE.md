@@ -5807,6 +5807,9 @@ How each host does it:
   (Ctrl+Z) takes back a Cut or a Paste.
 - **The arigl-web page**: the browser's own menu stays off the canvas.
   - Copy is `navigator.clipboard.writeText`.
+  - Ctrl+V is the browser's own paste: its `paste` event carries the text, which the field takes.
+    SDL cancels the keydown of every Ctrl chord, and a cancelled Ctrl+V pastes nothing, so the
+    page keeps SDL from cancelling Ctrl+V's (`src/cvcGL/Clipboard.cpp`).
   - Paste is `navigator.clipboard.readText()`, which answers later; the text goes into the field
     when it does. Chrome asks the user once for the permission. Firefox and Safari show their own
     Paste button by the pointer each time, which the user clicks.

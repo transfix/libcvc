@@ -11,10 +11,15 @@
 //   2. right-clicks the field, and its menu's Paste reads the clipboard
 //      (navigator.clipboard.readText) and puts what it read in the field, which Enter commits;
 //   3. its Cut takes the field's text to the clipboard and out of the field;
-//   4. with the read refused (the permission denied), Paste puts the focus in the field, and a
-//      paste the browser delivers (Ctrl+V's paste event) still lands there;
-//   5. when the package has ari's terminal page (ari.html), the same document there: Shift+F10 on
+//   4. with the read refused (the permission denied), Paste puts the focus in the field, and
+//      Ctrl+V still pastes there: its keydown is left to the browser (SDL would cancel it), so the
+//      browser's own paste event comes, and the field takes its text;
+//   5. on a page just loaded, the first thing done, Ctrl+V into the field, pastes too;
+//   6. when the package has ari's terminal page (ari.html), the same document there: Shift+F10 on
 //      the field and Paste, which the program asks for with an OSC 52 read that the page answers.
+//
+// Ctrl+V is the browser's own paste: DevTools' "paste" editing command goes with the key, as a
+// key binding's does, and the browser runs it only when the keydown is not cancelled.
 //
 // The menu's items are found without knowing where ImGui draws them: the page's clipboard glue
 // is told which item the pointer is over (cvc::gl::clipboard::arm: window.__cvcglClip.arm), so
@@ -143,8 +148,12 @@ await page.send('Page.bringToFront');
 await page.send('Emulation.setFocusEmulationEnabled', {enabled: true});
 await page.send('Page.addScriptToEvaluateOnNewDocument', {source: `(() => {
 window.__out = [];
+window.__vDown = [];
 const log = console.log;
 console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(this, a); };
+window.addEventListener('keydown', e => {
+  if (e.code === 'KeyV') window.__vDown.push({ctrl: e.ctrlKey, cancelled: e.defaultPrevented});
+});
 })();`});
 await grant(true);
 await page.send('Page.navigate', {url: `${ORIGIN}/clip/?src=main.ari`});
@@ -186,6 +195,18 @@ const key = async (k, code, vk, modifiers = 0, commands = []) => {
   await sleep(250);
 };
 const enter = () => key('Enter', 'Enter', 13);
+// Ctrl+V as a user's: Ctrl down, V with the browser's paste command, both up. Returns what the
+// page saw of V's keydown (whether it was cancelled).
+const ctrlV = async () => {
+  await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Control', code: 'ControlLeft',
+                                             modifiers: 2, windowsVirtualKeyCode: 17});
+  await sleep(60);
+  await key('v', 'KeyV', 86, 2, ['paste']);
+  await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Control', code: 'ControlLeft',
+                                             windowsVirtualKeyCode: 17});
+  await sleep(250);
+  return evaluate('JSON.stringify(window.__vDown.at(-1) || null)');
+};
 const armed = () => evaluate('JSON.stringify(window.__cvcglClip ? window.__cvcglClip.arm : null)')
                         .then(s => JSON.parse(s || 'null'));
 // What the document printed, each line as the string it printed ((print S) quotes a string).
@@ -262,39 +283,41 @@ try {
       step((await clipboard()) === 'from the clipboard', 'Cut puts it on the clipboard');
     }
 
-    // 4. The read refused: the focus goes to the field, and the browser's own paste lands there.
-    // The clipboard holds another text than the paste event carries, so the field shows which
-    // one it took: a read the browser refused takes nothing.
+    // 4. The read refused: the focus goes to the field, and Ctrl+V pastes there. The clipboard
+    // holds another text when the read is refused than when Ctrl+V pastes, so the field shows
+    // which one it took: a read the browser refused takes nothing.
     await evaluate('navigator.clipboard.writeText("not read")', true);
     await grant(false);
     const refused = await menuItem(X, field.row, a => a.paste === true);
     if (refused) {
       await click(refused.x, refused.y);
       await sleep(1000);
-      // Ctrl+V as the browser does it: the key, and its paste event with the clipboard's text.
-      await evaluate(`(() => {
-        const dt = new DataTransfer();
-        dt.setData('text/plain', 'typed paste');
-        document.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt}));
-      })()`);
-      await page.send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key: 'Control',
-                                                 code: 'ControlLeft', modifiers: 2,
-                                                 windowsVirtualKeyCode: 17});
-      await sleep(60);
-      await key('v', 'KeyV', 86, 2);
-      await page.send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Control',
-                                                 code: 'ControlLeft', windowsVirtualKeyCode: 17});
-      await sleep(250);
+      await evaluate('navigator.clipboard.writeText("typed paste")', true);
+      const v = await ctrlV();
       await enter();
       const lines = await printed();
       step(lines.at(-1) === 'name=typed paste',
-           `a refused read leaves the field focused for Ctrl+V: ${lines.at(-1)}`);
+           `a refused read leaves the field focused for Ctrl+V: ${lines.at(-1)} (V's keydown ${v})`);
     } else {
       step(false, 'the field\'s menu again');
     }
+
+    // 5. A page just loaded: Ctrl+V before anything else touched the clipboard.
+    await page.send('Page.reload', {ignoreCache: false});
+    await until('the page runs its document again', async () =>
+      (await evaluate('window.ariadneWeb && ariadneWeb.state')) === 'running');
+    await sleep(1500);
+    await evaluate('navigator.clipboard.writeText("first paste")', true);
+    await click(X + 120, field.row);
+    const firstV = await ctrlV();
+    await enter();
+    const first = await until('the field commits', async () =>
+      (await printed()).find(l => l.startsWith('name=')), 10000).catch(() => null);
+    step(first === 'name=first paste',
+         `on a page just loaded, the first Ctrl+V pastes: ${first} (V's keydown ${firstV})`);
   }
 
-  // 5. ari's terminal page (FTXUI in xterm.js), when the package has it: Tab to the field, Shift+F10
+  // 6. ari's terminal page (FTXUI in xterm.js), when the package has it: Tab to the field, Shift+F10
   // for its menu, Enter on Paste. The program asks with an OSC 52 read, which the page answers
   // with navigator.clipboard.readText(), and the answer is typed into the field.
   if (fs.existsSync(path.join(WEB, 'ari.html'))) {
