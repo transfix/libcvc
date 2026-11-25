@@ -141,14 +141,13 @@ TEST(AriTest, FramesAndTimeout) {
       << timed.output;
   const AriRun framed = ari("test --frames 3 " + quoted(idle));
   EXPECT_EQ(framed.status, 0) << framed.output;
+  // The clock starts before the load, and a Debug build's load can take over a second (CI's
+  // Debug job ran out of 1 s before the test began), so give it 5 s: the test never ends anyway.
   const fs::path stuck =
       dir.write("stuck.ari", doc("tests:\n  waits: (set v (msg-recv \"never\"))\n"));
-  // Long enough that the document is loaded and its test running when the timeout comes: on a
-  // loaded Debug runner the load alone took over a second, and a 1 s timeout came before the test
-  // had started (with no test to name).
-  const AriRun hung = ari("test --timeout 3 " + quoted(stuck));
+  const AriRun hung = ari("test --timeout 5 " + quoted(stuck));
   EXPECT_EQ(hung.status, 1) << hung.output;
-  EXPECT_TRUE(has(hung, "timed out after 3 s in test 'waits'")) << hung.output;
+  EXPECT_TRUE(has(hung, "timed out after 5 s in test 'waits'")) << hung.output;
 }
 
 // A program's time backstop under `ari test` is the run's --timeout, not a running app's 0.1 s:

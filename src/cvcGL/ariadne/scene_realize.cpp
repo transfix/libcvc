@@ -40,6 +40,7 @@
 #include <cvc/gl/ariadne/stream_texture_binding.h> // material: { texture: { stream } }
 #include <cvc/gl/ariadne/tf_binding.h>    // every volume node's editable transfer-function model
 #include <cvc/gl/ariadne/vehicle_view.h>  // the world's vehicles, drawn on their chassis
+#include <cvc/gl/ariadne/world_nodes.h>   // a world dataset, drawn with the world renderer
 #include <cvc/gl/physics_scene_binding.h> // body: the nodes physics moves
 #include <cvc/gl/state_publisher.h>       // a copy's published pose lands before it goes
 #include <cvc/gl/world_geometry_nodes.h>  // a dataset's world_geometry, drawn
@@ -919,6 +920,13 @@ void realize_node(SceneGraph &sg, const cvc::ariadne::SceneNode &n, const std::s
       b.group = node;
       if (!n.frame.empty()) // the main view's camera (CameraController::viewerStatePath)
         b.frame_key = cvc::ariadne::resolve_bind(bind_prefix, "viewers.main.camera.frame");
+      // A world dataset draws with the world renderer, its job and install in flight until the
+      // world is in (a settled frame waits for it).
+      b.world = make_data_world_view(sg, n, node, bind_prefix);
+      out.pending_work.push_back([view = std::weak_ptr<DataWorldView>(b.world)]() {
+        const std::shared_ptr<DataWorldView> v = view.lock();
+        return v && data_world_busy(*v);
+      });
       cvc::ariadne::DataStore::of(sg.appContext())->touch(b.path); // a lazy dataset loads now
       out.data_nodes.push_back(std::move(b));
     }
@@ -2474,7 +2482,27 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
   using geometry_ptr = std::shared_ptr<const cvc::geometry>;
   using field_ptr = std::shared_ptr<const cvc::height_field>;
   using volume_ptr = std::shared_ptr<const cvc::volume>;
-  if (const world_ptr *w = boost::any_cast<world_ptr>(&obj)) {
+  const world_ptr *w = boost::any_cast<world_ptr>(&obj);
+  // A world draws with the world renderer, but for a terrain that takes a live texture: the plain
+  // draw below binds that to the terrain's mesh.
+  const bool renderer = w && b.world && n.material_texture_stream.empty();
+  if (b.world && !renderer)
+    data_world_clear(*b.world); // what it drew before goes
+  if (renderer) {
+    // The world's ground and bounds now, from the dataset; what it draws comes off the frame
+    // thread (data_world_load), and the world drawn before stays until the new one is in.
+    if (std::shared_ptr<const cvc::height_field> t = (*w)->terrain())
+      r.height_fields[n.id] = t;
+    const cvc::world::world_bounds wb = (*w)->bounds();
+    if (!wb.empty()) {
+      for (int k = 0; k < 3; ++k) {
+        bounds[k] = wb.min[k];
+        bounds[3 + k] = wb.max[k];
+      }
+      has_bounds = true;
+    }
+    data_world_load(*b.world, store);
+  } else if (w) {
     b.drawn = cvc::gl::add_world_geometry(*r.sg, **w, n.id + "_", group);
     const cvc::world::world_bounds wb = (*w)->bounds();
     if (!wb.empty()) {
@@ -2599,6 +2627,14 @@ int sync_scene_data(RealizedScene &realized, std::vector<std::string> *warnings)
   return rebuilt;
 }
 
+int finish_scene_data(RealizedScene &realized) {
+  int shown = 0;
+  for (SceneDataBinding &b : realized.data_nodes)
+    if (b.world && data_world_finish(*b.world))
+      ++shown;
+  return shown;
+}
+
 bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warnings) {
   if (!realized.world)
     return false;
@@ -2633,9 +2669,12 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   }
   sync_scene_data(realized);    // a data node whose dataset (re)loaded draws it this frame
   sync_scene_opacity(realized); // bound material opacities, on what was just drawn too
-  for (SceneDataBinding &d : realized.data_nodes) // a data node's terrain's live texture
-    if (d.texture)
+  for (SceneDataBinding &d : realized.data_nodes) {
+    if (d.texture) // a data node's terrain's live texture
       d.texture->tick();
+    if (d.world) // a world dataset's drawing: its job, its install, its LOD for this camera
+      data_world_tick(*d.world, renderer);
+  }
   cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any
   // custom_tick reading app.world_clock().t()) sees ONE coherent world time for this frame. Opt-in:
