@@ -116,7 +116,7 @@ TEST(AriadneSceneSwarm, StepsOnTheWorldClock) {
   s.set_city(ari::synthetic_swarm_city(48));
   ASSERT_TRUE(run_until(app, s, 0, [&] { return s.running(); }));
   const ari::SceneSwarm::frame start = s.now();
-  // One navigator step is 6 quanta of the suite's 0.01 s: 60 quanta are 10 steps.
+  // One navigator step is 7 of the suite's 1/120 s quanta (cvc::kSimTickQuanta).
   ASSERT_TRUE(run_until(app, s, 60, [&] { return s.now().tick >= 50; }));
   const ari::SceneSwarm::frame &f = s.now();
   ASSERT_EQ(f.n, 32);
@@ -131,6 +131,29 @@ TEST(AriadneSceneSwarm, StepsOnTheWorldClock) {
         return true;
     return false;
   }));
+}
+
+// Without a worker (a browser without threads), the frame steps the navigator on the clock: its
+// tick, 7 of the suite's quanta. It followed the training scene's 0.06 s, 7.2 quanta, which the
+// clock refused, so the swarm never moved.
+TEST(AriadneSceneSwarm, StepsOnTheFramesThreadWithoutAWorker) {
+  cvc::app app;
+  ari::swarm_spec spec = small_spec();
+  spec.worker = false;
+  ari::SceneSwarm s(app, "doc.swarm", spec);
+  s.set_city(ari::synthetic_swarm_city(48));
+  ASSERT_TRUE(run_until(app, s, 0, [&] { return s.running(); }));
+  const ari::SceneSwarm::frame start = s.now();
+  // 70 quanta are 10 navigator steps.
+  app.world_clock().advance_ticks(70);
+  s.update(/*wait=*/true);
+  const ari::SceneSwarm::frame &f = s.now();
+  ASSERT_EQ(f.n, 32);
+  EXPECT_EQ(f.tick, start.tick + 10) << "one step per navigator tick, on the frame's thread";
+  double moved = 0.0;
+  for (int i = 0; i < f.n; ++i)
+    moved += std::hypot(f.pos[2 * i] - start.pos[2 * i], f.pos[2 * i + 1] - start.pos[2 * i + 1]);
+  EXPECT_GT(moved, 0.0);
 }
 
 TEST(AriadneSceneSwarm, KeysMoveATargetAndFollowAVehicle) {

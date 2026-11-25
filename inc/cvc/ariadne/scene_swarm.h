@@ -106,6 +106,9 @@ struct swarm_spec {
   // not counted): "800 agents ..." or "60 vehicles · 6 convoys ...".
   std::string noun = "agents";
   std::string groups;
+  // The navigator on a thread of its own where there are threads (natively, a browser built with
+  // them); false: on the frame's thread, as a browser without threads steps it. Not a prop.
+  bool worker = true;
 
   // A node's props: agents, grid, belief, fog, seed, spawn, targets, reach, separate,
   // sep_radius, sep_gain, plant, policy, sense_every, noun, groups. Others are left as they are.

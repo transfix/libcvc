@@ -517,17 +517,23 @@ struct SceneSwarm::impl {
     read_frame(true);
     cvc::world_clock &clock = app.world_clock();
 #if CVC_SWARM_WORKER
-    try {
-      thread = std::make_unique<cvc::nav::sim_thread>(*world, clock);
-      thread->start();
-    } catch (const std::exception &e) {
-      std::fprintf(stderr, "nav_swarm: no worker (%s); stepping on the frame's thread\n", e.what());
-      thread.reset();
+    if (spec.worker) {
+      try {
+        thread = std::make_unique<cvc::nav::sim_thread>(*world, clock);
+        thread->start();
+      } catch (const std::exception &e) {
+        std::fprintf(stderr, "nav_swarm: no worker (%s); stepping on the frame's thread\n",
+                     e.what());
+        thread.reset();
+      }
     }
 #endif
     if (!thread) {
+      // The world's own step, the hosts' tick (config_for), as a sim_thread follows it; not the
+      // training scene's 0.06 s, which is no whole number of the suite's quanta.
       try {
-        follower = cvc::clock_follower::for_step(clock, ts.dt);
+        follower = cvc::clock_follower::for_step(
+            clock, static_cast<double>(world->current_config().veh.dt));
       } catch (const std::exception &e) {
         // The clock's quantum does not divide the navigator's step: it cannot follow this clock.
         std::fprintf(stderr, "nav_swarm: %s\n", e.what());
