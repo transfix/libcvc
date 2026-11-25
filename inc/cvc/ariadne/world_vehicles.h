@@ -359,10 +359,11 @@ struct entity_plant {
   double rear_x = 0.0;        // the rear axle along the body from the chassis's centre (m)
   bool placed = false;        // in the world; nothing below is set otherwise
   // The model that stands for the plant:
-  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact`. jolt: the four-wheel
-  //             model with the vehicle's own numbers (nav_plant::dyn4_si_of), its pose and twist
-  //             read from the chassis, its heave 0 and its drive state 0 (not `exact`).
-  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact`.
+  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact` unless it waded in
+  //             the last tick (dyn_wading.h). jolt: the four-wheel model with the vehicle's own
+  //             numbers (nav_plant::dyn4_si_of), its pose and twist read from the chassis, its
+  //             heave 0 and its drive state 0 (not `exact`).
+  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact` unless it waded.
   //   bike      kinematic: nav's bicycle, `exact`; `bike_state` holds the rear axle, the heading
   //             and the speed (as vx), `limits` its limits. dynamicboat: the bicycle nav plans the
   //             boat with (physics::dyn_boat_plant drives it; not `exact`).

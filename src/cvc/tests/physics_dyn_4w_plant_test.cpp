@@ -10,18 +10,20 @@
 
 // cvc::physics::dyn_4w_plant (dyn_4w_plant.h): nav's agents on the dynamic four-wheel vehicle
 // with suspension as their live plant. Its steps are dyn4_plant's, its energy books close, it
-// climbs the ground it is given, its chassis collide in a world, and plant_host puts a
-// sim_world's agents on it by name.
+// climbs the ground it is given, its chassis collide in a world, it wades into the world's water
+// (dyn_wading.h), and plant_host puts a sim_world's agents on it by name.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/dyn_4w_plant.h>
 #include <cvc/physics/plant_host.h>
+#include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -96,6 +98,17 @@ std::unique_ptr<world> walled_world(double wall_x, body_id &ground) {
   wall.position = {wall_x + 0.5, 0.0, 3.0};
   w->add_body(wall);
   return w;
+}
+
+// Still water over the ground (top at z = 0) to `depth`, over x0 < x < x1 and |y| < 50.
+void add_water(cvc::app &app, world &w, double x0, double x1, double depth) {
+  auto v = std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                         cvc::bounding_box(x0, -50.0, -1.0, x1, 50.0, depth));
+  v->fill(1000.0);
+  field water;
+  water.kind = field_kind::fluid;
+  water.volume = v;
+  w.add_field(water);
 }
 
 double nose_ahead_of_rear_axle(const vehicle_desc &d) {
@@ -445,4 +458,108 @@ TEST(Dyn4wPlant, PlantHostPutsTheAgentsOnItByName) {
   EXPECT_EQ(host.use(sim, "kinematic"), "kinematic");
   EXPECT_EQ(host.active(), nullptr);
   EXPECT_EQ(host.physics(), nullptr);
+}
+
+// Into a lake (dyn_wading.h): from x = 40 the world holds 0.5 m of still water, from x = 90 1.2 m.
+// A Humvee on the four-wheel plant, its chassis in the world, sent east at 2 m/s^2. Without wading
+// it drives through as on dry ground, tick for tick: its chassis box takes the water's sealed-box
+// push in the world, but the model puts it back each substep, so nothing floats it and nothing
+// slows it. Wading, the water's drag slows it in the shallows to where its drive's max_accel meets
+// the drag and the rolling resistance, its tires lose grip with the load the water lifts, it keeps
+// its ride height (it never floats), and once its front axle is past its 0.76 m fording depth its
+// engine floods and it stops in the deep water whatever nav asks. The flooded engine is state.
+TEST(Dyn4wPlant, DrivesIntoALakeAndWades) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app; // the water's volumes'
+  struct run {
+    std::unique_ptr<world> w;
+    std::unique_ptr<dyn_4w_plant> plant;
+  };
+  const auto make = [&app](bool water, bool wading) {
+    run r;
+    r.w = std::make_unique<world>();
+    body_desc g;
+    g.shape = box{{500.0, 500.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.position = {0.0, 0.0, -0.5};
+    g.material = r.w->add_material({"lake bed", 0.9f, 0.0f, 0.0f, -1, 0.45f});
+    const body_id ground = r.w->add_body(g);
+    if (water) {
+      add_water(app, *r.w, 40.0, 90.0, 0.5);
+      add_water(app, *r.w, 90.0, 400.0, 1.2);
+    }
+    dyn_4w_plant_options o;
+    o.physics = r.w.get();
+    o.ground_bodies = {ground};
+    vehicle_desc d = vehicle_desc::humvee();
+    d.wading.enabled = wading;
+    r.plant = std::make_unique<dyn_4w_plant>(std::vector<vehicle_desc>{d}, o);
+    cvc::nav::plant_state start;
+    r.plant->attach(1, &start, trained_frame(), 0.06);
+    return r;
+  };
+  run dry = make(false, true), off = make(true, false), wet = make(true, true);
+  const vehicle_desc d = vehicle_desc::humvee();
+  const double front = d.axles.front().x - wet.plant->rear_axle(0); // front axle ahead of the rear
+  double at85 = -1.0, dry85 = -1.0, flooded_at = -1.0, stopped_at = -1.0;
+  double z_shallow = 0.0, z_dry = 0.0, drag85 = 0.0, crr = wet.plant->params(0).c_rr;
+  double grip85 = 1.0, lift85 = 0.0;
+  bool same = true;
+  for (int t = 0; t < 1000; ++t) {
+    for (run *r : {&dry, &off, &wet}) {
+      r->plant->command(0, 0.0f, static_cast<float>(2.0 * kS));
+      r->plant->advance();
+    }
+    const diff::dyn4_state<double> &a = dry.plant->body(0), &b = off.plant->body(0);
+    for (int k = 0; k < diff::dyn4_state<double>::size; ++k)
+      same = same && a[k] == b[k];
+    const diff::dyn4_state<double> &s = wet.plant->body(0);
+    const dyn_wading &water = wet.plant->wading(0);
+    if (dry85 < 0.0 && a.x > 85.0)
+      dry85 = a.vx;
+    if (at85 < 0.0 && s.x > 85.0) {
+      at85 = s.vx;
+      drag85 = wet.plant->params(0).drag;
+      grip85 = water.grip[2];
+      lift85 = water.lift;
+      vec3 p;
+      quat q;
+      wet.plant->box_pose(0, p, q);
+      z_shallow = p.z;
+      dry.plant->box_pose(0, p, q);
+      z_dry = p.z;
+    }
+    if (flooded_at < 0.0 && water.engine_flooded)
+      flooded_at = s.x + front;
+    if (flooded_at > 0.0 && stopped_at < 0.0 && std::fabs(s.vx) < 0.05)
+      stopped_at = s.x + front;
+  }
+  const diff::dyn4_state<double> &s = wet.plant->body(0);
+  // Where the drive's most meets the water's drag and the rolling resistance.
+  const double v_cap = std::sqrt((d.max_accel - crr * kG) * d.mass / drag85);
+  std::printf("  dry: %.2f m/s at x = 85; wading: %.2f m/s (drive vs drag %.0f kg/m: %.2f m/s), "
+              "rear grip x %.2f with %.0f N lifted; flooded with its front axle at %.1f m, stopped "
+              "at %.1f m, at %.1f m after 60 s\n",
+              dry85, at85, drag85, v_cap, grip85, lift85, flooded_at, stopped_at, s.x + front);
+  EXPECT_TRUE(same) << "without wading the water does nothing to the model";
+  EXPECT_LT(at85, 0.6 * dry85) << "the water's drag slows it";
+  EXPECT_NEAR(at85, v_cap, 0.1 * v_cap);
+  EXPECT_LT(grip85, 0.95) << "the water lifts load off its tires";
+  EXPECT_GT(lift85, 0.0);
+  EXPECT_NEAR(z_shallow, z_dry, 0.02) << "it keeps its ride height: it does not float";
+  EXPECT_NEAR(flooded_at, 90.0, 1.5) << "as its front axle reached the deep water";
+  EXPECT_GT(stopped_at, 90.0);
+  EXPECT_LT(s.x + front, 110.0) << "and it stays stopped in it";
+  EXPECT_LT(std::fabs(s.vx), 0.05);
+  EXPECT_FALSE(off.plant->wading(0).wet);
+  EXPECT_FALSE(dry.plant->wading(0).wet);
+  EXPECT_TRUE(wet.plant->waded(0));
+  EXPECT_NEAR(identity_gap(*wet.plant, 0), 0.0, 1e-9 * wet.plant->books(0).flow());
+  // The flooded engine is state.
+  const dyn_4w_saved saved = wet.plant->save(0);
+  EXPECT_TRUE(saved.engine_flooded);
+  run again = make(true, true);
+  again.plant->restore(0, saved);
+  EXPECT_TRUE(again.plant->save(0).engine_flooded);
 }

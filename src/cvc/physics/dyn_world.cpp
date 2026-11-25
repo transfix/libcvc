@@ -16,6 +16,7 @@
 #include <cmath>
 #include <exception>
 #include <map>
+#include <optional>
 #include <tuple>
 
 namespace cvc {
@@ -282,6 +283,119 @@ void attitude_of(const quat &rotation, cvc::nav::plant_sample &s) {
   s.grade = clamp1(rotate(rotation, {1.0, 0.0, 0.0}).z);
   s.roll = clamp1(rotate(rotation, {0.0, 1.0, 0.0}).z);
   s.up_z = clamp1(rotate(rotation, {0.0, 0.0, 1.0}).z);
+}
+
+namespace {
+// vehicle.cpp's: standing water (AMC 25.1591's 3 mm), the aquaplaning speed per sqrt(psi), and
+// the friction an aquaplaning tire keeps.
+constexpr double kStandingWater = 0.003;
+constexpr double kAquaplane = 0.85 * 9.0 * 1852.0 / 3600.0;
+constexpr double kPascalsPerPsi = 6894.757293168;
+constexpr double kLeastMu = 0.05;
+
+// The area of a circle of radius r below a chord h above its lowest point, h in [0, 2r].
+double segment_area(double r, double h) {
+  h = std::max(0.0, std::min(2.0 * r, h));
+  return r * r * det::acos((r - h) / r) - (r - h) * std::sqrt(std::max(0.0, h * (2.0 * r - h)));
+}
+} // namespace
+
+dyn_wading wade(const world &w, const vehicle_desc &d, const wade_contact *c, int n,
+                double box_bottom, double speed, double mu, double gravity, bool flooded) {
+  const wading_desc &g = d.wading;
+  dyn_wading r;
+  r.n = std::max(0, std::min(4, n));
+  double front = 0.0;
+  for (std::size_t ai = 0; ai < d.axles.size(); ++ai)
+    if (ai == 0 || d.axles[ai].x > front)
+      front = d.axles[ai].x;
+  double front_depth = 0.0, top = 0.0, rho = 0.0, soak[4] = {mu, mu, mu, mu};
+  int front_n = 0, wet_n = 0;
+  for (int i = 0; i < r.n; ++i) {
+    const wade_contact &k = c[i];
+    r.x[i] = k.x;
+    r.y[i] = k.y;
+    const water_sample water = w.water_at({k.x, k.y, k.ground});
+    const double depth = water.wet ? std::max(0.0, water.depth) : 0.0;
+    const axle_desc &a = d.axles.at(static_cast<std::size_t>(k.axle));
+    if (a.x == front) {
+      front_depth += depth;
+      ++front_n;
+    }
+    if (!(depth > 0.0))
+      continue;
+    r.wet = true;
+    r.depth[i] = depth;
+    top += k.ground + depth;
+    rho += water.density;
+    ++wet_n;
+    // The tire: its displacement drag along its travel and its displaced share.
+    const double h = std::min(depth, 2.0 * a.wheel_radius);
+    r.drag += 0.5 * water.density * g.wheel_drag * a.wheel_width * h * k.tires;
+    r.lift += water.density * gravity * segment_area(a.wheel_radius, h) * a.wheel_width *
+              g.wheel_displacement * k.tires;
+    // Soaked, from the material under it (from just under the chassis box, which it must miss).
+    const double from = std::max(k.ground + 0.02, std::min(k.ground + 0.5, box_bottom - 0.01));
+    const double standing = std::min(1.0, depth / kStandingWater);
+    double m = mu;
+    if (const std::optional<ray_hit> hit = w.raycast({k.x, k.y, from}, {k.x, k.y, k.ground - 0.5}))
+      if (hit->material < w.material_count()) {
+        const float wet = w.get_material(hit->material).wet_friction;
+        if (wet > 0.0f)
+          m += (static_cast<double>(wet) - mu) * standing;
+      }
+    if (g.tire_pressure > 0.0) {
+      const double q = speed / (kAquaplane * std::sqrt(g.tire_pressure / kPascalsPerPsi));
+      const double aquaplaning = std::max(kLeastMu, m * (1.0 - q * q));
+      if (aquaplaning < m)
+        m += (aquaplaning - m) * standing;
+    }
+    soak[i] = m;
+  }
+  r.engine_flooded =
+      flooded || (g.fording_depth > 0.0 && front_n > 0 && front_depth / front_n > g.fording_depth);
+  if (!r.wet)
+    return r;
+  // The chassis box (flooded: its displacement) and the underbody under it, from the mean water.
+  top /= wet_n;
+  rho /= wet_n;
+  const vec3 e = d.half_extents;
+  const double hb = std::max(0.0, std::min(2.0 * e.z, top - box_bottom));
+  r.lift += rho * gravity * g.displacement * 4.0 * e.x * e.y * hb;
+  if (g.underbody_depth > 0.0) {
+    const double hu =
+        std::max(0.0, std::min(g.underbody_depth, top - (box_bottom - g.underbody_depth)));
+    r.drag += 0.5 * rho * g.underbody_drag * 2.0 * e.y * hu;
+  }
+  // Each tire keeps the share of its load the water leaves it.
+  const double weight = d.mass * gravity;
+  const double kept = weight > 0.0 ? std::max(0.0, 1.0 - r.lift / weight) : 1.0;
+  for (int i = 0; i < r.n; ++i)
+    if (r.depth[i] > 0.0 && mu > 0.0)
+      r.grip[i] = std::max(kLeastMu, soak[i] * kept) / mu;
+  return r;
+}
+
+double wade_grip(const dyn_wading &r, double x, double y) {
+  if (!r.wet)
+    return 1.0;
+  int best = 0;
+  double d2 = 0.0;
+  for (int i = 0; i < r.n; ++i) {
+    const double dx = x - r.x[i], dy = y - r.y[i], e = dx * dx + dy * dy;
+    if (i == 0 || e < d2) {
+      best = i;
+      d2 = e;
+    }
+  }
+  return r.n > 0 ? r.grip[best] : 1.0;
+}
+
+double flooded_drive(double a, double vx, double want) {
+  constexpr double kDeadband = 0.05, kHoldSpeed = 0.3; // drive()'s
+  if (std::fabs(vx) < kHoldSpeed)
+    return std::fabs(want) <= kDeadband ? a : 0.0; // held on the brakes; nothing to move off with
+  return a * vx < 0.0 ? a : 0.0;                   // the brakes, against the motion
 }
 
 } // namespace dyn

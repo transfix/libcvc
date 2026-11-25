@@ -62,6 +62,7 @@
 #include <cvc/nav/detail/dyn_contact.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/dyn_driver.h>
+#include <cvc/physics/dyn_wading.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
@@ -145,6 +146,7 @@ struct dyn_bike_saved {
   double wheels[2] = {0.0, 0.0};
   dyn_driver driver;
   double steer_cmd = 0.0, accel_cmd = 0.0;
+  bool engine_flooded = false; // wading
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -243,6 +245,12 @@ public:
   double accel_command(int i) const { return _agents.at(i).accel_cmd; }
   const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
   const std::vector<double> &applied_grade(int i) const { return _agents.at(i).applied_grade; }
+  // Agent i's water as of its last model step (dyn_wading.h: its two axles as the tires; dry
+  // without a world or wading), and whether it stood in water in any step of the last tick (then
+  // a twin replaying applied_accel alone is not exact: the water changed its drag and grip). Its
+  // grip is the mean of its axles'.
+  const dyn_wading &wading(int i) const { return _agents.at(i).water; }
+  bool waded(int i) const { return _agents.at(i).waded; }
 
   // ── the books ──
   const dyn_bike_books &books(int i) const { return _agents.at(i).total; }
@@ -325,7 +333,16 @@ private:
       cvc::nav::diff::dyn_step_free<double> free{};
       bool on = false;
     } step;
+    // Wading: the model's own mu and drag, the water as of the last step, and whether it was in
+    // water in the last tick.
+    float mu0 = 0.9f, drag0 = 0.0f;
+    dyn_wading water;
+    bool waded = false;
   };
+
+  // Agent a's water at its axles as a model step starts (dyn_wading.h): into a.water, its mu and
+  // its drag.
+  void wade(agent &a) const;
 
   // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's), its box in the world.
   void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);

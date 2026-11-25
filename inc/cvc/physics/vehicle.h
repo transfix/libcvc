@@ -63,6 +63,23 @@
 //   chassis  only `displacement` of the box's volume displaces water: the cabin and the engine bay
 //            flood, and what is left is the body's solid and sealed parts. So a heavy vehicle stays
 //            on its wheels as it wades, and sinks rather than floats in water over its roof.
+//   flooding with a `flood_area`, the cabin and engine bay (the box's other 1 - displacement) take
+//            the water in over time instead, through openings of that area at the box's bottom
+//            (door seals, vents, floor drains), at an orifice's rate: Q = C_d A sqrt(2 g dh),
+//            C_d 0.6 (a sharp-edged orifice), dh the water's depth over the openings outside less
+//            the water's inside. The water inside stands level over the box's floor; the box
+//            floats as a sealed box and the water inside weighs it down (its weight, at its
+//            centroid, not its inertia: it sloshes). So a vehicle driven into deep water first
+//            floats a little, settles as it fills, and once level inside and out the water lifts
+//            just `displacement` again; climbing out it is heavier until the water drains out of
+//            the same openings. Each step is exact for the water outside at its start: sqrt(|dh|)
+//            closes at a constant rate, so the level never overshoots. Cars sink this way
+//            (McDonald and Giesbrecht, "Vehicle submersion: a review of the problem, associated
+//            risks, and survival information", Aviat. Space Environ. Med. 84(5), 2013: one floats
+//            for about 15 s to a minute, as water comes in through its seals and vents, before
+//            the water reaches its side windows), and flooding codes for damaged ships flood each
+//            compartment so: a level surface inside, Bernoulli's flow through each opening, C_d
+//            about 0.6 ("Benchmark study on simulation of flooding progression", STAB&S 2021).
 //   wheels   the immersed part of each wheel is dragged by the water, 1/2 rho C_d A |u| u: u the
 //            water's velocity (a current, the waves' orbital motion) less the hub's, along the
 //            tire's travel and across it, A the tire's width times its immersed height along its
@@ -73,7 +90,9 @@
 //            below the box) are dragged the same way across their immersed height.
 //   grip     a tire in water is on soaked ground: its mu runs to the material's wet_friction (the
 //            rain's soaked value, apply_wetness's surface_class::mu_wet) as the water over its
-//            contact deepens to 3 mm (standing water, AMC 25.1591). In standing water a tire with
+//            contact deepens to 3 mm (standing water, AMC 25.1591). Under a water class (deep or
+//            shallow water) that is the lake or pond bed's soaked mu, above the class's dry one,
+//            which stands for the water when no fluid covers it. In standing water a tire with
 //            a `tire_pressure` aquaplanes: its mu falls as 1 - (v / v_p)^2 to 0.05 at
 //            v_p = 0.85 x 9 sqrt(p) kt (p in psi; AMC 25.1591, 7.1.1), v its speed over the ground.
 //   engine   water deeper than `fording_depth` over the ground at the front axle floods the engine:
@@ -165,6 +184,12 @@ struct wading_desc {
   // The depth of water over the ground at the front axle (m) past which the engine floods and stops
   // for good: the rated fording depth. 0 = it never floods.
   double fording_depth = 0.0;
+  // The effective area (m^2) of the openings the cabin and engine bay flood and drain through, at
+  // the chassis box's bottom (the header's flooding). 0, the default, floods them at once: the box
+  // displaces only `displacement` whenever it is in water. A car with its doors shut leaks through
+  // its seals, vents and drains, a few hundredths of a square metre (it floats for most of a
+  // minute); open doors or windows, or an open engine bay, are tenths of a square metre.
+  double flood_area = 0.0;
 };
 
 struct vehicle_desc {
@@ -389,9 +414,13 @@ struct vehicle_state {
   vec3 aero_force;         // N, the drag applied
   vec3 air_velocity;       // m/s, the air's (a flow field's wind, or still)
   // Wading: the water's push on the wheels and underbody applied this step (drag and the wheels'
-  // buoyancy, not the chassis box's, which is the fields'), and whether the engine has flooded.
+  // buoyancy, not the chassis box's, which is the fields'; with a flood_area, the water inside's
+  // weight too), and whether the engine has flooded.
   vec3 water_force; // N
   bool engine_flooded = false;
+  // With a flood_area: the water in the cabin and engine bay (m^3, and its mass, kg).
+  double water_inside = 0.0;
+  double water_inside_mass = 0.0;
   std::vector<wheel_state> wheels;
   vehicle_energy energy; // its ledger since it was added
 };
