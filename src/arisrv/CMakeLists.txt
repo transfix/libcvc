@@ -509,7 +509,16 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   # Client identity (docs/roadmap/ARISRV_IDENTITY.md, ID1): stock arisrv keeps a record of each
   # client, answers server.whoami and server.set itself, owns profile.name (room-join asks for
   # it), and never sends a client arisrv.clients. tests/relay_pair.py runs the relay and the
-  # client, as the room-call tests do; it needs only a Python to run it, not arisrvx.
+  # client, as the room-call tests do; it needs only a Python to run it, not arisrvx. Only pycvc
+  # and arisrvx look Python up, so a build with neither (CI's gRPC job) finds an interpreter here,
+  # or these tests, rcon's among them, would silently not exist.
+  if(TARGET ari AND NOT Python3_EXECUTABLE)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+  endif()
+  if(TARGET ari AND NOT Python3_EXECUTABLE)
+    message(STATUS "arisrv: the client identity and rcon tests are off: no Python interpreter "
+                   "to run tests/relay_pair.py")
+  endif()
   if(TARGET ari AND Python3_EXECUTABLE)
     set(_id_pair "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py")
     set(_id_relay --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
