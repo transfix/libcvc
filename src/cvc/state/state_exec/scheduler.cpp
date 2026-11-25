@@ -520,6 +520,7 @@ int scheduler::execute(const std::string &script, const execute_options &opts) {
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  proc.owner_root = opts.owner_root;
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
@@ -559,6 +560,7 @@ int scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.gid = opts.gid;
   proc.root_path = opts.root_path;
   proc.owner = opts.owner;
+  proc.owner_root = opts.owner_root;
   // The floor (design 7.2): a host's, explicit, or the submit priority; and what the process
   // keeps alive (a spawned child's context, td 4.15).
   proc.priority_floor = opts.priority_floor.value_or(opts.priority);
@@ -1566,6 +1568,7 @@ int scheduler::fork(int pid) {
   child->gid = parent.gid;
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
+  child->owner_root = parent.owner_root;
   child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
   child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;
@@ -1791,6 +1794,8 @@ void scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out) {
     case control_cmd::kind::signal:
       applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
       break;
+    case control_cmd::kind::kill_owner:
+      break; // S2b's pool.kill_owner posts only to async schedulers: refused here
     }
   } catch (...) {
     // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
@@ -1857,6 +1862,8 @@ process_info scheduler::make_info(const process &proc) const {
   info.priority = proc.priority;
   info.uid = proc.uid;
   info.gid = proc.gid;
+  info.scope = process_scope(proc.root_path, proc.owner_root);
+  info.owner = proc.owner;
   info.step_count = proc.step_count();
   fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();

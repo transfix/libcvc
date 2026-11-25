@@ -593,6 +593,93 @@ TEST(StateTransportGrpcTest, ConnectionClosedReportsThePeersNodeId) {
   EXPECT_EQ(closed[0], "alice");
 }
 
+namespace {
+// Poll DONE every 5 ms until it holds or TIMEOUT passes; whether it held.
+template <class F> bool poll_until(F done, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!done()) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;
+}
+} // namespace
+
+// A silent stream (a peer gone without closing: a crash behind NAT, a suspended phone) is closed by
+// reap_idle once it has sent nothing for the timeout, at either end. At the relay its on-close
+// report fires, as for a stream that ended; at the client the relay is no longer a link (so it
+// dials again). The probe is off here, so a live peer is silent too.
+TEST(StateTransportGrpcTest, ReapIdleClosesASilentStreamAtEitherEnd) {
+  for (const bool at_relay : {true, false}) {
+    SCOPED_TRACE(at_relay ? "the relay reaps" : "the client reaps");
+    cvc::state_transport_grpc relay, client;
+    relay.set_ping_interval(std::chrono::milliseconds(0));
+    client.set_ping_interval(std::chrono::milliseconds(0));
+    std::mutex mu;
+    std::vector<std::string> closed;
+    relay.set_on_connection_closed([&](const std::string &node_id) {
+      std::lock_guard<std::mutex> lk(mu);
+      closed.push_back(node_id);
+    });
+    relay.start("127.0.0.1:0", "relay", "C");
+    client.start("127.0.0.1:0", "alice", "C");
+    ASSERT_TRUE(client.connect_to_peer(relay.listen_address(), std::chrono::milliseconds(2000)));
+    ASSERT_TRUE(poll_until(
+        [&] {
+          const auto links = relay.link_reports();
+          return !links.empty() && links[0].remote_node_id == "alice";
+        },
+        std::chrono::milliseconds(5000)))
+        << "the relay never saw alice";
+    EXPECT_EQ((at_relay ? relay : client).reap_idle(std::chrono::seconds(10)), 0u)
+        << "not silent that long";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    EXPECT_EQ((at_relay ? relay : client).reap_idle(std::chrono::milliseconds(20)), 1u);
+    EXPECT_TRUE(poll_until(
+        [&] {
+          std::lock_guard<std::mutex> lk(mu);
+          return !closed.empty();
+        },
+        std::chrono::milliseconds(5000)))
+        << "no connection-closed report";
+    EXPECT_TRUE(
+        poll_until([&] { return client.link_reports().empty(); }, std::chrono::milliseconds(5000)))
+        << "the client still has a link to the relay";
+    EXPECT_TRUE(relay.link_reports().empty());
+    client.stop();
+    relay.stop();
+    std::lock_guard<std::mutex> lk(mu);
+    ASSERT_EQ(closed.size(), 1u);
+    EXPECT_EQ(closed[0], "alice");
+  }
+}
+
+// A client that sends nothing of its own but answers the relay's Pings is alive: the reaper keeps
+// it (the gRPC twin of the WebSocket transport's QuietClientAnsweringPingsIsNotReaped).
+TEST(StateTransportGrpcTest, AQuietClientAnsweringPingsIsNotReaped) {
+  cvc::state_transport_grpc relay, client;
+  relay.set_ping_interval(std::chrono::milliseconds(20));
+  client.set_ping_interval(std::chrono::milliseconds(0)); // the client never initiates anything
+  std::atomic<int> closed{0};
+  relay.set_on_connection_closed([&](const std::string &) { closed.fetch_add(1); });
+  relay.start("127.0.0.1:0", "relay", "C");
+  client.start("127.0.0.1:0", "alice", "C");
+  ASSERT_TRUE(client.connect_to_peer(relay.listen_address(), std::chrono::milliseconds(2000)));
+  ASSERT_TRUE(wait_connected(client, relay, std::chrono::milliseconds(2000)));
+  // ~2 s of reaping with a 750 ms limit (the probe runs on a 50 ms tick; a loaded runner needs the
+  // margin), well past what a client that did not answer would survive.
+  for (int i = 0; i < 40; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    relay.reap_idle(std::chrono::milliseconds(750));
+  }
+  EXPECT_EQ(closed.load(), 0) << "a client answering Pings is not a ghost";
+  EXPECT_EQ(relay.connection_count(), 1u);
+  client.stop();
+  relay.stop();
+}
+
 // The link probe: both ends Ping, the other end Pongs, and each measures the round trip on its own
 // clock. Each side reports one link with its peer's node id, traffic both ways, and an RTT -- the
 // same report a relay gets for a client and a server gets for a peer (delegation) server.
@@ -1711,22 +1798,25 @@ cvc::pose_snapshot sample_poses() {
   a.x = 4000, a.y = -2500, a.z = 1;
   a.vx = 3000, a.vy = -1, a.vz = 0;
   a.qw = 32767, a.qx = 0, a.qy = -5, a.qz = 12;
+  a.wx = -120, a.wy = 45, a.wz = 350, a.steer = -123456; // OW5n
   cvc::pose_entry b;
   b.slot = 4;
   b.x = 67, b.y = -66;
   s.entries = {a, b};
   s.gone = {1, 2};
+  s.carries = cvc::pose_snapshot::kCarriesMotion;
   return s;
 }
 bool same_poses(const cvc::pose_snapshot &a, const cvc::pose_snapshot &b) {
   if (a.server_tick != b.server_tick || a.seq != b.seq || a.base_seq != b.base_seq ||
-      a.gone != b.gone || a.entries.size() != b.entries.size())
+      a.gone != b.gone || a.carries != b.carries || a.entries.size() != b.entries.size())
     return false;
   for (std::size_t i = 0; i < a.entries.size(); ++i) {
     const cvc::pose_entry &x = a.entries[i], &y = b.entries[i];
     if (x.slot != y.slot || x.pid != y.pid || x.x != y.x || x.y != y.y || x.z != y.z ||
         x.vx != y.vx || x.vy != y.vy || x.vz != y.vz || x.qw != y.qw || x.qx != y.qx ||
-        x.qy != y.qy || x.qz != y.qz)
+        x.qy != y.qy || x.qz != y.qz || x.wx != y.wx || x.wy != y.wy || x.wz != y.wz ||
+        x.steer != y.steer)
       return false;
   }
   return true;

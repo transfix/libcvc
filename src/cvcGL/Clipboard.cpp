@@ -18,6 +18,9 @@
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
 
+// The EM_JS bodies are JavaScript, which clang-format would mangle (it splits `===`).
+// clang-format off
+
 // COPY: navigator.clipboard.writeText is async and gated on transient
 // activation (Firefox/Safari want a gesture every time; Chromium remembers the
 // permission). We fire and forget — the write happens, we just cannot report
@@ -25,6 +28,11 @@
 // for older/permission-less contexts.
 EM_JS(void, cvcgl_clip_write, (const char *text), {
   var s = UTF8ToString(text);
+  var C = window.__cvcglClip;
+  if (C && C.copied && C.copied.text === s && Date.now() - C.copied.t < 3000) {
+    C.copied = null; // the pointer release that picked this Copy has written it (arm)
+    return;
+  }
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(s).catch(function() { cvcglClipFallback(s); });
@@ -68,6 +76,76 @@ EM_JS(void, cvcgl_clip_install, (), {
         } catch (err) {
         }
       });
+  // A context menu's Copy and Paste (arm): the item under the pointer, and the clipboard call
+  // made inside the pointer release over it. A mouse's press must have been over the same item
+  // too, as a click's is; a finger's has no hover before it lands, so its release is enough.
+  var C = window.__cvcglClip = {arm: null, downArm: null, copied: null, gesture: null, reads: {},
+                                next: 1};
+  C.read = function() {
+    var h = {state: 0, text: ''};
+    try {
+      navigator.clipboard.readText().then(function(t) {
+        h.text = t;
+        h.state = 1;
+      }, function() { h.state = 2; });
+    } catch (e) {
+      h.state = 2; // no clipboard API (an insecure page, an old browser)
+    }
+    return h;
+  };
+  window.addEventListener('pointerdown', function(e) {
+    C.downArm = e.button === 0 ? C.arm : null;
+  }, true);
+  window.addEventListener(
+      'pointerup', function(e) {
+        var a = C.arm;
+        if (!a || e.button !== 0 || (a !== C.downArm && e.pointerType === 'mouse'))
+          return;
+        if (a.copy !== null) {
+          C.copied = {text: a.copy, t: Date.now()};
+          try {
+            navigator.clipboard.writeText(a.copy).catch(function() { C.copied = null; });
+          } catch (err) {
+            C.copied = null; // set() tries again, with its fallback
+          }
+        }
+        if (a.paste)
+          C.gesture = {h: C.read(), t: Date.now()};
+      }, true);
+});
+
+EM_JS(void, cvcgl_clip_arm, (const char *copy, int paste), {
+  var C = window.__cvcglClip;
+  C.arm = copy || paste ? {copy: copy ? UTF8ToString(copy) : null, paste: !!paste} : null;
+});
+
+EM_JS(int, cvcgl_clip_begin_read, (), {
+  var C = window.__cvcglClip;
+  var h;
+  if (C.gesture && Date.now() - C.gesture.t < 3000)
+    h = C.gesture.h; // the read the release over Paste started
+  else
+    h = C.read();
+  C.gesture = null;
+  var id = C.next++;
+  C.reads[id] = h;
+  return id;
+});
+
+// 0 pending, 1 done (its text is cvcgl_clip_read_text's), 2 failed or unknown.
+EM_JS(int, cvcgl_clip_poll_read, (int id), {
+  var h = window.__cvcglClip.reads[id];
+  return h ? h.state : 2;
+});
+
+EM_JS(char *, cvcgl_clip_read_text, (int id), {
+  var C = window.__cvcglClip;
+  var s = C.reads[id] ? C.reads[id].text : '';
+  delete C.reads[id];
+  var n = lengthBytesUTF8(s) + 1;
+  var p = _malloc(n);
+  stringToUTF8(s, p, n);
+  return p;
 });
 
 EM_JS(char *, cvcgl_clip_read, (), {
@@ -77,6 +155,7 @@ EM_JS(char *, cvcgl_clip_read, (), {
   stringToUTF8(s, p, n);
   return p;
 });
+// clang-format on
 
 #elif defined(_WIN32)
 // Nothing here: Dear ImGui core already implements the Win32 clipboard
@@ -305,6 +384,52 @@ bool canPaste() {
   return false;
 #else
   return true;
+#endif
+}
+
+bool readIsAsync() {
+#if defined(__EMSCRIPTEN__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+void arm(const std::string *copy, bool paste) {
+#if defined(__EMSCRIPTEN__)
+  cvcgl_clip_install();
+  cvcgl_clip_arm(copy ? copy->c_str() : nullptr, paste ? 1 : 0);
+#else
+  (void)copy;
+  (void)paste;
+#endif
+}
+
+int beginRead() {
+#if defined(__EMSCRIPTEN__)
+  cvcgl_clip_install();
+  return cvcgl_clip_begin_read();
+#else
+  return 0;
+#endif
+}
+
+ReadState pollRead(int ticket, std::string &text) {
+#if defined(__EMSCRIPTEN__)
+  if (ticket <= 0)
+    return ReadState::Failed;
+  const int st = cvcgl_clip_poll_read(ticket);
+  if (st == 0)
+    return ReadState::Pending;
+  char *p = cvcgl_clip_read_text(ticket); // spends the ticket either way
+  if (st == 1)
+    text = p ? p : "";
+  std::free(p);
+  return st == 1 ? ReadState::Done : ReadState::Failed;
+#else
+  (void)ticket;
+  (void)text;
+  return ReadState::Failed;
 #endif
 }
 

@@ -152,11 +152,14 @@ std::vector<std::string> present_in_order(cvc::app &app, const std::string &path
   return out;
 }
 
-// Soft-remove (present = 0) the ids under PATH that KEEP does not name.
+// Remove the ids under PATH that KEEP does not name: a delete each, which every client applies.
 void retire_others(cvc::app &app, const std::string &path, const std::set<std::string> &keep) {
+  cvc::state *parent = find(app, path);
+  if (!parent)
+    return;
   for (const std::string &id : child_ids(app, path))
-    if (!keep.count(id) && get_b(app, sub(path, {id, "present"}), false))
-      set_b(app, sub(path, {id, "present"}), false);
+    if (!keep.count(id))
+      parent->removeChild(id);
 }
 
 void write_part(cvc::app &app, const std::string &base, const avatar_part &p) {

@@ -18,6 +18,7 @@
 #include <cvc/geometry/tiler_params.h>
 #include <cvc/state/state.h>
 #include <cvc/volume/volume_grid.h>
+#include <cvc/volume/volume_grid_segment.h>
 #include <fstream>
 #include <iterator>
 #include <set>
@@ -720,7 +721,8 @@ bool volume_grid_session_key(const std::string &path) {
          in("grid.display.", param_names<volume_grid_display_params>()) ||
          in("grid.contour.", param_names<volume_grid_contour_params>()) ||
          in("grid.tile.", param_names<tile_params>()) ||
-         in("grid.source.", {"var", "time"}); // not where the data come from: the document's
+         in("grid.source.", {"var", "time"}) || // not where the data come from: the document's
+         volume_grid_segment_session_key(path); // the Segmentation tab's parameters
 }
 
 namespace {

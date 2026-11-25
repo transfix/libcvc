@@ -187,6 +187,11 @@ public:
   bool cap_scales_with_rate() const;
   void set_cap_scales_with_rate(bool on);
 
+  // The stall guard (config::max_steps_per_advance), changed in place: the tick, the bank and the
+  // drop count stand, as they do for the lockstep steps and the rate scaling.
+  int max_steps_per_advance() const;
+  void set_max_steps_per_advance(int n); // clamped to >= 1
+
   // --- observability ------------------------------------------------------
 
   // Total quanta ever discarded by the clamp. Non-zero means this run is not

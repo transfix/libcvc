@@ -1300,6 +1300,11 @@ struct pycvc_py_conversion {
 // (cvc/ph/compose.h, docs/PH_COMPOSE.md).
 %include "pycvc_ph.i"
 
+// ── cvc::nav's CoPH: the kernels, the learner and the fleet ────────────────────
+// NavCophAgent, NavCophFleet, NavCophPacket and the golden kernels (cvc/nav/coph_*.h, C6 of
+// docs/roadmap/NAV-COPH-ROADMAP.md).
+%include "pycvc_nav_coph.i"
+
 // ── Direct wrap of the REAL cvc::state class (full surface, no facade) ───────
 // Like voxels/volume/geometry, the real libcvc header is %include'd here so
 // Python gets the actual cvc::state tree node — not a parallel facade. This
@@ -1443,6 +1448,7 @@ struct pycvc_py_conversion {
 %include "pycvc_volume_slice.i"
 %include "pycvc_volume_grid_contours.i" // before volume_grid.i: its session holds contours
 %include "pycvc_volume_grid.i"
+%include "pycvc_volume_grid_segment.i"
 
 // ── UTF-8 display-width utilities (cvc::text, roadmap §17) ───────────────
 // text_display_width / _pad_to_width / _truncate_to_width / … so a pycvc UI does
@@ -3890,6 +3896,8 @@ struct execute_options {
   std::string gid;
   std::string root_path;
   std::string owner;
+  // The root the owner's scopes are written from: process_info.scope is root_path relative to it.
+  std::string owner_root;
   unsigned long long max_steps;
   double max_time;
   double max_step_time;
@@ -3966,6 +3974,12 @@ struct process_info {
   int priority;
   std::string uid;
   std::string gid;
+  // Whose it is: its chroot relative to its owner's root ("" for a document's own programs,
+  // "includes.<as>" for a loaded document's; docs/roadmap/ARIADNE_SHELL.md 4.10).
+  std::string scope;
+  // Its owner tag ("" unowned; a pooled Exec's "pycvc:<prefix>.<i>"): what the owner rule compares
+  // (S2-Q7, S2-Q8).
+  std::string owner;
   unsigned long long step_count;
   double elapsed_time;
   unsigned long long current_memory;
@@ -4070,6 +4084,7 @@ struct process {
   std::string gid;
   std::string root_path;
   std::string owner;
+  std::string owner_root;
   bool awaiting_frame;
   unsigned long long max_steps;
   double max_time;
@@ -4285,7 +4300,9 @@ public:
       std::optional<double> max_time = std::nullopt);
   int kill_owner(const std::string &owner);
   int wake_awaiting();
-  void post_message(const std::string &path, const value_t &msg);
+  // False when the scheduler refused it: its ingress cap (state_exec.groups.ingress_cap), or it is
+  // being destroyed (S2-Q10).
+  bool post_message(const std::string &path, const value_t &msg);
   void drain_ingress();
   bool wait_for_work(double seconds);
   size_t awaiting_frame_count() const;
@@ -4841,7 +4858,8 @@ def register_intrinsics(env, ctx):
 // idle_timeout=60.0) (docs/STATE_EXEC_THREADED.md 4.12; S1-Q5): many programs at once on the app's
 // exec_pool. Keywords, as Exec's: the constructor is one declaration. An argument it can't take
 // raises ValueError. run_all, register_fn, register_async_fn, stats() (a dict of run_all's batch
-// wait counters, S2a.8) and close() are methods; threads is a read-only property.
+// wait counters, S2a.8), info(pid) (a process's published row, S2b) and close() are methods;
+// threads and prefix (the one its pooled Execs use: the default's pick) are read-only properties.
 %feature("kwargs") pycvc::ExecPool::ExecPool;
 %feature("kwargs") pycvc::ExecPool::register_async_fn;
 %exception pycvc::ExecPool::ExecPool {
@@ -4853,11 +4871,63 @@ def register_intrinsics(env, ctx):
   PYCVC_STATE_EXEC_CATCH
 }
 %rename(_threads) pycvc::ExecPool::threads;
+%rename(_prefix) pycvc::ExecPool::prefix;
 %include "pycvc_exec_pool.h"
 %extend pycvc::ExecPool {
+  // info(pid): the process's row as its group last published it (S2-Q9; exec_pool::info), a dict
+  // with "pid", "name", "owner", "uid", "scope", "parent_pid", "status" (a
+  // pycvc.process_status), "base_priority", "effective_priority", "floor", "locks_held" (absolute
+  // keys), "waits_on", "steps", "run_seconds" and "memory"; None for a pid in no group of the app,
+  // or not published since its creation. Any thread.
+  PyObject *info(int pid) const {
+    const std::optional<cvc::state_exec::published_process> row = $self->published(pid);
+    if (!row)
+      Py_RETURN_NONE;
+    PyObject *keys = PyList_New(static_cast<Py_ssize_t>(row->locks_held.size()));
+    for (std::size_t i = 0; keys != nullptr && i < row->locks_held.size(); ++i) {
+      PyObject *k = PyUnicode_FromStringAndSize(
+          row->locks_held[i].data(), static_cast<Py_ssize_t>(row->locks_held[i].size()));
+      if (k == nullptr)
+        Py_CLEAR(keys);
+      else
+        PyList_SET_ITEM(keys, static_cast<Py_ssize_t>(i), k);
+    }
+    const auto text = [](const std::string &s) {
+      return PyUnicode_FromStringAndSize(s.data(), static_cast<Py_ssize_t>(s.size()));
+    };
+    const std::pair<const char *, PyObject *> items[] = {
+        {"pid", PyLong_FromLong(row->pid)},
+        {"name", text(row->name)},
+        {"owner", text(row->owner)},
+        {"uid", text(row->uid)},
+        {"scope", text(row->scope)},
+        {"parent_pid", PyLong_FromLong(row->parent_pid)},
+        {"status", pycvc_enum_to_py("process_status", static_cast<int>(row->status))},
+        {"base_priority", PyLong_FromLong(row->base_priority)},
+        {"effective_priority", PyLong_FromLong(row->effective_priority)},
+        {"floor", PyLong_FromLong(row->floor)},
+        {"locks_held", keys},
+        {"waits_on", text(row->waits_on)},
+        {"steps", PyLong_FromUnsignedLongLong(row->steps)},
+        {"run_seconds", PyFloat_FromDouble(row->run_seconds)},
+        {"memory", PyLong_FromSize_t(row->memory)}};
+    PyObject *d = PyDict_New();
+    bool ok = d != nullptr;
+    for (const auto &[key, value] : items) {
+      ok = ok && value != nullptr && PyDict_SetItemString(d, key, value) == 0;
+      Py_XDECREF(value);
+    }
+    if (!ok) {
+      Py_XDECREF(d);
+      return nullptr;
+    }
+    return d;
+  }
   %pythoncode %{
     threads = property(lambda self: self._threads(),
                        doc="The app pool's worker count (the real one).")
+    prefix = property(lambda self: self._prefix(),
+                      doc="The prefix its pooled Execs are chrooted under (the default's pick).")
   %}
 }
 

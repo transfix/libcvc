@@ -15,10 +15,12 @@
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/tvision_backend.h> // §5.20 the desktop has rich text too
 #include <cvc/core/app.h>
+#include <cvc/core/exec_pool.h> // pool_options: the app's pool (S2b.6)
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_call.h>      // async_kernel, async_call
 #include <cvc/state/state_exec/async_scheduler.h> // policy (--exec-policy)
 #include <cvc/state/state_exec/exceptions.h> // dsl_error
+#include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key (S2b.6)
 #include <cvc/state/state_exec/types.h>
 #include <cvc/volume/point_classes.h> // data-save's point_classes
 #include <cvc/volume/volume.h>        // data-put's volume
@@ -2059,4 +2061,48 @@ TEST(AriadneRichText, ADocumentRequiringTextRunsLoadsAndItsLinksTakeTheKeys) {
       << "opened '" << val(app, "ui.docs.rich.opened") << "'";
   TvisionBackend desk;
   EXPECT_TRUE(desk.capabilities().rich_text);
+}
+
+// --- Stage 2b router (S2b.6) ---
+
+// S2.md section 0 row 21: the host seam app.h's compute_async and intrinsics.h's
+// resolve_channel_key document posts to app.exec_scheduler(). For an isolated document's channel
+// such a post used to stay in group 0's queue; with the router (S2b) group 0 passes it on to the
+// document's group, the home of its prefix, where it reaches the waiting action, and group 0 keeps
+// nothing. The document has no channels: block (eligible since S2-Q16). At threads 0, 1 and 2,
+// with a 30 s hang guard. Needs the router's routing (S2b.4): on S2b.0's stubs the post stays in
+// group 0.
+TEST(AriadneRouterHost, S2b6_AHostPostToGroupZeroReachesAnIsolatedDocument) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("s2b6_host_post");
+  const fs::path doc = write(dir, "hp.ari", "meta: {min_libcvc: 3.4.0}\nroot:\n  - text: hp\n");
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    cvc::pool_options o;
+    o.threads = threads;
+    app.exec_pool(o); // before anything makes the lock manager, so it is shared (S1-Q1)
+    cvc::state::instance(app)("ariadne.exec.isolate_documents").value(std::string("1"));
+    FtxuiBackend be;
+    AppRuntime art(app, "ui.docs.hp");
+    art.set_backend(be);
+    art.load(doc.string());
+    ASSERT_NE(art.runtime().isolated_group(), nullptr) << art.runtime().isolation_reason();
+    std::string how = "running";
+    art.run_program(R"((state-set "got" (msg-recv "wake")))",
+                    [&](const std::string &h) { how = h; });
+    art.drain(); // the action starts and waits
+    const std::string key = se::resolve_channel_key("ui.docs.hp", "wake");
+    se::async_scheduler &g0 = app.exec_scheduler();
+    EXPECT_TRUE(g0.post_message(key, se::value_t(std::string("woken"))));
+    const auto t0 = std::chrono::steady_clock::now();
+    while (how == "running" && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(30)) {
+      art.drain();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(how, "") << "the host's post to group 0 never reached the document";
+    EXPECT_EQ(val(app, "ui.docs.hp.got"), "woken");
+    g0.drain_ingress();
+    EXPECT_EQ(g0.total_pending_messages(), 0u) << "the post stayed in group 0";
+  }
 }

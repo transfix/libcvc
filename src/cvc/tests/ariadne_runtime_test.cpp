@@ -295,6 +295,13 @@ struct MockBackend : Backend {
     rec(std::string("color:") + l);
     return color_ret;
   }
+  ColorEdit color_hex(const char *l, const float rgb[3]) override {
+    last_color[0] = rgb[0];
+    last_color[1] = rgb[1];
+    last_color[2] = rgb[2];
+    rec(std::string("color_hex:") + l);
+    return color_ret;
+  }
   bool draw_image_ret =
       false;              // whether the mock "drew" the image (else the core falls back to text)
   std::string last_image; // the image name the core resolved (src or bound key)
@@ -1610,6 +1617,67 @@ TEST(AriadneIsolatedDocs, FilePickOpensItsPickerOnTheFramesThread) {
                             [&](std::thread::id t) { return t != frame_thread; }));
 }
 
+// §5.29 (save-url) binds as it is in an `any` group too: its program hands the save to the
+// Runtime from whichever thread pumps it, and the drain starts it on the frame's thread, where the
+// host's Save dialog is asked. The file is written where the dialog says, and the program learns
+// the name and size, never the path.
+TEST(AriadneIsolatedDocs, SaveUrlAsksForAPathOnTheFramesThread) {
+  namespace fs = std::filesystem;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const fs::path dir =
+      fs::temp_directory_path() /
+      ("cvc_runtime_save_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir);
+  std::ofstream(dir / "photo", std::ios::binary) << std::string("GIF89a and the rest", 19);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  struct SaverBackend : MockBackend {
+    std::set<std::thread::id> threads;
+    std::vector<std::string> names;
+    fs::path to;
+    bool ask_save_path(const SavePathRequest &req, SavePathDone done) override {
+      threads.insert(std::this_thread::get_id());
+      names.push_back(req.name);
+      done((to / ("saved-" + std::to_string(names.size()) + ".gif")).string(), std::string());
+      return true;
+    }
+  } sb;
+  sb.to = dir;
+  Runtime rt(app, "docs.saver");
+  rt.set_backend(&sb);
+  rt.set_media_base(dir.string());
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("saver")}));
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, cvc::state_exec::group_affinity::any);
+  for (int run = 0; run < 3; ++run) {
+    std::string how = "running";
+    rt.run_program("(begin (state-set \"has\" (if (has? \"save-url\") \"yes\" \"no\"))"
+                   "  (set r (save-url \"file://photo\"))"
+                   "  (state-set \"ok\" (if (get-attr r \"ok\") \"yes\" \"no\"))"
+                   "  (state-set \"name\" (get-attr r \"name\"))"
+                   "  (state-set \"size\" (get-attr r \"size\")))",
+                   [&](const std::string &h) { how = h; });
+    for (int frame = 0; frame < 2000 && how == "running"; ++frame) {
+      isolated_frame(app, rt);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(how, "") << "run " << run;
+    EXPECT_EQ(isolated_value(app, "docs.saver.has"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.saver.ok"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.saver.name"), "saved-" + std::to_string(run + 1) + ".gif");
+    EXPECT_EQ(isolated_value(app, "docs.saver.size"), "19");
+    EXPECT_TRUE(fs::exists(dir / ("saved-" + std::to_string(run + 1) + ".gif")));
+  }
+  EXPECT_EQ(sb.names, (std::vector<std::string>{"photo.gif", "photo.gif", "photo.gif"}));
+  EXPECT_EQ(sb.threads, std::set<std::thread::id>{frame_thread})
+      << "a Save dialog asked off the frame's thread";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 // A group a move retired still counts for AppRuntime::idle() and wait_idle() while its kernel
 // runs: a host waiting before it lets go of what an async function uses waits for that kernel
 // too. The move here is a thread-affine declaration over the running document (any to host).
@@ -1967,9 +2035,10 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleDecideNothing) {
 }
 
 // R1b skeptic M1: a move re-points the streams the document owns, and only those. A group-0
-// document nested under a moving document's prefix keeps its stream on group 0, its producer's
-// posts never land in the mover's group, and after the mover's teardown the stream still names
-// group 0, not a destroyed group.
+// document nested under a moving document's prefix (kept there by a writable hole: its channels no
+// longer would, S2-Q16) keeps its stream on group 0, its producer's posts still go to group 0 and
+// reach its resident, and after the mover's teardown the stream still names group 0, not a
+// destroyed group.
 TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   namespace se = cvc::state_exec;
   namespace sx = cvc::ariadne::stream;
@@ -1986,9 +2055,9 @@ TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   outer->set_channel_policy({}, {}, true, true);
   outer->set_root(group({holed})); // a writable hole out of its prefix: group 0 first
   outer->set_tick_program("(state-set \"ticked\" \"1\")");
-  Runtime inner(app, "docs.outer.inner"); // no strict channels: group 0, always
+  Runtime inner(app, "docs.outer.inner"); // a writable hole out of its prefix: group 0, always
   inner.set_backend(&mb);
-  inner.set_root(group({text("inner")}));
+  inner.set_root(group({text("inner"), holed}));
   std::string how = "running";
   inner.run_program(
       "(state-set \"tok\" (get-attr (stream-open (dict \"id\" \"cam\" \"w\" 4 \"h\" 2 "
@@ -2013,12 +2082,19 @@ TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   outer->render();
   se::exec_group *g = outer->isolated_group();
   ASSERT_NE(g, nullptr) << outer->isolation_reason();
-  se::async_scheduler *const gs = &g->sched();
   EXPECT_EQ(s->scheduler_for_test(), g0) << "the mover took a nested document's stream";
-  const std::uint64_t posts0 = gs->ingress_posts_for_test();
-  std::thread producer([s] { s->post_seq(7); }); // inner's producer posts a seq
+  // Inner's producer posts a seq, to group 0 still, and inner's resident, started after the move,
+  // takes it. (With the router the key's home is the mover's group, whose prefix covers inner's:
+  // group 0 passes the post on to it, and it delivers it back to the resident in group 0, S2b.)
+  inner.set_tick_program("(state-set \"seq\" (msg-recv \"streams.cam.seq\"))");
+  std::thread producer([s] { s->post_seq(7); });
   producer.join();
-  EXPECT_EQ(gs->ingress_posts_for_test() - posts0, 0u) << "inner's seq landed in the mover's group";
+  for (int f = 0; f < 2000 && isolated_value(app, "docs.outer.inner.seq") != "7"; ++f) {
+    outer->drain();
+    inner.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(isolated_value(app, "docs.outer.inner.seq"), "7") << "inner's resident missed its seq";
   outer.reset();
   EXPECT_EQ(s->scheduler_for_test(), g0);
 }
@@ -3056,6 +3132,35 @@ TEST(AriadneRuntime, CustomWidgetUncommittedEscapeDoesNotWrite) {
   rt.set_root(group({c}));
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("c2").value(), "keep"); // uncommitted -> no write
+}
+
+// A custom widget's further events all run, each with its fields; one marked `document` runs at
+// the document's prefix wherever the widget sits (a viewport in a load:ed module raising a scene
+// node's on_pick:), the rest at the widget's own.
+TEST(AriadneRuntime, CustomWidgetEventsRunEachInItsScope) {
+  cvc::app app;
+  Runtime rt(app, "doc");
+  MockBackend mock;
+  rt.set_backend(&mock);
+  mock.custom_ret = CustomEdit{true, false, false, ""};
+  mock.custom_ret.events.push_back(
+      {"(state-set \"who\" (get-attr event \"node\"))", {{"node", "crate"}}, true});
+  mock.custom_ret.events.push_back(
+      {"(state-set \"who\" (get-attr event \"node\"))", {{"node", "lid"}}, false});
+  Widget c;
+  c.kind = Kind::Custom;
+  c.custom_type = "picker";
+  Widget mount;
+  mount.kind = Kind::Group;
+  mount.scope = "mod";
+  mount.children = {c};
+  rt.set_root(group({mount}));
+  rt.render();
+  mock.custom_ret = CustomEdit{}; // raised once
+  rt.drain();
+  cvc::state &tree = cvc::state::instance(app);
+  EXPECT_EQ(tree("doc.who").value(), "crate");   // the document's scope
+  EXPECT_EQ(tree("doc.mod.who").value(), "lid"); // the widget's
 }
 
 TEST(AriadneInit, RunawayScriptIsBoundedNotHang) {
@@ -4380,6 +4485,46 @@ TEST(AriadneRuntime, ColorWidgetReadsAndWritesCsv) {
   mb.color_ret = ColorEdit{true, true, true, {0.1f, 0.5f, 0.9f}};
   rt.render();
   EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
+}
+
+// fmt: hex draws the picker as one "#rrggbb" field (Backend::color_hex), reading and writing the
+// same "r,g,b" key; fmt: rgb (the default) the per-channel picker; another fmt warns.
+TEST(AriadneRuntime, ColorWidgetFmtHexDrawsTheHexPicker) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("tint").value(std::string("0.2,0.4,0.6"));
+  const LoadResult r =
+      load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: W\n    children:\n"
+                       "      - color: Hex\n        bind: tint\n        fmt: hex\n"
+                       "      - color: Rgb\n        bind: tint\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty());
+  mb.color_ret = ColorEdit{true, true, true, {0.1f, 0.5f, 0.9f}};
+  rt.set_root(r.root);
+  rt.render();
+  EXPECT_TRUE(mb.saw("color_hex:Hex"));
+  EXPECT_FALSE(mb.saw("color:Hex"));
+  EXPECT_TRUE(mb.saw("color:Rgb"));
+  EXPECT_EQ(cvc::state::instance(app)("tint").value(), "0.1,0.5,0.9");
+  const LoadResult bad =
+      load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: W\n    children:\n"
+                       "      - color: Odd\n        bind: tint\n        fmt: hsv\n");
+  ASSERT_TRUE(bad.ok) << bad.error;
+  // The loader's own warning; a build with the schema validator flags the same fmt as well.
+  std::vector<std::string> loader_warnings;
+  for (const std::string &w : bad.warnings)
+    if (w.rfind("ari: schema: ", 0) != 0)
+      loader_warnings.push_back(w);
+  ASSERT_EQ(loader_warnings.size(), 1u);
+  EXPECT_NE(loader_warnings[0].find("not rgb or hex"), std::string::npos) << loader_warnings[0];
+  if (cvc::ariadne::have_jsonschema()) {
+    bool flagged = false;
+    for (const cvc::ariadne::SchemaIssue &i : bad.schema_issues)
+      flagged = flagged || i.pointer == "/windows/0/children/0/fmt";
+    EXPECT_TRUE(flagged);
+  }
 }
 
 TEST(AriadneRuntime, ColorWidgetFallsBackToTextWhenBackendCantDraw) {
@@ -7926,6 +8071,43 @@ TEST(AriadneRuntime, ProgramsAndWarningsPostToTheFeedFromTheirDocument) {
 
 // §5.24 `notifications: false` keeps the bell out of the tray whatever the feed holds; `- bell`
 // places it among the tray's icons.
+// §5.28 a notification's context menu copies its whole message: the core hands the backend the
+// entry's text (next_item_copy) before the bell's one-line entry and the Notifications window's.
+TEST(AriadneRuntime, ANotificationsEntryCopiesItsWholeMessage) {
+  struct CopyBackend : TrayBackend {
+    void next_item_copy(const std::string &t) override { rec("copy:" + t); }
+  };
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  CopyBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({menubar({menu("File", {})})}));
+  cvc::notification n;
+  n.text = "build failed\nstep 3: link error";
+  cvc::notify(app, n);
+  mb.open = "\xF0\x9F\x94\x94";
+  rt.render();
+  const auto at = [&](const std::string &prefix) {
+    for (std::size_t i = 0; i < mb.log.size(); ++i)
+      if (mb.log[i].rfind(prefix, 0) == 0)
+        return static_cast<int>(i);
+    return -1;
+  };
+  const int copy = at("copy:" + n.text), entry = at("menu_action:\xE2\x80\xA2 build failed  ");
+  ASSERT_GE(copy, 0) << mb.dump();
+  EXPECT_EQ(copy + 1, entry) << "just before the entry\n" << mb.dump();
+  EXPECT_LT(at("copy:"), at("menu_action:Mark all read")) << "the bell's own items copy nothing";
+  EXPECT_EQ(at("copy:"), copy) << "one entry, one copy";
+  // The Notifications window: the same, before the entry's line.
+  mb.open.clear();
+  cvc::state::instance(app)("ui.demo.tree._notifications.open").value("1");
+  mb.log.clear();
+  rt.render();
+  const int wcopy = at("copy:" + n.text), line = at("text_line:\xE2\x80\xA2 build failed  ");
+  ASSERT_GE(wcopy, 0) << mb.dump();
+  EXPECT_EQ(wcopy + 1, line) << mb.dump();
+}
+
 TEST(AriadneRuntime, ADocumentPlacesOrTurnsOffTheBell) {
   {
     cvc::app app;
@@ -8236,6 +8418,131 @@ TEST(AriadneRuntime, AMountsNameNamesEachInstancesApplication) {
   rt2.set_root(group({menubar({menu("File", {})}), one}));
   rt2.render();
   EXPECT_TRUE(mb2.saw("begin_menu:Lab 7")) << mb2.dump();
+}
+
+// The shell's Processes view (docs/roadmap/ARIADNE_SHELL.md 4.10): every process the Runtime starts
+// says whose it is. (ps)'s and (inspect)'s `scope` is its chroot from the document's prefix: "" for
+// the document's own on_tick: and actions, "includes.fe_lab" for a loaded document's on_tick:, its
+// actions and the children they spawn.
+TEST(AriadneRuntime, ProcessRowsSayWhoseTheyAre) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  // A resident writes its own (ps) row's scope, bracketed so that "" shows.
+  const std::string own_row = "(for p (ps) (if (= (get-attr p \"pid\") (self-pid)) (state-set "
+                              "\"seen\" (str-concat \"[\" (get-attr p \"scope\") \"]\")) #f))";
+  // Its Remesh: an action that sleeps, after spawning a child that says it ran and sleeps too.
+  Widget frag = group({menubar({menu("Mesh", {menu_action("Remesh", R"S((begin
+               (spawn "(begin (state-set \"child\" \"ran\") (sleep 600) (state-set \"child\" \"woke\"))"
+                      "child")
+               (state-set "remeshed" "started") (sleep 600) (state-set "remeshed" "woke")))S")})}),
+                       window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  m.tick_script = own_row;
+  rt.set_tick_program(own_row);
+  rt.set_root(group({menubar({menu("File", {})}), m,
+                     window("W", {button("Probe", "(state-set \"probe\" (str-concat \"[\" "
+                                                  "(get-attr (inspect (self-pid)) \"scope\") "
+                                                  "\"]\"))")})}));
+  mb.pick = "Remesh";
+  mb.click_button = "Probe";
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  mb.click_button.clear();
+  const auto all_ran = [&] {
+    return sval(app, "ui.demo.seen") == "[]" && sval(app, "ui.demo.probe") == "[]" &&
+           sval(app, "ui.demo.includes.fe_lab.seen") == "[includes.fe_lab]" &&
+           sval(app, "ui.demo.includes.fe_lab.remeshed") == "started" &&
+           sval(app, "ui.demo.includes.fe_lab.child") == "ran";
+  };
+  ASSERT_TRUE(pump_until(rt, all_ran))
+      << sval(app, "ui.demo.seen") << " " << sval(app, "ui.demo.probe") << " "
+      << sval(app, "ui.demo.includes.fe_lab.seen");
+  int own = 0, mounted = 0, children = 0;
+  for (const se::process_info &p : app.exec_scheduler().list_processes()) {
+    if (se::is_finished(p.status))
+      continue;
+    if (p.scope.empty())
+      ++own;
+    else if (p.scope == "includes.fe_lab")
+      ++mounted;
+    else
+      ADD_FAILURE() << "pid " << p.pid << " " << p.name << ": scope '" << p.scope << "'";
+    if (p.name == "child") {
+      EXPECT_EQ(p.scope, "includes.fe_lab") << "a spawned child is its parent's";
+      ++children;
+    }
+  }
+  EXPECT_EQ(own, 1) << "the document's on_tick";
+  EXPECT_EQ(mounted, 3) << "the loaded document's on_tick, its Remesh and the child it spawned";
+  EXPECT_EQ(children, 1);
+}
+
+// The shell's application list (docs/roadmap/ARIADNE_SHELL.md 4.9): the Runtime mirrors each §5.25
+// application under the document's prefix, ariadne.apps.<key>.{name, scope, running}, and the
+// document's own name at ariadne.name. running follows Quit, reopening and Restart; a repeated
+// application has an entry per instance, and one gone from the tree is taken out.
+TEST(AriadneRuntime, TheApplicationsAreMirroredUnderTheDocumentsPrefix) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  Widget root = group({menubar({menu("File", {})}), fe_lab_mount()});
+  root.app_name = "Shell"; // the loader's: the document's meta.name
+  rt.set_root(root);
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.name"), "Shell");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.name"), "FE Lab");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.scope"), "includes.fe_lab");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "1");
+  const auto pick = [&](const char *label) {
+    mb.pick = label;
+    rt.render();
+    rt.drain();
+    mb.pick.clear();
+  };
+  pick("Quit FE Lab");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "0") << "Quit";
+  mb.click_toggle = "FE Lab"; // Windows > Applications > FE Lab
+  rt.render();
+  rt.drain();
+  mb.click_toggle.clear();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "1") << "opened again";
+  pick("Restart FE Lab");
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.running"), "1") << "Restart starts it again";
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.fe_lab.name"), "FE Lab")
+      << "Restart drops the application's state, not its entry";
+
+  Widget cam = fe_lab_mount();
+  cam.repeat = "(int 2)";
+  cam.scope = "includes.cam";
+  cam.app_name = "Camera";
+  rt.set_root(group({menubar({menu("File", {})}), cam}));
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_0.name"), "Camera 1");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_1.name"), "Camera 2");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_1.scope"), "includes.cam.1");
+  const std::vector<std::string> keys =
+      cvc::state::instance(app)("ui.demo.ariadne.apps").childNames();
+  EXPECT_EQ(keys, (std::vector<std::string>{"cam_0", "cam_1"})) << "fe_lab is gone from the tree";
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.name"), "") << "the new root has no name";
+
+  // A loader's name: (§5.25) names an entry as it names the menu, worked out each frame.
+  cam.app_name_bind = "slots.{i}.name";
+  cvc::state::instance(app)("ui.demo.slots.0.name").value(std::string("tx.wtf"));
+  rt.set_root(group({menubar({menu("File", {})}), cam}));
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_0.name"), "tx.wtf");
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_1.name"), "Camera 2") << "no name: its number";
+  cvc::state::instance(app)("ui.demo.slots.0.name").value(std::string("ncviz.com"));
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.ariadne.apps.cam_0.name"), "ncviz.com") << "the next frame's name";
 }
 
 // A document with two bars of its own: one clock and one bell, in the first; the loaded documents'
@@ -12398,9 +12705,11 @@ TEST(SpawnContext, SP01_AChildOfADeletedChrootWritesTheDetachedNode) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
-// EL-1 (S1-Q6): with ariadne.exec.isolate_documents on, a document gets a group of its own only
-// when it has a prefix, a channels: block enforced strictly, no global channel, no static `/`
-// reference, no oidc use and no writable link: hole whose target leaves its prefix. An ineligible
+// EL-1 (S1-Q6, S2-Q16): with ariadne.exec.isolate_documents on, a document gets a group of its own
+// only when it has a prefix, no oidc use and no writable link: hole whose target leaves its prefix.
+// Its channels no longer matter (S2-Q16 lifted S1-Q6's channel rules: a `/` channel is homed at
+// group 0 and routed): one with no channels: block, a block in warn mode, a global: true channel or
+// a static `/` reference is eligible. An ineligible
 // document stays in group 0 and gives a reason (its wording is not pinned), which the app's log
 // shows once, however many frames it then runs (read through system.log_output; not checked in a
 // log4cplus build). An eligible one's group is affinity::host when its host declared a
@@ -12492,6 +12801,21 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(load("docs.el.stage.doc", strict + text,
                        [](AppRuntime &a) { a.declare_thread_affine_prefix("docs.el.stage"); }),
                   "host", "a thread-affine prefix declared above it");
+  // S1-Q6's channel rules, lifted by S2-Q16.
+  expect_isolated(load("docs.el.nochannels", std::string(kS1bMeta) + text), "any",
+                  "no channels: block");
+  expect_isolated(load("docs.el.warn", std::string(kS1bMeta) +
+                                           "lint:\n  channels: warn\nchannels:\n  - box\n" + text),
+                  "any", "a channels: block in warn mode");
+  expect_isolated(load("docs.el.global", std::string(kS1bMeta) +
+                                             "channels:\n  - channel: app.quit\n"
+                                             "    global: true\n" +
+                                             text),
+                  "any", "a global: true channel");
+  // The load's channel lint does not read a widget's on_click; S1-Q6's rules did.
+  expect_isolated(load("docs.el.slash", strict + "root:\n  - text: Clickable\n"
+                                                 "    on_click: '(msg-send \"/x\" \"y\")'\n"),
+                  "any", "a static / reference");
   register_action_intrinsics(
       app,
       [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
@@ -12505,24 +12829,8 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(native, "host", "a host_only native in its env");
 
   // Ineligible: each stays in group 0.
-  expect_group_zero(load("docs.el.nochannels", std::string(kS1bMeta) + text), "a channels: block");
-  expect_group_zero(
-      load("docs.el.warn",
-           std::string(kS1bMeta) + "lint:\n  channels: warn\nchannels:\n  - box\n" + text),
-      "a channels: block enforced in strict mode");
-  expect_group_zero(load("docs.el.global", std::string(kS1bMeta) +
-                                               "channels:\n  - channel: app.quit\n"
-                                               "    global: true\n" +
-                                               text),
-                    "no global: true channel");
   expect_group_zero(load("docs.el.hole", hole("/shared.level")),
                     "no writable link: hole leaving its prefix");
-  // The load's channel lint does not read a widget's on_click; the placement rules do.
-  AppRuntime &slash = load("docs.el.slash", strict + "root:\n  - text: Clickable\n"
-                                                     "    on_click: '(msg-send \"/x\" \"y\")'\n");
-  expect_group_zero(slash, "no static / reference");
-  EXPECT_NE(slash.runtime().isolation_reason().find("/x"), std::string::npos)
-      << "the reason does not name the static / reference: " << slash.runtime().isolation_reason();
   expect_group_zero(load("", strict + text), "a non-empty prefix");
   if (cvc::net::have_http_backend()) {
     op.emplace();
@@ -12964,6 +13272,90 @@ TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
   EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
 }
 
+// The Processes window (components/processes.ari, docs/roadmap/ARIADNE_SHELL.md 4.10): its step,
+// called from on_tick:, lists the document's processes by application (the document's own by its
+// meta.name, a loaded document's by its name in ariadne.apps), and a row's Kill kills that row's
+// process, here the loaded document's sleeping action, and leaves the rest running.
+TEST(AriadneComponents, ProcessesListsByApplicationAndKillsARow) {
+  namespace se = cvc::state_exec;
+  struct KillBackend : TrayBackend {
+    int kill_row = -1; // the row whose Kill reports a click, counted in the frame's Kill buttons
+    int kills = 0;
+    void begin_frame() override {
+      TrayBackend::begin_frame();
+      kills = 0;
+    }
+    bool button(const char *l) override {
+      MockBackend::button(l);
+      return std::string(l) == "Kill" && kills++ == kill_row;
+    }
+  };
+  namespace fs = std::filesystem;
+  const fs::path file =
+      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "components" / "processes.ari";
+  if (!fs::exists(file))
+    GTEST_SKIP() << "component sources not found at " << file.string();
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  KillBackend be;
+  rt.set_backend(&be);
+  LoadResult r =
+      load_string(app, "meta: { name: Shell, min_libcvc: \"0.0.0\" }\nimport: " + file.string() +
+                           "\nwindows:\n  - include: processes\n    args: { rows: procs }\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(r.root.app_name, "Shell") << "the loader names the root by its meta.name";
+  // A loaded document beside it, whose Remesh sleeps.
+  Widget frag = group({menubar({menu("Mesh", {menu_action("Remesh", R"S((begin
+                                    (state-set "remeshed" "started") (sleep 600)
+                                    (state-set "remeshed" "done")))S")})}),
+                       window_with_id("FE", "fe", true)});
+  Widget m = group({frag});
+  m.scope = "includes.fe_lab";
+  m.app_name = "FE Lab";
+  r.root.children.push_back(std::move(m));
+  cvc::state::instance(app)("ui.demo.procs.every").value("0"); // a poll every tick
+  rt.set_tick_program("(processes-step \"procs\")");
+  rt.set_root(std::move(r.root));
+  be.pick = "Remesh";
+  rt.render();
+  rt.drain();
+  be.pick.clear();
+  const auto field = [&](int row, const char *name) {
+    return sval(app, ("ui.demo.procs." + std::to_string(row) + "." + name).c_str());
+  };
+  // The first row of application `name` that waits on `waits` ("" for any), or -1.
+  const auto row_of = [&](const std::string &name, const char *waits) {
+    const std::string n = sval(app, "ui.demo.procs.count");
+    for (int i = 0; i < (n.empty() ? 0 : std::stoi(n)); ++i)
+      if (field(i, "app") == name && (!*waits || field(i, "waits") == waits))
+        return i;
+    return -1;
+  };
+  ASSERT_TRUE(pump_until(rt, [&] { return row_of("FE Lab", "sleep") >= 0; }))
+      << "count " << sval(app, "ui.demo.procs.count") << ", row 0: " << field(0, "app");
+  EXPECT_TRUE(rt.take_reactive_warnings().empty()) << "no rows yet is no warning";
+  ASSERT_GE(row_of("Shell", ""), 0) << "the document's own on_tick, by its meta.name";
+  const int row = row_of("FE Lab", "sleep");
+  EXPECT_EQ(field(row, "scope"), "includes.fe_lab");
+  EXPECT_EQ(field(row, "status"), "waiting");
+  const int pid = std::stoi(field(row, "pid"));
+  const int ticker = std::stoi(field(row_of("Shell", ""), "pid"));
+  be.kill_row = row; // its Kill
+  rt.render();
+  rt.drain();
+  be.kill_row = -1;
+  se::async_scheduler &sched = app.exec_scheduler();
+  ASSERT_TRUE(pump_until(rt, [&] {
+    const std::optional<se::process_info> info = sched.get_process_info(pid);
+    return !info || info->status == se::process_status::killed;
+  }));
+  EXPECT_EQ(sval(app, "ui.demo.includes.fe_lab.remeshed"), "started") << "killed in its sleep";
+  EXPECT_TRUE(pump_until(rt, [&] { return row_of("FE Lab", "") < 0; })) << "its row went";
+  const std::optional<se::process_info> still = sched.get_process_info(ticker);
+  ASSERT_TRUE(still.has_value());
+  EXPECT_FALSE(se::is_finished(still->status)) << "the document's on_tick still runs";
+}
+
 // The conference's Audio window (components/audio_buffers.ari): a name, a graph and a line per
 // person in room_users' rows, each reading that person's own media.<pid>.jb.* keys (the host's
 // voice_monitor). The graphs are repeated charts, so their series take the row's index.
@@ -13018,4 +13410,237 @@ TEST(AriadneComponents, AudioBuffersDrawsARowPerPerson) {
   ASSERT_EQ(be.charts[1].series.size(), 2u);
   EXPECT_EQ(be.charts[1].series[0].y, (std::vector<double>{100, 0, 40}));
   EXPECT_EQ(be.charts[1].series[1].line, ChartLine::Dashed);
+}
+
+// --- Stage 2b router (S2b.6) ---
+//
+// Threaded S2b.6 (S2.md section 0 rows 21-23, S2-Q16): an isolated document's group is the home of
+// the channels under its prefix, and a `/` channel is homed at group 0 and routed, so its channels
+// no longer keep a document out of a group of its own; group 0 is pumped for what is posted to it
+// even with no live process there. Each case runs at threads 0, 1 and 2 (fork-join: a worker may
+// pump the document's group inside the frame's pump_all), its frames bounded by a 30 s hang guard,
+// never timed.
+
+// S2-Q16, row 23: a document with global channels and a static `/` reference, which S1-Q6 kept in
+// group 0, is isolated now. A group-0 program's send on a global channel reaches the document's
+// action waiting on it (the channel is homed at group 0, the action waits in the document's group),
+// and the document's send on another reaches a group-0 action. Needs the router's routing (S2b.4):
+// on S2b.0's stubs neither message crosses.
+TEST(AriadneRouter, S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup) {
+  namespace se = cvc::state_exec;
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    isolate_documents(app, threads);
+    MockBackend doc_be, host_be;
+    Runtime doc(app, "docs.glob");
+    doc.set_backend(&doc_be);
+    doc.set_channel_policy({}, {"bus", "back"}, /*strict=*/true, /*quiet=*/true);
+    doc.set_root(group({text("glob")}));
+    se::exec_group *const g = doc.isolated_group();
+    ASSERT_NE(g, nullptr) << "a document with global channels stayed in group 0: "
+                          << doc.isolation_reason();
+    EXPECT_EQ(doc.isolation_reason(), "");
+    Runtime host(app, ""); // no prefix: group 0, where a channel is its raw key
+    host.set_backend(&host_be);
+    host.set_root(group({text("host")}));
+    const auto frame = [&] {
+      doc.drain();
+      host.drain();
+    };
+    std::string recv_how = "running", send_how = "running";
+    // A msg-send's message is its envelope; its payload is what was sent.
+    doc.run_program("(state-set \"got\" (get-attr (msg-recv \"/bus\") \"payload\"))",
+                    [&](const std::string &h) { recv_how = h; });
+    host.run_program("(msg-send \"bus\" \"hello\")", [&](const std::string &h) { send_how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return recv_how != "running" && send_how != "running"; }, 30.0))
+        << "group 0's send never reached the document's group";
+    EXPECT_EQ(send_how, "");
+    EXPECT_EQ(recv_how, "");
+    EXPECT_EQ(found_value(app, "docs.glob.got"), "hello");
+    // The reverse: the document sends, a group-0 program receives.
+    recv_how = send_how = "running";
+    host.run_program("(state-set \"back\" (get-attr (msg-recv \"back\") \"payload\"))",
+                     [&](const std::string &h) { recv_how = h; });
+    doc.run_program("(msg-send \"/back\" \"pong\")", [&](const std::string &h) { send_how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return recv_how != "running" && send_how != "running"; }, 30.0))
+        << "the document's send never reached group 0";
+    EXPECT_EQ(send_how, "");
+    EXPECT_EQ(recv_how, "");
+    EXPECT_EQ(found_value(app, "back"), "pong");
+    EXPECT_EQ(doc.isolated_group(), g) << "the document moved";
+  }
+}
+
+// Row 22: group 0 with no live process is pumped by a document's drain while anything posted waits
+// there. First a host's post to group 0: the next drain applies it there (it joins group 0's
+// pending messages), which it did not while no process lived there. Then a document with no
+// channels: block (eligible since S2-Q16) sends on a `/` channel, homed at group 0, and waits on
+// it: the send and the wait's subscription wait in group 0's ingress, and the document's action
+// gets its message back. Nothing runs on group 0. The first half fails without the fix on S2b.0
+// too; the second needs the router's routing (S2b.4), and on S2b.0's stubs passes without it (the
+// send and the wait meet in the document's group).
+TEST(AriadneRouter, S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage) {
+  namespace se = cvc::state_exec;
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    GroupZeroProbeApp app;
+    isolate_documents(app, threads);
+    MockBackend mb;
+    Runtime doc(app, "docs.r22");
+    doc.set_backend(&mb);
+    doc.set_root(group({text("r22")}));
+    ASSERT_NE(doc.isolated_group(), nullptr)
+        << "a document with no channels: block stayed in group 0: " << doc.isolation_reason();
+    se::async_scheduler &g0 = app.exec_scheduler();
+    EXPECT_TRUE(g0.post_message("s2b6.host", se::value_t(std::string("posted"))));
+    ASSERT_TRUE(g0.has_pending_ingress());
+    doc.drain();
+    EXPECT_FALSE(g0.has_pending_ingress()) << "the document's drain did not pump group 0";
+    EXPECT_EQ(g0.pending_message_count("s2b6.host"), 1u);
+    std::string how = "running";
+    doc.run_program("(begin (msg-send \"/r22\" \"ping\")"
+                    " (state-set \"got\" (get-attr (msg-recv \"/r22\") \"payload\")))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(frames_until([&] { doc.drain(); }, [&] { return how != "running"; }, 30.0))
+        << "the routed message never came back: group 0 was not pumped";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.r22.got"), "ping");
+    EXPECT_EQ(g0.process_count(), 0) << "a process ran in group 0";
+  }
+}
+
+// Row 23 across a move: a document moved to a new group (a host verb registered while it runs,
+// bound at its next load, as in AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad) keeps receiving
+// on its channels. Its old group is retired while a call of it still runs (a kernel held at a
+// gate), so it is neither pumped nor destroyed; it leaves the router at the move all the same: a
+// message it held for the document (posted before the move, never received) reaches the
+// document's action in the new group, the home of its prefix now, and so does a host's post to
+// group 0 after the move, both before the old group goes. Needs the router's routing and rehoming
+// (S2b.4): on S2b.0's stubs neither arrives.
+TEST(AriadneRouter, S2b6_AMovedDocumentKeepsReceivingOnItsChannels) {
+  namespace se = cvc::state_exec;
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    isolate_documents(app, threads);
+    const auto gate = std::make_shared<Gate>();
+    register_action_intrinsics(
+        app,
+        [gate](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+          se::register_async_fn(env, *ictx.host, "s2b6-hold",
+                                [gate](std::span<const se::value_t>) -> se::async_kernel {
+                                  return [gate](se::async_call &) -> se::value_t {
+                                    gate->pass(120.0); // past the case's own waits
+                                    return se::value_t(std::string("held"));
+                                  };
+                                });
+        },
+        se::provider_affinity::any);
+    TempDocs paths;
+    const std::string doc =
+        paths.write("s2b6_move", std::string(kS1bMeta) + "root:\n  - text: mv\n");
+    MockBackend mb;
+    AppRuntime art(app, "docs.mv");
+    art.set_backend(mb);
+    GateOpener opener{{gate}}; // after the document: the kernel is let go before it goes
+    art.load(doc);
+    se::exec_group *const first = art.runtime().isolated_group();
+    ASSERT_NE(first, nullptr) << art.runtime().isolation_reason();
+    ASSERT_EQ(first->opts().affinity, se::group_affinity::any);
+    const auto frame = [&] { art.drain(); };
+    std::string held = "running";
+    art.run_program("(s2b6-hold)", [&](const std::string &h) { held = h; });
+    ASSERT_TRUE(frames_until(
+        frame, [&] { return gate->arrivals() > 0; }, 30.0))
+        << "the held call never started";
+    // A message on the document's channel, with nobody waiting, joins the pending messages of its
+    // home, the document's group.
+    const std::string key = se::resolve_channel_key("docs.mv", "wake");
+    ASSERT_TRUE(first->sched().post_message(key, se::value_t(std::string("before"))));
+    frame();
+    // The move: a late host verb, bound at the next load, in a host group.
+    art.register_verb("s2b6-verb", [] {});
+    art.load(doc);
+    se::exec_group *const second = art.runtime().isolated_group();
+    ASSERT_NE(second, nullptr) << art.runtime().isolation_reason();
+    ASSERT_NE(second, first) << "the document did not move";
+    EXPECT_EQ(second->opts().affinity, se::group_affinity::host);
+    EXPECT_EQ(held, "did not complete: the document moved to another group");
+    ASSERT_EQ(se::detail::live_groups(app), 2u) << "the old group is not retired";
+    std::string how = "running";
+    art.run_program("(state-set \"before\" (msg-recv \"wake\"))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return how != "running"; }, 30.0))
+        << "the message the old group held never reached the new group";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.mv.before"), "before");
+    how = "running";
+    art.run_program("(state-set \"after\" (msg-recv \"wake\"))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(app.exec_scheduler().post_message(key, se::value_t(std::string("after"))));
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return how != "running"; }, 30.0))
+        << "a host's post to group 0 after the move never reached the new group";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.mv.after"), "after");
+    EXPECT_EQ(se::detail::live_groups(app), 2u) << "the old group went before its call ended";
+    gate->release();
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return se::detail::live_groups(app) == 1u; }, 30.0))
+        << "the retired group never went";
+    EXPECT_FALSE(gate->opened_by_itself()) << "the held call waited out its gate";
+  }
+}
+
+// Group 0's token (pycvc's ExecPool.run_all drains group 0's posts under it, on its own thread,
+// S2b.7): while another thread holds it, a Runtime's drain skips group 0, without throwing,
+// and a message posted there waits; once that thread lets go, the next drain delivers it. The
+// document is in group 0 (isolation off), so its drain pumps group 0 every frame. Without the
+// token the drain pumped group 0 under the other thread.
+TEST(AriadneRouter, S2b6_ADrainSkipsAGroupZeroAnotherThreadHolds) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  MockBackend mb;
+  Runtime rt(app, "docs.held0");
+  rt.set_backend(&mb);
+  rt.set_root(group({text("held0")}));
+  std::string how = "running";
+  rt.run_program("(state-set \"got\" (msg-recv \"go\"))", [&](const std::string &h) { how = h; });
+  rt.drain(); // the action starts in group 0 and waits
+  se::async_scheduler &g0 = app.exec_scheduler();
+  std::mutex mu;
+  std::condition_variable cv;
+  bool held = false, let_go = false;
+  std::thread holder([&] {
+    se::async_scheduler::pump_owner_scope token(g0);
+    std::unique_lock<std::mutex> lock(mu);
+    held = true;
+    cv.notify_all();
+    cv.wait(lock, [&] { return let_go; });
+  });
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&] { return held; });
+  }
+  EXPECT_TRUE(
+      g0.post_message(se::resolve_channel_key("docs.held0", "go"), se::value_t(std::string("go"))));
+  EXPECT_NO_THROW(rt.drain());
+  EXPECT_TRUE(g0.has_pending_ingress()) << "the drain pumped group 0 while another thread held it";
+  EXPECT_EQ(how, "running");
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    let_go = true;
+  }
+  cv.notify_all();
+  holder.join();
+  EXPECT_TRUE(frames_until([&] { rt.drain(); }, [&] { return how != "running"; }, 30.0))
+      << "the message never came once group 0 was let go";
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(found_value(app, "docs.held0.got"), "go");
 }

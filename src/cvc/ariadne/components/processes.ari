@@ -1,0 +1,158 @@
+# processes.ari — a REUSABLE Processes window: the document's running DSL programs, a row each,
+# named by the application each belongs to (docs/roadmap/ARIADNE_SHELL.md 4.10).
+#
+# Import the file for its unit and the functions that fill and act on its rows:
+#   processes   a window with a table: application, pid, name, status, steps, what it waits on,
+#               memory, and a Kill button per row
+#       args: id (processes), title (Processes), rows (processes)
+# `rows` is the state prefix the rows are written under, in the document's own state.
+#
+# Use it:
+#     import: cvc://components/processes.ari
+#     windows:
+#       - include: processes
+#     on_tick: (processes-step "processes")       # every tick; it polls twice a second
+#
+# (processes-step ROWS) reads (ps), and (inspect PID) for each row it shows, at most once every
+# ROWS.every seconds (0.5), and writes at most ROWS.max rows (50), in pid order:
+#   ROWS.count, ROWS.<i>.{pid, scope, app, name, status, steps, waits, memory}
+#   ROWS.total how many processes there are, ROWS.more "and N more" past the rows shown, ROWS.at
+#   when it last polled ((time-now))
+# A row's application is its `scope` (a (ps) row's: its chroot relative to the document's prefix)
+# looked up in ariadne.apps, the Runtime's mirror of the loaded documents (ARIADNE.md 5.25): the
+# deepest application whose scope holds it. The document's own rows (scope "") are named by
+# ariadne.name, its meta.name ("document" without one); any other row shows its scope.
+# (processes-kill ROWS I) kills row I's process, as its Kill button does, and polls again at the
+# next step. A killed resident (an on_tick:) is started again by the Runtime, with a new pid.
+#
+# It lists its Runtime's processes: the document's own and every mount's (since threaded
+# execution's S2b a program with an owner sees only its owner's, so other documents' in execution
+# group 0 are not listed). An isolated document (ariadne.exec.isolate_documents) sees its own
+# group's.
+
+functions: |
+  ; A number at KEY, or DEFAULT when it is unset or empty.
+  (defun processes-num (key default)
+    (set v (state-get key))
+    (if (or (is-null v) (= v "")) default (float v)))
+  ; D's KEY, or "" when it has none ((inspect) gives waiting_on only while a process waits).
+  (defun processes-field (d key)
+    (try (get-attr d key) (catch (KeyError e) "")))
+  ; N bytes, in B, KB or MB.
+  (defun processes-bytes (n)
+    (if (< n 1024) (str-concat (str n) " B")
+      (if (< n 1048576) (str-concat (str (math.round (/ n 1024.0))) " KB")
+        (str-concat (str (math.round (/ n 1048576.0))) " MB"))))
+  ; What a process waits on, shorter for a resident: "msg ari#3:ui.doc#tick@ui.doc.includes.fe"
+  ; is its lane's next delivery, "msg tick".
+  (defun processes-waits (w)
+    (if (string.starts-with w "msg ari#")
+      (begin
+        (set parts (string.split w "#"))
+        (str-concat "msg " (nth (string.split (nth parts (- (length parts) 1)) "@") 0)))
+      w))
+  ; The application a process with scope SCOPE belongs to (ariadne.apps.<key>.{name, scope}).
+  ; state-children names every node under ariadne.apps by its full path: each entry's .scope,
+  ; made relative to this document's root, finds the entry.
+  (defun processes-app (scope)
+    (set root (state-root-path))
+    (set skip (if (= root "") 0 (+ (string.length root) 1)))
+    (set best "")
+    (set best-len -1)
+    (for c (state-children "ariadne.apps")
+      (if (string.ends-with c ".scope")
+        (begin
+          (set at (string.substring c skip (- (- (string.length c) skip) 6)))
+          (set s (state-get (str-concat at ".scope")))
+          (if (and (not (is-null s)) (> (string.length s) best-len)
+                   (or (= scope s) (string.starts-with scope (str-concat s "."))))
+            (begin
+              (set best (state-get (str-concat at ".name")))
+              (set best-len (string.length s)))
+            #f))
+        #f))
+    (if (>= best-len 0) best
+      (if (= scope "")
+        (if (or (is-null (state-get "ariadne.name")) (= (state-get "ariadne.name") "")) "document"
+          (state-get "ariadne.name"))
+        scope)))
+  (defun processes-step (rows)
+    (if (< (- (time-now) (processes-num (str-concat rows ".at") 0))
+           (processes-num (str-concat rows ".every") 0.5))
+      #f
+      (begin
+        (state-set (str-concat rows ".at") (str (time-now)))
+        (set procs (ps))
+        (set cap (int (processes-num (str-concat rows ".max") 50)))
+        (set n (if (< (length procs) cap) (length procs) cap))
+        (for i (range 0 n)
+          (set p (nth procs i))
+          (set pid (get-attr p "pid"))
+          (set info (inspect pid))
+          (set row (str-concat rows "." (str i) "."))
+          (state-set (str-concat row "pid") (str pid))
+          (state-set (str-concat row "scope") (get-attr p "scope"))
+          (state-set (str-concat row "app") (processes-app (get-attr p "scope")))
+          (state-set (str-concat row "name") (get-attr p "name"))
+          (state-set (str-concat row "status") (get-attr p "status"))
+          (state-set (str-concat row "steps") (str (get-attr p "steps")))
+          (state-set (str-concat row "waits")
+                     (if (is-null info) "" (processes-waits (processes-field info "waiting_on"))))
+          (state-set (str-concat row "memory")
+                     (if (is-null info) "" (processes-bytes (get-attr info "memory")))))
+        (state-set (str-concat rows ".count") (str n))
+        (state-set (str-concat rows ".total") (str (length procs)))
+        (state-set (str-concat rows ".more")
+                   (if (> (length procs) n) (str-concat "and " (str (- (length procs) n)) " more") ""))
+        #t)))
+  (defun processes-kill (rows i)
+    (set pid (state-get (str-concat rows "." (str i) ".pid")))
+    (state-set (str-concat rows ".at") "0")
+    (if (or (is-null pid) (= pid "")) #f (kill (int pid))))
+
+units:
+  processes:
+    args: { id: processes, title: Processes, rows: processes }
+    window: "{title}"
+    id: "{id}"
+    closable: true
+    children:
+      - text: "processes"
+        bind: "{rows}.total"
+      - separator
+      - type: group
+        id: "{id}_head"
+        layout: { kind: grid, col_widths: [110, 44, 110, 64, 64, 110, 64, 48] }
+        children:
+          - text: "application"
+          - text: "pid"
+          - text: "name"
+          - text: "status"
+          - text: "steps"
+          - text: "waits on"
+          - text: "memory"
+          - text: ""
+      - type: group
+        repeat: (if (is-null (state-get "{rows}.count")) 0 (int (state-get "{rows}.count")))
+        layout: { kind: grid, col_widths: [110, 44, 110, 64, 64, 110, 64, 48] }
+        children:
+          - text: ""
+            bind: "{rows}.{i}.app"
+          - text: ""
+            bind: "{rows}.{i}.pid"
+          - text: ""
+            bind: "{rows}.{i}.name"
+          - text: ""
+            bind: "{rows}.{i}.status"
+          - text: ""
+            bind: "{rows}.{i}.steps"
+          - text: ""
+            bind: "{rows}.{i}.waits"
+          - text: ""
+            bind: "{rows}.{i}.memory"
+          - button: Kill
+            on: (processes-kill "{rows}" {i})
+            tooltip: "Kill this process"
+      - text: ""
+        bind: "{rows}.more"
+        visible_when: (not (= (state-get "{rows}.more") ""))

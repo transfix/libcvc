@@ -4060,6 +4060,13 @@ TEST(ExecPool, PL04_ASleeperIsPumpedAtItsDeadline) {
 TEST(ExecPool, PL05_ALightGroupIsNotStarved) {
   cvc::pool_options po;
   po.threads = 1;
+  // A pump far longer than the noise in a step's time: the pool's virtual time is pump time, so
+  // with the default 2 ms a step slowed past it (a Debug build on a loaded runner: steps of 2-3 ms
+  // were seen) ends a light pump before its program takes the message, which then waits out a heavy
+  // pump more than the one in progress (the count, not the queue, misread). Steps are unbounded so
+  // every build's heavy pump takes the whole 20 ms.
+  po.pump_seconds = 0.02;
+  po.pump_steps = std::numeric_limits<std::uint64_t>::max();
   cvc::exec_pool pool(po);
   if (pool.threads() == 0)
     GTEST_SKIP() << "no worker on this machine";

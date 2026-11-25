@@ -20,6 +20,8 @@
 #include <cvc/ariadne/uri.h> // a node's source: URI to a local path (temp-file bridge)
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/model/model.h>
+#include <cvc/model/model_file_io.h>
 #include <cvc/world/generated_world.h> // source.heightfield.generator: a cvc::world terrain
 #include <exception>
 #include <stdexcept>
@@ -262,6 +264,47 @@ cvc::geometry turn_up(const cvc::geometry &raw, char up, bool flip) {
   return g;
 }
 
+SceneFit scene_fit(const cvc::geometry &raw, char up, bool flip, float height) {
+  SceneFit f;
+  f.up = up;
+  f.flip = flip;
+  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+  for (const auto &p : raw.points()) {
+    const double in[3] = {p[0], p[1], p[2]};
+    double w[3];
+    turn_up_point(up, flip, in, w);
+    for (int k = 0; k < 3; ++k) {
+      lo[k] = std::min(lo[k], w[k]);
+      hi[k] = std::max(hi[k], w[k]);
+    }
+  }
+  const double ext = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
+  f.scale = ext > 0 ? static_cast<double>(height) / ext : 1.0;
+  f.cx = 0.5 * (lo[0] + hi[0]);
+  f.cy = 0.5 * (lo[1] + hi[1]);
+  f.z0 = lo[2];
+  return f;
+}
+
+void apply_scene_fit(const SceneFit &fit, const cvc::geometry::points_t &points,
+                     const cvc::geometry::normals_t &normals, std::vector<double> &xyz,
+                     std::vector<double> &normal_xyz) {
+  xyz.resize(points.size() * 3);
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    const double in[3] = {points[i][0], points[i][1], points[i][2]};
+    double w[3];
+    turn_up_point(fit.up, fit.flip, in, w);
+    xyz[3 * i] = (w[0] - fit.cx) * fit.scale;
+    xyz[3 * i + 1] = (w[1] - fit.cy) * fit.scale;
+    xyz[3 * i + 2] = (w[2] - fit.z0) * fit.scale;
+  }
+  normal_xyz.resize(normals.size() * 3);
+  for (std::size_t i = 0; i < normals.size(); ++i) {
+    const double in[3] = {normals[i][0], normals[i][1], normals[i][2]};
+    turn_up_point(fit.up, fit.flip, in, &normal_xyz[3 * i]);
+  }
+}
+
 cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float height) {
   const auto &P = raw.points();
   const auto &N = raw.normals();
@@ -270,23 +313,13 @@ cvc::geometry fit_to_ground(const cvc::geometry &raw, char up, bool flip, float 
     const double in[3] = {x, y, z};
     turn_up_point(up, flip, in, o);
   };
-  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-  for (const auto &p : P) {
-    double w[3];
-    rot(p[0], p[1], p[2], w);
-    for (int k = 0; k < 3; ++k) {
-      lo[k] = std::min(lo[k], w[k]);
-      hi[k] = std::max(hi[k], w[k]);
-    }
-  }
-  const double ext = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
-  const double s = ext > 0 ? static_cast<double>(height) / ext : 1.0;
-  const double cx = 0.5 * (lo[0] + hi[0]), cy = 0.5 * (lo[1] + hi[1]);
+  const SceneFit f = scene_fit(raw, up, flip, height);
+  const double s = f.scale, cx = f.cx, cy = f.cy;
   cvc::geometry g;
   for (std::size_t i = 0; i < P.size(); ++i) {
     double w[3];
     rot(P[i][0], P[i][1], P[i][2], w);
-    g.points().push_back({(w[0] - cx) * s, (w[1] - cy) * s, (w[2] - lo[2]) * s});
+    g.points().push_back({(w[0] - cx) * s, (w[1] - cy) * s, (w[2] - f.z0) * s});
     if (i < N.size()) {
       double nn[3];
       rot(N[i][0], N[i][1], N[i][2], nn); // a proper rotation preserves unit length
@@ -356,6 +389,24 @@ bool read_scene_node_geometry(cvc::app &ctx, const SceneNode &n, cvc::geometry &
                          n.source_primitive +
                          "' primitive (already placed and sized; size it via source." +
                          n.source_primitive + ")");
+  }
+  return true;
+}
+
+bool read_scene_node_model(cvc::app &ctx, const SceneNode &n, cvc::model &model,
+                           std::vector<std::string> *warnings) {
+  if (n.source_file.empty() || !n.source_primitive.empty() || n.has_heightfield) {
+    warn(warnings, "ari: scene node '" + n.id + "' draws no model file");
+    return false;
+  }
+  ResolvedFile src = resolve_source(ctx, n, warnings);
+  if (!src.ok)
+    return false;
+  try {
+    model = cvc::read_model(ctx, src.path);
+  } catch (const std::exception &e) {
+    warn(warnings, "ari: scene node '" + n.id + "': " + e.what());
+    return false;
   }
   return true;
 }

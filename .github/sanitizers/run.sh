@@ -6,8 +6,12 @@
 #     SAN_CXX_RUNS (ci.yml's matrix `cxx_runs`) gives some of them an environment and arguments of
 #     their own, one line a binary: `<name>: [VAR=VALUE ...] [--option ...]`. That binary runs with
 #     the variables set and the options passed; a --gtest_filter among them gets *Stress* added to
-#     its negative patterns, so the Stress suites stay out. The others run bare. A line naming a
-#     binary SAN_CXX_TESTS does not run is an error;
+#     its negative patterns, so the Stress suites stay out. --keep-stress-suites, which run.sh takes
+#     and does not pass on, runs that binary's Stress suites too (its --gtest_filter alone, or the
+#     whole binary): for a binary whose own default size is the sanitizer jobs' (ci.yml's
+#     SAN_CXX_RUNS_S2B: state_exec_stress_test's short form, ST-1 and ST-2, whatever its suites
+#     are called). The others run bare. A line naming a binary SAN_CXX_TESTS does not run is an
+#     error;
 #   - every pycvc script named in SAN_PY_TESTS, with the sanitizer runtime the build linked
 #     preloaded into the interpreter, which was not built with it, except those py_skip (below)
 #     names for the sanitizer. gcc links its runtimes as shared libraries, found with ldd; clang
@@ -145,21 +149,28 @@ for t in $SAN_CXX_TESTS; do
   read -ra words <<< "${cxx_run[$t]}"
   vars=()
   opts=()
-  filter='-*Stress*'
+  f=''
+  keep_stress=0
   for w in "${words[@]}"; do
     if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
       vars+=("$w")
     elif [[ $w == --gtest_filter=* ]]; then
       f=${w#--gtest_filter=}
-      if [[ $f == *-* ]]; then
-        filter="$f:*Stress*" # more negative patterns
-      else
-        filter="$f-*Stress*" # positive patterns only
-      fi
+    elif [[ $w == --keep-stress-suites ]]; then
+      keep_stress=1
     else
       opts+=("$w")
     fi
   done
+  if [ "$keep_stress" -eq 1 ]; then
+    filter=${f:-*}
+  elif [ -z "$f" ]; then
+    filter='-*Stress*'
+  elif [[ $f == *-* ]]; then
+    filter="$f:*Stress*" # more negative patterns
+  else
+    filter="$f-*Stress*" # positive patterns only
+  fi
   echo "$t: ${vars[*]} --gtest_filter=$filter ${opts[*]}"
   run_one "$t" env "${vars[@]}" "$bin/$t" --gtest_filter="$filter" "${opts[@]}"
 done

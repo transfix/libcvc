@@ -1,0 +1,51 @@
+# ariglx-web's browser smoke (arigl_web_smoke.mjs --pydocs): CoPH in the page, natively. A python:
+# block runs the crossing demo's first 120 CoPH ticks on pycvc's NavCophFleet (libcvc's C++ CoPH:
+# no torch; C6 of docs/roadmap/NAV-COPH-ROADMAP.md), in chunks of 40 as a page runs it a few ticks a
+# frame, and reports to stderr: the ticks, the packets sent and delivered, and each agent's
+# version and energy residual. examples/ariadne/python/coph.py is the whole demo.
+
+meta:
+  name: CoPH in the page
+  min_libcvc: 4.0.0
+
+requires: [python, python.pycvc_gl]
+
+python:
+  source: |
+    import sys
+    import time
+
+    import pycvc
+
+    DOORS = [[9.5, 4.0, 0.1, 0.0, 0.75], [2.5, 7.5, 0.1, 0.0, 0.75]]
+    AGENTS = [{"initial": [0.0, 4.0, 0.0, 0.0], "goal": [12.0, 4.0]},
+              {"initial": [12.0, 4.0, 0.0, 0.0], "goal": [0.0, 4.0]}]
+
+    def noise(agent, tick, j):
+        return 0.003 * (((7 * tick + 13 * j + 5 * agent) % 11) - 5) / 5.0
+
+    @export
+    def coph_report():
+        if not hasattr(pycvc, "NavCophFleet"):
+            print("ariglx-web: coph unavailable (pycvc has no NavCophFleet)", file=sys.stderr)
+            return "unavailable"
+        t = time.perf_counter()
+        fleet = pycvc.NavCophFleet({"steps": 120}, {}, AGENTS, senders=[0, 1], seed=7)
+        fleet.run_crossing({"obstacles": DOORS, "seeds": [152000, 152001], "noise": noise}, 40)
+        while not fleet.run_crossing(ticks=40):
+            pass
+        ms = (time.perf_counter() - t) * 1000.0
+        kinds = [e["kind"] for e in fleet.events()]
+        agents = ", ".join(
+            f"agent {i} version {fleet.agent_state(i)['version']} residual "
+            f"{abs(fleet.energy(i)['residual']):.0e}" for i in range(2))
+        print(f"ariglx-web: coph {fleet.tick()} ticks, {kinds.count('sent')} sent, "
+              f"{kinds.count('delivered')} delivered; {agents}; {ms:.0f} ms", file=sys.stderr)
+        return str(fleet.tick())
+
+init: |
+  (state-set "ticks" (coph_report))
+
+root:
+  - text: ticks
+    bind: ticks

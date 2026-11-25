@@ -32,6 +32,44 @@
   if (location.pathname.endsWith('/')) document.getElementById('gallery').hidden = false;
   const setStatus = (text) => { statusEl.textContent = text; };
 
+  // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4), arigl-web.js's check and text.
+  // The module is built with wasm exceptions and JSPI and has no fallback, so a browser without
+  // JSPI gets what it needs in place of the terminal, before anything downloads. Every browser on
+  // an iPhone or iPad is WebKit, so there it is iOS 27 whichever browser it is.
+  const missingJspi = () => {
+    if (typeof WebAssembly === 'object' && typeof WebAssembly.Suspending === 'function' &&
+        typeof WebAssembly.promising === 'function')
+      return null;
+    const ua = navigator.userAgent || '';
+    const ios = /iPhone|iPad|iPod/.test(ua) ||
+                (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS's desktop UA
+    const versions = 'Chrome 137, Firefox 153 or Safari 27, or later';
+    return ['This page needs a newer browser',
+            'It runs on WebAssembly with JSPI (JavaScript Promise Integration), which this ' +
+                'browser does not have.'].concat(ios ? [
+      'On an iPhone or iPad every browser, Chrome and Firefox included, uses Safari\'s engine, ' +
+          'so it needs iOS 27 or later (iPadOS 27 on an iPad): Settings > General > Software ' +
+          'Update.',
+      'On a computer: ' + versions + '.',
+    ] : ['It needs ' + versions + ' (Edge 137 and other browsers built on Chrome 137 too).']);
+  };
+  const needs = missingJspi();
+  if (needs) {
+    window.ariadneWeb = {state: 'unsupported', needs, log: [], src: '', warnings: [],
+                         text: () => needs.join('\n')};
+    setStatus('needs a newer browser');
+    const box = document.getElementById('term');
+    box.id = 'needs';
+    for (const [i, text] of needs.concat(['This browser: ' + navigator.userAgent]).entries()) {
+      const p = document.createElement(i ? 'p' : 'h1');
+      p.textContent = text;
+      box.append(p);
+    }
+    box.lastChild.className = 'ua';
+    document.title = 'Needs a newer browser — ' + document.title;
+    return;
+  }
+
   const term = new Terminal({
     fontFamily: '"DejaVu Sans Mono", Menlo, Consolas, "Liberation Mono", monospace',
     fontSize: 14,
@@ -57,10 +95,23 @@
   term.focus();
   // OSC 52 (ESC ] 52 ; c ; base64 BEL): a document's (clipboard-set TEXT). xterm.js leaves it to
   // the page. The browser writes the clipboard within the key press or click that ran the action
-  // (its user activation lasts past the frame it takes). A read (`?`) is refused.
+  // (its user activation lasts past the frame it takes). A read (`?`, a context menu's Paste,
+  // docs/ARIADNE.md §5.28) is answered with navigator.clipboard.readText(), within the same click:
+  // Chrome asks the user once for the permission, Firefox and Safari show their own Paste button.
+  // The answer goes to the program as the terminal's would (the same escape, the text in base64);
+  // a refused read sends nothing, and the program says to paste with Ctrl+V.
   term.parser.registerOscHandler(52, (data) => {
     const b64 = data.slice(data.indexOf(';') + 1);
-    if (b64 === '?' || !navigator.clipboard || !navigator.clipboard.writeText)
+    if (b64 === '?') {
+      if (navigator.clipboard && navigator.clipboard.readText)
+        navigator.clipboard.readText().then((text) => {
+          let bin = '';
+          for (const b of utf8.encode(text)) bin += String.fromCharCode(b);
+          for (const b of utf8.encode('\x1b]52;c;' + btoa(bin) + '\x1b\\')) stdin.push(b);
+        }, () => {});
+      return true;
+    }
+    if (!navigator.clipboard || !navigator.clipboard.writeText)
       return true;
     try {
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -75,6 +126,11 @@
   // mouse reports past column 95).
   const stdin = [];
   const utf8 = new TextEncoder();
+  // While the program takes the mouse, a right-click is its own (its context menu, §5.28), not the
+  // browser's.
+  termEl.addEventListener('contextmenu', (e) => {
+    if (term.modes && term.modes.mouseTrackingMode !== 'none') e.preventDefault();
+  });
   term.onData((s) => { for (const b of utf8.encode(s)) stdin.push(b); });
   term.onBinary((s) => { for (let i = 0; i < s.length; ++i) stdin.push(s.charCodeAt(i) & 0xff); });
 

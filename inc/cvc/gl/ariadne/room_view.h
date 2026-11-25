@@ -42,6 +42,7 @@
 #include <cvc/ariadne/avatar_sim.h>             // avatar_intent
 #include <cvc/ariadne/conference/room_avatar.h> // avatar_catalog, avatar_look
 #include <cvc/ariadne/section.h>                // section_stamp
+#include <cvc/gl/ariadne/entity_view.h>         // the entities at scale
 #include <cvc/lod/select.h>                     // quality_preset
 #include <cvc/physics/types.h>      // vec3
 #include <map>
@@ -164,10 +165,15 @@ public:
   // look of vehicle_view: chassis, cabin and four wheels, sized from its identity, in its two
   // colours), built again when its identity changes, posed where the playout shows it (the
   // chassis's centre, its heading), with its name among draw_labels'. An entity with no identity
-  // yet is drawn with the defaults until its identity replicates.
+  // yet is drawn with the defaults until its identity replicates. Past 32 of them they are drawn
+  // at scale, as a scene draws its own world's (entity_view.h, the implicit layer under
+  // `room_entities`): one mesh per archetype, the nearest 8 and the one this client drives (or a
+  // camera follows) promoted to nodes of their own.
   void update_entities(const cvc::ariadne::entity_playout &entities);
-  // The entities drawn right now, by id.
+  // The entities drawn as nodes of their own right now, by id.
   std::vector<std::uint64_t> entity_ids() const;
+  // What the entity view drew in the last update_entities.
+  entity_view_stats entity_stats() const;
   static std::string entity_node_id(std::uint64_t id) { return "entity_" + std::to_string(id); }
 
   // The look PID's marker was last built with (its body colour, its accessory's parts); false if
@@ -232,6 +238,9 @@ private:
   std::map<std::string, std::string> _entity_names;
   // The vehicle models fitted for the entities (made with the first one that has a model look).
   std::shared_ptr<vehicle_model_cache> _models;
+  // The entities at scale (entity_view.h), made again when the playout's revision moves.
+  std::unique_ptr<entity_view> _entity_view;
+  std::uint64_t _entity_view_rev = ~std::uint64_t(0);
 };
 
 } // namespace ariadne

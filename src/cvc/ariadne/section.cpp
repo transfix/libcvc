@@ -114,6 +114,17 @@ void section_writer::set_flag(std::initializer_list<std::string> rel, bool b) {
   set(rel, b ? "1" : "0");
 }
 
+bool section_writer::remove(std::initializer_list<std::string> rel) {
+  if (rel.size() == 0)
+    return false;
+  const std::string full = path(rel);
+  const std::size_t dot = full.rfind(cvc::state::SEPARATOR);
+  if (dot == std::string::npos)
+    return false;
+  cvc::state *parent = _app.root().findDescendant(full.substr(0, dot));
+  return parent && parent->removeChild(full.substr(dot + 1));
+}
+
 section_stamp section_writer::commit(std::uint64_t at, std::uint64_t epoch) {
   const section_stamp before = read_section_stamp(_app, _base);
   section_stamp s;

@@ -14,7 +14,8 @@ this module is everything under it:
 - :class:`Cars`: libcvc's ``sim_world`` over that grid, its agents on a plant that
   ``pycvc.plant_host`` picks by name (nav's kinematic bicycle, Jolt vehicles, the dynamic single
   track), and your ``(steer, accel)`` in its navigator's place (``nav_sim_world_override``). With
-  ``navigator=True`` the navigator drives instead, as a baseline.
+  ``navigator=True`` the navigator drives instead, as a baseline; with ``coph=`` libcvc's CoPH
+  fleet drives every car natively (``pycvc.NavCophDriver``, ``--controller coph``).
 - :class:`GymCars`: the same cars in a world document (``pycvc.WorldGym``, ARIADNE_WORLDS.md
   §14, L4): the document's world, its vehicles as Jolt vehicles in its own physics world, its
   spawn points. Your controller runs on it unchanged; ``--gym DOC`` runs the template on it.
@@ -23,6 +24,8 @@ this module is everything under it:
   otherwise (``pycvc.WorldEntities``). ``--world-doc DOC`` runs the template on it: DOC is the
   host's document, drawn as it draws its world and vehicles (headless, the world steps a tick per
   frame, lockstep).
+- :class:`CophControl`: CoPH's fleet as a controller for any of these cars, from their state
+  (``--controller coph`` on :class:`GymCars` and :class:`HostCars`).
 - :class:`CarsState`: what a controller reads each tick, as numpy arrays (SI units).
 - :func:`rollout`: a controller's own predicted paths, on nav's bicycle.
 - :func:`local_raster`: the occupancy and signed distance around a car, heading up.
@@ -500,15 +503,24 @@ class Cars:
     navigator ("" = libcvc's built-in one), and ``scale`` the frame it was trained in (normalized
     units per metre; nav's demos use 0.05). ``seed`` makes the starts and goals repeatable;
     ``starts`` and ``goals`` ((n, 2) world positions) set them instead, and the cars start facing
-    their goals. ``rays`` and ``range_m`` shape the range readings."""
+    their goals. ``rays`` and ``range_m`` shape the range readings.
+
+    ``coph`` (a dict, or True for the defaults) has libcvc's CoPH fleet drive every car instead,
+    natively (``pycvc.NavCophDriver``, C6 of docs/roadmap/NAV-COPH-ROADMAP.md), through
+    :meth:`step_coph`. Its keys: ``froude`` (CoPH's lengths in metres, D4; default
+    :meth:`coph_froude`), ``config`` and ``communication`` (dicts over the demos' profile),
+    ``local_goal`` (m, D12) and ``seed``. A car that reaches its goal brakes until it is given a
+    new one (:meth:`new_goals`), then runs again, its learner keeping what it learned."""
 
     def __init__(self, world: World, n=6, vehicle="humvee", *, seed=0, navigator=False,
                  nav_weights="", scale=SCALE, app=None, prefix="", rays=16, range_m=60.0,
-                 starts=None, goals=None):  # fmt: skip
+                 starts=None, goals=None, coph=None):  # fmt: skip
         _require()
         self.world, self.n = world, int(max(1, n))
         self.app, self.prefix = app, prefix
         self.navigator, self.nav_weights = bool(navigator), str(nav_weights or "")
+        self.coph_options = (dict(coph) if isinstance(coph, dict) else {}) if coph else None
+        self.coph = None
         self.scale = float(scale)
         self.rng = np.random.default_rng(seed)
         self.ray_angles = np.linspace(-math.pi, math.pi, int(rays), endpoint=False)
@@ -585,6 +597,38 @@ class Cars:
         if self.app is not None:  # the tree's settings apply (unset ones are seeded), then publish
             self.pull()
             self.publish()
+        if self.coph_options is not None:
+            self.coph = self._coph_driver(self.coph_options)
+
+    # ── CoPH ──
+    def coph_froude(self) -> float:
+        """The Froude scale s for these cars (D3, D4): the longest car over a RoboRacer's length,
+        so a RoboRacer runs at s = 1 and a Humvee at about 9."""
+        racer = 0.55
+        if hasattr(pycvc, "vehicle_desc"):
+            racer = 2.0 * float(pycvc.vehicle_desc.roboracer().half_extents()[0])
+        return max(1.0, float(np.max(self.length)) / racer)
+
+    def _coph_driver(self, opts):
+        if not hasattr(pycvc, "NavCophDriver"):
+            raise RuntimeError("CoPH needs pycvc with NavCophDriver (libcvc's C6 bindings)")
+        d = pycvc.NavCophDriver(
+            self.sim, opts.get("config"), opts.get("communication"),
+            froude=float(opts.get("froude") or self.coph_froude()),
+            local_goal=float(opts.get("local_goal", 30.0)), seed=int(opts.get("seed", 0)),
+        )  # fmt: skip
+        for i in range(self.n):
+            d.attach(i)
+        return d
+
+    def coph_coeffs(self) -> dict:
+        """Each car's CoPH account, as the coefficient plots take it: the allocation residual (the
+        share of CoPH's force the car could not take), the work, the risk cost and the CoPH steps."""
+        acc = [self.coph.account(i) for i in range(self.n)]
+        return {"alloc_residual": np.array([a["allocation_residual"] for a in acc]),
+                "work": np.array([a["work"] for a in acc]),
+                "risk_cost": np.array([a["risk_cost"] for a in acc]),
+                "coph_steps": np.array([a["steps"] for a in acc], float)}  # fmt: skip
 
     # ── the state tree ──
     def pull(self):
@@ -652,6 +696,16 @@ class Cars:
         self.last_command = (np.full(self.n, np.nan), np.full(self.n, np.nan))
         return self._advance()
 
+    def step_coph(self) -> CarsState:
+        """One tick of CoPH driving every car (``coph=``): a CoPH step on its own cadence, each
+        car's allocated command every tick (``pycvc.NavCophDriver.apply``), then the world's step."""
+        if self.coph is None:
+            raise RuntimeError("these cars were not made with coph=")
+        self.coph.apply()
+        pycvc.nav_sim_world_step(self.sim)
+        self.last_command = (np.full(self.n, np.nan), np.full(self.n, np.nan))
+        return self._advance()
+
     def stepped(self) -> CarsState:
         """After the world was stepped elsewhere, one tick (an arms run steps its worlds itself,
         pycvc.nav_arms_step): advance the clock and read the cars back, as
@@ -711,6 +765,186 @@ class Cars:
             max_speed=self.max_speed, reach=self.reach, driving=self.driving, world=self.world.kind,
             nav=nav,
         )  # fmt: skip
+
+
+class CophControl:
+    """CoPH's fleet as a controller for any of the template's cars, from their state alone: each
+    tick ``steer, accel, info = ctl(s)``, as ``controller(s, p)`` returns, for :meth:`Cars.step`,
+    :meth:`GymCars.step` or :meth:`HostCars.step`. It is the template's ``--controller coph`` for
+    :class:`GymCars` and :class:`HostCars`, whose worlds are not a ``sim_world``; on :class:`Cars`
+    the template drives natively (``Cars(coph=...)``), which senses the world's own grid and
+    material. The twin of libcvc's ``coph_driver`` (C5 part 2b) over ``pycvc.NavCophFleet``:
+
+    - a CoPH step every ``round(0.12 sqrt(s) / dt)`` ticks, in Froude-scaled frames about the cars'
+      first centre (D4, D6), with ``s`` = ``froude`` or the car's length over a RoboRacer's;
+    - each car's goal, or the point ``local_goal`` m along the straight line to it (D12);
+    - what each car senses: CoPH's 21 lattice points of ``risk(x, y)`` (default: the constant
+      ``base_risk``), and its rays' hits within the scaled sensor radius as disks (the rays start
+      half a wheelbase ahead of the rear axle, as :class:`Cars` casts them);
+    - each tick, the held force allocated to a steer and an acceleration (``nav_coph_allocate``);
+    - a car whose state says it reached its goal is done and brakes, and a new goal runs it again
+      (``NavCophFleet.resume``), its learner keeping what it learned.
+
+    ``info["coeffs"]`` holds each car's account, as :meth:`Cars.coph_coeffs` gives it."""
+
+    def __init__(self, froude=None, *, config=None, communication=None, local_goal=30.0, seed=0,
+                 base_risk=0.02, risk=None):  # fmt: skip
+        if pycvc is None or not hasattr(pycvc, "NavCophFleet"):
+            raise RuntimeError("CoPH needs pycvc with NavCophFleet (libcvc's C6 bindings)")
+        self.froude, self.config, self.communication = froude, config, communication
+        self.local_goal, self.seed, self.base_risk = float(local_goal), int(seed), float(base_risk)
+        self.risk = risk
+        self.fleet = None
+
+    # ── frames ──
+    def _q(self, p):
+        return [float((p[0] - self.origin[0]) / self.s), float((p[1] - self.origin[1]) / self.s)]
+
+    def _state(self, s, i):
+        q, r = self._q((s.x[i], s.y[i])), math.sqrt(self.s)
+        h, v = float(s.heading[i]), float(s.speed[i])
+        return [q[0], q[1], v * math.cos(h) / r, v * math.sin(h) / r]
+
+    def _local(self, p, goal):
+        d = np.asarray(goal, float) - np.asarray(p, float)
+        dist = float(np.hypot(d[0], d[1]))
+        if dist <= self.local_goal:
+            return np.asarray(goal, float).copy()
+        return np.asarray(p, float) + d * (self.local_goal / dist)
+
+    def _risk(self, x, y):
+        return float(self.risk(x, y)) if self.risk is not None else self.base_risk
+
+    def _start(self, s):
+        racer = 0.55
+        if hasattr(pycvc, "vehicle_desc"):
+            racer = 2.0 * float(pycvc.vehicle_desc.roboracer().half_extents()[0])
+        self.s = float(self.froude or max(1.0, float(np.max(s.length)) / racer))
+        self.origin = np.array([float(np.mean(s.x)), float(np.mean(s.y))])
+        cfg = {"steps": 1000000, **(self.config or {})}
+        self.cfg = pycvc.nav_coph_config(cfg)
+        self.k = max(1, int(round(self.cfg["dt"] * math.sqrt(self.s) / float(s.dt))))
+        n = int(s.n)
+        pos = np.stack([np.asarray(s.x, float), np.asarray(s.y, float)], 1)
+        self.goal = np.asarray(s.goal, float).copy()
+        self.local = np.array([self._local(pos[i], self.goal[i]) for i in range(n)])
+        agents = [{"initial": self._state(s, i), "goal": self._q(self.local[i])} for i in range(n)]
+        self.fleet = pycvc.NavCophFleet(cfg, self.communication or {}, agents, network="none",
+                                        senders=list(range(n)), seed=self.seed)  # fmt: skip
+        self.n, self.ticks, self.steps = n, 0, 0
+        self.u = np.zeros((n, 2))
+        self.used, self.e = np.zeros((n, 2)), np.zeros((n, 2))
+        self.held = np.zeros(n, int)
+        self.done = np.zeros(n, bool)
+        self.x_prev = [None] * n
+        self.work, self.risk_cost = np.zeros(n), np.zeros(n)
+        self.e2, self.u2, self.coph_steps = np.zeros(n), np.zeros(n), np.zeros(n)
+
+    # ── a CoPH step ──
+    def _obstacles(self, s, i):
+        r = np.asarray(s.ranges[i], float)
+        hit = r < float(s.range_max) - 1e-6
+        if not hit.any():
+            return []
+        h = float(s.heading[i])
+        ox = float(s.x[i]) + 0.5 * float(s.wheelbase[i]) * math.cos(h)
+        oy = float(s.y[i]) + 0.5 * float(s.wheelbase[i]) * math.sin(h)
+        a = h + np.asarray(s.ray_angles, float)[hit]
+        d = r[hit]
+        px, py = ox + d * np.cos(a), oy + d * np.sin(a)
+        spacing = 2.0 * math.pi / max(1, len(s.ray_angles))
+        rad = np.maximum(0.1, 0.5 * d * spacing)
+        sensor = float(self.cfg["sensor_radius"]) * self.s
+        near = np.hypot(px - float(s.x[i]), py - float(s.y[i])) - rad <= sensor
+        out = [[*self._q((x, y)), float(rr) / self.s] for x, y, rr in zip(px[near], py[near], rad[near])]
+        return out[: int(self.cfg["obstacle_cap"])]
+
+    def _observation(self, s, i, now):
+        x = self._state(s, i)
+        R = float(self.cfg["sensor_radius"])
+        readings, j = [], 0
+        for a in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            for b in (-1.0, -0.5, 0.0, 0.5, 1.0):
+                if a * a + b * b > 1.0:
+                    continue
+                q = (x[0] + a * R, x[1] + b * R)
+                wx, wy = q[0] * self.s + self.origin[0], q[1] * self.s + self.origin[1]
+                readings.append({"uid": f"{self.seed}:{self.steps}:{j}", "time": now, "q": list(q),
+                                 "value": max(0.001, self._risk(wx, wy))})  # fmt: skip
+                j += 1
+        return {"time": now, "readings": readings, "sensor_center": x[:2], "sensor_radius": R}
+
+    def _coph_step(self, s):
+        dt_us = round(float(self.cfg["dt"]) * 1e6)
+        now = self.steps * dt_us / 1e6
+        inputs = []
+        for i in range(self.n):
+            x = self._state(s, i)
+            g = np.asarray(s.goal[i], float)
+            moved = not np.allclose(g, self.goal[i])
+            if self.done[i]:
+                if not moved or not self.fleet.resume(i):
+                    inputs.append({"x": x})
+                    continue
+                self.done[i], self.x_prev[i] = False, None
+                self.used[i], self.e[i], self.held[i] = 0.0, 0.0, 0
+            p = np.array([float(s.x[i]), float(s.y[i])])
+            inp = {"x": x, "observation": self._observation(s, i, now),
+                   "obstacles": self._obstacles(s, i), "arrived": bool(s.reached[i])}  # fmt: skip
+            near = np.hypot(*(p - self.local[i])) < 0.5 * self.local_goal and not np.allclose(
+                self.local[i], g
+            )
+            if moved or near:
+                self.goal[i] = g
+                self.local[i] = self._local(p, g)
+                inp["goal"] = self._q(self.local[i])
+            if self.x_prev[i] is not None and self.held[i] > 0:
+                u_used = self.used[i] / self.held[i]
+                inp["u_used"] = [float(u_used[0]), float(u_used[1])]
+                self.work[i] += float(u_used @ (np.array(x[:2]) - np.array(self.x_prev[i][:2])))
+                self.risk_cost[i] += float(self.cfg["dt"]) * 4.0 * self._risk(p[0], p[1])
+                self.coph_steps[i] += 1
+            self.used[i], self.e[i], self.held[i] = 0.0, 0.0, 0
+            inputs.append(inp)
+        held = self.fleet.boundary(self.steps, now, inputs)
+        for i, h in enumerate(held):
+            if self.done[i]:
+                continue
+            if h is None:
+                self.done[i], self.u[i], self.x_prev[i] = True, 0.0, None
+            else:
+                self.u[i], self.x_prev[i] = h, inputs[i]["x"]
+        self.steps += 1
+
+    def __call__(self, s, p=None):
+        if self.fleet is None:
+            self._start(s)
+        if self.ticks % self.k == 0:
+            self._coph_step(s)
+        steer, accel = np.zeros(self.n), np.zeros(self.n)
+        dt = float(s.dt)
+        dt_coph = dt / math.sqrt(self.s)
+        for i in range(self.n):
+            v = float(s.speed[i])
+            if self.done[i]:
+                accel[i] = -float(np.clip(v / max(dt, 0.25), -s.max_accel[i], s.max_accel[i]))
+                continue
+            a = pycvc.nav_coph_allocate(list(self.u[i]), float(s.heading[i]), v, float(s.wheelbase[i]),
+                                        float(s.max_steer[i]), float(s.max_accel[i]))  # fmt: skip
+            steer[i], accel[i] = a["steer"], a["accel"]
+            self.used[i] += a["used"]
+            self.e[i] += a["unallocated"]
+            self.held[i] += 1
+            self.e2[i] += (a["unallocated"][0] ** 2 + a["unallocated"][1] ** 2) * dt_coph
+            self.u2[i] += float(self.u[i] @ self.u[i]) * dt_coph
+        self.ticks += 1
+        return steer, accel, {"coeffs": self.coeffs()}
+
+    def coeffs(self) -> dict:
+        """Each car's account: the allocation residual, the work, the risk cost, the CoPH steps."""
+        res = np.where(self.u2 > 0, np.sqrt(self.e2 / np.where(self.u2 > 0, self.u2, 1.0)), 0.0)
+        return {"alloc_residual": res, "work": self.work.copy(), "risk_cost": self.risk_cost.copy(),
+                "coph_steps": self.coph_steps.copy()}  # fmt: skip
 
 
 class GymCars:
@@ -1370,7 +1604,11 @@ def _parse(argv, doc_default):
                    help="the plant: kinematic, humvee, roboracer, a comma list, dynamic[:presets] "
                         "(sets nav_plant.vehicle)")  # fmt: skip
     add_args(p)
-    p.add_argument("--controller", choices=("yours", "navigator"), default=None)
+    p.add_argument("--controller", choices=("yours", "navigator", "coph"), default=None,
+                   help="yours (cars.py), libcvc's navigator, or CoPH's fleet natively")  # fmt: skip
+    p.add_argument("--coph-scale", type=float, default=None,
+                   help="--controller coph: the Froude scale s, CoPH's lengths in metres "
+                        "(default: the car's length over a RoboRacer's)")  # fmt: skip
     p.add_argument("--nav-weights", default="", help="a .cvcnav policy for the navigator")
     p.add_argument("--nav-scale", type=float, default=SCALE,
                    help="the navigator's normalized units per metre: the frame its policy was "
@@ -1485,6 +1723,10 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
 
     def build(seed=None):
         n = max(1, host.get_int("run.cars", 6))
+        # CoPH on a world document's cars (not a sim_world): the fleet from their state.
+        st["coph"] = None
+        if host.get("run.controller", "yours") == "coph" and (args.world_doc or args.gym):
+            st["coph"] = CophControl(args.coph_scale, seed=args.seed if seed is None else seed)
         if args.world_doc:
             # The host's own world: wait for its grid (a frame or a few), then spawn the cars in it.
             nav = host.get("run.controller", "yours") == "navigator"
@@ -1501,7 +1743,7 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             if log is not None:
                 log.meta.update(world={"source": "host", "document": str(args.world_doc)}, cars=n,
                                 seed=args.seed if seed is None else seed,
-                                controller="navigator" if nav else "yours")  # fmt: skip
+                                controller=host.get("run.controller", "yours") or "yours")  # fmt: skip
             return
         if args.gym:
             nav = host.get("run.controller", "yours") == "navigator"
@@ -1511,7 +1753,7 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             if log is not None:
                 log.meta.update(world={"source": "gym", "document": str(args.gym)}, cars=n,
                                 seed=args.seed if seed is None else seed,
-                                controller="navigator" if nav else "yours")  # fmt: skip
+                                controller=host.get("run.controller", "yours") or "yours")  # fmt: skip
             return
         kind = host.get("run.world", "data") or "data"
         try:
@@ -1521,10 +1763,13 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
             print(f"cars: the {kind} world failed ({e}); flat ground instead", file=sys.stderr)
             world = flat_world(4.84)
         vehicle = host.get("nav_plant.vehicle", "humvee") or "humvee"
-        nav = host.get("run.controller", "yours") == "navigator"
+        ctl = host.get("run.controller", "yours") or "yours"
+        nav = ctl == "navigator"
+        coph = {"froude": args.coph_scale, "seed": args.seed if seed is None else seed} \
+            if ctl == "coph" else None  # fmt: skip
         cars = Cars(world, n, vehicle, seed=args.seed if seed is None else seed, navigator=nav,
                     nav_weights=args.nav_weights, scale=args.nav_scale, app=host.app,
-                    prefix=pre)  # fmt: skip
+                    prefix=pre, coph=coph)  # fmt: skip
         st.update(cars=cars, speed=[], gap=[], coef={}, world=world)
         show_world(host, world.kind, args.doc)
         if log is not None:
@@ -1532,10 +1777,12 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
                 world=world.info,
                 cars=n,
                 seed=args.seed if seed is None else seed,
-                controller="navigator" if nav else "yours",
+                controller=ctl,
                 nav_weights=args.nav_weights,
                 nav_scale=args.nav_scale,
             )
+            if coph is not None:
+                log.meta["coph_froude"] = coph["froude"] or cars.coph_froude()
         if drawn:
             draw_world(host, st)
             draw_cars(host, st)
@@ -1606,6 +1853,13 @@ def run(controller, params: dict, *, cost=None, doc=None, argv=None) -> int:
                     if cars.navigator:
                         s = cars.step_navigator()
                         coeffs = s.nav
+                    elif getattr(cars, "coph", None) is not None:
+                        s = cars.step_coph()
+                        coeffs = cars.coph_coeffs()
+                    elif st.get("coph") is not None:
+                        r = st["coph"](s)
+                        s = cars.step(r[0], r[1])
+                        coeffs = r[2]["coeffs"]
                     else:
                         r = controller(s, p)
                         info = r[2] if len(r) > 2 and r[2] else {}

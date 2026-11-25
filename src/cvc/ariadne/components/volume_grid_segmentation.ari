@@ -1,0 +1,175 @@
+# volume_grid_segmentation.ari — a REUSABLE Ariadne component: the Segmentation tab of the
+# volume_grid component (volume_grid.ari), VolumeGridRover's (docs/roadmap/VOLROVER-LIBRARY-PORTS-
+# ROADMAP.md §4, §5). Its Segment button runs the grid's `segment` request: the shown point classes
+# seed a segmentation of the grid's volume (cvc::segment_seeded, GenSeg's fast marching, Bajaj, Yu
+# and Auer, J. Struct. Biol. 2003), then each class's surface is made for the 3D view
+# (cvc::class_surfaces), as a sliced task on the app's scheduler while the views stay live. The
+# labels draw on the slices in the classes' colours, as the fronts advance and then for good; the
+# table lists the classes, whose colour and Show each recolour or hide its labels and surface.
+#
+# Every control binds a key of the node (graphics.root.children.<node>.grid.segment.*,
+# cvc/gl/VolumeGridSegmentation.h), so it runs with NO host C++. The thresholds' sliders span the
+# volume's data range (the node keeps the keys' min and max at it); their units are the volume's,
+# or 0..255 with Legacy thresholds. Saving goes through the app (data-save), as the grid's other
+# Save buttons do: the classes as one multi-variable volume (VolumeGridRover's SegTmp.rawv), the
+# labels as one volume, beside the document or, in a browser, as a download.
+#
+# Units:
+#   volume_grid_segmentation       the tab's controls in a window of their own (args node, title,
+#                                  id), for a document that keeps the segmentation apart
+#   volume_grid_segmentation_tab   the controls alone (a group, args node and id, as volume_grid's):
+#                                  volume_grid.ari includes it as its Segmentation tab, and a
+#                                  document laying out its own panel the same way:
+#     - include: volume_grid_segmentation_tab
+#       args: { node: grid, id: vg }
+
+units:
+  volume_grid_segmentation:
+    args: { node: grid, title: Segmentation, id: volume_grid_segmentation }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - include: volume_grid_segmentation_tab
+        args: { node: "{node}", id: "{id}" }
+
+  volume_grid_segmentation_tab:
+    args: { node: grid, id: volume_grid }
+    type: group
+    id: "{id}_segment"
+    children:
+      - text: "Seeds: the point classes shown (each class a label)"
+      - slider_float: Low threshold
+        bind: graphics.root.children.{node}.grid.segment.t_low
+        range: key
+        lo: 0.0
+        hi: 255.0
+        fmt: "%.3g"
+        tooltip: "voxels below this stop every front (ctrl-click to type)"
+      - slider_float: High threshold
+        bind: graphics.root.children.{node}.grid.segment.t_high
+        range: key
+        lo: 0.0
+        hi: 255.0
+        fmt: "%.3g"
+        tooltip: "automatic seeds (local maxima) are the smoothed volume's maxima above this"
+      - checkbox: Legacy thresholds
+        bind: graphics.root.children.{node}.grid.segment.normalized_thresholds
+        tooltip: "the thresholds on GenSeg's 0..255 scale (the volume rescaled), not in its units"
+      - slider_float: Gamma
+        bind: graphics.root.children.{node}.grid.segment.gamma
+        range: key
+        lo: -1.0
+        hi: 0.0
+        fmt: "%.3f"
+        tooltip: "front speed exp(gamma |grad I|): the more negative, the more fronts slow at edges"
+      - radio_row: Automatic seeds
+        bind: graphics.root.children.{node}.grid.segment.automatic
+        options: [None, Maxima, Critical]
+        values: [none, local_maxima, critical_points]
+        tooltip: "seeds added to the point classes': none, GenSeg's local maxima, or the paper's critical points (two more classes, feature and background)"
+      - type: group
+        id: "{id}_segment_run"
+        layout: { kind: horizontal }
+        children:
+          - button: Segment
+            on: (state-set "graphics.root.children.{node}.grid.request" "segment")
+            disabled_when: (= (state-get "graphics.root.children.{node}.grid.busy") "1")
+            tooltip: "segment the volume from the shown point classes, then make each class's surface"
+          - button: Stop
+            on: (state-set "graphics.root.children.{node}.grid.request" "stop")
+            enabled_when: (= (state-get "graphics.root.children.{node}.grid.stoppable") "1")
+            tooltip: "end the run at its next step, keeping the last result"
+      - progress: progress
+        bind: graphics.root.children.{node}.grid.progress
+        hi: 100
+        overlay: graphics.root.children.{node}.grid.phase
+      - separator
+      - text: "Classes"
+      - type: group
+        id: "{id}_segment_head"
+        layout: { kind: grid, col_widths: [36, 80, 110, 56, 64] }
+        children:
+          - text: "show"
+          - text: "name"
+          - text: "colour"
+          - text: "voxels"
+          - text: "triangles"
+      # One row per class of the last result (grid.segment.rows.<i>).
+      - type: group
+        id: "{id}_segment_{i}"
+        repeat: (int (state-get "graphics.root.children.{node}.grid.segment.rows"))
+        layout: { kind: grid, col_widths: [36, 80, 110, 56, 64] }
+        children:
+          - type: checkbox
+            label: "##show{i}"
+            bind: graphics.root.children.{node}.grid.segment.rows.{i}.visible
+            tooltip: "draw this class's labels and surface"
+          - text: ""
+            bind: graphics.root.children.{node}.grid.segment.rows.{i}.name
+          - color: "##colour{i}"
+            bind: graphics.root.children.{node}.grid.segment.rows.{i}.color
+            fmt: hex
+          - text: ""
+            bind: graphics.root.children.{node}.grid.segment.rows.{i}.voxels
+          - text: ""
+            bind: graphics.root.children.{node}.grid.segment.rows.{i}.triangles
+      - type: group
+        id: "{id}_segment_info"
+        layout: { kind: horizontal }
+        children:
+          - text: Labelled
+            bind: graphics.root.children.{node}.grid.segment.info.labelled
+          - text: Border
+            bind: graphics.root.children.{node}.grid.segment.info.border
+          - text: Warnings
+            bind: graphics.root.children.{node}.grid.segment.warnings
+            tooltip: "what the last run warned of (grid.segment.warnings.<i>)"
+      - separator
+      - text: "Display"
+      - type: group
+        id: "{id}_segment_show"
+        layout: { kind: horizontal }
+        children:
+          - checkbox: Labels
+            bind: graphics.root.children.{node}.grid.segment.show
+            tooltip: "draw the labels on the slices"
+          - checkbox: Surfaces
+            bind: graphics.root.children.{node}.grid.segment.show_surfaces
+            tooltip: "draw each class's surface in the 3D view"
+          - checkbox: Live
+            bind: graphics.root.children.{node}.grid.segment.live
+            tooltip: "draw the labels while the fronts advance"
+      - slider_float: Label opacity
+        bind: graphics.root.children.{node}.grid.segment.opacity
+        range: key
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - slider_float: Surface opacity
+        bind: graphics.root.children.{node}.grid.segment.surface_opacity
+        range: key
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - checkbox: Make surfaces
+        bind: graphics.root.children.{node}.grid.segment.make_surfaces
+        tooltip: "a run makes each class's surface after its labels"
+      - slider_int: Smoothing
+        bind: graphics.root.children.{node}.grid.segment.mesh.smoothing
+        lo: 0
+        hi: 40
+        tooltip: "passes of Taubin's smoothing of the surfaces (0: the voxel steps)"
+      - separator
+      - input_text: Segments file
+        bind: graphics.root.children.{node}.grid.files.segments
+        tooltip: "a volume file: .rawv holds the classes as its variables (VolumeGridRover's SegTmp.rawv); the labels as one volume (.rawiv, .rawv, .mrc ...)"
+      - type: group
+        id: "{id}_segment_files"
+        layout: { kind: horizontal }
+        children:
+          - button: Save classes
+            on: (data-save "graphics.root.children.{node}.grid.segment.classes" (state-get "graphics.root.children.{node}.grid.files.segments") "volume")
+            tooltip: "the app writes each class's voxels (zero elsewhere) as one file's variables: beside the document, or in a browser as a download"
+          - button: Save labels
+            on: (data-save "graphics.root.children.{node}.grid.segment.labels" (state-get "graphics.root.children.{node}.grid.files.segments") "volume")
+            tooltip: "the app writes the labels (each voxel's class, 255 none) as one volume"

@@ -6,14 +6,17 @@
 #include <algorithm>
 #include <boost/any.hpp>
 #include <chrono>
+#include <cstdlib>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/files.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/media_save.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
+#include <cvc/core/notify.h>
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
@@ -22,8 +25,10 @@
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -50,6 +55,10 @@ struct PickMock : Backend {
   bool own_picker = false; // answer pick_files itself
   FilePickRequest asked;
   FilePickDone pending;
+
+  bool own_save = false; // §5.29 answer ask_save_path itself
+  SavePathRequest save_asked;
+  SavePathDone save_pending;
 
   Capabilities capabilities() const override {
     Capabilities c;
@@ -110,6 +119,13 @@ struct PickMock : Backend {
       return false;
     asked = req;
     pending = std::move(done);
+    return true;
+  }
+  bool ask_save_path(const SavePathRequest &req, SavePathDone done) override {
+    if (!own_save)
+      return false;
+    save_asked = req;
+    save_pending = std::move(done);
     return true;
   }
   bool shows(const std::string &title) const {
@@ -957,4 +973,295 @@ TEST(AriadneHttpUpload, StartedChunksLetFramesGoOnAndATornDownDocumentAborts) {
     rt.reset();
     EXPECT_EQ(net->live(), 0u) << "its request was aborted";
   }
+}
+
+// ---- §5.29 saving a picture or a video: (save-url) and what it names and writes ----------------
+
+namespace {
+
+std::string read_file(const fs::path &p) {
+  std::ifstream in(p, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// A PNG's signature and some bytes after it: what the save sniffs, not a picture to decode.
+const std::string kPngBytes =
+    std::string("\x89PNG\r\n\x1a\n", 8) + "pixels, as far as a save knows";
+
+// (save-url ARGS)'s reply in state: s.ok, s.cancelled, s.name, s.size, s.error; done = 1.
+std::string save_program(const std::string &args) {
+  return "(begin (set r (save-url " + args +
+         "))"
+         "  (state-set \"s.ok\" (get-attr r \"ok\"))"
+         "  (state-set \"s.cancelled\" (get-attr r \"cancelled\"))"
+         "  (state-set \"s.name\" (get-attr r \"name\"))"
+         "  (state-set \"s.size\" (get-attr r \"size\"))"
+         "  (state-set \"s.error\" (get-attr r \"error\"))"
+         "  (state-set \"done\" 1))";
+}
+
+// The newest notification's text, "" with none.
+std::string last_notice(cvc::app &app) {
+  const std::vector<cvc::notification_entry> all = cvc::notifications(app);
+  return all.empty() ? std::string() : all.back().text;
+}
+
+} // namespace
+
+TEST(AriadneMediaSave, ItSniffsWhatTheBytesAre) {
+  EXPECT_EQ(sniff_mime(kPngBytes), "image/png");
+  EXPECT_EQ(sniff_mime(std::string("\xff\xd8\xff\xe0", 4) + "JFIF"), "image/jpeg");
+  EXPECT_EQ(sniff_mime("GIF89a......"), "image/gif");
+  EXPECT_EQ(sniff_mime(std::string("RIFF\x10\0\0\0WEBPVP8 ", 16)), "image/webp");
+  EXPECT_EQ(sniff_mime(std::string("\0\0\0\x18"
+                                   "ftypisom\0\0\x02\0",
+                                   16)),
+            "video/mp4");
+  EXPECT_EQ(sniff_mime(std::string("\0\0\0\x14"
+                                   "ftypqt  \0\0\0\0",
+                                   16)),
+            "video/quicktime");
+  EXPECT_EQ(sniff_mime(std::string("\0\0\0\x1c"
+                                   "ftypavif\0\0\0\0",
+                                   16)),
+            "image/avif");
+  EXPECT_EQ(sniff_mime(std::string("\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm", 16)),
+            "video/webm");
+  EXPECT_EQ(sniff_mime("  <?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>"),
+            "image/svg+xml");
+  EXPECT_EQ(sniff_mime("just some text"), "");
+  EXPECT_EQ(sniff_mime(""), "");
+  EXPECT_EQ(mime_extension("image/jpeg"), "jpg");
+  EXPECT_EQ(mime_extension("Video/MP4; codecs=avc1"), "mp4");
+  EXPECT_EQ(mime_extension("application/x-unknown"), "");
+}
+
+TEST(AriadneMediaSave, TheNameComesFromTheUrlAndTheExtensionFromWhatItIs) {
+  // txwtf's uploads have no extension: the bytes give it.
+  EXPECT_EQ(save_file_name("https://tx.wtf/uploads/abc123", "", "image/png", false), "abc123.png");
+  EXPECT_EQ(save_file_name("https://m.test/a/photo.jpg?w=640#x", "", "image/png", false),
+            "photo.png")
+      << "another type's extension is replaced";
+  EXPECT_EQ(save_file_name("https://m.test/a/photo.JPEG", "", "image/jpeg", false), "photo.JPEG")
+      << "its own type's is kept";
+  EXPECT_EQ(save_file_name("https://m.test/clip.m4v", "", "video/mp4", true), "clip.m4v");
+  EXPECT_EQ(save_file_name("https://m.test/view.php", "", "image/png", false), "view.php.png")
+      << "an extension of no known type is kept, and the type's added";
+  EXPECT_EQ(save_file_name("https://m.test/", "", "video/webm", true), "video.webm");
+  EXPECT_EQ(save_file_name("https://m.test", "", "", false), "image") << "the host is no name";
+  EXPECT_EQ(save_file_name("https://m.test/a%20b%2Fc.gif", "", "image/gif", false), "a b_c.gif")
+      << "percent-decoded, a slash in it replaced";
+  EXPECT_EQ(save_file_name("file://pics/cat.webp", "", "", false), "cat.webp");
+  EXPECT_EQ(save_file_name("https://m.test/x", "../../etc/pass:wd", "", false), "pass_wd")
+      << "a given name loses its folders, and what a file name can't hold";
+  EXPECT_EQ(save_file_name("https://m.test/x", "CON.png", "image/png", false), "_CON.png");
+  EXPECT_EQ(save_file_name("https://m.test/x", ".profile", "", false), "_profile");
+  EXPECT_EQ(save_file_name("https://m.test/%ff%fe.png", "", "image/png", false), "__.png")
+      << "bytes that are not UTF-8";
+  const std::string long_name = std::string(300, 'a') + ".png";
+  const std::string cut = save_file_name("https://m.test/" + long_name, "", "image/png", false);
+  EXPECT_EQ(cut.size(), 200u);
+  EXPECT_EQ(cut.substr(cut.size() - 4), ".png");
+}
+
+TEST(AriadneMediaSave, ANewFileNeverReplacesOneThere) {
+  TempDir dir("save_new");
+  std::string error;
+  const std::string a = save_new_file(dir.str(), "cat.png", "first", &error);
+  ASSERT_FALSE(a.empty()) << error;
+  const std::string b = save_new_file(dir.str(), "cat.png", "second", &error);
+  const std::string c = save_new_file(dir.str(), "cat.png", "third", &error);
+  EXPECT_EQ(utf8_path(a).filename(), fs::path("cat.png"));
+  EXPECT_EQ(utf8_path(b).filename(), fs::path("cat (1).png"));
+  EXPECT_EQ(utf8_path(c).filename(), fs::path("cat (2).png"));
+  EXPECT_EQ(read_file(utf8_path(a)), "first");
+  EXPECT_EQ(read_file(utf8_path(b)), "second");
+  const std::string u = save_new_file(dir.str(),
+                                      "\xc3\xbcn\xc3\xaf"
+                                      "code \xe5\x86\x99.png",
+                                      "x", &error);
+  ASSERT_FALSE(u.empty()) << error;
+  EXPECT_TRUE(fs::exists(utf8_path(u)));
+  EXPECT_EQ(save_new_file(path_utf8(dir.path / "missing" / "folder"), "x.png", "x", &error), "");
+  EXPECT_FALSE(error.empty());
+  std::string at_error;
+  ASSERT_TRUE(save_file_at(a, "replaced", &at_error)) << at_error;
+  EXPECT_EQ(read_file(utf8_path(a)), "replaced");
+}
+
+TEST(AriadneMediaSave, DownloadsIsTheUsersFolder) {
+  std::string error;
+#ifdef _WIN32
+  const std::string d = downloads_dir(&error);
+  ASSERT_FALSE(d.empty()) << error;
+  EXPECT_TRUE(fs::is_directory(utf8_path(d))) << d;
+#else
+  TempDir home("save_home");
+  const auto keep = [](const char *k) {
+    const char *v = std::getenv(k);
+    return v ? std::optional<std::string>(v) : std::nullopt;
+  };
+  const auto put = [](const char *k, const std::optional<std::string> &v) {
+    if (v)
+      ::setenv(k, v->c_str(), 1);
+    else
+      ::unsetenv(k);
+  };
+  const auto old_home = keep("HOME"), old_xdg = keep("XDG_DOWNLOAD_DIR"),
+             old_cfg = keep("XDG_CONFIG_HOME");
+  ::setenv("HOME", home.str().c_str(), 1);
+  ::unsetenv("XDG_CONFIG_HOME");
+  ::unsetenv("XDG_DOWNLOAD_DIR");
+  EXPECT_EQ(downloads_dir(&error), path_utf8(home.path / "Downloads")) << error;
+  EXPECT_TRUE(fs::is_directory(home.path / "Downloads")) << "made when it isn't there";
+  home.write(".config/user-dirs.dirs", "# xdg-user-dirs\nXDG_DOWNLOAD_DIR=\"$HOME/Fetched\"\n");
+  EXPECT_EQ(downloads_dir(&error), home.str() + "/Fetched") << "user-dirs.dirs says where";
+  ::setenv("XDG_DOWNLOAD_DIR", (home.str() + "/Env").c_str(), 1);
+  EXPECT_EQ(downloads_dir(&error), home.str() + "/Env") << "$XDG_DOWNLOAD_DIR first";
+  put("HOME", old_home);
+  put("XDG_DOWNLOAD_DIR", old_xdg);
+  put("XDG_CONFIG_HOME", old_cfg);
+#endif
+}
+
+TEST(AriadneSaveUrl, TheHostsDialogAsksWhereAndTheFileIsWrittenThere) {
+  TempDir dir("save_dialog");
+  dir.write("pics/upload", kPngBytes);
+  cvc::app app;
+  Runtime rt(app, "");
+  PickMock mb;
+  mb.own_save = true;
+  rt.set_backend(&mb);
+  rt.set_media_base(dir.str());
+  run(rt, mb, "(state-set \"has\" (if (has? \"save-url\") \"yes\" \"no\"))");
+  frames(rt, 2);
+  EXPECT_EQ(sval(app, "has"), "yes");
+  run(rt, mb, save_program("\"file://pics/upload\""));
+  ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(mb.save_pending); }))
+      << "the host's dialog was asked, once the bytes came";
+  EXPECT_EQ(mb.save_asked.name, "upload.png") << "named from the URL, typed from the bytes";
+  EXPECT_EQ(mb.save_asked.mime, "image/png");
+  EXPECT_EQ(mb.save_asked.title, "Save image");
+  EXPECT_EQ(sval(app, "done"), "") << "the program waits for the user";
+
+  // A second save while the dialog is open is refused, not queued behind it.
+  run(rt, mb, "(state-set \"two\" (get-attr (save-url \"file://pics/upload\") \"error\"))");
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "two").empty(); }));
+  EXPECT_EQ(sval(app, "two"), "a Save dialog is open already");
+
+  const fs::path chosen = dir.path / "kept" / "mine.png";
+  fs::create_directories(chosen.parent_path());
+  mb.save_pending(path_utf8(chosen), "");
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "s.ok"), "true") << sval(app, "s.error");
+  EXPECT_EQ(sval(app, "s.name"), "mine.png");
+  EXPECT_EQ(sval(app, "s.size"), std::to_string(kPngBytes.size()));
+  EXPECT_EQ(read_file(chosen), kPngBytes);
+  for (const char *k : {"s.ok", "s.name", "s.size", "s.error"})
+    EXPECT_EQ(sval(app, k).find(path_utf8(dir.path)), std::string::npos)
+        << k << ": the reply never holds the path";
+  EXPECT_NE(last_notice(app).find("Saved mine.png to "), std::string::npos) << last_notice(app);
+
+  // The user cancels: nothing is written, and the program hears so.
+  mb.save_pending = nullptr;
+  run(rt, mb,
+      save_program("\"file://pics/upload\" (dict \"name\" \"other\" \"mime\" \"image/png\")"));
+  ASSERT_TRUE(pump_until(rt, [&] { return static_cast<bool>(mb.save_pending); }));
+  EXPECT_EQ(mb.save_asked.name, "other.png") << "the given name, with the type's extension";
+  mb.save_pending("", "");
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "s.cancelled") == "true"; }));
+  EXPECT_EQ(sval(app, "s.ok"), "false");
+  EXPECT_FALSE(fs::exists(dir.path / "kept" / "other.png"));
+}
+
+TEST(AriadneSaveUrl, WithNoDialogItIsANewFileInTheSaveFolderAndANoticeSaysWhere) {
+  TempDir dir("save_folder");
+  dir.write("clip", std::string("\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm", 16));
+  dir.write("dl/clip.webm", "already here");
+  cvc::app app;
+  Runtime rt(app, "");
+  PickMock mb; // no dialog of its own: a terminal's case
+  rt.set_backend(&mb);
+  rt.set_media_base(dir.str());
+  rt.set_save_dir(path_utf8(dir.path / "dl"));
+  run(rt, mb, save_program("\"file://clip\""));
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "s.ok"), "true") << sval(app, "s.error");
+  EXPECT_EQ(sval(app, "s.name"), "clip (1).webm") << "never over the file there";
+  EXPECT_EQ(read_file(dir.path / "dl" / "clip.webm"), "already here");
+  EXPECT_EQ(read_file(dir.path / "dl" / "clip (1).webm").size(), 16u);
+  const std::string where = path_utf8(dir.path / "dl" / "clip (1).webm");
+  EXPECT_EQ(last_notice(app), "Saved clip (1).webm to " + where);
+}
+
+TEST(AriadneSaveUrl, AFailureIsAReplyAndAMisusedCallAnError) {
+  TempDir dir("save_fail");
+  cvc::app app;
+  Runtime rt(app, "");
+  PickMock mb;
+  rt.set_backend(&mb);
+  rt.set_media_base(dir.str());
+  rt.set_save_dir(dir.str());
+  run(rt, mb, save_program("\"file://nothing-here.png\""));
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "s.ok"), "false");
+  EXPECT_FALSE(sval(app, "s.error").empty());
+  EXPECT_EQ(sval(app, "s.name"), "nothing-here.png");
+  EXPECT_TRUE(cvc::notifications(app).empty()) << "a program's failure is the program's to show";
+  run(rt, mb,
+      "(begin"
+      "  (state-set \"e.opt\" (try (save-url \"file://a.png\" (dict \"path\" \"/tmp\"))"
+      "    (catch (e) (get-attr e \"message\"))))"
+      "  (state-set \"e.name\" (try (save-url \"published-image\")"
+      "    (catch (e) (get-attr e \"message\"))))"
+      "  (state-set \"e.type\" (try (save-url \"file://a.png\" (dict \"name\" 3))"
+      "    (catch (e) (get-attr e \"message\")))))");
+  frames(rt, 3);
+  EXPECT_NE(sval(app, "e.opt").find("no option 'path' (name, mime, auth)"), std::string::npos)
+      << sval(app, "e.opt");
+  EXPECT_NE(sval(app, "e.name").find("is not an http(s), file, cvc or state URI"),
+            std::string::npos)
+      << sval(app, "e.name");
+  EXPECT_NE(sval(app, "e.type").find("'name' is a string"), std::string::npos)
+      << sval(app, "e.type");
+}
+
+TEST(AriadneSaveUrl, ItFetchesWithTheWidgetsCredentialAndThePolicy) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  const std::string token = "media-token-0123456789abcdef";
+  TempDir dir("save_http");
+  cvc::app app;
+  NetGuard guard{app};
+  auto *net = new FnHttpClient([token](const cvc::net::HttpRequest &r) {
+    if (r.url == "http://api.test/login")
+      return reply(200, "{\"token\": \"" + token + "\"}", {"Content-Type: application/json"});
+    if (r.url == "http://api.test/uploads/private" &&
+        header(r, "Authorization") != "Bearer " + token)
+      return reply(401, "{}");
+    return reply(200, kPngBytes, {"Content-Type: image/png"});
+  });
+  cvc::net::set_http_client(app, std::unique_ptr<cvc::net::HttpClient>(net));
+  ASSERT_EQ(enable_net(app, allow({"http://api.test"})), "");
+  Runtime rt(app, "");
+  PickMock mb;
+  rt.set_backend(&mb);
+  rt.set_save_dir(dir.str());
+  run(rt, mb,
+      "(begin (http-request \"POST\" \"http://api.test/login\""
+      "    (dict \"capture_auth\" (dict \"name\" \"api\")))"
+      "  " +
+          save_program("\"http://api.test/uploads/private\" (dict \"auth\" \"api\")") + ")");
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "done") == "1"; }));
+  EXPECT_EQ(sval(app, "s.ok"), "true") << sval(app, "s.error");
+  EXPECT_EQ(sval(app, "s.name"), "private.png");
+  EXPECT_EQ(read_file(dir.path / "private.png"), kPngBytes);
+  EXPECT_EQ(whole_state(app).find(token), std::string::npos);
+
+  // An origin the host does not allow is not fetched.
+  run(rt, mb, save_program("\"http://evil.test/x.png\""));
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "s.name") == "x.png"; }));
+  EXPECT_EQ(sval(app, "s.ok"), "false");
+  for (const cvc::net::HttpRequest &r : net->requests())
+    EXPECT_EQ(r.url.find("evil.test"), std::string::npos) << r.url;
 }

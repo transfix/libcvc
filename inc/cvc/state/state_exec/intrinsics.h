@@ -260,10 +260,13 @@ cvc::state &pinned_root(intrinsics_context *ctx);
 /// where root_path comes from the action's intrinsics_context.root_path. Post to the scheduler the
 /// program parks on: `ctx->host->parking_scheduler()`, read in the intrinsic (an isolated
 /// document's group), or the app's exec_scheduler() when that is null. A post to exec_scheduler()
-/// for a program in another group stays in group 0's queue and never wakes it. An isolated
-/// document's group lives while the document stays in it: a move or teardown destroys it once its
-/// host's own calls have ended, which do not include a compute_async job, so such a job must end
-/// before the document moves or goes (an async function on `*ctx->host` needs no such care).
+/// on a channel of a program in another group (an isolated document's, under its prefix) is passed
+/// on to that group, the channel's home, by the app's router (S2b), one hop more than a post to the
+/// parking scheduler; a '#' key is never passed on, so such a post on one stays in group 0's queue
+/// and never wakes the program. An isolated document's group lives while the document stays in it:
+/// a move or teardown destroys it once its host's own calls have ended, which do not include a
+/// compute_async job, so such a job must end before the document moves or goes (an async function
+/// on `*ctx->host` needs no such care).
 /// Rules (identical to the intrinsic-side resolver, minus grant-link following which needs the
 /// tree): a '#'-bearing channel (the runtime's own tick/key/pointer channels) and an empty
 /// root_path return `channel` verbatim (backward-compatible); a leading '/' is an app-root-global

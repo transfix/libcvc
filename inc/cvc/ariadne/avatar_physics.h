@@ -156,6 +156,10 @@ struct avatar_static {
   // that world's id, not this one's); null: this world's default (ARIADNE_WORLDS.md section 18.5,
   // OW5h). A geometry's items carry their own surface classes.
   std::shared_ptr<const cvc::physics::material> material;
+  // Ground a vehicle drives on (OW5p), as the relay's world has it (SceneWorldBody::ground): a
+  // vehicle's chassis touching it has not hit anything. A geometry's: its height fields (its
+  // terrain), not its other items (its buildings) or its edge walls.
+  bool ground = false;
 };
 
 class avatar_world {
@@ -254,6 +258,9 @@ public:
   // Its centre now. Throws std::out_of_range for an unknown key.
   cvc::physics::body_state obstacle_state(std::uint64_t key) const;
 
+  // The statics' bodies that are ground (avatar_static::ground), as set_statics made them.
+  const std::vector<cvc::physics::body_id> &ground_bodies() const { return _ground; }
+
   // One step of the world. Not in a shared world (its owner steps it): std::logic_error.
   void step();
 
@@ -290,6 +297,7 @@ private:
   cvc::physics::world *_world = nullptr;     // the world the avatars are in (_own's or shared)
   std::uint32_t _avatar_material = 0;
   std::vector<std::uint32_t> _statics;
+  std::vector<cvc::physics::body_id> _ground; // the statics that are ground (OW5p)
   // The statics' materials added to the world, each once (set_statics): the material and its id.
   std::vector<std::pair<cvc::physics::material, cvc::physics::material_id>> _static_materials;
   std::vector<cvc::physics::field_id> _static_fields; // a static geometry's volumes

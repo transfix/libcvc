@@ -2,10 +2,13 @@
 // what its dataset decoded, and draws it again when the dataset is replaced. Headless. These checks
 // pin that:
 //   1. at realize the node is an empty group: nothing waits for a load;
-//   2. once the dataset is ready, sync_scene_data draws it: a city bundle's world as its items'
-//      nodes, the terrain wearing the bundle's satellite.png (north at the image's top), kept as
-//      the node's height field and, with body:, in the physics world;
-//      a mesh dataset as one mesh node;
+//   2. once the dataset is ready, sync_scene_data draws it: a city bundle's world with the world
+//      renderer (world_nodes.h, put in by finish_scene_data here), the terrain's chunks wearing
+//      the bundle's satellite.png (north at the image's top, any width and height), kept as the
+//      node's height field and, with body:, in the physics world; a mesh dataset as one mesh
+//      node;
+//   2b. a generated world's dataset draws as the generated_world node draws its world: its props
+//      in LOD cells, its buildings, roads and water, on its 2048 ground;
 //   3. re-pointing the document's link at another dataset ((data-load) does) redraws the node from
 //      it, and what it drew before is gone, its bodies too;
 //   4. a dataset with nothing to draw warns, never throws;
@@ -23,11 +26,15 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/LodGraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/image/image.h>
+#include <cvc/image/image_encode.h>
 #include <cvc/state/state.h>
 #include <cvc/utility/archive.h>
+#include <cvc/world/generated_world.h>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -35,6 +42,7 @@
 #include <string>
 #include <vector>
 #include <vtkNew.h>
+#include <vtkProp.h>
 #include <vtkRenderer.h>
 
 using cvc::gl::SceneGraph;
@@ -104,16 +112,30 @@ const unsigned char kSatellitePng[] = {
     0xd9, 0x68, 0x8b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
 
 // A city bundle as a cvcpkg package holds it: a gzip tar, the bundle under share/cvc-scenes/, with
-// an aerial image when `satellite`.
-std::string package(int n, bool satellite) {
+// an aerial image when `satellite` (the 2 x 2 one, else `png` when given).
+std::string package(int n, bool satellite, const std::string &png = std::string()) {
   std::vector<std::pair<std::string, std::string>> files = {
       {"share/libcvc-deps/scene-test/manifest.yaml", "m"},
       {"share/cvc-scenes/test/terrain.json", terrain_json(n)}};
   if (satellite)
-    files.push_back(
-        {"share/cvc-scenes/test/satellite.png",
-         std::string(reinterpret_cast<const char *>(kSatellitePng), sizeof kSatellitePng)});
+    files.push_back({"share/cvc-scenes/test/satellite.png",
+                     png.empty() ? std::string(reinterpret_cast<const char *>(kSatellitePng),
+                                               sizeof kSatellitePng)
+                                 : png});
   return cvc::archive::gzip(cvc::archive::pack_tar(files));
+}
+
+// A world dataset's ground as the world renderer draws it: the rung that draws of the first chunk
+// under <id>_terrain in the data node `node`.
+std::shared_ptr<cvc::gl::GeometryNode> ground_rung(cvc::gl::GraphicsNode &node,
+                                                   const std::string &id) {
+  std::shared_ptr<cvc::gl::GraphicsNode> t = node.findChildByName(id + "_terrain");
+  if (!t)
+    return nullptr;
+  for (const auto &c : t->getGraphicsChildren())
+    if (auto l = std::dynamic_pointer_cast<cvc::gl::LodGraphicsNode>(c); l && l->rungCount() > 0)
+      return l->rung(std::max(0, l->activeRung()));
+  return nullptr;
 }
 
 bool wait_ready(cvc::app &app, const std::string &path) {
@@ -183,8 +205,14 @@ scene:
   CHECK(wait_ready(app, prefix + ".data.tri"));
   CHECK(wait_ready(app, prefix + ".data.notes"));
   CHECK(ari::sync_scene_data(out, &warnings) == 3);
+  // The city is a world: the world renderer draws it, made off the frame thread and put in a piece
+  // at a time; finish_scene_data runs that to its end.
+  CHECK(out.data_nodes[0].world != nullptr);
+  CHECK(ari::finish_scene_data(out) == 1);
   const std::vector<std::string> drawn = child_names(*city);
-  CHECK(drawn.size() == 1 && drawn[0] == "city_terrain");
+  CHECK(!drawn.empty() && drawn[0] == "city_terrain");
+  for (const std::string &d : drawn) // the terrain and the parts beside it, under the node
+    CHECK(d == "city_terrain" || d == "city_water" || d == "city_buildings" || d == "city_roads");
   CHECK(out.height_fields.count("city") == 1);
   if (out.height_fields.count("city"))
     CHECK(out.height_fields.at("city")->rows() == 3);
@@ -217,12 +245,15 @@ scene:
     }
     CHECK(img && img->width() == 2 && img->height() == 2);
   }
+  // The terrain node holds the ground's texture, the 2 x 2 image; its chunks share it.
   if (auto terrain =
-          std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain"));
-      terrain && terrain->getGeometry()) {
-    CHECK(terrain->hasTexture()); // the 2 x 2 image, draped
-    CHECK(terrain->textureWidth() == 2 && terrain->textureHeight() == 2);
-    const cvc::geometry &g = *terrain->getGeometry();
+          std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
+    CHECK(terrain->hasTexture() && terrain->textureWidth() == 2 && terrain->textureHeight() == 2);
+  else
+    CHECK(false);
+  if (auto rung = ground_rung(*city, "city"); rung && rung->getGeometry()) {
+    CHECK(rung->hasTexture());
+    const cvc::geometry &g = *rung->getGeometry();
     CHECK(g.const_uvs().size() == g.const_points().size());
     int corners = 0;
     for (std::size_t i = 0; i < g.const_points().size() && i < g.const_uvs().size(); ++i) {
@@ -233,7 +264,7 @@ scene:
       if (p[0] == 10.0 && p[1] == -10.0)
         corners += (uv[0] == 1.0 && uv[1] == 0.0) ? 1 : 100; // south-east: its bottom-right
     }
-    CHECK(corners == 2);
+    CHECK(corners >= 2 && corners < 100); // a skirt's copy of a corner has its UV too
   } else {
     CHECK(false);
   }
@@ -260,9 +291,15 @@ scene:
   store->bind(prefix, bigger);
   CHECK(wait_ready(app, city_path));
   CHECK(ari::sync_scene_data(out, &warnings) == 1);
-  CHECK(child_names(*city).size() == 1);
+  CHECK(ari::finish_scene_data(out) == 1);
+  CHECK(child_names(*city) == drawn); // the old world's nodes went; the parts stay
   if (out.height_fields.count("city"))
     CHECK(out.height_fields.at("city")->rows() == 5);
+  if (std::shared_ptr<const cvc::world::generated_world> w =
+          ari::data_world_shown(*out.data_nodes[0].world))
+    CHECK(w->terrain && w->terrain->rows() == 5); // the big city is the world drawn
+  else
+    CHECK(false);
   if (out.world) { // the old terrain's body went with it
     const std::size_t before = out.world->world().body_count();
     out.world->sync(&warnings);
@@ -270,9 +307,12 @@ scene:
     CHECK(out.world->world().body_count() == before);
   }
   CHECK(cvc::state::instance(app)(frame_key).value() == framed); // frame: true frames only once
+  // The big city's package has no aerial image: its ground is the terrain's surface colour.
   if (auto terrain =
           std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
-    CHECK(!terrain->hasTexture()); // the big city's package has no aerial image
+    CHECK(terrain->hasTexture() && terrain->textureWidth() == 2);
+  else
+    CHECK(false);
 }
 
 // A hidden `source: { data }` node draws nothing when its dataset arrives. What it draws keeps its
@@ -327,7 +367,15 @@ scene:
   CHECK(wait_ready(app, prefix + ".data.city"));
   CHECK(wait_ready(app, prefix + ".data.tri"));
   CHECK(ari::sync_scene_data(out, &warnings) == 2);
+  CHECK(ari::finish_scene_data(out) == 1);
+  // What draws: a mesh node's own prop, or for the city (a world) its ground's chunk rung, which
+  // stays registered with the renderer and draws by its actor's visibility (LodGraphicsNode).
   auto drawn = [&](cvc::gl::GraphicsNode &node, const char *child) {
+    if (std::string(child) == "city_terrain") {
+      std::shared_ptr<cvc::gl::GeometryNode> rung = ground_rung(node, "city");
+      return rung && rung->prop() && ren->HasViewProp(rung->prop()) &&
+             rung->prop()->GetVisibility() != 0;
+    }
     std::shared_ptr<cvc::gl::GraphicsNode> c = node.findChildByName(child);
     return c && c->prop() && ren->HasViewProp(c->prop());
   };
@@ -354,10 +402,129 @@ scene:
   store->bind(prefix, bigger);
   CHECK(wait_ready(app, prefix + ".data.city"));
   CHECK(ari::sync_scene_data(out, &warnings) == 1);
+  CHECK(ari::finish_scene_data(out) == 1);
   CHECK(!drawn(*city, "city_terrain"));
   city->setVisible(true);
   CHECK(drawn(*city, "city_terrain"));
   sg.setRenderer(nullptr);
+}
+
+// A city's aerial image need not be square: the ground's texture is the image, 4 x 2, and the
+// world's status says it is drawn.
+void test_a_city_ground_that_is_not_square() {
+  std::printf("test_a_city_ground_that_is_not_square\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  unsigned char px[4 * 2 * 3];
+  for (int i = 0; i < 4 * 2 * 3; ++i)
+    px[i] = static_cast<unsigned char>(30 * i);
+  const std::string png = cvc::encode_png(
+      cvc::image(4, 2, cvc::image::pixel_format::RGB, cvc::image::data_type::u8, px));
+  TempDir t;
+  t.put("wide.tgz", package(3, true, png));
+  cvc::ariadne::LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+data:
+  city: { uri: wide.tgz, path: share/cvc-scenes/test, as: city_bundle }
+scene:
+  nodes:
+    - node: city
+      source: { data: city }
+      tint: satellite
+)");
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  const std::string prefix = sg.getStatePrefix();
+  auto store = cvc::ariadne::DataStore::of(app);
+  for (cvc::ariadne::DataSpec d : r.data) {
+    d.base = t.dir.generic_string();
+    store->bind(prefix, d);
+  }
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, prefix, &warnings);
+  std::shared_ptr<cvc::gl::GraphicsNode> city = sg.getGraphics("city");
+  CHECK(city != nullptr && out.data_nodes.size() == 1);
+  if (!city || out.data_nodes.size() != 1)
+    return;
+  CHECK(wait_ready(app, prefix + ".data.city"));
+  CHECK(ari::sync_scene_data(out, &warnings) == 1);
+  CHECK(!out.pending_work.empty() && out.pending_work.back()()); // drawing: in flight
+  CHECK(ari::finish_scene_data(out) == 1);
+  CHECK(!out.pending_work.back()());
+  CHECK(ari::data_world_status(*out.data_nodes[0].world).empty());
+  if (auto terrain =
+          std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
+    CHECK(terrain->hasTexture() && terrain->textureWidth() == 4 && terrain->textureHeight() == 2);
+  else
+    CHECK(false);
+}
+
+// A generated world's dataset (generate: generated_world) draws as the generated_world node draws
+// its world: the props in LOD cells under <id>_props, the buildings and the roads as meshes under
+// their holders, the water by chunk under <id>_water, on the bundle's ground (2048 a side).
+void test_a_generated_worlds_dataset_draws_as_its_node_does() {
+  std::printf("test_a_generated_worlds_dataset_draws_as_its_node_does\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  cvc::ariadne::LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+data:
+  world:
+    generate: generated_world
+    params: { seed: 5, half_m: 200, trees: 40, rocks: 6, buildings: 8, water_level_m: 2 }
+scene:
+  nodes:
+    - node: city
+      source: { data: world }
+)");
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  cvc::app app;
+  SceneGraph sg(app);
+  const std::string prefix = sg.getStatePrefix();
+  auto store = cvc::ariadne::DataStore::of(app);
+  for (const cvc::ariadne::DataSpec &d : r.data)
+    store->bind(prefix, d);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, prefix, &warnings);
+  std::shared_ptr<cvc::gl::GraphicsNode> city = sg.getGraphics("city");
+  CHECK(city != nullptr && out.data_nodes.size() == 1);
+  if (!city || out.data_nodes.size() != 1)
+    return;
+  CHECK(cvc::ariadne::DataStore::of(app)->wait(prefix + ".data.world", 300.0));
+  CHECK(ari::sync_scene_data(out, &warnings) == 1);
+  CHECK(ari::finish_scene_data(out) == 1);
+  std::shared_ptr<const cvc::world::generated_world> w =
+      ari::data_world_shown(*out.data_nodes[0].world);
+  CHECK(w != nullptr);
+  if (!w)
+    return;
+  CHECK(!w->prop_cells.empty() && !w->buildings.const_points().empty());
+  auto children = [&](const std::string &part) {
+    std::shared_ptr<cvc::gl::GraphicsNode> g = city->findChildByName("city" + part);
+    return g ? g->getGraphicsChildren().size() : std::size_t(0);
+  };
+  CHECK(children("_props") == w->prop_cells.size()); // a ladder per cell
+  CHECK(children("_buildings") == 1 && children("_roads") <= 1);
+  CHECK(children("_terrain") == w->terrain_chunks.size());
+  std::size_t wet = 0;
+  for (const cvc::world::terrain_chunk &ch : w->terrain_chunks)
+    wet += !ch.water.empty() && !ch.water[0].const_tris().empty();
+  CHECK(children("_water") >= wet); // a ladder per wet chunk, and the texture's holder
+  if (auto terrain =
+          std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
+    CHECK(terrain->textureWidth() == cvc::world::world_ground_size &&
+          terrain->textureHeight() == cvc::world::world_ground_size);
+  else
+    CHECK(false);
 }
 
 // material: { uv: ... } turns a texture's UVs: flips, then quarter turns (the image
@@ -400,6 +567,8 @@ void test_a_uv_block_orients_the_texture() {
 int main() {
   test_a_dataset_draws_into_its_node_and_redraws_when_replaced();
   test_a_hidden_data_node_draws_nothing();
+  test_a_city_ground_that_is_not_square();
+  test_a_generated_worlds_dataset_draws_as_its_node_does();
   test_a_uv_block_orients_the_texture();
   if (g_failures) {
     std::printf("cvcgl_ariadne_data: %d FAILED\n", g_failures);

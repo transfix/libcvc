@@ -171,8 +171,8 @@ section_stamp write_room_entities(cvc::app &app, const std::string &room,
   }
   const section_reader r(app, base);
   for (std::uint64_t id : section_ids(app, base))
-    if (!written.count(id) && r.flag({entity_key(id), "present"}, false))
-      w.set_flag({entity_key(id), "present"}, false);
+    if (!written.count(id))
+      w.remove({entity_key(id)}); // a delete, before the revision that covers it
   return w.commit(0, epoch);
 }
 
@@ -304,9 +304,8 @@ std::vector<pose_subject> entity_pose_subjects(const WorldVehicles &vehicles) {
       continue;
     pose_subject s;
     s.pid = entity_pid(info.id);
-    s.state.position = {info.x, info.y, info.z};
-    s.state.rotation = {std::cos(0.5 * info.yaw), 0.0, 0.0, std::sin(0.5 * info.yaw)};
-    s.state.linear_velocity = {info.vx, info.vy, 0.0};
+    s.state = entity_ride(info, &vehicles.world()); // its chassis's attitude too (OW5m)
+    s.steer = info.steer;                           // and its steering (OW5n)
     s.state.active = true;
     out.push_back(std::move(s));
   }

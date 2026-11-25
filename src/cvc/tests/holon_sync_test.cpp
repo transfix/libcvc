@@ -31,6 +31,7 @@
 #include <cvc/ariadne/section.h> // section_epoch
 #include <cvc/ariadne/vehicle_dynamics.h>
 #include <cvc/ariadne/world_rules.h> // world_rules
+#include <cvc/ariadne/world_vehicles.h> // vehicle_desc_of: a boat's numbers
 #include <cvc/core/app.h>
 #include <cvc/physics/backend.h>
 #include <cvc/physics/body.h>
@@ -38,6 +39,7 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_cluster_shard.h>
 #include <cvc/state/state_transport_inproc.h>
+#include <cvc/volume/volume.h> // a lake for the boat
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
@@ -1577,6 +1579,56 @@ TEST(HolonSyncTest, TheClientPumpHoldsTheVehiclesWeShow) {
   EXPECT_TRUE(client.held_entities().empty()) << "gone from the room, let go";
 }
 
+// The room's avatars for the car we drive (OW5p): client_pump marks a peer aboard when a vehicle
+// the room shows carries it, so the holon holds the avatars on foot for the car to meet and not
+// one whose pose is its vehicle's.
+TEST(HolonSyncTest, TheClientPumpTellsTheAvatarsOnFootFromThoseAboard) {
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "garage";
+  conf::seed_default_scene(app, room);
+  for (const char *pid : {"ann", "bob", "cat"})
+    conf::room_join(app, room, pid);
+  body_state ann, bob, cat;
+  ann.position = vec3{-6.0, 5.0, 0.0};
+  bob.position = vec3{2.0, -5.0, 0.0};
+  cat.position = vec3{4.0, 0.0, 0.75}; // driving: its vehicle's pose
+  cvc::ariadne::write_pose(app, room, "ann", ann, 100);
+  cvc::ariadne::write_pose(app, room, "bob", bob, 100);
+  cvc::ariadne::write_pose(app, room, "cat", cat, 100);
+  conf::room_entity driven;
+  driven.id = 1;
+  driven.archetype = "humvee";
+  driven.size = {4.5, 2.0, 1.5};
+  driven.driver = "cat";
+  conf::write_room_entities(app, room, {driven});
+  cvc::ariadne::entity_playout playout;
+  ASSERT_TRUE(playout.apply(conf::entity_pid(1), cat, 100));
+  holon client(holon_role::client, cvc::ariadne::room_holon_config());
+  if (!client.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  std::vector<cvc::ariadne::vehicle_obstacle> avatars;
+  for (const cvc::ariadne::vehicle_obstacle &o : client.held_obstacles())
+    if (o.mass > 0.0)
+      avatars.push_back(o);
+  ASSERT_EQ(avatars.size(), 1u) << "bob on foot; not cat, aboard its vehicle; not ann";
+  EXPECT_NEAR(avatars[0].at.position.x, 2.0, 0.05);
+  EXPECT_NEAR(avatars[0].at.position.y, -5.0, 0.05);
+  EXPECT_EQ(client.held_entities(), std::vector<std::uint64_t>{1}) << "cat's vehicle is held";
+
+  conf::room_entity parked = driven; // cat gets out
+  parked.driver.clear();
+  conf::write_room_entities(app, room, {parked});
+  playout.pump(app, room, 1.0 / 60.0);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  std::size_t n = 0;
+  for (const cvc::ariadne::vehicle_obstacle &o : client.held_obstacles())
+    n += o.mass > 0.0 ? 1 : 0;
+  EXPECT_EQ(n, 2u) << "out, cat is on foot too";
+}
+
 // The vehicle we drive, predicted (section 18.5, OW5b): with the room's entities saying how it
 // runs (the kinematic plant's numbers, room_entity::drive), client_pump keeps us local and the
 // holon predicts it; a vehicle on another plant is played out as before; out, the walker again.
@@ -1842,4 +1894,82 @@ TEST(HolonSyncTest, TheClientPumpPredictsTheJoltVehicleWeDrive) {
     cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
   EXPECT_TRUE(client.predicts_vehicle("ann"));
   EXPECT_LT(std::fabs(client.state("ann").position.z), 3.0) << "on the ground, not fallen through";
+}
+
+// And a boat (OW5j): the room's entities carry the dynamicboat plant, and the client predicts it
+// once its statics bring the water (world_replica's water); until then it is played out.
+TEST(HolonSyncTest, TheClientPumpPredictsTheBoatWeDriveOnTheWater) {
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace conf = cvc::ariadne::conference;
+  cvc::app app;
+  const std::string room = "harbour";
+  conf::room_join(app, room, "ann");
+  body_state feet;
+  feet.position = vec3{1.0, 2.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", feet, 100);
+  conf::room_entity boat_entity;
+  boat_entity.id = 12;
+  boat_entity.plant = "dynamicboat";
+  cvc::ariadne::vehicle_archetype a;
+  a.id = "launch";
+  a.plant = "dynamicboat";
+  a.preset = "launch";
+  const cvc::physics::vehicle_desc d = cvc::ariadne::vehicle_desc_of(a);
+  cvc::ariadne::dynamic_drive &k = boat_entity.dynamics;
+  k.plant = "dynamicboat";
+  k.preset = "launch";
+  k.mass = d.mass;
+  k.max_speed = d.max_speed;
+  k.max_accel = d.max_accel;
+  k.max_decel = d.max_decel;
+  k.max_steer = d.max_steer;
+  k.lock = d.max_steer;
+  k.vmax = d.max_speed;
+  k.a_hold = d.max_decel;
+  k.tick_steps = 12;
+  k.phase = 5;
+  ASSERT_TRUE(k.valid());
+  conf::write_room_entities(app, room, {boat_entity});
+  {
+    const std::vector<conf::room_entity> back = conf::read_room_entities(app, room);
+    ASSERT_EQ(back.size(), 1u);
+    EXPECT_EQ(back[0].dynamics, k) << "the plant round-trips";
+  }
+  cvc::ariadne::entity_playout playout;
+  playout.pump(app, room, 1.0 / 60.0);
+  holon client(holon_role::client);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  cvc::state &driving = app.root()(conf::room_participant_path(room, "ann") + ".driving");
+  driving.value(std::string("12"));
+  body_state boat;
+  boat.position = vec3{4.0, 2.0, 0.0};
+  boat.linear_velocity = vec3{1.0, 0.0, 0.0};
+  cvc::ariadne::write_pose(app, room, "ann", boat, 200);
+  cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_FALSE(client.predicts_vehicle("ann")) << "no water: played out";
+
+  // The water with the statics: a still lake 20 m deep.
+  auto lake =
+      std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                    cvc::bounding_box(-500.0, -500.0, -20.0, 500.0, 500.0, 0.0));
+  lake->fill(1000.0);
+  cvc::physics::field water;
+  water.kind = cvc::physics::field_kind::fluid;
+  water.volume = lake;
+  water.drag_coefficient = 1.0;
+  water.damping = 1.0e4;
+  client.set_statics({}, 1, {water});
+  cvc::ariadne::write_pose(app, room, "ann", boat, 210);
+  for (int i = 0; i < 2; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  cvc::ariadne::dynamic_vehicle now;
+  ASSERT_TRUE(client.predicted_vehicle("ann", now)) << "on its model, on the water";
+  const auto *saved = std::get_if<cvc::ariadne::jolt_vehicle_saved>(&now.model);
+  ASSERT_NE(saved, nullptr);
+  EXPECT_NE(saved->world, nullptr) << "afloat";
+  for (int i = 0; i < 60; ++i)
+    cvc::ariadne::client_pump(client, app, room, "ann", 1.0 / 60.0, &playout);
+  EXPECT_TRUE(client.predicts_vehicle("ann"));
+  EXPECT_NEAR(client.state("ann").position.z, 0.0, 0.5) << "afloat at the water's top";
 }

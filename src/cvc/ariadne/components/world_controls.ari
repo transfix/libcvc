@@ -12,6 +12,17 @@
 # the water level; Colour by only repaints the ground, at once. Regenerate, Randomize and Stop go
 # through a request key (world.request) the realizer consumes.
 #
+# Save writes the world shown as a bundle (ARIADNE_WORLDS section 18.8), through the same request
+# key: natively a directory beside the document, or a zip when the name ends in .zip; in a browser
+# a zip download. "With terrain mesh and height map" adds export/ for other software: the terrain as
+# terrain.glb, a 16-bit heightmap.png and heightmap.json (its size, extent and height range). A
+# saved world loads again as a data: entry, `uri: <the name>`, `as: city_bundle`.
+#
+# Joined to a server whose world runs the same node (ARIADNE_WORLDS section 18.8, GB5), the lab
+# shows the server's world, and its Regenerate and Randomize go to the server: an admin's make the
+# server's world, which every client then shows; anyone else's are refused. Log in as an admin with
+# the server's rcon password. "server status" says what the server did. Not joined, these do nothing.
+#
 # Args (every one has a default, so a bare include works):
 #   keys   the generated_world node's state key root: its `keys:` prop, else world (the default).
 #          A second generated_world node with `keys: island` gets its own panel from
@@ -168,3 +179,25 @@ units:
         bind: "{keys}.stats.occupied"
       - text: "water"
         bind: "{keys}.stats.water"
+      - separator
+      - input_text: Save as
+        bind: "{keys}.save.file"
+        tooltip: "a directory beside the document, or a name ending in .zip for one zip; in a browser the world downloads as a .zip"
+      - checkbox: With terrain mesh and height map
+        bind: "{keys}.save.exports"
+        tooltip: "adds export/ for other software (Blender, a GIS, a game engine): the terrain as terrain.glb, a 16-bit heightmap.png, and heightmap.json with its size, extent and height range"
+      - button: Save
+        on: (state-set "{keys}.request" "save")
+        tooltip: "saves the world shown as a bundle, the same world when it loads again (a data: entry, as: city_bundle)"
+      - text: "save status"
+        bind: "{keys}.save.status"
+      - separator
+      - input_text: Admin password
+        bind: "{keys}.server.password"
+        password: true
+        tooltip: "the server's rcon password, when the lab is joined to a server: an admin's Regenerate makes the server's world"
+      - button: Log in as admin
+        on: (state-set "{keys}.request" "rcon")
+        tooltip: "sends the password to the server (server.rcon), for this connection; the field is cleared"
+      - text: "server status"
+        bind: "{keys}.server.status"

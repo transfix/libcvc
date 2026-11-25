@@ -117,9 +117,9 @@ catalog:
     file: world_controls.ari
     unit: world_controls
     binds: "<prefix>.{keys}.*"              # read every frame by the generated_world node, drawn or headless
-    for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour)"
+    for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour / save)"
     args: { keys: world, title: Terrain Lab, id: world_controls }   # defaults; keys = the node's `keys:` prop
-    note: "the realizer seeds world.* from the node props; structural edits regenerate the world; world_settings is its widgets without the window (args: keys)"
+    note: "the realizer seeds world.* from the node props; structural edits regenerate the world; Save writes the world shown as a bundle (a directory, a .zip, a browser download), with export/ for other software; world_settings is its widgets without the window (args: keys)"
   - component: world_source
     file: world_source.ari
     unit: world_source
@@ -319,9 +319,16 @@ catalog:
     file: volume_grid.ari
     unit: volume_grid
     binds: "<prefix>.graphics.root.children.{node}.grid.* (view, tool, slice.*, display.*, source.*, classes.*, pick.*, pointer.*, cursor.*, request, status) and .transfer_function; <prefix>.viewers.{id}_*.camera"
-    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), contours per object (linear or spline; draw, close, move, select, delete, save, load) tiled into surfaces in the 3D view, sessions and the transfer function, over a volume the app holds"
+    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), contours per object (linear or spline; draw, close, move, select, delete, save, load) tiled into surfaces in the 3D view, the segmentation (its Segmentation tab), sessions and the transfer function, over a volume the app holds"
     args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }   # defaults
     note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views), volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) and volume_grid_contours_tab (the Contours tab) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"
+  - component: volume_grid_segmentation
+    file: volume_grid_segmentation.ari
+    unit: volume_grid_segmentation
+    binds: "<prefix>.graphics.root.children.{node}.grid.segment.* (t_low, t_high, gamma, automatic, show, opacity, show_surfaces, surface_opacity, make_surfaces, live, mesh.*, rows.*, info.*, warnings), .grid.request, .grid.busy / stoppable / progress / phase and .grid.files.segments"
+    for: "the Segmentation tab of a volume_grid in a window of its own: thresholds, gamma and the automatic seeds, Segment and Stop with a progress bar, the result's classes (colour, show, voxels, triangles), how the labels and surfaces draw, and Save (the classes as one multi-variable volume, the labels as one)"
+    args: { node: grid, title: Segmentation, id: volume_grid_segmentation }   # defaults
+    note: "the grid's point classes of the shown variable and timestep are the seeds; the labels draw on the slices while the fronts advance, each class's surface in the 3D view; saving goes through the app (data-save). volume_grid_segmentation_tab is the controls alone (a group, args node and id), the volume_grid component's Segmentation tab"
   - component: http_cache
     file: http_cache.ari
     unit: http_cache
@@ -330,3 +337,10 @@ catalog:
     args: { title: Network cache, id: http_cache }   # defaults
     verbs: [http_cache.clear]
     note: "arigl puts it in every document, opened from Settings > Network cache...; Clear is the bare action http_cache.clear, which AppRuntime handles (uri_http_cache.h: clear_http_cache)"
+  - component: processes
+    file: processes.ari
+    unit: processes
+    binds: "<prefix>.{rows}.* rows (count, total, more, at, every, max, <i>.{pid,scope,app,name,status,steps,waits,memory}); reads <prefix>.ariadne.apps.* and <prefix>.ariadne.name (the Runtime's mirror)"
+    for: "the document's running DSL programs, a row each: the application each belongs to (from its (ps) scope), pid, name, status, steps, what it waits on, memory, and a Kill button (docs/roadmap/ARIADNE_SHELL.md 4.10)"
+    args: { id: processes, title: Processes, rows: processes }   # defaults
+    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button"

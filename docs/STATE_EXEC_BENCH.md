@@ -170,7 +170,8 @@ over the measured reps and prints `PASS` or `FAIL`. Options:
 A scenario whose gate could pass without judging anything has an entry in the runner's
 `GATE_GUARDS`, for the metrics it names (`mt.ariadne_docs`' `extra.helper_wakes`,
 `extra.wakes_per_frame` and `extra.worker_pumps`; `mt.groups`' `extra.of_ceiling` and
-`extra.speedup`; `mt.groups.move`'s `extra.ns_per_move`):
+`extra.speedup`; `mt.groups.move`'s `extra.ns_per_move`; `mt.cross_group_msg`'s
+`extra.wake_p50_ns`):
 
 - **vacuous**: metrics each row must hold at least at one of its params, else the point prints
   `FAIL (vacuous: ...)`. For `mt.ariadne_docs`, `extra.isolated` and `extra.any_groups` at `docs`:
@@ -187,7 +188,9 @@ A scenario whose gate could pass without judging anything has an entry in the ru
 Each key of an entry is optional, and a `vacuous` bound may be a number instead of a param:
 `mt.groups.move`'s `extra.ns_per_move` needs `extra.moves` at least 1, else the point fails as
 vacuous (`force_move` added no move: no other worker to move to, or `CVC_EXEC_FORCE_MOVE` set for
-both pools).
+both pools). `mt.cross_group_msg`'s `extra.wake_p50_ns` judges `pattern=pingpong span=cross k=1`
+only (other points are n/a: one group, fan-out, broadcast, and several pairs, which at t=1 queue
+behind each other) and needs `extra.receipts` at least 1, else the point fails as vacuous.
 
 It exits 1 when a point fails, a matching point has a failed rep or leaves the gate vacuous,
 nothing matches, every point is n/a, or a control fails. Otherwise it exits 2 when a point is
@@ -234,7 +237,12 @@ as `state_exec_bench_gates` (`src/cvc/tests/state_exec_bench_gates.cmake`, a `cm
   pool's budget, take the steps that groups pumped by `pump_all` rounds take, point by point, on
   the caller (t=1) and on workers (t=2), even and uneven (threaded execution's Stage 2a). A
   fork-join point without its continuous twin, or a continuous point that failed its checks,
-  fails it.
+  fails it;
+- `mt.cross_group_msg --smoke` at `--size span=one,cross --size t=1,2 --size
+  pump=fork_join,continuous`, then `compare RUN RUN --pair span=one:cross --metric steps_total
+  --threshold 0 --fail-on-change`: the same programs take the same steps across groups, through
+  the router, as in one group with it off (threaded execution's Stage 2b), 12 pairs. A
+  cross-group point that failed its checks (routing off included) fails it.
 
 Every command must exit 0. The test is registered where the tool test is (a working Python 3),
 and only for Release and RelWithDebInfo: MSVC's Debug STL allocates for its iterator debugging,
@@ -1161,6 +1169,31 @@ than workers it is the heap work and the group's cache misses on its new core, w
 gate below judges. At smoke size the difference is noise (a negative `ns_per_move` happens); the
 gate is for the A/B's medians.
 
+### mt.cross_group_msg (async)
+
+Threaded execution's Stage 2b (td 4.6, 6.3; S2.md section 6): messages between exec_groups on the
+app's exec_pool through the router, against the same programs in one group. `t` (1, 2, 4) and
+`pump` (`fork_join`, `continuous`) are mt.groups'. `pattern=pingpong`: `k` (1, 2, 4, 8) pairs
+trading a ping and a pong; `pattern=fanout`: one sender sending to `k` receivers, each on a key of
+its own, then taking their `k` acks; `pattern=broadcast`: one send on round i's key, which `k`
+receivers wait on, the host starting each round once every receiver waits again (it posts the
+round's go to the sender's group, after the receivers' subscribes in that group's ordered
+ingress). `span=cross` puts each process in a group of its own whose name is its channel prefix
+(the router on; a broadcast's receivers wait on the sender's key: remote deliveries, tracked at
+k >= 2); `span=one` runs the same programs in one group with no prefix (the router off, RT-1's
+fast path; it fails if the router was consulted). `m` rounds (200). Smoke: every pattern, both
+spans, t 1 and 2, k 2, m 10, both pumps.
+
+Records `extra.ns_per_msg` (the region over the timed receipts), `extra.wake_p50_ns` and
+`extra.wake_p99_ns` (a send's post to its receiver's step; `latency_ns` has every percentile),
+`extra.receipts`, `extra.groups`, `extra.router_active`, `extra.router_consulted`, the groups'
+ingress counters summed (`requeued`, `stale_dropped`, `ingress_refused`, `pending_dropped`), the
+pool's (`pumps`, `worker_pumps`, `helper_wakes`, `effective_threads`, and continuous mode's),
+`rounds`, `idle_waits` and, for broadcast, `go_posts`. A rep fails unless every program returns
+`m`, the timed receipts are 2km (pingpong, fanout) or km (broadcast), every receipt carries its
+send time, and the router is on exactly when `span=cross`. A cross-group point first checks that a
+send reaches its key's home (it fails at once while the router does not route).
+
 ### mt.groups.flood (async)
 
 `n` (2000) tiny programs, flood.small's (`(+ 1 2)` and a 10-iteration loop, alternating, as
@@ -1443,6 +1476,30 @@ scenario.
   pins continuous mode's `steps_total` to fork-join's, point by point ("Gates in CTest"); the
   sanitizer jobs run mt.groups' `t=8 groups=8` points in both modes under gcc's TSan, clang's TSan
   and ASan with UBSan, and require the continuous points' lines too (`SAN_REQUIRED_S2A`;
+  docs/TESTING.md, "The Sanitizer Jobs").
+
+### Threaded execution's Stage 2b gates
+
+S2b is the router and process control across groups (td 4.5, 4.6; threaded-impl/S2.md section 6).
+The method is Stage 2a's.
+
+- **Regression**: `steps_total` unchanged on `msg.*` and `sched.single.*`, and `msg.*` (one
+  group) within 3 % (as Stage 2a's): RT-1's fast path, with the ordered ingress every async
+  scheduler now has.
+- **Wake latency** across groups under 50 us at p50, one pair's pingpong (`GATE_GUARDS` makes the
+  other points n/a):
+
+  ```sh
+  python3 $B run --scenario mt.cross_group_msg --size pattern=pingpong --size span=cross \
+      --size k=1 --reps 5 --out s2b_cross.jsonl
+  python3 $B gate s2b_cross.jsonl --scenario mt.cross_group_msg --metric extra.wake_p50_ns \
+      --max 50000
+  ```
+
+- **Recorded**: fan-out, broadcast and several pairs, in one group and across groups.
+- **In CTest and CI**: `state_exec_bench_gates` pins the one:cross `steps_total` pairs ("Gates in
+  CTest"); the sanitizer legs run `mt.cross_group_msg --size t=4 --size k=4 --size m=20` in both
+  pump modes (12 points) and require its six cross-group points (`SAN_REQUIRED_S2B`;
   docs/TESTING.md, "The Sanitizer Jobs").
 
 ### mt.pycvc_threads (pycvc)

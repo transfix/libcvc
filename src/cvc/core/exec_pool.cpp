@@ -29,6 +29,7 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/detail/lock_home.h>
 #include <cvc/state/state_exec/exec_group.h>
+#include <cvc/state/state_exec/exec_router.h>
 #include <cvc/state/state_exec/heap.h>
 #include <cvc/state/state_exec/lock_manager.h>
 #include <cvc/state/state_exec/process_table.h>
@@ -1807,7 +1808,13 @@ void take_token(se::exec_group &g, std::optional<se::async_scheduler::pump_owner
 
 } // namespace
 
-struct exec_pool::impl : pool_state {};
+struct exec_pool::impl : pool_state {
+  cvc::app *app = nullptr; // whose router and directory the S2b calls use (null: none)
+};
+
+exec_pool::exec_pool(const pool_options &opts, cvc::app *app) : exec_pool(opts) {
+  impl_->app = app;
+}
 
 exec_pool::exec_pool(const pool_options &opts) : impl_(std::make_unique<impl>()) {
   impl &p = *impl_;
@@ -2747,6 +2754,275 @@ bool exec_pool::attached(const state_exec::exec_group &group) const {
 }
 
 const pool_options &exec_pool::options() const { return impl_->opts; }
+
+// --- Stage 2: messaging and process control across groups (S2b; exec_router.h) ---
+
+bool exec_pool::post_message(const std::string &channel, se::value_t value) {
+  return impl_->app && impl_->app->exec_router().post_message(channel, value);
+}
+
+bool exec_pool::post_control(int pid, se::control_cmd cmd) {
+  return impl_->app && impl_->app->exec_router().post_control(pid, std::move(cmd));
+}
+
+// --- Stage 2: pool.kill_owner (S2b.5; S2-Q8, td 4.5; exec_pool.h has the contract) ---
+
+namespace {
+
+// One kill_owner's commands: a flag a group, set by its done (applied, or refused by a scheduler
+// destroyed first: KO-3), and the wakeup of the thread waiting for them. Shared with the dones,
+// which an early return (an exception) leaves to come later. `mu` is a leaf.
+struct owner_kill {
+  std::mutex mu;
+  std::vector<char> done;
+  std::size_t left = 0;
+  se::detail::wakeup *wake = nullptr; // the waiting thread's, while it waits
+
+  bool is_done(std::size_t i) {
+    std::lock_guard<std::mutex> lock(mu);
+    return done[i] != 0;
+  }
+  // Idempotent: a group counted as applied here may still call its done later.
+  void finish(std::size_t i) noexcept {
+    try {
+      std::lock_guard<std::mutex> lock(mu);
+      if (!done[i]) {
+        done[i] = 1;
+        --left;
+      }
+      if (wake)
+        wake->notify();
+    } catch (...) {
+    }
+  }
+};
+
+// Under Q: whether the calling thread is inside a pump, a host body or a callback of `p`, where
+// kill_owner's wait could wait for the pump it is in: a worker, an attaching thread pumping a
+// group of its own or running one of its host entries, or a pump_all's caller (its group-0 frame,
+// bodies and callbacks run there).
+bool in_pool_work(pool_state &p, std::thread::id me) {
+  if (worker_of(p, me))
+    return true;
+  if (const host_thread *h = host_of(p, me); h && (h->pumping || h->in_callback))
+    return true;
+  return std::any_of(p.callers.begin(), p.callers.end(),
+                     [&](const auto &c) { return c.first == me; });
+}
+
+// Drain `s`'s ingress on this thread, which holds its token, until it is empty (S2b R2a C-M2): the
+// commands another kill_owner posted while this one held the token are applied too, since that
+// one's try of the token failed. A drain that throws drops the entry that threw and puts the rest
+// back (exec_router.h's throw rule), so each round gets further; the rounds are bounded (posts may
+// keep coming), and a command still queued then is drained by its own kill_owner's retry. The
+// first exception is kept for the caller.
+void drain_all(se::async_scheduler &s, std::exception_ptr &err) {
+  constexpr int kRounds = 16;
+  for (int round = 0; round < kRounds; ++round) {
+    try {
+      s.drain_ingress();
+    } catch (...) {
+      if (!err)
+        err = std::current_exception();
+    }
+    if (!s.has_pending_ingress())
+      return;
+  }
+}
+
+// Group 0 drained here when its token is free (its driver is this thread: exec_pool.h); false when
+// another thread holds it (pycvc's run_all, another kill_owner), and the wait tries again.
+bool drain_group0(cvc::app &app, std::exception_ptr &err) {
+  se::async_scheduler &s = app.exec_scheduler();
+  std::optional<se::async_scheduler::pump_owner_scope> token;
+  try {
+    token.emplace(s);
+  } catch (const std::runtime_error &) { // kPumpedElsewhereError
+    return false;
+  }
+  drain_all(s, err);
+  return true;
+}
+
+// A group of this pool's fork-join side (not attached, in no pump_all, its token free) drained
+// here; false, touching nothing, when it is held, and the wait tries again. Looked at under its
+// handle, which keeps it alive while its token is taken; the token (its teardown waits for it)
+// then keeps it so, and its membership (a pump_all's claim takes it) keeps pumps off it, until the
+// drain ends. Its membership only tried there: the handle's lock is never held waiting for it.
+bool drain_unattached(const se::group_ref &g, std::exception_ptr &err) {
+  std::optional<se::async_scheduler::pump_owner_scope> token;
+  std::unique_lock<std::mutex> member;
+  se::async_scheduler *s = nullptr;
+  g.visit([&](se::async_scheduler &sched) {
+    se::exec_group &group = *g.group();
+    se::detail::group_pool_link &link = group.pool_link();
+    std::unique_lock<std::mutex> m(link.membership, std::try_to_lock);
+    if (!m.owns_lock() || link.call.load(std::memory_order_relaxed) != nullptr ||
+        link.attached.load(std::memory_order_acquire) != nullptr || group.pumping_here())
+      return;
+    try {
+      token.emplace(sched);
+    } catch (const std::runtime_error &) { // kPumpedElsewhereError
+      return;
+    }
+    member = std::move(m);
+    s = &sched;
+  });
+  if (!s)
+    return false;
+  drain_all(*s, err);
+  token.reset(); // the token first: the teardown takes the membership only after it
+  member.unlock();
+  return true;
+}
+
+// Whether the calling thread is inside a step or pump of `g` (C-m5: refused before anything is
+// posted or drained): group 0 stepping with no other thread its pump owner, or an exec_group
+// pumped here.
+bool inside_its_pump(cvc::app &app, const se::group_ref &g) {
+  if (g.is_group0()) {
+    se::async_scheduler *s = app.exec_scheduler_probe();
+    return s && !s->pumped_elsewhere() && s->current_pid() >= 0;
+  }
+  bool here = false;
+  g.visit([&](se::async_scheduler &) { here = g.group()->pumping_here(); });
+  return here;
+}
+
+// Wait for every done, servicing this thread's host queue (td 4.9: a worker blocked on one of its
+// bodies goes on), as detach's wait does. A failed try of a group's token never means another
+// thread will drain it (S2b R2a C-M2: a one-shot drain may hold it, or a pump_all that is never
+// called again): while a group's command is not done, `retry` tries it again on a backoff.
+void wait_for_dones(pool_state &p, owner_kill &w, std::exception_ptr &err,
+                    const std::function<void(std::size_t)> &retry) {
+  std::optional<se::detail::wakeup> own;
+  auto backoff = std::chrono::milliseconds(1);
+  clock_type::time_point next_try = clock_type::now() + backoff;
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lk(p.m);
+      const idle_release after{p};
+      // Looked up each round: a retry's with_group may free an idle record of this thread.
+      host_thread *h = host_of(p, std::this_thread::get_id());
+      se::detail::wakeup *wk = h ? &h->wake : own.has_value() ? &*own : &own.emplace();
+      {
+        std::lock_guard<std::mutex> lock(w.mu);
+        if (w.left == 0)
+          return;
+        w.wake = wk;
+      }
+      struct unhook {
+        owner_kill &w;
+        ~unhook() {
+          std::lock_guard<std::mutex> lock(w.mu);
+          w.wake = nullptr;
+        }
+      } unhooked{w};
+      if (!(h && service_once(p, *h, lk, err))) {
+        lk.unlock();
+        wk->wait_until(next_try); // a done, an entry for this thread, or the next try
+        lk.lock();
+      }
+    }
+    if (clock_type::now() < next_try)
+      continue;
+    for (std::size_t i = 0; i < w.done.size(); ++i)
+      if (!w.is_done(i))
+        retry(i);
+    backoff = std::min(backoff * 2, std::chrono::milliseconds(50));
+    next_try = clock_type::now() + backoff;
+  }
+}
+
+} // namespace
+
+void exec_pool::kill_owner(const std::string &owner) {
+  impl &p = *impl_;
+  const std::thread::id me = std::this_thread::get_id();
+  const auto refuse = [] {
+    throw std::logic_error("exec_pool::kill_owner: from inside a pump, a host body or a callback "
+                           "of the pool, or a group's pump (it would wait for the pump it is in)");
+  };
+  {
+    std::lock_guard<std::mutex> lock(p.m);
+    if (in_pool_work(p, me))
+      refuse();
+  }
+  if (!p.app)
+    return;
+  const std::vector<se::group_ref> groups = p.app->exec_router().directory().groups_of(owner);
+  if (groups.empty())
+    return;
+  // Refused inside a target's own pump before anything is posted or drained (C-m5).
+  for (const se::group_ref &g : groups)
+    if (inside_its_pump(*p.app, g))
+      refuse();
+  // The commands first, one a group, each acknowledged by its done.
+  auto w = std::make_shared<owner_kill>();
+  w->done.assign(groups.size(), 0);
+  w->left = groups.size();
+  for (std::size_t i = 0; i < groups.size(); ++i) {
+    se::control_cmd cmd;
+    cmd.what = se::control_cmd::kind::kill_owner;
+    cmd.owner = owner;
+    cmd.done = [w, i](bool) { w->finish(i); };
+    if (!groups[i].post_control(-1, std::move(cmd)))
+      w->finish(i); // being torn down (its handle closed): its own kills come next
+  }
+  // Then each group this thread may pump drained here: group 0 when its token is free, a group of
+  // the fork-join side that nothing holds, and a group attached to this thread (or held by it),
+  // under with_group. A failed attached group's processes are killed already. The rest are waited
+  // for; one whose try failed is tried again while its command is not done (wait_for_dones).
+  std::exception_ptr err;
+  const auto attempt = [&](std::size_t i) {
+    const se::group_ref &g = groups[i];
+    if (g.is_group0()) {
+      drain_group0(*p.app, err);
+      return;
+    }
+    enum class where { unattached, failed, here, elsewhere } at = where::unattached;
+    {
+      // The record's group is compared, never followed: one attached to (or held by) this thread
+      // is alive, since only that thread detaches or destroys it.
+      std::lock_guard<std::mutex> lock(p.m);
+      for (const auto &[key, a] : p.attachments)
+        if (a->group == g.group()) {
+          if (a->failed)
+            at = where::failed;
+          else if (a->host->id == me || (a->host_held && a->holder == me))
+            at = where::here;
+          else
+            at = where::elsewhere;
+          break;
+        }
+    }
+    switch (at) {
+    case where::failed:
+      w->finish(i);
+      break;
+    case where::here:
+      with_group(*g.group(), [&] { drain_all(g.group()->sched(), err); });
+      break;
+    case where::unattached:
+      drain_unattached(g, err);
+      break;
+    case where::elsewhere:
+      break;
+    }
+  };
+  for (std::size_t i = 0; i < groups.size(); ++i)
+    if (!w->is_done(i))
+      attempt(i);
+  wait_for_dones(p, *w, err, attempt);
+  if (err)
+    std::rethrow_exception(err);
+}
+
+std::optional<se::published_process> exec_pool::info(int pid) {
+  if (!impl_->app)
+    return std::nullopt;
+  return impl_->app->exec_router().info(pid);
+}
 
 bool exec_pool::deterministic() const { return impl_->deterministic; }
 

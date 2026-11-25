@@ -419,6 +419,160 @@ void read_nodes(const aiScene *s, model &m) {
   }
 }
 
+// The first node named `name`, -1 for none.
+int node_named(const model &m, const std::string &name) {
+  for (std::size_t i = 0; i < m.nodes.size(); ++i)
+    if (m.nodes[i].name == name)
+      return static_cast<int>(i);
+  return -1;
+}
+
+model::transform_t transform_of(const aiMatrix4x4 &t) {
+  return {{t.a1, t.a2, t.a3, t.a4, t.b1, t.b2, t.b3, t.b4, t.c1, t.c2, t.c3, t.c4, t.d1, t.d2, t.d3,
+           t.d4}};
+}
+
+// A mesh's bones as its skin: each bone's node (by name) and offset, and each vertex's
+// influences, its weights made to sum to 1.
+void read_skin(const aiMesh *am, const model &m, model::mesh &mm) {
+  if (!am->HasBones())
+    return;
+  const unsigned int nv = am->mNumVertices;
+  std::vector<std::vector<std::pair<int, double>>> per(nv);
+  for (unsigned int b = 0; b < am->mNumBones; ++b) {
+    const aiBone *ab = am->mBones[b];
+    if (!ab)
+      continue;
+    model::bone bn;
+    bn.node = node_named(m, ab->mName.C_Str());
+    bn.offset = transform_of(ab->mOffsetMatrix);
+    const int index = static_cast<int>(mm.bones.bones.size());
+    mm.bones.bones.push_back(bn);
+    for (unsigned int w = 0; w < ab->mNumWeights; ++w)
+      if (ab->mWeights[w].mVertexId < nv && ab->mWeights[w].mWeight > 0.0f)
+        per[ab->mWeights[w].mVertexId].emplace_back(index, ab->mWeights[w].mWeight);
+  }
+  mm.bones.first.reserve(nv + 1);
+  for (unsigned int v = 0; v < nv; ++v) {
+    mm.bones.first.push_back(static_cast<boost::uint32_t>(mm.bones.influences.size()));
+    double sum = 0.0;
+    for (const auto &bw : per[v])
+      sum += bw.second;
+    for (const auto &bw : per[v])
+      mm.bones.influences.emplace_back(bw.first, sum > 0.0 ? bw.second / sum : bw.second);
+  }
+  mm.bones.first.push_back(static_cast<boost::uint32_t>(mm.bones.influences.size()));
+}
+
+// A mesh's anim meshes as its morph targets: each the difference of its positions (and normals)
+// from the mesh's, and its weight at rest.
+void read_morphs(const aiMesh *am, model::mesh &mm) {
+  const unsigned int nv = am->mNumVertices;
+  for (unsigned int k = 0; k < am->mNumAnimMeshes; ++k) {
+    const aiAnimMesh *a = am->mAnimMeshes[k];
+    if (!a)
+      continue;
+    model::morph_target mt;
+    mt.name = a->mName.C_Str();
+    mt.position_deltas.assign(nv, geometry::point_t{{0.0, 0.0, 0.0}});
+    if (a->HasPositions() && a->mNumVertices == nv)
+      for (unsigned int v = 0; v < nv; ++v)
+        mt.position_deltas[v] = {{a->mVertices[v].x - am->mVertices[v].x,
+                                  a->mVertices[v].y - am->mVertices[v].y,
+                                  a->mVertices[v].z - am->mVertices[v].z}};
+    if (a->HasNormals() && am->HasNormals() && a->mNumVertices == nv) {
+      mt.normal_deltas.reserve(nv);
+      for (unsigned int v = 0; v < nv; ++v)
+        mt.normal_deltas.push_back(
+            {{a->mNormals[v].x - am->mNormals[v].x, a->mNormals[v].y - am->mNormals[v].y,
+              a->mNormals[v].z - am->mNormals[v].z}});
+    }
+    mm.morphs.push_back(std::move(mt));
+    mm.morph_weights.push_back(a->mWeight);
+  }
+}
+
+// The node a morph channel names: a node of that name, else the first node drawing a mesh of it.
+int morph_node(const model &m, const std::string &name) {
+  const int n = node_named(m, name);
+  if (n >= 0)
+    return n;
+  for (std::size_t i = 0; i < m.nodes.size(); ++i)
+    for (int mi : m.nodes[i].meshes)
+      if (mi >= 0 && mi < static_cast<int>(m.meshes.size()) && m.meshes[mi].name == name)
+        return static_cast<int>(i);
+  return -1;
+}
+
+// The scene's animations as clips, their times in seconds.
+void read_clips(const aiScene *s, model &m) {
+  for (unsigned int a = 0; a < s->mNumAnimations; ++a) {
+    const aiAnimation *an = s->mAnimations[a];
+    if (!an)
+      continue;
+    model::clip c;
+    c.name = an->mName.C_Str();
+    const double tps = an->mTicksPerSecond > 0.0 ? an->mTicksPerSecond : 25.0;
+    double last = 0.0;
+    for (unsigned int k = 0; k < an->mNumChannels; ++k) {
+      const aiNodeAnim *na = an->mChannels[k];
+      if (!na)
+        continue;
+      model::clip::node_channel ch;
+      ch.node = node_named(m, na->mNodeName.C_Str());
+      if (ch.node < 0)
+        continue;
+      for (unsigned int i = 0; i < na->mNumPositionKeys; ++i) {
+        const aiVectorKey &key = na->mPositionKeys[i];
+        ch.position.t.push_back(key.mTime / tps);
+        ch.position.v.push_back({{key.mValue.x, key.mValue.y, key.mValue.z}});
+        ch.position.step = key.mInterpolation == aiAnimInterpolation_Step;
+        last = std::max(last, key.mTime / tps);
+      }
+      for (unsigned int i = 0; i < na->mNumRotationKeys; ++i) {
+        const aiQuatKey &key = na->mRotationKeys[i];
+        ch.rotation.t.push_back(key.mTime / tps);
+        ch.rotation.q.push_back({{key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z}});
+        ch.rotation.step = key.mInterpolation == aiAnimInterpolation_Step;
+        last = std::max(last, key.mTime / tps);
+      }
+      for (unsigned int i = 0; i < na->mNumScalingKeys; ++i) {
+        const aiVectorKey &key = na->mScalingKeys[i];
+        ch.scale.t.push_back(key.mTime / tps);
+        ch.scale.v.push_back({{key.mValue.x, key.mValue.y, key.mValue.z}});
+        ch.scale.step = key.mInterpolation == aiAnimInterpolation_Step;
+        last = std::max(last, key.mTime / tps);
+      }
+      c.nodes.push_back(std::move(ch));
+    }
+    for (unsigned int k = 0; k < an->mNumMorphMeshChannels; ++k) {
+      const aiMeshMorphAnim *mc = an->mMorphMeshChannels[k];
+      if (!mc)
+        continue;
+      model::clip::weights_channel wc;
+      wc.node = morph_node(m, mc->mName.C_Str());
+      if (wc.node < 0)
+        continue;
+      for (unsigned int i = 0; i < mc->mNumKeys; ++i) {
+        const aiMeshMorphKey &key = mc->mKeys[i];
+        std::vector<double> w;
+        for (unsigned int j = 0; j < key.mNumValuesAndWeights; ++j) {
+          const unsigned int target = key.mValues[j];
+          if (target >= w.size())
+            w.resize(target + 1, 0.0);
+          w[target] = key.mWeights[j];
+        }
+        wc.t.push_back(key.mTime / tps);
+        wc.weights.push_back(std::move(w));
+        last = std::max(last, key.mTime / tps);
+      }
+      c.weights.push_back(std::move(wc));
+    }
+    c.duration = an->mDuration > 0.0 ? an->mDuration / tps : last;
+    m.clips.push_back(std::move(c));
+  }
+}
+
 // A read scene as a model; `model_dir` resolves its external textures (empty: none resolve).
 model model_of_scene(app &ctx, const aiScene *s, const std::string &model_dir) {
   model m;
@@ -438,6 +592,12 @@ model model_of_scene(app &ctx, const aiScene *s, const std::string &model_dir) {
 
   if (s->mRootNode)
     read_nodes(s, m);
+  // Skins name their bones' nodes, so after the nodes; morph targets; the clips.
+  for (unsigned int i = 0; i < s->mNumMeshes && i < m.meshes.size(); ++i) {
+    read_skin(s->mMeshes[i], m, m.meshes[i]);
+    read_morphs(s->mMeshes[i], m.meshes[i]);
+  }
+  read_clips(s, m);
   return m;
 }
 

@@ -7,9 +7,11 @@ pump per frame, isolated documents, providers and posts on the caller's group, t
 own host, the teardown reap, the subscriber audit). Stage S, runs of several steps a pick, is built
 (`perf/threaded-ss`). Stage 2 ships in three parts (`threaded-impl/S2.md`, S2-Q1): S2a, the
 continuous pool (attached groups pumped whenever they have work, the split kernel pools and the
-long-step monitor), is built in `perf/threaded-s2a`; S2b (the router and process control across
-groups) and S2c (priority across groups, the weights, the coordinator) are not, nor are Stages 3,
-4 and M. Section 9.2 records the S2 decisions. Tracked in the
+long-step monitor), is built in `perf/threaded-s2a`; S2b, the router and process control across
+groups (channel homes, one ordered ingress, the pid directory, published info, the owner rule and
+`pool.kill_owner`), is built in `perf/threaded-s2b`; S2c (priority across groups, merged `ps` and
+`inspect`, the weights, the coordinator) is not, nor are Stages 3, 4 and M. Section 9.2 records
+the S2 decisions. Tracked in the
 `state-exec-perf` workstream, as its third track. The first two are the benchmark suite
 (transfix/libcvc#834) and the single-thread optimizations (branches `perf/sched`, `perf/async` and
 `perf/eval`).
@@ -1143,8 +1145,9 @@ threaded modes. The parallel test suites run in this mode first (section 8).
 
 ### 4.5 Cross-process operations
 
-**Inside a group:** unchanged. Kill, pause, resume, signal, delivery, `ps`, `inspect` and fork
-work as today (`async_scheduler.cpp:858-929, 945-998`).
+**Inside a group:** kill, pause, resume, signal, delivery, `ps`, `inspect` and fork work as
+before, but for S2b's owner rule (below): a process with an owner sees and controls only its
+owner's processes, in its own group too.
 
 **Pids** (B32; built in Stage 1a). Each app has one pid source, a shared `std::atomic<int>`
 (`app::exec_pid_source()`), made with group 0's state and counting from 1. The app scheduler and
@@ -1166,132 +1169,330 @@ exists.
   with heavy process churn reaches the wrap after 2^31 processes sooner than one scheduler did;
   that stays a known limit.
 - A process moved in Stage 3 keeps its pid.
-- Stage 2 adds a directory that maps a pid to its group: 64 shards, each a mutex and a map. It is
-  written at create, move and reap, and read by host and cross-group calls. Ariadne creates about
-  one process per action, so the writes are negligible.
 
-**From a host or another thread.** `pool.post_control(pid, cmd)` covers `kill`, `pause`, `resume`,
-`signal` and `set_priority`.
-- The command goes into the target group's ingress as a new entry kind, applied in
-  `drain_ingress` between steps.
-- It returns true when the pid was live in the directory.
-- It never blocks.
-- Stage 0 built the scheduler half: `post_control` with these kinds on both schedulers
-  (`control_cmd` in `scheduler_base.h`: `kill`, `pause`, `resume`, `signal`, `set_priority` and
-  `query`, with an optional `done(bool)`), which `exec_coordinator`'s bus threads use (4.12). The
-  pool's version routes to the target's group.
+**The pid directory** (built in S2b, S2b.2; `exec_directory` in
+`inc/cvc/state/state_exec/exec_router.h`, the app's at `app::exec_router().directory()`). It maps
+each pid of the app to its group (a `group_ref`, the handle 4.6 posts through) and its owner: 64
+shards by pid, each a mutex and a map, every read copied out, nothing posted under a shard's lock.
+- **Written by the scheduler that issues the pid**, at `execute`, `fork` and `restore` (Stage 3:
+  a move), and erased at its reap (a process that reaps itself in its own step, once the step is
+  over; a scheduler's destructor erases what was never reaped). So a pid is found from its
+  creation until its reap, before its group's first publish too, and an ended process not yet
+  reaped is still in it. Only a scheduler in an app's routing writes it: group 0 and every
+  `exec_group` built with an app (`async_scheduler::set_router`). A plain pycvc `Exec`, a bare
+  scheduler and a group with no app write nothing, and their pids are in no directory.
+- **Read by** `pool.post_control`, `pool.info`, `pool.kill_owner` (`groups_of(owner)`: the groups
+  with a process of the owner, each once, in creation order, group 0 first) and the control
+  intrinsics' cross-group half. Ariadne creates about one process per action, so the writes are
+  negligible.
 
-**From a program to another group** (Stage 2):
-- `kill`, `pause`, `resume`, `send-signal` and `set-priority` on a pid in another group are posted
-  as above. The call returns `#t` for "requested", and the effect lands at the target's next step
-  boundary. A `set-priority` is checked against the target's published owner, uid, parent pid and
-  floor (the rule of [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 7.2, the descent walked over
-  the published parent pids), carries the caller's pid, owner, uid and floor, and is re-checked in
-  full at the target, which holds the authoritative values
-  ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 7.5).
-- This is allowed only when the target's group has the caller's owner: the same document or the
-  same `Exec`. Otherwise the pid is treated as unknown, as today for a dead pid.
-- The same rule governs `ps` and `inspect`. A program sees its own group exactly, and other groups
-  of its owner through each group's published table, at most one slice stale.
-- So documents stop seeing and killing each other's processes. Today they can, through the shared
-  app scheduler. Within one document nothing is lost (Q5).
+**From a host or another thread** (built in S2b, S2b.5). `pool.post_control(pid, cmd)`
+(`exec_pool::post_control`, which the app's router serves) posts `cmd` to the group the directory
+has `pid` in, through that group's handle.
+- `cmd` is any of Stage 0's kinds (`kill`, `pause`, `resume`, `signal`, `set_priority`), each the
+  direct call's host path, unchecked, as on one scheduler; the target applies it in its next drain,
+  in post order with its messages and router entries (4.6, "The ordered ingress").
+- It returns true when the group took it, and the command's `done`, if set, is then called once,
+  on the thread that applies it. It returns false, and `done` is never called, for a pid not in the
+  directory or a group being torn down (its handle closed), and for a pool built with no app.
+- It never blocks, and a command never counts against the ingress cap.
+- Stage 0 built the scheduler half: `post_control` on both schedulers (`control_cmd` in
+  `scheduler_base.h`: `kill`, `pause`, `resume`, `signal`, `set_priority` and `query`, with an
+  optional `done(bool)`), which `exec_coordinator`'s bus threads use (4.12). S2b adds the kind
+  `kill_owner` (below).
 
-**Published info.** At the end of each pump a group publishes a snapshot of its processes' info
-(status, steps, times, memory, owner, uid, parent pid, base and effective priority, floor, locks
-held, what each waits on) and its `best_runnable` priority, under a mutex. Cross-group `ps`,
-`pool.info(pid)`, cross-group `set-priority`'s check, the ready queue's weights and the
-per-group statistics read it.
+**The owner rule** (built in S2b; S2-Q7, S2-Q8; `scheduler_base::control_as`). It decides what a
+program's `kill`, `pause`, `resume`, `ps` and `inspect` reach. The caller's owner is the owner of
+the process the scheduler is stepping, else of the context's own process, else `""` (a host's
+context).
+- **Locally**, a caller with owner `""` (an unowned process, a host) sees and controls every
+  process of its scheduler, as before. A caller with owner X reaches only X's: `kill`, `pause` and
+  `resume` of another owner's pid give `#f`, `ps` lists only X's rows, and `inspect` gives `nil`,
+  as for an unknown pid. This carries out Q5 for documents left in group 0, which shared the app
+  scheduler's `ps` and `kill` before (S2.md section 0, row 20).
+- **Across groups**, only a caller with a non-empty owner reaches anything: a pid the directory has
+  in another group with the caller's owner gets the `kill`, `pause` or `resume` posted there (a
+  command with no `done`), and the call returns `#t` for "requested", even where the direct call
+  would say `#f` (a `pause` of a process that is waiting, say); it lands at the target's next
+  drain. Anything else gives `#f`, as an unknown pid does: another owner's pid, any pid for owner
+  `""` (which has no rights across groups: S2-Q7), and a group being torn down (its handle refuses
+  the post).
+- **What the owners are.** An Ariadne Runtime gives every process it starts its owner tag, the
+  documents it loads included; a pooled pycvc `Exec` i runs its programs as `pycvc:<prefix>.<i>`
+  (S2-Q7); a plain `Exec` and a C++ host's processes have `""` unless the host sets one. Forked and
+  spawned children keep their parent's. So one document reaches its own sliced tasks in group 0
+  from its isolated group, and one pooled `Exec` reaches none of another's processes.
+- **Not in S2b:** `set-priority` and `get-priority` across groups (checked against the published
+  row on the caller's side and again at the target, with a caller-identity control kind:
+  [`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 7.5), and `ps` and `inspect` merging the
+  owner's rows from other groups' published rows, are S2c's. Until then a program's `ps` and
+  `inspect` see its own group only. `send-signal` gets no intrinsic (S2-Q8): hosts keep
+  `post_control`'s `signal`.
+- So documents stop seeing and killing each other's processes, in group 0 as in groups of their
+  own. Within one document nothing is lost (Q5).
+
+**Published info** (built in S2b, S2b.3; S2-Q9). Each scheduler in an app's routing publishes at
+the end of every run loop, whichever driver ran it (a group's pump, `exec_pump_frame`'s group 0,
+Ariadne's drain, `cvc::pump_exec_frame`):
+- **A summary**, in atomics (`async_scheduler::published()`): whether a process is runnable, the
+  next deadline and `best_runnable` (the run report's when a wake notifier is installed, else read
+  from the table), the count of live processes (ended ones awaiting their reap left out), and how
+  many run loops have published.
+- **A row per process** (`published_process`, in `scheduler_base.h`; `published_rows()` in pid
+  order, `published_info(pid)`): pid, name, owner, uid, scope, parent pid, status, base and
+  effective priority (the base under `round_robin`, as `get-priority` reports it), floor, the
+  absolute keys of its lock holds in the order it took them, what it waits on (`process_info`'s
+  `waiting_on` text), steps, run seconds and memory. It holds no `value_t`, so a reader on another
+  thread shares nothing with the group. It carries `scope` (`process_scope` of the chroot and the
+  owner's root, computed when the row is rebuilt) and no chroot or owner root (Joe, 2026-11-23),
+  and `name`, so that S2c's merged `ps` rows match a local `(ps)` row field for field. Ended
+  processes not yet reaped have rows, as `ps` lists them.
+- **When the rows are rebuilt:** when the process table's generation moved (an insert, an erase, a
+  status change other than ready and running, a priority change or relevel, a floor set by the
+  host), or when a lock hold moved. An uncontended grant or a release changes no status, and the
+  lock home's paths are frozen for the locks track's speed work, so the publisher compares each
+  holder's holds with its row instead: one walk of the table per publish when nothing else moved.
+  Otherwise steps, run seconds and memory are refreshed in place at most every 100 ms, so status
+  and identity are as of the run loop's end and the counters may lag 100 ms. A row set is built
+  outside the rows' mutex and swapped in under it; one that cannot be built (no memory) leaves the
+  old rows, and the next run loop rebuilds.
+- **Readers:** `pool.info(pid)` (the directory's group, then that group's row, read under its
+  handle; `nullopt` for a pid not in the directory, or not published since its creation), pycvc's
+  `ExecPool.info(pid)`, and in S2c cross-group `ps`, `inspect`, `set-priority`'s check and the
+  ready queue's weights.
 
 **`kill_owner`** (D's graft). Stage 1a built the scheduler's half, which group teardowns and
 Ariadne's rely on: `async_scheduler::kill_owner(owner)` takes the owner's live processes first and
 then kills each by its pid, so a kill whose tree slots reap or submit processes cannot disturb the
 loop (one submitted meanwhile is not killed). Every kill is tried, and the first that threw is
 rethrown after the rest (KO-1, KO-2). `kill(pid, reason)` kills with a reason of the caller's as
-the exit error (the pool's "internal error", 4.17). Stage 2's `pool.kill_owner(owner)` posts a
-kill to every group that has a process of that owner, then waits until each group has applied it.
-- In fork-join mode the wait pumps those groups' ingress inline.
-- Ariadne calls it before freeing the action contexts that intrinsics point at (`ictx.document`,
-  `ictx.channels`, which `Runtime::Impl::make_action_context` points at the Runtime's document
-  scope and channel policy). Without the acknowledgement, a child in another group could still run
-  against a freed context.
-- A document's own group is simply destroyed (section 4.2), after the Runtime's own kills and
-  reaps (4.17, "Teardown of an Ariadne Runtime").
+the exit error (the pool's "internal error", 4.17). S2b built the pool's half,
+`pool.kill_owner(owner)` (S2-Q8), in fork-join and continuous mode:
+- **The commands.** A `kill_owner` command (`control_cmd::kind::kill_owner`, naming the owner,
+  with a `done`) is posted to each group the directory has a process of the owner in, group 0
+  included. A group whose handle is closed already counts as applied: its teardown's kills come
+  next. A group torn down after the post refuses it in its destructor (`done(false)`, never
+  dropped), which counts as applied too (KO-3).
+- **The wait.** Each group the calling thread may pump is drained inline under its token, until its
+  command is applied: group 0 when no other thread holds its pump owner; a group of the fork-join
+  side that no `pump_all` holds, nobody pumps and no thread attached (its membership and token
+  taken in a try, under its handle, so nothing pumps it during the drain and its teardown waits for
+  it); and a group attached to, or held by, this thread, under `with_group`. A failed attached
+  group counts as applied (its processes were killed when it failed). Every other group is waited
+  for, by its `done`, the thread servicing its host queue meanwhile. An inline drain that throws
+  drops the entry that threw (4.6's throw rule) and goes on; the first exception is rethrown once
+  every group has applied its command.
+- **Refused** (`std::logic_error`) where its wait could wait for the pump it is in: on a worker, on
+  an attaching thread that is pumping or running a host entry or callback, on a `pump_all`'s caller
+  (its group-0 frame, bodies and callbacks run there), inside a step of group 0, and inside the
+  pump of a group it would drain.
+- It has no in-tree caller until Stage 3 (S2.md section 0, row 29). Then Ariadne calls it before
+  freeing the action contexts that intrinsics point at (`ictx.document`, `ictx.channels`, which
+  `Runtime::Impl::make_action_context` points at the Runtime's document scope and channel policy),
+  when spawn groups hold the document's children: without the acknowledgement, a child in another
+  group could still run against a freed context. Until then a document's processes all run in its
+  own group or in group 0, and its own group is simply destroyed (section 4.2), after the Runtime's
+  own kills and reaps (4.17, "Teardown of an Ariadne Runtime").
 
 ### 4.6 Messaging between groups
 
 **Inside a group:** unchanged. Delivery is immediate, broadcast reaches every waiter with one
-shared envelope, and the pending FIFO keeps its cap of 1024 (`async_scheduler.h:105`).
+shared envelope, and the pending FIFO keeps its cap of 1024
+(`async_scheduler::max_pending_messages`); S2b counts the messages a full FIFO drops
+(`pending_dropped`, 4.17). The one change inside a group is S2b's ordered ingress (below), which
+every async scheduler has.
 
-**Stage 1: no router** (built in Stage 1b). A document gets a group of its own only if it uses no
-app-global channel (S1-Q6; the rules are in 4.12):
-- Only a `channels:` block enforced in strict lint mode proves that, so it needs one, with no
-  `global: true` entry, and no program of it may name a `/` channel in a literal. A channel key it
-  computes at run time is checked by the channel policy (`Runtime::set_channel_policy`'s
-  `enforce`), which refuses an undeclared one, a `/` key included.
-- Its channels then all resolve under its prefix (`resolve_channel_key`), as its state keys do.
-- A `#` key is never scoped, so oidc's `"oidc#NAME"`, posted to group 0, would never reach the
-  document's group: a document that uses oidc stays in group 0.
+**Stage 1: no router** (built in Stage 1b; S2b lifted its channel rules, S2-Q16). A document got a
+group of its own only if it used no app-global channel (S1-Q6): a `channels:` block enforced in
+strict lint mode, with no `global: true` entry, and no program naming a `/` channel in a literal.
+Since S2b a channel outside the document's prefix is homed at group 0, or at the group whose prefix
+covers it, and routed (below), so those three rules are gone; the rest of S1-Q6's list stays (4.12).
+What Stage 1 built and S2b keeps:
+- The document's channels resolve under its prefix (`resolve_channel_key`), as its state keys do,
+  and its group is the home of the keys under that prefix (its `channel_prefixes`).
+- A `#` key is never scoped and never routed, so oidc's `"oidc#NAME"`, posted to group 0, would
+  never reach the document's group: a document that uses oidc stays in group 0.
 - The host posts it receives go to its group: the Runtime's tick, key, pointer and signal posts
   (`post_tick`, `deliver_input`, `post_signal`) go to the scheduler its programs run on, and its
   providers post to the calling program's group: async verbs' done channels, streams' events and
-  net completions (4.9).
+  net completions (4.9). A host post to group 0 on one of its channels is routed there too (S2b,
+  "Host posts" below), one hop more.
 
-**Stage 2: channel homes.**
-- **Each resolved channel key has one home group.** The home is the group that registered the
-  longest prefix covering the key.
-  - Groups register prefixes when they are made: a document group its document prefix, a spawn
-    group nothing.
-  - A key with no registered prefix (an app-global or `/`-escaped key, or a raw key in an
-    unchrooted context) is homed at group 0. Group 0 is the app scheduler, or the `Exec` that owns
-    the pool.
-  - `#` keys (runtime-internal: tick, key, pointer and future channels) are always local to the
-    group that resolves them.
-- **The home owns the channel's waiters and pending FIFO.** Each group caches key-to-home lookups,
-  invalidated by a directory epoch. When the pool has one group the router is never consulted.
+**Stage 2: channel homes** (built in S2b; `inc/cvc/state/state_exec/exec_router.h`, whose header
+comment holds the rules, `src/cvc/state/state_exec/exec_router.cpp`, and the async scheduler's
+messaging; S2-Q10 as S2b.0a amended it from the router model, 9.2). The app has one router,
+`app::exec_router()`, made with group 0's state beside the pid source and kept until the app goes.
+Each group is named by a `group_ref`, a handle any thread may copy and post through: its group's
+teardown closes it before the scheduler goes, and a post through a closed handle is refused,
+never touching the scheduler (a post holds the handle's lock while it pushes, and the close waits
+for it).
+- **Homes.** A resolved channel key's home is the group that registered the longest prefix covering
+  it (the key itself, or the prefix followed by `.`), else group 0. Group 0, the app scheduler,
+  registers `""` when `app::exec_scheduler()` builds it; a key homed at an unbuilt group 0 builds
+  it. Groups register at construction, from `exec_group::options::channel_prefixes`: an isolated
+  Ariadne document's group its document prefix, a pooled pycvc `Exec` its chroot `<prefix>.<i>`
+  (S2.md section 0, row 23); a group's teardown unregisters them. Of two equal prefixes the first
+  registered is the home. A `#` key (runtime-internal: tick, key, pointer and future channels) is
+  never routed: it stays in the group that resolves it. A hand-built future dict on a routed key
+  follows its key; the futures code builds always contain `#`. Registering a prefix moves no waiter
+  or message already parked on a key under it (a gap below).
+- **Islands.** A group that registered no prefix (a Stage 1 host's own group;
+  `exec_router::has_prefix` false) keeps every key no other group's prefix covers in its own
+  scheduler, router on or off, as before: only a key under another group's prefix is routed from
+  it, so a plain group's own messaging never changes home as the router turns on and off, and
+  asking about one never builds group 0 (`exec_router::prefix_home_of`). Two plain groups exchange
+  messages only on keys a group with a prefix homes: give one a prefix.
+- **When the router is on** (`exec_router::active()`, two atomic loads): while a group other than
+  group 0 has a registered prefix, or a remote-waiter record (below) exists at some home. Group 0's
+  `""` alone never turns it on. Off, no scheduler consults it (RT-1): messaging is the one-scheduler
+  path, and `consulted()`, the count of lookups, does not move. So a host with one group, or with
+  groups and no prefix, never routes.
+- **The cache.** Each scheduler caches its lookups of homes, on its own thread: at most 4096 keys
+  (cleared when full, since computed keys are unbounded), dropped whenever the router's epoch moves
+  (at every registration and unregistration). The router's lookup itself is uncached.
+- **The ordered ingress** (S2b.1; every async scheduler, router or not, 5). `post_message`'s
+  messages, `post_control`'s commands and router entries share one queue, applied in post order.
+  In a drain the lock port's posts come before it and the settled async calls after it, so
+  messages still come before completions, and commands moved from after the completions to their
+  post place (before S2b each kind was its own FIFO, all messages applied before all commands).
+  The drain's own deliveries take the local path, so routing never recurses.
+- **The throw rule** (S0.7, S2-Q10). A drain that throws puts back what it had not applied, ahead
+  of later posts. The entry that threw is not put back (it may have half happened) and is counted
+  (`throw_dropped`): a command gets `done(false)` (one whose call had returned, a kill that killed
+  before it threw, has had its `done` with that result), and a `deliver` that threw before it
+  patched its frame is handled as a stale one (a `requeue` to its home, or dropped when
+  `requeue_if_stale` is false), followed by a `subscribe` for its wait with the same `seq`, to the
+  same home: the process still waits, and its record there was used.
 
-**`msg-send` in group S to a key homed at H.** The state-tree half (`sendMessage`) is unchanged,
-on pinned lookups. The scheduler half:
-1. **H == S:** today's path. Every current waiter is delivered, local or remote. A remote waiter
-   gets a `deliver{pid, seq, envelope}` post to its group, with a fresh envelope per receiving
-   group. With no waiter, the message joins the pending FIFO.
-2. **H != S:** S posts `send{key, envelope}` to H's ingress, and H performs step 1 when it drains,
-   which is at its next step if it is running.
+**The protocol** (td's five entries, plus `taken` and `adopt`: `detail::route_entry`). Where it
+branches: the async scheduler's overrides of `deliver_to_receivers`, `receive_message` and
+`receive_message_until`, `pop_pending_message` and `pending_message_count`, each of which first
+asks whether the key is homed elsewhere (never for a `#` key, never with the router off).
+1. **`msg-send` in group S on a key homed at H != S** posts `send{key, envelope}` to H. H applies it
+   as a local `msg-send`: each current waiter gets it, a local one at once, a remote one by a
+   `deliver` to its group, with one envelope copy per receiving group (its lists and dicts copied,
+   keeping their sharing and cycles, atoms shared); with no waiter it joins H's pending FIFO, under
+   its cap. The state-tree half (`sendMessage`) is unchanged, on pinned lookups. With H == S it is
+   the one-scheduler path, which also delivers to H's remote waiters.
+2. **`msg-recv`** (or `await` on a channel) **in group R on a key homed at H != R** parks the
+   process as before with a new `recv_seq` (one count per scheduler, moved at every park, so the
+   lowest is the earliest wait), and posts `subscribe{key, R, pid, seq, deadline}` to H. H answers
+   from its pending FIFO's front with a `deliver`, or records a remote waiter; a record past its
+   deadline is skipped.
+3. **R applies a `deliver{pid, seq, envelope}`** by pid and seq (`async_scheduler::deliver_to`): if
+   the process still waits on that key with that seq, its frame is patched as a local delivery
+   patches it.
+4. **The re-send rule** (A's graft). A stale `deliver` (the process timed out, was killed or reaped,
+   or waits again with a newer seq) goes back to H as `requeue{key, envelope}`. H gives a requeued
+   message to the next waiter (the earliest local waiter, else the earliest record not past its
+   deadline), else puts it at the front of its pending FIFO, past the cap. A `deliver` that the
+   receiving group's closed handle refuses is stale at once: H applies it as that requeue.
+5. **On a timeout, a kill or a reap** of a remote wait, R posts `unsubscribe{key, pid, seq}` to H,
+   which drops its record if unused; a used one has a `deliver` in flight, which step 4 returns.
+   A process that parks again ends its old wait the same way.
+6. **`msg-pending`** on a key homed elsewhere gives 0 and `pop_pending_message` nothing: the FIFO is
+   at the home, and a receive subscribes there. Reading the home's published count (MS-11) is S2c's.
 
-**`msg-recv` (or `await` on a channel) in group R on a key homed at H != R:**
-1. R parks the process as today, with a fresh `seq`. It posts `subscribe{key, R, pid, seq,
-   deadline}` to H.
-2. H pops its pending FIFO and replies with `deliver`, or records a remote waiter.
-3. When R applies `deliver{pid, seq, envelope}`, it patches the process's frame as today, if the
-   process still waits with that `seq`.
-4. **The re-send rule** (A's graft). If the process no longer waits with that `seq` (it timed out,
-   was killed or was reaped), R posts `requeue{key, envelope}` to H. H delivers it to another waiter
-   or puts it at the front of the pending FIFO. No message is lost.
-5. **On a timeout or kill,** R posts `unsubscribe{key, pid, seq}` to H. If a delivery is already
-   in flight, step 4 returns it.
+**Broadcast tracking.** A send that a local waiter at H took sends its remote copies with
+`requeue_if_stale` false: a stale one is dropped (`stale_dropped`). One that reached no local waiter
+and one remote waiter is untracked (a stale copy is requeued). One that reached no local waiter and
+k >= 2 remote waiters is tracked at H by an id unique in the app (`exec_router::new_broadcast_id`):
+each copy answers `taken` or `requeue`; when every copy comes back stale H applies the message once
+as a requeue, and a stale copy of one already taken is dropped. A copy a closed receiver refuses
+counts as answered stale at once. A home torn down with copies outstanding forwards its tracker as
+`adopt{key, envelope, id, outstanding, taken}`, which the new home takes over, so the copies' late
+answers find it. A `requeue` or `taken` naming an id its home does not track is applied as
+untracked. So nothing is lost and nothing is delivered twice.
 
-**`msg-pending`** on a remote-homed key reads the home's published count, which is approximate.
+**The cap** (D's graft; `state_exec.groups.ingress_cap`, default 65536, 0 for none, read from the
+tree when a run loop starts after a change, unless `set_ingress_cap` set one). It counts the capped
+entries a group's ingress holds undrained, a drain emptying the count: only `send` entries and a
+host's `post_message`. Past it they are refused: `msg-send` returns `{status: "error", path,
+reason: "ingress full"}` (`deliver_to_receivers` returns -1), `post_message` returns false, and the
+home counts it (`ingress_refused`). Commands, `deliver`, `requeue`, `subscribe`, `unsubscribe`,
+`taken`, `adopt`, uncapped sends (rehomed messages), completions and lock posts never count, so no
+message a home accepted is lost to the cap (4.11). An uncapped send that finds no waiter joins the
+pending FIFO past `max_pending_messages`.
+
+**Teardown and rehoming.** A group's teardown, holding its token after the lock port's close and
+the pool's detach and before the kills, calls `async_scheduler::leave_router()`:
+1. It closes its handle. A post through it is refused from then on, and its poster resolves the
+   home again and posts again, waiting (yielding) while the home is still this group, so what it
+   posts arrives after what the teardown forwards. (A group closed and never unregistered, which
+   only a teardown outside `leave_router` leaves, is passed over after 2^20 yields; a closed group
+   0, during `~app`, at once.)
+2. It sends what it holds to the keys' new homes, resolved without it or any other closed group
+   (`exec_router::new_home_of`), in the order it took them: the pending messages of the keys it
+   homed (uncapped sends, each key's in FIFO order), its remote-waiter records (subscribes with the
+   same seq), its broadcast trackers (`adopt`), then its queued messages and router entries in
+   queue order: a host post of a key it homed and a `send` as uncapped sends, a `deliver` as a
+   stale one (a requeue to its home, or dropped), the rest as they are. The messages of keys it did
+   not home (a `#` key's, an island's own) die with it, counted (`destroy_dropped`). Its commands
+   stay for the destructor, which refuses them (`done(false)`).
+3. Only then it unregisters its prefixes, which ends the posters' wait.
+
+The forward waits on nothing, so the wait is bounded. The kills that follow post unsubscribes for
+its processes' remote waits. An island homes nothing for another group, so its teardown forwards
+none of its own keys' messages, as a Stage 1 group's die with it. When a prefix's home goes, its
+keys come home to group 0 for groups with prefixes and to each island itself. A group that was
+only unregistered (Ariadne's move, when another thread held its token) forwards at its teardown the
+messages of keys another group's prefix covers by then, to that group. `leave_router` may be called
+twice (Ariadne's move, then the teardown): the second finds nothing to send. Group 0's teardown
+(`~app`, after every group) drops what is still posted to it and counts it, refusing its commands.
+With the router off a teardown asks the router nothing.
+
+**Host posts** (S2.md section 0, row 21). `async_scheduler::post_message` on a key homed elsewhere,
+with the router on, forwards the message to the home as a `send` (the home's cap applying); an
+island forwards only a key another group's prefix covers. So a host that posts to
+`app.exec_scheduler()` on an isolated document's channel reaches the document's group, one hop more
+than a post to the program's parking scheduler, and a `#` key never moves. A post to a group whose
+handle closed goes on to the key's new home the same way. `pool.post_message(channel, value)` posts
+to the key's home (group 0's `post_message` while the router is off, and for a `#` key); `channel`
+is resolved already (no chroot is applied), and false means the home refused it (its cap), or the
+pool has no app.
+
+**Group 0 never stranded** (S2.md section 0, row 22). Group 0 may hold router entries with no
+process of its own (an isolated document's send or wait on a `/` key), so its drivers pump it while
+it has anything posted (`has_pending_ingress()`), not only while it has live processes:
+`exec_pump_frame`, Ariadne's drain (`scheduler_to_pump`) and pycvc's `ExecPool.run_all`, which
+drains it before each round. Each takes group 0's token in a try: while another thread holds it,
+group 0 is skipped there, never a throw, and pumped at the next frame or round.
+
+**The router's fuzz points** (S2-Q15). Under `CVC_EXEC_FUZZ` (4.13) each router post yields at the
+seed's draw before it is pushed: the router's, for a host's `pool.post_message` (read when the
+router is made), and each scheduler's for the entries it posts.
 
 **What is kept and what is not across groups:**
 - **Kept:**
-  - FIFO per (sender group, channel), because each ingress is one queue applied in order;
+  - FIFO per (sender group, channel), since a group's posts to one home go through one queue in
+    order and the home applies them in that order, across the home's teardown too (its forward
+    keeps the order, and a refused poster's wait puts its later posts after it); a host thread's
+    posts likewise;
   - a broadcast reaches every process waiting at the home when the send is applied there, local
-    and remote alike;
-  - no loss to an expiry, kill or reap race;
+    and remote alike (a record past its deadline excepted), each receiving group with an envelope
+    of its own;
+  - no loss to an expiry, kill or reap race, nor to a home's teardown, and no duplicate: a message
+    is received once or left pending once. The drops that remain are counted: a full pending FIFO
+    (a fresh send, as inside a group), the messages of keys a torn-down group did not home, and
+    what is posted to group 0 as the app goes;
   - the pending cap, applied at the home.
 - **Not kept:**
   - order between messages from different groups;
-  - the order of a requeued message relative to later sends on the channel (documented);
-  - immediacy: a cross-group message arrives at the home's next drain.
-- **Fork-join mode.** In fork-join mode (Stage 1 hosts that also enable the router) "next drain"
-  means the receiving group's next pump. For Ariadne that is the next frame, as for host posts
-  today.
-
-**Bounded ingress** (D's graft). Cross-group entries into one group's ingress are capped
-(`state_exec.groups.ingress_cap`, default 65536).
-- Past the cap a cross-group `msg-send` returns its existing failure shape, `{status: "error"}`
-  (`intrinsics.cpp:990-992`), with `reason: "ingress full"`.
-- `pool.post_message` returns false.
-- Control posts are never dropped.
+  - the position of a requeued message: a requeued message is handed out after messages its
+    sender sent later (documented; the router model's `gap-requeue-order`);
+  - immediacy: a cross-group message reaches its home at the home's next drain, and a remote
+    waiter at its own group's next drain after that;
+  - islands' exchange once a prefix's home goes: the keys are then each island's own, so islands
+    no longer exchange messages on them, and an island's waits recorded at the dying home are
+    rehomed to group 0 and served there beside its later local ones (documented;
+    `gap-island-rehomed`). Nothing is lost or duplicated, and an island's own messaging works;
+  - a document moving into a group: registering its prefix moves nothing parked, so a message
+    another group sent on one of its keys while the document ran in group 0, and not yet received,
+    stays in group 0's FIFO, and another group's wait recorded at group 0 on one of its keys stays
+    there, unserved by the document's new group (documented; the lead's decision).
+- **Fork-join mode.** In fork-join mode "next drain" means the receiving group's next pump. For
+  Ariadne that is the next frame, as for host posts, and a message between two isolated documents
+  may take a frame per group it passes.
 
 **Locks do not use the router.** A lock is not a channel, so it has no home group, and Q6 does not
 apply to it.
@@ -1724,6 +1925,7 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 | `nav_compute` (the example) | `nav-step` | `any` | its marshal touches nothing, and its kernel runs on the background pool |
 | The backend's verbs (the Runtime's own, `Runtime::Impl::install_host_verbs`) | `clipboard-set` (where the backend has a clipboard), `fullscreen` | `host_proxied` | they call the backend, whose window and clipboard are the host thread's; `has?` sees them in an `any` group too (`AriadneIsolatedDocs.TheBackendsVerbsRunOnTheFramesThread`) |
 | | `file-pick` (where there is a backend), `file-info`, `file-forget` (master's #1190) | bound as they are in every group | `file-info` and `file-forget` lock the app's `PickedFiles`; `file-pick` is async, so it is not proxied: it parks on the program's own host, claims the Runtime's picker hub under its lock where it is called, and opens the picker on the host thread (`exec_pool::run_on_host` for the group the verbs were bound for; inline when it is called there, or in group 0); the answer goes through the host's finisher |
+| | `save-url` (where there is a backend, §5.29) | bound as it is in every group | async, so not proxied: it parks on the program's own host and hands the save to the Runtime's save hub under its lock, from wherever it is called; the drain starts it on the host thread, where the Save dialog is asked (`AriadneIsolatedDocs.SaveUrlAsksForAPathOnTheFramesThread`); the answer goes through the host's finisher |
 | | `notify`, `notify-read`, `notify-clear`, `notify-read-all`, `notify-clear-all`, `notify-status`, `notify-list` (master's #1241) | `host_proxied` | the feed locks, but `cvc::notify` mirrors it into the app's `notify.*` subtree raw on the caller's thread (4.8). What they capture (the program's scope, the source the feed names for it and a copy of the mounts' names) is taken on the host thread when its context is made (`notify_scope`); a spawned child binds from its parent's copy, as `mount_names` is the host thread's |
 | cvcGL media and stream verbs (`media_verbs.cpp`, `stream_verbs.cpp`) | `stream-capture-camera`, `stream-capture-audio`, `stream-play-audio`, `stream-set-muted`, `gl-bind-stream` | `host_only` (one-argument form) | SDL's camera and audio on their owner thread, GL on the render thread |
 | contours, point classes, skeletons and segmentation (`install_contour_intrinsics`, `install_point_class_intrinsics`, `add_skeleton_intrinsics`, master's #1171, `install_segmentation_intrinsics`, master's #1252) | `contours.info`, `point-classes.*`, `skeleton.compute`, `segment.seeded` and the param verbs (`register_param_intrinsics`) | `host_only` (registered without a kind; not yet audited) | they bind into every env, so in an app that installs them an isolated document is placed in a host-affinity group (`host_only_bindings`) |
@@ -1988,9 +2190,15 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
    rules. A group's run equals its solo run, given the same inputs at the same pump boundaries.
    This is the oracle of section 8 (GR-1).
 2. A process's steps never run concurrently, and keep program order.
-3. FIFO per (sender group, channel) across groups.
-4. A broadcast reaches every waiter registered at the channel's home when the send is applied.
-5. No message is lost to an expiry, kill or reap race, inside or across groups.
+3. FIFO per (sender group, channel) across groups, a host thread's posts likewise, across a home's
+   teardown too (built in S2b: MS-7, MS-7b).
+4. A broadcast reaches every waiter registered at the channel's home when the send is applied,
+   local and remote (a record past its deadline excepted), each receiving group with an envelope
+   of its own (MS-4).
+5. No message is lost to an expiry, kill or reap race, inside or across groups, nor to a home's
+   teardown, and none is delivered twice (MS-5, MS-6, MS-12, ST-1, ST-2). The drops left are
+   counted (4.17): a full pending FIFO, the messages of keys a torn-down group did not home (a `#`
+   key's, an island's own), and what is posted to group 0 as the app goes.
 6. An `await` crosses exactly one frame. `wake_awaiting` runs once per group per pump, and a
    multi-document host pumps once per frame (B29).
 7. A quick Ariadne action completes within its drain, and render never runs during a fork-join
@@ -2014,10 +2222,15 @@ The tree is the one mutable structure all groups share. Stage 0 made the DSL's u
 
 **Not kept between different groups:**
 1. Interleaving and relative progress. Deterministic mode reproduces them.
-2. The order of messages from different groups, and the position of a requeued message.
-3. The immediacy of cross-group kill, pause, resume, signal and `set-priority`, and of a lock
-   grant to a waiter in another group. They land at the target's next step boundary (a grant at
-   its group's next drain), and cross-group `ps` can lag one slice.
+2. The order of messages from different groups, and the position of a requeued message (handed out
+   after messages its sender sent later). As built in S2b two more gaps are documented (4.6): once
+   a prefix's home goes, islands no longer exchange messages on its keys; and a document that moves
+   into a group leaves its keys' pending messages, and other groups' waits on them, at group 0.
+3. The immediacy of cross-group kill, pause and resume (S2b), `signal` (a host's `post_control`)
+   and `set-priority` (S2c), and of a lock grant to a waiter in another group. They land at the
+   target's next drain, between its steps. A published row's status and identity are as of its
+   group's last run loop, and its counters may lag 100 ms (S2b), so cross-group `ps` (S2c) can
+   lag one slice.
 4. Strict priority across groups: each group's policy holds inside it. Between groups, Stage 2
    weights a group's pump share by its best runnable priority (4.4), and a lock boost raises a
    holder inside its own group.
@@ -2049,7 +2262,7 @@ class exec_group {
     environment_ptr base;                   // the scope its global env extends; null: the builtins
     std::optional<std::uint64_t> seed;      // math.random's seed; unset: random_device words
     cvc::thread_class thread_class = cvc::thread_class::normal; // L4 and Stage 2; ignored
-    std::vector<std::string> channel_prefixes;                  // Stage 2; ignored
+    std::vector<std::string> channel_prefixes;                  // S2b: the keys it is the home of
     std::function<void(exec_group &)> pump_hook_for_test;       // GR-12
     std::function<void(exec_group &)> teardown_hook_for_test;   // GL-2
   };
@@ -2068,6 +2281,7 @@ class exec_group {
   static exec_group *current(const exec_context *ctx); // the group whose pump runs ctx's work
   bool pumping_here() const;                // whether the calling thread pumps it now
   const options &opts() const;
+  const group_ref &route() const;           // S2b: its handle in the app's router (4.6)
 };
 ```
 
@@ -2075,7 +2289,11 @@ class exec_group {
   policy from `state_exec.policy`, the watch root (`options::watch_root`, else the app's root), the
   host parser and data defaults, the base env (4.2), the app's pid source (4.5), its own registry
   and random stream (4.7, 4.10), and the app's lock manager in the manager's own mode (S1-Q1,
-  4.13). With no app, it has no pid source and no lock manager.
+  4.13). With no app, it has no pid source and no lock manager. Since S2b it also joins the app's
+  routing: it makes its handle (`route()`), gives it to its scheduler with the app's router
+  (`set_router`), and registers its `channel_prefixes` there (4.6); with no app it has none.
+  Its teardown leaves the router (`leave_router`) after the lock port's close and the pool's
+  detach, before the kills (4.6, "Teardown and rehoming").
 - **`execute(value_t)`** copies the AST's lists and dicts, keeping their sharing and cycles, and
   shares its atoms (B12). It copies always, not only when the value is shared, since the caller's
   reference is always there: so two groups, and the host's AST, never share a quoted literal or the
@@ -2129,6 +2347,7 @@ struct pool_stats { std::uint64_t pumps, helper_wakes, skipped, worker_pumps;
 class exec_pool {
  public:
   explicit exec_pool(const pool_options &);
+  exec_pool(const pool_options &, cvc::app *app); // S2b: its routing is the app's
   ~exec_pool();                             // stops the workers after their current pumps
   // Stage 1: fork-join
   // Each returns the groups it failed. Nothing is kept per thread: a group being pumped points at
@@ -2153,11 +2372,11 @@ class exec_pool {
   void with_group(exec_group &, const std::function<void()> &fn); // fn under the group's token
   std::vector<exec_group *> take_failed();  // this thread's attached groups that failed, detached
   bool attached(const exec_group &) const;  // any thread; a snapshot
-  // Stage 2b: routing, control
-  bool post_message(const std::string &channel, value_t); // to the home group; false if full
-  bool post_control(int pid, control_cmd);
-  void kill_owner(const std::string &owner); // acknowledged by every group
-  std::optional<process_info> info(int pid); // the published snapshot
+  // Stage 2b (built): routing, control (4.5, 4.6)
+  bool post_message(const std::string &channel, value_t value); // to its home; false: refused
+  bool post_control(int pid, control_cmd cmd); // to its group; false: no such pid, a closed group
+  void kill_owner(const std::string &owner); // returns once every group applied it
+  std::optional<published_process> info(int pid); // its group's last published row
   // Stage 3
   int spawn_isolated(const std::string &script, execute_options, value_t args);
   bool move(int pid, exec_group &to);       // false when the process is not movable
@@ -2175,6 +2394,26 @@ host-affinity group, logging it once per pool (a debug build asserts when a pool
 given one), so a pool built directly, or one app's pool pumping another app's groups, never steps
 a single manager's homes on two threads (S1-Q1); attached, it is pumped by its attaching thread
 only.
+
+**Messaging and control across groups** (built in S2b; 4.5, 4.6; S2-Q8..S2-Q10). `app::exec_pool()`
+builds its pool with the app (`exec_pool(opts, app)`), and the four calls below use that app's
+router and directory; a pool built with no app finds nothing (false, `nullopt`, no kills). Any
+thread, unless said:
+- `post_message(channel, value)`: `value` on `channel`, a resolved key (no chroot is applied), to
+  the key's home, as a host's `async_scheduler::post_message` (it counts against the home's
+  ingress cap; group 0's `post_message` while the router is off, and for a `#` key). False when the
+  home refused it (its cap). The value is moved in, as any host post's (invariant G).
+- `post_control(pid, cmd)`: `cmd` (a host's `kill`, `pause`, `resume`, `signal` or
+  `set_priority`, unchecked) to the group the directory has `pid` in. True when that group took
+  it, its `done` then called once, on the thread that applies it; false, `done` never called, for a
+  pid not in the directory or a group being torn down. Never blocks.
+- `kill_owner(owner)`: every process of `owner` in every group of the app, group 0 included,
+  killed, returning once each group has applied it: the groups this thread may pump drained inline,
+  the rest waited for while this thread services its host queue (4.5). Not from inside a pump, a
+  host body or a callback of the pool (`std::logic_error`).
+- `info(pid)`: the row its group last published (`published_process`, S2-Q9; td said
+  `std::optional<process_info>`, which carries a `value_t`), `nullopt` for a pid not in the
+  directory or not published since its creation (its group publishes at its next run loop's end).
 
 **Continuous mode** (S2a; 4.4, 4.9; S2-Q4, S2-Q5). A C++ host attaches its groups and drives them
 from its own thread:
@@ -2238,10 +2477,14 @@ from its own thread:
   deadline from its entry and Ariadne's budget (200000 steps, 0.1 s), over every registered frame
   group, with group 0, `exec_scheduler()`, pumped first on the calling thread as a host-affinity
   group (`host_first`: its token taken, `drain_ingress`, `wake_awaiting`, `sync_run_steps`) once it
-  is built and holds a live process; a frame group skipped last frame starts before it when the
-  caller pumps it (4.4). In deterministic mode (the pool's, or with no pool the tree's and
-  `CVC_EXEC_DETERMINISTIC`) group 0 is pumped with steps only and its stream seeded from "group0".
-  It builds no pool when no frame group is registered, and never builds group 0. Then
+  is built and holds a live process or, since S2b, has anything posted (`has_pending_ingress()`: a
+  router entry homed there, a command, a message); a frame group skipped last frame starts before
+  it when the caller pumps it (4.4). Group 0's token is taken in a try, for the look and again for
+  the pump: while another thread holds it (pycvc's `ExecPool.run_all` draining it, `pool.kill_owner`
+  draining it inline) group 0 is skipped this frame, never a throw, and pumped next frame. In
+  deterministic mode (the pool's, or with no pool the tree's and `CVC_EXEC_DETERMINISTIC`) group 0
+  is pumped with steps only and its stream seeded from "group0". It builds no pool when no frame
+  group is registered, and never builds group 0. Then
   `exec_pump_generation()` advances, which Stage 1b's `drain_end` reads.
   Host thread, outside a pump. `cvc::pump_exec_frame(sched, lanes)` (`async_lane.h`) is another
   driver of one scheduler, `exec_scheduler()` included, which pumps no group and does not advance
@@ -2250,6 +2493,12 @@ from its own thread:
   `exec_pump_frame()` pumps the group until the handle is reset or destroyed, which the host does
   before the group goes, on the host thread, outside a pump.
 - `exec_pid_source()` is the pid source group 0 and every `exec_group` of the app share (4.5).
+- (S2b) `exec_router()` is the app's router and pid directory (`exec_router.h`; 4.5, 4.6), made
+  with group 0's state, beside the pid source, at its first call, and kept until the app goes,
+  after every scheduler that uses it. `exec_scheduler()` registers group 0 with it (`""`), and each
+  `exec_group` built with the app its handle and channel prefixes. `exec_scheduler_probe()` returns
+  group 0 if it is built, and never builds it: for a host that drains group 0 only once it exists,
+  as pycvc's `ExecPool.run_all` does.
 - (S2a) The kernel pools (4.9): `trySubmitKernel(task, priority, io)`, where the exec async host
   sends a kernel, split once the app's pool has workers; `kernelPoolHere()` and
   `backgroundCpuPoolSize()`. Group 0 logs its long steps through the app (4.9).
@@ -2266,7 +2515,14 @@ from its own thread:
   `last_run_report()`, what the last run loop left, computed only while a notifier is installed;
   and the long-step monitor's `set_long_step_sink`, `set_long_step_default` and `long_steps()`
   (4.9);
-- (S2b) an ingress entry kind for control and router messages;
+- (S2b, built) the ordered ingress, one queue for messages, commands and router entries (4.6);
+  `set_router`, `router()` and `route_self()`, joining the app's routing; `leave_router()`, the
+  teardown's step; `post_route(entry)` and `deliver_to(pid, seq, key, msg)`, the protocol's ends;
+  `set_ingress_cap` and `ingress_cap()`; `ingress_counters()` (4.17); `has_pending_ingress()`, for
+  group 0's drivers; `published()`, `published_info(pid)` and `published_rows()` (4.5);
+  `post_message` returning `bool`; and `control_as`, the owner rule (4.5), which `scheduler_base`
+  declares with the local half as its default, and the async scheduler extends with the
+  directory's;
 - (Stage 3) `adopt(process_ptr)`: like `restore`, keeping the pid and the process's state, its lock
   holds included;
 - a lock port for `wake` and `relevel` posts, with its own mutex, queue and pending flag and
@@ -2286,7 +2542,9 @@ stop flags since Stage 0. The same queue carries `set_priority`. As built, on bo
   nothing.
 - **`post_control`'s kinds** are `kill` (reason `killed_by_user`), `pause`, `resume`, `signal`
   (`"SIGKILL"` kills) and `set_priority`, each the direct call's host path, unchecked, and
-  `query`. An unknown pid is found, and refused, on the scheduler's thread.
+  `query`; S2b adds `kill_owner` (`async_scheduler::kill_owner` of the command's `owner`, its
+  `done` given true; the pid is not read), which `pool.kill_owner` posts (4.5). An unknown pid is
+  found, and refused, on the scheduler's thread.
 - **`done(bool)`**, optional, is called once on the scheduler's thread with what the direct call
   returned, or with false from the scheduler's destructor for a command never applied. A query
   has none. It must not throw, block or take the GIL. It is moved out of the command before it is
@@ -2296,12 +2554,13 @@ stop flags since Stage 0. The same queue carries `set_priority`. As built, on bo
 - **Order.** First in, first out, applied at the next step boundary: the sync scheduler at the
   top of `step()` and of each `run()` iteration, before its `has_runnable()` test (so a resume of
   the only process, or a kill of the last, takes effect in a run with nothing else to do); the
-  async scheduler in its next drain, after the drain's messages and completions, whatever the
-  order they were all posted in (Stage 2 unifies them if it needs a total order). Commands are
+  async scheduler in its next drain, in the order they were posted with its messages and router
+  entries, before the drain's settled calls (S2b's ordered ingress, 4.6; until S2b, after the
+  drain's messages and completions, whatever the order they were all posted in). Commands are
   applied one at a time: one that throws (a kill releases locks and cancels calls, which can
-  write the tree) gets `done(false)`, and the rest go back to the front of the queue, in order,
-  before the exception propagates. The async drain puts back its unapplied messages and
-  completions the same way.
+  write the tree) gets `done(false)` (a kill that killed before it threw, `done(true)`), and the
+  rest go back to the front of the queue, in order, before the exception propagates. The async
+  drain puts back its unapplied messages, router entries and completions the same way.
 - **Wakes.** A post ends the sync scheduler's idle `run()` wait (it notifies the idle wakeup, now
   made with the scheduler), as a post wakes the async scheduler's `wait_for_work()`.
   `has_pending_control()` is true from a post until the batch that took the command has been
@@ -2339,7 +2598,9 @@ and 9.1).
   - `drain()`'s pump is what it was, plus the document's group: group 0 a bounded slice
     (`drain_ingress`; `wake_awaiting` once per app frame however many Runtimes drain, through
     `starts_frame()` and the app's pump clock, which stay for this path; `sync_run(200000, 0.1)`)
-    when this Runtime used group 0 or any process lives on it, never building it otherwise; then
+    when this Runtime used group 0, any process lives on it or, since S2b, anything is posted to it
+    (`scheduler_to_pump`), never building it otherwise, under its token, taken in a try (another
+    thread holding it, pycvc's `ExecPool.run_all` say, skips group 0 for this drain); then
     the document's group, if it has one, through `app.exec_pool().pump_all` with the same budget
     and a 0.1 s deadline. So a host with one Runtime that opts in keeps calling `drain()`.
 - **Hosts with several Runtimes** call `drain_begin()` on each, then `app.exec_pump_frame()` once,
@@ -2382,22 +2643,26 @@ and 9.1).
 - **Isolated documents** (`ariadne.exec.isolate_documents`, opt-in, S1-Q6). The setting is read
   from the app's tree (on for `1` or `true`, in any case) each time the placement is decided. With
   it on, the Runtime gives its document an `exec_group` of its own (name and owner the Runtime's
-  owner tag, built on the app) and registers it as a frame group, when the document passes every
-  rule, checked in this order (`Runtime::Impl::isolation_verdict`):
+  owner tag, built on the app, with its document prefix as its channel prefix since S2b) and
+  registers it as a frame group, when the document passes every rule, checked in this order
+  (`Runtime::Impl::isolation_verdict`; S1-Q6's list as S2-Q16 leaves it):
   1. a non-empty prefix;
-  2. an enforced channel policy: a `channels:` block in strict lint mode (the default for a
-     document with one; `AppRuntime::load` passes the mode to `set_channel_policy`);
-  3. no `global: true` channel;
-  4. no static `/` reference: no program of the document names a `/` channel as the string-literal
-     first argument of a `msg-send`, `msg-recv` or `msg-pending`. The programs read are its lanes,
-     its key bindings and functions, every widget's `on:`, `on_click`, `on_hover`, `on_drag`,
-     `on_drag_start`, `on_drag_end` and `on_top`, each mount's `init:`, `on_tick:` and functions,
-     and the `init:` and `tests:` that `AppRuntime::load` runs elsewhere and hands over
-     (`set_document_programs`): more lanes than the loader's channel lint reads;
-  5. no oidc: no literal `"oidc#..."` channel and no free `oidc-*` call (`free_heads`) in those
-     programs, since oidc posts its flow's end to group 0;
-  6. no writable `link:` hole whose target, resolved against its mount's parent scope, leaves the
+  2. no oidc: no literal `"oidc#..."` channel (read as the string-literal first argument of a
+     `msg-send`, `msg-recv` or `msg-pending`) and no free `oidc-*` call (`free_heads`) in its
+     programs, since oidc posts its flow's end to group 0 on a `#` key, which is never routed. The
+     programs read are its lanes, its key bindings and functions, every widget's `on:`,
+     `on_click`, `on_hover`, `on_drag`, `on_drag_start`, `on_drag_end` and `on_top`, each mount's
+     `init:`, `on_tick:` and functions, and the `init:` and `tests:` that `AppRuntime::load` runs
+     elsewhere and hands over (`set_document_programs`): more lanes than the loader's channel lint
+     reads;
+  3. no writable `link:` hole whose target, resolved against its mount's parent scope, leaves the
      prefix (a read-only hole, or one inside, is fine).
+
+  Stage 1b's rules 2-4, an enforced channel policy (a `channels:` block in strict lint mode), no
+  `global: true` channel and no static `/` reference, went in S2b (S2-Q16): a channel outside the
+  prefix is homed at group 0 or at the document whose prefix covers it, and routed (4.6). So a
+  document with no `channels:` block, a `global: true` channel or a `/` reference now gets a group.
+  The channel policy still enforces what it declares at run time.
 
   A program that does not parse is skipped there (its error shows when it runs). A document that
   fails a rule stays in group 0, and the first rule it failed is its reason:
@@ -2469,7 +2734,10 @@ and 9.1).
   application's scope are killed on `current_sched()`, its group's), and the teardown's kills. Its settings reads stay on the host thread. Its
   providers are installed by kind (4.9), so a `host_proxied` verb on a worker completes a frame
   later (4.11 item 7). Its programs see only the group: `ps`, `inspect` and `kill` reach only the
-  document's own processes (5 item 11), and pids stay unique app-wide.
+  document's own processes (5 item 11), and pids stay unique app-wide. Since S2b a document's
+  programs in group 0 see only its own processes too (the owner rule, 4.5: every process a Runtime
+  starts carries its owner tag, the documents it loads included), and a host's post to group 0 on
+  an isolated document's channel is routed to its group (4.6, "Host posts").
 - **When it is decided** (`ensure_placement`). At load (`AppRuntime::load` asks, through
   `isolated_group()`, once the document's programs, channel policy and tree, and its host's
   providers and declarations, are set), and again, before the next program starts, the next frame
@@ -2515,7 +2783,12 @@ and 9.1).
      that throws too, its resources are dropped, `doc_scope_.clear()`): none is left naming the old
      place;
   4. the old group is retired, not destroyed: unregistered and unpumped, it keeps the contexts
-     taken from it, and a later `drain_begin` destroys it once its host has no kernel in flight
+     taken from it. Since S2b it leaves the router at once (`retire_from_router`: its
+     `leave_router`, under its token, after the new group registered the prefix), so the new group
+     is the home of the document's keys at once and what the old one held for the router goes
+     there; if another thread holds its token (a host attached the group), only its prefixes are
+     unregistered then, and it forwards at its teardown. A later `drain_begin` destroys it once
+     its host has no kernel in flight
      (`host().in_flight()` 0), so a move never waits for the old group's calls
      (`AMoveDoesNotWaitForTheOldGroupsCalls`). Only its own kernels' completions can post to it
      then: its processes are gone, no stream names it, the Runtime posts to the new place, and its
@@ -2655,6 +2928,20 @@ and 9.1).
     the GIL released, and destroys the pooled `Exec`s; from inside its own batch it raises.
   - Without threads (the Emscripten pycvc) or at `threads=0`, every group is pumped on the calling
     thread, in creation order.
+  - (S2b.7, S2-Q7) Pooled `Exec` i's group has the owner `pycvc:<prefix>.<i>`, which its programs
+    and their children run as (run_all submits with it), and its chroot `<prefix>.<i>` as its
+    channel prefix, so its programs' own channels stay in its group, a key under another pooled
+    `Exec`'s chroot goes to that group, and any other key (`"/jobs"`) is homed at group 0. One
+    pooled `Exec` controls none of another's processes (owners differ), and `Exec.lock_query`'s
+    viewer is the tag. A plain `Exec` keeps `""`. Group 0, which no pooled pump drains, is drained
+    by `run_all` before each round on its thread, under group 0's pump owner taken in a try (held
+    elsewhere, the round leaves it to that thread), once it exists (`app::exec_scheduler_probe`),
+    and never from inside one of group 0's own steps; its processes are not stepped there.
+    `ExecPool.info(pid)` returns `pool.info(pid)`'s row as a dict.
+  - An Ariadne host (`AriApp`) and `run_all` on one app run on one thread: both drive group 0,
+    and the Runtime submits to and kills in group 0 between its pumps without its token, which a
+    `run_all` drain on another thread would race (S1-Q4: one driver of a scheduler at a time).
+    Nothing checks it (the lead's decision in S2b).
 - **`ExecPool` or several `Exec`s.** Several `Exec`s, each `run()` on a Python thread of its own,
   already run in parallel (Stage 0): each is its own group 0, with its own pid counter and an
   unchrooted context. `ExecPool` is for a batch of independent programs: one call, the GIL
@@ -2979,8 +3266,11 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | An attaching thread that exits with groups attached | Not checked: nothing is kept per thread. `~exec_pool` asserts that nothing is attached; the host detaches, or destroys, what it attached first (4.12) |
 | A host posts one compound value to two groups (invariant G broken) | A data race in a release build; TSan in CI. The host API documents a posted value as moved in (4.12). Stage 1 has no `CVC_EXEC_VERIFY` tagging, and `exec_group::execute(value_t)` copies the AST's lists and dicts itself |
 | A subscriber assumed the main thread but its document was declared `any` | A data race in the host's code. Mitigated by the audit, the host's thread-affine declarations, `host_only` as the default, and the debug home-thread asserts of cvcGL's render-thread subscribers (4.8) |
-| Cross-group ingress full | `msg-send` returns `{status: "error", reason: "ingress full"}`; `post_message` returns false; counted per group |
-| A remote waiter vanishes with a delivery in flight | Requeued at the home (4.6); counted |
+| Cross-group ingress full (S2b) | The home refuses the `send` or host post past its cap: `msg-send` returns `{status: "error", path, reason: "ingress full"}`, `post_message` (the scheduler's or the pool's) returns false, and the home counts it (`ingress_refused`). Nothing the cap does not count is refused (4.6, "The cap") |
+| A remote waiter vanishes with a delivery in flight (S2b) | The stale `deliver` goes back to the home as a `requeue` (`requeued` there), to the next waiter or the front of the FIFO; a copy of a message a local waiter took, or of a tracked broadcast already taken, is dropped instead (`stale_dropped`). A receiving group torn down refuses it at its closed handle: stale at once (4.6) |
+| A drain throws on a router entry or message (S2b) | The throw rule (4.6): what it had not applied goes back, ahead of later posts; the entry that threw is counted (`throw_dropped`), a command refused (`control_refused`, `done(false)`), and a `deliver` that had not patched its frame sent back as a stale one, with a `subscribe` for its wait |
+| A home torn down holding messages, waits or broadcasts (S2b) | Forwarded to the keys' new homes before its prefixes go, posters waiting (4.6, "Teardown and rehoming"); the messages of keys it did not home die with it, counted (`destroy_dropped`); its commands are refused (`control_refused`) |
+| A group torn down while `pool.kill_owner` waits for it (S2b) | Its destructor refuses the command (`done(false)`), which ends the wait for that group; its own kills have killed the processes (KO-3) |
 | A lock holder killed or failed, alone or with its group | Its locks are released when the kill is applied, before `release_if_idle`; an X holder whose section had started is marked abandoned for the next exclusive holder ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) 5.6) |
 | A lock waiter killed while its grant's wake is in flight | The grant is already a hold of the waiter in the lock manager, so the kill releases it and the next waiter is granted; the late wake is ignored. A waiter whose timeout fires after the grant takes the grant |
 | A lock deadlock across groups | `DeadlockError` in the request that closes the cycle, when it blocks: the check runs under the lock manager's mutex over every group's holds and waiters, so it is exact |
@@ -2989,7 +3279,29 @@ the judges' corrections. It is recorded here so the earlier stages do not close 
 | Under `CVC_EXEC_FORCE_MOVE`, no worker reaches a call's groups before its deadline | The caller, which may not take a group it pumped last, waits for the workers no longer than the deadline, then skips those groups itself, and a worker that skips them tells it (4.4): the frame ends on time, and the skipped groups go first next frame |
 | Teardown of an Ariadne Runtime (`~Runtime`; built in Stage 1b, S1.10, S1-Q8) | On the host thread, outside a pump: while a `pump_all` of the app's pool holds the document's group it is refused in every build, from any thread, printed and logged and then aborted before anything is touched (`refuse_if_held`, 4.12); a group-0 document's, or one whose group no pump holds, goes ahead. In this order, each step catching and logging what it throws: (1) the document's resources close (`doc_scope_.clear()`: a stream marks its descriptor closed and posts its last seq and "closed" to the scheduler it names); (2) on the scheduler its processes run on (its group's, else group 0's if it ever used it), `kill_owner` of the Runtime's owner tag, then a reap of every process the Runtime knows of, its actions' own processes included: the actions and the children they forked, the spawned children, the residents and the mount ticks (S1-Q8: a killed record left in group 0 was a leak whose context was already gone; HZ-8); (3) its frame registration, then its group, whose own teardown (4.2) kills, shuts its host down and reaps whatever is left, and then any group a move retired, each waiting for its kernels (a cancelled http request ends its transfer within about a second, 4.9). The group goes first of the Runtime's members, before the channel policy and the document scope its processes' contexts point at. Why this order: an open stream holds the group's scheduler and posts to it, from its producer thread too, so the streams close while the group lives; a started net call holds the group's host's finisher, and the host's shutdown, after the kills, cancels it before the scheduler goes (4.9). A resident a reload or a mount reconcile stops is killed and reaped then (`stop_resident`), so nothing of the Runtime's owner is left in group 0 (`AriadneHazards.AResidentAReloadStopsIsReaped`) |
 | A document moved (its placement changed) while its programs run | Its processes are killed and reaped where they ran, a `run_program` caller whose program had not ended is told "did not complete: the document moved to another group", its residents start again in the new place, the streams it owns are re-pointed there (closed if that fails), and the old group is retired: unpumped at once, destroyed at a later `drain_begin` once its kernels have ended, so the move does not wait for them (4.12) |
-| Teardown of the app | The groups' owners destroy them first (an attached group's teardown detaches it); the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its kernel pools, which ran the groups' kernels, close (`background_cpu` with the background pool, its queued tasks destroyed unrun) |
+| Teardown of the app | The groups' owners destroy them first (an attached group's teardown detaches it); the pool owns none, and `~app` asserts in debug builds that none is left. Then `~app` destroys the pool, whose workers stop after their current pumps, before the app's async host shuts down and its kernel pools, which ran the groups' kernels, close (`background_cpu` with the background pool, its queued tasks destroyed unrun). Group 0's scheduler closes its handle first (S2b), then drops what is still posted to it, counted, and refuses its commands; the router and directory go after it, with group 0's state |
+
+**The ingress counters** (built in S2b; S2-Q10, S2-Q17; `async_scheduler::ingress_counters()`, any
+thread, since the scheduler was made). Each is counted by the group where it happens:
+- `ingress_refused`: capped entries (a `send` that is not uncapped, a host `post_message`) refused
+  at the cap, at the home.
+- `requeued`: messages a requeue gave back to this home: a stale copy's `requeue` applied, a tracked
+  broadcast applied once when every copy came back stale, and a `deliver` this home posted that a
+  closed receiver refused.
+- `stale_dropped`: stale copies dropped because a waiter already had the message: at a receiver, a
+  `deliver` sent with `requeue_if_stale` false; at a home, a tracked broadcast's stale copy once
+  another was taken, and a copy a closed receiver refused when a local waiter took the message.
+- `pending_dropped`: messages a full pending FIFO dropped (`max_pending_messages`), for a local
+  `msg-send`, a host post and a routed `send` alike; requeued and uncapped messages go past the cap.
+- `control_refused`: commands refused: never applied (the destructor's), or one that threw before
+  its call returned.
+- `throw_dropped`: entries and settled calls a drain's throw left unapplied, not put back (the
+  throw rule), and those left when putting back failed for want of memory.
+- `destroy_dropped`: messages and router entries no home took: the destructor's plain messages, a
+  teardown's messages of keys it did not home, and a forward, bounce or stale copy whose key had no
+  home left (group 0 closed, as the app goes).
+
+The bench's `mt.cross_group_msg` records the groups' sums (`docs/STATE_EXEC_BENCH.md`).
 
 ### 4.18 Every blocker, resolved
 
@@ -3221,6 +3533,9 @@ Each item says when it applies. "Always" items land whether or not a host enable
     - Its pump budget is 200000 steps and 0.1 s per frame, of its own.
     - Its `ps`, `kill` and `inspect` see only its own group's processes, not other documents'
       (AR-3).
+    - Since S2b (S2-Q16) a document with no `channels:` block, a `global: true` channel or a
+      static `/` reference is isolated too: its channels outside its prefix are homed at group 0
+      or another document's group and routed (item 12), a frame per group a message passes.
     - Its natives and subscribers may run on a worker thread, if its group is `any`.
     - In an `any` group a worker pumps, an action that calls a `host_proxied` verb completes a
       frame later (4.11 item 7), and `has?` answers from the frame's snapshot (4.9).
@@ -3233,15 +3548,22 @@ Each item says when it applies. "Always" items land whether or not a host enable
       load, a `host_only` one is a NameError in its `any` group (logged once), where in group 0 it
       binds at once.
     - Pids stay unique app-wide.
-12. **Opt-in (Stage 2's S2b router; not built): cross-group messages.**
-    - A message to a channel homed in another group arrives at that group's next drain.
+12. **Opt-in (Stage 2's S2b router; built in S2b): cross-group messages,** once a group other
+    than group 0 registers a prefix (an isolated Ariadne document, a pycvc `ExecPool`, a host's
+    `channel_prefixes`; 4.6).
+    - A message to a channel homed in another group arrives at that group's next drain; a
+      receive of one parks and subscribes there.
     - FIFO holds per sender group and channel, with no order across groups.
-    - A message bounced by a vanished waiter may be reordered.
-    - A full ingress makes `msg-send` return `{status: "error", reason: "ingress full"}`.
-13. **Opt-in (Stage 2's S2b and S2c; not built): cross-group control.** `kill`, `pause`,
-    `resume` and `send-signal` on a same-owner process in another group return "requested" and
-    land at its next step boundary. Cross-group `ps` and `inspect` read a snapshot at most one
-    slice old.
+    - A message bounced by a vanished waiter may be reordered (handed out after later ones).
+    - A full ingress makes `msg-send` return `{status: "error", path, reason: "ingress full"}`.
+    - `msg-pending` on a key homed in another group gives 0 until S2c reads the home's count.
+    - A group with no prefix keeps the keys no prefix covers, as before; two such groups exchange
+      messages only on keys a group with a prefix homes.
+13. **Opt-in (Stage 2's S2b and S2c): cross-group control.** Built in S2b: `kill`, `pause` and
+    `resume` on a process of the caller's (non-empty) owner in another group return `#t`,
+    "requested", and land at its next drain; any other pid in another group gives `#f`. Not built
+    (S2c): `set-priority` and `get-priority` across groups, and `ps` and `inspect` merging other
+    groups' published rows (at most one slice old). `send-signal` is dropped: no intrinsic.
 14. **Opt-in (Stage 3): `spawn-isolated`.** The child runs in another group with copied arguments.
     It cannot share values with its parent, only messages and the tree.
 15. **Opt-in (Stage 3): `parallel_actions`.** A document's actions from one frame may run at the
@@ -3452,6 +3774,62 @@ none in production; the bench's `app_pool_active_after` and `app_pool_pending_af
 `Exec`s. Per-step interleaving: Stage S's list, unchanged. S2a changes no ingress order, so the
 message-and-control pattern is S2b's to check.
 
+**Always (S2b, built)** (S2.md sections 1 and 8). With one group, or with no group registering a
+prefix, the router is never consulted (RT-1: a scheduler checks `router && router->active()`, two
+atomic loads, and takes the one-scheduler path), and these are the only changes:
+- **One ordered ingress** (S2-Q10): every async scheduler applies its posted messages and commands
+  (and router entries) in the order they were posted, with the lock port's posts before them in a
+  drain and the settled calls after them. Before, a drain applied all messages, then all
+  completions, then all commands, so a command now comes before the completions it used to follow,
+  and before a message posted after it. The throw rule is unchanged (S0.7), with the router entries
+  under it.
+- **The owner filter** (S2-Q8): on both schedulers a process with an owner sees and controls only
+  its owner's processes locally: its `kill`, `pause` and `resume` of another owner's pid give `#f`,
+  `ps` leaves another owner's rows out and `inspect` gives `nil`. Unowned processes and hosts are
+  unchanged. Ariadne gives every process of a Runtime its owner tag, so a document in group 0 no
+  longer sees other documents' processes there (Q5).
+- **`async_scheduler::post_message` returns `bool`** (source-compatible): false, posting nothing,
+  when the ingress already holds `state_exec.groups.ingress_cap` capped entries (65536 by default,
+  0 for none; host posts and other groups' sends), or the scheduler is being destroyed. With the
+  router on it forwards a key homed elsewhere to its home, whose cap applies.
+- **Costs, not behaviour:** a post takes the same mutex and pushes onto one vector of a variant; a
+  scheduler in an app's routing writes the directory at each create and reap (a shard's mutex) and
+  publishes at each run loop's end (a pointer test per process when nothing moved, a rebuild when
+  the generation or a hold moved, a refresh at most every 100 ms); the process table bumps a
+  generation counter; `recv_seq` moves at every park. The headers stay source-compatible; the ABI
+  grows (`process_info::owner`, `control_cmd`'s `owner`, `process::recv_seq`, `async_scheduler`
+  members, `exec_pool`'s app).
+
+**Hosts (S2b, built), with prefixes registered or opted in:** messages across groups (item 12),
+`pool.post_message`, `pool.post_control`, `pool.kill_owner` and `pool.info` (4.12), cross-group
+control from programs (item 13), group 0 pumped for what is posted to it (4.6), and S2-Q16's wider
+eligibility of isolated documents (item 11). pycvc's pooled `Exec`s carry owner tags and register
+their chroots, so an `ExecPool` turns the router on for its app: a key outside a pooled `Exec`'s
+chroot is homed at group 0, which `run_all` drains (4.12). An Ariadne host and `run_all` on one app
+run on one thread (4.12).
+
+**Step counts (S2b).** Every existing program takes the steps it took before, at `slice_steps` 1
+and at `CVC_EXEC_SLICE_STEPS=256`: the router and cross-group control add no step to a local
+operation, and `state_exec_bench_gates` pins `mt.cross_group_msg`'s `steps_total` across groups to
+the same programs' in one group, point by point (6.3).
+
+**Compatibility scan (S2b)**, at its cut and head (S2.md section 8):
+- `.ari` documents calling `ps`, `kill`, `pause`, `resume` or `inspect`: master's
+  `components/processes.ari` (#1499, the Ariadne shell's Processes view) and its test
+  `processes_component.ari`. Every process of a Runtime has its owner tag, a loaded document's
+  too, so the component now lists only its own Runtime's processes in group 0, where it listed
+  every document's (Q5's intent); its Kill acts on rows it listed, and its test's assertions hold.
+- Tests posting both a message and a command to one async scheduler: only
+  `AsyncPostControl.HasPendingControlCountsCommandsOnly` changes (its query, posted before a
+  message, is now applied before it: it sees `waiting`, not `ready`);
+  `WakeNotifier.EveryPostCallsIt` counts calls only; the bench's `mt.control` and `msg.ingress` (at most 16000 undrained, under the
+  cap), the lock tests' queries and the sync scheduler's tests are unchanged. No test relied on a
+  command applying after a settled call.
+- Tests where an owned process controls or lists another owner's in one scheduler: none.
+- Readers of `msg-send`'s `"error"` status: none in `.ari` documents or the intrinsics tests.
+- Owner `""` relied on by pooled `Exec`s: `Exec.lock_query`, whose viewer follows the tag.
+- `post_message`'s callers (now `bool`): source-compatible.
+
 ## 6. Expected performance
 
 ### 6.1 The data points
@@ -3550,8 +3928,8 @@ binary's records match the candidate's default points (`driver=spin`, `base=own`
     (`extra.of_ceiling`), on Windows;
   - `mt.groups` clean under gcc's and clang's TSan (CI);
   - Stage 1b: `mt.ariadne_docs` small frames show 0 helper wakes (`extra.helper_wakes`).
-- **Stage 2** (S2a's gates as built: S2.md section 6, `docs/STATE_EXEC_BENCH.md`, "Threaded
-  execution's Stage 2a gates"):
+- **Stage 2** (S2a's and S2b's gates as built: S2.md section 6, `docs/STATE_EXEC_BENCH.md`,
+  "Threaded execution's Stage 2a gates" and "... Stage 2b gates"):
   - S2a: `steps_total` unchanged, and `sched.single.*`, `flood.*`, `limits.*`, `msg.*` and
     `async.*` at threads 0 within 3%, as Stage 1's; `mt.groups` fork-join within 3%;
   - S2a: `mt.groups` `pump=continuous` fib at 8 threads at least 0.9x (`extra.of_ceiling`; even
@@ -3564,7 +3942,14 @@ binary's records match the candidate's default points (`driver=spin`, `base=own`
     groups (S2-Q6's evidence for a continuous `ExecPool`);
   - S2a, in CTest: `state_exec_bench_gates` runs `mt.groups`' smoke points in both modes and
     pins continuous mode's `steps_total` to fork-join's, point by point;
-  - S2b: `mt.cross_group_msg` wake latency p50 under 50 us on Windows;
+  - S2b: `mt.cross_group_msg` wake latency p50 under 50 us on Windows, one pair's pingpong across
+    groups (`pattern=pingpong span=cross k=1`, `GATE_GUARDS`); `steps_total` unchanged on `msg.*`
+    and `sched.single.*`, and `msg.*` in one group within 3% (RT-1's path); fan-out, broadcast and
+    several pairs recorded, in one group and across groups (`docs/STATE_EXEC_BENCH.md`, "Threaded
+    execution's Stage 2b gates");
+  - S2b, in CTest: `state_exec_bench_gates` runs `mt.cross_group_msg`'s smoke points in one group
+    and across groups, in both pump modes, and pins `steps_total` across groups to one group's,
+    point by point;
   - S2c: `mt.groups.locks` with disjoint keys within 5% of the same workload without `with-lock`
     in the same rep;
   - S2c: `prio.groups_weighted` within 20% of the CFS ratio expected for each configuration
@@ -3593,7 +3978,7 @@ Stage 0 has not landed (its L2). Stage M comes last.
 |---|---|---|---|
 | 0 | Process-global hazard fixes; no threads added | `perf/async` (pool), `perf/sched` (ingress flag) | HZ cases pass; TSan clean on `mt.multi_exec` |
 | 1 | 1a (built): `exec_group`, a fork-join `exec_pool`, registry and random stream per group, lightweight groups, pid source, pump owner, the foreign-future check, provider kinds, `ExecPool`. 1b (built): host natives classified, Ariadne one pump per frame and isolated documents, the spawn context in Ariadne's groups | Stage 0 | GR, IS-1, IS-2 and AR-1 to AR-4 pass; Stage 1 gate |
-| 2 | In three PRs (S2-Q1). S2a (built): the continuous pool with wakeups, split kernel pools, the long-step monitor, pycvc's batch wait. S2b: router with channel homes, cross-group control, bounded ingress. S2c: priority across groups, published info, the weights, `exec_coordinator` on the pool | Stage 1, Stage S; `perf/sched` (timer heap, `wait_for_work`) | S2a: S2.md section 4's PL, CT, ST-3, LG and RA-1 cases and its gates; then MS and AR-7; Stage 2 gate |
+| 2 | In three PRs (S2-Q1). S2a (built): the continuous pool with wakeups, split kernel pools, the long-step monitor, pycvc's batch wait. S2b (built): router with channel homes, cross-group control, bounded ingress, the pid directory, published info. S2c: priority across groups, merged `ps`, the weights, `exec_coordinator` on the pool | Stage 1, Stage S; `perf/sched` (timer heap, `wait_for_work`) | S2a: S2.md section 4's PL, CT, ST-3, LG and RA-1 cases and its gates; then MS and AR-7; Stage 2 gate |
 | 3 | `spawn-isolated`, spawn groups, movable processes and moves, Ariadne parallel actions | Stage 2 | IS-3 to IS-10, AR-5 and AR-6 pass; Stage 3 gate |
 | S | Slices (runs) in today's `async_scheduler`, single-threaded; built in `perf/threaded-ss` | `perf/sched` (direct step, one clock reading); cut from master | SL-1 to SL-10 pass; Stage S gate |
 | L | Locks and priority on one machine, one thread and several `Exec`s ([`docs/STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) L0-L3, with the spawn context on one scheduler in L1b); its L4 rides Stages 1-3 | `perf/sched`, `perf/eval`, `perf/async`; it lands B28 (L1) and B27's single-scheduler part (L1b) itself, and Stage 0's `post_control` for `set_priority` if Stage 0 has not landed (L2) | that document's phase exits, with section 5's compatibility scans; its L1b also passes IS-1 and IS-2 on one scheduler (they move to whichever of L1b or Stage 1 merges first, and Stage 1 re-runs them in groups) |
@@ -3889,18 +4274,59 @@ S2c, priority across groups, the weights and the coordinator, after Stage 3's po
   `CVC_EXEC_SLICE_STEPS=256`; the sanitizer legs are clean with `SAN_REQUIRED_S2A` found; the S2a
   gates (6.3) pass or are recorded as no verdict with the owner's agreement.
 
-**S2b and S2c** (not built):
+**S2b: the router and process control** (built in `perf/threaded-s2b`; S2.md section 2's
+S2b.0-S2b.9, with S2b.0a's amendments).
 - **Files:**
-  - `exec_pool.cpp`: the pid directory, published info, `kill_owner` with acknowledgement;
-  - new `exec_router.h`/`.cpp`: homes, the subscription protocol, requeue, caps;
-  - `intrinsics.cpp:960-1015, 1167-1191`: `msg-send` and `msg-recv` through the router when the pool
-    has more than one group;
-  - `async_scheduler.cpp`: the ingress entry kinds;
-  - `exec_coordinator.cpp`: `attach_pool`, job groups.
-- **Tests:** PL-6 to PL-8, MS-1 to MS-12, AR-7, DT-3, DT-4, ST-1, ST-2.
-- **Exit:** the Stage 2 gate; the channel semantics matrix (MS-12) matches single-group outcomes.
-- **Risk:** medium. The router's corner cases are timed waits on remote homes, kills between
-  subscribe and deliver, and caps at the home.
+  - new `exec_router.h` (the frozen rules in its header comment; `group_ref`, `route_entry`,
+    `exec_directory`, `exec_router`), `exec_router.cpp` (handles, homes, the host's post, the
+    protocol's ends in the async scheduler, broadcast tracking, rehoming, `leave_router`) and
+    `exec_control.cpp` (the directory, `control_as`, the router's `post_control` and `info`,
+    published info);
+  - `scheduler_base.h`: `process_info::owner`, `published_process`, `control_cmd`'s `kill_owner`
+    and `owner`, `control_as`; `process.h`: `recv_seq`; `process_table.h`/`process.cpp`: the
+    generation;
+  - `async_scheduler.h`/`.cpp`: the ordered ingress, the throw rule over router entries, the
+    destructor's bounce, the cap and the counters, per-pid delivery, the branch points, the
+    directory's writes and the publish;
+  - `intrinsics.cpp`: `msg-send`'s `reason`; `kill`, `pause`, `resume`, `ps` and `inspect` under
+    the owner rule;
+  - `exec_pool.h`/`.cpp`: `exec_pool(opts, app)`, `post_message`, `post_control`, `kill_owner`,
+    `info`; `exec_group.h`/`.cpp`: the handle, `channel_prefixes` registered, `leave_router` in the
+    teardown; `app.h`/`app.cpp`: `exec_router()`, `exec_scheduler_probe()`, group 0's registration
+    and its frame pump for pending ingress;
+  - `ariadne.cpp`: document prefixes registered, `retire_from_router` at a move, S1-Q6's channel
+    rules lifted, group 0's drain for pending ingress under its token; the comments of `app.h`'s
+    `compute_async` and `intrinsics.h`'s `resolve_channel_key` (routed host posts);
+  - `bindings/pycvc`: owner tags and chroot prefixes for pooled `Exec`s, `run_all`'s group 0
+    drain, `ExecPool.info`, `process_info.owner`, `post_message`'s `bool`;
+  - tools: `tools/locks_model/router.py` and `test_router.py` (the router model); the bench's
+    `mt.cross_group_msg`, its `GATE_GUARDS` entry and the gates CTest's pin;
+  - CI: `SAN_REQUIRED_S2B`, `SAN_CXX_RUNS_S2B` and `run.sh`'s `--keep-stress-suites`, the router and
+    stress binaries in every sanitizer leg, `mt.cross_group_msg` in `SAN_BENCH`; the nightly
+    `state-exec-stress.yml`; `locks-deep.yml`'s `router-model` lane; the CTest entries
+    `state_exec_router_model_test` and `state_exec_stress_test`;
+  - docs: this document, [`STATE_EXEC_LOCKS.md`](STATE_EXEC_LOCKS.md) (7.2, 7.5),
+    [`ARIADNE.md`](ARIADNE.md), [`APP_API.md`](APP_API.md),
+    [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md),
+    [`STATE_EXEC_BENCH.md`](STATE_EXEC_BENCH.md), [`TESTING.md`](TESTING.md) and
+    `bindings/pycvc/README.md`.
+- **Tests:** MS-1 to MS-10, MS-7b, MS-12, PL-6 to PL-8, KO-3, OW-1, RT-1, DT-3, DT-4, ST-1, ST-2
+  (8.4, 8.8), and the implementers' own beside them (8.4); MS-11 moves to S2c.
+- **Exit:** these pass; with one group, or no group with a prefix, the router is never consulted,
+  and step counts are those before S2b (section 5), at the default and at
+  `CVC_EXEC_SLICE_STEPS=256`; the sanitizer legs are clean with `SAN_REQUIRED_S2B` found; the S2b
+  gates (6.3) pass or are recorded as no verdict with the owner's agreement.
+
+**S2c** (not built):
+- **Files:** `intrinsics.cpp`: `set-priority` and `get-priority` across groups (a caller-identity
+  control kind), `ps` and `inspect` merging published rows, `msg-pending` reading the home's
+  published count; `exec_pool.cpp`: the weights by `best_runnable`, `worker_class`;
+  `exec_coordinator.cpp`: `attach_pool`, job groups.
+- **Tests:** MS-11, AR-7, LG-4, LG-5.
+- **Exit:** the Stage 2 gate.
+- **Risk:** medium. The router's corner cases (timed waits on remote homes, kills between subscribe
+  and deliver, caps at the home, teardowns) were S2b's, checked by the router model, MS-12 and
+  ST-1.
 
 **Stage 3: isolated spawns and moves** (3 weeks, plus 1-2 for parallel actions).
 - **Files:**
@@ -4075,8 +4501,8 @@ As built in S2a (`threaded-impl/S2.md` section 4, which narrows the cases above 
 assertions): PL-1 is the state-word model (4.4), with hosts, the attaching thread and a liveness
 check besides the posters and workers; PL-3, PL-4 and PL-5 record their latencies and assert
 counts (PL-4's "no worker spins" is `pool_stats::empty_wakes` 0; PL-5 counts the light group's
-pumps against the heavy one's); PL-6 to PL-8 are S2b's. S2a adds CT-1 (attached groups at threads
-0 to 8 equal their solo runs), CT-2 (teardown during continuous pumps), CT-3 (host bodies and the
+pumps against the heavy one's); PL-6 to PL-8 are S2b's (8.4, as built). S2a adds CT-1 (attached
+groups at threads 0 to 8 equal their solo runs), CT-2 (teardown during continuous pumps), CT-3 (host bodies and the
 token), CT-4 (caller-only groups stay on their thread), ST-3 (group churn with kernels in flight)
 and RA-1 (a post ends `ExecPool.run_all`'s batch wait), in `exec_pool_test`,
 `state_exec_groups_test` and pycvc's `test_pycvc_exec_pool.py`.
@@ -4097,6 +4523,38 @@ and RA-1 (a post ends `ExecPool.run_all`'s batch wait), in `exec_pool_test`,
 | MS-10 | H's ingress at its cap | the sender's `msg-send` returns `{status: "error", reason: "ingress full"}`; `post_message` returns false |
 | MS-11 | `msg-pending` on a remote-homed key | the home's count, at most one slice stale |
 | MS-12 | **Semantics matrix**: for {same group, home remote, receiver remote, both remote} x {waiter present or absent, broadcast to M waiters, timed receive expiring with a message in flight, waiter killed, pending cap, chroot-resolved key, future channel}; deterministic mode | every outcome equals the single-group outcome, except the documented requeue order |
+
+As built in S2b (`threaded-impl/S2.md` section 4, narrowed against wall-clock assertions: counts
+and outcomes, with 60 s ceilings only as hang guards), in `state_exec_router_test`, suite `Router`:
+`MS01_ASendReachesAWaiterAtItsHomeOnce`, `MS02_ASendWithNoWaiterIsTakenFromTheHomesQueue`,
+`MS03_AReceiveElsewhereThenASendIsDeliveredOnce`,
+`MS04_ABroadcastReachesThreeGroupsEachWithItsOwnEnvelope`,
+`MS05_ATimedWaitExpiringWithADeliveryInFlight`, `MS06_AKilledOrReapedWaiterRequeues`,
+`MS07_EightGroupsSendingToOneKeyKeepFifoPerSender` (fork-join and continuous, threads 1, 2 and 4),
+`MS07b_FifoPerSenderHoldsAcrossItsHomesTeardown` (S2b.0a), `MS08_AnAppGlobalKeyIsHomedAtGroupZero`
+(with group 0 drained for a routed entry, and an island keeping its own key),
+`MS09_AHashKeyStaysInTheGroupThatResolvesIt`, `MS10_AFullIngressRefusesSendsAndPosts` and
+`MS12_SemanticsMatrix` (its columns also a hand-built future, broadcasts with every copy stale and
+with one taken, a local taker with a stale remote copy, and a tracked broadcast whose home is torn
+down; each cell checks that the protocol posted what it should, so a remote cell cannot pass by
+delivering locally). MS-11 moves to S2c (`msg-pending` on a key homed elsewhere gives 0 in S2b). The
+same suite has PL-6..PL-8 (`PL06_ControlAcrossGroups`, `PL07_AnotherOwnersPid`,
+`PL08_KillOwnerIsAcknowledged`), `KO03_KillOwnerSurvivesADyingGroup`, `RT01_OneGroupNeverRoutes`,
+`DT03_DeterministicEqualsThreaded` and `DT04_CrossGroupOrderRepeats`; ST-1 and ST-2 are
+`state_exec_stress_test`'s `RandomPrograms.ST01_SixteenGroupsLoseAndDuplicateNothing` and
+`ST02_TheSameUnderFuzzSeeds` (8.8). The implementers' own cases, in the same binary:
+`RouterInterfaces.*` (the handle, the longest prefix, a forward past closed homes), `RouterR.*`
+(the ordered ingress, the throw rule, the destructor's bounce, the cap, per-pid delivery,
+requeues, broadcast tracking, a torn-down home's forward and adopted tracker, islands, the cache's
+epoch, the directory and the publish following a process, a second `leave_router`),
+`ExecDirectory.*`, `PublishedInfo.*`, `OwnerRule.*`, `PoolKillOwner.*` and
+`GroupZeroDriver.AFrameSkipsGroupZeroWhileAnotherThreadHoldsIt`. Ariadne's are
+`AriadneRouter.S2b6_*` (`ariadne_runtime_test`: a `/` channel between group 0 and a document's
+group, group 0 with no live process still delivering, a moved document still receiving, a drain
+skipping a group 0 another thread holds) and
+`AriadneRouterHost.S2b6_AHostPostToGroupZeroReachesAnIsolatedDocument` (`ariadne_host_test`); pycvc's, OW-1 (`test_ow01_pooled_execs_have_owners`) and the S2b.7 cases of
+`test_pycvc_exec_pool.py`. The router protocol's model (`tools/locks_model/router.py`, S2-Q15) runs
+its quick suite in CTest (`state_exec_router_model_test`) and its deep one in `locks-deep.yml`.
 
 ### 8.5 Isolated spawns and moves (IS, Stage 3)
 
@@ -4211,6 +4669,20 @@ The implementers' own cases, beside the code's existing tests:
 | ST-2 | ST-1 with `CVC_EXEC_FUZZ` over 1000 seeds | the same invariants |
 | ST-3 | group churn: 10k groups each running one program, destroyed while kernels are in flight (ASan) | thread and handle counts flat; nothing leaked |
 | ST-4 | a one-hour soak: Ariadne-shaped frames with 4 isolated documents, document churn, isolated children and moves | registries, ingress queues, the pid directory and spawn groups return to their baseline |
+
+As built in S2b (`state_exec_stress_test`, suite `RandomPrograms`, a name without "Stress" so
+CTest and every sanitizer leg run its short form): ST-1 is S2b's half, the router's. A run is an
+app with a pool (threads 1, 2 or 4, fork-join or continuous, by seed), 16 groups in Release (8 in
+Debug, 6 under a sanitizer) each the home of a unicast and a broadcast key, and group 0 with two
+global keys; receivers (timed or not), senders and victims in random groups; host kills (direct and
+through `pool.post_control`), kills of waiting receivers, pauses and resumes, killer programs
+across groups, and every 40 passes a group churned (destroyed and replaced, its keys rehomed to
+group 0). Every id must be received once or drained once from its key's home at the end, never
+both or neither, with no phantom, no failed receiver and no hang (run ceiling 300 s); FIFO is
+MS-7's. ST-1 runs seeds 1-6, or seed after seed for `CVC_EXEC_STRESS_MINUTES`; ST-2 seeds 1000-1002 under
+`CVC_EXEC_FUZZ`, or `CVC_EXEC_STRESS_SEEDS` of them. The nightly `state-exec-stress.yml` runs both
+long, under gcc's TSan and in Release. The spawn trees, tree writes, async calls and `set-attr` on
+envelopes of td's ST-1 are not in it.
 
 ### 8.9 Determinism (DT)
 
@@ -4488,18 +4960,22 @@ approved as recommended on 2026-11-12 (its section 1 keeps the alternatives weig
   fork-join, `run_all` waiting once for its batch on the notifiers (S2a.8); continuous mode serves
   C++ embedders, then Stage 3's spawn groups and S2c's job groups; a continuous `ExecPool` only if
   `mt.groups` shows continuous more than 10% ahead on uneven groups (4.12).
-- **S2-Q7. Owners across groups** (S2b): the rule is per process; pooled `Exec`s get owner tags,
-  `pycvc:<prefix>.<i>`; owner `""` has no rights across groups.
-- **S2-Q8. Process control across groups** (S2b, S2c): `kill`, `pause` and `resume` posted when
+- **S2-Q7. Owners across groups** (built in S2b): the rule is per process; pooled `Exec`s get owner
+  tags, `pycvc:<prefix>.<i>`; owner `""` has no rights across groups.
+- **S2-Q8. Process control across groups** (S2b's half built, S2c's not): `kill`, `pause` and
+  `resume` posted when
   the directory gives the pid the caller's owner, returning `#t` for "requested"; owned processes
   see only their owner's processes locally too; `set-priority`, `ps` and `inspect` across groups in
   S2c; no `send-signal` intrinsic; `pool.kill_owner` with a `done`.
-- **S2-Q9. Published info** (S2c): published at the end of every run loop; rows rebuilt when a
-  generation moves, counters refreshed at most every 100 ms; `pool.info(pid)` returns that row.
-- **S2-Q10. The router** (S2b): one ordered ingress for messages, controls and router entries;
-  the throw rule kept; router entries bounced, not dropped; `#` keys never routed; requeue to the
-  front; the cap `state_exec.groups.ingress_cap` (65536) with `msg-send`'s `reason`; per-group
-  counters; the router on from the first prefix registration.
+- **S2-Q9. Published info** (built in S2b): published at the end of every run loop; rows rebuilt
+  when a generation moves, counters refreshed at most every 100 ms; `pool.info(pid)` returns that
+  row. Its readers across groups (merged `ps`, `inspect`, `set-priority`'s check, the weights) are
+  S2c's.
+- **S2-Q10. The router** (built in S2b, as S2b.0a amended it, below): one ordered ingress for
+  messages, controls and router entries; the throw rule kept; router entries bounced, not dropped;
+  `#` keys never routed; requeue to the front; the cap `state_exec.groups.ingress_cap` (65536) with
+  `msg-send`'s `reason`; per-group counters; the router on from the first prefix registration (as
+  built: while a group other than group 0 has a prefix, or a remote-waiter record exists).
 - **S2-Q11. Kernel pools and blocking steps** (built in S2a): the split only while the app's pool
   has workers, `background_cpu` the cores less the exec workers (at least 1), `background_io` the
   existing pool at its size, picked by the existing `io`; the long-step monitor on with workers or
@@ -4517,8 +4993,8 @@ approved as recommended on 2026-11-12 (its section 1 keeps the alternatives weig
   `tools/locks_model`'s style, with no C++ port, in CTest and a `locks-deep.yml` lane (PL-1);
   `CVC_EXEC_FUZZ` points at the word's transitions, the ingress push and the eventcount, the
   router's in S2b (4.13).
-- **S2-Q16. Documents leaving the host thread** (S2b): S1-Q6's channel rules lifted once the
-  router exists; oidc, writable `link:` holes and the thread-affinity rules stay.
+- **S2-Q16. Documents leaving the host thread** (built in S2b): S1-Q6's channel rules lifted once
+  the router exists; oidc, writable `link:` holes and the thread-affinity rules stay.
 - **S2-Q17. Names**: `state_exec.slice_steps`, `state_exec.slice_seconds`, `CVC_EXEC_SLICE_STEPS`,
   `async_scheduler::set_slice`; `pool_options::pump_steps`, `pump_seconds`, `priority_weights`;
   `exec_pool::with_group`, `published_process`, `caller_identity`, `exec_router`;
@@ -4532,6 +5008,60 @@ notifier is installed (R2b's S-m2); the hold handoff to a host waiting now, with
 within 4.4's reproducible schedule); `detach` and `with_group` refused where they would wait for
 themselves, and the teardown aborting in a group's own waiting body (R2a's C-M2, C-M3);
 `pool_options::force_move`; and `attach` refusing a scheduler that already has a notifier.
+
+S2b's lead decided these within the S2 decisions, recorded in the frozen header comment of
+`exec_router.h` and the S2b headers (S2b.0):
+- A group is named by a `group_ref`, a shared handle whose close waits for posts in progress: the
+  lifetime rule for every post across groups. The router (homes by registered prefix) and the
+  directory live in the app's group-0 state (`app::exec_router()`), outliving every scheduler.
+- The cache of homes is each scheduler's, capped, checked against the router's epoch; the router's
+  lookup is uncached and counted (`consulted()`, RT-1). `active()` counts prefixes of groups other
+  than group 0 and outstanding remote-waiter records, so group 0's `""` alone never turns it on.
+- Broadcast tracking needs an answer per copy: a sixth entry kind, `taken`. Tracking only when no
+  local waiter took the message and k >= 2 remote copies went out; one copy is untracked (a stale
+  one requeued); with a local taker the copies go with `requeue_if_stale` false (a stale one
+  dropped). Rehomed messages travel as `uncapped` sends.
+- The drain's order: the lock port, then the ordered queue, then the settled calls (messages keep
+  coming before completions; commands move to their post place). `deliver_to_receivers` returns
+  -1 for a send the home refused (msg-send's "ingress full"), with no new virtual.
+- The owner rule's local half is `scheduler_base::control_as` (a default both schedulers have),
+  with `process_info::owner` added; the async scheduler adds the directory's half.
+- `published_process` carries `name` and `scope` beside S2-Q9's list (the user's answer,
+  2026-11-23: `scope` alone, no chroot or owner root, so S2c's merged `ps` rows match local ones
+  field for field); `published_summary::processes` counts live processes.
+- `ingress_stats::destroy_dropped` counts what a teardown drops (S2-Q10: plain host posts are still
+  dropped, and now counted). `exec_pool(opts, app)`: a pool's S2b calls use its app's router, and a
+  standalone pool finds nothing. `has_pending_ingress()` makes group 0's drivers pump it for a
+  router entry (S2.md section 0, row 22), each taking group 0's token in a try.
+- `app::exec_scheduler_probe()` (with S2b.0a) lets pycvc drain group 0 only once it exists, and
+  `exec_router::prefix_home_of` lets an island ask whether another group's prefix covers a key
+  without building group 0.
+- Two limits documented, not fixed: an Ariadne host and pycvc's `ExecPool.run_all` on one app run
+  on one thread (both drive group 0; S1-Q4); and a document moving into a group leaves its keys'
+  pending messages, and other groups' waits on them, at group 0 (registering a prefix moves
+  nothing).
+
+The router model (`tools/locks_model/router.py`, S2-Q15) found eleven problems in S2b.0's frozen
+text; the lead amended it as S2b.0a, before the implementation:
+- Taken as proposed: the teardown closes its handle first, a refused poster resolving the home again
+  and waiting while it is still the closed group, then forwards to new homes resolved without
+  closed groups (`exec_router::new_home_of`), and only then unregisters; it forwards its pending
+  messages first, then its records, its trackers and its queue; a queued send (and a queued host
+  post of a key it homed) forwards uncapped; an uncapped send with no waiter goes past the pending
+  cap; a forwarded `deliver`, and one that threw, follow `requeue_if_stale`; one that threw before
+  patching also resubscribes with the same seq; a `deliver` a closed receiver refuses is stale at
+  once; a tracked broadcast with every copy stale is applied as a requeue; broadcast ids are unique
+  in the app (`new_broadcast_id`); a requeue's next waiter is the earliest local waiter, else the
+  earliest record.
+- Not as proposed: the model's "router on while any group exists", which would have routed every
+  plain Stage 1 group's own messaging through group 0, which its hosts never pump; instead the
+  island rule (`has_prefix`), with the gap that islands no longer exchange messages on a prefix's
+  keys once its home goes.
+- Closed rather than documented: a torn-down home's broadcast trackers are forwarded (`adopt`,
+  with `outstanding` and `taken`), which unique ids and the poster's wait make safe.
+- Then (ae66f1952) an island homes nothing for another group, so its teardown forwards none of its
+  own keys' messages: they die with it, counted, as a Stage 1 group's do.
+- Kept as documented: the requeue position (`gap-requeue-order`).
 
 ## 10. Prior art and lessons
 

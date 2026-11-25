@@ -505,6 +505,15 @@ and open `/apps/nicotina/` (the default document is `main.ari`) or
 `/apps/nicotina/?src=main.ari`, and for the terminal client `/apps/nicotina/ari.html`. Any static server works for the single-threaded build,
 `python3 -m http.server` included.
 
+**Which browsers.** The module is built with wasm exceptions and JSPI (JavaScript Promise
+Integration), with no Asyncify fallback ([WASM_JSPI_EXCEPTIONS.md](roadmap/WASM_JSPI_EXCEPTIONS.md)).
+That takes Chrome 137, Firefox 153 or Safari 27, or later. Every browser on an iPhone or iPad
+is WebKit, so there it takes iOS 27 (iPadOS 27), whichever browser it is. Before it fetches
+anything of the module, the page checks for `WebAssembly.Suspending` and
+`WebAssembly.promising`. A browser without them gets a page that names those versions (iOS 27
+on an iPhone or an iPad, by its user agent and touch screen) and its own user agent, in place
+of a load that would fail part way. `ari.html` does the same in place of its terminal.
+
 **How a document loads.** The page resolves `src` against its own URL and runs
 `arigl run <flags> <absolute src URL> <document args>`. Before the load, arigl
 ([`web_document.h`](../inc/cvc/ariadne/web_document.h), over [`doc_fetch.h`](../inc/cvc/ariadne/doc_fetch.h)) does
@@ -527,6 +536,19 @@ network policy the host flags set. A missing import is a warning, as it is nativ
 missing document is an error. A name built from a unit's arguments (`load: "{panel}.ari"`)
 cannot be known ahead, so it is a warning: list such files, and data files a scene reads,
 in the config's `preload`.
+
+**A download that breaks off.** Each fetch, the page's own (the module's `.wasm`, ariglx-web's
+`python312.zip`) and arigl's (the document, the files it names, the `preload`), asks with
+`cache: 'no-cache'`, so a cached copy is only revalidated. A fetch that fails or whose body
+breaks off is asked twice more, half a second and a second later, with `cache: 'reload'`: past
+the browser's cache, and replacing what is there. That covers a dropped connection, and a
+partial copy Firefox keeps after a cut-off load: it resumes the copy with a range request, and
+on GitHub Pages that body can break on every load after ("Error in input stream") until the
+copy is gone. A server's refusal (a 404) is not asked
+again. The page's error then names the file and how much of it arrived:
+`Could not start: downloading ariglx.wasm broke off after 23.6 MB, 3 tries (Error in input
+stream)`. [`arigl_web_download.mjs`](../src/arigl/web/test/arigl_web_download.mjs) checks the
+page's side with a stand-in module; the smoke test's `/apps/flaky/` checks arigl's.
 
 **The config** is `ariadne.config.json` beside the page (a 404 means the defaults), or
 `window.ARIADNE_CONFIG` set by a script ahead of `arigl-web.js`. `ari.html` reads the same file:
@@ -585,7 +607,8 @@ shows that it has ended. A warning while the document runs (a program that faile
 `on_tick:` that stopped) shows in the canvas's corner for 8 s (ARIADNE.md §2.4). The page reads
 `Module.ariadneRunning()`, `Module.ariadneWarning(text)` and `Module.ariadneExit(status)`, which
 arigl calls, and keeps its state in `window.ariadneWeb` (`state` is `loading`, `running`, `ended`
-or `failed`, `log` holds arigl's output, and `warnings` the warnings) for tests and the console.
+or `failed`, or `unsupported` from the browser gate, with its text in `needs`; `log` holds arigl's
+output, and `warnings` the warnings) for tests and the console.
 
 **Content-Security-Policy.** Nothing in the page is inline, and nothing in the module
 evals: cvcGL's touch probe used `emscripten_run_script_int` and is now an `EM_JS`. The
@@ -770,6 +793,9 @@ src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python` runs arigl
 the page, then the Python ones:
 - `numpy.ari`, a `python:` block with numpy and pycvc_gl, which reports the imports' time and
   the loop's;
+- `coph.ari`, CoPH's crossing on pycvc's `NavCophFleet` (libcvc's C++ CoPH, no torch), run 40
+  ticks at a time as a page runs it, which reports its packets and each agent's version and
+  energy residual;
 - `program.py`, a program in place of the document;
 - `python_error.ari`, a block that raises;
 - `vtk.ari`, a VTK pipeline through vtkmodules, when the zip has them;

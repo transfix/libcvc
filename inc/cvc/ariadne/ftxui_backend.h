@@ -213,6 +213,8 @@ public:
   void end_item_group() override;
   // (clipboard-set TEXT): an OSC 52 escape, which run() writes after the drain that ran it (the
   // terminal decides; take_clipboard() is it, headless). Hosted: none (TvisionBackend has its own).
+  // A context menu's Paste queues its OSC 52 read (osc52_query) there too; run() hands the
+  // terminal's answer to the focused field as typed text (a TermEvent::text_event of all of it).
   bool set_clipboard(cvc::app &app, const std::string &text) override;
   std::string take_clipboard();
   // §5.13 the fullscreen view: a layer over the whole screen (Esc leaves). Not hosted: tvision's
@@ -244,6 +246,10 @@ public:
   TextViewEvent text_view(const char *label, const char *key, const std::string &text,
                           const TextViewOptions &opts) override;
   void focus_next_widget() override;
+  // §5.28 the next text or menu item copies `text` from its context menu.
+  void next_item_copy(const std::string &text) override;
+  // §5.29 the picture just drawn offers Save image... / Save video... in its context menu.
+  void item_save(const MediaSave &m) override;
   bool draw_image(const char *name, float width) override;
   // §5.12 a container's background: half-blocks behind the content (dimmed, text kept readable),
   // or the picture as a banner row above it (pixels where the terminal has them).
@@ -454,6 +460,14 @@ protected:
   // run(AppRuntime&) does: keys as a press + release pair with SDL's modifier bits, pointer events
   // at the cell's centre in px.
   void forward_to_document(AppRuntime &app, const TermEvent &e) const;
+  // §5.28 the clipboard of the context menus (a right-click, Shift+F10 or the Menu key: Cut, Copy,
+  // Paste and Select all in a field, Copy on a text or a notification, Copy line and Copy all in a
+  // text view). clipboard_copy puts `text` on it: here an OSC 52 escape, as set_clipboard sends
+  // (none hosted). clipboard_request asks for its text, which comes back as typed text to the
+  // focused field: here an OSC 52 read, answered by a terminal that allows it (false hosted, where
+  // there is no terminal to ask). TvisionBackend uses tvision's clipboard for both.
+  virtual bool clipboard_copy(const std::string &text);
+  virtual bool clipboard_request();
 
 private:
   struct Impl;

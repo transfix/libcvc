@@ -11,22 +11,23 @@ migration.
 This guide walks through every major subsystem with working C++ examples
 you can drop directly into a test or application.
 
-Each scheduler steps its processes on one thread at a time. The design for
-running programs on several threads is in
-[STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted; its Stages 0, 1 and S, and
-Stage 2's first part, S2a, are built): execution groups, each one scheduler stepped by one
-thread at a time, run in parallel on a shared worker pool, added in stages. Stage 0 fixed
-what a second thread would race on: read-only built-in exception classes, an isolating
-copy on the data channel, pinned state-tree lookups and a single-node `state-delete`, a
-root per watch, and `stop()` and `post_control` from any thread. Stage 1a built the groups
-and the app's fork-join pool, a cycle registry and `math.random` stream per scheduler, one
-pid source per app, the pump owner, provider kinds, and pycvc's `ExecPool`
-([Execution Groups and the Pool](#execution-groups-and-the-pool)); Stage 1b gave Ariadne's
-isolated documents groups of their own. Stage S lets a pick run several steps
-([Runs](#runs-several-steps-a-pick-slice_steps)). S2a built continuous mode, groups
-pumped whenever they have work ([Continuous mode](#continuous-mode)), the split kernel
-pools and the long-step monitor. Which scheduler each host and Ariadne lane runs, and which
-settings choose what, is in [Which Scheduler Runs a Program](#which-scheduler-runs-a-program).
+Each scheduler steps its processes on one thread at a time. The design for running programs on
+several threads is in [STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) (adopted; its Stages 0, 1 and
+S, and Stage 2's first two parts, S2a and S2b, are built): execution groups, each one scheduler
+stepped by one thread at a time, run in parallel on a shared worker pool, added in stages. Stage 0
+fixed what a second thread would race on: read-only built-in exception classes, an isolating copy on
+the data channel, pinned state-tree lookups and a single-node `state-delete`, a root per watch, and
+`stop()` and `post_control` from any thread. Stage 1a built the groups and the app's fork-join pool,
+a cycle registry and `math.random` stream per scheduler, one pid source per app, the pump owner,
+provider kinds, and pycvc's `ExecPool` ([Execution Groups and the
+Pool](#execution-groups-and-the-pool)); Stage 1b gave Ariadne's isolated documents groups of their
+own. Stage S lets a pick run several steps ([Runs](#runs-several-steps-a-pick-slice_steps)). S2a
+built continuous mode, groups pumped whenever they have work ([Continuous mode](#continuous-mode)),
+the split kernel pools and the long-step monitor. S2b built the router, messages and process control
+across groups ([Messages and control across groups](#messages-and-control-across-groups)), and the
+owner rule ([Process Lifecycle](#process-lifecycle-from-dsl)). Which scheduler each host and Ariadne
+lane runs, and which settings choose what, is in [Which Scheduler Runs a
+Program](#which-scheduler-runs-a-program).
 
 ---
 
@@ -993,7 +994,10 @@ while (busy())
   the group is pumped.
 - **Posting.** `group.sched().post_message(channel, value)` from any thread, as on one scheduler.
   A compound value you post is handed over: keep no reference to it, and never post one value to
-  two groups (a data race in a release build; nothing checks it in Stage 1).
+  two groups (a data race in a release build; nothing checks it in Stage 1). It returns false when
+  the ingress is full (S2b), and a key another group is the home of goes to that group ([Messages
+  and control across groups](#messages-and-control-across-groups), where `channel_prefixes` and
+  the pool's `post_message`, `post_control`, `kill_owner` and `info` are).
 - **The frame.** A host with a frame loop registers its groups once
   (`app.register_frame_group(group)`, which returns a handle that unregisters on reset or
   destruction) and calls `app.exec_pump_frame()` each frame: one `pump_all` of every frame group
@@ -1010,7 +1014,8 @@ while (busy())
   lock home attached to a single manager on its caller only, whichever pool it is (logged once; a
   debug build asserts when a pool with workers is given one).
 - **Destroying a group** takes its token (waiting for a pump in progress), closes its lock port,
-  kills its processes, waits for its kernels, and reaps, then frees its scheduler and collects its
+  leaves the app's router (sending what it holds for other groups to their new homes, S2b), kills
+  its processes, waits for its kernels, and reaps, then frees its scheduler and collects its
   registry (STATE_EXEC_THREADED.md 4.2). Destroy your groups before the app; never inside a
   `pump_all` that holds them, nor from a native or callback the pool runs (debug assertions). From
   inside the group's own pump (a native or an inline callback of its own process) it aborts, in
@@ -1170,17 +1175,20 @@ const auto post = [&app, parks](const std::string &chan, const se::value_t &v) {
 
 `parking_scheduler()` is null only for an inline host (the `init:` lane's, whose posts then go to
 the app scheduler, where the document's programs are when they are not isolated). A post to
-`app.exec_scheduler()` for a program of an isolated document stays in group 0's queue and never
-wakes it. The captured scheduler lives while the document stays in its group: a move or teardown
-destroys the group once its host's own calls (async functions on `*ictx.host`) have ended, which do
-not include work the host does not track, such as an `app::compute_async` job. Such a job must
-end before the document moves or goes; work that answers a program is simpler as an async function
-on `*ictx.host` (`register_async_fn`), as `nav_compute` does. Resolve the
-channel in the provider's body, on the env's thread (`resolve_channel_key(ictx.root_path, name)`),
-never in a kernel. `AppRuntime`'s done channels and libcvc's streams (`stream_params::scheduler`)
-work this way; a stream posts there from its producer thread too, and a stream the document owns
-follows it when it moves (its member `stream::retarget(from, to)`, through
-`retarget_document_streams`).
+`app.exec_scheduler()` on a channel of an isolated document's program (a key under its prefix) is
+routed to the document's group, the key's home, by the app's router (threaded execution's S2b,
+[Messages and control across groups](#messages-and-control-across-groups)): it arrives, one hop
+later than a post to the parking scheduler, which stays the better choice. A `#` key is never
+routed, so a post on one to `app.exec_scheduler()` stays in group 0's queue and never wakes an
+isolated document's program. The captured scheduler lives while the document stays in its group: a
+move or teardown destroys the group once its host's own calls (async functions on `*ictx.host`) have
+ended, which do not include work the host does not track, such as an `app::compute_async` job. Such
+a job must end before the document moves or goes; work that answers a program is simpler as an async
+function on `*ictx.host` (`register_async_fn`), as `nav_compute` does. Resolve the channel in the
+provider's body, on the env's thread (`resolve_channel_key(ictx.root_path, name)`), never in a
+kernel. `AppRuntime`'s done channels and libcvc's streams (`stream_params::scheduler`) work this
+way; a stream posts there from its producer thread too, and a stream the document owns follows it
+when it moves (its member `stream::retarget(from, to)`, through `retarget_document_streams`).
 
 **Work that answers by itself** (an `async_work` whose `start` hands the call to a transport that
 settles it on a thread of its own) keeps the host's finisher, `ictx.host->make_finisher()`, not
@@ -1346,6 +1354,70 @@ charges its call its one step and no run time or CPU (`docs/STATE_EXEC_EXCEPTION
 it holds a `background_cpu` worker the CPU-bound kernels need. `setThreadPoolSize` then sizes
 `background_io` only.
 
+#### Messages and control across groups
+
+Threaded execution's S2b (STATE_EXEC_THREADED.md 4.5, 4.6; the rules are in the header comment of
+`<cvc/state/state_exec/exec_router.h>`) lets the groups of one app exchange messages and control
+each other's processes, through the app's router (`app.exec_router()`).
+
+**Homes.** Every resolved channel key has one home group: the group that registered the longest
+prefix covering it (`exec_group::options::channel_prefixes`, registered when the group is built,
+unregistered when it goes), else group 0, the app scheduler. Ariadne registers an isolated
+document's prefix, and pycvc's `ExecPool` each pooled `Exec`'s chroot. A key with a `#` (the
+runtime's tick, key, pointer and future channels) is never routed: it stays in the group that
+resolves it. A group with no prefix (a host's own group, as before S2b) keeps every key no other
+group's prefix covers in its own scheduler; only a key under another group's prefix leaves it. So
+two prefix-less groups never meet on a key: give one a prefix.
+
+```cpp
+se::exec_group::options o;
+o.name = "sim";
+o.app = &app;
+o.channel_prefixes = {"sim"};          // "sim" and "sim.*" are homed here, from any group
+se::exec_group sim(std::move(o));
+```
+
+**When it is on.** While a group other than group 0 has a prefix (or a wait recorded across
+groups is outstanding), a program's `msg-send` on a key homed elsewhere is posted to the home,
+which delivers it at its next drain, to its waiters or into its pending FIFO, and a `msg-recv`
+parks the process and subscribes at the home. With no prefix registered a scheduler never asks the
+router anything: one group costs what it did. Order is kept per sending group and channel, not
+across groups; a message that came back from a waiter that had stopped waiting may be handed out
+after later ones; nothing is lost or delivered twice. `msg-pending` on a key homed elsewhere gives
+0 (the count is at the home; S2c reads it).
+
+**Group 0 holds the app-global keys** (`/x`, and every key no prefix covers), so a host that pumps
+group 0 only while it has live processes would strand a message routed there: pump it while
+`has_pending_ingress()` is true too, as `exec_pump_frame`, Ariadne's drain and `ExecPool.run_all`
+do, taking its token in a try (`pump_owner_scope`, which throws while another thread holds it).
+
+**Host posts.** `group.sched().post_message(key, value)` and `app.exec_scheduler().post_message`
+forward a key homed in another group to its home, and `pool.post_message(key, value)` posts to the
+home directly; a post to the scheduler the program parks on stays one hop shorter. Each returns
+false when the home refused the post: its ingress holds `state_exec.groups.ingress_cap` posts and
+sends not yet drained (65536 by default, 0 for none). A program's `msg-send` refused so returns
+`{status "error", path, reason "ingress full"}` (section 6).
+
+**Control.** `pool.post_control(pid, cmd)` posts a host's command to the group `pid` is in (the
+app's pid directory has every pid from its creation to its reap), true once that group took it.
+`pool.kill_owner(owner)` kills an owner's processes in every group and returns once each group has
+done it (never from inside a pump of the pool). `pool.info(pid)` reads the row the process's group
+last published at the end of a run loop. From programs, the owner rule applies (section 4,
+"Process Lifecycle"): a process with an owner reaches only its owner's processes, locally and in
+other groups, and owner `""` reaches nothing in another group.
+
+**Teardown.** A group's destructor sends what it holds for other groups (pending messages of its
+keys, waits recorded there, broadcasts in flight, queued router entries) to each key's new home
+before its prefixes go, so destroying a group loses no message another group sent it; the
+messages of keys it did not home (`#` keys, a prefix-less group's own) die with it, counted in
+`ingress_counters().destroy_dropped`. `ingress_counters()` (any thread) also counts refusals at
+the cap, requeues, stale copies dropped, a full FIFO's drops, refused commands and a drain's
+throws (STATE_EXEC_THREADED.md 4.17).
+
+**Gaps** (documented): when a prefix's group goes, its keys are each prefix-less group's own again,
+so those groups stop meeting on them; and registering a prefix moves nothing already parked, so
+messages and waits left in group 0 for a key that a new group then homes stay there.
+
 #### `ExecPool` or several `Exec`s
 
 From Python there are two ways to run programs at once (`bindings/pycvc/README.md`):
@@ -1416,6 +1488,7 @@ sched.post_control(pid, std::move(cmd));
 | `signal` | `send_signal(pid, cmd.signal)`: `"SIGKILL"` kills | what `send_signal` returned |
 | `set_priority` | `set_priority(pid, cmd.value)` | what `set_priority` returned |
 | `query` | `cmd.query(sched)`, which must not throw | nothing: a query has no `done` |
+| `kill_owner` (async, S2b) | `kill_owner(cmd.owner)`; the pid is not read (what `pool.kill_owner` posts) | true |
 
 - **Host paths.** Each command is the direct call a host makes, unchecked: no permission or
   floor check. An unknown pid is found then, so its `done` gets false.
@@ -1429,11 +1502,19 @@ sched.post_control(pid, std::move(cmd));
   the sync scheduler at the top of `step()` and of each iteration of `run()`'s loop, before it
   tests for a runnable process (so resuming the only process, or killing the last one, takes
   effect in a run with nothing else to do); the async scheduler at its next drain (a step's, or
-  `drain_ingress()`), after that drain's posted messages and settled async calls, whatever order
-  they were all posted in.
+  `drain_ingress()`), in the order they were posted with its messages (and, across groups, router
+  entries), before that drain's settled async calls. (Before threaded execution's S2b the async
+  drain applied its messages and settled calls first, whatever the order they were all posted in:
+  a command posted before a message now sees the message not yet delivered.)
 - **A command that throws** (a kill releases locks and cancels async calls, which can write the
-  tree, whose slots may throw) gets `done(false)`. The commands after it stay queued, in order,
-  ahead of later posts, and the exception leaves the step.
+  tree, whose slots may throw) gets `done(false)`, unless its call had returned (a kill that killed
+  before it threw gets `done(true)`). What was posted after it (commands, and on the async
+  scheduler messages too) stays queued, in order, ahead of later posts, and the exception leaves
+  the step.
+- **A pool's `post_control(pid, cmd)`** (`app.exec_pool()`, S2b) posts the command to the group
+  the app's pid directory has `pid` in, with the same rules there; it returns false, and `done` is
+  never called, for a pid the app does not know or a group being destroyed ([Messages and control
+  across groups](#messages-and-control-across-groups)).
 - **Wakes.** A post ends the sync scheduler's idle `run()` wait, and wakes a driver blocked in
   the async scheduler's `wait_for_work()`. `has_pending_control()` (any thread) is true while a
   posted command waits: from the post until the batch that took it has been applied, refused or
@@ -1494,13 +1575,14 @@ Programs can manage other processes using DSL intrinsics:
 (self-pid)      ;; => 1
 (self-uid)      ;; => "alice"
 
-;; List all processes
+;; List all processes: pid, name, status, priority, uid, steps and scope
 (ps)            ;; => list of dicts [{pid: 1, name: "...", status: "running", ...}, ...]
 
 ;; Inspect a specific process
-(inspect 2)     ;; => dict with full process_info
+(inspect 2)     ;; => dict with full process_info, scope included
 
-;; Control other processes
+;; Control other processes: #t when done (or, in another group, requested), #f for a pid the
+;; caller cannot reach
 (pause 2)
 (resume 2)
 (kill 2)
@@ -1529,6 +1611,34 @@ as Ariadne's action and resident lanes, gives each context a placeholder process
 rule those readers reported 0 there, so a loop bounded by `(time-elapsed)` never ended, and a
 watch was registered for pid 0 and never fired. `memory-usage` reads the context's tracker,
 which such a host keeps per program.
+
+**Which processes they reach: the owner rule** (threaded execution's S2b; STATE_EXEC_THREADED.md
+4.5). A process's `owner` (`execute_options::owner`, kept by its forked and spawned children;
+`process_info::owner`) decides what its `ps`, `inspect`, `kill`, `pause` and `resume` reach. A
+process with no owner (`""`), and a host's context, sees and controls every process of its
+scheduler, as before. A process with an owner sees only its owner's: `(ps)` leaves the others'
+rows out, `(inspect pid)` gives `nil` for one, and `(kill pid)`, `(pause pid)` and `(resume pid)`
+give `#f`, as for an unknown pid. Across execution groups only an owned process reaches anything: a
+`kill`, `pause` or `resume` of a pid of its own owner in another group of the app is passed to that
+group and returns `#t` for "requested" (even where the call there would give `#f`), landing at
+that group's next drain; any other pid in another group gives `#f`. `ps` and `inspect` see the
+caller's own group only until S2c merges other groups' rows. Ariadne gives every process of a
+document its Runtime's owner tag, and pycvc's `ExecPool` each pooled `Exec` its own, so documents
+and pooled `Exec`s reach only their own processes.
+
+**Whose a process is: `scope`.** Every `(ps)` and `(inspect)` row, and `process_info::scope`,
+says which part of its owner a process runs in: its chroot (`execute_options::root_path`)
+relative to its owner's root (`execute_options::owner_root`), written by `process_scope`. A
+chroot equal to the owner's root is `""`, one under it is the rest of the path, one outside it is
+written whole after a `/`, and with no owner root the scope is the chroot itself. A plain host
+gives neither, so its rows' scope is `""`. An Ariadne Runtime gives each process it starts its
+context's chroot and the document's prefix as the owner's root, so a document's own programs
+are `""` and a loaded document's are `includes.<as>` (`includes.<as>.<i>` for a repeated mount):
+a Processes view names each row's application from it (docs/roadmap/ARIADNE_SHELL.md 4.10,
+`components/processes.ari`). A spawned or forked child keeps its parent's owner root and
+chroot, so it has its parent's scope. The cluster's process rows (`exec_coordinator`'s
+`serialize_process_info`) carry it, and a migrated process keeps its owner root
+(`state_value_codec`).
 
 **What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
 a document's processes with `kill_owner` reaps its children too. Its environment depends on the
@@ -1940,6 +2050,16 @@ message bus delivers it to any subscribers on that path.
 ;; msg-send returns a dict: {status: "delivered", path: "myapp.events.updates"}
 ```
 
+**What `msg-send` returns.** `{status, path}`, where `status` is the state tree's side of the send
+(`sendMessage`, the cluster message bus): `"delivered"` when a cluster shard is attached and took
+it, else `"error"`. Most hosts attach no shard (only `arisrv` and the distributed state session do),
+so there `status` is `"error"` although the scheduler delivered the message to its waiters or queued
+it: `status` alone says nothing about the scheduler. The scheduler's one failure is threaded
+execution's S2b's: when the channel's home is another execution group (STATE_EXEC_THREADED.md 4.6)
+and its ingress is full (`state_exec.groups.ingress_cap`, 65536 posts and sends not yet drained by
+default), the message is refused and `msg-send` returns `{status: "error", path, reason: "ingress
+full"}`. Only that result has a `reason`.
+
 ### Producer-Consumer Pattern
 
 **Producer process:**
@@ -2065,6 +2185,11 @@ Resolution order when `msg-recv` is called:
 1. **Inbox** — if the process has buffered messages, pops the front one
 2. **Pending queue** — if the scheduler has a pre-delivered message for the path, returns it
 3. **Suspend** — otherwise the process enters `waiting` status until a message is delivered
+
+On a channel whose home is another execution group (threaded execution's S2b,
+[Messages and control across groups](#messages-and-control-across-groups)) the pending queue is the
+home's: the process suspends and subscribes there, and the home answers with its queue's front or
+the next message sent; `msg-pending` on such a channel gives 0.
 
 ### Checking for Pending Messages
 
@@ -2737,10 +2862,14 @@ reads. Each is read once, when that object is built, and a later change does not
 | `state_exec.deterministic` | the app's pool is built, unless the host gives `pool_options`; by `exec_pump_frame()` for group 0 when no pool exists | `true`, `1`, `on`, `yes`; `false`, `0`, `off`, `no` (anything else is logged and `false` used) | `false` |
 | `state_exec.process_class` | `app::exec_scheduler()` is first built ([THREAD_POOL.md](THREAD_POOL.md)) | `background`, `utility`, `normal` (anything else is logged and ignored) | unset (the OS's) |
 
-`state_exec.slice_steps`, `state_exec.slice_seconds` and `state_exec.long_step_ms` are not read
-once: each async scheduler reads them under its watch root when a run loop starts after a change
-under `state_exec` ([Runs](#runs-several-steps-a-pick-slice_steps),
-[The long-step monitor](#the-long-step-monitor)).
+`state_exec.slice_steps`, `state_exec.slice_seconds`, `state_exec.long_step_ms` and
+`state_exec.groups.ingress_cap` are not read once: each async scheduler reads them under its watch
+root when a run loop starts after a change under `state_exec`
+([Runs](#runs-several-steps-a-pick-slice_steps), [The long-step monitor](#the-long-step-monitor)).
+`state_exec.groups.ingress_cap` (a whole number, 0 for none; missing or empty, 65536) is how many
+host posts and sends from other groups an ingress holds undrained before it refuses more (S2b;
+[Messages and control across groups](#messages-and-control-across-groups));
+`async_scheduler::set_ingress_cap` wins over it.
 
 ---
 

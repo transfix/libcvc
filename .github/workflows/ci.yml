@@ -1312,9 +1312,12 @@ jobs:
   # way a site serves them, from an ordinary path with no COOP/COEP and under a strict
   # Content-Security-Policy (any violation fails): a document set from the page's origin must load
   # and run (on ari's terminal, its text must show), and a cross-origin or missing src must show
-  # the error (src/arigl/web/test/arigl_web_smoke.mjs). xterm.js for ari's page comes from the
-  # prefix's xterm-js packages when installed, else the pinned npm download. Only when the pages,
-  # their document loader, the recipe or this file changed: it builds libcvc and cvcGL for wasm.
+  # the error (src/arigl/web/test/arigl_web_smoke.mjs); and the context menu's Copy, Cut and Paste
+  # must go through the browser's clipboard (arigl_web_clipboard.mjs); a picture's Save image...
+  # and (save-url) must download the file (arigl_web_save.mjs). xterm.js for ari's page
+  # comes from the prefix's xterm-js packages when installed, else the pinned npm download. Only
+  # when the pages, their document loader, the clipboard, the recipe or this file changed: it
+  # builds libcvc and cvcGL for wasm.
   arigl-web:
     name: arigl-web shell + ari page (wasm, headless Chrome)
     runs-on: ubuntu-24.04
@@ -1347,7 +1350,9 @@ jobs:
                    inc/cvc/ariadne/doc_fetch.h src/cvc/ariadne/doc_fetch.cpp \
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
                    inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
+                   inc/cvc/ariadne/media_save.h src/cvc/ariadne/media_save.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
+                   src/cvcGL/Clipboard.cpp src/cvcGL/ariadne/ImGuiBackend.cpp \
                    .github/workflows/ci.yml | grep -q .; then
               run=false
             fi
@@ -1369,6 +1374,15 @@ jobs:
             --config release --link shared --no-fallback-to-source
           test -f "$RUNNER_TEMP/emsdk/emsdk_env.sh"
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
+
+      - name: The page's loader in headless Chrome (no wasm build)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          # arigl-web.js downloading the module it starts, with a stand-in module: a download that
+          # breaks off is fetched again past the cache, and one that keeps breaking names itself.
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_download.mjs --chrome "$chrome"
 
       - name: Install the recipe's wasm deps, and xterm.js for ari's pages
         if: steps.paths.outputs.run == 'true'
@@ -1398,6 +1412,22 @@ jobs:
           "$chrome" --version
           "$node" src/arigl/web/test/arigl_web_smoke.mjs --web stage-arigl-web/share/arigl-web \
             --docset src/cvc/tests/data/ariadne_docset --chrome "$chrome"
+
+      - name: Copy, cut and paste through the context menu in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_clipboard.mjs --web stage-arigl-web/share/arigl-web \
+            --chrome "$chrome"
+
+      - name: Save a picture and a video as browser downloads in headless Chrome
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$node" src/arigl/web/test/arigl_web_save.mjs --web stage-arigl-web/share/arigl-web \
+            --chrome "$chrome"
 
       - name: Upload the arigl-web shell
         if: steps.paths.outputs.run == 'true'
@@ -1811,14 +1841,16 @@ jobs:
       # The terminal backends are optional at configure time: without ftxui / tvision the
       # backends compile to stubs and the AriadneFtxui / AriadneTvision tests SKIP instead of
       # failing, which is how the macOS and Windows lanes ran them until the libcvc recipe declared
-      # ftxui there. Make a missing backend a failure.
+      # ftxui there. Make a missing backend a failure. So too the .ari schema's validator
+      # (json-schema-validator): without it no load checks a document, and ariadne_schema_test skips.
       # Likewise SDL3: without it cvcGL's onscreen window is VTK's and cvcgl_sdl_attach skips.
       - name: Assert the Ariadne terminal backends and cvcGL's SDL3 are configured
         shell: bash
         run: |
-          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED"; do
+          for want in "Ariadne: FTXUI terminal backend ENABLED" "Ariadne: tvision terminal backend ENABLED" \
+                      "Ariadne: .ari Layer-2 JSON-Schema validation ENABLED"; do
             grep -qF "$want" configure.log \
-              || { echo "::error::the configure did not print '$want': the Ariadne terminal tests would only skip"; exit 1; }
+              || { echo "::error::the configure did not print '$want': the Ariadne tests that need it would only skip"; exit 1; }
           done
           grep -qF "cvcGL: SDL3 input/peripheral seam ENABLED" configure.log \
             || { echo "::error::the configure found no SDL3: cvcGL's SDL window would go untested"; exit 1; }
@@ -2471,6 +2503,17 @@ jobs:
   # mt.groups' continuous points are required in all three legs: SAN_REQUIRED_S2A, appended as
   # SAN_REQUIRED_S1A is. Q's state-word model runs in CTest (its quick suite) and in
   # locks-deep.yml (its deep suite), under no sanitizer: it is Python.
+  #
+  # Threaded execution's Stage 2b (the router and process control across groups; S2.md section
+  # 5) adds state_exec_router_test (td 8.4's MS cases, control across groups, pool.kill_owner,
+  # RT-1, DT-3, DT-4) and state_exec_stress_test's short form (ST-1's random programs over 16
+  # groups and ST-2's fuzz seeds; their long forms run nightly, state-exec-stress.yml) to every
+  # leg, the stress binary whole, its Stress suites included (SAN_CXX_RUNS_S2B), and SAN_BENCH
+  # runs mt.cross_group_msg at t=4 k=4: pingpong, fan-out and broadcast between groups through
+  # the router, and the same programs in one group. Stage 2b's cases and mt.cross_group_msg's
+  # cross-group points are required in all three legs: SAN_REQUIRED_S2B, appended as
+  # SAN_REQUIRED_S1A is. The router protocol's model runs in CTest (its quick suite) and in
+  # locks-deep.yml (its deep suite), under no sanitizer: it is Python.
   sanitizers:
     name: sanitizers / ${{ matrix.name }}
     runs-on: ubuntu-24.04
@@ -2484,14 +2527,16 @@ jobs:
           # case, or the pycvc script's "ok:" line. <run> may also be a scenario in SAN_BENCH, whose
           # line for a point is its params ("t=8 prog=fib runs=1"). Stage 0's lines, the same in
           # both gcc legs, follow the locks phases'; "(" after a name keeps it from matching a
-          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, Stage 1b's SAN_REQUIRED_S1B's and
-          # Stage 2a's SAN_REQUIRED_S2A's, in every leg. A leg may also name its own C and C++
-          # compilers (cc, cxx; the runner's gcc otherwise), C++ tests (cxx_tests, for
-          # SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH) and how some of its C++ tests run
-          # (cxx_runs, run.sh's SAN_CXX_RUNS): one line a binary of its C++ tests,
+          # longer one. Stage 1a's are SAN_REQUIRED_S1A's, Stage 1b's SAN_REQUIRED_S1B's,
+          # Stage 2a's SAN_REQUIRED_S2A's and Stage 2b's SAN_REQUIRED_S2B's, in every leg. A leg
+          # may also name its own C and C++ compilers (cc, cxx; the runner's gcc otherwise), C++
+          # tests (cxx_tests, for SAN_CXX_TESTS), bench runs (bench, for SAN_BENCH) and how some
+          # of its C++ tests run (cxx_runs, run.sh's SAN_CXX_RUNS, with SAN_CXX_RUNS_S2B's lines
+          # after its own): one line a binary of its C++ tests,
           # `<name>: [VAR=VALUE ...] [--option ...]`, whose variables are set and options passed
           # for that binary's run alone (the others run bare). A --gtest_filter there still leaves
-          # the Stress suites out: run.sh adds *Stress* to its negative patterns.
+          # the Stress suites out: run.sh adds *Stress* to its negative patterns, unless the line
+          # says --keep-stress-suites.
           - name: tsan
             flags: -fsanitize=thread
             required: |
@@ -2645,7 +2690,7 @@ jobs:
               test_pycvc_state_exec_sched.py: ok: test_hz14_stop_from_another_thread
           # clang's TSan (S1-Q9), with the runner's preinstalled clang. clang links its TSan
           # runtime into each executable, and run.sh preloads the shared one, libclang_rt.tsan,
-          # into the interpreter. Its lines are Stage 1a's, 1b's and 2a's only, and of
+          # into the interpreter. Its lines are Stage 1a's, 1b's, 2a's and 2b's only, and of
           # state_exec_stackless_evaluator_test it runs the NativeSite cases alone (Stage 2a's;
           # the gcc legs run the whole binary). Its Ariadne run sizes a pool built from the tree
           # at up to four workers (CVC_EXEC_THREADS; three on the 4-vCPU runner, and a case that
@@ -2667,11 +2712,13 @@ jobs:
               async_lane_test thread_pool_test state_exec_locks_test state_exec_locks_model_test
               ariadne_runtime_test state_lifetime_stress_test stream_test net_ws_client_test
               net_engine_test state_exec_coordinator_test state_exec_stackless_evaluator_test
+              state_exec_router_test state_exec_stress_test
             cxx_runs: |
               ariadne_runtime_test: CVC_EXEC_THREADS=4 --gtest_filter=-AppLockManager.*
               state_exec_stackless_evaluator_test: --gtest_filter=NativeSite.*
             bench: |
               mt.groups --size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size shape=even
+              mt.cross_group_msg --size t=4 --size k=4 --size m=20 --size pump=fork_join,continuous
     concurrency:
       group: ci-${{ github.ref }}-sanitizers-${{ matrix.name }}
       cancel-in-progress: true
@@ -2689,12 +2736,14 @@ jobs:
         state_exec_grammar_test state_exec_corpus_test state_exec_pegtl_test
         state_exec_gaps_test state_exec_advanced_integration_test state_exec_deep_data_test
         state_exec_bench_test state_exec_groups_test exec_pool_test stream_test net_ws_client_test
+        state_exec_router_test state_exec_stress_test
         net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
         skeleton_test pocket_tunnel_test contour_stack_test point_classes_test planar_test
         tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test
-        volume_grid_test volume_grid_contours_test volume_grid_contour_intrinsics_test
+        volume_grid_test class_surfaces_test volume_grid_segment_test volume_grid_contours_test
+        volume_grid_contour_intrinsics_test
       # pycvc test scripts (bindings/pycvc/<name>).
       SAN_PY_TESTS: >-
         test_pycvc_exec.py test_pycvc_exec_async.py test_pycvc_exec_coro.py
@@ -2705,10 +2754,17 @@ jobs:
         test_pycvc_point_classes.py
       # state_exec_bench runs (build/bin/state_exec_bench), one a line: a scenario and its --size
       # options; run.sh adds --reps 1 --warmup 0 --timeout 900 and the JSON file. A scenario's
-      # log is named after it, so each scenario takes one line (mt.groups' both pump modes).
+      # log is named after it, so each scenario takes one line (mt.groups' both pump modes;
+      # mt.cross_group_msg's three patterns, in one group and across groups, in both).
       SAN_BENCH: |
         mt.multi_exec --size t=8 --size runs=1
         mt.groups --size t=8 --size groups=8 --size runs=1 --size pump=fork_join,continuous --size shape=even
+        mt.cross_group_msg --size t=4 --size k=4 --size m=20 --size pump=fork_join,continuous
+      # Stage 2b's lines for run.sh's SAN_CXX_RUNS, after each leg's own cxx_runs: the stress
+      # binary's default form is the one for these jobs (ST-1's and ST-2's short forms), so it runs
+      # whole, its Stress suites included, whatever they are called.
+      SAN_CXX_RUNS_S2B: |
+        state_exec_stress_test: --keep-stress-suites
       # Stage 1a's required lines (the matrix's `required` format), the same in every leg: each
       # case of state_exec_groups_test and exec_pool_test (a case added to either adds its line),
       # KO-1 and KO-2, the foreign-future cases of state_exec_async_calls_test, K's pycvc pool
@@ -2952,6 +3008,93 @@ jobs:
         exec_pool_test: OK ] ExecPoolContinuous.ALastGroupDetachedByAnEntryLeavesNoRecord
       # ^ SAN_REQUIRED_S2A ends here. No comment line inside the list: run.sh would read it as a
       # required line.
+      # Stage 2b's required lines (the matrix's `required` format), the same in every leg: the
+      # router test's cases (S2b.0's interface cases; S2.md section 4's MS-12, PL-6..PL-8, KO-3,
+      # RT-1, DT-3 and DT-4), pycvc's OW-1, and mt.cross_group_msg's cross-group points. A case
+      # added to them adds its line.
+      SAN_REQUIRED_S2B: |
+        state_exec_router_test: OK ] RouterInterfaces.AClosedHandleRefusesEveryPost
+        state_exec_router_test: OK ] RouterInterfaces.TheLongestRegisteredPrefixIsTheHome
+        state_exec_router_test: OK ] RouterInterfaces.ATeardownForwardsPastClosedHomes
+        state_exec_router_test: OK ] Router.MS01_ASendReachesAWaiterAtItsHomeOnce
+        state_exec_router_test: OK ] Router.MS02_ASendWithNoWaiterIsTakenFromTheHomesQueue
+        state_exec_router_test: OK ] Router.MS03_AReceiveElsewhereThenASendIsDeliveredOnce
+        state_exec_router_test: OK ] Router.MS04_ABroadcastReachesThreeGroupsEachWithItsOwnEnvelope
+        state_exec_router_test: OK ] Router.MS05_ATimedWaitExpiringWithADeliveryInFlight
+        state_exec_router_test: OK ] Router.MS06_AKilledOrReapedWaiterRequeues
+        state_exec_router_test: OK ] Router.MS07_EightGroupsSendingToOneKeyKeepFifoPerSender
+        state_exec_router_test: OK ] Router.MS07b_FifoPerSenderHoldsAcrossItsHomesTeardown
+        state_exec_router_test: OK ] Router.MS08_AnAppGlobalKeyIsHomedAtGroupZero
+        state_exec_router_test: OK ] Router.MS09_AHashKeyStaysInTheGroupThatResolvesIt
+        state_exec_router_test: OK ] Router.MS10_AFullIngressRefusesSendsAndPosts
+        state_exec_router_test: OK ] Router.MS12_SemanticsMatrix
+        state_exec_router_test: OK ] Router.PL06_ControlAcrossGroups
+        state_exec_router_test: OK ] Router.PL07_AnotherOwnersPid
+        state_exec_router_test: OK ] Router.PL08_KillOwnerIsAcknowledged
+        state_exec_router_test: OK ] Router.KO03_KillOwnerSurvivesADyingGroup
+        state_exec_router_test: OK ] Router.RT01_OneGroupNeverRoutes
+        state_exec_router_test: OK ] Router.DT03_DeterministicEqualsThreaded
+        state_exec_router_test: OK ] Router.DT04_CrossGroupOrderRepeats
+        state_exec_stress_test: OK ] RandomPrograms.ST01_SixteenGroupsLoseAndDuplicateNothing
+        state_exec_stress_test: OK ] RandomPrograms.ST02_TheSameUnderFuzzSeeds
+        state_exec_router_test: OK ] RouterR.TheOrderedIngressAppliesInPostOrder
+        state_exec_router_test: OK ] RouterR.TheThrowRuleCountsTheEntryAndRequeuesTheRest
+        state_exec_router_test: OK ] RouterR.TheDestructorBouncesRouterEntries
+        state_exec_router_test: OK ] RouterR.TheIngressCapRefusesCappedEntriesOnly
+        state_exec_router_test: OK ] RouterR.DeliverToIsForOneWaitOnly
+        state_exec_router_test: OK ] RouterR.ARequeueGoesToTheFrontPastTheCap
+        state_exec_router_test: OK ] RouterR.BroadcastTrackingQueuesOnceOrDrops
+        state_exec_router_test: OK ] RouterR.ATornDownHomeForwardsWhatItHoldsInOrder
+        state_exec_router_test: OK ] RouterR.ATornDownHomesTrackerIsAdopted
+        state_exec_router_test: OK ] RouterR.ARequeueGoesToTheEarliestWaiterOnly
+        state_exec_router_test: OK ] RouterR.ADeliverAClosedReceiverRefusesIsStaleAtOnce
+        state_exec_router_test: OK ] RouterR.AnUncappedSendGoesPastTheFifosCap
+        state_exec_router_test: OK ] RouterR.AnIslandKeepsItsOwnKeys
+        state_exec_router_test: OK ] RouterR.AnIslandsTeardownForwardsNothing
+        state_exec_router_test: OK ] RouterR.TheDirectoryAndThePublishFollowTheProcess
+        state_exec_router_test: OK ] RouterR.LeavingTheRouterTwiceAndAfterAMove
+        state_exec_router_test: OK ] RouterR.TheCacheOfHomesFollowsTheEpoch
+        state_exec_router_test: OK ] RouterR.AClosedHomeIsResolvedAgain
+        state_exec_router_test: OK ] RouterR.NoPrefixNoConsultation
+        state_exec_router_test: OK ] RouterR.ARemoteReceiverGetsEveryMessageInOrderOnAPool
+        state_exec_router_test: OK ] ExecDirectory.AddFindRemoveAndGroupsOfAnOwner
+        state_exec_router_test: OK ] ExecDirectory.ThreadsShareTheShards
+        state_exec_router_test: OK ] ExecDirectory.APidIsFoundBetweenItsCreationAndItsGroupsFirstPublish
+        state_exec_router_test: OK ] PublishedInfo.TheGenerationMovesWhereARowWouldChange
+        state_exec_router_test: OK ] PublishedInfo.ARowIsTheProcessAsMakeInfoReadsIt
+        state_exec_router_test: OK ] PublishedInfo.AHoldTakenOrDroppedWithoutAWaitIsPublished
+        state_exec_router_test: OK ] PublishedInfo.RowsAreRebuiltOnGenerationMovesAndCountersRefreshEvery100Ms
+        state_exec_router_test: OK ] OwnerRule.LocalControlIsFilteredForAnOwnedCaller
+        state_exec_router_test: OK ] OwnerRule.AcrossGroupsTheCallersOwnerIsPosted
+        state_exec_router_test: OK ] PoolKillOwner.ForkJoinDrainsEachGroupInline
+        state_exec_router_test: OK ] PoolKillOwner.ContinuousWaitsForEachGroup
+        state_exec_router_test: OK ] PoolKillOwner.AGroupTornDownMeanwhileEndsTheWait
+        state_exec_router_test: OK ] PoolKillOwner.RefusedFromInsideAPumpOfThePool
+        state_exec_router_test: OK ] GroupZeroDriver.AFrameSkipsGroupZeroWhileAnotherThreadHoldsIt
+        state_exec_router_test: OK ] RouterR.APostThroughAHandleNeverDeadlocksWithItsClose
+        state_exec_router_test: OK ] RouterR.APostThroughAHandleGoesIntoItsGroup
+        state_exec_router_test: OK ] RouterR.AnUnregisterAloneStillForwardsAtTheTeardown
+        state_exec_router_test: OK ] RouterR.ATornDownHomeForwardsAMessageALaterPrefixCovers
+        state_exec_router_test: OK ] RouterR.AnAnswerWaitsForItsClosedHomesForward
+        state_exec_router_test: OK ] RouterR.ATeardownNeverWaitsOnItself
+        state_exec_router_test: OK ] RouterR.AReplyOnAHashKeyIsNeverCapped
+        state_exec_router_test: OK ] PoolKillOwner.TwoAtOnceBothReturn
+        state_exec_router_test: OK ] PoolKillOwner.RefusedInsideAGroupsPumpBeforeActing
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_AMovedDocumentKeepsReceivingOnItsChannels
+        ariadne_runtime_test: OK ] AriadneRouter.S2b6_ADrainSkipsAGroupZeroAnotherThreadHolds
+        test_pycvc_exec_pool.py: ok: test_ow01_pooled_execs_have_owners
+        test_pycvc_exec_pool.py: ok: test_s2b7_post_message_returns_bool
+        test_pycvc_exec_pool.py: ok: test_s2b7_a_global_key_meets_across_pooled_execs
+        test_pycvc_exec_pool.py: ok: test_s2b7_one_prefix_per_pool
+        mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=fork_join
+        mt.cross_group_msg: pattern=pingpong span=cross t=4 k=4 m=20 pump=continuous
+        mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=fork_join
+        mt.cross_group_msg: pattern=fanout span=cross t=4 k=4 m=20 pump=continuous
+        mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=fork_join
+        mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=continuous
+      # ^ SAN_REQUIRED_S2B ends here (no comment line inside it).
       # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
       # in every leg: its I/O threads take commands from the test's thread and post events back,
       # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
@@ -3063,13 +3206,16 @@ jobs:
         shell: bash
         env:
           SAN_CXX_TESTS: ${{ matrix.cxx_tests || env.SAN_CXX_TESTS }}
-          SAN_CXX_RUNS: ${{ matrix.cxx_runs }}
+          SAN_CXX_RUNS: |
+            ${{ matrix.cxx_runs }}
+            ${{ env.SAN_CXX_RUNS_S2B }}
           SAN_BENCH: ${{ matrix.bench || env.SAN_BENCH }}
           SAN_REQUIRED: |
             ${{ matrix.required }}
             ${{ env.SAN_REQUIRED_S1A }}
             ${{ env.SAN_REQUIRED_S1B }}
             ${{ env.SAN_REQUIRED_S2A }}
+            ${{ env.SAN_REQUIRED_S2B }}
             ${{ env.SAN_REQUIRED_NET }}
         run: bash .github/sanitizers/run.sh "${{ matrix.name }}"
 
@@ -3085,9 +3231,10 @@ jobs:
     # Pushes only (master, tags, ci/full/**): pull requests skip the four macOS package lanes.
     # The account runs 5 hosted macOS jobs at a time (40 in all), and with these four every PR
     # needed six macOS jobs to merge, so macOS set the merge rate (2026-11-13: 777 jobs queued,
-    # 177 of them macOS, the oldest 17 h old). The two macOS recipe lanes (ci-recipe.yml) still
-    # gate pull requests. A macOS-only packaging break shows on master's run; to see it before a
-    # merge, push the branch to ci/full/**. Branch protection no longer requires these four.
+    # 177 of them macOS, the oldest 17 h old). The two macOS recipe lanes (ci-recipe.yml) moved
+    # to master too (2026-11-23). A macOS-only packaging break shows on master's run; to see it
+    # before a merge, push the branch to ci/full/**, or give the PR the `macos` label for the
+    # recipe lanes. Branch protection no longer requires these four.
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
     # Non-blocking for experimental matrix entries (the gRPC probe below): a macOS grpc build

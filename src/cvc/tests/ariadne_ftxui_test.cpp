@@ -10,14 +10,19 @@
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/term_graphics.h> // §5.28 osc52_copy, the context menu's Copy
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/core/app.h>
+#include <cvc/core/notify.h> // §5.28 a notification's entry
 #include <cvc/image/image.h>
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h> // §10 the tf_editor's model
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -102,6 +107,16 @@ struct Term {
     return true;
   }
   bool shows(const std::string &s) const { return screen.find(s) != std::string::npos; }
+  // §5.28 right-click the first cell of `needle`, then redraw: its context menu.
+  bool rclick(const std::string &needle) {
+    int x = 0, y = 0;
+    if (!find_cell(screen, needle, x, y))
+      return false;
+    be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x, y, 3));
+    be.feed(rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x, y, 3));
+    draw();
+    return true;
+  }
 };
 
 } // namespace
@@ -2295,6 +2310,235 @@ TEST(AriadneFtxui, ClipboardSetIsAnOsc52Escape) {
   EXPECT_EQ(val(t.app, "fs"), "no");
   EXPECT_EQ(t.be.take_clipboard(), "\x1b]52;c;aHR0cHM6Ly90eC53dGYvcC8x\x07");
   EXPECT_EQ(t.be.take_clipboard(), "") << "taken once";
+}
+
+// §5.28 a right-click on a text opens its context menu, Copy: an OSC 52 escape of the text (a
+// value's: the value). Escape or a click elsewhere closes it.
+TEST(AriadneFtxui, ARightClickOnATextOffersCopy) {
+  REQUIRE_FTXUI();
+  Term t(group({text("a caption"), text_bound("Room", "room")}));
+  cvc::state::instance(t.app)("room").value("standup");
+  t.draw();
+  ASSERT_TRUE(t.rclick("a caption")) << t.screen;
+  ASSERT_TRUE(t.shows(" Copy ")) << "its menu\n" << t.screen;
+  ASSERT_TRUE(t.click(" Copy "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("a caption"));
+  EXPECT_FALSE(t.shows(" Copy ")) << "picked: closed\n" << t.screen;
+  ASSERT_TRUE(t.rclick("Room: standup"));
+  ASSERT_TRUE(t.click(" Copy "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("standup")) << "a value's Copy: the value";
+  ASSERT_TRUE(t.rclick("a caption"));
+  t.key("Escape");
+  t.draw();
+  EXPECT_FALSE(t.shows(" Copy ")) << "Escape closes it\n" << t.screen;
+  EXPECT_EQ(t.be.take_clipboard(), "");
+}
+
+// §5.28 a field's menu: Cut, Copy, Paste and Select all, on the selection (Shift with the arrows,
+// or Select all) or, with none, the whole text. Paste asks the terminal (an OSC 52 read), whose
+// answer comes as typed text into the field. Shift+F10 opens the focused field's menu, which the
+// arrows and Enter drive.
+TEST(AriadneFtxui, AFieldsMenuCutsCopiesAndPastes) {
+  REQUIRE_FTXUI();
+  Widget name = input_text("Name", "name");
+  Widget pw = input_text("Secret", "secret");
+  pw.password = true;
+  Term t(group({name, pw}));
+  cvc::state::instance(t.app)("name").value("hello world");
+  cvc::state::instance(t.app)("secret").value("hunter2");
+  t.draw();
+  ASSERT_TRUE(t.rclick("Name: [")) << t.screen;
+  for (const char *e : {" Cut ", " Copy ", " Paste ", " Select all "})
+    EXPECT_TRUE(t.shows(e)) << e << "\n" << t.screen;
+  ASSERT_TRUE(t.click(" Copy "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("hello world")) << "nothing selected: all";
+
+  // Select "world" with Shift+Left, and copy it.
+  t.key("End");
+  for (int i = 0; i < 5; ++i)
+    t.key("Left", /*shift=*/true);
+  t.draw();
+  ASSERT_TRUE(t.rclick("Name: ["));
+  ASSERT_TRUE(t.click(" Copy "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("world"));
+  // Typing replaces the selection.
+  t.type("there");
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "hello there");
+
+  // Select all, then Cut: all of it to the clipboard, out of the field.
+  ASSERT_TRUE(t.rclick("Name: ["));
+  ASSERT_TRUE(t.click(" Select all "));
+  ASSERT_TRUE(t.rclick("Name: ["));
+  ASSERT_TRUE(t.click(" Cut "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("hello there"));
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "");
+
+  // Paste: the OSC 52 read goes out; the answer, typed, lands in the field.
+  ASSERT_TRUE(t.rclick("Name: ["));
+  ASSERT_TRUE(t.click(" Paste "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_query());
+  t.be.feed(t.rt, TermEvent::text_event("pasted\ntext"));
+  t.key("Return");
+  EXPECT_EQ(val(t.app, "name"), "pastedtext") << "a line field takes it without its line break";
+
+  // Shift+F10: the focused field's menu, from the keys.
+  t.key("F10", /*shift=*/true);
+  t.draw();
+  ASSERT_TRUE(t.shows(" Select all ")) << t.screen;
+  t.key("Down"); // Copy
+  t.key("Return");
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("pastedtext"));
+
+  // A password: no Cut or Copy.
+  t.draw(); // the menu Return closed is gone from the screen
+  ASSERT_TRUE(t.rclick("Secret: [")) << t.screen;
+  ASSERT_TRUE(t.click(" Copy "));
+  EXPECT_EQ(t.be.take_clipboard(), "") << "a password's Copy does nothing";
+}
+
+// §5.28 a text view's menu: Copy line (the line under the pointer, a chat message) and Copy all.
+TEST(AriadneFtxui, ATextViewsMenuCopiesALineOrAll) {
+  REQUIRE_FTXUI();
+  Term t(group({text_view("##log", "log")}));
+  const std::string log = "[10:01] ana: alpha\n[10:02] bo: beta\n[10:03] cy: gamma";
+  cvc::state::instance(t.app)("log").value(log);
+  t.draw();
+  ASSERT_TRUE(t.rclick("bo: beta")) << t.screen;
+  ASSERT_TRUE(t.click(" Copy line ")) << t.screen;
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy("[10:02] bo: beta"));
+  ASSERT_TRUE(t.rclick("cy: gamma"));
+  ASSERT_TRUE(t.click(" Copy all "));
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy(log));
+}
+
+// §5.28 the bell's entry copies the whole message, not the one line it shows.
+TEST(AriadneFtxui, ANotificationsEntryCopiesItsWholeMessage) {
+  REQUIRE_FTXUI();
+  Term t(group({menubar({menu("File", {}), tray_bell()})}));
+  cvc::notification n;
+  n.text = "build failed\nstep 3: link error";
+  cvc::notify(t.app, n);
+  t.draw();
+  ASSERT_TRUE(t.click("\xF0\x9F\x94\x94")) << "the bell\n" << t.screen;
+  ASSERT_TRUE(t.shows("build failed")) << t.screen;
+  ASSERT_TRUE(t.rclick("build failed")) << t.screen;
+  ASSERT_TRUE(t.click(" Copy ")) << t.screen;
+  EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy(n.text));
+}
+
+// §5.29 a picture by URL or file has Save image... in its context menu. A terminal has no Save
+// dialog, so the picture goes into the save folder (the Downloads folder unless the host says
+// otherwise) as a new file, never over one there, and a notification says where. A video: has
+// Save video...; a picture with save: false, and a decorative video (a video URL in an image:),
+// have none. Shift+F10 on a picture that takes the focus (fullscreen: true) opens its menu too.
+TEST(AriadneFtxui, APicturesMenuSavesItIntoTheDownloadsFolder) {
+  REQUIRE_FTXUI();
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() /
+      ("cvc_ftxui_save_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir / "dl");
+  const std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + "the picture's own bytes";
+  std::ofstream(dir / "cat.png", std::ios::binary) << png;
+  std::ofstream(dir / "dl" / "cat.png", std::ios::binary) << "already there";
+  std::ofstream(dir / "clip.webm", std::ios::binary)
+      << std::string("\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm", 16);
+
+  Widget pic = image_widget("pic", "file://cat.png", 64);
+  Widget kept = image_widget("kept", "file://cat.png", 64);
+  kept.save_menu = false;
+  Widget avatar = image_widget("avatar", "file://clip.webm", 64); // a decorative video
+  Widget clip;
+  clip.kind = Kind::Video;
+  clip.label = "clip";
+  clip.src = "file://clip.webm";
+  clip.img_size = 64;
+  clip.img_h = 36;
+  Widget open = image_widget("open", "file://cat.png", 64);
+  open.fullscreen_control = true;
+  Term t(group({text("first"), pic, text("second"), kept, text("third"), avatar, text("fourth"),
+                clip, text("fifth"), open}));
+  t.rt.set_media_base(dir.string());
+  t.rt.set_save_dir((dir / "dl").string());
+  t.draw();
+  // The cell under a caption: its picture's first row.
+  const auto under = [&](const char *caption) {
+    int x = 0, y = 0;
+    if (!find_cell(t.screen, caption, x, y))
+      return false;
+    t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x, y + 1, 3));
+    t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x, y + 1, 3));
+    t.draw();
+    return true;
+  };
+  const auto saved = [&](const fs::path &p) {
+    for (int i = 0; i < 2000 && !fs::exists(p); ++i) {
+      t.rt.drain();
+      t.draw();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (int i = 0; i < 5; ++i) // the notification comes from the drain after the write
+      t.rt.drain();
+    return fs::exists(p);
+  };
+
+  ASSERT_TRUE(under("first")) << t.screen;
+  ASSERT_TRUE(t.shows(" Save image... ")) << "its menu\n" << t.screen;
+  ASSERT_TRUE(t.click(" Save image... "));
+  EXPECT_FALSE(t.shows(" Save image... ")) << "picked: closed\n" << t.screen;
+  ASSERT_TRUE(saved(dir / "dl" / "cat (1).png")) << "a new file beside the one there";
+  {
+    std::ifstream in(dir / "dl" / "cat (1).png", std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), png);
+  }
+  const std::vector<cvc::notification_entry> notes = cvc::notifications(t.app);
+  ASSERT_FALSE(notes.empty());
+  EXPECT_EQ(notes.back().text, "Saved cat (1).png to " + (dir / "dl" / "cat (1).png").string());
+
+  ASSERT_TRUE(under("second"));
+  EXPECT_FALSE(t.shows(" Save image... ")) << "save: false: none\n" << t.screen;
+  ASSERT_TRUE(under("third"));
+  EXPECT_FALSE(t.shows(" Save ")) << "a decorative video: none\n" << t.screen;
+  ASSERT_TRUE(under("fourth"));
+  ASSERT_TRUE(t.shows(" Save video... ")) << "a video's\n" << t.screen;
+  ASSERT_TRUE(t.click(" Save video... "));
+  ASSERT_TRUE(saved(dir / "dl" / "clip.webm"));
+
+  // The keyboard: Tab to the picture that opens full screen, then Shift+F10.
+  for (int i = 0; i < 12 && !t.shows(" Save image... "); ++i) {
+    t.key("Tab");
+    t.key("F10", /*shift=*/true);
+    t.draw();
+    if (!t.shows(" Save image... ")) {
+      t.key("Escape");
+      t.draw();
+    }
+  }
+  EXPECT_TRUE(t.shows(" Save image... ")) << "Shift+F10 on the focused picture\n" << t.screen;
+  t.key("Escape");
+  t.draw();
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// §5.28 hosted, there is no terminal to ask for the clipboard: Paste says to paste with the
+// terminal's own paste (the tooltip line, which the host shows).
+TEST(AriadneFtxuiHosted, APasteWithNoTerminalToAskSaysHowToPaste) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.hosted = true;
+  Term t(group({input_text("Name", "name")}), o);
+  t.key("Tab");
+  t.key("F10", /*shift=*/true);
+  t.key("Down");
+  t.key("Down"); // Paste
+  t.key("Return");
+  t.draw();
+  EXPECT_NE(t.be.tooltip().find("terminal's own paste"), std::string::npos) << t.be.tooltip();
+  EXPECT_EQ(t.be.take_clipboard(), "");
 }
 
 TEST(AriadneFtxui, BackgroundImageFillsTheScreenUnderTheWidgets) {

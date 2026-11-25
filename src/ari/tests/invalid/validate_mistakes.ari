@@ -1,0 +1,19 @@
+# validate_mistakes.ari — a document with mistakes the .ari schema catches, for ari validate's
+# tests (src/ari/CMakeLists.txt). It lives under invalid/ so the test that every shipped document
+# is valid (ariadne_schema_test) leaves it out. Each line below that ends in "# <-" is one.
+
+meta:
+  name: Validate mistakes
+  min_libcvc: 4.0.0
+
+windows:
+  - window: Controls
+    closeable: false          # <- closable
+    children:
+      - slider_int: Speed
+        bnd: demo.speed       # <- bind
+        lo: 1
+        hi: fast              # <- a number
+      - button: Go
+        on: (state-set "demo.go" 1)
+        commit: release       # <- a slider's key, not a button's

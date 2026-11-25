@@ -23,6 +23,7 @@
 #include <cvc/ariadne/value.h>
 #include <cvc/ariadne/world_rules.h>
 #include <cvc/core/app.h>
+#include <cvc/state/state.h> // findDescendant (SectionTest.RemoveTakesAnEntryOut)
 #include <gtest/gtest.h>
 #include <string>
 #include <utility>
@@ -237,6 +238,28 @@ TEST(SectionTest, ACommitStampsTheSection) {
   const ca::section_stamp other = w.commit(0, ca::section_epoch(app) ^ 1);
   EXPECT_EQ(other.rev, 1u) << "another run's revisions start at 1";
   EXPECT_FALSE(other.same(s1)) << "and its epoch tells them apart";
+}
+
+// remove takes a leaf or a subtree out of the section, never the section itself.
+TEST(SectionTest, RemoveTakesAnEntryOut) {
+  cvc::app app;
+  const std::string base = "conf.rooms.r.thing";
+  ca::section_writer w(app, base);
+  w.set({"a", "x"}, "1");
+  w.set({"a", "y"}, "2");
+  w.set({"b"}, "3");
+  w.commit();
+  EXPECT_TRUE(w.remove({"a"}));
+  EXPECT_FALSE(w.remove({"a"})) << "gone already";
+  EXPECT_FALSE(w.remove({"never"}));
+  EXPECT_FALSE(w.remove({})) << "not the section";
+  EXPECT_EQ(app.root().findDescendant(base + ".a"), nullptr);
+  EXPECT_EQ(app.root().findDescendant(base + ".a.x"), nullptr);
+  const ca::section_reader r(app, base);
+  EXPECT_EQ(r.text({"b"}), "3");
+  EXPECT_TRUE(w.remove({"b"}));
+  EXPECT_FALSE(r.has({"b"}));
+  EXPECT_TRUE(ca::read_section_stamp(app, base).written()) << "the stamp stays";
 }
 
 TEST(RoomRulesTest, EachSectionRoundTrips) {
