@@ -1640,8 +1640,9 @@ TEST(PhysicsFieldWake, SleepingBodiesLeaveTheirSlotsToABoat) {
 
 // Packed bodies (0.6 m apart) on calm water: their waves die down (they leave the window slowly,
 // through its sponge), and the bodies fall asleep with a wake as they do without one, if later:
-// within 120 s, where without one they sleep within 40. In a swell no crate sleeps, with a wake or
-// without, and the waves they scatter do not grow.
+// within 120 s, where without one they sleep within 3. (The swell's half is a test of its own,
+// PackedBodiesStayBoundedInASwell, so each has its own ctest budget: a Debug build takes minutes
+// over either.)
 TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   REQUIRE_JOLT();
   const auto still = std::make_shared<still_surface>(0.0);
@@ -1652,8 +1653,19 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   for (double p : on.peaks)
     std::printf(" %.4f", p);
   std::printf("\n");
+  EXPECT_EQ(off.asleep, 9) << "every crate sleeps without a wake";
   EXPECT_EQ(on.asleep, off.asleep) << "the wake keeps no crate awake";
   EXPECT_LT(on.peaks[9], 0.05 * std::max(on.peaks[0], on.peaks[1])) << "the waves die down";
+  // Each body cuts its columns against the others' waves, so one riding another's wave does not
+  // send it on again: the first waves stay under 0.5 m (cut against the bare water they reached
+  // 0.82 m, against 0.35 m now).
+  EXPECT_LT(on.peaks[0], 0.5);
+}
+
+// The packed crates in a swell: no crate sleeps, with a wake or without, and the waves they
+// scatter do not grow.
+TEST(PhysicsFieldWake, PackedBodiesStayBoundedInASwell) {
+  REQUIRE_JOLT();
   const auto swell = std::make_shared<wave_train_surface>(
       0.0, 0.0, std::vector<wave_train>{{0.25, 5.0, 0.3, 0.0}});
   const packed_run soff = packed(false, swell, 60.0), son = packed(true, swell, 60.0);
@@ -1663,6 +1675,8 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   for (double p : son.peaks)
     std::printf(" %.4f", p);
   std::printf("\n");
+  EXPECT_EQ(soff.asleep, 0) << "no crate sleeps in the swell";
+  EXPECT_EQ(son.asleep, 0) << "nor with a wake";
   double early = 0.0, late = 0.0;
   for (int k = 1; k < 5; ++k)
     early = std::max(early, son.peaks[k]);
@@ -1671,9 +1685,8 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   EXPECT_LT(late, 2.0 * early + 1e-3) << "the scattered waves do not grow";
   // Each body cuts its columns against the sea and the others' waves, so one riding another's
   // wave does not send it on again: the waves among the crates stay under 0.25 m (cut against the
-  // bare sea they reached 0.32 m, and 0.82 m on calm water against 0.35 m now).
+  // bare sea they reached 0.32 m).
   EXPECT_LT(std::max(early, son.peaks[0]), 0.25);
-  EXPECT_LT(on.peaks[0], 0.5);
   EXPECT_LT(son.late_speed, 2.0 * soff.late_speed + 0.05);
 }
 

@@ -838,6 +838,7 @@ bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_
       out.velocity = surface->velocity(p, t);
       if (fw) {
         wake_sample ws;
+        fw->ready_depths(); // its callers read one at a time (a boat's pre-step, the world's lock)
         fw->motion(own, p.x, p.y, out.depth, ws);
         out.velocity = out.velocity + vec3{ws.u, ws.v, ws.w};
       }
@@ -1421,6 +1422,16 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       advance_wakes(be, cfg, t, gn, held_of);
       break;
     }
+  // And their motion below the top, for the reads below (made here, before the field workers
+  // read it): only for a wake an awake body is in, so the waves' steps while every body sleeps
+  // make none.
+  for (const auto &fe : _fields)
+    if (fe.second.wake)
+      for (const placed &pb : awake)
+        if (overlaps(pb.blo, pb.bhi, fe.second.scalar)) {
+          fe.second.wake->ready_depths();
+          break;
+        }
   // What body `id` reads of field `cf`'s wake: the others' waves (none without a wake).
   const auto view_of = [](const compiled_field &cf, body_id id) {
     wake_view v;
