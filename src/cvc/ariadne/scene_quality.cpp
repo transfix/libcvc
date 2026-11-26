@@ -143,16 +143,22 @@ WaterQuality water_quality(int tier, double scale) {
   case 3:
     q.shade = q.foam = q.waves = 0.0;
     q.far_normal = 0.5;
-    q.persistent_foam = q.wake = false;
+    q.persistent_foam = false;
+    // The wake stays, on its smallest window (64 m): a floating body's rings are what shows the
+    // water is live, and a slow machine (the browser's) sits at the last two tiers. In 1/30 s
+    // substeps, half the passes; the shortest waves (0.7 m) keep omega dt under 0.35, where a
+    // substep's phi is within 1 % of the exact (ewave.h).
     q.wake_cells = 128;
+    q.wake_substep = 1.0 / 30.0;
     q.cascades = 2;
     q.spray = q.spray_reach = 0.0;
     break;
   default:
     q.shade = q.foam = q.waves = 0.0;
     q.far_normal = 0.25;
-    q.persistent_foam = q.wake = false;
-    q.wake_cells = 128;
+    q.persistent_foam = false;
+    q.wake_cells = 128; // the wake as at tier 3
+    q.wake_substep = 1.0 / 30.0;
     q.cascades = 2;
     q.spray = q.spray_reach = 0.0;
     break;

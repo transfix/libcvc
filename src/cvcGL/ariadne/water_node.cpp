@@ -1684,12 +1684,14 @@ void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
 }
 
 // The bodies' waves' window: `cells` a side of 0.5 m (adaptive quality's tier picks 256 or 128,
-// the window's reach halving with it), started flat; placed again on the next frame. False (and no
-// window) without float targets.
-bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells) {
+// the window's reach halving with it) stepped in `substep` seconds (1/60, or 1/30 at the last
+// tiers), started flat; placed again on the next frame. False (and no window) without float
+// targets.
+bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells, double substep) {
   cvc::ocean::ewave_params wp;
   wp.n = cells;
   wp.dx = 0.5;
+  wp.substep = substep;
   wp.depth = 5.0;       // until the window is placed: then its wet cells' mean depth
   wp.damping_k2 = 2e-3; // m^2/s: waves 1 m long fade over about 13 s
   wp.damping = 0.02;    // 1/s: everything, over a minute
@@ -1733,9 +1735,10 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
     return;
   const ari::WaterQuality q = quality_of(app, rt);
   const bool on = key(app, rt.wakeKey, 1.0) > 0.5 && q.wake;
-  // the tier's window size (a new window, flat; the old one's waves are dropped)
-  if (on && q.wake_cells != rt.wake->params().n &&
-      !start_wake(rt, vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()), q.wake_cells))
+  // the tier's window size and substep (a new window, flat; the old one's waves are dropped)
+  if (on && (q.wake_cells != rt.wake->params().n || q.wake_substep != rt.wake->params().substep) &&
+      !start_wake(rt, vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()), q.wake_cells,
+                  q.wake_substep))
     return;
   // Decision D3: the camera's target, the point the view is about; the camera's own place when the
   // target is off past the near grid (a view toward the horizon).
@@ -2016,8 +2019,10 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
       return;
     }
     // The bodies' waves, with body: (the window needs float targets too).
-    if (rt.physics)
-      start_wake(rt, ow, std::max(quality_of(app, rt).wake_cells, 128));
+    if (rt.physics) {
+      const ari::WaterQuality q = quality_of(app, rt);
+      start_wake(rt, ow, std::max(q.wake_cells, 128), q.wake_substep);
+    }
     // The persistent foam: the long and middle cascades' turbulence, in one atlas.
     if (rt.cascades.size() >= 2) {
       rt.foam = std::make_unique<OceanFoam>(kFftN, 2);

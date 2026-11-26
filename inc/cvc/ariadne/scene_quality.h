@@ -108,7 +108,10 @@ struct WaterQuality {
   bool persistent_foam = true; // the foam a breaking wave leaves (OceanFoam's passes)
   bool wake = true;            // the bodies' waves (the eWave window's passes and reads)
   int wake_cells = 256;        // their window's cells a side (0.5 m each: 128 m, or 64 m at 128)
-  int cascades = 3;            // 2: the short cascade is not transformed or read
+  // The window's fixed substep (s; ewave_params::substep): its passes a frame go as the frame's
+  // time over it. 1/30 halves them against 1/60 and keeps open water's exact dispersion.
+  double wake_substep = 1.0 / 60.0;
+  int cascades = 3; // 2: the short cascade is not transformed or read
   // The wind-blown spray (§10.5): its particles, a share of water.spray_count (0: none drawn), and
   // its reach, a share of water.lod_spray. Tiers 2 to 4 draw none.
   double spray = 1.0;
@@ -122,8 +125,8 @@ struct WaterQuality {
 //             a quarter the cells (half the reach: 64 m); half the spray, to half its reach
 //   2 medium  ... the full shading to a quarter; the short cascade and the far normal to half; no
 //             persistent foam (the whitecaps alone take Monahan's share); no spray (its own draw)
-//   3 low     the simple shading everywhere; no wake; two cascades (no short one); the far normal
-//             to half
+//   3 low     the simple shading everywhere; two cascades (no short one); the far normal to half;
+//             the wake still drawn, on the 64 m window in 1/30 s substeps (half the passes)
 //   4 least   ... and the far normal to a quarter
 // (What each saves, measured: OCEAN-AND-WEATHER-ROADMAP.md, O21's notes.)
 WaterQuality water_quality(int tier, double scale);
