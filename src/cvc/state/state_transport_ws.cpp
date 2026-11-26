@@ -2803,7 +2803,38 @@ std::size_t state_transport_ws::reap_idle(std::chrono::milliseconds timeout) {
   // 3) And the threads of handshakes that ended unadmitted.
   reap_handshakes();
 #else
-  (void)timeout;
+  // A browser: close a link silent past the timeout (the relay, or the path to it, gone without
+  // closing; the relay pings it every 2 s), so it is no longer a link and its client dials again.
+  // The socket is deleted with it, so no callback can reach the connection any more, and it is
+  // swept here. A backgrounded tab still answers the relay's Pings from onmessage, so it is not
+  // silent; a frozen one may find its link stale when it wakes, and the relay will have closed
+  // its end by then.
+  const std::int64_t now = steady_ns();
+  const std::int64_t to_ns = static_cast<std::int64_t>(timeout.count()) * 1000000;
+  std::lock_guard<std::mutex> lk(_conns_mu);
+  for (auto it = _conns.begin(); it != _conns.end();) {
+    connection *c = it->get();
+    const std::int64_t last = c ? c->last_rx_ns.load(std::memory_order_relaxed) : 0;
+    if (c && c->alive.load() && c->em_socket >= 0 && last != 0 && now - last > to_ns) {
+      std::fprintf(stderr, "[ws] closing a silent link (idle %.1fs)\n",
+                   static_cast<double>(now - last) / 1.0e9);
+      c->alive.store(false);
+      c->open = false;
+      emscripten_websocket_close(c->em_socket, 1000, "idle");
+      emscripten_websocket_delete(c->em_socket);
+      c->em_socket = -1;
+    }
+    if (c && !c->alive.load() && !c->open && c->em_socket >= 0) {
+      emscripten_websocket_delete(c->em_socket); // the browser closed it: onclose has fired
+      c->em_socket = -1;
+    }
+    if (c && !c->alive.load() && c->em_socket < 0) {
+      it = _conns.erase(it); // its socket is deleted: no callback can reach it
+      ++reaped;
+    } else {
+      ++it;
+    }
+  }
 #endif
   return reaped;
 }

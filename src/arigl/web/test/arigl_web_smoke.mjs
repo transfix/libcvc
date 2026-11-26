@@ -20,6 +20,10 @@
 // guest over Chrome's 8 MB (big.wasm, the guest with a 9 MiB custom section after it, which this
 // makes) compiled and instantiated asynchronously.
 //
+// A relay that goes silent without closing (its host gone, the path to it cut) must not hold the
+// page's conference link for good: the page closes a link that has sent nothing for 10 s
+// (state_transport::reap_idle) and dials again.
+//
 // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4): with WebAssembly.Suspending deleted
 // before the page's own script runs, as in a browser without JSPI, each page must show the browsers
 // it needs (Chrome 137, Firefox 153, Safari 27; iOS 27 on an iPhone or iPad, whatever the browser)
@@ -46,6 +50,9 @@
 //   /apps/mol/          the app again, with a page config that preloads PDB entry 1GRL from there
 //   /apps/flaky/        the app again, with a page config that preloads blob.bin, whose first
 //                       download breaks off half-way (the page must fetch it again)
+//   /apps/silent/       the app again, with a page config that makes it a conference client of
+//                       /apps/silent-relay: a WebSocket "relay" that sends one empty frame, then
+//                       nothing, and keeps the connection open
 //   /apps/py/           ariglx-web's files again, beside the --pydocs documents; /apps/pyprog/ the
 //                       same with a page config that runs program.py and preloads program.ari
 //   /apps/wasm/         ariglx-web's files again, beside the --wasmdocs documents and guests
@@ -62,6 +69,7 @@
 // and fails on any CSP violation the page reports. Exit status 0 when every case passes.
 
 import {spawn} from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -145,6 +153,27 @@ const MOL_CONFIG = JSON.stringify({preload: ['../data/molecules/1grl.pdb']});
 // time: then it promises all of it (Content-Length) and drops the connection half-way, as a cut-off
 // download does. arigl must ask again past the browser's cache (cache: 'reload'), so the page runs.
 const FLAKY_CONFIG = JSON.stringify({preload: ['blob.bin']});
+// /apps/silent/: the app again, as a conference client (arigl's CVC_ARIADNE_RELAY) of
+// /apps/silent-relay on this server. That end takes the WebSocket upgrade, sends one empty binary
+// frame (an empty Frame: the page has heard from it once) and then nothing, and never closes. The
+// page must close the link once it has been silent for 10 s, and dial again: a second upgrade.
+const SILENT_CONFIG = JSON.stringify({
+  env: {CVC_ARIADNE_RELAY: '{ws_origin}/apps/silent-relay', CVC_ARIADNE_NAME: 'smoke'},
+});
+const silent = {opens: 0, closes: 0};
+function silentRelay(req, socket) {
+  const key = req.headers['sec-websocket-key'];
+  if (!key) return socket.destroy();
+  const accept = crypto.createHash('sha1')
+                     .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  silent.opens++;
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n' +
+               `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  socket.write(Buffer.from([0x82, 0x00])); // one empty binary frame, then silence
+  // The page's close frame (opcode 8; a client's frames are masked) is all this end reads.
+  socket.on('data', d => { if (d.length && (d[0] & 0x0f) === 0x08) { silent.closes++; socket.end(); } });
+  socket.on('error', () => {});
+}
 const FLAKY_BLOB = Buffer.alloc(256 * 1024, 7);
 const flaky = {hits: 0, reloads: 0};
 function serveFlaky(req, res) {
@@ -163,10 +192,12 @@ function fileFor(urlPath) {
   if (rest === 'tiler/ariadne.config.json') return {json: TILER_CONFIG};
   if (rest === 'mol/ariadne.config.json') return {json: MOL_CONFIG};
   if (rest === 'flaky/ariadne.config.json') return {json: FLAKY_CONFIG};
+  if (rest === 'silent/ariadne.config.json') return {json: SILENT_CONFIG};
   if (rest.startsWith('data/')) return path.join(EXAMPLES_DATA, rest.slice('data/'.length));
   if (rest.startsWith('tiler/')) rest = 'app/' + rest.slice('tiler/'.length);
   if (rest.startsWith('mol/')) rest = 'app/' + rest.slice('mol/'.length);
   if (rest.startsWith('flaky/')) rest = 'app/' + rest.slice('flaky/'.length);
+  if (rest.startsWith('silent/')) rest = 'app/' + rest.slice('silent/'.length);
   if (PYDOCS && rest === 'pyprog/ariadne.config.json') return {json: PY_CONFIG};
   if (PYDOCS && (rest.startsWith('py/') || rest.startsWith('pyprog/'))) {
     const name = rest.slice(rest.indexOf('/') + 1);
@@ -248,6 +279,10 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, headers);
   fs.createReadStream(f).pipe(res);
 });
+server.on('upgrade', (req, socket) => {
+  if (new URL(req.url, 'http://x').pathname === '/apps/silent-relay') return silentRelay(req, socket);
+  socket.destroy();
+});
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -324,8 +359,9 @@ async function openPage(url, inject) {
 }
 
 // Wait until the case's check passes, or the page has left 'loading' and a few seconds more have
-// gone by (ari draws after it reports running); the state, the runtime's output, the terminal text.
-async function settle(page, check) {
+// gone by (ari draws after it reports running; GRACE_MS, 15 s unless the case says); the state, the
+// runtime's output, the terminal text.
+async function settle(page, check, GRACE_MS = 15000) {
   const start = Date.now(), until = start + TIMEOUT_MS;
   let settledAt = 0, runningMs = 0;
   for (;;) {
@@ -344,7 +380,7 @@ async function settle(page, check) {
     if (v) v.runningMs = runningMs;
     if (v && check(v)) return v;
     if (v && v.state !== 'loading' && !settledAt) settledAt = Date.now();
-    if ((settledAt && Date.now() > settledAt + 15000) || Date.now() > until)
+    if ((settledAt && Date.now() > settledAt + GRACE_MS) || Date.now() > until)
       return v || {state: 'timeout', log: [], text: '', status: '', csp: [], warnings: [], out: []};
     await new Promise(r => setTimeout(r, 500));
   }
@@ -386,6 +422,15 @@ const cases = [
     url: `${ORIGIN}/apps/flaky/?src=main.ari`,
     before: () => { flaky.hits = flaky.reloads = 0; },
     check: v => v.state === 'running' && flaky.hits === 2 && flaky.reloads === 1,
+  },
+  {
+    name: 'a relay link silent for 10 s is closed, and the page dials again',
+    url: `${ORIGIN}/apps/silent/?src=main.ari`,
+    before: () => { silent.opens = silent.closes = 0; },
+    graceMs: 40000,
+    check: v => v.state === 'running' && silent.opens >= 2 && silent.closes >= 1 &&
+                v.log.some(l => /closing a silent link/.test(l)),
+    report: () => [`relay opens ${silent.opens}, closes ${silent.closes}`],
   },
 ];
 
@@ -714,7 +759,7 @@ let failures = 0;
 for (const c of cases) {
   if (c.before) c.before();
   const page = await openPage(c.url, c.inject);
-  const v = await settle(page, ISOLATED ? x => x.isolated && c.check(x) : c.check);
+  const v = await settle(page, ISOLATED ? x => x.isolated && c.check(x) : c.check, c.graceMs);
   const ok = !!(v && c.check(v) && v.csp.length === 0 && (!ISOLATED || v.isolated));
   if (!ok) failures++;
   const took = v && v.runningMs ? `, running after ${(v.runningMs / 1000).toFixed(1)} s` : '';
