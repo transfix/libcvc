@@ -1424,9 +1424,9 @@ TEST(AriadneWorldVehicles, TheHumveeIsInPartsWhereTheyAreInstalled) {
     v[2].id = "turned"; // model: humvee, yaw: 180: the one piece (a parted look takes no yaw)
     v[2].look = v[1].look;
     v[2].look.yaw = 180.0;
-    v[3].id = "unfitted"; // model: humvee, fit: false: the one piece
+    v[3].id = "lifted"; // model: humvee, z: 0.2: the one piece
     v[3].look = v[1].look;
-    v[3].look.fit = false;
+    v[3].look.z = 0.2;
     v[4].id = "file"; // file: Humvee.glb: that file
     v[4].look.kind = "file";
     v[4].look.path = "Humvee.glb";
@@ -1457,7 +1457,7 @@ TEST(AriadneWorldVehicles, TheHumveeIsInPartsWhereTheyAreInstalled) {
     EXPECT_EQ(v[k].look.path, one_piece);
   }
   EXPECT_EQ(v[2].look.yaw, 180.0);
-  EXPECT_FALSE(v[3].look.fit);
+  EXPECT_EQ(v[3].look.z, 0.2);
   EXPECT_FALSE(v[4].look.parted());
   EXPECT_EQ(fs::path(v[4].look.path), prefix / "doc" / "Humvee.glb");
   EXPECT_EQ(v[5].look.kind, "box");
@@ -1469,6 +1469,16 @@ TEST(AriadneWorldVehicles, TheHumveeIsInPartsWhereTheyAreInstalled) {
 
   // A relay passes the look on as its kind and file: the one piece, by its file's name.
   EXPECT_EQ(fs::path(v[0].look.path).filename().string(), "Humvee.glb");
+
+  // A host's own vehicles (a nav_swarm's agents, nav_scrub's runs) take the same look by name.
+  EXPECT_EQ(vehicle_look_named("humvee"), v[0].look);
+  const vehicle_look by_file = vehicle_look_named((shared / "Humvee.glb").string());
+  EXPECT_EQ(by_file.kind, "file");
+  EXPECT_FALSE(by_file.parted()) << "a file named is that file";
+  EXPECT_TRUE(by_file.fit);
+  std::vector<std::string> named_warnings;
+  EXPECT_EQ(vehicle_look_named("no_such_vehicle", &named_warnings).kind, "box");
+  EXPECT_TRUE(any_contains(named_warnings, "model 'no_such_vehicle' is not installed"));
 
   // An install without all three (no rig): the one piece.
   fs::remove(shared / "humvee" / "rig.json", ec);

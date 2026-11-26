@@ -26,24 +26,22 @@
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_swarm.h>
-#include <cvc/ariadne/world_vehicles.h> // find_vehicle_model
+#include <cvc/ariadne/world_vehicles.h> // vehicle_look_named, vehicle_desc_of
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/ariadne/mesh_lod.h> // decimate_mesh: the model's rungs
+#include <cvc/gl/ariadne/mesh_lod.h> // decimate_mesh_by_role: the model's rungs
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/swarm_nodes.h>
+#include <cvc/gl/ariadne/vehicle_view.h> // vehicle_look_mesh_of: the model's template
 #include <cvc/image/image.h>
 #include <cvc/lod/select.h>
-#include <cvc/model/model.h>
-#include <cvc/model/model_file_io.h>
 #include <cvc/state/state.h>
 #include <cvc/world/world_geometry.h>
 #include <exception>
-#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -81,10 +79,13 @@ void warn(std::vector<std::string> *w, const std::string &m) {
 class glyphs {
 public:
   // `verts` [3V] in the template's frame (forward +x, up +z, resting on z >= 0), `tris` [3T];
-  // `color` [3n] (null: teal); `uvs` [2V] or null.
+  // `color` [3n] (null: teal); `uvs` [2V] or null; `role` [V] and `own` [3V] (vehicle_look_mesh's)
+  // or null: a point of role 2 in its own colour (a tyre's dark), the others in its instance's.
   cvc::geometry build(cvc::app &app, int n, const float *color, const std::vector<double> &verts,
                       const std::vector<std::uint32_t> &tris, double z = 0.0,
-                      const std::vector<float> *uvs = nullptr) {
+                      const std::vector<float> *uvs = nullptr,
+                      const std::vector<unsigned char> *role = nullptr,
+                      const std::vector<unsigned char> *own = nullptr) {
     tmpl_ = verts;
     tris_ = tris;
     z_ = z;
@@ -109,7 +110,11 @@ public:
       const double r = color ? color[3 * i] : 0.20, gg = color ? color[3 * i + 1] : 0.80,
                    bb = color ? color[3 * i + 2] : 0.75;
       for (int k = 0; k < v_; ++k)
-        cols.push_back({r, gg, bb});
+        if (own_at(role, own, k))
+          cols.push_back(
+              {(*own)[3 * k] / 255.0, (*own)[3 * k + 1] / 255.0, (*own)[3 * k + 2] / 255.0});
+        else
+          cols.push_back({r, gg, bb});
       if (uv)
         for (int k = 0; k < v_; ++k)
           g.uvs().push_back({uvs_[2 * k], uvs_[2 * k + 1]});
@@ -173,6 +178,13 @@ public:
   int capacity() const { return n_; }
   int verts_per_instance() const { return v_; }
 
+  // Whether template point k keeps its own colour (role 2, a tyre's dark).
+  static bool own_at(const std::vector<unsigned char> *role, const std::vector<unsigned char> *own,
+                     int k) {
+    const auto i = static_cast<std::size_t>(k);
+    return role && own && i < role->size() && 3 * i + 2 < own->size() && (*role)[i] == 2;
+  }
+
 private:
   int n_ = 0, v_ = 0;
   double z_ = 0.0;
@@ -187,99 +199,6 @@ void arrow_template(double size, std::vector<double> &v, std::vector<std::uint32
   const double tip = size, back = -0.45 * size, half = 0.42 * size;
   v = {tip, 0.0, 0.0, back, half, 0.0, back, -half, 0.0};
   t = {0, 1, 2};
-}
-
-// A vehicle model read once: its merged mesh, UVs and base-colour texture.
-struct vehicle_model {
-  cvc::geometry mesh;
-  cvc::image texture;
-  bool ok = false;
-};
-
-vehicle_model read_vehicle(cvc::app &app, const std::string &path) {
-  vehicle_model m;
-  if (path.empty() || !std::filesystem::exists(path))
-    return m;
-  try {
-    cvc::model md = cvc::read_model(app, path);
-    m.mesh = md.merged();
-    for (const auto &mat : md.materials)
-      if (mat.has_base_color_texture()) {
-        m.texture = mat.base_color_texture;
-        break;
-      }
-    m.ok = m.mesh.num_tris() > 0;
-  } catch (const std::exception &e) {
-    std::fprintf(stderr, "nav_swarm: vehicle model %s: %s\n", path.c_str(), e.what());
-  }
-  return m;
-}
-
-// The model as a vehicle template (forward +x, side +y, up +z resting on 0, its longest side
-// `len`): the height axis is its smallest extent, forward the longer of the others, and the nose
-// the end whose top sits lower (a hood below a cabin), else the end with fewer vertices.
-void vehicle_template(const cvc::geometry &g, double len, std::vector<double> &verts,
-                      std::vector<std::uint32_t> &tris, std::vector<float> &uvs) {
-  const auto &pts = g.const_points();
-  double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
-  for (const auto &v : pts)
-    for (int k = 0; k < 3; ++k) {
-      lo[k] = std::min(lo[k], v[k]);
-      hi[k] = std::max(hi[k], v[k]);
-    }
-  const double ext[3] = {hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]};
-  int up = 0;
-  for (int k = 1; k < 3; ++k)
-    if (ext[k] < ext[up])
-      up = k;
-  int fwd = (up + 1) % 3, side = (up + 2) % 3;
-  if (ext[side] > ext[fwd])
-    std::swap(fwd, side);
-  const double s = ext[fwd] > 1e-9 ? len / ext[fwd] : 1.0;
-  const double cf = 0.5 * (lo[fwd] + hi[fwd]), cs = 0.5 * (lo[side] + hi[side]);
-  int front = +1;
-  {
-    long npos = 0, nneg = 0, tpos = 0, tneg = 0;
-    double spos = 0.0, sneg = 0.0;
-    const double top = lo[up] + 0.6 * ext[up];
-    for (const auto &v : pts) {
-      const double f = v[fwd] - cf;
-      const bool pos = f > 0;
-      (pos ? npos : nneg) += 1;
-      if (v[up] >= top) {
-        if (pos) {
-          spos += f;
-          ++tpos;
-        } else {
-          sneg += f;
-          ++tneg;
-        }
-      }
-    }
-    const int lighter = npos < nneg ? +1 : -1;
-    int lower_top = 0;
-    if (tpos > 8 && tneg > 8)
-      lower_top = (spos / tpos) < std::abs(sneg / tneg) ? +1 : -1;
-    front = lower_top != 0 ? lower_top : lighter;
-  }
-  verts.clear();
-  verts.reserve(pts.size() * 3);
-  for (const auto &v : pts) {
-    verts.push_back((v[fwd] - cf) * s * front);
-    verts.push_back((v[side] - cs) * s);
-    verts.push_back((v[up] - lo[up]) * s);
-  }
-  tris.clear();
-  for (const auto &t : g.const_tris())
-    for (int k = 0; k < 3; ++k)
-      tris.push_back(static_cast<std::uint32_t>(t[k]));
-  uvs.clear();
-  const auto &mu = g.const_uvs();
-  if (mu.size() == pts.size())
-    for (const auto &uv : mu) {
-      uvs.push_back(static_cast<float>(uv[0]));
-      uvs.push_back(static_cast<float>(uv[1]));
-    }
 }
 
 // The synthetic city's blocks: each building (4-connected component) one height in
@@ -714,7 +633,11 @@ struct agents_layer : layer {
   bool lod = true;
   int near_cap = 10;
   bool model_read = false;
-  vehicle_model model;
+  // The look's mesh, read once at a Humvee's own size (model_length, its chassis box's length):
+  // drawn at the swarm's vehicle length, scaled alike on every axis.
+  vehicle_look_mesh model;
+  bool have_model = false;
+  double model_length = 1.0;
   // The finer rungs' size floors: a vehicle takes rung k only while its radius on screen is at
   // least floor_px[k] (and the rung has room), so an overview, where every vehicle is a few pixels,
   // draws them all on the coarsest rung. lod_px: [rung 0, rung 1, rung 2].
@@ -724,42 +647,58 @@ struct agents_layer : layer {
     std::weak_ptr<GeometryNode> node;
     int cap = 0;
     bool textured = false;
+    std::vector<unsigned char> role, own; // the template's points' roles, [V] and [3V]
     std::vector<unsigned char> rgb;
     std::vector<std::uint32_t> idx;
     std::size_t shown = ~std::size_t(0); // vehicles it drew last frame
+    // One instance's colours at p ([3V]): `c`, but where a point keeps its own (a tyre's dark).
+    void paint(unsigned char *p, const unsigned char c[3]) const {
+      const int V = g.verts_per_instance();
+      for (int q = 0; q < V; ++q) {
+        const unsigned char *from = glyphs::own_at(&role, &own, q) ? &own[3 * q] : c;
+        p[3 * q] = from[0];
+        p[3 * q + 1] = from[1];
+        p[3 * q + 2] = from[2];
+      }
+    }
   };
   std::vector<rung> rungs; // one without lod: every vehicle, every frame
   bool use_lod = false;
   std::vector<unsigned char> color_u8, restyle;
   std::vector<std::pair<float, int>> score;
 
+  // The look, resolved and read as a world vehicle's (vehicle_look_named; vehicle_look_mesh_of, as
+  // an entity layer's template): `humvee` the Humvee in parts where they are installed (its wheels
+  // at rest, in a tyre's dark), else the one-piece Humvee.glb; another model by its name or its
+  // file. None of them (the box): arrows.
+  void load_look(cvc::app &app) {
+    model_read = true;
+    if (look == "arrow" || look == "none")
+      return;
+    std::vector<std::string> why;
+    const ari::vehicle_look resolved = ari::vehicle_look_named(look, &why);
+    if (resolved.kind == "file") {
+      vehicle_shape shape;
+      try {
+        shape = vehicle_shape_of(ari::vehicle_desc_of(ari::vehicle_archetype{})); // a Humvee's
+      } catch (const std::exception &) {
+      }
+      model_length = shape.length;
+      const std::shared_ptr<vehicle_model_cache> cache = make_vehicle_model_cache();
+      have_model = vehicle_look_mesh_of(app, *cache, resolved, shape, 0.0, model, &why) ==
+                       vehicle_model_status::ready &&
+                   model.model;
+    }
+    for (const std::string &w : why)
+      std::fprintf(stderr, "nav_swarm: %s\n", w.c_str());
+    if (!have_model)
+      std::fprintf(stderr, "nav_swarm: no vehicle model '%s'; arrows\n", look.c_str());
+  }
+
   void build(swarm_view &v) override {
     ari::SceneSwarm &s = *v.swarm;
-    if (!model_read) {
-      model_read = true;
-      if (look != "arrow" && look != "none") {
-        std::string path = ari::find_vehicle_model(look);
-        if (path.empty() && std::filesystem::exists(look))
-          path = look;
-        // Beside a city bundle read from a directory: in it, or in the shared/ the vehicle-humvee
-        // package installs beside the scenes (the nav demos' <bundle>/../../shared/Humvee.glb).
-        const std::string dir = v.city_path.empty()
-                                    ? std::string()
-                                    : ari::read_or<std::string>(v.app, v.city_path + ".uri", "");
-        const std::string file = look == "humvee" ? "Humvee.glb" : look;
-        if (path.empty() && !dir.empty() && std::filesystem::is_directory(dir))
-          for (const char *rel : {"", "../shared", "../../shared"}) {
-            const std::filesystem::path p = std::filesystem::path(dir) / rel / file;
-            if (std::filesystem::exists(p)) {
-              path = p.lexically_normal().string();
-              break;
-            }
-          }
-        model = read_vehicle(v.app, path);
-        if (!model.ok)
-          std::fprintf(stderr, "nav_swarm: no vehicle model '%s'; arrows\n", look.c_str());
-      }
-    }
+    if (!model_read)
+      load_look(v.app);
     for (std::size_t k = 0; k < rungs.size(); ++k)
       drop("_lod" + std::to_string(k));
     drop("_body");
@@ -769,30 +708,42 @@ struct agents_layer : layer {
     std::vector<double> tv;
     std::vector<std::uint32_t> tt;
     std::vector<float> tuv;
-    if (model.ok)
-      vehicle_template(model.mesh, len, tv, tt, tuv);
-    else
+    std::vector<unsigned char> trole, town;
+    if (have_model) { // at the swarm's length, resting on z 0 (the look's base)
+      const double k = model_length > 1e-9 ? len / model_length : 1.0;
+      tv = model.verts;
+      for (double &x : tv)
+        x *= k;
+      tt = model.tris;
+      tuv = model.uvs;
+      trole = model.role;
+      town = model.own;
+    } else {
       arrow_template(len, tv, tt);
-    const bool textured = model.ok && !tuv.empty() && !model.texture.empty();
+    }
+    const bool textured = have_model && !tuv.empty() && model.texture && !model.texture->empty();
     color_u8.resize(s.colors().size());
     for (std::size_t i = 0; i < color_u8.size(); ++i)
       color_u8[i] =
           static_cast<unsigned char>(std::lround(std::clamp(s.colors()[i], 0.0f, 1.0f) * 255.0f));
-    use_lod = lod && model.ok;
+    use_lod = lod && have_model;
     if (!use_lod) {
       rungs.resize(1);
       rung &r = rungs[0];
       r.cap = n;
       r.textured = textured;
-      cvc::geometry g = r.g.build(v.app, n, s.colors().data(), tv, tt, model.ok ? 0.0 : 0.6,
-                                  textured ? &tuv : nullptr);
+      r.role = trole;
+      r.own = town;
+      cvc::geometry g = r.g.build(v.app, n, s.colors().data(), tv, tt, have_model ? 0.0 : 0.6,
+                                  textured ? &tuv : nullptr, &r.role, &r.own);
       auto node = mesh("_body", g, 0.32, 0.9, 0.2, 18.0);
       if (node && textured)
-        node->setTexture(model.texture, false);
+        node->setTexture(*model.texture, false);
       r.node = node;
       return;
     }
-    // Finest first; the last rung takes every vehicle the others do not.
+    // Finest first; the last rung takes every vehicle the others do not. A coarser rung's colour
+    // roles each decimated on their own (decimate_mesh_by_role), so the tyres keep their dark.
     const struct {
       double reduction;
       int cap;
@@ -802,20 +753,20 @@ struct agents_layer : layer {
                  {0.985, n}};
     rungs.resize(4);
     for (int k = 0; k < 4; ++k) {
+      rung &r = rungs[k];
       std::vector<double> rv = tv;
       std::vector<std::uint32_t> rt = tt;
-      if (specs[k].reduction > 0.0 && !decimate_mesh(tv, tt, specs[k].reduction, rv, rt)) {
-        rv = tv;
-        rt = tt;
-      }
-      rung &r = rungs[k];
+      r.role = trole;
+      r.own = town;
+      if (specs[k].reduction > 0.0)
+        decimate_mesh_by_role(tv, tt, trole, town, specs[k].reduction, rv, rt, r.role, r.own);
       r.cap = std::max(1, specs[k].cap);
       r.textured = k == 0 && textured;
-      cvc::geometry g =
-          r.g.build(v.app, r.cap, s.colors().data(), rv, rt, 0.0, r.textured ? &tuv : nullptr);
+      cvc::geometry g = r.g.build(v.app, r.cap, s.colors().data(), rv, rt, 0.0,
+                                  r.textured ? &tuv : nullptr, &r.role, &r.own);
       auto node = mesh("_lod" + std::to_string(k), g, 0.34, 0.9, 0.18, 18.0);
       if (node && r.textured)
-        node->setTexture(model.texture, false);
+        node->setTexture(*model.texture, false);
       else
         r.rgb.assign(static_cast<std::size_t>(r.cap) * r.g.verts_per_instance() * 3, 180);
       r.node = node;
@@ -850,12 +801,7 @@ struct agents_layer : layer {
             c[1] = color_u8[3 * i + 1];
             c[2] = color_u8[3 * i + 2];
           }
-          unsigned char *p = restyle.data() + static_cast<std::size_t>(3) * V * i;
-          for (int k = 0; k < V; ++k) {
-            p[3 * k] = c[0];
-            p[3 * k + 1] = c[1];
-            p[3 * k + 2] = c[2];
-          }
+          rungs[0].paint(restyle.data() + static_cast<std::size_t>(3) * V * i, c);
         }
         node->updateColors(restyle);
       }
@@ -928,12 +874,7 @@ struct agents_layer : layer {
           if (j < prev.size() && prev[j] == r.idx[j])
             continue;
           const int a = static_cast<int>(r.idx[j]);
-          for (int q = 0; q < V; ++q) {
-            const std::size_t o = (j * V + q) * 3;
-            r.rgb[o] = color_u8[3 * a];
-            r.rgb[o + 1] = color_u8[3 * a + 1];
-            r.rgb[o + 2] = color_u8[3 * a + 2];
-          }
+          r.paint(r.rgb.data() + j * V * 3, &color_u8[3 * a]);
         }
         node->updateColors(r.rgb);
       }

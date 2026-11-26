@@ -727,11 +727,10 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
     }
     if (look.kind == "model") {
       const std::string model = find_vehicle_model(look.path);
-      // `model: humvee` is the Humvee in parts too, unless it is placed (scale:, yaw:, z:) or not
-      // fitted (fit: false): a parted look is fitted to its vehicle by its rig, so only the one
-      // piece takes those.
-      if (look.path == "humvee" && look.fit && look.scale == 1.0 && look.yaw == 0.0 &&
-          look.z == 0.0 && humvee_parts(look, model))
+      // `model: humvee` is the Humvee in parts too, unless it is placed (scale:, yaw:, z:): a
+      // parted look is fitted to its vehicle by its rig, so only the one piece takes those.
+      if (look.path == "humvee" && look.scale == 1.0 && look.yaw == 0.0 && look.z == 0.0 &&
+          humvee_parts(look, model))
         continue;
       if (model.empty()) {
         warn("world: vehicles: " + v.id + ": look: model '" + look.path +
@@ -806,6 +805,20 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings) {
   resolve_vehicle_looks(archetypes, doc_dir, assets, warnings, std::vector<SceneData>{});
+}
+
+vehicle_look vehicle_look_named(const std::string &name, std::vector<std::string> *warnings) {
+  std::vector<vehicle_archetype> one(1); // a humvee preset with no look: the default
+  one[0].id = name;
+  vehicle_look &look = one[0].look;
+  std::error_code ec;
+  if (name != "humvee") {
+    look.kind = std::filesystem::is_regular_file(name, ec) ? "file" : "model";
+    look.path = name;
+    look.fit = true;
+  }
+  resolve_vehicle_looks(one, "", {}, warnings);
+  return one[0].look;
 }
 
 vehicle_stats vehicle_stats_of(const ph::vehicle_desc &d) {

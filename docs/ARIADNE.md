@@ -2060,8 +2060,11 @@ scene:
   `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
   `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
   target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
-- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee` or a mesh file, else arrows;
-  with `lod:` on, four quadric-decimated rungs of it picked per vehicle by its size on screen: a rung
+- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee`, a model's name or a mesh
+  file, else arrows: the look a world vehicle would have, `vehicle_look_named` and
+  `vehicle_look_mesh_of`, so `humvee` is the Humvee in parts, its wheels at rest in a tyre's dark,
+  where vehicle-humvee has them, else `Humvee.glb`; with `lod:` on, four quadric-decimated rungs of
+  it, each colour role decimated on its own, picked per vehicle by its size on screen: a rung
   takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
   and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
   reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
@@ -2375,7 +2378,7 @@ scene:
     wheels. `look: { model: humvee }` names a model, `file:` a mesh beside the document and
     `asset:` a document asset; `fit: true` orients and scales a file as a model is; `scale:`,
     `yaw:` and `z:` place it. `model: humvee` is the Humvee in parts too, unless it has `scale:`,
-    `yaw:`, `z:` or `fit: false`, which only the one-piece model takes; `file: Humvee.glb` is the
+    `yaw:` or `z:`, which only the one-piece model takes; `file: Humvee.glb` is the
     one piece always. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
     document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
     document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
@@ -7049,8 +7052,9 @@ and runs headless too. [CARS.md](CARS.md) describes it.
 `nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
 `<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
 vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
-makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
-`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+makes a glTF vehicle +X forward, +Z up and true to scale with cvcGL's own fit
+(`pycvc_gl.fit_vehicle_geometry`, as a world vehicle's model look is fitted), and
+`seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance

@@ -104,8 +104,8 @@ struct avatar_policy {
 // Humvee in parts when the package's humvee/chassis.glb, humvee/wheel.glb and humvee/rig.json are
 // installed (a parted look, below: its wheels turn), else as the one-piece Humvee model when that
 // is installed, and as its box otherwise. `model: humvee` is the parted Humvee too, unless it has
-// scale:, yaw:, z: or fit: false, which only the one-piece model takes. A look that names a file
-// (`file:`, or `data:` with `file:`) is that file.
+// scale:, yaw: or z:, which only the one-piece model takes. A look that names a file (`file:`, or
+// `data:` with `file:`) is that file.
 //
 // A parted look (`chassis:`, `wheel:`, `rig:`) is a model in parts: the chassis's mesh without its
 // wheels, one wheel's mesh, and the rig that says where the wheels go (vehicle_rig). Each wheel is

@@ -33,6 +33,17 @@ namespace ariadne {
 bool decimate_mesh(const std::vector<double> &verts, const std::vector<std::uint32_t> &tris,
                    double reduction, std::vector<double> &ov, std::vector<std::uint32_t> &ot);
 
+// A mesh whose points each have a colour role (`role` [V], `own` [3V]: vehicle_view.h's
+// vehicle_look_mesh) decimated role by role, so each part keeps its colour (a wheeled look's
+// tyres their dark): each role's triangles on their own (decimate_mesh), a role's that collapse
+// kept as they are, into `ov`, `ot`, `orole` and `oown` (a decimated part's points take its first
+// point's own colour). False, the outputs untouched, when no role got coarser.
+bool decimate_mesh_by_role(const std::vector<double> &verts, const std::vector<std::uint32_t> &tris,
+                           const std::vector<unsigned char> &role,
+                           const std::vector<unsigned char> &own, double reduction,
+                           std::vector<double> &ov, std::vector<std::uint32_t> &ot,
+                           std::vector<unsigned char> &orole, std::vector<unsigned char> &oown);
+
 } // namespace ariadne
 } // namespace gl
 } // namespace cvc
