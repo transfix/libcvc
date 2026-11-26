@@ -1087,8 +1087,12 @@ std::string check_world_rules(const world_rules &r) {
   for (const spawn_point &sp : r.spawns.points) {
     if (!std::isfinite(sp.x) || !std::isfinite(sp.y) || !std::isfinite(sp.heading))
       return "spawns: a point's at: and heading: must be finite";
-    if (!sp.archetype.empty() && !vehicles.count(sp.archetype))
-      return "spawns: a point names vehicle '" + sp.archetype + "', which vehicles: does not offer";
+    bool avatar = sp.archetype == "avatar";
+    for (const avatar_archetype &a : r.archetypes)
+      avatar = avatar || sp.archetype == a.id;
+    if (!sp.archetype.empty() && !avatar && !vehicles.count(sp.archetype))
+      return "spawns: a point names '" + sp.archetype +
+             "', which is neither a vehicle vehicles: offers nor avatar or an avatar archetype";
   }
 
   const avatar_policy &p = r.policy;

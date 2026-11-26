@@ -143,9 +143,12 @@ struct holon_config {
   // every controller spends under (§5k), gravity. A room's holons take the room's from its tree
   // (holon_sync), the relay's and each client's alike.
   world_rules rules;
-  // SERVER with physics: an avatar that fell off the world (below this z) respawns where it
-  // joined.
+  // SERVER with physics: an avatar with no ground beneath it (ground_at) respawns (spawn_for)
+  // once it is below this z, or `respawn_depth` metres below where it last stood, whichever
+  // comes first. An avatar over ground never respawns, however low that ground is (a valley, a
+  // seabed), and one that walked off a city's edge high above 0 comes back after a short fall.
   double respawn_below_z = -10.0;
+  double respawn_depth = 10.0;
 };
 
 // CFG on a clock of HZ ticks a second (a world's rate, cvc::sim_rate_valid: a room's, room_clock):
@@ -269,6 +272,24 @@ public:
   // then as it was. WORLD must outlive the holon, or be detached first.
   bool attach_world(SceneWorld *world, std::string *why = nullptr);
   SceneWorld *attached_world() const noexcept { return _scene; }
+
+  // SERVER: where avatars start and come back (ARISRV_SCENES.md, SC1). The points of SPAWNS that
+  // serve avatars -- archetype "", "avatar" or one of the rules' avatar archetype ids, and world
+  // "" or the one the attached world has on -- taken by its policy: `fixed` the first, `random`,
+  // `round_robin`, or `nearest_free` the first no other avatar stands within 1.5 m of (else
+  // random). With none, the 4 m golden-angle ring round the origin, and an avatar that fell off
+  // the world comes back where it joined. Either way the feet go on the ground there (ground_at),
+  // so a joiner on a generated world or a city stands on it rather than inside it. The relay gives
+  // it the document's world: spawns: (the room carries no spawns).
+  void set_avatar_spawns(const spawn_rules &spawns);
+  const spawn_rules &avatar_spawns() const noexcept { return _avatar_spawns; }
+  // Where the next avatar starts, or where PID comes back: as above, its feet on the ground.
+  cvc::physics::body_state spawn_for(const std::string &pid);
+  // SERVER with physics: the height of the first static surface straight down from (x, y, Z_FROM)
+  // -- a terrain, a building, a floor; never a body with mass (an avatar, a dynamic vehicle) or one
+  // in motion. A kinematic body standing still counts as ground (the physics world tells static
+  // from kinematic only by motion). False when there is none below, or no physics.
+  bool ground_at(double x, double y, double z_from, double &z) const;
 
   // GENERIC ENTITIES (ARIADNE_WORLDS.md section 18.4). Every thing that moves in the holon's world,
   // one table: each participant's person, and the attached world's entities (its vehicles, boats).
@@ -635,9 +656,12 @@ private:
     cvc::physics::quat ease_rot;
     bool have_shown = false;
     cvc::physics::pose shown;
-    // physics: where it joined (a SERVER respawn point), and the CLIENT-local avatar's
+    // physics: where it joined, and the CLIENT-local avatar's
     // prediction log -- predicted_avatar's, over the Jolt world instead of avatar_sim.
     cvc::physics::body_state spawn;
+    // SERVER with physics: the ground's height where it last stood (respawn_if_lost).
+    double last_ground_z = 0.0;
+    bool stood = false;
     struct logged {
       std::uint64_t tick = 0;
       avatar_intent in;
@@ -787,6 +811,16 @@ private:
   void scene_step();                        // SERVER with a world attached: the due steps
   void update_rides();                      // ... each driver's ride, from its vehicle
   void get_out(const std::string &pid, participant &p); // ... its person back beside it
+
+  // SERVER with physics: PID back at a spawn point (where it joined, when the world has no avatar
+  // spawns) when it has fallen off the world.
+  void respawn_if_lost(const std::string &pid, participant &p);
+  std::vector<const spawn_point *> avatar_points() const; // the spawns that serve avatars now
+  cvc::physics::body_state grounded(cvc::physics::body_state s) const; // s's feet on the ground
+  spawn_rules _avatar_spawns;                                          // SERVER: set_avatar_spawns
+  std::uint64_t _spawn_draw = 0; // ... the random draw's state
+  std::size_t _spawn_cursor = 0; // ... round_robin's next point
+  std::uint64_t _spawned = 0;    // ... the ring's next step
 };
 
 } // namespace ariadne

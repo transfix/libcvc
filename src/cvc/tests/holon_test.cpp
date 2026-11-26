@@ -886,6 +886,79 @@ TEST(HolonPhysicsTest, AnAvatarThatFallsOffTheWorldRespawns) {
   EXPECT_GT(p.z, -0.05);
 }
 
+// Avatar spawns (ARISRV_SCENES SC1): a point tagged for avatars (or untagged) is where a joiner
+// starts, by the policy, with its feet on the ground there -- here on top of a 5 m block -- and a
+// point tagged with a vehicle is not an avatar's. With no points, the ring round the origin, on
+// the floor.
+TEST(HolonPhysicsTest, AnAvatarStartsAtASpawnPointOnTheGround) {
+  holon server(holon_role::server, physics_config());
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  std::vector<cvc::ariadne::avatar_static> statics = room_statics();
+  cvc::ariadne::avatar_static block; // its top at z = 5
+  block.center = vec3{6.0, 6.0, 2.5};
+  block.half_extents = vec3{2.0, 2.0, 2.5};
+  statics.push_back(block);
+  server.set_statics(statics, 1);
+
+  const body_state ring = server.spawn_for("B");
+  EXPECT_NEAR(std::hypot(ring.position.x, ring.position.y), 4.0, 1e-9) << "no points: the ring";
+  EXPECT_NEAR(ring.position.z, 0.05, 1e-3) << "on the floor";
+
+  cvc::ariadne::spawn_rules spawns;
+  spawns.policy = "round_robin";
+  spawns.points.push_back({6.0, 6.0, 90.0, -1, "avatar", ""});
+  spawns.points.push_back({-6.0, -6.0, 0.0, -1, "humvee", ""}); // a vehicle's: never an avatar's
+  server.set_avatar_spawns(spawns);
+  for (int i = 0; i < 3; ++i) {
+    const body_state s = server.spawn_for("A");
+    EXPECT_NEAR(s.position.x, 6.0, 1e-9);
+    EXPECT_NEAR(s.position.y, 6.0, 1e-9);
+    EXPECT_NEAR(s.position.z, 5.05, 1e-3) << "on top of the block";
+    EXPECT_NEAR(s.rotation.z, std::sin(0.25 * 3.14159265358979323846), 1e-9) << "facing +y";
+  }
+  server.add_participant("A", false, server.spawn_for("A"));
+  run(server, 240); // 2 s
+  EXPECT_NEAR(server.state("A").position.z, 5.0, 0.03) << "standing on the block, not inside it";
+}
+
+// Respawn is relative to the ground (SC1): an avatar standing in a valley far below z = -10 stays
+// there (the old rule took it away at -10), and one that walks off a slab 50 m up comes back
+// after falling respawn_depth (10 m), not after falling all the way to -10.
+TEST(HolonPhysicsTest, RespawnIsRelativeToTheGround) {
+  {
+    holon server(holon_role::server, physics_config());
+    if (!server.physics())
+      GTEST_SKIP() << "no Jolt backend in this build";
+    cvc::ariadne::avatar_static valley; // its top at z = -30
+    valley.center = vec3{0.0, 0.0, -30.5};
+    valley.half_extents = vec3{20.0, 20.0, 0.5};
+    server.set_statics({valley}, 1);
+    server.add_participant("A", false, at(2.0, 0.0, -30.0));
+    run(server, 240);
+    EXPECT_NEAR(server.state("A").position.z, -30.0, 0.03) << "it stays in the valley";
+    EXPECT_NEAR(server.state("A").position.x, 2.0, 0.03);
+  }
+  holon server(holon_role::server, physics_config());
+  cvc::ariadne::avatar_static slab; // its top at z = 50, x in [-5, 5]; nothing under it
+  slab.center = vec3{0.0, 0.0, 49.5};
+  slab.half_extents = vec3{5.0, 5.0, 0.5};
+  server.set_statics({slab}, 1);
+  server.add_participant("A", false, at(4.0, 0.0, 50.0));
+  server.set_intent("A", avatar_intent{vec3{3.0, 0.0, 0.0}});
+  run(server, 120); // walks off the edge at x = 5
+  server.set_intent("A", avatar_intent{});
+  double lowest = 1e9;
+  for (int i = 0; i < 480; ++i) {
+    run(server, 1);
+    lowest = std::min(lowest, server.state("A").position.z);
+  }
+  const vec3 p = server.state("A").position;
+  EXPECT_NEAR(p.x, 4.0, 0.1) << "back where it joined (the world has no avatar spawns)";
+  EXPECT_NEAR(p.z, 50.0, 0.05) << "on the slab";
+  EXPECT_GT(lowest, 50.0 - 12.0) << "after a short fall, not all the way down to z = -10";
+}
+
 // The leading client again, now with Jolt on both sides and the cube in the walk: the client's
 // world predicts the stop at the cube exactly as the server simulates it, so reconcile has nothing
 // to correct.

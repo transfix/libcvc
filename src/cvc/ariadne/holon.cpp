@@ -155,6 +155,128 @@ void holon::add_participant(const std::string &pid, bool local,
     _world->remove_avatar(pid); // re-registered pose-less: no body left at its old pose
 }
 
+void holon::set_avatar_spawns(const spawn_rules &spawns) { _avatar_spawns = spawns; }
+
+bool holon::ground_at(double x, double y, double z_from, double &z) const {
+  if (!_world)
+    return false;
+  const cvc::physics::world &w = _world->world();
+  constexpr double kBottom = -1.0e5;
+  double top = z_from;
+  // Past whatever moves (an avatar, a vehicle, a boat), to the first static surface: no mass (a
+  // static or kinematic body) and not moving (a static body is never active; a kinematic one
+  // standing still is taken for ground too).
+  for (int i = 0; i < 64 && top > kBottom; ++i) {
+    const std::optional<cvc::physics::ray_hit> hit = w.raycast({x, y, top}, {x, y, kBottom});
+    if (!hit)
+      return false;
+    if (w.get_body(hit->body).mass == 0.0 && !w.state(hit->body).active) {
+      z = hit->point.z;
+      return true;
+    }
+    top = std::min(top, hit->point.z) - 0.05;
+  }
+  return false;
+}
+
+std::vector<const spawn_point *> holon::avatar_points() const {
+  // The points that serve avatars, in the world on.
+  const world_rules &r = rules();
+  const std::string on = _scene ? _scene->world_on() : std::string();
+  std::vector<const spawn_point *> pts;
+  for (const spawn_point &sp : _avatar_spawns.points) {
+    bool avatar = sp.archetype.empty() || sp.archetype == "avatar";
+    for (const avatar_archetype &a : r.archetypes)
+      avatar = avatar || sp.archetype == a.id;
+    if (avatar && (sp.world.empty() || sp.world == on))
+      pts.push_back(&sp);
+  }
+  return pts;
+}
+
+cvc::physics::body_state holon::grounded(cvc::physics::body_state s) const {
+  double ground = 0.0;
+  if (ground_at(s.position.x, s.position.y, 1.0e4, ground))
+    s.position.z = ground + 0.05;
+  s.linear_velocity = s.angular_velocity = cvc::physics::vec3{0.0, 0.0, 0.0};
+  return s;
+}
+
+cvc::physics::body_state holon::spawn_for(const std::string &pid) {
+  const std::vector<const spawn_point *> pts = avatar_points();
+  const auto draw = [this](std::size_t n) {
+    _spawn_draw = _spawn_draw * 6364136223846793005ull + 1442695040888963407ull;
+    return static_cast<std::size_t>((_spawn_draw >> 33) % n);
+  };
+  double x = 0.0, y = 0.0, heading = 0.0;
+  if (!pts.empty()) {
+    const std::string &policy = _avatar_spawns.policy;
+    std::size_t k = 0;
+    if (policy == "fixed") {
+      k = 0;
+    } else if (policy == "round_robin") {
+      k = _spawn_cursor++ % pts.size();
+    } else if (policy == "nearest_free") {
+      k = pts.size();
+      for (std::size_t i = 0; i < pts.size() && k == pts.size(); ++i) {
+        bool free = true;
+        for (const auto &kv : _participants) {
+          if (kv.first == pid || !_world || !_world->has_avatar(kv.first))
+            continue;
+          const cvc::physics::vec3 at = _world->state(kv.first).position;
+          if (std::hypot(at.x - pts[i]->x, at.y - pts[i]->y) < 1.5)
+            free = false;
+        }
+        if (free)
+          k = i;
+      }
+      if (k == pts.size())
+        k = draw(pts.size());
+    } else {
+      k = draw(pts.size());
+    }
+    x = pts[k]->x;
+    y = pts[k]->y;
+    heading = pts[k]->heading;
+  } else {
+    // The ring: each joiner at the next golden-angle step, so they never stack.
+    constexpr double kSpawnRadius = 4.0;
+    constexpr double kGoldenAngle = 2.39996322972865332; // radians
+    const double a = kGoldenAngle * static_cast<double>(_spawned++);
+    x = kSpawnRadius * std::cos(a);
+    y = kSpawnRadius * std::sin(a);
+  }
+  cvc::physics::body_state s;
+  s.position = {x, y, 0.0};
+  const double half = 0.5 * heading * 3.14159265358979323846 / 180.0; // about +z
+  s.rotation = {std::cos(half), 0.0, 0.0, std::sin(half)};
+  return grounded(s);
+}
+
+void holon::respawn_if_lost(const std::string &pid, participant &p) {
+  const cvc::physics::body_state now = _world->state(pid);
+  double ground = 0.0;
+  if (ground_at(now.position.x, now.position.y, now.position.z + 0.5, ground)) {
+    if (now.position.z - ground < 2.0) { // standing, or near enough
+      p.last_ground_z = ground;
+      p.stood = true;
+    }
+    return;
+  }
+  // No ground beneath: back once below respawn_below_z, or respawn_depth under where it stood.
+  const double floor = p.stood
+                           ? std::max(p.last_ground_z - _cfg.respawn_depth, _cfg.respawn_below_z)
+                           : _cfg.respawn_below_z;
+  if (now.position.z < floor) {
+    // A spawn point when the world has avatar spawns, else where it joined; on the ground there.
+    const cvc::physics::body_state back =
+        avatar_points().empty() ? grounded(p.spawn) : spawn_for(pid);
+    _world->place(pid, back);
+    p.last_ground_z = back.position.z;
+    p.stood = false;
+  }
+}
+
 void holon::remove_participant(const std::string &pid) {
   const auto it = _participants.find(pid);
   if (it != _participants.end() && _role == holon_role::client && it->second.have_seen) {
@@ -772,8 +894,7 @@ void holon::scene_step() {
         for (auto &kv : _participants) {
           if (!_world->has_avatar(kv.first))
             continue;
-          if (_world->state(kv.first).position.z < _cfg.respawn_below_z)
-            _world->place(kv.first, kv.second.spawn); // fell off the world
+          respawn_if_lost(kv.first, kv.second);
           kv.second.last_feet = _world->state(kv.first);
         }
         if (WorldVehicles *v = _scene->vehicles())
@@ -1473,8 +1594,8 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
         avatar_water_for(tick);              // and the water, as theirs (OW9a)
         _world->step();
         for (auto &kv : _participants)
-          if (_world->state(kv.first).position.z < _cfg.respawn_below_z)
-            _world->place(kv.first, kv.second.spawn); // fell off the world
+          if (_world->has_avatar(kv.first))
+            respawn_if_lost(kv.first, kv.second);
       } else {
         const auto self = std::find_if(_participants.begin(), _participants.end(),
                                        [](const auto &kv) { return kv.second.local; });

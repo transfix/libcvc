@@ -4608,7 +4608,8 @@ TEST(AriadneWorldSpawns, TheWorldBlockDeclaresSpawnPoints) {
   EXPECT_NE(error("{ policy: closest }").find("policy 'closest'"), std::string::npos);
   EXPECT_NE(error("{ scope: colour }").find("scope 'colour'"), std::string::npos);
   EXPECT_NE(error("{ points: [ { heading: 3 } ] }").find("has no at:"), std::string::npos);
-  EXPECT_NE(error("{ points: [ { at: [1, 2], archetype: tank } ] }").find("vehicle 'tank'"),
+  EXPECT_NE(error("{ points: [ { at: [1, 2], archetype: tank } ] }")
+                .find("'tank', which is neither a vehicle"),
             std::string::npos);
   EXPECT_EQ(error("{ policy: nearest_free, scope: all, points: [ { at: [1, 2] } ] }"), "");
 }
@@ -10023,6 +10024,57 @@ TEST(AriadneOneWorld, AClientFollowsTheRelaysWorldSwitch) {
   EXPECT_NEAR(world.ground()(0.0, 0.0), 1.0, 0.05) << "the dome's top";
   std::error_code ec;
   fs::remove_all(dir, ec);
+}
+
+// A joiner on a generated world (ARISRV_SCENES SC1): the server holon runs the document's world
+// (attach_world), and an avatar spawn point puts the joiner's feet on the terrain there, where the
+// old ring put every joiner at z = 0 whatever the ground's height. Two seconds later it still
+// stands there: not fallen through, not stuck inside.
+TEST(AriadneOneWorld, AJoinerStandsOnAGeneratedWorldsGround) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = fresh_load(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  // A place whose ground is well away from z = 0 (and from the ball at (3, -4)).
+  const auto first_static = [&](double x, double y) {
+    const std::optional<cvc::physics::ray_hit> h =
+        w->world().raycast({x, y, 400.0}, {x, y, -400.0});
+    return h ? h->point.z : std::nan("");
+  };
+  double px = 0.0, py = 0.0, ground = 0.0;
+  for (int k = 0; k < 81 && std::fabs(ground) < 1.0; ++k) {
+    px = -80.0 + 20.0 * (k % 9);
+    py = -80.0 + 20.0 * (k / 9);
+    ground = first_static(px, py);
+    if (!std::isfinite(ground))
+      ground = 0.0;
+  }
+  ASSERT_GT(std::fabs(ground), 1.0) << "a world whose ground is not all at z = 0";
+
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  spawn_rules spawns;
+  spawns.points.push_back({px, py, 0.0, -1, "avatar", ""});
+  h.set_avatar_spawns(spawns);
+  const cvc::physics::body_state s = h.spawn_for("walker");
+  EXPECT_NEAR(s.position.z, ground + 0.05, 1e-3) << "its feet on the ground";
+  h.add_participant("walker", false, s);
+  for (int i = 0; i < 120; ++i)
+    h.advance(1.0 / 60.0);
+  const cvc::physics::vec3 at = h.state("walker").position;
+  std::printf("  spawned at (%.0f, %.0f): the ground is at z %.2f, and the walker stands at z %.2f "
+              "after 2 s (the old ring put every joiner at z 0)\n",
+              px, py, ground, at.z);
+  EXPECT_NEAR(at.z, ground, 0.3) << "standing on it";
+  EXPECT_NEAR(at.x, px, 0.5);
+  EXPECT_NEAR(at.y, py, 0.5);
 }
 
 // A lab joined to a relay that runs the same generated_world node (ARIADNE_WORLDS section 18.8,

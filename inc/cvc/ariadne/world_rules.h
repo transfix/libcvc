@@ -211,9 +211,11 @@ bool vehicle_plant_known(const std::string &plant);
 // Whether `plant` is a boat's (dynamicboat): its vehicles move on water, not land.
 bool vehicle_plant_floats(const std::string &plant);
 
-// Where vehicles start (ARIADNE_WORLDS.md §14, L3, the `spawns` section): points with a heading
-// (degrees from +x, counter-clockwise), and tags a spawn is matched on: a team (-1: any) and an
-// archetype ("": any). A point belongs to one of the scene's worlds (`world`, "" every world).
+// Where vehicles and avatars start (ARIADNE_WORLDS.md §14, L3, the `spawns` section;
+// ARISRV_SCENES.md SC1): points with a heading (degrees from +x, counter-clockwise), and tags a
+// spawn is matched on: a team (-1: any) and an archetype ("": any). `archetype: avatar`, or an
+// avatar archetype's id, makes a point an avatar's only; an untagged point serves avatars and
+// vehicles alike. A point belongs to one of the scene's worlds (`world`, "" every world).
 struct spawn_point {
   double x = 0.0, y = 0.0, heading = 0.0;
   int team = -1;

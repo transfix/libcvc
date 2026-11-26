@@ -138,6 +138,39 @@ world:
       << "an energy key left out keeps the default";
 }
 
+// Avatar spawns (ARISRV_SCENES SC1): a spawn point may be tagged `avatar` or an avatar
+// archetype's id, as well as a vehicle archetype's; any other name is still refused.
+TEST(WorldRulesTest, ASpawnPointMayBeAnAvatars) {
+  if (!ca::have_yaml())
+    GTEST_SKIP() << "built without yaml-cpp";
+  std::string why;
+  const ca::world_rules r = rules_of(R"(
+world:
+  avatars:
+    archetypes:
+      pilot: { body: { mass: 90 } }
+  spawns:
+    policy: nearest_free
+    points:
+      - { at: [10, 5], heading: 90, archetype: avatar }
+      - { at: [-10, 5], archetype: pilot }
+      - { at: [0, -5] }
+)",
+                                     why);
+  ASSERT_EQ(why, "");
+  ASSERT_EQ(r.spawns.points.size(), 3u);
+  EXPECT_EQ(r.spawns.points[0].archetype, "avatar");
+  EXPECT_EQ(r.spawns.points[1].archetype, "pilot");
+  rules_of(R"(
+world:
+  spawns:
+    points:
+      - { at: [10, 5], archetype: hovercraft }
+)",
+           why);
+  EXPECT_NE(why.find("'hovercraft', which is neither a vehicle"), std::string::npos) << why;
+}
+
 TEST(WorldRulesTest, WhatItDoesNotKnowIsAWarningAndWhatCannotRunAnError) {
   if (!ca::have_yaml())
     GTEST_SKIP() << "built without yaml-cpp";
