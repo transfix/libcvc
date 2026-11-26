@@ -71,15 +71,26 @@ public:
     std::size_t max_connections = 32; // connections kept in each record's log
   };
 
+  // What a client says it is (ID5a, ARISRV_IDENTITY.md 2.7): a claim, used to route and offer
+  // services, never to grant anything. clean_client() makes a valid one of anything.
+  struct client_info {
+    std::string kind = "unknown"; // an app's name ("nicotina"), else its host's ("arigl"), or
+                                  // "nmdc"; "unknown" when it said nothing
+    std::string version;          // free text for the log (a libcvc version, an NMDC tag)
+    std::vector<std::string> capabilities; // the services it can use: "chat", "files.share", ...
+  };
+
   struct connection {
     std::uint64_t seq =
         0;           // its number in its record's log (arisrv.clients.<id>.connections.n<seq>)
-    std::string pid; // the node id its Hello named
-    std::string transport;      // "grpc" | "ws"
+    std::string pid; // the node id its Hello named; "" for a net-engine connection
+    std::string transport;      // "grpc" | "ws", or a net-engine listener's ("nmdc", "nmdcs", ...)
     std::string public_address; // the address the relay saw, without its port
     std::string local_address; // the client's own end, as its Hello reported it ("" from a browser)
     std::string opened, closed; // UTC, ISO 8601; closed "" while it is open
     bool active = false;
+    bool engine = false; // a net-engine connection (ID5b): no Hello, no pid, no room presence
+    client_info client;
   };
 
   // A client's own caps, where an admin set them (server.limits); an unset field keeps the
@@ -113,6 +124,7 @@ public:
     bool banned = false;        // refused at each connection (server.ban), until unbanned
     std::uint64_t rcon_failures = 0; // wrong rcon passwords its connections sent
     client_limits limits;            // where an admin set them (server.limits)
+    client_info client; // what its newest open connection says it is (the last one's, once none is)
   };
 
   // Why a request was refused: a room-call error code (room_calls.h) and its message.
@@ -213,8 +225,40 @@ public:
   // loop, as every call here is (ServerDocument asks from run_client_*, which runs there).
   std::optional<client_limits> limits(const std::string &pid) const;
 
+  // -------- the net engine's connections (ID5b, ARISRV_IDENTITY.md 2.8) --------
+  //
+  // A connection the relay's net engine accepted (ARIADNE_NET_ENGINE.md 2.6) has no Hello and no
+  // pid. It is keyed by the engine's connection id, which a run never reuses, and kept until
+  // close_engine: update() leaves it alone. Each call is on the room loop, as the rest are: the
+  // engine's I/O threads queue their events to it.
+
+  // Open engine connection CONN, accepted on listener TRANSPORT ("nmdc", "nmdcs", "tcp", "tls"),
+  // in the record of its addresses' client id (client_id's fallback: it sends no device id), with
+  // what CLIENT says it is. Returns the client id; "" with WHY: `forbidden` for a banned client
+  // (the engine closes it), `invalid` for a CONN already open or a TRANSPORT that is no name.
+  std::string open_engine(std::uint64_t conn, const std::string &transport,
+                          const std::string &public_address, const std::string &local_address,
+                          const client_info &client, double now_s, const std::string &wall,
+                          refusal &why);
+  // The username engine connection CONN's protocol gives its client (an NMDC nick), cleaned as
+  // set_username cleans one and unique among the active clients, without a suffix: false with WHY,
+  // `invalid` for no name or one another active client has (the program refuses the login),
+  // `unavailable` for no such connection.
+  bool name_engine(std::uint64_t conn, const std::string &nick, refusal &why);
+  // What engine connection CONN says it is, when its protocol tells (an NMDC client's $MyINFO).
+  // False for no such connection.
+  bool describe_engine(std::uint64_t conn, const client_info &client);
+  // Engine connection CONN closed at WALL. False for no such connection.
+  bool close_engine(std::uint64_t conn, const std::string &wall);
+
+  // CLIENT made valid: a kind of 1-32 bytes of [a-z0-9._-] ("unknown" otherwise), a version of at
+  // most 64 printable ASCII bytes, and capabilities of 1-64 bytes of [a-z0-9._-] each, at most 32,
+  // in order with no repeats; anything else is dropped.
+  static client_info clean_client(const client_info &client);
+
   // Every record, active ones first, then the latest seen (server.clients): a list of
-  // {client_id, username, active, admin, banned, verified, device, first_seen, last_seen}.
+  // {client_id, username, active, admin, banned, verified, device, first_seen, last_seen, kind,
+  // capabilities}.
   cvc::state_exec::value_t list_value() const;
   // One record (server.client): the list's fields, its limits, its rcon failures and its
   // connection log. Nil for an unknown id.
@@ -239,8 +283,12 @@ private:
     std::uint64_t connection = 0;
     std::string public_address;
     bool secure = false;
+    bool engine = false; // a net-engine connection: close_engine ends it, not update()
   };
   bool record_admin(const std::string &id) const;
+  // REC's client: its newest active connection's, else its newest connection's.
+  static void take_client(record &rec);
+  static std::string engine_key(std::uint64_t conn);
   cvc::state_exec::value_t summary(const record &rec) const;
 
   options _opt;

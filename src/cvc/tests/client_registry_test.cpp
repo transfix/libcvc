@@ -447,6 +447,163 @@ TEST(ClientRegistry, ABannedClientIsClosedAtEachConnection) {
   EXPECT_TRUE(reg.take_banned_links().empty());
 }
 
+namespace {
+// The strings of a list value, in order.
+std::vector<std::string> str_list(const se::value_t &v, const std::string &key) {
+  std::vector<std::string> out;
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
+  if (!d || !*d)
+    return out;
+  for (const auto &[k, x] : **d)
+    if (k == key)
+      if (const se::list_ptr *l = std::get_if<se::list_ptr>(&x.v); l && *l)
+        for (const se::value_t &e : **l)
+          if (const std::string *str = std::get_if<std::string>(&e.v))
+            out.push_back(*str);
+  return out;
+}
+
+reg_t::client_info nmdc_client(const std::string &tag = "<DC++ V:0.868>") {
+  reg_t::client_info c;
+  c.kind = "nmdc";
+  c.version = tag;
+  c.capabilities = {"chat", "chat.dm", "files.search", "files.transfer"};
+  return c;
+}
+} // namespace
+
+// A net-engine connection (ID5b) has no Hello and no pid: it opens in the record of its addresses'
+// client id, survives update() passes that never report it, takes its protocol's nick as its
+// username, and closes when the engine says so.
+TEST(ClientRegistry, AnEngineConnectionIsRecordedWithoutAHello) {
+  cvc::app app;
+  reg_t reg(opts());
+  reg_t::refusal why;
+  const std::string id =
+      reg.open_engine(41, "nmdc", "ipv4:198.51.100.9:41234", "", nmdc_client(), 1.0, "t1", why);
+  ASSERT_FALSE(id.empty()) << why.message;
+  EXPECT_EQ(id, reg.client_id("", "", "198.51.100.9")) << "the address fallback";
+  const reg_t::record *rec = reg.find(id);
+  ASSERT_NE(rec, nullptr);
+  EXPECT_TRUE(rec->active);
+  ASSERT_EQ(rec->connections.size(), 1u);
+  EXPECT_TRUE(rec->connections[0].engine);
+  EXPECT_EQ(rec->connections[0].pid, "");
+  EXPECT_EQ(rec->connections[0].transport, "nmdc");
+  EXPECT_EQ(rec->connections[0].public_address, "198.51.100.9");
+  EXPECT_EQ(rec->client.kind, "nmdc");
+  EXPECT_EQ(reg.open_engine(41, "nmdc", "198.51.100.9", "", nmdc_client(), 1.0, "t1", why), "");
+  EXPECT_EQ(why.code, "invalid") << "a connection id already open";
+  EXPECT_EQ(reg.open_engine(42, "No Name", "198.51.100.9", "", {}, 1.0, "t1", why), "");
+  EXPECT_EQ(why.code, "invalid") << "a transport is a short lowercase name";
+
+  // The transports' passes don't report it, and leave it open.
+  reg.update({link(1, "bob")}, 2.0, "t2");
+  reg.update({}, 3.0, "t3");
+  EXPECT_TRUE(reg.find(id)->active);
+
+  // Its nick is its username, unique among the active clients, with no suffix.
+  ASSERT_TRUE(reg.name_engine(41, "  nmdcuser ", why)) << why.message;
+  EXPECT_EQ(reg.find(id)->username, "nmdcuser");
+  reg.update({link(2, "carol")}, 4.0, "t4");
+  ASSERT_TRUE(reg.set_username("carol", "carol", 4.0, why)) << why.message;
+  EXPECT_FALSE(reg.name_engine(41, "carol", why));
+  EXPECT_EQ(why.code, "invalid") << "another active client has it";
+  EXPECT_FALSE(reg.name_engine(41, "  ", why));
+  EXPECT_EQ(why.code, "invalid");
+  EXPECT_FALSE(reg.name_engine(99, "x", why));
+  EXPECT_EQ(why.code, "unavailable");
+
+  // The private mirror has it, with its kind and capabilities.
+  reg.write(app, {});
+  const std::string base = std::string(reg_t::kRoot) + "." + id;
+  EXPECT_EQ(value_at(app, base + ".username"), "nmdcuser");
+  EXPECT_EQ(value_at(app, base + ".kind"), "nmdc");
+  EXPECT_EQ(value_at(app, base + ".capabilities"), "chat,chat.dm,files.search,files.transfer");
+  EXPECT_EQ(value_at(app, base + ".connections.n1.engine"), "1");
+  EXPECT_EQ(value_at(app, base + ".connections.n1.transport"), "nmdc");
+  EXPECT_EQ(value_at(app, base + ".connections.n1.version"), "<DC++ V:0.868>");
+
+  ASSERT_TRUE(reg.close_engine(41, "t5"));
+  EXPECT_FALSE(reg.close_engine(41, "t5")) << "closed already";
+  rec = reg.find(id);
+  EXPECT_FALSE(rec->active);
+  EXPECT_FALSE(rec->connections[0].active);
+  EXPECT_EQ(rec->connections[0].closed, "t5");
+  EXPECT_EQ(rec->client.kind, "nmdc") << "the last connection's, once none is open";
+}
+
+// server.kick reaches an engine connection through links_of, and a banned client is refused at
+// its next accept, which the engine then closes.
+TEST(ClientRegistry, EngineConnectionsAreKickedAndBannedLikeTheRest) {
+  reg_t reg(opts());
+  reg_t::refusal why;
+  const std::string id =
+      reg.open_engine(7, "nmdcs", "203.0.113.50", "", nmdc_client(), 1.0, "t1", why);
+  ASSERT_FALSE(id.empty());
+  const std::vector<reg_t::link_ref> open = reg.links_of(id);
+  ASSERT_EQ(open.size(), 1u);
+  EXPECT_EQ(open[0].transport, "nmdcs");
+  EXPECT_EQ(open[0].connection, 7u);
+  ASSERT_TRUE(reg.ban(id, true));
+  ASSERT_TRUE(reg.close_engine(7, "t2")); // the relay closed it through the engine
+  EXPECT_EQ(reg.open_engine(8, "nmdcs", "203.0.113.50", "", nmdc_client(), 3.0, "t3", why), "");
+  EXPECT_EQ(why.code, "forbidden");
+  EXPECT_TRUE(reg.links_of(id).empty());
+  ASSERT_TRUE(reg.ban(id, false));
+  EXPECT_EQ(reg.open_engine(9, "nmdcs", "203.0.113.50", "", nmdc_client(), 4.0, "t4", why), id);
+}
+
+// What a client says it is (ID5a): cleaned, kept per connection, and the record's is its newest
+// open connection's. A native client that says nothing is "unknown". The admin's views and whoami
+// show it.
+TEST(ClientRegistry, AClientsKindAndCapabilitiesAreKept) {
+  reg_t::client_info raw;
+  raw.kind = "Nicotina!";
+  raw.version = std::string("4.0.9\x01") + std::string(100, 'v');
+  raw.capabilities = {"chat", "chat", "Files.Share", "files.share", "", "conference.audio"};
+  const reg_t::client_info c = reg_t::clean_client(raw);
+  EXPECT_EQ(c.kind, "unknown") << "not a short lowercase name";
+  EXPECT_EQ(c.version.size(), 64u);
+  EXPECT_EQ(c.version.substr(0, 5), "4.0.9") << "control bytes dropped";
+  EXPECT_EQ(c.capabilities, (std::vector<std::string>{"chat", "files.share", "conference.audio"}));
+  raw.kind = "arigl-web";
+  EXPECT_EQ(reg_t::clean_client(raw).kind, "arigl-web");
+
+  reg_t reg(opts());
+  reg.update({link(1, "bob")}, 1.0, "t1");
+  const std::string bob = reg.identity_key("bob");
+  EXPECT_EQ(reg.find(bob)->client.kind, "unknown") << "a Hello that says nothing";
+  EXPECT_EQ(str_field(reg.whoami("bob"), "kind"), "unknown");
+
+  // An NMDC client describes itself once its $MyINFO comes; the record follows its newest
+  // open connection.
+  reg_t::refusal why;
+  reg_t::client_info bare;
+  bare.kind = "nmdc";
+  const std::string id = reg.open_engine(5, "nmdc", "198.51.100.20", "", bare, 2.0, "t2", why);
+  ASSERT_FALSE(id.empty());
+  EXPECT_TRUE(reg.find(id)->client.capabilities.empty());
+  ASSERT_TRUE(reg.describe_engine(5, nmdc_client("<ApexDC++ V:1.6>")));
+  EXPECT_FALSE(reg.describe_engine(6, nmdc_client()));
+  EXPECT_EQ(reg.find(id)->client.version, "<ApexDC++ V:1.6>");
+
+  const se::value_t list = reg.list_value();
+  const se::list_ptr *l = std::get_if<se::list_ptr>(&list.v);
+  ASSERT_TRUE(l && *l && (*l)->size() == 2u);
+  bool saw_nmdc = false;
+  for (const se::value_t &row : **l)
+    if (str_field(row, "client_id") == id) {
+      saw_nmdc = true;
+      EXPECT_EQ(str_field(row, "kind"), "nmdc");
+      EXPECT_EQ(str_list(row, "capabilities"),
+                (std::vector<std::string>{"chat", "chat.dm", "files.search", "files.transfer"}));
+    }
+  EXPECT_TRUE(saw_nmdc);
+  const se::value_t one = reg.record_value(id);
+  EXPECT_EQ(str_field(one, "kind"), "nmdc");
+}
+
 TEST(ClientRegistry, AnAdminRenamesWithoutTheRateLimit) {
   reg_t reg(opts());
   reg.update({link(1, "a", "dev-a"), link(2, "b", "dev-b")}, 1.0, "t");

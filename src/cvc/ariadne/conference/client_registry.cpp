@@ -148,6 +148,22 @@ std::string seconds_text(double s) {
 }
 
 // A client's limits as server.client answers them: only the ones set.
+// A list of strings, as a value (a client's capabilities).
+se::value_t strings_value(const std::vector<std::string> &v) {
+  std::vector<se::value_t> out;
+  for (const std::string &s : v)
+    out.emplace_back(s);
+  return se::make_list(std::move(out));
+}
+
+// The same, as one comma-separated leaf for the private mirror.
+std::string comma_list(const std::vector<std::string> &v) {
+  std::string out;
+  for (const std::string &s : v)
+    out += (out.empty() ? "" : ",") + s;
+  return out;
+}
+
 se::value_t limits_value(const client_registry::client_limits &l) {
   std::vector<std::pair<std::string, se::value_t>> out;
   if (l.programs)
@@ -218,6 +234,7 @@ void client_registry::update(const std::vector<cvc::state_link_report> &links, d
       rec.connections.push_back(std::move(c));
       while (rec.connections.size() > _opt.max_connections)
         rec.connections.pop_front();
+      take_client(rec);
       link_state ls;
       ls.client_id = id;
       ls.seq = rec.connections.back().seq;
@@ -254,9 +271,10 @@ void client_registry::update(const std::vector<cvc::state_link_report> &links, d
       }
     }
   }
-  // The links gone since the last pass: their connections close.
+  // The links gone since the last pass: their connections close. The net engine's are no link
+  // report's, and close_engine ends them.
   for (auto it = _links.begin(); it != _links.end();) {
-    if (seen.count(it->first)) {
+    if (seen.count(it->first) || it->second.engine) {
       ++it;
       continue;
     }
@@ -271,9 +289,10 @@ void client_registry::update(const std::vector<cvc::state_link_report> &links, d
       }
       // A connection trimmed from the log may still be open: ask the links, not the log.
       for (const auto &[k, ls] : _links)
-        if (k != it->first && seen.count(k) && ls.client_id == rec->id)
+        if (k != it->first && (seen.count(k) || ls.engine) && ls.client_id == rec->id)
           any = true;
       rec->active = any;
+      take_client(*rec);
       rec->dirty = rec->log_dirty = _dirty = true;
     }
     _admins.erase(it->first); // an elevation ends with its connection
@@ -427,7 +446,9 @@ se::value_t client_registry::whoami(const std::string &pid) const {
                         {"username", se::value_t(rec->username)},
                         {"verified", se::value_t(rec->verified)},
                         {"device", se::value_t(rec->device)},
-                        {"admin", se::value_t(is_admin(pid))}});
+                        {"admin", se::value_t(is_admin(pid))},
+                        {"kind", se::value_t(rec->client.kind)},
+                        {"capabilities", strings_value(rec->client.capabilities)}});
 }
 
 void client_registry::write(cvc::app &app, const std::set<std::string> &present) {
@@ -472,6 +493,8 @@ void client_registry::mirror(cvc::app &app) {
       put(app, join(base, "admin"), record_admin(id) ? "1" : "0");
       put(app, join(base, "banned"), rec.banned ? "1" : "0");
       put(app, join(base, "rcon_failures"), std::to_string(rec.rcon_failures));
+      put(app, join(base, "kind"), rec.client.kind);
+      put(app, join(base, "capabilities"), comma_list(rec.client.capabilities));
       // Only the limits set, each under limits.<key>.
       const std::string lb = join(base, "limits");
       const client_limits &l = rec.limits;
@@ -502,6 +525,10 @@ void client_registry::mirror(cvc::app &app) {
       put(app, join(cb, "opened"), c.opened);
       put(app, join(cb, "closed"), c.closed);
       put(app, join(cb, "active"), c.active ? "1" : "0");
+      put(app, join(cb, "engine"), c.engine ? "1" : "0");
+      put(app, join(cb, "kind"), c.client.kind);
+      put(app, join(cb, "version"), c.client.version);
+      put(app, join(cb, "capabilities"), comma_list(c.client.capabilities));
       now.insert(c.seq);
     }
     std::set<std::uint64_t> &had = _mirrored_seqs[id];
@@ -670,7 +697,9 @@ se::value_t client_registry::summary(const record &rec) const {
                         {"verified", se::value_t(rec.verified)},
                         {"device", se::value_t(rec.device)},
                         {"first_seen", se::value_t(rec.first_seen)},
-                        {"last_seen", se::value_t(rec.last_seen)}});
+                        {"last_seen", se::value_t(rec.last_seen)},
+                        {"kind", se::value_t(rec.client.kind)},
+                        {"capabilities", strings_value(rec.client.capabilities)}});
 }
 
 se::value_t client_registry::list_value() const {
@@ -701,7 +730,11 @@ se::value_t client_registry::record_value(const std::string &id) const {
                                    {"local", se::value_t(c.local_address)},
                                    {"opened", se::value_t(c.opened)},
                                    {"closed", se::value_t(c.closed)},
-                                   {"active", se::value_t(c.active)}}));
+                                   {"active", se::value_t(c.active)},
+                                   {"engine", se::value_t(c.engine)},
+                                   {"kind", se::value_t(c.client.kind)},
+                                   {"version", se::value_t(c.client.version)},
+                                   {"capabilities", strings_value(c.client.capabilities)}}));
   se::dict_ptr *d = std::get_if<se::dict_ptr>(&v.v);
   (*d)->emplace_back("limits", limits_value(rec->limits));
   (*d)->emplace_back("rcon_failures", se::value_t(static_cast<std::int64_t>(rec->rcon_failures)));
@@ -745,6 +778,158 @@ void rcon_guard::failed(const std::string &address, const std::string &client, d
 void rcon_guard::succeeded(const std::string &address, const std::string &client) {
   _by.erase("a:" + address);
   _by.erase("c:" + client);
+}
+
+// -------- the net engine's connections (ID5b) --------
+
+std::string client_registry::engine_key(std::uint64_t conn) {
+  return "engine#" + std::to_string(conn);
+}
+
+void client_registry::take_client(record &rec) {
+  for (auto it = rec.connections.rbegin(); it != rec.connections.rend(); ++it)
+    if (it->active) {
+      rec.client = it->client;
+      return;
+    }
+  if (!rec.connections.empty())
+    rec.client = rec.connections.back().client;
+}
+
+namespace {
+bool client_word(const std::string &s, std::size_t max) {
+  if (s.empty() || s.size() > max)
+    return false;
+  for (const char ch : s)
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
+          ch == '-'))
+      return false;
+  return true;
+}
+} // namespace
+
+client_registry::client_info client_registry::clean_client(const client_info &in) {
+  client_info out;
+  out.kind = client_word(in.kind, 32) ? in.kind : "unknown";
+  for (const char ch : in.version) {
+    if (out.version.size() >= 64)
+      break;
+    if (ch >= 0x20 && ch < 0x7f)
+      out.version.push_back(ch);
+  }
+  for (const std::string &c : in.capabilities) {
+    if (out.capabilities.size() >= 32)
+      break;
+    if (client_word(c, 64) &&
+        std::find(out.capabilities.begin(), out.capabilities.end(), c) == out.capabilities.end())
+      out.capabilities.push_back(c);
+  }
+  return out;
+}
+
+std::string client_registry::open_engine(std::uint64_t conn, const std::string &transport,
+                                         const std::string &public_address,
+                                         const std::string &local_address,
+                                         const client_info &client, double now_s,
+                                         const std::string &wall, refusal &why) {
+  const std::string key = engine_key(conn);
+  if (_links.count(key) || !client_word(transport, 32)) {
+    why = {"invalid", _links.count(key) ? "that connection is open already"
+                                        : "a transport is a short lowercase name"};
+    return std::string();
+  }
+  const std::string pub = address_host(public_address);
+  const std::string id = client_id(std::string(), local_address, pub);
+  if (const record *known = find(id); known && known->banned) {
+    why = {"forbidden", "this client is banned"};
+    return std::string();
+  }
+  record &rec = admit(id, now_s, wall);
+  connection c;
+  c.seq = rec.next_seq++;
+  c.transport = transport;
+  c.public_address = pub;
+  c.local_address = local_address;
+  c.opened = wall;
+  c.active = true;
+  c.engine = true;
+  c.client = clean_client(client);
+  rec.connections.push_back(std::move(c));
+  while (rec.connections.size() > _opt.max_connections)
+    rec.connections.pop_front();
+  link_state ls;
+  ls.client_id = id;
+  ls.seq = rec.connections.back().seq;
+  ls.transport = transport;
+  ls.connection = conn;
+  ls.public_address = pub;
+  ls.secure = transport == "nmdcs" || transport == "tls";
+  ls.engine = true;
+  _links.emplace(key, std::move(ls));
+  rec.active = true;
+  rec.last_seen = wall;
+  rec.seen_s = now_s;
+  take_client(rec);
+  rec.dirty = rec.log_dirty = _dirty = true;
+  return id;
+}
+
+bool client_registry::name_engine(std::uint64_t conn, const std::string &nick, refusal &why) {
+  const auto l = _links.find(engine_key(conn));
+  record *rec = l == _links.end() ? nullptr : find_mut(l->second.client_id);
+  if (!rec) {
+    why = {"unavailable", "no such connection"};
+    return false;
+  }
+  std::string name;
+  if (!clean_username(nick, name)) {
+    why = {"invalid", "that is not a name"};
+    return false;
+  }
+  if (name == rec->username)
+    return true;
+  if (name_taken(name, rec->id)) {
+    why = {"invalid", "another client has that name"};
+    return false;
+  }
+  rec->username = name;
+  rec->dirty = _dirty = true;
+  return true;
+}
+
+bool client_registry::describe_engine(std::uint64_t conn, const client_info &client) {
+  const auto l = _links.find(engine_key(conn));
+  record *rec = l == _links.end() ? nullptr : find_mut(l->second.client_id);
+  if (!rec)
+    return false;
+  for (connection &c : rec->connections)
+    if (c.seq == l->second.seq)
+      c.client = clean_client(client);
+  take_client(*rec);
+  rec->dirty = rec->log_dirty = _dirty = true;
+  return true;
+}
+
+bool client_registry::close_engine(std::uint64_t conn, const std::string &wall) {
+  const auto l = _links.find(engine_key(conn));
+  if (l == _links.end())
+    return false;
+  if (record *rec = find_mut(l->second.client_id)) {
+    for (connection &c : rec->connections)
+      if (c.seq == l->second.seq && c.active) {
+        c.active = false;
+        c.closed = wall;
+      }
+    bool any = false;
+    for (const auto &[k, ls] : _links)
+      if (k != l->first && ls.client_id == rec->id)
+        any = true;
+    rec->active = any;
+    take_client(*rec);
+    rec->dirty = rec->log_dirty = _dirty = true;
+  }
+  _links.erase(l);
+  return true;
 }
 
 bool client_registry::clean_username(const std::string &in, std::string &out) {
