@@ -1098,6 +1098,12 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.engine_flooded"), 0.0);
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.water_force.z"), 0.0);
   EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.0.water_depth"), 0.0);
+  // Its flood_area (0: it floods at once) cannot become one that fills over time.
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.wading.flood_area"), 0.0);
+  set_tree(a, "physics.vehicles.truck.tuning.wading.flood_area", "0.1");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).wading.flood_area, 0.0);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.water_inside"), 0.0);
   // Pedals.
   set_tree(a, "physics.vehicles.truck.controls.hand_brake", "1");
   b.step();

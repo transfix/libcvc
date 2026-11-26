@@ -162,12 +162,12 @@ public:
         {
           const cvc::physics::wading_desc &g = body.wading;
           put(d, "wading",
-              Py_BuildValue("{s:O,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "enabled",
+              Py_BuildValue("{s:O,s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "enabled",
                             g.enabled ? Py_True : Py_False, "displacement", g.displacement,
                             "wheel_displacement", g.wheel_displacement, "wheel_drag",
                             g.wheel_drag, "underbody_depth", g.underbody_depth, "underbody_drag",
                             g.underbody_drag, "tire_pressure", g.tire_pressure, "fording_depth",
-                            g.fording_depth));
+                            g.fording_depth, "flood_area", g.flood_area));
         }
         put(d, "posed", PyBool_FromLong(e.posed ? 1 : 0));
         put(d, "pose", e.posed ? pose_dict(e.pose) : (Py_INCREF(Py_None), Py_None));
