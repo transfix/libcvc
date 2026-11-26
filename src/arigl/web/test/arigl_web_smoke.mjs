@@ -22,7 +22,8 @@
 //
 // A relay that goes silent without closing (its host gone, the path to it cut) must not hold the
 // page's conference link for good: the page closes a link that has sent nothing for 10 s
-// (state_transport::reap_idle) and dials again.
+// (state_transport::reap_idle) and dials again. Only a package with the WebSocket transport has a
+// conference link (arigl-web; not ariglx-web, built without it), so the case runs there alone.
 //
 // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4): with WebAssembly.Suspending deleted
 // before the page's own script runs, as in a browser without JSPI, each page must show the browsers
@@ -161,6 +162,12 @@ const SILENT_CONFIG = JSON.stringify({
   env: {CVC_ARIADNE_RELAY: '{ws_origin}/apps/silent-relay', CVC_ARIADNE_NAME: 'smoke'},
 });
 const silent = {opens: 0, closes: 0};
+// Whether the package's module has the WebSocket transport (the browser's WebSocket API in its
+// glue, as cyprty's stage.sh checks): without it, CVC_ARIADNE_RELAY runs the document locally.
+const HAS_WS = ['arigl.js', 'ariglx.js'].some(f => {
+  const js = path.join(WEB, f);
+  return fs.existsSync(js) && fs.readFileSync(js, 'utf8').includes('emscripten_websocket');
+});
 function silentRelay(req, socket) {
   const key = req.headers['sec-websocket-key'];
   if (!key) return socket.destroy();
@@ -423,7 +430,9 @@ const cases = [
     before: () => { flaky.hits = flaky.reloads = 0; },
     check: v => v.state === 'running' && flaky.hits === 2 && flaky.reloads === 1,
   },
-  {
+];
+if (HAS_WS)
+  cases.push({
     name: 'a relay link silent for 10 s is closed, and the page dials again',
     url: `${ORIGIN}/apps/silent/?src=main.ari`,
     before: () => { silent.opens = silent.closes = 0; },
@@ -431,8 +440,9 @@ const cases = [
     check: v => v.state === 'running' && silent.opens >= 2 && silent.closes >= 1 &&
                 v.log.some(l => /closing a silent link/.test(l)),
     report: () => [`relay opens ${silent.opens}, closes ${silent.closes}`],
-  },
-];
+  });
+else
+  console.log('skip  a relay link silent for 10 s is closed (this package has no WebSocket transport)');
 
 // The browser gate. NO_JSPI runs before the page's own script, as a browser without JSPI would
 // be; IPHONE and IPAD make it Chrome on an iPhone, and Safari on an iPad (whose user agent is a
