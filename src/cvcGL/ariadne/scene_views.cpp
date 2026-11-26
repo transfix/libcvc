@@ -198,6 +198,7 @@ struct SceneViews::View {
   std::string pointer_key;
   long pointer_seq = 0;
   bool drawn = false;  // a widget drew it this frame
+  bool fresh = true;   // made this frame: the widget readies it before its first draw
   bool framed = false; // its camera has been framed on what it shows
   double region[4] = {-1.0, -1.0, -1.0, -1.0};
   std::unordered_set<vtkProp *> hidden; // the main view's props this one leaves out
@@ -609,6 +610,20 @@ std::string on_pick_of(const RealizedScene &rs, const GraphicsNode *node) {
   }
   return {};
 }
+#ifdef CVC_ENABLE_IMGUI
+// The modifier keys held, as a pick's `mods` field: shift, ctrl, alt, super, comma-separated.
+std::string pointer_mods() {
+  const ImGuiIO &io = ImGui::GetIO();
+  std::string mods;
+  for (const auto &[on, name] : {std::pair<bool, const char *>{io.KeyShift, "shift"},
+                                 {io.KeyCtrl, "ctrl"},
+                                 {io.KeyAlt, "alt"},
+                                 {io.KeySuper, "super"}})
+    if (on)
+      mods += (mods.empty() ? "" : ",") + std::string(name);
+  return mods;
+}
+#endif
 
 // The world ray through display point (x, y) of `ren`: the near plane's point and the direction to
 // the far plane's.
@@ -882,11 +897,16 @@ void SceneViews::bind_camera(View &v, const std::string &name) {
   v.camera = bound;
 }
 
-bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
+bool SceneViews::pick_at(View &v, double wx, double wy, PickHit &hit) const {
   hit = PickHit{};
   vtkRenderer *ren = v.vp ? v.vp->renderer() : nullptr;
   if (!ren)
     return false;
+  // The point in its renderer's display coordinates: the view draws into a texture, whose pixels
+  // those are (Viewport::windowToRenderer).
+  double at[2];
+  v.vp->windowToRenderer(wx, wy, at);
+  const double x = at[0], y = at[1];
   double origin[3], dir[3];
   const bool ray = display_ray(ren, x, y, origin, dir);
   // A slice view: the plane of the nearest volume_slice node on its axis that it draws, met
@@ -937,6 +957,15 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
     if (t.second.volume)
       node_of.emplace(t.second.volume.GetPointer(), it->second);
   }
+  return pick_props(ren, x, y, node_of, slot.realized, hit);
+}
+
+bool SceneViews::pick_props(
+    vtkRenderer *ren, double x, double y,
+    const std::unordered_map<vtkProp *, std::pair<std::string, const GraphicsNode *>> &node_of,
+    const RealizedScene *realized, PickHit &hit) const {
+  double origin[3], dir[3];
+  const bool ray = display_ray(ren, x, y, origin, dir);
   // A real geometry hit test, as SceneRenderer::pickWorld: a miss over empty space is a miss.
   vtkNew<vtkCellPicker> picker;
   picker->SetTolerance(0.0005);
@@ -958,12 +987,13 @@ bool SceneViews::pick_at(View &v, double x, double y, PickHit &hit) const {
     const auto n = node_of.find(prop);
     if (n != node_of.end()) {
       hit.node = n->second.first;
-      hit.on_pick = on_pick_of(*slot.realized, n->second.second);
+      if (realized)
+        hit.on_pick = on_pick_of(*realized, n->second.second);
     }
   }
   // On a volume_slice node: the point on its plane exactly, and the voxel there.
-  if (ray && !hit.node.empty() && slot.realized)
-    for (const RealizedScene::TaggedNode &t : slot.realized->nodes)
+  if (ray && !hit.node.empty() && realized)
+    for (const RealizedScene::TaggedNode &t : realized->nodes)
       if (t.id == hit.node)
         if (auto s = std::dynamic_pointer_cast<VolumeSliceNode>(t.node.lock())) {
           PickHit h;
@@ -988,13 +1018,21 @@ SceneViews::pick_fields(View &v, const char *phase, long &seq, PickHit &hit) con
   const double x = io.MousePos.x * io.DisplayFramebufferScale.x;
   const double y = (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y;
   pick_at(v, x, y, hit);
-  std::string mods;
-  for (const auto &[on, name] : {std::pair<bool, const char *>{io.KeyShift, "shift"},
-                                 {io.KeyCtrl, "ctrl"},
-                                 {io.KeyAlt, "alt"},
-                                 {io.KeySuper, "super"}})
-    if (on)
-      mods += (mods.empty() ? "" : ",") + std::string(name);
+  std::vector<std::pair<std::string, std::string>> f = hit_fields(hit, v.scene);
+  f.emplace_back("button", std::string(phase) == "hover" ? "0" : "1");
+  f.emplace_back("mods", pointer_mods());
+  f.emplace_back("phase", phase);
+  f.emplace_back("view", v.name);
+  f.emplace_back("seq", std::to_string(++seq));
+  return f;
+#else
+  (void)v, (void)phase, (void)seq;
+  return {};
+#endif
+}
+
+std::vector<std::pair<std::string, std::string>>
+SceneViews::hit_fields(const PickHit &hit, const std::string &scene) const {
   const auto num = [](double d) {
     char b[64];
     std::snprintf(b, sizeof b, "%.9g", d);
@@ -1003,6 +1041,16 @@ SceneViews::pick_fields(View &v, const char *phase, long &seq, PickHit &hit) con
   const bool at = hit.hit || hit.plane; // a slice view reports the plane's point past its edge
   const auto ijk = [&hit](int c) { return hit.voxel ? std::to_string(hit.ijk[c]) : std::string(); };
   const char *axes[] = {"x", "y", "z"};
+  // §5.30 the node's own tags:, so a right-click menu's items can show over the nodes they act on.
+  std::string tags;
+  SceneSlot slot;
+  if (!hit.node.empty() && scenes_ && scenes_(scene, slot) && slot.realized)
+    for (const RealizedScene::TaggedNode &t : slot.realized->nodes)
+      if (t.id == hit.node) {
+        for (const std::string &tag : t.tags)
+          tags += (tags.empty() ? "" : " ") + tag;
+        break;
+      }
   return {{"x", at ? num(hit.world[0]) : ""},
           {"y", at ? num(hit.world[1]) : ""},
           {"z", at ? num(hit.world[2]) : ""},
@@ -1013,13 +1061,37 @@ SceneViews::pick_fields(View &v, const char *phase, long &seq, PickHit &hit) con
           {"k", ijk(2)},
           {"value", hit.voxel ? num(hit.value) : ""},
           {"axis", hit.plane && hit.axis >= 0 && hit.axis < 3 ? axes[hit.axis] : ""},
-          {"button", std::string(phase) == "hover" ? "0" : "1"},
-          {"mods", mods},
-          {"phase", phase},
-          {"view", v.name},
-          {"seq", std::to_string(++seq)}};
+          {"tags", tags}};
+}
+
+std::vector<std::pair<std::string, std::string>> SceneViews::main_pick_fields() const {
+#ifdef CVC_ENABLE_IMGUI
+  vtkRenderer *ren = view_->renderer();
+  SceneSlot slot;
+  if (!ren || !scenes_ || !scenes_("", slot))
+    return {};
+  // The main scene's nodes, less what main_view: leaves out of the main view.
+  std::unordered_map<vtkProp *, std::pair<std::string, const GraphicsNode *>> node_of;
+  if (slot.realized)
+    for (const RealizedScene::TaggedNode &t : slot.realized->nodes) {
+      const std::shared_ptr<GraphicsNode> g = t.node.lock();
+      std::unordered_set<vtkProp *> own;
+      collect(g, own, false);
+      for (vtkProp *p : own)
+        if (std::find(main_hidden_.begin(), main_hidden_.end(), static_cast<void *>(p)) ==
+            main_hidden_.end())
+          node_of.emplace(p, std::make_pair(t.id, g.get()));
+    }
+  const ImGuiIO &io = ImGui::GetIO();
+  PickHit hit;
+  pick_props(ren, io.MousePos.x * io.DisplayFramebufferScale.x,
+             (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y, node_of,
+             slot.realized, hit);
+  std::vector<std::pair<std::string, std::string>> f = hit_fields(hit, "");
+  f.emplace_back("view", "main");
+  f.emplace_back("mods", pointer_mods());
+  return f;
 #else
-  (void)v, (void)phase, (void)seq;
   return {};
 #endif
 }
@@ -1143,18 +1215,12 @@ SceneViews::View *SceneViews::view_for(const std::string &name, const std::strin
 void SceneViews::end_walk() {
   walked_ = true;
   // A scenes: entry's own viewport bakes its shadow maps when it draws, so while one of its views
-  // shows and it casts shadows, draw one pixel of it in a corner of that view, which draws over it.
+  // shows and it casts shadows, it draws one pixel, into a texture of its own that nothing shows.
   std::vector<std::string> anchors;
   ViewportManager &vm = view_->viewportManager();
-  int W = 0, H = 0;
-  if (vtkRenderWindow *win = vm.renderWindow()) {
-    const int *sz = win->GetSize();
-    W = sz[0];
-    H = sz[1];
-  }
   for (auto &kv : views_) {
     View &v = *kv.second;
-    if (!v.drawn || v.scene.empty() || W <= 0 || H <= 0)
+    if (!v.drawn || v.scene.empty())
       continue;
     SceneSlot slot;
     if (!scenes_ || !scenes_(v.scene, slot) || !slot.anchor || !slot.sg ||
@@ -1163,7 +1229,7 @@ void SceneViews::end_walk() {
     if (std::find(anchors.begin(), anchors.end(), slot.source) != anchors.end())
       continue;
     Viewport &a = vm.viewport(slot.source);
-    a.setRegion(v.region[0], v.region[1], v.region[0] + 1.0 / W, v.region[1] + 1.0 / H);
+    a.setTextureSize(1, 1);
     if (!a.visible()) {
       // Shown again after frames unseen: bake its maps on this frame, whatever its stride, so the
       // views never draw maps from before (the anchor draws first, a layer under them).
@@ -1253,173 +1319,204 @@ void SceneViews::update(double dt) {
     View &v = *kv.second;
     if (!walked && v.vp->visible())
       v.vp->setVisible(false);
-    SceneSlot slot;
-    if (!scenes_ || !scenes_(v.scene, slot) || !slot.sg)
-      continue;
-    SceneGraph &sg = *slot.sg;
-    const RealizedScene *rs = slot.realized;
-    // What it leaves out: the tagged nodes its show: / hide: rule out, and the chrome.
-    v.hidden.clear();
-    if (rs && (!v.show.empty() || !v.hide.empty()))
-      for (const RealizedScene::TaggedNode &t : rs->nodes)
-        if (!in_view(t.tags, v.show, v.hide))
-          collect(t.node.lock(), v.hidden, t.subtree);
-    // A slice view leaves out the volume_slice nodes on the other two axes, with their overlays:
-    // seen edge-on, each would only draw a line across its own.
-    const bool slice_view = v.start.mode == "slice" && v.camera.empty();
-    if (rs && slice_view)
-      for (const RealizedScene::TaggedNode &t : rs->nodes)
-        if (auto s = std::dynamic_pointer_cast<VolumeSliceNode>(t.node.lock()))
-          if (static_cast<int>(s->params().axis) != v.slice_axis)
-            collect(s, v.hidden);
-    // How it restyles the rest: each override: entry's look on the props of the nodes it names (by
-    // id or tag, with their subtrees), in order; a transform applies in the named node's frame.
-    v.entries.clear();
-    for (const auto &o : v.overrides) {
-      Entry e;
-      e.look = o.second;
-      e.all = o.first == "*";
-      if (!e.all && rs)
-        for (const RealizedScene::TaggedNode &t : rs->nodes) {
-          if (t.id != o.first && std::find(t.tags.begin(), t.tags.end(), o.first) == t.tags.end())
-            continue;
-          std::shared_ptr<GraphicsNode> n = t.node.lock();
-          if (!n)
-            continue;
-          std::array<double, 16> frame;
-          identity(frame.data());
-          if (o.second.has_xform)
-            if (vtkSmartPointer<vtkMatrix4x4> w = n->getWorldTransform())
-              std::copy(w->GetData(), w->GetData() + 16, frame.begin());
-          std::unordered_set<vtkProp *> props;
-          collect(n, props, t.subtree);
-          for (vtkProp *p : props)
-            e.props.emplace(p, frame); // an outer named node's frame wins over one inside it
-        }
-      v.entries.push_back(std::move(e));
-    }
-    // Its volumes, which a view from a camera of its own draws as its own eye needs.
-    v.own_eye = v.camera != "main";
-    v.volumes.clear();
-    if (rs)
-      for (const RealizedScene::TaggedNode &t : rs->nodes) {
-        std::shared_ptr<GraphicsNode> n = t.node.lock();
-        VolumeProp vol;
-        if (auto *sl = dynamic_cast<VolSliceNode *>(n.get()))
-          vol = {VolumeKind::slices, sl};
-        else if (auto *rc = dynamic_cast<VolRenNode *>(n.get()))
-          vol = {VolumeKind::raycast, rc};
-        else if (dynamic_cast<VolumeNode *>(n.get()))
-          vol = {VolumeKind::gpu, n.get()};
-        else
-          continue;
-        if (vtkProp *own = n->prop())
-          v.volumes[own] = vol;
-      }
-    // The twins of props no longer drawn (a node removed, an override dropped) go.
-    for (auto it = v.twins.begin(); it != v.twins.end();) {
-      if (!it->second.seen)
-        it = v.twins.erase(it);
-      else
-        (it++)->second.seen = false;
-    }
-    // The scene's shadows: a pass reading the maps its scene's renderer bakes, or a chain of its
-    // own that bakes what this view draws, remade when the scene's shadows change.
-    const std::pair<const void *, double> key = v.shadow_mode != "off"
-                                                    ? sg.shadowReceiverKey()
-                                                    : std::pair<const void *, double>(nullptr, 0.0);
-    if (key != v.shadow_key || v.shadow_mode != v.shadow_built) {
-      vtkRenderer *r = v.vp->renderer();
-      if (v.shadow_pass)
-        v.shadow_pass->ReleaseGraphicsResources(view_->viewportManager().renderWindow());
-      v.shadow_pass = !key.first               ? nullptr
-                      : v.shadow_mode == "own" ? sg.makeShadowPasses()
-                                               : sg.makeShadowReceiverPass();
-      r->SetPass(v.shadow_pass);
-      v.shadow_key = key;
-      v.shadow_built = v.shadow_mode;
-    }
-    if (!v.chrome) {
-      if (std::shared_ptr<GraphicsNode> root = sg.getGraphicsRoot()) {
-        collect(root->findChildByName("grid"), v.hidden);
-        collect(root->findChildByName("axis"), v.hidden);
-        collect(root, v.hidden, false); // the root's own bounding box, not the scene under it
-      }
-    }
-    if (!v.camera.empty()) { // a named camera, moved below (or the main one, by its host)
-      auto it = cameras_.find(v.scene + "|" + v.camera);
-      if (it != cameras_.end() && v.vp->visible())
-        it->second->used = true;
-      continue;
-    }
-    CameraController &cam = v.vp->camera();
-    // Framed once it has drawn something: the bounds of what this view shows (the tagged nodes it
-    // names, when it names some to show).
-    if (!v.framed && v.vp->visible()) {
-      double b[6];
-      vtkRenderer *r = v.vp->renderer();
-      if (r && r->GetViewProps()->GetNumberOfItems() > 0) {
-        // A slice view frames on the slices on its axis that it draws, when there are any.
-        bool own = false;
-        if (slice_view && rs)
-          for (const auto &s : slices_on(*rs, v.slice_axis)) {
-            if (v.hidden.count(s.second->prop()))
-              continue;
-            // A slice is flat (no volume, which bounding_box::isNull calls null): only an
-            // inverted or empty box is skipped.
-            const cvc::bounding_box bb = s.second->getWorldBoundingBox();
-            if (bb.minx > bb.maxx || bb.miny > bb.maxy || bb.minz > bb.maxz ||
-                !(bb.maxx - bb.minx + bb.maxy - bb.miny + bb.maxz - bb.minz > 0.0))
-              continue;
-            const double sb[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
-            for (int i = 0; i < 3; ++i) {
-              b[2 * i] = own ? std::min(b[2 * i], sb[2 * i]) : sb[2 * i];
-              b[2 * i + 1] = own ? std::max(b[2 * i + 1], sb[2 * i + 1]) : sb[2 * i + 1];
-            }
-            own = true;
-          }
-        // A view naming tags to show waits while the nodes it lets in have no bounds yet (a
-        // mesh_lab's skeleton before its run ends), rather than framing on what else it holds.
-        bool wait = false;
-        if (!own) {
-          int matched = 0;
-          if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b, &matched)) {
-            wait = matched > 0;
-            if (!wait)
-              r->ComputeVisiblePropBounds(b);
-          }
-        }
-        if (!wait && valid_bounds(b)) {
-          frame_camera(cam, b, v.start, sg, v.slice_axis);
-          v.framed = true;
-        }
-      }
-    }
-    cam.update(dt);
+    prepare(v, dt);
   }
 
   // The named cameras: each framed on its whole scene the first time a view shows it, then moved
   // once a frame however many views draw from it. Its near / far planes span the whole scene, so
   // no view that draws from it clips what it shows.
-  ViewportManager &vm = view_->viewportManager();
   for (auto &kv : cameras_) {
     Camera &c = *kv.second;
-    double whole[6] = {1.0, -1.0, 1.0, -1.0, 1.0, -1.0};
-    SceneSlot slot;
-    if (scenes_ && scenes_(c.scene, slot) && vm.hasViewport(slot.source))
-      if (vtkRenderer *src = vm.viewport(slot.source).renderer())
-        src->ComputeVisiblePropBounds(whole);
-    if (!c.framed && c.used && c.driver && valid_bounds(whole) && slot.sg) {
-      frame_camera(*c.ctl, whole, c.spec, *slot.sg);
-      c.framed = true;
-    }
+    double whole[6];
+    const bool bounded = frame_named(c, whole);
     c.ctl->update(dt);
     double clip_near = 0.0, clip_far = 0.0; // near: and far: fix them instead
-    if (c.driver && c.driver->GetActiveCamera() == c.cam && valid_bounds(whole) &&
+    if (c.driver && c.driver->GetActiveCamera() == c.cam && bounded &&
         !c.ctl->clipRange(clip_near, clip_far))
       c.driver->ResetCameraClippingRange(whole);
     c.used = false;
   }
+}
+
+bool SceneViews::frame_named(Camera &c, double whole[6]) {
+  for (int i = 0; i < 6; ++i)
+    whole[i] = i % 2 ? -1.0 : 1.0;
+  ViewportManager &vm = view_->viewportManager();
+  SceneSlot slot;
+  if (scenes_ && scenes_(c.scene, slot) && vm.hasViewport(slot.source))
+    if (vtkRenderer *src = vm.viewport(slot.source).renderer())
+      src->ComputeVisiblePropBounds(whole);
+  if (!c.framed && c.used && c.driver && valid_bounds(whole) && slot.sg) {
+    frame_camera(*c.ctl, whole, c.spec, *slot.sg);
+    c.framed = true;
+  }
+  return valid_bounds(whole);
+}
+
+void SceneViews::prepare(View &v, double dt) {
+  SceneSlot slot;
+  if (!scenes_ || !scenes_(v.scene, slot) || !slot.sg)
+    return;
+  SceneGraph &sg = *slot.sg;
+  const RealizedScene *rs = slot.realized;
+  // What it leaves out: the tagged nodes its show: / hide: rule out, and the chrome.
+  v.hidden.clear();
+  if (rs && (!v.show.empty() || !v.hide.empty()))
+    for (const RealizedScene::TaggedNode &t : rs->nodes)
+      if (!in_view(t.tags, v.show, v.hide))
+        collect(t.node.lock(), v.hidden, t.subtree);
+  // A slice view leaves out the volume_slice nodes on the other two axes, with their overlays:
+  // seen edge-on, each would only draw a line across its own.
+  const bool slice_view = v.start.mode == "slice" && v.camera.empty();
+  if (rs && slice_view)
+    for (const RealizedScene::TaggedNode &t : rs->nodes)
+      if (auto s = std::dynamic_pointer_cast<VolumeSliceNode>(t.node.lock()))
+        if (static_cast<int>(s->params().axis) != v.slice_axis)
+          collect(s, v.hidden);
+  // How it restyles the rest: each override: entry's look on the props of the nodes it names (by
+  // id or tag, with their subtrees), in order; a transform applies in the named node's frame.
+  v.entries.clear();
+  for (const auto &o : v.overrides) {
+    Entry e;
+    e.look = o.second;
+    e.all = o.first == "*";
+    if (!e.all && rs)
+      for (const RealizedScene::TaggedNode &t : rs->nodes) {
+        if (t.id != o.first && std::find(t.tags.begin(), t.tags.end(), o.first) == t.tags.end())
+          continue;
+        std::shared_ptr<GraphicsNode> n = t.node.lock();
+        if (!n)
+          continue;
+        std::array<double, 16> frame;
+        identity(frame.data());
+        if (o.second.has_xform)
+          if (vtkSmartPointer<vtkMatrix4x4> w = n->getWorldTransform())
+            std::copy(w->GetData(), w->GetData() + 16, frame.begin());
+        std::unordered_set<vtkProp *> props;
+        collect(n, props, t.subtree);
+        for (vtkProp *p : props)
+          e.props.emplace(p, frame); // an outer named node's frame wins over one inside it
+      }
+    v.entries.push_back(std::move(e));
+  }
+  // Its volumes, which a view from a camera of its own draws as its own eye needs.
+  v.own_eye = v.camera != "main";
+  v.volumes.clear();
+  if (rs)
+    for (const RealizedScene::TaggedNode &t : rs->nodes) {
+      std::shared_ptr<GraphicsNode> n = t.node.lock();
+      VolumeProp vol;
+      if (auto *sl = dynamic_cast<VolSliceNode *>(n.get()))
+        vol = {VolumeKind::slices, sl};
+      else if (auto *rc = dynamic_cast<VolRenNode *>(n.get()))
+        vol = {VolumeKind::raycast, rc};
+      else if (dynamic_cast<VolumeNode *>(n.get()))
+        vol = {VolumeKind::gpu, n.get()};
+      else
+        continue;
+      if (vtkProp *own = n->prop())
+        v.volumes[own] = vol;
+    }
+  // The twins of props no longer drawn (a node removed, an override dropped) go.
+  for (auto it = v.twins.begin(); it != v.twins.end();) {
+    if (!it->second.seen)
+      it = v.twins.erase(it);
+    else
+      (it++)->second.seen = false;
+  }
+  // The scene's shadows: a pass reading the maps its scene's renderer bakes, or a chain of its
+  // own that bakes what this view draws, remade when the scene's shadows change.
+  const std::pair<const void *, double> key = v.shadow_mode != "off"
+                                                  ? sg.shadowReceiverKey()
+                                                  : std::pair<const void *, double>(nullptr, 0.0);
+  if (key != v.shadow_key || v.shadow_mode != v.shadow_built) {
+    vtkRenderer *r = v.vp->renderer();
+    if (v.shadow_pass)
+      v.shadow_pass->ReleaseGraphicsResources(view_->viewportManager().renderWindow());
+    v.shadow_pass = !key.first               ? nullptr
+                    : v.shadow_mode == "own" ? sg.makeShadowPasses()
+                                             : sg.makeShadowReceiverPass();
+    r->SetPass(v.shadow_pass);
+    v.shadow_key = key;
+    v.shadow_built = v.shadow_mode;
+  }
+  if (!v.chrome) {
+    if (std::shared_ptr<GraphicsNode> root = sg.getGraphicsRoot()) {
+      collect(root->findChildByName("grid"), v.hidden);
+      collect(root->findChildByName("axis"), v.hidden);
+      collect(root, v.hidden, false); // the root's own bounding box, not the scene under it
+    }
+  }
+  if (!v.camera.empty()) { // a named camera, moved by update() (or the main one, by its host)
+    auto it = cameras_.find(v.scene + "|" + v.camera);
+    if (it != cameras_.end() && v.vp->visible())
+      it->second->used = true;
+    return;
+  }
+  CameraController &cam = v.vp->camera();
+  // Framed once it has drawn something: the bounds of what this view shows (the tagged nodes it
+  // names, when it names some to show).
+  if (!v.framed && v.vp->visible()) {
+    // Its renderer re-syncs as the render reaches it, so a view made in this frame's walk still
+    // holds the main view's props as they were primed: what it leaves out, and a volren's picture
+    // for the main camera instead of its own. Re-synced now, it holds what it will draw.
+    view_->viewportManager().syncMirror(v.vp->name());
+    double b[6];
+    vtkRenderer *r = v.vp->renderer();
+    if (r && r->GetViewProps()->GetNumberOfItems() > 0) {
+      // A slice view frames on the slices on its axis that it draws, when there are any.
+      bool own = false;
+      if (slice_view && rs)
+        for (const auto &s : slices_on(*rs, v.slice_axis)) {
+          if (v.hidden.count(s.second->prop()))
+            continue;
+          // A slice is flat (no volume, which bounding_box::isNull calls null): only an
+          // inverted or empty box is skipped.
+          const cvc::bounding_box bb = s.second->getWorldBoundingBox();
+          if (bb.minx > bb.maxx || bb.miny > bb.maxy || bb.minz > bb.maxz ||
+              !(bb.maxx - bb.minx + bb.maxy - bb.miny + bb.maxz - bb.minz > 0.0))
+            continue;
+          const double sb[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+          for (int i = 0; i < 3; ++i) {
+            b[2 * i] = own ? std::min(b[2 * i], sb[2 * i]) : sb[2 * i];
+            b[2 * i + 1] = own ? std::max(b[2 * i + 1], sb[2 * i + 1]) : sb[2 * i + 1];
+          }
+          own = true;
+        }
+      // A view naming tags to show waits while the nodes it lets in have no bounds yet (a
+      // mesh_lab's skeleton before its run ends), rather than framing on what else it holds.
+      bool wait = false;
+      if (!own) {
+        int matched = 0;
+        if (v.show.empty() || !rs || !shown_bounds(*rs, v.show, v.hide, b, &matched)) {
+          wait = matched > 0;
+          if (!wait) {
+            r->ComputeVisiblePropBounds(b);
+            // A volren node it draws, by its volumes' box (as VolRenNode's view picture gives its
+            // bounds): that picture joins the renderer only once its first raycast lands, after
+            // the view is framed.
+            for (const auto &[prop, vol] : v.volumes) {
+              if (vol.kind != VolumeKind::raycast || v.hidden.count(prop) || !prop->GetVisibility())
+                continue;
+              const cvc::bounding_box bb = vol.node->getWorldBoundingBox();
+              if (bb.minx > bb.maxx || bb.miny > bb.maxy || bb.minz > bb.maxz)
+                continue;
+              const double vb[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+              for (int i = 0; i < 3; ++i) {
+                b[2 * i] = std::min(b[2 * i], vb[2 * i]);
+                b[2 * i + 1] = std::max(b[2 * i + 1], vb[2 * i + 1]);
+              }
+            }
+          }
+        }
+      }
+      if (!wait && valid_bounds(b)) {
+        frame_camera(cam, b, v.start, sg, v.slice_axis);
+        v.framed = true;
+      }
+    }
+  }
+  cam.update(dt);
 }
 
 void SceneViews::register_widget() {
@@ -1566,15 +1663,25 @@ void SceneViews::register_widget() {
                                ImGuiButtonFlags_MouseButtonLeft |
                                    ImGuiButtonFlags_MouseButtonRight |
                                    ImGuiButtonFlags_MouseButtonMiddle);
-        ImRect r(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-        r.ClipWithFull(ImGui::GetCurrentWindow()->ClipRect); // the part that shows
-        const ImVec2 disp = ImGui::GetIO().DisplaySize;
+        // The whole widget, and the part of it the window shows (it clips and scrolls it).
+        const ImRect whole(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        ImRect r = whole;
+        r.ClipWithFull(ImGui::GetCurrentWindow()->ClipRect);
+        const ImGuiIO &gio = ImGui::GetIO();
+        const ImVec2 disp = gio.DisplaySize;
         if (r.GetWidth() < 1.0f || r.GetHeight() < 1.0f || disp.x <= 0.0f || disp.y <= 0.0f)
           return {}; // scrolled out of sight: not drawn this frame
-        backend_->cut_window_background(r.Min.x, r.Min.y, r.Max.x, r.Max.y);
-        // Normalized, in VTK's y-up window space.
-        const double reg[4] = {r.Min.x / disp.x, 1.0 - r.Max.y / disp.y, r.Max.x / disp.x,
-                               1.0 - r.Min.y / disp.y};
+        // It draws into a texture of its own, the widget's size in framebuffer pixels, which the
+        // window shows as an image (below), so the window stacks, clips and scrolls the view as it
+        // does any of its content (Viewport::setTextureSize).
+        const ImVec2 fbs = gio.DisplayFramebufferScale;
+        v->vp->setTextureSize(
+            std::max(1, static_cast<int>(std::lround(whole.GetWidth() * fbs.x))),
+            std::max(1, static_cast<int>(std::lround(whole.GetHeight() * fbs.y))));
+        // Where it shows: the whole widget, normalized in VTK's y-up window space (past the
+        // window's edges when it is partly out of sight). A pick there lands in its texture.
+        const double reg[4] = {whole.Min.x / disp.x, 1.0 - whole.Max.y / disp.y,
+                               whole.Max.x / disp.x, 1.0 - whole.Min.y / disp.y};
         bool moved = false;
         for (int i = 0; i < 4; ++i)
           moved = moved || std::fabs(reg[i] - v->region[i]) > 1e-6;
@@ -1585,9 +1692,29 @@ void SceneViews::register_widget() {
         if (!v->vp->visible())
           v->vp->setVisible(true);
         v->drawn = true;
+        // Made this frame: what it leaves out, its shadows and its camera's framing now, as the
+        // next update() would, so its first frame already shows the view.
+        if (v->fresh) {
+          v->fresh = false;
+          prepare(*v, 0.0);
+          auto it = cameras_.find(v->scene + "|" + v->camera);
+          if (it != cameras_.end() && !it->second->framed) {
+            double bounds[6], clip_near = 0.0, clip_far = 0.0; // near: and far: fix them
+            if (frame_named(*it->second, bounds) && it->second->driver &&
+                it->second->driver->GetActiveCamera() == it->second->cam) {
+              it->second->ctl->update(0.0);
+              if (!it->second->ctl->clipRange(clip_near, clip_far))
+                it->second->driver->ResetCameraClippingRange(bounds);
+            }
+          }
+        }
 
-        // Its caption in the corner, and an outline while the pointer is over it or drags it.
+        // The view, as an image of its texture (GL's rows run bottom-up), then its caption in the
+        // corner, and an outline while the pointer is over it or drags it.
         ImDrawList *dl = ImGui::GetWindowDrawList();
+        if (const unsigned int tex = v->vp->texture())
+          dl->AddImage(static_cast<ImTextureID>(static_cast<std::intptr_t>(tex)), whole.Min,
+                       whole.Max, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
         const std::string caption = w.props.str("caption");
         if (!caption.empty()) {
           const ImVec2 pad(4.0f * unit, 2.0f * unit);
@@ -1610,12 +1737,14 @@ void SceneViews::register_widget() {
           CameraController &cam = controller(*v);
           const ImGuiIO &io = ImGui::GetIO();
           if (ImGui::IsItemHovered() && io.MouseWheel != 0.0f) {
-            // At the pointer, in VTK display coordinates: a slice view zooms about it.
-            const int px =
-                static_cast<int>(std::lround(io.MousePos.x * io.DisplayFramebufferScale.x));
-            const int py = static_cast<int>(
-                std::lround((io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y));
-            cam.mouseWheelAt(io.MouseWheel, px, py);
+            // At the pointer, in its renderer's display coordinates (its texture's pixels): a slice
+            // view zooms about it.
+            double at[2];
+            v->vp->windowToRenderer(
+                io.MousePos.x * io.DisplayFramebufferScale.x,
+                (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y, at);
+            cam.mouseWheelAt(io.MouseWheel, static_cast<int>(std::lround(at[0])),
+                             static_cast<int>(std::lround(at[1])));
           }
           if (!v->pick && ImGui::IsItemHovered() &&
               ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -1669,6 +1798,18 @@ void SceneViews::register_widget() {
           --v->settle;
           v->vp->invalidate();
         }
+        // §5.30 a right-click menu over it gets the pick at the pointer, taken as it opens.
+        if (w.context_menu)
+          edit.context_pick = [this, v] {
+            const ImGuiIO &io = ImGui::GetIO();
+            PickHit hit;
+            pick_at(*v, io.MousePos.x * io.DisplayFramebufferScale.x,
+                    (io.DisplaySize.y - io.MousePos.y) * io.DisplayFramebufferScale.y, hit);
+            std::vector<std::pair<std::string, std::string>> f = hit_fields(hit, v->scene);
+            f.emplace_back("view", v->name);
+            f.emplace_back("mods", pointer_mods());
+            return f;
+          };
         return edit;
       });
 #endif

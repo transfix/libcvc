@@ -150,11 +150,33 @@ struct city_bundle_write {
 city_bundle_files city_bundle_bytes(app &ctx, const world_geometry &world,
                                     const city_bundle_write &info = {});
 
-// The content hash: SHA-256 (hex) over every file but world.json, in name order, each as its name,
-// a NUL, and its bytes' SHA-256 (hex). The same contents hash the same, whoever wrote them.
+// The content hash: SHA-256 (hex) over every file but world.json and what is under export/, in
+// name order, each as its name, a NUL, and its bytes' SHA-256 (hex). The same contents hash the
+// same, whoever wrote them.
 std::string city_bundle_hash(const city_bundle_files &files);
 
-// Write the files into `dir` (created if absent). Throws std::runtime_error on an I/O failure.
+// What a saved world adds for software that reads no bundle (Blender, a GIS, a game engine), under
+// export/, which the content hash and the bundle's readers leave out (ARIADNE_WORLDS 18.8, GB4):
+//   export/terrain.glb      the terrain as one mesh, a mesh per surface its cells use (the material
+//                           named by the surface, its colour the surface's albedo), z up in world
+//                           metres as the bundle's other glbs; at most `max_samples` a side: a
+//                           larger terrain is resampled over the same extent (heightmap.json says
+//                           at what size)
+//   export/heightmap.png    the heights at full size, 16-bit grey, the north row at the top:
+//                           height = min_height_m + value / 65535 * (max_height_m - min_height_m);
+//                           a hole (NaN) is 0
+//   export/heightmap.json   what reading the PNG needs: rows, cols, the bounds, the spacing,
+//                           min_height_m, max_height_m, water_level_m (when given) and the mesh's
+//                           size
+// The world's terrain is its first height field, as for city_bundle_bytes; throws
+// std::invalid_argument when it has none, unsupported_model_file_type when no backend writes glb.
+city_bundle_files city_bundle_exports(app &ctx, const world_geometry &world,
+                                      std::optional<double> water_level = std::nullopt,
+                                      int max_samples = 1025);
+
+// Write the files into `dir` (created if absent), a name with a '/' (export/terrain.glb) in its
+// subdirectory. Throws std::invalid_argument for a name that climbs out of `dir` (archive's
+// safe_path), std::runtime_error on an I/O failure.
 void write_city_bundle(const std::string &dir, const city_bundle_files &files);
 
 // A reader over files in memory (city_bundle_bytes' result, an unpacked zip), for

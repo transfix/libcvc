@@ -133,6 +133,10 @@ public:
   // §5.11: the directory a picture's relative file:// URI resolves against (the document's own;
   // AppRuntime::load sets it). Empty: the working directory.
   void set_media_base(std::string dir);
+  // §5.29: the folder a Save (a context menu's Save image..., (save-url)) puts a new file in where
+  // the host has no Save dialog and no browser page (ari's terminals). Empty (the default): the
+  // user's Downloads folder (downloads_dir, media_save.h).
+  void set_save_dir(std::string dir);
   // §5.11: whether a picture by URI the document draws is still loading.
   bool media_busy() const;
   // §5.11: whether the last frame drew a picture that was still loading (a placeholder), so a
@@ -148,6 +152,14 @@ public:
   // Register a host handler for an action event name (a Button / MenuItemAction
   // `on:`). The handler runs on the host thread inside drain(), never in the walk.
   void on(std::string event, std::function<void()> handler);
+
+  // §5.30 a scene view's pick at the pointer, for a right-click menu's `event`: the fields an
+  // `input: pick` viewport writes (x, y, z, hit, node, i, j, k, value, axis, view, mods) and the
+  // node's `tags` (space-separated). The main view's comes from the host here (the cvcGL host
+  // picks its scene; a terminal has none); a viewport's from its widget (CustomEdit::context_pick).
+  // Called in the walk, only on the frame the document's top-level menu opens. {} clears it.
+  using ContextPick = std::function<std::vector<std::pair<std::string, std::string>>()>;
+  void set_main_view_pick(ContextPick pick);
 
   // §7.1 resident on:tick handler — register a state_exec PROGRAM that runs ONCE PER FRAME.
   // Unlike a fire-once action `on:`, this submits ONE long-lived, owner-tagged process on the

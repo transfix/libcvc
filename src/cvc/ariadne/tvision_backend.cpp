@@ -14,6 +14,7 @@
 //     close box -> close_window. Destroying a window waits for the next sync, which runs only
 //     after the event that asked for it has finished, so no view is deleted under its own feet.
 
+#include <algorithm> // min: a context popup kept on the desktop
 #include <chrono>
 #include <cstdlib>
 #include <cvc/ariadne/app_runtime.h>
@@ -36,7 +37,9 @@
 #define Uses_TKeys
 #define Uses_TMenu
 #define Uses_TMenuBar
+#define Uses_TMenuBox
 #define Uses_TMenuItem
+#define Uses_TMenuPopup
 #define Uses_TPalette
 #define Uses_TProgram
 #define Uses_TRect
@@ -62,6 +65,7 @@ TvisionBackend::TvisionBackend() : TvisionBackend(Options{}) {}
 TvisionBackend::TvisionBackend(Options opts)
     : FtxuiBackend([&] {
         opts.hosted = true;
+        opts.host_draws_context_menu = true; // a popup of tvision's own (Host::show_context)
         // Bodies at full colour: tvision draws each as the nearest the terminal has (§5.26).
         if (opts.palette == Options::Palette::Auto)
           opts.palette = Options::Palette::TrueColor;
@@ -313,6 +317,48 @@ private:
 };
 constexpr const char *kTrayMore = "##tray.more"; // the overflow icon's id
 constexpr ushort cmAriTrayBase = 30000;          // tray popup item k: cmAriTrayBase + k
+constexpr ushort cmAriContextBase = 40000;       // context menu item k: cmAriContextBase + k
+
+// §5.28 / §5.30 a context menu's popup: tvision's TMenuPopup, except that one a key opened has its
+// first entry lit, as the terminal backend's list has, so Enter picks it at once (tvision's own
+// popups light nothing until an arrow key).
+class ContextPopup : public TMenuPopup {
+public:
+  ContextPopup(const TRect &r, TMenu *m, bool lit) : TMenuPopup(r, m), lit_(lit) {}
+  ushort execute() override {
+    menu->deflt = nullptr;
+    if (lit_)
+      for (TMenuItem *i = menu->items; i; i = i->next)
+        if (i->name && !i->disabled) {
+          menu->deflt = i;
+          break;
+        }
+    return TMenuBox::execute(); // TMenuView's loop, past TMenuPopup's unlit start
+  }
+
+private:
+  bool lit_;
+};
+
+// popupMenu with a ContextPopup: placed as tvision places its popups (below `where`, absolute, kept
+// inside the desktop's bottom right), run, disposed. Owns `items`. Returns the command chosen, 0
+// for none.
+ushort context_popup(TPoint where, TMenuItem &items, bool lit) {
+  TGroup *app = TProgram::application;
+  if (!app)
+    return 0;
+  const TPoint p = app->makeLocal(where);
+  auto *popup = new ContextPopup(TRect(p, p), new TMenu(items), lit);
+  TRect r = popup->getBounds();
+  const TPoint d = app->size - p;
+  r.move(std::min(popup->size.x, d.x), std::min(popup->size.y + 1, d.y));
+  if (r.contains(p) && r.b.y - r.a.y < p.y)
+    r.move(0, -(r.b.y - p.y));
+  popup->setBounds(r);
+  const ushort res = app->execView(popup);
+  TObject::destroy(popup); // and its menu, the items with it
+  return res;
+}
 
 class App : public TApplication {
 public:
@@ -357,6 +403,10 @@ struct Host {
   TrayView *tray = nullptr; // §5.22, made at the first sync with a tray
   TPoint mouse{-1, -1};     // where the pointer last was (screen), for the tray's tooltip
   bool dirty = true; // a sync is due (after input, or the redraw tick)
+  // §5.28 / §5.30 the context menu last shown (FtxuiBackend::HostedContextMenu::serial), whether
+  // its popup is up now (its own event loop runs then; the redraw tick still syncs).
+  long context_shown = 0;
+  bool in_context = false;
   std::chrono::steady_clock::time_point last_sync{};
   std::chrono::steady_clock::time_point burst_start{};
   int burst = 0;
@@ -408,8 +458,9 @@ struct Host {
     dirty = true;
   }
 
-  // One walk, then make the desktop match it.
-  void sync() {
+  // One walk, then make the desktop match it. `may_popup`: after an event, where a context menu
+  // the event opened is shown (show_context); not from the idle tick.
+  void sync(bool may_popup = false) {
     TDeskTop *desk = TProgram::deskTop;
     // Report the windows' current bounds first, so a move / resize persists in this walk. Only
     // the user's size is the window's own (FtxuiBackend::set_window_geometry).
@@ -495,6 +546,40 @@ struct Host {
       w->content->drawView();
     if (background)
       background->drawView();
+    if (may_popup && !in_context)
+      show_context();
+  }
+
+  // §5.28 / §5.30 a context menu the last walk opened, as a popup of tvision's own at the cell it
+  // hangs from in its window (not inside the window's body, which a short window would cut off):
+  // its entries, the leaf's own and the document's items, worked by tvision (the arrows, Enter,
+  // Esc, the mouse). The entry chosen, or none, goes back to the backend.
+  void show_context() {
+    const FtxuiBackend::HostedContextMenu cm = be.hosted_context_menu();
+    if (!cm.open || cm.serial == context_shown)
+      return;
+    context_shown = cm.serial;
+    std::vector<std::string> ids;
+    TMenuItem *first = nullptr, **next = &first;
+    std::size_t k = 0;
+    menu_items_of(cm.items, k, 0, cmAriContextBase, ids, next);
+    if (!first) {
+      be.pick_context_entry(rt, "");
+      return;
+    }
+    TView *body = background;
+    if (!cm.win.empty()) {
+      const auto w = windows.find(cm.win);
+      body = w != windows.end() ? w->second->content : nullptr;
+    }
+    const TPoint where = body ? body->makeGlobal(TPoint{cm.x, cm.y}) : TPoint{cm.x, cm.y};
+    in_context = true;
+    const ushort c = context_popup(where, *first, cm.by_key);
+    in_context = false;
+    const bool picked =
+        c >= cmAriContextBase && static_cast<std::size_t>(c - cmAriContextBase) < ids.size();
+    be.pick_context_entry(rt, picked ? ids[c - cmAriContextBase] : std::string());
+    dirty = true;
   }
 
   void sync_menus() {
@@ -614,6 +699,7 @@ struct Host {
       } else {
         const std::string label = (i.toggle ? (i.checked ? "[x] " : "[ ] ") : "") + i.label;
         *next = new TMenuItem(label, static_cast<ushort>(base + ids.size()), kbNoKey);
+        (*next)->disabled = i.disabled;
         ids.push_back(i.id);
       }
       next = &(*next)->next;
@@ -818,7 +904,7 @@ void App::handleEvent(TEvent &ev) {
   }
   TApplication::handleEvent(ev);
   if (host_.dirty) // after the event has finished with every view, so a dropped window can go
-    host_.sync();
+    host_.sync(/*may_popup=*/true);
 }
 
 void App::idle() {

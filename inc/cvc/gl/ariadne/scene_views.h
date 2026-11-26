@@ -29,10 +29,10 @@
 // slices face the main camera, draws slices swept for a view's own camera (VolSliceNode::viewProp);
 // a volren node, raycast for the main view and composited into its pixels, is in no view. A
 // `type: volume` node takes an opacity override.
-// The widget reserves its rect in the window,
-// cuts it out of the window's background (ImGuiBackend::cut_window_background) and puts the
-// viewport there, so the view sits where the widget is, scrolls and moves with its window, and is
-// hidden on any frame the widget is not drawn (a closed or collapsed window, another tab).
+// The view draws into a texture of its own, the widget's size (Viewport::setTextureSize), and the
+// widget draws that texture as an image in its window, so the window stacks, clips and scrolls the
+// view as it does any of its content: a window in front covers it, and it covers a window behind.
+// It is hidden on any frame the widget is not drawn (a closed or collapsed window, another tab).
 // Dragging in it orbits its camera (the middle or right button pans), the wheel zooms, and a
 // double-click puts the camera back where azimuth: / elevation: / zoom: start it. In mode: slice
 // (CameraController::Mode::Slice) it looks straight down one axis: drags pan, the wheel zooms
@@ -60,8 +60,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+
+class vtkProp;
+class vtkRenderer;
 
 namespace cvc {
 namespace ariadne {
@@ -73,6 +77,7 @@ class SceneRenderer;
 class ImGuiBackend;
 class CameraController;
 class SceneGraph;
+class GraphicsNode;
 namespace ariadne {
 
 struct RealizedScene; // scene_realize.h
@@ -90,8 +95,8 @@ struct SceneSlot {
   SceneGraph *sg = nullptr;                // its graph
   const RealizedScene *realized = nullptr; // its nodes and named cameras (null: none realized)
   std::string source;                      // the viewport its views mirror
-  bool anchor = false; // `source` is the scene's own, never shown: the views draw a pixel of it
-                       // under one of them so its shadow maps are baked
+  bool anchor = false; // `source` is the scene's own, never shown: while one of its views shows it
+                       // draws a pixel into a texture of its own, so its shadow maps are baked
 };
 
 class SceneViews {
@@ -140,9 +145,10 @@ public:
     double value = 0.0;
     int axis = -1; // with plane: the axis the slice looks down (0 x, 1 y, 2 z)
   };
-  // Pick in view `view` at (x, y) in VTK display coordinates (framebuffer pixels from the lower
-  // left), against what the view drew last frame: what an `input: pick` viewport's left button
-  // does, for tests and hosts. False for a miss or no such view.
+  // Pick in view `view` at (x, y) in VTK display coordinates of the window (framebuffer pixels from
+  // the lower left; the view's texture is shown at its region), against what the view drew last
+  // frame: what an `input: pick` viewport's left button does, for tests and hosts. False for a
+  // miss or no such view.
   bool pick(const std::string &view, double x, double y, PickHit &hit) const;
 
   // The scene a viewport would show for `scene` ("" the main one), as the constructor's lookup
@@ -150,6 +156,12 @@ public:
   bool scene(const std::string &scene, SceneSlot &out) const {
     return scenes_ && scenes_(scene, out);
   }
+
+  // §5.30 the main view's pick at the pointer, for the document's right-click menu
+  // (Runtime::set_main_view_pick): what a viewport's pick writes (x, y, z, hit, node, i, j, k,
+  // value, axis, tags, view "main", mods), against the main scene's nodes as the main view draws
+  // them (main_view: hides some). Empty where there is no ImGui.
+  std::vector<std::pair<std::string, std::string>> main_pick_fields() const;
 
 private:
   struct View;
@@ -160,6 +172,13 @@ private:
   void main_view_end();   // ... and its EndEvent: put it back
   void bind_camera(View &v, const std::string &name); // "" its own, "main", or a named camera
   CameraController &controller(View &v);              // what a drag in v moves
+  // A view's frame: what it leaves out and restyles, its shadows, its camera framed once it has
+  // something to show and moved by dt. update() runs it for every view; the widget runs it for a
+  // view made in this frame's walk, so its first frame shows it.
+  void prepare(View &v, double dt);
+  // A named camera framed on its whole scene, the first time a shown view draws from it; `whole`
+  // is that scene's bounds (false when it has none).
+  bool frame_named(Camera &c, double whole[6]);
   // Where the keys of the viewport being drawn (pick:, pointer:, axis: { bind }) resolve, for a
   // view of `sg`: the scope its widget sits in, as its bind: (Backend::custom_scope).
   std::string key_scope(const SceneGraph &sg) const;
@@ -171,10 +190,21 @@ private:
   // A pointer: view's pick at the pointer as it moves with no button down: written under its
   // pointer key with phase "hover" (no on_pick).
   void pointer(View &v);
-  // The keys a pick at the pointer writes (x, y, z, hit, node, i, j, k, value, axis, button,
-  // mods, phase, view, seq), `seq` counted by `seq`, and what it hit in `hit`.
+  // The keys a pick at the pointer writes (x, y, z, hit, node, i, j, k, value, axis, tags,
+  // button, mods, phase, view, seq), `seq` counted by `seq`, and what it hit in `hit`.
   std::vector<std::pair<std::string, std::string>> pick_fields(View &v, const char *phase,
                                                                long &seq, PickHit &hit) const;
+  // A cell pick at (x, y) in `ren`'s display coordinates against the props `node_of` names, each
+  // by its node's id and the node (for its on_pick:), and on a volume_slice node of `realized`
+  // its voxel. pick_at's, and the main view's.
+  bool pick_props(
+      vtkRenderer *ren, double x, double y,
+      const std::unordered_map<vtkProp *, std::pair<std::string, const GraphicsNode *>> &node_of,
+      const RealizedScene *realized, PickHit &hit) const;
+  // §5.30 a hit's fields (x, y, z, hit, node, i, j, k, value, axis, tags: the node's own tags in
+  // scene `scene`, space-separated), as a pick writes them.
+  std::vector<std::pair<std::string, std::string>> hit_fields(const PickHit &hit,
+                                                              const std::string &scene) const;
 
   SceneRenderer *view_;
   ImGuiBackend *backend_;

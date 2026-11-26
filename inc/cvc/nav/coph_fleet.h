@@ -138,7 +138,12 @@ public:
                                                  const std::vector<input> &in);
 
   // Run on the crossing world from tick 0 until every agent is done.
-  void run(const coph_crossing_world &world);
+  void run(const coph_crossing_world &world) { run(world, -1); }
+  // The same, at most `ticks` ticks (negative: no limit) from where the last call stopped, so a
+  // page can run it a few ticks a frame. Whether every agent is done. tick() is the next tick it
+  // runs. Every call must pass the same world.
+  bool run(const coph_crossing_world &world, long long ticks);
+  long long tick() const { return run_tick_; }
 
   // Agent i, done at its goal (success, not a hit), runs again from the next boundary, as
   // GRL-SNAM's cars controller clears a car's done when the template gives it a new goal. Its
@@ -209,6 +214,7 @@ private:
   std::vector<std::vector<update_record>> updates_;
   std::vector<event> events_;
   std::vector<coph_energy> energy_;
+  long long run_tick_ = 0; // run()'s next tick
 };
 
 } // namespace nav

@@ -14,7 +14,7 @@
 
 #include "ImGuiKeyNames.h" // VTK's key names (X11's, or a browser's) as ImGui keys
 #ifdef CVC_ENABLE_SDL
-#include "SdlWindow.h" // the window's display scale: the UI's pixel ratio natively
+#include "SdlWindow.h" // the window's display scale (the UI's pixel ratio natively), its Cmd key
 #endif
 
 #include <cvc/gl/CameraController.h>
@@ -52,6 +52,32 @@ EM_JS(void, cvcgl_toggle_clearance, (double css_px), {
 EM_JS(double, cvcgl_device_pixel_ratio, (), {
   var r = globalThis.devicePixelRatio;
   return r > 0 ? r : 1.0;
+});
+
+// The page's platform name, for isApplePlatformName: navigator.userAgentData.platform where the
+// browser has it, else navigator.platform.
+EM_JS(int, cvcgl_page_platform, (char *buf, int cap), {
+  var s = '';
+  try {
+    if (typeof navigator !== 'undefined')
+      s = String((navigator.userAgentData && navigator.userAgentData.platform) ||
+                 navigator.platform || '');
+  } catch (e) {
+  }
+  stringToUTF8(s, buf, cap);
+  return lengthBytesUTF8(s);
+});
+
+// The page's ?mackeys=1|0, which overrules the platform: 1 or 0, -1 when absent or anything else.
+EM_JS(int, cvcgl_mac_keys_url, (), {
+  try {
+    if (typeof location === 'undefined' || !location.search)
+      return -1;
+    var v = new URLSearchParams(location.search).get('mackeys');
+    return v === '1' ? 1 : (v === '0' ? 0 : -1);
+  } catch (e) {
+    return -1;
+  }
 });
 
 // The system keyboard (see the header). A phone raises its keyboard only for a focused text
@@ -573,6 +599,7 @@ struct ImGuiOverlay::Impl {
   bool visible = true;  // caller intent
   CameraController *cam = nullptr;
   bool hadKeyboard = false; // for the rising edge of WantCaptureKeyboard
+  bool cmdDown = false;     // ImGui's shortcut key on a Mac (Cmd) at the last key event
   // Where the windows drawn last frame are (x0 y0 x1 y1 each, ImGui's pixels): a press there is
   // the UI's, though ImGui hears of the pointer only in its next frame.
   std::vector<float> uiRegions;
@@ -866,6 +893,13 @@ struct ImGuiOverlay::Impl {
   }
 
   // ---- input --------------------------------------------------------------
+  // Lets go of each key ImGui has down, but the modifiers, which the event that called this sets.
+  static void releaseKeys(ImGuiIO &io) {
+    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_GamepadStart; ++k)
+      if ((k < ImGuiKey_LeftCtrl || k > ImGuiKey_RightSuper) && ImGui::IsKeyDown(ImGuiKey(k)))
+        io.AddKeyEvent(ImGuiKey(k), false);
+  }
+
   // Feed ImGui the interactor's pointer state, then decide whether VTK's style
   // is allowed to see this event. Returning true ABORTS the style's handling.
   bool intercept(unsigned long eid) {
@@ -935,14 +969,51 @@ struct ImGuiOverlay::Impl {
       // or code-editor panel). Without this ImGui never receives keys, so an
       // active InputText sets WantCaptureKeyboard yet no character ever lands.
       // VTK exposes only aggregate modifier state (no left/right split), so feed
-      // ImGui the combined mods; it derives io.KeyCtrl/Shift/Alt from these.
+      // ImGui the combined mods; it derives io.KeyCtrl/Shift/Alt/Super from these.
       const bool down = (eid == vtkCommand::KeyPressEvent);
-      io.AddKeyEvent(ImGuiMod_Ctrl, interactor->GetControlKey() != 0);
+      const bool mac = io.ConfigMacOSXBehaviors;
+      bool ctrl = interactor->GetControlKey() != 0, super = false;
+      ImGuiKey key = imguiKeyForVtkKeySym(interactor->GetKeySym());
+      bool sdlWindow = false;
+#ifdef CVC_ENABLE_SDL
+      if (const auto *sdl = SdlRenderWindowInteractor::SafeDownCast(interactor)) {
+        // SDL's window tells Ctrl from the GUI key (Cmd on a Mac, a browser's Meta). ImGui gets
+        // each as it is, as imgui_impl_sdl3 hands them over, and on a Mac swaps them itself.
+        super = sdl->GetSuperKey() != 0;
+        sdlWindow = true;
+      }
+#endif
+      if (mac && !sdlWindow) {
+        // VTK's own window has one control flag, which its Cocoa view sets for Cmd or Ctrl
+        // (vtkCocoaGLView.mm). ImGui with ConfigMacOSXBehaviors (its default on Apple) swaps Cmd
+        // and Ctrl in AddKeyEvent, so there the flag goes in as Super and comes out as ImGui's
+        // shortcut key: Cmd+Z, C, V, X and A work in a field. Sent as Ctrl it came out as Super,
+        // and Cmd+Z did nothing and Cmd+C typed a "c". The Control_L the view reports for the flag
+        // goes in as Super too.
+        super = ctrl;
+        ctrl = false;
+        if (key == ImGuiKey_LeftCtrl)
+          key = ImGuiKey_LeftSuper;
+        else if (key == ImGuiKey_RightCtrl)
+          key = ImGuiKey_RightSuper;
+      }
+      // A Mac sends no key-up for a key let go while Cmd is down (Chrome and Safari in a browser;
+      // Cocoa, unless the app asks for them, as SDL does). So under Cmd a key's press is a tap
+      // (below), and Cmd's release lets go of any key still down, one pressed before Cmd too.
+      // Left down, Cmd+Z's Z repeated the undo for as long as Cmd was held, and a second Cmd+Z
+      // was no press at all. Where the key-ups do come, they change nothing.
+      if (mac && cmdDown && !super)
+        releaseKeys(io);
+      cmdDown = mac && super;
+      io.AddKeyEvent(ImGuiMod_Ctrl, ctrl);
+      io.AddKeyEvent(ImGuiMod_Super, super);
       io.AddKeyEvent(ImGuiMod_Shift, interactor->GetShiftKey() != 0);
       io.AddKeyEvent(ImGuiMod_Alt, interactor->GetAltKey() != 0);
-      const ImGuiKey key = imguiKeyForVtkKeySym(interactor->GetKeySym());
-      if (key != ImGuiKey_None)
+      if (key != ImGuiKey_None) {
         io.AddKeyEvent(key, down);
+        if (down && cmdDown && (key < ImGuiKey_LeftCtrl || key > ImGuiKey_RightSuper))
+          io.AddKeyEvent(key, false); // the tap: ImGui takes the release a frame later
+      }
       break;
     }
     case vtkCommand::CharEvent: {
@@ -1007,6 +1078,26 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
   ImGuiIO &io = ImGui::GetIO();
   io.IniFilename = nullptr; // don't litter imgui.ini next to the binary
   ImGui::StyleColorsDark();
+#ifdef __EMSCRIPTEN__
+  // A browser on a Mac: Cmd is the shortcut key there too (Cmd+Z, C, V, X and A in a field, and
+  // the menus' "Cmd+"), as ImGui makes it on Apple. A wasm build has no __APPLE__, so the page's
+  // platform decides, and its ?mackeys=1|0 overrules that; a host can still set
+  // io.ConfigMacOSXBehaviors after this. SDL's window hands the browser's Meta over as Super.
+  {
+    char platform[64] = {};
+    cvcgl_page_platform(platform, sizeof platform);
+    const int url = cvcgl_mac_keys_url();
+    io.ConfigMacOSXBehaviors = url >= 0 ? url == 1 : isApplePlatformName(platform);
+    // ImGui chose its window-switching shortcut when the context was made: choose it again.
+    ImGuiContext &g = *m_impl->ctx;
+    const ImGuiKeyChord cmd = io.ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+    g.ConfigNavWindowingKeyNext = cmd | ImGuiKey_Tab;
+    g.ConfigNavWindowingKeyPrev = cmd | ImGuiMod_Shift | ImGuiKey_Tab;
+    std::printf("cvcGL: %s is the shortcut key (the page's platform '%s'%s)\n",
+                io.ConfigMacOSXBehaviors ? "Cmd" : "Ctrl", platform,
+                url >= 0 ? ", overruled by ?mackeys" : "");
+  }
+#endif
 
   // Be explicit about the font. AddFontDefault() is a HEURISTIC that picks the
   // 13px bitmap ProggyClean below an expected size of 15 and the scalable
@@ -1073,6 +1164,7 @@ ImGuiOverlay::ImGuiOverlay(SceneRenderer &viewer) : m_impl(new Impl) {
     impl->clipboardText = cvc::gl::clipboard::get(*impl->app);
     return impl->clipboardText.c_str();
   };
+  cvc::gl::clipboard::install(); // in a browser, before the first Ctrl+V
 #ifdef __EMSCRIPTEN__
   // The system keyboard, for a phone (see the header): ImGui reports here, at the end of each
   // frame where it changed, whether a text field wants text and where its caret is.

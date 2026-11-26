@@ -133,6 +133,7 @@ class async_scheduler;
 class async_host;
 class lock_manager;
 class exec_group;
+class exec_router;
 } // namespace state_exec
 
 class app;
@@ -558,8 +559,11 @@ public:
   // once the job is queued; on_done hands the result back on the worker thread — typically through
   // a scheduler's thread-safe post_message(channel, value), to the scheduler the waiting program
   // parks on: ictx.host->parking_scheduler(), read in the intrinsic (an isolated document's group),
-  // or exec_scheduler() when that is null. A post to exec_scheduler() for a program in another
-  // group stays in group 0's queue and never wakes it. An async function on *ictx.host
+  // or exec_scheduler() when that is null. A post to exec_scheduler() on a channel of a program in
+  // another group (an isolated document's, under its prefix) is passed on to that group, the
+  // channel's home, by the app's router (S2b), one hop more than a post to the parking scheduler;
+  // a '#' key is never passed on, so such a post on one stays in group 0's queue and never wakes
+  // the program. An async function on *ictx.host
   // (register_async_fn), which its host tracks, is the simpler route for an Ariadne verb
   // (STATE_EXEC_DEVELOPER_GUIDE.md, "Posting to the caller's group"). Queuing the job does
   // not wait for the pool, with one exception: while the pool has no worker running yet, only
@@ -671,6 +675,9 @@ public:
   // chroot + per-document child env). See docs/STATE_EXEC_DEVELOPER_GUIDE.md, "Which Scheduler
   // Runs a Program".
   cvc::state_exec::async_scheduler &exec_scheduler();
+  // exec_scheduler() if it has been built, else null; never builds it (S2b: a host that drains
+  // group 0 for router entries homed there only while it exists, as pycvc's ExecPool does).
+  cvc::state_exec::async_scheduler *exec_scheduler_probe();
 
   // The async host for exec_scheduler() (docs/STATE_EXEC_EXCEPTIONS.md 3.2): an async function
   // registered with it (state_exec::register_async_fn) parks its calling process while its
@@ -720,6 +727,11 @@ public:
   // none repeats app-wide: made with group 0's state, counting from 1, the app scheduler's first
   // pid as before (async_scheduler::set_pid_source).
   std::shared_ptr<std::atomic<int>> exec_pid_source();
+  // This app's router and pid directory (S2b; docs/STATE_EXEC_THREADED.md 4.5, 4.6;
+  // state_exec/exec_router.h): made with group 0's state, beside the pid source, at the first call,
+  // and kept until the app goes, after every scheduler that uses it. exec_scheduler() registers
+  // group 0 with it, and each exec_group built with this app its channel prefixes.
+  cvc::state_exec::exec_router &exec_router();
 
   // Used to easily manage saving/restoring thread info as we
   // traverse a threads stack.

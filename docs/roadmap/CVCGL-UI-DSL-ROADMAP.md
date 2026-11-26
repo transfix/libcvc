@@ -2641,7 +2641,10 @@ ideal — GPU FBO-share:** a dedicated `vtkRenderer` renders into an FBO-attache
 OceanFFT `vtkOpenGLFramebufferObject` pattern) and the mesh **samples** it GPU-side via the
 already-shipping `setShaderTexture(name, vtkTextureObject*)` — **zero readback, zero re-upload**. The
 sampling half already exists; only "render a scene into the FBO" (vs OceanFFT's fragment quad) is new.
-**Ship (a) now, file (b) as follow-up.**
+**Ship (a) now, file (b) as follow-up.** *Rendering a view into a texture is built:* every Ariadne
+`viewport` widget draws its view into a texture of its own and shows it as an image
+(`Viewport::setTextureSize` / `texture()`, shell phase SH2, ARIADNE.md §5.18). A node sampling such
+a texture is still to do.
 
 ---
 

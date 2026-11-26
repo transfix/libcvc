@@ -248,8 +248,22 @@ struct ImGuiBackend::TextViewState {
 // the bell's menu), under an id of its own: a field's comes from the field's id; a text's, from its
 // place among the texts under the same id stack this frame, as a rich text's links are.
 struct ImGuiBackend::ContextMenus {
-  enum class Kind { Text, Field, TextView, Selection };
+  // Document: a document's context_menu: (§5.30) over something with no menu of its own, which
+  // offers only the items the core adds.
+  enum class Kind { Text, Field, TextView, Selection, Save, Document };
   static constexpr float kLongPress = 0.5f; // s a finger stays still for a menu
+
+  // §5.30 the document's context_menu: areas open in the walk (begin_context_area), innermost
+  // last, by ImGui id; and the one whose items join the open menu, under a separator (0: none):
+  // the innermost area around the item it opened on, or the area itself when it opened over
+  // nothing with a menu of its own. The frame open() ran in (a frame's one request to open a
+  // menu is then taken), and how and where (the pointer) it opened.
+  std::vector<ImGuiID> areas;
+  ImGuiID area = 0;
+  int opened_frame = -1;
+  const char *via = "pointer";
+  ImVec2 at;
+  bool taken() const { return opened_frame == ImGui::GetFrameCount(); }
 
   // The menu open, and what it offers.
   ImGuiID host = 0;
@@ -269,6 +283,11 @@ struct ImGuiBackend::ContextMenus {
   // next_item_copy's text, for the next item.
   std::string next_copy;
   bool have_next_copy = false;
+
+  // §5.29 a picture's: what its Save saves; and in a browser, whether its Save item is under the
+  // pointer this frame, and whether the page was last told it is (browser_save_arm).
+  cvc::ariadne::MediaSave save;
+  bool save_arm_now = false, save_armed = false;
 
   // A long press (a finger held still kLongPress s) opens the menu of the item under it. The menu
   // takes no click until the finger has lifted: the release would pick what opened under it.
@@ -312,12 +331,14 @@ struct ImGuiBackend::ContextMenus {
     return clicked;
   }
 
-  ImGuiID text_id() {
+  ImGuiID text_id() { return nth_id("##cvc.copy"); }
+  ImGuiID save_id() { return nth_id("##cvc.save"); } // §5.29 a picture's, as a text's
+  ImGuiID nth_id(const char *what) {
     if (frame != ImGui::GetFrameCount()) {
       frame = ImGui::GetFrameCount();
       seen.clear();
     }
-    const ImGuiID key = ImGui::GetID("##cvc.copy");
+    const ImGuiID key = ImGui::GetID(what);
     const int nth = seen[key]++;
     return ImHashData(&nth, sizeof nth, key);
   }
@@ -334,8 +355,12 @@ struct ImGuiBackend::ContextMenus {
   void open(ImGuiID id) {
     host = id;
     ImGui::OpenPopupEx(id);
+    via = long_press ? "touch" : ImGui::IsMouseReleased(ImGuiMouseButton_Right) ? "pointer" : "key";
     held = long_press;
     long_press = false; // the item under the finger has it
+    area = areas.empty() ? 0 : areas.back(); // §5.30 the document's items around it join it
+    opened_frame = ImGui::GetFrameCount();
+    at = ImGui::GetIO().MousePos;
   }
 
   bool begin(ImGuiID id) {
@@ -440,6 +465,16 @@ struct ImGuiBackend::ContextMenus {
       if (item("Select all", (m + "A").c_str(), !select.empty()))
         select_all = true;
       break;
+    case Kind::Document: // §5.30 only the items the core adds
+      break;
+    case Kind::Save: { // §5.29 the core saves it, from its next drain
+      const bool clicked = item(save.video ? "Save video..." : "Save image...", nullptr, true);
+      if (ImGui::IsItemHovered())
+        save_arm_now = true; // a browser page's release over it downloads it, inside the click
+      if (clicked)
+        be->media_save_chosen(save);
+      break;
+    }
     }
   }
 
@@ -614,6 +649,14 @@ struct ImGuiBackend::ContextMenus {
       armed = arm_now;
     }
     arm_now = 0;
+#ifdef __EMSCRIPTEN__
+    if (save_arm_now != save_armed) { // §5.29 so does it over a Save item
+      const std::string key = cvc::ariadne::media_save_key(save);
+      cvc::ariadne::browser_save_arm(save_arm_now ? &key : nullptr);
+      save_armed = save_arm_now;
+    }
+#endif
+    save_arm_now = false;
   }
 };
 #else
@@ -637,6 +680,27 @@ void ImGuiBackend::next_item_copy(const std::string &text) {
   cm.have_next_copy = true;
 #else
   (void)text;
+#endif
+}
+
+void ImGuiBackend::item_save(const cvc::ariadne::MediaSave &m) {
+#ifdef CVC_ENABLE_IMGUI
+  ContextMenus &cm = context_menus();
+  const ImGuiID id = cm.save_id();
+  if (cm.requested(false)) {
+    cm.kind = ContextMenus::Kind::Save;
+    cm.save = m;
+    cm.open(id);
+#ifdef __EMSCRIPTEN__
+    media_save_prepare(m); // the page fetches it while the pointer goes to Save
+#endif
+  }
+  if (cm.begin(id)) {
+    cm.draw();
+    cm.end();
+  }
+#else
+  (void)m;
 #endif
 }
 
@@ -690,6 +754,7 @@ ariadne::Capabilities ImGuiBackend::capabilities() const {
   c.rich_text = true;
   c.button_icon = true;
   c.button_selected = true;
+  c.context_menu = true;
   return c;
 }
 
@@ -1103,18 +1168,6 @@ void ImGuiBackend::focus_next_window() {
 #endif
 }
 
-#ifdef CVC_ENABLE_IMGUI
-struct ImGuiBackend::WindowCuts {
-  std::string name;    // the ImGui window's name ("title###id")
-  bool paints = false; // ImGui's background is clear this frame and end_window paints it
-  ImDrawList *dl = nullptr;
-  ImDrawListSplitter split; // channel 0 the background, 1 the window's content
-  std::vector<ImRect> holes;
-};
-#else
-struct ImGuiBackend::WindowCuts {};
-#endif
-
 bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne::Size &size,
                                 float border, bool *p_open) {
   int pushes = 0;
@@ -1454,14 +1507,6 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   const ImGuiWindowFlags flags = ImGuiWindowFlags_HorizontalScrollbar |
                                  (!maximized && fits ? ImGuiWindowFlags_AlwaysAutoResize : 0) |
                                  (resizable ? 0 : ImGuiWindowFlags_NoResize);
-  // A window that cut a hole in its background last frame (a viewport widget) paints its own in
-  // end_window, around this frame's cuts: ImGui's is made clear, and the content goes on a channel
-  // above the one that background is drawn on.
-  auto cuts = std::make_shared<WindowCuts>();
-  cuts->name = name;
-  cuts->paints = m_cutWindows.count(name) != 0;
-  if (cuts->paints)
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
   // With a maximize button the title is drawn after Begin, short of that button (title_text): the
   // window is begun as "###<id>", which is the same ImGui window (its id hashes from the "###").
   const bool own_title = maximize != nullptr && *title;
@@ -1492,13 +1537,6 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   if (maximize)
     maximize_button(maximize, p_open != nullptr);
   title_button_tooltip(ImGui::GetCurrentWindow(), p_open != nullptr, maximize);
-  if (cuts->paints) {
-    ImGui::PopStyleColor();
-    cuts->dl = ImGui::GetWindowDrawList();
-    cuts->split.Split(cuts->dl, 2);
-    cuts->split.SetCurrentChannel(cuts->dl, 1);
-  }
-  m_windowCuts.push_back(std::move(cuts));
 #else
   (void)size;
   (void)border;
@@ -1557,18 +1595,6 @@ void ImGuiBackend::end_window() {
 #endif
   m_lastTextView.reset();
   m_lastTextViewWindow = nullptr;
-#ifdef CVC_ENABLE_IMGUI
-  if (!m_windowCuts.empty()) {
-    std::shared_ptr<WindowCuts> cuts = std::move(m_windowCuts.back());
-    m_windowCuts.pop_back();
-    if (cuts->paints)
-      paint_window_background(*cuts);
-    if (cuts->holes.empty())
-      m_cutWindows.erase(cuts->name);
-    else
-      m_cutWindows.insert(cuts->name);
-  }
-#endif
   ui::End(); // unconditional per ImGui's contract
   if (!m_windowStylePushes.empty()) {
     const int n = m_windowStylePushes.back();
@@ -3214,56 +3240,6 @@ bool ImGuiBackend::draw_image(const char *name, float width) {
 }
 
 #ifdef CVC_ENABLE_IMGUI
-void ImGuiBackend::cut_window_background(float x0, float y0, float x1, float y1) {
-  if (m_windowCuts.empty() || !(x1 > x0) || !(y1 > y0))
-    return;
-  m_windowCuts.back()->holes.emplace_back(x0, y0, x1, y1);
-}
-
-// The window's background below its title bar, less its holes: for each band between the holes'
-// top and bottom edges, the stretches of it no hole covers.
-void ImGuiBackend::paint_window_background(WindowCuts &cuts) {
-  ImGuiWindow *win = ImGui::GetCurrentWindow();
-  ImDrawList *dl = cuts.dl;
-  cuts.split.SetCurrentChannel(dl, 0);
-  const ImRect bg(win->Pos.x, win->InnerRect.Min.y, win->Pos.x + win->Size.x,
-                  win->Pos.y + win->Size.y);
-  if (bg.Max.y > bg.Min.y && !win->Collapsed) {
-    const ImU32 col = ImGui::GetColorU32(ImGuiCol_WindowBg);
-    std::vector<ImRect> holes;
-    std::vector<float> ys{bg.Min.y, bg.Max.y};
-    for (ImRect h : cuts.holes) {
-      h.ClipWithFull(bg);
-      if (h.Max.x > h.Min.x && h.Max.y > h.Min.y) {
-        holes.push_back(h);
-        ys.push_back(h.Min.y);
-        ys.push_back(h.Max.y);
-      }
-    }
-    std::sort(ys.begin(), ys.end());
-    ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
-    dl->PushClipRect(bg.Min, bg.Max, false);
-    for (std::size_t i = 0; i + 1 < ys.size(); ++i) {
-      const float ya = ys[i], yb = ys[i + 1];
-      std::vector<std::pair<float, float>> covered;
-      for (const ImRect &h : holes)
-        if (h.Min.y < yb && h.Max.y > ya)
-          covered.emplace_back(h.Min.x, h.Max.x);
-      std::sort(covered.begin(), covered.end());
-      float x = bg.Min.x;
-      for (const auto &c : covered) {
-        if (c.first > x)
-          dl->AddRectFilled(ImVec2(x, ya), ImVec2(c.first, yb), col);
-        x = std::max(x, c.second);
-      }
-      if (bg.Max.x > x)
-        dl->AddRectFilled(ImVec2(x, ya), ImVec2(bg.Max.x, yb), col);
-    }
-    dl->PopClipRect();
-  }
-  cuts.split.Merge(dl);
-}
-
 struct ImGuiBackend::BackdropFrame {
   cvc::ariadne::Backdrop bd;
   ImDrawList *dl = nullptr;
@@ -3282,7 +3258,6 @@ struct ImGuiBackend::ItemGroupFrame {
   float right = 0.0f; // the right edge of the room it started with
 };
 #else
-void ImGuiBackend::cut_window_background(float, float, float, float) {}
 struct ImGuiBackend::BackdropFrame {};
 struct ImGuiBackend::ItemGroupFrame {};
 #endif
@@ -3367,10 +3342,98 @@ bool ImGuiBackend::pick_files(const cvc::ariadne::FilePickRequest &req,
 #endif
 }
 
+// §5.29 the Save dialog: what SDL answers (on its thread, under `m`), and what it needs until then.
+struct ImGuiBackend::SaveDialog {
+  std::mutex m;
+  bool answered = false;
+  std::string path, error;
+  cvc::ariadne::SavePathDone done; // the drawing thread's
+  std::string filter_name, filter_pattern, location, title;
+#ifdef CVC_IMGUI_FILE_DIALOG
+  SDL_DialogFileFilter filter{nullptr, nullptr};
+#endif
+};
+
+bool ImGuiBackend::ask_save_path(const cvc::ariadne::SavePathRequest &req,
+                                 cvc::ariadne::SavePathDone done) {
+#ifdef CVC_IMGUI_FILE_DIALOG
+  if (SDL_WasInit(SDL_INIT_VIDEO) == 0 || m_saveDialog)
+    return false;
+  auto d = std::make_shared<SaveDialog>();
+  d->done = std::move(done);
+  const std::string ext = cvc::ariadne::mime_extension(req.mime);
+  if (!ext.empty()) {
+    const std::string major = req.mime.substr(0, req.mime.find('/'));
+    d->filter_name = major == "image" ? "Image" : major == "video" ? "Video" : "File";
+    d->filter_name += " (." + ext + ")";
+    d->filter_pattern = ext;
+    d->filter = SDL_DialogFileFilter{d->filter_name.c_str(), d->filter_pattern.c_str()};
+  }
+  // In the Downloads folder, the name filled in, as a browser asks; the system's choice of folder
+  // when there is none.
+  const std::string dir = cvc::ariadne::downloads_dir();
+#ifdef _WIN32
+  d->location = dir.empty() ? req.name : dir + "\\" + req.name;
+#else
+  d->location = dir.empty() ? req.name : dir + "/" + req.name;
+#endif
+  d->title = req.title;
+  m_saveDialog = d;
+  auto *keep = new std::shared_ptr<SaveDialog>(d);
+  const SDL_PropertiesID props = SDL_CreateProperties();
+  if (!d->filter_pattern.empty()) {
+    SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_FILTERS_POINTER, &d->filter);
+    SDL_SetNumberProperty(props, SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER, 1);
+  }
+  SDL_SetPointerProperty(props, SDL_PROP_FILE_DIALOG_WINDOW_POINTER, SDL_GetKeyboardFocus());
+  SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_LOCATION_STRING, d->location.c_str());
+  if (!d->title.empty())
+    SDL_SetStringProperty(props, SDL_PROP_FILE_DIALOG_TITLE_STRING, d->title.c_str());
+  SDL_ShowFileDialogWithProperties(
+      SDL_FILEDIALOG_SAVEFILE,
+      [](void *userdata, const char *const *filelist, int) {
+        std::unique_ptr<std::shared_ptr<SaveDialog>> held(
+            static_cast<std::shared_ptr<SaveDialog> *>(userdata));
+        SaveDialog &st = **held;
+        std::lock_guard<std::mutex> lock(st.m);
+        if (!filelist) {
+          const char *why = SDL_GetError();
+          st.error = why && *why ? why : "the save dialog failed";
+        } else if (*filelist) {
+          st.path = *filelist; // none: the user cancelled
+        }
+        st.answered = true;
+      },
+      keep, props);
+  SDL_DestroyProperties(props);
+  return true;
+#else
+  (void)req;
+  (void)done;
+  return false;
+#endif
+}
+
 void ImGuiBackend::begin_frame() {
 #ifdef CVC_ENABLE_IMGUI
   context_menus().begin_frame(); // §5.28 a long press
 #endif
+  if (m_saveDialog) { // §5.29 the Save dialog's answer, to the core
+    const std::shared_ptr<SaveDialog> d = m_saveDialog;
+    std::string path, error;
+    bool answered = false;
+    {
+      std::lock_guard<std::mutex> lock(d->m);
+      answered = d->answered;
+      path = std::move(d->path);
+      error = std::move(d->error);
+    }
+    if (answered) {
+      m_saveDialog.reset();
+      if (d->done)
+        d->done(std::move(path), std::move(error));
+    }
+  }
   if (!m_fileDialog)
     return;
   const std::shared_ptr<FileDialog> d = m_fileDialog;
@@ -3490,6 +3553,116 @@ void ImGuiBackend::end_item_group() {
     f->dl->AddRectFilled(mn, mx, ImGui::GetColorU32(col), ImGui::GetStyle().FrameRounding);
   }
   f->split.Merge(f->dl);
+#endif
+}
+
+void ImGuiBackend::begin_context_area(const char *id, cvc::ariadne::ContextMenuOver over) {
+#ifdef CVC_ENABLE_IMGUI
+  const bool item = over == cvc::ariadne::ContextMenuOver::Item;
+  m_contextAreas.push_back(item);
+  context_menus().areas.push_back(ImGui::GetID(id)); // a menu opened inside it takes its items
+  if (item)
+    ImGui::BeginGroup();
+#else
+  (void)id;
+  (void)over;
+#endif
+}
+
+void ImGuiBackend::end_context_area() {
+#ifdef CVC_ENABLE_IMGUI
+  if (m_contextAreas.empty())
+    return;
+  const bool item = m_contextAreas.back();
+  m_contextAreas.pop_back();
+  ContextMenus &cm = context_menus();
+  if (!cm.areas.empty())
+    cm.areas.pop_back();
+  if (!item)
+    return;
+  // The group makes the area one rect for the menu; the item drawn last inside it stays the last
+  // item, so the core's on_click, on_hover and tooltip after it still see the widget's own.
+  ImGuiContext &g = *ImGui::GetCurrentContext();
+  const ImGuiLastItemData inner = g.LastItemData;
+  ImGui::EndGroup();
+  const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+  m_contextRect[0] = mn.x;
+  m_contextRect[1] = mn.y;
+  m_contextRect[2] = mx.x;
+  m_contextRect[3] = mx.y;
+  g.LastItemData = inner;
+#endif
+}
+
+bool ImGuiBackend::begin_context_menu(const char *id, cvc::ariadne::ContextMenuOver over,
+                                      cvc::ariadne::ContextMenuOpen &opened) {
+#ifdef CVC_ENABLE_IMGUI
+  using cvc::ariadne::ContextMenuOver;
+  ContextMenus &cm = context_menus();
+  const ImGuiID area = ImGui::GetID(id);
+  const ImGuiID popup = ImHashStr("##cvc.area", 0, area);
+  const ImGuiIO &io = ImGui::GetIO();
+  // Where in the area it opened from: its top left (a window's content's; the screen's).
+  ImVec2 origin(0.0f, 0.0f);
+  if (over == ContextMenuOver::Item)
+    origin = ImVec2(m_contextRect[0], m_contextRect[1]);
+  else if (over == ContextMenuOver::Window)
+    origin = ImGui::GetCurrentWindow()->InnerRect.Min;
+  // This frame's one request to open a menu, when nothing inside the area took it (a text's, a
+  // field's own menu): a right-click released where it went down (a right-drag pans a view or
+  // turns the main view's camera, so it opens nothing), a touch screen's long press (the menu
+  // takes no tap until the finger lifts), or the Menu key or Shift+F10 at the pointer. Over this
+  // menu's area, and no window above it (a popup open there included).
+  if (!cm.taken()) {
+    const float slop2 = io.MouseDragThreshold * io.MouseDragThreshold;
+    const bool asked = (io.MouseReleased[ImGuiMouseButton_Right] &&
+                        io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Right] <= slop2) ||
+                       cm.long_press || ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
+                       (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false));
+    constexpr ImGuiHoveredFlags kWin =
+        ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem;
+    bool over_it = false;
+    if (asked && over == ContextMenuOver::Item)
+      over_it = ImGui::IsWindowHovered(kWin) &&
+                ImGui::IsMouseHoveringRect(origin, ImVec2(m_contextRect[2], m_contextRect[3]));
+    else if (asked && over == ContextMenuOver::Window)
+      over_it = ImGui::IsWindowHovered(kWin);
+    else if (asked) // the main view: wherever no window is
+      over_it = !ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow |
+                                        ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+                                        ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+    if (over_it) {
+      cm.kind = ContextMenus::Kind::Document;
+      cm.open(popup);
+      cm.area = area;
+    }
+  }
+  // Open over this area: a menu of its own, or one opened on something inside it, whose own items
+  // come first and this area's after them, under a separator (the same popup, begun again).
+  if (cm.area != area || cm.host == 0 || !cm.begin(cm.host))
+    return false;
+  if (cm.taken()) {
+    opened.now = true;
+    opened.via = cm.via;
+    if (std::strcmp(cm.via, "key") != 0) {
+      opened.x = cm.at.x - origin.x;
+      opened.y = cm.at.y - origin.y;
+    }
+  }
+  if (cm.kind != ContextMenus::Kind::Document)
+    ImGui::Separator();
+  return true;
+#else
+  (void)id;
+  (void)over;
+  (void)opened;
+  return false;
+#endif
+}
+
+void ImGuiBackend::end_context_menu() {
+#ifdef CVC_ENABLE_IMGUI
+  context_menus().end();
 #endif
 }
 

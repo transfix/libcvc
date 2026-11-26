@@ -125,6 +125,17 @@ public:
   // channel below it) while hovered with `highlight`.
   void begin_item_group(const char *id, const cvc::ariadne::ItemGroupOptions &opts) override;
   void end_item_group() override;
+  // §5.30 a document's context_menu:, one of the context menus (§5.28): an item's area is an ImGui
+  // group, the item drawn last inside it staying the last item. A menu a text, a field or a
+  // picture inside it opens takes the area's items after its own, under a separator; elsewhere
+  // over the area a right-click released without a drag (a drag pans a view), a long press on a
+  // touch screen, or the Menu key or Shift+F10 opens a menu of the area's items alone. One menu a
+  // frame: the innermost asks first.
+  void begin_context_area(const char *id, cvc::ariadne::ContextMenuOver over) override;
+  void end_context_area() override;
+  bool begin_context_menu(const char *id, cvc::ariadne::ContextMenuOver over,
+                          cvc::ariadne::ContextMenuOpen &opened) override;
+  void end_context_menu() override;
   // (clipboard-set TEXT): cvc::gl::clipboard::set on the document's app (SDL's, the platform's, the
   // browser's navigator.clipboard, which wants the click's user activation: an action a frame later
   // still has it).
@@ -144,6 +155,15 @@ public:
   void end_frame() override;
   // §5.28 the next text or menu item copies `text` from its context menu.
   void next_item_copy(const std::string &text) override;
+  // §5.29 the picture just drawn offers Save image... / Save video... in its context menu. In a
+  // browser its opening asks the core to fetch the bytes (media_save_prepare), and the page's
+  // pointer release over the item downloads them (browser_save_arm).
+  void item_save(const cvc::ariadne::MediaSave &m) override;
+  // §5.29 SDL3's Save dialog, where SDL's video is up (not in a browser): it opens in the user's
+  // Downloads folder with the name filled in, and answers from begin_frame. False when one is open
+  // already, or there is no SDL: the core then uses the Downloads folder itself.
+  bool ask_save_path(const cvc::ariadne::SavePathRequest &req,
+                     cvc::ariadne::SavePathDone done) override;
   // The window's fullscreen, as the host does it (AriRuntime: the VTK / SDL window natively,
   // requestFullscreen on the canvas in a browser): `set(on)` asks and says whether it could, `is()`
   // says whether the window covers the screen now. Until one is installed, (fullscreen ON)
@@ -237,12 +257,6 @@ public:
   // rt.set_backend(this). `rt` must outlive the overlay's callback.
   void install(cvc::ariadne::Runtime &rt, ImGuiOverlay &overlay);
 
-  // Leave the screen-pixel rect (x0, y0)-(x1, y1) of the current window's background undrawn, so
-  // what the renderers drew under the UI shows through it: a `viewport` widget's view of the
-  // scene. A window that cut its background last frame paints its own (ImGui's is made clear),
-  // around the cuts it makes this frame; so the first frame a window cuts one it is still opaque.
-  void cut_window_background(float x0, float y0, float x1, float y1);
-
   // Make `ctx` the current Dear ImGui context of the module this backend runs in (libcvcGL), for a
   // host that created the context itself rather than through ImGuiOverlay. Where imgui is a static
   // library linked into both the host and libcvcGL (the cvcpkg Windows imgui), each copy keeps its
@@ -270,6 +284,9 @@ private:
   // §10.8 the file dialog out (pick_files), shared with SDL's callback until it answers.
   struct FileDialog;
   std::shared_ptr<FileDialog> m_fileDialog;
+  // §5.29 the Save dialog out (ask_save_path), shared with SDL's callback until it answers.
+  struct SaveDialog;
+  std::shared_ptr<SaveDialog> m_saveDialog;
 
   // Per-instance tf_editor state (the drag gesture, the working model while a delayed-update drag
   // is in flight, popups), keyed by the editor's `key`. Defined in tf_editor_imgui.cpp; shared_ptr
@@ -414,13 +431,6 @@ private:
   // W x H; 0 when nothing is published under it. Render thread (the GL context current).
   unsigned int image_texture(const char *name, int &W, int &H);
 
-  // cut_window_background(): each open window's cuts, innermost last, and the windows (by ImGui
-  // name) that made cuts the last time they were drawn, which draw their own background.
-  struct WindowCuts;
-  std::vector<std::shared_ptr<WindowCuts>> m_windowCuts;
-  void paint_window_background(WindowCuts &cuts); // end_window, ImGui builds only
-  std::unordered_set<std::string> m_cutWindows;
-
   // §5.12 backdrops open in this frame, innermost last (a splitter each, so they nest).
   struct BackdropFrame;
   std::vector<std::shared_ptr<BackdropFrame>> m_backdrops;
@@ -435,6 +445,11 @@ private:
   std::vector<std::shared_ptr<ItemGroupFrame>> m_itemGroups;
   unsigned int m_groupHitId = 0;
   bool m_groupHit = false;
+  // §5.30 the document's context areas open, innermost last (true: an item's, an ImGui group); the
+  // last item area closed, as a screen rect (min x, min y, max x, max y). Which menu is open, and
+  // the areas' ids, are ContextMenus'.
+  std::vector<bool> m_contextAreas;
+  float m_contextRect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   std::function<bool(bool)> m_setFullscreen; // set_fullscreen_handler
   std::function<bool()> m_isFullscreen;
   bool m_inFullscreenView = false; // between begin_ and end_fullscreen_view: an ImGui window open

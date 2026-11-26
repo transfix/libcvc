@@ -117,9 +117,9 @@ catalog:
     file: world_controls.ari
     unit: world_controls
     binds: "<prefix>.{keys}.*"              # read every frame by the generated_world node, drawn or headless
-    for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour)"
+    for: "a `type: generated_world` node (seed / preset / size / counts / relief / water / colour / save)"
     args: { keys: world, title: Terrain Lab, id: world_controls }   # defaults; keys = the node's `keys:` prop
-    note: "the realizer seeds world.* from the node props; structural edits regenerate the world; world_settings is its widgets without the window (args: keys)"
+    note: "the realizer seeds world.* from the node props; structural edits regenerate the world; Save writes the world shown as a bundle (a directory, a .zip, a browser download), with export/ for other software; world_settings is its widgets without the window (args: keys)"
   - component: world_source
     file: world_source.ari
     unit: world_source

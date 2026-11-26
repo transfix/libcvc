@@ -59,6 +59,11 @@ std::string get(cvc::app &app);
 bool canCopy();
 bool canPaste();
 
+// In a browser, installs the page's side now: the paste listener get() reads, and what lets
+// Ctrl+V reach it. The first call to any function here installs it as well, but a paste before
+// that came and went unseen, so ImGuiOverlay calls this when it is made. Natively it does nothing.
+void install();
+
 // A Copy or Paste chosen from a context menu (docs/ARIADNE.md §5.28), in a browser. Natively
 // get() and set() answer at once, so a menu calls them and none of this is needed: readIsAsync()
 // is false there, and the rest do nothing.

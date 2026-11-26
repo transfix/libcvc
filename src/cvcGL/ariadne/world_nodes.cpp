@@ -44,6 +44,7 @@
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, dataset
 #include <cvc/ariadne/scene_wind.h>            // the scene's one wind, which the trees lean in
+#include <cvc/ariadne/shown_clock.h>           // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -144,6 +145,7 @@ struct WorldRT {
   bool publishes = true;
   bool show_underside = true; // the rock under a floating world (put_underside)
   ari::GeneratedWorldKeys k;
+  ari::GeneratedWorldRelay relay;     // GB5: the relay's world, while joined to one that runs it
   world::generated_world_params base; // the authored props
   std::string base_dir;               // the document's, for a relative terrain_file
   const world::building_library *library = nullptr;
@@ -452,7 +454,7 @@ void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
   if (on) {
     constexpr double kPi = 3.14159265358979323846, kSwayPeriod = 2.0 * kPi / 1.3;
     const double rad = sw->mean_dir() * kPi / 180.0, u = sw->mean_speed() / 9.0,
-                 t = app.world_clock().t();
+                 t = ari::shown_time(app, rt.prefix, app.world_clock().t()); // shown_clock.h
     const double lean = std::min(0.03 * u * u * strength, 0.3);
     const double sway = std::min(0.02 * u * strength, 0.2);
     in.f3["uFwDir"] = {float(std::cos(rad)), float(std::sin(rad)), 0.0f};
@@ -1308,6 +1310,7 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   // The trees in the scene's wind: world.sway (its strength, from the `sway` prop, 1), and the way
   // they lean published at world.lean_dir.
   rt->prefix = sg.getStatePrefix();
+  ari::seed_shown_clock(sg.appContext(), rt->prefix); // its foliage sways at the shown time (OW5q)
   rt->sway_key = ari::resolve_bind(rt->prefix, ari::node_key(n, "world.sway"));
   rt->lean_key = ari::resolve_bind(rt->prefix, ari::node_key(n, "world.lean_dir"));
   ari::read_or_seed<double>(app, rt->sway_key, n.props.num("sway", 1.0));
@@ -1362,11 +1365,24 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
     if (rt->terrain.expired())
       return;
     cvc::app &app = *rt->app;
-    // Regenerate, Randomize and Stop, a new preset, and world.auto (poll_generated_world). A new
-    // colour alone repaints the shown world at once, once no rebuild is running (a rebuild paints
-    // in the colour asked when it started, and a later change is repainted after it).
-    const ari::GeneratedWorldPoll poll =
+    // Regenerate, Randomize, Stop and Save, a new preset, and world.auto (poll_generated_world). A
+    // new colour alone repaints the shown world at once, once no rebuild is running (a rebuild
+    // paints in the colour asked when it started, and a later change is repainted after it). Save
+    // writes the shown world's dataset, at once.
+    // Joined to a relay that runs this node (GB5): the relay's world in, and the panel's rebuild
+    // out to it (ari::GeneratedWorldRelay).
+    rt->relay.follow(app, rt->k, rt->id, rt->preset, rt->sig);
+    const std::string shown = rt->sig;
+    ari::GeneratedWorldPoll poll =
         ari::poll_generated_world(app, rt->k, rt->base, rt->preset, rt->sig);
+    if (poll.rebuild && poll.asked && rt->relay.ask(app, rt->k, rt->id, poll.params)) {
+      rt->sig = shown; // the relay makes it, and world_on brings it back
+      poll.rebuild = false;
+    }
+    if (poll.save)
+      ari::save_generated_world(app, rt->k, rt->data_path, rt->base_dir);
+    if (poll.rcon)
+      rt->relay.login(app, rt->k);
     if (poll.stop && rt->job) {
       stop_world_job(*rt);
       ari::write<std::string>(app, rt->k.status, "stopped: the previous world is shown");

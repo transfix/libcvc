@@ -33,6 +33,7 @@
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
+#include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/requires.h>     // free_heads: the isolation rules' oidc check
@@ -307,6 +308,10 @@ void substitute_index_in(Widget &out, const std::string &idx) {
     // A nested `repeat` template is left UNtouched so its own expansion owns its `{i}` (rather
     // than the outer index clobbering the inner template's bindings). Single-level still: the
     // inner cannot also reference the outer index — the loader warns on a nested repeat.
+    if (c.repeat.empty())
+      substitute_index_in(c, idx);
+  // §5.30 a row's right-click menu acts on that row (on: (delete-row {i})).
+  for (Widget &c : out.context_items)
     if (c.repeat.empty())
       substitute_index_in(c, idx);
 }
@@ -907,6 +912,15 @@ public:
     scope_ = &cache_[root_path_]; // unordered_map: the element stays where it is
   }
 
+  // §5.30 bind `event` to `ev` (a right-click menu's, while its items are drawn), or back to nil
+  // (nullptr). `ev` must outlive the binding. While one is bound no result is reused or kept.
+  void set_event(const se::value_t *ev) {
+    if (ev == event_)
+      return;
+    event_ = ev;
+    env_->set("event", ev ? *ev : se::value_t());
+  }
+
   // A read function (Runtime::register_read_function), bound beside the allowlist, with this
   // engine's environment for the readers it calls. A result kept from before may have come from
   // the function it replaces, so the kept results go (each scope's map stays where it is).
@@ -1138,7 +1152,8 @@ private:
     if (!expr)
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
     sync_writes();
-    const auto hit = scope_->find(src);
+    // §5.30 with a menu's `event` bound, a result may depend on it: neither reused nor kept.
+    const auto hit = event_ ? scope_->end() : scope_->find(src);
     if (hit != scope_->end()) {
       if (fresh(hit->second)) { // nothing it read was written: last time's result
         hit->second.used = frame_no_;
@@ -1173,7 +1188,7 @@ private:
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
       if (!st.done) // step cap: run() returns nil with done==false
         return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
-      if (!reads.live)
+      if (!reads.live && !event_)
         keep(src, r, std::move(reads), made_at);
       return {std::move(r), std::string()};
     } catch (const se::evaluation_timeout &) {
@@ -1412,6 +1427,7 @@ private:
   std::unordered_map<std::string, std::uint64_t> node_gen_, sub_gen_;
   Reads *rec_ = nullptr; // the evaluation running now, noting what it reads
   std::uint64_t frame_no_ = 0, evaluated_ = 0;
+  const se::value_t *event_ = nullptr; // set_event's: bound as `event` while a menu's items draw
 
   static constexpr uint64_t kMaxSteps = 100'000; // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;   // per-eval time cap (5 ms)
@@ -1626,6 +1642,98 @@ struct Runtime::Impl {
   // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
   void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
                        cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
+
+  // §5.29 saving a picture or a video: a context menu's Save image... / Save video..., and
+  // (save-url). A save's bytes are fetched as the widget's are (image_cache().fetch), the file is
+  // named from the URL and what the bytes are, and then the backend's Save dialog asks where (the
+  // file is written there), a browser page downloads it, or it goes into the Downloads folder as a
+  // new file. Each step that answers off the frame (a fetch, a dialog, a write) hands the next one
+  // to the hub, which drain() runs on the drawing thread; one a Runtime that is gone never ran is
+  // abandoned, and its save told why. The hub is shared with the verb, whose program may outlive
+  // this Runtime.
+  struct SaveOutcome {
+    bool ok = false;
+    bool cancelled = false; // the user closed the dialog
+    bool browser = false;   // a browser page downloads it: no path here
+    std::string name;       // the file's name
+    std::string path;       // where it was written (natively)
+    std::uint64_t size = 0;
+    std::string error;
+  };
+  struct SaveJob {
+    MediaSave save;
+    bool menu = false; // a context menu's: a failure is a notification
+    // (save-url)'s program: called once, from any thread, with the outcome.
+    std::function<void(const SaveOutcome &)> done;
+  };
+  struct SaveHub {
+    struct Step {
+      std::function<void()> run;     // on the drawing thread, from drain()
+      std::function<void()> abandon; // when the Runtime goes first: tell the save
+    };
+    std::mutex m;
+    std::vector<SaveJob> asked; // (save-url)'s, from wherever its program runs
+    std::vector<Step> steps;
+    // The drawing thread's alone: a Save dialog is open (one at a time), and where a save with no
+    // dialog goes ("" the Downloads folder).
+    bool dialog_open = false;
+    std::string dir;
+    void post(Step s) {
+      std::lock_guard<std::mutex> lock(m);
+      steps.push_back(std::move(s));
+    }
+    void ask(SaveJob j) {
+      std::lock_guard<std::mutex> lock(m);
+      asked.push_back(std::move(j));
+    }
+    ~SaveHub() {
+      for (Step &s : steps)
+        if (s.abandon)
+          s.abandon();
+      SaveOutcome gone;
+      gone.error = "the document is gone";
+      for (SaveJob &j : asked)
+        if (j.done)
+          j.done(gone);
+    }
+  };
+  std::shared_ptr<SaveHub> saves = std::make_shared<SaveHub>();
+  // A browser page's save a context menu opened on (Backend::media_save_prepare): its bytes are
+  // fetched and staged on the page, so the pointer's release over Save downloads them inside the
+  // click. The saves chosen before they came wait for them.
+  struct PreparedSave {
+    std::string key; // media_save_key
+    long gen = 0;
+    bool staged = false;
+    std::chrono::steady_clock::time_point staged_at; // the page lets it go after two minutes
+    SaveOutcome outcome;                             // what its saves are told (name, size)
+    std::vector<SaveJob> waiting;
+  };
+  std::unique_ptr<PreparedSave> prepared_save;
+  long prepared_gen = 0;
+  void pump_saves();                     // drain(): the saves asked for, and their steps
+  void start_save(SaveJob job);          // fetch the bytes
+  void prepare_save(const MediaSave &m); // a browser page: fetch now, stage on the page
+  void save_fetched(SaveJob job, media::FetchResult r);
+  void save_deliver(SaveJob job, const std::string &name, const std::string &mime,
+                    std::shared_ptr<const std::string> bytes);
+  void save_write(SaveJob job, const std::string &path, const std::string &name,
+                  std::shared_ptr<const std::string> bytes, bool fresh);
+  void finish_save(const SaveJob &job, const SaveOutcome &o);
+  // The file name and type of `bytes` saved for `m` (its own name and mime, else the URL's and
+  // what the bytes are).
+  static void save_naming(const MediaSave &m, const std::string &bytes, std::string &name,
+                          std::string &mime);
+  // §5.29 the picture just drawn for `w` offers Save (unless `save: false`).
+  void offer_save(const Widget &w, const std::string &uri, bool video) {
+    if (!w.save_menu || !media::is_uri(uri))
+      return;
+    MediaSave m;
+    m.url = uri;
+    m.auth = w.media_auth;
+    m.video = video;
+    backend->item_save(m);
+  }
 
   // The document's own program-lane intrinsics (add_program_intrinsics), in order, each with its
   // kind: bound after the app's into every program env this Runtime builds, and into no other
@@ -1994,12 +2102,12 @@ struct Runtime::Impl {
   // A placement change (ensure_placement) moves the document: move_out kills and reaps its
   // processes where they ran and drops their records, so its residents start again in the new
   // place; the streams it owns are re-pointed there (retarget_document_streams). Its old group, if
-  // any, is retired: unregistered and unpumped, it keeps the contexts taken from it and is
-  // destroyed at a later drain_begin once its host has no kernel in flight (R1b skeptic m1, m5), so
-  // a move never waits for them. Only its own kernels' completions can post to it then: its
-  // processes are gone, no stream names it, the Runtime posts to the new place and its host-call
-  // queue is empty outside a pump. The contexts taken from group 0 stay until ~Impl, for a process
-  // a failed kill left there.
+  // any, is retired: unregistered (as a frame group, and from the router: retire_from_router) and
+  // unpumped, it keeps the contexts taken from it and is destroyed at a later drain_begin once its
+  // host has no kernel in flight (R1b skeptic m1, m5), so a move never waits for them. Only its own
+  // kernels' completions can post to it then: its processes are gone, no stream names it, the
+  // Runtime posts to the new place and its host-call queue is empty outside a pump. The contexts
+  // taken from group 0 stay until ~Impl, for a process a failed kill left there.
   struct RetiredGroup {
     std::unique_ptr<cvc::state_exec::exec_group> group;
     std::vector<std::shared_ptr<ActionContext>> contexts; // go after the group
@@ -2011,6 +2119,11 @@ struct Runtime::Impl {
   std::vector<std::shared_ptr<ActionContext>> move_out();
   // drain_begin: destroy the retired groups whose hosts have no kernel in flight.
   void destroy_idle_retired_groups();
+  // A group the document leaves leaves the app's router at once (S2b), not at its teardown, which
+  // waits for its kernels: its prefix is unregistered and what it holds for the router (pending
+  // messages, waits of other groups, router entries) goes to the keys' new homes. Called once the
+  // document's new group, if any, has registered the prefix. Logs what it throws.
+  void retire_from_router(cvc::state_exec::exec_group &g) noexcept;
   // Late registrations (R1b skeptic m3, the lead's rule): a registration after the placement
   // (refresh_program_names, or the providers' registry moving past placement_generation_) has it
   // decided again only when a move would kill nothing; else it waits for the document's next
@@ -2024,8 +2137,8 @@ struct Runtime::Impl {
   // Kill every process of the owner on `sched` and reap each one the Runtime knows of, each step
   // catching and logging what it throws (`when`: "tearing down", "moving").
   void kill_and_reap(cvc::state_exec::async_scheduler &sched, const char *when) noexcept;
-  // "" when the document may have a group (S1-Q6), else the first rule it fails; `host_affinity`
-  // tells whether that group must be pumped on the host thread.
+  // "" when the document may have a group (S1-Q6, S2-Q16), else the first rule it fails;
+  // `host_affinity` tells whether that group must be pumped on the host thread.
   std::string isolation_verdict(bool &host_affinity) const;
   // Whether a host_only provider binds anything in an action's env (the group is then host).
   bool host_only_bindings() const;
@@ -2302,6 +2415,7 @@ struct Runtime::Impl {
       reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
     }
     reactive->set_root_path(app, current_prefix());
+    reactive->set_event(menu_event ? &menu_event->dict : nullptr); // §5.30 inside a menu's items
     return *reactive;
   }
 
@@ -2309,8 +2423,28 @@ struct Runtime::Impl {
     if (!event.empty()) {
       queued_events.push_back({event, current_prefix()}); // capture the mount scope for a program
       queued_events.back().functions = current_functions(); // and its functions
+      if (menu_event) // §5.30 a right-click menu's item: its program gets the menu's `event`
+        queued_events.back().event_values = menu_event->fields;
     }
   }
+
+  // §5.30 right-click menus. Each open menu's `event`, taken when it opened and kept while it
+  // stays open, by the menu's instance key, with the walk that last drew it (one no walk drew is
+  // closed, and goes); the menu whose items the walk is emitting, whose event their visible_when:
+  // reads and the programs they run get; the host's pick in the main view (set_main_view_pick).
+  struct MenuEvent {
+    std::vector<std::pair<std::string, cvc::state_exec::value_t>> fields;
+    cvc::state_exec::value_t dict;
+    std::uint64_t walk = 0;
+  };
+  std::unordered_map<std::string, MenuEvent> menu_events; // nodes stay put (menu_event points in)
+  const MenuEvent *menu_event = nullptr;
+  std::uint64_t walk_no = 0;
+  Runtime::ContextPick main_view_pick;
+  MenuEvent context_event(const Widget &w, ContextMenuOver over, const ContextMenuOpen &o,
+                          const Runtime::ContextPick &pick) const;
+  void emit_context_menu(const Widget &w, ContextMenuOver over, const Runtime::ContextPick &pick);
+  std::string context_id(const Widget &w) const { return "ctx:" + item_id(w); }
   // §4.6: enqueue a widget POINTER handler carrying its event data (a program gets an `event`
   // dict).
   void enqueue_event(const std::string &event, float x, float y, float dx, float dy, int button) {
@@ -3010,6 +3144,84 @@ void Runtime::Impl::emit(const Widget &w) {
   });
 }
 
+// §5.30 a right-click menu's `event`: what it was opened over (`on`: group, viewport, window or
+// main; a custom widget other than a viewport by its type) and that widget's `id`, the menu's
+// `id`, how (`via`) and where (`px`, `py`) it was opened, and the pick at that point over a scene
+// view. The pick's fields are always there, empty (hit "0") over a widget that is no scene view, so
+// a visible_when: can read them anywhere; they are strings, as a viewport's pick: key holds them,
+// but `tags` is a list.
+Runtime::Impl::MenuEvent Runtime::Impl::context_event(const Widget &w, ContextMenuOver over,
+                                                      const ContextMenuOpen &o,
+                                                      const Runtime::ContextPick &pick) const {
+  namespace se = cvc::state_exec;
+  MenuEvent e;
+  auto &f = e.fields;
+  std::string on = "group";
+  if (over == ContextMenuOver::Main)
+    on = "main";
+  else if (over == ContextMenuOver::Window)
+    on = "window";
+  else if (w.kind == Kind::Custom)
+    on = w.custom_type;
+  f.emplace_back("on", se::value_t(on));
+  f.emplace_back("id", se::value_t(over == ContextMenuOver::Main                     ? std::string()
+                                   : over == ContextMenuOver::Window && w.id.empty() ? w.label
+                                                                                     : w.id));
+  f.emplace_back("menu", se::value_t(w.context_menu_id));
+  f.emplace_back("via", se::value_t(o.via.empty() ? std::string("pointer") : o.via));
+  f.emplace_back("px", se::value_t(static_cast<double>(o.x)));
+  f.emplace_back("py", se::value_t(static_cast<double>(o.y)));
+  std::vector<std::pair<std::string, std::string>> hit;
+  if (pick)
+    hit = pick();
+  const auto field = [&hit](const char *name, const char *dflt) {
+    for (const auto &kv : hit)
+      if (kv.first == name)
+        return kv.second;
+    return std::string(dflt);
+  };
+  for (const char *k : {"node", "x", "y", "z", "i", "j", "k", "value", "axis", "view", "mods"})
+    f.emplace_back(k, se::value_t(field(k, "")));
+  f.emplace_back("hit", se::value_t(field("hit", "0")));
+  std::vector<se::value_t> tags;
+  {
+    std::istringstream words(field("tags", ""));
+    for (std::string t; words >> t;)
+      tags.emplace_back(t);
+  }
+  f.emplace_back("tags", se::make_list(std::move(tags)));
+  e.dict = se::make_dict(f);
+  return e;
+}
+
+void Runtime::Impl::emit_context_menu(const Widget &w, ContextMenuOver over,
+                                      const Runtime::ContextPick &pick) {
+  // Its instance (a repeated group's menus are apart), and the id the backend keys the popup on.
+  const std::string key = instance_key() + (over == ContextMenuOver::Main ? "|main" : "|menu");
+  const std::string id = over == ContextMenuOver::Main ? std::string("ctx:main") : context_id(w);
+  ContextMenuOpen opened;
+  if (!backend->begin_context_menu(id.c_str(), over, opened)) {
+    menu_events.erase(key);
+    return;
+  }
+  auto it = menu_events.find(key);
+  if (opened.now || it == menu_events.end())
+    it = menu_events.insert_or_assign(key, context_event(w, over, opened, pick)).first;
+  it->second.walk = walk_no;
+  const MenuEvent *const outer = std::exchange(menu_event, &it->second);
+  // Its items, apart from the widget's children in the tree's paths (instance keys, unnamed ids).
+  constexpr std::size_t kItemsPath = std::size_t(1) << 30;
+  for (std::size_t k = 0; k < w.context_items.size(); ++k) {
+    emit_path.push_back(kItemsPath + k);
+    emit(w.context_items[k]);
+    emit_path.pop_back();
+  }
+  menu_event = outer;
+  if (reactive) // unbound now: the next menu binds its own, even one made where this one was
+    reactive->set_event(menu_event ? &menu_event->dict : nullptr);
+  backend->end_context_menu();
+}
+
 void Runtime::Impl::emit_node(const Widget &w) {
   if (w.kind == Kind::TrayIcon) // emit_tray draws it, after the bar's menus; not here, where its
     return;                     // tooltip and pointer handlers would land on the item before it
@@ -3207,10 +3419,16 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, geo_path, format_geom(persist));
     if (visible) {
       b.push_id(id.c_str());
+      if (w.context_menu) // §5.30 its right-click menu: over its body, inside the window
+        b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Window);
       const bool backdrop = open_backdrop(w, /*window=*/true); // §5.12
       emit_container(w); // §3.0.3b: the window body honours w.layout
       if (backdrop)
         b.end_backdrop();
+      if (w.context_menu) {
+        b.end_context_area();
+        emit_context_menu(w, ContextMenuOver::Window, {});
+      }
       b.pop_id();
     }
     b.end_window();
@@ -3224,6 +3442,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // hold a "Change" button.
     if (!w.id.empty())
       b.push_id(w.id.c_str());
+    // §5.30 its right-click menu is over all of it (the document root's is the main view's, which
+    // render() opens after the walk).
+    const bool menu = w.context_menu && &w != &root;
+    if (menu)
+      b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Item);
     // §4.6 a group with pointer handlers of its own, or `hover: highlight`, is one item over its
     // whole area (a feed's card): named by its id:, else by its place in the tree, so two unnamed
     // ones never share a backend id.
@@ -3245,6 +3468,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
     inner_click = clicks_fired != clicks_before;
     if (item)
       b.end_item_group();
+    if (menu) {
+      b.end_context_area();
+      emit_context_menu(w, ContextMenuOver::Item, {});
+    }
     if (!w.id.empty())
       b.pop_id();
     break;
@@ -3798,30 +4025,40 @@ void Runtime::Impl::emit_node(const Widget &w) {
     //  2. else the BACKEND's novel-primitive escape (custom_widget) — the core reads
     //     the bound value, hands it in, and writes back on the committed edge;
     //  3. else a placeholder (neither knows this type).
+    // §5.30 its right-click menu is over all of it; a scene view (a viewport) adds its pick.
+    if (w.context_menu)
+      b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Item);
+    Runtime::ContextPick pick;
     if (const WidgetEmitFn fn = lookup_widget(app, w.custom_type)) {
       WidgetEmitContext ctx;
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
       ctx.fire = [this](const std::string &event) { enqueue(event); };
       fn(w, ctx);
-      break;
+    } else {
+      const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
+      const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
+      b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
+      CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+      b.set_custom_scope(std::string());
+      if (!e.handled)
+        b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
+      else if (e.committed && !w.bind.empty())
+        write<std::string>(app, path, e.value);
+      if (e.handled && !e.fire.empty()) // an event it raised, with its fields
+        enqueue_fields(e.fire, std::move(e.fields));
+      for (CustomEdit::Event &ev : e.events) // and any more, in order
+        if (e.handled && ev.document)
+          enqueue_document_fields(ev.fire, std::move(ev.fields));
+        else if (e.handled)
+          enqueue_fields(ev.fire, std::move(ev.fields));
+      if (e.handled)
+        pick = std::move(e.context_pick);
     }
-    const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
-    const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
-    b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
-    CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
-    b.set_custom_scope(std::string());
-    if (!e.handled)
-      b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
-    else if (e.committed && !w.bind.empty())
-      write<std::string>(app, path, e.value);
-    if (e.handled && !e.fire.empty()) // an event it raised, with its fields
-      enqueue_fields(e.fire, std::move(e.fields));
-    for (CustomEdit::Event &ev : e.events) // and any more, in order
-      if (e.handled && ev.document)
-        enqueue_document_fields(ev.fire, std::move(ev.fields));
-      else if (e.handled)
-        enqueue_fields(ev.fire, std::move(ev.fields));
+    if (w.context_menu) {
+      b.end_context_area();
+      emit_context_menu(w, ContextMenuOver::Item, pick);
+    }
     break;
   }
   }
@@ -4003,6 +4240,8 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
                         v.status == media::Status::Ready
                             ? uri
                             : std::string("(") + media::status_name(v.status) + ")");
+  else
+    offer_save(w, uri, /*video=*/false); // §5.29 Save image... in its context menu
   if (v.status == media::Status::Failed)
     backend->set_tooltip((caption + ": " + v.error).c_str());
   write_media_status(w.media_status, v);
@@ -4620,6 +4859,8 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
         b.item_badge(why.c_str());
     }
     emit_badge(w);
+    if (drew && !decorative) // §5.29 Save video... in its context menu (a decorative one has none)
+      offer_save(w, uri, /*video=*/true);
   }
 
   // autoplay: it starts once it can, and until the user (or the document) plays or pauses it, it
@@ -4957,6 +5198,10 @@ void Runtime::Impl::render() {
       backend->end_main_menu_bar();
     }
     emit(root);
+    // §5.30 the document's own right-click menu, over the main view: after every window, so a
+    // window's or a group's menu under the pointer opens instead.
+    if (root.context_menu && root.repeat.empty() && visible(root))
+      emit_context_menu(root, ContextMenuOver::Main, main_view_pick);
     emit_notify_window(); // §5.24, while Show all... has it open
     // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
     // on it.
@@ -4965,6 +5210,9 @@ void Runtime::Impl::render() {
     file_pick->composed.emit(*backend);
   }
   players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
+  // §5.30 a menu this walk did not draw (its widget hidden, its window closed) is closed.
+  std::erase_if(menu_events, [this](const auto &kv) { return kv.second.walk != walk_no; });
+  ++walk_no;
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
@@ -6220,6 +6468,10 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         o.owner = owner_;
         o.affinity = affinity;
         o.app = &app;
+        // The home of the keys under its prefix, its channels' among them (S2b, S2.md section 0
+        // row 23): the constructor registers it with the app's router, so a message sent on one
+        // from another group comes here.
+        o.channel_prefixes = {prefix};
         group_ = std::make_unique<se::exec_group>(std::move(o));
         frame_handle_ = app.register_frame_group(*group_);
       } catch (const std::exception &e) {
@@ -6245,9 +6497,13 @@ void Runtime::Impl::ensure_placement(bool submitting) {
         }
       }
     }
-    // The old group is retired, with the contexts taken from it, until its kernels end (m1).
-    if (old_group)
+    // The old group is retired, with the contexts taken from it, until its kernels end (m1). It
+    // leaves the router now, after the new group registered the prefix (S2b): nothing pumps it,
+    // so the messages and waits it is the home of go to the new home.
+    if (old_group) {
+      retire_from_router(*old_group);
       retired_groups_.push_back(RetiredGroup{std::move(old_group), std::move(taken)});
+    }
   }
   // Why a document stays in group 0 is logged when the reason changes (a new document's, or a
   // first), and only when the setting asks for isolation; one reason is logged once. Not before a
@@ -6304,18 +6560,37 @@ void Runtime::Impl::destroy_idle_retired_groups() {
   });
 }
 
+void Runtime::Impl::retire_from_router(cvc::state_exec::exec_group &g) noexcept {
+  // As its teardown leaves (exec_router.h, "Teardown and rehoming"), holding its token, which is
+  // free: no pump_all holds the group (refuse_if_held) and the frames pump it no more. The
+  // teardown leaves again later and finds nothing to send. If the token is held elsewhere (a host
+  // attached the group and a worker pumps it), only its prefix goes now, and what it holds goes at
+  // its teardown.
+  try {
+    cvc::state_exec::async_scheduler::pump_owner_scope token(g.sched());
+    g.sched().leave_router();
+    return;
+  } catch (const std::exception &e) {
+    teardown_note("moving", "leaving the router", e.what());
+  } catch (...) {
+    teardown_note("moving", "leaving the router", "an unknown exception");
+  }
+  try {
+    app.exec_router().unregister(g.route());
+  } catch (...) {
+  }
+}
+
 std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
   namespace se = cvc::state_exec;
   host_affinity = false;
   if (!isolate_documents_on(cvc::state::instance(app)))
     return "ariadne.exec.isolate_documents is off";
-  // S1-Q6, in order. No router until Stage 2, so its channels must all resolve under its prefix.
+  // S1-Q6's rules, in order, but its channel rules (S2-Q16): its channels no longer keep it in
+  // group 0, since one outside its prefix (a `/` channel, global: true or not) is homed at group 0
+  // or another document's group and routed (S2b). A '#' key is never routed, so oidc still does.
   if (prefix.empty())
     return "it has no prefix (it runs at the app root)";
-  if (!channel_policy_.enforce)
-    return "it has no channels: block enforced in strict lint mode";
-  if (!channel_policy_.global.empty())
-    return "it declares the global channel '" + channel_policy_.global.front() + "'";
   // The programs it runs as written: its lanes, its key bindings, its functions and every program
   // in its tree (a mount's init:, on_tick: and functions too).
   const Widget &tree = has_pending ? pending : root;
@@ -6335,8 +6610,10 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
       collect(c);
   };
   collect(tree);
-  std::string global_channel, oidc_use;
+  std::string oidc_use;
   for (const std::string *p : programs) {
+    if (!oidc_use.empty())
+      break;
     if (!is_expr(*p))
       continue;
     std::vector<std::string> channels;
@@ -6345,13 +6622,10 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
     } catch (const std::exception &) {
       continue; // its parse error shows when it runs
     }
-    for (const std::string &c : channels) {
-      if (global_channel.empty() && !c.empty() && c.front() == '/')
-        global_channel = c;
+    for (const std::string &c : channels)
       // oidc's completions go to "oidc#NAME" on group 0 (oidc_host.cpp)
       if (oidc_use.empty() && c.rfind("oidc#", 0) == 0)
         oidc_use = "it waits on oidc's channel '" + c + "'";
-    }
     if (oidc_use.empty())
       for (const std::string &name : free_heads(*p))
         if (name.rfind("oidc-", 0) == 0) {
@@ -6359,8 +6633,6 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
           break;
         }
   }
-  if (!global_channel.empty())
-    return "a program uses the app-global channel '" + global_channel + "'";
   if (!oidc_use.empty())
     return oidc_use;
   // A writable link: hole whose target leaves the prefix would write outside it from the group's
@@ -6660,6 +6932,37 @@ FilePickRequest file_pick_request(std::span<const cvc::state_exec::value_t> args
   return req;
 }
 
+// (save-url URL [OPTS])'s arguments (§5.29): the URL, an http(s), file, cvc or state URI, and the
+// options name (the file's name), mime (its type) and auth (a credential name, as image:'s).
+MediaSave save_url_request(std::span<const cvc::state_exec::value_t> args) {
+  namespace se = cvc::state_exec;
+  if (args.empty() || args.size() > 2)
+    throw se::dsl_error("TypeError", "save-url: (save-url URL [OPTS])");
+  const std::string *url = std::get_if<std::string>(&args[0].v);
+  if (!url)
+    throw se::dsl_error("TypeError", "save-url: the URL is a string, not " + args[0].type_name());
+  if (!media::is_uri(*url))
+    throw se::dsl_error("ValueError",
+                        "save-url: \"" + *url + "\" is not an http(s), file, cvc or state URI");
+  MediaSave m;
+  m.url = *url;
+  if (args.size() < 2 || args[1].is_nil())
+    return m;
+  const se::dict_ptr *d = std::get_if<se::dict_ptr>(&args[1].v);
+  if (!d)
+    throw se::dsl_error("TypeError",
+                        "save-url: the options are a dict, not " + args[1].type_name());
+  for (const auto &[key, v] : **d) {
+    const std::string *s = std::get_if<std::string>(&v.v);
+    if (key != "name" && key != "mime" && key != "auth")
+      throw se::dsl_error("ValueError", "save-url: no option '" + key + "' (name, mime, auth)");
+    if (!s)
+      throw se::dsl_error("TypeError", "save-url: '" + key + "' is a string");
+    (key == "name" ? m.name : key == "mime" ? m.mime : m.auth) = *s;
+  }
+  return m;
+}
+
 std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_t> args) {
   namespace se = cvc::state_exec;
   const std::string *h = args.size() == 1 ? std::get_if<std::string>(&args[0].v) : nullptr;
@@ -6794,6 +7097,337 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
       env, "file-forget", [app_ptr](std::span<const se::value_t> args) -> se::value_t {
         return se::value_t(picked_files(*app_ptr).forget(handle_arg("file-forget", args)));
       });
+  // §5.29 (save-url URL [OPTS]) / (save-url-async ...): save what URL names to a file the user
+  // keeps, as a context menu's Save image... does. The program parks until it is saved, the user
+  // cancelled the dialog, or it failed: {ok cancelled name size error}, never the path. Bound where
+  // there is a backend: (has? "save-url"). The call hands the save to the Runtime's hub, under its
+  // lock, from wherever its program runs; drain() starts it on the drawing thread.
+  const std::weak_ptr<SaveHub> weak_saves = saves;
+  if (backend)
+    se::register_async_fn(
+        env, host, "save-url",
+        [weak_saves, &host](std::span<const se::value_t> args) -> se::async_work {
+          const MediaSave m = save_url_request(args);
+          se::async_work work;
+          work.start = [weak_saves, m,
+                        fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
+            const std::shared_ptr<SaveHub> hub = weak_saves.lock();
+            if (!hub)
+              throw std::runtime_error("save-url: the document is gone");
+            auto settled = std::make_shared<std::atomic<bool>>(false);
+            SaveJob job;
+            job.save = m;
+            job.done = [call, fin, settled](const SaveOutcome &o) {
+              if (settled->exchange(true) || call->cancel_requested())
+                return; // its host may be gone
+              se::value_t value = se::make_dict({
+                  {"ok", se::value_t(o.ok)},
+                  {"cancelled", se::value_t(o.cancelled)},
+                  {"name", se::value_t(o.name)},
+                  {"size", se::value_t(static_cast<int64_t>(o.size))},
+                  {"error", se::value_t(o.error)},
+              });
+              if (call->settle(std::move(value), nullptr))
+                fin.finish(call);
+            };
+            call->on_cancel([settled] { settled->store(true); });
+            hub->ask(std::move(job));
+          };
+          return work;
+        },
+        io);
+}
+
+// ---- §5.29 saving a picture or a video ----------------------------------------------------------
+
+void Runtime::Impl::pump_saves() {
+  std::vector<SaveJob> asked;
+  std::vector<SaveHub::Step> steps;
+  {
+    std::lock_guard<std::mutex> lock(saves->m);
+    asked.swap(saves->asked);
+    steps.swap(saves->steps);
+  }
+  if (backend)
+    for (Backend::MediaSaveAsk &a : backend->take_media_saves()) {
+      if (a.prepare) {
+        prepare_save(a.save);
+        continue;
+      }
+      SaveJob job;
+      job.save = std::move(a.save);
+      job.menu = true;
+      start_save(std::move(job));
+    }
+  for (SaveJob &j : asked)
+    start_save(std::move(j));
+  for (SaveHub::Step &s : steps)
+    s.run();
+}
+
+void Runtime::Impl::save_naming(const MediaSave &m, const std::string &bytes, std::string &name,
+                                std::string &mime) {
+  mime = m.mime;
+  if (mime.empty())
+    mime = sniff_mime(bytes);
+  if (mime.empty()) { // what its name says it is, if anything
+    const std::string guess = guess_mime_type(save_file_name(m.url, m.name, "", m.video));
+    if (guess != "application/octet-stream")
+      mime = guess;
+  }
+  name = save_file_name(m.url, m.name, mime, m.video);
+}
+
+void Runtime::Impl::prepare_save(const MediaSave &m) {
+#ifdef __EMSCRIPTEN__
+  const std::string key = media_save_key(m);
+  const bool fresh = prepared_save && (!prepared_save->staged ||
+                                       std::chrono::steady_clock::now() - prepared_save->staged_at <
+                                           std::chrono::seconds(100));
+  if (prepared_save && ((prepared_save->key == key && fresh) || !prepared_save->waiting.empty()))
+    return; // this one's, or one a save waits for
+  if (prepared_save && prepared_save->staged)
+    browser_save_drop(prepared_save->key);
+  prepared_save = std::make_unique<PreparedSave>();
+  prepared_save->key = key;
+  const long gen = prepared_save->gen = ++prepared_gen;
+  const std::weak_ptr<SaveHub> weak = saves;
+  image_cache().fetch(m.url, m.auth, [this, weak, gen, m](media::FetchResult r) {
+    const std::shared_ptr<SaveHub> hub = weak.lock();
+    if (!hub)
+      return;
+    auto got = std::make_shared<media::FetchResult>(std::move(r));
+    hub->post({[this, gen, m, got] {
+                 if (!prepared_save || prepared_save->gen != gen)
+                   return; // another menu's since
+                 PreparedSave &p = *prepared_save;
+                 std::vector<SaveJob> waiting = std::move(p.waiting);
+                 SaveOutcome o;
+                 if (got->ok) {
+                   std::string name, mime;
+                   save_naming(m, got->bytes, name, mime);
+                   o.name = name;
+                   o.size = got->bytes.size();
+                   p.staged = browser_save_stage(p.key, name, mime, got->bytes);
+                   p.staged_at = std::chrono::steady_clock::now();
+                 }
+                 if (!p.staged) { // a failed fetch: a save asked for again fetches again
+                   prepared_save.reset();
+                   for (SaveJob &j : waiting) {
+                     if (got->ok) {
+                       start_save(std::move(j));
+                       continue;
+                     }
+                     SaveOutcome f;
+                     f.error = got->error;
+                     f.name = save_file_name(j.save.url, j.save.name, j.save.mime, j.save.video);
+                     finish_save(j, f);
+                   }
+                   return;
+                 }
+                 p.outcome = o;
+                 if (waiting.empty())
+                   return; // staged for the pointer's release, or a Save to come
+                 browser_save_commit(p.key);
+                 prepared_save.reset();
+                 o.ok = o.browser = true;
+                 for (SaveJob &j : waiting)
+                   finish_save(j, o);
+               },
+               nullptr});
+  });
+#else
+  (void)m; // natively a Save fetches when it is picked: no click rules to keep
+#endif
+}
+
+void Runtime::Impl::start_save(SaveJob job) {
+  if (!media::is_uri(job.save.url)) {
+    SaveOutcome o;
+    o.error = "it is not a URL (http(s), file, cvc or state)";
+    finish_save(job, o);
+    return;
+  }
+#ifdef __EMSCRIPTEN__
+  // A menu's prepared save: downloaded now if its bytes are staged, else when they come.
+  if (prepared_save && prepared_save->key == media_save_key(job.save)) {
+    if (!prepared_save->staged) {
+      prepared_save->waiting.push_back(std::move(job));
+      return;
+    }
+    const bool done = browser_save_commit(prepared_save->key);
+    SaveOutcome o = prepared_save->outcome;
+    prepared_save.reset();
+    if (done) {
+      o.ok = o.browser = true;
+      finish_save(job, o);
+      return;
+    } // its page let it go: fetch it again
+  }
+#endif
+  const std::weak_ptr<SaveHub> weak = saves;
+  auto held = std::make_shared<SaveJob>(std::move(job));
+  image_cache().fetch(held->save.url, held->save.auth, [this, weak, held](media::FetchResult r) {
+    const std::shared_ptr<SaveHub> hub = weak.lock();
+    if (!hub) {
+      if (held->done) {
+        SaveOutcome o;
+        o.error = "the document is gone";
+        held->done(o);
+      }
+      return;
+    }
+    auto got = std::make_shared<media::FetchResult>(std::move(r));
+    hub->post({[this, held, got] { save_fetched(std::move(*held), std::move(*got)); },
+               [held] {
+                 if (held->done) {
+                   SaveOutcome o;
+                   o.error = "the document is gone";
+                   held->done(o);
+                 }
+               }});
+  });
+}
+
+void Runtime::Impl::save_fetched(SaveJob job, media::FetchResult r) {
+  if (!r.ok) {
+    SaveOutcome o;
+    o.error = r.error.empty() ? std::string("the fetch failed") : r.error;
+    o.name = save_file_name(job.save.url, job.save.name, job.save.mime, job.save.video);
+    finish_save(job, o);
+    return;
+  }
+  std::string name, mime;
+  save_naming(job.save, r.bytes, name, mime);
+  save_deliver(std::move(job), name, mime, std::make_shared<const std::string>(std::move(r.bytes)));
+}
+
+void Runtime::Impl::save_deliver(SaveJob job, const std::string &name, const std::string &mime,
+                                 std::shared_ptr<const std::string> bytes) {
+  // 1. The host's own Save dialog (arigl: the system's), one at a time.
+  if (backend && saves->dialog_open) {
+    SaveOutcome o;
+    o.name = name;
+    o.error = "a Save dialog is open already";
+    finish_save(job, o);
+    return;
+  }
+  if (backend) {
+    SavePathRequest req;
+    req.name = name;
+    req.mime = mime;
+    const std::string major = mime.substr(0, mime.find('/'));
+    req.title = major == "image" ? "Save image" : major == "video" ? "Save video" : "Save file";
+    const std::weak_ptr<SaveHub> weak = saves;
+    auto held = std::make_shared<SaveJob>(job);
+    SavePathDone done = [this, weak, held, name, bytes](std::string path, std::string error) {
+      const std::shared_ptr<SaveHub> hub = weak.lock();
+      if (!hub) {
+        if (held->done) {
+          SaveOutcome o;
+          o.error = "the document is gone";
+          held->done(o);
+        }
+        return;
+      }
+      hub->post({[this, held, name, bytes, path, error] {
+                   saves->dialog_open = false;
+                   SaveOutcome o;
+                   o.name = name;
+                   if (!error.empty()) {
+                     o.error = error;
+                     finish_save(*held, o);
+                   } else if (path.empty()) {
+                     o.cancelled = true;
+                     finish_save(*held, o);
+                   } else {
+                     save_write(std::move(*held), path, name, bytes, /*fresh=*/false);
+                   }
+                 },
+                 nullptr});
+    };
+    if (backend->ask_save_path(req, std::move(done))) {
+      saves->dialog_open = true;
+      return;
+    }
+  }
+  // 2. A browser page: a download.
+  if (browser_save_file(name, mime, *bytes)) {
+    SaveOutcome o;
+    o.ok = o.browser = true;
+    o.name = name;
+    o.size = bytes->size();
+    finish_save(job, o);
+    return;
+  }
+  // 3. A new file in the Downloads folder (or the host's set_save_dir).
+  std::string dir = saves->dir, why;
+  if (dir.empty())
+    dir = downloads_dir(&why);
+  if (dir.empty()) {
+    SaveOutcome o;
+    o.name = name;
+    o.error = why;
+    finish_save(job, o);
+    return;
+  }
+  save_write(std::move(job), dir, name, std::move(bytes), /*fresh=*/true);
+}
+
+void Runtime::Impl::save_write(SaveJob job, const std::string &path, const std::string &name,
+                               std::shared_ptr<const std::string> bytes, bool fresh) {
+  // Off the frame: a video can be tens of MiB. `fresh`: a new file in the folder `path`, never
+  // over one there; else the file `path` the user chose, replaced.
+  const std::weak_ptr<SaveHub> weak = saves;
+  auto held = std::make_shared<SaveJob>(std::move(job));
+  app.submitPooled([this, weak, held, path, name, bytes, fresh] {
+    SaveOutcome o;
+    o.name = name;
+    o.size = bytes->size();
+    std::string error;
+    if (fresh) {
+      o.path = save_new_file(path, name, *bytes, &error);
+      o.ok = !o.path.empty();
+    } else {
+      o.ok = save_file_at(path, *bytes, &error);
+      o.path = path;
+    }
+    if (o.ok) {
+      const std::size_t slash = o.path.find_last_of("/\\");
+      o.name = slash == std::string::npos ? o.path : o.path.substr(slash + 1);
+    } else {
+      o.error = error;
+    }
+    const std::shared_ptr<SaveHub> hub = weak.lock();
+    if (!hub) {
+      if (held->done)
+        held->done(o); // written, or not, all the same
+      return;
+    }
+    hub->post({[this, held, o] { finish_save(*held, o); },
+               [held, o] {
+                 if (held->done)
+                   held->done(o);
+               }});
+  });
+}
+
+void Runtime::Impl::finish_save(const SaveJob &job, const SaveOutcome &o) {
+  // Where a file was written, the user is told where: a terminal shows no download.
+  if (o.ok && !o.browser && !o.path.empty()) {
+    cvc::notification n;
+    n.text = "Saved " + o.name + " to " + o.path;
+    n.path = prefix;
+    cvc::notify(app, std::move(n));
+  } else if (job.menu && !o.ok && !o.cancelled) {
+    cvc::notification n;
+    n.text = "Could not save " + (o.name.empty() ? std::string("it") : o.name) + ": " + o.error;
+    n.level = 2;
+    n.path = prefix;
+    cvc::notify(app, std::move(n));
+  }
+  if (job.done)
+    job.done(o);
 }
 
 cvc::state_exec::spawn_setup
@@ -6899,11 +7533,13 @@ cvc::state_exec::async_scheduler *Runtime::Impl::scheduler_to_pump() {
     seen_scheduler_ = exec_scheduler_probe::built(app);
   if (!seen_scheduler_)
     return nullptr; // nothing ever used it: nothing to pump, and it stays unbuilt
-  // Someone else's processes (a scene's overlay tasks, a host verb's): pumped while any is live.
-  // Messages posted while none is live wait in the ingress for the next one, in order.
+  // Someone else's processes (a scene's overlay tasks, a host verb's): pumped while any is live,
+  // and while anything posted waits there (S2.md section 0 row 22): a router entry homed at group
+  // 0, such as an isolated document's send or wait on a `/` channel, would wait for a live process
+  // there, which may never come. A post while none is live joins its pending messages, in order.
   const se::scheduler_stats s = seen_scheduler_->get_stats();
   const int live = s.total_processes - s.terminated - s.killed - s.failed;
-  return live > 0 ? seen_scheduler_ : nullptr;
+  return live > 0 || seen_scheduler_->has_pending_ingress() ? seen_scheduler_ : nullptr;
 }
 
 void Runtime::Impl::sweep_document() {
@@ -6926,7 +7562,19 @@ bool Runtime::Impl::starts_frame() {
 
 void Runtime::Impl::pump_frame() {
   namespace se = cvc::state_exec;
-  if (se::async_scheduler *sched = scheduler_to_pump()) {
+  se::async_scheduler *sched = scheduler_to_pump();
+  // Group 0's token while it is pumped here, as exec_pump_frame takes it (S1-Q4). Another thread
+  // may hold it a moment (pycvc's ExecPool.run_all drains group 0's posts under it, S2b): group 0
+  // is skipped for this drain then, and what it has waits for the next.
+  std::optional<se::async_scheduler::pump_owner_scope> token;
+  if (sched) {
+    try {
+      token.emplace(*sched);
+    } catch (const std::runtime_error &) {
+      sched = nullptr;
+    }
+  }
+  if (sched) {
     // Apply any cross-thread post_message() deliveries FIRST, so a delivery that readies a parked
     // (msg-recv …) receiver is seen by sync_run's has_runnable() gate — otherwise, with everything
     // parked, sync_run would skip stepping and never drain the ingress itself.
@@ -6944,6 +7592,7 @@ void Runtime::Impl::pump_frame() {
     // runaways.
     sched->sync_run(kPumpMaxSteps, kPumpMaxSeconds);
   }
+  token.reset(); // not held across the document's group's pump
   // An isolated document's group, one pump through the app's pool, as exec_pump_frame() would
   // pump it: a host with one Runtime that opts in may keep calling drain() (td 4.12). Its pump
   // drains, wakes the frame-waiters and runs a slice of the same budget.
@@ -7352,6 +8001,8 @@ void Runtime::set_media_base(std::string dir) {
     m_->images->set_base(m_->media_base);
 }
 
+void Runtime::set_save_dir(std::string dir) { m_->saves->dir = std::move(dir); }
+
 void Runtime::set_root(Widget root) {
   // Now, not at the swap: a resident submitted in the next drain() runs with these.
   m_->doc_functions = root.functions ? root.functions->prelude : std::string();
@@ -7365,9 +8016,11 @@ void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
 
-// A lane's program, the channel policy and the key bindings are read by the isolation rules
-// (S1-Q6): setting one decides the placement again before the next program starts (s-m2). Host
-// thread, outside a pump (they kill residents).
+void Runtime::set_main_view_pick(ContextPick pick) { m_->main_view_pick = std::move(pick); }
+
+// A lane's program and the key bindings are read by the isolation rules (S1-Q6), and the channel
+// policy was until S2-Q16: setting one decides the placement again before the next program starts
+// (s-m2). Host thread, outside a pump (they kill residents).
 void Runtime::set_tick_program(std::string script) {
   assert_outside_pump(m_->app, m_->group_.get());
   // Replacing the program kills any running resident so the new body starts fresh next drain.
@@ -7444,7 +8097,7 @@ void Runtime::set_channel_policy(std::vector<std::string> declared, std::vector<
   m_->channel_policy_.global = std::move(global);
   m_->channel_policy_.enforce = strict;
   m_->channel_policy_.quiet = quiet;
-  m_->placement_decided_ = false; // the isolation rules read it (s-m2)
+  m_->placement_decided_ = false; // decided again (s-m2); the rules no longer read it (S2-Q16)
 }
 
 void Runtime::post_input(const InputEvent &ev) {
@@ -7707,6 +8360,7 @@ void Runtime::drain_begin() {
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
   m.run_key_bindings();
+  m.pump_saves(); // §5.29 the saves asked for since, and the steps of those under way
   if (m.images) // §5.11: a build without threads loads its pictures here, a step per drain
     m.images->pump();
   std::vector<Impl::QueuedAction> events;

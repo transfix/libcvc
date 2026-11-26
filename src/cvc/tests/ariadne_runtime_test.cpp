@@ -1617,6 +1617,67 @@ TEST(AriadneIsolatedDocs, FilePickOpensItsPickerOnTheFramesThread) {
                             [&](std::thread::id t) { return t != frame_thread; }));
 }
 
+// §5.29 (save-url) binds as it is in an `any` group too: its program hands the save to the
+// Runtime from whichever thread pumps it, and the drain starts it on the frame's thread, where the
+// host's Save dialog is asked. The file is written where the dialog says, and the program learns
+// the name and size, never the path.
+TEST(AriadneIsolatedDocs, SaveUrlAsksForAPathOnTheFramesThread) {
+  namespace fs = std::filesystem;
+  isolated_env_var force("CVC_EXEC_FORCE_MOVE", "1"); // the group alternates between threads
+  cvc::app app;
+  isolate_documents(app, 2);
+  const fs::path dir =
+      fs::temp_directory_path() /
+      ("cvc_runtime_save_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir);
+  std::ofstream(dir / "photo", std::ios::binary) << std::string("GIF89a and the rest", 19);
+  const std::thread::id frame_thread = std::this_thread::get_id();
+  struct SaverBackend : MockBackend {
+    std::set<std::thread::id> threads;
+    std::vector<std::string> names;
+    fs::path to;
+    bool ask_save_path(const SavePathRequest &req, SavePathDone done) override {
+      threads.insert(std::this_thread::get_id());
+      names.push_back(req.name);
+      done((to / ("saved-" + std::to_string(names.size()) + ".gif")).string(), std::string());
+      return true;
+    }
+  } sb;
+  sb.to = dir;
+  Runtime rt(app, "docs.saver");
+  rt.set_backend(&sb);
+  rt.set_media_base(dir.string());
+  rt.set_channel_policy({}, {}, /*strict=*/true, /*quiet=*/true);
+  rt.set_root(group({text("saver")}));
+  ASSERT_NE(rt.isolated_group(), nullptr) << rt.isolation_reason();
+  EXPECT_EQ(rt.isolated_group()->opts().affinity, cvc::state_exec::group_affinity::any);
+  for (int run = 0; run < 3; ++run) {
+    std::string how = "running";
+    rt.run_program("(begin (state-set \"has\" (if (has? \"save-url\") \"yes\" \"no\"))"
+                   "  (set r (save-url \"file://photo\"))"
+                   "  (state-set \"ok\" (if (get-attr r \"ok\") \"yes\" \"no\"))"
+                   "  (state-set \"name\" (get-attr r \"name\"))"
+                   "  (state-set \"size\" (get-attr r \"size\")))",
+                   [&](const std::string &h) { how = h; });
+    for (int frame = 0; frame < 2000 && how == "running"; ++frame) {
+      isolated_frame(app, rt);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(how, "") << "run " << run;
+    EXPECT_EQ(isolated_value(app, "docs.saver.has"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.saver.ok"), "yes");
+    EXPECT_EQ(isolated_value(app, "docs.saver.name"), "saved-" + std::to_string(run + 1) + ".gif");
+    EXPECT_EQ(isolated_value(app, "docs.saver.size"), "19");
+    EXPECT_TRUE(fs::exists(dir / ("saved-" + std::to_string(run + 1) + ".gif")));
+  }
+  EXPECT_EQ(sb.names, (std::vector<std::string>{"photo.gif", "photo.gif", "photo.gif"}));
+  EXPECT_EQ(sb.threads, std::set<std::thread::id>{frame_thread})
+      << "a Save dialog asked off the frame's thread";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 // A group a move retired still counts for AppRuntime::idle() and wait_idle() while its kernel
 // runs: a host waiting before it lets go of what an async function uses waits for that kernel
 // too. The move here is a thread-affine declaration over the running document (any to host).
@@ -1974,9 +2035,10 @@ TEST(AriadneIsolatedDocs, IdleAndWaitIdleDecideNothing) {
 }
 
 // R1b skeptic M1: a move re-points the streams the document owns, and only those. A group-0
-// document nested under a moving document's prefix keeps its stream on group 0, its producer's
-// posts never land in the mover's group, and after the mover's teardown the stream still names
-// group 0, not a destroyed group.
+// document nested under a moving document's prefix (kept there by a writable hole: its channels no
+// longer would, S2-Q16) keeps its stream on group 0, its producer's posts still go to group 0 and
+// reach its resident, and after the mover's teardown the stream still names group 0, not a
+// destroyed group.
 TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   namespace se = cvc::state_exec;
   namespace sx = cvc::ariadne::stream;
@@ -1993,9 +2055,9 @@ TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   outer->set_channel_policy({}, {}, true, true);
   outer->set_root(group({holed})); // a writable hole out of its prefix: group 0 first
   outer->set_tick_program("(state-set \"ticked\" \"1\")");
-  Runtime inner(app, "docs.outer.inner"); // no strict channels: group 0, always
+  Runtime inner(app, "docs.outer.inner"); // a writable hole out of its prefix: group 0, always
   inner.set_backend(&mb);
-  inner.set_root(group({text("inner")}));
+  inner.set_root(group({text("inner"), holed}));
   std::string how = "running";
   inner.run_program(
       "(state-set \"tok\" (get-attr (stream-open (dict \"id\" \"cam\" \"w\" 4 \"h\" 2 "
@@ -2020,12 +2082,19 @@ TEST(AriadneIsolatedDocs, AMoveLeavesANestedDocumentsStreamAlone) {
   outer->render();
   se::exec_group *g = outer->isolated_group();
   ASSERT_NE(g, nullptr) << outer->isolation_reason();
-  se::async_scheduler *const gs = &g->sched();
   EXPECT_EQ(s->scheduler_for_test(), g0) << "the mover took a nested document's stream";
-  const std::uint64_t posts0 = gs->ingress_posts_for_test();
-  std::thread producer([s] { s->post_seq(7); }); // inner's producer posts a seq
+  // Inner's producer posts a seq, to group 0 still, and inner's resident, started after the move,
+  // takes it. (With the router the key's home is the mover's group, whose prefix covers inner's:
+  // group 0 passes the post on to it, and it delivers it back to the resident in group 0, S2b.)
+  inner.set_tick_program("(state-set \"seq\" (msg-recv \"streams.cam.seq\"))");
+  std::thread producer([s] { s->post_seq(7); });
   producer.join();
-  EXPECT_EQ(gs->ingress_posts_for_test() - posts0, 0u) << "inner's seq landed in the mover's group";
+  for (int f = 0; f < 2000 && isolated_value(app, "docs.outer.inner.seq") != "7"; ++f) {
+    outer->drain();
+    inner.drain();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(isolated_value(app, "docs.outer.inner.seq"), "7") << "inner's resident missed its seq";
   outer.reset();
   EXPECT_EQ(s->scheduler_for_test(), g0);
 }
@@ -12636,9 +12705,11 @@ TEST(SpawnContext, SP01_AChildOfADeletedChrootWritesTheDetachedNode) {
   EXPECT_TRUE(rt.take_reactive_warnings().empty());
 }
 
-// EL-1 (S1-Q6): with ariadne.exec.isolate_documents on, a document gets a group of its own only
-// when it has a prefix, a channels: block enforced strictly, no global channel, no static `/`
-// reference, no oidc use and no writable link: hole whose target leaves its prefix. An ineligible
+// EL-1 (S1-Q6, S2-Q16): with ariadne.exec.isolate_documents on, a document gets a group of its own
+// only when it has a prefix, no oidc use and no writable link: hole whose target leaves its prefix.
+// Its channels no longer matter (S2-Q16 lifted S1-Q6's channel rules: a `/` channel is homed at
+// group 0 and routed): one with no channels: block, a block in warn mode, a global: true channel or
+// a static `/` reference is eligible. An ineligible
 // document stays in group 0 and gives a reason (its wording is not pinned), which the app's log
 // shows once, however many frames it then runs (read through system.log_output; not checked in a
 // log4cplus build). An eligible one's group is affinity::host when its host declared a
@@ -12730,6 +12801,21 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(load("docs.el.stage.doc", strict + text,
                        [](AppRuntime &a) { a.declare_thread_affine_prefix("docs.el.stage"); }),
                   "host", "a thread-affine prefix declared above it");
+  // S1-Q6's channel rules, lifted by S2-Q16.
+  expect_isolated(load("docs.el.nochannels", std::string(kS1bMeta) + text), "any",
+                  "no channels: block");
+  expect_isolated(load("docs.el.warn", std::string(kS1bMeta) +
+                                           "lint:\n  channels: warn\nchannels:\n  - box\n" + text),
+                  "any", "a channels: block in warn mode");
+  expect_isolated(load("docs.el.global", std::string(kS1bMeta) +
+                                             "channels:\n  - channel: app.quit\n"
+                                             "    global: true\n" +
+                                             text),
+                  "any", "a global: true channel");
+  // The load's channel lint does not read a widget's on_click; S1-Q6's rules did.
+  expect_isolated(load("docs.el.slash", strict + "root:\n  - text: Clickable\n"
+                                                 "    on_click: '(msg-send \"/x\" \"y\")'\n"),
+                  "any", "a static / reference");
   register_action_intrinsics(
       app,
       [](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
@@ -12743,24 +12829,8 @@ TEST(AriadneFrames, EL01_IneligibleDocumentsStayInGroupZero) {
   expect_isolated(native, "host", "a host_only native in its env");
 
   // Ineligible: each stays in group 0.
-  expect_group_zero(load("docs.el.nochannels", std::string(kS1bMeta) + text), "a channels: block");
-  expect_group_zero(
-      load("docs.el.warn",
-           std::string(kS1bMeta) + "lint:\n  channels: warn\nchannels:\n  - box\n" + text),
-      "a channels: block enforced in strict mode");
-  expect_group_zero(load("docs.el.global", std::string(kS1bMeta) +
-                                               "channels:\n  - channel: app.quit\n"
-                                               "    global: true\n" +
-                                               text),
-                    "no global: true channel");
   expect_group_zero(load("docs.el.hole", hole("/shared.level")),
                     "no writable link: hole leaving its prefix");
-  // The load's channel lint does not read a widget's on_click; the placement rules do.
-  AppRuntime &slash = load("docs.el.slash", strict + "root:\n  - text: Clickable\n"
-                                                     "    on_click: '(msg-send \"/x\" \"y\")'\n");
-  expect_group_zero(slash, "no static / reference");
-  EXPECT_NE(slash.runtime().isolation_reason().find("/x"), std::string::npos)
-      << "the reason does not name the static / reference: " << slash.runtime().isolation_reason();
   expect_group_zero(load("", strict + text), "a non-empty prefix");
   if (cvc::net::have_http_backend()) {
     op.emplace();
@@ -13340,4 +13410,521 @@ TEST(AriadneComponents, AudioBuffersDrawsARowPerPerson) {
   ASSERT_EQ(be.charts[1].series.size(), 2u);
   EXPECT_EQ(be.charts[1].series[0].y, (std::vector<double>{100, 0, 40}));
   EXPECT_EQ(be.charts[1].series[1].line, ChartLine::Dashed);
+}
+
+// --- Stage 2b router (S2b.6) ---
+//
+// Threaded S2b.6 (S2.md section 0 rows 21-23, S2-Q16): an isolated document's group is the home of
+// the channels under its prefix, and a `/` channel is homed at group 0 and routed, so its channels
+// no longer keep a document out of a group of its own; group 0 is pumped for what is posted to it
+// even with no live process there. Each case runs at threads 0, 1 and 2 (fork-join: a worker may
+// pump the document's group inside the frame's pump_all), its frames bounded by a 30 s hang guard,
+// never timed.
+
+// S2-Q16, row 23: a document with global channels and a static `/` reference, which S1-Q6 kept in
+// group 0, is isolated now. A group-0 program's send on a global channel reaches the document's
+// action waiting on it (the channel is homed at group 0, the action waits in the document's group),
+// and the document's send on another reaches a group-0 action. Needs the router's routing (S2b.4):
+// on S2b.0's stubs neither message crosses.
+TEST(AriadneRouter, S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup) {
+  namespace se = cvc::state_exec;
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    isolate_documents(app, threads);
+    MockBackend doc_be, host_be;
+    Runtime doc(app, "docs.glob");
+    doc.set_backend(&doc_be);
+    doc.set_channel_policy({}, {"bus", "back"}, /*strict=*/true, /*quiet=*/true);
+    doc.set_root(group({text("glob")}));
+    se::exec_group *const g = doc.isolated_group();
+    ASSERT_NE(g, nullptr) << "a document with global channels stayed in group 0: "
+                          << doc.isolation_reason();
+    EXPECT_EQ(doc.isolation_reason(), "");
+    Runtime host(app, ""); // no prefix: group 0, where a channel is its raw key
+    host.set_backend(&host_be);
+    host.set_root(group({text("host")}));
+    const auto frame = [&] {
+      doc.drain();
+      host.drain();
+    };
+    std::string recv_how = "running", send_how = "running";
+    // A msg-send's message is its envelope; its payload is what was sent.
+    doc.run_program("(state-set \"got\" (get-attr (msg-recv \"/bus\") \"payload\"))",
+                    [&](const std::string &h) { recv_how = h; });
+    host.run_program("(msg-send \"bus\" \"hello\")", [&](const std::string &h) { send_how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return recv_how != "running" && send_how != "running"; }, 30.0))
+        << "group 0's send never reached the document's group";
+    EXPECT_EQ(send_how, "");
+    EXPECT_EQ(recv_how, "");
+    EXPECT_EQ(found_value(app, "docs.glob.got"), "hello");
+    // The reverse: the document sends, a group-0 program receives.
+    recv_how = send_how = "running";
+    host.run_program("(state-set \"back\" (get-attr (msg-recv \"back\") \"payload\"))",
+                     [&](const std::string &h) { recv_how = h; });
+    doc.run_program("(msg-send \"/back\" \"pong\")", [&](const std::string &h) { send_how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return recv_how != "running" && send_how != "running"; }, 30.0))
+        << "the document's send never reached group 0";
+    EXPECT_EQ(send_how, "");
+    EXPECT_EQ(recv_how, "");
+    EXPECT_EQ(found_value(app, "back"), "pong");
+    EXPECT_EQ(doc.isolated_group(), g) << "the document moved";
+  }
+}
+
+// Row 22: group 0 with no live process is pumped by a document's drain while anything posted waits
+// there. First a host's post to group 0: the next drain applies it there (it joins group 0's
+// pending messages), which it did not while no process lived there. Then a document with no
+// channels: block (eligible since S2-Q16) sends on a `/` channel, homed at group 0, and waits on
+// it: the send and the wait's subscription wait in group 0's ingress, and the document's action
+// gets its message back. Nothing runs on group 0. The first half fails without the fix on S2b.0
+// too; the second needs the router's routing (S2b.4), and on S2b.0's stubs passes without it (the
+// send and the wait meet in the document's group).
+TEST(AriadneRouter, S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage) {
+  namespace se = cvc::state_exec;
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    GroupZeroProbeApp app;
+    isolate_documents(app, threads);
+    MockBackend mb;
+    Runtime doc(app, "docs.r22");
+    doc.set_backend(&mb);
+    doc.set_root(group({text("r22")}));
+    ASSERT_NE(doc.isolated_group(), nullptr)
+        << "a document with no channels: block stayed in group 0: " << doc.isolation_reason();
+    se::async_scheduler &g0 = app.exec_scheduler();
+    EXPECT_TRUE(g0.post_message("s2b6.host", se::value_t(std::string("posted"))));
+    ASSERT_TRUE(g0.has_pending_ingress());
+    doc.drain();
+    EXPECT_FALSE(g0.has_pending_ingress()) << "the document's drain did not pump group 0";
+    EXPECT_EQ(g0.pending_message_count("s2b6.host"), 1u);
+    std::string how = "running";
+    doc.run_program("(begin (msg-send \"/r22\" \"ping\")"
+                    " (state-set \"got\" (get-attr (msg-recv \"/r22\") \"payload\")))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(frames_until([&] { doc.drain(); }, [&] { return how != "running"; }, 30.0))
+        << "the routed message never came back: group 0 was not pumped";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.r22.got"), "ping");
+    EXPECT_EQ(g0.process_count(), 0) << "a process ran in group 0";
+  }
+}
+
+// Row 23 across a move: a document moved to a new group (a host verb registered while it runs,
+// bound at its next load, as in AHostVerbRegisteredWhileItRunsBindsAtTheNextLoad) keeps receiving
+// on its channels. Its old group is retired while a call of it still runs (a kernel held at a
+// gate), so it is neither pumped nor destroyed; it leaves the router at the move all the same: a
+// message it held for the document (posted before the move, never received) reaches the
+// document's action in the new group, the home of its prefix now, and so does a host's post to
+// group 0 after the move, both before the old group goes. Needs the router's routing and rehoming
+// (S2b.4): on S2b.0's stubs neither arrives.
+TEST(AriadneRouter, S2b6_AMovedDocumentKeepsReceivingOnItsChannels) {
+  namespace se = cvc::state_exec;
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  for (const unsigned threads : {0u, 1u, 2u}) {
+    SCOPED_TRACE("threads " + std::to_string(threads));
+    cvc::app app;
+    isolate_documents(app, threads);
+    const auto gate = std::make_shared<Gate>();
+    register_action_intrinsics(
+        app,
+        [gate](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
+          se::register_async_fn(env, *ictx.host, "s2b6-hold",
+                                [gate](std::span<const se::value_t>) -> se::async_kernel {
+                                  return [gate](se::async_call &) -> se::value_t {
+                                    gate->pass(120.0); // past the case's own waits
+                                    return se::value_t(std::string("held"));
+                                  };
+                                });
+        },
+        se::provider_affinity::any);
+    TempDocs paths;
+    const std::string doc =
+        paths.write("s2b6_move", std::string(kS1bMeta) + "root:\n  - text: mv\n");
+    MockBackend mb;
+    AppRuntime art(app, "docs.mv");
+    art.set_backend(mb);
+    GateOpener opener{{gate}}; // after the document: the kernel is let go before it goes
+    art.load(doc);
+    se::exec_group *const first = art.runtime().isolated_group();
+    ASSERT_NE(first, nullptr) << art.runtime().isolation_reason();
+    ASSERT_EQ(first->opts().affinity, se::group_affinity::any);
+    const auto frame = [&] { art.drain(); };
+    std::string held = "running";
+    art.run_program("(s2b6-hold)", [&](const std::string &h) { held = h; });
+    ASSERT_TRUE(frames_until(
+        frame, [&] { return gate->arrivals() > 0; }, 30.0))
+        << "the held call never started";
+    // A message on the document's channel, with nobody waiting, joins the pending messages of its
+    // home, the document's group.
+    const std::string key = se::resolve_channel_key("docs.mv", "wake");
+    ASSERT_TRUE(first->sched().post_message(key, se::value_t(std::string("before"))));
+    frame();
+    // The move: a late host verb, bound at the next load, in a host group.
+    art.register_verb("s2b6-verb", [] {});
+    art.load(doc);
+    se::exec_group *const second = art.runtime().isolated_group();
+    ASSERT_NE(second, nullptr) << art.runtime().isolation_reason();
+    ASSERT_NE(second, first) << "the document did not move";
+    EXPECT_EQ(second->opts().affinity, se::group_affinity::host);
+    EXPECT_EQ(held, "did not complete: the document moved to another group");
+    ASSERT_EQ(se::detail::live_groups(app), 2u) << "the old group is not retired";
+    std::string how = "running";
+    art.run_program("(state-set \"before\" (msg-recv \"wake\"))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return how != "running"; }, 30.0))
+        << "the message the old group held never reached the new group";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.mv.before"), "before");
+    how = "running";
+    art.run_program("(state-set \"after\" (msg-recv \"wake\"))",
+                    [&](const std::string &h) { how = h; });
+    EXPECT_TRUE(app.exec_scheduler().post_message(key, se::value_t(std::string("after"))));
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return how != "running"; }, 30.0))
+        << "a host's post to group 0 after the move never reached the new group";
+    EXPECT_EQ(how, "");
+    EXPECT_EQ(found_value(app, "docs.mv.after"), "after");
+    EXPECT_EQ(se::detail::live_groups(app), 2u) << "the old group went before its call ended";
+    gate->release();
+    EXPECT_TRUE(frames_until(
+        frame, [&] { return se::detail::live_groups(app) == 1u; }, 30.0))
+        << "the retired group never went";
+    EXPECT_FALSE(gate->opened_by_itself()) << "the held call waited out its gate";
+  }
+}
+
+// Group 0's token (pycvc's ExecPool.run_all drains group 0's posts under it, on its own thread,
+// S2b.7): while another thread holds it, a Runtime's drain skips group 0, without throwing,
+// and a message posted there waits; once that thread lets go, the next drain delivers it. The
+// document is in group 0 (isolation off), so its drain pumps group 0 every frame. Without the
+// token the drain pumped group 0 under the other thread.
+TEST(AriadneRouter, S2b6_ADrainSkipsAGroupZeroAnotherThreadHolds) {
+  namespace se = cvc::state_exec;
+  cvc::app app;
+  MockBackend mb;
+  Runtime rt(app, "docs.held0");
+  rt.set_backend(&mb);
+  rt.set_root(group({text("held0")}));
+  std::string how = "running";
+  rt.run_program("(state-set \"got\" (msg-recv \"go\"))", [&](const std::string &h) { how = h; });
+  rt.drain(); // the action starts in group 0 and waits
+  se::async_scheduler &g0 = app.exec_scheduler();
+  std::mutex mu;
+  std::condition_variable cv;
+  bool held = false, let_go = false;
+  std::thread holder([&] {
+    se::async_scheduler::pump_owner_scope token(g0);
+    std::unique_lock<std::mutex> lock(mu);
+    held = true;
+    cv.notify_all();
+    cv.wait(lock, [&] { return let_go; });
+  });
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&] { return held; });
+  }
+  EXPECT_TRUE(
+      g0.post_message(se::resolve_channel_key("docs.held0", "go"), se::value_t(std::string("go"))));
+  EXPECT_NO_THROW(rt.drain());
+  EXPECT_TRUE(g0.has_pending_ingress()) << "the drain pumped group 0 while another thread held it";
+  EXPECT_EQ(how, "running");
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    let_go = true;
+  }
+  cv.notify_all();
+  holder.join();
+  EXPECT_TRUE(frames_until([&] { rt.drain(); }, [&] { return how != "running"; }, 30.0))
+      << "the message never came once group 0 was let go";
+  EXPECT_EQ(how, "");
+  EXPECT_EQ(found_value(app, "docs.held0.got"), "go");
+}
+
+// ---- §5.30 right-click menus (context_menu:) -------------------------------------------------
+
+namespace {
+// A backend whose right-click menus open when a test asks: `open_over` opens the `open_nth`
+// (0-based) menu of that kind ("item", "window" or "main") asked on the next walk, reporting `via`
+// and (x, y) as the place it was opened; it stays open until an item runs. `click` is an item
+// label that reports a click while a menu is open.
+struct MenuBackend : MockBackend {
+  bool caps_menu = true;
+  Capabilities capabilities() const override {
+    Capabilities c = MockBackend::capabilities();
+    c.context_menu = caps_menu;
+    return c;
+  }
+  std::string open_over;
+  int open_nth = 0;
+  std::string via = "pointer";
+  float x = 0.0f, y = 0.0f;
+  std::string click;
+  std::string shown;            // the open menu's id
+  int shown_n = -1;             // ... and which of the menus asked in a walk it is
+  std::vector<std::string> ids; // the menus asked this walk, in walk order
+  std::vector<int> kind_of;     // each one's ContextMenuOver, parallel to ids
+  int areas = 0;                // context areas open (balanced)
+  bool in_menu = false;
+  void begin_frame() override {
+    MockBackend::begin_frame();
+    ids.clear();
+    kind_of.clear();
+  }
+  void begin_context_area(const char *id, ContextMenuOver over) override {
+    ++areas;
+    rec(std::string("ctx_area:") + id + (over == ContextMenuOver::Window ? ":window" : ":item"));
+  }
+  void end_context_area() override {
+    --areas;
+    rec("ctx_area_end");
+  }
+  bool begin_context_menu(const char *id, ContextMenuOver over, ContextMenuOpen &o) override {
+    static const char *const kinds[] = {"item", "window", "main"};
+    const int n = static_cast<int>(ids.size());
+    int nth_of_kind = 0;
+    for (int k : kind_of)
+      nth_of_kind += k == static_cast<int>(over) ? 1 : 0;
+    ids.push_back(id);
+    kind_of.push_back(static_cast<int>(over));
+    if (!open_over.empty() && open_over == kinds[static_cast<int>(over)] &&
+        nth_of_kind == open_nth) {
+      open_over.clear();
+      shown = id;
+      shown_n = n;
+      o.now = true;
+      o.via = via;
+      o.x = x;
+      o.y = y;
+    }
+    if (shown != id || shown_n != n)
+      return false;
+    in_menu = true;
+    rec(std::string("ctx_menu:") + id);
+    return true;
+  }
+  void end_context_menu() override {
+    in_menu = false;
+    rec("ctx_menu_end");
+  }
+  bool menu_item_action(const char *l) override {
+    MockBackend::menu_item_action(l);
+    if (!in_menu || click != l)
+      return false;
+    click.clear();
+    shown.clear(); // an item that runs closes its menu
+    shown_n = -1;
+    return true;
+  }
+};
+
+std::string ctx_val(cvc::app &app, const std::string &key) {
+  return cvc::state::instance(app)(key).value();
+}
+} // namespace
+
+// An item of a group's right-click menu runs with the menu's `event`: what it was opened over and
+// that widget's id, the menu's id, how and where, taken when it opened and kept while it stays
+// open. Over a widget that is no scene view the pick's fields are there, empty.
+TEST(AriadneRuntime, ARightClickMenusItemRunsWithItsEvent) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MenuBackend be;
+  rt.set_backend(&be);
+  Widget card = group({text("a card")});
+  card.id = "card";
+  card = with_context_menu(
+      card,
+      {menu_action("Open", "(begin (state-set \"on\" (get-attr event \"on\"))"
+                           " (state-set \"id\" (get-attr event \"id\"))"
+                           " (state-set \"menu\" (get-attr event \"menu\"))"
+                           " (state-set \"via\" (get-attr event \"via\"))"
+                           " (state-set \"at\" (if (and (= (get-attr event \"px\") 12.0)"
+                           " (= (get-attr event \"py\") 5.0)) \"12,5\" \"elsewhere\"))"
+                           " (state-set \"hit\" (get-attr event \"hit\"))"
+                           " (state-set \"node\" (get-attr event \"node\"))"
+                           " (state-set \"ntags\" (length (get-attr event \"tags\"))))"),
+       separator(), menu_action("Close", "(state-set \"closed\" \"1\")")},
+      "card_menu");
+  rt.set_root(group({window("W", {card, button("Go", "go")})}));
+  rt.render();
+  ASSERT_EQ(be.ids.size(), 1u) << "the group's menu is asked, once";
+  EXPECT_EQ(be.areas, 0) << "its area is balanced";
+  EXPECT_TRUE(be.saw("ctx_area:ctx:card:item"));
+  EXPECT_FALSE(be.saw("menu_action:Open")) << "a menu that is not open draws no items";
+  // Its area brackets the group: the card's text is drawn inside it, the button after it.
+  const auto at = [&](const std::string &s) {
+    return std::find(be.log.begin(), be.log.end(), s) - be.log.begin();
+  };
+  EXPECT_LT(at("ctx_area:ctx:card:item"), at("text_line:a card"));
+  EXPECT_LT(at("text_line:a card"), at("ctx_area_end"));
+  EXPECT_LT(at("ctx_area_end"), at("button:Go"));
+
+  be.open_over = "item";
+  be.x = 12.0f;
+  be.y = 5.0f;
+  be.log.clear();
+  rt.render(); // it opens: the core takes its event now
+  EXPECT_TRUE(be.saw("menu_action:Open"));
+  EXPECT_TRUE(be.saw("separator"));
+  EXPECT_TRUE(be.saw("menu_action:Close"));
+  be.via = "key"; // a later walk's report does not change the event taken when it opened
+  be.x = be.y = 0.0f;
+  be.click = "Open";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.on") == "group"; }));
+  EXPECT_EQ(ctx_val(app, "ui.id"), "card");
+  EXPECT_EQ(ctx_val(app, "ui.menu"), "card_menu");
+  EXPECT_EQ(ctx_val(app, "ui.via"), "pointer");
+  EXPECT_EQ(ctx_val(app, "ui.at"), "12,5");
+  EXPECT_EQ(ctx_val(app, "ui.hit"), "0") << "no scene view under it: no hit";
+  EXPECT_EQ(ctx_val(app, "ui.node"), "");
+  EXPECT_EQ(ctx_val(app, "ui.ntags"), "0");
+  be.log.clear();
+  rt.render();
+  EXPECT_FALSE(be.saw("menu_action:Open")) << "the item that ran closed it";
+}
+
+// Over a scene view (a viewport), the menu's event carries the pick at the place it opened,
+// taken once, and the node's tags. An item's visible_when: reads it, so each item shows only over
+// the nodes it acts on, and a menu opened over another node shows other items.
+TEST(AriadneRuntime, ARightClickMenuOverAViewportGetsThePickAndItsVisibleWhenReadsIt) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MenuBackend be;
+  rt.set_backend(&be);
+  Widget flatten = menu_action("Flatten", "(begin (state-set \"node\" (get-attr event \"node\"))"
+                                          " (state-set \"tag\" (nth (get-attr event \"tags\") 1))"
+                                          " (state-set \"x\" (get-attr event \"x\"))"
+                                          " (state-set \"on\" (get-attr event \"on\"))"
+                                          " (state-set \"view\" (get-attr event \"view\")))");
+  flatten.visible_when = "(= (get-attr event \"node\") \"terrain\")";
+  Widget sink = menu_action("Sink", "(state-set \"sunk\" (get-attr event \"node\"))");
+  sink.visible_when = "(= (get-attr event \"node\") \"boat\")";
+  Widget center = menu_action("Center here", "(state-set \"centered\" \"1\")");
+  center.visible_when = "(= (get-attr event \"hit\") \"1\")";
+  Widget view;
+  view.kind = Kind::Custom;
+  view.custom_type = "viewport";
+  view.id = "map";
+  view = with_context_menu(view, {flatten, sink, center});
+  int picks = 0;
+  std::string node = "terrain";
+  be.custom_ret.handled = true;
+  be.custom_ret.context_pick = [&] {
+    ++picks;
+    return std::vector<std::pair<std::string, std::string>>{
+        {"x", "1.5"},           {"y", "2"},      {"z", "0"},  {"hit", "1"}, {"node", node},
+        {"tags", "ground sim"}, {"view", "map"}, {"mods", ""}};
+  };
+  rt.set_root(group({window("Map", {view})}));
+  rt.render();
+  EXPECT_TRUE(be.saw("custom_widget:viewport="));
+  EXPECT_EQ(picks, 0) << "no pick until a menu opens";
+
+  be.open_over = "item";
+  be.log.clear();
+  rt.render();
+  EXPECT_EQ(picks, 1) << "the pick is taken as it opens";
+  EXPECT_TRUE(be.saw("menu_action:Flatten"));
+  EXPECT_TRUE(be.saw("menu_action:Center here"));
+  EXPECT_FALSE(be.saw("menu_action:Sink")) << "Sink is for boats";
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+  be.log.clear();
+  rt.render(); // still open: the same event, no second pick
+  EXPECT_EQ(picks, 1);
+  EXPECT_TRUE(be.saw("menu_action:Flatten"));
+  be.click = "Flatten";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.node") == "terrain"; }));
+  EXPECT_EQ(ctx_val(app, "ui.tag"), "sim") << "tags is a list of the node's tags";
+  EXPECT_EQ(ctx_val(app, "ui.x"), "1.5");
+  EXPECT_EQ(ctx_val(app, "ui.on"), "viewport");
+  EXPECT_EQ(ctx_val(app, "ui.view"), "map");
+
+  // Opened again over a boat: its visible_when: is worked out against this menu's event, not the
+  // last one's.
+  node = "boat";
+  be.open_over = "item";
+  be.log.clear();
+  rt.render();
+  EXPECT_EQ(picks, 2);
+  EXPECT_TRUE(be.saw("menu_action:Sink"));
+  EXPECT_FALSE(be.saw("menu_action:Flatten"));
+  be.click = "Sink";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.sunk") == "boat"; }));
+  EXPECT_TRUE(rt.take_reactive_warnings().empty());
+}
+
+// The document's own menu opens over the main view, after the walk, with the host's pick of the
+// main scene. A repeated group's menus are one per instance, each item acting on its row.
+TEST(AriadneRuntime, TheDocumentsMenuIsTheMainViewsAndARepeatedGroupsMenuActsOnItsRow) {
+  cvc::app app;
+  Runtime rt(app, "ui");
+  MenuBackend be;
+  rt.set_backend(&be);
+  cvc::state::instance(app)("ui.rows").value("3");
+  Widget row = group({text("a row")});
+  row.repeat = "(int (state-get \"rows\"))";
+  row = with_context_menu(row, {menu_action("Pick", "(state-set \"picked\" \"{i}\")")});
+  Widget root = group({window("W", {row})});
+  root = with_context_menu(
+      root,
+      {menu_action("Spawn here", "(begin (state-set \"on\" (get-attr event \"on\"))"
+                                 " (state-set \"view\" (get-attr event \"view\"))"
+                                 " (state-set \"node\" (get-attr event \"node\"))"
+                                 " (state-set \"menu\" (get-attr event \"menu\")))")},
+      "scene");
+  int picks = 0;
+  rt.set_main_view_pick([&] {
+    ++picks;
+    return std::vector<std::pair<std::string, std::string>>{
+        {"node", "ground"}, {"hit", "1"}, {"view", "main"}};
+  });
+  rt.set_root(std::move(root));
+  rt.render();
+  ASSERT_EQ(be.ids.size(), 4u) << "three rows' menus and the main view's";
+  EXPECT_EQ(be.ids.back(), "ctx:main") << "the main view's is asked after every window";
+  EXPECT_EQ(be.kind_of.back(), static_cast<int>(ContextMenuOver::Main));
+  EXPECT_EQ(picks, 0);
+
+  be.open_over = "main";
+  rt.render();
+  EXPECT_EQ(picks, 1);
+  be.click = "Spawn here";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.on") == "main"; }));
+  EXPECT_EQ(ctx_val(app, "ui.view"), "main");
+  EXPECT_EQ(ctx_val(app, "ui.node"), "ground");
+  EXPECT_EQ(ctx_val(app, "ui.menu"), "scene");
+
+  be.open_over = "item";
+  be.open_nth = 2; // the third row's
+  rt.render();
+  be.click = "Pick";
+  rt.render();
+  ASSERT_TRUE(pump_until(rt, [&] { return ctx_val(app, "ui.picked") == "2"; }));
+}
+
+// ui.context_menu: whether the backend opens right-click menus.
+TEST(AriadneRuntime, UiContextMenuSaysWhetherTheBackendOpensRightClickMenus) {
+  cvc::app app;
+  {
+    Runtime rt(app, "");
+    MenuBackend be;
+    rt.set_backend(&be);
+    EXPECT_TRUE(rt.has("ui.context_menu"));
+    EXPECT_TRUE(rt.host_facts().caps.context_menu);
+  }
+  {
+    Runtime rt(app, "");
+    MockBackend be; // the Backend default: no right-click menus
+    rt.set_backend(&be);
+    EXPECT_FALSE(rt.has("ui.context_menu"));
+  }
 }

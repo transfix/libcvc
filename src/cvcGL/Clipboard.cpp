@@ -76,6 +76,15 @@ EM_JS(void, cvcgl_clip_install, (), {
         } catch (err) {
         }
       });
+  // SDL cancels every keydown with Ctrl in it (SDL3's Emscripten_HandleKey counts a Ctrl chord as
+  // a navigation key), and a cancelled Ctrl+V pastes nothing: the browser fires no paste event, so
+  // the text above never came. This sees Ctrl+V (and Cmd+V) before SDL does, and makes its cancel
+  // a no-op for that one event. SDL still hands the key to ImGui, whose paste reads the text.
+  window.addEventListener(
+      'keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && e.code === 'KeyV')
+          e.preventDefault = function() {};
+      }, true);
   // A context menu's Copy and Paste (arm): the item under the pointer, and the clipboard call
   // made inside the pointer release over it. A mouse's press must have been over the same item
   // too, as a click's is; a finger's has no hover before it lands, so its release is enough.
@@ -392,6 +401,12 @@ bool readIsAsync() {
   return true;
 #else
   return false;
+#endif
+}
+
+void install() {
+#if defined(__EMSCRIPTEN__)
+  cvcgl_clip_install();
 #endif
 }
 

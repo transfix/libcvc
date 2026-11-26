@@ -288,6 +288,12 @@ it.
   background follow curves.
 - The cloud deck, water and weather already read the key light, so they darken with it.
 - The world clock can drive a day-night cycle.
+- **Its clock (Joe, 2026-11-24).** A document sets the cycle (its length, the time it starts
+  at), and can instead set it against the system clock, so the time of day is the local wall
+  clock's. A client connected to a server uses the server's time, never its own: the time of day
+  follows the relay's clock as the client counts it. ARIADNE_WORLDS.md OW5q already draws a
+  client's scene at the relay's time (`shown_clock`, from `show_relay_seas`), so the cycle reads
+  that clock where a client draws, and a relay set against its system clock publishes that time.
 - A server world publishes the time of day as a section with an activation tick (WD2's
   discipline), so every client agrees.
 - The nav city documents get a Night switch.
@@ -325,7 +331,7 @@ fleet, quantizes them, and sends only what a viewer's area of interest holds.
 | **NL2** | **The shadow budget.** `max_lights`, `pick`, hysteresis, texture-unit accounting. | NL1 | S |
 | **NL3** | **The lamp field.** `lamps:` (list, dataset layer, along roads); receivers' shader injection with a 2-D binned lamp texture; emissive lamp heads; the nearest promoted to real shadowed spots (NL2). | NL1, NL2 | L |
 | **NL4** | **Headlights.** An archetype's `lights:`: real attached spots on promoted entities, lamp-field entries for instanced ones, optional ground pools; carried by the relay's archetype. | FL2, NL1 to NL3 | M |
-| **NL5** | **Night.** `sky:` time of day, sun and moon, ambient and background curves, exposure; the cloud, water and weather read it; a day-night cycle on the world clock; the time of day as a server world section; the nav city documents' Night switch. | NL1 | M |
+| **NL5** | **Night.** `sky:` time of day, sun and moon, ambient and background curves, exposure; the cloud, water and weather read it; a day-night cycle on the world clock, or set against the system clock; a connected client on the server's time; the time of day as a server world section; the nav city documents' Night switch. | NL1 | M |
 | NL6 | Lit windows, light-pool decals, bloom. | NL3, NL5 | M |
 
 ### 3.1 FL0's numbers
@@ -465,6 +471,9 @@ part.
 - **D5. Where Austin's lamps come from:** the bundle (does it carry street lights?), generated along
   roads, or OSM later.
 - **D6. Time of day:** a scene key a client may override, or the server's world section only.
+  Partly settled (Joe, 2026-11-24): a client connected to a server uses the server's time; a
+  document may set its cycle against the system clock. Still open: whether a connected client
+  may override it locally (a preview, say).
 - **D7. The shadow budget's default N:** desktop against WebGL2.
 - **D8. Settled (Joe, 2026-11-18).** Without the trained weights the fleet falls back to the
   built-in net, visibly. `trained` downloads `cvcpkg://cvc/grl-snam-weights` by default, and a

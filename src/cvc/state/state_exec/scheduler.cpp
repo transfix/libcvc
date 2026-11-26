@@ -1794,6 +1794,8 @@ void scheduler::apply_control(int pid, control_cmd &cmd, bool &counted_out) {
     case control_cmd::kind::signal:
       applied = send_signal(pid, cmd.signal); // "SIGKILL" kills
       break;
+    case control_cmd::kind::kill_owner:
+      break; // S2b's pool.kill_owner posts only to async schedulers: refused here
     }
   } catch (...) {
     // A kill (or a SIGKILL) that throws has still killed its process (kill_process; R0-final), and
@@ -1861,6 +1863,7 @@ process_info scheduler::make_info(const process &proc) const {
   info.uid = proc.uid;
   info.gid = proc.gid;
   info.scope = process_scope(proc.root_path, proc.owner_root);
+  info.owner = proc.owner;
   info.step_count = proc.step_count();
   fill_budget_usage(info, proc.state.stats);
   info.elapsed_time = proc.elapsed_time();

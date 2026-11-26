@@ -18,8 +18,11 @@
 #include <cvc/state/state.h>
 #include <cvc/tf/model.h> // §10 the tf_editor's model
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -2425,6 +2428,102 @@ TEST(AriadneFtxui, ANotificationsEntryCopiesItsWholeMessage) {
   EXPECT_EQ(t.be.take_clipboard(), gfx::osc52_copy(n.text));
 }
 
+// §5.29 a picture by URL or file has Save image... in its context menu. A terminal has no Save
+// dialog, so the picture goes into the save folder (the Downloads folder unless the host says
+// otherwise) as a new file, never over one there, and a notification says where. A video: has
+// Save video...; a picture with save: false, and a decorative video (a video URL in an image:),
+// have none. Shift+F10 on a picture that takes the focus (fullscreen: true) opens its menu too.
+TEST(AriadneFtxui, APicturesMenuSavesItIntoTheDownloadsFolder) {
+  REQUIRE_FTXUI();
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() /
+      ("cvc_ftxui_save_" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(dir / "dl");
+  const std::string png = std::string("\x89PNG\r\n\x1a\n", 8) + "the picture's own bytes";
+  std::ofstream(dir / "cat.png", std::ios::binary) << png;
+  std::ofstream(dir / "dl" / "cat.png", std::ios::binary) << "already there";
+  std::ofstream(dir / "clip.webm", std::ios::binary)
+      << std::string("\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\x82\x84webm", 16);
+
+  Widget pic = image_widget("pic", "file://cat.png", 64);
+  Widget kept = image_widget("kept", "file://cat.png", 64);
+  kept.save_menu = false;
+  Widget avatar = image_widget("avatar", "file://clip.webm", 64); // a decorative video
+  Widget clip;
+  clip.kind = Kind::Video;
+  clip.label = "clip";
+  clip.src = "file://clip.webm";
+  clip.img_size = 64;
+  clip.img_h = 36;
+  Widget open = image_widget("open", "file://cat.png", 64);
+  open.fullscreen_control = true;
+  Term t(group({text("first"), pic, text("second"), kept, text("third"), avatar, text("fourth"),
+                clip, text("fifth"), open}));
+  t.rt.set_media_base(dir.string());
+  t.rt.set_save_dir((dir / "dl").string());
+  t.draw();
+  // The cell under a caption: its picture's first row.
+  const auto under = [&](const char *caption) {
+    int x = 0, y = 0;
+    if (!find_cell(t.screen, caption, x, y))
+      return false;
+    t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x, y + 1, 3));
+    t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x, y + 1, 3));
+    t.draw();
+    return true;
+  };
+  const auto saved = [&](const fs::path &p) {
+    for (int i = 0; i < 2000 && !fs::exists(p); ++i) {
+      t.rt.drain();
+      t.draw();
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (int i = 0; i < 5; ++i) // the notification comes from the drain after the write
+      t.rt.drain();
+    return fs::exists(p);
+  };
+
+  ASSERT_TRUE(under("first")) << t.screen;
+  ASSERT_TRUE(t.shows(" Save image... ")) << "its menu\n" << t.screen;
+  ASSERT_TRUE(t.click(" Save image... "));
+  EXPECT_FALSE(t.shows(" Save image... ")) << "picked: closed\n" << t.screen;
+  ASSERT_TRUE(saved(dir / "dl" / "cat (1).png")) << "a new file beside the one there";
+  {
+    std::ifstream in(dir / "dl" / "cat (1).png", std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), png);
+  }
+  const std::vector<cvc::notification_entry> notes = cvc::notifications(t.app);
+  ASSERT_FALSE(notes.empty());
+  EXPECT_EQ(notes.back().text, "Saved cat (1).png to " + (dir / "dl" / "cat (1).png").string());
+
+  ASSERT_TRUE(under("second"));
+  EXPECT_FALSE(t.shows(" Save image... ")) << "save: false: none\n" << t.screen;
+  ASSERT_TRUE(under("third"));
+  EXPECT_FALSE(t.shows(" Save ")) << "a decorative video: none\n" << t.screen;
+  ASSERT_TRUE(under("fourth"));
+  ASSERT_TRUE(t.shows(" Save video... ")) << "a video's\n" << t.screen;
+  ASSERT_TRUE(t.click(" Save video... "));
+  ASSERT_TRUE(saved(dir / "dl" / "clip.webm"));
+
+  // The keyboard: Tab to the picture that opens full screen, then Shift+F10.
+  for (int i = 0; i < 12 && !t.shows(" Save image... "); ++i) {
+    t.key("Tab");
+    t.key("F10", /*shift=*/true);
+    t.draw();
+    if (!t.shows(" Save image... ")) {
+      t.key("Escape");
+      t.draw();
+    }
+  }
+  EXPECT_TRUE(t.shows(" Save image... ")) << "Shift+F10 on the focused picture\n" << t.screen;
+  t.key("Escape");
+  t.draw();
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
 // §5.28 hosted, there is no terminal to ask for the clipboard: Paste says to paste with the
 // terminal's own paste (the tooltip line, which the host shows).
 TEST(AriadneFtxuiHosted, APasteWithNoTerminalToAskSaysHowToPaste) {
@@ -3483,4 +3582,232 @@ TEST(AriadneFtxui, RichTextALinkInTheLinesCutAwayIsNoStop) {
     t.rt.drain();
   EXPECT_EQ(val(t.app, "after"), "1");
   EXPECT_EQ(val(t.app, "opened"), "");
+}
+
+// ---- §5.30 right-click menus -------------------------------------------------------------------
+
+namespace {
+// Drain until `key` holds `want` (a menu item's program runs on the action lane).
+bool drain_until(Term &t, const std::string &key, const std::string &want) {
+  for (int i = 0; i < 200 && val(t.app, key) != want; ++i)
+    t.rt.drain();
+  return val(t.app, key) == want;
+}
+// An item that notes the menu's event: what it was opened over, that widget's id, and how.
+Widget noting_item(const std::string &label, const std::string &tag) {
+  return menu_action(label, "(begin (state-set \"" + tag +
+                                ".on\" (get-attr event \"on\"))"
+                                " (state-set \"" +
+                                tag +
+                                ".id\" (get-attr event \"id\"))"
+                                " (state-set \"" +
+                                tag + ".via\" (get-attr event \"via\")))");
+}
+} // namespace
+
+// Shift+F10 opens the menu of the area around the focused widget, hanging under it; Enter runs its
+// first item with the menu's event and closes it, and the focus goes back where it was. A widget in
+// no area, in a window without a menu, opens nothing.
+TEST(AriadneFtxui, ShiftF10OpensTheMenuAroundTheFocus) {
+  REQUIRE_FTXUI();
+  Widget card = group({checkbox("A", "a")});
+  card.id = "card";
+  card = with_context_menu(card, {noting_item("Open card", "got"),
+                                  menu_action("Close card", "(state-set \"closed\" \"1\")")});
+  Term t(group({window("W", {card, checkbox("B", "b")})}));
+  EXPECT_TRUE(t.be.capabilities().context_menu);
+  EXPECT_FALSE(t.shows("Open card")) << t.screen;
+  ASSERT_TRUE(t.key("Tab")); // A
+  ASSERT_TRUE(t.key("F10", true));
+  t.draw();
+  ASSERT_TRUE(t.shows("Open card")) << t.screen;
+  EXPECT_TRUE(t.shows("Close card")) << t.screen;
+  int ax = 0, ay = 0, mx = 0, my = 0;
+  ASSERT_TRUE(find_cell(t.screen, "[ ] A", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "Open card", mx, my)) << t.screen;
+  EXPECT_GT(my, ay) << "it hangs under the focused widget\n" << t.screen;
+  ASSERT_TRUE(t.key("Return")); // its first item has the focus
+  ASSERT_TRUE(drain_until(t, "got.on", "group"));
+  EXPECT_EQ(val(t.app, "got.id"), "card");
+  EXPECT_EQ(val(t.app, "got.via"), "key");
+  t.draw();
+  EXPECT_FALSE(t.shows("Open card")) << "the item that ran closed it\n" << t.screen;
+  EXPECT_EQ(val(t.app, "a"), "0") << "Enter went to the menu, not the checkbox";
+  t.type(" "); // the focus is back on A
+  EXPECT_EQ(val(t.app, "a"), "1");
+
+  ASSERT_TRUE(t.key("Tab")); // B: in the window, outside the card
+  t.key("F10", true);
+  t.draw();
+  EXPECT_FALSE(t.shows("Open card")) << "B's window has no menu\n" << t.screen;
+}
+
+// The Menu key opens a window's menu from anywhere in it; Down and Enter run the second item, and
+// Esc closes it with nothing run.
+TEST(AriadneFtxui, TheMenuKeyOpensTheWindowsMenu) {
+  REQUIRE_FTXUI();
+  Widget w = window("Tools", {checkbox("A", "a")});
+  w = with_context_menu(
+      w, {menu_action("First", "(state-set \"pick\" \"first\")"), noting_item("Second", "got")});
+  Term t(group({w}));
+  ASSERT_TRUE(t.key("Tab"));
+  ASSERT_TRUE(t.key("Menu"));
+  t.draw();
+  ASSERT_TRUE(t.shows("First")) << t.screen;
+  t.key("Down");
+  t.key("Return");
+  ASSERT_TRUE(drain_until(t, "got.on", "window"));
+  EXPECT_EQ(val(t.app, "got.id"), "Tools") << "a window without an id: its title";
+  EXPECT_EQ(val(t.app, "pick"), "");
+
+  t.key("Menu");
+  t.draw();
+  ASSERT_TRUE(t.shows("First")) << t.screen;
+  t.key("Escape");
+  t.draw();
+  EXPECT_FALSE(t.shows("First")) << t.screen;
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "pick"), "");
+}
+
+// A right-click opens the menu under the pointer (the item there's area, else its window's, else
+// the document's over no window); a left click on an item runs it.
+TEST(AriadneFtxui, ARightClickOpensTheMenuUnderThePointer) {
+  REQUIRE_FTXUI();
+  Widget card = group({text("card text")});
+  card.id = "card";
+  card = with_context_menu(card, {noting_item("Open card", "card")});
+  Widget w = window("W", {card});
+  w.has_pos = true;
+  w.pos_x = 8.0f;  // a column in
+  w.pos_y = 16.0f; // a row down
+  Widget root = group({w});
+  root = with_context_menu(root, {noting_item("Spawn here", "main")}, "scene");
+  Term t(root);
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "card text", x, y)) << t.screen;
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, x + 2, y, 3));
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, x + 2, y, 3));
+  t.draw();
+  ASSERT_TRUE(t.shows("Open card")) << t.screen;
+  EXPECT_FALSE(t.shows("Spawn here")) << t.screen;
+  ASSERT_TRUE(t.click("Open card"));
+  ASSERT_TRUE(drain_until(t, "card.on", "group"));
+  EXPECT_EQ(val(t.app, "card.via"), "pointer");
+  EXPECT_FALSE(t.shows("Open card")) << t.screen;
+
+  // Over no window: the document's own menu, over the main view.
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Press, 70, 20, 3));
+  t.be.feed(t.rt, TermEvent::mouse_event(TermEvent::Mouse::Release, 70, 20, 3));
+  t.draw();
+  ASSERT_TRUE(t.shows("Spawn here")) << t.screen;
+  ASSERT_TRUE(t.click("Spawn here"));
+  ASSERT_TRUE(drain_until(t, "main.on", "main"));
+  EXPECT_EQ(val(t.app, "main.id"), "");
+}
+
+// With nothing focused, Shift+F10 opens the document's menu, at the top left.
+TEST(AriadneFtxui, ShiftF10WithNothingFocusedOpensTheDocumentsMenu) {
+  REQUIRE_FTXUI();
+  Widget root = group({text("just text")});
+  root = with_context_menu(root, {noting_item("New scene", "got")}, "scene");
+  Term t(root);
+  ASSERT_TRUE(t.key("F10", true));
+  t.draw();
+  ASSERT_TRUE(t.shows("New scene")) << t.screen;
+  ASSERT_TRUE(t.key("Return"));
+  ASSERT_TRUE(drain_until(t, "got.on", "main"));
+  EXPECT_EQ(val(t.app, "got.via"), "key");
+}
+
+// §5.30 one menu: Shift+F10 on a field in a card shows the field's own Cut, Copy, Paste and Select
+// all (§5.28), then under a rule the card's items; Down past them reaches the card's, whose program
+// gets the card's event. A right-click on the card's text shows the text's Copy, then the card's.
+TEST(AriadneFtxui, AFieldInACardOffersItsOwnEntriesThenTheCards) {
+  REQUIRE_FTXUI();
+  Widget card = group({text("card text"), input_text("Name", "name")});
+  card.id = "card";
+  card = with_context_menu(card, {noting_item("Open card", "got")});
+  Term t(group({window("W", {card})}));
+  ASSERT_TRUE(t.key("Tab")); // the field
+  ASSERT_TRUE(t.key("F10", true));
+  t.draw();
+  int cx = 0, cy = 0, ox = 0, oy = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Cut ", cx, cy)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, " Select all ", ox, oy)) << t.screen;
+  int gx = 0, gy = 0;
+  ASSERT_TRUE(find_cell(t.screen, " Open card ", gx, gy)) << t.screen;
+  EXPECT_GT(gy, oy) << "the card's items come after the field's own\n" << t.screen;
+  // An empty field: Cut, Copy and Select all are dimmed, so Paste is lit first; Down skips the
+  // dimmed Select all to the card's item.
+  t.key("Down");
+  t.key("Return");
+  for (int i = 0; i < 200 && val(t.app, "got.on") != "group"; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "got.on"), "group");
+  EXPECT_EQ(val(t.app, "got.id"), "card");
+  EXPECT_EQ(val(t.app, "got.via"), "key");
+  t.draw();
+  EXPECT_FALSE(t.shows(" Open card ")) << t.screen;
+
+  ASSERT_TRUE(t.rclick("card text")) << t.screen;
+  EXPECT_TRUE(t.shows(" Copy ")) << t.screen;
+  EXPECT_TRUE(t.shows(" Open card ")) << t.screen;
+  t.key("Escape");
+  t.draw();
+  EXPECT_FALSE(t.shows(" Open card ")) << t.screen;
+}
+
+// §5.30 hosted with Options::host_draws_context_menu (tvision's), the menu is not drawn in the
+// window's body, which a short window cuts off: hosted_context_menu() hands the host its entries,
+// a new serial each time it opens, and pick_context_entry() runs the one the host's popup chose.
+TEST(AriadneFtxuiHosted, AHostedContextMenuIsAModelForTheHost) {
+  REQUIRE_FTXUI();
+  FtxuiBackend::Options o;
+  o.hosted = true;
+  o.host_draws_context_menu = true;
+  Widget card = group({checkbox("Pinned", "pinned"), input_text("Name", "name")});
+  card.id = "card";
+  card = with_context_menu(card, {noting_item("Open card", "got"),
+                                  menu_action("Close card", "(state-set \"c\" \"1\")")});
+  Widget w = window("Cards", {card});
+  w.id = "cards";
+  Term t(group({w}), o);
+  EXPECT_FALSE(t.be.hosted_context_menu().open);
+  ASSERT_TRUE(t.be.feed_window(t.rt, "cards", TermEvent::key_event("Tab")));
+  ASSERT_TRUE(t.be.feed_window(t.rt, "cards", TermEvent::key_event("F10", true)));
+  t.draw();
+  FtxuiBackend::HostedContextMenu m = t.be.hosted_context_menu();
+  ASSERT_TRUE(m.open);
+  EXPECT_TRUE(m.by_key) << "Shift+F10 opened it: the host lights its first entry";
+  EXPECT_EQ(m.win, "cards");
+  ASSERT_EQ(m.items.size(), 2u) << "the checkbox has no entries of its own: the card's two";
+  EXPECT_EQ(m.items[0].label, "Open card");
+  EXPECT_EQ(m.items[1].label, "Close card");
+  EXPECT_FALSE(t.shows("Open card")) << "not drawn in the body\n" << t.screen;
+  const long first = m.serial;
+  t.be.pick_context_entry(t.rt, m.items[0].id);
+  for (int i = 0; i < 200 && val(t.app, "got.on") != "group"; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "got.on"), "group");
+  EXPECT_EQ(val(t.app, "got.via"), "key");
+  EXPECT_FALSE(t.be.hosted_context_menu().open) << "the item that ran closed it";
+
+  // On the field: its own entries first, a rule, then the card's; cancelled, nothing runs.
+  ASSERT_TRUE(t.be.feed_window(t.rt, "cards", TermEvent::key_event("Tab")));
+  ASSERT_TRUE(t.be.feed_window(t.rt, "cards", TermEvent::key_event("F10", true)));
+  m = t.be.hosted_context_menu();
+  ASSERT_TRUE(m.open);
+  EXPECT_GT(m.serial, first) << "a new menu: the host shows it again";
+  ASSERT_EQ(m.items.size(), 7u);
+  EXPECT_EQ(m.items[0].label, "Cut");
+  EXPECT_TRUE(m.items[0].disabled) << "an empty field has nothing to cut";
+  EXPECT_TRUE(m.items[4].separator);
+  EXPECT_EQ(m.items[5].label, "Open card");
+  t.be.pick_context_entry(t.rt, "");
+  EXPECT_FALSE(t.be.hosted_context_menu().open);
+  for (int i = 0; i < 20; ++i)
+    t.rt.drain();
+  EXPECT_EQ(val(t.app, "c"), "");
 }

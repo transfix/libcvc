@@ -339,6 +339,11 @@ public:
   void drive(vehicle_id id, const drive_command &c);
   // ... or pedals of your own, past it. The steering goes through the actuator either way.
   void set_controls(vehicle_id id, const vehicle_controls &c);
+  // Put the steering actuator at bicycle angle STEER (rad, + left; clamped to max_steer), as if it
+  // had slewed there: its wheels take it at the next step, and it slews on toward the command from
+  // there. For a client's model of a vehicle the relay steers, placed from a sample that carries
+  // the relay's angle (ARIADNE_WORLDS.md OW5r). Throws cvc::physics_error for a non-finite angle.
+  void set_vehicle_steer(vehicle_id id, double steer);
   // The chassis, the actuator, the pedals the last step applied, the powertrain and every
   // wheel, from the last step.
   physics::vehicle_state vehicle_state(vehicle_id id) const;

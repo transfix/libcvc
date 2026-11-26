@@ -958,7 +958,11 @@ class GymCars:
     names it: ``kinematic``, ``jolt``, ``dynamic`` or ``dynamic4w``, with ``:<archetype>`` after
     it to name the archetype too (``dynamic:roboracer``). The archetype must allow ``nav@1`` for
     :meth:`step_navigator` to drive. ``seed`` makes the starts and goals repeatable. ``gym_args``
-    go to ``pycvc.WorldGym`` (``prefix``, ``world``, ``set``, ``ready_timeout``).
+    go to ``pycvc.WorldGym`` (``prefix``, ``world``, ``set``, ``ready_timeout``, and ``people``:
+    avatars in the gym's world beside the cars, each a dict of ``x``, ``y``, ``yaw`` and ``walk``
+    (m/s), which the navigators steer around and a car can hit, as on a relay;
+    ``self.gym.observe()`` has their ``person_x`` and ``person_y``, and each car's
+    ``hit_person``).
 
     What differs from :class:`Cars`: the plant runs in the document's world (a Jolt vehicle in
     its physics world, the dynamic models' chassis boxes in it too, nav's bicycle a kinematic box

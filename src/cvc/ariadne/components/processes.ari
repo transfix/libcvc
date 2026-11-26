@@ -25,9 +25,10 @@
 # (processes-kill ROWS I) kills row I's process, as its Kill button does, and polls again at the
 # next step. A killed resident (an on_tick:) is started again by the Runtime, with a new pid.
 #
-# It lists the processes of its document's scheduler: the document's own, every mount's, and, in
-# execution group 0, the other documents' there too. An isolated document (ariadne.exec.
-# isolate_documents) sees its own group's.
+# It lists its Runtime's processes: the document's own and every mount's (since threaded
+# execution's S2b a program with an owner sees only its owner's, so other documents' in execution
+# group 0 are not listed). An isolated document (ariadne.exec.isolate_documents) sees its own
+# group's.
 
 functions: |
   ; A number at KEY, or DEFAULT when it is unset or empty.

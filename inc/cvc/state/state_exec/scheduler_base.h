@@ -99,6 +99,8 @@ struct process_info {
   /// root (process_scope). "" for a document's own programs and an unchrooted process,
   /// "includes.<as>" for a loaded document's.
   std::string scope;
+  /// Its owner tag (process::owner; "" = unowned): what S2-Q8's owner rule compares (S2b).
+  std::string owner;
   uint64_t step_count;
   // What the steps were spent on (step_kind): reading the script a slice at a time
   // (parser.step_tokens), deep-data work a slice at a time (data.step_nodes), evaluating the
@@ -144,6 +146,32 @@ struct process_info {
   /// process waits for, under a priority policy), and the floor (docs/STATE_EXEC_LOCKS.md 7.2).
   int effective_priority = 0;
   int priority_floor = 0;
+};
+
+/// One process as its group publishes it (S2-Q9; td 4.5's published info), for readers on other
+/// threads: exec_pool::info(pid), and in S2c cross-group ps, inspect, set-priority's check and the
+/// pool's weights. No value_t, so a reader shares nothing with the group. Status and identity are
+/// as of the publishing run loop's end; steps, run_seconds and memory may lag up to 100 ms.
+struct published_process {
+  int pid = -1;
+  std::string name;
+  std::string owner;
+  std::string uid;
+  /// process_info::scope (process_scope of its chroot and its owner's root), computed when the row
+  /// is rebuilt; the row carries no chroot or owner root (S2-Q9, Joe 2026-11-23).
+  std::string scope;
+  int parent_pid = -1;
+  process_status status = process_status::ready;
+  int base_priority = 0;
+  int effective_priority = 0;
+  int floor = 0;
+  /// The absolute keys of its holds (docs/STATE_EXEC_LOCKS.md 5.10), in the order it took them.
+  std::vector<std::string> locks_held;
+  /// process_info::waiting_on, or "" when it waits for nothing.
+  std::string waits_on;
+  std::uint64_t steps = 0;
+  double run_seconds = 0.0;
+  std::size_t memory = 0;
 };
 
 /// Fill `info`'s budget-by-kind fields from a process's evaluation stats.
@@ -211,13 +239,17 @@ class scheduler_base;
 
 /// A command posted to a scheduler from another thread, applied between its steps (td Stage 0's
 /// post_control; gap G-20). L2 has set_priority, and a query (pycvc's between-steps reads); Stage
-/// 0 adds kill, pause, resume and signal, each the direct call's host path, unchecked.
+/// 0 adds kill, pause, resume and signal, each the direct call's host path, unchecked. Stage 2
+/// (S2b, S2-Q8) adds kill_owner: async_scheduler::kill_owner(owner), its done given true once
+/// applied (a destroyed scheduler refuses it, done(false), rather than dropping it); the pid it is
+/// posted with is not read.
 struct control_cmd {
-  enum class kind { set_priority, query, kill, pause, resume, signal };
+  enum class kind { set_priority, query, kill, pause, resume, signal, kill_owner };
   kind what = kind::set_priority;
   int value = 0;
   std::function<void(scheduler_base &)> query;
   std::string signal; // kind::signal: the name send_signal takes ("SIGKILL" kills)
+  std::string owner;  // kind::kill_owner: the owner whose processes it kills
   /// Optional, not used for a query: called once, on the scheduler's thread, with what the direct
   /// call returned, or with false from the scheduler's destructor when the command was never
   /// applied. It must not throw, block or take the GIL.
@@ -308,6 +340,13 @@ public:
   virtual bool yield_frame(int pid) = 0;
 
   // --- Inter-process messaging (msg-send/msg-recv) ---
+  // Stage 2 (S2b, S2-Q10): on an async scheduler in an app whose router is on, a key homed in
+  // another group goes through the router (exec_router.h): receive_message parks the process and
+  // subscribes at the home; deliver_to_receivers posts a send to the home and returns 0 once the
+  // home took it, or -1 when the home's ingress refused it (its cap: msg-send's "ingress full") or
+  // no home is left (~app);
+  // pop_pending_message finds nothing and pending_message_count gives 0 for such a key (S2c reads
+  // the home's published count, MS-11). Never for a '#' key.
   virtual bool receive_message(int pid, const std::string &path) = 0;
   virtual int deliver_to_receivers(const std::string &path, const value_t &msg) = 0;
   virtual std::optional<value_t> pop_pending_message(const std::string &path) = 0;
@@ -398,6 +437,30 @@ public:
   virtual scheduling_policy policy() const { return scheduling_policy::round_robin; }
   /// A spawn's priority was clamped to the spawner's floor: count it (gap G-40).
   virtual void note_priority_clamped() {}
+
+  // --- Process control across groups (S2b; td 4.5; S2-Q7, S2-Q8) ---
+
+  /// A program's kill, pause or resume (`what`) of `pid`, for a caller whose owner is
+  /// `caller_owner` ("" for an unowned process or a host's context), under the owner rule
+  /// (exec_router.h). A pid of this scheduler: the direct call's result when the caller is
+  /// unowned or the pid has its owner, else false, as for an unknown pid. A pid the app's directory
+  /// has in another group with the caller's owner, which is not "": posted there, true
+  /// ("requested", even where the direct call would say false). Anything else: false. This
+  /// default is the local half (the async scheduler adds the directory's); `what` other than kill,
+  /// pause or resume gives false.
+  virtual bool control_as(const std::string &caller_owner, int pid, control_cmd::kind what) {
+    if (what != control_cmd::kind::kill && what != control_cmd::kind::pause &&
+        what != control_cmd::kind::resume)
+      return false;
+    if (!caller_owner.empty()) {
+      const std::optional<process_info> info = get_process_info(pid);
+      if (!info || info->owner != caller_owner)
+        return false;
+    }
+    if (what == control_cmd::kind::kill)
+      return kill(pid);
+    return what == control_cmd::kind::pause ? pause(pid) : resume(pid);
+  }
 
 private:
   const std::uint64_t serial_ = detail::new_scheduler_serial();

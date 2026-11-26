@@ -64,6 +64,10 @@ std::span<const TokenRule> rules() {
       {{"ui.maximize", "a window's title bar has a maximize button that fills it to the screen "
                        "under the menu bar, and back (tree.<id>.maximized)"},
        [](const HostFacts &f) { return f.caps.maximize; }},
+      {{"ui.context_menu", "context_menu: on a window, a group, a viewport or the document opens "
+                           "a menu: a right-click or a long press in a window, the Menu key or "
+                           "Shift+F10 in a terminal"},
+       [](const HostFacts &f) { return f.caps.context_menu; }},
       {{"raster.bitmap", "images in real pixels (a GL window, or a kitty or Sixel terminal)"},
        [](const HostFacts &f) { return f.caps.bitmap; }},
       {{"input.on_change", "message_input: takes live: true and on_change: (event.text, as it is "

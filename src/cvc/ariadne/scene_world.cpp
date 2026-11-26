@@ -763,6 +763,8 @@ ph::world &SceneWorld::world() { return *_impl->world; }
 const ph::world &SceneWorld::world() const { return *_impl->world; }
 const std::vector<SceneWorldBody> &SceneWorld::bodies() const { return _impl->bodies; }
 
+std::vector<ph::body_id> SceneWorld::ground_bodies() const { return _impl->ground_bodies(); }
+
 ph::body_id SceneWorld::body(const std::string &id) const {
   for (const SceneWorldBody &b : _impl->bodies)
     if (b.node == id)
@@ -1356,6 +1358,15 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
 }
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {
+  if (_impl->app) {
+    sync(_impl->app->world_clock(), warnings);
+  } else {
+    const cvc::world_clock none;
+    sync(none, warnings);
+  }
+}
+
+void SceneWorld::sync(const cvc::world_clock &clock, std::vector<std::string> *warnings) {
   impl &d = *_impl;
   // The weather nodes: each its ground's height field once there is one (the storms' area), then
   // its keys. The friction itself is set in follow(), inside the physics step. First, so the wind
@@ -1371,10 +1382,10 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
       if (field)
         wf->set_ground(std::move(field));
     }
-    wf->read_keys();
+    wf->read_keys(&clock);
   }
-  sync_wind();     // the scene wind's field, before anything steps in it
-  publish_front(); // and the storms' gust front, before the water reads its wind
+  sync_wind();          // the scene wind's field, before anything steps in it
+  publish_front(clock); // and the storms' gust front, before the water reads its wind
   // With storms, the runtimes whose changes follow the clock (the water's sea) make them on its
   // periods, and the world puts them in on the clock (SceneColliders::clock_period, from_tick).
   {
@@ -1403,7 +1414,7 @@ void SceneWorld::sync(std::vector<std::string> *warnings) {
   for (const auto &g : d.generated)
     g->tick(warnings);
   for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
-    w->tick();
+    w->tick(&clock);
   for (impl::tracked &t : d.tracked_nodes) {
     d.take_dataset(t, warnings); // a dataset that is ready and new: its colliders
     // A change timed on the clock goes in at its step (follow), unless that step has gone by.
@@ -1573,6 +1584,30 @@ const WaterRuntime *SceneWorld::water(const std::string &node) const {
   return nullptr;
 }
 
+std::vector<std::string> SceneWorld::water_nodes() const {
+  std::vector<std::string> out;
+  for (const auto &w : _impl->waters)
+    out.push_back(w->node());
+  return out;
+}
+
+bool SceneWorld::follow_weather(const std::string &node, const std::string &events, double gust,
+                                std::uint64_t gust_from) {
+  for (const auto &wf : _impl->weathers)
+    if (wf->node() == node)
+      return wf->follow(events, gust, gust_from);
+  return false;
+}
+
+bool SceneWorld::follow_sea(const std::string &node, const SceneWaterKeyframe &k) {
+  for (const auto &w : _impl->waters)
+    if (w->node() == node) {
+      w->follow_sea(k);
+      return true;
+    }
+  return false;
+}
+
 WorldVehicles *SceneWorld::vehicles() { return _impl->vehicles.get(); }
 const WorldVehicles *SceneWorld::vehicles() const { return _impl->vehicles.get(); }
 
@@ -1660,7 +1695,7 @@ void SceneWorld::sync_wind() {
     d.vehicles->set_wind(d.wind_flow);
 }
 
-void SceneWorld::publish_front() {
+void SceneWorld::publish_front(const cvc::world_clock &clock) {
   impl &d = *_impl;
   if (!d.wind_bound || !d.app || d.weathers.empty())
     return; // a scene without a weather node never writes wind.front
@@ -1671,7 +1706,6 @@ void SceneWorld::publish_front() {
   double fx = 0.0, fy = 0.0;
   if (const auto *storm = dynamic_cast<const StormWindFlow *>(d.wind_flow.get())) {
     const cvc::world::weather_params &p = d.weathers.front()->model().params();
-    const cvc::world_clock &clock = d.app->world_clock();
     const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
     const double t = static_cast<double>(clock.tick() / ticks * ticks) * clock.fixed_dt();
     for (const cvc::world::weather &m : storm->weathers()) {
@@ -1777,20 +1811,9 @@ bool SceneWorld::follow_generated(const std::string &node,
       write<double>(app, k.preset, double(params.preset));
       g->tick(warnings);
     }
-    write<double>(app, k.seed, double(params.seed));
-    write<double>(app, k.half, params.half_m);
-    write<double>(app, k.trees, double(params.trees));
-    write<double>(app, k.rocks, double(params.rocks));
-    write<double>(app, k.buildings, double(params.buildings));
-    write<double>(app, k.tree_gen, double(params.tree_gen));
-    write<double>(app, k.amp, params.amp_m);
-    write<double>(app, k.water_level, params.water_level_m);
-    write<double>(app, k.ontology, double(params.ontology));
-    write<double>(app, k.edge, double(params.edge));
-    write<std::string>(app, k.terrain_gen, params.terrain);
-    write<std::string>(app, k.city, params.city);
-    write<std::string>(app, k.terrain_file, params.terrain_file);
-    write<std::string>(app, k.request, "regenerate");
+    write_generated_world_keys(app, k, params);
+    // A follow, not the panel's Regenerate: never sent on to a relay (GeneratedWorldRelay).
+    write<std::string>(app, k.request, "follow");
     return true;
   }
   return false;
@@ -1904,8 +1927,11 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
                                  const std::function<void()> &after_step,
                                  const step_hook &before_each, const step_hook &after_each) {
   impl &d = *_impl;
+  // What the clock times, on the clock this world steps on (OW5q). Deferred, publish_due() syncs
+  // on the host's thread instead, on the host's clock, which a world_worker's holon follows tick
+  // for tick.
   if (!d.deferred)
-    sync(&d.warnings);
+    sync(clock, &d.warnings);
   // Deferred, the world's own capture follows each step a holon runs (it gives no after_step).
   const std::function<void()> &capture = after_step || !d.deferred ? after_step : d.capture;
   if (!d.follower) {

@@ -133,6 +133,12 @@ struct GeneratedWorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
       color, request, status, props, building_count, occupied, terrain, water, terrain_gen, city,
       terrain_file, edge, busy, progress, phase, autoregen, pending;
+  // Save (a "save" request): world.save.file, world.save.exports, world.save.status.
+  std::string save_file, save_exports, save_status;
+  // What the relay did with this world, while this host is joined to one that runs it
+  // (GeneratedWorldRelay): world.server.status; and the rcon password an "rcon" request sends,
+  // world.server.password (cleared as it is sent).
+  std::string server_status, server_password;
 };
 
 // The keys for node n under `bind_prefix`, each seeded from `base` (and `color`, a
@@ -150,6 +156,13 @@ read_generated_world_params(cvc::app &app, const GeneratedWorldKeys &k,
 
 // The params as one string: two worlds from the same signature are the same world.
 std::string generated_world_signature(const cvc::world::generated_world_params &p);
+
+// Set the keys to p's params: the seed, the size, the counts, the relief, the water level, the
+// ontology, the edge, the generators and the terrain file (not the preset, which quick-sets the
+// counts when it changes: the caller sets it first, and lets a poll see it, or moves the poll's
+// `preset` along with it).
+void write_generated_world_keys(cvc::app &app, const GeneratedWorldKeys &k,
+                                const cvc::world::generated_world_params &p);
 
 // p with its terrain_file a local path (a URI, or a path relative to `base_dir`); `f` keeps a
 // fetched file alive until the world is made. Throws std::runtime_error when it cannot be had.
@@ -175,15 +188,70 @@ void publish_generated_world_stats(cvc::app &app, const GeneratedWorldKeys &k,
 // Otherwise an edit only marks the world pending (world.pending). A new preset quick-sets the
 // counts, relief and water level. Stop ends a job under way. `preset` is the preset the counts last
 // came from and `sig` the signature of the world shown or being made; both are updated, and the
-// request key is cleared.
+// request key is cleared. A "follow" request (SceneWorld::follow_generated, GeneratedWorldRelay)
+// makes a new world as Regenerate does, but it is not the panel's: `asked` stays false.
 struct GeneratedWorldPoll {
   bool stop = false;    // a "stop" request
+  bool save = false;    // a "save" request: save_generated_world
+  bool rcon = false;    // an "rcon" request: GeneratedWorldRelay::login
   bool rebuild = false; // make a new world from `params`
+  bool asked = false;   // the rebuild is the panel's (Regenerate, Randomize, an edit with
+                        // world.auto on), not a follow
   cvc::world::generated_world_params params;
 };
 GeneratedWorldPoll poll_generated_world(cvc::app &app, const GeneratedWorldKeys &k,
                                         const cvc::world::generated_world_params &base, int &preset,
                                         std::string &sig);
+
+// A "save" request (world_controls' Save, ARIADNE_WORLDS section 18.8, GB4): the node's dataset at
+// `data_path`, the world shown, saved as world.save.file (data_save_files: a directory beside the
+// document, or a zip when it ends in .zip; in a browser a zip download), with its files for other
+// software (export/: the terrain as a glb, a 16-bit height map) when world.save.exports is on.
+// world.save.status says where it went, or "error: " and why. Returns true when it saved.
+bool save_generated_world(cvc::app &app, const GeneratedWorldKeys &k, const std::string &data_path,
+                          const std::string &base_dir);
+
+// A generated_world node while this host is joined to a relay whose world document runs the same
+// node (ARIADNE_WORLDS section 18.8, GB5). The relay's world is the room's, so the panel edits it,
+// and the node shows what the relay made:
+//   - follow(), each frame before poll_generated_world: when the relay's world_on
+//     (conf.rooms.<room>.world_on, publish_world_on) lists the node with params that are not the
+//     world shown or being made, the keys take them and ask for a "follow", which the poll makes at
+//     once (and never sends back). It looks again only when world_on's stamp moves.
+//   - ask(), after the poll: a rebuild the panel asked for (poll.asked) goes to the relay as
+//     (room-call "server.regenerate" NODE PARAMS-JSON), and the node makes nothing itself. The
+//     relay makes it only for a connection rcon made an admin (server.rcon); anyone else is
+//     refused, and world.server.status says so. A world the relay makes comes back through
+//     world_on, to every client.
+//   - login(), on an "rcon" request: world.server.password to the relay as (room-call "server.rcon"
+//     PASSWORD), which makes this connection an admin; the key is cleared as it goes.
+// The room is the one room_call_client::for_app(app) joined. A host that joined none, or a relay
+// that runs no such node, leaves the node alone: it makes its worlds itself, as it always has.
+// The node is matched by its id alone.
+class GeneratedWorldRelay {
+public:
+  GeneratedWorldRelay();
+  ~GeneratedWorldRelay();
+  GeneratedWorldRelay(const GeneratedWorldRelay &) = delete;
+  GeneratedWorldRelay &operator=(const GeneratedWorldRelay &) = delete;
+
+  // The relay's world for `node` into the keys, when it is new and not `sig`'s (the world shown or
+  // being made); `preset` moves with it (poll_generated_world's). Also writes the relay's reply to
+  // the last ask() into world.server.status, once it has come. True when it asked for a follow.
+  bool follow(cvc::app &app, const GeneratedWorldKeys &k, const std::string &node, int &preset,
+              const std::string &sig);
+  // Send the panel's rebuild to the relay, when this host is joined to one that runs `node`.
+  // True when it went: the caller makes nothing, and puts the poll's `sig` back as it was.
+  bool ask(cvc::app &app, const GeneratedWorldKeys &k, const std::string &node,
+           const cvc::world::generated_world_params &p);
+  // Log in as the relay's admin with world.server.password, clearing it. False when this host has
+  // joined no relay (world.server.status says so).
+  bool login(cvc::app &app, const GeneratedWorldKeys &k);
+
+private:
+  struct impl;
+  std::shared_ptr<impl> _impl;
+};
 
 // The world's colliders: its terrain and its buildings (cvc::world::generated_world::geometry, the
 // collide items).

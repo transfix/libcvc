@@ -516,6 +516,9 @@ struct Widget {
   // `badge:` on an image: or a video: (§5.11): a text (or an expression giving one) drawn over the
   // picture, dimmed under it: a media grid's "+3" on its last tile.
   std::string badge;
+  // §5.29 an image: by URL or file, or a video:, offers Save image... / Save video... in its
+  // context menu; `save: false` leaves it out.
+  bool save_menu = true;
 
   // Kind::Progress: the bar is the number at `bind` placed in [lo, hi] (clamped); `overlay` is a
   // state path (or a computed expression) whose text is drawn over the bar, else the percent.
@@ -630,7 +633,24 @@ struct Widget {
   Value props;
 
   std::vector<Widget> children;
+
+  // §5.30 `context_menu:` the menu a right-click, a long press or the Menu key opens over this
+  // window, group or viewport (on the document's root: over the main view). `context_items` are
+  // its items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
+  // `contributes: context_menus:` adds to (a menu without one takes items from no one).
+  // `context_menu` says it has one, so an id with no items of its own yet still counts.
+  bool context_menu = false;
+  std::string context_menu_id;
+  std::vector<Widget> context_items;
 };
+
+// §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).
+inline Widget with_context_menu(Widget w, std::vector<Widget> items, std::string id = {}) {
+  w.context_menu = true;
+  w.context_menu_id = std::move(id);
+  w.context_items = std::move(items);
+  return w;
+}
 
 // ---------------------------------------------------------------------------
 // Builder helpers — ergonomic programmatic tree construction for the P0 slice

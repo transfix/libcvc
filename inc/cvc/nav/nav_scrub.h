@@ -56,6 +56,7 @@ class app;
 namespace nav {
 
 class policy_library;
+struct world_grid;
 class sim_world;
 
 inline constexpr const char *kScrubReportSchema = "cvc.nav.scrub/v1";
@@ -113,9 +114,22 @@ struct scrub_scenario {
 
 // The built-in scenario: a walled 120 m square with a 3 x 3 grid of buildings (each nudged and
 // sized by `seed`) and streets between them, `agents` agents from starts on its west side to goals
-// on its east (their lanes from `seed`), at 0.05 normalized units per metre and 0.05 s a tick, the
-// map known (no sensing), run for `ticks`, on nav's kinematic bicycle (set `plant` for another).
+// on its east (their lanes from `seed`, 8 m apart where they fit, so no two start or end on top of
+// each other), at 0.05 normalized units per metre and 0.05 s a tick, the map known (no sensing),
+// run for `ticks`, on nav's kinematic bicycle (set `plant` for another).
 scrub_scenario default_scenario(int agents = 4, unsigned seed = 0, long ticks = 600);
+// A scenario on a world as the navigator sees it (cvc/nav/world_grid.h: a data bundle's city, a
+// generated world, a flat square; SceneWorld::grid gives a document's), at its real size: the
+// world stays in metres and the agents run at `scale` normalized units per metre (the policy's
+// frame; 0.05, one unit 20 m, is the nav demos' and libcvc's trainer's). `agents` agents start on
+// free ground 4 m clear of anything blocked and 12 m apart, each to a goal drawn the same way (12 m
+// from every start and every other goal) at least 0.3 of the world's span away, all from `seed` the
+// same on every platform; on nav's kinematic bicycle (set `plant` for another). `world` names it
+// (the scenario's name and its world_id, "nav-lab:<world>"). The scenario keeps the grid only: the
+// world's meshes, which a view draws and a plant collides with, stay the host's. Throws
+// std::runtime_error for a grid with too little free ground.
+scrub_scenario grid_scenario(const world_grid &g, int agents, std::uint64_t seed, long ticks,
+                             const std::string &world, double scale = 0.05);
 // A recorded input trace's world and agents (its header; its inputs are not replayed). Throws
 // std::runtime_error for a trace whose world v1 cannot rebuild.
 scrub_scenario scenario_from_trace(const std::string &trace_path, long ticks = 600);
