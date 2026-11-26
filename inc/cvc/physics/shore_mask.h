@@ -9,8 +9,8 @@
 */
 
 // shore_mask.h — a wake's coast from a shore grid (OCEAN-AND-WEATHER-ROADMAP.md C6): the mask the
-// physics wake (field_wake::shore, field.h) is stepped under, the drawn wake window's
-// (lsystem_coast's seaWakeMask, the water node's wake_mask).
+// physics wake (field_wake::shore, field.h) is stepped under, and the drawn wake window's
+// (lsystem_coast's seaWakeMask; the water node's, water_node.cpp's place_wake).
 //
 //   auto shore = std::make_shared<cvc::physics::shore_grid_mask>(grid, slope, layer);
 //   cvc::physics::field water = ...;  // a fluid with a free surface
@@ -60,10 +60,11 @@ public:
   std::uint64_t digest() const override { return _digest; }
 
   const cvc::ocean::shore_grid &grid() const noexcept { return *_grid; }
-
-private:
+  // A plane of the grid (one value a sample, as its depth), bilinear at (x, y), clamped to the
+  // grid: how the mask reads the shore distance and the slope.
   double sample(const std::vector<float> &f, double x, double y) const;
 
+private:
   std::shared_ptr<const cvc::ocean::shore_grid> _grid;
   std::vector<float> _slope;
   std::shared_ptr<const cvc::ocean::shore_layer> _layer;
