@@ -141,7 +141,8 @@ public:
   // (so its peer's on-close retraction fires), and join+erase finished reader threads. This drops a
   // peer whose tab navigated/reloaded away WITHOUT a clean WebSocket close — the usual TCP close is
   // never seen for such a ghost; the Ping/Pong probe keeps a quiet live one from looking idle. Call
-  // periodically. No-op under wasm. Returns how many connections were erased this call.
+  // periodically. In a browser it closes and deletes a silent link's socket, so its client dials
+  // again. Returns how many connections were erased this call.
   std::size_t reap_idle(std::chrono::milliseconds timeout) override;
 
   // Relay reliability: bring EVERY connection up to date with the current shard snapshot (not just

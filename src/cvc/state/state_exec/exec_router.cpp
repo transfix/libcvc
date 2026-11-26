@@ -114,8 +114,6 @@ struct exec_router::impl {
   std::vector<registration> regs; // every prefix but group 0's "", in registration order
   group_ref group0;               // the default home, once group 0 registered ""
   std::atomic<std::uint64_t> epoch{0};
-  std::atomic<int> others{0};          // registrations of groups other than group 0
-  std::atomic<long> remote_waiters{0}; // note_remote_waiters
   mutable std::atomic<std::uint64_t> consulted{0};
   std::atomic<std::uint64_t> broadcasts{0}; // new_broadcast_id
   // CVC_EXEC_FUZZ's yields at the host's posts (S2-Q15), read as the router is made; null: off.
@@ -152,7 +150,7 @@ void exec_router::register_prefix(const group_ref &group, std::string prefix) {
     } else {
       m.regs.push_back({std::move(prefix), group});
       if (!group.is_group0())
-        m.others.fetch_add(1, std::memory_order_relaxed);
+        others_.fetch_add(1, std::memory_order_relaxed);
     }
     m.epoch.fetch_add(1, std::memory_order_release);
   }
@@ -168,7 +166,7 @@ void exec_router::unregister(const group_ref &group) {
   const auto removed = static_cast<int>(m.regs.end() - end);
   m.regs.erase(end, m.regs.end());
   if (!group.is_group0())
-    m.others.fetch_sub(removed, std::memory_order_relaxed);
+    others_.fetch_sub(removed, std::memory_order_relaxed);
   if (m.group0 == group)
     m.group0 = group_ref();
   m.epoch.fetch_add(1, std::memory_order_release);
@@ -261,11 +259,6 @@ std::uint64_t exec_router::new_broadcast_id() noexcept {
   return impl_->broadcasts.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-bool exec_router::active() const noexcept {
-  return impl_->others.load(std::memory_order_acquire) > 0 ||
-         impl_->remote_waiters.load(std::memory_order_acquire) > 0;
-}
-
 std::uint64_t exec_router::epoch() const noexcept {
   return impl_->epoch.load(std::memory_order_acquire);
 }
@@ -275,7 +268,7 @@ std::uint64_t exec_router::consulted() const noexcept {
 }
 
 void exec_router::note_remote_waiters(int delta) noexcept {
-  impl_->remote_waiters.fetch_add(delta, std::memory_order_acq_rel);
+  remote_waiters_.fetch_add(delta, std::memory_order_acq_rel);
 }
 
 namespace {
@@ -428,9 +421,9 @@ group_ref async_scheduler::cached_home(const std::string &key) const {
   return home;
 }
 
-bool async_scheduler::homed_elsewhere(const std::string &key, group_ref *home) const {
-  // RT-1: with one group (or no router) this is two atomic loads, and the router is not consulted.
-  if (!router_ || !router_->active() || never_routed(key))
+bool async_scheduler::homed_elsewhere_slow(const std::string &key, group_ref *home) const {
+  // The router is on (homed_elsewhere's inline test, RT-1); a '#' key is never routed.
+  if (never_routed(key))
     return false;
   group_ref h = cached_home(key);
   if (!h || h == route_self_)

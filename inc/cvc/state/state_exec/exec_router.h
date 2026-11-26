@@ -296,8 +296,12 @@ public:
   bool prefix_registered(std::string_view prefix) const;
   /// A tracked broadcast's id, unique in the app (never 0).
   std::uint64_t new_broadcast_id() noexcept;
-  /// Whether the router is on (the header's rule): two atomic loads.
-  bool active() const noexcept;
+  /// Whether the router is on (the header's rule): two atomic loads, inline, since every message
+  /// operation of a scheduler with a router asks it first.
+  bool active() const noexcept {
+    return others_.load(std::memory_order_acquire) > 0 ||
+           remote_waiters_.load(std::memory_order_acquire) > 0;
+  }
   /// Moves at every registration and unregistration: a scheduler's cache of homes is stale once it
   /// differs.
   std::uint64_t epoch() const noexcept;
@@ -328,6 +332,8 @@ private:
   cvc::app *const app_;
   exec_directory directory_;
   std::unique_ptr<impl> impl_;
+  std::atomic<int> others_{0};          // registrations of groups other than group 0 (active())
+  std::atomic<long> remote_waiters_{0}; // note_remote_waiters (active())
 };
 
 } // namespace cvc::state_exec

@@ -1327,13 +1327,13 @@ int async_scheduler::wake_awaiting() {
   return woken;
 }
 
-bool async_scheduler::park_receiver(int pid, const std::string &path) {
+process *async_scheduler::park_receiver(int pid, const std::string &path) {
   auto it = procs_.all().find(pid);
   if (it == procs_.all().end())
-    return false;
+    return nullptr;
   auto &proc = *it->second;
   if (proc.status != process_status::ready && proc.status != process_status::running)
-    return false;
+    return nullptr;
   if (proc.status == process_status::running) {
     auto now = std::chrono::steady_clock::now();
     proc.accumulated_time += std::chrono::duration<double>(now - proc.last_run_start).count();
@@ -1347,33 +1347,36 @@ bool async_scheduler::park_receiver(int pid, const std::string &path) {
   // per scheduler, so the lowest is the earliest wait (a requeue's next local waiter, S2b.0a).
   proc.recv_seq = ++recv_clock_;
   procs_.set_status(proc, process_status::waiting); // indexed under its channel
-  return true;
+  return &proc;
 }
 
 bool async_scheduler::receive_message(int pid, const std::string &path) {
   check_not_in_kernel("async_scheduler::receive_message");
-  if (!park_receiver(pid, path))
+  process *const proc = park_receiver(pid, path);
+  if (!proc)
     return false;
-  subscribe_if_remote(*procs_.find(pid), path); // S2b.4: a key homed elsewhere
+  if (routing_on())
+    subscribe_if_remote(*proc, path); // S2b.4: a key homed elsewhere
   return true;
 }
 
 bool async_scheduler::receive_message_until(int pid, const std::string &path, double seconds) {
   check_not_in_kernel("async_scheduler::receive_message");
-  if (!park_receiver(pid, path))
+  process *const parked = park_receiver(pid, path);
+  if (!parked)
     return false;
-  process &proc = *procs_.find(pid);
+  process &proc = *parked;
   proc.recv_deadline = detail::time_after(std::chrono::steady_clock::now(), seconds);
-  procs_.update(proc);             // a timer for the deadline
-  subscribe_if_remote(proc, path); // with the deadline, which its home skips a record past
+  procs_.update(proc); // a timer for the deadline
+  if (routing_on())
+    subscribe_if_remote(proc, path); // with the deadline, which its home skips a record past
   return true;
 }
 
 int async_scheduler::deliver_to_receivers(const std::string &path, const value_t &msg) {
   check_not_in_kernel("async_scheduler::deliver_to_receivers");
   // S2b.4: a key homed in another group goes there as a send (exec_router.h), refused at its cap.
-  group_ref home;
-  if (homed_elsewhere(path, &home)) {
+  if (group_ref home; routing_on() && homed_elsewhere_slow(path, &home)) {
     detail::route_entry e;
     e.what = detail::route_entry::kind::send;
     e.key = path;

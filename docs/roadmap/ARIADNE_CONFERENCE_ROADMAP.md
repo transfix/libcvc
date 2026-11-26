@@ -880,7 +880,8 @@ reconcile-correction sum varies two-fold between identical runs, so it says noth
   - **Silent connections.** Every link is probed each 2 s, and `state_transport::reap_idle`
     closes one silent for `--idle-timeout-s` (10 s) on both transports, so a peer gone without
     closing (a crash behind NAT, a suspended phone) departs like one that closed. arigl and
-    `relay_session` do the same for their link to the relay, so they dial again.
+    `relay_session` do the same for their link to the relay, so they dial again; a browser page
+    too (arigl-web closes and deletes the silent socket).
   - **Scene objects, lights, avatar options and world entities** the relay drops are removed
     from the tree (a delete each), not marked `present = 0`; a revisioned section removes an
     entry with `section_writer::remove`, before the revision that covers it.
