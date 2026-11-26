@@ -101,7 +101,11 @@ struct avatar_policy {
 // cvcpkg installs it. `fit: true` (a model's default) orients the mesh (its smallest extent up,
 // its longest forward, the nose the end whose top sits lower) and scales it to the chassis box's
 // length, standing on the ground under the chassis. With no look:, a humvee is drawn as the
-// Humvee model when it is installed, and as its box otherwise.
+// Humvee in parts when the package's humvee/chassis.glb, humvee/wheel.glb and humvee/rig.json are
+// installed (a parted look, below: its wheels turn), else as the one-piece Humvee model when that
+// is installed, and as its box otherwise. `model: humvee` is the parted Humvee too, unless it has
+// scale:, yaw:, z: or fit: false, which only the one-piece model takes. A look that names a file
+// (`file:`, or `data:` with `file:`) is that file.
 //
 // A parted look (`chassis:`, `wheel:`, `rig:`) is a model in parts: the chassis's mesh without its
 // wheels, one wheel's mesh, and the rig that says where the wheels go (vehicle_rig). Each wheel is
@@ -151,9 +155,11 @@ struct vehicle_look {
   std::string data, uri, subpath;
   double scale = 1.0, yaw = 0.0, z = 0.0;
   bool fit = false;
-  // A parted look (kind file, or data with `data:`; `path` unused): the chassis's file and the
-  // wheel's, and its rig, given inline (`rig`) or read from `rig_file` (in the package, for a data
-  // look) when the view draws it. Fitted to the vehicle always: scale, yaw and z do not apply.
+  // A parted look (kind file, or data with `data:`): the chassis's file and the wheel's, and its
+  // rig, given inline (`rig`) or read from `rig_file` (in the package, for a data look) when the
+  // view draws it. Fitted to the vehicle always: scale, yaw and z do not apply. Its `path` is
+  // unused, but for the default Humvee in parts, whose path is the one-piece model (when it is
+  // installed) for a reader that draws one model only (a relay's clients).
   std::string chassis, wheel, rig_file;
   vehicle_rig rig;
   bool parted() const { return !chassis.empty(); }

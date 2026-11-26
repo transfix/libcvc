@@ -686,12 +686,36 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
   const auto relative = [](const std::string &p) {
     return fs::path(p).is_relative() && p.find("://") == std::string::npos;
   };
+  // The Humvee in parts, its wheels turning: the vehicle-humvee package's humvee/chassis.glb,
+  // humvee/wheel.glb and humvee/rig.json, all three in one directory where the vehicle models are
+  // installed. False, `look` as it was, when they are not all there. The one-piece model stays in
+  // `path` (when it is installed) for a reader that draws only that: a relay passes a look's kind
+  // and file on, not its parts (room_entities.h), so its clients draw the one piece.
+  const auto humvee_parts = [](vehicle_look &look, const std::string &one_piece) {
+    const std::string chassis = find_vehicle_model("humvee/chassis.glb");
+    if (chassis.empty())
+      return false;
+    std::error_code ec;
+    const fs::path dir = fs::path(chassis).parent_path();
+    const fs::path wheel = dir / "wheel.glb", rig = dir / "rig.json";
+    if (!fs::is_regular_file(wheel, ec) || !fs::is_regular_file(rig, ec))
+      return false;
+    look.kind = "file";
+    look.path = one_piece;
+    look.fit = true;
+    look.chassis = chassis;
+    look.wheel = wheel.string();
+    look.rig_file = rig.string();
+    return true;
+  };
   for (vehicle_archetype &v : archetypes) {
     vehicle_look &look = v.look;
     if (look.kind.empty()) { // the default: a preset's model, when it is installed
       const std::string model = v.preset == "humvee"     ? find_vehicle_model("humvee")
                                 : v.preset == "tactical" ? find_vehicle_model("TacticalBoat")
                                                          : std::string();
+      if (v.preset == "humvee" && humvee_parts(look, model))
+        continue;
       if (!model.empty()) {
         look.kind = "file";
         look.path = model;
@@ -703,6 +727,12 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
     }
     if (look.kind == "model") {
       const std::string model = find_vehicle_model(look.path);
+      // `model: humvee` is the Humvee in parts too, unless it is placed (scale:, yaw:, z:) or not
+      // fitted (fit: false): a parted look is fitted to its vehicle by its rig, so only the one
+      // piece takes those.
+      if (look.path == "humvee" && look.fit && look.scale == 1.0 && look.yaw == 0.0 &&
+          look.z == 0.0 && humvee_parts(look, model))
+        continue;
       if (model.empty()) {
         warn("world: vehicles: " + v.id + ": look: model '" + look.path +
              "' is not installed (cvcpkg install vehicle-" + look.path +
