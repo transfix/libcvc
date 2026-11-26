@@ -3752,6 +3752,16 @@ cvc_discover_tests(physics_codec_test)
 # here), which may pass the 300 s a test without a TIMEOUT of its own gets there (ci.yml): their
 # own budget, as the water's.
 cvc_discover_tests(physics_field_test PROPERTIES TIMEOUT 1200)
+# One of them needs more: PhysicsFieldWake.PackedBodiesStayBoundedAndSleep took 747 s of its 1200
+# on a Debug coverage runner (#1548's package-linux libcvc-debug) and timed out on a runner about
+# 2.9x slower (#1551's first run of the same lane, where its sibling took 784 s against 271). The
+# discovered tests' own file sets the 1200 above; this file, included after it, gives that one
+# test 3600, the cap ci.yml gives the heavy Debug lanes. ctest ignores the line if the test is
+# not there.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/physics_field_test_timeouts.cmake"
+  "set_tests_properties(PhysicsFieldWake.PackedBodiesStayBoundedAndSleep PROPERTIES TIMEOUT 3600)\n")
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/physics_field_test_timeouts.cmake")
 cvc_discover_tests(physics_hull_test)
 cvc_discover_tests(physics_immersion_test)
 cvc_discover_tests(physics_boat_test)
