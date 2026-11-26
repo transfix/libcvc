@@ -1454,10 +1454,13 @@ The parts:
   its triangles.
 - **Wading** (`vehicle.h`'s `wading_desc`). `vehicle_desc.wading` is a `pycvc.wading_desc`
   whose fields read and write in place (`d.wading.fording_depth = 1.52`); `as_dict()` gives
-  them all. `vehicle_state` adds `water_force` and `engine_flooded`, each wheel `water_depth`
-  and `water_drag`. `set_vehicle(id, desc)` tunes a running vehicle, wading's knobs included;
-  `wading.enabled` and `wading.displacement` are fixed when it is added. The binding's
-  `vehicles.<name>.tuning.wading.*` knobs do the same from the tree.
+  them all. `vehicle_state` adds `water_force`, `engine_flooded`, `water_inside` and
+  `water_inside_mass` (with a `flood_area`), each wheel `water_depth` and `water_drag`.
+  `set_vehicle(id, desc)` tunes a running vehicle, wading's knobs included; `wading.enabled`,
+  `wading.displacement` and whether `flood_area` is 0 are fixed when it is added. The
+  binding's `vehicles.<name>.tuning.wading.*` knobs do the same from the tree.
+  `dyn_bike_plant.wading(i)` (wet, engine_flooded, drag, lift and each axle's contact, grip and
+  depth) and `waded(i)` read the dynamic plant's water (`dyn_wading.h`).
 - **The wind** (`flow_velocity.h`). `wind_flow(speed_mps, dir_rad, gustiness, base_z)` is the
   scene's wind; `scene_wind_flow(speed, dir, gustiness=0.25, base_z=0)` is the one Ariadne's
   `wind.speed`, `wind.dir` (degrees) and `wind.gustiness` keys make. Both have `velocity(p,
