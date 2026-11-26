@@ -133,9 +133,15 @@ void repose_forest(const forest_wind &w, double t, double wind_scale, std::vecto
 // way the wind blows (a unit vector); `strength` scales the authored sway (1 at the reference
 // wind, more in a stronger one); gust(x, y) is the gust factor at a tree's base (null: 1). A
 // tree's angle is sway x strength x gust x (0.6 + 0.4 sin(1.3 t + phase)): never upwind.
+// `local` (null: none) gives the wind at a tree's base where it differs from tree to tree (a
+// storm's gust fronts, F4): the strength there and the way it blows (a unit vector), in place of
+// strength, dir_x and dir_y.
+using tree_wind_fn =
+    std::function<void(double x, double y, double &strength, double &dir_x, double &dir_y)>;
 void repose_forest_in_wind(const forest_wind &w, double t, double strength, double dir_x,
                            double dir_y, const std::function<double(double, double)> &gust,
-                           std::vector<double> &wood_buf, std::vector<double> &needle_buf);
+                           std::vector<double> &wood_buf, std::vector<double> &needle_buf,
+                           const tree_wind_fn &local = nullptr);
 
 // ── single-tree generators (building blocks; also the seam for DSL intrinsics) ───────────────
 // Grow ONE pine at base (bx,by,bz) with trunk scale `size` and grammar depth `maturity` (1..5),

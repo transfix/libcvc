@@ -57,6 +57,11 @@
 //     front there to wind.front ("x y", m/s; empty with none), and scene_wind_now() adds it. The
 //     gusts' pattern still drifts with the wind as authored (SceneWind::state()), so a front
 //     passing changes how hard and which way the wind blows, not where the gusts have drifted to.
+//   - what moves with the wind where each thing is takes the front there: the water's ripples
+//     and roughness (drawn and physics alike), the generated world's trees and the pines read
+//     the storms' cells (scene_fronts, scene_weather.h; the shaders' uniforms, StormFrontGLSL)
+//     and evaluate the front at each wave, vertex or tree. The sea's spectrum still grows toward
+//     the centre's wind above, one sea for the whole water.
 //   - the steering wind the storms ride and the clouds' drift are the wind as authored
 //     (scene_wind_set): a storm is not carried by its own outflow.
 // Decision: the fronts ride on the scene's wind. A scene with storms but no `wind:` has no scene

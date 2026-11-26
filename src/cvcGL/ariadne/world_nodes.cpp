@@ -43,8 +43,9 @@
 #include <cvc/ariadne/data.h> // a data node's dataset: its files, data_file
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_generated_world.h> // the node in core: params, keys, stats, dataset
-#include <cvc/ariadne/scene_wind.h>            // the scene's one wind, which the trees lean in
-#include <cvc/ariadne/shown_clock.h>           // the time the scene is drawn at (OW5q)
+#include <cvc/ariadne/scene_weather.h> // scene_fronts: the storms' fronts where each tree is (F4)
+#include <cvc/ariadne/scene_wind.h>    // the scene's one wind, which the trees lean in
+#include <cvc/ariadne/shown_clock.h>   // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -55,12 +56,14 @@
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LodGraphicsNode.h> // the props' and the ground's ladders, make_view_params
 #include <cvc/gl/SceneGraph.h>
-#include <cvc/gl/WindGLSL.h> // the gusts the trees sway in, the water's and the physics'
+#include <cvc/gl/StormFrontGLSL.h> // the storms' fronts, evaluated where each tree stands
+#include <cvc/gl/WindGLSL.h>       // the gusts the trees sway in, the water's and the physics'
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/world_geometry_nodes.h> // surface_colors: a mesh without colours of its own
 #include <cvc/image/image.h>
 #include <cvc/model/model_file_io.h> // can_write_model_to_memory
+#include <cvc/ocean/sea_surface.h>   // sea_fronts: the fronts as scene_fronts hands them
 #include <cvc/state/state.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/world/building_archetypes.h>
@@ -212,6 +215,9 @@ struct WorldRT {
     return in;
   }();
   std::string prefix, sway_key, lean_key, lean_now;
+  // The scene's world's air (scene tick, or tick_scene for a world dataset): with storms, the
+  // trees lean in the wind where each stands, its fronts in it (F4).
+  std::shared_ptr<const cvc::physics::flow_velocity> air;
 
   ~WorldRT();
 };
@@ -365,13 +371,17 @@ constexpr double kLiftMax = 60.0;       // the height encoded at most
 // p with normal n. uFwDir is the way the wind blows (x, y); uFwMotion holds the lean (radians, at
 // 10 m up), the sway's amplitude (radians) and the clock (s, reduced to the sway's period);
 // uFwEye is the camera, and the sway fades out between 300 and 450 m from it (where it is about a
-// pixel at terrain_lab's view), so a far tree skips the gusts' noise.
+// pixel at terrain_lab's view), so a far tree skips the gusts' noise. With the storms' gust fronts
+// (F4, StormFrontGLSL's uniforms on) the lean, the sway and their way are the wind's where the
+// vertex is, the fronts in it (uFwSway the strength, world.sway), as the CPU works them out for
+// one wind: lean 0.03 (U / 9)^2, sway 0.02 U / 9 radians, at most 0.3 and 0.2.
 std::string foliage_wind_dec() {
   return std::string("//VTK::PositionVC::Dec\n"
                      "uniform highp float uFwOn; uniform highp vec3 uFwDir; "
-                     "uniform highp vec3 uFwMotion; uniform highp vec3 uFwEye;\n"
+                     "uniform highp vec3 uFwMotion; uniform highp vec3 uFwEye; "
+                     "uniform highp float uFwSway;\n"
                      "out vec4 cvcFwRestVC;\n") +
-         cvc::gl::WindGLSL::glsl() +
+         cvc::gl::WindGLSL::glsl() + cvc::gl::StormFrontGLSL::glsl() +
          "vec4 cvc_foliage_sway(vec4 p, vec3 n){\n"
          "  float h = max(length(n) - 1.0, 0.0) * 64.0;\n" // kLiftPerNormal
          "  float lift = h - 0.3;\n"                       // the foot of a trunk stays put
@@ -380,9 +390,18 @@ std::string foliage_wind_dec() {
          "  if (near <= 0.0) return p;\n"
          "  float g = cvc_wind_gust(p.xy, 0.0);\n"
          "  float phase = dot(p.xy, vec2(0.071, 0.053));\n"
-         "  float a = near * g * (uFwMotion.x + uFwMotion.y * sin(1.3 * uFwMotion.z + phase));\n"
+         "  vec2 dir = uFwDir.xy;\n"
+         "  float lean = uFwMotion.x, sway = uFwMotion.y;\n"
+         "  if (uFrontU.w > 0.0) {\n" // the wind where this tree stands
+         "    vec2 wv = uFrontU.xy + cvc_storm_front(p.xy);\n"
+         "    float ws = length(wv), u = ws / 9.0;\n"
+         "    if (ws > 1e-4) dir = wv / ws;\n"
+         "    lean = min(0.03 * u * u * uFwSway, 0.3);\n"
+         "    sway = min(0.02 * u * uFwSway, 0.2);\n"
+         "  }\n"
+         "  float a = near * g * (lean + sway * sin(1.3 * uFwMotion.z + phase));\n"
          "  float s = a * lift * lift * 0.1;\n" // the bend: angle a at 10 m up
-         "  p.xy += uFwDir.xy * s;\n"
+         "  p.xy += dir * s;\n"
          "  p.z -= 0.5 * s * s / max(h, 1.0);\n" // a leaning crown comes down a little
          "  return p;\n"
          "}\n";
@@ -467,6 +486,18 @@ void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
     if (ren && ren->IsActiveCameraCreated())
       ren->GetActiveCamera()->GetPosition(eye);
     in.f3["uFwEye"] = {float(eye[0]), float(eye[1]), float(eye[2])};
+    in.f["uFwSway"] = float(strength);
+  }
+  // The storms' fronts where each tree stands (F4): none without storms (uFrontU.w 0), the old
+  // one wind for all.
+  {
+    cvc::ocean::sea_fronts fronts;
+    if (on)
+      ari::scene_fronts(rt.air.get(), ari::shown_time(app, rt.prefix, app.world_clock().t()),
+                        fronts);
+    for (const auto &[name, v] :
+         cvc::gl::StormFrontGLSL::at(fronts.cells, fronts.ux, fronts.uy, fronts.ref).uniforms())
+      in.f4[name] = v;
   }
   if (std::string lean = on ? std::to_string(sw->mean_dir()) : std::string(); lean != rt.lean_now) {
     rt.lean_now = lean;
@@ -1361,6 +1392,11 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   // The world went in as the node's dataset (swap_world); a body: on the node is its world.
   out.body_data[n.id] = rt->data_path;
 
+  // The scene's world's air: the storms' fronts the trees lean in (F4).
+  out.scene_ticks.push_back(
+      [rt](vtkRenderer *, RealizedScene &scene, const cvc::world_clock::step_result &) {
+        rt->air = scene.world ? scene.world->wind() : nullptr;
+      });
   out.custom_ticks.push_back([rt](vtkRenderer *ren) {
     if (rt->terrain.expired())
       return;
@@ -1746,6 +1782,10 @@ void data_world_clear(DataWorldView &v) {
       rt.retired.nodes.emplace_back(group, t);
     }
   rt.terrain.reset();
+}
+
+void data_world_set_air(DataWorldView &v, std::shared_ptr<const cvc::physics::flow_velocity> air) {
+  v.rt->air = std::move(air);
 }
 
 void data_world_tick(DataWorldView &v, vtkRenderer *ren) {
