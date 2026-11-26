@@ -913,9 +913,15 @@ private:
   bool deliver_patched_ = false;
   /// `key`'s home through the cache (router set; not a '#' key).
   group_ref cached_home(const std::string &key) const;
+  /// Whether a router is set and on: inline, the whole cost of every message operation while it
+  /// is not (RT-1: one null test, or two atomic loads).
+  bool routing_on() const noexcept { return router_ != nullptr && router_->active(); }
   /// Whether `key` is homed in another group (router on, not '#'; an island's keys no other
   /// group's prefix covers stay its own), which `home` gets. Scheduler thread.
-  bool homed_elsewhere(const std::string &key, group_ref *home) const;
+  bool homed_elsewhere(const std::string &key, group_ref *home) const {
+    return routing_on() && homed_elsewhere_slow(key, home);
+  }
+  bool homed_elsewhere_slow(const std::string &key, group_ref *home) const;
   /// Post `e` to `home`. A closed handle is resolved again (home_of), waiting while it is still
   /// that closed group (exec_router.cpp), unless the poster is this scheduler's teardown (its
   /// handle closed, and not `host`: a host's post from another thread). `posted_to` gets the home
@@ -938,7 +944,7 @@ private:
   /// A tracked broadcast's id (exec_router::new_broadcast_id).
   std::uint64_t new_broadcast_id();
   /// receive_message's park (recv_seq moves), and its subscribe at a remote home.
-  bool park_receiver(int pid, const std::string &path);
+  process *park_receiver(int pid, const std::string &path); // null: not parked
   void subscribe_if_remote(process &proc, const std::string &path);
   /// `pid`'s remote wait ended (a timeout, a kill, a reap, a local delivery): unsubscribe.
   void end_remote_wait(int pid) noexcept;
