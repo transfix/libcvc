@@ -690,7 +690,7 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
     return false;
   chassis->setPosition(f.offset[0], f.offset[1], f.offset[2]);
   chassis->setScale(f.scale[0], f.scale[1], f.scale[2]);
-  static const cvc::image none; // `texture: false`: in its colours
+  const cvc::image none; // `texture: false`: in its colours (a local, not process-wide state)
   colour(*chassis, look.texture ? m->chassis_texture : none, color);
   static const float tyre[3] = {0.07f, 0.07f, 0.08f};
   for (std::size_t k = 0; k < f.hubs.size(); ++k) {

@@ -43,7 +43,7 @@ customs:
     required: false
 
 args:
-  speed: {type: float, default: 2.0, help: "world seconds per wall second"}
+  speed: {type: float, default: 1.0, help: "world seconds per wall second"}
   ui: {type: bool, default: true, help: "--no-ui: no panel (a capture)"}
   bench: {type: bool, help: "print the frame time every 120 frames"}
 
@@ -232,7 +232,7 @@ windows:
 
 scene:
   chrome: false
-  clock: { scale: 2.0 }
+  clock: { scale: 1.0 }
   physics: {}
   world: { source: terrain, cell: 2 }  # the world on at the start; World (the panel) switches
   background: { top: [0.62, 0.74, 0.90], bottom: [0.86, 0.89, 0.92] }
