@@ -123,6 +123,12 @@ endif()
 if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set(_srv_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   set(_srv_listen "--room@@ctest@@--state-listen@@127.0.0.1:0@@--media-listen@@127.0.0.1:0@@--ws-listen@@127.0.0.1:0")
+  # The schemes a client dials the relay by: gRPC always, and the WebSocket only with
+  # CVC_ENABLE_WS. Without it the relay has no WebSocket, and a ws pair would only fail.
+  set(_srv_schemes grpc)
+  if(CVC_ENABLE_WS)
+    list(APPEND _srv_schemes ws)
+  endif()
   add_test(NAME arisrv_doc_echo
            COMMAND ${CMAKE_COMMAND} -DARISRV=$<TARGET_FILE:arisrv>
                    "-DARGS=--doc@@${_srv_tests}/echo_server.ari@@${_srv_listen}" -DSTATUS=0
@@ -412,11 +418,14 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        --scheme grpc ${_auth_relay} ${_auth_client}
                        --client-env=CVC_ARIADNE_ROOM_TOKEN=staff-token-0123456789
                        "--client-arg=${_srv_tests}/auth_staff.ari")
-      add_test(NAME arisrvx_auth_user_ws
-               COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
-                       --scheme ws ${_auth_relay} ${_auth_client}
-                       --client-env=CVC_ARIADNE_ROOM_TOKEN=user-token-0123456789
-                       "--client-arg=${_srv_tests}/auth_user.ari")
+      if(CVC_ENABLE_WS)
+        add_test(NAME arisrvx_auth_user_ws
+                 COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                         --scheme ws ${_auth_relay} ${_auth_client}
+                         --client-env=CVC_ARIADNE_ROOM_TOKEN=user-token-0123456789
+                         "--client-arg=${_srv_tests}/auth_user.ari")
+        list(APPEND _call_tests arisrvx_auth_user_ws)
+      endif()
       foreach(_case wrong:nope-token-0123456789 slow:slow-token-0123456789
                     raises:boom-token-0123456789)
         string(REPLACE ":" ";" _case "${_case}")
@@ -438,7 +447,7 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        --scheme grpc ${_auth_relay} ${_auth_client}
                        --client-credential=relaytok=staff-token-0123456789
                        "--client-arg=${_srv_tests}/auth_credential.ari")
-      list(APPEND _call_tests arisrvx_auth_staff arisrvx_auth_user_ws arisrvx_auth_credential)
+      list(APPEND _call_tests arisrvx_auth_staff arisrvx_auth_credential)
 
       # The read_scope hook (S6, §6.5.6): tests/scope_service.py admits bob, who reads svc.public
       # and his projects; tests/scope_user.ari sees a project's subtree arrive as he joins it, go
@@ -451,7 +460,7 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
       foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
         list(APPEND _scope_relay "--relay-arg=${_a}")
       endforeach()
-      foreach(_scheme grpc ws)
+      foreach(_scheme IN LISTS _srv_schemes)
         set(_name arisrvx_read_scope)
         if(_scheme STREQUAL "ws")
           set(_name arisrvx_read_scope_ws)
@@ -492,7 +501,7 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                        "--client-arg=${_srv_tests}/echo_client.ari")
       list(APPEND _call_tests arisrvx_echo_service)
     endif()
-    if(TARGET arix)
+    if(TARGET arix AND CVC_ENABLE_WS)
       add_test(NAME arisrvx_room_call_ws_arix
                COMMAND ${_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arix>
                        --scheme ws ${_call_relay} "--expect=room-call explode from arix_[a-z0-9]+ raised"
@@ -524,7 +533,7 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set(_id_relay --relay-arg=--room --relay-arg=ctest --relay-arg=--state-listen
                   --relay-arg=127.0.0.1:0 --relay-arg=--media-listen --relay-arg=127.0.0.1:0
                   --relay-arg=--ws-listen --relay-arg=127.0.0.1:0)
-    foreach(_scheme grpc ws)
+    foreach(_scheme IN LISTS _srv_schemes)
       add_test(NAME arisrv_identity_${_scheme}
                COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrv> --client $<TARGET_FILE:ari>
                        --scheme ${_scheme} ${_id_relay} --client-only --client-arg=--relay-room
