@@ -1083,6 +1083,21 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "none");
   b.step();
   EXPECT_TRUE(w.get_vehicle(v).engine_friction_curve.empty());
+  // Wading's knobs, seeded with the Humvee's: the deep-water fording kit from the tree; an
+  // invalid value is ignored. Dry, its engine runs and no water pushes it.
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.wading.fording_depth"),
+            vehicle_desc::humvee().wading.fording_depth);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.wading.tire_pressure"),
+            vehicle_desc::humvee().wading.tire_pressure);
+  set_tree(a, "physics.vehicles.truck.tuning.wading.fording_depth", "1.52");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).wading.fording_depth, 1.52);
+  set_tree(a, "physics.vehicles.truck.tuning.wading.fording_depth", "-1");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).wading.fording_depth, 1.52);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.engine_flooded"), 0.0);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.water_force.z"), 0.0);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.0.water_depth"), 0.0);
   // Pedals.
   set_tree(a, "physics.vehicles.truck.controls.hand_brake", "1");
   b.step();
