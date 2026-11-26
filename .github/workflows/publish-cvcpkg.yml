@@ -30,7 +30,7 @@
 #                      host, arigl-web, is publish-cvcgl-wasm.yml's.)
 #   * arix / ariglx  — the scripting hosts: ari and arigl with CPython 3.12
 #                      embedded (src/ariadne_python). Built in the cp312 column's
-#                      jobs (Linux x86_64, Windows x86_64, and arix on macOS), by
+#                      jobs (Linux x86_64 and arm64, Windows x86_64, and arix on macOS), by
 #                      their recipes' own scripts against that job's libcvc,
 #                      cvcGL and python312, and each must run a document's
 #                      python: block through that job's pycvc before it packs.
@@ -467,11 +467,14 @@ jobs:
           - config: release
             pyver: "313"
             target: { os: ubuntu-22.04, platform: linux, arch: x86_64 }
-          # The cp312 column on Windows and macOS: the scripting hosts (arix, ariglx, arisrvx)
-          # embed CPython 3.12, so they and the pycvc-cp312 they import are built here, as the
-          # linux cp312 job builds them. Each rebuilds libcvc (and on Windows cvcGL) to link against
+          # The cp312 column on linux arm64, Windows and macOS: the scripting hosts (arix, ariglx,
+          # arisrvx) embed CPython 3.12, so they and the pycvc-cp312 they import are built here, as
+          # the linux x86_64 cp312 job builds them (arm64 through the same Linux steps). Each rebuilds libcvc (and on Windows cvcGL) to link against
           # and publishes neither: the `matrix.pyver == '311'` guards keep that to the base jobs.
           # The macOS rows have the base rows' runners and floors, Intel experimental as there.
+          - config: release
+            pyver: "312"
+            target: { os: ubuntu-22.04-arm, platform: linux, arch: arm64, experimental: true }
           - config: release
             pyver: "312"
             target: { os: windows-2022, platform: windows, arch: x86_64 }
