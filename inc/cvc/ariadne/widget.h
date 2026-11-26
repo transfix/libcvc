@@ -262,6 +262,10 @@ struct TextRunSpec {
   bool operator==(const TextRunSpec &) const = default;
 };
 
+// §5.3 a `state:` block's seeds, in document order: each a path (relative to the prefix it is
+// written under, or app-root-absolute with a leading '/') and the text written there.
+using StateSeeds = std::vector<std::pair<std::string, std::string>>;
+
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
@@ -614,6 +618,10 @@ struct Widget {
   // them. A seed, not a per-frame action: it does not re-run on a reconcile. Only on a mount
   // wrapper; empty otherwise.
   std::string init_script;
+
+  // §12 load: the mounted fragment's own `state:` seeds (§5.3), written at the mount's sub-prefix
+  // just before its init: runs, and like it once. Only on a mount wrapper; empty otherwise.
+  StateSeeds state_seeds;
 
   // §12 load: the mounted fragment's own on_tick: body. The Runtime runs it as one resident per
   // mount, chrooted to the sub-prefix with the mount's functions, woken once per drain like the

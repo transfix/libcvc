@@ -4351,6 +4351,74 @@ windows: [ { window: W, children: [] } ]
   EXPECT_NE(r.init_script.find("state-set"), std::string::npos);
 }
 
+// state: (§5.3): flattened to (path, text) in document order, every value as it is spelled.
+TEST(AriadneState, BlockFlattenedInOrder) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+state:
+  run:
+    world: data
+    crop: 600
+    ratio: 1.50
+    deep: { er: x }
+  view.camera: follow
+  /app.theme: dark
+  pos: [1, 2.5, -3]
+  none: []
+  empty:
+  quoted: "a: b"
+  flag: yes
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const StateSeeds want = {{"run.world", "data"},
+                           {"run.crop", "600"},
+                           {"run.ratio", "1.50"},
+                           {"run.deep.er", "x"},
+                           {"view.camera", "follow"},
+                           {"/app.theme", "dark"},
+                           {"pos", "1,2.5,-3"},
+                           {"none", ""},
+                           {"empty", ""},
+                           {"quoted", "a: b"},
+                           {"flag", "yes"}};
+  EXPECT_EQ(r.state_seeds, want);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("state:"), std::string::npos) << w;
+}
+
+TEST(AriadneState, BadEntriesWarnAndAreLeftOut) {
+  SKIP_WITHOUT_YAML();
+  LoadResult list = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nstate: [a, b]\n");
+  ASSERT_TRUE(list.ok) << list.error;
+  EXPECT_TRUE(list.state_seeds.empty());
+  EXPECT_TRUE(has_warning(list, "state: is a map of state keys to their values"));
+  LoadResult none = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nstate:\n");
+  ASSERT_TRUE(none.ok) << none.error;
+  EXPECT_TRUE(none.state_seeds.empty());
+  EXPECT_FALSE(has_warning(none, "state:")); // an empty block seeds nothing, and is no mistake
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+state:
+  run:
+    /abs: 1
+    ok: 2
+  a..b: 3
+  trailing.: 4
+  mixed: [1, { b: 2 }]
+  twice: { a: 1 }
+  twice.a: 2
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const StateSeeds want = {{"run.ok", "2"}, {"twice.a", "1"}, {"twice.a", "2"}};
+  EXPECT_EQ(r.state_seeds, want);
+  EXPECT_TRUE(has_warning(r, "state: 'run./abs' is not a state path"));
+  EXPECT_TRUE(has_warning(r, "state: 'a..b' is not a state path"));
+  EXPECT_TRUE(has_warning(r, "state: 'trailing.' is not a state path"));
+  EXPECT_TRUE(has_warning(r, "state: 'mixed': a list's items are scalars"));
+  EXPECT_TRUE(has_warning(r, "state: 'twice.a' is given twice — the later value is used"));
+}
+
 // tests: (`ari test`): name -> program, captured in document order and never run by the loader.
 TEST(AriadneTests, BlockCapturedInOrder) {
   SKIP_WITHOUT_YAML();

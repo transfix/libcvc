@@ -741,6 +741,11 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
   return true;
 }
 
+void seed_state(cvc::app &app, const std::string &prefix, const StateSeeds &seeds) {
+  for (const auto &[path, value] : seeds) // a write through a link hole reaches its target
+    write<std::string>(app, resolve_bind(prefix, path), value);
+}
+
 // The read lane's builtins (read_lane_builtins, ariadne.h): what a reactive slot's predicate may
 // call, and where a LaneProcess's `allow` starts.
 namespace {
@@ -2945,10 +2950,14 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // Plant the mount's parent-scope holes once, BEFORE emitting the fragment that reads them.
     if (!w.links.empty() && wired_mounts.insert(sub_prefix).second)
       wire_holes(parent_prefix, sub_prefix, w.links);
-    // Run the fragment's init: once (after its holes exist, so init may seed through them). Kept
-    // in ran_inits, NOT cleared on reconcile — a one-shot seed, never re-run per frame/rebuild.
-    if (!w.init_script.empty() && ran_inits.insert(sub_prefix).second)
-      run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
+    // Run the fragment's init: once (after its holes exist, so init may seed through them), its
+    // state: seeds (§5.3) just before. Kept in ran_inits, NOT cleared on reconcile — a one-shot
+    // seed, never re-run per frame/rebuild.
+    if ((!w.state_seeds.empty() || !w.init_script.empty()) && ran_inits.insert(sub_prefix).second) {
+      seed_state(app, sub_prefix, w.state_seeds);
+      if (!w.init_script.empty())
+        run_mount_init(sub_prefix, (w.functions ? w.functions->prelude : "") + w.init_script);
+    }
     if (!w.tick_script.empty())
       ensure_mount_tick(sub_prefix, w); // after its init:, so the first tick sees the seed
     // §5.25 the application's name, as its menu has it: the mount's name:, else the loaded
@@ -5750,7 +5759,8 @@ void Runtime::Impl::quit_app(const std::string &scope) {
 }
 
 // §5.25 Restart: Quit, then a full reset. Its state is dropped, its notifications too, and it
-// starts again as when it was first loaded: its holes planted, its init: run, its on_tick: started.
+// starts again as when it was first loaded: its holes planted, its state: written (§5.3), its init:
+// run, its on_tick: started.
 void Runtime::Impl::restart_app(const std::string &scope) {
   quit_app(scope);
   const std::size_t dot = scope.rfind(cvc::state::SEPARATOR[0]);
