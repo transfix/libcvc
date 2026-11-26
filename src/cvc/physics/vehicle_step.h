@@ -92,6 +92,9 @@ private:
     std::vector<double> water_depth, water_drag;
     vec3 water_force;
     bool flooded = false;
+    // With a flood_area: the water in the cabin and engine bay, m^3 and kg (state: saved while
+    // there is any).
+    double inside_volume = 0.0, inside_mass = 0.0;
     vehicle_readback readback;           // the last step's wheels
     vehicle_energy energy;               // the ledger since added
     double potential0 = 0.0;             // the potential energy at the first sample
@@ -101,9 +104,11 @@ private:
   // Wading: the water's push on the wheels and underbody for the step about to run, at the
   // chassis state `s` (centre of mass `com`) with each wheel's `steer`, into `force` / `torque`
   // (about com); sets each wheel's grip and the flooded engine, and records the readbacks. `t` is
-  // the field time. Returns whether any part was in water (with none, `force` and `torque` are
-  // left alone), and sets `moving` when that water flows (a current, waves). It reads only what
-  // save() keeps, so a restored world wades the same.
+  // the field time. With a flood_area it also floods or drains the cabin and engine bay over the
+  // step and adds the water inside's weight. Returns whether any part was in water or there is
+  // water inside (with neither, `force` and `torque` are left alone), and sets `moving` when that
+  // water flows (a current, waves) or the water inside rises or falls. It reads only what save()
+  // keeps, so a restored world wades the same.
   static bool wade(rt &v, const body_state &s, const vec3 &com, const std::vector<double> &steer,
                    const field_set &fields, const world_config &cfg,
                    const std::vector<material> &materials, double t, vec3 &force, vec3 &torque,

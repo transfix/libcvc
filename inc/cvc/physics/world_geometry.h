@@ -77,7 +77,8 @@ world_bodies add_world_geometry(world &w, const cvc::world::world_geometry &g,
                                 const std::vector<int> &nav_materials = {});
 
 // O20 (F6), the weather into physics: the friction a surface class has at a wetness w (0 dry,
-// 1 soaked), its dry mu run toward its wet one (surface_class::mu_wet).
+// 1 soaked), its dry mu run toward its wet one (surface_class::mu_wet), never above its dry one:
+// the water classes' mu_wet, above their mu, is their bed's under a fluid, not the rain's.
 double wet_friction(const cvc::world::surface_class &c, double wetness);
 // Set every material of `w` named after a class of `surfaces` (add_world_geometry names them so)
 // to its friction at `wetness`, its restitution and rolling resistance kept; the others are left

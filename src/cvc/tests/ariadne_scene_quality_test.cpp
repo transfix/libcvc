@@ -216,6 +216,7 @@ TEST(WaterQuality, EachTierDrawsNoMoreThanTheOneAbove) {
     EXPECT_LE(int(b.persistent_foam), int(a.persistent_foam)) << t;
     EXPECT_LE(int(b.wake), int(a.wake)) << t;
     EXPECT_LE(b.wake_cells, a.wake_cells) << t;
+    EXPECT_GE(b.wake_substep, a.wake_substep) << t; // a longer substep: fewer passes
     EXPECT_LE(b.cascades, a.cascades) << t;
     EXPECT_LE(b.spray, a.spray) << t;
     EXPECT_LE(b.spray_reach, a.spray_reach) << t;
@@ -231,9 +232,21 @@ TEST(WaterQuality, EachTierDrawsNoMoreThanTheOneAbove) {
   EXPECT_EQ(full.spray_reach, 1.0);
   const ari::WaterQuality least = ari::water_quality(ari::kQualityTiers - 1, 1.0);
   EXPECT_EQ(least.shade, 0.0);
-  EXPECT_FALSE(least.persistent_foam || least.wake);
+  EXPECT_FALSE(least.persistent_foam);
   EXPECT_EQ(least.cascades, 2);
   EXPECT_EQ(least.spray, 0.0);
+}
+
+// A slow machine (the browser's) sits at the last tiers, so the bodies' waves are drawn at every
+// tier, on the 64 m window from tier 1 down: without them nothing floating leaves a ring. The last
+// two step it in 1/30 s substeps, half the passes of 1/60.
+TEST(WaterQuality, TheWakeIsDrawnAtEveryTier) {
+  for (int t = 0; t < ari::kQualityTiers; ++t) {
+    const ari::WaterQuality q = ari::water_quality(t, 0.5);
+    EXPECT_TRUE(q.wake) << t;
+    EXPECT_EQ(q.wake_cells, t == 0 ? 256 : 128) << t;
+    EXPECT_DOUBLE_EQ(q.wake_substep, t >= 3 ? 1.0 / 30.0 : 1.0 / 60.0) << t;
+  }
 }
 
 TEST(WaterQuality, TheScaleScalesTheDistancesAndIsClamped) {

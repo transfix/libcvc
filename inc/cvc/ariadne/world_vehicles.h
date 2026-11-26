@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/ariadne/people_walk.h>        // walker_car: footprints() (OW7d)
 #include <cvc/ariadne/vehicle_drive.h>      // dynamic_drive
 #include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h>        // vehicle_archetype
@@ -360,10 +361,11 @@ struct entity_plant {
   double rear_x = 0.0;        // the rear axle along the body from the chassis's centre (m)
   bool placed = false;        // in the world; nothing below is set otherwise
   // The model that stands for the plant:
-  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact`. jolt: the four-wheel
-  //             model with the vehicle's own numbers (nav_plant::dyn4_si_of), its pose and twist
-  //             read from the chassis, its heave 0 and its drive state 0 (not `exact`).
-  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact`.
+  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact` unless it waded in
+  //             the last tick (dyn_wading.h). jolt: the four-wheel model with the vehicle's own
+  //             numbers (nav_plant::dyn4_si_of), its pose and twist read from the chassis, its
+  //             heave 0 and its drive state 0 (not `exact`).
+  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact` unless it waded.
   //   bike      kinematic: nav's bicycle, `exact`; `bike_state` holds the rear axle, the heading
   //             and the speed (as vx), `limits` its limits. dynamicboat: the bicycle nav plans the
   //             boat with (physics::dyn_boat_plant drives it; not `exact`).
@@ -568,6 +570,9 @@ public:
   // default. A vehicle a participant or a gym commands is its commander's to brake.
   void set_brake_for_people(bool on);
   bool brakes_for_people() const;
+  // Each placed vehicle as a walker sees it (people_walk.h's walker_car: its chassis's centre,
+  // heading, half-length, half-width and velocity), for a scripted person to walk round (OW7d).
+  std::vector<walker_car> footprints() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense

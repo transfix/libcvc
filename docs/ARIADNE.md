@@ -2003,7 +2003,8 @@ overrides): tier 1 draws the full shading and the persistent foam to half their 
 wake's window at half its reach (64 m), and half the spray to half its reach; 2 also the shading to
 a quarter, the short cascade and the far grid's waves to half, and no persistent foam (the
 whitecaps alone take Monahan's share) and no spray; 3 the
-plain Fresnel sea, no wake, and two cascades; 4 the far grid's waves to a quarter.
+plain Fresnel sea and two cascades; 4 the far grid's waves to a quarter. The wake is drawn at every
+tier, on the 64 m window below tier 0, in 1/30 s substeps at 3 and 4 (half the passes).
 
 **Swarms.** A `nav_swarm` node is a swarm of navigating vehicles: libcvc's navigator
 (`cvc::nav::sim_world`) driving hundreds of them across a city toward colour-coded rally points with no

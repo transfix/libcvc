@@ -23,7 +23,8 @@
 //   (9) the same run twice, and a save / restore / re-run, give the same hash;
 //  (10) wading (vehicle_desc::wading): a Humvee in 0.5 m of water keeps its traction and slows at
 //       its tires' and underbody's drag; past its fording depth its engine floods and it stays on
-//       the bottom; a current and a swell push it; standing water soaks and aquaplanes its tires.
+//       the bottom; a current and a swell push it; standing water soaks and aquaplanes its tires;
+//       with a flood_area its cabin floods over seconds and drains as it drives out.
 // Jolt only; the refusals run on the null backend too.
 
 #include <algorithm>
@@ -1082,6 +1083,21 @@ TEST(PhysicsVehicle, TheTreeDrivesTunesAndReadsAPublishedVehicle) {
   set_tree(a, "physics.vehicles.truck.tuning.engine_friction_curve", "none");
   b.step();
   EXPECT_TRUE(w.get_vehicle(v).engine_friction_curve.empty());
+  // Wading's knobs, seeded with the Humvee's: the deep-water fording kit from the tree; an
+  // invalid value is ignored. Dry, its engine runs and no water pushes it.
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.wading.fording_depth"),
+            vehicle_desc::humvee().wading.fording_depth);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.tuning.wading.tire_pressure"),
+            vehicle_desc::humvee().wading.tire_pressure);
+  set_tree(a, "physics.vehicles.truck.tuning.wading.fording_depth", "1.52");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).wading.fording_depth, 1.52);
+  set_tree(a, "physics.vehicles.truck.tuning.wading.fording_depth", "-1");
+  b.step();
+  EXPECT_EQ(w.get_vehicle(v).wading.fording_depth, 1.52);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.engine_flooded"), 0.0);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.water_force.z"), 0.0);
+  EXPECT_EQ(tree_num(a, "physics.vehicles.truck.wheels.0.water_depth"), 0.0);
   // Pedals.
   set_tree(a, "physics.vehicles.truck.controls.hand_brake", "1");
   b.step();
@@ -1716,4 +1732,198 @@ TEST(PhysicsVehicle, WadingIsStateAndItsValuesAreChecked) {
   d.wading.wheel_drag = 0.9;
   EXPECT_NO_THROW(a.set_vehicle(va, d));
   EXPECT_TRUE(a.vehicle_state(va).engine_flooded);
+}
+
+// Flooding over time (wading_desc::flood_area): a Humvee with hard doors shut (0.1 m^2 of seals,
+// vents and drains, a test value) put into 0.7 m of still water, which stands 0.13 m over its
+// box's bottom. Sealed at first, the box floats it a little: its tires carry less than once it has
+// flooded, and it rides higher. The water comes in over seconds, at the orifice's rate, and once
+// the level inside meets the outside's its tires carry what the flooded-at-once model's do.
+// Driven out onto dry land it is heavier by the water it holds, which drains out over seconds
+// until its tires carry its dry weight again. The water inside is state (save, restore, replay)
+// and the ledger balances with its weight's work in `fields`.
+TEST(PhysicsVehicle, AHardDooredHumveeFloodsOverSecondsAndDrainsOnTheWayOut) {
+  REQUIRE_JOLT();
+  const double depth = 0.7, edge = 15.0;
+  vehicle_desc d = vehicle_desc::humvee();
+  d.wading.flood_area = 0.1;
+  const auto build = [&](world &w, const vehicle_desc &desc, bool wet) {
+    flat_ground(w, 0.9);
+    if (wet)
+      add_water(w, -50.0, edge, depth);
+    const vehicle_id v = w.add_vehicle(desc, {0.0, 0.0, 1.2});
+    w.drive(v, {});
+    return v;
+  };
+  // Dry, and flooded at once (#1348's model), for reference.
+  vehicle_desc at_once = d;
+  at_once.wading.flood_area = 0.0;
+  world dry_w(jolt_config()), once_w(jolt_config());
+  const vehicle_id dry_v = build(dry_w, d, false), once_v = build(once_w, at_once, true);
+  dry_w.step(1000);
+  once_w.step(1000);
+  const vehicle_state dry = dry_w.vehicle_state(dry_v), once = once_w.vehicle_state(once_v);
+
+  world w(jolt_config());
+  const vehicle_id v = build(w, d, true);
+  const double dt = w.config().fixed_dt;
+  std::vector<vehicle_state> s; // every 0.5 s
+  for (int i = 0; i <= 120; ++i) {
+    s.push_back(w.vehicle_state(v));
+    w.step(static_cast<int>(0.5 / dt));
+  }
+  const vehicle_state &early = s[2], &late = s.back(); // at 1 s and 60 s
+  const double plan = (1.0 - d.wading.displacement) * 4.0 * d.half_extents.x * d.half_extents.y;
+  const double outside = depth - (late.body.position.z - d.half_extents.z); // over its bottom
+  std::printf("  flooded at once: tires carry %.0f N, chassis at %.3f m\n", total_load(once),
+              once.body.position.z);
+  for (int k : {1, 2, 4, 10, 20, 40, 60, 120})
+    std::printf("  %5.1f s: %.3f m^3 inside, tires carry %.0f N, chassis at %.3f m\n", 0.5 * k,
+                s[k].water_inside, total_load(s[k]), s[k].body.position.z);
+  // The orifice's fill, dh/dt = k sqrt(H - h), over each half second from the water over its
+  // bottom then (H falls as the filling body settles): sqrt(H - h) closes at k / 2 a second.
+  const double kk = 0.6 * d.wading.flood_area * std::sqrt(2.0 * kG) / plan;
+  std::vector<double> model(s.size(), 0.0); // m^3
+  for (std::size_t k = 1; k < s.size(); ++k) {
+    const double H = depth - (s[k - 1].body.position.z - d.half_extents.z), h = model[k - 1] / plan;
+    const double r = std::max(0.0, std::sqrt(std::fabs(H - h)) - 0.5 * kk * 0.5);
+    model[k] = std::max(0.0, H > h ? H - r * r : H + r * r) * plan;
+  }
+  std::printf("  %.3f m of water over its bottom at the end: %.3f m^3 inside at 5 s (orifice "
+              "model %.3f), %.3f at 10 s (%.3f), %.3f at 60 s (level %.3f)\n",
+              outside, s[10].water_inside, model[10], s[20].water_inside, model[20],
+              late.water_inside, outside * plan);
+  // It fills while the body settles; then, level, the water follows the body's last millimetres.
+  for (std::size_t k = 1; k <= 40; ++k)
+    EXPECT_GT(s[k].water_inside, s[k - 1].water_inside) << "it fills, at " << 0.5 * k << " s";
+  EXPECT_LT(early.water_inside, 0.25 * late.water_inside) << "it fills over seconds, not at once";
+  EXPECT_LT(total_load(early), total_load(once) - 3000.0) << "sealed at first, it floats a little";
+  EXPECT_GT(early.body.position.z, once.body.position.z + 0.01) << "and rides higher";
+  // (The model's H is the half second's first: the body sinks as it fills, so it runs behind.)
+  EXPECT_NEAR(s[10].water_inside, model[10], 0.1 * model[10]);
+  EXPECT_NEAR(s[20].water_inside, model[20], 0.1 * model[20]);
+  EXPECT_NEAR(late.water_inside, outside * plan, 0.03 * outside * plan) << "level inside and out";
+  EXPECT_NEAR(total_load(late), total_load(once), 0.03 * total_load(once))
+      << "flooded, the water lifts what the flooded-at-once model's does";
+  EXPECT_NEAR(late.water_inside_mass, kRho * late.water_inside, 1e-6 * kRho * late.water_inside);
+
+  // Out onto dry land past x = edge, and stop there.
+  for (int i = 0; i < 6000; ++i) {
+    const vehicle_state n = w.vehicle_state(v);
+    const bool out = n.body.position.x > edge + 10.0;
+    if (out && std::fabs(n.speed) < 0.05)
+      break;
+    w.drive(v, {0.0, out ? -3.0 : 1.0});
+    w.step();
+  }
+  w.drive(v, {});
+  w.step(50);
+  const vehicle_state landed = w.vehicle_state(v);
+  ASSERT_GT(landed.body.position.x, edge + 5.0) << "it drove out";
+  ASSERT_GT(landed.water_inside, 0.0);
+  const double carried = landed.water_inside_mass * kG;
+  std::printf("  on land: %.3f m^3 still inside, tires carry %.0f N (%.0f dry, + %.0f N of "
+              "water)\n",
+              landed.water_inside, total_load(landed), total_load(dry), carried);
+  EXPECT_GT(total_load(landed), total_load(dry) + 0.5 * carried) << "heavier coming out";
+  EXPECT_NEAR(total_load(landed), total_load(dry) + carried, 0.05 * carried + 300.0);
+
+  // The water inside is state: a save while it drains restores, and replays to the same hash.
+  const std::vector<std::uint8_t> mid = w.save();
+  world c(jolt_config());
+  const vehicle_id vc = build(c, d, true);
+  c.restore(mid);
+  EXPECT_DOUBLE_EQ(c.vehicle_state(vc).water_inside, landed.water_inside);
+  w.step(300);
+  c.drive(vc, {});
+  c.step(300);
+  EXPECT_EQ(c.state_hash(), w.state_hash());
+
+  // It drains out of the same openings, over seconds, to nothing.
+  const double h0 = landed.water_inside / plan;
+  const double drain = 2.0 * std::sqrt(h0) / kk; // s, the orifice's
+  w.step(static_cast<int>((drain + 5.0) / dt));
+  const vehicle_state drained = w.vehicle_state(v);
+  std::printf("  drained in %.1f s (orifice): %.4f m^3 inside, tires carry %.0f N\n", drain,
+              drained.water_inside, total_load(drained));
+  EXPECT_GT(drain, 5.0);
+  EXPECT_EQ(drained.water_inside, 0.0);
+  EXPECT_EQ(drained.water_inside_mass, 0.0);
+  EXPECT_NEAR(total_load(drained), total_load(dry), 0.01 * total_load(dry));
+  // The ledger balances, the water's weight and buoyancy in `fields`.
+  const vehicle_energy &e = drained.energy;
+  std::printf("  ledger: supplied %.0f J, fields %.0f J, residual %.0f J\n", e.supplied, e.fields,
+              e.residual);
+  EXPECT_LT(std::fabs(e.residual), 0.02 * (e.supplied + std::fabs(e.fields)));
+
+  // The area is checked; whether the body floods at once is fixed when it is added, the area not.
+  vehicle_desc bad = d;
+  bad.wading.flood_area = -0.1;
+  EXPECT_THROW(w.add_vehicle(bad, {0, 20, 1.2}), cvc::physics_error);
+  vehicle_desc t = w.get_vehicle(v);
+  t.wading.flood_area = 0.0;
+  EXPECT_THROW(w.set_vehicle(v, t), cvc::physics_error);
+  t.wading.flood_area = 0.3; // a door opened
+  EXPECT_NO_THROW(w.set_vehicle(v, t));
+}
+
+// A lake bed: the still water a data node's water_level: lays over a generated world
+// (ARIADNE_WORLDS 18.8), over ground the world classes water_deep. That class's mu, 0.10, stands
+// for the water where no fluid covers it; under the water a wading tire stands on the bed, soaked
+// mud (the class's mu_wet, 0.20). A Humvee braking on the bed under 0.5 m of water uses 0.20 at its
+// tires and stops as it does on a ground of friction 0.20 under the same water; with no water over
+// the class it keeps 0.10, and the rain does not raise it.
+TEST(PhysicsVehicle, OnALakeBedItBrakesWithTheBedsWetFriction) {
+  REQUIRE_JOLT();
+  const cvc::world::surface_registry &reg = cvc::world::surface_registry::builtin();
+  std::uint16_t deep = 0, shallow = 0;
+  ASSERT_TRUE(reg.find("water_deep", deep));
+  ASSERT_TRUE(reg.find("water_shallow", shallow));
+  const cvc::world::surface_class &c = reg[deep];
+  // As add_world_geometry makes a class's material.
+  const material bed{c.name, c.mu, c.restitution, c.rolling_resistance, -1, c.mu_wet};
+  const material mud{"mud bed", 0.20f, 0.0f, c.rolling_resistance};
+  const double depth = 0.5, dt = 0.01;
+  // From 4 m/s on the brakes in full: the deceleration over 0.5 s once they hold, and the mu the
+  // tires used then.
+  const auto brake = [&](const material &m, bool wet, double &mu) {
+    world w(jolt_config());
+    body_desc g;
+    g.shape = box{{1500.0, 1500.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.position = {0.0, 0.0, -0.5};
+    g.material = w.add_material(m);
+    w.add_body(g);
+    if (wet)
+      add_water(w, -300.0, 300.0, depth);
+    const vehicle_id v = settled_humvee(w, -250.0, 0.0);
+    accelerate_to(w, v, 4.0);
+    vehicle_controls stop;
+    stop.brake = 1.0;
+    w.set_controls(v, stop);
+    w.step(20);
+    const vehicle_state s0 = w.vehicle_state(v);
+    w.step(50);
+    const vehicle_state s1 = w.vehicle_state(v);
+    mu = 0.0;
+    for (const wheel_state &ws : s0.wheels)
+      mu += ws.friction / s0.wheels.size();
+    return (s0.speed - s1.speed) / (50 * dt);
+  };
+  double mu_bed = 0.0, mu_mud = 0.0, mu_dry = 0.0;
+  const double a_bed = brake(bed, true, mu_bed), a_mud = brake(mud, true, mu_mud);
+  const double a_dry = brake(bed, false, mu_dry);
+  std::printf("  lake bed under %.1f m: tires use mu %.3f, decel %.2f m/s^2; a 0.20 ground under "
+              "it: %.3f, %.2f; the class with no water over it: %.3f, %.2f\n",
+              depth, mu_bed, a_bed, mu_mud, a_mud, mu_dry, a_dry);
+  EXPECT_NEAR(mu_bed, c.mu_wet, 0.01) << "the bed's soaked mud, not the class's 0.10";
+  EXPECT_NEAR(a_bed, a_mud, 0.05 * a_mud) << "it brakes as on a 0.20 ground";
+  EXPECT_NEAR(mu_dry, c.mu, 0.005) << "with no water over it the class keeps its mu";
+  EXPECT_GT(a_bed, 1.5 * a_dry);
+  // The bed's values (Hakanson and Jansson): mud in the deep, sand or gravel in the shallows.
+  EXPECT_FLOAT_EQ(reg[deep].mu_wet, 0.20f);
+  EXPECT_FLOAT_EQ(reg[shallow].mu_wet, 0.45f);
+  // The rain soaks ground; it does not raise the water classes to their beds.
+  for (const std::uint16_t k : {deep, shallow})
+    EXPECT_DOUBLE_EQ(cvc::physics::wet_friction(reg[k], 1.0), static_cast<double>(reg[k].mu));
 }

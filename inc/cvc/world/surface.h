@@ -77,7 +77,10 @@ struct surface_class {
   float rolling_resistance = 0.01f;
   // The same friction soaked by rain (O20, F6: a weather's wetness runs mu toward it,
   // cvc::physics::apply_wetness): wet pavement about 0.55, wet grass 0.3; indoor classes and
-  // those already wet keep their mu.
+  // those already wet keep their mu. Under standing water a wading tire finds it too (vehicle.h).
+  // The water classes are the exception: their mu stands for the water itself (a world without a
+  // fluid over them), and their mu_wet, above it, is their bed's under a fluid, which the rain
+  // does not raise them to.
   float mu_wet = 1.0f;
 };
 

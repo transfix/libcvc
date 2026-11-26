@@ -104,6 +104,8 @@ check(ents.spawn("tank") == 0 and "tank" in ents.why(), "an archetype that is no
 frames(rt, 60)
 e = by_id(ents, a)
 check(e["controller"] == "external" and e["name"] == "lead" and e["placed"], f"listed: {e}")
+check(e["wading"]["enabled"] and e["wading"]["fording_depth"] > 0.0,
+      f"a Humvee wades, to its fording depth: {e['wading']}")
 check(abs(e["speed"]) < 0.05, f"it holds still ({e['speed']})")
 check(pycvc.state_get(app, "w.entities.1.command.by") == "hold", "commanded to hold")
 x0, yaw0 = e["x"], e["yaw"]

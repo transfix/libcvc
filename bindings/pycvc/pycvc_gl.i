@@ -71,6 +71,10 @@ if _sys.platform == "win32":
 #include <cvc/geometry/height_field.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
+// pycvc_physics.i's shared_ptr hierarchies, %import'd from pycvc.i: the type table casts a
+// shore_grid_mask to its wake_shore and a wind_flow to its flow_velocity here too.
+#include <cvc/physics/flow_velocity.h>
+#include <cvc/physics/shore_mask.h>
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands

@@ -13,7 +13,8 @@ Checks:
      restored snapshot;
   6. torque mode saturates at the motors' ranges; run_mujoco_trial gives the C++ trial's numbers
      as a dict, and the Go2 recovers on a 10 degree slope;
-  7. step() releases the GIL: another Python thread runs while the robot steps;
+  7. step() releases the GIL: another Python thread runs while the robot steps; a wind
+     (set_wind) pushes it along the wind, and still air not at all;
   8. bad input raises: an unknown mode, the wrong number of commands, energy on a robot built
      without it.
 CVC_MUJOCO_MENAGERIE_DIR names the Menagerie (<prefix>/share/mujoco-menagerie; CMake sets it). Script
@@ -217,6 +218,18 @@ during = spins - before
 spinning = False
 th.join()
 check(during > 1000, f"another thread ran while the robot stepped: {during} spins")
+
+# ── 7b. the wind: the scene's air (a pycvc.wind_flow) pushes the robot along it ──
+if hasattr(go2, "set_wind"):
+    go2.reset()
+    go2.set_wind(pycvc.wind_flow(speed_mps=15.0, dir_rad=math.pi / 2, gustiness=0.0))
+    go2.step(10)
+    f = go2.wind_force()
+    check(f[1] > 1.0 and abs(f[0]) < 0.01 * f[1], f"a 15 m/s wind along +y pushes it: {f}")
+    go2.set_wind(None)
+    go2.step(1)
+    check(go2.wind_force() == (0.0, 0.0, 0.0), "still air pushes nothing")
+    print(f"15 m/s wind: {f[1]:.2f} N along it")
 
 # ── 8. bad input ──
 expect_raises(lambda: go2.set_mode("walk"), "an unknown mode")

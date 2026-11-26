@@ -5854,6 +5854,39 @@ TEST(AriadneWorldGym, PeopleAreInTheGymsWorld) {
     EXPECT_LT(pushed, 0.05);
     EXPECT_TRUE(obs.reached[0]) << "and got to its goal";
   }
+  // A car parked across a walking person's way (OW7d): they walk round its end and on, touching
+  // it never (people_walk.h); one who walked straight on would push into it and stop there.
+  {
+    gym_options o;
+    entity_spec parked;
+    parked.controller = "none";
+    parked.placed = true;
+    parked.x = 0.0;
+    parked.y = 0.0;
+    parked.yaw = 0.5 * 3.14159265358979323846; // across the way, along y
+    o.agents.push_back(parked);
+    gym_person p;
+    p.x = -15.0;
+    p.y = 0.3;
+    p.walk = 1.2;
+    o.people.push_back(p);
+    WorldGym gym(doc, o);
+    gym_observation obs = gym.reset(1);
+    bool touched = false;
+    double off = 0.0;
+    for (int i = 0; i < 400; ++i) {
+      const gym_step s = gym.step({kNaN}, {kNaN});
+      touched = touched || s.observation.hit_person[0] != 0;
+      obs = s.observation;
+      off = std::max(off, std::fabs(obs.person_y[0] - 0.3));
+    }
+    std::printf("  OW7D a person walking at a parked car across their way: past it to x %.1f, "
+                "%.2f m off their line at most, touched it %s\n",
+                obs.person_x[0], off, touched ? "yes" : "no");
+    EXPECT_GT(obs.person_x[0], 10.0) << "round it and on";
+    EXPECT_FALSE(touched) << "never touching it";
+    EXPECT_LT(off, 6.0) << "round its end, not far off their way";
+  }
   // Without the holon: no people.
   {
     gym_options o = agents(1);

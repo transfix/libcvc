@@ -4382,7 +4382,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     if (g->four) {
       const ph::dyn_4w_plant &pl = *g->four;
       p.model = "dyn4";
-      p.exact = true;
+      p.exact = !pl.waded(i); // in water its drag and grip changed each substep (dyn_wading.h)
       p.dyn4 = pl.params(i);
       p.dyn4_state = pl.body(i);
       p.limits = pl.step_limits(i);
@@ -4396,7 +4396,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     } else if (g->bike) {
       const ph::dyn_bike_plant &pl = *g->bike;
       p.model = "dyn_bike";
-      p.exact = true;
+      p.exact = !pl.waded(i);
       p.bike = pl.params(i);
       p.bike_state = pl.body(i);
       p.limits = pl.step_limits(i);
@@ -4551,6 +4551,26 @@ ph::body_state entity_ride(const entity_info &e, const ph::world *world) {
     s.angular_velocity = b.angular_velocity;
   }
   return s;
+}
+
+std::vector<walker_car> WorldVehicles::footprints() const {
+  const impl &d = *_impl;
+  std::vector<walker_car> out;
+  for (const impl::entity &e : d.ents) {
+    const entity_info i = d.info(e);
+    if (!i.placed)
+      continue;
+    walker_car c;
+    c.x = i.x;
+    c.y = i.y;
+    c.yaw = i.yaw;
+    c.half_length = e.desc.half_extents.x;
+    c.half_width = e.desc.half_extents.y;
+    c.vx = i.vx;
+    c.vy = i.vy;
+    out.push_back(c);
+  }
+  return out;
 }
 
 std::vector<entity_info> WorldVehicles::entities() const {
