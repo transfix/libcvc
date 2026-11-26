@@ -1115,6 +1115,15 @@ if(TARGET net_engine_test)
       GTest::gtest
       GTest::gtest_main
   )
+  # TLS (N3): the test's clients and certificates are OpenSSL's, as the engine's TLS is; the
+  # certificates beside arisrv's tests (src/arisrv/tests/tls) are its fixed ones.
+  get_property(_net_tls GLOBAL PROPERTY CVC_NET_HAVE_TLS)
+  find_package(OpenSSL QUIET COMPONENTS SSL Crypto)
+  if(_net_tls AND TARGET OpenSSL::SSL)
+    target_link_libraries(net_engine_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(net_engine_test PRIVATE CVC_NET_TEST_TLS=1
+      "CVC_NET_TEST_TLS_DIR=\"${CMAKE_SOURCE_DIR}/src/arisrv/tests/tls\"")
+  endif()
 endif()
 
 target_link_libraries(e2ee_test
