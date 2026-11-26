@@ -848,6 +848,13 @@ struct FtxuiBackend::Impl {
     std::vector<std::string> windows;                           // windows, in emit order
     std::set<std::string> closable;                             // windows drawn with an [x]
     std::set<std::string> maximizable;                          // ... with a maximize marker
+    // §5.9 the windows the user may resize by an edge or a corner, and each one's authored min:
+    // and max: in cells (0 and INT_MAX: none), which a resize keeps to.
+    std::set<std::string> resizable;
+    struct Bounds {
+      int min_w = 0, max_w = INT_MAX, min_h = 0, max_h = INT_MAX;
+    };
+    std::map<std::string, Bounds> bounds;
     std::string menu_popup;                                     // dropdown drawn, if any
     std::string combo_popup;                                    // combo list drawn, if any
     // §5.30 the document's context_menu: areas: each window's own (its area's key), the
@@ -1126,6 +1133,17 @@ struct FtxuiBackend::Impl {
   std::string drag_win;
   int drag_dx = 0, drag_dy = 0;
   bool drag_from_max = false; // §5.9 drag_win was maximized when its title bar was pressed
+  // §5.9 a window being resized by an edge or a corner: the edges that follow the pointer, and the
+  // window's outer box and the pointer's cell when the press came.
+  struct ResizeDrag {
+    std::string win;
+    bool left = false, right = false, bottom = false;
+    int x0 = 0, y0 = 0, w0 = 0, h0 = 0; // the window's top-left cell and outer size
+    int px = 0, py = 0;                 // where the press was
+    bool from_max = false;              // it was maximized when the press came
+    bool moved = false;                 // the pointer has left the press's cell: it resizes now
+  };
+  ResizeDrag resize_drag;
   std::map<std::string, Edit> edits;
   std::map<std::string, TextView> text_views;
   std::string wheel_id;  // the item the wheel last turned over (a text_view takes it) ...
@@ -2235,6 +2253,9 @@ struct FtxuiBackend::Impl {
       if (seam_drag.active) {
         drag_seam(seam_drag.rows ? e.y : e.x);
         consumed = true;
+      } else if (!resize_drag.win.empty()) {
+        resize_to(e.x, e.y);
+        consumed = true;
       } else if (!drag_win.empty()) {
         Win &w = windows[drag_win];
         if (drag_from_max) {
@@ -2259,6 +2280,10 @@ struct FtxuiBackend::Impl {
     case TermEvent::Mouse::Release:
       if (seam_drag.active) {
         seam_drag.active = false;
+        consumed = true;
+      } else if (!resize_drag.win.empty()) {
+        resize_to(e.x, e.y);
+        resize_drag.win.clear();
         consumed = true;
       } else if (!drag_win.empty()) {
         drag_win.clear();
@@ -2341,12 +2366,30 @@ struct FtxuiBackend::Impl {
         max_win = win;
         return;
       }
-      if (y == boxes["win|" + win].y_min) { // the title bar: a move (out of maximized, too)
+      const fx::Box wb = boxes["win|" + win];
+      if (y == wb.y_min) { // the title bar: a move (out of maximized, too)
         const Win &w = windows[win];
         drag_win = win;
         drag_dx = x - w.sx;
         drag_dy = y - w.sy;
         drag_from_max = w.maximized;
+        return;
+      }
+      // §5.9 its left, right or bottom edge, or a bottom corner: a resize. The size the user
+      // leaves it at is its own (persisted); a maximized window comes out of it at that size.
+      if (shown.resizable.count(win) && (x == wb.x_min || x == wb.x_max || y == wb.y_max)) {
+        resize_drag = ResizeDrag{};
+        resize_drag.win = win;
+        resize_drag.left = x == wb.x_min;
+        resize_drag.right = x == wb.x_max && !resize_drag.left;
+        resize_drag.bottom = y == wb.y_max;
+        resize_drag.x0 = wb.x_min;
+        resize_drag.y0 = wb.y_min;
+        resize_drag.w0 = wb.x_max - wb.x_min + 1;
+        resize_drag.h0 = wb.y_max - wb.y_min + 1;
+        resize_drag.px = x;
+        resize_drag.py = y;
+        resize_drag.from_max = windows[win].maximized;
         return;
       }
     }
@@ -2380,6 +2423,44 @@ struct FtxuiBackend::Impl {
       if (win.empty())
         consumed = false; // the background's: RunOptions::background_input, then the document
     }
+  }
+
+  // §5.9 resize_drag's window, its edges at the pointer's cell (px, py): the right or left edge
+  // across, the bottom down; the other edges stay. It keeps to its min: and max:, at least a
+  // title bar's width and a row inside its frame, and to the screen. The size is the user's from
+  // the first move (Win::sized, persisted), and a maximized window comes out of it there.
+  void resize_to(int px, int py) {
+    ResizeDrag &r = resize_drag;
+    if (!r.moved && px == r.px && py == r.py)
+      return; // a press on the edge, not (yet) a drag
+    r.moved = true;
+    Win &w = windows[r.win];
+    if (r.from_max) {
+      r.from_max = false;
+      max_win = r.win; // its next begin_window ends the maximize; it stays where it was drawn
+      w.maximized = false;
+    }
+    Walk::Bounds lim;
+    if (const auto b = shown.bounds.find(r.win); b != shown.bounds.end())
+      lim = b->second;
+    const int min_w = std::max(8, lim.min_w), min_h = std::max(3, lim.min_h);
+    const int dx = px - r.px, dy = py - r.py;
+    int x = r.x0, cols = r.w0;
+    if (r.left) { // the right edge stays put
+      const int right = r.x0 + r.w0 - 1;
+      cols = std::clamp(r.w0 - dx, min_w, std::max(min_w, std::min(lim.max_w, right + 1)));
+      x = std::max(0, right - cols + 1);
+    } else {
+      cols = std::clamp(r.right ? r.w0 + dx : r.w0, min_w,
+                        std::max(min_w, std::min(lim.max_w, term_w - x)));
+    }
+    const int rows = std::clamp(r.bottom ? r.h0 + dy : r.h0, min_h,
+                                std::max(min_h, std::min(lim.max_h, term_h - r.y0)));
+    w.x = w.sx = x;
+    w.y = w.sy = r.y0;
+    w.w = cols;
+    w.h = rows;
+    w.sized = true;
   }
 
   // A seam drag resizes the two tracks either side of it, keeping their sum (each at least 1 cell).
@@ -3022,6 +3103,7 @@ void FtxuiBackend::seed_window_geometry(const WindowGeom &g) {
 void FtxuiBackend::reset_layout() {
   m_->windows.clear();
   m_->drag_win.clear();
+  m_->resize_drag = Impl::ResizeDrag{};
 }
 
 bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &size,
@@ -3211,12 +3293,20 @@ void FtxuiBackend::end_window() {
     bar.push_back(fx::text("[x]") | fx::reflect(m.boxes["winx|" + f.id]));
     m.walk.closable.insert(f.id);
   }
+  if (f.resizable)
+    m.walk.resizable.insert(f.id);
+  m.walk.bounds[f.id] = Impl::Walk::Bounds{min_w, max_w, min_h, max_h};
   fx::Element el =
       fx::window(fx::hbox(std::move(bar)), body, holds_focus ? fx::HEAVY : fx::ROUNDED);
-  if (win_w)
+  if (win_w) {
     el = el | fx::size(fx::WIDTH, fx::EQUAL, win_w);
-  else if (min_w)
-    el = el | fx::size(fx::WIDTH, fx::GREATER_THAN, min_w);
+  } else {
+    // §5.8 its content's width: content that would stretch (a bordered group, a filler, a
+    // separator) takes the window's width rather than widening it to the screen's edge, as
+    // under ImGui's auto-fit.
+    el->ComputeRequirement();
+    el = el | fx::size(fx::WIDTH, fx::EQUAL, std::max(min_w, el->requirement().min_x));
+  }
   if (win_h)
     el = el | fx::size(fx::HEIGHT, fx::EQUAL, win_h);
   else if (min_h)
