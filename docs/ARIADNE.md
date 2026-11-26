@@ -6640,6 +6640,9 @@ shell.apps.<id>.args.<name>       its args: substitutions, as a load:'s args: ar
 shell.apps.<id>.budget.steps      its budget, when not its principal's default (below)
 shell.apps.<id>.budget.time
 shell.apps.<id>.budget.memory
+shell.apps.<id>.net_policy        a local application's own network (§10.3 "Per principal"):
+shell.apps.<id>.credential_store    a --net-policy file, a --credential-store and an
+shell.apps.<id>.e2ee_store          --e2ee-store SPEC, read as it opens
 ```
 
 and the Runtime writes back `status` (`open`, `refused`, `closed`), `error` (why it was
@@ -6699,7 +6702,9 @@ A mounted document's programs get a `PermissionError`: opening others needs a gr
 **Principals and budgets.** Every mount runs as a principal, from where its bytes came: `local`
 for a `cvc://` or `state://` document and for one the slot's `catalog:` lists (a URI, or a prefix
 ending in `/`), `remote:<scheme>://<host>` for one from the network, and `file:<its directory>`
-for any other local file. Each mount has a budget for its programs, counted over every process
+for any other local file. Its programs and widgets reach the network, its credentials, the
+end-to-end keys and sign-ins as that principal (§10.3 "Per principal"). Each mount has a budget
+for its programs, counted over every process
 whose scope is under it (the mount's actions, its `on_tick:` resident, what they spawn and fork):
 
 | | `local` | `file:`, `remote:` |

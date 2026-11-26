@@ -725,9 +725,9 @@ shell hosts nicotina beside any other application, remote or not.
 *As built in SH11:*
 
 - **Who a program runs as** ([`principal.h`](../../inc/cvc/ariadne/principal.h)): a table per
-  app of scope to principal. The Runtime records a mount's principal there when it opens a
-  `mounts:` entry (SH1's `mount_principal`), with what the shell's entry gives it, and drops it
-  when the mount closes. A scope under several runs as the innermost; a `local` one inside a
+  app of scope to principal. `open_mount` records a mount's principal there (SH1's
+  `mount_principal`, with what the shell's entry gives it) before any of its programs is built.
+  `close_mount` drops it, and so does the Runtime's teardown. A scope under several runs as the innermost; a `local` one inside a
   sandboxed one runs as the sandboxed one. Unrecorded scopes, the shell itself among them, are
   `local`. A remote principal is kept in one spelling, `remote:` and the origin as a policy
   writes it.
@@ -747,9 +747,12 @@ shell hosts nicotina beside any other application, remote or not.
   **Pictures, video and Save** with `auth:`: fetched as the widget's principal
   (`ImageRequest::scope`, `PlayerSource::scope`, `MediaSave::scope`).
 - **A local application's own network**: `shell.apps.<as>.net_policy`, `.credential_store` and
-  `.e2ee_store`, for a `local` mount only. A policy alone gets an in-memory store, so its
-  `credential` lines do not rebind the launcher's names. A policy that does not load, or binds an
-  origin it does not allow, refuses the mount (`set_principal_check`).
+  `.e2ee_store`, read as the mount opens, for a `local` mount only. A sandboxed mount that names one
+  is refused. A policy alone gets an in-memory store, so its `credential` lines do not rebind the
+  launcher's names. A policy that does not load, or binds an origin it does not allow, refuses the
+  mount (`set_principal_check`). `shell.ari` takes them from a catalog entry's `net_policy`,
+  `credential_store` and `e2ee_store` (paths relative to the catalog), and opens such an entry
+  under its slug with them written first.
 - **Left for later**: `data:` entries still read over the launcher's allowlist into the one shared
   store (with SH12/SH13's fetching). Keeping a sandboxed program off the other global `#` channels
   is SH12's.

@@ -36,6 +36,7 @@
 #include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
+#include <cvc/ariadne/principal.h>    // set_scope_principal: what a mount runs as (SH11)
 #include <cvc/ariadne/requires.h>     // free_heads: the isolation rules' oidc check
 #include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
 #include <cvc/ariadne/stream_intrinsics.h> // retarget_document_streams: a move takes its streams
@@ -6614,6 +6615,23 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   if (!r.ok)
     return refuse_mount(slot, r.error.empty() ? "it could not be loaded" : r.error);
   slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical);
+  // 4.12 SH11: what its programs and widgets reach (the network, its credentials, end-to-end keys
+  // and sign-ins) is its principal's, recorded under its scope before any of them is built. The
+  // entry may give a local application a network of its own (shell.apps.<as>.net_policy,
+  // .credential_store, .e2ee_store, as a launcher's flags take them); a host check refuses one
+  // that does not open, and a sandboxed principal one at all.
+  {
+    ScopePrincipal who;
+    who.principal = slot.principal;
+    const std::string entry =
+        slot.slot_key + cvc::state::SEPARATOR + slot.as + cvc::state::SEPARATOR;
+    who.net_policy = read_string(app, entry + "net_policy");
+    who.credential_store = read_string(app, entry + "credential_store");
+    who.e2ee_store = read_string(app, entry + "e2ee_store");
+    if (const std::string why = set_scope_principal(app, sub, who); !why.empty())
+      return refuse_mount(slot, why);
+    slot.principal = scope_principal(app, sub).principal; // as the store keys it
+  }
   slot.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
   if (!slot.wrapper->app_name.empty())
     slot.name = slot.wrapper->app_name;
@@ -6647,6 +6665,7 @@ void Runtime::Impl::close_mount(const std::string &sub, bool forget_init) {
   if (it == mount_slots_.end())
     return;
   quit_app(sub);
+  clear_scope_principal(app, sub); // 4.12: its programs are gone; the next open records it again
   // What quit_app leaves: the children its programs spawned or forked, which share its scope.
   if (group_ || used_scheduler_) {
     try {
@@ -7688,6 +7707,10 @@ Runtime::Impl::~Impl() {
   }
   if (sched)
     kill_and_reap(*sched, "tearing down");
+  // ARIADNE_SHELL.md 4.12 its mounts' principals, which the app keeps by scope: another document
+  // at this prefix starts with none.
+  for (const auto &[sub, slot] : mount_slots_)
+    clear_scope_principal(app, sub);
   // Last the group, which the app's frames stop pumping first: its own teardown (S1.5) kills and
   // reaps whatever is left, before channel_policy_ and doc_scope_ go, which its processes'
   // contexts point at; then any retired group, waiting for its kernels as a teardown does. Both
