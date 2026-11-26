@@ -4,20 +4,24 @@
 # Every 15 s of world time the rally points swap across a ring, so the teams cross the middle
 # through each other and back.
 #
-# Two worlds, World on the panel switching them (the fleet is laid out again on the new one):
+# Two worlds, the panel's terrain and blocks switching them (the fleet is laid out again on the
+# new one):
 #   terrain  the terrain lab's world, small (300 m): relief, trees, rocks and a roads-first city,
-#            generated at load; what stands on it is the navigator's grid (the default);
+#            generated at load; what stands on it is the navigator's grid (the default). New
+#            terrain generates another from a new seed;
 #   blocks   a city of 6 x 6 blocks of 26 m with 12 m streets and four plazas, 240 m across.
 # The fleet is drawn at scale: one mesh for all of it, the nearest few their own nodes (entity
-# layers, the fleets roadmap's FL2). The world steps on the frame's thread, as a browser without
-# threads has it. The sun casts shadows: the world's baked once, the moving vehicles' each frame.
+# layers, the fleets roadmap's FL2). The sun casts shadows: the world's baked once, the moving
+# vehicles' each frame.
 #
-# The vehicles are nav's kinematic bicycle, kept from passing through each other (collide: nav's
-# de-overlap pushes any two too close apart after each step); Plant puts the fleet, or one team, on
-# Jolt, where each is a vehicle with wheels and suspension that collides as a body (costly on one
-# thread: one team on Jolt is ten times the frame). Drag to orbit, the wheel to zoom; Overhead
-# (H) puts the camera back above the world, Chase follows a vehicle. The panel's fps is the frame
-# rate (quality.frame_ms).
+# The vehicles are nav's kinematic bicycle, cheap enough for all 256 on one thread, kept from
+# passing through each other (collide: nav's de-overlap pushes any two too close apart after each
+# step). Vehicles sets how many (the fleet is laid out again). Plant puts the fleet, or one team,
+# on Jolt, where each is a vehicle with wheels and suspension that collides as a body; Jolt steps
+# them on worker threads where there are threads (natively, and in a browser built with them),
+# and about 40 is where its step starts to cost the frame. Drag to orbit, the wheel to zoom;
+# Overhead (H) puts the camera back above the world, Chase follows a vehicle. The panel's fps is
+# the frame rate (quality.frame_ms).
 #
 # Run (the Humvee model and the trained policy come from cvcpkg.org; without the network the
 # vehicles are boxes and the built-in net drives):
@@ -65,7 +69,7 @@ world:
       - fleet: swarm
         archetype: car
         plant: kinematic           # nav's bicycle: cheap enough for every vehicle on one thread
-        count: 240
+        count: 240                 # Vehicles (the panel) changes it
         spawn: scattered
         seed: 7
         rally: { count: 6 }        # six teams, each to its rally point, hsv-coloured
@@ -163,7 +167,8 @@ on_tick: |
       (if (and (= (% n 15) 0) (!= ms ""))
           (state-set "ui.fps" (str (int (+ 0.5 (/ 1000.0 (math.max 0.1 (float ms))))))))
       (if (and (arg-on "bench") (= (% n 120) 0))
-          (print (str-concat "fleet_swarm: " ms " ms a frame, "
+          (print (str-concat "fleet_swarm: " ms " ms a frame, physics step "
+                             (sv "physics.stats.step_ms") " ms, "
                              (sv "vehicles.fleets.swarm.placed") " placed")))))
 
 keys:
@@ -180,22 +185,45 @@ windows:
   - window: Fleet swarm
     id: fleet_panel
     pos: [10, 30]
-    size: [270, 430]
+    size: [290, 500]
     closable: true
     children:
       - text: "fps"
         bind: ui.fps
-      - text: "vehicles"
+      - text: "placed"
         bind: vehicles.fleets.swarm.placed
       - text: "arrived"
         bind: vehicles.fleets.swarm.arrived
       - text: "driven by"
         bind: ui.drives
       - separator
-      - combo: world
-        bind: scene.world.source
-        options: [terrain, blocks]
-        tooltip: "terrain: the terrain lab's world, small; blocks: a city of blocks"
+      # The world: the terrain lab's or the block city, and a new terrain from a new seed (the
+      # fleet is laid out again on it).
+      - type: group
+        layout: { kind: horizontal }
+        children:
+          - button: terrain
+            on: (state-set "scene.world.source" "terrain")
+            enabled_when: (!= (state-get "scene.world.source") "terrain")
+            tooltip: "the terrain lab's world, small: hills, trees, rocks and a city"
+          - button: blocks
+            on: (state-set "scene.world.source" "blocks")
+            enabled_when: (!= (state-get "scene.world.source") "blocks")
+            tooltip: "a city of 6 x 6 blocks on a flat ground"
+          - button: New terrain
+            on: (begin
+                  (state-set "scene.world.source" "terrain")
+                  (state-set "world.request" "randomize"))
+            enabled_when: (!= (state-get "world.busy") "1")
+            tooltip: "the terrain world generated again from a new seed"
+      - text: "world"
+        bind: world.status
+      - slider_int: vehicles
+        bind: vehicles.fleets.swarm.size
+        lo: 1
+        hi: 256
+        commit: release
+        tooltip: "how many: the fleet is laid out again (all 256 kinematic; about 40 on Jolt)"
       - slider_float: world speed
         bind: sim.speed
         lo: 0.25
@@ -206,8 +234,9 @@ windows:
       - combo: plant
         bind: vehicles.fleets.swarm.plant
         options: ["kinematic", "kinematic, 0: jolt", "jolt"]
-        tooltip: "kinematic: nav's bicycle, no collisions (cheap); jolt: each a Jolt vehicle that
-          collides with the others and the city (costly on one thread); or one team on Jolt"
+        tooltip: "kinematic: nav's bicycle (cheap: all 256); jolt: each a Jolt vehicle that
+          collides with the others and the world (about 40 before it costs the frame); or one
+          team on Jolt"
       - combo: policy
         bind: vehicles.fleets.swarm.policy
         options: [trained, builtin]
