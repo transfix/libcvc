@@ -690,7 +690,8 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
     return false;
   chassis->setPosition(f.offset[0], f.offset[1], f.offset[2]);
   chassis->setScale(f.scale[0], f.scale[1], f.scale[2]);
-  colour(*chassis, m->chassis_texture, color);
+  static const cvc::image none; // `texture: false`: in its colours
+  colour(*chassis, look.texture ? m->chassis_texture : none, color);
   static const float tyre[3] = {0.07f, 0.07f, 0.08f};
   for (std::size_t k = 0; k < f.hubs.size(); ++k) {
     const std::array<double, 3> &h = f.hubs[k];
@@ -707,7 +708,7 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
     if (right && m->rig.mirror == "turn") // before the scale: setRotation drops it
       mesh->setRotation(0.0, 0.0, 180.0); // half a turn about its upright: its outside to -y
     mesh->setScale(f.wheel_scale, f.wheel_scale, f.wheel_scale);
-    colour(*mesh, m->wheel_texture, tyre);
+    colour(*mesh, look.texture ? m->wheel_texture : none, tyre);
     drawn_wheel d;
     d.node = hub;
     d.x = h[0];
@@ -741,7 +742,7 @@ bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
   node->setPosition(0.0, 0.0, base_z + look.z);
   node->setRotation(0.0, 0.0, look.yaw);
   node->setScale(look.scale, look.scale, look.scale);
-  if (!m->texture.empty()) {
+  if (look.texture && !m->texture.empty()) {
     node->setUseSingleColor(false);
     node->setTexture(m->texture, false);
   } else {
@@ -1017,8 +1018,8 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
     if (!m)
       return pending ? vehicle_model_status::pending : vehicle_model_status::failed;
     const parted_fit f = fit_parts(m->rig, s, base_z);
-    const bool textured =
-        !m->chassis_texture.empty() && m->chassis.uvs().size() == m->chassis.points().size();
+    const bool textured = look.texture && !m->chassis_texture.empty() &&
+                          m->chassis.uvs().size() == m->chassis.points().size();
     add_part(out, m->chassis, {f.scale[0], 0.0, 0.0, 0.0, f.scale[1], 0.0, 0.0, 0.0, f.scale[2]},
              f.offset, textured, 3, white);
     const double ws = f.wheel_scale;
@@ -1048,7 +1049,8 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
     const cvc::geometry &g = m->geometry;
     const double yaw = look.yaw * 3.14159265358979323846 / 180.0;
     const double cy = std::cos(yaw), sy = std::sin(yaw), sc = look.scale;
-    const bool textured = !m->texture.empty() && g.uvs().size() == g.points().size();
+    const bool textured =
+        look.texture && !m->texture.empty() && g.uvs().size() == g.points().size();
     add_part(out, g, {sc * cy, -sc * sy, 0.0, sc * sy, sc * cy, 0.0, 0.0, 0.0, sc},
              {0.0, 0.0, base_z + look.z}, textured, 3, white);
     if (textured)
@@ -1458,9 +1460,10 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
     const std::string sig = sel + "|" + get(st, a + "length") + "|" + get(st, a + "width") + "|" +
                             get(st, a + "height") + "|" + get(st, a + "look.kind") + "|" +
                             get(st, a + "look.path") + "|" + get(st, a + "look.uri") + "|" +
-                            get(st, a + "look.fit") + "|" + get(st, a + "look.chassis") + "|" +
-                            get(st, a + "look.wheel") + "|" + get(st, a + "look.rig") + "|" +
-                            get(st, root + ".spawn.color") + "|" + get(st, root + ".spawn.color2");
+                            get(st, a + "look.fit") + "|" + get(st, a + "look.texture") + "|" +
+                            get(st, a + "look.chassis") + "|" + get(st, a + "look.wheel") + "|" +
+                            get(st, a + "look.rig") + "|" + get(st, root + ".spawn.color") + "|" +
+                            get(st, root + ".spawn.color2");
     if (sig != *last) {
       *last = sig;
       if (graph->getGraphics(drawn))
@@ -1482,6 +1485,7 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         look.yaw = num(get(st, a + "look.yaw"), 0.0);
         look.z = num(get(st, a + "look.z"), 0.0);
         look.fit = get(st, a + "look.fit") == "1";
+        look.texture = get(st, a + "look.texture") != "0";
         look.chassis = get(st, a + "look.chassis");
         look.wheel = get(st, a + "look.wheel");
         const std::string rig = get(st, a + "look.rig"); // its file, or its text when inline

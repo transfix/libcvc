@@ -1074,6 +1074,65 @@ TEST(AriadneSceneWorld, AWorldNodesVisibilityFollowsItsWorld) {
   EXPECT_TRUE(scene_has_world(r.scene));
 }
 
+// A flat world's grid has what stands on its ground blocked: its other static nodes, under their
+// footprints, where they rise 0.5 m or more over it. A kerb lower than that and a body that moves
+// block nothing, and the grid is the same one from call to call (a new one lays a fleet out again).
+TEST(AriadneSceneWorld, WhatStandsOnAFlatGroundBlocksItsGrid) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  world: { source: city, cell: 2 }
+  nodes:
+    - node: ground
+      world: city
+      source: { box: { size: [60, 60, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: block
+      world: city
+      source: { box: { size: [10, 10, 8] } }
+      transform: { position: [12, 12, 4] }
+      body: static
+    - node: kerb
+      world: city
+      source: { box: { size: [10, 2, 0.2] } }
+      transform: { position: [-12, -12, 0.1] }
+      body: static
+    - node: crate
+      world: city
+      source: { box: { size: [4, 4, 4] } }
+      transform: { position: [-12, 12, 2] }
+      body: { mass: 100 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(val(app, "scene.world.kind"), "flat");
+  std::shared_ptr<const cvc::nav::world_grid> g;
+  std::shared_ptr<const cvc::height_field> terrain;
+  w->vehicle_ground(g, terrain);
+  ASSERT_NE(g, nullptr);
+  EXPECT_TRUE(g->occupied(12.0, 12.0)) << "the block's middle";
+  EXPECT_TRUE(g->occupied(16.0, 8.0)) << "inside its edge";
+  EXPECT_FALSE(g->occupied(20.0, 12.0)) << "past it";
+  EXPECT_FALSE(g->occupied(0.0, 0.0));
+  EXPECT_FALSE(g->occupied(-12.0, -12.0)) << "the kerb is 0.2 m: driven over";
+  EXPECT_FALSE(g->occupied(-12.0, 12.0)) << "the crate moves";
+  // The ground's own grid is the open walled square; the world's has the block's 5 x 5 samples
+  // (8 to 16 m each way at 2 m) more, and scene.world.grid says so.
+  const std::shared_ptr<const cvc::nav::world_grid> ground = w->grid("ground", 2.0);
+  ASSERT_NE(ground, nullptr);
+  EXPECT_FALSE(ground->occupied(12.0, 12.0));
+  EXPECT_EQ(g->occupied_count(), ground->occupied_count() + 25);
+  EXPECT_EQ(val(app, "scene.world.grid.occupied"), std::to_string(g->occupied_count()));
+  std::shared_ptr<const cvc::nav::world_grid> again;
+  w->vehicle_ground(again, terrain);
+  EXPECT_EQ(again, g) << "the same grid while the world is";
+}
+
 TEST(AriadneSceneWorld, TheScenesWorldsAreOnOneAtATime) {
   REQUIRE_YAML();
   LoadResult r = fresh_load(kWorlds);
@@ -1411,7 +1470,7 @@ world:
   vehicles:
     archetypes:
       h: { vehicle: humvee, look: { data: humvee, file: Humvee.glb } }
-      flat: { look: { file: car.glb, data: local, fit: false } }
+      flat: { look: { file: car.glb, data: local, fit: false, texture: false } }
       lost: { look: { data: no_such_entry, file: x.glb } }
 scene:
   nodes: []
@@ -1431,6 +1490,8 @@ scene:
   EXPECT_TRUE(rules.vehicles[0].look.fit);
   EXPECT_EQ(rules.vehicles[1].look.kind, "data") << "data: and file: in either order";
   EXPECT_FALSE(rules.vehicles[1].look.fit);
+  EXPECT_TRUE(rules.vehicles[0].look.texture) << "a model wears its texture by default";
+  EXPECT_FALSE(rules.vehicles[1].look.texture) << "texture: false: in its entity's colours";
   std::vector<std::string> warnings;
   resolve_vehicle_looks(rules.vehicles, "", r.scene.assets, &warnings, r.scene.data);
   EXPECT_EQ(rules.vehicles[0].look.uri, "cvcpkg://cy-pca/vehicle-humvee");
@@ -2809,6 +2870,59 @@ TEST(AriadneWorldVehicles, AFleetHasPlantsAndAMetric) {
   art.drain();
   EXPECT_EQ(key_of("teams", "plans"), "vehicle");
   EXPECT_NEAR(kinematic_limits("teams").rr, own, 1e-6);
+}
+
+// A colliding fleet (collide:) keeps its vehicles apart: 24 kinematic Humvees driven to one rally
+// point pile into each other without it, and with it (the key switches it live) no two centres
+// come closer than nav's gap, nine tenths of a Humvee's length.
+TEST(AriadneWorldVehicles, ACollidingFleetsVehiclesStayApart) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_collide", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: pack, archetype: v, count: 24, spawn: scattered, seed: 3, rally: { count: 1 },
+          policy: builtin }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)")
+               .string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  const auto closest = [&] {
+    art.step_world(1);
+    art.drain();
+    const std::shared_ptr<const fleet_poses> p = v->poses("pack");
+    double best = 1e30;
+    for (std::size_t i = 0; p && i < p->size(); ++i)
+      for (std::size_t j = i + 1; j < p->size(); ++j)
+        best = std::min(best, std::hypot(double(p->x[i] - p->x[j]), double(p->y[i] - p->y[j])));
+    return best;
+  };
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.collide"), "0");
+  // To the rally point: 20 s of world time.
+  art.step_world(2400);
+  const double piled = closest();
+  const double gap = 0.9 * 4.84 * 0.99; // nine tenths of its length (kCollideGap x its radius)
+  EXPECT_LT(piled, gap) << "without collide: they pile into each other";
+  cvc::state::instance(app)("vehicles.fleets.pack.collide").value(std::string("1"));
+  art.step_world(240);
+  const double apart = closest();
+  EXPECT_GE(apart, gap) << "with collide: kept apart";
+  EXPECT_GT(apart, piled);
 }
 
 // A fleet's poses are a snapshot (FL1d): poses(fleet) gives its placed vehicles as the last

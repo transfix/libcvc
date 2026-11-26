@@ -2308,7 +2308,8 @@ scene:
     (`scene.world.grid.{rows, cols, cell, occupied, summary}`, `SceneWorld::grid`):
     - a generated or data world's grid comes from its world;
     - a terrain's from its height field;
-    - a flat ground's is an open walled grid over its footprint.
+    - a flat ground's is an open walled grid over its footprint, with the world's other static
+      nodes that stand 0.5 m or more over it blocked under their footprints (a city of boxes).
   - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
     - for a generated world, `world_controls`' widgets;
     - for a data world, its loading progress, plus loading another bundle into the same dataset.
@@ -2379,7 +2380,9 @@ scene:
     asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
-    name is used (`find_vehicle_model`), else the box.
+    name is used (`find_vehicle_model`), else the box. `texture: false` draws a model (one-piece or
+    parted) in the entity's colours instead of its texture, so a fleet's teams read at any
+    distance (an entity layer's coarse rungs are in them already).
   - **A model in parts.** A one-piece model is one mesh: its wheels are in it and cannot turn. A
     parted look is the chassis without its wheels, one wheel, and a rig that says where the
     wheels go, so each wheel is drawn on its own and rolls and steers as the vehicle drives:
@@ -2574,8 +2577,9 @@ scene:
   - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
     named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
     grid exists, the way libcvc's nav swarms are
-    ([`nav_fleet_swarm.ari`](../examples/ariadne/documents/nav_fleet_swarm.ari): 240 in six teams
-    over a small city of blocks, their rally points moved by the document):
+    ([`nav_fleet_swarm.ari`](../examples/ariadne/documents/nav_fleet_swarm.ari): 240 Humvees in six
+    teams over a small terrain lab world or a city of blocks, their rally points moved by the
+    document):
 
     ```yaml
     start:
@@ -2602,6 +2606,10 @@ scene:
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. The others share a line in `entities.summary` and in
       `physics.stats.vehicles`. `keys: all` writes every vehicle's.
+    - `collide: true` keeps its vehicles from passing through each other on nav's own plant
+      (kinematic): after each navigator step, any two closer than nine tenths of the vehicle's
+      length are pushed apart (never into what blocks the grid). A Jolt plant's vehicles collide as
+      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),

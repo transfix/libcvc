@@ -68,6 +68,9 @@ constexpr int kMaxSpawnCount = 256; // vehicles.spawn.count's most at one reques
 // How vehicles steer around each other (set_avoid): the separation's radius and strength in units
 // of the largest vehicle's radius (cfg.veh.rr), and its pass-on-the-right share.
 constexpr float kAvoidRadius = 5.0f;
+// How close a colliding fleet's vehicles may come (collide: nav's min_gap), in the vehicle's
+// radius: about nine tenths of its length apart, so two side by side or nose to tail barely meet.
+constexpr float kCollideGap = 3.6f;
 constexpr float kAvoidGain = 1.5f;
 constexpr float kAvoidSide = 0.6f;
 constexpr float kAvoidSideRadius = 20.0f; // the turn's look-ahead, in vehicle radii
@@ -976,6 +979,8 @@ struct WorldVehicles::impl {
     std::string status;
     // Its navigator (FL1b): what it knows and how its vehicles share it (the keys switch them).
     std::string sense, belief, seen_sense, seen_belief;
+    bool collide = false; // its vehicles kept apart (collide:; the key switches it)
+    std::string seen_collide;
     // Its policy: what is asked (trained, builtin, data:<entry> or a uri; the key switches it),
     // what drives (`model`, null: the built-in net) and that, said (`drives`). `loading` is the
     // data store's node of weights still on their way, `file` the .cvcnav in it.
@@ -1324,6 +1329,12 @@ struct WorldVehicles::impl {
     const std::vector<std::uint8_t> unknown(fog ? plan->occupancy.size() : 0, 0);
     cvc::nav::sim_world::config c = cfg;
     c.freeze_sense = !fog; // known: the world's grid; fog: sensed
+    // Its vehicles kept apart (collide:), at the vehicles' own size whatever metric they plan with.
+    if (group >= 0 && groups[static_cast<std::size_t>(group)].collide) {
+      c.min_gap = kCollideGap * cfg.veh.rr;
+      c.min_gap_parked = true;            // a team at its rally point spreads out
+      c.min_gap_ahead = 0.5f * cfg.veh.L; // between the vehicles' middles, not their rear axles
+    }
     // Its metric (D9): the trainer's vehicle, at the metric its weights learned in, as the demos
     // plan (SceneSwarm), and its plants plan with it too; else each plant's own size and limits.
     f->trained = trained_metric(group);
@@ -2434,6 +2445,18 @@ struct WorldVehicles::impl {
             status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
   }
+  // Fleet `gi`'s vehicles kept apart, or not, now (collide), its navigators kept.
+  void apply_collide(std::size_t gi) {
+    const float gap = groups[gi].collide ? kCollideGap * cfg.veh.rr : 0.0f;
+    for (const auto &[k, nav] : fleets)
+      if (nav && nav->group == static_cast<int>(gi) && nav->sim) {
+        cvc::nav::sim_world::config c = nav->sim->current_config();
+        c.min_gap = gap;
+        c.min_gap_parked = gap > 0.0f;
+        c.min_gap_ahead = gap > 0.0f ? 0.5f * cfg.veh.L : 0.0f;
+        nav->sim->set_live_knobs(c);
+      }
+  }
   // Fleet `gi`'s navigators made again when the metric they plan with is no longer its own (its
   // metric: or policy changed, or the weights fell back), its vehicles at rest where they are.
   void sync_metric(std::size_t gi) {
@@ -2617,6 +2640,14 @@ struct WorldVehicles::impl {
         }
       }
       poll_policy(gi);
+      if (const std::string c = get(at + "collide"); c != g.seen_collide) {
+        g.seen_collide = c;
+        const bool want = c == "1" || c == "true";
+        if ((c == "1" || c == "0" || c == "true" || c == "false") && want != g.collide) {
+          g.collide = want;
+          apply_collide(gi);
+        }
+      }
       const std::string s = get(at + "sense"), b = get(at + "belief");
       if (s != g.seen_sense || b != g.seen_belief) {
         g.seen_sense = s;
@@ -3302,6 +3333,7 @@ struct WorldVehicles::impl {
       put(at + "look.yaw", num(a.look.yaw));
       put(at + "look.z", num(a.look.z));
       put(at + "look.fit", a.look.fit ? "1" : "0");
+      put(at + "look.texture", a.look.texture ? "1" : "0");
       put(at + "look.chassis", a.look.chassis);
       put(at + "look.wheel", a.look.wheel);
       put(at + "look.rig", a.look.rig_file.empty() && !a.look.rig.hubs.empty()
@@ -3720,6 +3752,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       impl::fleet_group &g = d.groups[gi];
       g.sense = st.sense;
       g.belief = st.belief.empty() ? "shared" : st.belief;
+      g.collide = st.collide;
       g.policy = !st.policy_data.empty() ? "data:" + st.policy_data
                  : st.policy.empty()     ? "trained"
                                          : st.policy;
@@ -3735,12 +3768,14 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         d.put(at + "policy", g.policy);
         d.put(at + "metric", g.metric);
         d.put(at + "plant", g.plants.empty() ? g.base_plant : g.plants.text());
+        d.put(at + "collide", g.collide ? "1" : "0");
       }
       g.seen_sense = d.get("fleets." + st.fleet + ".sense");
       g.seen_belief = d.get("fleets." + st.fleet + ".belief");
       g.seen_policy = d.get("fleets." + st.fleet + ".policy");
       g.seen_metric = d.get("fleets." + st.fleet + ".metric");
       g.seen_plant = d.get("fleets." + st.fleet + ".plant");
+      g.seen_collide = d.get("fleets." + st.fleet + ".collide");
       d.hold_placing = true;
       int got = 0;
       std::string why;
