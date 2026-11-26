@@ -1,6 +1,7 @@
 // The keys ImGuiOverlay hands ImGui, under both names VTK gives them: its own windows' (X11's:
 // "Return", "BackSpace", "Left") and a browser's (KeyboardEvent.key: "Enter", "Backspace",
 // "ArrowLeft"). In a browser Enter and Backspace never reached a text field before the second set.
+// And which browser platforms are Apple's, where Cmd is the shortcut key.
 #include <cstdio>
 #include <string>
 #ifdef CVC_ENABLE_IMGUI
@@ -60,6 +61,15 @@ int main() {
           imguiKeyForVtkKeySym("") == ImGuiKey_None &&
           imguiKeyForVtkKeySym(nullptr) == ImGuiKey_None,
       "an unknown name, an empty one and none map to no key");
+
+  // A browser's platform, where Cmd is the shortcut key (ImGuiOverlay in a wasm build).
+  using cvc::gl::isApplePlatformName;
+  for (const char *apple : {"MacIntel", "macOS", "MacPPC", "iPhone", "iPad", "iPod", "iOS"})
+    chk(isApplePlatformName(apple), std::string("\"") + apple + "\" is Apple's");
+  for (const char *other :
+       {"Win32", "Windows", "Linux x86_64", "Linux armv8l", "Android", "Chrome OS", "", "Ma"})
+    chk(!isApplePlatformName(other), std::string("\"") + other + "\" is not");
+  chk(!isApplePlatformName(nullptr), "no platform is not");
   std::printf("cvcgl_imgui_key_names: %s\n", failures ? "FAILED" : "PASSED");
   return failures ? 1 : 0;
 #endif

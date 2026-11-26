@@ -1022,6 +1022,7 @@ void SdlRenderWindowInteractor::dispatch(const SDL_Event &e) {
       (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) ? e.key.mod : SDL_GetModState();
   const int ctrl = (mods & SDL_KMOD_CTRL) ? 1 : 0, shift = (mods & SDL_KMOD_SHIFT) ? 1 : 0;
   this->SetAltKey((mods & SDL_KMOD_ALT) ? 1 : 0);
+  superKey_ = (mods & SDL_KMOD_GUI) ? 1 : 0;
   const bool relative = win && win->relativeMouse(); // positions follow the motion (pointerX_)
   // Whether the pointer's position stands still: in a browser, while the page holds the pointer
   // lock on the canvas (the camera's mouse look, which reads the lock's motion itself), as it did

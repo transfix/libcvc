@@ -37,6 +37,7 @@
         "overlays": {"$ref": "#/$defs/widget_list"},
         "root": {"$ref": "#/$defs/widget_list", "description": "Top-level widgets (alias: children)."},
         "children": {"$ref": "#/$defs/widget_list"},
+        "context_menu": {"$ref": "#/$defs/context_menu"},
         "windows_menu": {
           "anyOf": [{"$ref": "#/$defs/flag"}, {"$ref": "#/$defs/string"}],
           "description": "false turns the built-in Windows menu off; a string renames it."
@@ -530,6 +531,21 @@
         "hover": {"enum": ["highlight", "none"]}
       }
     },
+    "context_menu": {
+      "description": "A right-click menu (docs/ARIADNE.md §5.30): its items, as a menu's items:, or { id, items }, whose id names it for contributes: context_menus:.",
+      "anyOf": [
+        {"$ref": "#/$defs/widget_list"},
+        {
+          "type": "object",
+          "properties": {
+            "id": {"$ref": "#/$defs/string"},
+            "items": {"$ref": "#/$defs/widget_list"}
+          },
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
     "w_group": {
       "type": "object",
       "description": "A group of widgets (also written as a map with only children:).",
@@ -539,7 +555,8 @@
         "children": {"$ref": "#/$defs/widget_list"},
         "layout": {"$ref": "#/$defs/layout"},
         "size": {"$ref": "#/$defs/size_box"},
-        "background": {"$ref": "#/$defs/background"}
+        "background": {"$ref": "#/$defs/background"},
+        "context_menu": {"$ref": "#/$defs/context_menu"}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -556,7 +573,8 @@
         "children": {"$ref": "#/$defs/widget_list"},
         "layout": {"$ref": "#/$defs/layout"},
         "size": {"$ref": "#/$defs/size_box"},
-        "background": {"$ref": "#/$defs/background"}
+        "background": {"$ref": "#/$defs/background"},
+        "context_menu": {"$ref": "#/$defs/context_menu"}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -667,7 +685,8 @@
         "maximizable": {"$ref": "#/$defs/flag"},
         "resizable": {"$ref": "#/$defs/flag"},
         "maximized": {"$ref": "#/$defs/maximized"},
-        "background": {"$ref": "#/$defs/background"}
+        "background": {"$ref": "#/$defs/background"},
+        "context_menu": {"$ref": "#/$defs/context_menu"}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -694,7 +713,8 @@
         "maximizable": {"$ref": "#/$defs/flag"},
         "resizable": {"$ref": "#/$defs/flag"},
         "maximized": {"$ref": "#/$defs/maximized"},
-        "background": {"$ref": "#/$defs/background"}
+        "background": {"$ref": "#/$defs/background"},
+        "context_menu": {"$ref": "#/$defs/context_menu"}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -1441,7 +1461,8 @@
         "bind": {"$ref": "#/$defs/string"},
         "on": {"$ref": "#/$defs/program"},
         "children": {"$ref": "#/$defs/widget_list"},
-        "items": {"$ref": "#/$defs/widget_list"}
+        "items": {"$ref": "#/$defs/widget_list"},
+        "context_menu": {"$ref": "#/$defs/context_menu"}
       },
       "required": ["type"]
     },
@@ -1450,6 +1471,7 @@
       "description": "include: <unit> instantiates a units: template, its args substituted (docs/ARIADNE.md §6.1).",
       "allOf": [{"$ref": "#/$defs/widget_common"}],
       "properties": {
+        "context_menu": {"$ref": "#/$defs/context_menu"},
         "include": {"$ref": "#/$defs/string"},
         "args": {
           "type": "object",

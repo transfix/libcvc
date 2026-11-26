@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cvc/ariadne/app_runtime.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/holon.h> // the local server-role holon the world runs in (OW7a)
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_gym.h>
@@ -108,6 +109,64 @@ struct WorldGym::impl {
   SceneWorld &world() const { return *rt->scene_world(); }
   WorldVehicles &vehicles() const { return *rt->scene_world()->vehicles(); }
 
+  // LOCAL IS THE SAME (OW7a): the server-role holon the world runs in, as a relay's does, and the
+  // people in it this episode (their participant ids). Null: a build without its avatar physics,
+  // and the world steps on the gym's clock (the runtime's).
+  std::unique_ptr<holon> h;
+  std::vector<std::string> people;
+
+  // The world's syncs (a generated world's colliders as they come, the vehicles' ground) between
+  // steps: the runtime's frame, and the world's own sync on the holon's clock when it runs there.
+  void pump() {
+    rt->drain();
+    if (h)
+      world().sync(h->clock(), &warnings);
+  }
+
+  // The holon, at the world's rate and the gym's tick, lockstep (an advance runs one quantum), the
+  // world in it, and the runtime stepping it no more. False (and no holon) when it cannot take the
+  // world: a build without the holon's avatar physics.
+  bool attach_holon() {
+    const double dt = world().world().config().fixed_dt;
+    holon_config cfg;
+    cfg.physics = true;
+    try {
+      cfg = holon_config_at(cfg, std::round(1.0 / dt));
+    } catch (const std::invalid_argument &) {
+      return false; // no holon rate: the gym's clock steps it
+    }
+    cfg.clock.lockstep_steps = 1;
+    auto made = std::make_unique<holon>(holon_role::server, cfg);
+    made->clock().set_mode(cvc::world_clock::mode::lockstep);
+    made->clock().seek_tick(app->world_clock().tick());
+    if (!made->attach_world(&world()))
+      return false;
+    h = std::move(made);
+    rt->set_world_external(true);
+    world().follow(h->clock()); // anchored at the gym's tick: no step runs
+    return true;
+  }
+
+  // The people of this episode: each an avatar on the ground under it, walking at its pace.
+  void place_people() {
+    people.clear();
+    if (!h)
+      return;
+    for (std::size_t i = 0; i < opts.people.size(); ++i) {
+      const gym_person &p = opts.people[i];
+      const std::string pid = p.name.empty() ? "person " + std::to_string(i + 1) : p.name;
+      physics::body_state feet;
+      feet.position = {p.x, p.y, vehicles().ground_height(p.x, p.y)};
+      feet.rotation = {std::cos(0.5 * p.yaw), 0.0, 0.0, std::sin(0.5 * p.yaw)};
+      h->add_participant(pid, false, feet);
+      avatar_intent in;
+      in.move = {p.walk * std::cos(p.yaw), p.walk * std::sin(p.yaw), 0.0};
+      in.yaw = p.yaw;
+      h->set_intent(pid, in);
+      people.push_back(pid);
+    }
+  }
+
   void put(const std::string &leaf, const std::string &value) {
     cvc::state::instance (*app)(resolve_bind(opts.prefix, "gym." + leaf)).value(value);
   }
@@ -148,7 +207,9 @@ struct WorldGym::impl {
       o.reached.push_back(e.placed && dist < e.reach ? 1 : 0);
       o.hit_obstacle.push_back(e.obstacle_contacts > 0 ? 1 : 0);
       o.hit_vehicle.push_back(e.vehicle_contact ? 1 : 0);
-      o.collided.push_back(o.hit_obstacle.back() || o.hit_vehicle.back() ? 1 : 0);
+      o.hit_person.push_back(e.person_contact ? 1 : 0);
+      o.collided.push_back(
+          o.hit_obstacle.back() || o.hit_vehicle.back() || o.hit_person.back() ? 1 : 0);
       const bool off = grid && e.placed &&
                        (e.x < grid->min_x || e.x > grid->max_x || e.y < grid->min_y ||
                         e.y > grid->max_y || e.z < e.ground_z - kFallen);
@@ -165,6 +226,15 @@ struct WorldGym::impl {
       o.max_accel.push_back(b.max_accel);
       o.max_decel.push_back(b.max_decel);
       o.max_speed.push_back(b.max_speed);
+    }
+    o.people = people.size();
+    for (const std::string &pid : people) {
+      const physics::body_state s = h->state(pid);
+      o.person_x.push_back(s.position.x);
+      o.person_y.push_back(s.position.y);
+      o.person_z.push_back(s.position.z);
+      o.person_vx.push_back(s.linear_velocity.x);
+      o.person_vy.push_back(s.linear_velocity.y);
     }
     return o;
   }
@@ -261,6 +331,9 @@ WorldGym::WorldGym(const std::string &document, gym_options options)
     }
     d.fleets.push_back(*it);
   }
+  // Its world in a server-role holon of its own, as a relay's (OW7a).
+  if (d.opts.holon)
+    d.attach_holon();
   d.put("status", "loaded");
 }
 
@@ -277,7 +350,7 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
           std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<long long>(
                                                  std::max(0.0, d.opts.ready_timeout) * 1000.0));
       for (;;) {
-        d.rt->drain();
+        d.pump();
         if (d.vehicles().grid() && d.vehicles().grid() != before)
           break;
         if (std::chrono::steady_clock::now() > deadline)
@@ -288,7 +361,20 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
     }
   }
   v.set_tick(d.opts.tick > 0.0 ? d.opts.tick : cvc::kSimTick); // built with the restart's navigator
+  // The last episode's people go, and the holon lets the world go while the restart replaces its
+  // physics world (its avatars' bodies are in that world).
+  for (const std::string &pid : d.people)
+    d.h->remove_participant(pid);
+  d.people.clear();
+  if (d.h)
+    d.h->attach_world(nullptr);
   d.rt->restart_world(); // the clock at tick 0, the world as the document built it
+  if (d.h) {
+    // The world in the holon again, its clock at the gym's (tick 0), anchored there.
+    d.h->clock().seek_tick(d.app->world_clock().tick());
+    d.h->attach_world(&d.world());
+    d.world().follow(d.h->clock());
+  }
   v.reseed(seed);
   v.set_wander(d.opts.wander);
   std::vector<entity_spec> agents = d.opts.agents;
@@ -339,7 +425,8 @@ const gym_observation &WorldGym::reset(std::uint64_t seed) {
       }
     d.bodies.push_back(b);
   }
-  d.rt->drain(); // the world anchors on the clock (no step runs: it is paused)
+  d.place_people(); // after the agents: the spawn points are theirs
+  d.pump();         // the world anchors on the clock (no step runs: it is paused)
   d.take(d.rt->take_warnings());
   const std::uint64_t episode = d.obs.episode + 1;
   d.obs.episode = episode;
@@ -372,9 +459,17 @@ gym_step WorldGym::step(const std::vector<double> &steer, const std::vector<doub
   const double quantum = d.app->world_clock().fixed_dt();
   const std::uint64_t quanta =
       quantum > 0.0 ? static_cast<std::uint64_t>(std::max(1.0, std::round(dt() / quantum))) : 1;
-  d.rt->step_world(quanta);
-  for (int tries = 0; tries < 100 && d.world().world().tick() < target; ++tries)
-    d.rt->drain();
+  if (d.h) {
+    // In the holon: its lockstep clock a quantum at a time, the people walked and the world
+    // stepped in each (holon::scene_step), as the relay's holon steps its world.
+    for (std::uint64_t q = 0; q < quanta; ++q)
+      d.h->advance(0.0);
+    d.rt->drain(); // the runtime's frame: the document's programs, the keys
+  } else {
+    d.rt->step_world(quanta);
+    for (int tries = 0; tries < 100 && d.world().world().tick() < target; ++tries)
+      d.rt->drain();
+  }
   if (d.world().world().tick() < target)
     throw std::runtime_error("WorldGym::step: the world did not step (" + v.status() + ")");
   d.take(d.rt->take_warnings());
@@ -530,6 +625,7 @@ std::vector<std::string> WorldGym::take_warnings() {
 
 cvc::app &WorldGym::app() { return *_impl->app; }
 AppRuntime &WorldGym::runtime() { return *_impl->rt; }
+holon *WorldGym::local_holon() { return _impl->h.get(); }
 SceneWorld &WorldGym::world() { return _impl->world(); }
 WorldVehicles &WorldGym::vehicles() { return _impl->vehicles(); }
 

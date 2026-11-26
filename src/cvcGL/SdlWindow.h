@@ -176,6 +176,11 @@ public:
   int addSink(std::function<void(const SDL_Event &)> sink);
   void removeSink(int id);
 
+  // Whether the GUI key (Cmd on a Mac, the Windows key, a browser's Meta) is down in the event
+  // being delivered, as GetControlKey is for Ctrl: VTK has no flag for it. ImGuiOverlay hands it
+  // to ImGui as Super.
+  int GetSuperKey() const { return superKey_; }
+
 protected:
   SdlRenderWindowInteractor();
   ~SdlRenderWindowInteractor() override;
@@ -202,6 +207,7 @@ private:
   int nextSink_ = 1;
   std::vector<Kept> kept_;
   float wheelY_ = 0.0f, wheelX_ = 0.0f; // fractional wheel steps (trackpads) carried over
+  int superKey_ = 0;                    // GetSuperKey
   // Where the pointer is, in window points: SDL's, or in relative mode SDL's last one moved by
   // each motion since (SDL holds its own still), so a delta from VTK's positions is the motion.
   float pointerX_ = 0.0f, pointerY_ = 0.0f;

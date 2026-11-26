@@ -836,6 +836,8 @@ struct WorldVehicles::impl {
   bool wander = true;      // nav@1 draws another goal at each one it reaches
   bool avoid = true;       // vehicles steer around each other (set_avoid)
   std::vector<std::array<double, 2>> movers; // what else they steer around (set_movers), m
+  std::vector<ph::body_id> people;           // the bodies that are people (set_people)
+  bool brake_people = true;                  // the navigators brake for the movers (OW7c)
   std::string sense = "known"; // what the navigators know: known or fog (set_sense)
   bool drive_tel = false;  // the navigators capture their drive (set_drive_telemetry)
 
@@ -929,6 +931,7 @@ struct WorldVehicles::impl {
     double cmd_accel = std::numeric_limits<double>::quiet_NaN();
     int hits = 0; // contacts with the world's bodies since the navigator's last tick
     bool hit_vehicle = false;
+    bool hit_person = false; // with a person's body (set_people)
     // The dynamic and kinematic plants' odometer (m), from its position at each navigator tick.
     double distance = 0.0, ox = 0.0, oy = 0.0;
     bool odometer = false;
@@ -2073,6 +2076,7 @@ struct WorldVehicles::impl {
       if (!ready) { // no navigator tick counts the contacts afresh: each step does
         e.hits = 0;
         e.hit_vehicle = false;
+        e.hit_person = false;
       }
       const entity_pose p = target_at(e, end);
       try {
@@ -2817,7 +2821,9 @@ struct WorldVehicles::impl {
       if (!e)
         continue;
       const ph::body_id other = a ? ev.body_b : ev.body_a;
-      if (std::find(ground.begin(), ground.end(), other) == ground.end())
+      if (std::find(people.begin(), people.end(), other) != people.end())
+        e->hit_person = true; // a person, not an obstacle
+      else if (std::find(ground.begin(), ground.end(), other) == ground.end())
         ++e->hits;
     }
   }
@@ -2876,6 +2882,25 @@ struct WorldVehicles::impl {
           if (fleet_of(e) == f.get())
             if (const int i = index(e); i >= 0)
               f->from[static_cast<std::size_t>(i)] = bicycle_box(*f, i, e.desc);
+      // The movers are people (a holon's avatars), whom the navigators brake for in their lanes
+      // (OW7c) as well as steering round.
+      if (brake_people && !movers.empty()) {
+        std::vector<float> xy;
+        for (const std::array<double, 2> &m : movers) {
+          xy.push_back(nx(m[0]));
+          xy.push_back(ny(m[1]));
+        }
+        f->sim->set_people(std::move(xy));
+        cvc::nav::sim_world::people_brake pb;
+        pb.on = true;
+        pb.person_r = static_cast<float>(0.4 * kScale);
+        pb.person_speed = static_cast<float>(1.5 * kScale);
+        pb.reaction_s = 0.3f;
+        pb.gap = static_cast<float>(1.0 * kScale);
+        f->sim->set_people_brake(pb);
+      } else if (!f->sim->people().empty()) {
+        f->sim->set_people({});
+      }
       // The other plants' vehicles, the `pose` entities and the world's other movers (a
       // holon's avatars), for this fleet's separation to steer around.
       if (avoid && (fleets.size() > 1 || posed_placed() || !movers.empty())) {
@@ -2910,6 +2935,7 @@ struct WorldVehicles::impl {
       e.cmd_steer = e.cmd_accel = std::numeric_limits<double>::quiet_NaN();
       e.hits = 0;
       e.hit_vehicle = false;
+      e.hit_person = false;
       fleet *f = fleet_of(e);
       const int i = index(e);
       if (!f || i < 0)
@@ -2970,6 +2996,7 @@ struct WorldVehicles::impl {
     out.ground_z = ground_height(out.x, out.y);
     out.obstacle_contacts = e.hits;
     out.vehicle_contact = e.hit_vehicle;
+    out.person_contact = e.hit_person;
     if (f->plant == "kinematic" && footprint_blocked(out.x, out.y, out.yaw, e.desc))
       out.obstacle_contacts = std::max(out.obstacle_contacts, 1);
     if (const float *s = f->sim->plant_steer_command())
@@ -3056,6 +3083,7 @@ struct WorldVehicles::impl {
     out.ground_z = ground_height(out.x, out.y);
     out.obstacle_contacts = e.hits;
     out.vehicle_contact = e.hit_vehicle;
+    out.person_contact = e.hit_person;
     if (footprint_blocked(out.x, out.y, out.yaw, e.desc)) // a kinematic box meets no building
       out.obstacle_contacts = std::max(out.obstacle_contacts, 1);
     out.wheel_load = e.desc.mass * 9.80665;
@@ -3967,6 +3995,14 @@ void WorldVehicles::set_avoid(bool avoid) {
 }
 
 bool WorldVehicles::avoid() const { return _impl->avoid; }
+
+void WorldVehicles::set_brake_for_people(bool on) { _impl->brake_people = on; }
+bool WorldVehicles::brakes_for_people() const { return _impl->brake_people; }
+
+void WorldVehicles::set_people(std::vector<ph::body_id> bodies) {
+  _impl->people = std::move(bodies);
+}
+const std::vector<ph::body_id> &WorldVehicles::people() const { return _impl->people; }
 
 void WorldVehicles::set_movers(std::vector<std::array<double, 2>> xy) {
   _impl->movers = std::move(xy);

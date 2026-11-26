@@ -153,6 +153,14 @@ public:
   // `on:`). The handler runs on the host thread inside drain(), never in the walk.
   void on(std::string event, std::function<void()> handler);
 
+  // §5.30 a scene view's pick at the pointer, for a right-click menu's `event`: the fields an
+  // `input: pick` viewport writes (x, y, z, hit, node, i, j, k, value, axis, view, mods) and the
+  // node's `tags` (space-separated). The main view's comes from the host here (the cvcGL host
+  // picks its scene; a terminal has none); a viewport's from its widget (CustomEdit::context_pick).
+  // Called in the walk, only on the frame the document's top-level menu opens. {} clears it.
+  using ContextPick = std::function<std::vector<std::pair<std::string, std::string>>()>;
+  void set_main_view_pick(ContextPick pick);
+
   // §7.1 resident on:tick handler — register a state_exec PROGRAM that runs ONCE PER FRAME.
   // Unlike a fire-once action `on:`, this submits ONE long-lived, owner-tagged process on the
   // app-wide scheduler that PARKS between frames (it never re-submits per frame); each drain()

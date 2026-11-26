@@ -111,10 +111,10 @@ struct dyn_boat_desc {
   //   tactical the vehicle-tactical-boat package's patrol boat: its own V hull, baked from the
   //            model into 16 stations (loft_hull; tools/boat_hulls/bake_loft.py), 6.85 m long
   //            and 2.33 m in beam, 7.8 m overall with its outboards; 2800 kg, floating 0.49 m
-  //            over its keel; its two outboards one thrust (8 kN ahead, 3.5 kN astern, none past
-  //            18 m/s) that swings 0.5 rad to steer, and its keel, chines and strakes one fixed
-  //            0.4 m^2 foil (the rudder, max_angle 0) for the grip sideways its triangles do not
-  //            give a V. 10.5 m/s, 32.5 m.
+  //            over its keel; the hull's own lift (hull_mesh::lift_coefficient 0.56) for its
+  //            grip sideways and its planing; its two outboards one thrust (8 kN ahead, 3.5 kN
+  //            astern, none past 18 m/s) that swings 0.3 rad to steer, and their legs one
+  //            0.2 m^2 rudder at the propellers that swings with them. 10.2 m/s, 32.3 m.
   static dyn_boat_desc launch();
   static dyn_boat_desc jonboat();
   static dyn_boat_desc tactical();

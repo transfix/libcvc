@@ -310,6 +310,10 @@ void substitute_index_in(Widget &out, const std::string &idx) {
     // inner cannot also reference the outer index — the loader warns on a nested repeat.
     if (c.repeat.empty())
       substitute_index_in(c, idx);
+  // §5.30 a row's right-click menu acts on that row (on: (delete-row {i})).
+  for (Widget &c : out.context_items)
+    if (c.repeat.empty())
+      substitute_index_in(c, idx);
 }
 
 // One deep copy of the template, then the index substituted through it in place. (Copying each
@@ -908,6 +912,15 @@ public:
     scope_ = &cache_[root_path_]; // unordered_map: the element stays where it is
   }
 
+  // §5.30 bind `event` to `ev` (a right-click menu's, while its items are drawn), or back to nil
+  // (nullptr). `ev` must outlive the binding. While one is bound no result is reused or kept.
+  void set_event(const se::value_t *ev) {
+    if (ev == event_)
+      return;
+    event_ = ev;
+    env_->set("event", ev ? *ev : se::value_t());
+  }
+
   // A read function (Runtime::register_read_function), bound beside the allowlist, with this
   // engine's environment for the readers it calls. A result kept from before may have come from
   // the function it replaces, so the kept results go (each scope's map stays where it is).
@@ -1139,7 +1152,8 @@ private:
     if (!expr)
       return {{}, "ari: reactive expr parse error in \"" + src + "\""};
     sync_writes();
-    const auto hit = scope_->find(src);
+    // §5.30 with a menu's `event` bound, a result may depend on it: neither reused nor kept.
+    const auto hit = event_ ? scope_->end() : scope_->find(src);
     if (hit != scope_->end()) {
       if (fresh(hit->second)) { // nothing it read was written: last time's result
         hit->second.used = frame_no_;
@@ -1174,7 +1188,7 @@ private:
       se::value_t r = ev_->run(st, kMaxSteps, std::min(kMaxSeconds, remaining));
       if (!st.done) // step cap: run() returns nil with done==false
         return {{}, "ari: reactive expr \"" + src + "\" exceeded the eval budget (step cap)"};
-      if (!reads.live)
+      if (!reads.live && !event_)
         keep(src, r, std::move(reads), made_at);
       return {std::move(r), std::string()};
     } catch (const se::evaluation_timeout &) {
@@ -1413,6 +1427,7 @@ private:
   std::unordered_map<std::string, std::uint64_t> node_gen_, sub_gen_;
   Reads *rec_ = nullptr; // the evaluation running now, noting what it reads
   std::uint64_t frame_no_ = 0, evaluated_ = 0;
+  const se::value_t *event_ = nullptr; // set_event's: bound as `event` while a menu's items draw
 
   static constexpr uint64_t kMaxSteps = 100'000; // per-eval step cap (a predicate is tiny)
   static constexpr double kMaxSeconds = 0.005;   // per-eval time cap (5 ms)
@@ -2400,6 +2415,7 @@ struct Runtime::Impl {
       reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
     }
     reactive->set_root_path(app, current_prefix());
+    reactive->set_event(menu_event ? &menu_event->dict : nullptr); // §5.30 inside a menu's items
     return *reactive;
   }
 
@@ -2407,8 +2423,28 @@ struct Runtime::Impl {
     if (!event.empty()) {
       queued_events.push_back({event, current_prefix()}); // capture the mount scope for a program
       queued_events.back().functions = current_functions(); // and its functions
+      if (menu_event) // §5.30 a right-click menu's item: its program gets the menu's `event`
+        queued_events.back().event_values = menu_event->fields;
     }
   }
+
+  // §5.30 right-click menus. Each open menu's `event`, taken when it opened and kept while it
+  // stays open, by the menu's instance key, with the walk that last drew it (one no walk drew is
+  // closed, and goes); the menu whose items the walk is emitting, whose event their visible_when:
+  // reads and the programs they run get; the host's pick in the main view (set_main_view_pick).
+  struct MenuEvent {
+    std::vector<std::pair<std::string, cvc::state_exec::value_t>> fields;
+    cvc::state_exec::value_t dict;
+    std::uint64_t walk = 0;
+  };
+  std::unordered_map<std::string, MenuEvent> menu_events; // nodes stay put (menu_event points in)
+  const MenuEvent *menu_event = nullptr;
+  std::uint64_t walk_no = 0;
+  Runtime::ContextPick main_view_pick;
+  MenuEvent context_event(const Widget &w, ContextMenuOver over, const ContextMenuOpen &o,
+                          const Runtime::ContextPick &pick) const;
+  void emit_context_menu(const Widget &w, ContextMenuOver over, const Runtime::ContextPick &pick);
+  std::string context_id(const Widget &w) const { return "ctx:" + item_id(w); }
   // §4.6: enqueue a widget POINTER handler carrying its event data (a program gets an `event`
   // dict).
   void enqueue_event(const std::string &event, float x, float y, float dx, float dy, int button) {
@@ -3108,6 +3144,84 @@ void Runtime::Impl::emit(const Widget &w) {
   });
 }
 
+// §5.30 a right-click menu's `event`: what it was opened over (`on`: group, viewport, window or
+// main; a custom widget other than a viewport by its type) and that widget's `id`, the menu's
+// `id`, how (`via`) and where (`px`, `py`) it was opened, and the pick at that point over a scene
+// view. The pick's fields are always there, empty (hit "0") over a widget that is no scene view, so
+// a visible_when: can read them anywhere; they are strings, as a viewport's pick: key holds them,
+// but `tags` is a list.
+Runtime::Impl::MenuEvent Runtime::Impl::context_event(const Widget &w, ContextMenuOver over,
+                                                      const ContextMenuOpen &o,
+                                                      const Runtime::ContextPick &pick) const {
+  namespace se = cvc::state_exec;
+  MenuEvent e;
+  auto &f = e.fields;
+  std::string on = "group";
+  if (over == ContextMenuOver::Main)
+    on = "main";
+  else if (over == ContextMenuOver::Window)
+    on = "window";
+  else if (w.kind == Kind::Custom)
+    on = w.custom_type;
+  f.emplace_back("on", se::value_t(on));
+  f.emplace_back("id", se::value_t(over == ContextMenuOver::Main                     ? std::string()
+                                   : over == ContextMenuOver::Window && w.id.empty() ? w.label
+                                                                                     : w.id));
+  f.emplace_back("menu", se::value_t(w.context_menu_id));
+  f.emplace_back("via", se::value_t(o.via.empty() ? std::string("pointer") : o.via));
+  f.emplace_back("px", se::value_t(static_cast<double>(o.x)));
+  f.emplace_back("py", se::value_t(static_cast<double>(o.y)));
+  std::vector<std::pair<std::string, std::string>> hit;
+  if (pick)
+    hit = pick();
+  const auto field = [&hit](const char *name, const char *dflt) {
+    for (const auto &kv : hit)
+      if (kv.first == name)
+        return kv.second;
+    return std::string(dflt);
+  };
+  for (const char *k : {"node", "x", "y", "z", "i", "j", "k", "value", "axis", "view", "mods"})
+    f.emplace_back(k, se::value_t(field(k, "")));
+  f.emplace_back("hit", se::value_t(field("hit", "0")));
+  std::vector<se::value_t> tags;
+  {
+    std::istringstream words(field("tags", ""));
+    for (std::string t; words >> t;)
+      tags.emplace_back(t);
+  }
+  f.emplace_back("tags", se::make_list(std::move(tags)));
+  e.dict = se::make_dict(f);
+  return e;
+}
+
+void Runtime::Impl::emit_context_menu(const Widget &w, ContextMenuOver over,
+                                      const Runtime::ContextPick &pick) {
+  // Its instance (a repeated group's menus are apart), and the id the backend keys the popup on.
+  const std::string key = instance_key() + (over == ContextMenuOver::Main ? "|main" : "|menu");
+  const std::string id = over == ContextMenuOver::Main ? std::string("ctx:main") : context_id(w);
+  ContextMenuOpen opened;
+  if (!backend->begin_context_menu(id.c_str(), over, opened)) {
+    menu_events.erase(key);
+    return;
+  }
+  auto it = menu_events.find(key);
+  if (opened.now || it == menu_events.end())
+    it = menu_events.insert_or_assign(key, context_event(w, over, opened, pick)).first;
+  it->second.walk = walk_no;
+  const MenuEvent *const outer = std::exchange(menu_event, &it->second);
+  // Its items, apart from the widget's children in the tree's paths (instance keys, unnamed ids).
+  constexpr std::size_t kItemsPath = std::size_t(1) << 30;
+  for (std::size_t k = 0; k < w.context_items.size(); ++k) {
+    emit_path.push_back(kItemsPath + k);
+    emit(w.context_items[k]);
+    emit_path.pop_back();
+  }
+  menu_event = outer;
+  if (reactive) // unbound now: the next menu binds its own, even one made where this one was
+    reactive->set_event(menu_event ? &menu_event->dict : nullptr);
+  backend->end_context_menu();
+}
+
 void Runtime::Impl::emit_node(const Widget &w) {
   if (w.kind == Kind::TrayIcon) // emit_tray draws it, after the bar's menus; not here, where its
     return;                     // tooltip and pointer handlers would land on the item before it
@@ -3305,10 +3419,16 @@ void Runtime::Impl::emit_node(const Widget &w) {
       write<std::string>(app, geo_path, format_geom(persist));
     if (visible) {
       b.push_id(id.c_str());
+      if (w.context_menu) // §5.30 its right-click menu: over its body, inside the window
+        b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Window);
       const bool backdrop = open_backdrop(w, /*window=*/true); // §5.12
       emit_container(w); // §3.0.3b: the window body honours w.layout
       if (backdrop)
         b.end_backdrop();
+      if (w.context_menu) {
+        b.end_context_area();
+        emit_context_menu(w, ContextMenuOver::Window, {});
+      }
       b.pop_id();
     }
     b.end_window();
@@ -3322,6 +3442,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     // hold a "Change" button.
     if (!w.id.empty())
       b.push_id(w.id.c_str());
+    // §5.30 its right-click menu is over all of it (the document root's is the main view's, which
+    // render() opens after the walk).
+    const bool menu = w.context_menu && &w != &root;
+    if (menu)
+      b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Item);
     // §4.6 a group with pointer handlers of its own, or `hover: highlight`, is one item over its
     // whole area (a feed's card): named by its id:, else by its place in the tree, so two unnamed
     // ones never share a backend id.
@@ -3343,6 +3468,10 @@ void Runtime::Impl::emit_node(const Widget &w) {
     inner_click = clicks_fired != clicks_before;
     if (item)
       b.end_item_group();
+    if (menu) {
+      b.end_context_area();
+      emit_context_menu(w, ContextMenuOver::Item, {});
+    }
     if (!w.id.empty())
       b.pop_id();
     break;
@@ -3896,30 +4025,40 @@ void Runtime::Impl::emit_node(const Widget &w) {
     //  2. else the BACKEND's novel-primitive escape (custom_widget) — the core reads
     //     the bound value, hands it in, and writes back on the committed edge;
     //  3. else a placeholder (neither knows this type).
+    // §5.30 its right-click menu is over all of it; a scene view (a viewport) adds its pick.
+    if (w.context_menu)
+      b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Item);
+    Runtime::ContextPick pick;
     if (const WidgetEmitFn fn = lookup_widget(app, w.custom_type)) {
       WidgetEmitContext ctx;
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
       ctx.fire = [this](const std::string &event) { enqueue(event); };
       fn(w, ctx);
-      break;
+    } else {
+      const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
+      const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
+      b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
+      CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
+      b.set_custom_scope(std::string());
+      if (!e.handled)
+        b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
+      else if (e.committed && !w.bind.empty())
+        write<std::string>(app, path, e.value);
+      if (e.handled && !e.fire.empty()) // an event it raised, with its fields
+        enqueue_fields(e.fire, std::move(e.fields));
+      for (CustomEdit::Event &ev : e.events) // and any more, in order
+        if (e.handled && ev.document)
+          enqueue_document_fields(ev.fire, std::move(ev.fields));
+        else if (e.handled)
+          enqueue_fields(ev.fire, std::move(ev.fields));
+      if (e.handled)
+        pick = std::move(e.context_pick);
     }
-    const std::string path = w.bind.empty() ? std::string() : resolve(w.bind);
-    const std::string cur = w.bind.empty() ? std::string() : read_string(app, path);
-    b.set_custom_scope(current_prefix()); // where its bind: resolved, for keys of its own
-    CustomEdit e = b.custom_widget(w.custom_type.c_str(), cur, w);
-    b.set_custom_scope(std::string());
-    if (!e.handled)
-      b.text_line(("[" + w.custom_type + "?]").c_str()); // neither composed nor backend-drawn
-    else if (e.committed && !w.bind.empty())
-      write<std::string>(app, path, e.value);
-    if (e.handled && !e.fire.empty()) // an event it raised, with its fields
-      enqueue_fields(e.fire, std::move(e.fields));
-    for (CustomEdit::Event &ev : e.events) // and any more, in order
-      if (e.handled && ev.document)
-        enqueue_document_fields(ev.fire, std::move(ev.fields));
-      else if (e.handled)
-        enqueue_fields(ev.fire, std::move(ev.fields));
+    if (w.context_menu) {
+      b.end_context_area();
+      emit_context_menu(w, ContextMenuOver::Item, pick);
+    }
     break;
   }
   }
@@ -5059,6 +5198,10 @@ void Runtime::Impl::render() {
       backend->end_main_menu_bar();
     }
     emit(root);
+    // §5.30 the document's own right-click menu, over the main view: after every window, so a
+    // window's or a group's menu under the pointer opens instead.
+    if (root.context_menu && root.repeat.empty() && visible(root))
+      emit_context_menu(root, ContextMenuOver::Main, main_view_pick);
     emit_notify_window(); // §5.24, while Show all... has it open
     // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
     // on it.
@@ -5067,6 +5210,9 @@ void Runtime::Impl::render() {
     file_pick->composed.emit(*backend);
   }
   players_end_walk(); // §5.13: a player whose widget this walk did not draw stops
+  // §5.30 a menu this walk did not draw (its widget hidden, its window closed) is closed.
+  std::erase_if(menu_events, [this](const auto &kv) { return kv.second.walk != walk_no; });
+  ++walk_no;
   backend->end_frame();
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
@@ -7869,6 +8015,8 @@ void Runtime::set_root(Widget root) {
 void Runtime::on(std::string event, std::function<void()> handler) {
   m_->handlers[std::move(event)] = std::move(handler);
 }
+
+void Runtime::set_main_view_pick(ContextPick pick) { m_->main_view_pick = std::move(pick); }
 
 // A lane's program and the key bindings are read by the isolation rules (S1-Q6), and the channel
 // policy was until S2-Q16: setting one decides the placement again before the next program starts

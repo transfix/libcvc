@@ -3,7 +3,8 @@
 # for its own camera and size and depth-tests the picture against what it draws: two rods pass
 # through the bunny, so in every view a rod shows outside the surface and is hidden inside it,
 # and the bunny hides the part of a rod behind it. The signed distance field of the embedded bunny
-# (32^3, to keep the run short) is raycast as an opaque surface.
+# (32^3, to keep the run short) is raycast as an opaque surface. Each view is framed on what it
+# draws, the rods and the volume's box.
 
 meta:
   name: golden volren views
@@ -26,7 +27,6 @@ windows:
         view: side
         azimuth: 90
         elevation: 10
-        zoom: 1.7
         chrome: false
         shadows: false
         clear_color: [0.05, 0.06, 0.08]
@@ -41,7 +41,6 @@ windows:
         view: above
         azimuth: -40
         elevation: 60
-        zoom: 1.7
         chrome: false
         shadows: false
         clear_color: [0.05, 0.06, 0.08]

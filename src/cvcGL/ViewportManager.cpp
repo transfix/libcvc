@@ -31,9 +31,9 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>      // vtkStandardNewMacro
 #include <vtkOpenGLRenderWindow.h> // limitTextureUnits: the window's GL state
-#include <vtkOpenGLRenderer.h>
-#include <vtkOpenGLState.h>  // ... and its texture-unit table
-#include <vtkOutputWindow.h> // route VTK's ERR/WARN to stderr, not a Win32 message box
+#include <vtkOpenGLRenderer.h>     // lightsPerRenderer; a mirror's image-based lighting
+#include <vtkOpenGLState.h>        // ... and its texture-unit table
+#include <vtkOutputWindow.h>       // route VTK's ERR/WARN to stderr, not a Win32 message box
 #include <vtkPBRPrefilterTexture.h>
 #include <vtkPNGWriter.h>
 #include <vtkProp.h>
@@ -178,9 +178,25 @@ namespace cvc {
 namespace gl {
 
 namespace {
+// Whether `items` holds exactly `want`, in that order.
+bool sameItems(vtkCollection *items, const std::vector<vtkObject *> &want) {
+  if (items->GetNumberOfItems() != static_cast<int>(want.size()))
+    return false;
+  vtkCollectionSimpleIterator it;
+  items->InitTraversal(it);
+  for (vtkObject *w : want)
+    if (items->GetNextItemAsObject(it) != w)
+      return false;
+  return true;
+}
+
 // Copy the source renderer's current props into the mirror's renderer, so the
 // mirror shows the live scene (any node added / re-meshed since last frame) from
 // its OWN camera. The props are shared by reference — one geometry, drawn twice.
+// A mirror that already holds exactly what it should draw is left alone: taking
+// every prop out and putting it back each frame makes the next draw of them
+// slower (measured on viewer_grid.ari, a view re-synced just before it draws:
+// 1.6 ms a draw instead of 0.4).
 void syncMirrorProps(Viewport &mirror) {
   vtkRenderer *dst = mirror.renderer();
   vtkRenderer *src = mirror.mirrorSource();
@@ -189,29 +205,37 @@ void syncMirrorProps(Viewport &mirror) {
   // 3-D props only: skip vtkActor2D (FpsHud, ScreenTextHud, scalar bars). A 2-D
   // overlay is positioned in the WINDOW, not the scene, so copying it would draw
   // the source's HUD a second time on top of the inset.
-  dst->RemoveAllViewProps();
   const Viewport::PropFilter &keep = mirror.mirrorFilter(); // a subset, restyled, if set
+  std::vector<vtkObject *> drawn;
   vtkPropCollection *props = src->GetViewProps();
   vtkCollectionSimpleIterator it;
   props->InitTraversal(it);
   while (vtkProp *p = props->GetNextProp(it)) {
     if (vtkActor2D::SafeDownCast(p))
       continue;
-    vtkProp *drawn = keep ? keep(p) : p;
-    if (!drawn)
-      continue;
-    dst->AddViewProp(drawn);
+    if (vtkProp *d = keep ? keep(p) : p)
+      drawn.push_back(d);
+  }
+  if (!sameItems(dst->GetViewProps(), drawn)) {
+    dst->RemoveAllViewProps();
+    for (vtkObject *d : drawn)
+      dst->AddViewProp(static_cast<vtkProp *>(d));
   }
   // Copy the source's lights so a mirror of a StageLighting-rigged scene is lit
   // the same instead of rendering flat. World-space lights are correct from the
   // mirror's own camera; with none, the mirror falls back to VTK's automatic
   // headlight following its own camera.
-  dst->RemoveAllLights();
+  std::vector<vtkObject *> lit;
   vtkLightCollection *lights = src->GetLights();
-  vtkCollectionSimpleIterator lit;
-  lights->InitTraversal(lit);
-  while (vtkLight *l = lights->GetNextLight(lit))
-    dst->AddLight(l);
+  vtkCollectionSimpleIterator li;
+  lights->InitTraversal(li);
+  while (vtkLight *l = lights->GetNextLight(li))
+    lit.push_back(l);
+  if (!sameItems(dst->GetLights(), lit)) {
+    dst->RemoveAllLights();
+    for (vtkObject *l : lit)
+      dst->AddLight(static_cast<vtkLight *>(l));
+  }
   // And its image-based lighting (SceneGraph::setImageBasedLighting), the same environment texture
   // (each renderer filters its own copy on the GPU once). Set only on a change: a new texture
   // makes VTK filter it again.
@@ -315,6 +339,23 @@ struct ViewportManager::Impl {
   // Keep the window's layer count strictly greater than the highest layer index
   // in use, or VTK silently drops the top layer.
   void syncLayerCount() { window->SetNumberOfLayers(highestLayer() + 1); }
+
+  // The window's renderers share its shader programs, and VTK keeps a program's light uniforms
+  // with only the time they were set: with a second renderer, one can draw with the other's
+  // lights, the main view with a view's (they draw the same props). So once the window has two,
+  // every renderer sends its own lights to each program it draws with, once a render (cvcpkg's
+  // VTK 9.5.0+cvc.7); one left out could still draw with another's. It stays on when a view goes:
+  // the view's lights may still be in a program. A window that only ever had one renderer keeps
+  // VTK's default, which sends the lights only when they change.
+  void lightsPerRenderer() {
+#ifdef CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER
+    if (viewports.size() < 2)
+      return;
+    for (const auto &v : viewports)
+      if (auto *gl = vtkOpenGLRenderer::SafeDownCast(v->renderer()))
+        gl->UpdateLightingUniformsEveryRenderOn();
+#endif
+  }
 
   // ---- FrameYield (see ViewportManager::setFrameYield / lockFrameYield) ----
   // requestedYield: what the app asked for. urlYield: the page's ?frameyield= (0 absent, 1 vtk,
@@ -624,10 +665,13 @@ ViewportManager::~ViewportManager() {
     m_impl->unitCapObserver = 0;
     // Detach every scene BEFORE the window dies: the scenes hold actors that
     // belong to these renderers, and tearing the window down under them is how
-    // offscreen backends crash at exit (see SceneRenderer::close).
+    // offscreen backends crash at exit (see SceneRenderer::close). The viewports'
+    // own GL objects (a texture, a throttled one's last pixels) go while the
+    // context is still there.
     for (auto &v : m_impl->viewports) {
       if (!v->isMirror())
         v->scene().setRenderer(nullptr);
+      v->releaseGraphics();
     }
     // Cut the router's back-pointer and detach it before the interactor dies, so
     // no late event dereferences a half-destroyed manager.
@@ -709,6 +753,7 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
   // count must exceed the highest layer index or VTK rejects the top layer
   // ("Invalid layer for renderer: not rendered") and never draws it.
   m_impl->syncLayerCount();
+  m_impl->lightsPerRenderer();
   return ref;
 }
 
@@ -733,6 +778,11 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   vp->setLayer(layer);
   vp->setMirrorSource(src->renderer());
   vp->setMirrorLive(liveSync); // false => primed once here, never re-synced
+  // Drawn into a texture (Viewport::setTextureSize), it re-syncs as the render reaches it, on the
+  // renders it draws: a widget that shows it during the frame finds it current.
+  Viewport *raw = vp.get();
+  if (liveSync)
+    vp->setBeforeDraw([raw] { syncMirrorProps(*raw); });
   m_impl->window->AddRenderer(vp->renderer());
   vp->camera().setRenderWindow(m_impl->window); // pan scaling + Fly capture (not attach)
 
@@ -747,7 +797,14 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
   m_impl->byName[name] = vp.get();
   m_impl->viewports.push_back(std::move(vp));
   m_impl->syncLayerCount();
+  m_impl->lightsPerRenderer();
   return ref;
+}
+
+void ViewportManager::syncMirror(const std::string &name) {
+  Viewport &vp = viewport(name); // checks the manager is open, throws for an unknown name
+  if (vp.isMirror() && vp.mirrorLive())
+    syncMirrorProps(vp);
 }
 
 void ViewportManager::removeViewport(const std::string &name) {
@@ -772,6 +829,7 @@ void ViewportManager::removeViewport(const std::string &name) {
     vp->scene().setRenderer(nullptr);
     m_impl->attachedScenes.erase(&vp->scene());
   }
+  vp->releaseGraphics();
   m_impl->window->RemoveRenderer(vp->renderer());
 
   // Drop any router state that points at it, so a live drag / hover does not
@@ -815,8 +873,12 @@ void ViewportManager::render() {
   // mirror too, then draw it with the mirror's own camera. A FROZEN mirror
   // (mirrorLive() == false) keeps its add-time snapshot and is skipped here, and
   // so is a throttled one (Viewport::setRefreshHz) showing its last pixels this
-  // frame: it re-syncs on the frame it draws.
+  // frame: it re-syncs on the frame it draws. A viewport drawn into a texture
+  // decides, and re-syncs, as the window's render reaches it (after a UI walk
+  // inside that render has shown, hidden or sized it).
   for (auto &v : m_impl->viewports) {
+    if (v->textured())
+      continue;
     const bool draws = v->beginRender();
     if ((draws || !v->visible()) && v->isMirror() && v->mirrorLive())
       syncMirrorProps(*v);
@@ -839,8 +901,15 @@ Viewport *ViewportManager::viewportAt(int x, int y) const {
   for (const auto &v : m_impl->viewports) {
     if (!v->visible() || !v->inputEnabled())
       continue;
-    if (!v->renderer()->IsInViewport(x, y))
+    if (v->textured()) { // shown where its region is; its renderer draws at its texture's rect
+      double r[4];
+      v->region(r);
+      const int *ws = m_impl->window->GetSize();
+      if (x < r[0] * ws[0] || x >= r[2] * ws[0] || y < r[1] * ws[1] || y >= r[3] * ws[1])
+        continue;
+    } else if (!v->renderer()->IsInViewport(x, y)) {
       continue;
+    }
     // Descending layer, later-added wins on a tie: iterate in add order and take
     // any hit whose layer >= the best so far (so the last max-layer hit wins).
     if (!best || v->layer() >= bestLayer) {

@@ -26,6 +26,7 @@
 #include <cvc/nav/policy_library.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
+#include <cvc/nav/world_grid.h>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -184,6 +185,74 @@ TEST(NavScrub, TheScenarioAndItsHash) {
   const scrub_scenario r = scenario_from_trace(trace, 200);
   EXPECT_EQ(scenario_hash(r), scenario_hash(s));
   EXPECT_EQ(r.name, "nav-lab:blocks, 3 agents");
+}
+
+// The least distance (m, at `scale` units a metre) between any two of the agents' starts, and
+// between any two of their goals.
+static double least_apart(const scrub_scenario &s, bool goals, double scale = 0.05) {
+  double d = 1e30;
+  const auto &a = s.world.agents;
+  for (std::size_t i = 0; i < a.size(); ++i)
+    for (std::size_t j = i + 1; j < a.size(); ++j) {
+      const auto &p = goals ? a[i].goal : a[i].start, &q = goals ? a[j].goal : a[j].start;
+      d = std::min(d, std::hypot(p[0] - q[0], p[1] - q[1]) / scale);
+    }
+  return d;
+}
+
+TEST(NavScrub, NoTwoCarsStartOrEndOnTopOfEachOther) {
+  // the built-in scenario's lanes are 8 m apart (a Humvee is 2.2 m wide)
+  for (unsigned seed = 0; seed < 8; ++seed) {
+    const scrub_scenario s = default_scenario(6, seed, 10);
+    EXPECT_GE(least_apart(s, false), 8.0 - 1e-3) << "seed " << seed;
+    EXPECT_GE(least_apart(s, true), 8.0 - 1e-3) << "seed " << seed;
+  }
+}
+
+TEST(NavScrub, AScenarioOnAWorldGridAtItsRealSize) {
+  // a 160 m flat square with a 40 m block in its middle, on 2 m cells
+  world_grid g = flat_grid(80.0, 2.0);
+  for (int r = 0; r < g.rows; ++r)
+    for (int c = 0; c < g.cols; ++c) {
+      const double x = g.min_x + c * g.cell(), y = g.min_y + r * g.cell();
+      if (std::abs(x) <= 20.0 && std::abs(y) <= 20.0)
+        g.occupancy[static_cast<std::size_t>(r) * g.cols + c] = 1;
+    }
+  const scrub_scenario s = grid_scenario(g, 5, 11, 300, "plaza");
+  EXPECT_EQ(s.ticks, 300);
+  EXPECT_EQ(s.name, "plaza, 5 agents, seed 11");
+  EXPECT_EQ(s.world.world_id, "nav-lab:plaza");
+  ASSERT_EQ(s.world.agents.size(), 5u);
+  EXPECT_EQ(scenario_hash(s), scenario_hash(grid_scenario(g, 5, 11, 300, "plaza")));
+  EXPECT_NE(scenario_hash(s), scenario_hash(grid_scenario(g, 5, 12, 300, "plaza")));
+  EXPECT_GE(least_apart(s, false), 12.0 - 1e-3);
+  EXPECT_GE(least_apart(s, true), 12.0 - 1e-3);
+  for (const auto &a : s.world.agents) // no goal on another's start
+    for (const auto &b : s.world.agents)
+      EXPECT_GE(std::hypot(a.goal[0] - b.start[0], a.goal[1] - b.start[1]) / 0.05, 12.0 - 1e-3);
+  for (const auto &a : s.world.agents) {
+    // the world stays in metres: the normalized start is (x - cx) * 0.05
+    const double x = a.start[0] / 0.05, y = a.start[1] / 0.05;
+    const double gx = a.goal[0] / 0.05, gy = a.goal[1] / 0.05;
+    EXPECT_LE(std::abs(x), 80.0);
+    EXPECT_LE(std::abs(y), 80.0);
+    EXPECT_FALSE(std::abs(x) <= 24.0 && std::abs(y) <= 24.0) << x << ", " << y; // 4 m clear
+    EXPECT_FALSE(std::abs(gx) <= 24.0 && std::abs(gy) <= 24.0) << gx << ", " << gy;
+    EXPECT_GE(std::hypot(gx - x, gy - y), 0.3 * 160.0 - 1e-3); // a goal across the world
+    EXPECT_NEAR(a.start[2], std::atan2(gy - y, gx - x), 1e-5); // facing it
+  }
+  // the scenario deploys: the untrained policy runs on it
+  {
+    policy_library lib;
+    EXPECT_EQ(world_from_trace(s.world, lib).size(), 5);
+  }
+  // the same world at another scale is another scenario; a scenario needs an agent and a scale
+  EXPECT_NE(scenario_hash(grid_scenario(g, 5, 11, 300, "plaza", 0.1)), scenario_hash(s));
+  EXPECT_THROW(grid_scenario(g, 0, 11, 300, "plaza"), std::invalid_argument);
+  EXPECT_THROW(grid_scenario(g, 2, 11, 300, "plaza", 0.0), std::invalid_argument);
+  world_grid shut = flat_grid(20.0, 2.0);
+  std::fill(shut.occupancy.begin(), shut.occupancy.end(), std::uint8_t{1});
+  EXPECT_THROW(grid_scenario(shut, 2, 0, 10, "shut"), std::runtime_error);
 }
 
 TEST(NavScrub, OneBlobDeployedTwiceIsTheSameRun) {
