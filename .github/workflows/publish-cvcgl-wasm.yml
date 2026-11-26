@@ -1,11 +1,12 @@
 name: publish-cvcgl-wasm
 
 # Build + publish libcvc and cvcgl for the wasm-mt platform (WebAssembly +
-# pthreads), so downstream wasm consumers (browser apps built on cvcGL) can
-# `cvcpkg install cvc/cvcgl --platform wasm-mt` instead of rebuilding cvcGL from
-# source. The wasm-mt DEPS (vtk/imgui/boost/codecs, all wasm32) are already on
-# the catalog; only libcvc + cvcgl were missing. cvcgl is built WITH imgui, so
-# the browser overlay works.
+# pthreads) and the single-threaded wasm platform, so downstream wasm consumers
+# (browser apps built on cvcGL) can `cvcpkg install cvc/cvcgl --platform wasm-mt`
+# (or `--platform wasm`) instead of rebuilding cvcGL from source. The DEPS
+# (vtk/imgui/boost/codecs, all wasm32) are already on the catalog for both; only
+# libcvc + cvcgl were missing. cvcgl is built WITH imgui, so the browser overlay
+# works.
 #
 # Also builds + publishes libcvc-examples-web for wasm-mt: the examples' threaded
 # browser gallery that libcvc-examples' launcher serves (every `wasm-demos` target,
@@ -17,6 +18,7 @@ name: publish-cvcgl-wasm
 # The arigl-web job builds + publishes arigl-web, the stock browser host for anyone's .ari
 # documents (arigl, and in the single-threaded package ari's terminal pages), for both wasm
 # flavours, from the recipe's own build-wasm.sh against the recipe's own declared dep closure.
+# The ariglx-web job does the same for ariglx-web, arigl-web with an embedded Python.
 #
 # Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
 # toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
@@ -45,11 +47,22 @@ jobs:
     # toolchain + cmake/ninja from the cvcpkg catalog. No dependency on a box with
     # a pre-installed emsdk (this used to pin to catx-03's /opt/cvc-wasm/emsdk) —
     # emsdk is just a cvcpkg package, so any linux runner works identically.
+    #
+    # One leg per flavour: the libcvc and cvcgl SDK bundles for wasm-mt (-pthread) and for wasm
+    # (single-threaded, as arigl-web's and ariglx-web's single-threaded pages are built), each
+    # against its own dep closure, since Emscripten won't link -pthread and non-pthread objects.
+    # The cvcGL JS tests and the libcvc-examples-web gallery are the wasm-mt leg's alone.
+    name: libcvc + cvcgl (${{ matrix.platform }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [wasm-mt, wasm]
     env:
       EMSDK_DIR: ${{ github.workspace }}/emsdk
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
       INST: ${{ github.workspace }}/wasm-inst
+      PLATFORM: ${{ matrix.platform }}
       # Only a manual dispatch can dry-run; a tag push always publishes.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
@@ -84,9 +97,10 @@ jobs:
 
       - name: cvcGL browser-side JS tests (state shim, glsync, serve.py)
         # The shim ships in the bundle built below; test it first, with the emsdk's own node.
+        if: matrix.platform == 'wasm-mt'
         run: src/cvcGL/wasm/run-js-tests.sh
 
-      - name: Install the wasm-mt dep closure
+      - name: Install the ${{ matrix.platform }} dep closure
         # The same list + flags the nightly installs; libcvc/cvcGL link these. sdl3 backs the
         # cvcGL input/peripheral seam (CVC_ENABLE_SDL): with it in $WASM_DEPS, cvcGL's
         # find_package(SDL3 CONFIG) (resolved via CMAKE_FIND_ROOT_PATH below) links SDL3::SDL3
@@ -103,14 +117,17 @@ jobs:
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui-w32 sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
-              --platform wasm-mt --arch wasm32 --config release --link static \
+              --platform "$PLATFORM" --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
 
-      - name: Build + install libcvc + cvcGL (wasm-mt, with imgui + sdl3)
+      - name: Build + install libcvc + cvcGL (${{ matrix.platform }}, with imgui + sdl3)
         # ONE emscripten configure builds both cvc + cvcGL targets and installs
         # them into $INST (the same single-configure shape a standalone downstream
-        # wasm-mt app build uses). -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
+        # wasm app build uses). -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
+        # CVC_WASM_PTHREADS follows the flavour.
+        env:
+          PTHREADS: ${{ matrix.platform == 'wasm-mt' && 'ON' || 'OFF' }}
         run: |
           # shellcheck disable=SC1091
           source "$CVC_EMSDK_DIR/emsdk_env.sh"
@@ -123,7 +140,7 @@ jobs:
             -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=ON \
             -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=ON \
-            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS="$PTHREADS" \
             -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF
           # CVC_BUILD_ARI=OFF, CVC_BUILD_ARIGL=OFF: this SDK bundle is the libraries; the `ari` and
           # `arigl` runners are not built here (only cvc + cvcGL are), and with either option on,
@@ -159,28 +176,28 @@ jobs:
             || { echo "::error::cvcGL wasm did NOT link SDL3 (find_package(SDL3) failed under emcmake despite sdl3 in \$WASM_DEPS) — the input seam fell back to the VTK interactor"; exit 1; }
           echo "cvcGL wasm: SDL3 input seam ENABLED (find_dependency(SDL3) present)"
           # cvcgl_wasm_app(): the WebGL state shim and the CMake function that links it must ship,
-          # the config must say this cvcGL is -pthread (MIMALLOC AUTO follows it), and none of the
-          # three CMake files may name a path on this runner (the JS dir is computed from the
+          # the config must say whether this cvcGL is -pthread (MIMALLOC AUTO follows it), and none
+          # of the three CMake files may name a path on this runner (the JS dir is computed from the
           # installed config's own location).
           test -f "$INST/share/cvcGL/wasm/webgl_state_shadow.js" \
             || { echo "::error::cvcGL wasm bundle has no share/cvcGL/wasm/webgl_state_shadow.js"; exit 1; }
           grep -q "function(cvcgl_wasm_app" "$INST/lib/cmake/cvcGL/cvcGLWasm.cmake" \
             || { echo "::error::cvcGL wasm bundle has no cvcgl_wasm_app() (lib/cmake/cvcGL/cvcGLWasm.cmake)"; exit 1; }
-          grep -q "CVCGL_WASM_PTHREADS ON" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
-            || { echo "::error::cvcGLConfig.cmake does not record the -pthread build (CVCGL_WASM_PTHREADS)"; exit 1; }
+          grep -q "CVCGL_WASM_PTHREADS $PTHREADS" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
+            || { echo "::error::cvcGLConfig.cmake does not record CVCGL_WASM_PTHREADS $PTHREADS for this $PLATFORM build"; exit 1; }
           if grep -nF -e "$GITHUB_WORKSPACE" -e "$INST" "$INST"/lib/cmake/cvcGL/cvcGLConfig.cmake \
                "$INST"/lib/cmake/cvcGL/cvcGLTargets.cmake "$INST"/lib/cmake/cvcGL/cvcGLWasm.cmake; then
             echo "::error::cvcGL's installed CMake files name a path on this runner (not relocatable)"; exit 1
           fi
 
-      - name: Pack + publish libcvc + cvcgl wasm-mt
+      - name: Pack + publish libcvc + cvcgl ${{ matrix.platform }}
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
           mkdir -p dist
           for r in libcvc cvcgl; do
             cvcpkg pack "cvcpkg/recipes/$r" --from-prefix "$INST" \
-              --platform wasm-mt --config release --link static \
+              --platform "$PLATFORM" --config release --link static \
               --local --output-dir dist
           done
           ls -la dist/
@@ -189,16 +206,17 @@ jobs:
           fi
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
           # Publish by archive PATH (the archive's own manifest carries the
-          # wasm-mt platform/arch; publish-by-name would re-derive the host arch).
-          # Skip any archive whose exact name+version is already on the catalog:
-          # libcvc/cvcgl wasm-mt are typically already published at these versions,
-          # and re-publishing the same +cvc.N would fail. A revision bump republishes.
-          for a in dist/libcvc-*-wasm-mt-*.tar.gz dist/cvcgl-*-wasm-mt-*.tar.gz; do
+          # platform/arch; publish-by-name would re-derive the host arch).
+          # Skip any archive whose exact name+version this flavour already has on
+          # the catalog (re-publishing the same +cvc.N would fail); the platform
+          # column is matched too, so one flavour never stands in for the other.
+          # A revision bump republishes.
+          for a in dist/libcvc-*-"$PLATFORM"-wasm32-*.tar.gz dist/cvcgl-*-"$PLATFORM"-wasm32-*.tar.gz; do
             base=$(basename "$a" .tar.gz)
             name=$(echo "$base" | sed -E 's/-[0-9].*$//')
-            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-mt-.*$//")
-            if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
-                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-${PLATFORM}-wasm32-.*$//")
+            if cvcpkg search "$name" --platform "$PLATFORM" 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" -v p="$PLATFORM" '$1==n && $2==v && $3==p{f=1} END{exit !f}'; then
               echo "=== skip $name $ver (already on catalog) ==="; continue
             fi
             echo "=== publish $a ==="
@@ -206,6 +224,7 @@ jobs:
           done
 
       - name: Build + pack + publish libcvc-examples-web (wasm-mt gallery)
+        if: matrix.platform == 'wasm-mt'
         # The threaded browser gallery libcvc-examples' launcher serves: every
         # `wasm-demos` target (examples/CMakeLists.txt), with the real Austin scene +
         # trained weights preloaded — what gh-pages serves, less the single-threaded
@@ -427,6 +446,125 @@ jobs:
             if cvcpkg search arigl-web --platform "$PLATFORM" 2>/dev/null \
                  | awk -v v="$ver" -v p="$PLATFORM" '$1=="arigl-web" && $2==v && $3==p{f=1} END{exit !f}'; then
               echo "=== skip arigl-web $ver $PLATFORM (already on catalog) ==="; continue
+            fi
+            echo "=== publish $a ==="
+            cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
+          done
+
+  # ariglx-web: arigl-web with an embedded Python (cvcpkg/recipes/ariglx-web, roadmap phases W1 and
+  # W3): CPython 3.12, pycvc, pycvc_gl and numpy linked into one module, the stdlib and the
+  # pure-Python packages in python312.zip beside it. One leg per flavour, each with its own dep
+  # closure installed from the recipe's own list, and built by the recipe's build-wasm.sh, as
+  # ci.yml's ariglx-web job builds it: the lean tier (the recipe declares no vtk-python, so no
+  # VTK-Python bridge). Then the same headless-Chrome smoke ci.yml runs: arigl-web's cases on its
+  # page, with --pydocs a python: block with numpy and pycvc_gl, one with the stdlib's expat and
+  # SHA-2, a Python program in place of the document and a block that raises, and with --wasmdocs a
+  # document's WebAssembly guests; the threaded page cross-origin isolated. Revisions as for
+  # arigl-web: the recipe's cvc_revision, skipped when that version is already on the catalog.
+  ariglx-web:
+    name: ariglx-web (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [wasm, wasm-mt]
+    env:
+      EMSDK_DIR: ${{ github.workspace }}/emsdk
+      WASM_DEPS: ${{ github.workspace }}/wasm-deps
+      INST: ${{ github.workspace }}/ariglx-web-inst
+      PLATFORM: ${{ matrix.platform }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cvcpkg, cmake/ninja and protoc from the catalog
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja protobuf --prefix "${{ github.workspace }}/tools" \
+            --config release --link shared
+          echo "${{ github.workspace }}/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Provision the Emscripten SDK from the catalog
+        run: |
+          cvcpkg install emsdk --platform linux --prefix "$EMSDK_DIR" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$EMSDK_DIR/emsdk_env.sh" \
+            || { echo "::error::emsdk bundle has no emsdk_env.sh at $EMSDK_DIR"; exit 1; }
+          echo "CVC_EMSDK_DIR=$EMSDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Install the recipe's ${{ matrix.platform }} deps
+        # The newest of each. The link takes undefined symbols as errors, so python312 must be
+        # 3.12.10+cvc.23 or later; the configure checks it (src/ariadne_python/ariadne_python.cmake).
+        run: |
+          set -o pipefail
+          mkdir -p "$WASM_DEPS"
+          cvcpkg install-deps cvcpkg/recipes/ariglx-web --prefix "$WASM_DEPS" \
+            --platform "$PLATFORM" --arch wasm32 --config release --link static \
+            --no-fallback-to-source \
+            || { echo "::error::failed to install ariglx-web's $PLATFORM deps"; exit 1; }
+          grep -m1 '^  version: ' "$WASM_DEPS/share/libcvc-deps/python312/manifest.yaml"
+
+      - name: Build ariglx-web (${{ matrix.platform }}) with the recipe's script
+        run: |
+          set -euo pipefail
+          export CVC_SOURCE_DIR="${{ github.workspace }}"
+          export CVC_BUILD_DIR="${{ github.workspace }}/build-ariglx-web"
+          export CVC_INSTALL_DIR="$INST"
+          export CVC_DEPS_PREFIX="$WASM_DEPS"
+          export CVC_PLATFORM="$PLATFORM"
+          bash cvcpkg/recipes/ariglx-web/build-wasm.sh
+          WEB="$INST/share/ariglx-web"
+          for f in index.html arigl-web.js arigl-web.css ariglx.js ariglx.wasm python312.zip; do
+            test -f "$WEB/$f" || { echo "::error::ariglx-web ($PLATFORM) has no $f"; exit 1; }
+          done
+          echo "=== share/ariglx-web ==="; ls -la "$WEB"
+
+      - name: Transform the smoke's WebAssembly guest (ari_wasm_meter, then wasm-opt)
+        # In the recipe's build tree, beside the documents that run it (src/arigl/web/test/wasm).
+        # Not part of the package.
+        run: |
+          source "$CVC_EMSDK_DIR/emsdk_env.sh" >/dev/null
+          cmake --build build-ariglx-web --target ariglx_wasm_guests
+          ls -la build-ariglx-web/bin/ariglx-wasm-guests
+
+      - name: Run documents with Python and WebAssembly guests in headless Chrome
+        run: |
+          node=$(ls "$CVC_EMSDK_DIR"/node/*/bin/node | head -1)
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          "$chrome" --version
+          pil=
+          if [ -f "$WASM_DEPS/share/python-wasm/pillow-cp312.inittab" ]; then pil=--expect-pil; fi
+          "$node" src/arigl/web/test/arigl_web_smoke.mjs --web "$INST/share/ariglx-web" \
+            --docset src/cvc/tests/data/ariadne_docset --pydocs src/arigl/web/test/python \
+            --wasmdocs build-ariglx-web/bin/ariglx-wasm-guests \
+            --chrome "$chrome" ${pil:+"$pil"} ${{ matrix.platform == 'wasm-mt' && '--isolated' || '' }}
+
+      - name: Pack + publish ariglx-web (${{ matrix.platform }})
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/ariglx-web --from-prefix "$INST" \
+            --platform "$PLATFORM" --config release --link static \
+            --local --output-dir dist
+          ls -la dist/
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry-run: built + packed ariglx-web ($PLATFORM), not publishing"; exit 0
+          fi
+          [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
+          # As for arigl-web: by archive path, skipping a version this flavour already has.
+          shopt -s nullglob
+          archives=(dist/ariglx-web-*-"$PLATFORM"-wasm32-*.tar.gz)
+          [ ${#archives[@]} -gt 0 ] || { echo "::error::no ariglx-web $PLATFORM archive in dist/"; exit 1; }
+          for a in "${archives[@]}"; do
+            ver=$(basename "$a" .tar.gz | sed -E "s/^ariglx-web-//; s/-${PLATFORM}-wasm32-.*$//")
+            if cvcpkg search ariglx-web --platform "$PLATFORM" 2>/dev/null \
+                 | awk -v v="$ver" -v p="$PLATFORM" '$1=="ariglx-web" && $2==v && $3==p{f=1} END{exit !f}'; then
+              echo "=== skip ariglx-web $ver $PLATFORM (already on catalog) ==="; continue
             fi
             echo "=== publish $a ==="
             cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
