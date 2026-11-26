@@ -2445,7 +2445,9 @@ scene:
       passes both with each pose (`entity_pose`, the pose keys or the packed poses).
     - **Nodes.** The entity's group `vehicle_<id>` holds `vehicle_<id>_chassis` and
       `vehicle_<id>_wheel<k>` (a group posed each frame, its mesh `vehicle_<id>_wheel<k>_mesh`
-      under it), the wheels in the rig's order. The catalog publishes the parts too:
+      under it), the wheels in the rig's order. The wheels cast no shadow: the chassis's is the
+      vehicle's, and each turning wheel would be a moving caster the shadow cache redraws on its
+      own. The catalog publishes the parts too:
       `<vehicles>.archetypes.<id>.look.chassis`, `.look.wheel` and `.look.rig` (the rig's file, or
       an inline rig's text, `vehicle_rig_text`), so a `vehicle_preview` draws them, at rest.
     - **Later.** Each wheel's own suspension travel for a `pose` entity: today its wheels stand on

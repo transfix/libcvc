@@ -281,6 +281,9 @@ scene:
     check(mesh != nullptr, "wheel " + std::to_string(k) + "'s mesh under its node");
     if (!mesh)
       continue;
+    // Its chassis's shadow is the vehicle's: a wheel casts none (each would be a moving caster
+    // the shadow cache redraws on its own).
+    check(!mesh->castsShadow(), "wheel " + std::to_string(k) + " casts no shadow");
     const std::array<double, 16> mm = matrix_of(*mesh);
     const double sign = k % 2 == 0 ? 1.0 : -1.0; // a right one turned half a turn about z
     check(near(mm[0], sign * sz, 1e-9) && near(mm[5], sign * sz, 1e-9) && near(mm[10], sz, 1e-9),

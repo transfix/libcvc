@@ -709,6 +709,10 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
       mesh->setRotation(0.0, 0.0, 180.0); // half a turn about its upright: its outside to -y
     mesh->setScale(f.wheel_scale, f.wheel_scale, f.wheel_scale);
     colour(*mesh, look.texture ? m->wheel_texture : none, tyre);
+    // No shadow of its own: it stands under its chassis, whose shadow is the vehicle's, and a
+    // turning wheel is a moving caster the shadow cache redraws on its own every bake (four a
+    // vehicle; 8 promoted Humvees' wheels took a 240-vehicle frame from 78 to 109-131 ms).
+    mesh->setCastsShadow(false);
     drawn_wheel d;
     d.node = hub;
     d.x = h[0];

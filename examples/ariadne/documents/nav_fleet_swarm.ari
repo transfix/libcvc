@@ -62,8 +62,11 @@ world:
     archetypes:
       car:
         vehicle: humvee            # its size and limits
-        look: { data: humvee, file: Humvee.glb, texture: false }   # in its team's colour (a box
-                                                                    # until the model is here)
+        # The parted Humvee (vehicle-humvee 1.0.0+cvc.5): a chassis, a wheel and the rig that
+        # places four of them, so the wheels roll and the front pair steer on the vehicles near
+        # the camera; in its team's colour (a box until the model is here).
+        look: { data: humvee, chassis: humvee/chassis.glb, wheel: humvee/wheel.glb,
+                rig: humvee/rig.json, texture: false }
         controllers: [nav@1, none]
     start:
       - fleet: swarm
