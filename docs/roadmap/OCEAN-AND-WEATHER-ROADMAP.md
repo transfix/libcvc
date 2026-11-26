@@ -1699,8 +1699,23 @@ All of these are vertex-shader maths plus a CPU event manager, and every one has
   | 0 full | to `lod_shade` | to `lod_foam` | 256² (128 m) | to `lod_waves` | full |
   | 1 high | half | half | 128² (64 m) | to `lod_waves` | full |
   | 2 medium | a quarter | off | 128² (64 m) | half | half |
-  | 3 low | off | off | off | not transformed or read | half |
-  | 4 least | off | off | off | not transformed or read | a quarter |
+  | 3 low | off | off | 128² (64 m), 1/30 s substeps | not transformed or read | half |
+  | 4 least | off | off | 128² (64 m), 1/30 s substeps | not transformed or read | a quarter |
+
+  Tiers 3 and 4 kept no wake at first. The gallery's browser build runs terrain_lab at about 14 fps against the 30 fps target, so it sat at tier 4 and never drew a floating body's rings. The wake now stays at every tier on its 64 m window. At tiers 3 and 4 it steps in 1/30 s substeps (`WaterQuality::wake_substep`, `ewave_params::substep`), so a frame runs half the substeps of 1/60. The window's shortest waves (0.7 m at 0.5 m cells, ω ≈ 9.3 /s) keep ω dt under 0.35, where a substep's φ is within 1 % of the exact and open water keeps its exact dispersion (`ewave.h`). The rings a crate makes look the same at either substep.
+
+  **The wake at the last tiers, measured.** terrain_lab at 1280 × 720 with the camera 14 m behind crate_b on the lake (the crates and the launch in the window), `arigl snapshot` on its 1/30 s clock. The figures are the water node's own section times (`water.profile` 2, which waits for the GPU at each section's end), averaged over frames 60–240, in two runs each (Windows, MSVC Release, Intel Arc iGPU):
+
+  | the wake, a frame | sources | step | upload | the rest | all |
+  |---|---|---|---|---|---|
+  | tier 2: 128², 1/60 s substeps | 1.89–1.93 ms | 2.40–2.48 ms | 0.86–0.87 ms | 0.07 ms | 5.3 ms |
+  | tier 4: 128², 1/30 s substeps | 1.95–2.00 ms | 1.56–1.64 ms | 0.83–0.84 ms | 0.07 ms | 4.4–4.6 ms |
+
+  - The step falls by a third, not a half: each step also has fixed passes besides its substeps. The wake as a whole falls by about 0.8 ms of a frame of about 47 ms.
+  - `cvcgl_ewave`'s own timing agrees: a walled 256² window steps a 1/30 s frame in 0.57–0.88 ms of GPU at 1/60 s (71 passes) and 0.29–0.44 ms at 1/30 s (36 passes).
+  - The browser was not measured. There a frame is about 70 ms, so 1/60 s runs about four substeps a frame against two at 1/30 s, and the saving grows with the frame.
+  - The largest part left is the sources (the CPU's immersion of each body in the sea at the frame's time), which no tier changes.
+  - Wall-clock frame times at tier 4 with the wake on and off were tried first. With other builds sharing the machine they spread too widely to use (paired differences from −1.6 to +71 ms).
 
   Each distance is also multiplied by the scale. With the persistent foam off by a tier, the whitecaps take the bias that covers Monahan's share alone; the calibration finds it with the other two (`OceanFoamCalibration::whitecapsAlone`), so a tier change never stalls the frame on a synchronous threshold search. The whitecaps keep `lod_foam` at every tier, since they cost nothing.
 - **Not stepped.**
