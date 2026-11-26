@@ -408,6 +408,11 @@ if(CVC_BUILD_PYCVC_CORE)
   add_test(NAME pycvc_physics
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_physics.py)
   set_tests_properties(pycvc_physics PROPERTIES ENVIRONMENT "${_pycvc_physics_env}")
+  # The water physics' knobs (OCEAN-AND-WEATHER-ROADMAP.md): the wake, wading, the wind and boats,
+  # against C++'s pinned hashes and its tests' scenarios.
+  add_test(NAME pycvc_physics_water
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_pycvc_physics_water.py)
+  set_tests_properties(pycvc_physics_water PROPERTIES ENVIRONMENT "${_pycvc_test_env}")
   # cvc::physics::mujoco_robot (docs/MUJOCO.md). With CVC_WITH_MUJOCO the test drives the Go2 from
   # cvcpkg's mujoco-menagerie, whose directory it gets in CVC_MUJOCO_MENAGERIE_DIR; without it, it
   # checks that the robot refuses.
