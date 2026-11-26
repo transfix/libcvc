@@ -164,10 +164,14 @@ depends:
     - ninja
 
 build:
-  # VTK is available on linux + windows (no macOS VTK bundle yet).
+  # VTK has bundles for linux, windows and macos/arm64 (none for macos/x86_64 yet).
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
 
