@@ -3684,9 +3684,10 @@ windows:
 
 // A document nested 40 levels deep, each level a unit included with args (a feed's window, view,
 // profile, card list, card, media grid, tile, ... and more), loads, and a terminal draws its
-// innermost widget. Loading and drawing recurse once a level: at Windows' default 1 MB main-thread
-// stack about 15 levels overflowed it (0xC00000FD), so the hosts and these tests link with 8 MB
-// there, as Linux has (CMake/CvcHostStack.cmake).
+// innermost widget. Loading recurses once a level (drawing no longer does:
+// ariadne_deep_nesting_test): at Windows' default 1 MB main-thread stack about 15 levels overflowed
+// it (0xC00000FD), so the hosts and these tests link with 8 MB there, as Linux has
+// (CMake/CvcHostStack.cmake).
 TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
   SKIP_WITHOUT_YAML();
   constexpr int kDepth = 40;
