@@ -1,0 +1,270 @@
+# nav_fleet_swarm.ari — a swarm of vehicles over a small city, seen from above: one fleet of the
+# world's vehicles (docs/ARIADNE.md, "Fleets"), 240 of them in six colour-coded teams, threading a
+# city of blocks with no global plan, each team to its rally point, on the cvc::nav runtime. Every
+# 15 s of world time the rally points swap across a ring, so the teams cross the city's middle
+# through each other. The city is this document's own boxes (no download), 240 m across, small
+# enough to see the whole swarm from overhead, and the vehicles are drawn at scale: one mesh for all
+# of them, the nearest few their own nodes (entity layers, the fleets roadmap's FL2). The world
+# steps on the frame's thread, as a browser without threads has it.
+#
+# Drag to orbit, the wheel to zoom; Overhead (H) puts the camera back above the city, Chase follows
+# a vehicle. The panel's fps is the frame rate (quality.frame_ms).
+#
+# Run:
+#   arigl nav_fleet_swarm.ari
+#   arigl --net-allow https://cvcpkg.org nav_fleet_swarm.ari    # the published trained policy
+#   arigl snapshot --png swarm.png --frames 240 --width 1280 --height 720 nav_fleet_swarm.ari --no-ui
+
+meta:
+  name: Fleet swarm (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.9
+
+requires:
+  - gl.scene                       # the swarm and the city are the point: a scene renderer
+  - scene.physics                  # the world's vehicles step on its physics clock
+  - {name: net, optional: true}    # the trained policy from cvcpkg.org; without it, the built-in net
+
+args:
+  speed: {type: float, default: 2.0, help: "world seconds per wall second"}
+  ui: {type: bool, default: true, help: "--no-ui: no panel (a capture)"}
+  bench: {type: bool, help: "print the frame time every 120 frames"}
+
+world:
+  vehicles:
+    archetypes:
+      car:
+        vehicle: humvee            # its size and limits; drawn as the box look in its team's colour
+        controllers: [nav@1, none]
+    start:
+      - fleet: swarm
+        archetype: car
+        plant: kinematic           # nav's bicycle: cheap enough for every vehicle on one thread
+        count: 240
+        spawn: scattered
+        seed: 7
+        rally: { count: 6 }        # six teams, each to its rally point, hsv-coloured
+        policy: trained            # the published CoefMLP once it is here; the built-in net meanwhile
+        keys: summary
+
+functions: |
+  ; A state key's text, "" while it is unset.
+  (defun sv (k) (let ((v (state-get k))) (if (= v nil) "" v)))
+  ; A state key's number, 0 while it is unset.
+  (defun num (k) (let ((v (sv k))) (if (= v "") 0.0 (float v))))
+  ; A bool document argument.
+  (defun arg-on (name) (= (sv (str-concat "args." name)) "true"))
+  ; The camera above the city: an orbit high over its centre, looking down at the whole of it.
+  (defun overhead ()
+    (begin
+      (state-set "viewers.main.camera.track.target" "")
+      (state-set "viewers.main.camera.mode" "0")
+      (state-set "viewers.main.camera.orbit.center.x" "0")
+      (state-set "viewers.main.camera.orbit.center.y" "0")
+      (state-set "viewers.main.camera.orbit.center.z" "0")
+      (state-set "viewers.main.camera.orbit.azimuth" "-90")
+      (state-set "viewers.main.camera.orbit.elevation" "72")
+      (state-set "viewers.main.camera.orbit.distance" "490")))
+  ; What drives the fleet, in a few words.
+  (defun drives ()
+    (let ((w (string.split (sv "vehicles.fleets.swarm.drives") " ")))
+      (if (= (nth w 0) "trained") "the trained policy"
+          (if (and (> (length w) 1) (= (nth w 1) "loading")) "loading the trained policy..."
+              "the built-in net"))))
+  ; Six rally points around the city, on its street crossings: x y pairs.
+  (defun rally-points () (list -76 -76 76 -76 114 0 76 76 -76 76 -114 0))
+  ; A team's rally point at turn k: across the ring each turn, so the six teams cross the city's
+  ; middle through each other, and back.
+  (defun set-rally (team k)
+    (let ((p (rally-points)) (j (% (+ team (* 3 k)) 6))
+          (at (str-concat "vehicles.fleets.swarm.rally." (str team))))
+      (begin
+        (state-set (str-concat at ".x") (str (nth p (* 2 j))))
+        (state-set (str-concat at ".y") (str (nth p (+ 1 (* 2 j))))))))
+  (defun move-rallies (k)
+    (begin (set-rally 0 k) (set-rally 1 k) (set-rally 2 k)
+           (set-rally 3 k) (set-rally 4 k) (set-rally 5 k)))
+  ; The chase camera behind the fleet's first vehicle (its own node while it is followed).
+  (defun chase ()
+    (begin
+      (state-set "viewers.main.camera.track.target" "vehicle_1")
+      (state-set "viewers.main.camera.track.back" "22")
+      (state-set "viewers.main.camera.track.height" "12")
+      (state-set "viewers.main.camera.track.look_ahead" "8")
+      (state-set "viewers.main.camera.track.min_speed" "0.5")
+      (state-set "viewers.main.camera.mode" "2")))
+
+init: |
+  (begin
+    (state-set "sim.speed" (sv "args.speed"))
+    (state-set "ui.frames" "0")
+    (state-set "ui.fps" "")
+    (state-set "ui.rally_k" "")
+    (state-set "shadows.enabled" "0")
+    (if (not (arg-on "ui")) (state-set "tree.fleet_panel.open" "0")))
+
+on_tick: |
+  (let ((n (+ 1 (int (sv "ui.frames"))))
+        (ms (sv "quality.frame_ms")))
+    (begin
+      (state-set "ui.frames" (str n))
+      ; Once the scene's first framing has run, the camera goes above the city.
+      (if (= n 20) (overhead))
+      (if (= (% n 30) 0) (state-set "ui.drives" (drives)))
+      ; Every 15 s of world time the rally points swap across the ring (and at once after a
+      ; restart lays the fleet out again).
+      (let ((k (str (int (/ (num "sim.time") 15.0)))))
+        (if (and (!= (sv "vehicles.fleets.swarm.placed") "") (!= k (sv "ui.rally_k")))
+            (begin (state-set "ui.rally_k" k) (move-rallies (int k)))))
+      ; The frame rate, from the runtime's frame time (a window's mean).
+      (if (and (= (% n 15) 0) (!= ms ""))
+          (state-set "ui.fps" (str (int (+ 0.5 (/ 1000.0 (math.max 0.1 (float ms))))))))
+      (if (and (arg-on "bench") (= (% n 120) 0))
+          (print (str-concat "fleet_swarm: " ms " ms a frame, "
+                             (sv "vehicles.fleets.swarm.placed") " placed")))))
+
+keys:
+  pause:
+    label: Pause the world
+    key: P
+    on: (state-set "sim.paused" (if (= (state-get "sim.paused") "1") "0" "1"))
+  overhead:
+    label: The camera above the city
+    key: H
+    on: (overhead)
+
+windows:
+  - window: Fleet swarm
+    id: fleet_panel
+    pos: [10, 30]
+    size: [270, 300]
+    closable: true
+    children:
+      - text: "fps"
+        bind: ui.fps
+      - text: "vehicles"
+        bind: vehicles.fleets.swarm.placed
+      - text: "arrived"
+        bind: vehicles.fleets.swarm.arrived
+      - text: "driven by"
+        bind: ui.drives
+      - separator
+      - slider_float: world speed
+        bind: sim.speed
+        lo: 0.25
+        hi: 8.0
+        log: true
+        fmt: "%.2fx"
+        tooltip: "world seconds per wall second"
+      - combo: policy
+        bind: vehicles.fleets.swarm.policy
+        options: [trained, builtin]
+        tooltip: "the published trained CoefMLP, or the built-in net"
+      - combo: sense
+        bind: vehicles.fleets.swarm.sense
+        options: [known, fog]
+        tooltip: "known: the city's map; fog: each vehicle senses what it passes"
+      - separator
+      - button: Restart
+        on: (begin
+              (state-set "vehicles.fleets.swarm.restart.request"
+                         (str (+ 1 (int (sv "vehicles.fleets.swarm.restart.request")))))
+              (state-set "ui.rally_k" ""))
+        tooltip: "every vehicle back at its start"
+      - button: New seed
+        on: (begin
+              (state-set "vehicles.fleets.swarm.reseed.request"
+                         (str (+ 1 (int (sv "vehicles.fleets.swarm.reseed.request")))))
+              (state-set "ui.rally_k" ""))
+        tooltip: "a new scatter of starts and goals"
+      - button: Overhead
+        on: (overhead)
+      - button: Chase
+        on: (chase)
+
+scene:
+  chrome: false
+  clock: { scale: 2.0 }
+  physics: {}
+  world: { source: city, cell: 2 }  # the blocks below: 6 x 6 of 26 m, 12 m streets, 4 plazas
+  background: { top: [0.62, 0.74, 0.90], bottom: [0.86, 0.89, 0.92] }
+  lights:
+    - light: sun
+      rig: three_point
+      sun: true
+      stage: { center: [0, 0, 10], radius: 170 }
+      key: { intensity: 0.95, azimuth: -55, elevation: 48, cone: 62 }
+      fill: 0.3
+      back: 0
+      wash: 0
+  nodes:
+    - node: ground
+      world: city
+      source: { box: { size: [260, 260, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      material: { color: [0.36, 0.37, 0.39] }   # the streets' asphalt
+      body: static
+    - { node: block_00, world: city, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 19.0] } }, transform: { position: [-95, -95, 9.50] } }
+    - { node: block_01, world: city, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 27.2] } }, transform: { position: [-57, -95, 13.60] } }
+    - { node: block_02, world: city, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 8.1] } }, transform: { position: [-19, -95, 4.05] } }
+    - { node: block_03, world: city, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 25.4] } }, transform: { position: [19, -95, 12.70] } }
+    - { node: block_04, world: city, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 21.5] } }, transform: { position: [57, -95, 10.75] } }
+    - { node: block_05, world: city, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 9.4] } }, transform: { position: [95, -95, 4.70] } }
+    - { node: block_10, world: city, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 29.9] } }, transform: { position: [-95, -57, 14.95] } }
+    - { node: block_11, world: city, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 8.5] } }, transform: { position: [-57, -57, 4.25] } }
+    - { node: block_12, world: city, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 27.0] } }, transform: { position: [-19, -57, 13.50] } }
+    - { node: block_13, world: city, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 15.0] } }, transform: { position: [19, -57, 7.50] } }
+    - { node: block_15, world: city, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 24.4] } }, transform: { position: [95, -57, 12.20] } }
+    - { node: block_20, world: city, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 16.2] } }, transform: { position: [-95, -19, 8.10] } }
+    - { node: block_21, world: city, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 21.4] } }, transform: { position: [-57, -19, 10.70] } }
+    - { node: block_23, world: city, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 20.5] } }, transform: { position: [19, -19, 10.25] } }
+    - { node: block_24, world: city, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 18.0] } }, transform: { position: [57, -19, 9.00] } }
+    - { node: block_25, world: city, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 19.6] } }, transform: { position: [95, -19, 9.80] } }
+    - { node: block_30, world: city, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 8.8] } }, transform: { position: [-95, 19, 4.40] } }
+    - { node: block_31, world: city, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 27.1] } }, transform: { position: [-57, 19, 13.55] } }
+    - { node: block_32, world: city, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 14.1] } }, transform: { position: [-19, 19, 7.05] } }
+    - { node: block_34, world: city, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 21.7] } }, transform: { position: [57, 19, 10.85] } }
+    - { node: block_35, world: city, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 12.7] } }, transform: { position: [95, 19, 6.35] } }
+    - { node: block_40, world: city, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 24.4] } }, transform: { position: [-95, 57, 12.20] } }
+    - { node: block_42, world: city, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 28.8] } }, transform: { position: [-19, 57, 14.40] } }
+    - { node: block_43, world: city, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 15.2] } }, transform: { position: [19, 57, 7.60] } }
+    - { node: block_44, world: city, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 14.6] } }, transform: { position: [57, 57, 7.30] } }
+    - { node: block_45, world: city, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 29.1] } }, transform: { position: [95, 57, 14.55] } }
+    - { node: block_50, world: city, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 27.8] } }, transform: { position: [-95, 95, 13.90] } }
+    - { node: block_51, world: city, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 21.5] } }, transform: { position: [-57, 95, 10.75] } }
+    - { node: block_52, world: city, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 8.2] } }, transform: { position: [-19, 95, 4.10] } }
+    - { node: block_53, world: city, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 25.1] } }, transform: { position: [19, 95, 12.55] } }
+    - { node: block_54, world: city, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 24.9] } }, transform: { position: [57, 95, 12.45] } }
+    - { node: block_55, world: city, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 8.1] } }, transform: { position: [95, 95, 4.05] } }

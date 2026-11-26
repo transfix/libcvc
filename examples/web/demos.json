@@ -26,8 +26,7 @@
     "ari_tvision",
     "terminal_scene_term",
     "terminal_tour_term",
-    "nav_city_swarm",
-    "nav_city_drive",
+    "nav_fleet_swarm_ari",
     "nav_fog_ghost",
     "nav_scrub",
     "bunny_shadow",
@@ -134,13 +133,24 @@
           "Sail a procedural coastline where a GPU FFT ocean rolls in: an FFT-synthesised wave spectrum evolved live on the GPU, an L-system shore, sky and sun, with a free orbit/fly camera. 100% procedural — nothing is downloaded.",
       "thumb": "img/lsystem_coast.jpg"
     },
+    "nav_fleet_swarm_ari": {
+      "app": "arigl",
+      "doc": "nav_fleet_swarm",
+      "title": "fleet swarm",
+      "desc": "240 vehicles swarm a small city, seen from above",
+      "blurb":
+          "One fleet of the world's vehicles, 240 of them in six colour-coded teams, threads a small city of blocks with no global plan: each vehicle reacts locally on the cvc::nav runtime, driven by the published trained CoefMLP (the built-in net until it arrives). Every 15 seconds of world time each team's rally point swaps across the city, so the six teams cross its middle through each other and back. The fleet is drawn at scale, one mesh for all of it and the nearest few vehicles their own nodes, and the world steps on the page's one thread. Orbit and zoom, chase a vehicle, change the world's speed, the policy and what the fleet senses; the panel shows the frame rate.",
+      "thumb": "img/nav_fleet_swarm_ari.jpg"
+    },
     "nav_city_swarm": {
+      "card": false,
       "desc": "the GRL-SNAM reactive swarm on a procedural city",
       "blurb":
           "800 vehicles cross a foggy city with no global plan — the GRL-SNAM reactive swarm on the cvc::nav runtime (no Python, no libtorch). Tune agents, fog and belief live, then Apply / Restart to watch shared belief beat private belief on the same city.",
       "thumb": "img/nav_city_swarm.jpg"
     },
     "nav_city_drive": {
+      "card": false,
       "desc": "colour-coded convoys thread real downtown Austin to six rally points",
       "blurb":
           "The legible cousin of the swarm: a few dozen vehicles in colour-coded convoys thread real downtown Austin to six rally points with no global plan — pure local reaction on the cvc::nav runtime (no Python, no libtorch), driven by the published trained CoefMLP. Chase-cam onto a lead vehicle, drag a rally point to re-route a whole convoy live, and under fog watch each convoy's sensed corridor light up in its own colour. Switch belief between shared, grouped and private.",

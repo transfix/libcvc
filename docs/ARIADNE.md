@@ -2573,7 +2573,9 @@ scene:
     document included, populates its world. A gym's reset clears them and spawns its own agents.
   - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
     named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
-    grid exists, the way libcvc's nav swarms are:
+    grid exists, the way libcvc's nav swarms are
+    ([`nav_fleet_swarm.ari`](../examples/ariadne/documents/nav_fleet_swarm.ari): 240 in six teams
+    over a small city of blocks, their rally points moved by the document):
 
     ```yaml
     start:
