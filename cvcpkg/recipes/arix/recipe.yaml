@@ -42,7 +42,9 @@ recipe:
 # python312.dll from bin\, and python312 must be 3.12.10+cvc.22 or later: bundles carry the DLL
 # there since cvc.21 (cy-pca/cvcpkg#542), but cvc.21's python3.dll forwards to python313.dll, which
 # cvc.22 fixed (cy-pca/cvcpkg#551). build.ps1 refuses a python312 without bin\python312.dll, or
-# whose bin\python3.dll forwards anywhere else. macOS waits on a macOS pycvc-cp312.
+# whose bin\python3.dll forwards anywhere else. On macOS bin/arix loads libpython3.12.dylib and
+# libwasmtime.dylib from ../lib, as it loads libcvc, and finds its Python in <prefix>/lib/python3.12;
+# publish-cvcpkg.yml builds it in the macOS cp312 jobs, beside pycvc-cp312.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/ari.
@@ -77,6 +79,10 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
 
