@@ -108,6 +108,15 @@ functions: |
       (begin
         (state-set (str-concat at ".x") (str (nth p (* 2 j))))
         (state-set (str-concat at ".y") (str (nth p (+ 1 (* 2 j))))))))
+  ; Team t's beacon on its rally point, as the fleet publishes it.
+  (defun place-beacon (team)
+    (let ((at (str-concat "vehicles.fleets.swarm.rally." (str team))))
+      (if (!= (sv (str-concat at ".x")) "")
+          (state-set (str-concat "graphics.root.children.rally_" (str team) ".position")
+                     (str-concat (sv (str-concat at ".x")) "," (sv (str-concat at ".y")) ",0")))))
+  (defun place-beacons ()
+    (begin (place-beacon 0) (place-beacon 1) (place-beacon 2)
+           (place-beacon 3) (place-beacon 4) (place-beacon 5)))
   (defun move-rallies (k)
     (begin (set-rally 0 k) (set-rally 1 k) (set-rally 2 k)
            (set-rally 3 k) (set-rally 4 k) (set-rally 5 k)))
@@ -128,6 +137,7 @@ init: |
     (state-set "ui.fps" "")
     (state-set "ui.rally_k" "")
     (state-set "ui.world_was" "")
+    (state-set "ui.beacons" "1")
     (if (not (arg-on "ui")) (state-set "tree.fleet_panel.open" "0")))
 
 on_tick: |
@@ -143,6 +153,7 @@ on_tick: |
                  (state-set "ui.rally_k" "")
                  (overhead)))
       (if (= (% n 30) 0) (state-set "ui.drives" (drives)))
+      (if (= (% n 10) 0) (place-beacons))
       ; Every 15 s of world time the rally points swap across the ring (and at once after a
       ; restart lays the fleet out again).
       (let ((k (str (int (/ (num "sim.time") 15.0)))))
@@ -169,7 +180,7 @@ windows:
   - window: Fleet swarm
     id: fleet_panel
     pos: [10, 30]
-    size: [270, 404]
+    size: [270, 430]
     closable: true
     children:
       - text: "fps"
@@ -205,6 +216,9 @@ windows:
         bind: vehicles.fleets.swarm.collide
         tooltip: "kept apart (nav's de-overlap on the kinematic plant); off, they pass through
           each other. On Jolt they collide as bodies."
+      - checkbox: targets
+        bind: ui.beacons
+        tooltip: "a beacon on each team's rally point"
       - checkbox: shadows
         bind: shadows.enabled
         tooltip: "the sun's shadows: the city's baked once, the moving vehicles' each frame"
@@ -263,6 +277,63 @@ scene:
     - node: fleet
       type: entity_layer
       lod: { near_cap: 8, px: [90, 45, 20] }
+    # Where each team is headed: a beacon in its colour (the fleet's hsv(t / 6, 0.74, 0.98)), a
+    # translucent pillar to stand clear of the hills and a ball on top, on its rally point (on_tick).
+    # In no world: drawn over either.
+    - node: rally_0
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_0_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.98, 0.255, 0.255] }, opacity: 0.5, casts_shadow: false }
+        - { node: rally_0_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.98, 0.255, 0.255] }, casts_shadow: false }
+    - node: rally_1
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_1_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.98, 0.98, 0.255] }, opacity: 0.5, casts_shadow: false }
+        - { node: rally_1_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.98, 0.98, 0.255] }, casts_shadow: false }
+    - node: rally_2
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_2_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.255, 0.98, 0.255] }, opacity: 0.5, casts_shadow: false }
+        - { node: rally_2_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.255, 0.98, 0.255] }, casts_shadow: false }
+    - node: rally_3
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_3_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.255, 0.98, 0.98] }, opacity: 0.5, casts_shadow: false }
+        - { node: rally_3_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.255, 0.98, 0.98] }, casts_shadow: false }
+    - node: rally_4
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_4_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.255, 0.255, 0.98] }, opacity: 0.5, casts_shadow: false }
+        - { node: rally_4_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.255, 0.255, 0.98] }, casts_shadow: false }
+    - node: rally_5
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_5_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.98, 0.255, 0.98] }, opacity: 0.5, casts_shadow: false }
+        - { node: rally_5_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.98, 0.255, 0.98] }, casts_shadow: false }
     # The terrain lab's world, small: cvc::world's relief, L-system trees, rocks and a roads-first
     # city, generated at load. Its ground, buildings, trees and rocks are the navigator's grid. No
     # water: the fleet's plant drives on the ground (the water level is under it).
