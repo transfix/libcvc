@@ -826,7 +826,7 @@ the first fluid field, in id order, whose box holds the point in x and y and rea
 gives a `water_sample`: `wet`, `depth` below the top (negative above it), `density` and the water's
 `velocity`. Where no fluid field covers the point it is dry, still and of density 0.
 
-Not modelled: the propeller's slipstream over the rudder (at low speed an outboard steers and a rudder barely does), propeller torque and walk, ventilation of a propeller near the surface (it is wet or dry at its centre), and a partly immersed rudder. `snapshot()`, its JSON, `physics_codec` and pycvc do not carry boats yet. `physics_boat_test` checks the balance at terminal speed, backing, the turning circle against the rudder angle, a dry propeller, an outboard at low speed, pitching on a swell, and the state (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O11b: boats)").
+Not modelled: the propeller's slipstream over the rudder (at low speed an outboard steers and a rudder barely does), propeller torque and walk, ventilation of a propeller near the surface (it is wet or dry at its centre), and a partly immersed rudder. `snapshot()`, its JSON and `physics_codec` do not carry boats yet (pycvc binds them: "Python: pycvc"). `physics_boat_test` checks the balance at terminal speed, backing, the turning circle against the rudder angle, a dry propeller, an outboard at low speed, pitching on a swell, and the state (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O11b: boats)").
 
 ## cvc::nav's plant: `nav_plant` (P4)
 
@@ -1134,7 +1134,7 @@ Gates (`physics_dyn_boat_plant_test`, Windows MSVC Release):
 | Hosting, contacts | A host stepping the world matches the plant's own stepping bit for bit; a hull hitting a pier counts a static contact |
 | Pinned | `DynBoatPlant.CrossPlatformGoldenHash` `96abfc30fcae4fd4` (Windows MSVC; CI confirms Linux and macOS) |
 
-pycvc does not bind it yet (pycvc binds no boats), and a scene's world vehicles do not spawn boats yet
+pycvc binds it (`dyn_boat_plant`; "Python: pycvc"), and a scene's world vehicles do not spawn boats yet
 (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O12: the boat plant)").
 
 ## Terrain in the navigator's energy (P5)
@@ -1418,6 +1418,43 @@ The parts:
 - **The terrain planes.** `nav_terrain_build(heights, cell_w, config)` is `terrain_build`: the
   slope, the grade cost, the infeasible cells and the limit, as numpy arrays. It is the C++
   reference a Python twin of the planes is checked against.
+- **The wake** (`field.h`'s `field_wake`). `pycvc.field_wake(cells=64, cell=1.0, ...,
+  shore=None)` holds `field_wake`'s values; `add_field(..., inertial=True, wake=...)` puts it on
+  a fluid with a surface. `field_wake_info(field)` is a dict of `wake_info` (placed, x0, y0,
+  cell, cells, windows, sources, outside); `field_wake_height(field, x, y)` and
+  `field_wake_of(field)` read it, and `water_at(p, body=None)` is the water at a point (wet,
+  depth, density, velocity) with the waves in it, less `body`'s own. `shore_grid_mask(depth,
+  shore_m, min_x, min_y, cell, slope=None)` is a coast from (rows, cols) planes. `add_box`,
+  `add_sphere` and `add_hull` take `hull=` (a `hull_mesh`) for a body the water pushes on by
+  its triangles.
+- **Wading** (`vehicle.h`'s `wading_desc`). `vehicle_desc.wading` is a `pycvc.wading_desc`
+  whose fields read and write in place (`d.wading.fording_depth = 1.52`); `as_dict()` gives
+  them all. `vehicle_state` adds `water_force` and `engine_flooded`, each wheel `water_depth`
+  and `water_drag`. `set_vehicle(id, desc)` tunes a running vehicle, wading's knobs included;
+  `wading.enabled` and `wading.displacement` are fixed when it is added. The binding's
+  `vehicles.<name>.tuning.wading.*` knobs do the same from the tree.
+- **The wind** (`flow_velocity.h`). `wind_flow(speed_mps, dir_rad, gustiness, base_z)` is the
+  scene's wind; `scene_wind_flow(speed, dir, gustiness=0.25, base_z=0)` is the one Ariadne's
+  `wind.speed`, `wind.dir` (degrees) and `wind.gustiness` keys make. Both have `velocity(p,
+  t)`, `reference(p, t)`, `profile(z)`, `base()` and `digest()`. `physics_world.set_wind(speed,
+  dir, gustiness, base_z)` keeps one as a flow of air everywhere (`add_wind`; a second call
+  changes it in place, `None` takes it away; `wind()` and `wind_field()` read it).
+  `add_field(None, kind="flow", wind=...)` adds one by hand. `mujoco_robot.set_wind(air,
+  time_offset, drag_coefficient, density)` blows on a robot; `wind_force()` and
+  `wind_torque()` read it.
+- **Boats** (`hull.h`, `boat.h`, `dyn_boat_plant.h`). `hull_mesh(vertices, triangles, ...)`,
+  `box_hull(half_extents)` and `loft_hull(stations)` (each `{"x": x, "section": [(half_width,
+  height), ...]}`) make hulls, with `vertices()`, `triangles()`, `bounds()` and
+  `waterline_box(z)`. `boat_desc` holds the hull body (`hull()`, `set_hull(half_extents=...,
+  mass=..., ...)`), its mesh (`hull_mesh()`, `set_hull_mesh()`, copied in and out), and the
+  propeller and rudder as dicts (`propeller()`, `set_propeller({...})`, `rudder()`,
+  `set_rudder({...})`). `dyn_boat_desc.launch()`, `jonboat()`, `tactical()` and `preset(name)`
+  add `max_speed`, `turn_radius` and `length_overall`. `physics_world.add_boat(desc, position)`,
+  `set_boat_controls(id, throttle, rudder)`, `boat_state(id)`, `remove_boat` and
+  `boat_desc_of`. `dyn_boat_plant(descs, world, ...)` is the boat plant, with `state(i)`,
+  `boat_state(i)`, `books(i)`, `hold_controls(i, ...)` and the static `float_height(boat,
+  mass, density)` and `draft(...)`; `nav_sim_world_set_plant` takes it. `plant_host` adds
+  `boat_state(i)` and `boat_books(i)` on "dynamicboat".
 - **Key metadata.** `state_comment`, `state_property` and `state_property_keys` read what a
   key says it is.
 - **Lifetimes.** A `nav_plant` keeps its world alive, a `physics_binding` its app and world, and
