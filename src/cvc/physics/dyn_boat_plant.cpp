@@ -710,8 +710,9 @@ void dyn_boat_plant::drive(agent &a, double h) {
   heading_speed(a, s, psi, st.u);
   st.prop = s.position + dyn::rotate(s.rotation, b.propeller.position);
   st.rudder = s.position + dyn::rotate(s.rotation, b.rudder.position);
-  st.water_prop = w.water_at(st.prop).velocity;
-  st.water_rudder = w.water_at(st.rudder).velocity;
+  // As the boat reads it: a wake's waves less its own (at a wave step, one wave step behind it).
+  st.water_prop = w.water_at(st.prop, bs.hull).velocity;
+  st.water_rudder = w.water_at(st.rudder, bs.hull).velocity;
 
   const double m = a.props.mass;
   double throttle = 0.0, rudder = 0.0;

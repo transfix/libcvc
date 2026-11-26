@@ -164,16 +164,22 @@ compiled_field compile(const field &f, const compiled_field *old = nullptr) {
 struct wake_view {
   const fluid_wake *wake = nullptr;
   int own = -1;
-  void sample(double x, double y, wake_sample &out) const { wake->sample(own, x, y, out); }
+  // Their height at (x, y), and their motion `depth` metres below the top there.
+  double height(double x, double y) const { return wake->height(own, x, y); }
+  void motion(double x, double y, double depth, wake_sample &out) const {
+    wake->motion(own, x, y, depth, out);
+  }
 };
 
 // What one cell reads of a field: whether any of it is in the stuff (immersed, the stuff's value
-// there > 0), and then the immersed part's centre, its share of the cell, the value and the
-// stuff's velocity there. A pure function of its arguments (a surface's reads are, and its memo
-// is the cell's own), so cells can be read in any order and on any thread.
+// there > 0), and then the immersed part's centre, its depth below the stuff's top, its share of
+// the cell, the value and the stuff's velocity there. A pure function of its arguments (a
+// surface's reads are, and its memo is the cell's own), so cells can be read in any order and on
+// any thread.
 struct cell_read {
   bool in = false;
   double p[3] = {0.0, 0.0, 0.0};
+  double depth = 0.0;
   double f = 0.0;
   double value = 0.0;
   vec3 w;
@@ -206,19 +212,18 @@ cell_read read_cell(const vec3 &local, const body_state &s, const mat3 &r, const
   // surface's height over the clipped centre (x and y come first), the others' waves on it with a
   // wake. The velocity below is read at that centre too, so the two reads share the cell's memo.
   surface_memo memo;
-  wake_sample ws;
-  double p[3], f = 1.0;
+  double p[3], f = 1.0, ztop = 0.0;
   bool in = true;
   for (int k = 0; k < 3 && in; ++k) {
     double top = cf.scalar.hi[k];
     if (k == 2 && surface) {
       double sh = surface->height_with(p[0], p[1], t, memo);
-      if (wake) {
-        wake->sample(p[0], p[1], ws);
-        sh += ws.h;
-      }
+      if (wake)
+        sh += wake->height(p[0], p[1]);
       top = std::min(top, sh);
     }
+    if (k == 2)
+      ztop = top;
     double bottom = cf.scalar.lo[k];
     if (k == 2 && wind) // the air starts at the wind's base
       bottom = std::max(bottom, wind->floor);
@@ -237,13 +242,17 @@ cell_read read_cell(const vec3 &local, const body_state &s, const mat3 &r, const
   out.p[0] = p[0];
   out.p[1] = p[1];
   out.p[2] = p[2];
+  out.depth = ztop - p[2];
   out.f = f;
   out.value = value;
   const vec3 at{p[0], p[1], p[2]};
   if (surface) {
     out.w = surface->velocity_with(at, t, memo);
-    if (wake) // the others' waves' surface velocity, at every depth (what it pushes floats)
+    if (wake) { // the others' waves' motion at the immersed part's depth below the top
+      wake_sample ws;
+      wake->motion(p[0], p[1], out.depth, ws);
       out.w = out.w + vec3{ws.u, ws.v, ws.w};
+    }
   } else if (wind) // the body's wind, times its profile at the cell's height
     out.w = wind->at(p[2]);
   else if (cf.moving)
@@ -432,10 +441,8 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
       double top = box.hi[2];
       if (surface) {
         double sh = surface->height(p.x, p.y, t);
-        if (wake) {
-          wake->sample(p.x, p.y, ws);
-          sh += ws.h;
-        }
+        if (wake)
+          sh += wake->height(p.x, p.y);
         top = std::min(top, sh);
       }
       depth[i] = top - p.z;
@@ -514,12 +521,13 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
     sum.push_t = sum.push_t + cross(moment, n) * (-pg);
     volume -= press * n.z; // the divergence theorem: V = -int depth n_z dA
 
-    // The velocity terms, against the water's velocity at the submerged part's centroid.
+    // The velocity terms, against the water's velocity at the submerged part's centroid (the
+    // others' waves' at its depth, the mean of the depths over the part: press / area).
     vec3 w;
     if (surface) {
       w = surface->velocity(at, t);
       if (wake) {
-        wake->sample(at.x, at.y, ws);
+        wake->motion(at.x, at.y, press / area, ws);
         w = w + vec3{ws.u, ws.v, ws.w};
       }
     } else if (cf.moving)
@@ -802,7 +810,7 @@ bool field_set::air_at(const vec3 &p, double t, double &rho, vec3 &wind) const {
   return false;
 }
 
-bool field_set::water_at(const vec3 &p, double t, water_sample &out) const {
+bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_read &wake) const {
   out = water_sample{};
   for (const auto &fe : _fields) {
     const compiled_field &cf = fe.second;
@@ -811,16 +819,29 @@ bool field_set::water_at(const vec3 &p, double t, water_sample &out) const {
         !(p.y >= g.lo[1] && p.y <= g.hi[1]) || !(p.z >= g.lo[2]))
       continue;
     const fluid_surface *surface = cf.desc.surface.get();
+    // With a wake, as a body reads it in the step: the others' waves on the surface (all of them
+    // for no body), their motion at the point's depth below that.
+    const fluid_wake *fw = wake.on && surface ? cf.wake.get() : nullptr;
+    const int own = fw && wake.body.valid() ? fw->own(wake.body.value) : -1;
     double top = g.hi[2];
-    if (surface)
-      top = std::min(top, surface->height(p.x, p.y, t));
+    if (surface) {
+      double sh = surface->height(p.x, p.y, t);
+      if (fw)
+        sh += fw->height(own, p.x, p.y);
+      top = std::min(top, sh);
+    }
     out.depth = top - p.z;
     const double q[3] = {p.x, p.y, std::min(p.z, g.hi[2])};
     out.density = g.at(q);
     out.wet = out.depth > 0.0 && out.density > 0.0;
-    if (surface)
+    if (surface) {
       out.velocity = surface->velocity(p, t);
-    else if (cf.moving)
+      if (fw) {
+        wake_sample ws;
+        fw->motion(own, p.x, p.y, out.depth, ws);
+        out.velocity = out.velocity + vec3{ws.u, ws.v, ws.w};
+      }
+    } else if (cf.moving)
       out.velocity = {cf.velocity[0].contains(q) ? cf.velocity[0].at(q) : 0.0,
                       cf.velocity[1].contains(q) ? cf.velocity[1].at(q) : 0.0,
                       cf.velocity[2].contains(q) ? cf.velocity[2].at(q) : 0.0};
@@ -1025,11 +1046,16 @@ void field_set::save_wakes(std::string &out) const {
     const std::uint32_t id = fe.first;
     out.append(reinterpret_cast<const char *>(&id), sizeof(id));
     put_wake_params(out, fe.second.desc.wake);
+    // Version 2: its shore, flagged and named by its digest.
+    const std::uint8_t shore = fe.second.desc.wake.shore ? 1 : 0;
+    const std::uint64_t digest = fe.second.desc.wake.shore_digest();
+    out.append(reinterpret_cast<const char *>(&shore), sizeof(shore));
+    out.append(reinterpret_cast<const char *>(&digest), sizeof(digest));
     fe.second.wake->save(out);
   }
 }
 
-void field_set::restore_wakes(const std::string &in, std::size_t &pos) {
+void field_set::restore_wakes(const std::string &in, std::size_t &pos, int version) {
   // Every wake read whole first, then all taken: a state that fails part-way changes no wake.
   std::vector<std::pair<fluid_wake *, std::shared_ptr<fluid_wake::saved>>> read;
   for (const auto &fe : _fields) {
@@ -1043,9 +1069,22 @@ void field_set::restore_wakes(const std::string &in, std::size_t &pos) {
     pos += sizeof(id);
     if (!get_wake_params(in, pos, p))
       throw cvc::physics_error("restore: the wakes' state is truncated");
-    if (id != fe.first || p != fe.second.desc.wake)
+    // A version 1 state is from before shores: a wake without one.
+    std::uint8_t shore = 0;
+    std::uint64_t digest = 0;
+    if (version >= 2) {
+      if (pos > in.size() || sizeof(shore) + sizeof(digest) > in.size() - pos)
+        throw cvc::physics_error("restore: the wakes' state is truncated");
+      std::memcpy(&shore, in.data() + pos, sizeof(shore));
+      std::memcpy(&digest, in.data() + pos + sizeof(shore), sizeof(digest));
+      pos += sizeof(shore) + sizeof(digest);
+    }
+    const field_wake &mine = fe.second.desc.wake;
+    p.shore = mine.shore; // compared by its flag and digest below
+    if (id != fe.first || p != mine || shore != (mine.shore ? 1 : 0) ||
+        digest != mine.shore_digest())
       throw cvc::physics_error("restore: this world's wakes differ from the state's");
-    read.emplace_back(fe.second.wake.get(), fe.second.wake->parse(in, pos));
+    read.emplace_back(fe.second.wake.get(), fe.second.wake->parse(in, pos, version));
   }
   for (auto &r : read)
     r.first->commit(*r.second);
@@ -1491,8 +1530,9 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       // An inertial fluid (field.h): its damping on the vertical only, and the water's
       // acceleration over the immersed part, from its displaced mass and centroid.
       const bool inertial = cf.desc.inertial && cf.desc.kind == field_kind::fluid;
-      double displaced = 0.0; // kg of water the body displaces in this field
-      vec3 displaced_at;      // their moment, kg m
+      double displaced = 0.0;       // kg of water the body displaces in this field
+      vec3 displaced_at;            // their moment, kg m
+      double displaced_depth = 0.0; // and of their depths below the top, kg m
       // The cells' reads: done above for a free surface (a fluid's, never a wind's), else here.
       const cell_read *pre = nullptr;
       if (run_at < runs.size() && runs[run_at].body == bi && runs[run_at].cf == &cf)
@@ -1518,6 +1558,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           if (inertial) {
             displaced += cr.value * fv * fb.buoyancy;
             displaced_at = displaced_at + at * (cr.value * fv * fb.buoyancy);
+            displaced_depth += cr.depth * (cr.value * fv * fb.buoyancy);
           }
         } else if (cf.desc.kind == field_kind::medium) {
           const vec3 b = up * (cr.value * fv);
@@ -1558,9 +1599,10 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         const vec3 dudt =
             (surface->velocity(at, t + h) - surface->velocity(at, t - h)) * (1.0 / (2.0 * h));
         vec3 fk{displaced * dudt.x, displaced * dudt.y, 0.0};
-        if (wv) { // and the others' waves': du/dt = grad(dphi/dt) = -g grad h at the surface
+        if (wv) { // and the others' waves': du/dt = grad(dphi/dt) = -g grad h, at the displaced
+                  // water's centroid and mean depth (as the surface's is read at its centroid)
           wake_sample ws;
-          wv->sample(at.x, at.y, ws);
+          wv->motion(at.x, at.y, displaced_depth / displaced, ws);
           fk.x += displaced * (-gn * ws.gx);
           fk.y += displaced * (-gn * ws.gy);
         }

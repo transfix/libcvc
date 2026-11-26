@@ -1878,10 +1878,13 @@ is pushed by the others' waves (their height under its cells and hull, their orb
 their acceleration), never its own, so the launches rock in each other's wakes and a crate's
 splash rocks the boat beside it while a body alone floats exactly as it did. It is physics: the
 same on every host and at every frame rate, saved and restored with the world and in its state
-hash; with it off the world is bit for bit as before. It has no shores (a wake runs on over land,
-where nothing floats, and does not reflect), and a boat's propeller and rudder read the water
-without it. Bodies outside its window (a group farther away than the window is wide) make and
-feel none. With a
+hash; with it off the world is bit for bit as before. It is masked from the node's coast as the
+drawn window is (C6; `cvc::physics::shore_grid_mask`): its waves reflect off steep shores, soak
+into beaches and never run over land, and a lake or pond reflects them off all its banks. Their
+motion decays with depth, so a body deep down feels less of them than one afloat, and a boat's
+propeller and rudder read the others' waves in the water they turn in, never the boat's own.
+Bodies outside its window (a group farther away than the window is wide) make and feel none.
+With a
 swell, the swash runs up the beach on the ground itself. The node adds it to the fragment shader
 of every mesh under its ground node (the `world:` / `ground:` node, found by id at the top of the
 scene, its LOD rungs and regenerated chunks included), as the cloud deck adds its shade to its

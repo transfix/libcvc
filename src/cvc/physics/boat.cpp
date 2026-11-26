@@ -215,7 +215,11 @@ void boat_set::pre_step(world_backend &be, const field_set &fields, const world_
                      b.direction.z};
     const vec3 dir = rotate(s.rotation, local);
     const vec3 prop = s.position + rotate(s.rotation, pd.position);
-    fields.water_at(prop, t, ws);
+    // A wake's waves in the water it reads are the others', never the boat's own (field.h).
+    field_set::wake_read others;
+    others.on = true;
+    others.body = b.hull;
+    fields.water_at(prop, t, ws, others);
     b.propeller_wet = ws.wet;
     b.inflow = 0.0;
     b.thrust = 0.0;
@@ -242,7 +246,7 @@ void boat_set::pre_step(world_backend &be, const field_set &fields, const world_
     vec3 at;
     if (rd.area > 0.0) {
       at = s.position + rotate(s.rotation, rd.position);
-      fields.water_at(at, t, ws);
+      fields.water_at(at, t, ws, others);
       b.rudder_wet = ws.wet;
       const vec3 flow = unrotate(s.rotation, ws.velocity - point_velocity(at));
       const double v = det::hypot(flow.x, flow.y);

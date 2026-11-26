@@ -310,8 +310,13 @@ public:
   // id order, whose box holds the point in x and y and reaches below it, as a boat's
   // propeller and rudder read it. Dry and still (wet false, density 0) where none does;
   // above the water's top it is dry with a negative depth. Its surface's height, density
-  // and velocity, or its box's top and velocity volumes without a surface.
+  // and velocity, or its box's top and velocity volumes without a surface. With a wake
+  // (field::wake) every body's waves are in it: their height in the top, their motion at
+  // p's depth below it in the velocity.
   water_sample water_at(const vec3 &p) const;
+  // The water at p as body `self` feels it: a wake's waves less its own (as a boat's propeller
+  // and rudder read it). Without a wake, or for a body with no waves in it, water_at(p).
+  water_sample water_at(const vec3 &p, body_id self) const;
   // The ruts a medium with field::ruts keeps; empty for one without.
   rut_map field_ruts(field_id id) const;
   // A fluid's wake (field::wake): where its window is and which bodies make waves in it, and the
