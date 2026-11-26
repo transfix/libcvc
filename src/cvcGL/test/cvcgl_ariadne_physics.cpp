@@ -28,6 +28,7 @@
 #include <cvc/ariadne/scene_boat.h>
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_water.h>           // a followed sea (OW5q)
+#include <cvc/ariadne/scene_weather.h>         // WeatherFriction: the storms the world runs
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/world_rules.h>
@@ -2120,6 +2121,136 @@ scene:
 // --world-thread runs it: each frame's tick_scene, under the frame's lock, drives the clock and
 // publishes what the worker ran, and draws from the poses the worker captured. The bodies end where
 // the frame's own follow() leaves them, bit for bit, and are drawn there.
+// F4: the storms' steering is the scene's wind, and a change of it made live goes into the
+// weather's events in the scene's world, on the clock, whether the scene is drawn or not: so a
+// headless run (SceneWorld on its clock) and a drawn one (realize_scene + tick_scene, the weather
+// node drawn) given the same wind change at the same frame log the same steer event at the same
+// tick, and the storm's front pushes the ball alike, bit for bit. (Before, only the drawn node
+// logged steer events, after HOLD_FRAMES frames: a headless run's storms never turned.)
+const char *kSteerWorld = R"(
+meta: { min_libcvc: "0.0.0" }
+scene:
+  physics: { gravity: [0, 0, 0] }
+  wind: { speed: 6, dir: 0, gustiness: 0 }
+  nodes:
+    - node: ball
+      source: { sphere: { radius: 0.5 } }
+      transform: { position: [0, 0, 10] }
+      body: { mass: 1 }
+)";
+
+void test_steering_headless_and_drawn() {
+  std::printf("test_steering_headless_and_drawn\n");
+  if (!cvc::ariadne::have_yaml()) {
+    std::printf("  skipped: no YAML in this build\n");
+    return;
+  }
+  if (!cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no Jolt in this build\n");
+    return;
+  }
+  // A mature storm 900 m upwind of the ball, time-lapsed by 15 so it moves on in seconds; the wind
+  // turns from 0 to 90 degrees 2.2 s in, so the storm turns with it.
+  const auto load = [](cvc::app &app) {
+    cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, kSteerWorld);
+    if (!r.ok)
+      return r;
+    cvc::world::weather_event e;
+    e.t = 0.0;
+    e.tau = -1500.0;
+    e.x = -900.0;
+    e.y = 0.0;
+    e.radius = 400.0;
+    e.peak = 1.0;
+    e.life = 3000.0;
+    cvc::ariadne::SceneNode wn;
+    wn.id = "weather";
+    wn.type = "weather";
+    wn.props.kind = cvc::ariadne::Value::Kind::Map;
+    for (const auto &[k, v] : std::vector<std::pair<const char *, std::string>>{
+             {"chance", "0"},
+             {"area", "100"},
+             {"time_scale", "15"},
+             {"events", cvc::world::format_weather_events({e})}}) {
+      cvc::ariadne::Value sv;
+      sv.kind = cvc::ariadne::Value::Kind::Scalar;
+      sv.scalar = v;
+      wn.props.entries.emplace_back(k, sv);
+    }
+    r.scene.nodes.push_back(wn);
+    return r;
+  };
+  constexpr int kFrames = 300, kTurn = 132; // the turn mid-period at 60 frames a second
+  const auto script = [](cvc::state &st, int frame) {
+    if (frame == kTurn)
+      st("wind.dir").value(90.0);
+  };
+
+  cvc::app drawn_app;
+  cvc::ariadne::LoadResult r = load(drawn_app);
+  CHECK(r.ok);
+  if (!r.ok)
+    return;
+  SceneGraph sg(drawn_app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  CHECK(out.world != nullptr && out.world->weathers().size() == 1);
+  if (!out.world || out.world->weathers().size() != 1)
+    return;
+  cvc::state &dst = cvc::state::instance(drawn_app);
+  for (int i = 0; i < kFrames; ++i) {
+    script(dst, i);
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+
+  cvc::app headless_app;
+  cvc::ariadne::LoadResult hr = load(headless_app);
+  std::unique_ptr<cvc::ariadne::SceneWorld> world =
+      cvc::ariadne::SceneWorld::from_scene(headless_app, hr.scene, "", "physics", &warnings);
+  CHECK(world != nullptr && world->weathers().size() == 1);
+  if (!world || world->weathers().size() != 1)
+    return;
+  cvc::state &hst = cvc::state::instance(headless_app);
+  cvc::ariadne::SceneClockDriver clock(headless_app, hr.scene.clock);
+  for (int i = 0; i < kFrames; ++i) {
+    script(hst, i);
+    clock.drive(1.0 / 60.0);
+    world->follow(headless_app.world_clock());
+  }
+
+  const std::string drawn_events = dst("weather.events").value();
+  const std::string headless_events = hst("weather.events").value();
+  std::printf("  drawn events: %s\n  headless events: %s\n", drawn_events.c_str(),
+              headless_events.c_str());
+  CHECK(headless_events.find("steer") != std::string::npos);
+  CHECK(drawn_events == headless_events);
+  // One steer, at the start of the clock period after the one the turn was read in (2.5 s).
+  std::size_t steers = 0;
+  for (std::size_t at = drawn_events.find("steer"); at != std::string::npos;
+       at = drawn_events.find("steer", at + 1))
+    ++steers;
+  CHECK(steers == 1);
+  CHECK(drawn_events.find("t=2.5 ") != std::string::npos);
+  CHECK(world->world().tick() == out.physics->tick());
+  const std::uint64_t drawn_hash = out.physics->state_hash();
+  const std::uint64_t headless_hash = world->world().state_hash();
+  if (drawn_hash != headless_hash)
+    std::printf("  drawn %016llx, headless %016llx\n", static_cast<unsigned long long>(drawn_hash),
+                static_cast<unsigned long long>(headless_hash));
+  CHECK(drawn_hash == headless_hash);
+  // The drawn node's storms are the world's: it read the event back.
+  const auto *drawn_model = &out.world->weathers()[0]->model();
+  const auto *headless_model = &world->weathers()[0]->model();
+  const double t = 4.0;
+  double dvx = 0.0, dvy = 0.0, hvx = 0.0, hvy = 0.0;
+  drawn_model->steering(drawn_model->weather_time(t), dvx, dvy);
+  headless_model->steering(headless_model->weather_time(t), hvx, hvy);
+  std::printf("  the steering at 4 s: drawn (%.3f, %.3f), headless (%.3f, %.3f) m/s\n", dvx, dvy,
+              hvx, hvy);
+  CHECK(dvx == hvx && dvy == hvy);
+  CHECK(std::fabs(hvx) < 1e-6 && hvy > 1.0); // turned to +y with the wind
+}
+
 void test_world_worker_drawn() {
   std::printf("test_world_worker_drawn\n");
   if (!cvc::ariadne::have_yaml() || !cvc::physics::backend_available(cvc::physics::backend::jolt)) {
@@ -2222,6 +2353,7 @@ int main() {
   test_drawn_water_shows_another_hosts_sea();
   test_drawn_weather_draws_another_hosts_time();
   test_world_worker_drawn();
+  test_steering_headless_and_drawn();
   if (g_failures) {
     std::printf("cvcgl_ariadne_physics: %d FAILURE(S)\n", g_failures);
     return 1;

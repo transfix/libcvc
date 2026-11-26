@@ -42,6 +42,10 @@ class world_clock;
 namespace physics {
 class world;
 }
+namespace ocean {
+struct sea_fronts;
+class sea_front_source;
+} // namespace ocean
 namespace ariadne {
 
 struct Scene;
@@ -68,6 +72,10 @@ double scene_weather_dry(const SceneNode &n);
 // are seeds from its `base` prop (cvcGL's cloud_sky defaults it to kCloudSkyBase).
 constexpr double kCloudSkyBase = 74.0;
 constexpr double kWeatherDeckBase = 300.0;
+// Without a scene wind the storms ride the cloud deck's own: its heading `<sky>.wind_az` (the
+// weather's steer_az without the key) at this many m/s times `<sky>.drift` (cvcGL's
+// CLOUD_SKY_DRIFT).
+constexpr double kCloudSkyDrift = 3.0;
 // The same headless, from the document: the `base` of the scene's cloud_sky (at any depth) whose
 // key root is the one the weather node's `sky:` names (default `sky`; a cloud_sky's root is its
 // `keys:`, default `sky`), else kWeatherDeckBase. So a drawn and a headless run steer alike.
@@ -89,10 +97,19 @@ std::string scene_weather_sky(const SceneNode &weather);
 // weather's centre with none) runs every surface material's friction toward its wet value
 // (cvc::physics::apply_wetness), when it has moved by 1/64. The wetness is the weather's
 // (cvc::world::weather::wetness): a function of the node's props, the time and the events in its
-// `weather.events`, which the drawn node writes when someone starts a storm or the steering wind
-// turns. Its keys, under the node's id: `weather.friction` (1; 0 dries the surfaces at the next
-// step, and they are wetted again at the next step after it is set back) and `weather.wetness`,
-// the wetness last applied.
+// `weather.events`, which the drawn node writes when someone starts a storm. Its keys, under the
+// node's id: `weather.friction` (1; 0 dries the surfaces at the next step, and they are wetted
+// again at the next step after it is set back) and `weather.wetness`, the wetness last applied.
+//
+// The steering wind and the time scale (F4): the scene's world logs their changes, drawn or
+// headless, so a wind changed live steers a headless run's storms as it steers a drawn run's. The
+// steering is read at each sync as the drawn node reads it (scene_weather_steering, else the
+// sky's `wind_az`), and `weather.time_scale` with it; a change goes in as a `steer` (or `rate`)
+// event at the start of the clock period after the one it was read in, at the first step past it
+// (switch_steering), so at the same step and with the same event whatever the frames. A slider
+// dragged within a period logs its last value once. The event goes into `weather.events`, which
+// the drawn node then reads; with the scene's world running its weather, the drawn node logs
+// neither.
 class WeatherFriction {
 public:
   static constexpr double kWetPeriod = 0.5; // s of world time between two settings
@@ -124,6 +141,10 @@ public:
   // first step past the start of the clock period after the one read_keys saw it in, so at the same
   // step whatever the frames. True when it did (the scene's world makes its air again).
   bool switch_gust(std::uint64_t tick);
+  // Before that step too: a change of the steering wind or of weather.time_scale read_keys saw goes
+  // into model() as a steer (rate) event at the start of the clock period after the one it was
+  // read in, on the first step past it, and into weather.events. True when it did.
+  bool switch_steering(std::uint64_t tick);
   // The world was made again (sim.restart): its materials are dry, so set them at the next step.
   void world_gone();
   // weather.wetness, when it changed.
@@ -144,7 +165,8 @@ public:
   // storm-wind peak (gust_front()) went in after (0: from the start). A relay publishes them
   // (conference::room_world_on), and a client's replica follows them here: EVENTS (empty: keep its
   // own) and GUST go into model() at once, nothing stepping the replica's world; the keys take
-  // them too, so read_keys() keeps them. True when model() changed.
+  // them too, so read_keys() keeps them. From the first follow on it logs no steering or time
+  // scale of its own (the followed host does). True when model() changed.
   const std::string &events_text() const;
   std::uint64_t gust_from() const;
   bool follow(const std::string &events, double gust, std::uint64_t gust_from);
@@ -196,6 +218,24 @@ private:
   mutable std::mutex _mutex;
   mutable std::shared_ptr<const moment> _last;
 };
+
+// F4: the storms' gust fronts where each thing is. The cells of the storm air's weathers at clock
+// time `clock_t` (cvc::world::weather::front_cell_of), the strongest kSceneFrontCells; the mean
+// wind they add to (the wind as authored); and the wind at the reference point, the first
+// weather's centre, where wind.front is read and toward which the sea's keyframes grow (|U + its
+// fronts|). The drawn water and trees take them as uniforms (cvc/gl/StormFrontGLSL.h) and the
+// physics sea reads the same (scene_sea_fronts), so the waves drawn and felt rise alike where a
+// front blows; a tree leans in the wind where it stands. No cells when `air` is no StormWindFlow
+// (no storms) or no front blows. (The physics' air itself reads every cell, StormWindFlow::front.)
+constexpr std::size_t kSceneFrontCells = 4;
+void scene_fronts(const cvc::physics::flow_velocity *air, double clock_t,
+                  cvc::ocean::sea_fronts &out);
+// The fronts a water node's physics sea reads: the air in SLOT (SceneColliders::air, which the
+// scene's world sets) at the sea's time t, the world's field time, the air's clock offset added
+// (so the clock's storms, the ones drawn). It reads the slot at each read, so the air the world
+// has at each step, and keeps the last time's fronts.
+std::shared_ptr<const cvc::ocean::sea_front_source>
+scene_sea_fronts(std::shared_ptr<std::shared_ptr<const cvc::physics::flow_velocity>> slot);
 
 } // namespace ariadne
 } // namespace cvc

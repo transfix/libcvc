@@ -312,6 +312,8 @@ PyObject *vehicle_state_dict(const ph::vehicle_state &s) {
   put(d, "air_velocity", tuple3(s.air_velocity));
   put(d, "water_force", tuple3(s.water_force));
   put(d, "engine_flooded", PyBool_FromLong(s.engine_flooded ? 1 : 0));
+  put(d, "water_inside", PyFloat_FromDouble(s.water_inside));
+  put(d, "water_inside_mass", PyFloat_FromDouble(s.water_inside_mass));
   PyObject *wheels = PyList_New(static_cast<Py_ssize_t>(s.wheels.size()));
   for (std::size_t i = 0; i < s.wheels.size(); ++i)
     PyList_SET_ITEM(wheels, static_cast<Py_ssize_t>(i), wheel_dict(s.wheels[i]));
@@ -1102,20 +1104,23 @@ struct wading_desc {
   double underbody_drag;     // its C_d
   double tire_pressure;      // Pa (0: never aquaplanes)
   double fording_depth;      // m of water at the front axle past which the engine floods (0: never)
+  // m^2 of openings the cabin and engine bay flood and drain through, at the box's bottom (0: they
+  // flood at once). Whether it is 0 is fixed when the vehicle is added; the value tunes.
+  double flood_area;
 };
 } // namespace physics
 } // namespace cvc
 
 %extend cvc::physics::wading_desc {
-  // As a dict of its fields, and the generic road vehicle's defaults (enabled False) changed by
-  // keyword.
+  // As a dict of its fields.
   PyObject *as_dict() const {
-    return Py_BuildValue("{s:O,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "enabled",
+    return Py_BuildValue("{s:O,s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "enabled",
                          $self->enabled ? Py_True : Py_False, "displacement", $self->displacement,
                          "wheel_displacement", $self->wheel_displacement, "wheel_drag",
                          $self->wheel_drag, "underbody_depth", $self->underbody_depth,
                          "underbody_drag", $self->underbody_drag, "tire_pressure",
-                         $self->tire_pressure, "fording_depth", $self->fording_depth);
+                         $self->tire_pressure, "fording_depth", $self->fording_depth,
+                         "flood_area", $self->flood_area);
   }
 }
 
@@ -2491,6 +2496,32 @@ public:
     if (!world && !o.ground_bodies.empty())
       throw std::invalid_argument("dyn_bike_plant: ground_bodies needs a world");
     return new cvc::physics::dyn_bike_plant(descs, o);
+  }
+  // With a world and the vehicle's wading on (dyn_wading.h): agent i's water as of its last model
+  // step, as a dict: wet, engine_flooded, drag (kg/m: the water's drag on the forward speed v is
+  // drag v |v|), lift (N off the tires), and per axle (front, rear) its contact (x, y), grip (its
+  // factor on mu) and depth (m of water over it). waded(i): it stood in water in some step of the
+  // last tick.
+  PyObject *wading(int i) const {
+    pycvc_physics::need_agent(i, $self->size(), "dyn_bike_plant.wading");
+    const cvc::physics::dyn_wading &g = $self->wading(i);
+    PyObject *d = PyDict_New();
+    pycvc_physics::put(d, "wet", PyBool_FromLong(g.wet ? 1 : 0));
+    pycvc_physics::put(d, "engine_flooded", PyBool_FromLong(g.engine_flooded ? 1 : 0));
+    pycvc_physics::put(d, "drag", PyFloat_FromDouble(g.drag));
+    pycvc_physics::put(d, "lift", PyFloat_FromDouble(g.lift));
+    const int n = std::max(0, std::min(g.n, 4));
+    PyObject *tires = PyList_New(n);
+    for (int k = 0; k < n; ++k)
+      PyList_SET_ITEM(tires, k,
+                      Py_BuildValue("{s:(dd),s:d,s:d}", "contact", g.x[k], g.y[k], "grip",
+                                    g.grip[k], "depth", g.depth[k]));
+    pycvc_physics::put(d, "tires", tires);
+    return d;
+  }
+  bool waded(int i) const {
+    pycvc_physics::need_agent(i, $self->size(), "dyn_bike_plant.waded");
+    return $self->waded(i);
   }
   std::string kind() const { return "dynamic"; }
   // Agent i as nav reads it (normalized frame): x, y, heading, speed, steer, and tire_use (the

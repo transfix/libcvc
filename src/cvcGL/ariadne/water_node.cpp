@@ -135,6 +135,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_quality.h>         // adaptive quality's tiers (O21)
 #include <cvc/ariadne/scene_water.h>           // its physics (WaterRuntime) and coast
+#include <cvc/ariadne/scene_weather.h> // scene_fronts: the storms' fronts where each wave is (F4)
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -143,6 +144,7 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/StormFrontGLSL.h> // the fronts in the shader: the ripples and the roughness
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/physics_scene_binding.h>
@@ -381,7 +383,7 @@ const char *const kWakeOff = "float wkVertex(vec2 p, float s){ return 0.0; }\n"
 
 std::string common_glsl(bool wake) {
   return std::string(kWaterCommonDec) + kWaterFetchFuncs + OceanWind::glsl(true) +
-         kWaterCommonFuncs + (wake ? kWakeOn : kWakeOff);
+         StormFrontGLSL::glsl() + kWaterCommonFuncs + (wake ? kWakeOn : kWakeOff);
 }
 
 const char *const kWaterVsDec = "//VTK::PositionVC::Dec\n"
@@ -410,7 +412,10 @@ const char *const kWaterVsImpl =
     // (the far grid's fragments read through it too) and the gust (its cat's paws fading out toward
     // the near grid's edge; none on the far grid)
     "  owFlow = owCurrent(w);\n"
-    "  float gust = cvc_wind_gust(w, uWaves*(1.0 - smoothstep(0.35, 0.8, edge)));\n"
+    // and the storms' gust fronts where this vertex is (F4: the ripples and the cat's paws rise
+    // with the wind here over the wind the sea grows toward, as the physics sea's do)
+    "  float gust = cvc_wind_gust(w, uWaves*(1.0 - smoothstep(0.35, 0.8, edge))) * "
+    "cvc_front_ratio(w);\n"
     "  vWaterGust = gust;\n"
     "  vWaterCur = owFlow;\n"
     "  vec3 k = vec3(0.0);\n"
@@ -909,7 +914,13 @@ struct WaterRT {
   // uploaded until the next keyframe. h0Mix is the crossfade's scratch.
   std::unique_ptr<ari::SceneWaterSeaClock> seaClock;
   std::shared_ptr<const ari::SceneWaterSea> sea, seaDrawn;
+  // The storms' gust fronts (F4) as both meshes' shader inputs (StormFrontGLSL), set each frame
+  // from the scene's world's air: the colliders' slot with body:, else the world's (a scene tick).
+  std::shared_ptr<GeometryNode::ShaderInputs> frontIn =
+      std::make_shared<GeometryNode::ShaderInputs>();
+  std::shared_ptr<const cvc::physics::flow_velocity> air;
   bool seaFinal = false;
+  bool seaBefore = false; // the old keyframe's h0 is uploaded: the new one's crossfade is ahead
   std::vector<cvc::ocean::h0_field> h0Mix;
   bool ready = false, failed = false;
   double level = 0.0, nearHalf = 192.0, cell = 2.0;
@@ -1248,6 +1259,7 @@ void style_ocean(GeometryNode &g, const WaterRT &rt) {
   const std::string common = common_glsl(rt.wake != nullptr);
   g.addVertexShaderReplacement("//VTK::PositionVC::Dec", std::string(kWaterVsDec) + common);
   g.addVertexShaderReplacement("//VTK::PositionVC::Impl", kWaterVsImpl);
+  g.setSharedShaderInputs("water_fronts", rt.frontIn);
   g.addFragmentShaderReplacement("//VTK::Normal::Dec", std::string(kWaterFsDec) + common +
                                                            kWaterFsFuncs + oceanFoamGLSL() +
                                                            kWaterFoamFlow);
@@ -1355,7 +1367,8 @@ void upload_fetch(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
 // The sea's keyframes onto the GPU at world time t: on a new keyframe its fetch maps (and its h0
 // kept for the whitecaps); while its crossfade runs, the two keyframes' h0 mixed on the CPU by the
 // crossfade's weight and uploaded each frame; once it is over, the new h0 once. Between keyframes
-// nothing is uploaded.
+// nothing is uploaded. A keyframe whose crossfade is still ahead (one timed on the clock's periods
+// while the scene has storms) draws the old keyframe's h0 until it starts, as the physics does.
 void sync_sea(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, GeometryNode &far,
               double t) {
   const std::shared_ptr<const ari::SceneWaterSea> k = rt.sea;
@@ -1368,7 +1381,20 @@ void sync_sea(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Geomet
       upload_fetch(rt, ow, near, far);
     rt.seaDrawn = k;
     rt.seaFinal = false;
+    rt.seaBefore = false;
   }
+  // A keyframe timed on the clock (storms: its crossfade starts at the next period's start) can
+  // come before its crossfade: until then the old keyframe's sea, as the physics field has it.
+  const bool before = t < k->t0 && k->h0_from.size() >= rt.cascades.size();
+  if (before) {
+    if (!rt.seaBefore)
+      for (std::size_t i = 0; i < rt.cascades.size(); ++i)
+        rt.fft->setH0(int(i), k->h0_from[i]);
+    rt.seaBefore = true;
+    rt.seaFinal = false;
+    return;
+  }
+  rt.seaBefore = false;
   const bool fading = k->fading(t) && k->h0_from.size() >= rt.cascades.size();
   if (fading) {
     const double w = k->weight(t);
@@ -2192,6 +2218,17 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   OceanWind::frame wind;
   if (rt.sea)
     wind = OceanWind::at(*ari::scene_water_forcing(spec, *rt.sea), wind_cascades(*rt.sea), t);
+  // The storms' fronts where each wave is (F4), at the time the sea is drawn: the air the physics
+  // sea reads (the colliders' slot), else the scene's world's.
+  {
+    const std::shared_ptr<const cvc::physics::flow_velocity> air =
+        rt.physics ? *rt.physics->colliders()->air : rt.air;
+    cvc::ocean::sea_fronts fronts;
+    ari::scene_fronts(air.get(), t, fronts);
+    for (const auto &[name, v] :
+         StormFrontGLSL::at(fronts.cells, fronts.ux, fronts.uy, fronts.ref).uniforms())
+      rt.frontIn->f4[name] = v;
+  }
   near->setShaderUniformf("uFoamDetail", 1.0f);
   far->setShaderUniformf("uFoamDetail", 0.0f); // the far grid: the mean cover only
   for (GeometryNode *g : {near.get(), far.get()}) {
@@ -2359,6 +2396,11 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
 
   cvc::app *ap = &app;
   out.custom_ticks.push_back([ap, rt](vtkRenderer *ren) { tick_water(*ap, *rt, ren); });
+  // The scene's world's air, for the storms' fronts on a water without body: (F4).
+  out.scene_ticks.push_back(
+      [rt](vtkRenderer *, RealizedScene &scene, const cvc::world_clock::step_result &) {
+        rt->air = scene.world ? scene.world->wind() : nullptr;
+      });
   if (rt->physics) // the bodies' waves read the scene's world, as the frame left it
     out.scene_ticks.push_back([ap, rt](vtkRenderer *ren, RealizedScene &scene,
                                        const cvc::world_clock::step_result &clock) {
