@@ -2218,6 +2218,10 @@ scene:
 - **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
   steps by the quanta due. With a renderer, `tick_scene` does that and draws each moving body's
   node at the body's pose, between the last two steps, wherever the node sits in the hierarchy.
+  Each step runs on Jolt's own workers beside the stepping thread wherever there are threads: up
+  to three natively, two in a browser built with threads, none without. Its vehicles' wheels,
+  its collisions and its islands are shared among them, and a run is the same on any number. 40
+  Jolt vehicles step in about 1.8 ms on three workers against 3 ms on none, 120 in 5 against 12.
 - **Headless.** The world is core libcvc's (`cvc::ariadne::SceneWorld`,
   [`scene_world.h`](../inc/cvc/ariadne/scene_world.h)), so it runs with no renderer too. An
   `AppRuntime` with no `SceneAdapter` (`ari`, `ari test`, pycvc's headless `AriApp`, `arix`)
@@ -2600,7 +2604,9 @@ scene:
       `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
       `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
       out again from its seed, every vehicle back at its start; `reseed.request` from the next
-      seed. `vehicles.fleets.names` lists the fleets.
+      seed. `size` (the entry's `count:` to start) is how many it has: writing it adds vehicles
+      or takes its last ones off (1 to 256), and the fleet is laid out again from its seed.
+      `vehicles.fleets.names` lists the fleets.
     - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and

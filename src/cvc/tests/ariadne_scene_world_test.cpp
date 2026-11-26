@@ -2925,6 +2925,76 @@ scene:
   EXPECT_GT(apart, piled);
 }
 
+// A fleet's size key (vehicles.fleets.<f>.size) starts at its count: writing it adds vehicles
+// after its last or takes its last ones off, and the fleet is laid out again from its seed. A
+// size out of range is held to 1..256, and the key says what the fleet holds.
+TEST(AriadneWorldVehicles, AFleetsSizeKeyAddsAndTakesOffVehicles) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_size", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: pack, archetype: v, count: 12, spawn: scattered, seed: 3, rally: { count: 3 },
+          policy: builtin }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)")
+               .string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  const auto settle = [&] {
+    art.drain();
+    art.step_world(1);
+    art.drain();
+  };
+  const auto placed = [&] {
+    const std::shared_ptr<const fleet_poses> p = v->poses("pack");
+    return p ? p->size() : std::size_t{0};
+  };
+  const auto members = [&] {
+    std::size_t n = 0;
+    for (const entity_info &e : v->entities())
+      n += e.fleet == "pack" ? 1 : 0;
+    return n;
+  };
+  settle();
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.size"), "12");
+  EXPECT_EQ(placed(), 12u);
+  cvc::state &size = cvc::state::instance(app)("vehicles.fleets.pack.size");
+  size.value(std::string("30"));
+  settle();
+  EXPECT_EQ(members(), 30u);
+  EXPECT_EQ(placed(), 30u);
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.count"), "30");
+  size.value(std::string("5"));
+  settle();
+  EXPECT_EQ(members(), 5u);
+  EXPECT_EQ(placed(), 5u);
+  size.value(std::string("100000"));
+  settle();
+  EXPECT_EQ(members(), 256u);
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.size"), "256");
+  size.value(std::string("0"));
+  settle();
+  EXPECT_EQ(members(), 1u);
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.size"), "1");
+  size.value(std::string("lots")); // not a number: nothing changes
+  settle();
+  EXPECT_EQ(members(), 1u);
+}
+
 // A fleet's poses are a snapshot (FL1d): poses(fleet) gives its placed vehicles as the last
 // publish left them (ids, chassis centres, headings, speeds, teams, the box they lie in and the
 // tick), the same the fleet's .tick and .bounds keys say. A snapshot held stays as it was while the

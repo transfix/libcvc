@@ -816,6 +816,16 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
   // beside the stepping thread: the same values in the same order, so a run is the same.
   const unsigned hw = std::thread::hardware_concurrency();
   cfg.field_threads = hw > 1 ? static_cast<int>(std::min(3u, hw - 1)) : 0;
+  // Jolt's own workers inside each step, wherever there are threads (as the swarm's plant host
+  // has them): its vehicles' wheels and suspensions (step listeners, eight to a job), its
+  // collisions and its islands run on them beside the stepping thread. A run is the same on any
+  // number (Jolt is deterministic across them). Up to three natively; in a browser built with
+  // threads, up to two, which its pre-spawned pthread pool has room for.
+#if !defined(__EMSCRIPTEN__)
+  cfg.threads = hw > 2 ? static_cast<int>(std::min(3u, hw - 2)) : 0;
+#elif defined(__EMSCRIPTEN_PTHREADS__)
+  cfg.threads = hw > 2 ? static_cast<int>(std::min(2u, hw - 2)) : 0;
+#endif
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;

@@ -976,6 +976,7 @@ struct WorldVehicles::impl {
     std::vector<std::array<float, 3>> colors; // each team's colour
     std::vector<std::string> seen_rally;      // each team's "x|y" as last written or read
     std::string seen_restart, seen_reseed;
+    std::string seen_size; // its size key as last read (vehicles.fleets.<f>.size; poll)
     std::string status;
     // Its navigator (FL1b): what it knows and how its vehicles share it (the keys switch them).
     std::string sense, belief, seen_sense, seen_belief;
@@ -3769,6 +3770,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         d.put(at + "metric", g.metric);
         d.put(at + "plant", g.plants.empty() ? g.base_plant : g.plants.text());
         d.put(at + "collide", g.collide ? "1" : "0");
+        d.put(at + "size", std::to_string(st.count));
       }
       g.seen_sense = d.get("fleets." + st.fleet + ".sense");
       g.seen_belief = d.get("fleets." + st.fleet + ".belief");
@@ -3776,6 +3778,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.seen_metric = d.get("fleets." + st.fleet + ".metric");
       g.seen_plant = d.get("fleets." + st.fleet + ".plant");
       g.seen_collide = d.get("fleets." + st.fleet + ".collide");
+      g.seen_size = d.get("fleets." + st.fleet + ".size");
       d.hold_placing = true;
       int got = 0;
       std::string why;
@@ -3958,6 +3961,60 @@ void WorldVehicles::poll() {
   if (const std::string m = d.get("sense"); (m == "known" || m == "fog") && m != d.sense)
     set_sense(m);
   d.poll_groups();
+  // A fleet's size (vehicles.fleets.<f>.size): vehicles added after its last or its last ones
+  // taken off, to match, and the whole fleet laid out again from its seed.
+  for (std::size_t gi = 0; gi < d.groups.size(); ++gi) {
+    impl::fleet_group &g = d.groups[gi];
+    const std::string at = "fleets." + g.start.fleet + ".";
+    const std::string v = d.get(at + "size");
+    if (v == g.seen_size)
+      continue;
+    g.seen_size = v;
+    char *end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (end == v.c_str())
+      continue;
+    const int want = static_cast<int>(std::clamp<long>(n, 1, kMaxVehicleStartCount));
+    std::vector<std::pair<int, std::uint64_t>> members; // (member, id)
+    for (const impl::entity &e : d.ents)
+      if (e.group == static_cast<int>(gi))
+        members.emplace_back(e.member, e.id);
+    std::sort(members.begin(), members.end());
+    const int have = static_cast<int>(members.size());
+    if (want < have) {
+      for (int k = want; k < have; ++k)
+        despawn(members[static_cast<std::size_t>(k)].second);
+    } else if (want > have) {
+      const vehicle_start &st = g.start;
+      d.hold_placing = true;
+      std::string why;
+      for (int k = members.empty() ? 0 : members.back().first + 1, i = have; i < want; ++k, ++i) {
+        entity_spec s;
+        s.archetype = st.archetype;
+        s.name = (st.name.empty() ? st.fleet : st.name) + " " + std::to_string(k + 1);
+        s.team = st.team;
+        s.controller = st.controller;
+        s.plant = g.plants.of(k, -1);
+        if (st.has_heading)
+          s.yaw = st.heading * kPi / 180.0;
+        if (!spawn(s, &why)) {
+          d.status = "fleet '" + st.fleet + "': " + why;
+          break;
+        }
+        d.ents.back().group = static_cast<int>(gi);
+        d.ents.back().member = k;
+      }
+      d.hold_placing = false;
+    }
+    if (want != have) {
+      g.start.count = d.members(static_cast<int>(gi));
+      d.restart_group(gi, false);
+    }
+    if (const std::string said = std::to_string(g.start.count); said != v) {
+      d.put(d.vkey + "." + at + "size", said); // what it holds: in range, or as many as it got
+      g.seen_size = said;
+    }
+  }
   if (const std::string a = d.get("avoid"); a == "0" || a == "1")
     if ((a == "1") != d.avoid)
       set_avoid(a == "1");
