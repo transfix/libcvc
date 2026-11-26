@@ -426,12 +426,12 @@ log entry (`geo.*`); a program's connection brings its own.
 - **D4. Python in wasm replaces S4** (RestrictedPython in worker processes) as tier 3 of the
   scripting hosts' §6.3.
 
-## 5. Decisions (Joe, 2026-11-26) and the ones proposed
+## 5. Decisions (Joe, 2026-11-26)
 
 - **D5. NMDC users go in the relay's client list,** and the identity work goes on: every identity
   is flagged with its kind of client and the services it can use (2.7, 2.8). The identity session
   takes ID4c too.
-- **Proposed, for review:**
+- **D6-D8, approved by Joe 2026-11-26 ("Approve D6-D8")** after the reviews below:
   - **D6.** A participant's kind and capabilities are in the room tree for its peers to see; its
     version stays in the private log.
   - **D7.** A document names its app with a top-level `client:` block; without one, the host's own
