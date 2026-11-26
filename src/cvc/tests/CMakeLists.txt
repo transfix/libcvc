@@ -3896,7 +3896,7 @@ if(_cvc_bench_python)
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/locks_model/test_state_word.py")
     # The router protocol's model (tools/locks_model/test_router.py; S2b, S2-Q15): its quick
-    # suite and checks of its explorer, about 25 s, standard library only.
+    # suite and checks of its explorer, about 30 s, standard library only.
     add_test(NAME state_exec_router_model_test
              COMMAND "${_cvc_bench_python}" -I
                      "${PROJECT_SOURCE_DIR}/tools/locks_model/test_router.py")

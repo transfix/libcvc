@@ -291,9 +291,10 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 } // namespace
 
 async_scheduler::~async_scheduler() {
-  // No post reaches it through its router handle from here on (exec_router.h; group 0's teardown:
-  // an app's groups closed theirs in leave_router).
-  route_self_.close();
+  // No post reaches it through its router handle from here on, and the handle is done
+  // (exec_router.h; group 0's teardown: an app's groups finished theirs in leave_router). What its
+  // late queue held (a handle closed outside leave_router) is refused below with the ingress.
+  std::vector<detail::route_entry> late = route_self_.close_for_good();
   home_.reset();
   // What the ingress holds, never applied (S2b.1): commands refused, done(false), each counted out
   // first; plain messages dropped and counted; router entries bounced to their homes (S2-Q10).
@@ -309,6 +310,9 @@ async_scheduler::~async_scheduler() {
     left.swap(ingress_);
     ingress_capped_ = 0;
   }
+  for (detail::route_entry &e : late)
+    left.emplace_back(std::in_place_type<detail::route_entry>, std::move(e));
+  late.clear();
   while (!left.empty()) {
     for (ingress_entry &entry : left)
       refuse_entry(entry);
@@ -1484,39 +1488,57 @@ bool async_scheduler::post_message(const std::string &path, const value_t &msg) 
   // S2b.4: a key the router homes in another group goes there as a send, the home's cap applying
   // (exec_router.h, "Host posts"). The router's lookup is thread-safe; the cache is not, and is
   // not used here.
-  if (router_ && router_->active() && path.find('#') == std::string::npos) {
+  const bool hashed = path.find('#') != std::string::npos;
+  const auto as_send = [&] {
+    detail::route_entry e;
+    e.what = detail::route_entry::kind::send;
+    e.key = path;
+    e.value = msg;
+    return e;
+  };
+  if (router_ && !hashed && router_->active()) {
     // An island (no prefix of its own) keeps the keys no other group's prefix covers (S2b.0a): it
-    // asks only for a covering prefix, never building group 0. A key homed here once its handle
-    // closed (its teardown) goes on as a send too: the poster waits for the forward, so it arrives
-    // after what the teardown sends on.
+    // asks only for a covering prefix, never building group 0.
     const bool island = !router_->has_prefix(route_self_);
     group_ref home = island ? router_->prefix_home_of(path) : router_->home_of(path);
-    if (home && (home != route_self_ || route_self_.closed())) {
-      detail::route_entry e;
-      e.what = detail::route_entry::kind::send;
-      e.key = path;
-      e.value = msg;
-      return post_routed(std::move(home), std::move(e), nullptr, true) > 0;
-    }
+    if (home && home != route_self_)
+      return post_routed(std::move(home), as_send()) > 0;
   }
   // A '#' key's post is a runtime reply (a kernel's, a task's, a lane's): a completion, never
   // capped (S2b.R2, S-M1); its waiter would wait for good.
-  const bool capped = path.find('#') == std::string::npos;
-  return push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), capped);
+  const int pushed =
+      push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), !hashed);
+  if (pushed > 0)
+    return true;
+  if (pushed != -2)
+    return false; // at its cap, or its destructor took the queue
+  // Its teardown routes its messages out (leave_router; S2b.R3, K-3): a key it homed goes through
+  // its own handle as a send (its queue, its late queue, or on by the forwarding address), after
+  // what the teardown sends on. A message that would have died with it in its queue (a '#' key's,
+  // an island's own) dies now, counted, as it would have there.
+  if (hashed || !route_self_ || !prefixed_once_.load(std::memory_order_relaxed)) {
+    ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  return post_routed(route_self_, as_send()) > 0;
 }
 
-bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
+int async_scheduler::push_capped(ingress_entry &&e, bool capped) {
   // The wait is notified under the lock: once the poster lets go of it, it touches the scheduler
   // no more, so a scheduler thread that drains this post may destroy the scheduler.
   std::lock_guard<std::mutex> lock(ingress_mutex_);
+  // 1: pushed; 0: refused at the cap (counted); -1: the destructor took the queue; -2: a message,
+  // which the teardown routes out (post_message sends it through the handle).
   if (destroying_)
-    return false; // the destructor took the queue: nothing posted now would be applied
+    return -1; // the destructor took the queue: nothing posted now would be applied
+  if (routed_out_ && std::holds_alternative<posted_message>(e))
+    return -2;
   // The cap (S2-Q10) counts the capped entries in the queue; a drain empties it.
   if (capped) {
     const std::size_t cap = ingress_cap_.load(std::memory_order_relaxed);
     if (cap != 0 && ingress_capped_ >= cap) {
       ingress_counts_.ingress_refused.fetch_add(1, std::memory_order_relaxed);
-      return false;
+      return 0;
     }
     ++ingress_capped_;
   }
@@ -1527,7 +1549,7 @@ bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
   ingress_.push_back(std::move(e));
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
-  return true;
+  return 1;
 }
 
 // --- Stage 2: the router (S2b; exec_router.h). The protocol's ends are in exec_router.cpp. ---
@@ -1538,13 +1560,14 @@ void async_scheduler::set_router(exec_router *router, group_ref self) {
   // exec_group registers its prefixes before this (S2b.R2, C-M4): a group that had one forwards
   // what it holds at its teardown even once unregistered.
   if (router_ && route_self_ && router_->has_prefix(route_self_))
-    prefixed_once_ = true;
+    prefixed_once_.store(true, std::memory_order_relaxed);
 }
 
 bool async_scheduler::post_route(detail::route_entry e) {
   // Only a send counts against the cap, unless it is a rehomed one (S2-Q10).
   const bool capped = e.what == detail::route_entry::kind::send && !e.uncapped;
-  return push_capped(ingress_entry(std::in_place_type<detail::route_entry>, std::move(e)), capped);
+  return push_capped(ingress_entry(std::in_place_type<detail::route_entry>, std::move(e)), capped) >
+         0;
 }
 
 void async_scheduler::set_ingress_cap(std::size_t cap) {
