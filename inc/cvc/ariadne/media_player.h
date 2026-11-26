@@ -46,6 +46,9 @@ struct PlayerSource {
   cvc::app *app = nullptr;
   std::string uri;
   std::string auth;  // a host credential NAME for an http(s) source ("" = none)
+  // The scope of the widget that plays it: an http(s) source is fetched as its principal
+  // (media.h fetch_bytes; docs/roadmap/ARIADNE_SHELL.md 4.12). "" = the launcher's.
+  std::string scope;
   std::string base;  // the directory a relative file:// URI resolves against
   bool video = true; // a video: widget (false: audio:, no picture wanted)
   int frame_w = 0;   // the picture's box in px (frames are scaled to fit it)

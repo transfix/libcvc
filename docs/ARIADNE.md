@@ -8368,9 +8368,41 @@ resolve. With them the host ([`net_host.h`](../inc/cvc/ariadne/net_host.h), `ena
 - **keeps credentials across runs with `--credential-store`.** A plain name (`nicotina`) is a
   file of that name in the user's config directory: `$XDG_CONFIG_HOME/cvc/credentials` or
   `~/.config/cvc/credentials`, `%LOCALAPPDATA%\cvc\credentials` on Windows. Anything else
-  is a path. The file holds one `<name> <origin> <token>` line each, written owner-only (0600
-  in a 0700 directory) and replaced whole on each change; the host refuses to read one that
-  another user owns or that others can read. In a browser credentials live in memory only.
+  is a path. The file holds one `<principal> <name> <origin> <token>` line each (below; the
+  principal percent-encoded, so a directory with a space in it stays one word), written
+  owner-only (0600 in a 0700 directory) and replaced whole on each change; the host refuses to
+  read one that another user owns or that others can read. A line of three words, as a file
+  written before principals were kept holds, is the `local` principal's, and the next change
+  writes it in the new form. In a browser credentials live in memory only.
+
+**Per principal** ([`principal.h`](../inc/cvc/ariadne/principal.h); the shell, docs/roadmap/
+ARIADNE_SHELL.md 4.12). Everything above is the launcher's, and belongs to the `local` principal:
+the outermost document and what it loads. A document mounted in the shell runs as a principal
+fixed when it is mounted, from where its bytes came: `local` for one the launcher or the catalog
+named, `file:<its directory>` for another local file, `remote:<its origin>` for one fetched over
+the network. The host checks each request against the principal of the program that makes it,
+which the scope it runs in names, and binds its verbs to that principal's network:
+
+| | allowlist | credentials | end-to-end keys | sign-ins |
+|---|---|---|---|---|
+| `local` | the launcher's | the launcher's store | the launcher's `--e2ee-store` | its own |
+| a local application with a network of its own | its `net_policy` (else the launcher's) | its `credential_store` (in memory when it names only a policy) | its `e2ee_store` (else the launcher's) | its own |
+| `remote:<origin>` | its origin, and the origins it was granted | its own, in the launcher's file under its principal | its own, in memory | its own |
+| `file:<dir>` | only the origins it was granted | as `remote:` | as `remote:` | its own |
+
+So a credential is kept as (principal, name, origin, token), and a request naming `txwtf` finds
+only its own principal's: a document fetched from a post and mounted beside nicotina cannot post as
+the reader by naming nicotina's credential, nor reach an origin nicotina may. `(net-auth-clear)`
+clears its own principal's, `(net-allowed? URL)` answers for it, a WebSocket handle is its
+opener's alone, and `(fetch URL)` of an http(s) URL is held to its own allowlist before the
+launcher's. A picture, a video or a Save that a mounted document's widget names with `auth:` is
+fetched with that document's principal's credential, on its allowlist. A sign-in kept under
+another principal is not posted to `oidc#NAME`, which any program can read: it reports at its
+status path and through `(oidc-status NAME)`. The shell gives a local application its own network
+with `shell.apps.<as>.net_policy`, `.credential_store` and `.e2ee_store`, as `bin/nicotina` passes
+`--net-policy fleet.policy --credential-store ...` today; a policy file that does not load refuses
+the mount. A sandboxed principal may name none of them. `data:` entries are not split yet: they
+read over the launcher's allowlist, into one store the documents share.
 
 A policy file holds one directive a line, `#` starting a comment:
 

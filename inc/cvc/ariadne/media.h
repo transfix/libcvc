@@ -73,6 +73,11 @@ const char *status_name(Status s); // "loading" | "ready" | "failed"
 struct ImageRequest {
   std::string uri;
   std::string auth; // a credential NAME (never a token); "" = none
+  // The scope of the widget that shows it (the Runtime's prefix there): an http(s) picture is
+  // fetched as that scope's principal (net_host_access(app, scope); docs/roadmap/ARIADNE_SHELL.md
+  // 4.12), on its allowlist and with its credential, and is not shared with another principal's
+  // widget. "" = the launcher's.
+  std::string scope;
   int w = 256;      // the box, px
   int h = 0;        // <= 0: the image's own aspect at width w
   Fit fit = Fit::Contain;
@@ -119,9 +124,11 @@ using Fetcher =
 // the cache, never following a redirect), else through whatever http(s) handler the host
 // registered; any other URI through the resolver (uri.h), relative file:// paths against `base`.
 // `auth` on anything but http(s), or with no credential store, is an error. A reply that is not 2xx
-// is an error ("http 404").
+// is an error ("http 404"). An http(s) URI is fetched as `scope`'s principal (ImageRequest::scope):
+// its allowlist holds first, and `auth` names one of its credentials. "" = the launcher's.
 FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string &auth,
-                        const std::string &base = std::string());
+                        const std::string &base = std::string(),
+                        const std::string &scope = std::string());
 
 // The Runtime's cache of pictures by URI. Frame-thread API; its jobs run on the app's background
 // pool (or, in a build without threads, a step per image() call).
@@ -155,8 +162,10 @@ public:
   // §5.29 the encoded bytes of `uri` under credential `auth`, fetched as this cache fetches a
   // picture (its fetcher, else fetch_bytes against its base: through the app's HTTP cache without
   // `auth`), for a Save: off the frame, on the app's background pool, or started in a browser build
-  // without threads. `done` is called once, on any thread. Never kept in the cache.
-  void fetch(const std::string &uri, const std::string &auth, FetchDone done);
+  // without threads. `done` is called once, on any thread. Never kept in the cache. `scope` as
+  // ImageRequest::scope.
+  void fetch(const std::string &uri, const std::string &auth, const std::string &scope,
+             FetchDone done);
   void set_limits(const Limits &limits);
   const Limits &limits() const;
 

@@ -678,6 +678,38 @@ its own: `shell.apps.<as>.net_policy` and `.credential_store`, as `bin/nicotina`
 `--net-policy fleet.policy --credential-store nicotina` today. This split is needed as soon as the
 shell hosts nicotina beside any other application, remote or not.
 
+*As built in SH11:*
+
+- **Who a program runs as** ([`principal.h`](../../inc/cvc/ariadne/principal.h)): a table per
+  app of scope to principal. The Runtime records a mount's principal there when it opens a
+  `mounts:` entry (SH1's `mount_principal`), with what the shell's entry gives it, and drops it
+  when the mount closes. A scope under several runs as the innermost; a `local` one inside a
+  sandboxed one runs as the sandboxed one. Unrecorded scopes, the shell itself among them, are
+  `local`. A remote principal is kept in one spelling, `remote:` and the origin as a policy
+  writes it.
+- **The verbs** (`enable_net`, [`net_host.h`](../../inc/cvc/ariadne/net_host.h)): each program's
+  http verbs, `fetch`, `http-upload`, `ws-*`, `net-*`, `oidc-*`, `e2ee-*` and `open-url` are bound,
+  as the program is built, to its principal's network (`net_host_access(app, scope)`, from
+  `intrinsics_context::root_path`). `local` gets the launcher's, as before. `remote:<origin>` gets
+  its origin and `ScopePrincipal::net_origins`; `file:<dir>` only `net_origins`. That list is
+  the input from SH7's `net.origin` grants; nothing writes it yet.
+- **Credentials** ([`credentials.h`](../../inc/cvc/net/credentials.h)): one store, one file, one
+  lock, seen through one view per principal (`CredentialStore::for_principal`). Each view has its
+  own entries, bindings (the launcher's policy binds only `local`'s names) and renewers. The file's
+  lines are `<principal> <name> <origin> <token>`, and a three-word line loads as `local`.
+- **End-to-end keys**: `local` uses the launcher's store, a sandboxed principal one of its own
+  in memory. **Sign-ins**: kept per owner, with its policy and store; another principal's are not
+  posted to the global `oidc#NAME` channel. **WebSockets**: a handle is its opener's.
+  **Pictures, video and Save** with `auth:`: fetched as the widget's principal
+  (`ImageRequest::scope`, `PlayerSource::scope`, `MediaSave::scope`).
+- **A local application's own network**: `shell.apps.<as>.net_policy`, `.credential_store` and
+  `.e2ee_store`, for a `local` mount only. A policy alone gets an in-memory store, so its
+  `credential` lines do not rebind the launcher's names. A policy that does not load, or binds an
+  origin it does not allow, refuses the mount (`set_principal_check`).
+- **Left for later**: `data:` entries still read over the launcher's allowlist into the one shared
+  store (with SH12/SH13's fetching). Keeping a sandboxed program off the other global `#` channels
+  is SH12's.
+
 **Untrusted bytes in native readers.** A sandboxed document's datasets, scene sources, pictures
 and videos are a stranger's bytes handed to native readers: VTK's, the mesh and image decoders,
 the media player. Those are not memory-safe. So a sandboxed document may load only the formats
