@@ -25,6 +25,12 @@
 # (processes-kill ROWS I) kills row I's process, as its Kill button does, and polls again at the
 # next step. A killed resident (an on_tick:) is started again by the Runtime, with a new pid.
 #
+# Each application with a budget (a mounts: entry's, ARIADNE.md §6.7) gets a row of its share too,
+# from its mirror's ariadne.apps.<key>.budget.*:
+#   ROWS.apps.count, ROWS.apps.<i>.{name, principal, steps, time, memory, held}
+# steps "used / allowed" in the last frame, time in ms the same way, memory in MB, held "yes" while
+# it is held to its budget.
+#
 # It lists its Runtime's processes: the document's own and every mount's (since threaded
 # execution's S2b a program with an owner sees only its owner's, so other documents' in execution
 # group 0 are not listed). An isolated document (ariadne.exec.isolate_documents) sees its own
@@ -76,6 +82,40 @@ functions: |
         (if (or (is-null (state-get "ariadne.name")) (= (state-get "ariadne.name") "")) "document"
           (state-get "ariadne.name"))
         scope)))
+  ; The text at KEY, or "" ((str) would quote a string).
+  (defun processes-text (key)
+    (set v (state-get key))
+    (if (is-null v) "" (if (is-string v) v (str v))))
+  ; A number at KEY, or 0.
+  (defun processes-n (key)
+    (set v (state-get key))
+    (if (or (is-null v) (= v "")) 0 (float v)))
+  ; Each application's share of its budget (a mounts: entry's: ariadne.apps.<key>.budget.*).
+  (defun processes-apps (rows)
+    (set root (state-root-path))
+    (set skip (if (= root "") 0 (+ (string.length root) 1)))
+    (set k 0)
+    (for c (state-children "ariadne.apps")
+      (if (string.ends-with c ".budget.max_steps")
+        (begin
+          (set at (string.substring c skip (- (- (string.length c) skip) 17)))
+          (set b (str-concat at ".budget."))
+          (set row (str-concat rows ".apps." (str k) "."))
+          (state-set (str-concat row "name") (processes-text (str-concat at ".name")))
+          (state-set (str-concat row "principal") (processes-text (str-concat at ".principal")))
+          (state-set (str-concat row "steps")
+                     (str-concat (str (int (processes-n (str-concat b "steps")))) " / "
+                                 (str (int (processes-n (str-concat b "max_steps"))))))
+          (state-set (str-concat row "time")
+                     (str-concat (str (math.round (* 1000 (processes-n (str-concat b "time"))))) " / "
+                                 (str (math.round (* 1000 (processes-n (str-concat b "max_time"))))) " ms"))
+          (state-set (str-concat row "memory")
+                     (str-concat (processes-bytes (int (processes-n (str-concat b "memory")))) " / "
+                                 (processes-bytes (int (processes-n (str-concat b "max_memory"))))))
+          (state-set (str-concat row "held") (if (= (processes-text (str-concat b "held")) "1") "yes" ""))
+          (set k (+ k 1)))
+        #f))
+    (state-set (str-concat rows ".apps.count") (str k)))
   (defun processes-step (rows)
     (if (< (- (time-now) (processes-num (str-concat rows ".at") 0))
            (processes-num (str-concat rows ".every") 0.5))
@@ -101,6 +141,7 @@ functions: |
           (state-set (str-concat row "memory")
                      (if (is-null info) "" (processes-bytes (get-attr info "memory")))))
         (state-set (str-concat rows ".count") (str n))
+        (processes-apps rows)
         (state-set (str-concat rows ".total") (str (length procs)))
         (state-set (str-concat rows ".more")
                    (if (> (length procs) n) (str-concat "and " (str (- (length procs) n)) " more") ""))
@@ -156,3 +197,35 @@ units:
       - text: ""
         bind: "{rows}.more"
         visible_when: (not (= (state-get "{rows}.more") ""))
+      # Each application's share of its budget (ARIADNE.md §6.7), while any has one.
+      - type: group
+        id: "{id}_apps"
+        visible_when: (> (if (is-null (state-get "{rows}.apps.count")) 0 (int (state-get "{rows}.apps.count"))) 0)
+        children:
+          - separator
+          - type: group
+            id: "{id}_apps_head"
+            layout: { kind: grid, col_widths: [110, 140, 110, 90, 130, 48] }
+            children:
+              - text: "application"
+              - text: "runs as"
+              - text: "steps a frame"
+              - text: "time a frame"
+              - text: "memory"
+              - text: "held"
+          - type: group
+            repeat: (if (is-null (state-get "{rows}.apps.count")) 0 (int (state-get "{rows}.apps.count")))
+            layout: { kind: grid, col_widths: [110, 140, 110, 90, 130, 48] }
+            children:
+              - text: ""
+                bind: "{rows}.apps.{i}.name"
+              - text: ""
+                bind: "{rows}.apps.{i}.principal"
+              - text: ""
+                bind: "{rows}.apps.{i}.steps"
+              - text: ""
+                bind: "{rows}.apps.{i}.time"
+              - text: ""
+                bind: "{rows}.apps.{i}.memory"
+              - text: ""
+                bind: "{rows}.apps.{i}.held"

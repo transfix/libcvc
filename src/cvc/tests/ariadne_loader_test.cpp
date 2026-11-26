@@ -5007,6 +5007,21 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
         << "cvc://components/" << file << " resolved to '" << src.canonical
         << "', not the source file " << e.path().string();
+    // A component that is a document of its own (shell.ari: INDEX.ari says `document: true`) is
+    // run, not imported: it loads clean as it is.
+    const std::size_t entry = index.find("file: " + file);
+    const std::size_t next = index.find("- component:", entry == std::string::npos ? 0 : entry);
+    if (entry != std::string::npos &&
+        index.substr(entry, next == std::string::npos ? std::string::npos : next - entry)
+                .find("document: true") != std::string::npos) {
+      const LoadResult d = load_file(app, e.path().string());
+      ASSERT_TRUE(d.ok) << d.error;
+      EXPECT_TRUE(d.schema_issues.empty()) << d.schema_issues.front().text();
+      for (const std::string &w : d.warnings)
+        ADD_FAILURE() << file << ": " << w;
+      ++checked;
+      continue;
+    }
     LoadResult r = load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" +
                                         file + "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
@@ -8032,4 +8047,99 @@ windows:
   const Widget *inner = find(r.root, Kind::Window, "Inner");
   ASSERT_NE(inner, nullptr);
   EXPECT_TRUE(inner->context_menu) << "its windows keep theirs";
+}
+
+// docs/roadmap/ARIADNE_SHELL.md 4.2 a mounts: slot: its key, allow: and catalog: (a list, or a
+// bound key), the document's directory for its entries; the schema knows it; and a data: entry's
+// uri from an argument (4.1).
+TEST(AriadneLoader, MountsSlotAndADataUriFromAnArgument) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+args:
+  catalog: { type: string }
+data:
+  catalog: { uri: { arg: catalog }, as: json }
+root:
+  - mounts: shell.apps
+    allow: { bind: shell.allow }
+    catalog: [a.ari, apps/]
+  - mounts: other
+    allow: docs/
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.schema_issues.empty()) << r.schema_issues.front().text();
+  const Widget *m = find(r.root, Kind::Mounts);
+  ASSERT_NE(m, nullptr);
+  EXPECT_EQ(m->bind, "shell.apps");
+  ASSERT_TRUE(m->mounts);
+  EXPECT_EQ(m->mounts->allow_bind, "shell.allow");
+  EXPECT_TRUE(m->mounts->allow.empty());
+  EXPECT_EQ(m->mounts->catalog, (std::vector<std::string>{"a.ari", "apps/"}));
+  EXPECT_EQ(count(r.root, Kind::Mounts), 2);
+  ASSERT_EQ(r.data.size(), 1u);
+  EXPECT_EQ(r.data[0].uri_arg, "catalog");
+  EXPECT_TRUE(r.data[0].uri.empty()) << "filled in from the command line";
+  // A misspelt key under mounts: breaks the schema; a mounts: with no key warns.
+  LoadResult bad =
+      fresh_load("meta: { min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: x\n    alow: y\n");
+  ASSERT_TRUE(bad.ok);
+  EXPECT_TRUE(has_schema_issue(bad, "/root/0/alow") || has_schema_issue(bad, "/root/0"));
+  LoadResult empty = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: \"\"\n");
+  ASSERT_TRUE(empty.ok);
+  EXPECT_TRUE(has_warning(empty, "mounts: needs a state key"));
+  LoadResult noarg =
+      fresh_load("meta: { min_libcvc: \"0.0.0\" }\ndata:\n  d: { uri: { arg: \"\" } }\n");
+  ASSERT_TRUE(noarg.ok);
+  EXPECT_TRUE(noarg.data.empty());
+}
+
+// load_mount: a mounts: entry's document through the static load:'s path, stateless: the wrapper
+// at includes.<as> with the fragment's init:, on_tick:, requires:, name and args substituted; why
+// one is not mounted; its sources for hot reload.
+TEST(AriadneLoader, LoadMountParsesAnEntrysDocument) {
+  SKIP_WITHOUT_YAML();
+  const std::string frag =
+      write_temp_ari("mount_frag.ari", R"(meta: { name: Frag, min_libcvc: "0.0.0" }
+requires: [json-parse]
+init: (state-set "seeded" "1")
+on_tick: (state-set "t" "{who}")
+windows:
+  - window: "For {who}"
+)");
+  const std::string dir = std::filesystem::path(frag).parent_path().string();
+  cvc::app app;
+  MountRequest rq;
+  rq.uri = "mount_frag.ari"; // relative to the slot's document
+  rq.as = "f";
+  rq.args = {{"who", "ada"}};
+  rq.base_dir = dir;
+  const MountResult m = load_mount(app, rq);
+  ASSERT_TRUE(m.ok) << m.error;
+  EXPECT_EQ(m.wrapper.scope, "includes.f");
+  EXPECT_EQ(m.wrapper.app_name, "Frag");
+  EXPECT_NE(m.wrapper.init_script.find("seeded"), std::string::npos);
+  EXPECT_NE(m.wrapper.tick_script.find("ada"), std::string::npos) << "its args substituted";
+  ASSERT_EQ(m.wrapper.requirements.size(), 1u);
+  EXPECT_NE(find(m.wrapper, Kind::Window, "For ada"), nullptr);
+  EXPECT_FALSE(m.has_scene);
+  ASSERT_FALSE(m.sources.empty());
+  EXPECT_TRUE(std::filesystem::equivalent(m.sources.front(), frag));
+  EXPECT_EQ(m.source_stamps.count(m.sources.front()), 1u);
+  EXPECT_TRUE(std::filesystem::equivalent(m.canonical, frag));
+
+  rq.uri = "no_such_document.ari";
+  const MountResult missing = load_mount(app, rq);
+  EXPECT_FALSE(missing.ok);
+  EXPECT_NE(missing.error.find("could not be resolved"), std::string::npos) << missing.error;
+
+  rq.uri = write_temp_ari("mount_newer.ari", "meta: { min_libcvc: \"99.0.0\" }\n");
+  const MountResult newer = load_mount(app, rq);
+  EXPECT_FALSE(newer.ok);
+  EXPECT_NE(newer.error.find("requires libcvc >= 99.0.0"), std::string::npos) << newer.error;
+
+  rq.uri =
+      write_temp_ari("mount_scene.ari", "meta: { min_libcvc: \"0.0.0\" }\nscene:\n  nodes: []\n");
+  const MountResult scene = load_mount(app, rq);
+  EXPECT_TRUE(scene.ok) << scene.error;
+  EXPECT_TRUE(scene.has_scene) << "the host decides (gl.scene)";
 }

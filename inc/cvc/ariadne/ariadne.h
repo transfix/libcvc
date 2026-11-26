@@ -108,6 +108,9 @@ struct LaneProcess {
   std::function<void(const std::string &)> done;
 };
 
+struct MountRequest; // loader.h: a mounts: entry's document, as the host's loader is asked for it
+struct MountResult;
+
 class Runtime {
 public:
   // `prefix` is the cvc::state prefix that relative bind paths splice onto
@@ -479,6 +482,46 @@ public:
   // verb (stream_verbs.h). Lives on the Impl, torn down with the Runtime; call between construction
   // and the first drain().
   cvc::state_exec::document_scope &document_scope();
+
+  // ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, docs/ARIADNE.md §6.7) ----
+  // A `mounts: <key>` widget holds one isolated mount per child of <key>. When a child with a
+  // `uri` appears, the Runtime asks `loader` for its document (load_mount: the loader resolves and
+  // parses it as a static load: with as: <child> would be) and mounts it at includes.<child> under
+  // the slot's scope: its init: runs, its on_tick: starts. When the child goes, the mount is quit
+  // and freed, and its state stays, so the same child resumes it. The host's loader checks the
+  // document's requires: against the host too; AppRuntime gives one. With none, none mounts.
+  using MountLoader = std::function<MountResult(const MountRequest &)>;
+  void set_mount_loader(MountLoader loader);
+  // A mount's frame budget (4.11): the steps and the seconds its processes may use in a frame and
+  // the bytes they may hold, counted over every process whose scope is under the mount (0: none).
+  struct MountBudget {
+    std::uint64_t steps = 0;
+    double time = 0.0;
+    std::uint64_t memory = 0;
+  };
+  // The default for a principal: `local` (the catalog's, cvc:// and state:// documents), and a
+  // tighter one for `file:<dir>` and `remote:<origin>` documents.
+  static MountBudget default_mount_budget(const std::string &principal);
+  // One mount as it stands: its child's name, its sub-prefix, the URI its entry gives and where it
+  // came from, its principal, why it was refused ("" when mounted), its budget and its use in the
+  // last whole frame, whether it was held to its budget then, and how often it has been.
+  struct MountState {
+    std::string as, scope, uri, canonical, principal, refused;
+    bool mounted = false;
+    MountBudget budget;
+    std::uint64_t steps = 0;
+    double time = 0.0;
+    std::uint64_t memory = 0;
+    bool held = false;
+    std::uint64_t holds = 0;
+  };
+  std::vector<MountState> mounts() const;
+  // The local files the open mounts were parsed from (hot reload watches them with the
+  // document's: AppRuntime::reload_if_changed).
+  std::vector<std::string> mount_sources() const;
+  // Whether a mount's file changed since it was parsed; each one that did is parsed again at the
+  // next frame, and keeps its on_tick: resident when its program did not change. Host thread.
+  bool reload_mounts_if_changed();
 
 private:
   struct Impl;

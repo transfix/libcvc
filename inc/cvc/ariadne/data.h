@@ -85,6 +85,10 @@ struct DataSpec {
   // without one the params name it, so the same params share one dataset.
   std::string generate;
   std::string params;
+  // `uri: { arg: <name> }` (docs/roadmap/ARIADNE_SHELL.md 4.1): the uri is the document's argument
+  // <name> (its args: block, doc_args.h), filled in by the host once the command line is parsed;
+  // a relative path given there is relative to the working directory. Empty: `uri` as written.
+  std::string uri_arg;
 };
 
 // A file's bytes, as a store node holds them.
