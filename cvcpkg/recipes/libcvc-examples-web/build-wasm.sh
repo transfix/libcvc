@@ -30,16 +30,11 @@ case "$CVC_PLATFORM" in
   *) echo "libcvc-examples-web: CVC_PLATFORM is wasm or wasm-mt, not '${CVC_PLATFORM}'" >&2; exit 1 ;;
 esac
 
-# Preload the real Austin scene + trained policy into the nav_city demos' MEMFS
-# when the data packages are staged (declared build deps), so the gallery shows
-# downtown Austin. Absent the data, the demos fall back to a synthetic city + the
-# default-biased net. A caller's own CVC_WASM_BUNDLE / CVC_WASM_NAV_WEIGHTS win.
+# Preload the real Austin scene into nav_scrub's MEMFS when the data packages are staged
+# (declared build deps), so the gallery's scrubber trains and deploys on downtown Austin. Absent
+# the data, it runs on its generated world. A caller's own CVC_WASM_BUNDLE wins.
 _austin="$CVC_DEPS_PREFIX/share/cvc-scenes/austin_south"
-_weights="$CVC_DEPS_PREFIX/share/grl-snam-weights/coef_sdf.cvcnav"
 if [[ -z "${CVC_WASM_BUNDLE:-}" && -d "$_austin" ]]; then export CVC_WASM_BUNDLE="$_austin"; fi
-if [[ -z "${CVC_WASM_NAV_WEIGHTS:-}" && -f "$_weights" ]]; then
-  export CVC_WASM_NAV_WEIGHTS="$_weights"
-fi
 
 # ImageMagick ON, like every native build: cvc's image I/O (volume_ops, the formats stb
 # does not read) is the same in the browser. The static MagickCore's codec closure (bz2,

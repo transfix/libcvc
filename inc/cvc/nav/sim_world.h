@@ -138,7 +138,7 @@ public:
     // picks each uniformly at random from every free cell — the original look.
     // `opposed` clusters every start into a band on one edge of the map and every
     // goal into the opposite edge, so the swarm reads as a deliberate cross-map
-    // migration instead of a random tangle (used by nav_city_swarm).
+    // migration instead of a random tangle (a fleet's `spawn: opposed`).
     enum class spawn { scattered, opposed };
     spawn spawn_layout = spawn::scattered;
   };

@@ -27,10 +27,11 @@
     "terminal_scene_term",
     "terminal_tour_term",
     "nav_fleet_swarm_ari",
-    "nav_fog_ghost",
     "nav_scrub",
     "bunny_shadow",
-    "terrain_lab"
+    "terrain_lab",
+    "nav_city_swarm",
+    "nav_city_drive"
   ],
   "demos": {
     "arigl": {
@@ -143,30 +144,22 @@
       "thumb": "img/nav_fleet_swarm_ari.jpg"
     },
     "nav_city_swarm": {
+      "app": "arigl",
+      "doc": "nav_fleet_swarm",
       "card": false,
-      "desc": "the GRL-SNAM reactive swarm on a procedural city",
-      "blurb":
-          "800 vehicles cross a foggy city with no global plan — the GRL-SNAM reactive swarm on the cvc::nav runtime (no Python, no libtorch). Tune agents, fog and belief live, then Apply / Restart to watch shared belief beat private belief on the same city.",
-      "thumb": "img/nav_city_swarm.jpg"
+      "desc": "the old swarm demo's address (a retired C++ demo): opens the fleet swarm (nav_fleet_swarm_ari)"
     },
     "nav_city_drive": {
+      "app": "arigl",
+      "doc": "nav_fleet_swarm",
       "card": false,
-      "desc": "colour-coded convoys thread real downtown Austin to six rally points",
-      "blurb":
-          "The legible cousin of the swarm: a few dozen vehicles in colour-coded convoys thread real downtown Austin to six rally points with no global plan — pure local reaction on the cvc::nav runtime (no Python, no libtorch), driven by the published trained CoefMLP. Chase-cam onto a lead vehicle, drag a rally point to re-route a whole convoy live, and under fog watch each convoy's sensed corridor light up in its own colour. Switch belief between shared, grouped and private.",
-      "thumb": "img/nav_city_drive.jpg"
+      "desc": "the old convoy demo's address (a retired C++ demo): opens the fleet swarm (nav_fleet_swarm_ari)"
     },
     "nav_scrub": {
       "desc": "watch a navigation policy learn, checkpoint by checkpoint",
       "blurb":
           "cvc::nav's own trainer runs a short training in the page, saving a checkpoint every few steps; every checkpoint is then deployed on a walled square of city blocks it trained on, on a Jolt Humvee that stops against the buildings and on nav's kinematic bicycle that drives through them (the Plant combo switches), and you scrub through them: checkpoint k drives beside step 0, with the deployed metric against the training step, the loss curve, and the Stats and Ledger of both runs at the play head (the books against U_nav, the plant ledger). No Python, no libtorch, nothing fetched.",
       "thumb": "img/nav_scrub.jpg"
-    },
-    "nav_fog_ghost": {
-      "desc": "one agent detours a phantom wall, then senses it clear",
-      "blurb":
-          "Fog of war: a vehicle detours a phantom wall its stale map shows but reality lacks, then erases it cell by cell as its sensor clears the ground. Switch between two limited-belief scenarios — ghost (a phantom wall) and dynamic (a vehicle crossing its path).",
-      "thumb": "img/nav_fog_ghost.jpg"
     },
     "volren_bunny": {
       "desc": "the Stanford bunny as a signed-distance volume, CPU-raycast live",
