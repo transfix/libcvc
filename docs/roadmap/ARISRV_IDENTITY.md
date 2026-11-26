@@ -279,15 +279,17 @@ arisrv.clients.<client_id>.
 
 - **What each connection says about itself.** A `client` beside the device id: its **kind**, its
   **version**, and its **capabilities**.
-  - **kind** is one lowercase state name. It is an app's own name when a document declares one
+  - **kind** is one short lowercase word (1-32 bytes of `[a-z0-9._-]`; anything else is
+    `unknown`). It is an app's own name when a document declares one
     (`nicotina`, `sublevels`, `cyprty`), else the host's (`arigl`, `arigl-web`, `ari`, `ariglx`,
     `arix`), and `nmdc` for a legacy NMDC client on the net engine (2.8).
-  - **version** is free text for the log: the host's libcvc version, or an NMDC client's `$MyINFO`
-    tag.
+  - **version** is free text for the log, at most 64 printable bytes: the host's libcvc version, or
+    an NMDC client's `$MyINFO` tag.
   - **capabilities** are the services the client can use, as dotted names: `chat`, `chat.dm`,
     `files.share`, `files.search`, `files.transfer`, `conference.audio`, `conference.video`,
     `conference.avatar`, `e2ee.dm`, `programs` (S3), `guests` (G4). The set is open: an unknown
-    name is kept as given, so an app can add its own (`sublevels.hublist`).
+    name is kept as given, so an app can add its own (`sublevels.hublist`). Each is 1-64 bytes of
+    `[a-z0-9._-]`, at most 32 of them, without repeats (`client_registry::clean_client`).
 - **Where it comes from.**
   - A native client sends it in its `Hello`: a new `ClientInfo client = 6` (`kind = 1`,
     `version = 2`, `repeated string capabilities = 3`). Older clients send none, and are recorded
