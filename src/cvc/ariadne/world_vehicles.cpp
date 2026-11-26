@@ -4382,7 +4382,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     if (g->four) {
       const ph::dyn_4w_plant &pl = *g->four;
       p.model = "dyn4";
-      p.exact = true;
+      p.exact = !pl.waded(i); // in water its drag and grip changed each substep (dyn_wading.h)
       p.dyn4 = pl.params(i);
       p.dyn4_state = pl.body(i);
       p.limits = pl.step_limits(i);
@@ -4396,7 +4396,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     } else if (g->bike) {
       const ph::dyn_bike_plant &pl = *g->bike;
       p.model = "dyn_bike";
-      p.exact = true;
+      p.exact = !pl.waded(i);
       p.bike = pl.params(i);
       p.bike_state = pl.body(i);
       p.limits = pl.step_limits(i);

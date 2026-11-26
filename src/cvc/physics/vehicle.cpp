@@ -163,6 +163,9 @@ vehicle_desc vehicle_desc::humvee() {
   // sealed tank, frame rails and axle housings (about 0.5 m^3): 1.1 of the box's 9.5 m^3. A sink
   // test would measure it.
   d.wading.displacement = 0.12;
+  // [est] It floods as fast as it wades in (flood_area 0): its engine bay is open below and its
+  // soft doors leave hand-wide gaps. A hard-doored body would take a flood_area.
+  d.wading.flood_area = 0.0;
   d.wading.wheel_displacement = 0.8; // [derived] the 37 in tire round the 16.5 in rim: 1 - 0.45^2
   d.wading.wheel_drag = 0.75;        // [AMC] an isolated tire below its aquaplaning speed
   // [derived] The box's bottom rides 0.57 m up (the chassis origin about 1.02 m up, less the box's
@@ -244,6 +247,7 @@ vehicle_desc vehicle_desc::roboracer() {
   d.wading.enabled = true;
   d.wading.fording_depth = 0.03;
   d.wading.displacement = 0.2;
+  d.wading.flood_area = 0.0; // the shell is open below: it floods as it wades in
   d.wading.wheel_displacement = 0.3;
   d.wading.wheel_drag = 0.75; // [AMC] as the Humvee's
   d.wading.underbody_depth = 0.01;
@@ -368,8 +372,9 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
        "wading.displacement and wading.wheel_displacement must be in [0, 1]");
   need(nonnegative(g.wheel_drag) && nonnegative(g.underbody_depth) &&
            nonnegative(g.underbody_drag) && nonnegative(g.tire_pressure) &&
-           nonnegative(g.fording_depth),
-       "wading's drags, underbody depth, tire pressure and fording depth must be finite and >= 0");
+           nonnegative(g.fording_depth) && nonnegative(g.flood_area),
+       "wading's drags, underbody depth, tire pressure, fording depth and flood area must be "
+       "finite and >= 0");
   need(std::isfinite(d.shift_up_rpm_light) && d.shift_up_rpm_light >= 0.0 &&
            std::isfinite(d.shift_down_rpm_light) && d.shift_down_rpm_light >= 0.0,
        "the light-throttle shift points must be finite and >= 0");
@@ -450,6 +455,8 @@ std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
     return "wading.enabled";
   if (a.wading.displacement != b.wading.displacement)
     return "wading.displacement";
+  if ((a.wading.flood_area > 0.0) != (b.wading.flood_area > 0.0))
+    return "wading.flood_area to or from 0 (whether the body floods at once)";
   return std::string();
 }
 
@@ -472,6 +479,8 @@ constexpr double kAquaplane = 0.85 * 9.0 * 1852.0 / 3600.0; // m/s per sqrt(psi)
 constexpr double kPascalsPerPsi = 6894.757293168;
 // The friction an aquaplaning tire keeps (AMC 25.1591, past 0.85 V_P).
 constexpr double kAquaplaneMu = 0.05;
+// A sharp-edged orifice's discharge coefficient, for the openings a body floods through.
+constexpr double kOrifice = 0.6;
 
 // The area of a circle of radius r below a chord h above its lowest point, h in [0, 2r].
 double segment_area(double r, double h) {
@@ -595,12 +604,14 @@ vehicle_id vehicle_set::add(world_backend &be, field_set &fields, const vehicle_
     throw cvc::unsupported_exception("cvc::physics: this backend has no vehicles (cap_vehicles); "
                                      "use the Jolt backend");
   // The chassis as the fields see it: a box about the body origin, its own centre of mass,
-  // no flow drag (the vehicle's aero is its drag), and a wading vehicle's flooded buoyancy.
+  // no flow drag (the vehicle's aero is its drag), and a wading vehicle's flooded buoyancy (sealed
+  // with a flood_area: the water inside is wade()'s).
   body_desc box_desc;
   box_desc.shape = box{d.half_extents};
   box_desc.mass = d.mass;
   fields.body_added(be, chassis, box_desc);
-  fields.mark_vehicle(chassis, d.center_of_mass, d.wading.enabled ? d.wading.displacement : 1.0);
+  const bool floods_at_once = d.wading.enabled && !(d.wading.flood_area > 0.0);
+  fields.mark_vehicle(chassis, d.center_of_mass, floods_at_once ? d.wading.displacement : 1.0);
 
   rt v;
   v.desc = d;
@@ -1092,9 +1103,11 @@ bool vehicle_set::wade(rt &v, const body_state &s, const vec3 &com,
     const double mu0 = m.friction;
     if (!(mu0 > 0.0))
       continue;
+    // The soaked value is soaked ground's, below the dry one, or a lake or pond bed's under a water
+    // class, above it (that class's dry mu stands for the water itself; material::wet_friction).
     const double standing = std::min(1.0, depth / kStandingWater);
     double mu = mu0;
-    if (m.wet_friction > 0.0f && m.wet_friction < m.friction)
+    if (m.wet_friction > 0.0f)
       mu += (static_cast<double>(m.wet_friction) - mu0) * standing;
     if (g.tire_pressure > 0.0) {
       const double vp = kAquaplane * std::sqrt(g.tire_pressure / kPascalsPerPsi);
@@ -1120,6 +1133,46 @@ bool vehicle_set::wade(rt &v, const body_state &s, const vec3 &com,
       drag(s.position + rotate(s.rotation, {0.0, 0.0, z0 + 0.5 * h}), water,
            rotate(s.rotation, {1.0, 0.0, 0.0}), rotate(s.rotation, {0.0, 1.0, 0.0}), 2.0 * e.y * h,
            2.0 * e.x * h, g.underbody_drag);
+    }
+  }
+
+  // The cabin and engine bay (flood_area > 0): the water through their openings at the box's
+  // bottom, over the step, at the orifice's rate C_d A sqrt(2 g dh). With the inside's plan area
+  // S (the box's footprint less the share that displaces), its level h rises at dh/dt = k
+  // sqrt(H - h), k = C_d A sqrt(2 g) / S, toward the depth H of the water over the openings
+  // outside (0 out of it: it drains). So sqrt(|H - h|) falls at k / 2 a second: exact for the
+  // step's H, and never past it. The box floats sealed (the fields'); the water inside weighs it.
+  if (g.flood_area > 0.0) {
+    const vec3 e = d.half_extents;
+    const double plan = (1.0 - g.displacement) * 4.0 * e.x * e.y;
+    water_sample water;
+    const bool wet =
+        fields.water_at(s.position + rotate(s.rotation, {0.0, 0.0, -e.z}), t, water) && water.wet;
+    const double outside = wet ? std::max(0.0, water.depth) : 0.0;
+    if (plan > 0.0 && (v.inside_volume > 0.0 || outside > 0.0)) {
+      const double level = v.inside_volume / plan;
+      const double k = kOrifice * g.flood_area * std::sqrt(2.0 * norm(cfg.gravity)) / plan;
+      const double gap = outside - level;
+      const double r = std::max(0.0, std::sqrt(std::fabs(gap)) - 0.5 * k * cfg.fixed_dt);
+      const double next =
+          std::min(2.0 * e.z, std::max(0.0, gap > 0.0 ? outside - r * r : outside + r * r));
+      if (next > level) { // in at the water's density
+        v.inside_mass += (next - level) * plan * water.density;
+        moving = true;
+      } else if (next < level) { // out at the inside's
+        v.inside_mass *= next / level;
+        moving = true;
+      }
+      v.inside_volume = next * plan;
+      if (!(next > 0.0))
+        v.inside_volume = v.inside_mass = 0.0;
+      if (v.inside_mass > 0.0) {
+        const vec3 at = s.position + rotate(s.rotation, {0.0, 0.0, -e.z + 0.5 * next});
+        const vec3 weight = cfg.gravity * v.inside_mass;
+        push_f = push_f + weight;
+        push_t = push_t + cross(at - com, weight);
+        any = true;
+      }
     }
   }
 
@@ -1159,6 +1212,8 @@ vehicle_state vehicle_set::state(const world_backend &be, vehicle_id id) const {
   out.air_velocity = v.air_velocity;
   out.water_force = v.water_force;
   out.engine_flooded = v.flooded;
+  out.water_inside = v.inside_volume;
+  out.water_inside_mass = v.inside_mass;
   out.wheels.reserve(v.readback.wheels.size());
   for (std::size_t w = 0; w < v.readback.wheels.size(); ++w) {
     wheel_state ws = v.readback.wheels[w].state;
@@ -1190,9 +1245,15 @@ void vehicle_set::save(const world_backend &be, std::string &out) const {
     put(out, e.first);
     put(out, v.steer);
     put(out, v.steer_command);
-    // Bit 0 set_controls rather than drive, bit 1 a flooded engine (wading): a vehicle whose
-    // engine has not flooded saves the bytes it always has, so its state_hash stands.
-    put(out, static_cast<std::uint8_t>((v.raw ? 1 : 0) | (v.flooded ? 2 : 0)));
+    // Bit 0 set_controls rather than drive, bit 1 a flooded engine (wading), bit 2 water in the
+    // cabin and engine bay (its volume and mass follow): a vehicle whose engine has not flooded
+    // and that holds no water saves the bytes it always has, so its state_hash stands.
+    const bool inside = v.inside_volume > 0.0;
+    put(out, static_cast<std::uint8_t>((v.raw ? 1 : 0) | (v.flooded ? 2 : 0) | (inside ? 4 : 0)));
+    if (inside) {
+      put(out, v.inside_volume);
+      put(out, v.inside_mass);
+    }
     put(out, v.command.steer);
     put(out, v.command.accel);
     put_flag(out, v.command.reverse);
@@ -1247,6 +1308,11 @@ void vehicle_set::restore(world_backend &be, const std::string &in, std::size_t 
     get(in, pos, mode);
     v.raw = (mode & 1) != 0;
     v.flooded = (mode & 2) != 0;
+    v.inside_volume = v.inside_mass = 0.0;
+    if ((mode & 4) != 0) {
+      get(in, pos, v.inside_volume);
+      get(in, pos, v.inside_mass);
+    }
     get(in, pos, v.command.steer);
     get(in, pos, v.command.accel);
     v.command.reverse = get_flag(in, pos);

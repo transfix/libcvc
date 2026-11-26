@@ -27,6 +27,22 @@ using dim = cvc::world_units::dimension;
 namespace diff = cvc::nav::diff;
 constexpr double kPi = 3.14159265358979323846;
 
+// The index of the frontmost axle, and of the rearmost unsteered one (nav_plant's rear axle).
+int front_axle_index(const vehicle_desc &d) {
+  int k = 0;
+  for (std::size_t i = 1; i < d.axles.size(); ++i)
+    if (d.axles[i].x > d.axles[static_cast<std::size_t>(k)].x)
+      k = static_cast<int>(i);
+  return k;
+}
+int rear_axle_index(const vehicle_desc &d) {
+  int k = -1;
+  for (std::size_t i = 0; i < d.axles.size(); ++i)
+    if (!d.axles[i].steered && (k < 0 || d.axles[i].x < d.axles[static_cast<std::size_t>(k)].x))
+      k = static_cast<int>(i);
+  return k < 0 ? 0 : k;
+}
+
 // The rearmost unsteered axle's x, as nav_plant's.
 double rear_axle_x(const vehicle_desc &d) {
   double rear = 0.0;
@@ -130,6 +146,7 @@ void dyn_4w_plant::place(const cvc::nav::plant_state &start, const vehicle_desc 
     cvc::nav::dyn4_si s4 = nav_plant::dyn4_si_of(a.desc, 1.0, _o.drive_lag, _o.gravity);
     s4.grade_force = _o.grade_force;
     a.p = cvc::nav::dyn4_params_of(s4, si);
+    a.drag0 = a.p.drag;
     a.lim.L = a.p.lf + a.p.lr;
     a.lim.delta_max = static_cast<float>(a.desc.max_steer);
     a.lim.hdt = static_cast<float>(h);
@@ -225,6 +242,7 @@ dyn_4w_saved dyn_4w_plant::save(int i) const {
   s.driver = a.driver;
   s.steer_cmd = a.steer_cmd;
   s.accel_cmd = a.accel_cmd;
+  s.engine_flooded = a.water.engine_flooded;
   return s;
 }
 
@@ -234,6 +252,9 @@ void dyn_4w_plant::restore(int i, const dyn_4w_saved &s) {
   a.driver = s.driver;
   a.steer_cmd = s.steer_cmd;
   a.accel_cmd = s.accel_cmd;
+  a.water = dyn_wading{};
+  a.water.engine_flooded = s.engine_flooded;
+  a.p.drag = a.drag0;
   if (_chassis->on()) {
     vec3 pos;
     quat rot;
@@ -353,11 +374,41 @@ void dyn_4w_plant::begin_tick() {
     a.touched = -1;
     a.touch_depth = 0.0;
     a.applied.clear();
+    a.waded = false;
   }
 }
 
+double dyn_4w_plant::grip_at(const dyn_wading &water, double x, double y) {
+  return dyn::wade_grip(water, x, y);
+}
+
+void dyn_4w_plant::wade(agent &a) const {
+  if (!_chassis->on() || !a.desc.wading.enabled || a.desc.axles.empty())
+    return;
+  // Its four tires where dyn4_wheel_state puts them, on the plant's ground.
+  const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+  const double cgx = a.s.x + a.p.lr * c, cgy = a.s.y + a.p.lr * sn;
+  const double xs[4] = {a.p.lf, a.p.lf, -a.p.lr, -a.p.lr},
+               ys[4] = {a.p.tf, -a.p.tf, a.p.tr, -a.p.tr};
+  const int front = front_axle_index(a.desc), rear = rear_axle_index(a.desc);
+  dyn::wade_contact k[4];
+  for (int i = 0; i < 4; ++i) {
+    k[i].x = cgx + xs[i] * c - ys[i] * sn;
+    k[i].y = cgy + xs[i] * sn + ys[i] * c;
+    k[i].ground = dyn::ground_at(_o.plant, k[i].x, k[i].y);
+    k[i].axle = i < 2 ? front : rear;
+  }
+  vec3 pos;
+  quat rot;
+  chassis_pose(a, a.s, pos, rot);
+  const double bottom = (pos + dyn::rotate(rot, {0.0, 0.0, -a.desc.half_extents.z})).z;
+  a.water = dyn::wade(*_o.physics, a.desc, k, 4, bottom, a.s.vx, _o.mu, _o.gravity,
+                      a.water.engine_flooded);
+  a.p.drag = a.water.wet ? static_cast<float>(a.drag0 + a.water.drag) : a.drag0;
+  a.waded = a.waded || a.water.wet;
+}
+
 void dyn_4w_plant::substep_begin(double h) {
-  const ground_sampler ground{this};
   const bool world = _chassis->on();
   for (std::size_t i = 0; i < _agents.size(); ++i) {
     agent &a = _agents[i];
@@ -368,12 +419,16 @@ void dyn_4w_plant::substep_begin(double h) {
                              ? dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn,
                                              a.s.psi, static_cast<double>(a.p.lf + a.p.lr))
                              : 0.0;
-    const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
-                                                _o.gravity, a.p.tau_drive, h)
-                                   : a.accel_cmd;
+    // The water at its tires (wading): its drag, its tires' grip, its engine.
+    wade(a);
+    double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade, _o.gravity,
+                                          a.p.tau_drive, h)
+                             : a.accel_cmd;
+    if (a.water.engine_flooded)
+      accel = dyn::flooded_drive(accel, a.s.vx, a.accel_cmd);
     a.applied.push_back(accel);
-    diff::dyn4_plant_books<double>(a.p, a.lim, ground, a.s, a.steer_cmd, accel, a.next,
-                                   a.step_books);
+    const ground_sampler at{this, &a.water};
+    diff::dyn4_plant_books<double>(a.p, a.lim, at, a.s, a.steer_cmd, accel, a.next, a.step_books);
     a.stepping = true;
     if (world) {
       // The box where this substep starts, moving as the model moved.

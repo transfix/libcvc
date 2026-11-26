@@ -115,7 +115,10 @@ and at 32 for the RoboRacer (see [the energy ledger](#the-energy-ledger-p3)).
 - **`wet_friction`** is the friction soaked, what a wading tire finds under water (Vehicles,
   "Wading"); 0, the default, means not known, and the tire keeps `friction`. `add_world_geometry`
   sets it to the surface class's `mu_wet`, the value `apply_wetness` runs `friction` toward in
-  the rain, so the rain and the water agree.
+  the rain, so the rain and the water agree. The water classes (`water_shallow`, `water_deep`)
+  are the exception: their `friction` stands for the water where no fluid covers them, and their
+  `wet_friction`, above it, is their bed's under a fluid (wet sand and gravel 0.45, wet mud
+  0.20). The rain never raises a material above its `friction`.
 
 ### Shapes
 
@@ -518,11 +521,13 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     `clutch_strength`, `driveline_efficiency`;
   - each axle: `max_brake_torque`, `max_hand_brake_torque`, `suspension_frequency`,
     `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar;
-  - wading, all but `wading.enabled` and `wading.displacement` (fitting the deep-water kit is
-    `fording_depth` 1.52; it does not unflood an engine).
+  - wading, all but `wading.enabled`, `wading.displacement` and whether `wading.flood_area` is 0
+    (fitting the deep-water kit is `fording_depth` 1.52; it does not unflood an engine; opening a
+    door is a larger `flood_area`).
 
   A change to anything else (the chassis, the mass, the wheels' geometry, the gearing, the
-  torque and tire curves, the energy source, whether it wades and its body's displacement)
+  torque and tire curves, the energy source, whether it wades, its body's displacement and
+  whether it floods at once)
   throws `cvc::physics_error` naming it and changes nothing. Like materials, a tuning is not
   part of `save()`.
 
@@ -551,6 +556,17 @@ so a free surface's waves and a current count):
   field step scales its cells' buoyancy): what is left of a soft-doored body is its solid and
   sealed parts. A heavy vehicle stays on its wheels as it wades and sits on the bottom in water
   over its roof, rather than floating.
+- **Over time, with a `flood_area`.** The cabin and engine bay (the box's other 1 − displacement)
+  take the water in through openings of that area (m²) at the box's bottom, at an orifice's rate,
+  Q = C_d A √(2 g Δh), C_d 0.6, Δh the water over the openings outside less the water inside.
+  The box floats sealed and the water inside, level over its floor, weighs it down at its
+  centroid (its weight, not its inertia). So a vehicle driven into deep water floats a little at
+  first, settles as it fills, and lifts just `displacement` once the levels meet; out of the
+  water it is heavier until the water drains out of the same openings. Each step is exact for
+  the water outside at its start, so the level never overshoots. 0, the default and both presets'
+  value, floods at once. A car with its doors shut leaks a few hundredths of a square metre; an
+  open door or engine bay, tenths. The water inside is state (`save()` writes it only while there
+  is any), and its weight's work is the ledger's `fields`.
 - **The tires and underbody are dragged**, 1/2 ρ C_d A |u| u, u the water's velocity (a current,
   the waves' orbital motion) less the part's:
   - a tire along its travel: its width times its immersed height, with `wheel_drag` (AMC 25.1591's
@@ -567,7 +583,8 @@ so a free surface's waves and a current count):
 - **The grip.** A tire in water is on soaked ground: its μ runs from the material's `friction` to
   its `wet_friction` as the water over its contact deepens to 3 mm (AMC 25.1591's standing water).
   On ground the rain has already soaked (`apply_wetness`), `friction` is `wet_friction` already,
-  so it is no slicker under water. In standing water a tire with a `tire_pressure` aquaplanes:
+  so it is no slicker under water. On a lake or pond bed (a water class under a fluid) it runs up
+  to the bed's soaked μ, above the class's dry one. In standing water a tire with a `tire_pressure` aquaplanes:
   its μ falls as 1 − (v / v_p)² to 0.05 at v_p = 0.85 × 9 √p knots (p in psi; AMC 25.1591,
   7.1.1), v its speed over the ground; the shape between the ends is ours. A tire in a medium
   (mud, snow) keeps the medium's traction. `wheel_state::friction` reads the μ it used.
@@ -580,8 +597,12 @@ so a free surface's waves and a current count):
 - **The ledger.** The water's work on the tires and underbody is the ledger's `fields`, with the
   box's buoyancy and drag.
 - **Readbacks.** `wheel_state::water_depth` and `water_drag`, `vehicle_state::water_force` (the
-  tires' and underbody's, not the box's, which is `world::snapshot`'s field load) and
-  `engine_flooded`; the snapshot's JSON has them, and the description's `wading`.
+  tires' and underbody's and the water inside's weight, not the box's, which is
+  `world::snapshot`'s field load), `engine_flooded`, and `water_inside` (m³) and
+  `water_inside_mass` (kg); the snapshot's JSON has them, and the description's `wading`.
+- **The dynamic plants** (`dyn_bike_plant`, `dyn_4w_plant`) wade too, with a world and the
+  description's wading on: drag, the load lifted off the tires, soaking, aquaplaning and the
+  flooded engine on a model that never floats (`dyn_wading.h`).
 
 A dry vehicle that wades steps exactly as one that does not: nothing touches its loads, its
 grip or its saved bytes until a part of it is in water.
@@ -603,6 +624,10 @@ What `physics_vehicle_test` measures (Windows MSVC):
 | μ on asphalt (0.9 dry, 0.55 soaked) in 2 cm at 2 m/s, 20 psi tires | 0.543 | 0.543 |
 | in 1 mm (a third soaked) | 0.780 | 0.780 |
 | in 2 cm at 14 m/s (aquaplaning, v_p 17.6 m/s) | 0.202 | 0.202 |
+| A Humvee with 0.1 m² of openings put into 0.7 m: inside after 10 s | 0.492 m³ (the orifice, at the outside level each half second) | 0.506 m³; 0.025 m³ at 0.5 s, its tires carrying 12.4 kN against 19.6 kN flooded |
+| ... level inside and out (60 s) | the flooded-at-once model's 19639 N | 0.787 m³; tires carry 19575 N |
+| ... driven out onto dry land | 26222 N dry + the water's weight | 30950 N with 0.487 m³ (4774 N) inside; drained to 0 in 16 s |
+| Braking from 4 m/s on `water_deep` under 0.5 m | the bed's 0.20, as a 0.20 ground | μ 0.196, 2.66 m/s² (the 0.20 ground: 2.66); no water over it: 0.100, 1.43 m/s² |
 
 ### The presets
 

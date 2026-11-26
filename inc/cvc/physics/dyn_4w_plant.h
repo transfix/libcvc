@@ -32,6 +32,9 @@
 // with each other and with anything else in it, a collision taking the world's pose and twist back
 // into the model (heave, roll and pitch stay the model's) and booking the energy that changed.
 //
+// With a world and the vehicle's wading on, the world's water at its tires drags it, lifts load
+// off them, soaks and aquaplanes them, and floods its engine past its fording depth (dyn_wading.h).
+//
 // Nav's acceleration goes through the Jolt plant's driver (dyn_driver.h; options.driver), as
 // dyn_bike_plant's does. Each tick runs dyn4_plant's substeps under the held command and books
 // every step (dyn4_plant_books):
@@ -51,6 +54,7 @@
 #include <cvc/nav/detail/dyn_4w.h>
 #include <cvc/nav/vehicle_plant.h>
 #include <cvc/physics/dyn_driver.h>
+#include <cvc/physics/dyn_wading.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/vehicle.h>
 #include <cvc/physics/world.h>
@@ -100,11 +104,13 @@ struct dyn_4w_plant_options {
 
 // One agent's state as the plant steps it, to keep and put back (dyn_4w_plant::save, restore):
 // the model's (the rear axle, the heading, the twist, heave, roll and pitch and their rates, the
-// actuators), what its driver has learnt, and the command it holds (SI: rad, m/s^2).
+// actuators), what its driver has learnt, the command it holds (SI: rad, m/s^2), and whether its
+// engine has flooded (wading).
 struct dyn_4w_saved {
   cvc::nav::diff::dyn4_state<double> body{};
   dyn_driver driver;
   double steer_cmd = 0.0, accel_cmd = 0.0;
+  bool engine_flooded = false;
 };
 
 // One agent's energy, in J: over the last tick, or since attach().
@@ -182,6 +188,11 @@ public:
   const std::vector<double> &applied_accel(int i) const { return _agents.at(i).applied; }
   // The ground (m) under a world point, as the model sees it.
   double ground_height(double x, double y) const;
+  // Agent i's water as of its last substep (dyn_wading.h; dry without a world or wading), and
+  // whether it stood in water in any substep of the last tick (then a twin replaying its model's
+  // applied_accel alone is not exact: the water changed its drag and grip).
+  const dyn_wading &wading(int i) const { return _agents.at(i).water; }
+  bool waded(int i) const { return _agents.at(i).waded; }
   // Agent i's rear axle on its body's x axis (m from the chassis box's centre, - behind it): the
   // model's reference point, where its chassis box is drawn from.
   double rear_axle(int i) const { return _agents.at(i).rear_x; }
@@ -227,11 +238,15 @@ public:
 
   const dyn_4w_plant_options &options() const { return _o; }
 
-  // The ground sampler dyn4_plant reads: the plant's ground less its reference height.
+  // The ground sampler dyn4_plant reads: the plant's ground less its reference height, and its mu
+  // (with `water`, an agent's in water: each tire's grip there, dyn_wading.h).
   struct ground_sampler {
     const dyn_4w_plant *plant = nullptr;
+    const dyn_wading *water = nullptr;
     template <class S> void at(S wx, S wy, S &mu, S &height) const {
       mu = S(plant->_o.mu);
+      if (water && water->wet)
+        mu = S(plant->_o.mu * grip_at(*water, static_cast<double>(wx), static_cast<double>(wy)));
       height =
           S(plant->ground_height(static_cast<double>(wx), static_cast<double>(wy)) - plant->_z0);
     }
@@ -262,7 +277,17 @@ private:
     cvc::nav::diff::dyn4_state<double> next{};
     cvc::nav::diff::dyn4_ph_books<double> step_books{};
     bool stepping = false;
+    // Wading: the model's own drag (its air's), the water as of the last substep, and whether it
+    // was in water in the last tick.
+    float drag0 = 0.0f;
+    dyn_wading water;
+    bool waded = false;
   };
+
+  // Agent a's water at its tires as its substep starts (dyn_wading.h), into a.water and its drag.
+  void wade(agent &a) const;
+  // The grip factor at a world point in `water` (its nearest tire's).
+  static double grip_at(const dyn_wading &water, double x, double y);
 
   // A tick: begun (the books zeroed, its start kept), its substeps in two halves around the
   // world's step, then ended (the books summed, the sample measured).
