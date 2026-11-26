@@ -4553,6 +4553,26 @@ ph::body_state entity_ride(const entity_info &e, const ph::world *world) {
   return s;
 }
 
+std::vector<walker_car> WorldVehicles::footprints() const {
+  const impl &d = *_impl;
+  std::vector<walker_car> out;
+  for (const impl::entity &e : d.ents) {
+    const entity_info i = d.info(e);
+    if (!i.placed)
+      continue;
+    walker_car c;
+    c.x = i.x;
+    c.y = i.y;
+    c.yaw = i.yaw;
+    c.half_length = e.desc.half_extents.x;
+    c.half_width = e.desc.half_extents.y;
+    c.vx = i.vx;
+    c.vy = i.vy;
+    out.push_back(c);
+  }
+  return out;
+}
+
 std::vector<entity_info> WorldVehicles::entities() const {
   const impl &d = *_impl;
   std::vector<entity_info> out;
