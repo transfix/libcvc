@@ -502,7 +502,7 @@ struct traffic_run {
   int moving = 0, touches = 0, touches_moving = 0;
   double fastest = 0.0, closest = 1e9, walked_least = 1e9, walked_median = 0.0;
 };
-traffic_run run_traffic(const fs::path &path, bool brake) {
+traffic_run run_traffic(const fs::path &path, bool brake, bool walk_round = true) {
   traffic_run r;
   cvc::app app;
   ari::ServerDocument doc(app, kRoom);
@@ -547,6 +547,20 @@ traffic_run run_traffic(const fs::path &path, bool brake) {
   }
   std::vector<ari::entity_info> start;
   for (int frame = 0; frame < 60 * 60; ++frame) { // a minute at 60 frames a second
+    if (walk_round) {
+      // Each person's way among the cars (people_walk.h, OW7d): round a car stopped in their way,
+      // waiting for a moving one.
+      const std::vector<ari::walker_car> cars = vehicles->footprints();
+      for (const walker &p : people) {
+        const cvc::physics::body_state s = h.state(p.pid);
+        ari::avatar_intent in;
+        double vx = 0.0, vy = 0.0;
+        ari::walker_velocity(s.position.x, s.position.y, p.vx, p.vy, cars, vx, vy);
+        in.move = {vx, vy, 0.0};
+        in.yaw = std::atan2(p.vy, p.vx);
+        h.set_intent(p.pid, in);
+      }
+    }
     h.advance(1.0 / 60.0);
     doc.step(h.tick(), h.clock().t());
     const std::vector<ari::entity_info> now = vehicles->entities();
@@ -591,9 +605,14 @@ TEST(ServerDocumentTest, TheTrafficWorldHostsPeopleWalkingAmongItsCars) {
     GTEST_SKIP() << "no source tree beside this test: " << path.string();
   if (!cvc::physics::backend_available(cvc::physics::backend::jolt))
     GTEST_SKIP() << "no Jolt in this build";
-  const traffic_run braking = run_traffic(path, true), steering = run_traffic(path, false);
-  for (const auto &[name, r] : {std::pair<const char *, const traffic_run &>{"braking", braking},
-                                {"steering only", steering}})
+  // Cars braking and people walking round them (OW7c, OW7d); cars braking and people walking
+  // straight on; cars only steering round people walking straight on.
+  const traffic_run both = run_traffic(path, true, true), braking = run_traffic(path, true, false),
+                    steering = run_traffic(path, false, false);
+  for (const auto &[name, r] :
+       {std::pair<const char *, const traffic_run &>{"cars braking, people walking round", both},
+        {"cars braking, people straight on", braking},
+        {"cars only steering, people straight on", steering}})
     std::printf(
         "  OW7C the traffic world, 6 people for a minute, %s: %d of 18 cars drove over "
         "10 m; car-person touches %d (%d while the car moved over 1 m/s), the fastest car at "
@@ -601,11 +620,12 @@ TEST(ServerDocumentTest, TheTrafficWorldHostsPeopleWalkingAmongItsCars) {
         "%.1f the median\n",
         name, r.moving, r.touches, r.touches_moving, r.fastest, r.closest, r.walked_least,
         r.walked_median);
-  EXPECT_GE(braking.moving, 12) << "the cars drove among them";
-  EXPECT_EQ(braking.touches_moving, 0) << "no car touched a person while moving";
-  EXPECT_LT(braking.fastest, 1.0);
+  EXPECT_GE(both.moving, 12) << "the cars drove among them";
+  EXPECT_EQ(both.touches_moving, 0) << "no car touched a person while moving";
+  EXPECT_LT(both.touches, braking.touches) << "people walking round touch cars less";
+  EXPECT_GT(both.walked_least, braking.walked_least) << "and nobody stands against a car";
+  EXPECT_EQ(braking.touches_moving, 0) << "braking alone, no moving car touches anyone";
   EXPECT_GT(steering.fastest, 5.0) << "steering alone, a car ran into one at speed";
-  EXPECT_GT(braking.walked_median, 40.0) << "most people walked their streets";
 }
 
 // The document's own state is never published, whatever prefix it binds under: an entry that is

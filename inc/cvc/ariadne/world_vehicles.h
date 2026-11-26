@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/ariadne/people_walk.h>        // walker_car: footprints() (OW7d)
 #include <cvc/ariadne/vehicle_drive.h>      // dynamic_drive
 #include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h>        // vehicle_archetype
@@ -568,6 +569,9 @@ public:
   // default. A vehicle a participant or a gym commands is its commander's to brake.
   void set_brake_for_people(bool on);
   bool brakes_for_people() const;
+  // Each placed vehicle as a walker sees it (people_walk.h's walker_car: its chassis's centre,
+  // heading, half-length, half-width and velocity), for a scripted person to walk round (OW7d).
+  std::vector<walker_car> footprints() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense
