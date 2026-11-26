@@ -9,6 +9,7 @@
 #ifndef CVC_GL_IMGUI_KEY_NAMES_H
 #define CVC_GL_IMGUI_KEY_NAMES_H
 
+#include <cstddef>
 #include <cstring>
 #include <imgui.h>
 
@@ -119,6 +120,24 @@ inline ImGuiKey imguiKeyForVtkKeySym(const char *sym) {
     if (std::strcmp(sym, e.sym) == 0)
       return e.key;
   return ImGuiKey_None;
+}
+
+// Whether a browser's platform name is Apple's, where Cmd is the shortcut key (ImGui's
+// ConfigMacOSXBehaviors, which only __APPLE__ turns on, and a wasm build has none). The name is
+// navigator.userAgentData.platform where the browser has it ("macOS", "iOS"), else
+// navigator.platform ("MacIntel", which an iPad's Safari reports too, "iPhone", "iPad", "iPod").
+inline bool isApplePlatformName(const char *platform) {
+  if (!platform)
+    return false;
+  const auto starts = [platform](const char *prefix) {
+    for (std::size_t i = 0; prefix[i]; ++i) {
+      const char c = platform[i];
+      if (!c || (c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c) != prefix[i])
+        return false;
+    }
+    return true;
+  };
+  return starts("mac") || starts("iphone") || starts("ipad") || starts("ipod") || starts("ios");
 }
 
 } // namespace gl

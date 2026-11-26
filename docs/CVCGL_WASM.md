@@ -192,6 +192,20 @@ key names, as on the desktop.
 - **Keys.** SDL listens for the keys typed into the canvas only, so the canvas needs
   `tabindex` and the focus (the stock pages focus it on a click). The page's own fields and
   ImGuiOverlay's system-keyboard field keep their keys.
+- **Cmd on a Mac.** A wasm build has no `__APPLE__`, so ImGuiOverlay asks the page: on a Mac,
+  iPhone or iPad (`navigator.userAgentData.platform`, else `navigator.platform`) it turns on
+  ImGui's Mac behaviours (`io.ConfigMacOSXBehaviors`), as a native Apple build has them.
+  - Cmd is then the shortcut key: Cmd+Z, C, V, X and A in a field, and "Cmd+" in the menus.
+    Ctrl+click is a right click.
+  - `?mackeys=1` or `?mackeys=0` on the page's URL overrules the platform, and a host can set
+    the flag itself once the overlay is made. The console says which key it chose.
+  - SDL hands the browser's Meta key to ImGui as Super, which ImGui turns into its shortcut key.
+    SDL also leaves Cmd+V's keydown to the browser, so the paste event the clipboard reads
+    still comes.
+  - A Mac's Chrome and Safari send no key-up for a key let go while Cmd is down. When Cmd goes
+    up, the overlay lets go of every key, so Cmd+Z's Z does not stay down and undo again.
+  - VTK's canvas window (the fallback below) reads only `ctrlKey`, so there Ctrl is the shortcut
+    key on a Mac. `arigl_web_mac_keys.mjs` checks all of this in Chrome told it runs on a Mac.
 - **Pointer and touch.** SDL reads the canvas's pointer events and makes the first finger the
   mouse. The canvas cancels its touch events, as VTK's canvas window did, so a touch makes no
   mouse events or click of its own: the browser's mousedown would focus the canvas and take the

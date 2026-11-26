@@ -1233,6 +1233,12 @@ add_test(NAME cvcgl_imgui_context_menu COMMAND cvcgl_imgui_context_menu)
 add_executable(cvcgl_imgui_key_names test/cvcgl_imgui_key_names.cpp)
 target_link_libraries(cvcgl_imgui_key_names PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_key_names COMMAND cvcgl_imgui_key_names)
+# ImGuiOverlay's keys from VTK's own window, with ImGui's Mac behaviours forced on and off: the
+# control flag (Cmd or Ctrl in VTK's Cocoa view) undoes and selects all in a field. No window, no
+# GL: the overlay never renders and the test runs ImGui's frames itself.
+add_executable(cvcgl_imgui_overlay_keys test/cvcgl_imgui_overlay_keys.cpp)
+target_link_libraries(cvcgl_imgui_overlay_keys PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_overlay_keys COMMAND cvcgl_imgui_overlay_keys)
 
 # The tf_editor transfer-function widget (ImGuiBackend::tf_editor) on a bare ImGui context, driven
 # by synthesized mouse input: drags, adds, deletes, the zoom strip, the context menu, commits.
