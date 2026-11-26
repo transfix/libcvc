@@ -14,7 +14,9 @@
 #include <cstdio>
 #include <cstring> // strstr: WebGL2's units, a draw that ran out
 #include <cvc/ariadne/scene.h>
-#include <cvc/ariadne/scene_water.h> // scene_water_spec: the scene wind's case (O14)
+#include <cvc/ariadne/scene_water.h>   // scene_water_spec: the scene wind's case (O14)
+#include <cvc/ariadne/scene_weather.h> // F4: scene_fronts, the storms' fronts where each thing is
+#include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
 #include <cvc/core/async_lane.h> // field colours: pump the scheduler their overlay tasks run on
@@ -38,6 +40,7 @@
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/image/image.h>
+#include <cvc/ocean/sea_surface.h>                // F4: sea_fronts, what scene_fronts hands back
 #include <cvc/physics/world_geometry.h>           // O20: wet_friction
 #include <cvc/state/state.h>                      // clock test: read/write the bound sim.* keys
 #include <cvc/state/state_exec/async_scheduler.h> // fe_lab: its jobs are scheduler processes
@@ -47,7 +50,8 @@
 #include <cvc/volume/volume_file_io.h>
 #include <cvc/world/generated_world.h>
 #include <cvc/world/surface.h> // O20: the surface classes' wet friction // terrain source test: the generator it draws
-#include <filesystem>                  // mesh_lab / fe_lab sources: a temp "document directory"
+#include <cvc/world/weather.h> // F4: a storm west of the world
+#include <filesystem>          // mesh_lab / fe_lab sources: a temp "document directory"
 #include <functional>
 #include <thread>
 #include <vtkAbstractVolumeMapper.h>
@@ -2233,6 +2237,169 @@ int main() {
             approx(drift(), st("sky.wind_az").value<double>()) && lean().empty() &&
             worldLean().empty() && fw() && fw()->f.at("uFwOn") == 0.0f,
         "without wind.speed each node takes its own wind again (the world's trees stand still)");
+    for (const std::string &w : warnings)
+      printf("  warning: %s\n", w.c_str());
+  }
+
+  // ── F4: the storms' fronts where each tree and wave is ─────────────────────────────────────
+  // A mature storm west of a generated world: its gust front covers the world's west end and not
+  // its east. The trees' sway and the water's ripples take the storm cells as uniforms (the same
+  // set the physics sea reads, scene_fronts), and evaluated as their shaders do the wind is the
+  // front's at the west end and the plain wind at the east end. Without a storm the uniforms are
+  // off (uFrontU.w 0), the one wind for all as before.
+  {
+    printf("== the storms' fronts where each tree and wave is ==\n");
+    SceneGraph sg(app, "f4");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    Scene scene;
+    scene.wind.present = true;
+    scene.wind.speed = 9.0;
+    scene.wind.dir = 0.0;
+    scene.wind.gustiness = 0.0;
+    scene.physics.present = true;
+    auto node = [](const char *id, const char *type,
+                   std::vector<std::pair<const char *, std::string>> props) {
+      SceneNode n;
+      n.id = id;
+      n.type = type;
+      n.props.kind = Value::Kind::Map;
+      for (auto &p : props) {
+        Value v;
+        v.kind = Value::Kind::Scalar;
+        v.scalar = p.second;
+        n.props.entries.emplace_back(p.first, v);
+      }
+      return n;
+    };
+    SceneNode worldNode = node("world", "generated_world",
+                               {{"seed", "5"},
+                                {"half", "150"},
+                                {"trees", "24"},
+                                {"rocks", "0"},
+                                {"buildings", "0"},
+                                {"amp", "40"},
+                                {"water_level", "0"},
+                                {"water", "0"},
+                                {"texture", "256"}});
+    worldNode.body.present = true;
+    scene.nodes.push_back(worldNode);
+    SceneNode waterNode = node("water", "water", {{"world", "world"}, {"level", "0"}});
+    waterNode.body.present = true;
+    scene.nodes.push_back(waterNode);
+    // In its prime 500 m west of the world's centre, 200 m in radius: its front's edge 300 m ahead
+    // of it (x -200), its reach 480 m (x -20, short of the centre); the world spans x -150 to 150.
+    cvc::world::weather_event e;
+    e.t = 0.0;
+    e.tau = -1500.0;
+    e.x = -500.0 - 1500.0 * 9.0 * cvc::algo::wind_profile(cvc::ariadne::kWeatherDeckBase);
+    e.y = 0.0;
+    e.radius = 200.0;
+    e.peak = 1.0;
+    e.life = 3000.0;
+    scene.nodes.push_back(node("weather", "weather",
+                               {{"ground", "world"},
+                                {"chance", "0"},
+                                {"sky", ""},
+                                {"events", cvc::world::format_weather_events({e})}}));
+    std::vector<std::string> warnings;
+    auto realized = cvc::gl::ariadne::realize_scene(sg, scene, "f4", &warnings);
+    auto tick = [&]() {
+      view.render();
+      cvc::gl::ariadne::tick_scene(realized, view.renderer(), 1.0 / 60.0);
+    };
+    for (int k = 0; k < 4; ++k)
+      tick();
+    using cvc::gl::GeometryNode;
+    using cvc::gl::GraphicsNode;
+    using cvc::gl::LodGraphicsNode;
+    std::vector<GeometryNode *> swayed;
+    std::function<void(GraphicsNode &)> collect = [&](GraphicsNode &g) {
+      if (auto *m = dynamic_cast<GeometryNode *>(&g);
+          m && m->hasSharedShaderInputs("cvc.foliage_wind"))
+        swayed.push_back(m);
+      if (auto *l = dynamic_cast<LodGraphicsNode *>(&g))
+        for (int k = 0; k < l->rungCount(); ++k)
+          if (auto r = l->rung(k); r && r.get() != &g)
+            collect(*r);
+      for (const std::shared_ptr<GraphicsNode> &c : g.getGraphicsChildren())
+        if (c)
+          collect(*c);
+    };
+    for (const char *part : {"world_props", "world_foliage", "world_needles"})
+      if (auto g = sg.getGraphics(part))
+        collect(*g);
+    auto group = sg.getGraphics("water");
+    auto nearMesh =
+        group ? std::dynamic_pointer_cast<GeometryNode>(group->findChildByName("near")) : nullptr;
+    const std::shared_ptr<const GeometryNode::ShaderInputs> trees =
+        swayed.empty() ? nullptr : swayed.front()->sharedShaderInputs("cvc.foliage_wind");
+    const std::shared_ptr<const GeometryNode::ShaderInputs> waves =
+        nearMesh ? nearMesh->sharedShaderInputs("water_fronts") : nullptr;
+    // The cells back from a set's uniforms, as the shader reads them (StormFrontGLSL).
+    const auto cells_of = [](const GeometryNode::ShaderInputs &in, double &ux, double &uy,
+                             double &ref) {
+      std::vector<cvc::algo::front_cell> cs;
+      const auto f4 = [&](const std::string &k) {
+        const auto it = in.f4.find(k);
+        return it == in.f4.end() ? std::array<float, 4>{} : it->second;
+      };
+      const std::array<float, 4> u = f4("uFrontU"), w = f4("uFrontW");
+      ux = u[0];
+      uy = u[1];
+      ref = u[2];
+      if (u[3] <= 0.0f)
+        return cs;
+      for (int i = 0; i < 4; ++i) {
+        const std::array<float, 4> c = f4("uFrontC" + std::to_string(i)),
+                                   m = f4("uFrontM" + std::to_string(i));
+        if (c[3] <= 0.0f)
+          continue;
+        cvc::algo::front_cell f;
+        f.x = c[0];
+        f.y = c[1];
+        f.r = c[2];
+        f.out = c[3];
+        f.vx = m[0];
+        f.vy = m[1];
+        f.ahead = m[2];
+        f.behind = m[3];
+        f.width = w[std::size_t(i)];
+        cs.push_back(f);
+      }
+      return cs;
+    };
+    double tux = 0, tuy = 0, tref = 0, wux = 0, wuy = 0, wref = 0;
+    const std::vector<cvc::algo::front_cell> tc =
+        trees ? cells_of(*trees, tux, tuy, tref) : std::vector<cvc::algo::front_cell>{};
+    const std::vector<cvc::algo::front_cell> wc =
+        waves ? cells_of(*waves, wux, wuy, wref) : std::vector<cvc::algo::front_cell>{};
+    const auto speed = [](const std::vector<cvc::algo::front_cell> &cs, double ux, double uy,
+                          double x) {
+      double vx = ux, vy = uy;
+      for (const cvc::algo::front_cell &c : cs)
+        cvc::algo::add_gust_front(c, x, 0.0, vx, vy);
+      return std::hypot(vx, vy);
+    };
+    const double treeWest = speed(tc, tux, tuy, -140.0), treeEast = speed(tc, tux, tuy, 140.0);
+    const double waveWest = cvc::algo::front_wind_ratio(wc, wux, wuy, wref, -140.0, 0.0);
+    const double waveEast = cvc::algo::front_wind_ratio(wc, wux, wuy, wref, 140.0, 0.0);
+    // The physics sea's, from the world's air at the same time.
+    cvc::ocean::sea_fronts cpu;
+    if (realized.world)
+      cvc::ariadne::scene_fronts(realized.world->wind().get(), app.world_clock().t(), cpu);
+    const double cpuWest =
+        cvc::algo::front_wind_ratio(cpu.cells, cpu.ux, cpu.uy, cpu.ref, -140.0, 0.0);
+    printf("  %zu prop meshes sway; the trees' wind %.2f m/s at x -140, %.2f at x 140; the "
+           "ripples' ratio %.3f at x -140 (the physics sea's %.3f), %.3f at x 140\n",
+           swayed.size(), treeWest, treeEast, waveWest, cpuWest, waveEast);
+    chk(trees && waves && !tc.empty() && !wc.empty(),
+        "the storm's cells are the trees' and the water's uniforms");
+    chk(treeWest > 12.0 && std::fabs(treeEast - 9.0) < 1e-4,
+        "the trees lean in the front at the world's west end, in the plain wind at its east end");
+    chk(waveWest > 1.3 && waveEast == 1.0,
+        "the ripples rise under the front at the west end and not at the east end");
+    chk(!cpu.cells.empty() && std::fabs(cpuWest - waveWest) < 1e-3 * cpuWest,
+        "the drawn ripples' front is the physics sea's");
     for (const std::string &w : warnings)
       printf("  warning: %s\n", w.c_str());
   }

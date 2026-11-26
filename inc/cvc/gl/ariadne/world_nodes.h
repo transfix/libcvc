@@ -72,6 +72,9 @@ struct SceneNode;
 namespace world {
 struct generated_world;
 }
+namespace physics {
+class flow_velocity;
+}
 namespace gl {
 class GraphicsNode;
 class SceneGraph;
@@ -116,6 +119,9 @@ void data_world_clear(DataWorldView &v);
 // A frame: a finished job is taken in, the world goes in or out a piece at a time, and the LOD
 // follows `ren`'s camera (null: no LOD change).
 void data_world_tick(DataWorldView &v, vtkRenderer *ren);
+// The scene's world's air (SceneWorld::wind): with storms its trees lean in the wind where each
+// stands, the storms' gust fronts in it (F4). tick_scene sets it each frame.
+void data_world_set_air(DataWorldView &v, std::shared_ptr<const cvc::physics::flow_velocity> air);
 // Whether a job runs or a world is going in.
 bool data_world_busy(const DataWorldView &v);
 // Run the job and the install to their end now, and free what is on its way out: for tests and

@@ -1354,6 +1354,7 @@ jobs:
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
                    inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
                    inc/cvc/ariadne/media_save.h src/cvc/ariadne/media_save.cpp \
+                   inc/cvc/state/state_transport_ws.h src/cvc/state/state_transport_ws.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    src/cvcGL/Clipboard.cpp src/cvcGL/ariadne/ImGuiBackend.cpp \
                    src/cvcGL/ImGuiOverlay.cpp src/cvcGL/ImGuiKeyNames.h src/cvcGL/SdlWindow.cpp \

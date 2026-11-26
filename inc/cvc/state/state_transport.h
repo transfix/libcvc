@@ -147,7 +147,7 @@ public:
   // relay gone (it reconnects). Both ends probe each other every ping_interval(), so only a peer
   // that went away without closing (a crash behind NAT, a suspended phone, a pulled cable) is
   // silent that long. Call it periodically, on a relay and a client alike. Returns how many it
-  // closed (the WebSocket transport: how many it swept). Default: none (0). No-op under wasm.
+  // closed (the WebSocket transport: how many it swept). Default: none (0).
   virtual std::size_t reap_idle(std::chrono::milliseconds timeout) {
     (void)timeout;
     return 0;

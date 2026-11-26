@@ -41,7 +41,8 @@
 #include <cstdint>
 #include <cvc/ariadne/bind.h> // live node params: read_or_seed / read_or / resolve_bind
 #include <cvc/ariadne/scene.h>
-#include <cvc/ariadne/scene_wind.h>  // the scene's one wind (O14)
+#include <cvc/ariadne/scene_weather.h> // scene_fronts: the storms' fronts where each pine is (F4)
+#include <cvc/ariadne/scene_wind.h>    // the scene's one wind (O14)
 #include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -57,6 +58,7 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/lsys/forest.h>
 #include <cvc/lsys/water.h>
+#include <cvc/ocean/sea_surface.h> // sea_fronts: the fronts as scene_fronts hands them
 #include <cvc/volslice/slicer.h>
 #include <cvc/volume/bounding_box.h>
 #include <cvc/volume/volume.h>
@@ -194,6 +196,9 @@ struct ForestRT {
   // The scene's wind (scene_wind.h, O14): its keys' root, and where the way the trees lean now is
   // published (forest.lean_dir, degrees; empty without a scene wind).
   std::string prefix, leanKey, leanNow;
+  // The scene's world's air (a scene tick): with storms each pine leans in the wind where it
+  // stands, the storms' gust fronts in it (F4).
+  std::shared_ptr<const cvc::physics::flow_velocity> air;
 };
 // Read the live forest params from the bound keys (falling back to the authored defaults).
 cvc::lsys::forest_params read_live_fp(ForestRT &rt) {
@@ -312,6 +317,10 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
   rt->workW = rt->woodBind;
   rt->workN = rt->needleBind;
 
+  out.scene_ticks.push_back(
+      [rt](vtkRenderer *, RealizedScene &scene, const cvc::world_clock::step_result &) {
+        rt->air = scene.world ? scene.world->wind() : nullptr; // the storms' fronts (F4)
+      });
   out.custom_ticks.push_back([rt](vtkRenderer *) {
     auto w = rt->wood.lock();
     if (!w)
@@ -362,10 +371,26 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
         constexpr double kRefWind = 9.0; // m/s: the authored sway's wind
         const double rad = sw->mean_dir() * 3.14159265358979323846 / 180.0;
         const cvc::algo::gust_frame gf = cvc::algo::gust_frame_at(sw->state(), t);
+        // With storms, each pine in the wind where it stands, the gust fronts in it (F4).
+        cvc::ocean::sea_fronts fronts;
+        ari::scene_fronts(rt->air.get(), t, fronts);
+        cvc::lsys::tree_wind_fn local;
+        if (!fronts.cells.empty())
+          local = [&fronts, windLive](double x, double y, double &s, double &dx, double &dy) {
+            double vx = fronts.ux, vy = fronts.uy;
+            for (const cvc::algo::front_cell &c : fronts.cells)
+              cvc::algo::add_gust_front(c, x, y, vx, vy);
+            const double v = std::sqrt(vx * vx + vy * vy);
+            s = windLive * v / kRefWind;
+            if (v > 1e-9) {
+              dx = vx / v;
+              dy = vy / v;
+            }
+          };
         cvc::lsys::repose_forest_in_wind(
             rt->wind, t, windLive * sw->mean_speed() / kRefWind, std::cos(rad), std::sin(rad),
             [&gf](double x, double y) { return cvc::algo::wind_gust(gf, x, y); }, rt->workW,
-            rt->workN);
+            rt->workN, local);
       } else {
         cvc::lsys::repose_forest(rt->wind, t, windLive, rt->workW, rt->workN);
       }

@@ -17,7 +17,7 @@ description: |
 
   Exported to the job environment (GITHUB_ENV):
     CVC_SWIG_EXECUTABLE  absolute path of the cvcpkg swig (swig.exe on Windows)
-    SWIG_LIB             its share/swig/<version> library. MANDATORY, not
+    SWIG_LIB             its share/swig/<version> library (bin/Lib on Windows). MANDATORY, not
                          belt-and-braces: the packaged binary has its BUILDER's
                          temp dir baked in as -swiglib (/tmp/cvcpkg-builder/...),
                          so without it every run dies "Unable to find 'swig.swg'".
@@ -41,7 +41,7 @@ outputs:
     description: 'Absolute path of the installed swig.'
     value: ${{ steps.swig.outputs.executable }}
   swig-lib:
-    description: 'Its runtime library directory (share/swig/<version>).'
+    description: 'Its runtime library directory (share/swig/<version>; bin/Lib on Windows).'
     value: ${{ steps.swig.outputs.swig-lib }}
   version:
     description: 'The full version the installed swig reports.'
@@ -77,11 +77,16 @@ runs:
           exit 1
         fi
 
+        # The library is share/swig/<version>/ on Linux and macOS. The Windows bundle has SWIG's
+        # own Windows layout instead: Lib\ beside bin\swig.exe (swig 4.4.1+cvc.6).
         shopt -s nullglob
         libs=( "$HT"/share/swig/*/swig.swg )
+        if [ "${#libs[@]}" -eq 0 ]; then
+          libs=( "$HT"/bin/Lib/swig.swg )
+        fi
         shopt -u nullglob
         if [ "${#libs[@]}" -ne 1 ]; then
-          echo "::error::expected exactly one share/swig/<version>/swig.swg under $HT, found ${#libs[@]}"
+          echo "::error::expected exactly one share/swig/<version>/swig.swg (or bin/Lib/swig.swg) under $HT, found ${#libs[@]}"
           exit 1
         fi
         swiglib="$(dirname "${libs[0]}")"

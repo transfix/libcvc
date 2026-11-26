@@ -30,8 +30,9 @@ recipe:
 # pycvc-gl-cp312, as arigl is.
 #
 # Platforms: linux and windows, where pycvc-gl-cp312 builds (on Windows, with python312's DLLs in
-# bin\: see arix's recipe). macOS waits on a macOS pycvc-gl-cp312, and on VTK and cvcgl bundles
-# for macOS.
+# bin\: see arix's recipe), and macOS arm64, where publish-cvcpkg.yml builds it once the catalog has
+# vtk-python-cp312 for macOS (cy-pca/cvcpkg#638), which pycvc-gl-cp312 links. macOS x86_64 waits
+# on a vtk bundle for it.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/arigl.
@@ -81,6 +82,10 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
 

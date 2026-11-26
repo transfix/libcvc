@@ -162,6 +162,7 @@ struct mujoco_snapshot {};
 
 %rename(mujoco_robot) cvc::physics::mujoco_robot;
 %feature("kwargs") cvc::physics::mujoco_robot::mujoco_robot;
+%feature("kwargs") cvc::physics::mujoco_robot::set_wind;
 
 namespace cvc {
 namespace physics {
@@ -257,6 +258,17 @@ public:
                           pycvc_physics::vec3_of(point, "mujoco_robot.apply_force_at: point"));
   }
   void clear_wrenches() { $self->clear_wrenches(); }
+
+  // ── the wind ── the air the robot stands in (a pycvc.wind_flow or scene_wind_flow; None: still
+  // air), read at each step's start at time() + time_offset: the time its owner reads it at (a
+  // physics world's field time at the robot's start). Each moving geom takes 1/2 rho C_d A |u| u.
+  // wind_force() and wind_torque() (about the world's origin) are the last step's, N and N m.
+  void set_wind(std::shared_ptr<const cvc::physics::flow_velocity> air, double time_offset = 0.0,
+                double drag_coefficient = 1.0, double density = 1.225) {
+    $self->set_wind(std::move(air), time_offset, drag_coefficient, density);
+  }
+  PyObject *wind_force() const { return pycvc_physics::tuple3($self->wind_force()); }
+  PyObject *wind_torque() const { return pycvc_physics::tuple3($self->wind_torque()); }
 
   // ── stepping ── n fixed steps, without the GIL.
   void step(int n = 1) {

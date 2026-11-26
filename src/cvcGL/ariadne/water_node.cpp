@@ -135,6 +135,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // SceneColliders
 #include <cvc/ariadne/scene_quality.h>         // adaptive quality's tiers (O21)
 #include <cvc/ariadne/scene_water.h>           // its physics (WaterRuntime) and coast
+#include <cvc/ariadne/scene_weather.h> // scene_fronts: the storms' fronts where each wave is (F4)
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
@@ -143,6 +144,7 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/SceneGraph.h>
+#include <cvc/gl/StormFrontGLSL.h> // the fronts in the shader: the ripples and the roughness
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/physics_scene_binding.h>
@@ -155,10 +157,12 @@
 #include <cvc/physics/field.h>
 #include <cvc/physics/immersion.h>
 #include <cvc/physics/pose_tracker.h>
+#include <cvc/physics/shore_mask.h> // the wake's mask from the coast, the physics wake's
 #include <cvc/physics/world.h>
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <vtkCamera.h>
@@ -379,7 +383,7 @@ const char *const kWakeOff = "float wkVertex(vec2 p, float s){ return 0.0; }\n"
 
 std::string common_glsl(bool wake) {
   return std::string(kWaterCommonDec) + kWaterFetchFuncs + OceanWind::glsl(true) +
-         kWaterCommonFuncs + (wake ? kWakeOn : kWakeOff);
+         StormFrontGLSL::glsl() + kWaterCommonFuncs + (wake ? kWakeOn : kWakeOff);
 }
 
 const char *const kWaterVsDec = "//VTK::PositionVC::Dec\n"
@@ -408,7 +412,10 @@ const char *const kWaterVsImpl =
     // (the far grid's fragments read through it too) and the gust (its cat's paws fading out toward
     // the near grid's edge; none on the far grid)
     "  owFlow = owCurrent(w);\n"
-    "  float gust = cvc_wind_gust(w, uWaves*(1.0 - smoothstep(0.35, 0.8, edge)));\n"
+    // and the storms' gust fronts where this vertex is (F4: the ripples and the cat's paws rise
+    // with the wind here over the wind the sea grows toward, as the physics sea's do)
+    "  float gust = cvc_wind_gust(w, uWaves*(1.0 - smoothstep(0.35, 0.8, edge))) * "
+    "cvc_front_ratio(w);\n"
     "  vWaterGust = gust;\n"
     "  vWaterCur = owFlow;\n"
     "  vec3 k = vec3(0.0);\n"
@@ -907,7 +914,13 @@ struct WaterRT {
   // uploaded until the next keyframe. h0Mix is the crossfade's scratch.
   std::unique_ptr<ari::SceneWaterSeaClock> seaClock;
   std::shared_ptr<const ari::SceneWaterSea> sea, seaDrawn;
+  // The storms' gust fronts (F4) as both meshes' shader inputs (StormFrontGLSL), set each frame
+  // from the scene's world's air: the colliders' slot with body:, else the world's (a scene tick).
+  std::shared_ptr<GeometryNode::ShaderInputs> frontIn =
+      std::make_shared<GeometryNode::ShaderInputs>();
+  std::shared_ptr<const cvc::physics::flow_velocity> air;
   bool seaFinal = false;
+  bool seaBefore = false; // the old keyframe's h0 is uploaded: the new one's crossfade is ahead
   std::vector<cvc::ocean::h0_field> h0Mix;
   bool ready = false, failed = false;
   double level = 0.0, nearHalf = 192.0, cell = 2.0;
@@ -977,12 +990,14 @@ struct WaterRT {
   // ground, its surface the sea drawn here, rebuilt as the wind or the ground changes.
   std::unique_ptr<cvc::ariadne::WaterRuntime> physics;
   // The bodies' waves (with body:, once the cascades are up): the window, its sources, where it is
-  // and the coast its mask was made from, the world time it was stepped to, and each body's outline
-  // by the description it was made from.
+  // and the coast its mask was made from (held, so a new coast is never taken for it) with that
+  // mask, the world time it was stepped to, and each body's outline by the description it was made
+  // from.
   std::unique_ptr<EWave> wake;
   std::unique_ptr<WakeSource> wakeSrc;
   bool wakePlaced = false;
-  const ari::SceneWaterShore *wakeShore = nullptr;
+  std::shared_ptr<const ari::SceneWaterShore> wakeShore;
+  std::shared_ptr<const cvc::physics::shore_grid_mask> wakeMask;
   double wakeT = -1.0;
   std::vector<double> wakeDh;
   std::map<const cvc::physics::body_desc *,
@@ -1244,6 +1259,7 @@ void style_ocean(GeometryNode &g, const WaterRT &rt) {
   const std::string common = common_glsl(rt.wake != nullptr);
   g.addVertexShaderReplacement("//VTK::PositionVC::Dec", std::string(kWaterVsDec) + common);
   g.addVertexShaderReplacement("//VTK::PositionVC::Impl", kWaterVsImpl);
+  g.setSharedShaderInputs("water_fronts", rt.frontIn);
   g.addFragmentShaderReplacement("//VTK::Normal::Dec", std::string(kWaterFsDec) + common +
                                                            kWaterFsFuncs + oceanFoamGLSL() +
                                                            kWaterFoamFlow);
@@ -1351,7 +1367,8 @@ void upload_fetch(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Ge
 // The sea's keyframes onto the GPU at world time t: on a new keyframe its fetch maps (and its h0
 // kept for the whitecaps); while its crossfade runs, the two keyframes' h0 mixed on the CPU by the
 // crossfade's weight and uploaded each frame; once it is over, the new h0 once. Between keyframes
-// nothing is uploaded.
+// nothing is uploaded. A keyframe whose crossfade is still ahead (one timed on the clock's periods
+// while the scene has storms) draws the old keyframe's h0 until it starts, as the physics does.
 void sync_sea(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, GeometryNode &far,
               double t) {
   const std::shared_ptr<const ari::SceneWaterSea> k = rt.sea;
@@ -1364,7 +1381,20 @@ void sync_sea(WaterRT &rt, vtkOpenGLRenderWindow *ow, GeometryNode &near, Geomet
       upload_fetch(rt, ow, near, far);
     rt.seaDrawn = k;
     rt.seaFinal = false;
+    rt.seaBefore = false;
   }
+  // A keyframe timed on the clock (storms: its crossfade starts at the next period's start) can
+  // come before its crossfade: until then the old keyframe's sea, as the physics field has it.
+  const bool before = t < k->t0 && k->h0_from.size() >= rt.cascades.size();
+  if (before) {
+    if (!rt.seaBefore)
+      for (std::size_t i = 0; i < rt.cascades.size(); ++i)
+        rt.fft->setH0(int(i), k->h0_from[i]);
+    rt.seaBefore = true;
+    rt.seaFinal = false;
+    return;
+  }
+  rt.seaBefore = false;
   const bool fading = k->fading(t) && k->h0_from.size() >= rt.cascades.size();
   if (fading) {
     const double w = k->weight(t);
@@ -1485,46 +1515,39 @@ void follow_shore(cvc::app &app, WaterRT &rt) {
 
 // ── the wake ─────────────────────────────────────────────────────────────────────────────────
 
-// A plane of the shore grid at (x, y), bilinear, clamped to the grid (sea_surface's grid_sample).
-double grid_sample(const cvc::ocean::shore_grid &g, const std::vector<float> &f, double x,
-                   double y) {
-  const double fc = std::clamp((x - g.min_x) / g.cell, 0.0, double(g.cols - 1));
-  const double fr = std::clamp((y - g.min_y) / g.cell, 0.0, double(g.rows - 1));
-  const int c0 = std::min(g.cols - 2, int(std::floor(fc))),
-            r0 = std::min(g.rows - 2, int(std::floor(fr)));
-  const double u = fc - c0, v = fr - r0;
-  const std::size_t i = std::size_t(r0) * std::size_t(g.cols) + std::size_t(c0);
-  return (f[i] * (1 - u) + f[i + 1] * u) * (1 - v) +
-         (f[i + std::size_t(g.cols)] * (1 - u) + f[i + std::size_t(g.cols) + 1] * u) * v;
+// The window's mask over coast sh: the physics wake's (cvc::physics::shore_grid_mask,
+// OCEAN-AND-WEATHER-ROADMAP.md C6, lsystem_coast's seaWakeMask), so the waves drawn here meet the
+// shores the waves that push the bodies do. Null when the coast's grid can't make one.
+std::shared_ptr<const cvc::physics::shore_grid_mask> coast_mask(const ari::SceneWaterShore &sh) {
+  const cvc::ocean::shore_grid *g = sh.grid.get();
+  if (!g)
+    return nullptr;
+  try {
+    return std::make_shared<const cvc::physics::shore_grid_mask>(
+        sh.grid, sh.slope.size() == g->count() ? sh.slope : std::vector<float>{}, sh.layer);
+  } catch (const std::invalid_argument &) {
+    return nullptr; // under 2 x 2 samples, or without a shore distance on each
+  }
 }
 
-// The window's mask (lsystem_coast's seaWakeMask, OCEAN-AND-WEATHER-ROADMAP.md C6): 0 on land; in
-// the water a ramp over the last 3 m to the shore from 1 down to 0.5 at the waterline, so beaches
-// absorb; where the shore is steep (the shore layer's reflection, or the ground's slope from 0.25
-// to 0.6), 1 up to the waterline, so it reflects. And the window's mean water depth.
-std::vector<double> wake_mask(const ari::SceneWaterShore &sh, const cvc::ocean::ewave_params &p,
-                              double &meanDepth) {
-  const cvc::ocean::shore_grid &g = *sh.grid;
-  const cvc::ocean::shore_layer *L = sh.layer.get();
-  const double W = 3.0, mb = 0.5;
+// The window's mask at each of its cells (0 on land; in the water a ramp over the last 3 m to the
+// shore from 1 down to 0.5 at the waterline, so beaches absorb; 1 up to the waterline where the
+// shore is steep, so it reflects), and the window's mean water depth over its wet cells.
+std::vector<double> wake_mask(const cvc::physics::shore_grid_mask &shore,
+                              const cvc::ocean::ewave_params &p, double &meanDepth) {
+  const cvc::ocean::shore_grid &g = shore.grid();
+  const bool hasDepth = g.depth.size() == g.count();
   std::vector<double> m(std::size_t(p.n) * p.n, 0.0);
   double dsum = 0.0;
   int dn = 0;
   for (int j = 0; j < p.n; ++j)
     for (int i = 0; i < p.n; ++i) {
       const double x = p.origin_x + i * p.dx, y = p.origin_y + j * p.dx;
-      const double s = grid_sample(g, g.shore_m, x, y);
-      if (!(s > 0.0))
-        continue; // land
-      const double kr = L && !L->empty() ? L->sample_field(L->reflection, x, y) : 0.0;
-      const double slope = sh.slope.size() == g.count() ? grid_sample(g, sh.slope, x, y) : 0.0;
-      const double ss = std::clamp((slope - 0.25) / 0.35, 0.0, 1.0);
-      const double steep =
-          std::min(1.0, std::max(std::isfinite(kr) ? kr : 0.0, ss * ss * (3.0 - 2.0 * ss)));
-      const double r = std::min(1.0, s / W);
-      const double beach = mb + (1.0 - mb) * r * r * (3.0 - 2.0 * r);
-      m[std::size_t(j) * p.n + i] = beach + (1.0 - beach) * steep;
-      const double d = grid_sample(g, g.depth, x, y);
+      const double v = shore.mask(x, y);
+      m[std::size_t(j) * p.n + i] = v;
+      if (!(v > 0.0) || !hasDepth)
+        continue; // land (the mask is 0.5 or more in the water)
+      const double d = shore.sample(g.depth, x, y);
       if (d > 0.0)
         dsum += d, ++dn;
     }
@@ -1542,7 +1565,7 @@ void place_wake(WaterRT &rt, double tx, double ty) {
   const long ci = std::lround(p.origin_x / p.dx), cj = std::lround(p.origin_y / p.dx);
   const long di = wi - ci, dj = wj - cj;
   const bool move = !rt.wakePlaced || std::labs(di) >= 16 || std::labs(dj) >= 16;
-  if (!move && rt.wakeShore == rt.shore.get())
+  if (!move && rt.wakeShore == rt.shore)
     return;
   if (move) {
     const int si = int(std::clamp(di, -100000L, 100000L));
@@ -1551,10 +1574,13 @@ void place_wake(WaterRT &rt, double tx, double ty) {
     rt.wakeSrc->shift(si, sj);
     rt.wakePlaced = true;
   }
-  rt.wakeShore = rt.shore.get();
-  if (rt.shore && rt.shore->grid) {
+  if (rt.wakeShore != rt.shore) {
+    rt.wakeShore = rt.shore;
+    rt.wakeMask = rt.shore ? coast_mask(*rt.shore) : nullptr;
+  }
+  if (rt.wakeMask) {
     double depth = 5.0;
-    rt.wake->setMask(wake_mask(*rt.shore, rt.wake->params(), depth));
+    rt.wake->setMask(wake_mask(*rt.wakeMask, rt.wake->params(), depth));
     rt.wake->setDepth(std::max(0.5, depth));
   }
 }
@@ -1684,12 +1710,14 @@ void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
 }
 
 // The bodies' waves' window: `cells` a side of 0.5 m (adaptive quality's tier picks 256 or 128,
-// the window's reach halving with it), started flat; placed again on the next frame. False (and no
-// window) without float targets.
-bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells) {
+// the window's reach halving with it) stepped in `substep` seconds (1/60, or 1/30 at the last
+// tiers), started flat; placed again on the next frame. False (and no window) without float
+// targets.
+bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells, double substep) {
   cvc::ocean::ewave_params wp;
   wp.n = cells;
   wp.dx = 0.5;
+  wp.substep = substep;
   wp.depth = 5.0;       // until the window is placed: then its wet cells' mean depth
   wp.damping_k2 = 2e-3; // m^2/s: waves 1 m long fade over about 13 s
   wp.damping = 0.02;    // 1/s: everything, over a minute
@@ -1699,7 +1727,8 @@ bool start_wake(WaterRT &rt, vtkOpenGLRenderWindow *ow, int cells) {
   rt.wake = std::make_unique<EWave>(wp);
   rt.wakeSrc.reset();
   rt.wakePlaced = false;
-  rt.wakeShore = nullptr;
+  rt.wakeShore.reset();
+  rt.wakeMask.reset();
   rt.wakeT = -1.0;
   if (!ow || !rt.wake->init(ow)) {
     rt.wake.reset();
@@ -1732,9 +1761,10 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
     return;
   const ari::WaterQuality q = quality_of(app, rt);
   const bool on = key(app, rt.wakeKey, 1.0) > 0.5 && q.wake;
-  // the tier's window size (a new window, flat; the old one's waves are dropped)
-  if (on && q.wake_cells != rt.wake->params().n &&
-      !start_wake(rt, vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()), q.wake_cells))
+  // the tier's window size and substep (a new window, flat; the old one's waves are dropped)
+  if (on && (q.wake_cells != rt.wake->params().n || q.wake_substep != rt.wake->params().substep) &&
+      !start_wake(rt, vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow()), q.wake_cells,
+                  q.wake_substep))
     return;
   // Decision D3: the camera's target, the point the view is about; the camera's own place when the
   // target is off past the near grid (a view toward the horizon).
@@ -2015,8 +2045,10 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
       return;
     }
     // The bodies' waves, with body: (the window needs float targets too).
-    if (rt.physics)
-      start_wake(rt, ow, std::max(quality_of(app, rt).wake_cells, 128));
+    if (rt.physics) {
+      const ari::WaterQuality q = quality_of(app, rt);
+      start_wake(rt, ow, std::max(q.wake_cells, 128), q.wake_substep);
+    }
     // The persistent foam: the long and middle cascades' turbulence, in one atlas.
     if (rt.cascades.size() >= 2) {
       rt.foam = std::make_unique<OceanFoam>(kFftN, 2);
@@ -2186,6 +2218,17 @@ void tick_water(cvc::app &app, WaterRT &rt, vtkRenderer *ren) {
   OceanWind::frame wind;
   if (rt.sea)
     wind = OceanWind::at(*ari::scene_water_forcing(spec, *rt.sea), wind_cascades(*rt.sea), t);
+  // The storms' fronts where each wave is (F4), at the time the sea is drawn: the air the physics
+  // sea reads (the colliders' slot), else the scene's world's.
+  {
+    const std::shared_ptr<const cvc::physics::flow_velocity> air =
+        rt.physics ? *rt.physics->colliders()->air : rt.air;
+    cvc::ocean::sea_fronts fronts;
+    ari::scene_fronts(air.get(), t, fronts);
+    for (const auto &[name, v] :
+         StormFrontGLSL::at(fronts.cells, fronts.ux, fronts.uy, fronts.ref).uniforms())
+      rt.frontIn->f4[name] = v;
+  }
   near->setShaderUniformf("uFoamDetail", 1.0f);
   far->setShaderUniformf("uFoamDetail", 0.0f); // the far grid: the mean cover only
   for (GeometryNode *g : {near.get(), far.get()}) {
@@ -2353,6 +2396,11 @@ std::shared_ptr<GraphicsNode> realize_water(SceneGraph &sg, const ari::SceneNode
 
   cvc::app *ap = &app;
   out.custom_ticks.push_back([ap, rt](vtkRenderer *ren) { tick_water(*ap, *rt, ren); });
+  // The scene's world's air, for the storms' fronts on a water without body: (F4).
+  out.scene_ticks.push_back(
+      [rt](vtkRenderer *, RealizedScene &scene, const cvc::world_clock::step_result &) {
+        rt->air = scene.world ? scene.world->wind() : nullptr;
+      });
   if (rt->physics) // the bodies' waves read the scene's world, as the frame left it
     out.scene_ticks.push_back([ap, rt](vtkRenderer *ren, RealizedScene &scene,
                                        const cvc::world_clock::step_result &clock) {
