@@ -31,6 +31,8 @@ namespace {
 void check_trainable(const canonical_spec &s) {
   if (!s.capacitor.empty())
     bad("training: a law with a capacitor curve is not trainable");
+  if (!s.cosine.empty() || !s.port_points.empty() || !s.input_points.empty())
+    bad("training: cosine potentials and attachment points are not trainable yet");
 }
 
 // Reads the next value of a flattened parameter vector.

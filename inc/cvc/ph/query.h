@@ -52,10 +52,17 @@ struct history {
   std::vector<vecd> samples;     // one row of channels.size() values per sample step
 };
 
+// What the prior, the fitted coordinates and the measured channels refer to: the readout (each
+// block's efforts, the physical quantities of a circuit, mapped to the state by
+// storage_from_efforts), or the state itself (a mechanical block's positions and momenta, whose
+// efforts, gravity's torques, need not determine them).
+enum class fit_space { efforts, state };
+
 struct history_fit_options {
   transition_opts step; // the frozen transition the window is run through
+  fit_space space = fit_space::efforts;
   vecd prior_mean,
-      prior_scale;    // the window start's readout (efforts): mean and scale, state_dim each
+      prior_scale; // the window start's readout (efforts) or state: mean and scale, state_dim each
   double noise = 0.0; // the measurement noise's standard deviation
   double noise_floor = 0.002;  // each measured channel is weighted by 1 / max(noise, noise_floor)
   int max_evals = 20;          // residual evaluations, besides the Jacobian's
@@ -70,7 +77,8 @@ struct history_fit_options {
 //   sum over samples |(readout_channels(x_k(xi)) - sample) / max(noise, floor)|^2 + |xi|^2,
 //
 // where x_0(xi) = storage_from_efforts(prior_mean + prior_scale xi) and x_{k+1} = step(x_k,
-// inputs[k]), by Levenberg-Marquardt from xi = 0 with a central-difference Jacobian.
+// inputs[k]), by Levenberg-Marquardt from xi = 0 with a central-difference Jacobian. With
+// space = state, x_0(xi) = prior_mean + prior_scale xi and the channels index the state.
 struct history_fit_result {
   vecd xi;
   vecd x_start, x_now;  // the window start's state, and the state after every step (the query time)
@@ -97,9 +105,11 @@ std::vector<vecd> posterior_states(const composite &s, const history &h,
                                    const history_fit_options &o, const history_fit_result &fit,
                                    int count, std::uint64_t seed, double sigmas = 1.0);
 
-// The readouts at the history's sample steps, from a start state (its forward model).
+// The readouts (or, with space = state, the states) at the history's sample steps, from a start
+// state (its forward model).
 std::vector<vecd> history_readouts(const composite &s, const history &h,
-                                   const transition_opts &step, const vecd &x_start);
+                                   const transition_opts &step, const vecd &x_start,
+                                   fit_space space = fit_space::efforts);
 
 // ── 3. consequences ─────────────────────────────────────────────────────────────────────────────
 

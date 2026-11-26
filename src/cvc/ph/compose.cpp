@@ -386,6 +386,31 @@ canonical_law::canonical_law(canonical_spec s) : s_(std::move(s)) {
   }
   check_size(s_.B, size_t(2 * n) * size_t(s_.ports), "canonical law B");
   check_size(s_.G, size_t(2 * n) * size_t(s_.inputs), "canonical law G");
+  if (!s_.cosine.empty()) {
+    check_size(s_.cosine, size_t(n), "canonical law cosine");
+    for (double a : s_.cosine)
+      if (!std::isfinite(a))
+        bad("canonical law cosine coefficients must be finite");
+  }
+  port_dim_ = s_.ports;
+  input_dim_ = s_.inputs;
+  auto check_points = [&](const std::vector<serial_chain> &points, int &dim, const char *what) {
+    for (const serial_chain &c : points) {
+      if (c.joints() != n || c.axis.size() != c.offset.size())
+        bad(std::string("canonical law ") + what + ": a chain needs n offsets and n axes");
+      for (const auto &a : c.axis)
+        if (std::fabs(std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]) - 1) > 1e-9)
+          bad(std::string("canonical law ") + what + ": a joint axis is not a unit vector");
+      if (c.components.empty())
+        bad(std::string("canonical law ") + what + ": a point needs at least one component");
+      for (int k : c.components)
+        if (k < 0 || k > 2)
+          bad(std::string("canonical law ") + what + ": components are 0, 1 and 2 (x, y, z)");
+      dim += static_cast<int>(c.components.size());
+    }
+  };
+  check_points(s_.port_points, port_dim_, "port point");
+  check_points(s_.input_points, input_dim_, "input point");
   if (s_.scheme == conservative_scheme::leapfrog && !s_.m_net.empty())
     bad("leapfrog needs a constant mass; use implicit_midpoint with a mass net");
 }
@@ -439,6 +464,11 @@ double canonical_law::potential(const double *q, double *grad) const {
     if (grad)
       for (int i = 0; i < n; ++i)
         grad[i] += Kd[i];
+  }
+  for (size_t i = 0; i < s_.cosine.size(); ++i) {
+    V += s_.cosine[i] * (1 - std::cos(q[i]));
+    if (grad)
+      grad[i] += s_.cosine[i] * std::sin(q[i]);
   }
   if (!s_.v_net.empty()) {
     double y = 0;
@@ -526,12 +556,115 @@ void canonical_law::structure(const double *x, double *J, double *R) const {
     R[(n + j) * N + n + j] = d[j];
 }
 
-void canonical_law::port_map(const double *, double *B) const {
-  std::copy(s_.B.begin(), s_.B.end(), B);
+void canonical_law::point_columns(const std::vector<serial_chain> &points, const double *q,
+                                  int cols, int first, double *M) const {
+  const int n = s_.n;
+  vecd r(3), J(size_t(3) * size_t(n));
+  int col = first;
+  for (const serial_chain &c : points) {
+    c.eval(q, r.data(), J.data());
+    for (int k : c.components) {
+      for (int j = 0; j < n; ++j) {
+        M[size_t(j) * cols + col] = 0.0;
+        M[size_t(n + j) * cols + col] = J[size_t(k) * n + j];
+      }
+      ++col;
+    }
+  }
 }
-void canonical_law::input_map(const double *, double *G) const {
-  std::copy(s_.G.begin(), s_.G.end(), G);
+
+// B (G) with its constant columns first: the spec's 2n x ports block is spread over the wider map.
+void canonical_law::port_map(const double *x, double *B) const {
+  const int N = 2 * s_.n, m = port_dim_, k = s_.ports;
+  for (int r = 0; r < N; ++r)
+    for (int c = 0; c < k; ++c)
+      B[size_t(r) * m + c] = s_.B[size_t(r) * k + c];
+  if (!s_.port_points.empty())
+    point_columns(s_.port_points, x, m, k, B);
 }
+void canonical_law::input_map(const double *x, double *G) const {
+  const int N = 2 * s_.n, m = input_dim_, k = s_.inputs;
+  for (int r = 0; r < N; ++r)
+    for (int c = 0; c < k; ++c)
+      G[size_t(r) * m + c] = s_.G[size_t(r) * k + c];
+  if (!s_.input_points.empty())
+    point_columns(s_.input_points, x, m, k, G);
+}
+
+// ── serial_chain ────────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+using vec3d = std::array<double, 3>;
+using mat3d = std::array<double, 9>; // row-major
+
+vec3d mul(const mat3d &R, const vec3d &v) {
+  return {R[0] * v[0] + R[1] * v[1] + R[2] * v[2], R[3] * v[0] + R[4] * v[1] + R[5] * v[2],
+          R[6] * v[0] + R[7] * v[1] + R[8] * v[2]};
+}
+
+mat3d mul(const mat3d &A, const mat3d &B) {
+  mat3d C{};
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      C[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
+  return C;
+}
+
+// Rodrigues: the rotation by angle t about the unit axis a.
+mat3d rotation(const vec3d &a, double t) {
+  const double c = std::cos(t), s = std::sin(t), v = 1 - c;
+  return {c + a[0] * a[0] * v,        a[0] * a[1] * v - a[2] * s, a[0] * a[2] * v + a[1] * s,
+          a[1] * a[0] * v + a[2] * s, c + a[1] * a[1] * v,        a[1] * a[2] * v - a[0] * s,
+          a[2] * a[0] * v - a[1] * s, a[2] * a[1] * v + a[0] * s, c + a[2] * a[2] * v};
+}
+
+} // namespace
+
+void serial_chain::eval(const double *q, double *r, double *jac) const {
+  const int n = joints();
+  mat3d R{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  vec3d o{0, 0, 0};
+  std::vector<vec3d> origin(n), w(n); // each joint's origin and axis, base frame
+  for (int i = 0; i < n; ++i) {
+    const vec3d d = mul(R, offset[i]);
+    for (int k = 0; k < 3; ++k)
+      o[k] += d[k];
+    origin[i] = o;
+    w[i] = mul(R, axis[i]);
+    R = mul(R, rotation(axis[i], q[i]));
+  }
+  const vec3d d = mul(R, point);
+  for (int k = 0; k < 3; ++k)
+    r[k] = o[k] + d[k];
+  if (!jac)
+    return;
+  // d r / d q_i = w_i x (r - origin_i).
+  for (int i = 0; i < n; ++i) {
+    const vec3d l{r[0] - origin[i][0], r[1] - origin[i][1], r[2] - origin[i][2]};
+    jac[0 * n + i] = w[i][1] * l[2] - w[i][2] * l[1];
+    jac[1 * n + i] = w[i][2] * l[0] - w[i][0] * l[2];
+    jac[2 * n + i] = w[i][0] * l[1] - w[i][1] * l[0];
+  }
+}
+
+// ── contact_law ─────────────────────────────────────────────────────────────────────────────────
+
+contact_law::contact_law(double stiffness) : k_(stiffness) {
+  if (!(stiffness > 0) || !std::isfinite(stiffness))
+    bad("a contact needs stiffness > 0");
+}
+
+double contact_law::energy(const double *x) const {
+  const double s = std::max(x[0], 0.0);
+  return 0.5 * k_ * s * s;
+}
+void contact_law::effort(const double *x, double *e) const { e[0] = k_ * std::max(x[0], 0.0); }
+void contact_law::structure(const double *, double *J, double *R) const {
+  J[0] = 0.0;
+  R[0] = 0.0;
+}
+void contact_law::port_map(const double *, double *B) const { B[0] = 1.0; }
 
 void canonical_law::damp(double tau, double *x) const {
   const int n = s_.n;
@@ -661,6 +794,18 @@ void composite::connect_skew(const std::vector<int> &blk, int port, const vecd &
     }
 }
 
+void composite::connect_damper(int i, int a, double c, int gate) {
+  if (i < 0 || i >= blocks())
+    bad("connect_damper: block index out of range");
+  if (a < 0 || a >= laws_[i]->port_dim())
+    bad("connect_damper: port index out of range");
+  if (!(c >= 0) || !std::isfinite(c))
+    bad("connect_damper needs a finite c >= 0");
+  if (gate >= blocks() || (gate >= 0 && laws_[gate]->state_dim() < 1))
+    bad("connect_damper: the gate names no block with a state");
+  dampers_.push_back(port_damper{yoff_[i] + a, c, gate < 0 ? -1 : gate});
+}
+
 double composite::energy(const double *x) const {
   double H = 0;
   for (int i = 0; i < blocks(); ++i)
@@ -689,8 +834,15 @@ void composite::outputs(const double *x, double *y) const {
 
 namespace {
 
-// e, y_hat and u_hat = -C y_hat at x.
-void coupling_inputs(const composite &s, const double *x, vecd &e, vecd &y, vecd &uh) {
+// A damper's coefficient at x.
+double damper_c(const composite &s, const port_damper &d, const double *x) {
+  return d.gate < 0 ? d.c : d.c * std::max(x[s.state_offset(d.gate)], 0.0);
+}
+
+// e, y_hat and u_hat = -C y_hat - (dampers) y_hat at x. damped (when non-null) gets the dampers'
+// loss sum c y^2.
+void coupling_inputs(const composite &s, const double *x, vecd &e, vecd &y, vecd &uh,
+                     double *damped = nullptr) {
   e.assign(s.state_dim(), 0.0);
   y.assign(s.port_dim(), 0.0);
   uh.assign(s.port_dim(), 0.0);
@@ -713,6 +865,14 @@ void coupling_inputs(const composite &s, const double *x, vecd &e, vecd &y, vecd
       v -= C[size_t(a) * ny + b] * y[b];
     uh[a] = v;
   }
+  double loss = 0;
+  for (const port_damper &d : s.dampers()) {
+    const double c = damper_c(s, d, x);
+    uh[d.port] -= c * y[d.port];
+    loss += c * y[d.port] * y[d.port];
+  }
+  if (damped)
+    *damped = loss;
 }
 
 } // namespace
@@ -772,9 +932,11 @@ void composite::coupling_field(const double *x, double *dx) const {
 power_terms composite::powers(const double *x, const double *u) const {
   power_terms p;
   vecd e, y, uh, J, R, G, t;
-  coupling_inputs(*this, x, e, y, uh);
+  double damped = 0;
+  coupling_inputs(*this, x, e, y, uh, &damped);
   p.stored = energy(x);
-  p.internal = dot(ny_, uh.data(), y.data());
+  p.internal = dot(ny_, uh.data(), y.data()) + damped;
+  p.loss = damped;
   for (int i = 0; i < blocks(); ++i) {
     const block_law &L = *laws_[i];
     const int n = L.state_dim(), k = L.input_dim();
@@ -797,10 +959,83 @@ power_terms composite::powers(const double *x, const double *u) const {
 
 // ── transitions ─────────────────────────────────────────────────────────────────────────────────
 
-void coupling_step(const composite &s, coupling_scheme c, double tau, double *x) {
+namespace {
+
+// The coupling field, plus G(x) u when u is given (the port subflow).
+void subflow(const composite &s, const double *x, const double *u, double *f) {
+  s.coupling_field(x, f);
+  if (!u)
+    return;
+  vecd G, t;
+  for (int i = 0; i < s.blocks(); ++i) {
+    const block_law &L = s.law(i);
+    const int n = L.state_dim(), k = L.input_dim();
+    if (k == 0)
+      continue;
+    G.resize(size_t(n) * size_t(k));
+    t.resize(n);
+    L.input_map(x + s.state_offset(i), G.data());
+    matvec(n, k, G.data(), u + s.input_offset(i), t.data());
+    for (int r = 0; r < n; ++r)
+      f[s.state_offset(i) + r] += t[r];
+  }
+}
+
+// The implicit midpoint of the subflow, x+ = x + tau f((x + x+)/2), by Newton from the
+// explicit-Euler prediction with a central-difference Jacobian of f. A subflow linear in the
+// state (momentum ports at frozen q, linear components) has an exact difference Jacobian up to
+// rounding, so one update solves it and a second confirms it.
+void coupling_cayley(const composite &s, double tau, double *x, const double *u) {
+  const int N = s.state_dim();
+  vecd f(N), x1(N), mid(N), fp(N), fm(N), A(size_t(N) * N), g(N);
+  subflow(s, x, u, f.data());
+  for (int i = 0; i < N; ++i)
+    x1[i] = x[i] + tau * f[i];
+  for (int it = 0; it < 20; ++it) {
+    for (int i = 0; i < N; ++i)
+      mid[i] = 0.5 * (x[i] + x1[i]);
+    subflow(s, mid.data(), u, f.data());
+    // g(x1) = x1 - x - tau f(mid); dg/dx1 = I - tau/2 df/dx(mid).
+    double gmax = 0, xmax = 0;
+    for (int i = 0; i < N; ++i) {
+      g[i] = x1[i] - x[i] - tau * f[i];
+      gmax = std::max(gmax, std::fabs(g[i]));
+      xmax = std::max(xmax, std::fabs(x1[i]));
+    }
+    if (gmax <= 1e-15 * (1 + xmax))
+      break;
+    for (int j = 0; j < N; ++j) {
+      const double h = 1e-6 * (1 + std::fabs(mid[j])), m0 = mid[j];
+      mid[j] = m0 + h;
+      subflow(s, mid.data(), u, fp.data());
+      mid[j] = m0 - h;
+      subflow(s, mid.data(), u, fm.data());
+      mid[j] = m0;
+      for (int i = 0; i < N; ++i)
+        A[size_t(i) * N + j] = (i == j ? 1.0 : 0.0) - 0.25 * tau * (fp[i] - fm[i]) / h;
+    }
+    solve_in_place(N, A.data(), g.data());
+    double dmax = 0;
+    for (int i = 0; i < N; ++i) {
+      x1[i] -= g[i];
+      dmax = std::max(dmax, std::fabs(g[i]));
+    }
+    if (dmax <= 1e-15 * (1 + xmax))
+      break;
+  }
+  std::copy(x1.begin(), x1.end(), x);
+}
+
+} // namespace
+
+void coupling_step(const composite &s, coupling_scheme c, double tau, double *x, const double *u) {
+  if (c == coupling_scheme::cayley) {
+    coupling_cayley(s, tau, x, u);
+    return;
+  }
   const int N = s.state_dim();
   vecd f(N);
-  s.coupling_field(x, f.data());
+  subflow(s, x, u, f.data());
   if (c == coupling_scheme::euler) {
     for (int i = 0; i < N; ++i)
       x[i] += tau * f[i];
@@ -809,7 +1044,7 @@ void coupling_step(const composite &s, coupling_scheme c, double tau, double *x)
   vecd xm(N);
   for (int i = 0; i < N; ++i)
     xm[i] = x[i] + 0.5 * tau * f[i];
-  s.coupling_field(xm.data(), f.data());
+  subflow(s, xm.data(), u, f.data());
   for (int i = 0; i < N; ++i)
     x[i] += tau * f[i];
 }
@@ -873,16 +1108,29 @@ step_stats step(const composite &s, const transition_opts &o, const double *u, d
     bad("step needs substeps >= 1 and local_substeps >= 1");
   step_stats st;
   const double d = o.dt / o.substeps;
+  const bool outside = o.order == split_order::inputs_outside;
+  const bool with = o.order == split_order::inputs_with_coupling;
+  const vecd none(s.input_dim(), 0.0);
+  auto kicks = [&]() {
+    for (int i = 0; i < s.blocks(); ++i)
+      if (s.law(i).input_dim() > 0)
+        s.law(i).kick(0.5 * d, u + s.input_offset(i), x + s.state_offset(i));
+  };
+  const double *port_u = with ? u : nullptr;
   for (int r = 0; r < o.substeps; ++r) {
-    coupling_step(s, o.coupling, 0.5 * d, x);
+    if (outside)
+      kicks();
+    coupling_step(s, o.coupling, 0.5 * d, x, port_u);
     for (int i = 0; i < s.blocks(); ++i) {
-      const int it = s.law(i).local_step(d, o.local_substeps, u + s.input_offset(i),
-                                         x + s.state_offset(i), o.solve);
+      const double *ui = (outside || with ? none.data() : u) + s.input_offset(i);
+      const int it = s.law(i).local_step(d, o.local_substeps, ui, x + s.state_offset(i), o.solve);
       if (it < 0)
         st.converged = false;
       st.iterations = std::max(st.iterations, std::abs(it));
     }
-    coupling_step(s, o.coupling, 0.5 * d, x);
+    coupling_step(s, o.coupling, 0.5 * d, x, port_u);
+    if (outside)
+      kicks();
   }
   return st;
 }
@@ -1104,7 +1352,13 @@ std::string describe(const composite &s) {
         o << "  pair " << port_name(a) << " - " << port_name(b) << ": " << c << "\n";
         ++pairs;
       }
-  if (pairs == 0)
+  for (const port_damper &d : s.dampers()) {
+    o << "  damper " << port_name(d.port) << ": " << d.c;
+    if (d.gate >= 0)
+      o << " x [" << block_label(s, d.gate) << ".0]+";
+    o << "\n";
+  }
+  if (pairs == 0 && s.dampers().empty())
     o << "  no pairings: the blocks evolve independently\n";
   return o.str();
 }
@@ -1176,7 +1430,27 @@ void write_csv(std::ostream &out, const composite &s, const transition_opts &opt
 // ── names ───────────────────────────────────────────────────────────────────────────────────────
 
 const char *to_string(coupling_scheme c) {
-  return c == coupling_scheme::euler ? "euler" : "midpoint";
+  switch (c) {
+  case coupling_scheme::euler:
+    return "euler";
+  case coupling_scheme::midpoint:
+    return "midpoint";
+  case coupling_scheme::cayley:
+    return "cayley";
+  }
+  return "midpoint";
+}
+
+const char *to_string(split_order o) {
+  switch (o) {
+  case split_order::coupling_outside:
+    return "coupling_outside";
+  case split_order::inputs_outside:
+    return "inputs_outside";
+  case split_order::inputs_with_coupling:
+    return "inputs_with_coupling";
+  }
+  return "coupling_outside";
 }
 
 const char *to_string(step_scheme s) {
@@ -1196,7 +1470,19 @@ coupling_scheme coupling_scheme_of(const std::string &s) {
     return coupling_scheme::euler;
   if (s == "midpoint")
     return coupling_scheme::midpoint;
-  bad("unknown coupling scheme '" + s + "' (euler, midpoint)");
+  if (s == "cayley")
+    return coupling_scheme::cayley;
+  bad("unknown coupling scheme '" + s + "' (euler, midpoint, cayley)");
+}
+
+split_order split_order_of(const std::string &s) {
+  if (s == "coupling_outside")
+    return split_order::coupling_outside;
+  if (s == "inputs_outside")
+    return split_order::inputs_outside;
+  if (s == "inputs_with_coupling")
+    return split_order::inputs_with_coupling;
+  bad("unknown split order '" + s + "' (coupling_outside, inputs_outside, inputs_with_coupling)");
 }
 
 step_scheme step_scheme_of(const std::string &s) {
@@ -1312,6 +1598,46 @@ conservative_scheme scheme_of(const std::string &s, const std::string &what) {
   file_error(what + ": unknown scheme '" + s + "' (implicit_midpoint, leapfrog)");
 }
 
+std::array<double, 3> triple(const pt::ptree &t, const std::string &what) {
+  vecd v;
+  flatten(t, v, what);
+  if (v.size() != 3)
+    file_error(what + " needs 3 numbers");
+  return {v[0], v[1], v[2]};
+}
+
+// "key": [{"offset": [[x, y, z], ...], "axis": [[x, y, z], ...], "point": [x, y, z],
+//          "components": [0, 1, 2]}, ...]
+std::vector<serial_chain> read_points(const pt::ptree &t, const std::string &key,
+                                      const std::string &what) {
+  std::vector<serial_chain> out;
+  auto P = t.get_child_optional(key);
+  if (!P)
+    return out;
+  int k = 0;
+  for (const auto &kv : *P) {
+    const std::string w = what + "." + key + "[" + std::to_string(k++) + "]";
+    const pt::ptree &c = kv.second;
+    serial_chain ch;
+    for (const char *f : {"offset", "axis"}) {
+      auto rows = c.get_child_optional(f);
+      if (!rows)
+        file_error(w + " has no " + f);
+      for (const auto &r : *rows)
+        (std::string(f) == "offset" ? ch.offset : ch.axis).push_back(triple(r.second, w + "." + f));
+    }
+    if (auto p = c.get_child_optional("point"))
+      ch.point = triple(*p, w + ".point");
+    if (c.get_child_optional("components")) {
+      ch.components.clear();
+      for (double v : numbers(c, "components", w))
+        ch.components.push_back(static_cast<int>(v));
+    }
+    out.push_back(std::move(ch));
+  }
+  return out;
+}
+
 law_ptr read_law(const pt::ptree &t, const std::string &what) {
   const std::string format = t.get<std::string>("format", kLawFormat);
   if (format != kLawFormat)
@@ -1340,6 +1666,7 @@ law_ptr read_law(const pt::ptree &t, const std::string &what) {
       s.scheme = scheme_of(t.get<std::string>("scheme", ""), what);
       if (auto v = t.get_child_optional("potential")) {
         s.K = numbers(*v, "K", what + ".potential");
+        s.cosine = numbers(*v, "cosine", what + ".potential");
         s.capacitor = numbers(*v, "capacitor", what + ".potential");
         s.center = numbers(*v, "center", what + ".potential");
         s.v_scale = v->get<double>("scale", 1.0);
@@ -1358,14 +1685,18 @@ law_ptr read_law(const pt::ptree &t, const std::string &what) {
         if (auto net = d->get_child_optional("net"))
           s.d_net = read_net(*net, what + ".damping.net");
       }
+      s.port_points = read_points(t, "port_points", what);
+      s.input_points = read_points(t, "input_points", what);
       return std::make_shared<canonical_law>(std::move(s));
     }
+    if (kind == "contact")
+      return std::make_shared<contact_law>(t.get<double>("stiffness"));
   } catch (const std::invalid_argument &e) {
     file_error(what + ": " + e.what());
   } catch (const pt::ptree_error &e) {
     file_error(what + ": " + e.what());
   }
-  file_error(what + ": unknown kind '" + kind + "' (linear, canonical)");
+  file_error(what + ": unknown kind '" + kind + "' (linear, canonical, contact)");
 }
 
 pt::ptree read_tree_file(const std::string &path) {
@@ -1457,8 +1788,12 @@ composite read_system(const pt::ptree &root, const std::filesystem::path &dir,
         } else if (type == "skew") {
           s.connect_skew(block_list(s, c, "blocks", w), integer(c, "port", 0, w),
                          numbers(c, "C", w));
+        } else if (type == "damper") {
+          const std::string gate = c.get<std::string>("gate", "");
+          s.connect_damper(block_of(s, c.get<std::string>("block"), w), integer(c, "port", 0, w),
+                           c.get<double>("c"), gate.empty() ? -1 : block_of(s, gate, w));
         } else {
-          file_error(w + ": unknown coupling type (pair, incidence, skew)");
+          file_error(w + ": unknown coupling type (pair, incidence, skew, damper)");
         }
       }
   } catch (const std::invalid_argument &e) {
@@ -1493,6 +1828,36 @@ void put_numbers(std::ostringstream &o, const char *key, const vecd &v) {
   o << ", " << quoted(key) << ": [";
   for (size_t i = 0; i < v.size(); ++i)
     o << (i ? ", " : "") << num(v[i]);
+  o << "]";
+}
+
+void put_triple(std::ostringstream &o, const std::array<double, 3> &v) {
+  o << "[" << num(v[0]) << ", " << num(v[1]) << ", " << num(v[2]) << "]";
+}
+
+void put_points(std::ostringstream &o, const char *key, const std::vector<serial_chain> &points) {
+  if (points.empty())
+    return;
+  o << ", " << quoted(key) << ": [";
+  for (size_t p = 0; p < points.size(); ++p) {
+    const serial_chain &c = points[p];
+    o << (p ? ", " : "") << "{\"offset\": [";
+    for (size_t i = 0; i < c.offset.size(); ++i) {
+      o << (i ? ", " : "");
+      put_triple(o, c.offset[i]);
+    }
+    o << "], \"axis\": [";
+    for (size_t i = 0; i < c.axis.size(); ++i) {
+      o << (i ? ", " : "");
+      put_triple(o, c.axis[i]);
+    }
+    o << "], \"point\": ";
+    put_triple(o, c.point);
+    o << ", \"components\": [";
+    for (size_t i = 0; i < c.components.size(); ++i)
+      o << (i ? ", " : "") << c.components[i];
+    o << "]}";
+  }
   o << "]";
 }
 
@@ -1562,6 +1927,8 @@ std::string law_json(const block_law &law) {
       put_numbers(o, "K", s.K);
       put_numbers(o, "center", s.center);
     }
+    if (!s.cosine.empty())
+      put_numbers(o, "cosine", s.cosine);
     if (!s.capacitor.empty())
       put_numbers(o, "capacitor", s.capacitor);
     if (!s.v_net.empty())
@@ -1584,7 +1951,14 @@ std::string law_json(const block_law &law) {
       put_numbers(o, "diag", s.damping);
       o << "}";
     }
+    put_points(o, "port_points", s.port_points);
+    put_points(o, "input_points", s.input_points);
     o << "}";
+    return o.str();
+  }
+  if (const auto *c = dynamic_cast<const contact_law *>(&law)) {
+    o << "{\"format\": \"cvc-ph-law/1\", \"kind\": \"contact\", \"stiffness\": "
+      << num(c->stiffness()) << "}";
     return o.str();
   }
   bad("law_json: a " + law.kind() + " law has no file form");
@@ -1630,6 +2004,15 @@ std::string system_json(const composite &s) {
         << ", \"b_port\": " << pb.second << ", \"c\": " << num(c) << "}";
       first = false;
     }
+  for (const port_damper &d : s.dampers()) {
+    const auto pa = port_of(d.port);
+    o << (first ? "" : ", ") << "{\"type\": \"damper\", \"block\": " << quoted(block_name(pa.first))
+      << ", \"port\": " << pa.second << ", \"c\": " << num(d.c);
+    if (d.gate >= 0)
+      o << ", \"gate\": " << quoted(block_name(d.gate));
+    o << "}";
+    first = false;
+  }
   o << "]}";
   return o.str();
 }

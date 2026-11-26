@@ -54,6 +54,7 @@
 #include <cvc/nav/run_log.h>
 #include <cvc/nav/sim_world_trace.h>
 #include <cvc/ph/compose.h>
+#include <cvc/ph/mechanical.h>
 #include <cvc/ph/microgrid.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/ph/train.h>
@@ -2638,12 +2639,19 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
       "                      system file\n"
       "  train-dgu <out>     fit a DGU law to trajectories of the reference nonlinear DGU (the\n"
       "                      C-PHAST electrical calibration), score it on held-out rollouts\n"
-      "                      against the fitted-linear control, and write it as cvc-ph-law/1\n\n"
+      "                      against the fitted-linear control, and write it as cvc-ph-law/1\n"
+      "  arm <out>           the planar arm's count transfer (C-PHAST Table 10, known joint\n"
+      "                      laws): fit the skew coupling at --train-n joints, score takeover\n"
+      "                      from joint positions at every --test-n, write the fitted arm\n"
+      "  leg <out>           a Go2 leg on a test rig dropped onto compliant ground under a foot\n"
+      "                      load: the contact force and the books; writes the system\n\n"
       "  cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5\n"
       "  cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u "
       "-0.1,1,-0.1,1,-0.1,1,-0.1,1\n");
   std::string op, file, x0s, physical, us, csv, coupling, scheme, edges, line_r, line_l, dgu_kind;
-  std::string v_hidden, m_hidden, d_hidden;
+  std::string v_hidden, m_hidden, d_hidden, order, test_n, observer, leg_name;
+  int train_n = 4, arm_train = 200, arm_test = 20, arm_steps = 200, context = 5, horizon = 50;
+  double load = 20.0, stiffness = 2.0e4, contact_damping = 2.0e5, clearance = 0.02;
   int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10, dgus = 4;
   int updates = 2000, constraint_first = 0, batch = 128, threads = 1, train_runs = 32,
       test_runs = 16;
@@ -2655,7 +2663,7 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   // clang-format off
   desc.add_options()
     ("help,h", "show help")
-    ("op", po::value<std::string>(&op)->required(), "info, simulate, check or microgrid")
+    ("op", po::value<std::string>(&op)->required(), "info, simulate, check, microgrid, train-dgu, arm or leg")
     ("file", po::value<std::string>(&file)->required(), "the system file (microgrid: the one to write)")
     ("x0", po::value<std::string>(&x0s), "simulate: the start state, comma separated (default zeros)")
     ("physical", po::value<std::string>(&physical), "simulate: the start as every block's efforts instead (a DGU's v and i, a line's i), mapped to its state")
@@ -2663,7 +2671,8 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     ("steps", po::value<int>(&steps)->default_value(100), "simulate: steps")
     ("dt", po::value<double>(&dt)->default_value(0.01), "simulate: step (s)")
     ("scheme", po::value<std::string>(&scheme)->default_value("split"), "simulate: split, rk4 or implicit_midpoint")
-    ("coupling", po::value<std::string>(&coupling)->default_value("midpoint"), "simulate: the split step's coupling, euler or midpoint")
+    ("coupling", po::value<std::string>(&coupling)->default_value("midpoint"), "simulate: the split step's coupling, euler, midpoint or cayley")
+    ("order", po::value<std::string>(&order)->default_value("coupling_outside"), "simulate: where the inputs sit, coupling_outside, inputs_outside (Algorithm 2) or inputs_with_coupling")
     ("substeps", po::value<int>(&substeps)->default_value(2), "simulate: the split step's substeps")
     ("local-substeps", po::value<int>(&local)->default_value(1), "simulate: each block's own substeps")
     ("max-iter", po::value<int>(&max_iter)->default_value(10), "simulate: Picard iterations at most")
@@ -2694,7 +2703,20 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     ("dgu", po::value<std::string>(&dgu_kind)->default_value("reference"), "microgrid: reference (q = 2.2 (v + v^3/3), 1.8 H, 1.2 ohm) or linear")
     ("dgu-c", po::value<double>(&dgu_c)->default_value(2.2), "microgrid: a linear DGU's capacitance (F)")
     ("dgu-l", po::value<double>(&dgu_l)->default_value(1.8), "microgrid: a linear DGU's inductance (H)")
-    ("dgu-r", po::value<double>(&dgu_r)->default_value(1.2), "microgrid: a linear DGU's resistance (ohm)");
+    ("dgu-r", po::value<double>(&dgu_r)->default_value(1.2), "microgrid: a linear DGU's resistance (ohm)")
+    ("train-n", po::value<int>(&train_n)->default_value(4), "arm: the joints the coupling is fitted at")
+    ("test-n", po::value<std::string>(&test_n)->default_value("2,3,4,5,6,8"), "arm: the joint counts it is scored at")
+    ("arm-train", po::value<int>(&arm_train)->default_value(200), "arm: training trajectories")
+    ("arm-test", po::value<int>(&arm_test)->default_value(20), "arm: test trajectories per count")
+    ("arm-steps", po::value<int>(&arm_steps)->default_value(200), "arm: steps per trajectory (0.02 s each)")
+    ("context", po::value<int>(&context)->default_value(5), "arm: observed position frames per window")
+    ("horizon", po::value<int>(&horizon)->default_value(50), "arm: predicted steps per window")
+    ("observer", po::value<std::string>(&observer)->default_value("fit"), "arm: the state from positions, fit (the window through the model) or fd (finite differences)")
+    ("leg", po::value<std::string>(&leg_name)->default_value("FL"), "leg: FL, FR, RL or RR")
+    ("load", po::value<double>(&load)->default_value(20.0), "leg: the foot's load (N, down)")
+    ("stiffness", po::value<double>(&stiffness)->default_value(2.0e4), "leg: the ground's stiffness (N/m)")
+    ("contact-damping", po::value<double>(&contact_damping)->default_value(2.0e5), "leg: its Hunt-Crossley damping (N s/m per m of compression)")
+    ("clearance", po::value<double>(&clearance)->default_value(0.02), "leg: the foot's height above the ground at the start (m)");
   // clang-format on
   po::positional_options_description pos;
   pos.add("op", 1).add("file", 1);
@@ -2805,6 +2827,81 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     std::cout << cvc::ph::describe(g.system) << "  wrote " << file << "\n";
     return 0;
   }
+  if (op == "arm") {
+    const cvc::ph::arm_params p;
+    const cvc::ph::law_ptr joint = cvc::ph::arm_joint(p);
+    const cvc::ph::transition_opts o = cvc::ph::arm_transition(p);
+    std::vector<int> counts;
+    for (double v : ph_numbers(test_n, "test-n"))
+      counts.push_back(static_cast<int>(v));
+    cvc::ph::coupling_fit_options f;
+    f.takeover.context = context;
+    f.takeover.horizon = horizon;
+    if (observer == "fd")
+      f.takeover.observer.kind = cvc::ph::observer_kind::finite_difference;
+    else if (observer != "fit")
+      throw std::invalid_argument("--observer: '" + observer + "' (use fit or fd)");
+    f.smax = train_n;
+    for (int n : counts)
+      f.smax = std::max(f.smax, n);
+    const auto t0 = std::chrono::steady_clock::now();
+    const cvc::ph::coupling_fit_result fit = cvc::ph::fit_arm_coupling(
+        joint, train_n, cvc::ph::arm_dataset(train_n, arm_train, arm_steps, data_seed, p), o, f);
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << std::setprecision(4) << "arm: coupling fitted at N = " << train_n << " on "
+              << arm_train << " trajectories in " << secs << " s; takeover MSE " << fit.mse_start
+              << " -> " << fit.mse << "\n  N    no coupling   fitted\n";
+    for (int n : counts) {
+      const std::vector<cvc::ph::arm_trajectory> test =
+          cvc::ph::arm_dataset(n, arm_test, arm_steps, data_seed + 100 + n, p);
+      const double a = cvc::ph::takeover_mse(cvc::ph::arm_system(joint, n), o, test, f.takeover);
+      const double b = cvc::ph::takeover_mse(
+          cvc::ph::arm_system(joint, n, cvc::ph::count_coupling(fit.U, fit.smax, n)), o, test,
+          f.takeover);
+      std::cout << "  " << n << "    " << a << "     " << b << "\n";
+    }
+    std::ofstream out(file);
+    if (!out)
+      throw std::runtime_error("cannot write " + file);
+    out << cvc::ph::system_json(cvc::ph::arm_system(
+               joint, train_n, cvc::ph::count_coupling(fit.U, fit.smax, train_n)))
+        << "\n";
+    std::cout << "  wrote " << file << " (simulate it with --coupling cayley --order "
+              << "inputs_outside --substeps 1 --dt " << p.dt << ")\n";
+    return 0;
+  }
+  if (op == "leg") {
+    const cvc::ph::go2_leg which = cvc::ph::go2_leg_of(leg_name);
+    cvc::ph::composite s;
+    const int leg = s.add_block(cvc::ph::go2_leg_law(which), leg_name);
+    const int ground = cvc::ph::attach_contact(s, leg, 2, stiffness, contact_damping, "ground");
+    std::vector<double> x(s.state_dim(), 0.0), u(s.input_dim(), 0.0);
+    const std::vector<double> q0 = {0.0, 0.9, -1.8};
+    for (int j = 0; j < 3; ++j)
+      x[s.state_offset(leg) + j] = q0[j];
+    x[s.state_offset(ground)] = -clearance;
+    u[s.input_offset(leg) + 5] = -load;
+    cvc::ph::transition_opts o;
+    o.dt = vm["dt"].defaulted() ? 5e-4 : dt;
+    o.substeps = 1;
+    o.coupling = cvc::ph::coupling_scheme::cayley;
+    o.order = vm["order"].defaulted() ? cvc::ph::split_order::inputs_with_coupling
+                                      : cvc::ph::split_order_of(order);
+    const int n = vm["steps"].defaulted() ? static_cast<int>(std::lround(4.0 / o.dt)) : steps;
+    const cvc::ph::rollout_result r = cvc::ph::rollout(s, o, x, u, n);
+    std::vector<double> e(s.state_dim());
+    s.effort(r.x.back().data(), e.data());
+    std::cout << cvc::ph::describe(s, o, r) << std::setprecision(6) << "  the ground carries "
+              << e[s.state_offset(ground)] << " N of the " << load << " N load ("
+              << cvc::ph::to_string(o.order) << ")\n";
+    std::ofstream out(file);
+    if (!out)
+      throw std::runtime_error("cannot write " + file);
+    out << cvc::ph::system_json(s) << "\n";
+    std::cout << "  wrote " << file << "\n";
+    return 0;
+  }
   const cvc::ph::composite s = cvc::ph::load_system(file);
   if (op == "info") {
     std::cout << cvc::ph::describe(s);
@@ -2823,13 +2920,14 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   }
   if (op != "simulate")
     throw std::runtime_error("Unknown ph operation: " + op +
-                             " (use info, simulate, check or microgrid)");
+                             " (use info, simulate, check, microgrid, train-dgu, arm or leg)");
   cvc::ph::transition_opts o;
   o.dt = dt;
   o.substeps = substeps;
   o.local_substeps = local;
   o.coupling = cvc::ph::coupling_scheme_of(coupling);
   o.scheme = cvc::ph::step_scheme_of(scheme);
+  o.order = cvc::ph::split_order_of(order);
   o.solve.max_iter = max_iter;
   o.solve.tol = tol;
   std::vector<double> x0 = ph_numbers(x0s, "x0"), u = ph_numbers(us, "u");

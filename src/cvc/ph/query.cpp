@@ -152,7 +152,8 @@ void check_history(const composite &s, const history &h) {
 // ── 1. the state from a measured history ────────────────────────────────────────────────────────
 
 std::vector<vecd> history_readouts(const composite &s, const history &h,
-                                   const transition_opts &step_opts, const vecd &x_start) {
+                                   const transition_opts &step_opts, const vecd &x_start,
+                                   fit_space space) {
   check_history(s, h);
   std::vector<vecd> out;
   vecd x = x_start, e(s.state_dim());
@@ -160,7 +161,10 @@ std::vector<vecd> history_readouts(const composite &s, const history &h,
   const int steps = static_cast<int>(h.inputs.size());
   for (int k = 0; k <= steps && next < h.sample_steps.size(); ++k) {
     if (h.sample_steps[next] == k) {
-      s.readout(x.data(), e.data());
+      if (space == fit_space::state)
+        e = x;
+      else
+        s.readout(x.data(), e.data());
       vecd row;
       for (int c : h.channels)
         row.push_back(e[c]);
@@ -185,14 +189,20 @@ history_fit_result fit_history(const composite &s, const history &h, const histo
   history_fit_result res;
   // r(xi): the weighted data misfit, then the prior's rows. false when no state reaches the
   // efforts.
+  const bool in_state = o.space == fit_space::state;
   auto residual = [&](const vecd &xi, vecd &r, vecd *x_start) {
     vecd e(N);
     for (int i = 0; i < N; ++i)
       e[i] = o.prior_mean[i] + o.prior_scale[i] * xi[i];
-    const storage_result st = storage_from_efforts(s, e);
-    if (!st.converged)
-      return false;
-    const std::vector<vecd> y = history_readouts(s, h, o.step, st.x);
+    storage_result st;
+    if (in_state) {
+      st.x = e;
+    } else {
+      st = storage_from_efforts(s, e);
+      if (!st.converged)
+        return false;
+    }
+    const std::vector<vecd> y = history_readouts(s, h, o.step, st.x, o.space);
     r.assign(rows, 0.0);
     int k = 0;
     for (size_t j = 0; j < y.size(); ++j)
@@ -371,10 +381,13 @@ std::vector<vecd> posterior_states(const composite &s, const history &h,
         xi += sigmas * L[size_t(i) * N + j] * z[j];
       e[i] = o.prior_mean[i] + o.prior_scale[i] * xi;
     }
-    const storage_result st = storage_from_efforts(s, e, fit.x_start);
-    if (!st.converged)
-      continue;
-    vecd x = st.x;
+    vecd x = e;
+    if (o.space == fit_space::efforts) {
+      const storage_result st = storage_from_efforts(s, e, fit.x_start);
+      if (!st.converged)
+        continue;
+      x = st.x;
+    }
     for (const vecd &u : h.inputs)
       step(s, o.step, u.data(), x.data());
     out.push_back(std::move(x));

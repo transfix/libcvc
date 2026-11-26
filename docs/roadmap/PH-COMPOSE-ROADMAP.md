@@ -1,6 +1,7 @@
 # cvc::ph composition: compositional port-Hamiltonian world models (C-PHAST)
 
-Status: Phase 1 in review. This plan covers native C++ composition of port-Hamiltonian (pH)
+Status: Phases 1-3 merged (transfix/libcvc#1227, #1265, #1287); Phase 4 in review (#1560);
+Phase 5 in review. This plan covers native C++ composition of port-Hamiltonian (pH)
 components in `cvc::ph`, with pycvc bindings and `cvc ph ...` subcommands. It follows the way
 GRL-SNAM and LieSPHGP were brought into libcvc.
 
@@ -112,7 +113,7 @@ imports phast and copies none of it.
 
 ## Phases (one PR each)
 
-1. **Composition core (this PR).** Block laws with typed ports, pairing assembly from
+1. **Composition core (merged, #1227).** Block laws with typed ports, pairing assembly from
    explicit pairs, an incidence matrix or a dense skew rule, the composed field, the split
    transition (Euler or midpoint coupling) plus whole-field RK4 and implicit-midpoint
    references, per-step books with the balance check, readouts, and the law/system JSON
@@ -127,7 +128,7 @@ imports phast and copies none of it.
    - a microgrid (linear DGUs, RL lines, a fifth DGU added at either of two buses) against
      a fine-step RK4 reference (`ph_compose_test`);
    - parity with phast on the fixtures above (`ph_compose_parity_test`).
-2. **The DC microgrid study end to end (in review, stacked on Phase 1).**
+2. **The DC microgrid study end to end (merged, #1265).**
    - DGU (Eq. 21) and line laws as presets in `cvc/ph/microgrid.h`.
    - The paper's reference nonlinear DGU (`q_C / C = 2.2 (v + v^3 / 3)`, L = 1.8 H,
      R = 1.2 ohm), through a capacitor curve on `canonical_law`.
@@ -145,7 +146,7 @@ imports phast and copies none of it.
        order all 16 candidate pairs as the reference does.
    - Not here: the paper's learned DGU family (2,407 parameters). It is not in phast; it would
      come with Shubham's checkpoints (Phase 4).
-3. **The query (in review, stacked on Phase 2).**
+3. **The query (merged, #1287).**
    - `InitializeState`: `fit_history`, the voltage-history fit (Eq. 204). Levenberg-Marquardt over
      the prior-scaled physical state at the window start, through the frozen transition (scipy's
      trust-region reflective solver in the paper). It reports success, optimality and
@@ -160,7 +161,7 @@ imports phast and copies none of it.
      wrong; voltage-only queries are mostly inconclusive, full-state ones certify.
    - pycvc: `fit_history`, `card`, `ph_rank`. Still to do: a `cvc ph query` subcommand (it needs
      a query file format); the paper's analytic bounds (Prop. F.7/F.8) in place of sampled ones.
-4. **Training (in review): native, Joe's choice (2026-11-26).**
+4. **Training (in review, #1560): native, Joe's choice (2026-11-26).**
    - `cvc/ph/ad.h`: a reverse-mode tape owned by the caller.
    - `cvc/ph/train.h`:
      - `canonical_t<T>`, canonical_law's arithmetic over a scalar type: with `double` it is the
@@ -184,10 +185,36 @@ imports phast and copies none of it.
    - Not yet: calibration on source networks (Eqs. 76-77), the Go2 leg blocks (Phase 5 first).
      Shubham's checkpoints, if they come, load as `"cvc-ph-law/1"` through the fixture
      script's exporter.
-5. **Later.** The planar arm (two-link, attachment maps `B(q) = [0; (dr/dq)^T]`), and legged
-   blocks on the MuJoCo plants (Go2 and Spot are in the cvcpkg Menagerie bundle; see the
-   mujoco workstream). Convoy formations are not a reason for these maps: a power-preserving
-   formation linkage was measured against slot chasing on point masses and lost
+5. **Mechanics (in review, stacked on Phase 4).** `cvc/ph/mechanical.h`, docs/PH_COMPOSE.md's
+   "Mechanics".
+   - Attachment-point ports and inputs (Eq. 49) through `serial_chain` on `canonical_law`, and a
+     pendulum's cosine potential.
+   - Algorithm 2's step: Cayley coupling (`coupling_scheme::cayley`, the implicit midpoint of the
+     coupling subflow) and its input order (`split_order::inputs_outside`). A third order,
+     `inputs_with_coupling`, is the paper's remark for forces the port subflow changes; stiff
+     contact under a load needs it.
+   - Contact as a port: `contact_law` (storage) and a gated Hunt-Crossley damper on the foot's
+     port (`composite::connect_damper`, loss).
+   - The planar arm's count transfer (Section 4.4, Table 10's KNOWN column):
+     - phast's simulator;
+     - the known joint law;
+     - the dense coupling of Eq. 208 and its fit;
+     - the state from joint positions (finite differences, or a window fit through the model
+       via `fit_history` in state space);
+     - takeover.
+   - The Go2's legs as blocks, from the Menagerie's `go2.xml`, checked against MuJoCo's
+     kinematics when built with it.
+   - `cvc ph arm`, `cvc ph leg`; pycvc `ph_arm_json`, `ph_arm_study`, `ph_go2_leg_json`,
+     `ph_go2_foot`.
+   - Not yet:
+     - phast's learned TCN observer residual (Eq. 66);
+     - the `⊗ I_d` lift of the dense coupling for multi-DOF blocks;
+     - a floating base (body plus legs);
+     - training a mechanical law natively (canonical_t has no cosine or attachment points yet);
+     - the size-equivariant coupling kernel the paper proposes for new interactions.
+
+   Convoy formations are not a reason for these maps: a power-preserving formation linkage was
+   measured against slot chasing on point masses and lost
    ([PH-CONVOY-FORMATION.md](PH-CONVOY-FORMATION.md)).
 
 ## Limits of Phase 1
@@ -195,8 +222,8 @@ imports phast and copies none of it.
 - `canonical_law` takes diagonal `M(q)` and `D(q)`. phast's Householder rank-1 mass and
   damping terms are not supported yet.
 - Periodic coordinates (phast's Fourier configuration features) are not supported yet.
-- Port maps `B_i` and input maps `G_i` are constant. The state-dependent attachment maps of
-  the arm come with Phase 5.
+- Port maps `B_i` and input maps `G_i` were constant. Phase 5 added the state-dependent
+  attachment maps (`port_points`, `input_points`).
 - An external flow source fed to a line through its input (rather than through a bus) reaches
   the line in the local step and the bus in the coupling half-steps, and the split step lets the
   line's state creep from the geometry it stands for, even at a steady state
@@ -238,9 +265,10 @@ which lines up with the paper's Go2 push-recovery study.
 
 **What it depends on**
 
-- Phases 2 to 5 here. Phase 5 brings state-dependent attachment maps, the mechanical
-  observer for position-only sensing, the learned skew coupling between legs, and contact as a
-  port.
+- Phases 2 to 5 here. Phase 5 brought state-dependent attachment maps, the state from
+  positions (finite differences or a window fit), the learned skew coupling (the arm's), contact
+  as a port, and the Go2's legs as blocks. The lab still needs a floating base (body plus legs)
+  and the coupling's lift to multi-DOF legs.
 - MuJoCo in libcvc: the mujoco workstream's plant (`CVC_WITH_MUJOCO`, a `legged` plant kind).
   Under that workstream's proposed split, MuJoCo owns the robot, Jolt keeps the vehicles and
   the world, and both read one height field. One-way proxies come first; two-way contact and

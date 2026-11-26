@@ -222,6 +222,7 @@ add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
 add_executable(ph_microgrid_test ph_microgrid_test.cpp)
 add_executable(ph_query_test ph_query_test.cpp)
 add_executable(ph_train_test ph_train_test.cpp)
+add_executable(ph_mech_test ph_mech_test.cpp)
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
@@ -269,6 +270,8 @@ if(CVC_WITH_MUJOCO)
 endif()
 target_compile_definitions(physics_mujoco_robot_test
   PRIVATE CVC_MUJOCO_MENAGERIE_DIR="${_cvc_menagerie}")
+# ph_mech_test checks the Go2 legs' chains against MuJoCo's Go2 when it has it (skipped without).
+target_compile_definitions(ph_mech_test PRIVATE CVC_MUJOCO_MENAGERIE_DIR="${_cvc_menagerie}")
 add_executable(geometry_height_field_test geometry_height_field_test.cpp)
 add_executable(world_geometry_test world_geometry_test.cpp)
 add_executable(nav_world_planes_test nav_world_planes_test.cpp)
@@ -555,6 +558,7 @@ set(TEST_TARGETS
   ph_microgrid_test
   ph_query_test
   ph_train_test
+  ph_mech_test
   ph_convoy_test
   ph_se2_test
   ph_se2_train_test
@@ -2647,6 +2651,12 @@ target_link_libraries(ph_train_test
     GTest::gtest
     GTest::gtest_main
 )
+target_link_libraries(ph_mech_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
 
 target_link_libraries(ph_se2_test
   PRIVATE
@@ -3145,6 +3155,7 @@ target_compile_features(ph_compose_parity_test PRIVATE cxx_std_17)
 target_compile_features(ph_microgrid_test PRIVATE cxx_std_17)
 target_compile_features(ph_query_test PRIVATE cxx_std_17)
 target_compile_features(ph_train_test PRIVATE cxx_std_17)
+target_compile_features(ph_mech_test PRIVATE cxx_std_17)
 target_compile_features(ph_convoy_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_test PRIVATE cxx_std_17)
 target_compile_features(ph_se2_train_test PRIVATE cxx_std_17)
@@ -3785,6 +3796,7 @@ cvc_discover_tests(ph_microgrid_test)
 cvc_discover_tests(ph_query_test PROPERTIES TIMEOUT 1200)
 # A short training run through the tape (a few seconds in Release).
 cvc_discover_tests(ph_train_test PROPERTIES TIMEOUT 1200)
+cvc_discover_tests(ph_mech_test PROPERTIES TIMEOUT 1200)
 # The convoy's two full runs (the composite against the formation; the follow laws on a step and
 # a stop) take ~95 s each in a Debug build, and a PR's Debug ctest gives a test without a TIMEOUT
 # of its own 300 s (ci.yml), which a busy runner misses: both timed out on #1288's run on

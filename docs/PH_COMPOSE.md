@@ -40,13 +40,25 @@ Two laws are built in:
 
 | `scheme` | what it does |
 | --- | --- |
-| `split` (default) | `substeps` repetitions of: coupling half-step, each block's local step, coupling half-step. A local step is kick, damp, conserve, damp, kick. The coupling half-step is `euler` or `midpoint` (`opts.coupling`). |
+| `split` (default) | `substeps` repetitions of: coupling half-step, each block's local step, coupling half-step. A local step is kick, damp, conserve, damp, kick. The coupling half-step is `euler`, `midpoint` or `cayley` (`opts.coupling`). |
 | `rk4` | classical RK4 on the whole composed field (a reference) |
 | `implicit_midpoint` | implicit midpoint on the whole field, by Picard iteration (a reference) |
 
 Notes on the split step:
 
-- Euler coupling makes the step first order; midpoint coupling makes it second order.
+- Euler coupling makes the step first order; midpoint and Cayley coupling make it second order.
+- `cayley` is the implicit midpoint of the coupling subflow, solved by Newton with a
+  central-difference Jacobian. For momentum ports (zero in the `q` rows, as every mechanical port
+  is) the subflow holds `q` and is linear in `p`, and this is Algorithm 2's Cayley map: each
+  half-step keeps its frozen-position kinetic energy `p . M(q)^-1 p` to rounding.
+- `opts.order` places the inputs:
+  - `coupling_outside` (the default; phast's typed composition API): the kicks sit inside each
+    block's local step;
+  - `inputs_outside` (Algorithm 2): every block's input kick, then the coupling, the local steps
+    without inputs, the coupling, the kicks;
+  - `inputs_with_coupling`: the inputs join the coupling's subflow (`f_c + G u`, by the coupling's
+    scheme) around local steps without inputs. A stiff coupling that balances an input needs it
+    ("Mechanics" below).
 - `canonical_law` conserves by implicit midpoint (Picard: at most `solve.max_iter` iterations,
   stopping when no coordinate moves by `solve.tol`). With a constant mass it can use leapfrog
   instead.
@@ -229,6 +241,109 @@ reproducing its spread. As in the paper, the two schedules differ little (about 
 constraint-first law is `src/cvc/tests/data/ph_dgu_trained.json`; `ph_train_test` holds it to
 its score.
 
+## Mechanics
+
+`cvc/ph/mechanical.h` holds C-PHAST's mechanical components. A mechanical block is a
+`canonical_law` with momentum ports, `B = [0; B_p(q)]`.
+
+**Attachment points (Eq. 49).** A `serial_chain` is a point carried by revolute joints, one per
+configuration coordinate: joint `i` sits at `offset[i]` in the previous joint's frame and turns
+about `axis[i]`. That is MuJoCo's body tree for a hinge chain without body rotations. A law's
+`port_points` and `input_points` add one column per chosen component (x, y, z): zero in the `q`
+rows and `(dr/dq)^T` in the `p` rows. A force `F` at the point enters as the torque
+`(dr/dq)^T F`, and the port's output is the point's velocity, so `F . rdot = tau . qdot`.
+`canonical_spec::cosine` adds a pendulum's gravity, `sum_i a_i (1 - cos q_i)`.
+
+**Contact as a port.** A `contact_law` is the storage of a compliant one-sided contact: one
+coordinate `s` (the compression), `H = k/2 [s]_+^2`, one port whose output is the force
+`k [s]_+`. Its loss is a damper on the foot's port, `composite::connect_damper(block, port, c,
+gate)`. That is a resistive termination `u_hat -= c [s]_+ y_hat` (Hunt-Crossley: zero at
+touchdown), booked as loss. `attach_contact` adds both and pairs them so that `ds/dt = -v`.
+
+**The arm (Section 4.4, Appendix K.1).**
+- `arm_dataset` runs phast's planar-arm simulator in its interconnection setting:
+  - homogeneous joints (inertia 1, damping 0.1) with gravity `9.81 (1 - cos q)`;
+  - soft joint limits at +/-2.5;
+  - the hidden skew coupling `C_true = chain / sqrt(n)`;
+  - sinusoidal torques.
+- `arm_joint` is the KNOWN per-joint law, and `arm_system` stacks `n` of them under a skew
+  coupling.
+- `count_coupling` is Eq. 208: `C_hat(s) = (U - U^T)_{1:s,1:s} / sqrt(s)`.
+- `fit_arm_coupling` fits the skew entries at the training count by Levenberg-Marquardt on
+  takeover residuals. It holds the observed window starts through each round.
+- `arm_transition` is Algorithm 2: inputs outside, Cayley coupling, leapfrog.
+
+The simulator recomputes `qdot` from the positions after its closing coupling half-step, as
+phast does. That discards the half-step, so the coupling acts for half of each step. The data
+therefore carry `C_true / 2`, and that is what the fit recovers: 0.245-0.250 against 0.25.
+
+**The state from positions (Appendix A.3).** `observe` takes `L_h` joint-position frames and the
+inputs between them:
+- `finite_difference`: Eq. 65 without phast's learned TCN residual (Eq. 66, not ported), then
+  `canonicalize` (`p = M(q) qdot`);
+- `window_fit`: `fit_history` in state space (`fit_space::state`, query.h). It fits the window's
+  start through the frozen transition to every frame and runs it to the last one. This is the
+  model's own estimate and needs no training.
+
+`takeover` then rolls the latent state out open loop under the supplied inputs (Eq. 67), and
+`takeover_mse` scores joint positions.
+
+**Measured** (Table 10's protocol: the coupling fitted at N = 4 on 200 trajectories of 200 steps,
+then the same model at each N on 20 test trajectories, 5 observed frames and 50 predicted steps;
+three data seeds, mean and population standard deviation):
+
+| N | no coupling | fitted, window fit | fitted, finite differences | the paper, KNOWN |
+| --- | --- | --- | --- | --- |
+| 2 | 2.87e-3 ± 4.8e-4 | 2.80e-5 ± 2.3e-6 | 1.20e-4 ± 8.2e-6 | 0.0029 ± 0.0001 |
+| 3 | 3.25e-3 ± 2.1e-4 | 2.47e-5 ± 1.4e-6 | 1.29e-4 ± 5.9e-6 | 0.0021 ± 0.0000 |
+| 4 | 2.03e-3 ± 3.8e-4 | 2.22e-5 ± 1.5e-6 | 1.17e-4 ± 1.2e-5 | 0.0017 ± 0.0000 |
+| 5 | 1.59e-3 ± 1.2e-4 | 4.03e-4 ± 8.8e-5 | 4.88e-4 ± 9.3e-5 | 0.0016 ± 0.0000 |
+| 6 | 1.51e-3 ± 7.0e-5 | 5.74e-4 ± 3.5e-5 | 6.53e-4 ± 4.9e-5 | 0.0018 ± 0.0000 |
+| 8 | 1.21e-3 ± 2.2e-4 | 7.05e-4 ± 6.7e-5 | 7.87e-4 ± 9.0e-5 | 0.0014 ± 0.0000 |
+
+`cvc ph arm` with its defaults and `--data-seed 1, 2, 3` (`--observer fd` for the fourth column)
+made these, at about 40 s a fit on one core. The paper's spread is over training seeds; this one
+is over data seeds, from this library's generator.
+
+- At N <= 4 the fitted coupling covers every pair of joints. There the model with the window fit
+  is 60 to 75 times more accurate than the paper's KNOWN row.
+- At N > 4 the pairs beyond the training block have no coupling (their entries in `U` got no
+  data), and the trained ones scale by `sqrt(4 / N)`. That is the limit the paper describes for
+  this dense rule. The error grows to 2 to 4 times below the paper's.
+- With no coupling at all, the known joints alone score at the paper's level.
+- The paper's KNOWN model observes with a learned TCN (about 13,000 parameters). Here the
+  observer is the model itself, and the only trained parameters are the six coupling entries.
+- Finite differences lag the velocity by about half a step. That costs a factor of 4 to 5 at
+  N <= 4.
+
+**The Go2's legs.**
+- `go2_foot(leg)` is a foot's chain from the Menagerie's `go2.xml`: hip abduction about x, thigh
+  and calf about y, the foot geom's centre. `Go2FeetMatchMujoco` checks it against MuJoCo's own
+  forward kinematics when built with MuJoCo.
+- `go2_leg_inertia` is the diagonal of a leg's joint-space inertia (base fixed), from the bodies'
+  inertials and the joints' armature.
+- `go2_leg_law` is a leg as one block:
+  - the masses are that diagonal at the home pose;
+  - the joint damping is 2 N m s/rad;
+  - the ports are the foot's x, y and z;
+  - the inputs are the three joint torques, then a force at the foot.
+
+**Measured, contact and the step's order.** A front-left leg on a fixed hip, loaded by 20 N
+down at the foot, drops 2 cm onto ground with k = 2e4 N/m and Hunt-Crossley damping 2e5:
+
+| order | the ground carries | books' residual / work (dt 5e-4, 2.5e-4) | joints' drift, last second |
+| --- | --- | --- | --- |
+| `inputs_outside` (Algorithm 2) | 20.0009 N | 2.9%, 0.74% | 8e-4 rad, 2e-4 rad |
+| `inputs_with_coupling` | 20.0000 N | 0.036%, 0.004% | 0 |
+
+With the inputs outside, the load's kick and the contact's reaction land in different substeps.
+Inside every step the kick leaves the foot a velocity of about 4 mm/s, and the contact's damper
+dissipates it. The endpoint books never see that loss, so it goes to their residual, and the leg
+creeps. Both shrink as `dt^2`. With the inputs in the port subflow, the implicit midpoint
+balances the load and the contact together: the leg stops and the books close. This is the
+remark after the paper's Algorithm 2 (a second-order port-subflow solver for forces the subflow
+changes).
+
 ## Files
 
 ### `cvc-ph-law/1`
@@ -266,7 +381,14 @@ A canonical law:
 - A net is a list of dense layers. `W` is `out x in`. `act` is one of `identity`, `silu`,
   `tanh`, `softplus`, `sigmoid`, and applies to that layer's output.
 - `B` and `G` have `2n` rows: `q_1..q_n`, then `p_1..p_n`.
+- `potential.cosine` (n values) adds `sum_i cosine[i] (1 - cos q_i)`.
+- `port_points` and `input_points` are lists of attachment points (`serial_chain`):
+  `{"offset": [[x, y, z], ...], "axis": [[x, y, z], ...], "point": [x, y, z],
+  "components": [0, 1, 2]}`, with n offsets and n unit axes. Each adds its components' columns
+  after `B`'s (`G`'s), so the law's port (input) count is `ports` (`inputs`) plus theirs.
 - `scheme` is `implicit_midpoint` (the default) or `leapfrog` (constant mass only).
+
+A contact law: `{"format": "cvc-ph-law/1", "kind": "contact", "stiffness": 20000}`.
 
 ### `cvc-ph-system/1`
 
@@ -290,12 +412,13 @@ stacked in the order given. The coupling types:
 | `pair` | `C(a.a_port, b.b_port) += c` and `C(b.b_port, a.a_port) -= c` |
 | `incidence` | An electrical network. `A` is buses x lines, with -1 at a line's sending bus and +1 at its receiving bus. It gives `dq_bus += A i_line` and `dphi_line -= A^T v_bus`. |
 | `skew` | A dense rule over repeated blocks, using the skew part `(C - C^T)/2` of the matrix given |
+| `damper` | `{"block", "port", "c", "gate"}`: a resistive termination on one port, `u_hat -= c y_hat`, or `c [s]_+ y_hat` with `s` the first coordinate of the `gate` block (optional) |
 
 A block never pairs with itself (`C_ii = 0`).
 
 `law_json(law)` and `system_json(s)` write these formats. Every number is written to 17 digits,
-each shared law once, and the pairing as `pair` couplings, so a file read back gives the same
-composite.
+each shared law once, the pairing as `pair` couplings and the dampers as `damper` couplings, so
+a file read back gives the same composite.
 
 ## Command line
 
@@ -303,7 +426,8 @@ composite.
 cvc ph info grid.json
 cvc ph check grid.json --samples 200
 cvc ph simulate grid.json --x0 2.2,0,2.6,0,0 --u -0.1,1,-0.15,1.1 --steps 200 \
-    [--dt 0.01] [--scheme split|rk4|implicit_midpoint] [--coupling midpoint|euler] \
+    [--dt 0.01] [--scheme split|rk4|implicit_midpoint] [--coupling midpoint|euler|cayley] \
+    [--order coupling_outside|inputs_outside|inputs_with_coupling] \
     [--substeps 2] [--local-substeps 1] [--max-iter 10] [--tol 1e-6] [--csv out.csv]
 ```
 
@@ -314,6 +438,10 @@ cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u -0.1,1,-0.1,1
 cvc ph train-dgu dgu.json [--updates 100000] [--constraint-first 25000] [--batch 128] [--lr 1e-4] \
     [--threads 12] [--train-runs 32] [--transitions 200] [--test-runs 16] [--test-transitions 500] \
     [--v-hidden 32,32] [--m-hidden 32,32] [--d-hidden 32] [--data-seed 1] [--init-seed 7] [--log-every N]
+cvc ph arm arm.json [--train-n 4] [--test-n 2,3,4,5,6,8] [--arm-train 200] [--arm-test 20] \
+    [--arm-steps 200] [--context 5] [--horizon 50] [--observer fit|fd] [--data-seed 1]
+cvc ph leg leg.json [--leg FL|FR|RL|RR] [--load 20] [--stiffness 2e4] [--contact-damping 2e5] \
+    [--clearance 0.02] [--dt 5e-4] [--order inputs_with_coupling]
 ```
 
 - `check` exits 1 when the pairing does work or `dH/dt` departs from `-loss + supplied`.
@@ -324,6 +452,9 @@ cvc ph train-dgu dgu.json [--updates 100000] [--constraint-first 25000] [--batch
 - `--u` takes one row of inputs, held over the rollout, or one row per step.
 - `--csv` writes `t`, every coordinate (`<block>.<i>`), `H`, then the step's `supplied`,
   `dissipated` and `residual`.
+- `arm` runs the count-transfer study ("Mechanics") and writes the fitted arm at `--train-n`.
+- `leg` drops a Go2 leg on a test rig onto compliant ground under a foot load, prints the books
+  and the ground's force, and writes the system.
 
 ## Python
 
@@ -344,6 +475,11 @@ card = g.card(f["x_now"], u, 200, [("peak", "max_abs", [6, 7]), ("loss", "total_
 pycvc.ph_rank([card_a, card_b], [bounds_a, bounds_b], [("peak", 0.5)], {"loss": 1.0})
 # {"best", "outcome": certified | inconclusive | abstain, "feasible", "order", ...}
 t = pycvc.ph_train_dgu(updates=2000, threads=8)   # {"law", "linear", "trained", "fit", "history", ...}
+arm = pycvc.ph_composite(pycvc.ph_arm_json(4, coupling=C))   # C: 4 x 4 rows, or None
+arm.simulate(x0, u, steps=50, dt=0.02, coupling="cayley", order="inputs_outside", substeps=1)
+st = pycvc.ph_arm_study(train_n=4, test_n=[2, 3, 4, 5, 6, 8])  # {"U", "mse", "counts": {n: ...}, "system"}
+leg = pycvc.ph_composite(pycvc.ph_go2_leg_json("FL", stiffness=2e4, damping=2e5))
+pycvc.ph_go2_foot("FL", [0.0, 0.9, -1.8])  # {"r", "jacobian"}
 ```
 
 ## Parity with the reference implementation

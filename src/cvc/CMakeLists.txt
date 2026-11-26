@@ -223,6 +223,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ph/ad.h
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
+  ../../inc/cvc/ph/mechanical.h
   ../../inc/cvc/ph/microgrid.h
   ../../inc/cvc/ph/query.h
   ../../inc/cvc/ph/optim.h
@@ -575,6 +576,7 @@ set(SOURCE_FILES
   nav/rollout_plant.cpp
   nav/dyn4_ledger.cpp
   ph/compose.cpp
+  ph/mechanical.cpp
   ph/microgrid.cpp
   ph/query.cpp
   ph/train.cpp
