@@ -175,6 +175,12 @@ imports phast and copies none of it.
    - The paper-size family has 2,405 parameters (the paper's: 2,407, 2,404 optimized). Its
      fitted-linear control scores 107 mV / 58 mA on held-out rollouts (Table 3's fitted linear:
      82-103 mV / 43-63 mA).
+   - The paper's protocol, one fit, on held-out 5 s rollouts:
+     - combined loss, 100k updates: 0.359 mV / 0.171 mA;
+     - constraint-first, 25k + 75k updates: 0.355 mV / 0.168 mA;
+     - Table 3's C-PHAST medians are 1.2 mV / 0.74 mA, ranging over 0.13-3.2 mV.
+
+     The constraint-first law is a test fixture (`tests/data/ph_dgu_trained.json`).
    - Not yet: calibration on source networks (Eqs. 76-77), the Go2 leg blocks (Phase 5 first).
      Shubham's checkpoints, if they come, load as `"cvc-ph-law/1"` through the fixture
      script's exporter.

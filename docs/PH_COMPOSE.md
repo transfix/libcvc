@@ -213,6 +213,22 @@ The isolated-DGU calibration follows the electrical studies:
 `cvc ph train-dgu <out>` runs the whole calibration and writes the trained law;
 `pycvc.ph_train_dgu(...)` returns it with its scores.
 
+**Measured** with the paper's protocol (`cvc ph train-dgu` defaults: 32 training runs of 200
+transitions, 16 held-out runs of 500 (5 s), a family of 2,405 parameters, batch 128, Adam
+1e-4, 12 threads), held-out capacitor-voltage / inductor-current RMSE:
+
+| law | voltage RMSE | current RMSE | training |
+| --- | --- | --- | --- |
+| fitted linear | 107.3 mV | 57.6 mA | none |
+| combined loss, 100,000 updates | 0.359 mV | 0.171 mA | 73 min |
+| constraint-first, 25,000 + 75,000 updates | 0.355 mV | 0.168 mA | 63 min |
+| C-PHAST's Table 3, five fits: median (range) | 1.2 mV (0.13-3.2) | 0.74 mA (0.05-1.9) | |
+
+This is one fit, against the paper's five, so it lies within the paper's range rather than
+reproducing its spread. As in the paper, the two schedules differ little (about 1%). The
+constraint-first law is `src/cvc/tests/data/ph_dgu_trained.json`; `ph_train_test` holds it to
+its score.
+
 ## Files
 
 ### `cvc-ph-law/1`

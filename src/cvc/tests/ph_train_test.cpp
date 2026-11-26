@@ -25,6 +25,7 @@
 #include <cvc/ph/microgrid.h>
 #include <cvc/ph/rng.h>
 #include <cvc/ph/train.h>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
@@ -276,6 +277,29 @@ TEST(PhTrain, ARunBeatsTheLinearWarmStartOnHeldOutRollouts) {
   back->effort(x, eb);
   EXPECT_EQ(ea[0], eb[0]);
   EXPECT_EQ(ea[1], eb[1]);
+}
+
+// ── the full protocol's law ────────────────────────────────────────────────────────────────────
+
+TEST(PhTrain, TheFullProtocolsLawKeepsItsHeldOutScore) {
+  // tests/data/ph_dgu_trained.json is `cvc ph train-dgu` with the paper's settings and the
+  // constraint-first schedule (25,000 + 75,000 updates, 2,405 parameters; about an hour on 12
+  // threads). Its held-out set is the command's: 16 runs of 500 transitions, data seed 2. The
+  // fitted-linear control scores 107 mV / 58 mA on it; the trained law 0.355 mV / 0.168 mA.
+  const law_ptr law = load_law(
+      (std::filesystem::path(__FILE__).parent_path() / "data" / "ph_dgu_trained.json").string());
+  const law_ptr ref = reference_dgu();
+  dgu_dataset_options o;
+  o.trajectories = 16;
+  o.transitions = 500;
+  o.seed = 2;
+  const dgu_dataset test = make_dgu_dataset(*ref, o);
+  const dgu_eval e = evaluate_dgu(*law, *ref, test);
+  RecordProperty("voltage_rmse_V", sci(e.voltage_rmse));
+  RecordProperty("current_rmse_A", sci(e.current_rmse));
+  ASSERT_TRUE(e.finite);
+  EXPECT_LT(e.voltage_rmse, 4e-4);
+  EXPECT_LT(e.current_rmse, 2e-4);
 }
 
 } // namespace
