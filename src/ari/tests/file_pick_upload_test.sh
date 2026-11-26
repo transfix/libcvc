@@ -73,9 +73,20 @@ wait_for "Attach a file" || fail "Attach did not open the Open file window"
 wait_for "photo.bin" || fail "the Open file window does not list the folder"
 tmux -L "$sock" send-keys -t ari -l "photo.bin"
 # Enter on its own, as a person presses it: tvision reads keys that come in a burst (three or more
-# at once) as a paste, and a paste's Enter is a line break, which a one-line field drops.
-sleep 0.3
-tmux -L "$sock" send-keys -t ari Enter
+# at once) as a paste, and a paste's Enter is a line break, which a one-line field drops. So Enter
+# goes once the field shows the name (the burst read), and again while the window stays open: a
+# slow build (CI's Debug) can still read the name and the Enter in one burst.
+wait_for "[photo.bin" || fail "the name never showed in the Open file window"
+sleep 0.5
+for _ in 1 2 3; do
+  tmux -L "$sock" send-keys -t ari Enter
+  open=1
+  for _ in $(seq 1 30); do
+    screen | grep -qF "Attach a file" || { open=0; break; }
+    sleep 0.1
+  done
+  [ "$open" = 0 ] && break
+done
 wait_for "Sent 5000 of 5000 bytes." || fail "the upload did not finish"
 
 got=$(python3 -c 'import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1]).read().decode())' "$base/up")
