@@ -1,11 +1,12 @@
 name: publish-cvcgl-wasm
 
 # Build + publish libcvc and cvcgl for the wasm-mt platform (WebAssembly +
-# pthreads), so downstream wasm consumers (browser apps built on cvcGL) can
-# `cvcpkg install cvc/cvcgl --platform wasm-mt` instead of rebuilding cvcGL from
-# source. The wasm-mt DEPS (vtk/imgui/boost/codecs, all wasm32) are already on
-# the catalog; only libcvc + cvcgl were missing. cvcgl is built WITH imgui, so
-# the browser overlay works.
+# pthreads) and the single-threaded wasm platform, so downstream wasm consumers
+# (browser apps built on cvcGL) can `cvcpkg install cvc/cvcgl --platform wasm-mt`
+# (or `--platform wasm`) instead of rebuilding cvcGL from source. The DEPS
+# (vtk/imgui/boost/codecs, all wasm32) are already on the catalog for both; only
+# libcvc + cvcgl were missing. cvcgl is built WITH imgui, so the browser overlay
+# works.
 #
 # Also builds + publishes libcvc-examples-web for wasm-mt: the examples' threaded
 # browser gallery that libcvc-examples' launcher serves (every `wasm-demos` target,
@@ -46,11 +47,22 @@ jobs:
     # toolchain + cmake/ninja from the cvcpkg catalog. No dependency on a box with
     # a pre-installed emsdk (this used to pin to catx-03's /opt/cvc-wasm/emsdk) —
     # emsdk is just a cvcpkg package, so any linux runner works identically.
+    #
+    # One leg per flavour: the libcvc and cvcgl SDK bundles for wasm-mt (-pthread) and for wasm
+    # (single-threaded, as arigl-web's and ariglx-web's single-threaded pages are built), each
+    # against its own dep closure, since Emscripten won't link -pthread and non-pthread objects.
+    # The cvcGL JS tests and the libcvc-examples-web gallery are the wasm-mt leg's alone.
+    name: libcvc + cvcgl (${{ matrix.platform }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [wasm-mt, wasm]
     env:
       EMSDK_DIR: ${{ github.workspace }}/emsdk
       WASM_DEPS: ${{ github.workspace }}/wasm-deps
       INST: ${{ github.workspace }}/wasm-inst
+      PLATFORM: ${{ matrix.platform }}
       # Only a manual dispatch can dry-run; a tag push always publishes.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
@@ -85,9 +97,10 @@ jobs:
 
       - name: cvcGL browser-side JS tests (state shim, glsync, serve.py)
         # The shim ships in the bundle built below; test it first, with the emsdk's own node.
+        if: matrix.platform == 'wasm-mt'
         run: src/cvcGL/wasm/run-js-tests.sh
 
-      - name: Install the wasm-mt dep closure
+      - name: Install the ${{ matrix.platform }} dep closure
         # The same list + flags the nightly installs; libcvc/cvcGL link these. sdl3 backs the
         # cvcGL input/peripheral seam (CVC_ENABLE_SDL): with it in $WASM_DEPS, cvcGL's
         # find_package(SDL3 CONFIG) (resolved via CMAKE_FIND_ROOT_PATH below) links SDL3::SDL3
@@ -104,14 +117,17 @@ jobs:
           for p in zlib bzip2 xz zstd libpng libjpeg-turbo tiff freetype libwebp libxml2 lerc assimp imagemagick boost imgui-w32 sdl3 vtk pegtl joltphysics yaml-cpp ftxui; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
-              --platform wasm-mt --arch wasm32 --config release --link static \
+              --platform "$PLATFORM" --arch wasm32 --config release --link static \
               --no-fallback-to-source 2>&1 | tail -3 || { echo "::error::failed to install wasm dep $p"; exit 1; }
           done
 
-      - name: Build + install libcvc + cvcGL (wasm-mt, with imgui + sdl3)
+      - name: Build + install libcvc + cvcGL (${{ matrix.platform }}, with imgui + sdl3)
         # ONE emscripten configure builds both cvc + cvcGL targets and installs
         # them into $INST (the same single-configure shape a standalone downstream
-        # wasm-mt app build uses). -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
+        # wasm app build uses). -DCVC_BUILD_EXAMPLES=OFF: libcvc's own demos never build.
+        # CVC_WASM_PTHREADS follows the flavour.
+        env:
+          PTHREADS: ${{ matrix.platform == 'wasm-mt' && 'ON' || 'OFF' }}
         run: |
           # shellcheck disable=SC1091
           source "$CVC_EMSDK_DIR/emsdk_env.sh"
@@ -124,7 +140,7 @@ jobs:
             -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
             -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=ON \
             -DCVC_ENABLE_MESHER=OFF -DCVC_ENABLE_SDF=ON \
-            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS=ON \
+            -DCVC_BUILD_CVCGL=ON -DCVC_BUILD_EXAMPLES=OFF -DCVC_WASM_PTHREADS="$PTHREADS" \
             -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF
           # CVC_BUILD_ARI=OFF, CVC_BUILD_ARIGL=OFF: this SDK bundle is the libraries; the `ari` and
           # `arigl` runners are not built here (only cvc + cvcGL are), and with either option on,
@@ -160,28 +176,28 @@ jobs:
             || { echo "::error::cvcGL wasm did NOT link SDL3 (find_package(SDL3) failed under emcmake despite sdl3 in \$WASM_DEPS) — the input seam fell back to the VTK interactor"; exit 1; }
           echo "cvcGL wasm: SDL3 input seam ENABLED (find_dependency(SDL3) present)"
           # cvcgl_wasm_app(): the WebGL state shim and the CMake function that links it must ship,
-          # the config must say this cvcGL is -pthread (MIMALLOC AUTO follows it), and none of the
-          # three CMake files may name a path on this runner (the JS dir is computed from the
+          # the config must say whether this cvcGL is -pthread (MIMALLOC AUTO follows it), and none
+          # of the three CMake files may name a path on this runner (the JS dir is computed from the
           # installed config's own location).
           test -f "$INST/share/cvcGL/wasm/webgl_state_shadow.js" \
             || { echo "::error::cvcGL wasm bundle has no share/cvcGL/wasm/webgl_state_shadow.js"; exit 1; }
           grep -q "function(cvcgl_wasm_app" "$INST/lib/cmake/cvcGL/cvcGLWasm.cmake" \
             || { echo "::error::cvcGL wasm bundle has no cvcgl_wasm_app() (lib/cmake/cvcGL/cvcGLWasm.cmake)"; exit 1; }
-          grep -q "CVCGL_WASM_PTHREADS ON" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
-            || { echo "::error::cvcGLConfig.cmake does not record the -pthread build (CVCGL_WASM_PTHREADS)"; exit 1; }
+          grep -q "CVCGL_WASM_PTHREADS $PTHREADS" "$INST/lib/cmake/cvcGL/cvcGLConfig.cmake" \
+            || { echo "::error::cvcGLConfig.cmake does not record CVCGL_WASM_PTHREADS $PTHREADS for this $PLATFORM build"; exit 1; }
           if grep -nF -e "$GITHUB_WORKSPACE" -e "$INST" "$INST"/lib/cmake/cvcGL/cvcGLConfig.cmake \
                "$INST"/lib/cmake/cvcGL/cvcGLTargets.cmake "$INST"/lib/cmake/cvcGL/cvcGLWasm.cmake; then
             echo "::error::cvcGL's installed CMake files name a path on this runner (not relocatable)"; exit 1
           fi
 
-      - name: Pack + publish libcvc + cvcgl wasm-mt
+      - name: Pack + publish libcvc + cvcgl ${{ matrix.platform }}
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
         run: |
           mkdir -p dist
           for r in libcvc cvcgl; do
             cvcpkg pack "cvcpkg/recipes/$r" --from-prefix "$INST" \
-              --platform wasm-mt --config release --link static \
+              --platform "$PLATFORM" --config release --link static \
               --local --output-dir dist
           done
           ls -la dist/
@@ -190,16 +206,17 @@ jobs:
           fi
           [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
           # Publish by archive PATH (the archive's own manifest carries the
-          # wasm-mt platform/arch; publish-by-name would re-derive the host arch).
-          # Skip any archive whose exact name+version is already on the catalog:
-          # libcvc/cvcgl wasm-mt are typically already published at these versions,
-          # and re-publishing the same +cvc.N would fail. A revision bump republishes.
-          for a in dist/libcvc-*-wasm-mt-*.tar.gz dist/cvcgl-*-wasm-mt-*.tar.gz; do
+          # platform/arch; publish-by-name would re-derive the host arch).
+          # Skip any archive whose exact name+version this flavour already has on
+          # the catalog (re-publishing the same +cvc.N would fail); the platform
+          # column is matched too, so one flavour never stands in for the other.
+          # A revision bump republishes.
+          for a in dist/libcvc-*-"$PLATFORM"-wasm32-*.tar.gz dist/cvcgl-*-"$PLATFORM"-wasm32-*.tar.gz; do
             base=$(basename "$a" .tar.gz)
             name=$(echo "$base" | sed -E 's/-[0-9].*$//')
-            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-wasm-mt-.*$//")
-            if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
-                 | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
+            ver=$(echo "$base" | sed -E "s/^${name}-//; s/-${PLATFORM}-wasm32-.*$//")
+            if cvcpkg search "$name" --platform "$PLATFORM" 2>/dev/null \
+                 | awk -v n="$name" -v v="$ver" -v p="$PLATFORM" '$1==n && $2==v && $3==p{f=1} END{exit !f}'; then
               echo "=== skip $name $ver (already on catalog) ==="; continue
             fi
             echo "=== publish $a ==="
@@ -207,6 +224,7 @@ jobs:
           done
 
       - name: Build + pack + publish libcvc-examples-web (wasm-mt gallery)
+        if: matrix.platform == 'wasm-mt'
         # The threaded browser gallery libcvc-examples' launcher serves: every
         # `wasm-demos` target (examples/CMakeLists.txt), with the real Austin scene +
         # trained weights preloaded — what gh-pages serves, less the single-threaded
