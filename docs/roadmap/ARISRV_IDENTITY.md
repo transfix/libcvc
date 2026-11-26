@@ -280,16 +280,27 @@ arisrv.clients.<client_id>.
 - **What each connection says about itself.** A `client` beside the device id: its **kind**, its
   **version**, and its **capabilities**.
   - **kind** is one short lowercase word (1-32 bytes of `[a-z0-9._-]`; anything else is
-    `unknown`). It is an app's own name when a document declares one
-    (`nicotina`, `sublevels`, `cyprty`), else the host's (`arigl`, `arigl-web`, `ari`, `ariglx`,
-    `arix`), and `nmdc` for a legacy NMDC client on the net engine (2.8).
-  - **version** is free text for the log, at most 64 printable bytes: the host's libcvc version, or
-    an NMDC client's `$MyINFO` tag.
-  - **capabilities** are the services the client can use, as dotted names: `chat`, `chat.dm`,
-    `files.share`, `files.search`, `files.transfer`, `conference.audio`, `conference.video`,
-    `conference.avatar`, `e2ee.dm`, `programs` (S3), `guests` (G4). The set is open: an unknown
-    name is kept as given, so an app can add its own (`sublevels.hublist`). Each is 1-64 bytes of
-    `[a-z0-9._-]`, at most 32 of them, without repeats (`client_registry::clean_client`).
+    `unknown`). It is an app's own name when a document declares one (`sublevels`, `cyprty`), else
+    the host's (`arigl`, `arigl-web`, `ari`, `ariglx`, `arix`), and `nmdc` for a legacy NMDC client
+    that a relay's program serves (2.8).
+  - **version** is free text for the log, at most 64 printable bytes: the app's and the host's
+    (`sublevels 0.9 / libcvc 4.0.9`, from the document's `meta.version` and the host), or an NMDC
+    client's `$MyINFO` tag.
+  - **capabilities** are the services the client can use, as dotted names. The set is open: an
+    unknown name is kept as given, so an app can add its own (`sublevels.hublist`). Each is 1-64
+    bytes of `[a-z0-9._-]`, at most 32 of them, without repeats (`client_registry::clean_client`).
+    The ones the relay and its documents know:
+
+    | name | the client can |
+    |---|---|
+    | `chat` | read and post in the room's chat |
+    | `chat.dm` | send and take direct messages |
+    | `e2ee.dm.<scheme>` | send and take end-to-end encrypted DMs in that scheme (nicotina's would be `e2ee.dm.txwtf1`: libsodium sealed boxes with txwtf-hosted prekeys). The scheme is in the name, so two apps with incompatible schemes never both claim one |
+    | `files.share` | offer a share list others can browse (as NMDC's are) |
+    | `files.search` | search others' shares |
+    | `files.transfer` | send a file, and take one it is sent |
+    | `conference.audio`, `conference.video`, `conference.avatar` | take part in the room's media and 3D |
+    | `programs`, `guests` | send client programs (S3) and guests (G4) |
 - **Where it comes from.**
   - A native client sends it in its `Hello`: a new `ClientInfo client = 6` (`kind = 1`,
     `version = 2`, `repeated string capabilities = 3`). Older clients send none, and are recorded
@@ -298,17 +309,24 @@ arisrv.clients.<client_id>.
     `conference.audio`, `conference.video` and `conference.avatar`; `arigl-web` the same; `ari`
     `chat`. A host leaves out what its build can't do (no media in `ari`).
   - A document names its app with a top-level `client:` block, which the host sends in place of
-    its defaults, less what the host can't serve:
+    its defaults, less the names the host knows it can't serve (`conference.*`, `files.*`):
 
     ```yaml
-    client: { kind: nicotina, capabilities: [chat, chat.dm, e2ee.dm, files.share, conference.audio] }
+    client: { kind: sublevels, capabilities: [chat, chat.dm, files.share, files.search, files.transfer, conference.audio] }
     ```
-  - An NMDC connection's are set by the program that speaks NMDC (sublevels), through the
-    registry's engine entry point (2.8): kind `nmdc`, the `$MyINFO` tag as its version, and what
-    NMDC carries (`chat`, `chat.dm`, `files.search`, `files.transfer`).
+
+    An app's own names depend on state the host can't see (no libsodium in a wasm build, no E2EE
+    store open), so `capabilities:` may also be an expression, evaluated when the host dials:
+    `capabilities: (if (has? "e2ee-seal") (list "chat.dm" "e2ee.dm.txwtf1") (list "chat.dm"))`.
+    A static list can't over-claim what an expression checks.
+  - A connection's are set by the relay's program that serves it (sublevels, for NMDC), through
+    the registry (2.8): kind `nmdc`, the `$MyINFO` tag as its version, and what the protocol
+    carries, updated as it changes (`chat` and `chat.dm` for a ChatOnly client; `files.share` only
+    while its share is above 0).
 - **A claim, not a credential.** Like the device id, it is what the client says. The relay and its
-  programs may use it to route and to offer services (no video to an NMDC user, a list of who can
-  share files), never for authority: roles come from the principal and rcon.
+  programs may use it to route and to offer services (no video to an NMDC user, a DM button only
+  for peers with `chat.dm`, "send a file" only to `files.transfer`), never for authority: roles
+  come from the principal and rcon.
 - **Where it shows.**
   - Each connection in the log keeps its kind, version and capabilities. The record's `kind` and
     `capabilities` are its newest active connection's.
@@ -320,34 +338,47 @@ arisrv.clients.<client_id>.
     video or shares files. The version stays private: it would fingerprint a client (D6).
   - arisrvx: `host.clients` and `ctx.client` carry them (2.9).
 
-### 2.8 Engine connections in the registry (ID5b)
+### 2.8 A program's connections in the registry (ID5b)
 
 The seam ARIADNE_NET_ENGINE.md §2.6 asks for: a record for a connection that has no `Hello` and no
-pid, keyed by the net engine's connection id.
+pid. The relay's program serves it (an NMDC client, on the net engine or, until the engine's TLS
+ships, on its own asyncio sockets) and reports it under a key of its own.
 
-- **The entry points** (`client_registry`, on the room loop like the rest; the engine's I/O
-  threads queue their events to it, as the transports' departures are queued today):
-  - `open_engine(conn_id, transport, public_address, local_address, client, now)` opens a
-    connection in the record of the address-fallback client id (2.1, D1). `transport` is the
-    listener's name (`nmdc`, `nmdcs`, `tcp`, `tls`). It returns the client id, or a refusal for a
-    banned id, which the engine applies at accept.
-  - `name_engine(conn_id, nick, now)` sets the username from the protocol (an NMDC nick), under
-    the registry's rules (unique among active clients). A refusal says it is taken, for the
-    program to refuse the login.
-  - `close_engine(conn_id, now)` closes the connection in its record's log.
-- **Admin, one surface.** `links_of` returns engine connections as `{transport, connection}` too,
-  and `server.kick` and `server.ban` close them through a closer the host sets on the registry
-  (`set_engine_closer`), which calls the engine. A ban also refuses the id at its next accept.
-- **No pid.** An engine connection is in no room tree, so it has no participant node, and it can't
-  hold rcon. `server.clients` lists it with its transport.
+- **The entry points** (`client_registry`, transfix/libcvc#1571; on the room loop like the rest):
+  - `open_engine(key, transport, public_address, local_address, client, geo, now, wall)` opens a
+    connection in the record of the address-fallback client id (2.1, D1). `key` is the program's
+    (1-128 bytes of `[A-Za-z0-9._:-]`, such as `nmdc:41` or `asyncio:7`), not reused while open.
+    `transport` is its listener's name (`nmdc`, `nmdcs`, `tcp`, `tls`). `geo` is where the address
+    is, when the program looked it up before its handshake (sublevels does, before `$Lock`), so
+    arisrvx needn't ask `@host.geolocate` again. It returns the client id, or a refusal for a banned
+    id, which the program applies at accept.
+  - `name_engine(key, nick)` sets the username from the protocol (an NMDC nick, up to 64 bytes as
+    NMDC's are; a native name stays at 32), unique among active clients. It refuses a taken nick
+    and never adds a suffix, since a renamed NMDC nick breaks the client; the program refuses the
+    login.
+  - `update_engine(key, client)` changes what the connection says it is, as its protocol does.
+  - `close_engine(key, wall)` closes the connection in its record's log.
+- **The program drives it**, from its accept hook: arisrvx's `host.clients.open_engine(...)` from
+  `on_accept`, after the program's own location policy and bans, then `name_engine` at
+  `$ValidateNick` (ID4c). A listener option that registers every accepted connection
+  (`register_clients`) can come later, for programs that want nothing of their own there.
+- **Admin, one surface.** `links_of` returns a program's connections as `{transport, key}`, and
+  `server.kick` and `server.ban` close them through a closer the program sets
+  (`host.clients.set_closer(fn)`), called with `(key, reason, kind)` where `kind` is `kick` or
+  `ban`, so the program can send its reason line before it closes. A ban also refuses the id at
+  its next accept.
+- **No pid.** A program's connection is in no room tree, so it has no participant node, and it
+  can't hold rcon. `server.clients` lists it with its transport.
 
 ### 2.9 ID4c, now the identity session's
 
 ID4c's scope is unchanged (3): the Python route, `host.clients`, `ctx.client`,
 `@host.geolocate` and `host.guest_password_ok`, with ID5's kind and capabilities in `host.clients`
-and `ctx.client`. `@host.geolocate(address)` returns `{country, region, city, asn}` (sublevels
-supplies one from GeoLite2). arisrvx asks it once per new connection, off the room loop, and
-keeps the answer in that connection's log entry (`geo.*`).
+and `ctx.client`, and 2.8's `host.clients.open_engine` / `name_engine` / `update_engine` /
+`close_engine` / `set_closer`. `@host.geolocate(address)` returns `{country, region, city, asn}`,
+any of them `None` (GeoLite2 City has no ASN; sublevels supplies one from GeoLite2). arisrvx asks
+it once per new native connection, off the room loop, and keeps the answer in that connection's
+log entry (`geo.*`); a program's connection brings its own.
 
 ## 3. Parts
 
@@ -360,7 +391,7 @@ keeps the answer in that connection's log entry (`geo.*`).
 | ID4b | The python-guest module (cvcpkg recipe) | "arisrvx S1: Python engine" | the cvcpkg recipe, `src/ariadne_wasm/*` |
 | ID4c | The Python route and `host.clients` / `ctx.client` / `@host.geolocate` / `host.guest_password_ok` | the identity session (from 2026-11-26; was "arisrvx S1: Python engine") | `server_document.*`, `room_calls.*` if a `language` field is needed, `ariadne_server.py`, `python_engine.cpp`, `server_link.{h,cpp}` |
 | ID5a | Client kinds and capabilities (2.7): `Hello.client`, the hosts' defaults and a document's `client:` block, the registry's fields, `server.*`, the participant's `client.*` | the identity session | `state_transport.proto` + both transports, `client_registry.*`, `room_write_gate.*`, `relay_session.*`, arigl `main.cpp`, the loader (`client:`), arisrv `main.cpp` |
-| ID5b | Engine connections in the registry (2.8): `open_engine` / `name_engine` / `close_engine`, the closer, kick and ban | the identity session, with the net engine's owner | `client_registry.*`, arisrv `main.cpp`, `net_engine.*` (`register_clients`) |
+| ID5b | A program's connections in the registry (2.8): `open_engine` / `name_engine` / `update_engine` / `close_engine` (transfix/libcvc#1571), the program's closer, kick and ban | the identity session | `client_registry.*`, arisrv `main.cpp`, `ariadne_server.py` (`host.clients`, with ID4c) |
 
 - arisrv `main.cpp` is the identity session's in every part. Whatever ID4 needs wired there, it
   wires: the `set_client_limits` callback, the call event's `client` beside `principal`,
@@ -407,3 +438,9 @@ keeps the answer in that connection's log entry (`geo.*`).
     kind and defaults go out.
   - **D8.** Kinds and capabilities are claims: used to route and offer services, never to grant
     anything.
+  - Reviewed 2026-11-26: sublevels (prettyhatemachine) agrees with D6-D8 and asked for 2.8's
+    program keys, the program's closer with a reason, `update_engine`, NMDC's 64-byte nicks and a
+    geo at open; the cypkg/nicotina session asked for the scheme in `e2ee.dm.<scheme>`, the
+    `files.share` / `files.transfer` split, an expression for an app's capabilities, the app's
+    version in the log, and not to show nicotina's set before nicotina joins a relay. All are in
+    2.7-2.9.
