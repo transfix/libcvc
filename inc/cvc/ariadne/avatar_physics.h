@@ -209,6 +209,11 @@ public:
   // every dynamic avatar with drag against its box (0.5 x 1.7 m across it: 50 N at 9 m/s), and
   // the walker leans into it within force_max. A speed of 0 takes the field out.
   void set_wind(const cvc::algo::wind_state &w, double base_z = 0.0);
+  // The water the avatars are in (OW9a, ARIADNE_WORLDS.md section 18.10): fluid fields as the
+  // relay's world has them (a sea, its free surface read at set_time's time), so a dynamic avatar
+  // floats and is dragged as it is there. Replaces the water set before; an empty list dries the
+  // world. A shared world's water is its owner's: nothing.
+  void set_water(const std::vector<cvc::physics::field> &water);
   // The time the wind's gusts are read at (world::set_field_time): the holon sets it to its tick's,
   // so the server and every client read the same gust at the same tick.
   void set_time(double t);
@@ -312,6 +317,7 @@ private:
   std::uint32_t create_obstacle(const cvc::physics::vec3 &half_extents,
                                 const cvc::physics::body_state &centre);
   std::uint32_t _wind_field = 0xffffffffu; // the wind's flow field (none)
+  std::vector<cvc::physics::field_id> _water_fields; // set_water's fluid fields
 };
 
 // A kinematic avatar's drift in a wind (O14): what a body the host places, not the solver, does in
