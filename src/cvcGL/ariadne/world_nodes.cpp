@@ -1011,11 +1011,12 @@ bool put_world_step(WorldRT &rt, double budget_ms) {
 }
 
 // The job's world as its bundle (world::generated_world_bundle), its ground the job's texture when
-// that is the bundle's ground (the material colours at world::world_ground_size), else painted
-// for it.
+// that is the bundle's ground (the material colours at world::world_ground_size_for the world),
+// else painted for it: the same bundle whoever writes it.
 world::city_bundle_files generated_world_bundle_of(cvc::app &app, const WorldJob &job, int size) {
   world::world_ground ground;
-  if (job.color == int(world::surface_color::material) && size == world::world_ground_size &&
+  if (job.color == int(world::surface_color::material) &&
+      size == world::world_ground_size_for(*job.world) &&
       job.texture.size() == std::size_t(size) * std::size_t(size) * 3) {
     ground.width = ground.height = size;
     ground.rgb = job.texture;
@@ -1076,7 +1077,7 @@ public:
       // The world as its bundle, here rather than on the frame thread when it goes in (a 1.2 km
       // world's is about 30 MB and 1.6 s to write): its dataset is that bundle read back. Its
       // ground is the texture just painted when that is the bundle's (the material colours at
-      // world_ground_size); in another colour or size it is painted again for the bundle.
+      // world_ground_size_for the world); in another colour or size it is painted for the bundle.
       set("bundle", kPaintEnd);
       try {
         if (cvc::can_write_model_to_memory(".glb"))
