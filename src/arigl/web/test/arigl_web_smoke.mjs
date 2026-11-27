@@ -22,8 +22,8 @@
 //
 // A relay that goes silent without closing (its host gone, the path to it cut) must not hold the
 // page's conference link for good: the page closes a link that has sent nothing for 10 s
-// (state_transport::reap_idle) and dials again. Only a package with the WebSocket transport has a
-// conference link (arigl-web; not ariglx-web, built without it), so the case runs there alone.
+// (state_transport::reap_idle) and dials again. Only arigl-web has a conference link (ariglx-web is
+// built without the WebSocket transport), so the case runs there alone.
 //
 // The browser gate (docs/roadmap/WASM_JSPI_EXCEPTIONS.md, JX4): with WebAssembly.Suspending deleted
 // before the page's own script runs, as in a browser without JSPI, each page must show the browsers
@@ -162,12 +162,13 @@ const SILENT_CONFIG = JSON.stringify({
   env: {CVC_ARIADNE_RELAY: '{ws_origin}/apps/silent-relay', CVC_ARIADNE_NAME: 'smoke'},
 });
 const silent = {opens: 0, closes: 0};
-// Whether the package's module has the WebSocket transport (the browser's WebSocket API in its
-// glue, as cyprty's stage.sh checks): without it, CVC_ARIADNE_RELAY runs the document locally.
-const HAS_WS = ['arigl.js', 'ariglx.js'].some(f => {
-  const js = path.join(WEB, f);
-  return fs.existsSync(js) && fs.readFileSync(js, 'utf8').includes('emscripten_websocket');
-});
+// Whether the package's page is a conference client: arigl-web, whose module has the WebSocket
+// transport (the browser's WebSocket API in arigl.js's glue, as cyprty's stage.sh checks). Not
+// ariglx-web, built without the transport (CVC_ENABLE_WS off), where CVC_ARIADNE_RELAY runs the
+// document locally. Its threaded (wasm-mt) glue has the WebSocket API all the same, so the glue alone
+// can't tell.
+const HAS_WS = !PYTHON && fs.existsSync(path.join(WEB, 'arigl.js')) &&
+               fs.readFileSync(path.join(WEB, 'arigl.js'), 'utf8').includes('emscripten_websocket');
 function silentRelay(req, socket) {
   const key = req.headers['sec-websocket-key'];
   if (!key) return socket.destroy();

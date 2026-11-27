@@ -604,10 +604,11 @@ its own world document.
     navigator of their own on the grid; `physics.stats.vehicles` names each one's plant; cvcGL
     poses a box look's wheels where its plant has them. A spawn may name a plant of its own
     (`entity_spec::plant`), as a gym's agents do (L4).
-  - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
-    the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
-    chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
-    asset: }` names another mesh.
+  - Looks: a humvee is the vehicle-humvee package's Humvee when it is installed (found under the
+    cvcpkg prefixes): in parts, its wheels turning, where the package has its `humvee/` parts
+    (1.0.0+cvc.5 on; ARIADNE.md, "A model in parts"), else the one-piece `Humvee.glb`, oriented
+    and scaled to the chassis as the nav demos do it; else its chassis box in the entity's colours
+    with a cabin and wheels. `look: { model: | file: | asset: }` names another mesh.
   - Controllers: `nav@1` (with a policy per entity, by `policy_library`), `none`, or `external`.
   - Intents (L2a, built 2026-11-14): any entity takes a wanted steer and acceleration that
     replaces or blends with its controller's command (`sim_world::override_command`, which takes
@@ -1587,7 +1588,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people, from Python too, a person hit a person's; OW7b: the traffic world hosting people among its cars, measured; OW7c: cars brake for people; OW7d: scripted people step around cars, and the live check, arisrv hosting traffic.ari with arigl clients over gRPC and WebSocket; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
-| OW9 | **Planned** (2026-11-26, §18.10). **Water: wading and swimming.** Today an avatar floats like a cork on the relay and walks on the bed in a client's prediction. OW9a: the same water in the client's avatar world; OW9b: a person's density, floating head-out; OW9c: walker@2, wading slower by depth, swimming at a swimmer's pace and cost, diving, climbing out; OW9d: the swimmer drawn, its controls, the live check. | M |
+| OW9 | **Started** (2026-11-26, §18.10; OW9a: the room's water in the client's avatar world, replayed by tick). **Water: wading and swimming.** Today an avatar floats like a cork on the relay and walks on the bed in a client's prediction. OW9a: the same water in the client's avatar world; OW9b: a person's density, floating head-out; OW9c: walker@2, wading slower by depth, swimming at a swimmer's pace and cost, diving, climbing out; OW9d: the swimmer drawn, its controls, the live check. | M |
 
 **Open:**
 
@@ -1635,7 +1636,7 @@ files beside them:
 | `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs `props_r1` and `props_r2`), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
 | `props.json` | The props' render cells: the cell size and, per cell, its bounds and its run of triangles (lines, for the needles) in each prop mesh, so a renderer draws a cell as a ladder of rungs. A cell's points are the ones its faces use. |
 | `streets.json` | The street network the roads were extruded from (nodes, and segments with their widths and classes), and the city's counts (buildings, districts, road length). |
-| `ground.png` | The painted ground texture (the material colours, 2048 a side, north at the top), where a city has `satellite.png`. |
+| `ground.png` | The painted ground texture (the material colours, north at the top), where a city has `satellite.png`. It is 2048 a side on a world 256 m across or more, and fewer on a smaller one: the fewest, a power of two, at most 0.25 m a texel (`world_ground_size_for`; 1024 on a 200 m world). |
 
 - **Nav materials** are the terrain's cell surfaces and each item's face surfaces, read through
   the one surface table, so the renderer, the physics and the navigator read the same materials
@@ -1911,10 +1912,31 @@ beside walk, car and boat (OW6a); its hints are in the Controls window.
 
 | Sub-phase | What | Size |
 |---|---|---|
-| OW9a | **The same water on the client.** The room's water as fields in the client's avatar world, on the relay's clock, replayed by tick. Before any new behaviour: the snap at the shore goes, and the avatar floats in prediction as on the relay. A holon_sync test walks a client into a lake: predicted against the relay's poses, corrections counted. | M |
+| OW9a | **Built** (2026-11-26). **The same water on the client.** The room's water as fields in the client's avatar world, on the relay's clock, replayed by tick. Before any new behaviour: the snap at the shore goes, and the avatar floats in prediction as on the relay. A holon_sync test walks a client into a lake: predicted against the relay's poses, corrections counted. | M |
 | OW9b | **People float like people.** `avatar_body::density`, `field_set::mark_avatar`, the rules key. The default person floats head-out (its top 2.5 cm above a still surface, the probe's -0.28 m becomes about -1.68 m). | S |
 | OW9c | **walker@2: wading and swimming.** The three states, the knobs, `move.z` diving and surfacing, the stroke up and climbing out, swimming's energy and ledger line, the controller state published. The stock worlds move to walker@2. Tests: the pace by depth, a swimmer's pace and cost, diving and surfacing, a current carrying a swimmer, getting out at a beach and at a quay, a client predicting it. | M |
 | OW9d | **Drawn and driven.** The swimmer's pose in arigl, the swim control scheme and its hints, the live check: arisrv hosting a world with terrain_lab's sea and clients swimming over gRPC and WebSocket. | S |
+
+- **As built (OW9a, the same water on the client; 2026-11-26).** `avatar_world::set_water` puts
+  fluid fields in a world of its own (a shared world's water is its owner's). A holon with a world
+  of its own puts the room's water there before each step (`avatar_water_for`), as a boat's model
+  takes it: the newest water in by the step ending on the tick, `set_statics`' water from the
+  start and `set_water`'s from the step ending past its tick, so a replay from before a change runs
+  in the water before it. The client's and the server's own worlds both take it (a relay's One
+  World avatars are in its scene's world, whose water is its own). In `holon_test`
+  (`AClientPredictsItsAvatarInTheRoomsWater`), a client walks into a lake 3 m deep beside the
+  server, a link's 6 frames each way:
+  - **The water in both:** the client floats where the server does (0.28 m under, the box's
+    draft), with no correction in 15 s.
+  - **The water in the server's only (before OW9a):** the client sinks toward the bed between
+    corrections, 20 m of corrections in the run, never where the server is.
+  - **The water rising half a metre, the client hearing it late:** one correction of 0.075 m (the
+    steps it predicted in the old water), then the client floats where the server does, 0.5 m
+    higher.
+
+  Not yet: the relay's wake (C6) is in its world's water and not the client's copy, so a boat's
+  wake rocks a swimmer on the relay alone; a sea's waves are read at the same tick on both but
+  their drift across platforms is not measured; not run live.
 
 **Open:**
 

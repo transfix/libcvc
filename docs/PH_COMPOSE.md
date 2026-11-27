@@ -176,6 +176,59 @@ match is in magnitude, not to the digit. Further results:
 - Measuring the full state, it picked the best in 4 of 4 and certified 1.
 - No certificate was wrong.
 
+## Training
+
+`cvc/ph/train.h` fits a component law's parameters natively, with gradients from the tape in
+`cvc/ph/ad.h`.
+
+- **The tape.** A reverse-mode tape owned by the caller; one tape per thread when the gradient is
+  split across threads. A `var` with no tape is a constant and records nothing.
+- **The law over the tape.** `canonical_t<T>` is `canonical_law`'s arithmetic written over a
+  scalar type. With `double` it is the runtime law's step to rounding. With `ad::var` one backward
+  sweep differentiates the loss through the potential's and the mass's input derivatives and
+  through the implicit midpoint's Picard iterations.
+- **The parameters.** `trainable_parameters` and `with_parameters` flatten and restore a spec's
+  trainable parameters: K's upper triangle, the centre, every net's weights and biases, and the
+  constant mass and damping where there is no net. `v_scale` and the floors stay fixed.
+
+The isolated-DGU calibration follows the electrical studies:
+
+1. `make_dgu_dataset` simulates a reference DGU law (RK4 at dt / 16) from capacitor voltages in
+   [-1.5, 1.5] V and fluxes in [-1, 1] Wb, under 0.1 A in and a 1 V source. Every sample is fully
+   observed: `(q, phi, V_src, V_src - R i, v, -i)`.
+2. `fit_linear_dgu` fits C, L and R by least squares; `linear_dgu_spec` is that fitted-linear
+   control.
+3. `warm_start_dgu` builds the trained family at those values:
+   - `V(q) = 1/2 q^2 / C + v_net(q)`, with v_net's last layer at zero;
+   - `M(q) = softplus(m_net(q)) + 0.01`;
+   - `D(q) = softplus(d_net(q)) + 0.001`, each net's last bias set to give L and R.
+4. `dgu_loss` gives the constraint loss (current balance, the resistive relation and the
+   capacitor-node voltage at the measured state) and the one-step loss (the six channels after
+   `LocalStep(dt, 2)`), weighted `1, 0.01, 1e-8 |theta|^2`, with their gradient.
+5. `train_dgu` runs Adam over random batches, optionally after constraint-only updates (the
+   staged schedule).
+6. `evaluate_dgu` scores a law on held-out open-loop rollouts: capacitor-voltage and
+   inductor-current RMSE.
+
+`cvc ph train-dgu <out>` runs the whole calibration and writes the trained law;
+`pycvc.ph_train_dgu(...)` returns it with its scores.
+
+**Measured** with the paper's protocol (`cvc ph train-dgu` defaults: 32 training runs of 200
+transitions, 16 held-out runs of 500 (5 s), a family of 2,405 parameters, batch 128, Adam
+1e-4, 12 threads), held-out capacitor-voltage / inductor-current RMSE:
+
+| law | voltage RMSE | current RMSE | training |
+| --- | --- | --- | --- |
+| fitted linear | 107.3 mV | 57.6 mA | none |
+| combined loss, 100,000 updates | 0.359 mV | 0.171 mA | 73 min |
+| constraint-first, 25,000 + 75,000 updates | 0.355 mV | 0.168 mA | 63 min |
+| C-PHAST's Table 3, five fits: median (range) | 1.2 mV (0.13-3.2) | 0.74 mA (0.05-1.9) | |
+
+This is one fit, against the paper's five, so it lies within the paper's range rather than
+reproducing its spread. As in the paper, the two schedules differ little (about 1%). The
+constraint-first law is `src/cvc/tests/data/ph_dgu_trained.json`; `ph_train_test` holds it to
+its score.
+
 ## Files
 
 ### `cvc-ph-law/1`
@@ -258,6 +311,9 @@ cvc ph simulate grid.json --x0 2.2,0,2.6,0,0 --u -0.1,1,-0.15,1.1 --steps 200 \
 cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5 --line-l 0.8 \
     [--dgu reference|linear] [--dgu-c 2.2] [--dgu-l 1.8] [--dgu-r 1.2]
 cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u -0.1,1,-0.1,1,-0.1,1,-0.1,1
+cvc ph train-dgu dgu.json [--updates 100000] [--constraint-first 25000] [--batch 128] [--lr 1e-4] \
+    [--threads 12] [--train-runs 32] [--transitions 200] [--test-runs 16] [--test-transitions 500] \
+    [--v-hidden 32,32] [--m-hidden 32,32] [--d-hidden 32] [--data-seed 1] [--init-seed 7] [--log-every N]
 ```
 
 - `check` exits 1 when the pairing does work or `dH/dt` departs from `-loss + supplied`.
@@ -287,6 +343,7 @@ f["x_now"], f["admitted"], f["rank"]
 card = g.card(f["x_now"], u, 200, [("peak", "max_abs", [6, 7]), ("loss", "total_loss", [])])
 pycvc.ph_rank([card_a, card_b], [bounds_a, bounds_b], [("peak", 0.5)], {"loss": 1.0})
 # {"best", "outcome": certified | inconclusive | abstain, "feasible", "order", ...}
+t = pycvc.ph_train_dgu(updates=2000, threads=8)   # {"law", "linear", "trained", "fit", "history", ...}
 ```
 
 ## Parity with the reference implementation

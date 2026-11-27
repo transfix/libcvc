@@ -1397,6 +1397,115 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   EXPECT_EQ(rules.vehicles[0].look.yaw, 180.0);
 }
 
+// The Humvee in parts (vehicle-humvee 1.0.0+cvc.5's humvee/chassis.glb, humvee/wheel.glb and
+// humvee/rig.json beside Humvee.glb): a humvee with no look:, or `model: humvee` unplaced, resolves
+// to a parted file look of the three, keeping the one-piece model's file; a placed model, a file
+// named, and an install without all three keep the one piece.
+TEST(AriadneWorldVehicles, TheHumveeIsInPartsWhereTheyAreInstalled) {
+  const fs::path prefix = fs::temp_directory_path() / "ariadne_world_vehicles_humvee_parts";
+  const fs::path shared = prefix / "share" / "cvc-scenes" / "shared";
+  std::error_code ec;
+  fs::remove_all(prefix, ec);
+  fs::create_directories(shared / "humvee");
+  for (const char *f : {"Humvee.glb", "humvee/chassis.glb", "humvee/wheel.glb", "humvee/rig.json"})
+    std::ofstream(shared / f) << "x";
+  EnvFor bundle("CVC_NAV_BUNDLE", "");
+  EnvFor env("CVC_PREFIX", prefix.string());
+  EnvFor cvcpkg("CVCPKG_PREFIX", "");
+  EnvFor conda("CONDA_PREFIX", "");
+  const std::string one_piece = find_vehicle_model("humvee");
+  ASSERT_NE(one_piece.find("Humvee.glb"), std::string::npos) << one_piece;
+
+  const auto archetypes = [] {
+    std::vector<vehicle_archetype> v(6);
+    v[0].id = "default"; // no look: the parts
+    v[1].id = "model";   // model: humvee, unplaced: the parts
+    v[1].look.kind = "model";
+    v[1].look.path = "humvee";
+    v[1].look.fit = true;
+    v[2].id = "turned"; // model: humvee, yaw: 180: the one piece (a parted look takes no yaw)
+    v[2].look = v[1].look;
+    v[2].look.yaw = 180.0;
+    v[3].id = "lifted"; // model: humvee, z: 0.2: the one piece
+    v[3].look = v[1].look;
+    v[3].look.z = 0.2;
+    v[4].id = "file"; // file: Humvee.glb: that file
+    v[4].look.kind = "file";
+    v[4].look.path = "Humvee.glb";
+    v[5].id = "racer"; // another preset: its box
+    v[5].preset = "roboracer";
+    return v;
+  };
+  std::vector<vehicle_archetype> v = archetypes();
+  std::vector<std::string> warnings;
+  resolve_vehicle_looks(v, (prefix / "doc").string(), {}, &warnings);
+  EXPECT_TRUE(warnings.empty());
+  for (int k : {0, 1}) {
+    const vehicle_look &look = v[k].look;
+    SCOPED_TRACE(v[k].id);
+    EXPECT_EQ(look.kind, "file");
+    EXPECT_TRUE(look.parted());
+    EXPECT_TRUE(look.fit);
+    EXPECT_EQ(fs::path(look.chassis), shared / "humvee" / "chassis.glb");
+    EXPECT_EQ(fs::path(look.wheel), shared / "humvee" / "wheel.glb");
+    EXPECT_EQ(fs::path(look.rig_file), shared / "humvee" / "rig.json");
+    EXPECT_TRUE(look.rig.hubs.empty()) << "the rig is its file's, read when it is drawn";
+    EXPECT_EQ(look.path, one_piece) << "the one piece kept, for a relay's clients";
+  }
+  for (int k : {2, 3}) {
+    SCOPED_TRACE(v[k].id);
+    EXPECT_FALSE(v[k].look.parted());
+    EXPECT_EQ(v[k].look.kind, "file");
+    EXPECT_EQ(v[k].look.path, one_piece);
+  }
+  EXPECT_EQ(v[2].look.yaw, 180.0);
+  EXPECT_EQ(v[3].look.z, 0.2);
+  EXPECT_FALSE(v[4].look.parted());
+  EXPECT_EQ(fs::path(v[4].look.path), prefix / "doc" / "Humvee.glb");
+  EXPECT_EQ(v[5].look.kind, "box");
+
+  // Resolved again (WorldVehicles resolves what a host passes it): the same.
+  std::vector<vehicle_archetype> again = {v[0]};
+  resolve_vehicle_looks(again, "", {});
+  EXPECT_EQ(again[0].look, v[0].look);
+
+  // A relay passes the look on as its kind and file: the one piece, by its file's name.
+  EXPECT_EQ(fs::path(v[0].look.path).filename().string(), "Humvee.glb");
+
+  // A host's own vehicles (a nav_swarm's agents, nav_scrub's runs) take the same look by name.
+  EXPECT_EQ(vehicle_look_named("humvee"), v[0].look);
+  const vehicle_look by_file = vehicle_look_named((shared / "Humvee.glb").string());
+  EXPECT_EQ(by_file.kind, "file");
+  EXPECT_FALSE(by_file.parted()) << "a file named is that file";
+  EXPECT_TRUE(by_file.fit);
+  std::vector<std::string> named_warnings;
+  EXPECT_EQ(vehicle_look_named("no_such_vehicle", &named_warnings).kind, "box");
+  EXPECT_TRUE(any_contains(named_warnings, "model 'no_such_vehicle' is not installed"));
+
+  // An install without all three (no rig): the one piece.
+  fs::remove(shared / "humvee" / "rig.json", ec);
+  v = archetypes();
+  resolve_vehicle_looks(v, "", {});
+  for (int k : {0, 1}) {
+    SCOPED_TRACE(v[k].id);
+    EXPECT_FALSE(v[k].look.parted());
+    EXPECT_EQ(v[k].look.kind, "file");
+    EXPECT_EQ(v[k].look.path, one_piece);
+    EXPECT_TRUE(v[k].look.fit);
+  }
+  // Neither: the box (and `model: humvee`'s warning), unless this program's own prefix has one.
+  fs::remove_all(shared, ec);
+  if (find_vehicle_model("humvee").empty()) {
+    v = archetypes();
+    warnings.clear();
+    resolve_vehicle_looks(v, "", {}, &warnings);
+    EXPECT_EQ(v[0].look.kind, "box");
+    EXPECT_EQ(v[1].look.kind, "box");
+    EXPECT_TRUE(any_contains(warnings, "model 'humvee' is not installed"));
+  }
+  fs::remove_all(prefix, ec);
+}
+
 // A look from a document's data: entry: `look: { data: NAME, file: FILE }` parses to a data look,
 // fitted unless fit: false, and resolve_vehicle_looks copies the entry's source and path: into it,
 // so the look is whole without the document (a client draws it from the same package); the loader

@@ -103,12 +103,12 @@ struct block_table {
 };
 // The top-level keys the loader reads itself (builtin_ari_blocks).
 constexpr const char *kBuiltinBlocks[] = {
-    "meta",        "menubar", "windows",      "overlays",      "root",          "children",
-    "scene",       "customs", "init",         "on_tick",       "on_key",        "on_pointer",
-    "on_signal",   "units",   "import",       "channels",      "lint",          "args",
-    "requires",    "keys",    "windows_menu", "tests",         "functions",     "data",
-    "assets",      "scenes",  "clock",        "menu_collapse", "notifications", "prototypes",
-    "context_menu"};
+    "meta",         "menubar", "windows",      "overlays",      "root",          "children",
+    "scene",        "customs", "init",         "on_tick",       "on_key",        "on_pointer",
+    "on_signal",    "units",   "import",       "channels",      "lint",          "args",
+    "requires",     "keys",    "windows_menu", "tests",         "functions",     "data",
+    "assets",       "scenes",  "clock",        "menu_collapse", "notifications", "prototypes",
+    "context_menu", "state"};
 bool is_builtin_block(const std::string &k) {
   for (const char *b : kBuiltinBlocks)
     if (k == b)
@@ -740,6 +740,7 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n); // §12 include: expand a 
 Widget expand_load(Ctx &ctx, const YAML::Node &n);    // §12 load: mount an isolated fragment
 std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
+StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where = ""); // §5.3
 Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
 std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label); // §5.9
@@ -2623,6 +2624,9 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       ctx.warn("ari: load '" + uri +
                "': the fragment's init: must be a scalar state_exec script string — ignored");
   }
+  // Its state: too (§5.3), written at the sub-prefix just before that init: runs.
+  if (frag.IsMap())
+    wrapper.state_seeds = parse_state(ctx, frag["state"], "load '" + uri + "': ");
   // Its on_tick: too, which the Runtime runs as the mount's own tick resident. The document-level
   // input lanes stay the document's: a module reacts to its own widgets, and the parent passes on
   // what else it needs through a link: hole (docs/ARIADNE.md §6.3).
@@ -4509,6 +4513,75 @@ LintConfig parse_lint(Ctx &ctx, const YAML::Node &l) {
   return cfg;
 }
 
+namespace {
+// One level of a `state:` block into `out`: `at` is the path so far (empty at the top).
+void collect_state(Ctx &ctx, const YAML::Node &n, const std::string &at, const std::string &where,
+                   StateSeeds &out, std::set<std::string> &seen) {
+  for (const auto &kv : n) {
+    if (!kv.first.IsScalar() || kv.first.Scalar().empty()) {
+      ctx.warn("ari: " + where + "state:" + (at.empty() ? "" : " '" + at + "'") +
+               ": a key that is not a name — left out");
+      continue;
+    }
+    const std::string key = kv.first.Scalar();
+    // A leading '/' is the app root (§7.1), so only a top-level key may start with one; and no
+    // segment may be empty (a.b..c, a trailing dot).
+    const std::string seg = key[0] == '/' ? key.substr(1) : key;
+    if ((key[0] == '/' && !at.empty()) || seg.empty() || seg.front() == '.' || seg.front() == '/' ||
+        seg.back() == '.' || seg.find("..") != std::string::npos) {
+      ctx.warn("ari: " + where + "state: '" + (at.empty() ? key : at + "." + key) +
+               "' is not a state path — left out");
+      continue;
+    }
+    const std::string path = at.empty() ? key : at + "." + key;
+    const YAML::Node &v = kv.second;
+    std::string text;
+    if (v.IsMap()) {
+      collect_state(ctx, v, path, where, out, seen);
+      continue;
+    }
+    if (v.IsScalar()) {
+      text = v.Scalar();
+    } else if (v.IsSequence()) { // a list of scalars, joined as a position key is: 1,2,3
+      bool ok = true, first = true;
+      for (const YAML::Node &e : v) {
+        if (!e.IsScalar()) {
+          ok = false;
+          break;
+        }
+        text += (first ? "" : ",") + e.Scalar();
+        first = false;
+      }
+      if (!ok) {
+        ctx.warn("ari: " + where + "state: '" + path +
+                 "': a list's items are scalars (a list is written joined by commas) — left out");
+        continue;
+      }
+    } // else null (`key:` with nothing after it): written as ""
+    if (!seen.insert(path).second)
+      ctx.warn("ari: " + where + "state: '" + path + "' is given twice — the later value is used");
+    out.emplace_back(path, std::move(text));
+  }
+}
+} // namespace
+
+// A document's or a module's `state:` (§5.3): a map of state paths to the literal values the host
+// writes before init: runs. A map's keys are path segments (one may hold dots), a top-level key
+// may start with '/' for the app root, a scalar is written as it is spelled, a list of scalars
+// joined by commas, and nothing as "". `where` starts each warning, as for requires:.
+StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where) {
+  StateSeeds out;
+  if (!n || n.IsNull())
+    return out;
+  if (!n.IsMap()) {
+    ctx.warn("ari: " + where + "state: is a map of state keys to their values — ignored");
+    return out;
+  }
+  std::set<std::string> seen;
+  collect_state(ctx, n, "", where, out, seen);
+  return out;
+}
+
 // A document's or a module's `requires:` (§7.6): a sequence of names, or {name, optional} maps.
 // The loader only parses it; AppRuntime::load checks it against the host. `where` starts each
 // warning ("load 'x.ari': " for a module's).
@@ -4972,6 +5045,8 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       r.init_script = in.Scalar();
     else if (in && !in.IsScalar())
       ctx.warn("ari: init: must be a scalar state_exec script string — ignored");
+    // state: (§5.3) the values the host writes under the prefix just before init: runs.
+    r.state_seeds = parse_state(ctx, doc["state"]);
 
     // §7.1/§4.6 document-level resident handlers: scalar state_exec scripts, captured like init:.
     // The host wires each to a Runtime setter: on_tick -> set_tick_program (per frame), on_key ->

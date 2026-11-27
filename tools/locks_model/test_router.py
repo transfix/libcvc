@@ -8,8 +8,9 @@ Runs router.py's quick suite (the CI lane's checks: the amended protocol finds n
 documented gaps, each finding of the frozen text is found without its amendment, each mutation is
 caught), and checks the explorer itself: the compact storage finds what the plain one finds, the
 state codec is canonical, a trace replays to its violation, the internal choices are enumerated,
-the state graph has no cycle (so the idle checks are the liveness check), and a poster waits on a
-closed home (rehome-order). Standard library only; about 25 s.
+the state graph has no cycle (so the idle checks are the liveness check), a post to a closed home
+joins its late queue, which its teardown forwards before it is done (rehome-order, S2b.R3), and
+teardown-no-wait skips it. Standard library only; about 30 s.
 """
 
 import os
@@ -105,7 +106,7 @@ class Explorer(unittest.TestCase):
                 for label in m.options(s):
                     try:
                         out += [o[1] for o in m.successors(s, label)]
-                    except (rt.Blocked, rt.Violation):
+                    except rt.Violation:
                         pass
                 succ[s] = out
                 todo += out
@@ -145,17 +146,37 @@ class Explorer(unittest.TestCase):
         self.assertTrue(m.idle(s))
         self.assertEqual(m.idle_check(s), [])
 
-    def test_a_poster_waits_on_a_closed_home(self):
-        # rehome-order: H closed and still registered; R1's subscribe waits for the unregister
-        m = rt.Model(rt.make_config('R1:r', {}, rt.ALL))
-        s = m.successors(m.initial(), ('td', rt.H))[0][1]
+    def test_a_post_to_a_closed_home_joins_its_late_queue(self):
+        # rehome-order (S2b.R3): H closed and not done; R1's subscribe does not wait: it joins H's
+        # late queue, which H's teardown forwards before it unregisters; R2's, after, goes to G0
+        m = rt.Model(rt.make_config('R1:r,R2:r', {}, rt.ALL))
+        s = m.successors(m.initial(), ('td', rt.H))[0][1]   # closes: nothing to forward
         self.assertTrue(s[rt.CLOSED][rt.H] and s[rt.REG])
-        with self.assertRaises(rt.Blocked):
-            m.successors(s, ('step', 0))
-        s = m.successors(s, ('td', rt.H))[0][1]   # nothing to forward: unregisters
-        self.assertFalse(s[rt.REG])
+        self.assertEqual(s[rt.TDH][0], rt.TD_LATE)
         s = m.successors(s, ('step', 0))[0][1]
-        self.assertEqual(s[rt.ING][rt.G0][0][0], 'U')
+        sub1 = ('U', rt.R1, 0, 1, False)
+        self.assertEqual((s[rt.TDH][2], s[rt.ING][rt.H]), ((sub1,), ()))
+        s = m.successors(s, ('td', rt.H))[0][1]   # forwards it; still registered
+        self.assertTrue(s[rt.REG])
+        self.assertEqual((s[rt.TDH][2], s[rt.ING][rt.G0]), ((), (sub1,)))
+        s = m.successors(s, ('td', rt.H))[0][1]   # the late queue is empty: unregisters, done
+        self.assertFalse(s[rt.REG])
+        s = m.successors(s, ('step', 1))[0][1]
+        self.assertEqual(s[rt.ING][rt.G0], (sub1, ('U', rt.R2, 1, 1, False)))
+
+    def test_teardown_no_wait_skips_the_late_queue(self):
+        # R1's teardown kills its process while H, closed, still forwards the record: the kill's
+        # unsubscribe joins H's late queue (after the record), or, with the mutation (S2b.R2's
+        # code, K-1), goes to G0 at once (ahead of it)
+        unsub = ('X', rt.R1, 0, 1)
+        for mut, late, g0 in (((), (unsub,), ()), (('teardown-no-wait',), (), (unsub,))):
+            m = rt.Model(rt.make_config('R1:r', dict(rdie=1), rt.ALL, mut))
+            s = m.initial()
+            for label in (('step', 0), ('drain', rt.H), ('td', rt.H), ('td', rt.R1),
+                          ('td', rt.R1), ('td', rt.R1)):
+                s = m.successors(s, label)[0][1]
+            self.assertEqual(s[rt.TDH][:2], (rt.TD_FWD, (('home', ('U', rt.R1, 0, 1, False)),)))
+            self.assertEqual((s[rt.TDH][2], s[rt.ING][rt.G0]), (late, g0), mut)
 
 
 if __name__ == '__main__':

@@ -43,8 +43,9 @@
  *   or records a remote waiter. R applies a `deliver` by pid and seq (async_scheduler::deliver_to);
  *   a stale one (the process no longer waits with that seq) goes back to H as a `requeue`, which H
  *   gives to the next waiter (the earliest local waiter, else the earliest record), else puts at
- *   the front of the FIFO, past its cap. A deliver that the receiving group's closed handle refuses
- *   is stale at once: H applies it as that requeue (or drops it when requeue_if_stale is false). A
+ *   the front of the FIFO, past its cap. A deliver that the receiving group's done handle refuses
+ *   is stale at once: H applies it as that requeue (or drops it when requeue_if_stale is false);
+ *   one its closed handle takes into its late queue goes back as a stale one at its teardown. A
  *   timed-out, killed or reaped remote wait posts `unsubscribe`.
  * - **Broadcasts.** A send that a local waiter at H took sends its remote copies with
  *   requeue_if_stale false (a stale one is dropped, counted). One that reached no local waiter and
@@ -53,10 +54,10 @@
  *   (exec_router::new_broadcast_id): each copy answers `taken` or `requeue`; if every copy comes
  *   back stale H applies it once as a requeue, and a stale copy of one already taken is dropped. A
  *   home torn down with copies outstanding forwards its tracker (`adopt`), which the new home takes
- *   over, so the copies' late answers find it. So nothing is lost and nothing is delivered twice. A
- *   requeue or taken naming an id its home does not track is applied as untracked (a documented
- *   gap: a key whose home changes twice while one of its broadcasts is out, by a teardown and then
- * a new registration covering it, may see a stale copy of a taken broadcast queued at the newest).
+ *   over, so the copies' late answers find it (an answer posted to the torn-down home goes on by
+ *   its forwarding address, below, whatever registered since). So nothing is lost and nothing is
+ *   delivered twice. A requeue or taken naming an id its home does not track is applied as
+ *   untracked.
  * - **The cap** (state_exec.groups.ingress_cap, default 65536, 0: none). Only `send` entries and a
  *   host's post_message of a key without '#' count (a '#' key's post is a runtime reply, a
  *   completion: never capped); past the cap they are refused (msg-send's {status "error", reason
@@ -65,24 +66,40 @@
  *   count. An uncapped send that finds no waiter joins the pending FIFO past max_pending_messages:
  *   a message a home accepted is never dropped by its move.
  * - **Teardown and rehoming.** A group's teardown, holding its token after the lock port's close
- *   and before the kills (async_scheduler::leave_router): (1) closes its handle: a post through it
- *   is refused from then on, and its poster re-resolves the home (home_of) and posts again, waiting
- *   (yielding, then sleeping briefly; no cap) while the home is still this closed, registered
- *   group; a post made on the thread running that teardown, and one refused by a closed group 0
- *   (~app, never unregistered), resolve without closed groups at once (new_home_of; none left: the
- *   entry is dropped, counted); (2) sends what it holds to the keys' new homes, resolved without
- *   it or any other closed group (exec_router::new_home_of), in the order it took them: the pending
- *   messages of every key without '#' (uncapped sends, FIFO order), its remote-waiter records
- *   (subscribes with the same seq), its broadcast trackers (adopt), then its queued messages and
- *   router entries in queue order (a host post of a key without '#' and a send as uncapped sends;
- *   a deliver as a stale one: a requeue to its home, or dropped when requeue_if_stale is false; the
- *   rest as they are); a '#' key's message dies with it, counted. A group that registered a prefix
- *   forwards so even once unregistered (Ariadne's move unregisters it early) and even for a key a
- *   longer prefix registered later covers; an island forwards no message (above); (3) only then
- *   unregisters its prefixes, which ends the posters' wait. The forward waits on nothing, so the
- *   wait is bounded. A throw still unregisters (no group stays closed and registered), and a second
- *   leave_router finds nothing to do. Its kills then post unsubscribes for its processes' remote
- *   waits. Group 0's teardown (~app) drops, and counts, whatever is still posted to it.
+ *   and before the kills (async_scheduler::leave_router), as amended in S2b.R3 (no poster waits):
+ *   (1) closes its handle: its scheduler takes no post through it from then on, and until the
+ *   handle is done (3) a router entry posted through it (group_ref::post: any kind, any thread, no
+ *   cap) goes into the handle's late queue; a host's post or command through the handle is
+ *   refused. (2) Sends what it holds on, in the order it took it: the pending messages of every
+ *   key it homed (uncapped sends, FIFO order), its remote-waiter records (subscribes with the same
+ *   seq), its broadcast trackers (adopt), then its queued messages and router entries in queue
+ *   order, then its late entries in arrival order, again until none are left; when a round's batch
+ *   does not shrink, reaches the ingress cap, or a few rounds have gone (posters as fast as its
+ *   forward), it seals the handle: from then on only another teardown's forward is taken into the
+ *   late queue, and any other poster waits (yielding, then sleeping briefly) until the handle is
+ *   done. A teardown's forward never waits (its kills, after it is done, may wait on another sealed
+ *   home), and a sealed one has only a finite number of entries left to forward, so the wait is
+ *   bounded and no cycle of waits can form. A host post or send
+ *   of a key it homed as an uncapped send; a deliver as a stale one (a requeue to the home that
+ *   sent it, or dropped when requeue_if_stale is false); the rest as they are. A key it did not
+ *   home (a '#' key, an island's own) has its messages and sends die with it, counted. Each key's
+ *   entries go to one target for the whole teardown: the key's home among the groups open when
+ *   its first entry goes (exec_router::new_home_of), then wherever that entry went. A group that
+ *   registered a prefix forwards so even once unregistered (Ariadne's move unregisters it early)
+ *   and even for a key a longer prefix registered later covers; an island forwards no message
+ *   (above). (3) Then, under the handle's lock with the late queue empty, unregisters its
+ *   prefixes, keeps each key's target as the handle's forwarding address, and marks the handle
+ *   done. A post through a done handle is refused, and its poster goes on at once to the handle's
+ *   address for the key (group_ref::forwarded), else the key's home (home_of), else, when that is
+ *   the same handle (group 0 during ~app, never unregistered), new_home_of; none left: the entry
+ *   is dropped, counted. Every target was open when it was chosen, so no forward comes back to a
+ *   teardown that sent it (but a deliver's requeue, which goes to the home that sent the deliver,
+ *   and is made at most once per entry): two teardowns at once both end, and each entry reaches
+ *   its key's state after the state. A throw still unregisters and marks the handle done (no group
+ * stays closed and registered), and a second leave_router finds nothing to do. Its kills then post
+ *   unsubscribes for its processes' remote waits. A handle closed outside leave_router (group 0's
+ *   at ~app; a group whose constructor threw) is done at once: the destructor sends its late
+ *   entries on as it does the router entries still posted to its scheduler (S2-Q10).
  * - **Host posts.** async_scheduler::post_message on a key homed elsewhere (router on) forwards
  *   it to the home as a send. exec_pool::post_message posts to the key's home. group_ref's
  *   post_message posts into that group, unrouted (the caller chose it).
@@ -100,9 +117,11 @@
  *   (create, reap, status, priority, floor) or a process's lock holds differ from its row's
  *   (compared at each publish), and steps, seconds and memory refresh at most every 100 ms.
  * - **Lock order:** a group_ref's lock, then the target's ingress mutex, then its wake notifier's
- *   lock, then the pool's ready-queue mutex; one group_ref lock at a time, never re-entered, and
- *   nothing is routed while one is held. The router's and the directory's own mutexes are leaves:
- *   nothing is posted, and no scheduler is built, while either is held.
+ *   lock, then the pool's ready-queue mutex; a group_ref's lock, then its late queue's mutex; one
+ *   group_ref lock at a time, never re-entered, and nothing is routed while one is held, but a
+ *   teardown's step (3) unregisters under its own handle's lock. The router's and the directory's
+ *   own mutexes are leaves: nothing is posted, no group_ref lock is taken, and no scheduler is
+ *   built, while either is held.
  */
 #ifndef CVC_STATE_EXEC_EXEC_ROUTER_H
 #define CVC_STATE_EXEC_EXEC_ROUTER_H
@@ -117,6 +136,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace cvc {
@@ -135,19 +155,41 @@ struct route_entry;  // below
 
 /// A group as the router and the directory name it: the app's group 0 (app::exec_scheduler()) or
 /// an exec_group. Any thread may copy one and post through it. Its group's teardown closes it
-/// before the scheduler goes: from then on a post through it returns false, never touching the
-/// freed scheduler (a post holds the handle's lock while it pushes, and the close waits for it).
-/// Empty (default-constructed): no group, and a post returns false.
+/// before the scheduler goes: from then on no post through it touches the scheduler (a post holds
+/// the handle's lock while it pushes, and the close waits for it). Until the teardown marks it done
+/// (the header's "Teardown and rehoming", S2b.R3), a router entry posted through it goes into its
+/// late queue, which the teardown forwards; once done, a post returns false and the handle keeps
+/// the teardown's forwarding addresses. Empty (default-constructed): no group, and a post returns
+/// false.
 class group_ref {
 public:
   group_ref() = default;
   /// A handle for `sched`: group 0 when `group` is null. Its owner makes it once, gives it to the
   /// scheduler (async_scheduler::set_router), and closes it in its teardown.
   static group_ref make(async_scheduler &sched, exec_group *group);
-  /// Refuse every post from now on, waiting for one in progress. Idempotent; noexcept.
+  /// No post reaches the scheduler from now on, waiting for one in progress; router entries go into
+  /// the late queue until the handle is done. Idempotent; noexcept.
   void close() const noexcept;
   /// Closed, or empty.
   bool closed() const noexcept;
+  /// Done (its teardown forwarded everything, or it was closed for good), or empty.
+  bool done() const noexcept;
+  /// Once done: where its teardown sent `key`'s entries (empty when it sent none, or not done).
+  group_ref forwarded(std::string_view key) const;
+  /// The teardown's step (3) (async_scheduler::leave_router), on its owner's thread, once closed:
+  /// with late entries queued, moves them into `late` and returns false (the teardown forwards them
+  /// and calls again); with none, runs `at_done` (the unregister), keeps `addresses` (key -> the
+  /// group its entries went to) and marks the handle done, all under its lock, and returns true.
+  /// True at once when already done.
+  bool finish(std::vector<detail::route_entry> &late,
+              std::unordered_map<std::string, group_ref> &addresses,
+              const std::function<void()> &at_done) const;
+  /// The teardown's backstop (leave_router, on its owner's thread, once closed): from now on only a
+  /// teardown's forward is taken into the late queue; any other poster waits until done.
+  void seal() const;
+  /// Close and mark done at once, with no forwarding addresses (a teardown outside leave_router:
+  /// ~async_scheduler, a throw), and return the late entries for the caller to refuse.
+  std::vector<detail::route_entry> close_for_good() const noexcept;
   explicit operator bool() const noexcept { return t_ != nullptr; }
   bool is_group0() const noexcept;
   /// The exec_group, or null for group 0 (and an empty handle). For identity and logs: nothing is
@@ -158,10 +200,19 @@ public:
   bool operator==(const group_ref &o) const noexcept { return t_ == o.t_; }
   bool operator!=(const group_ref &o) const noexcept { return t_ != o.t_; }
 
-  /// Push `e` into the group's ordered ingress (async_scheduler::post_route), any thread: false
-  /// when the handle is closed, or the group refused it (a capped send at its cap). Never waits
-  /// for a pump.
-  bool post(detail::route_entry e) const;
+  /// What try_post did with an entry.
+  enum class post_result : std::uint8_t {
+    taken,   ///< into the group's ingress, or its late queue
+    refused, ///< the open group refused it (a capped send at its cap)
+    sealed,  ///< closed and sealed, not `teardown`: its poster waits for done, then goes on
+    done,    ///< done (or empty): its poster goes on by the forwarding address
+  };
+  /// Push `e` into the group's ordered ingress (async_scheduler::post_route), any thread; once
+  /// closed, into the late queue until done (once sealed, only a `teardown`'s forward). Never
+  /// waits.
+  post_result try_post(detail::route_entry e, bool teardown = false) const;
+  /// try_post, true when taken.
+  bool post(detail::route_entry e, bool teardown = false) const;
   /// A host's post of `value` on `key` into this group's ingress, unrouted (the caller chose the
   /// group; a key without '#' counts against its cap): false once closed, or refused. To post to a
   /// key's home, use exec_router::post_message.
@@ -279,8 +330,8 @@ public:
   /// not yet). Uncached: each scheduler caches its lookups, a capped map checked against epoch().
   /// Counted in consulted(). Not for a '#' key (never routed).
   group_ref home_of(std::string_view key) const;
-  /// home_of, with every closed group's prefixes left out: where a teardown forwards what it holds
-  /// (exec_router.h, "Teardown and rehoming"). Not counted in consulted().
+  /// home_of, with every closed group's prefixes left out: where a teardown first forwards a key's
+  /// entries (exec_router.h, "Teardown and rehoming"). Not counted in consulted().
   group_ref new_home_of(std::string_view key) const;
   /// The group whose registered prefix (not group 0's "") covers `key`, the longest; empty when
   /// none does. Never builds group 0: an island's lookup (its keys no prefix covers are its own).

@@ -985,11 +985,12 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
-init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse  notifications
-context_menu
+state  init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint
+args  windows_menu  tests  functions  data  assets  scenes  prototypes  clock  menu_collapse
+notifications  context_menu
 ```
 
+`state:` is the document's starting values, written just before `init:` runs (§5.3).
 `tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
 `menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
 the tray's bell or not (§5.24). `assets:` and
@@ -1021,7 +1022,36 @@ meta:
   min_libcvc: 0.42.0      # refuse to load on an older runtime
 ```
 
-### 5.3 `init:` and the resident handlers
+### 5.3 `init:`, `state:` and the resident handlers
+
+**`state:`** gives keys their starting values without a program. It is a map of state paths to
+literal values, which the host writes under the document's prefix (`seed_state`) just before
+`init:` runs. So `init:` reads them and may override them, and, like an `init:` seed, they win
+over a widget's `def:`.
+
+```yaml
+state:
+  run:
+    world: data
+    crop: 600
+    paused: 0
+  view.camera: follow        # a key may hold dots
+  /app.theme: dark           # a leading / is the app root (§7.1)
+```
+
+writes what `init: (begin (state-set "run.world" "data") (state-set "run.crop" "600") ...)`
+wrote, without the program:
+
+- **Keys.** A map's keys are path segments, joined by dots, and a key may hold dots itself. Only a
+  top-level key may start with `/`.
+- **Values.** A value is written as it is spelled: `paused: 0` writes `0`, and `ready: true` writes
+  `true`. A list of scalars is joined by commas (`[1, 2, 3]` writes `1,2,3`, as a position key
+  holds it), and a key with nothing after it writes the empty string. Anything else, and a key
+  that is not a path (`a..b`), is left out with a warning; a key given twice warns, and the later
+  value is used.
+- **When.** Like `init:`, it is written on every load and reload. A `load:`ed module's `state:` is
+  written at its mount's sub-prefix just before the module's `init:` (§12), and again when the
+  module is restarted (§5.25).
 
 `init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
 the loader only *captures*. The host wires them:
@@ -1143,7 +1173,7 @@ widget's fields as sibling keys; copy the shipped components (§6.5) for the exa
 each type takes:
 
 ```yaml
-meta: { name: hello, version: 0.1.0, min_libcvc: 3.4.0 }
+meta: { name: hello, version: 0.1.0, min_libcvc: 4.0.9 }
 menubar:
   - menu: File
     items:
@@ -1161,7 +1191,7 @@ windows:
         bind: (* 2 (int (state-get "demo.n")))   # a computed bind, read lane
       - button: Bump
         on: (state-set "demo.n" (+ (int (state-get "demo.n")) 1))   # a program, action lane
-init: (begin (state-set "demo.n" 10) (state-set "demo.frames" 0))
+state: { demo: { n: 10, frames: 0 } }   # starting values (§5.3)
 on_tick: (state-set "demo.frames" (+ (int (state-get "demo.frames")) 1))
 ```
 
@@ -2060,8 +2090,11 @@ scene:
   `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
   `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
   target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
-- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee` or a mesh file, else arrows;
-  with `lod:` on, four quadric-decimated rungs of it picked per vehicle by its size on screen: a rung
+- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee`, a model's name or a mesh
+  file, else arrows: the look a world vehicle would have, `vehicle_look_named` and
+  `vehicle_look_mesh_of`, so `humvee` is the Humvee in parts, its wheels at rest in a tyre's dark,
+  where vehicle-humvee has them, else `Humvee.glb`; with `lod:` on, four quadric-decimated rungs of
+  it, each colour role decimated on its own, picked per vehicle by its size on screen: a rung
   takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
   and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
   reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
@@ -2363,19 +2396,26 @@ scene:
     `entity_spec::plant`), as a gym's agents do. A kinematic box meets no building in the
     physics world, so its obstacle contacts are its footprint on the grid's blocked cells, and
     two kinematic boxes touch when they overlap.
-  - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
-    `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
+  - **Looks.** With no `look:`, a humvee is the real Humvee from the vehicle-humvee package, with
+    its texture, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
-    `$CONDA_PREFIX` or the program's prefix), with its texture. It is oriented and scaled to the
-    chassis as the nav demos do it, and stands on the ground under it. Anything else, or a humvee
-    without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
-    `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
-    document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
-    `z:` place it. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
+    `$CONDA_PREFIX` or the program's prefix). It is the Humvee in parts, its wheels rolling and
+    its front pair steering (a parted look, below: the package's `humvee/chassis.glb`,
+    `humvee/wheel.glb` and `humvee/rig.json`, from 1.0.0+cvc.5), when the three are installed
+    together; else the one-piece `Humvee.glb`, oriented and scaled to the chassis as the nav demos
+    do it, its wheels still. Either stands on the ground under the chassis. Anything else, or a
+    humvee without the package, is its chassis box in the entity's two colours, with a cabin and
+    wheels. `look: { model: humvee }` names a model, `file:` a mesh beside the document and
+    `asset:` a document asset; `fit: true` orients and scales a file as a model is; `scale:`,
+    `yaw:` and `z:` place it. `model: humvee` is the Humvee in parts too, unless it has `scale:`,
+    `yaw:` or `z:`, which only the one-piece model takes; `file: Humvee.glb` is the
+    one piece always. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
     document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
     document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
-    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }`. It is
-    fitted unless `fit: false`. The resolved look carries the entry's source and path (`uri`,
+    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }` (the
+    one piece) or `look: { data: humvee, chassis: humvee/chassis.glb, wheel: humvee/wheel.glb,
+    rig: humvee/rig.json }` (in parts, as `world_lab.ari` draws it). It is fitted unless
+    `fit: false`. The resolved look carries the entry's source and path (`uri`,
     `subpath`), so it is whole without the document: a client fetches the same package. The view
     asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
     the box while it loads, then the model. When the package cannot load (the host's network is
@@ -2410,9 +2450,18 @@ scene:
       for glTF's own: +y up, +z forward, +x left). The wheel mesh is the left wheel, its axle along
       y and its outside toward +y; it is taken about its middle (its bounds' centre), wherever its
       file has it. Files sit beside the document, else where the vehicle models are installed
-      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package such as
-      vehicle-humvee can ship them; with `data:`, they are files in that entry's package, loaded as
-      a one-piece data look is (the box until it loads).
+      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package can
+      ship them; with `data:`, they are files in that entry's package, loaded as a one-piece data
+      look is (the box until it loads).
+    - **The Humvee in parts.** vehicle-humvee (1.0.0+cvc.5 on) ships its Humvee so beside
+      `Humvee.glb`: `share/cvc-scenes/shared/humvee/chassis.glb` (the chassis without its wheels),
+      `humvee/wheel.glb` (the front left wheel about its hub) and `humvee/rig.json` (its four hubs
+      and radius; it steers the front pair, `mirror: turn`), all in the rig's frame, z up, made by
+      graphics-assets' `tools/split_wheels.py`. A humvee with no `look:`, or `look: { model:
+      humvee }`, is drawn so when the three are installed in one directory (`resolve_vehicle_looks`;
+      an older package has no `humvee/`, so it is the one piece). Its resolved look keeps the
+      one-piece model's file as well (`vehicle_look::path`): a relay passes an entity's look on as
+      its kind and file alone (`room_entities.h`), so a room's clients draw the one piece.
     - **The rig** (`cvc::ariadne::vehicle_rig`), inline or a file of a map, YAML or JSON:
       `radius:` (or `wheel: { radius: }`), `hubs:` (a list of `[x, y, z]`, or a map whose `xyz:`
       lists them and whose `order:` names them, so `steer:` may name them), `steer:` (by index or
@@ -3693,7 +3742,10 @@ How each backend does it:
   line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
   little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
-  and cascade new windows instead of flowing them. A window that would run off the screen stops at
+  and cascade new windows instead of flowing them. That size is the content's natural one: content
+  that stretches to the line's end (a clickable group's card, a message field) takes the window's
+  width but doesn't widen it to the screen's edge, as under ImGui (FTXUI: libcvc 4.0.10; before
+  it, such content widened the window to the edge). A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view. The mouse wheel over it scrolls
   it too, 3 rows a notch, from where it shows, and stops with its last row at the bottom (a feed in
@@ -3745,10 +3797,14 @@ that use of the unit.
   the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
   - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
   - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
-  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+  - FTXUI (libcvc 4.0.10): a press on a window's left, right or bottom edge, or a bottom corner,
+    and a drag resize it; the title bar moves it. The other edges stay put, and the window keeps
+    to its `min:` and `max:` and to the screen. A press there without a drag changes nothing.
+    `resizable: false`: a drag on its edge does nothing. FTXUI draws no handle: the frame is it.
+    `ariadne_ftxui_test`'s `AWindowResizesByAnEdgeOrACorner` drags each.
 - A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
-  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
-  keeps that size; `resizable: false` stops that as well.
+  can't resize it either way. On the tvision desktop and under FTXUI the user may resize one, and
+  from then on it keeps that size; `resizable: false` stops that as well.
 - A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
 
 **Maximizing.**
@@ -3761,8 +3817,8 @@ that use of the unit.
   again:
   - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
     where along the title bar it was grabbed.
-  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
-    window's own, so a later maximize goes back to it.
+  - Resized by an edge or a corner (ImGui, FTXUI), it keeps the size it was given, where it was
+    drawn. That size is now the window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
 - **How it starts:** a window's `maximized:` is the maximize it has while that key holds nothing:
@@ -5566,7 +5622,8 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
 - **Quit** takes the application away: its windows, its menu and its tray icons go, and its
   `on_tick:` and the programs it started stop. Its state stays.
 - **Restart** quits it, drops its state subtree and its notifications, and starts it again as when
-  it was first loaded: its `link:` holes are planted, its `init:` runs, and its `on_tick:` starts.
+  it was first loaded: its `link:` holes are planted, its `state:` is written, its `init:` runs,
+  and its `on_tick:` starts.
 - **Windows > Applications** lists every application, ticked while it runs. Untick one to quit it;
   tick a quit one to open it again as it was. A quit application's windows are not listed until it
   comes back. A quit stays for the run; nothing persists it.
@@ -6227,8 +6284,9 @@ A module's own programs are its `init:`, its `on_tick:` and its widgets' actions
 from the host goes in the module's own `requires:` (§5.7). The loader
 captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
 `Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
-`init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
-request poller say, and be tested on its own with `ari test` (§13).
+`init:` once, `on_tick:` as the mount's own tick resident (§2.3). Its `state:` (§5.3), captured as
+`Widget::state_seeds`, is written at the sub-prefix just before its `init:`. So a module can own a
+loop, a request poller say, and be tested on its own with `ari test` (§13).
 
 `on_key:`, `on_pointer:` and `on_signal:` stay the outermost document's. A fragment that declares
 one loads with a warning, and the handler is ignored. Raw input and signals belong to the
@@ -7041,8 +7099,9 @@ and runs headless too. [CARS.md](CARS.md) describes it.
 `nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
 `<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
 vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
-makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
-`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+makes a glTF vehicle +X forward, +Z up and true to scale with cvcGL's own fit
+(`pycvc_gl.fit_vehicle_geometry`, as a world vehicle's model look is fitted), and
+`seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance

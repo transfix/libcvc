@@ -220,6 +220,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/nav/dyn4_ledger.h
   ../../inc/cvc/nav/terrain.h
   ../../inc/cvc/nav/vehicle_plant.h
+  ../../inc/cvc/ph/ad.h
   ../../inc/cvc/ph/compose.h
   ../../inc/cvc/ph/mat3.h
   ../../inc/cvc/ph/microgrid.h
@@ -227,6 +228,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/ph/optim.h
   ../../inc/cvc/ph/rff.h
   ../../inc/cvc/ph/rng.h
+  ../../inc/cvc/ph/train.h
   ../../inc/cvc/ph/se2_train.h
   ../../inc/cvc/ph/se2_vehicle.h
   ../../inc/cvc/lod/select.h
@@ -575,6 +577,7 @@ set(SOURCE_FILES
   ph/compose.cpp
   ph/microgrid.cpp
   ph/query.cpp
+  ph/train.cpp
   ph/se2_data.cpp
   ph/se2_model.cpp
   ph/se2_train.cpp
@@ -1686,9 +1689,9 @@ list(APPEND SOURCE_FILES net/json_lite.cpp net/oidc.cpp net/loopback_redirect.cp
 # (CVC_HAVE_SODIUM, below) every E2EE operation fails saying so.
 list(APPEND SOURCE_FILES net/private_file.cpp net/e2ee.cpp ariadne/e2ee_intrinsics.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/e2ee.h ../../inc/cvc/ariadne/e2ee_intrinsics.h)
-# The connection engine (cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1): TCP
-# listeners on Boost.Asio I/O threads of its own, framing, groups and one-copy broadcast. Always
-# compiled; a browser build has the stubs (it cannot listen).
+# The connection engine (cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1, N3): TCP
+# and TLS listeners on Boost.Asio I/O threads of its own, framing, groups and one-copy broadcast.
+# Always compiled; a browser build has the stubs (it cannot listen). TLS needs libssl (below).
 list(APPEND SOURCE_FILES net/net_engine.cpp)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/net_engine.h)
 list(APPEND INCLUDE_FILES ../../inc/cvc/net/oidc.h ../../inc/cvc/net/loopback_redirect.h
@@ -2093,6 +2096,22 @@ if(TARGET OpenSSL::Crypto)
   message(STATUS "cvc::state: device keys ENABLED (OpenSSL ${OPENSSL_VERSION})")
 else()
   message(STATUS "cvc::state: no device keys (OpenSSL not found) - every device is unverified")
+endif()
+
+# TLS in the connection engine (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N3): listener
+# certificates through OpenSSL's libssl (Boost.Asio's ssl::context to load them). OPTIONAL and
+# native only: without it net_engine::tls_available() is false and a TLS listener fails to listen.
+if(NOT EMSCRIPTEN)
+  find_package(OpenSSL QUIET COMPONENTS SSL Crypto)
+endif()
+if(NOT EMSCRIPTEN AND TARGET OpenSSL::SSL)
+  set_property(SOURCE net/net_engine.cpp APPEND PROPERTY COMPILE_DEFINITIONS CVC_NET_HAVE_TLS=1)
+  set_property(GLOBAL PROPERTY CVC_NET_HAVE_TLS ON) # net_engine_test's TLS cases
+  target_link_libraries(cvc PRIVATE OpenSSL::SSL)
+  list(APPEND CVC_PRIVATE_LINK_PACKAGES OpenSSL)
+  message(STATUS "cvc::net: connection engine TLS ENABLED (OpenSSL ${OPENSSL_VERSION})")
+else()
+  message(STATUS "cvc::net: connection engine without TLS (no OpenSSL libssl)")
 endif()
 
 # Per-viewer video rungs (media_rungs.h): a relay re-encodes a camera's MJPEG smaller for a viewer
