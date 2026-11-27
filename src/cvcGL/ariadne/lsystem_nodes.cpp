@@ -365,7 +365,8 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     }
     if (windLive != 0.0 && !rt->wind.trees.empty()) {
       // At the time the scene is drawn at (a relay's, when a client shows one: shown_clock.h).
-      const double t = ari::shown_time(*rt->app, rt->prefix, cvc::scene_clock(*rt->app, rt->prefix).t());
+      const double t =
+          ari::shown_time(*rt->app, rt->prefix, cvc::scene_clock(*rt->app, rt->prefix).t());
       rt->workW = rt->woodBind;
       rt->workN = rt->needleBind;
       if (sw) {
@@ -498,7 +499,8 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
         if (!v)
           return;
         const long f = (*frame)++;
-        const double t = ari::shown_time(*app, shownPrefix, cvc::scene_clock(*app, shownPrefix).t());
+        const double t =
+            ari::shown_time(*app, shownPrefix, cvc::scene_clock(*app, shownPrefix).t());
         if (f % 2 == 0) {
           sp->wave_amp = read_key(*app, ampKey, sp->wave_amp); // live from sea_controls
           sp->sea_level = read_key(*app, lvlKey, sp->sea_level);

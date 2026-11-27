@@ -1680,7 +1680,7 @@ void SceneViews::register_widget() {
         start.elevation = w.props.num("elevation", 0.0);
         start.zoom = w.props.num("zoom", 1.0);
         ari::read_scene_camera_viewpoint(w.props, start); // position, target, up, fov, ...
-        if (!own && !same_start(start, v->start)) { // a scene window starts as its scene says
+        if (!own && !same_start(start, v->start)) {       // a scene window starts as its scene says
           v->start = start;
           v->framed = false;
         }

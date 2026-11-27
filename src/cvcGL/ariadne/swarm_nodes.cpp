@@ -24,11 +24,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
-#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_swarm.h>
 #include <cvc/ariadne/world_vehicles.h> // vehicle_look_named, vehicle_desc_of
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
