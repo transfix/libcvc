@@ -5,6 +5,8 @@ code runs and is tested without arisrvx:
   * set / set_tree / set_series / set_plot / get_tree on Host's own tree, set_tree as
     (state-set-tree) writes;
   * host.clients with no registry: open_engine returns None, its arguments checked, the closer;
+    the read-only view, a mirrored record's conversion, @host.geolocate's cache, and
+    guest_password_ok;
   * serve_asgi + run(): a FastAPI app served on host.loop, a request (with a full garbage
     collection while it is in flight), and stop() from the loop, with the app's shutdown run;
     skipped where fastapi or uvicorn is not installed.
@@ -107,6 +109,53 @@ try:
 except TypeError:
     check(True, "set_closer wants a callable")
 clients.set_closer(None)
+# The list, read-only: empty without a relay.
+check(clients.get("c0123") is None and "c0123" not in clients and clients.active() == [],
+      "no records under plain python")
+try:
+    clients["c0123"]
+    check(False, "host.clients[id] raises KeyError for no such client")
+except KeyError:
+    check(True, "host.clients[id] raises KeyError for no such client")
+check(clients.get("../x") is None, "a client id is a name, not a path")
+# The registry's mirror read as Python data (what host.clients[id] returns in arisrvx).
+rec = pycvc.ariadne._client_record("c1", {
+    "username": "bob", "active": "1", "admin": "0", "kind": "nmdc", "capabilities": "chat,chat.dm",
+    "rcon_failures": "2", "limits": {"steps": "100"},
+    "connections": {"n10": {"active": "0", "engine": "1", "key": "nmdc:1", "geo": ""},
+                    "n9": {"active": "1", "engine": "0", "geo": {"city": "Austin"}}}})
+check(rec["active"] is True and rec["admin"] is False and rec["capabilities"] == ["chat", "chat.dm"]
+      and rec["rcon_failures"] == 2 and rec["limits"] == {"steps": "100"}, f"a record: {rec}")
+check([c["seq"] for c in rec["connections"]] == [9, 10] and rec["connections"][0]["geo"]["city"] ==
+      "Austin" and rec["connections"][1]["geo"]["city"] is None and rec["connections"][1]["engine"],
+      f"its log, oldest first: {rec['connections']}")
+# @host.geolocate keeps its hook and caches its answers by address.
+asked = []
+
+
+def where(address):
+    asked.append(address)
+    return {"country": "US", "city": "Austin"}
+
+
+check(host.geolocate(where) is where, "geolocate keeps its hook")
+host._locate(["c1", "3", "203.0.113.7"])
+host._locate(["c2", "4", "203.0.113.7"])
+check(asked == ["203.0.113.7"] and host._geo_cache["203.0.113.7"]["city"] == "Austin",
+      f"asked once an address: {asked}")
+host.geolocate(lambda a: "nowhere")
+host._locate(["c3", "5", "198.51.100.1"])  # logged: not a dict
+check("198.51.100.1" not in host._geo_cache, "an answer that isn't a dict isn't kept")
+host._geolocate = None
+# host.guest_password_ok: the relay compares; without one, nothing is a guest password.
+check(host.guest_password_ok("anything") is False and
+      host.guest_password_ok(pycvc.ariadne.Credential("b", "grpc", "p")) is False,
+      "no guest password under plain python")
+try:
+    host.guest_password_ok(42)
+    check(False, "guest_password_ok wants a Credential or a str")
+except TypeError:
+    check(True, "guest_password_ok wants a Credential or a str")
 check(issubclass(pycvc.ariadne.ClientRefused, Exception) and
       pycvc.ariadne.ClientRefused("forbidden", "banned").code == "forbidden",
       "ClientRefused carries its code")

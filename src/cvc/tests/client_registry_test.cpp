@@ -638,6 +638,43 @@ TEST(ClientRegistry, AClientsKindAndCapabilitiesAreKept) {
   EXPECT_EQ(str_field(one, "kind"), "nmdc");
 }
 
+// Where each native connection is (ID4c): update() queues a new one once, by its record and its
+// log entry, for arisrvx's @host.geolocate, whose answer lands in that entry. A program's
+// connection brings its own, so it isn't queued.
+TEST(ClientRegistry, NewConnectionsAreLocatedOnce) {
+  cvc::app app;
+  reg_t reg(opts());
+  reg_t::refusal why;
+  reg.update({link(1, "bob")}, 1.0, "t1");
+  const std::vector<reg_t::to_locate> asked = reg.take_to_locate();
+  ASSERT_EQ(asked.size(), 1u);
+  const std::string bob = reg.identity_key("bob");
+  EXPECT_EQ(asked[0].client_id, bob);
+  EXPECT_EQ(asked[0].address, "203.0.113.7") << "without the scheme and port";
+  reg.update({link(1, "bob")}, 2.0, "t2");
+  EXPECT_TRUE(reg.take_to_locate().empty()) << "once a connection";
+  ASSERT_FALSE(
+      reg.open_engine("nmdc:1", "nmdc", "198.51.100.9", "", {}, {}, 2.0, "t2", why).empty());
+  EXPECT_TRUE(reg.take_to_locate().empty()) << "a program's connection brings its own";
+
+  reg_t::geo_info geo;
+  geo.country = "US";
+  geo.city = std::string("Austin\x01");
+  ASSERT_TRUE(reg.set_geo(bob, asked[0].seq, geo));
+  EXPECT_EQ(reg.find(bob)->connections[0].geo.city, "Austin") << "control bytes dropped";
+  EXPECT_FALSE(reg.set_geo(bob, asked[0].seq + 100, geo)) << "no such entry";
+  EXPECT_FALSE(reg.set_geo("cnobody", 0, geo));
+  reg.write(app, {});
+  EXPECT_EQ(value_at(app, std::string(reg_t::kRoot) + "." + bob + ".connections.n" +
+                              std::to_string(asked[0].seq) + ".geo.country"),
+            "US");
+
+  // A relay that takes none keeps only the newest.
+  for (std::uint64_t i = 0; i < reg_t::kLocateMax + 10; ++i)
+    reg.update({link(100 + i, "p" + std::to_string(i), "dev-" + std::to_string(i))}, 3.0, "t3");
+  EXPECT_EQ(reg.take_to_locate().size(), reg_t::kLocateMax);
+}
+
 TEST(ClientRegistry, AnAdminRenamesWithoutTheRateLimit) {
   reg_t reg(opts());
   reg.update({link(1, "a", "dev-a"), link(2, "b", "dev-b")}, 1.0, "t");

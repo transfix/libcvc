@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cvc/state/state.h>
+#include <cvc/state/state_identity.h> // constant_time_equal
 #include <iterator>
 #include <memory>
 #include <unordered_set>
@@ -289,6 +290,10 @@ std::vector<ServerLink::ClientOp> ServerLink::take_client_ops(std::size_t max) {
   out.assign(std::make_move_iterator(client_ops_.begin()), std::make_move_iterator(end));
   client_ops_.erase(client_ops_.begin(), end);
   return out;
+}
+
+bool ServerLink::guest_password_ok(const std::string &bearer) const {
+  return !guest_bearer_.empty() && cvc::constant_time_equal(bearer, guest_bearer_);
 }
 
 void ServerLink::disconnect(std::string principal) {

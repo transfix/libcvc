@@ -573,8 +573,8 @@ PyObject *arihost_ready(PyObject *self, PyObject *args) {
 // next_event(): the relay's next event for the loop, waited for without the GIL, as (kind, id,
 // value): the value a capsule for pycvc.value_from_capsule, or None when the event has none (a
 // "shutdown", which so needs no pycvc). A "room_chat" event's is a str, and the registry's
-// ("clients_answer", "client_close") a list of str, so they need no pycvc either. None once the
-// link is closed. The waker thread's only call.
+// ("clients_answer", "client_close", "geolocate") a list of str, so they need no pycvc either.
+// None once the link is closed. The waker thread's only call.
 PyObject *arihost_next_event(PyObject *self, PyObject *) {
   ServerLink *link = server_link(self);
   if (!link)
@@ -597,7 +597,8 @@ PyObject *arihost_next_event(PyObject *self, PyObject *) {
       return nullptr;
   } else if (const se::list_ptr *strings = std::get_if<se::list_ptr>(&event.value.v);
              strings && *strings &&
-             (event.kind == "clients_answer" || event.kind == "client_close")) {
+             (event.kind == "clients_answer" || event.kind == "client_close" ||
+              event.kind == "geolocate")) {
     if (!(value = PyList_New(0)))
       return nullptr;
     for (const se::value_t &e : **strings) {
@@ -827,6 +828,57 @@ PyObject *arihost_set_client_closer(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+// client_geo(client_id, seq, country, region, city, asn): @host.geolocate's answer for a
+// "geolocate" event, kept in that connection's log entry on the relay's next step.
+PyObject *arihost_client_geo(PyObject *self, PyObject *args) {
+  const char *client = nullptr, *country = nullptr, *region = nullptr, *city = nullptr,
+             *asn = nullptr;
+  unsigned long long seq = 0;
+  if (!PyArg_ParseTuple(args, "sKssss", &client, &seq, &country, &region, &city, &asn))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  ServerLink::ClientOp op;
+  op.kind = ServerLink::ClientOp::Kind::geo;
+  op.key = client;
+  op.seq = seq;
+  op.country = country;
+  op.region = region;
+  op.city = city;
+  op.asn = asn;
+  link->client_op(std::move(op));
+  Py_RETURN_NONE;
+}
+
+// set_geolocates(ok): the program has a geolocate hook, which the relay asks about each new
+// native connection.
+PyObject *arihost_set_geolocates(PyObject *self, PyObject *args) {
+  int ok = 0;
+  if (!PyArg_ParseTuple(args, "p", &ok))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  link->set_geolocates(ok != 0);
+  Py_RETURN_NONE;
+}
+
+// guest_password_ok(bearer): whether a credential's bearer is the one the relay's guest password
+// makes (compared here, in constant time: Python never sees the expected one).
+PyObject *arihost_guest_password_ok(PyObject *self, PyObject *args) {
+  const char *bearer = nullptr;
+  Py_ssize_t len = 0;
+  if (!PyArg_ParseTuple(args, "s#", &bearer, &len))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  if (link->guest_password_ok(std::string(bearer, static_cast<std::size_t>(len))))
+    Py_RETURN_TRUE;
+  Py_RETURN_FALSE;
+}
+
 // set_converts(ok): whether pycvc is here to convert DSL values (pycvc.value_from_capsule); the
 // relay posts clients' calls only once it is.
 PyObject *arihost_set_converts(PyObject *self, PyObject *args) {
@@ -1054,6 +1106,12 @@ const PyMethodDef kArihostMethods[] = {
     {"client_close", arihost_client_close, METH_VARARGS, "client_close(id, key): it closed."},
     {"set_client_closer", arihost_set_client_closer, METH_VARARGS,
      "set_client_closer(ok): server.kick and server.ban reach the program's connections."},
+    {"client_geo", arihost_client_geo, METH_VARARGS,
+     "client_geo(client_id, seq, country, region, city, asn): where a native connection is."},
+    {"set_geolocates", arihost_set_geolocates, METH_VARARGS,
+     "set_geolocates(ok): the program has a geolocate hook."},
+    {"guest_password_ok", arihost_guest_password_ok, METH_VARARGS,
+     "guest_password_ok(bearer): the bearer is the relay's guest password's."},
     {"set_converts", arihost_set_converts, METH_VARARGS,
      "set_converts(ok): pycvc is here to convert DSL values, so calls may be posted."},
     {"set_authenticates", arihost_set_authenticates, METH_VARARGS,

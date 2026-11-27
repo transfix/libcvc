@@ -1054,6 +1054,10 @@ int main(int argc, char **argv) {
   // document's Python functions) reach its loop through the link too, so this thread never takes
   // the GIL. It starts now, before anything listens.
   cvc::ariadne::python::ServerLink scriptLink;
+  // host.guest_password_ok compares a credential's bearer with the guest password's here, so the
+  // program never holds it (ARISRV_IDENTITY.md 2.4, ID4c).
+  if (guestAsked)
+    scriptLink.set_guest_password_bearer(roomToken);
   // The host's connection engine (host.net; ARIADNE_NET_ENGINE.md §2.7), made when the program
   // first asks for it. Declared before the loan, so it outlives what Python holds of it.
   std::mutex netMu;
@@ -2290,6 +2294,15 @@ int main(int argc, char **argv) {
           principal = se::make_dict(std::move(entries));
         }
         se::set_field(call, "principal", principal);
+        // ctx.client (ID4c): the caller's client record, as server.whoami has it (its client id,
+        // username, kind and capabilities). The links as they are now when no pass has seen its
+        // Hello yet.
+        se::value_t caller = clients.whoami(r.pid);
+        if (caller.is_nil()) {
+          clients.update(client_links(), clients_now(), clients_wall());
+          caller = clients.whoami(r.pid);
+        }
+        se::set_field(call, "client", std::move(caller));
         scriptLink.post(cvc::ariadne::python::ServerLink::Event{"call", 0, std::move(call)});
         continue;
       }
@@ -2313,18 +2326,20 @@ int main(int argc, char **argv) {
       refresh_scope(principal);
     // The program's connections in the client registry (host.clients; ARISRV_IDENTITY.md 2.8),
     // each answered with a "clients_answer" event: ["ok", client id] for an open, ["ok"] for the
-    // rest, or ["error", code, message].
+    // rest, or ["error", code, message]; and @host.geolocate's answers, unanswered. The mirror is
+    // written before the answers go, so host.clients reads what an answered op did.
     {
       namespace se = cvc::state_exec;
       using ClientOp = cvc::ariadne::python::ServerLink::ClientOp;
+      std::vector<cvc::ariadne::python::ServerLink::Event> answers;
       const auto answer = [&](std::uint64_t id, std::vector<std::string> parts) {
         std::vector<se::value_t> elems;
         for (std::string &part : parts)
           elems.emplace_back(std::move(part));
-        scriptLink.post(cvc::ariadne::python::ServerLink::Event{"clients_answer", id,
-                                                                se::make_list(std::move(elems))});
+        answers.push_back({"clients_answer", id, se::make_list(std::move(elems))});
       };
-      for (const ClientOp &op : scriptLink.take_client_ops(256)) {
+      const std::vector<ClientOp> ops = scriptLink.take_client_ops(256);
+      for (const ClientOp &op : ops) {
         client_registry::refusal why;
         client_registry::client_info said;
         said.kind = op.client_kind;
@@ -2370,8 +2385,21 @@ int main(int argc, char **argv) {
             answer(op.id, {"error", "unavailable", "no open connection " + op.key});
           }
           break;
+        case ClientOp::Kind::geo: {
+          client_registry::geo_info geo;
+          geo.country = op.country;
+          geo.region = op.region;
+          geo.city = op.city;
+          geo.asn = op.asn;
+          clients.set_geo(op.key, op.seq, geo); // false: trimmed from the log since
+          break;
+        }
         }
       }
+      if (!ops.empty())
+        clients.write(app, {});
+      for (auto &e : answers)
+        scriptLink.post(std::move(e));
     }
     using Reply = cvc::ariadne::python::ServerLink::Reply;
     for (const Reply &rep : scriptLink.take_replies()) {
@@ -2575,6 +2603,19 @@ int main(int argc, char **argv) {
       clients.update(links, now_s, clients_wall());
       for (const client_registry::link_ref &l : clients.take_banned_links())
         kick_link(l, "banned", "ban");
+      // Where each new native connection is: the program's @host.geolocate, off this loop.
+      {
+        std::vector<client_registry::to_locate> asked = clients.take_to_locate();
+#ifdef CVC_ARIADNE_PYTHON
+        if (scriptThread.joinable() && scriptLink.geolocates())
+          for (client_registry::to_locate &l : asked)
+            scriptLink.post(cvc::ariadne::python::ServerLink::Event{
+                "geolocate", 0,
+                cvc::state_exec::make_list({cvc::state_exec::value_t(std::move(l.client_id)),
+                                            cvc::state_exec::value_t(std::to_string(l.seq)),
+                                            cvc::state_exec::value_t(std::move(l.address))})});
+#endif
+      }
       // Without bound writes the names stay the clients' own, as before: no gate keeps them out.
       clients.write(app, bindGate ? present : std::set<std::string>());
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,

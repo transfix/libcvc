@@ -1,13 +1,41 @@
 """The program beside the relay for ctest arisrvx_clients_program (ARISRV_IDENTITY.md 2.8, ID4c):
 connections the program serves, as an NMDC hub's users would be, in the relay's client list
 through host.clients. The client document opens them through these exports (a hub would from its
-listener's hooks), and an admin's server.kick and server.ban reach them through the closer."""
+listener's hooks), and an admin's server.kick and server.ban reach them through the closer. Its
+geolocate hook places the loopback, and ctx.client and host.clients read the list."""
 
 from pycvc.ariadne import ClientRefused, Host, export
 
 host = Host()
 closed = []  # what the closer was told, [key, reason, kind], in order
 ids = {}  # key -> the client id open_engine returned
+
+
+@host.geolocate
+def where(address):
+    # An operator's own GeoIP database would answer here; the loopback is nowhere real.
+    return {"country": "ZZ", "city": "loopback"} if address == "127.0.0.1" else None
+
+
+@export(clients=True)
+def my_client(ctx):
+    return ctx.client
+
+
+@export(clients=True)
+def record(ctx, client_id):
+    rec = host.clients.get(client_id)
+    if rec is None:
+        return None
+    last = rec["connections"][-1] if rec["connections"] else {"geo": {}}
+    return {"username": rec["username"], "kind": rec["kind"], "active": rec["active"],
+            "capabilities": rec["capabilities"], "connections": len(rec["connections"]),
+            "engine": bool(last.get("engine")), "city": last["geo"].get("city") or ""}
+
+
+@export(clients=True)
+def active_ids(ctx):
+    return [r["client_id"] for r in host.clients.active()]
 
 
 @host.clients.set_closer

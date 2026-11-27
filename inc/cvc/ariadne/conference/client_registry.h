@@ -270,6 +270,21 @@ public:
   // KEY closed at WALL. False for no such connection.
   bool close_engine(const std::string &key, const std::string &wall);
 
+  // Where a client's connection is (ID4c): arisrvx's @host.geolocate is asked once for each new
+  // native connection, off the room loop, and its answer kept in that connection's log entry. A
+  // program's connection brings its own (open_engine's GEO).
+  struct to_locate {
+    std::string client_id;
+    std::uint64_t seq = 0; // the connection's in its record's log
+    std::string address;   // its public address, without the port
+  };
+  // The native connections update() opened since the last call, oldest first (at most
+  // kLocateMax: a relay that takes none keeps only the newest).
+  std::vector<to_locate> take_to_locate();
+  static constexpr std::size_t kLocateMax = 1024;
+  // Connection SEQ of client CLIENT_ID is at GEO. False when the log no longer has it.
+  bool set_geo(const std::string &client_id, std::uint64_t seq, const geo_info &geo);
+
   // CLIENT made valid: a kind of 1-32 bytes of [a-z0-9._-] ("unknown" otherwise), a version of at
   // most 64 printable ASCII bytes, and capabilities of 1-64 bytes of [a-z0-9._-] each, at most 32,
   // in order with no repeats; anything else is dropped.
@@ -322,6 +337,7 @@ private:
   bool _dirty = true;
   std::set<std::string> _admins;  // the keys of the links rcon elevated
   std::vector<link_ref> _to_kick; // banned clients' links, for take_banned_links
+  std::deque<to_locate> _to_locate; // new native connections, for take_to_locate
 };
 
 // How many wrong rcon passwords a relay takes (ID3): after kFreeTries from one address, or by one

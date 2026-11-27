@@ -88,6 +88,11 @@ async def whoami(ctx, note: str = ""):
 
 
 @export(clients=True)
+def my_client(ctx):
+    return ctx.client
+
+
+@export(clients=True)
 def echo(ctx, value):
     return {"value": value, "kind": type(value).__name__}
 
@@ -173,6 +178,20 @@ except TypeError:
     check(True, "a function does not cross: a TypeError where it is sent")
 
 check(alice.call("staff_only") == "staff", "a role gate passes")
+# ctx.client (ID4c): the caller's record as the relay's would carry it, with what it said it is.
+mine = alice.call("my_client")
+check(mine["kind"] == "unknown" and mine["capabilities"] == [] and mine["username"] == alice.name,
+      f"ctx.client of a client that said nothing: {mine}")
+carol = harness.connect("staff-token-0123456789", name="carol",
+                        client={"kind": "sublevels", "capabilities": ["chat", "files.share"]})
+mine = carol.call("my_client")
+check(mine["kind"] == "sublevels" and mine["capabilities"] == ["chat", "files.share"] and
+      mine["client_id"] != alice.call("my_client")["client_id"], f"ctx.client says so: {mine}")
+try:
+    harness.connect("staff-token-0123456789", client={"colour": "red"})
+    check(False, "connect's client takes kind and capabilities")
+except ValueError:
+    check(True, "connect's client takes kind and capabilities")
 bob = harness.connect("user-token-0123456789")
 for name, code in (("staff_only", "forbidden"), ("explode", "internal"), ("slow", "deadline_exceeded"),
                    ("internal", "not_found"), ("nothing_here", "not_found")):

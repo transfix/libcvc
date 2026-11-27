@@ -174,6 +174,23 @@ Each call is applied on the relay's next step and raises ``ClientRefused(code, m
 what the registry refuses. Under plain ``python`` there is no registry: ``open_engine`` returns
 None and the rest do nothing.
 
+``host.clients`` is also the list, read-only: ``host.clients[client_id]`` is a client's record (its
+``username``, ``kind``, ``capabilities``, ``active``, ``admin``, ``banned``, ``connections``, ...),
+``host.clients.active()`` the active ones, and a client's function gets its caller's as
+``ctx.client`` (``client_id``, ``username``, ``kind``, ``capabilities``, ``admin``). Two hooks
+belong with them::
+
+    @host.geolocate                    # once for each new native connection, off the room loop
+    def where(address):                # its public address; cached per address
+        city = geoip.city(address)     # an operator's own GeoIP database
+        return {"country": city.country.iso_code, "city": city.city.name} if city else None
+
+    @host.authenticate
+    async def auth(cred):              # OIDC, or the relay's --guest-password
+        if host.guest_password_ok(cred):   # compared by the relay: the program never holds it
+            return {"id": f"guest-{cred.peer}", "roles": ["guest"]}
+        ...
+
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
 clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrvx --python main.py
@@ -576,9 +593,62 @@ def _strs(values, what) -> list[str]:
     return list(values)
 
 
+_CLIENTS_ROOT = "arisrv.clients"  # client_registry::kRoot
+_GEO_KEYS = ("country", "region", "city", "asn")
+_GEO_CACHE_MAX = 4096
+
+
+def _geo_of(node) -> dict:
+    node = node if isinstance(node, dict) else {}
+    return {k: (node.get(k) or None) for k in _GEO_KEYS}
+
+
+def _caps_of(text) -> list[str]:
+    return [c for c in (text or "").split(",") if c]
+
+
+def _client_record(client_id: str, tree):
+    """A record of the relay's mirror (client_registry::mirror) as Python data."""
+    if not isinstance(tree, dict):
+        return None
+    rec = {"client_id": client_id, "username": "", "kind": "unknown", "capabilities": [],
+           "active": False, "admin": False, "banned": False, "verified": False}
+    for k, v in tree.items():
+        if k in ("verified", "active", "admin", "banned"):
+            rec[k] = v == "1"
+        elif k == "capabilities":
+            rec[k] = _caps_of(v)
+        elif k == "rcon_failures":
+            rec[k] = int(v) if isinstance(v, str) and v.isdigit() else 0
+        elif k == "limits":
+            rec[k] = dict(v) if isinstance(v, dict) else {}
+        elif k != "connections":
+            rec[k] = v if isinstance(v, str) else ""
+    log_ = []
+    conns = tree.get("connections")
+    for name, c in (conns.items() if isinstance(conns, dict) else ()):
+        if not (name[:1] == "n" and name[1:].isdigit() and isinstance(c, dict)):
+            continue
+        e = {"seq": int(name[1:])}
+        for k, v in c.items():
+            if k in ("active", "engine"):
+                e[k] = v == "1"
+            elif k == "capabilities":
+                e[k] = _caps_of(v)
+            elif k == "geo":
+                e[k] = _geo_of(v)
+            else:
+                e[k] = v if isinstance(v, str) else ""
+        e.setdefault("geo", _geo_of(None))
+        log_.append(e)
+    rec["connections"] = sorted(log_, key=lambda e: e["seq"])
+    return rec
+
+
 class _Clients:
-    """``host.clients``: the connections the program serves, in the relay's client registry
-    (ARISRV_IDENTITY.md 2.8). Every call is the loop's: from the program's hooks and tasks."""
+    """``host.clients``: the relay's client list (ARISRV_IDENTITY.md 2.2, 2.8), read-only, and the
+    connections the program serves in it. Every call is the loop's: from the program's hooks and
+    tasks."""
 
     def __init__(self, host: "Host"):
         self._host = host
@@ -680,6 +750,37 @@ class _Clients:
             self._host._link.set_client_closer(fn is not None)
         return fn
 
+    # -- the list, read-only (ARISRV_IDENTITY.md 2.2) -----------------------------------------
+
+    def __getitem__(self, client_id: str) -> dict:
+        """Client ``client_id``'s record, as the relay keeps it under ``arisrv.clients``:
+        ``client_id``, ``username``, ``device``, ``verified``, ``first_seen``, ``last_seen``,
+        ``active``, ``admin``, ``banned``, ``rcon_failures``, ``kind``, ``capabilities`` (a list),
+        ``limits`` (the ones an admin set, as text) and ``connections`` (its log, oldest first:
+        ``seq``, ``pid``, ``transport``, ``public``, ``local``, ``opened``, ``closed``, ``active``,
+        ``engine``, ``key``, ``kind``, ``version``, ``capabilities``, ``geo``). KeyError when there
+        is no such client (and always under plain python)."""
+        rec = self.get(client_id)
+        if rec is None:
+            raise KeyError(client_id)
+        return rec
+
+    def __contains__(self, client_id) -> bool:
+        return self.get(client_id) is not None
+
+    def get(self, client_id: str, default=None):
+        """``self[client_id]``, or ``default``."""
+        if not isinstance(client_id, str) or not client_id.isalnum():
+            return default
+        rec = _client_record(client_id, self._host._read_tree(f"{_CLIENTS_ROOT}.{client_id}"))
+        return default if rec is None else rec
+
+    def active(self) -> list[dict]:
+        """The records of the clients with a connection open, by client id."""
+        ids = self._host._children(_CLIENTS_ROOT) or []
+        recs = (self.get(i) for i in sorted(ids))
+        return [r for r in recs if r is not None and r["active"]]
+
     def _close(self, value) -> None:
         parts = list(value or ())
         if len(parts) != 3 or self._closer is None:
@@ -750,7 +851,9 @@ class Host:
         self._chat_hooks: dict[str, list] = {}
         self._dm_hooks: dict[str, list] = {}
         self._chat_tasks: set = set()  # async hooks running
-        self.clients = _Clients(self)  # the program's connections in the relay's client list
+        self.clients = _Clients(self)  # the relay's client list, and the program's connections
+        self._geolocate = None  # @host.geolocate's hook
+        self._geo_cache: dict[str, dict] = {}  # its answers, by address (the newest 4096)
         self._stop_code = None  # stop()'s, once asked
         self._stop_event = None  # made on the loop by main()
         self._exit_code = 0
@@ -1033,6 +1136,76 @@ class Host:
             self._link.disconnect(str(principal_id))
         elif self._harness is not None:
             self._harness._disconnect(str(principal_id))
+
+    def guest_password_ok(self, cred) -> bool:
+        """Whether ``cred`` (a Credential, or its bearer) carries the relay's guest password
+        (``--guest-password``): for an authenticate hook that takes it beside OIDC, since with a
+        hook the hook decides. The relay compares it, in constant time; the program never holds
+        the password. False when the relay has none, and under plain python."""
+        bearer = cred.bearer if isinstance(cred, Credential) else cred
+        if not isinstance(bearer, str):
+            raise TypeError("Host.guest_password_ok: a Credential or its bearer (a str)")
+        return bool(self._link is not None and self._link.guest_password_ok(bearer))
+
+    # -- where clients are (ARISRV_IDENTITY.md 2.2) --------------------------------------------
+
+    def geolocate(self, fn):
+        """Decorator: ``fn(address)`` (sync or async) says where a native client's public address
+        is, as a dict with any of ``country``, ``region``, ``city`` and ``asn`` (str), or None. The
+        relay asks it once for each new connection, off its loop, and keeps the answer in that
+        connection's log entry (``host.clients[id]["connections"][i]["geo"]``). Answers are cached
+        per address (the newest 4096). One that raises, or returns anything else, is logged and
+        leaves the entry empty. A program's own connections bring theirs (``open_engine``'s
+        ``geo``). One per program."""
+        if not callable(fn):
+            raise TypeError(f"Host.geolocate: {fn!r} is not callable")
+        self._geolocate = fn
+        self._geo_cache.clear()
+        if self._link is not None:
+            self._link.set_geolocates(True)
+        return fn
+
+    def _locate(self, value) -> None:
+        parts = list(value or ())
+        if len(parts) != 3 or self._geolocate is None:
+            return
+        client_id, seq, address = parts
+        if address in self._geo_cache:
+            self._located(client_id, seq, address, self._geo_cache[address])
+            return
+        try:
+            where = self._geolocate(address)
+        except Exception:  # noqa: BLE001 - logged, not raised into the loop
+            log.exception("host.geolocate(%r) raised", address)
+            return
+        if inspect.isawaitable(where):
+            task = self.loop.create_task(self._locating(client_id, seq, address, where))
+            self._chat_tasks.add(task)
+            task.add_done_callback(self._chat_tasks.discard)
+            return
+        self._located(client_id, seq, address, where)
+
+    async def _locating(self, client_id, seq, address, awaitable) -> None:
+        try:
+            where = await awaitable
+        except Exception:  # noqa: BLE001
+            log.exception("host.geolocate(%r) raised", address)
+            return
+        self._located(client_id, seq, address, where)
+
+    def _located(self, client_id, seq, address, where) -> None:
+        if where is not None and not isinstance(where, Mapping):
+            log.error("host.geolocate(%r) returned %s: a dict or None", address,
+                      type(where).__name__)
+            return
+        geo = {k: str((where or {}).get(k) or "") for k in _GEO_KEYS}
+        if address not in self._geo_cache:
+            while len(self._geo_cache) >= _GEO_CACHE_MAX:
+                self._geo_cache.pop(next(iter(self._geo_cache)))
+            self._geo_cache[address] = geo
+        if any(geo.values()) and self._link is not None:
+            self._link.client_geo(client_id, int(seq), geo["country"], geo["region"], geo["city"],
+                                  geo["asn"])
 
     # -- what each principal reads (6.5.6) ---------------------------------------------------------
 
@@ -1428,8 +1601,11 @@ class CallContext:
     """``ctx``: what a client's call carries, passed first to a function exported with
     ``clients=True``."""
 
-    def __init__(self, principal, call_id, idempotency_key, deadline, progress=None):
+    def __init__(self, principal, call_id, idempotency_key, deadline, progress=None, client=None):
         self.principal = principal  # {"id": ..., "roles": [...]}
+        # The caller's client record (ID4c): {"client_id", "username", "verified", "device",
+        # "admin", "kind", "capabilities"}, as server.whoami has it; None when the relay has none.
+        self.client = client
         self.call_id = call_id
         self.idempotency_key = idempotency_key  # the caller's, or the call id
         self.deadline = deadline  # the time.time() at which the call is cancelled
@@ -1584,12 +1760,14 @@ class _Program:
             if _current is not None:
                 _current.stop(0)
             return
-        if kind in ("clients_answer", "client_close"):  # lists of str: no pycvc needed
+        if kind in ("clients_answer", "client_close", "geolocate"):  # lists of str: no pycvc
             if _current is not None:
                 if kind == "clients_answer":
                     _current.clients._answer(ident, value)
-                else:
+                elif kind == "client_close":
                     _current.clients._close(value)
+                else:
+                    _current._locate(value)
             return
         if kind == "room_chat":  # JSON, not a DSL value: no pycvc needed
             if _current is not None:
@@ -1775,7 +1953,8 @@ class _Program:
         limits = [t for t in (exp.timeout, asked) if t]
         timeout = min(limits) if limits else DEFAULT_TIMEOUT
         ctx = CallContext(principal, call_id, str(call.get("key") or call_id), time.time() + timeout,
-                          lambda f, m: self.link.progress(pid, call_id, f, m))
+                          lambda f, m: self.link.progress(pid, call_id, f, m),
+                          call.get("client"))
         try:
             result = await self.run(exp, [ctx, *(call.get("args") or [])],
                                     dict(call.get("kwargs") or {}), timeout)
@@ -2062,19 +2241,22 @@ class ServerHarness:
         return self.host.loop.run_until_complete(coro)
 
     def connect(self, bearer: str = "", *, transport: str = "grpc", peer: str = "127.0.0.1:0",
-                pid: str | None = None, name: str | None = None) -> HarnessClient:
+                pid: str | None = None, name: str | None = None,
+                client: Mapping | None = None) -> HarnessClient:
         """A client that connects with ``bearer``, judged by the program's authenticate hook as the
         relay would ask it. Refused (and why) when the hook refuses it, raises or runs out of time.
         Without a hook, the client's principal is its pid, as arisrvx's is. ``name`` is its name in
-        the room (its pid by default)."""
-        return self._run(self.aconnect(bearer, transport=transport, peer=peer, pid=pid, name=name))
+        the room (its pid by default); ``client`` what it says it is (``kind``, ``capabilities``),
+        which its calls' ``ctx.client`` carries."""
+        return self._run(self.aconnect(bearer, transport=transport, peer=peer, pid=pid, name=name,
+                                       client=client))
 
     async def aconnect(self, bearer: str = "", *, transport: str = "grpc",
                        peer: str = "127.0.0.1:0", pid: str | None = None,
-                       name: str | None = None) -> HarnessClient:
+                       name: str | None = None, client: Mapping | None = None) -> HarnessClient:
         pid = pid or f"harness-{next(self._ids)}"
         if self.host._authenticate is None:
-            return self.client({"id": pid, "roles": []}, pid=pid, name=name)
+            return self.client({"id": pid, "roles": []}, pid=pid, name=name, client=client)
         ident = next(self._ids)
         await self._program.authenticate(ident, {"bearer": str(bearer), "transport": transport,
                                                  "peer": peer})
@@ -2083,12 +2265,12 @@ class ServerHarness:
             raise Refused(f"unauthenticated: the relay could not judge this connection ({verdict})")
         if verdict is None:
             raise Refused("unauthenticated: the relay refused this connection")
-        return self.client(verdict, pid=pid, name=name)
+        return self.client(verdict, pid=pid, name=name, client=client)
 
-    def client(self, principal: dict, *, pid: str | None = None,
-               name: str | None = None) -> HarnessClient:
+    def client(self, principal: dict, *, pid: str | None = None, name: str | None = None,
+               client: Mapping | None = None) -> HarnessClient:
         """A client connected as ``principal`` (a dict with a str ``id``), as though the
-        authenticate hook had admitted it so."""
+        authenticate hook had admitted it so; ``client`` as ``connect``'s."""
         if not isinstance(principal, dict) or not isinstance(principal.get("id"), str) \
                 or not principal["id"]:
             raise TypeError("ServerHarness.client: a principal is a dict with a str id")
@@ -2099,7 +2281,16 @@ class ServerHarness:
             self._link.set_scope(principal["id"], self.host.scope_of(principal))
             self.host._principals[principal["id"]] = principal
         pid = pid or f"harness-{next(self._ids)}"
+        said = dict(client or {})
+        unknown = set(said) - {"kind", "capabilities"}
+        if unknown:
+            raise ValueError(f"ServerHarness: client takes kind and capabilities, not "
+                             f"{', '.join(sorted(unknown))}")
         c = HarnessClient(self, principal, pid, name if name is not None else pid)
+        # Its record as the relay's ctx.client has it: one client per connection here.
+        c.client = {"client_id": f"c{pid.replace('-', '')}", "username": c.name, "verified": False,
+                    "device": "", "admin": False, "kind": str(said.get("kind") or "unknown"),
+                    "capabilities": _strs(said.get("capabilities") or (), "capabilities")}
         self._clients.append(c)
         return c
 
@@ -2129,6 +2320,7 @@ class HarnessClient:
         self.pid = pid
         self.name = name or pid  # in the room
         self.connected = True
+        self.client: dict = {}  # its record, as its calls' ctx.client (set by ServerHarness.client)
         # By function: the (fraction, message) of its latest call's ctx.progress, as the client's
         # tree holds the latest at calls.<fn>.progress.
         self.progress: dict[str, list[tuple[float, str]]] = {}
@@ -2161,7 +2353,7 @@ class HarnessClient:
             await h._program.client_call({
                 "pid": self.pid, "id": call_id, "fn": name, "args": sent["args"],
                 "kwargs": sent["kwargs"], "key": key, "timeout": timeout,
-                "principal": self.principal})
+                "principal": self.principal, "client": dict(self.client)})
         finally:
             h._link.on_progress.pop(call_id, None)
         reply = h._link.replies.pop(call_id)

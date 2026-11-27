@@ -2,6 +2,8 @@
 # relay's Python program serves (as an NMDC hub's users would be) are in the relay's client list,
 # under the program's keys, with their kind, capabilities and nick, and an admin's server.kick and
 # server.ban reach them through the program's closer, which is told the reason and which it was.
+# The program reads the list too (host.clients, ctx.client), and its geolocate hook places this
+# client's connection.
 meta: { name: a program's connections in arisrvx's client list, min_libcvc: 4.0.9 }
 tests:
   a_an_admin_logs_in: |
@@ -57,3 +59,24 @@ tests:
       (assert (not (get-attr (room-call "server.unban" id) "banned")))
       (assert (= (room-call "try_open" "nmdc:5" "198.51.100.9:41302") id))
       (assert (nth (room-call "close_twice" "nmdc:5") 0)))
+  f_the_program_reads_the_list: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id"))
+          (ctx (room-call "my_client")))
+      (assert (= (get-attr ctx "client_id") me) ctx)
+      (assert (= (get-attr ctx "kind") "unknown") "this ari sends no Hello.client yet")
+      (assert (get-attr ctx "admin") "rcon made this connection an admin")
+      (let ((nmdc (room-call "client_of" "nmdc:1")))
+        (let ((r (room-call "record" nmdc)))
+          (assert (= (get-attr r "username") "nmdcuser") r)
+          (assert (= (get-attr r "kind") "nmdc") r)
+          (assert (not (get-attr r "active")) r)
+          (assert (get-attr r "engine") r))
+        (let ((ids (room-call "active_ids")))
+          (assert (= (length ids) 1) ids)
+          (assert (= (nth ids 0) me) ids)))
+      (assert (= (room-call "record" "cnobody") nil)))
+  g_the_geolocate_hook_places_this_connection: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (while (not (= (get-attr (room-call "record" me) "city") "loopback")) (sleep 0.1))
+      (let ((c (nth (get-attr (room-call "server.client" me) "connections") 0)))
+        (assert (= (get-attr (get-attr c "geo") "country") "ZZ") c)))

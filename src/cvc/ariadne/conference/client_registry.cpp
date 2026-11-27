@@ -242,6 +242,11 @@ void client_registry::update(const std::vector<cvc::state_link_report> &links, d
       ls.transport = r.transport;
       ls.connection = r.connection;
       ls.public_address = pub;
+      if (!pub.empty()) {
+        _to_locate.push_back({id, ls.seq, pub});
+        while (_to_locate.size() > kLocateMax)
+          _to_locate.pop_front();
+      }
       it = _links.emplace(key, std::move(ls)).first;
       if (rec.banned)
         _to_kick.push_back({r.transport, r.connection});
@@ -946,6 +951,28 @@ bool client_registry::update_engine(const std::string &key, const client_info &c
   take_client(*rec);
   rec->dirty = rec->log_dirty = _dirty = true;
   return true;
+}
+
+std::vector<client_registry::to_locate> client_registry::take_to_locate() {
+  std::vector<to_locate> out(std::make_move_iterator(_to_locate.begin()),
+                             std::make_move_iterator(_to_locate.end()));
+  _to_locate.clear();
+  return out;
+}
+
+bool client_registry::set_geo(const std::string &client_id, std::uint64_t seq,
+                              const geo_info &geo) {
+  record *rec = find_mut(client_id);
+  if (!rec)
+    return false;
+  for (connection &c : rec->connections)
+    if (c.seq == seq) {
+      c.geo = {printable(geo.country, 64), printable(geo.region, 64), printable(geo.city, 64),
+               printable(geo.asn, 64)};
+      rec->log_dirty = _dirty = true;
+      return true;
+    }
+  return false;
 }
 
 bool client_registry::close_engine(const std::string &key, const std::string &wall) {
