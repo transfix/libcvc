@@ -228,7 +228,12 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
       list(APPEND _relay_python_path "--relay-arg=${_a}")
     endforeach()
     set(_relay_tests)
-    foreach(_scheme grpc ws)
+    # The WebSocket pairs only with CVC_ENABLE_WS: without it the relay has no WebSocket.
+    set(_relay_schemes grpc)
+    if(CVC_ENABLE_WS)
+      list(APPEND _relay_schemes ws)
+    endif()
+    foreach(_scheme IN LISTS _relay_schemes)
       add_test(NAME arisrvx_room_call_arigl_${_scheme}
                COMMAND "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py"
                        --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arigl>

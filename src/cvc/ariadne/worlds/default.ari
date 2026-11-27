@@ -47,7 +47,7 @@ scene:
 world:
   avatars:
     archetypes:
-      person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+      person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@1] }
     policy:
       max_speed: 4.0        # twice the walk: room for a run without loosening the veto
       allow_vertical: false # avatars walk; gravity owns z

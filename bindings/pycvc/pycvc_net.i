@@ -1,11 +1,14 @@
 // pycvc_net.i — cvc::net, the connection engine (inc/cvc/net/net_engine.h;
-// docs/roadmap/ARIADNE_NET_ENGINE.md §2.7, part N2), in pycvc as it is in C++.
+// docs/roadmap/ARIADNE_NET_ENGINE.md §2.7, parts N2 and N3), in pycvc as it is in C++.
 //
 // DIRECT WRAP: net_engine.h is %include'd, so Python has the engine's whole API under its C++
 // names: net_engine, engine_options, listener_options, framing, inbound_limits, conn_info,
 // net_event, net_batch, net_counters, net_stats (listener_stats, thread_stats), close_reason and
 // net_event's types (close_reason_slow_reader, net_event.type_frames, framing.mode_delimiter, as
-// SWIG spells a C++ enum class). What Python needs beyond the C++ is added here, no more:
+// SWIG spells a C++ enum class), and N3's TLS: tls_options (listener_options.tls), tls_protocol
+// (tls_protocol_tls1_3), listener_options.detect_tls, conn_info's tls_* members, tls_available,
+// reload_tls, tls_keyprint and net_event.type_tls_reloaded. What Python needs beyond the C++ is
+// added here, no more:
 //
 //  * BYTES. send, send_many and broadcast take any bytes-like object (bytes, bytearray, memoryview)
 //    or a str (sent as UTF-8), and copy it once, as the C++ does. framing.delimited also takes a
@@ -24,6 +27,8 @@
 //  * net_counters.closed is a dict, close reason name -> count.
 //  * listen(options=None, **fields) raises OSError (with the C++ error) when it cannot listen, and
 //    returns a net_listener: the listener_id, an int, with the asyncio callbacks below.
+//  * reload_tls(listener, tls=None) returns None or raises OSError (the C++ error) when the files do
+//    not load; the certificate in use then stays.
 //  * The GIL. wait() and poll() release it (wait() blocks); so do stop() and the engine's
 //    destruction, which join the I/O threads. set_notify(fn) takes a Python callable, which an I/O
 //    thread calls with the GIL taken: keep it tiny, or use the waker below.
@@ -37,11 +42,13 @@
 // wait() without the GIL and hands each batch to the loop, then waits for the loop to take it, so
 // what comes in while the loop is busy arrives as one larger batch. A batch is delivered in this
 // order: accepts, each listener's frames (one on_frames call a listener, [(conn, [memoryview,
-// ...]), ...], each connection once, in arrival order), writables, closes, errors. For any one
-// connection that is the order the engine posted them. on_accept(conn, info) may return a reason
-// (a str) to refuse the connection: it is closed at once, and its frames in that batch dropped.
-// on_close(conn, reason) gets the reason's name ("peer_closed"); one that takes a third parameter
-// also gets the event's message. A callback that returns an awaitable runs as a task.
+// ...]), ...], each connection once, in arrival order), writables, closes, errors, TLS reloads.
+// For any one connection that is the order the engine posted them. on_accept(conn, info) may
+// return a reason (a str) to refuse the connection: it is closed at once, and its frames in that
+// batch dropped. on_close(conn, reason) gets the reason's name ("peer_closed"); one that takes a
+// third parameter also gets the event's message. on_tls_reload(keyprint) gets a TLS listener's new
+// keyprint after each reload (reload_tls, or its files' watch). A callback that returns an
+// awaitable runs as a task.
 //
 // %include'd from pycvc.i. NOTE: a SWIG interface file — do NOT run clang-format.
 
@@ -166,19 +173,20 @@ PyObject *frame_list(PyTypeObject *t, PyObject *owner, const cvc::net::net_event
 }
 
 // net_batch's event list for the asyncio waker, in delivery order:
-//   (accepts, frames, writables, closes, errors)
+//   (accepts, frames, writables, closes, errors, reloads)
 //   accepts:   [(listener, conn, conn_info)], each conn_info made by `info_of`
 //   frames:    {listener: [(conn, [memoryview, ...]), ...]}, a connection once per listener, in the
 //              order its first frames came
 //   writables: [(listener, conn)]
 //   closes:    [(listener, conn, reason name, message)]
 //   errors:    [(listener, message)]
+//   reloads:   [(listener, keyprint)]
 // A new reference, or nullptr with a Python error set.
 PyObject *dispatch_lists(const cvc::net::net_batch &batch, PyTypeObject *frame_type,
                          PyObject *(*info_of)(const cvc::net::conn_info &)) {
   using T = cvc::net::net_event::type;
   PyObject *owner = nullptr, *accepts = nullptr, *frames = nullptr, *writables = nullptr,
-           *closes = nullptr, *errors = nullptr, *out = nullptr;
+           *closes = nullptr, *errors = nullptr, *reloads = nullptr, *out = nullptr;
   // Where each connection's frame list is in its listener's list, so a connection's later frames
   // join its first entry.
   std::unordered_map<cvc::net::conn_id, PyObject *> conn_frames; // borrowed, from `frames`
@@ -188,7 +196,8 @@ PyObject *dispatch_lists(const cvc::net::net_batch &batch, PyTypeObject *frame_t
   writables = PyList_New(0);
   closes = PyList_New(0);
   errors = PyList_New(0);
-  if (!owner || !accepts || !frames || !writables || !closes || !errors)
+  reloads = PyList_New(0);
+  if (!owner || !accepts || !frames || !writables || !closes || !errors || !reloads)
     goto fail;
   for (const cvc::net::net_event &ev : batch.events) {
     PyObject *item = nullptr;
@@ -253,6 +262,12 @@ PyObject *dispatch_lists(const cvc::net::net_batch &batch, PyTypeObject *frame_t
       if (item == nullptr || PyList_Append(errors, item) < 0)
         goto fail_item;
       break;
+    case T::tls_reloaded:
+      item = Py_BuildValue("(Ks#)", static_cast<unsigned long long>(ev.listener),
+                           ev.message.data(), static_cast<Py_ssize_t>(ev.message.size()));
+      if (item == nullptr || PyList_Append(reloads, item) < 0)
+        goto fail_item;
+      break;
     }
     Py_XDECREF(item);
     continue;
@@ -260,7 +275,7 @@ PyObject *dispatch_lists(const cvc::net::net_batch &batch, PyTypeObject *frame_t
     Py_XDECREF(item);
     goto fail;
   }
-  out = PyTuple_Pack(5, accepts, frames, writables, closes, errors);
+  out = PyTuple_Pack(6, accepts, frames, writables, closes, errors, reloads);
 fail:
   Py_XDECREF(owner);
   Py_XDECREF(accepts);
@@ -268,6 +283,7 @@ fail:
   Py_XDECREF(writables);
   Py_XDECREF(closes);
   Py_XDECREF(errors);
+  Py_XDECREF(reloads);
   return out;
 }
 
@@ -416,6 +432,7 @@ std::function<void()> notify_callback(PyObject *fn) {
 %enddef
 PYCVC_NET_VALUE(cvc::net::listener_options, cvc::net::framing, frames)
 PYCVC_NET_VALUE(cvc::net::listener_options, cvc::net::inbound_limits, limits)
+PYCVC_NET_VALUE(cvc::net::listener_options, cvc::net::tls_options, tls)
 PYCVC_NET_VALUE(cvc::net::net_event, cvc::net::conn_info, info)
 PYCVC_NET_VALUE(cvc::net::net_stats, cvc::net::net_counters, engine)
 PYCVC_NET_VALUE(cvc::net::net_stats::listener_stats, cvc::net::net_counters, counters)
@@ -476,6 +493,7 @@ PYCVC_NET_VALUE(cvc::net::net_stats::listener_stats, cvc::net::net_counters, cou
 %ignore cvc::net::net_engine::impl;
 %ignore cvc::net::net_engine::operator=;
 %ignore cvc::net::net_engine::listen;
+%ignore cvc::net::net_engine::reload_tls; // reload_tls(listener, tls=None), below
 %ignore cvc::net::net_engine::set_notify(std::function<void()>);
 %rename(_stop) cvc::net::net_engine::stop;
 // The payload overloads: Python bytes are copied once either way, by the string_view ones.
@@ -518,6 +536,22 @@ PYCVC_NET_NOGIL(cvc::net::net_engine::~net_engine)
     SWIG_exception(SWIG_RuntimeError, e.what());
   }
 }
+%exception cvc::net::net_engine::_reload_tls {
+  try {
+    $action
+  } catch (const std::system_error &e) {
+    PyErr_SetString(PyExc_OSError, e.what());
+    SWIG_fail;
+  }
+}
+%exception cvc::net::net_engine::_reload_tls_to {
+  try {
+    $action
+  } catch (const std::system_error &e) {
+    PyErr_SetString(PyExc_OSError, e.what());
+    SWIG_fail;
+  }
+}
 %exception cvc::net::net_engine::set_notify {
   try {
     $action
@@ -538,6 +572,20 @@ PYCVC_NET_NOGIL(cvc::net::net_engine::~net_engine)
     return id;
   }
 
+  // reload_tls's two forms; std::system_error (OSError) with the engine's reason when they fail.
+  void _reload_tls(cvc::net::listener_id listener) {
+    std::string error;
+    if (!$self->reload_tls(listener, &error))
+      throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                              "net_engine.reload_tls: " + error);
+  }
+  void _reload_tls_to(cvc::net::listener_id listener, const cvc::net::tls_options &tls) {
+    std::string error;
+    if (!$self->reload_tls(listener, tls, &error))
+      throw std::system_error(std::make_error_code(std::errc::invalid_argument),
+                              "net_engine.reload_tls: " + error);
+  }
+
   void set_notify(PyObject *notify) { $self->set_notify(pycvc::net::notify_callback(notify)); }
 
   // The engine's address, which keys the asyncio waker (one a C++ engine, however many proxies).
@@ -553,12 +601,23 @@ PYCVC_NET_NOGIL(cvc::net::net_engine::~net_engine)
     def listen(self, options=None, **fields):
         """Listen with ``options`` (a listener_options), or one made of ``fields`` (its members as
         keywords: address, port, name, frames, backlog, max_frame, max_queued, limits, no_delay,
-        flush_timeout). Returns a net_listener, the listener's id; raises OSError when it cannot."""
+        flush_timeout, tls, detect_tls). Returns a net_listener, the listener's id; raises OSError
+        when it cannot (a TLS listener's files that do not load, too)."""
         if options is None:
             options = listener_options(**fields)
         elif fields:
             raise TypeError("net_engine.listen: give options or fields, not both")
         return net_listener(self._listen(options), self)
+
+    def reload_tls(self, listener, tls=None):
+        """Load a TLS listener's certificate and key files again, or ``tls``'s (a tls_options, which
+        replaces its TLS options), for the connections it accepts from now on; open ones keep
+        theirs. A tls_reloaded event (on_tls_reload) follows. Raises OSError when the listener has
+        no TLS or the files do not load; the certificate in use then stays."""
+        if tls is None:
+            self._reload_tls(listener)
+        else:
+            self._reload_tls_to(listener, tls)
 
     def stop(self):
         """Close every connection (closed: engine_stopped) and listener, and join the I/O threads.
@@ -693,7 +752,7 @@ def _net_keywords(cls):
     cls.__init__ = __init__
 
 
-for _c in (engine_options, listener_options, inbound_limits, framing):
+for _c in (engine_options, listener_options, inbound_limits, framing, tls_options):
     _net_keywords(_c)
 del _c
 
@@ -702,7 +761,7 @@ class net_listener(int):
     """A listener's id (an int, as net_engine.port() and stop_listening() take), and its asyncio
     callbacks, each a decorator: on_accept(conn, info) (may return a refusal reason),
     on_frames(batch) ([(conn, [memoryview, ...]), ...]), on_close(conn, reason[, message]),
-    on_writable(conn) and on_error(message)."""
+    on_writable(conn), on_error(message) and on_tls_reload(keyprint)."""
 
     def __new__(cls, ident, engine):
         self = super().__new__(cls, ident)
@@ -713,6 +772,15 @@ class net_listener(int):
     def port(self):
         """The bound port."""
         return self.engine.port(self)
+
+    @property
+    def keyprint(self):
+        """Its certificate's keyprint, "SHA256/<base32>" ([ADC-EXT] KEYP); "" without TLS."""
+        return self.engine.tls_keyprint(self)
+
+    def reload_tls(self, tls=None):
+        """net_engine.reload_tls for this listener."""
+        self.engine.reload_tls(self, tls)
 
     def stop(self):
         """Stop accepting (net_engine.stop_listening); its open connections stay."""
@@ -736,6 +804,9 @@ class net_listener(int):
 
     def on_error(self, fn):
         return self._on("error", fn)
+
+    def on_tls_reload(self, fn):
+        return self._on("tls_reload", fn)
 
 
 def _net_arity(fn):
@@ -863,7 +934,8 @@ class _NetWaker:
 
     def _deliver(self, batch, taken):
         try:
-            accepts, frames, writables, closes, errors = _net_batch_dispatch(batch, _pycvc._net_frame)
+            accepts, frames, writables, closes, errors, reloads = _net_batch_dispatch(
+                batch, _pycvc._net_frame)
             cbs = self.callbacks
             refused = set()
             for listener, conn, info in accepts:
@@ -904,6 +976,10 @@ class _NetWaker:
                     import logging
 
                     logging.getLogger("pycvc.net").warning("listener %d: %s", listener, message)
+            for listener, keyprint in reloads:
+                fn = cbs.get(listener, {}).get("tls_reload")
+                if fn is not None:
+                    self._call(fn[0], keyprint)
         finally:
             batch.clear()
             taken.set()
