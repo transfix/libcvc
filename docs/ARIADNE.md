@@ -2776,11 +2776,19 @@ scene:
     - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
       `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
       another is a fifth nearer, so a moving camera does not swap them frame by frame.
-    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
-      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
-      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - An entity goes to the first layer whose `of:` takes it, a boat as a car does. One no layer
+      takes, or a mesh file look without `fit`, has its own node. With no `entity_layer` the scene
+      has one over all of them (node `entities`, the defaults above), so a world of up to 32 is
+      drawn as before.
+    - A boat (a `dynamicboat` vehicle) is drawn as the `boat` node draws one, about its hull
+      body: its model fitted to its length overall with its keel on its hull's bottom, and a box
+      look's mesh its hull, flat-shaded, topsides and stripe in its colours and the wet bottom dark
+      red (a box hull open, with its teak sole), on a model's four rungs. The water keeps out of
+      the nearest boats' hulls however they are drawn. A relay's client has no hull to draw, so a
+      box-look boat is its box there.
     - The meshes are posed from the physics binding's poses, between steps, whether the frame
-      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      steps the world or `--world-thread`'s local holon does. A rung whose entities have not moved
+      (a parked fleet, a paused world) is not sent again. A client of a relay draws the room's
       entities the same way (`room_view`, from its entity playout, under node `room_entities`),
       the vehicle it drives among the promoted.
     - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
