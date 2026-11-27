@@ -81,3 +81,7 @@ package:
 
 abi:
   cxx_std: 20
+
+# Run by `cvcpkg build` (the fleet): see test.sh.
+test:
+  script: test.sh
