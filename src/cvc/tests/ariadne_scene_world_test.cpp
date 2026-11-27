@@ -3333,6 +3333,111 @@ scene:
   }
 }
 
+namespace {
+// A street 12 m wide between two blocks 120 m long.
+const char *kStreet = R"(
+world:
+  vehicles:
+    archetypes:
+      car: { plant: jolt, vehicle: humvee, controllers: [nav@1] }
+scene:
+  physics: {}
+  world: { source: street, cell: 1 }
+  nodes:
+    - node: ground
+      world: street
+      source: { box: { size: [140, 60, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: north
+      world: street
+      source: { box: { size: [120, 20, 8] } }
+      transform: { position: [0, 16, 4] }
+      body: static
+    - node: south
+      world: street
+      source: { box: { size: [120, 20, 8] } }
+      transform: { position: [0, -16, 4] }
+      body: static
+)";
+} // namespace
+
+// Two Humvees on Jolt meet head on in a 12 m street, on one line, and both get past. nav's plant
+// arm braked for walls and people but not for the other vehicles, and a Jolt body cannot be moved
+// as nav's de-overlap moves a kinematic box: the two met nose to nose and pushed at full throttle,
+// the engines at the torque converter's stall speed, going nowhere (sim_world::config::
+// plant_give_way). Now each brakes short of the other, backs off with its wheels the other way and
+// passes on its right.
+TEST(AriadneWorldVehicles, TwoJoltHumveesMeetingHeadOnInAStreetBothGetPast) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = load_vehicles(kStreet);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles *v = w->vehicles();
+  ASSERT_NE(v, nullptr);
+  v->set_wander(false);
+  w->sync(&warnings);
+  entity_spec a;
+  a.archetype = "car";
+  a.placed = true;
+  a.x = -25.0;
+  a.y = 0.0;
+  a.yaw = 0.0;
+  entity_spec b = a;
+  b.x = 25.0;
+  b.yaw = 3.14159265358979323846;
+  const std::uint64_t ia = v->spawn(a), ib = v->spawn(b);
+  ASSERT_NE(ia, 0u);
+  ASSERT_NE(ib, 0u);
+  v->set_goal(ia, 40.0, 0.0);
+  v->set_goal(ib, -40.0, 0.0);
+  SceneClockDriver clock(app, resolved_clock(r.scene));
+  double closest = 1e9, pushing_s = 0.0, touching_s = 0.0, past_s[2] = {-1.0, -1.0};
+  int flips[2] = {0, 0}, gear[2] = {0, 0};
+  entity_info e[2];
+  const int frames = 45 * 60;
+  for (int f = 0; f < frames; ++f) {
+    clock.drive(1.0 / 60.0);
+    w->follow(app.world_clock());
+    for (const entity_info &x : v->entities())
+      e[x.id == ia ? 0 : 1] = x;
+    closest = std::min(closest, std::hypot(e[0].x - e[1].x, e[0].y - e[1].y));
+    for (int k = 0; k < 2; ++k) {
+      // Pushing: full throttle, at rest, the other close in front (behind, in reverse).
+      const entity_info &me = e[k], &it = e[1 - k];
+      const double dir = me.gear < 0 ? -1.0 : 1.0;
+      const double dx = it.x - me.x, dy = it.y - me.y, dd = std::hypot(dx, dy);
+      if (me.throttle > 0.8 && std::fabs(me.speed) < 0.3 && dd < 6.5 &&
+          dir * (dx * std::cos(me.yaw) + dy * std::sin(me.yaw)) > 0.8 * dd)
+        pushing_s += 1.0 / 60.0;
+      if (me.vehicle_contact)
+        touching_s += 1.0 / 60.0;
+      if (past_s[k] < 0.0 && (k == 0 ? me.x > 25.0 : me.x < -25.0)) // past the other's start
+        past_s[k] = f / 60.0;
+      const int g = me.gear > 0 ? 1 : (me.gear < 0 ? -1 : 0);
+      if (g != 0 && gear[k] != 0 && g != gear[k])
+        ++flips[k];
+      if (g != 0)
+        gear[k] = g;
+    }
+  }
+  std::printf("[head on] past the other's start at %.1f s and %.1f s; ends at x %.1f and %.1f; "
+              "closest %.2f m; pushing %.1f s, touching %.1f s; gear flips %d and %d\n",
+              past_s[0], past_s[1], e[0].x, e[1].x, closest, pushing_s, touching_s, flips[0],
+              flips[1]);
+  EXPECT_GT(e[0].x, 25.0) << "the one from the west got past";
+  EXPECT_LT(e[1].x, -25.0) << "the one from the east got past";
+  EXPECT_LT(pushing_s, 1.0) << "neither pushes into the other";
+  EXPECT_LE(std::max(flips[0], flips[1]), 6) << "a gear flipping back and forth is a vehicle stuck";
+  for (int k = 0; k < 2; ++k)
+    EXPECT_LT(std::fabs(e[k].y), 6.0) << k << ": in the street";
+}
+
 // A fleet's size key (vehicles.fleets.<f>.size) starts at its count: writing it adds vehicles
 // after its last or takes its last ones off, and the fleet is laid out again from its seed. A
 // size out of range is held to 1..256, and the key says what the fleet holds.

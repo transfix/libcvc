@@ -1760,6 +1760,10 @@ struct WorldVehicles::impl {
     // A vehicle on a plant turns in a tight spot as a real one does, backing up with its wheels
     // the other way: a Humvee on Jolt that met a block it had to turn along stood at it.
     cfg.plant_turns = true;
+    // And it keeps from pushing into its fleet's other vehicles: it brakes for one in its lane, and
+    // backs off and passes one it is stuck at. A body cannot be moved as nav's de-overlap moves a
+    // kinematic box, so a Jolt fleet's Humvees stood nose to nose at full throttle.
+    cfg.plant_give_way = true;
     // Vehicles steer around each other: the nav demos' separation for the largest vehicle (the
     // other plants' vehicles join in as foreign agents at each tick, navigator_tick).
     if (avoid) {

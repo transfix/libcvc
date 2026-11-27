@@ -329,6 +329,14 @@ const veh_params &sim_world::drive_vehicle(veh_params &vplant, plant_drive &pdri
     pdrive.v_stop = pl_v_stop_.data();
     if (cfg_.plant_turns && pl_backing_.size() == static_cast<std::size_t>(n_))
       pdrive.backing = pl_backing_.data();
+    if (cfg_.plant_give_way && pl_peer_.size() == static_cast<std::size_t>(4) * n_ &&
+        pl_outline_.size() == static_cast<std::size_t>(3) * n_ &&
+        pl_give_way_.size() == static_cast<std::size_t>(n_)) {
+      pdrive.peers = pl_peer_.data();
+      pdrive.outline = pl_outline_.data();
+      pdrive.n_peers = n_;
+      pdrive.give_way = pl_give_way_.data();
+    }
     if (pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f)
       pdrive.gamma_scale = pl_gamma_scale_.data();
     if (pl_mod_.tip_gain > 0.0f)
@@ -386,8 +394,18 @@ void sim_world::step(int num_threads) {
   };
 
   // ── THE PLANT (P4): each agent where the plant has it at the tick's start ──
-  if (plant_)
+  if (plant_) {
     plant_read();
+    // The drive's view of the others (config::plant_give_way): a copy, as the drive writes o_.
+    if (cfg_.plant_give_way && pl_peer_.size() == static_cast<std::size_t>(4) * n_)
+      for (int i = 0; i < n_; ++i) {
+        const plant_state &s = pl_start_[i];
+        pl_peer_[4 * i] = s.x;
+        pl_peer_[4 * i + 1] = s.y;
+        pl_peer_[4 * i + 2] = s.heading;
+        pl_peer_[4 * i + 3] = s.speed;
+      }
+  }
 
   // ── The telemetry's context work: U at each agent's pose with last tick's context (tel_'s
   // coefficients, its carrot, and the field and material planes before this tick's sense
@@ -1039,6 +1057,8 @@ void sim_world::step(int num_threads) {
     for (int i = 0; i < n_; ++i) {
       if (parked_[i] && !pl_backing_.empty())
         pl_backing_[i] = 0; // a parked one's tight turn is over
+      if (parked_[i] && !pl_give_way_.empty())
+        pl_give_way_[i] = give_way_state{}; // and its giving way
       if (parked_[i] && !(ov_any_ && ov_on_[i])) {
         // Parked: brake to a stop within the tick, at most at what the vehicle's brakes achieve
         // (plant_limits::a_brake; a_max without one), then hold. At a_max (2 m/s^2 on the
@@ -1075,6 +1095,15 @@ void sim_world::step(int num_threads) {
       sp_[i] = s1.speed;
       pl_steer_now_[i] = s1.steer;
     }
+    // One held at rest by another vehicle, or giving way to it, is not stalled at a wall: the
+    // carrot FSM's stall count holds and its best distance is where it is, so it does not set off
+    // along a wall once it has waited (or backed off) for 70 ticks.
+    if (cfg_.plant_give_way && pl_give_way_.size() == static_cast<std::size_t>(n_))
+      for (int i = 0; i < n_; ++i)
+        if (pl_give_way_[i].held) {
+          stall_[i] = 0;
+          best_[i] = std::hypot(goal_[2 * i] - o_[2 * i], goal_[2 * i + 1] - o_[2 * i + 1]);
+        }
     // What the plant measured of each vehicle over the tick, for the plant ledger.
     if (plant_->tracks_samples()) {
       pl_sample_.resize(static_cast<std::size_t>(n_));
@@ -1935,6 +1964,9 @@ void sim_world::set_plant(vehicle_plant *p) {
     pl_drift_.clear();
     pl_sample_.clear();
     pl_backing_.clear();
+    pl_peer_.clear();
+    pl_outline_.clear();
+    pl_give_way_.clear();
     pl_max_steer_ = 0.0f;
     pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
     return;
@@ -1950,6 +1982,9 @@ void sim_world::set_plant(vehicle_plant *p) {
   pl_start_.assign(n, plant_state{});
   pl_drift_.assign(n, drift_sample{});
   pl_backing_.assign(n, 0);
+  pl_peer_.assign(4 * n, 0.0f);
+  pl_outline_.assign(3 * n, 0.0f);
+  pl_give_way_.assign(n, give_way_state{});
   pl_sample_.clear(); // filled each tick when the plant measures its vehicles
   // The plant takes the agents where they are, at rest.
   std::vector<plant_state> start(n);
@@ -2008,6 +2043,13 @@ void sim_world::plant_read() {
       pl_body_rr_[i] = cfg_.veh.rr_col ? cfg_.veh.rr_col[i] : cfg_.veh.rr;
       for (int b = 0; b < kPlantDiscs; ++b)
         off[b] = 0.0f;
+    }
+    // Its outline for the others' lanes (config::plant_give_way); without one, its disc's square.
+    if (pl_outline_.size() == static_cast<std::size_t>(3) * n_) {
+      const bool has = l.half_width > 0.0f && l.front + l.rear > 0.0f;
+      pl_outline_[3 * i] = has ? l.front : pl_body_rr_[i];
+      pl_outline_[3 * i + 1] = has ? l.rear : pl_body_rr_[i];
+      pl_outline_[3 * i + 2] = has ? l.half_width : pl_body_rr_[i];
     }
     pl_gamma_scale_[i] = 1.0f +
                          pl_mod_.tire_gain * std::max(0.0f, s.tire_use - pl_mod_.tire_onset) +
@@ -2312,6 +2354,9 @@ template <class F> void sim_world::each_agent_column(F &&f) {
   f(pl_start_, 1, plant_state{}, false, plant);
   f(pl_drift_, 1, drift_sample{}, false, plant);
   f(pl_backing_, 1, std::uint8_t{0}, false, plant);
+  f(pl_peer_, 4, 0.0f, false, plant);
+  f(pl_outline_, 3, 0.0f, false, plant);
+  f(pl_give_way_, 1, give_way_state{}, false, plant); // remove_agent renumbers `other`
   f(pl_sample_, 1, plant_sample{}, false, false); // filled each tick when the plant measures
 }
 
@@ -2428,6 +2473,11 @@ bool sim_world::remove_agent(std::uint64_t id) {
   refresh_columns();
   for (int &j : yield_pass_j_) // the one each agent passes, by index
     j = j == i ? -1 : (j > i ? j - 1 : j);
+  for (give_way_state &g : pl_give_way_) // the one each gives way to, by index
+    if (g.other == i)
+      g = give_way_state{};
+    else if (g.other > i)
+      --g.other;
   // The last tick's intents name agents by index: gone until the next step.
   yield_intents_.clear();
   yield_shift_.clear();

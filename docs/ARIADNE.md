@@ -2693,7 +2693,12 @@ scene:
     - `collide: true` keeps its vehicles from passing through each other on nav's own plant
       (kinematic): after each navigator step, any two closer than nine tenths of the vehicle's
       length are pushed apart (never into what blocks the grid). A Jolt plant's vehicles collide as
-      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live.
+      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live. Collide or
+      not, a vehicle on a plant brakes for another of its navigator's in its lane ahead, as for a
+      wall, and backing up for one behind it; one held at rest by another at rest for a second
+      backs off with its wheels the other way and passes it (two meeting head on both on their
+      right). One that meets another at rest on its goal waits: a crowd at a rally point does not
+      circle it.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
