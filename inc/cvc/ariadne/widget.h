@@ -266,7 +266,12 @@ struct TextRunSpec {
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
 // by the kinds that don't read them.
-struct Widget {
+//
+// WidgetNode is every field but the node's two subtrees (Widget::children and
+// Widget::context_items), so a Widget copies and frees its tree node by node,
+// never recursing once per level (a document nested thousands deep is copied by
+// a repeat: each frame, and freed, on a small stack).
+struct WidgetNode {
   Kind kind = Kind::Group;
 
   std::string id;    // stable widget id suffix; defaults to `label`
@@ -632,17 +637,95 @@ struct Widget {
   std::string custom_type;
   Value props;
 
-  std::vector<Widget> children;
-
   // §5.30 `context_menu:` the menu a right-click, a long press or the Menu key opens over this
-  // window, group or viewport (on the document's root: over the main view). `context_items` are
-  // its items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
+  // window, group or viewport (on the document's root: over the main view). Its items are
+  // Widget::context_items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
   // `contributes: context_menus:` adds to (a menu without one takes items from no one).
   // `context_menu` says it has one, so an id with no items of its own yet still counts.
   bool context_menu = false;
   std::string context_menu_id;
-  std::vector<Widget> context_items;
 };
+
+struct Widget : WidgetNode {
+  std::vector<Widget> children;
+  std::vector<Widget> context_items; // §5.30 its context menu's items (WidgetNode::context_menu)
+
+  Widget() = default;
+  Widget(const Widget &other);
+  Widget(Widget &&) noexcept = default;
+  Widget &operator=(const Widget &other);
+  Widget &operator=(Widget &&) noexcept = default;
+  ~Widget();
+
+private:
+  struct node_only {};
+
+public:
+  // `other` without its subtrees: the copy constructor's step (node_only is its own).
+  Widget(node_only, const Widget &other) : WidgetNode(other) {}
+};
+
+// A copy of `other`'s tree, a node at a time: each node's subtrees are copied
+// from a list of the nodes still to do, not by a call per level. (Only a node
+// whose children have subtrees of their own waits in that list.)
+inline Widget::Widget(const Widget &other) : WidgetNode(other) {
+  if (other.children.empty() && other.context_items.empty())
+    return;
+  std::vector<std::pair<Widget *, const Widget *>> todo;
+  const auto lists_of = [&todo](Widget &to, const Widget &from) {
+    for (auto lists : {std::pair{&to.children, &from.children},
+                       std::pair{&to.context_items, &from.context_items}}) {
+      lists.first->reserve(lists.second->size());
+      for (const Widget &c : *lists.second)
+        lists.first->emplace_back(node_only{}, c);
+      // Taken once the list is whole: it is not grown again, so the pointers stay good.
+      for (std::size_t i = 0; i < lists.second->size(); ++i)
+        if (!(*lists.second)[i].children.empty() || !(*lists.second)[i].context_items.empty())
+          todo.emplace_back(&(*lists.first)[i], &(*lists.second)[i]);
+    }
+  };
+  lists_of(*this, other);
+  while (!todo.empty()) {
+    const auto [to, from] = todo.back();
+    todo.pop_back();
+    lists_of(*to, *from);
+  }
+}
+
+inline Widget &Widget::operator=(const Widget &other) {
+  if (this != &other) {
+    Widget copy(other); // first: `other` may be in this tree
+    *this = std::move(copy);
+  }
+  return *this;
+}
+
+// The tree's nodes moved out into a list and freed one at a time, each with its
+// subtrees already empty, so no destructor call nests in another.
+inline Widget::~Widget() {
+  const auto leaves = [](const std::vector<Widget> &list) {
+    for (const Widget &c : list)
+      if (!c.children.empty() || !c.context_items.empty())
+        return false;
+    return true;
+  };
+  if (leaves(children) && leaves(context_items))
+    return; // the lists free their nodes, each with nothing under it
+  std::vector<Widget> todo;
+  const auto take = [&todo](std::vector<Widget> &list) {
+    for (Widget &c : list)
+      todo.push_back(std::move(c));
+    list.clear();
+  };
+  take(children);
+  take(context_items);
+  while (!todo.empty()) {
+    Widget node = std::move(todo.back());
+    todo.pop_back();
+    take(node.children);
+    take(node.context_items);
+  }
+}
 
 // §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).
 inline Widget with_context_menu(Widget w, std::vector<Widget> items, std::string id = {}) {

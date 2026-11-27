@@ -226,10 +226,10 @@ constexpr std::string_view kIndexToken = "{i}";
 
 // §3 repeat: substitute the loop-index token `{i}` with the 0-based index `idx`, in place on an
 // instance's own copy of its template, in every field an instance uses to address distinct state
-// or to display (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Recurses
-// into children. (Single-level: a nested `repeat` shares the same `{i}` token and is not
-// independently indexed — a follow-up.)
-void substitute_index_in(Widget &out, const std::string &idx) {
+// or to display (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Goes
+// through its children (substitute_index_in), without recursing. (Single-level: a nested `repeat`
+// shares the same `{i}` token and is not independently indexed — a follow-up.)
+void substitute_index_one(Widget &out, const std::string &idx) {
   constexpr std::string_view kTok = kIndexToken;
   replace_in(out.id, kTok, idx);
   replace_in(out.label, kTok, idx);
@@ -304,16 +304,32 @@ void substitute_index_in(Widget &out, const std::string &idx) {
     replace_in(h.name, kTok, idx);
     replace_in(h.target, kTok, idx);
   }
-  for (Widget &c : out.children)
+}
+
+// `out` and its subtree (its children and its context menu's items), each node on its own: no
+// call per level, and only a node with a subtree of its own waits in `todo`.
+void substitute_index_in(Widget &out, const std::string &idx) {
+  std::vector<Widget *> todo;
+  for (Widget *w = &out;;) {
+    substitute_index_one(*w, idx);
     // A nested `repeat` template is left UNtouched so its own expansion owns its `{i}` (rather
     // than the outer index clobbering the inner template's bindings). Single-level still: the
     // inner cannot also reference the outer index — the loader warns on a nested repeat.
-    if (c.repeat.empty())
-      substitute_index_in(c, idx);
-  // §5.30 a row's right-click menu acts on that row (on: (delete-row {i})).
-  for (Widget &c : out.context_items)
-    if (c.repeat.empty())
-      substitute_index_in(c, idx);
+    // §5.30 a row's right-click menu acts on that row (on: (delete-row {i})).
+    for (std::vector<Widget> *list : {&w->children, &w->context_items})
+      for (Widget &c : *list) {
+        if (!c.repeat.empty())
+          continue;
+        if (c.children.empty() && c.context_items.empty())
+          substitute_index_one(c, idx);
+        else
+          todo.push_back(&c);
+      }
+    if (todo.empty())
+      break;
+    w = todo.back();
+    todo.pop_back();
+  }
 }
 
 // One deep copy of the template, then the index substituted through it in place. (Copying each
@@ -2501,12 +2517,57 @@ struct Runtime::Impl {
     }
   }
 
-  void emit(const Widget &w);      // repeat + visibility gates (§4), then emit_node
-  void emit_node(const Widget &w); // draw the widget assuming it is visible
-  // §3 repetition: call `f(instance, i)` for each instance of `w` — once with i==-1 for a
-  // plain widget, or N times (i=0..N-1, `{i}` substituted) for a `repeat` template. The
-  // one place the 1-or-N expansion lives, shared by emit() and the grid layout.
-  void each_instance(const Widget &w, const std::function<void(const Widget &, int)> &f);
+  // The walk. Nothing in it recurses: a container's children, and what the container does after
+  // them (its end_*s, pop_ids and scope pops, in the order a recursive walk did them), go on walk_,
+  // a work stack on the heap, and run_walk steps it until it is back where it started. So a
+  // document nested any depth draws in the same native stack (ariadne_deep_nesting_test runs it on
+  // a 256 KiB one). The begin_* and emit_* below that take a widget start its work and return: what
+  // is left of it is on walk_, for the run_walk they were called under.
+  struct WalkFrame {
+    enum class Op : std::uint8_t {
+      Children,    // emit_children: `w`'s children (context_items, when `items`) from `next`
+      Cells,       // a grid's children from `next`, each instance a cell (emit_container)
+      Instances,   // a repeat's instances from `next` (begin_repeat), as cells when `cell`
+      Container,   // emit_container after the children: end_grid and its writes, the scope pops
+      Node,        // emit_node after a container's children, by w->kind and `stage`
+      ContextMenu, // emit_context_menu after its items
+      Then,        // `then`, run once the work above it is done
+    };
+    Op op = Op::Then;
+    std::uint8_t stage = 0;
+    bool items = false;     // Children: the context menu's items
+    bool cell = false;      // Instances: as a grid's cells
+    bool outermost = false; // Instances: the outermost repeat (emitting_repeat_ is its template)
+    bool open_item = false; // Instances: an instance's id and instance_path entry are pushed
+    bool scoped = false;    // Container: a mount pushed its scope
+    bool fns = false;       // Container: and its functions
+    bool grid = false;      // Container: begin_grid opened one
+    bool dis = false;       // Node: begin_disabled is open
+    bool flag = false;      // Node: Window open, Menu merges the Windows menu, Group inner click
+    bool backdrop = false;  // Node: a backdrop is open (Window, Group)
+    bool item = false;      // Node(Group): an item group is open
+    std::size_t next = 0;   // Children, Cells, Instances: the next index
+    int count = 0;          // Instances: how many; Node(Group): clicks_fired before its children
+    const Widget *w = nullptr;
+    std::unique_ptr<std::optional<Widget>> inst; // Instances: the instance drawn now
+    std::string path, path2;          // Container: tracks, columns; Node(Window): its open path
+    const MenuEvent *outer = nullptr; // ContextMenu: the menu event it took the place of
+    std::function<void()> then;
+  };
+  std::vector<WalkFrame> walk_;
+  void push_then(std::function<void()> then);
+  template <class Start> void run_walk(Start &&start);
+  void step_walk();
+  void leave_node(WalkFrame &f);
+  void emit_node_tail(const Widget &w, bool dis, bool inner_click);
+
+  void emit(const Widget &w);       // repeat + visibility gates (§4), then emit_node (runs a walk)
+  void begin_emit(const Widget &w); // as emit, on the walk running now
+  void emit_node(const Widget &w);  // draw the widget assuming it is visible (on the walk)
+  // §3 repetition: each instance of `w`, once (i == -1) for a plain widget, or N times (i=0..N-1,
+  // `{i}` substituted) for a `repeat` template: drawn by begin_emit, or as a grid's cells.
+  void begin_repeat(const Widget &w, bool cell);
+  void begin_cells(const Widget &c); // a grid's child: its instances, each in a cell
   void emit_children(const Widget &w);
   void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
@@ -2578,6 +2639,7 @@ struct Runtime::Impl {
   std::set<std::string> quit_apps;
   int app_menu_depth = 0; // > 0 while an application's menu is being drawn
   void emit_app_menus();
+  void app_menu(std::size_t k); // frame_apps[k]'s menu (the next running one from k), then the rest
   void quit_app(const std::string &scope);
   void restart_app(const std::string &scope);
   bool app_running(const std::string &scope) const;
@@ -2616,6 +2678,25 @@ struct Runtime::Impl {
     ScopedTo(const ScopedTo &) = delete;
     ScopedTo &operator=(const ScopedTo &) = delete;
   };
+  // ScopedTo's push and pop, for a scope held across steps of the walk (run_walk pops what is
+  // left of them if a step throws). push_scope returns what pop_scope takes off again.
+  struct PushedScope {
+    bool on = false, fns = false;
+  };
+  PushedScope push_scope(const std::string &scope, const FunctionScope *functions) {
+    PushedScope p{!scope.empty(), !scope.empty() && functions};
+    if (p.on)
+      scope_stack.push_back(scope);
+    if (p.fns)
+      fn_stack.push_back(functions);
+    return p;
+  }
+  void pop_scope(PushedScope p) {
+    if (p.fns)
+      fn_stack.pop_back();
+    if (p.on)
+      scope_stack.pop_back();
+  }
   void plan_windows_menu();
   // One instance of a repeated window, as the Windows menu lists it: its title and open state.
   struct RepeatedWindow {
@@ -2646,7 +2727,19 @@ struct Runtime::Impl {
   Backend::TrayIcon tray_spec(const Widget &w);
   std::string tray_picture(const Widget &w);
   std::vector<TrayEntry> tray_entries(const Widget &bar); // this frame's, in the bar's order
-  void emit_tray(const std::vector<TrayEntry> &icons);
+  // The tray, on the walk: begin_tray, the icons (shown ones and the overflow menu's), end_tray.
+  struct TrayWalk {
+    std::vector<TrayEntry> icons;
+    std::vector<Backend::TrayIcon> specs;
+    int hidden = 0; // the icons in the overflow menu, from the first
+  };
+  void emit_tray(std::vector<TrayEntry> icons);
+  void tray_menus(const std::shared_ptr<TrayWalk> &t, int k); // no tray: a menu per icon from k
+  void tray_more(const std::shared_ptr<TrayWalk> &t, int k);  // the overflow menu's from k
+  void tray_shown(const std::shared_ptr<TrayWalk> &t, int k); // the shown icons from k
+  void tray_item(const std::shared_ptr<TrayWalk> &t, int k);  // icon k as an item of a menu
+  // A tray icon's backend id: the clock's and the bell's own, else its id:, else its place.
+  static std::string tray_id(const TrayEntry &i, int k);
   void emit_tray_items(const TrayEntry &icon); // a tray menu's items: its children, or the bell's
   void emit_bell_items();
   // §5.23 the bar's menus folded into one menu under the "menu" icon, when the document lets them
@@ -2882,12 +2975,196 @@ int Runtime::Impl::eval_count(const std::string &expr) {
   return static_cast<int>(n);
 }
 
-void Runtime::Impl::emit_children(const Widget &w) {
-  for (std::size_t k = 0; k < w.children.size(); ++k) {
-    emit_path.push_back(k);
-    emit(w.children[k]);
-    emit_path.pop_back();
+namespace {
+// §5.30 a context menu's items in emit_path: apart from the widget's children (instance keys,
+// unnamed ids).
+constexpr std::size_t kItemsPath = std::size_t(1) << 30;
+// §3 the repeat instances one frame draws, across all its repeats: each repeat is capped on its
+// own (kMaxRepeat), but many could still compound into an unbounded walk (an instance's deep copy
+// and its emit), which the eval-time budget doesn't see.
+constexpr int kMaxFrameInstances = 16384;
+} // namespace
+
+void Runtime::Impl::push_then(std::function<void()> then) {
+  WalkFrame f;
+  f.op = WalkFrame::Op::Then;
+  f.then = std::move(then);
+  walk_.push_back(std::move(f));
+}
+
+// Start the work `start` pushes and step walk_ until it is back where it was. Called again from
+// inside a step (a registered widget fn's ctx.emit), it steps only what it pushed. If a step
+// throws, the work it left is dropped and the scopes, functions and repeat it held are popped, as
+// the guards of a recursive walk did when they unwound.
+template <class Start> void Runtime::Impl::run_walk(Start &&start) {
+  const std::size_t base = walk_.size();
+  const std::size_t scopes = scope_stack.size();
+  const std::size_t functions = fn_stack.size();
+  const Widget *const repeat = emitting_repeat_;
+  const int instance = emitting_instance_;
+  try {
+    start();
+    while (walk_.size() > base)
+      step_walk();
+  } catch (...) {
+    walk_.resize(base);
+    scope_stack.resize(scopes);
+    fn_stack.resize(functions);
+    emitting_repeat_ = repeat;
+    emitting_instance_ = instance;
+    throw;
   }
+}
+
+// One step of the walk: the top frame does what the recursive walk did next for it. A step never
+// holds a reference into walk_ across a call that can push to it.
+void Runtime::Impl::step_walk() {
+  using Op = WalkFrame::Op;
+  WalkFrame &f = walk_.back();
+  switch (f.op) {
+  case Op::Then: {
+    const std::function<void()> then = std::move(f.then);
+    walk_.pop_back();
+    then();
+    return;
+  }
+  case Op::Children: {
+    const std::vector<Widget> &list = f.items ? f.w->context_items : f.w->children;
+    if (f.next > 0)
+      emit_path.pop_back(); // the child before is done
+    if (f.next == list.size()) {
+      walk_.pop_back();
+      return;
+    }
+    const std::size_t k = f.next++;
+    emit_path.push_back(f.items ? kItemsPath + k : k);
+    begin_emit(list[k]);
+    return;
+  }
+  case Op::Cells: {
+    if (f.next > 0)
+      emit_path.pop_back();
+    if (f.next == f.w->children.size()) {
+      walk_.pop_back();
+      return;
+    }
+    const std::size_t k = f.next++;
+    const Widget &c = f.w->children[k];
+    emit_path.push_back(k);
+    begin_cells(c);
+    return;
+  }
+  case Op::Instances: {
+    if (f.open_item) { // the instance before is done
+      f.open_item = false;
+      instance_path.pop_back();
+      backend->pop_id();
+    }
+    if (f.next < static_cast<std::size_t>(f.count) && frame_instances >= kMaxFrameInstances) {
+      warn_once("ari: too many repeated widget instances this frame (cap " +
+                std::to_string(kMaxFrameInstances) + ") — remaining instances skipped");
+      f.next = static_cast<std::size_t>(f.count);
+    }
+    if (f.next >= static_cast<std::size_t>(f.count)) {
+      if (f.outermost) {
+        emitting_repeat_ = nullptr;
+        emitting_instance_ = -1;
+      }
+      walk_.pop_back();
+      return;
+    }
+    const int i = static_cast<int>(f.next++);
+    ++frame_instances;
+    if (f.outermost)
+      emitting_instance_ = i;
+    const Widget *inst = nullptr;
+    if (f.outermost && !f.w->scope.empty()) { // a repeated mount: its instance, made once
+      auto it = mount_instances_.find({f.w, i});
+      if (it == mount_instances_.end()) {
+        Widget made = substitute_index(*f.w, i);
+        made.repeat.clear();
+        it = mount_instances_.emplace(std::make_pair(f.w, i), std::move(made)).first;
+      }
+      inst = &it->second;
+    } else {
+      // The instance before is no longer drawn: this one is made in its place.
+      if (!f.inst)
+        f.inst = std::make_unique<std::optional<Widget>>();
+      Widget &made = f.inst->emplace(*f.w);
+      substitute_index_in(made, std::to_string(i));
+      made.repeat.clear(); // the instance renders once
+      inst = &made;
+    }
+    if (f.cell) {
+      // Visibility is decided before the cell advances, so a hidden instance takes no cell.
+      if (!visible(*inst))
+        return; // the next instance, at the next step
+      backend->grid_next_cell();
+      backend->push_id(std::to_string(i).c_str());
+      instance_path.push_back(i);
+      walk_.back().open_item = true;
+      autofocus(*inst, i);
+      next_is_cell = true; // §5.26 a group's fill covers its cell
+      emit_node(*inst);
+      return;
+    }
+    backend->push_id(std::to_string(i).c_str()); // per-instance identity
+    instance_path.push_back(i);
+    f.open_item = true;
+    if (visible(*inst)) { // §4: a falsy visible_when hides it + subtree
+      autofocus(*inst, i);
+      emit_node(*inst);
+    }
+    return;
+  }
+  case Op::Container: {
+    // Nothing here pushes to walk_, so the frame is popped once it is done with.
+    if (f.grid) {
+      Backend &b = *backend;
+      b.end_grid();
+      if (!f.path.empty()) { // a resizable row split: its pane sizes, as dragged
+        const std::vector<float> cur = b.grid_tracks();
+        if (!cur.empty())
+          write<std::string>(app, f.path, format_tracks(cur));
+      }
+      if (!f.path2.empty()) { // a resizable table: its column widths
+        const std::vector<float> cur = b.grid_columns();
+        if (!cur.empty())
+          write<std::string>(app, f.path2, format_tracks(cur));
+      }
+    }
+    if (f.scoped)
+      scope_stack.pop_back();
+    if (f.fns)
+      fn_stack.pop_back();
+    walk_.pop_back();
+    return;
+  }
+  case Op::Node: {
+    WalkFrame d = std::move(f);
+    walk_.pop_back();
+    leave_node(d);
+    return;
+  }
+  case Op::ContextMenu: {
+    const MenuEvent *const outer = f.outer;
+    walk_.pop_back();
+    menu_event = outer;
+    if (reactive) // unbound now: the next menu binds its own, even one made where this one was
+      reactive->set_event(menu_event ? &menu_event->dict : nullptr);
+    backend->end_context_menu();
+    return;
+  }
+  }
+}
+
+void Runtime::Impl::emit_children(const Widget &w) {
+  if (w.children.empty())
+    return;
+  WalkFrame f;
+  f.op = WalkFrame::Op::Children;
+  f.w = &w;
+  walk_.push_back(std::move(f));
 }
 
 // Lay a container's children out per its layout (§3.0.3b): a Grid/Horizontal
@@ -2935,7 +3212,7 @@ void Runtime::Impl::emit_container(const Widget &w) {
   // §12: a mount point (Widget::scope) scopes its CHILDREN — the loaded fragment — to a deeper
   // sub-prefix; the mount widget's own reactive fields already evaluated in the parent scope
   // (in emit() before we got here). Push the composed scope for the children walk, pop after
-  // (RAII, so a backend throw cannot leave the stack unbalanced).
+  // (Op::Container; run_walk pops it if a backend throws, so the stack is never left unbalanced).
   const bool scoped = !w.scope.empty();
   if (scoped && !quit_apps.empty() && !app_running(resolve_bind(current_prefix(), w.scope)))
     return; // §5.25 an application the user quit: nothing of it is drawn, nor its tick started
@@ -2964,22 +3241,13 @@ void Runtime::Impl::emit_container(const Widget &w) {
   // §6.6 the root's and a mount's functions are the ones programs started in its subtree get.
   if (w.functions)
     fn_stack.push_back(w.functions.get());
-  struct FunctionsGuard {
-    std::vector<const FunctionScope *> &stack;
-    bool active;
-    ~FunctionsGuard() {
-      if (active)
-        stack.pop_back();
-    }
-  } functions_guard{fn_stack, static_cast<bool>(w.functions)};
-  struct ScopeGuard {
-    std::vector<std::string> &stack;
-    bool active;
-    ~ScopeGuard() {
-      if (active)
-        stack.pop_back();
-    }
-  } guard{scope_stack, scoped};
+  // After the children (WalkFrame::Op::Container): the grid ended, then these popped. A plain
+  // stack that pushed nothing needs no frame.
+  WalkFrame after;
+  after.op = WalkFrame::Op::Container;
+  after.w = &w;
+  after.scoped = scoped;
+  after.fns = static_cast<bool>(w.functions);
 
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
     // The grid's identity: its id:, else its label, else where it sits in the tree. Backends key
@@ -3019,99 +3287,67 @@ void Runtime::Impl::emit_container(const Widget &w) {
         b.seed_grid_columns(seed);
     }
     if (b.begin_grid(w.layout, id.c_str())) {
-      for (std::size_t k = 0; k < w.children.size(); ++k) {
-        const Widget &c = w.children[k];
-        emit_path.push_back(k);
-        // Expand a `repeat` child into per-instance cells; a plain child is one instance.
-        // Decide visibility BEFORE advancing the cell, so a hidden child/instance consumes
-        // no cell (otherwise it would leave an empty cell and shift the following siblings).
-        each_instance(c, [&](const Widget &inst, int i) {
-          if (!visible(inst))
-            return;
-          b.grid_next_cell();
-          if (i >= 0) {
-            b.push_id(std::to_string(i).c_str());
-            instance_path.push_back(i);
-          }
-          autofocus(inst, i);
-          next_is_cell = true; // §5.26 a group's fill covers its cell
-          emit_node(inst);
-          if (i >= 0) {
-            instance_path.pop_back();
-            b.pop_id();
-          }
-        });
-        emit_path.pop_back();
+      // Each child a cell, a `repeat` child a cell per instance (step_walk: Op::Cells,
+      // begin_cells), then end_grid and the sizes written back (Op::Container).
+      after.grid = true;
+      after.path = std::move(tracks_path);
+      after.path2 = std::move(columns_path);
+      walk_.push_back(std::move(after));
+      if (!w.children.empty()) {
+        WalkFrame cells;
+        cells.op = WalkFrame::Op::Cells;
+        cells.w = &w;
+        walk_.push_back(std::move(cells));
       }
-      b.end_grid();
-      if (split) {
-        const std::vector<float> cur = b.grid_tracks();
-        if (!cur.empty())
-          write<std::string>(app, tracks_path, format_tracks(cur));
-      }
-      if (table) {
-        const std::vector<float> cur = b.grid_columns();
-        if (!cur.empty())
-          write<std::string>(app, columns_path, format_tracks(cur));
-      }
+      return;
     }
   } else {
+    if (after.scoped || after.fns)
+      walk_.push_back(std::move(after));
     emit_children(w);
-  }
-}
-
-void Runtime::Impl::each_instance(const Widget &w,
-                                  const std::function<void(const Widget &, int)> &f) {
-  if (w.repeat.empty()) {
-    f(w, -1); // a plain widget: one instance, no index
     return;
   }
+  // No grid opened: nothing of it is drawn.
+  if (after.scoped)
+    scope_stack.pop_back();
+  if (after.fns)
+    fn_stack.pop_back();
+}
+
+// A `repeat` template: the count and the outermost repeat's bookkeeping, then its instances, one a
+// step (step_walk, Op::Instances).
+void Runtime::Impl::begin_repeat(const Widget &w, bool cell) {
   const int n = eval_count(w.repeat); // capped, fail-safe 0
   // §12 the outermost repeat's instance, for the mount ticks started under it (a nested repeat is
   // a per-frame copy, so its instances are tracked by the outer one's).
   const bool outermost = emitting_repeat_ == nullptr;
   if (outermost && !mount_ticks_.empty())
     sweep_repeated_ticks(&w, n);
-  struct RepeatGuard {
-    const Widget *&tmpl;
-    int &instance;
-    bool active;
-    ~RepeatGuard() {
-      if (active) {
-        tmpl = nullptr;
-        instance = -1;
-      }
-    }
-  } repeat_guard{emitting_repeat_, emitting_instance_, outermost};
   if (outermost)
-    emitting_repeat_ = &w;
-  // Per-FRAME instance budget: each repeat is capped individually, but many repeats could
-  // still compound into an unbounded per-frame walk (substitute_index deep-copy + emit),
-  // which the eval-time budget doesn't see. Bound the total across the whole frame.
-  constexpr int kMaxFrameInstances = 16384;
-  for (int i = 0; i < n; ++i) {
-    if (frame_instances >= kMaxFrameInstances) {
-      warn_once("ari: too many repeated widget instances this frame (cap " +
-                std::to_string(kMaxFrameInstances) + ") — remaining instances skipped");
-      break;
-    }
-    ++frame_instances;
-    if (outermost)
-      emitting_instance_ = i;
-    if (outermost && !w.scope.empty()) { // a repeated mount: its instance, made once
-      auto it = mount_instances_.find({&w, i});
-      if (it == mount_instances_.end()) {
-        Widget inst = substitute_index(w, i);
-        inst.repeat.clear();
-        it = mount_instances_.emplace(std::make_pair(&w, i), std::move(inst)).first;
-      }
-      f(it->second, i);
-      continue;
-    }
-    Widget inst = substitute_index(w, i);
-    inst.repeat.clear(); // the instance renders once
-    f(inst, i);
+    emitting_repeat_ = &w; // until its last instance is done (Op::Instances)
+  WalkFrame f;
+  f.op = WalkFrame::Op::Instances;
+  f.w = &w;
+  f.count = n;
+  f.cell = cell;
+  f.outermost = outermost;
+  walk_.push_back(std::move(f));
+}
+
+// A grid's child: a plain one is one cell; a `repeat` child a cell per instance. Visibility is
+// decided BEFORE the cell advances, so a hidden child or instance takes no cell (else it would
+// leave an empty one and shift the siblings after it).
+void Runtime::Impl::begin_cells(const Widget &c) {
+  if (!c.repeat.empty()) {
+    begin_repeat(c, /*cell=*/true);
+    return;
   }
+  if (!visible(c))
+    return;
+  backend->grid_next_cell();
+  autofocus(c, -1);
+  next_is_cell = true; // §5.26 a group's fill covers its cell
+  emit_node(c);
 }
 
 void Runtime::Impl::autofocus(const Widget &inst, int i) {
@@ -3128,20 +3364,18 @@ void Runtime::Impl::autofocus(const Widget &inst, int i) {
 }
 
 void Runtime::Impl::emit(const Widget &w) {
-  each_instance(w, [this](const Widget &inst, int i) {
-    if (i >= 0) {
-      backend->push_id(std::to_string(i).c_str()); // per-instance identity
-      instance_path.push_back(i);
-    }
-    if (visible(inst)) { // §4: a falsy visible_when hides it + subtree
-      autofocus(inst, i);
-      emit_node(inst);
-    }
-    if (i >= 0) {
-      instance_path.pop_back();
-      backend->pop_id();
-    }
-  });
+  run_walk([&] { begin_emit(w); });
+}
+
+void Runtime::Impl::begin_emit(const Widget &w) {
+  if (!w.repeat.empty()) {
+    begin_repeat(w, /*cell=*/false); // each instance under its own id (Op::Instances)
+    return;
+  }
+  if (visible(w)) { // §4: a falsy visible_when hides it + subtree
+    autofocus(w, -1);
+    emit_node(w);
+  }
 }
 
 // §5.30 a right-click menu's `event`: what it was opened over (`on`: group, viewport, window or
@@ -3208,18 +3442,20 @@ void Runtime::Impl::emit_context_menu(const Widget &w, ContextMenuOver over,
   if (opened.now || it == menu_events.end())
     it = menu_events.insert_or_assign(key, context_event(w, over, opened, pick)).first;
   it->second.walk = walk_no;
-  const MenuEvent *const outer = std::exchange(menu_event, &it->second);
+  // After its items: the menu event it took the place of back, and end_context_menu
+  // (step_walk, Op::ContextMenu).
+  WalkFrame after;
+  after.op = WalkFrame::Op::ContextMenu;
+  after.outer = std::exchange(menu_event, &it->second);
+  walk_.push_back(std::move(after));
   // Its items, apart from the widget's children in the tree's paths (instance keys, unnamed ids).
-  constexpr std::size_t kItemsPath = std::size_t(1) << 30;
-  for (std::size_t k = 0; k < w.context_items.size(); ++k) {
-    emit_path.push_back(kItemsPath + k);
-    emit(w.context_items[k]);
-    emit_path.pop_back();
+  if (!w.context_items.empty()) {
+    WalkFrame items;
+    items.op = WalkFrame::Op::Children;
+    items.items = true;
+    items.w = &w;
+    walk_.push_back(std::move(items));
   }
-  menu_event = outer;
-  if (reactive) // unbound now: the next menu binds its own, even one made where this one was
-    reactive->set_event(menu_event ? &menu_event->dict : nullptr);
-  backend->end_context_menu();
 }
 
 void Runtime::Impl::emit_node(const Widget &w) {
@@ -3257,28 +3493,37 @@ void Runtime::Impl::emit_node(const Widget &w) {
       // seeds with its own default) finds the host's or the document's choice already there.
       read_bool_or_seed(app, resolve(kClockKey), clock_on_by_default() ? 1 : 0);
       read_bool_or_seed(app, resolve(kBellKey), bell_on_by_default() ? 1 : 0); // §5.24
-      const std::vector<TrayEntry> tray = tray_entries(w);
-      if (collapse_menus(w, tray)) {
+      std::vector<TrayEntry> tray = tray_entries(w);
+      const bool collapse = collapse_menus(w, tray);
+      // The rest goes on the walk, last first: the bar's own menus, the loaded documents' (§5.25),
+      // the Windows menu (§5.9: last unless the document placed it), then the tray, after every
+      // menu at the bar's right end, then the bar ends (leave_node).
+      WalkFrame after;
+      after.op = WalkFrame::Op::Node;
+      after.w = &w;
+      after.dis = dis;
+      walk_.push_back(std::move(after));
+      push_then([this, tray = std::move(tray)]() mutable { emit_tray(std::move(tray)); });
+      const auto windows_menu_last = [this] {
+        if (!windows_menu.placed)
+          emit_windows_menu(windows_menu.title);
+      };
+      if (collapse) {
         // §5.23 one menu, its items the bar's menus as submenus. menu_depth stays 0 for it, so a
         // menu titled as the Windows menu still takes the Windows menu's items (§5.9).
         const std::string glyph(icon_glyph("menu", b.unicode_glyphs()));
         if (b.begin_menu(glyph.c_str())) {
+          push_then([this] { backend->end_menu(); });
+          push_then(windows_menu_last);
+          push_then([this] { emit_app_menus(); });
           emit_children(w);
-          emit_app_menus();
-          if (!windows_menu.placed)
-            emit_windows_menu(windows_menu.title);
-          b.end_menu();
         }
       } else {
+        push_then(windows_menu_last);
+        push_then([this] { emit_app_menus(); });
         emit_children(w);
-        emit_app_menus();         // §5.25 the loaded documents' own, after the document's
-        if (!windows_menu.placed) // §5.9: the Windows menu goes last unless the document placed it
-          emit_windows_menu(windows_menu.title);
       }
-      emit_tray(tray); // after every menu, at the bar's right end
-      first_bar_drawn = true;
-      --menubar_depth;
-      b.end_main_menu_bar();
+      return;
     }
     break;
 
@@ -3296,13 +3541,14 @@ void Runtime::Impl::emit_node(const Widget &w) {
                        app_menu_depth == 0 && w.label == windows_menu.title;
     if (b.begin_menu(label)) {
       ++menu_depth;
+      WalkFrame after; // its items, then the Windows menu's when it merges, end_menu (leave_node)
+      after.op = WalkFrame::Op::Node;
+      after.w = &w;
+      after.dis = dis;
+      after.flag = merge;
+      walk_.push_back(std::move(after));
       emit_children(w);
-      --menu_depth;
-      if (merge && windows_menu.on && !windows_menu_drawn && windows_menu_has_items()) {
-        b.separator();
-        emit_windows_menu_items();
-      }
-      b.end_menu();
+      return;
     }
     if (merge)
       windows_menu_drawn = true; // open or not, it stands for the Windows menu this frame
@@ -3421,15 +3667,18 @@ void Runtime::Impl::emit_node(const Widget &w) {
       b.push_id(id.c_str());
       if (w.context_menu) // §5.30 its right-click menu: over its body, inside the window
         b.begin_context_area(context_id(w).c_str(), ContextMenuOver::Window);
-      const bool backdrop = open_backdrop(w, /*window=*/true); // §5.12
+      // After its body: the backdrop and context area end, its menu, pop_id, end_window and the
+      // open state written (leave_node).
+      WalkFrame after;
+      after.op = WalkFrame::Op::Node;
+      after.w = &w;
+      after.dis = dis;
+      after.flag = open;
+      after.path = open_path;
+      after.backdrop = open_backdrop(w, /*window=*/true); // §5.12
+      walk_.push_back(std::move(after));
       emit_container(w); // §3.0.3b: the window body honours w.layout
-      if (backdrop)
-        b.end_backdrop();
-      if (w.context_menu) {
-        b.end_context_area();
-        emit_context_menu(w, ContextMenuOver::Window, {});
-      }
-      b.pop_id();
+      return;
     }
     b.end_window();
     if (w.closable)
@@ -3458,23 +3707,17 @@ void Runtime::Impl::emit_node(const Widget &w) {
       o.highlight = w.hover_highlight;
       b.begin_item_group(item_id(w).c_str(), o);
     }
-    const int clicks_before = clicks_fired;
-    {
-      const bool backdrop = open_backdrop(w, /*window=*/false, cell); // §5.12, §5.26
-      emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
-      if (backdrop)
-        b.end_backdrop();
-    }
-    inner_click = clicks_fired != clicks_before;
-    if (item)
-      b.end_item_group();
-    if (menu) {
-      b.end_context_area();
-      emit_context_menu(w, ContextMenuOver::Item, {});
-    }
-    if (!w.id.empty())
-      b.pop_id();
-    break;
+    // After its children: the backdrop and item group end, its menu, pop_id (leave_node).
+    WalkFrame after;
+    after.op = WalkFrame::Op::Node;
+    after.w = &w;
+    after.dis = dis;
+    after.item = item;
+    after.count = clicks_fired;
+    after.backdrop = open_backdrop(w, /*window=*/false, cell); // §5.12, §5.26
+    walk_.push_back(std::move(after));
+    emit_container(w); // §3.0.3b: a group honours w.layout (grid / vertical)
+    return;
   }
 
   case Kind::Text:
@@ -3733,8 +3976,15 @@ void Runtime::Impl::emit_node(const Widget &w) {
       if (!w.on.empty())
         enqueue(w.on);
     }
-    if (!w.children.empty())
-      emit(w.children[static_cast<std::size_t>(idx)]); // only the selected tab's subtree
+    if (!w.children.empty()) {
+      WalkFrame after; // pop_id after the tab's subtree (leave_node)
+      after.op = WalkFrame::Op::Node;
+      after.w = &w;
+      after.dis = dis;
+      walk_.push_back(std::move(after));
+      begin_emit(w.children[static_cast<std::size_t>(idx)]); // only the selected tab's subtree
+      return;
+    }
     b.pop_id();
     break;
   }
@@ -4031,6 +4281,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
     Runtime::ContextPick pick;
     if (const WidgetEmitFn fn = lookup_widget(app, w.custom_type)) {
       WidgetEmitContext ctx;
+      // A child is drawn where the fn asks for it, between its own calls: a walk of its own, which
+      // returns once the child's subtree is drawn. (Only this nests natively, a level per custom
+      // widget whose fn draws a custom widget.)
       ctx.emit = [this](const Widget &child) { emit(child); };
       ctx.read = [this](const std::string &bind) { return read_string(app, resolve(bind)); };
       ctx.fire = [this](const std::string &event) { enqueue(event); };
@@ -4057,11 +4310,24 @@ void Runtime::Impl::emit_node(const Widget &w) {
     }
     if (w.context_menu) {
       b.end_context_area();
+      WalkFrame after; // the rest of the widget after its menu (leave_node)
+      after.op = WalkFrame::Op::Node;
+      after.w = &w;
+      after.dis = dis;
+      walk_.push_back(std::move(after));
       emit_context_menu(w, ContextMenuOver::Item, pick);
+      return;
     }
     break;
   }
   }
+  emit_node_tail(w, dis, inner_click);
+}
+
+// What every widget does after it is drawn: its pointer handlers and tooltip, on the item just
+// drawn, then the disabled scope ends.
+void Runtime::Impl::emit_node_tail(const Widget &w, bool dis, bool inner_click) {
+  Backend &b = *backend;
   // §4.6 widget-level on_click: if this widget carries an on_click and the backend reports the item
   // just drawn was clicked, enqueue it — a fire-once action drained + submitted like a Button's on:
   // (a program on: runs through state_exec; a bare name routes to a host handler). Sourced from the
@@ -4115,6 +4381,73 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
   if (dis)
     b.end_disabled();
+}
+
+// emit_node after a container's children (or a custom widget's menu): what its case did after
+// them, then emit_node_tail. A step that opens a context menu comes back at the next stage.
+void Runtime::Impl::leave_node(WalkFrame &f) {
+  Backend &b = *backend;
+  const Widget &w = *f.w;
+  bool inner_click = false;
+  switch (w.kind) {
+  case Kind::Menubar: // its menus, the Windows menu and the tray are drawn
+    first_bar_drawn = true;
+    --menubar_depth;
+    b.end_main_menu_bar();
+    break;
+  case Kind::Menu:
+    --menu_depth;
+    if (f.flag && windows_menu.on && !windows_menu_drawn && windows_menu_has_items()) {
+      b.separator();
+      emit_windows_menu_items();
+    }
+    b.end_menu();
+    if (f.flag)
+      windows_menu_drawn = true; // open or not, it stands for the Windows menu this frame
+    break;
+  case Kind::Window:
+    if (f.stage == 0) {
+      if (f.backdrop)
+        b.end_backdrop();
+      if (w.context_menu) {
+        b.end_context_area();
+        f.stage = 1;
+        walk_.push_back(std::move(f));
+        emit_context_menu(w, ContextMenuOver::Window, {});
+        return;
+      }
+    }
+    b.pop_id();
+    b.end_window();
+    if (w.closable)
+      write<int>(app, f.path, f.flag ? 1 : 0); // the close (X) button may have cleared `open`
+    break;
+  case Kind::Group:
+    if (f.stage == 0) {
+      if (f.backdrop)
+        b.end_backdrop();
+      f.flag = clicks_fired != f.count; // something inside it took this walk's click
+      if (f.item)
+        b.end_item_group();
+      if (w.context_menu && &w != &root) {
+        b.end_context_area();
+        f.stage = 1;
+        walk_.push_back(std::move(f));
+        emit_context_menu(w, ContextMenuOver::Item, {});
+        return;
+      }
+    }
+    inner_click = f.flag;
+    if (!w.id.empty())
+      b.pop_id();
+    break;
+  case Kind::Tabs:
+    b.pop_id();
+    break;
+  default: // Kind::Custom, after its menu
+    break;
+  }
+  emit_node_tail(w, f.dis, inner_click);
 }
 
 namespace {
@@ -5066,7 +5399,7 @@ bool Runtime::Impl::emit_fullscreen() {
     w.tooltip.clear();
     in_fullscreen = true;
     fullscreen_exit = false;
-    emit_node(w);
+    run_walk([&] { emit_node(w); });
     in_fullscreen = false;
     fn_stack.clear();
     scope_stack.clear();
@@ -5164,7 +5497,7 @@ void Runtime::Impl::render() {
     reactive->begin_frame(reactive_budget); // §4: reset the per-frame reactive eval budget
   frame_instances = 0;       // §3: reset the per-frame repeat-expansion budget
   emit_path.clear();
-  scope_stack.clear(); // §12: start every frame at the document scope (RAII keeps it balanced;
+  scope_stack.clear(); // §12: start every frame at the document scope (run_walk keeps it balanced;
                        // this is belt-and-suspenders so one bad frame can't leak into the next)
   windows_menu_drawn = false;
   apps_drawn = false;
@@ -5191,17 +5524,21 @@ void Runtime::Impl::render() {
       tray.erase(std::remove_if(tray.begin(), tray.end(),
                                 [](const TrayEntry &t) { return t.scope.empty(); }),
                  tray.end());
-      emit_app_menus();
-      emit_windows_menu(windows_menu.title);
-      emit_tray(tray);
-      --menubar_depth;
-      backend->end_main_menu_bar();
+      run_walk([&] {
+        push_then([this] {
+          --menubar_depth;
+          backend->end_main_menu_bar();
+        });
+        push_then([this, tray = std::move(tray)]() mutable { emit_tray(std::move(tray)); });
+        push_then([this] { emit_windows_menu(windows_menu.title); });
+        emit_app_menus();
+      });
     }
     emit(root);
     // §5.30 the document's own right-click menu, over the main view: after every window, so a
     // window's or a group's menu under the pointer opens instead.
     if (root.context_menu && root.repeat.empty() && visible(root))
-      emit_context_menu(root, ContextMenuOver::Main, main_view_pick);
+      run_walk([&] { emit_context_menu(root, ContextMenuOver::Main, main_view_pick); });
     emit_notify_window(); // §5.24, while Show all... has it open
     // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
     // on it.
@@ -5245,138 +5582,144 @@ void Runtime::Impl::plan_windows_menu() {
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
-  // `mount`: the innermost mount `w` is in, null in the document's own tree.
-  const Widget *mount = nullptr;
-  std::string mount_scope;
-  std::string mount_parent; // the scope the innermost mount sits in, where its name: is read
-  std::function<void(const Widget &, const std::string &, bool)> walk =
-      [&](const Widget &w, const std::string &scope, bool in_menubar) {
-        if (!w.repeat.empty()) {
-          if (w.kind == Kind::Window) {
-            p.repeated.emplace_back(&w, scope);
-            p.any_closable = p.any_closable || w.closable;
-          }
-          // §5.25 a repeated mount with a menubar of its own: an application per instance.
-          if (!w.scope.empty()) {
-            const std::function<const Widget *(const Widget &)> first_bar =
-                [&](const Widget &n) -> const Widget * {
-              for (const Widget &c : n.children) {
-                if (c.kind == Kind::Menubar)
-                  return &c;
-                if (!c.scope.empty())
-                  continue; // a nested mount's bar is its own
-                if (const Widget *b = first_bar(c))
-                  return b;
-              }
-              return nullptr;
-            };
-            if (const Widget *bar = first_bar(w)) {
-              WindowsMenuPlan::App a;
-              a.mount = &w;
-              a.bar = bar;
-              a.name = !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1);
-              a.functions = w.functions.get();
-              a.repeat = &w;
-              a.parent_scope = scope;
-              a.name_bind = w.app_name_bind;
-              p.apps.push_back(std::move(a));
-            }
-          }
-          return;
-        }
-        const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
-        const Widget *const outer_mount = mount;
-        const std::string outer_scope = mount_scope;
-        const std::string outer_parent = mount_parent;
-        if (!w.scope.empty()) {
-          mount = &w;
-          mount_scope = inner;
-          mount_parent = scope;
-        }
-        struct Restore {
-          const Widget *&m;
-          std::string &s;
-          std::string &pa;
-          const Widget *pm;
-          std::string ps;
-          std::string ppa;
-          ~Restore() {
-            m = pm;
-            s = ps;
-            pa = ppa;
-          }
-        } restore{mount, mount_scope, mount_parent, outer_mount, outer_scope, outer_parent};
-        switch (w.kind) {
-        case Kind::Menubar:
-          in_menubar = true;
-          if (mount) { // §5.25 a loaded document's: an application, once per mount
-            bool seen = false;
-            for (const WindowsMenuPlan::App &a : p.apps)
-              seen = seen || a.mount == mount;
-            if (!seen) {
-              WindowsMenuPlan::App a;
-              a.mount = mount;
-              a.bar = &w;
-              a.name = !mount->app_name.empty() ? mount->app_name
-                                                : mount->scope.substr(mount->scope.rfind('.') + 1);
-              a.scope = mount_scope;
-              a.functions = mount->functions.get();
-              a.parent_scope = mount_parent;
-              a.name_bind = mount->app_name_bind;
-              p.apps.push_back(std::move(a));
-            }
-            break;
-          }
-          p.has_menubar = true;
-          for (const Widget &c : w.children)
-            if (c.kind == Kind::Menu)
-              bar_menus.insert(c.label);
-          break;
-        case Kind::MenuItemToggle:
-          if (!w.bind.empty() && !is_expr(w.bind))
-            toggled.insert(resolve_bind(scope, w.bind));
-          break;
-        case Kind::TrayIcon: // §5.22 the clock, §5.24 the bell: placed in a menubar, else the
-                             // document's setting (a loaded document's are its own: ignored)
-          if (mount)
-            break;
-          if (w.tray_clock && in_menubar)
-            p.clock_placed = true;
-          else if (w.tray_clock)
-            p.clock_setting = w.bdef ? 1 : 0;
-          else if (w.tray_bell && in_menubar)
-            p.bell_placed = true;
-          else if (w.tray_bell) {
-            p.bell_setting = w.bdef ? 1 : 0;
-            p.bell_always = w.bell_always;
-          }
-          break;
-        case Kind::WindowsMenu:
-          if (mount) // a loaded document's Windows menu is the outer document's
-            break;
-          if (!w.bdef)
-            p.on = false;
-          else if (in_menubar)
-            p.placed = true;
-          if (!w.label.empty())
-            p.title = w.label;
-          break;
-        case Kind::Window: {
-          const std::string &id = w.id.empty() ? w.label : w.id;
-          windows.push_back({w.label.empty() ? id : w.label,
-                             resolve_bind(scope, "tree." + id + ".open"),
-                             resolve_bind(scope, "tree." + id + ".raise")});
+  // A node to visit, in tree order (a stack on the heap, not recursion): the scope it resolves in,
+  // whether it is in a menubar, and `mount`, the innermost mount it is in (itself, when it is one),
+  // null in the document's own tree, with that mount's scope and the scope the mount sits in
+  // (`mount_parent`, where its name: is read).
+  struct Visit {
+    const Widget *w;
+    std::string scope;
+    bool in_menubar;
+    const Widget *mount;
+    std::string mount_scope, mount_parent;
+  };
+  // A repeated mount's bar: the first menubar in it, in tree order, not in a nested mount.
+  const auto first_bar = [](const Widget &m) -> const Widget * {
+    std::vector<const Widget *> todo;
+    for (auto c = m.children.rbegin(); c != m.children.rend(); ++c)
+      todo.push_back(&*c);
+    while (!todo.empty()) {
+      const Widget &c = *todo.back();
+      todo.pop_back();
+      if (c.kind == Kind::Menubar)
+        return &c;
+      if (!c.scope.empty())
+        continue; // a nested mount's bar is its own
+      for (auto g = c.children.rbegin(); g != c.children.rend(); ++g)
+        todo.push_back(&*g);
+    }
+    return nullptr;
+  };
+  std::vector<Visit> todo;
+  todo.push_back({&root, prefix, false, nullptr, {}, {}});
+  while (!todo.empty()) {
+    Visit v = std::move(todo.back());
+    todo.pop_back();
+    const Widget &w = *v.w;
+    const std::string &scope = v.scope;
+    bool in_menubar = v.in_menubar;
+    {
+      if (!w.repeat.empty()) {
+        if (w.kind == Kind::Window) {
+          p.repeated.emplace_back(&w, scope);
           p.any_closable = p.any_closable || w.closable;
-          in_menubar = false;
+        }
+        // §5.25 a repeated mount with a menubar of its own: an application per instance.
+        if (!w.scope.empty()) {
+          if (const Widget *bar = first_bar(w)) {
+            WindowsMenuPlan::App a;
+            a.mount = &w;
+            a.bar = bar;
+            a.name = !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1);
+            a.functions = w.functions.get();
+            a.repeat = &w;
+            a.parent_scope = scope;
+            a.name_bind = w.app_name_bind;
+            p.apps.push_back(std::move(a));
+          }
+        }
+        continue;
+      }
+      const std::string inner = w.scope.empty() ? scope : resolve_bind(scope, w.scope);
+      if (!w.scope.empty()) {
+        v.mount = &w;
+        v.mount_scope = inner;
+        v.mount_parent = scope;
+      }
+      const Widget *const mount = v.mount;
+      const std::string &mount_scope = v.mount_scope;
+      const std::string &mount_parent = v.mount_parent;
+      switch (w.kind) {
+      case Kind::Menubar:
+        in_menubar = true;
+        if (mount) { // §5.25 a loaded document's: an application, once per mount
+          bool seen = false;
+          for (const WindowsMenuPlan::App &a : p.apps)
+            seen = seen || a.mount == mount;
+          if (!seen) {
+            WindowsMenuPlan::App a;
+            a.mount = mount;
+            a.bar = &w;
+            a.name = !mount->app_name.empty() ? mount->app_name
+                                              : mount->scope.substr(mount->scope.rfind('.') + 1);
+            a.scope = mount_scope;
+            a.functions = mount->functions.get();
+            a.parent_scope = mount_parent;
+            a.name_bind = mount->app_name_bind;
+            p.apps.push_back(std::move(a));
+          }
           break;
         }
-        default:
-          break;
-        }
+        p.has_menubar = true;
         for (const Widget &c : w.children)
-          walk(c, inner, in_menubar);
-      };
-  walk(root, prefix, false);
+          if (c.kind == Kind::Menu)
+            bar_menus.insert(c.label);
+        break;
+      case Kind::MenuItemToggle:
+        if (!w.bind.empty() && !is_expr(w.bind))
+          toggled.insert(resolve_bind(scope, w.bind));
+        break;
+      case Kind::TrayIcon: // §5.22 the clock, §5.24 the bell: placed in a menubar, else the
+                           // document's setting (a loaded document's are its own: ignored)
+        if (mount)
+          break;
+        if (w.tray_clock && in_menubar)
+          p.clock_placed = true;
+        else if (w.tray_clock)
+          p.clock_setting = w.bdef ? 1 : 0;
+        else if (w.tray_bell && in_menubar)
+          p.bell_placed = true;
+        else if (w.tray_bell) {
+          p.bell_setting = w.bdef ? 1 : 0;
+          p.bell_always = w.bell_always;
+        }
+        break;
+      case Kind::WindowsMenu:
+        if (mount) // a loaded document's Windows menu is the outer document's
+          break;
+        if (!w.bdef)
+          p.on = false;
+        else if (in_menubar)
+          p.placed = true;
+        if (!w.label.empty())
+          p.title = w.label;
+        break;
+      case Kind::Window: {
+        const std::string &id = w.id.empty() ? w.label : w.id;
+        windows.push_back({w.label.empty() ? id : w.label,
+                           resolve_bind(scope, "tree." + id + ".open"),
+                           resolve_bind(scope, "tree." + id + ".raise")});
+        p.any_closable = p.any_closable || w.closable;
+        in_menubar = false;
+        break;
+      }
+      default:
+        break;
+      }
+      for (auto c = w.children.rbegin(); c != w.children.rend(); ++c)
+        todo.push_back({&*c, inner, in_menubar, mount, mount_scope, mount_parent});
+    }
+  }
   for (auto &win : windows)
     if (!toggled.count(win.open_path))
       p.items.push_back(std::move(win));
@@ -5703,27 +6046,40 @@ void Runtime::Impl::emit_app_menus() {
   if (apps_drawn || frame_apps.empty())
     return;
   apps_drawn = true;
+  app_menu(0);
+}
+
+// On the walk: the first running application from k, its bar's entries walked in its scope, then
+// app_menu(k + 1) for the rest. (frame_apps stays as plan_frame_apps made it for the frame.)
+void Runtime::Impl::app_menu(std::size_t k) {
+  while (k < frame_apps.size() && !app_running(frame_apps[k].scope))
+    ++k; // reopened from Windows > Applications
+  if (k == frame_apps.size())
+    return;
+  push_then([this, k] { app_menu(k + 1); });
   Backend &b = *backend;
-  for (const WindowsMenuPlan::App &a : frame_apps) {
-    if (!app_running(a.scope))
-      continue; // reopened from Windows > Applications
-    b.push_id(("##app." + a.scope).c_str());
-    if (b.begin_menu(a.name.c_str())) {
-      {
-        const ScopedTo in(*this, a.scope, a.functions);
-        ++app_menu_depth;
-        emit_children(*a.bar);
-        --app_menu_depth;
-      }
-      b.separator();
-      if (b.menu_item_action(("Restart " + a.name).c_str()))
-        queued_events.push_back({kAppEvent + std::string("restart:") + a.scope, prefix});
-      if (b.menu_item_action(("Quit " + a.name).c_str()))
-        queued_events.push_back({kAppEvent + std::string("quit:") + a.scope, prefix});
-      b.end_menu();
-    }
+  const WindowsMenuPlan::App &a = frame_apps[k];
+  b.push_id(("##app." + a.scope).c_str());
+  if (!b.begin_menu(a.name.c_str())) {
     b.pop_id();
+    return;
   }
+  const PushedScope in = push_scope(a.scope, a.functions);
+  ++app_menu_depth;
+  push_then([this, k, in] { // after its entries
+    --app_menu_depth;
+    pop_scope(in);
+    Backend &be = *backend;
+    const WindowsMenuPlan::App &app_k = frame_apps[k];
+    be.separator();
+    if (be.menu_item_action(("Restart " + app_k.name).c_str()))
+      queued_events.push_back({kAppEvent + std::string("restart:") + app_k.scope, prefix});
+    if (be.menu_item_action(("Quit " + app_k.name).c_str()))
+      queued_events.push_back({kAppEvent + std::string("quit:") + app_k.scope, prefix});
+    be.end_menu();
+    be.pop_id();
+  });
+  emit_children(*a.bar);
 }
 
 // §5.25 Quit: the application's windows, menus and tray icons go, its on_tick: and the programs it
@@ -6208,69 +6564,33 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
 // order, into an overflow menu at the tray's left end, whose badge counts what their badges count
 // and takes the strongest of their tones. A backend without a tray shows each as an ordinary menu
 // at the end of the bar.
-void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
-  using Icon = TrayEntry;
+// On the walk: each icon's menu items (emit_tray_items: a bar's children) are walked, and what
+// follows them is a Then frame, in the order the backend saw it when this recursed.
+void Runtime::Impl::emit_tray(std::vector<TrayEntry> icons) {
   if (icons.empty())
     return;
   Backend &b = *backend;
-  std::vector<Backend::TrayIcon> specs;
-  for (const Icon &i : icons)
-    specs.push_back(i.spec);
-  const auto id_of = [&](const Icon &i, int k) {
-    if (i.clock || i.bell)
-      return std::string(i.clock ? "##tray.clock" : "##tray.bell");
-    const std::string own = i.w->id.empty() ? std::to_string(k) : i.w->id;
-    return i.scope.empty() ? own : i.scope + "/" + own; // a loaded document's: its own ids
-  };
-  // The icon as an item of a menu (the overflow menu, or a backend without a tray): its glyph and
-  // badge, then its tooltip; its own menu as a submenu.
-  const auto as_item = [&](const Icon &i) {
-    const ScopedTo in(*this, i.scope, i.functions);
-    std::string title = i.spec.glyph;
-    if (!i.spec.badge.empty())
-      title += " " + i.spec.badge;
-    if (!i.tip.empty())
-      title += "  " + i.tip;
-    if (i.spec.menu) {
-      if (b.begin_menu(title.c_str())) {
-        emit_tray_items(i);
-        b.end_menu();
-      }
-    } else if (b.menu_item_action(title.c_str()) && !i.clock && !i.w->on.empty()) {
-      enqueue(i.w->on);
-    }
-  };
-  const int n = static_cast<int>(icons.size());
-  const int fit = b.begin_tray(specs);
+  const auto t = std::make_shared<TrayWalk>();
+  t->icons = std::move(icons);
+  for (const TrayEntry &i : t->icons)
+    t->specs.push_back(i.spec);
+  const int n = static_cast<int>(t->icons.size());
+  const int fit = b.begin_tray(t->specs);
   if (fit < 0) { // no tray: a menu per icon, at the end of the bar
-    for (int k = 0; k < n; ++k) {
-      const Icon &i = icons[k];
-      const ScopedTo in(*this, i.scope, i.functions);
-      b.push_id(id_of(i, k).c_str());
-      std::string title = i.spec.glyph;
-      if (!i.spec.badge.empty())
-        title += " " + i.spec.badge;
-      if (b.begin_menu(title.c_str())) {
-        if (i.spec.menu)
-          emit_tray_items(i);
-        else
-          as_item(i);
-        b.end_menu();
-      }
-      b.pop_id();
-    }
+    tray_menus(t, 0);
     return;
   }
-  const int hidden = n - std::min(fit, n);
-  if (hidden > 0) {
+  t->hidden = n - std::min(fit, n);
+  push_then([this, t] { tray_shown(t, t->hidden); }); // then the shown icons and end_tray
+  if (t->hidden > 0) {
     Backend::TrayIcon more;
     more.glyph = std::string(icon_glyph("more", b.unicode_glyphs()));
     more.menu = true;
     long count = 0;
-    for (int k = 0; k < hidden; ++k) {
-      more.tone = std::max(more.tone, specs[k].tone);
+    for (int k = 0; k < t->hidden; ++k) {
+      more.tone = std::max(more.tone, t->specs[k].tone);
       try {
-        count += specs[k].badge.empty() ? 0 : std::stol(specs[k].badge);
+        count += t->specs[k].badge.empty() ? 0 : std::stol(t->specs[k].badge);
       } catch (const std::exception &) {
         ++count; // a badge that is not a number counts once
       }
@@ -6279,35 +6599,120 @@ void Runtime::Impl::emit_tray(const std::vector<TrayEntry> &icons) {
       more.badge = std::to_string(count);
     b.push_id("##tray.more");
     if (b.begin_tray_menu(more)) {
-      for (int k = 0; k < hidden; ++k) {
-        b.push_id(std::to_string(k).c_str());
-        as_item(icons[k]);
-        b.pop_id();
-      }
-      b.end_tray_menu();
-    }
-    b.pop_id();
-  }
-  for (int k = hidden; k < n; ++k) {
-    const Icon &i = icons[k];
-    const ScopedTo in(*this, i.scope, i.functions);
-    b.push_id(id_of(i, k).c_str());
-    if (i.spec.menu) {
-      if (b.begin_tray_menu(i.spec)) {
-        emit_tray_items(i);
-        b.end_tray_menu();
-      } else if (!i.tip.empty()) {
-        b.set_tooltip(i.tip.c_str());
-      }
+      push_then([this] {
+        backend->end_tray_menu();
+        backend->pop_id();
+      });
+      tray_more(t, 0);
     } else {
-      if (b.tray_button(i.spec) && !i.clock && !i.w->on.empty())
-        enqueue(i.w->on);
-      if (!i.tip.empty())
-        b.set_tooltip(i.tip.c_str());
+      b.pop_id();
     }
-    b.pop_id();
   }
-  b.end_tray();
+}
+
+// No tray: icon k as a menu at the end of the bar (its own items, or itself as an item), then the
+// icons after it.
+void Runtime::Impl::tray_menus(const std::shared_ptr<TrayWalk> &t, int k) {
+  if (k == static_cast<int>(t->icons.size()))
+    return;
+  push_then([this, t, k] { tray_menus(t, k + 1); });
+  Backend &b = *backend;
+  const TrayEntry &i = t->icons[k];
+  const PushedScope in = push_scope(i.scope, i.functions);
+  b.push_id(tray_id(i, k).c_str());
+  std::string title = i.spec.glyph;
+  if (!i.spec.badge.empty())
+    title += " " + i.spec.badge;
+  if (b.begin_menu(title.c_str())) {
+    push_then([this, in] {
+      backend->end_menu();
+      backend->pop_id();
+      pop_scope(in);
+    });
+    if (i.spec.menu)
+      emit_tray_items(i);
+    else
+      tray_item(t, k);
+    return;
+  }
+  b.pop_id();
+  pop_scope(in);
+}
+
+// The overflow menu's items: icon k as an item, then the hidden icons after it.
+void Runtime::Impl::tray_more(const std::shared_ptr<TrayWalk> &t, int k) {
+  if (k == t->hidden)
+    return;
+  push_then([this, t, k] { tray_more(t, k + 1); });
+  backend->push_id(std::to_string(k).c_str());
+  push_then([this] { backend->pop_id(); });
+  tray_item(t, k);
+}
+
+// The shown icons from k, each a tray menu or a button, then end_tray.
+void Runtime::Impl::tray_shown(const std::shared_ptr<TrayWalk> &t, int k) {
+  Backend &b = *backend;
+  if (k == static_cast<int>(t->icons.size())) {
+    b.end_tray();
+    return;
+  }
+  push_then([this, t, k] { tray_shown(t, k + 1); });
+  const TrayEntry &i = t->icons[k];
+  const PushedScope in = push_scope(i.scope, i.functions);
+  b.push_id(tray_id(i, k).c_str());
+  if (i.spec.menu) {
+    if (b.begin_tray_menu(i.spec)) {
+      push_then([this, in] {
+        backend->end_tray_menu();
+        backend->pop_id();
+        pop_scope(in);
+      });
+      emit_tray_items(i);
+      return;
+    }
+    if (!i.tip.empty())
+      b.set_tooltip(i.tip.c_str());
+  } else {
+    if (b.tray_button(i.spec) && !i.clock && !i.w->on.empty())
+      enqueue(i.w->on);
+    if (!i.tip.empty())
+      b.set_tooltip(i.tip.c_str());
+  }
+  b.pop_id();
+  pop_scope(in);
+}
+
+// Icon k as an item of a menu (the overflow menu, or a backend without a tray): its glyph and
+// badge, then its tooltip; its own menu as a submenu.
+void Runtime::Impl::tray_item(const std::shared_ptr<TrayWalk> &t, int k) {
+  Backend &b = *backend;
+  const TrayEntry &i = t->icons[k];
+  const PushedScope in = push_scope(i.scope, i.functions);
+  std::string title = i.spec.glyph;
+  if (!i.spec.badge.empty())
+    title += " " + i.spec.badge;
+  if (!i.tip.empty())
+    title += "  " + i.tip;
+  if (i.spec.menu) {
+    if (b.begin_menu(title.c_str())) {
+      push_then([this, in] {
+        backend->end_menu();
+        pop_scope(in);
+      });
+      emit_tray_items(i);
+      return;
+    }
+  } else if (b.menu_item_action(title.c_str()) && !i.clock && !i.w->on.empty()) {
+    enqueue(i.w->on);
+  }
+  pop_scope(in);
+}
+
+std::string Runtime::Impl::tray_id(const TrayEntry &i, int k) {
+  if (i.clock || i.bell)
+    return std::string(i.clock ? "##tray.clock" : "##tray.bell");
+  const std::string own = i.w->id.empty() ? std::to_string(k) : i.w->id;
+  return i.scope.empty() ? own : i.scope + "/" + own; // a loaded document's: its own ids
 }
 
 // --------------------------------------------------------------------------
@@ -6600,16 +7005,17 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
     programs.push_back(&b.on);
   for (const std::string &p : document_programs_) // its init: and tests:, run elsewhere
     programs.push_back(&p);
-  const std::function<void(const Widget &)> collect = [&](const Widget &w) {
+  for (std::vector<const Widget *> todo{&tree}; !todo.empty();) { // tree order, no recursion
+    const Widget &w = *todo.back();
+    todo.pop_back();
     for (const std::string *p : {&w.on, &w.on_click, &w.on_hover, &w.on_drag, &w.on_drag_start,
                                  &w.on_drag_end, &w.on_top, &w.init_script, &w.tick_script})
       programs.push_back(p);
     if (w.functions)
       programs.push_back(&w.functions->prelude);
-    for (const Widget &c : w.children)
-      collect(c);
-  };
-  collect(tree);
+    for (auto c = w.children.rbegin(); c != w.children.rend(); ++c)
+      todo.push_back(&*c);
+  }
   std::string oidc_use;
   for (const std::string *p : programs) {
     if (!oidc_use.empty())
@@ -6639,22 +7045,23 @@ std::string Runtime::Impl::isolation_verdict(bool &host_affinity) const {
   // thread. A hole's target resolves against its mount's parent scope ('/' is the app root).
   const std::string inside = prefix + cvc::state::SEPARATOR;
   std::string hole;
-  const std::function<void(const Widget &, const std::string &)> holes =
-      [&](const Widget &w, const std::string &scope) {
-        std::string inner = scope;
-        if (!w.scope.empty()) {
-          inner = resolve_bind(scope, w.scope);
-          for (const LinkHole &h : w.links) {
-            const std::string target = resolve_bind(scope, h.target);
-            if (hole.empty() && h.writable && target != prefix && target.rfind(inside, 0) != 0)
-              hole = "the mount at '" + inner + "' grants '" + h.name + "' writable to '" +
-                     h.target + "', outside its prefix";
-          }
-        }
-        for (const Widget &c : w.children)
-          holes(c, inner);
-      };
-  holes(tree, prefix);
+  std::vector<std::pair<const Widget *, std::string>> todo{{&tree, prefix}}; // node, its scope
+  while (!todo.empty()) {
+    const auto [w, scope] = std::move(todo.back());
+    todo.pop_back();
+    std::string inner = scope;
+    if (!w->scope.empty()) {
+      inner = resolve_bind(scope, w->scope);
+      for (const LinkHole &h : w->links) {
+        const std::string target = resolve_bind(scope, h.target);
+        if (hole.empty() && h.writable && target != prefix && target.rfind(inside, 0) != 0)
+          hole = "the mount at '" + inner + "' grants '" + h.name + "' writable to '" + h.target +
+                 "', outside its prefix";
+      }
+    }
+    for (auto c = w->children.rbegin(); c != w->children.rend(); ++c)
+      todo.emplace_back(&*c, inner);
+  }
   if (!hole.empty())
     return hole;
   // Eligible. Its group is pumped on the host thread when its host declared a thread-affine
@@ -7803,20 +8210,20 @@ void Runtime::Impl::drop_mount_ticks() {
   // The new tree's mounts outside any repeat: (a repeated one is made per frame), by sub-prefix,
   // composed as emit_container composes them.
   std::map<std::string, std::string> kept;
-  const std::function<void(const Widget &, const std::string &)> walk =
-      [&](const Widget &w, const std::string &scope) {
-        if (!w.repeat.empty())
-          return;
-        std::string inner = scope;
-        if (!w.scope.empty()) {
-          inner = resolve_bind(scope, w.scope);
-          if (!w.tick_script.empty())
-            kept[inner] = (w.functions ? w.functions->prelude : std::string()) + w.tick_script;
-        }
-        for (const Widget &c : w.children)
-          walk(c, inner);
-      };
-  walk(root, prefix);
+  std::vector<std::pair<const Widget *, std::string>> todo{{&root, prefix}}; // node, its scope
+  while (!todo.empty()) {
+    auto [w, inner] = std::move(todo.back());
+    todo.pop_back();
+    if (!w->repeat.empty())
+      continue;
+    if (!w->scope.empty()) {
+      inner = resolve_bind(inner, w->scope);
+      if (!w->tick_script.empty())
+        kept[inner] = (w->functions ? w->functions->prelude : std::string()) + w->tick_script;
+    }
+    for (auto c = w->children.rbegin(); c != w->children.rend(); ++c)
+      todo.emplace_back(&*c, inner);
+  }
   for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
     const auto k = kept.find(it->first);
     if (it->second.repeat || k == kept.end() ||
