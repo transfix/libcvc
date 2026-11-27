@@ -2041,8 +2041,8 @@ tier, on the 64 m window below tier 0, in 1/30 s substeps at 3 and 4 (half the p
 global plan, the published trained CoefMLP steering each one. Each part of it that is drawn is a
 `swarm_layer` node under it, a node like any other, with its own `visible:`, `tags:` and
 `material: { opacity }`. `examples/ariadne/documents/nav_city_swarm.ari` (800 vehicles, 16 targets) and
-`nav_city_drive.ari` (60 Humvees on Jolt, 6 convoys) are the nav demos `nav_city_swarm` and
-`nav_city_drive` as documents. The simulation is core libcvc
+`nav_city_drive.ari` (60 Humvees on Jolt, 6 convoys) are the retired C++ nav demos `nav_city_swarm`
+and `nav_city_drive` as documents. The simulation is core libcvc
 ([`scene_swarm.h`](../inc/cvc/ariadne/scene_swarm.h)), the drawing cvcGL's
 ([`swarm_nodes.h`](../inc/cvc/gl/ariadne/swarm_nodes.h)).
 
@@ -7338,7 +7338,7 @@ through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 | [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
 | [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture, a live video stream and a learning run on a log-y `chart:` (three series, a band, a gap, markers, a play-head), and reads the document's controls |
 | [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
-| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
+| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive.ari` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
 | [`coph.py`](../examples/ariadne/python/coph.py) | (none) | CoPH's crossing demo on pycvc's `NavCophFleet`, libcvc's C++ CoPH with no torch: two learners cross a maze with doors, a few CoPH ticks a frame, sharing packets or not (the Packets checkbox); a top-down picture, each agent's version, policy and energy account, and its distance to goal. No `scene:`, so it runs headless, and in a browser on ariglx-web (`?src=coph.py`) |
 
 Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and

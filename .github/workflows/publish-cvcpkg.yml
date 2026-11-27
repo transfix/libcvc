@@ -1022,8 +1022,8 @@ jobs:
           bash cvcpkg/recipes/libcvc-examples/build.sh
           # Every program the recipe lists, and the documents arigl and ari run.
           for b in lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny \
-                   volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale \
-                   nav_swarm_demo nav_train_demo nav_material_demo libcvc-examples-web; do
+                   volslice_bunny nav_swarm_demo nav_train_demo nav_material_demo \
+                   libcvc-examples-web; do
             test -x "stage-libcvc-examples/bin/$b" \
               || { echo "::error::libcvc-examples did not install bin/$b"; exit 1; }
           done

@@ -1,5 +1,5 @@
 # swarm_minimap.ari — a REUSABLE Ariadne component: a `type: nav_swarm` swarm's minimap, the
-# picture-in-picture nav_city_swarm.cpp and nav_city_drive.cpp drew with a second renderer and an
+# picture-in-picture the C++ nav_city_swarm and nav_city_drive drew with a second renderer and an
 # ImGui overlay. It is a map view of the scene (a viewport in mode: map) in a window you drag
 # anywhere, showing the nodes tagged `{tag}` the main view leaves out (main_view: { hide: [{tag}] }):
 # the swarm's dots and rally points (swarm_layer dots / targets). It leaves out `{hide}` (the belief
