@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cvc/ariadne/grants.h>
+#include <cvc/net/net_policy.h> // parse_origin_spec: origins as the network policy reads them
 #include <iterator>
+#include <optional>
 
 namespace cvc {
 namespace ariadne {
@@ -51,12 +53,6 @@ bool contains(const std::vector<std::string> &v, const std::string &x) {
 void add_once(std::vector<std::string> &v, const std::string &x) {
   if (!contains(v, x))
     v.push_back(x);
-}
-
-std::string lower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
 }
 
 // `a` with only what is in `b` too, in `a`'s order.
@@ -119,9 +115,10 @@ std::string GrantBuilder::add(const std::string &token, const std::vector<std::s
     else {
       listed_origins_ = true;
       for (const std::string &o : *covers) {
-        const std::string p = policy_origin(o);
+        std::string bad;
+        const std::string p = policy_origin(o, &bad);
         if (p.empty())
-          why += (why.empty() ? "" : "; ") + ("'" + o + "' is not an http(s) origin");
+          why += (why.empty() ? "" : "; ") + ("'" + o + "' is not an origin: " + bad);
         else
           add_once(g_.origins, p);
       }
@@ -202,12 +199,15 @@ MountGrants hold_grants(const GrantSet &granted, const std::vector<HostRequireme
     if (req.name == "net.origin") {
       bool any = req.origins.empty() && granted.has("net.origin");
       for (const std::string &o : req.origins) {
-        const std::string p = policy_origin(o);
+        std::string bad;
+        const std::string p = policy_origin(o, &bad);
         if (!p.empty() && granted.has("net.origin") && granted.covers_origin(p)) {
           add_once(g.net_origins, p);
           any = true;
         } else if (!req.optional) {
-          add_once(g.refused, "net.origin " + (p.empty() ? o : p));
+          // One the net host could not read would leave every request failing, silently: it is
+          // refused here instead, saying why.
+          add_once(g.refused, "net.origin " + (p.empty() ? o + " (" + bad + ")" : p));
         }
       }
       if (req.origins.empty() && !granted.has("net.origin") && !req.optional)
@@ -231,40 +231,10 @@ MountGrants hold_grants(const GrantSet &granted, const std::vector<HostRequireme
   return g;
 }
 
-std::string policy_origin(const std::string &origin) {
-  const std::size_t colon = origin.find("://");
-  if (colon == std::string::npos)
-    return {};
-  const std::string scheme = lower(origin.substr(0, colon));
-  if (scheme != "http" && scheme != "https")
-    return {};
-  std::string rest = origin.substr(colon + 3);
-  rest = rest.substr(0, rest.find_first_of("/?#"));
-  if (rest.empty() || rest.find('@') != std::string::npos)
-    return {}; // no host, or credentials in it
-  std::string host = rest, port;
-  if (rest.front() == '[') { // an IPv6 literal: [::1]:8443
-    const std::size_t close = rest.find(']');
-    if (close == std::string::npos)
-      return {};
-    host = rest.substr(0, close + 1);
-    if (close + 1 < rest.size()) {
-      if (rest[close + 1] != ':')
-        return {};
-      port = rest.substr(close + 2);
-    }
-  } else if (const std::size_t c = rest.rfind(':'); c != std::string::npos) {
-    host = rest.substr(0, c);
-    port = rest.substr(c + 1);
-  }
-  if (host.empty() || host == "[]")
-    return {};
-  if (!port.empty() && !std::all_of(port.begin(), port.end(),
-                                    [](unsigned char ch) { return std::isdigit(ch) != 0; }))
-    return {};
-  if ((scheme == "http" && port == "80") || (scheme == "https" && port == "443"))
-    port.clear();
-  return scheme + "://" + lower(host) + (port.empty() ? "" : ":" + port);
+std::string policy_origin(const std::string &origin, std::string *why) {
+  // The network policy's own parse, so what is granted here is what SH11's net host allows.
+  const std::optional<cvc::net::Origin> o = cvc::net::parse_origin_spec(origin, why);
+  return o ? o->str() : std::string();
 }
 
 std::string signal_name(const std::string &spelled) {

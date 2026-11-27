@@ -6724,6 +6724,20 @@ void Runtime::Impl::publish_mount_status(const MountSlot &slot) {
   }
 }
 
+namespace {
+// 4.12 the origins a mount holds beyond its principal's default: what it asked for and was granted
+// (in the form SH11's net host reads), less a remote principal's own origin, which it reaches
+// anyway.
+std::vector<std::string> held_origins(const Widget &wrapper, const std::string &principal) {
+  std::vector<std::string> out =
+      wrapper.grants ? wrapper.grants->net_origins : std::vector<std::string>{};
+  const std::string remote = "remote:";
+  if (principal.rfind(remote, 0) == 0)
+    std::erase(out, policy_origin(principal.substr(remote.size())));
+  return out;
+}
+} // namespace
+
 MountRequest Runtime::Impl::mount_request(const MountSlot &slot, const MountsSpec &spec) const {
   MountRequest rq;
   rq.uri = slot.uri;
@@ -6807,13 +6821,14 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   if (!r.ok)
     return refuse_mount(slot, r.error.empty() ? "it could not be loaded" : r.error);
   slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical);
+  // 4.12 the origins it holds beyond its principal's default, worked out with its principal and
+  // before any of its programs is built: SH11's net host reaches them
+  // (ScopePrincipal::net_origins), and a program keeps the access it was built with.
+  slot.net_origins = held_origins(r.wrapper, slot.principal);
   slot.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
   if (!slot.wrapper->app_name.empty())
     slot.name = slot.wrapper->app_name;
   slot.refused.clear();
-  // 4.12 the origins it holds beyond its principal's default (SH11 reaches them), and its tests:.
-  slot.net_origins =
-      slot.wrapper->grants ? slot.wrapper->grants->net_origins : std::vector<std::string>{};
   slot.tests = std::move(r.tests);
   slot.account = std::make_shared<cvc::state_exec::frame_account>();
   apply_mount_budget(slot);
@@ -7034,8 +7049,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
       if (!s.wrapper->app_name.empty())
         s.name = s.wrapper->app_name;
       // 4.5, 4.6 what it holds now, and its command line as the new text has it.
-      s.net_origins =
-          s.wrapper->grants ? s.wrapper->grants->net_origins : std::vector<std::string>{};
+      s.net_origins = held_origins(*s.wrapper, s.principal);
       s.tests = std::move(r.tests);
       publish_mount_status(s);
       publish_command_line(x.sub, *s.wrapper);

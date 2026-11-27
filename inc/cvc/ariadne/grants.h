@@ -148,10 +148,12 @@ GrantSet bound_grants(GrantSet granted, const MountGrants *parent);
 // requires:): held, signals, net_origins and refused. The input fields are left empty.
 MountGrants hold_grants(const GrantSet &granted, const std::vector<HostRequirement> &asks);
 
-// An origin as policy origins are written: scheme://host[:port], scheme and host lower case, no
-// path, no trailing '/', a default port (80 for http, 443 for https) left out. "" when `origin` is
-// not an http or https origin.
-std::string policy_origin(const std::string &origin);
+// An origin as a network policy writes it (cvc::net::parse_origin_spec(origin)->str()):
+// scheme://host[:port], scheme and host lower case, a default port (80 for http, 443 for https)
+// left out. "" when `origin` is not one, with `why` saying why: not http(s), a path after it ("is
+// a URL, not an origin"), a malformed host or port. SH11's net host reads net_origins with the same
+// parse, so an origin it would refuse is refused here, at grant time, instead.
+std::string policy_origin(const std::string &origin, std::string *why = nullptr);
 
 // A signal's POSIX name from how a document may spell it: "SIGTERM", "sigterm" or "TERM" all
 // give "SIGTERM".

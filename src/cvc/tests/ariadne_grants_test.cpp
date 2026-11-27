@@ -312,12 +312,17 @@ TEST(AriadneGrants, AGrantNeverWidensDownTheTree) {
 }
 
 TEST(AriadneGrants, PolicyOriginsAndSignalNames) {
-  EXPECT_EQ(policy_origin("https://API.Example.org:443/v1/x?y#z"), "https://api.example.org");
+  // As the network policy reads an origin (cvc::net::parse_origin_spec), which SH11's net host
+  // reads net_origins with: one it would refuse is refused at grant time, with its reason.
+  EXPECT_EQ(policy_origin("https://API.Example.org:443"), "https://api.example.org");
   EXPECT_EQ(policy_origin("http://localhost:8080"), "http://localhost:8080");
-  EXPECT_EQ(policy_origin("http://example.org:80/"), "http://example.org");
-  EXPECT_EQ(policy_origin("https://[::1]:8443/a"), "https://[::1]:8443");
+  EXPECT_EQ(policy_origin("http://example.org:80/"), "http://example.org")
+      << "a trailing / is fine";
+  EXPECT_EQ(policy_origin("https://[::1]:8443"), "https://[::1]:8443");
+  std::string why;
+  EXPECT_EQ(policy_origin("https://api.example.org/v1", &why), "") << "a path";
+  EXPECT_NE(why.find("is a URL, not an origin"), std::string::npos) << why;
   EXPECT_EQ(policy_origin("ftp://example.org"), "");
-  EXPECT_EQ(policy_origin("https://user@example.org"), "") << "credentials in it";
   EXPECT_EQ(policy_origin("https://example.org:x"), "");
   EXPECT_EQ(policy_origin("example.org"), "");
   EXPECT_EQ(signal_name("term"), "SIGTERM");
@@ -394,7 +399,7 @@ root:
     all += w + "\n";
   EXPECT_NE(all.find("'delegate.kees' is not a grant token"), std::string::npos) << all;
   EXPECT_NE(all.find("takes no list"), std::string::npos) << all;
-  EXPECT_NE(all.find("not an http(s) origin"), std::string::npos) << all;
+  EXPECT_NE(all.find("'ftp://nope' is not an origin"), std::string::npos) << all;
   fs::remove_all(dir);
 }
 
@@ -403,7 +408,7 @@ TEST(AriadneGrantsLoader, NetOriginAsksAreHeldWhereGranted) {
   fs::remove_all(dir);
   write_doc(dir, "client.ari", R"(meta: { name: Client, min_libcvc: "0.0.0" }
 requires:
-  - {name: net.origin, origins: ["https://API.example.org:443/v1", "https://cdn.example.org"]}
+  - {name: net.origin, origins: ["https://API.example.org:443", "https://cdn.example.org/"]}
 )");
   const fs::path doc = write_doc(dir, "doc.ari", R"(meta: { name: Doc, min_libcvc: "0.0.0" }
 root:
@@ -879,7 +884,7 @@ TEST(AriadneGrantsRuntime, AMountHoldsTheOriginsItsSlotGrants) {
   const fs::path client =
       write_doc(dir, "client.ari", R"(meta: { name: Client, min_libcvc: "0.0.0" }
 requires:
-  - {name: net.origin, origins: [https://api.example.org, "https://cdn.example.org:443/x"]}
+  - {name: net.origin, origins: [https://api.example.org, "https://cdn.example.org:443"]}
 )");
   const fs::path optional =
       write_doc(dir, "optional.ari", R"(meta: { name: Optional, min_libcvc: "0.0.0" }
@@ -931,6 +936,18 @@ root:
   EXPECT_NE(peek(app2, "ui.shell.apps.c.error").find("net.origin https://cdn.example.org"),
             std::string::npos)
       << peek(app2, "ui.shell.apps.c.error");
+
+  // An origin the net host could not read (a path after it) would leave every request failing,
+  // silently: the mount is refused at grant time instead, with the parse's reason.
+  const fs::path pathy = write_doc(dir, "pathy.ari", R"(meta: { name: Pathy, min_libcvc: "0.0.0" }
+requires:
+  - {name: net.origin, origins: [https://api.example.org/v1]}
+)");
+  put(app, "ui.shell.apps.p.uri", pathy.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return !peek(app, "ui.shell.apps.p.status").empty(); }));
+  EXPECT_EQ(peek(app, "ui.shell.apps.p.status"), "refused");
+  EXPECT_NE(peek(app, "ui.shell.apps.p.error").find("is a URL, not an origin"), std::string::npos)
+      << peek(app, "ui.shell.apps.p.error");
   fs::remove_all(dir);
 }
 

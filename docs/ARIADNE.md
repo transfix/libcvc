@@ -3689,7 +3689,7 @@ entry warns. An entry is one of:
   | `extend.tray` | has its tray icons join the parent's tray |
   | `access.settings`, `access.settings.read` | reads and writes, or reads, the settings the parent shares (SH9) |
   | `request.main_view`, `request.open` | may ask for the main view (SH6), or ask its shell to open a document (SH14) |
-  | `net.origin` | reaches the origins it names, `{name: net.origin, origins: [https://api.example.org]}`, beyond its own (SH11) |
+  | `net.origin` | reaches the origins it names, `{name: net.origin, origins: [https://api.example.org]}`, beyond its own (SH11); each written as a network policy writes one, `scheme://host[:port]`, and one with a path is refused |
 
   A token holds when the document asked for it and the loading document granted it (`grants:`
   on its `load:` or `mounts:` slot, §6.3, §6.8); `(has? NAME)` answers per mount, in programs, in

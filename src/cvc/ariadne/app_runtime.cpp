@@ -1003,10 +1003,12 @@ std::string grant_missing(const HostRequirement &req, const Widget *mount) {
       return g.granted.has("net.origin") ? std::string() : req.name;
     std::string missing;
     for (const std::string &o : req.origins) {
-      const std::string p = policy_origin(o);
-      if (p.empty() ||
-          std::find(g.net_origins.begin(), g.net_origins.end(), p) == g.net_origins.end())
-        missing += " " + (p.empty() ? o : p);
+      std::string bad;
+      const std::string p = policy_origin(o, &bad);
+      if (p.empty()) // the net host could not read it: every request would fail, silently
+        missing += " " + o + " (" + bad + ")";
+      else if (std::find(g.net_origins.begin(), g.net_origins.end(), p) == g.net_origins.end())
+        missing += " " + p;
     }
     return missing.empty() ? std::string() : req.name + missing;
   }

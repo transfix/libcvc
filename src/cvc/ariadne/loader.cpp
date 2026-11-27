@@ -5412,10 +5412,12 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
           for (const YAML::Node &x : o)
             if (x.IsScalar())
               req.origins.push_back(x.Scalar());
-        for (const std::string &x : req.origins)
-          if (policy_origin(x).empty())
-            ctx.warn("ari: " + where + "requires: net.origin: '" + x +
-                     "' is not an http(s) origin (https://host[:port]) — it cannot be granted");
+        for (const std::string &x : req.origins) {
+          std::string bad;
+          if (policy_origin(x, &bad).empty())
+            ctx.warn("ari: " + where + "requires: net.origin: " + bad +
+                     " — it cannot be granted (write https://host[:port])");
+        }
       }
     }
     if (req.name.empty()) {

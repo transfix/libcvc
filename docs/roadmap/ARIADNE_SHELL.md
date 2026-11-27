@@ -505,10 +505,15 @@ root:
   sub-prefix before the `init:` runs (a static `load:` as the walk first meets it). A `mounts:`
   entry's refusal carries the usage; a `load:`'s is a load warning, and the load is left out. A
   module with a command line of its own gets no `args` or `argv` hole.
-- **`net.origin`.** The origins a mount holds are on its slot (`MountState::net_origins`, the
-  entry's `net_origins`), in the policy form SH11's table keeps. SH11 (transfix/libcvc#1576) reads
-  `ScopePrincipal::net_origins`; once both are on master, `open_mount` hands them over with the
-  principal.
+- **`net.origin`.** An origin is read as the network policy reads one
+  (`cvc::net::parse_origin_spec`, which SH11's net host reads `net_origins` with), and kept in its
+  form (`Origin::str()`): one it would refuse (a path after it, not http(s)) is refused at grant
+  time, with its reason, since the net host would otherwise fail every request of the mount
+  without a word. The origins a mount holds are on its slot (`MountState::net_origins`, the
+  entry's `net_origins`), worked out with its principal before any of its programs is built, a
+  `remote:` principal's own origin left out (it reaches that anyway). SH11
+  (transfix/libcvc#1576) reads `ScopePrincipal::net_origins`; once both are on master,
+  `open_mount` hands them over with the principal.
 - **Tests.** `ariadne_grants_test` (the arithmetic, the loader, the Runtime: a refused mount, keys
   to the focused application only and none while the shell's field has the keyboard, a parent's
   binding keeping its key, the focus following the focused window, SIGTERM to every granted
