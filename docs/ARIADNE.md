@@ -2041,8 +2041,8 @@ tier, on the 64 m window below tier 0, in 1/30 s substeps at 3 and 4 (half the p
 global plan, the published trained CoefMLP steering each one. Each part of it that is drawn is a
 `swarm_layer` node under it, a node like any other, with its own `visible:`, `tags:` and
 `material: { opacity }`. `examples/ariadne/documents/nav_city_swarm.ari` (800 vehicles, 16 targets) and
-`nav_city_drive.ari` (60 Humvees on Jolt, 6 convoys) are the nav demos `nav_city_swarm` and
-`nav_city_drive` as documents. The simulation is core libcvc
+`nav_city_drive.ari` (60 Humvees on Jolt, 6 convoys) are the retired C++ nav demos `nav_city_swarm`
+and `nav_city_drive` as documents. The simulation is core libcvc
 ([`scene_swarm.h`](../inc/cvc/ariadne/scene_swarm.h)), the drawing cvcGL's
 ([`swarm_nodes.h`](../inc/cvc/gl/ariadne/swarm_nodes.h)).
 
@@ -6637,6 +6637,7 @@ Each child of the key is an entry:
 ```
 shell.apps.<id>.uri               the document to mount (relative to the slot's document)
 shell.apps.<id>.args.<name>       its args: substitutions, as a load:'s args: are
+shell.apps.<id>.catalog           1: one of the document's catalog, run as `local` (below)
 shell.apps.<id>.budget.steps      its budget, when not its principal's default (below)
 shell.apps.<id>.budget.time
 shell.apps.<id>.budget.memory
@@ -6700,9 +6701,16 @@ A mounted document's programs get a `PermissionError`: opening others needs a gr
 (`request.open`, SH14). A document with no slot gets a `RuntimeError`.
 
 **Principals and budgets.** Every mount runs as a principal, from where its bytes came: `local`
-for a `cvc://` or `state://` document and for one the slot's `catalog:` lists (a URI, or a prefix
-ending in `/`), `remote:<scheme>://<host>` for one from the network, and `file:<its directory>`
-for any other local file. Its programs and widgets reach the network, its credentials, the
+for a `cvc://` or `state://` document and for a local file that is the document's catalog's,
+`remote:<scheme>://<host>` for one from the network, and `file:<its directory>` for any other
+local file. A local file is the catalog's when the slot's `catalog:` lists it (a URI, or a prefix
+ending in `/`) or its entry's `catalog` flag is true; the shell sets the flag on what it opens from
+its catalog, and `catalog:` covers the catalog's documents opened any other way. Neither makes a
+document from the network `local`. The slot's document writes both, and a mounted document cannot
+write outside its own scope (§7.4), so it cannot make itself `local`. The principal is decided as
+the entry opens. An entry whose flag changes while it is open is opened again as its new
+principal, its state kept and its `init:` not run again; one that `catalog:` lists as well keeps
+its principal and runs on. Its programs and widgets reach the network, its credentials, the
 end-to-end keys and sign-ins as that principal (§10.3 "Per principal"). Each mount has a budget
 for its programs, counted over every process
 whose scope is under it (the mount's actions, its `on_tick:` resident, what they spawn and fork):
@@ -7343,7 +7351,7 @@ through; `pycvc_gl.ariadne`, its first name, is the same module. The programs in
 | [`hello.py`](../examples/ariadne/python/hello.py) | `ariadne_hello` | a button calls a Python function, another raises an event Python handles; Python writes the document every frame |
 | [`data_feed.py`](../examples/ariadne/python/data_feed.py) | `ariadne_stream` | Python pushes two plotted series, a table, a numpy picture, a live video stream and a learning run on a log-y `chart:` (three series, a band, a gap, markers, a play-head), and reads the document's controls |
 | [`form.py`](../examples/ariadne/python/form.py) | `nav_compute` | a two-way form: a function returns a dict the document writes with `state-set-tree`, an async function runs a Monte Carlo while the UI keeps drawing, a watch recomputes a preview |
-| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
+| [`nav.py`](../examples/ariadne/python/nav.py) | `nav_convoy`, `nav_city_drive.ari` | a Python loop drives Humvees on a `cvc::nav` sim_world (pycvc) through Austin, or a block city when its bundle is not installed: true-scale models, routes planned for their turning radius, Jolt physics or nav's kinematic bicycle (the Plant combo), a chase or overview camera, readouts and a map picture |
 | [`coph.py`](../examples/ariadne/python/coph.py) | (none) | CoPH's crossing demo on pycvc's `NavCophFleet`, libcvc's C++ CoPH with no torch: two learners cross a maze with doors, a few CoPH ticks a frame, sharing packets or not (the Packets checkbox); a top-down picture, each agent's version, policy and energy account, and its distance to goal. No `scene:`, so it runs headless, and in a browser on ariglx-web (`?src=coph.py`) |
 
 Each takes `--offscreen` (GL with no window), `--headless` (no GL), `--frames N` and

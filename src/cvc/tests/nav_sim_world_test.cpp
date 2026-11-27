@@ -8,7 +8,7 @@
 */
 
 // nav_sim_world_test — a headless smoke test for sim_world construction and the
-// renderer-facing readback, exercising exactly the path nav_city_swarm runs at
+// renderer-facing readback, exercising exactly the path a nav swarm runs at
 // startup BEFORE it ever opens a GL context: city_scene -> from_occupancy ->
 // size/planes/agent_planes -> snapshot -> step. No cvcGL, no VTK, no OpenGL.
 //
@@ -49,7 +49,7 @@ using cvc::nav::training_scene;
 
 namespace {
 
-// Mirror nav_city_swarm's config assembly from a training_scene.
+// Mirror a nav swarm's config assembly from a training_scene.
 sim_world::config make_cfg(const training_scene &ts) {
   sim_world::config cfg;
   cfg.rows = ts.rows;
@@ -159,7 +159,7 @@ TEST(NavSimWorld, SharedBeliefConstructsAndSnapshots) {
 
 TEST(NavSimWorld, GroupedBeliefMatchesRequestedCounts) {
   const int n = 512;
-  const int k = std::max(2, n / 64); // nav_city_swarm's grouped-cluster rule => 8
+  const int k = std::max(2, n / 64); // the swarm's grouped-cluster rule => 8
   sim_world w = build(n, sim_world::belief_mode::clustered, k);
   check_world(w, n, /*expect_planes=*/k);
 }

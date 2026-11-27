@@ -1,5 +1,5 @@
 # nav_city_swarm.ari — the cvc::nav reactive swarm in a city, as an Ariadne document: the port of
-# examples/nav/nav_city_swarm.cpp (docs/ARIADNE.md §5.4, "Swarms"). A MASS of vehicles (800) cross
+# the retired C++ nav_city_swarm (docs/ARIADNE.md §5.4, "Swarms"). A MASS of vehicles (800) cross
 # real downtown Austin toward SIXTEEN colour-coded targets with NO global plan: pure local reaction,
 # the published trained CoefMLP driving each one (the built-in biased net where none is installed).
 # Each flies a flag in its target's colour, so the swarm reads as 16 converging colour streams.

@@ -173,7 +173,9 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
 - **As built in SH1** (ARIADNE.md §6.8). `Kind::Mounts` reads `mounts:`, `allow:` and a third
   key, `catalog:` (a list, or `{ bind: <key> }`), which names the documents that run as `local`:
   the runtime takes the principal from where the bytes came (4.12), and the slot is where it
-  learns which local files are the shell's catalog. `load_mount` (loader.h) runs `expand_load`
+  learns which local files are the shell's catalog. An entry's own `catalog` flag does the same
+  for that entry: `shell.ari` sets it on what it opens from its catalog, and `catalog:` covers the
+  catalog's documents opened any other way (both, at Joe's choice, 2026-11-27). `load_mount` (loader.h) runs `expand_load`
   in a fresh context, stateless; `AppRuntime` hands the Runtime a loader that adds its component
   paths and the `requires:` check (`Runtime::set_mount_loader`). The Runtime keeps each mount in
   a slot by sub-prefix, reconciles the slots at the top of each frame (open, close, parse again)
@@ -687,6 +689,8 @@ acceptance test (SH15).
   with its publisher when it is signed (below).
 
 The principal is fixed at mount time from where the bytes came; a document cannot name its own.
+The shell says which local files are its catalog's: the slot's `catalog:` lists them, or an
+entry's `catalog` flag marks it (as built in SH1, 4.2); neither makes a remote document `local`.
 What it loads inherits it: a remote document that `load:`s a file from its own origin runs that
 file as the same principal and cannot raise it. Below, a *sandboxed* document is one whose
 principal is `file:` or `remote:`.
@@ -727,8 +731,9 @@ shell hosts nicotina beside any other application, remote or not.
 - **Who a program runs as** ([`principal.h`](../../inc/cvc/ariadne/principal.h)): a table per
   app of scope to principal. `open_mount` records a mount's principal there (SH1's
   `mount_principal`, with what the shell's entry gives it) before any of its programs is built.
-  `close_mount` drops it, and so does the Runtime's teardown. A scope under several runs as the innermost; a `local` one inside a
-  sandboxed one runs as the sandboxed one. Unrecorded scopes, the shell itself among them, are
+  `close_mount` drops it once the mount's processes are gone, and so does the Runtime's teardown;
+  an entry reopened as a new principal (its catalog flag) is recorded again. A scope under several
+  runs as the innermost; a `local` one inside a sandboxed one runs as the sandboxed one. Unrecorded scopes, the shell itself among them, are
   `local`. A remote principal is kept in one spelling, `remote:` and the origin as a policy
   writes it.
 - **The verbs** (`enable_net`, [`net_host.h`](../../inc/cvc/ariadne/net_host.h)): each program's
@@ -752,7 +757,7 @@ shell hosts nicotina beside any other application, remote or not.
   launcher's names. A policy that does not load, or binds an origin it does not allow, refuses the
   mount (`set_principal_check`). `shell.ari` takes them from a catalog entry's `net_policy`,
   `credential_store` and `e2ee_store` (paths relative to the catalog), and opens such an entry
-  under its slug with them written first.
+  under its slug with them and its catalog flag written first, so it opens as `local`.
 - **Left for later**: `data:` entries still read over the launcher's allowlist into the one shared
   store (with SH12/SH13's fetching). Keeping a sandboxed program off the other global `#` channels
   is SH12's.

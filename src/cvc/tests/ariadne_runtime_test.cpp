@@ -14058,6 +14058,125 @@ TEST(AriadneMounts, OpenCloseAndReopenKeepItsState) {
   fs::remove_all(dir);
 }
 
+// docs/ARIADNE.md §6.8, ARIADNE_SHELL.md 4.12: a local file runs as `local` when the slot's
+// catalog: lists it or its entry's catalog flag is set, and as `file:<its directory>` otherwise.
+// The flag set or cleared on an open entry opens it again as its new principal, its state kept and
+// its init: not run again; when catalog: lists it as well, its principal is the same, and it runs
+// on untouched.
+TEST(AriadneMounts, TheCatalogFlagOrCatalogMakesALocalFileLocal) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_catalog";
+  fs::remove_all(dir);
+  const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
+  const fs::path listed = write_doc(dir, "listed/worker.ari", kWorkerDoc);
+  const fs::path shell = write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+root:
+  - mounts: apps
+    catalog: [listed/]
+)");
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  const auto principal = [&](const std::string &as) {
+    const std::vector<Runtime::MountState> all = rt.mounts();
+    const Runtime::MountState *m = mount_named(all, as);
+    return m && m->mounted ? m->principal : std::string();
+  };
+  const auto steps = [&](const std::string &as) {
+    const std::vector<Runtime::MountState> all = rt.mounts();
+    const Runtime::MountState *m = mount_named(all, as);
+    return m ? m->budget.steps : 0;
+  };
+  const auto pids = [&](const std::string &as) {
+    std::set<int> out;
+    for (const auto &p : live_under(app, "includes." + as))
+      out.insert(p.pid);
+    return out;
+  };
+  // a: neither; b: its flag; c: under catalog:'s prefix.
+  tree("ui.shell.apps.a.uri").value(worker.generic_string());
+  tree("ui.shell.apps.b.uri").value(worker.generic_string());
+  tree("ui.shell.apps.b.catalog").value(std::string("1"));
+  tree("ui.shell.apps.c.uri").value(listed.generic_string());
+  ASSERT_TRUE(pump_until(rt,
+                         [&] {
+                           return ival(app, "ui.shell.includes.a.ticks") >= 2 &&
+                                  ival(app, "ui.shell.includes.b.ticks") >= 2 &&
+                                  ival(app, "ui.shell.includes.c.ticks") >= 2;
+                         }))
+      << "a " << sval(app, "ui.shell.apps.a.error") << "; b " << sval(app, "ui.shell.apps.b.error")
+      << "; c " << sval(app, "ui.shell.apps.c.error");
+  EXPECT_EQ(principal("a").rfind("file:", 0), 0u) << principal("a");
+  EXPECT_EQ(principal("b"), "local");
+  EXPECT_EQ(principal("c"), "local");
+  EXPECT_EQ(sval(app, "ui.shell.apps.b.principal"), "local");
+  EXPECT_EQ(steps("a"), Runtime::default_mount_budget("file:x").steps);
+  EXPECT_EQ(steps("b"), Runtime::default_mount_budget("local").steps);
+
+  // The flag set on a: it opens again as local, resumed.
+  tree("ui.shell.apps.a.catalog").value(std::string("true"));
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return principal("a") == "local" && ival(app, "ui.shell.includes.a.ticks") >= 4;
+  })) << principal("a");
+  EXPECT_EQ(sval(app, "ui.shell.apps.a.principal"), "local");
+  EXPECT_EQ(steps("a"), Runtime::default_mount_budget("local").steps);
+  EXPECT_EQ(ival(app, "ui.shell.includes.a.inits"), 1) << "resumed: its init: did not run again";
+
+  // Cleared on b: it opens again as file:.
+  tree("ui.shell.apps.b.catalog").value(std::string("0"));
+  ASSERT_TRUE(pump_until(rt, [&] { return principal("b").rfind("file:", 0) == 0; }))
+      << principal("b");
+  EXPECT_EQ(steps("b"), Runtime::default_mount_budget("file:x").steps);
+  EXPECT_EQ(ival(app, "ui.shell.includes.b.inits"), 1);
+
+  // Set on c, which catalog: lists: still local, and its programs run on (the same processes).
+  const std::set<int> before = pids("c");
+  ASSERT_FALSE(before.empty());
+  tree("ui.shell.apps.c.catalog").value(std::string("1"));
+  const int ticks = ival(app, "ui.shell.includes.c.ticks");
+  ASSERT_TRUE(pump_until(rt, [&] { return ival(app, "ui.shell.includes.c.ticks") >= ticks + 3; }));
+  EXPECT_EQ(principal("c"), "local");
+  EXPECT_EQ(pids("c"), before) << "not opened again";
+  fs::remove_all(dir);
+}
+
+// A document from the network runs as `remote:<origin>` whatever the slot says of it: its entry's
+// catalog flag makes only a local file `local`.
+TEST(AriadneMounts, TheCatalogFlagLeavesARemoteDocumentRemote) {
+  cvc::app app;
+  Runtime rt(app);
+  TrayBackend be;
+  rt.set_backend(&be);
+  rt.set_mount_loader([](const MountRequest &rq) { // as a fetched document would load
+    MountResult r;
+    r.ok = true;
+    r.canonical = rq.uri;
+    r.wrapper.scope = "includes." + rq.as;
+    r.wrapper.app_name = "Remote";
+    r.wrapper.children.push_back(text("from the network"));
+    return r;
+  });
+  Widget slot;
+  slot.kind = Kind::Mounts;
+  slot.bind = "apps";
+  std::vector<Widget> root;
+  root.push_back(std::move(slot));
+  rt.set_root(group(std::move(root)));
+  cvc::state &tree = cvc::state::instance(app);
+  tree("apps.r.uri").value(std::string("https://apps.example.org/r.ari"));
+  tree("apps.r.catalog").value(std::string("1"));
+  ASSERT_TRUE(pump_until(rt, [&] { return peek(app, "apps.r.status") == "open"; }))
+      << peek(app, "apps.r.error");
+  const std::vector<Runtime::MountState> all = rt.mounts();
+  const Runtime::MountState *m = mount_named(all, "r");
+  ASSERT_NE(m, nullptr);
+  EXPECT_EQ(m->principal, "remote:https://apps.example.org");
+  EXPECT_EQ(m->budget.steps, Runtime::default_mount_budget("remote:x").steps);
+}
+
 // docs/ARIADNE.md §5.3: a mounts: entry's state: is written at its sub-prefix as it opens, just
 // before its init: (which reads it), as a load: module's is. Reopened, it resumes with its state as
 // it was; Restart drops that state and writes the seeds again.
@@ -14621,6 +14740,7 @@ TEST(AriadneComponents, ShellOpensItsCatalogOnDemand) {
   EXPECT_EQ(sval(app, "ui.shell.shell.catalog"), "3");
   EXPECT_EQ(sval(app, "ui.shell.shell.catalog.2.title"), "Counter");
   EXPECT_EQ(peek(app, "ui.shell.shell.apps.counter.principal"), "local") << "the catalog's";
+  EXPECT_EQ(peek(app, "ui.shell.shell.apps.counter.catalog"), "1") << "shell-open flags it";
   be.log.clear();
   rt.render();
   EXPECT_TRUE(be.saw("begin_menu:Counter")) << "its menu joins the bar\n" << be.dump();
