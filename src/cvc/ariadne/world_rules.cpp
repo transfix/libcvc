@@ -207,7 +207,7 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
     } else if (key == "look") {
       if (!val.is_map())
         return at + " look: expects a map (box:, file:, asset:, model:, data:, chassis:, wheel:, "
-                    "rig:, fit:, scale:, yaw:, z:)";
+                    "rig:, fit:, texture:, scale:, yaw:, z:)";
       bool fit_given = false, rig_given = false;
       for (const auto &[k, x] : val.entries) {
         if (k == "chassis" || k == "wheel") {
@@ -234,6 +234,9 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
         } else if (k == "fit") {
           fit_given = true;
           if (!boolean(x, at + " look: fit:", v.look.fit, why))
+            return why;
+        } else if (k == "texture") {
+          if (!boolean(x, at + " look: texture:", v.look.texture, why))
             return why;
         } else if (k == "scale" || k == "yaw" || k == "z") {
           double n = 0.0;
@@ -376,6 +379,9 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
          : k == "sense"  ? s.sense
          : k == "belief" ? s.belief
                          : s.metric) = x.as_string();
+      } else if (k == "collide") {
+        if (!boolean(x, at + " collide:", s.collide, why))
+          return why;
       } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
         if (!number(x, at + " " + k + ":", n, why))
@@ -434,7 +440,8 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
                std::to_string(kMaxVehicleStartCount) + " (name a fleet: for more)";
       for (const auto &[k, x] : item.entries)
         if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys" ||
-            k == "sense" || k == "belief" || k == "metric" || (k == "policy" && x.is_map()))
+            k == "sense" || k == "belief" || k == "metric" || k == "collide" ||
+            (k == "policy" && x.is_map()))
           warn(warnings, at + " " + k + ": is a fleet's (fleet: names one), ignored");
         else if (k == "plant" && (x.is_seq() || x.is_map()))
           warn(warnings,

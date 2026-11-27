@@ -2278,6 +2278,10 @@ scene:
 - **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
   steps by the quanta due. With a renderer, `tick_scene` does that and draws each moving body's
   node at the body's pose, between the last two steps, wherever the node sits in the hierarchy.
+  Each step runs on Jolt's own workers beside the stepping thread wherever there are threads: up
+  to three natively, two in a browser built with threads, none without. Its vehicles' wheels,
+  its collisions and its islands are shared among them, and a run is the same on any number. 40
+  Jolt vehicles step in about 1.8 ms on three workers against 3 ms on none, 120 in 5 against 12.
 - **Headless.** The world is core libcvc's (`cvc::ariadne::SceneWorld`,
   [`scene_world.h`](../inc/cvc/ariadne/scene_world.h)), so it runs with no renderer too. An
   `AppRuntime` with no `SceneAdapter` (`ari`, `ari test`, pycvc's headless `AriApp`, `arix`)
@@ -2368,7 +2372,8 @@ scene:
     (`scene.world.grid.{rows, cols, cell, occupied, summary}`, `SceneWorld::grid`):
     - a generated or data world's grid comes from its world;
     - a terrain's from its height field;
-    - a flat ground's is an open walled grid over its footprint.
+    - a flat ground's is an open walled grid over its footprint, with the world's other static
+      nodes that stand 0.5 m or more over it blocked under their footprints (a city of boxes).
   - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
     - for a generated world, `world_controls`' widgets;
     - for a data world, its loading progress, plus loading another bundle into the same dataset.
@@ -2446,7 +2451,9 @@ scene:
     asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
-    name is used (`find_vehicle_model`), else the box.
+    name is used (`find_vehicle_model`), else the box. `texture: false` draws a model (one-piece or
+    parted) in the entity's colours instead of its texture, so a fleet's teams read at any
+    distance (an entity layer's coarse rungs are in them already).
   - **A model in parts.** A one-piece model is one mesh: its wheels are in it and cannot turn. A
     parted look is the chassis without its wheels, one wheel, and a rig that says where the
     wheels go, so each wheel is drawn on its own and rolls and steers as the vehicle drives:
@@ -2514,7 +2521,9 @@ scene:
       passes both with each pose (`entity_pose`, the pose keys or the packed poses).
     - **Nodes.** The entity's group `vehicle_<id>` holds `vehicle_<id>_chassis` and
       `vehicle_<id>_wheel<k>` (a group posed each frame, its mesh `vehicle_<id>_wheel<k>_mesh`
-      under it), the wheels in the rig's order. The catalog publishes the parts too:
+      under it), the wheels in the rig's order. The wheels cast no shadow: the chassis's is the
+      vehicle's, and each turning wheel would be a moving caster the shadow cache redraws on its
+      own. The catalog publishes the parts too:
       `<vehicles>.archetypes.<id>.look.chassis`, `.look.wheel` and `.look.rig` (the rig's file, or
       an inline rig's text, `vehicle_rig_text`), so a `vehicle_preview` draws them, at rest.
     - **Later.** Each wheel's own suspension travel for a `pose` entity: today its wheels stand on
@@ -2649,7 +2658,10 @@ scene:
     document included, populates its world. A gym's reset clears them and spawns its own agents.
   - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
     named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
-    grid exists, the way libcvc's nav swarms are:
+    grid exists, the way libcvc's nav swarms are
+    ([`nav_fleet_swarm.ari`](../examples/ariadne/documents/nav_fleet_swarm.ari): 240 Humvees in six
+    teams over a small terrain lab world or a city of blocks, their rally points moved by the
+    document):
 
     ```yaml
     start:
@@ -2670,12 +2682,18 @@ scene:
       `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
       `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
       out again from its seed, every vehicle back at its start; `reseed.request` from the next
-      seed. `vehicles.fleets.names` lists the fleets.
+      seed. `size` (the entry's `count:` to start) is how many it has: writing it adds vehicles
+      or takes its last ones off (1 to 256), and the fleet is laid out again from its seed.
+      `vehicles.fleets.names` lists the fleets.
     - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. The others share a line in `entities.summary` and in
       `physics.stats.vehicles`. `keys: all` writes every vehicle's.
+    - `collide: true` keeps its vehicles from passing through each other on nav's own plant
+      (kinematic): after each navigator step, any two closer than nine tenths of the vehicle's
+      length are pushed apart (never into what blocks the grid). A Jolt plant's vehicles collide as
+      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
