@@ -3715,7 +3715,10 @@ How each backend does it:
   line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
   little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
-  and cascade new windows instead of flowing them. A window that would run off the screen stops at
+  and cascade new windows instead of flowing them. That size is the content's natural one: content
+  that stretches to the line's end (a clickable group's card, a message field) takes the window's
+  width but doesn't widen it to the screen's edge, as under ImGui (FTXUI: libcvc 4.0.10; before
+  it, such content widened the window to the edge). A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view. The mouse wheel over it scrolls
   it too, 3 rows a notch, from where it shows, and stops with its last row at the bottom (a feed in
@@ -3767,10 +3770,14 @@ that use of the unit.
   the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
   - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
   - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
-  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+  - FTXUI (libcvc 4.0.10): a press on a window's left, right or bottom edge, or a bottom corner,
+    and a drag resize it; the title bar moves it. The other edges stay put, and the window keeps
+    to its `min:` and `max:` and to the screen. A press there without a drag changes nothing.
+    `resizable: false`: a drag on its edge does nothing. FTXUI draws no handle: the frame is it.
+    `ariadne_ftxui_test`'s `AWindowResizesByAnEdgeOrACorner` drags each.
 - A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
-  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
-  keeps that size; `resizable: false` stops that as well.
+  can't resize it either way. On the tvision desktop and under FTXUI the user may resize one, and
+  from then on it keeps that size; `resizable: false` stops that as well.
 - A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
 
 **Maximizing.**
@@ -3783,8 +3790,8 @@ that use of the unit.
   again:
   - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
     where along the title bar it was grabbed.
-  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
-    window's own, so a later maximize goes back to it.
+  - Resized by an edge or a corner (ImGui, FTXUI), it keeps the size it was given, where it was
+    drawn. That size is now the window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
 - **How it starts:** a window's `maximized:` is the maximize it has while that key holds nothing:
