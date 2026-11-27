@@ -47,10 +47,14 @@
 #include <string>
 #include <vector>
 #include <vtkActor.h>
+#include <vtkDataArray.h>
+#include <vtkImageData.h>
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
+#include <vtkTexture.h>
 
 using namespace cvcgl_test;
 using cvc::gl::GeometryNode;
@@ -237,6 +241,22 @@ std::vector<double> drawn_xy(const std::shared_ptr<GeometryNode> &g) {
     xy.push_back(p[1]);
   }
   return xy;
+}
+
+// How many of a node's texture's texels are this colour, as the texture samples them (its image
+// data, which aliases the layer's buffer); -1 without a texture.
+long texels(const std::shared_ptr<GeometryNode> &g, int r, int gr, int b) {
+  vtkActor *actor = g ? vtkActor::SafeDownCast(g->prop()) : nullptr;
+  vtkTexture *tex = actor ? actor->GetTexture() : nullptr;
+  vtkImageData *img = tex ? vtkImageData::SafeDownCast(tex->GetInput()) : nullptr;
+  vtkDataArray *px = img ? img->GetPointData()->GetScalars() : nullptr;
+  if (!px || px->GetNumberOfComponents() < 3)
+    return -1;
+  long n = 0;
+  for (vtkIdType i = 0; i < px->GetNumberOfTuples(); ++i)
+    if (px->GetComponent(i, 0) == r && px->GetComponent(i, 1) == gr && px->GetComponent(i, 2) == b)
+      ++n;
+  return n;
 }
 
 double moved(const std::vector<double> &a, const std::vector<double> &b) {
@@ -445,6 +465,10 @@ int main() {
           "ghost: the sensor ring is 72 segments a vehicle");
     check(points_of(mesh_of(gsg, "g_route", "_lines")) >= 2u,
           "ghost: the route round the phantom is drawn");
+    const auto ground = mesh_of(gsg, "g_city", "_ground");
+    const long amber0 = texels(ground, 242, 184, 64); // the ghost's lights, 2 x 2 texels a cell
+    check(amber0 == 60 * 4, "ghost: the ground lights the phantom's 60 cells amber",
+          std::to_string(amber0));
     const std::vector<double> plan0 = drawn_xy(mesh_of(gsg, "g_plan", "_lines"));
     const std::vector<double> ring0 = drawn_xy(mesh_of(gsg, "g_sensor", "_lines"));
     bool worn = false;
@@ -456,6 +480,11 @@ int main() {
     const auto ghosts_now = mesh_of(gsg, "g_ghosts", "_mesh");
     check(ghosts_now && (!ghosts_now->isVisible() || points_of(ghosts_now) < ghost0),
           "ghost: the wall the ghosts layer draws wears away with it");
+    // The texture shares the layer's buffer: its repaints show (the fog in view lit, the cleared
+    // lights out), not the picture it was made with.
+    check(texels(ground, 62, 68, 78) > 0, "ghost: the ground shows what is in view now");
+    check(texels(ground, 242, 184, 64) < amber0, "ghost: the cleared cells' lights go out",
+          std::to_string(texels(ground, 242, 184, 64)));
     check(moved(plan0, drawn_xy(mesh_of(gsg, "g_plan", "_lines"))) > 0.0,
           "ghost: the plan streams with the vehicle");
     check(moved(ring0, drawn_xy(mesh_of(gsg, "g_sensor", "_lines"))) > 0.0,

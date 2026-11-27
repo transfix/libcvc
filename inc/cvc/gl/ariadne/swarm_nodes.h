@@ -43,7 +43,8 @@
 //            vehicles culled. Without lod, white while wall-following and green once there.
 //   flags    a pole and a flag in each vehicle's colour above it
 //   goals    a beacon over each vehicle's goal, sunk once it is there
-//   trails   the last `segments:` (12) moves of each vehicle, every `every:` (3) frames; `width:`
+//   trails   the last `segments:` (12) moves of each vehicle, every `every:` (3) navigator frames
+//            (a move of over three vehicle lengths is a jump, and its trail starts again); `width:`
 //            a number or a state key
 //   path     the followed vehicle's trail, wider and yellow (segments: up to 1024: its whole track)
 //   belief   the walls the fleet has sensed, see-through boxes in the colours of the belief planes

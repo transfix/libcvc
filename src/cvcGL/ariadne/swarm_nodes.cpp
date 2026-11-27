@@ -431,6 +431,7 @@ struct swarm_view {
   // points.
   int trail_k = 0;
   int trail_every = 3;
+  long trail_frames = 0; // navigator frames kept (the trails sample every trail_every of them)
   std::vector<double> trail_xyz;
   std::vector<float> trail_last;
   std::vector<int> trail_wr;
@@ -530,8 +531,14 @@ struct swarm_view {
       ++trail_rev;
       return;
     }
-    if (frame % std::max(1, trail_every))
+    // Every trail_every-th navigator frame: counted in the navigator's frames, not the view's, so
+    // a world slower than the view (a story at half speed) still samples each vehicle often.
+    if (++trail_frames % std::max(1, trail_every))
       return;
+    // A move longer than three vehicle lengths (at least 3 m) since the last sample is a jump (a
+    // restart, a teleport): a chord would cut a corner through a wall, so the trail starts again.
+    const double jump = std::max(3.0, 3.0 * swarm->vehicle_length());
+    const float jump2 = static_cast<float>(jump * jump);
     bool any = false;
     for (int i = 0; i < n; ++i) {
       const float dx = f.pos[2 * i] - trail_last[2 * i],
@@ -539,7 +546,7 @@ struct swarm_view {
       const float m2 = dx * dx + dy * dy;
       if (m2 < 1.0f)
         continue;
-      if (m2 > 9.0f) { // too far since the last sample: a chord would cut a corner through a wall
+      if (m2 > jump2) { // too far since the last sample: a chord would cut a corner through a wall
         trail_last[2 * i] = f.pos[2 * i];
         trail_last[2 * i + 1] = f.pos[2 * i + 1];
         continue;
@@ -612,6 +619,7 @@ struct swarm_view {
     if (swarm->generation() != gen) {
       gen = swarm->generation();
       trail_wr.clear();
+      trail_frames = 0;
       for (const auto &l : layers)
         l->build(*this);
     }
@@ -1296,6 +1304,9 @@ struct targets_layer : layer {
 struct city_layer : layer {
   std::weak_ptr<GeometryNode> ground;
   cvc::image fog; // borrowed by the ground's texture (zero-copy) for the node's life
+  // Its pixels, taken before the texture shares the image: the image is copy-on-write, so a
+  // fog.data() after setTexture would paint a private copy the texture never sees.
+  unsigned char *pixels = nullptr;
   std::uint64_t seen = ~std::uint64_t(0);
   bool fog_on = false;
   bool leds = false; // belief: true
@@ -1305,6 +1316,7 @@ struct city_layer : layer {
     drop("_walls");
     drop("_ground");
     ground.reset();
+    pixels = nullptr;
     const ari::swarm_city &c = s.city();
     if (c.real)
       return; // a real city: the data node draws it
@@ -1322,6 +1334,7 @@ struct city_layer : layer {
       if (fog_on || leds) {
         fog = cvc::image(px * c.cols, px * c.rows, cvc::image::pixel_format::RGBA,
                          cvc::image::data_type::u8);
+        pixels = fog.data();
         paint(s);
         gn->setColor(1, 1, 1);
         if (leds) { // the lights are the picture: flat, never shaded
@@ -1343,7 +1356,7 @@ struct city_layer : layer {
     const ari::swarm_city &c = s.city();
     const auto &cov = s.coverage();
     const auto &bel = s.belief();
-    unsigned char *img = fog.data();
+    unsigned char *img = pixels;
     if (!img)
       return;
     static const unsigned char tiers[3][3] = {{20, 22, 26}, {40, 44, 50}, {62, 68, 78}};
@@ -1706,8 +1719,10 @@ std::shared_ptr<GraphicsNode> realize_swarm_layer(SceneGraph &sg, const ari::Sce
   } else if (kind == "trails" || kind == "path") {
     view->trail_k =
         std::max(view->trail_k, std::clamp(static_cast<int>(n.props.num("segments", 12)), 1, 1024));
-    if (kind == "trails") {
+    // Either layer may set the sampling (navigator frames); the rings are the view's, one for both.
+    if (n.props.find("every") || kind == "trails")
       view->trail_every = std::max(1, static_cast<int>(n.props.num("every", 3)));
+    if (kind == "trails") {
       auto t = std::make_shared<trails_layer>();
       t->width = live_prop(n.props, "width", 1.5, out.bind_prefix);
       l = t;

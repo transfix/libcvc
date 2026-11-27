@@ -87,7 +87,7 @@ functions: |
           (if (hero-arrived) "Straight to the goal, through a wall that was never there."
               (if (!= gone "")
                   (if (< (- tw (float gone)) 4.0) "SENSOR: nothing there. Replanned." "")
-                  (if (> tw 5.0) "Belief is all it has, so it detours."
+                  (if (> tw 2.0) "Belief is all it has, so it detours."
                       "MAP: wall ahead. TRUTH: open field."))))))
   ; The main camera: straight down on the whole field (a map), or a perspective orbit from the
   ; south; shadows only in 3-D.
@@ -331,7 +331,7 @@ scene:
         - { node: route_ahead, type: swarm_layer, layer: route, visible: show.route }
         - { node: plan, type: swarm_layer, layer: plan, visible: show.plan }
         - { node: track, type: swarm_layer, layer: path, visible: show.track, segments: 1024,
-            width: 3 }
+            every: 1, width: 3 }
         - { node: sensor_ring, type: swarm_layer, layer: sensor, visible: show.sensor }
         - { node: goals, type: swarm_layer, layer: goals }
         - { node: vehicles, type: swarm_layer, layer: agents, look: humvee, lod: false }

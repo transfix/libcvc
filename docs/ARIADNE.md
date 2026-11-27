@@ -2113,8 +2113,8 @@ scene:
   it, each colour role decimated on its own, picked per vehicle by its size on screen: a rung
   takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
   and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
-  reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail;
-  `segments` up to 1024, its whole track), `belief` (the walls the fleet has sensed, in the colours
+  reached), `trails` (`segments`, `every` navigator frames, `width`), `path` (the followed
+  vehicle's trail; `segments` up to 1024, its whole track; `every` too), `belief` (the walls the fleet has sensed, in the colours
   of the belief planes that saw them), `dots` and `targets` (markers over everything, for a map
   view), `city` (the synthetic city or the arena; with `belief: true` its ground also shows the
   fleet's map, a light per cell it blocks, red where the field has a wall and amber where it has

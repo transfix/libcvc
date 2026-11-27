@@ -1017,7 +1017,10 @@ struct SceneSwarm::impl {
     const std::string driving = plant.driving();
     char st[256];
     // "800 agents", or "60 vehicles · 6 convoys" with groups: (the drive's line).
-    std::string who = std::to_string(n) + " " + spec.noun;
+    std::string noun = spec.noun;
+    if (n == 1 && noun.size() > 1 && noun.back() == 's') // "1 vehicle", not "1 vehicles"
+      noun.pop_back();
+    std::string who = std::to_string(n) + " " + noun;
     if (!spec.groups.empty())
       who += " \xC2\xB7 " + std::to_string(spec.targets) + " " + spec.groups;
     std::snprintf(st, sizeof st,
@@ -1030,9 +1033,11 @@ struct SceneSwarm::impl {
     write(app, key("stats.status"), std::string(st));
     write(app, key("stats.arrived"), static_cast<int>(now.arrived));
     write(app, key("stats.tick"), static_cast<int>(now.tick));
-    write(app, key("stats.time"),
-          static_cast<double>(now.tick) *
-              static_cast<double>(world ? world->current_config().veh.dt : 0.0f));
+    char tw[32]; // to the hundredth: a readout, not a clock
+    std::snprintf(tw, sizeof tw, "%.2f",
+                  static_cast<double>(now.tick) *
+                      static_cast<double>(world ? world->current_config().veh.dt : 0.0f));
+    write(app, key("stats.time"), std::string(tw));
     write(app, key("stats.replans"), static_cast<int>(replans));
   }
 
