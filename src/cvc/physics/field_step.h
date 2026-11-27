@@ -97,11 +97,11 @@ struct field_body {
   bool cut_tried = false;
 };
 
-// Worker threads for the fields' free-surface reads (world_config::field_threads). run(n, fn)
-// hands the indices 0 .. n - 1 out to the workers and the calling thread from a shared counter
-// and returns once every one has run; fn must not depend on which thread runs an index. Without
-// workers (or in a build without threads) it runs them in turn on the calling thread. The first
-// exception an index throws is rethrown from run().
+// Worker threads for the fields' free-surface reads, the cells' and the hulls' pushes
+// (world_config::field_threads). run(n, fn) hands the indices 0 .. n - 1 out to the workers and
+// the calling thread from a shared counter and returns once every one has run; fn must not depend
+// on which thread runs an index. Without workers (or in a build without threads) it runs them in
+// turn on the calling thread. The first exception an index throws is rethrown from run().
 class field_workers {
 public:
   explicit field_workers(int threads);

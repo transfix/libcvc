@@ -30,6 +30,7 @@
 #include <cvc/core/world_clock.h>
 #include <cvc/ocean/h0.h>
 #include <cvc/ocean/sea_surface.h>
+#include <cvc/physics/dyn_boat_plant.h> // the tactical hull
 #include <cvc/physics/ocean_surface.h>
 #include <cvc/physics/shore_mask.h>
 #include <cvc/physics/world.h>
@@ -1105,6 +1106,67 @@ TEST(PhysicsOceanSurface, TheFieldThreadsChangeNoValue) {
   EXPECT_THROW(world w(bad), cvc::physics_error);
   bad.field_threads = 65;
   EXPECT_THROW(world w(bad), cvc::physics_error);
+}
+
+// Hulls on the sea (hull.h): dyn_boat_desc::tactical's lofted V hull, yawed and heeled, and a box
+// hull, beside a ball of cells. Their pushes run on the field workers (field_threads) and give the
+// same run at 0, 1 and 3 workers, and with the workers changed mid-run, on the plain sea and under
+// the wind's forcing, with and without the source lattice. The windy lattice run's hash is pinned:
+// the hulls read the sea the step holds at its time (fluid_surface::at), on the workers, from the
+// lattice in shards, and that changed no value (it was taken when each hull read the sea itself,
+// in turn, and the lattice had one lock).
+TEST(PhysicsOceanSurface, TheHullsOnTheFieldWorkersChangeNoValue) {
+  REQUIRE_JOLT();
+  const auto run = [](const std::shared_ptr<const cvc::ocean::sea_surface> &sea, int threads,
+                      bool switched) {
+    world_config c = jolt_config();
+    c.field_threads = threads;
+    world w(c);
+    w.add_field(ocean_water(std::make_shared<ocean_surface>(sea)));
+    const dyn_boat_desc boat = dyn_boat_desc::tactical();
+    body_desc v = boat.boat.hull;
+    v.position = {0.5, -3.0, dyn_boat_plant::float_height(boat.boat, v.mass, 1000.0) + 0.05};
+    // Yawed about z (cos and sin of the half angle 0.96 and 0.28), then heeled a little about its
+    // own x; std::sqrt is correctly rounded everywhere, so the pinned hash is every platform's.
+    const double cy = 0.96, sy = 0.28, ch = 0.998, sh = std::sqrt(1.0 - ch * ch);
+    v.rotation = {cy * ch, cy * sh, sy * sh, sy * ch};
+    w.add_body(v);
+    body_desc b;
+    b.shape = box{{2.0, 0.75, 0.3}};
+    b.hull = box_hull({2.0, 0.75, 0.3});
+    b.density = 400.0;
+    b.position = {-2.0, 4.0, 0.0};
+    b.allow_sleeping = false;
+    w.add_body(b);
+    w.add_body(ball_at(5.0, 3.0, 0.3));
+    w.set_field_time(17.0);
+    if (switched) {
+      w.step(50);
+      c.field_threads = 3;
+      w.reconfigure(c);
+      w.step(50);
+      c.field_threads = 0;
+      w.reconfigure(c);
+      w.step(50);
+    } else {
+      w.step(150);
+    }
+    return w.state_hash();
+  };
+  for (int k = 0; k < 4; ++k) {
+    const double cell = k % 2 == 0 ? 0.0 : 0.5;
+    const bool windy = k >= 2;
+    const auto sea = windy ? windy_sea(cell) : open_sea(0.0, cell);
+    const std::uint64_t h = run(sea, 0, false);
+    EXPECT_EQ(run(sea, 1, false), h) << (windy ? "windy, " : "") << "cell " << cell << ": 1 worker";
+    EXPECT_EQ(run(sea, 3, false), h) << (windy ? "windy, " : "") << "cell " << cell << ": 3";
+    EXPECT_EQ(run(sea, 0, true), h) << (windy ? "windy, " : "") << "cell " << cell << ": switched";
+    if (k == 3 && (backend_capabilities(backend::jolt) & cap_determinism_cross_platform)) {
+      std::printf("[physics-golden] hulls on the windy lattice sea after 150 steps: %016llx\n",
+                  static_cast<unsigned long long>(h));
+      EXPECT_EQ(h, 0xe23ce116800e66c4ull) << std::hex << "state hash " << h;
+    }
+  }
 }
 
 // --- wakes (field::wake; OCEAN-AND-WEATHER-ROADMAP.md C5, D6) ------------------------------------

@@ -53,7 +53,9 @@
 #include <cvc/ocean/sea_surface.h>
 #include <cvc/ocean/shore.h>
 #include <cvc/physics/backend.h>
-#include <cvc/physics/nav_plant.h> // nav_plant_options
+#include <cvc/physics/dyn_boat_plant.h> // StepBench: the tactical hull
+#include <cvc/physics/nav_plant.h>      // nav_plant_options
+#include <cvc/physics/ocean_surface.h>  // StepBench: the water node's sea
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // wet_friction
 #include <cvc/state/state.h>
@@ -4828,6 +4830,192 @@ TEST(AriadneWorldBoats, NavDrivesABoatAcrossTheLake) {
   EXPECT_GE(goals, 2) << "nav did not drive it to its goals";
   EXPECT_GT(min_depth, 0.2) << "it reached water shallower than its draft";
   EXPECT_GT(travelled, 40.0);
+}
+
+// What a boat fleet's physics step costs: N tactical boats (dynamicboat:tactical, nav@1) scattered
+// on a lake under the water node's sea, as the boat-fleet bench (boat_fleet_bench.ari) floats them,
+// headless. Prints the median of 120 steps' step_ms, its fields' and engine's shares, per boat;
+// then what one boat's hull reads of the sea cost, piece by piece. A benchmark, not a check: it
+// runs only with CVC_BOAT_BENCH=1 (CVC_BOAT_BENCH_SIZES: the fleet sizes, by default 1 60 240).
+namespace {
+
+std::string boat_bench_doc(int n) {
+  return "requires: [scene.physics]\n"
+         "world:\n"
+         "  vehicles:\n"
+         "    archetypes:\n"
+         "      boat: { plant: \"dynamicboat:tactical\", controllers: [nav@1, none] }\n"
+         "    start:\n"
+         "      - { fleet: harbour, archetype: boat, count: " +
+         std::to_string(n) +
+         ", spawn: scattered, seed: 7, policy: builtin, rally: { count: 6 } }\n" + R"(
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: lake, cell: 4 }
+  nodes:
+    - node: terrain
+      world: lake
+      source:
+        heightfield:
+          size: 640
+          resolution: 161
+          layers:
+            - { kind: dome, amplitude: -10, radius: 230 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 3
+      wave_amp: 0.25
+      body: {}
+)";
+}
+
+double median_of(std::vector<double> v) {
+  if (v.empty())
+    return 0.0;
+  std::sort(v.begin(), v.end());
+  const std::size_t m = v.size() / 2;
+  return v.size() % 2 ? v[m] : 0.5 * (v[m - 1] + v[m]);
+}
+
+void boat_step_bench(int n, int steps) {
+  const fs::path path = write_doc("boat_step_bench", boat_bench_doc(n));
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(path.string());
+  art.drain();
+  SceneWorld *w = art.scene_world();
+  if (!w || !w->vehicles()) {
+    std::printf("[boat bench] no world\n");
+    return;
+  }
+  for (int i = 0; i < 30; ++i) {
+    art.step_world(1);
+    art.drain();
+  }
+  using clk = std::chrono::steady_clock;
+  std::vector<double> step, fields, engine, wall;
+  for (int i = 0; i < steps; ++i) {
+    const auto a = clk::now();
+    art.step_world(1);
+    art.drain();
+    wall.push_back(std::chrono::duration<double, std::milli>(clk::now() - a).count());
+    const cvc::physics::step_report r = w->world().last_report();
+    step.push_back(r.step_ms);
+    fields.push_back(r.fields_ms);
+    engine.push_back(r.engine_ms);
+  }
+  const std::size_t boats = w->vehicles()->size();
+  const double s = median_of(step), f = median_of(fields), e = median_of(engine);
+  std::printf("[boat bench] n=%3zu step %8.3f ms (%.3f a boat): fields %8.3f, engine %8.3f, "
+              "boats' pre-step and the rest %8.3f; with the plants and nav %8.3f\n",
+              boats, s, boats ? s / boats : 0.0, f, e, s - f - e, median_of(wall));
+
+  // One boat's sea reads, piece by piece, at the hull's vertices where it floats now: the sea's
+  // fields for a new time; each vertex's height at that time with its lattice corners not yet
+  // found (as each step's first reads are) and found; the source and one move alone; the velocity;
+  // and the same through the step's held surface.
+  const cvc::physics::world_snapshot snap = w->world().snapshot();
+  std::shared_ptr<const cvc::physics::fluid_surface> surface;
+  for (const cvc::physics::field_snapshot &fs : snap.fields)
+    if (fs.desc.kind == cvc::physics::field_kind::fluid && fs.desc.surface)
+      surface = fs.desc.surface;
+  const auto *ocean = dynamic_cast<const cvc::physics::ocean_surface *>(surface.get());
+  const cvc::physics::body_snapshot *hull = nullptr;
+  for (const cvc::physics::body_snapshot &b : snap.bodies)
+    if (b.motion == cvc::physics::motion_type::dynamic && b.settings.mass > 1000.0) {
+      hull = &b;
+      break;
+    }
+  if (!ocean || !hull)
+    return;
+  const cvc::ocean::sea_surface &sea = ocean->sea();
+  const cvc::physics::dyn_boat_desc tactical = cvc::physics::dyn_boat_desc::tactical();
+  const std::vector<cvc::physics::vec3> &local = tactical.boat.hull.hull->vertices;
+  const cvc::physics::quat q = hull->state.rotation;
+  std::vector<cvc::physics::vec3> pts;
+  for (const cvc::physics::vec3 &v : local) {
+    const cvc::physics::vec3 u{q.x, q.y, q.z};
+    const auto cr = [](const cvc::physics::vec3 &a, const cvc::physics::vec3 &b) {
+      return cvc::physics::vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
+                                a.x * b.y - a.y * b.x};
+    };
+    const cvc::physics::vec3 t = cr(u, v) * 2.0;
+    pts.push_back(hull->state.position + v + t * q.w + cr(u, t));
+  }
+  const auto us = [](clk::time_point a, clk::time_point b) {
+    return std::chrono::duration<double, std::micro>(b - a).count();
+  };
+  const double t0 = w->world().field_time();
+  const int reps = 40;
+  double frame = 0.0, cold = 0.0, warm = 0.0, src = 0.0, mv = 0.0, vel = 0.0, held = 0.0,
+         heldv = 0.0, sink = 0.0;
+  for (int k = 1; k <= reps; ++k) {
+    const double t = t0 + 1000.0 + k / 120.0; // a time no step has read
+    auto a = clk::now();
+    (void)sea.at(t);
+    auto b = clk::now();
+    frame += us(a, b);
+    for (const auto &p : pts)
+      sink += surface->height(p.x, p.y, t);
+    a = clk::now();
+    cold += us(b, a);
+    for (const auto &p : pts)
+      sink += surface->height(p.x, p.y, t);
+    b = clk::now();
+    warm += us(a, b);
+    for (const auto &p : pts)
+      sink += sea.source(p.x, p.y, t)[0];
+    a = clk::now();
+    src += us(b, a);
+    for (const auto &p : pts)
+      sink += sea.displacement(p.x, p.y, t)[0];
+    b = clk::now();
+    mv += us(a, b);
+    for (const auto &p : pts)
+      sink += surface->velocity(p, t).x;
+    a = clk::now();
+    vel += us(b, a);
+    const std::shared_ptr<const cvc::physics::fluid_surface> h = surface->at(t, nullptr);
+    const cvc::physics::fluid_surface &hs = h ? *h : *surface;
+    b = clk::now();
+    for (const auto &p : pts) {
+      cvc::physics::surface_memo memo;
+      sink += hs.height_with(p.x, p.y, t, memo);
+    }
+    a = clk::now();
+    held += us(b, a);
+    for (const auto &p : pts) {
+      cvc::physics::surface_memo memo;
+      sink += hs.velocity_with(p, t, memo).x;
+    }
+    b = clk::now();
+    heldv += us(a, b);
+  }
+  const double nv = static_cast<double>(pts.size()) * reps;
+  std::printf("[boat bench]   one hull's %zu vertices (us a read): the sea's frame %.0f us; "
+              "height %.2f cold, %.2f warm, held %.2f; source %.2f, a move %.2f; velocity %.2f, "
+              "held %.2f (%g)\n",
+              pts.size(), frame / reps, cold / nv, warm / nv, held / nv, src / nv, mv / nv,
+              vel / nv, heldv / nv, sink > 0.0 ? 0.0 : 1.0);
+}
+
+} // namespace
+
+TEST(AriadneWorldBoats, StepBench) {
+  REQUIRE_YAML();
+  if (!std::getenv("CVC_BOAT_BENCH"))
+    GTEST_SKIP() << "a benchmark: set CVC_BOAT_BENCH=1";
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  const char *sizes = std::getenv("CVC_BOAT_BENCH_SIZES");
+  std::stringstream in(sizes ? sizes : "1 60 240");
+  for (int n = 0; in >> n;)
+    if (n > 0)
+      boat_step_bench(n, 120);
 }
 
 // A world with water and no water node (a generated world flooded to 200 m): the runtime adds
