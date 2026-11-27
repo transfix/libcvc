@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <cvc/physics/dyn_driver.h>
+#include <cvc/physics/dyn_wading.h>
 #include <cvc/physics/nav_plant.h>
 #include <cvc/physics/world.h>
 #include <set>
@@ -121,6 +122,26 @@ void count_contacts(const dyn_chassis &c, int i, int &statics, int &touched, dou
 // A body at `rotation` as the plant ledger takes its attitude (plant_sample's grade, roll and
 // up_z: its forward, left and up axes' world z), as nav_plant measures it.
 void attitude_of(const quat &rotation, cvc::nav::plant_sample &s);
+
+// Wading (dyn_wading.h) for a dynamic model: what the world's water at its contacts does to it this
+// substep.
+struct wade_contact {
+  double x = 0.0, y = 0.0, ground = 0.0; // world metres: the contact, on the ground
+  int axle = 0;                          // its axle in the vehicle_desc
+  int tires = 1;                         // the tires it stands for (2: a single-track model's)
+};
+// At most four contacts. `box_bottom` is the world height of the chassis box's bottom at its
+// centre, `speed` the forward speed (m/s), `mu` the model's dry grip. The result's
+// engine_flooded is `flooded`, set (and never cleared) once the water at the front axle stands
+// over the fording depth.
+dyn_wading wade(const world &w, const vehicle_desc &d, const wade_contact *c, int n,
+                double box_bottom, double speed, double mu, double gravity, bool flooded);
+// The grip factor at a world point: its nearest contact's (1 when dry).
+double wade_grip(const dyn_wading &r, double x, double y);
+// What a flooded engine leaves of a step's drive or brake `a` (m/s^2, + forward) at forward speed
+// vx, for nav's wanted acceleration `want`: the brakes, against the motion or holding it at rest,
+// and no drive.
+double flooded_drive(double a, double vx, double want);
 
 } // namespace dyn
 } // namespace physics

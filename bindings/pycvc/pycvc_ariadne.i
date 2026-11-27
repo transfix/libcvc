@@ -107,7 +107,8 @@ public:
   // power_kw, energy_wh, distance, gear, the command its plant took (steer, accel) and its intent;
   // vx, vy (m/s), steer (rad), goal_x, goal_y, reach (m), reached, collided (a contact with a
   // body other than the ground, or another vehicle, since the last tick); and its body: length, width,
-  // wheelbase (m), max_steer (rad), max_accel, max_decel (m/s^2), max_speed (m/s).
+  // wheelbase (m), max_steer (rad), max_accel, max_decel (m/s^2), max_speed (m/s), and its wading
+  // (pycvc.wading_desc.as_dict's form: enabled, fording_depth (m), ...).
   PyObject *list() const {
     PyObject *out = PyList_New(0);
     if (!out)
@@ -158,6 +159,16 @@ public:
         put(d, "max_accel", PyFloat_FromDouble(body.max_accel));
         put(d, "max_decel", PyFloat_FromDouble(body.max_decel));
         put(d, "max_speed", PyFloat_FromDouble(body.max_speed));
+        {
+          const cvc::physics::wading_desc &g = body.wading;
+          put(d, "wading",
+              Py_BuildValue("{s:O,s:d,s:d,s:d,s:d,s:d,s:d,s:d,s:d}", "enabled",
+                            g.enabled ? Py_True : Py_False, "displacement", g.displacement,
+                            "wheel_displacement", g.wheel_displacement, "wheel_drag",
+                            g.wheel_drag, "underbody_depth", g.underbody_depth, "underbody_drag",
+                            g.underbody_drag, "tire_pressure", g.tire_pressure, "fording_depth",
+                            g.fording_depth, "flood_area", g.flood_area));
+        }
         put(d, "posed", PyBool_FromLong(e.posed ? 1 : 0));
         put(d, "pose", e.posed ? pose_dict(e.pose) : (Py_INCREF(Py_None), Py_None));
         PyList_Append(out, d);

@@ -183,6 +183,12 @@ constexpr std::array<surface_class, surface_registry::class_count> base_classes(
 // are never driven on; their mu is what a box sliding along them meets. The last
 // column is mu soaked by rain (wet asphalt 0.55, wet grass 0.3; indoor floors and the
 // already wet keep theirs), which a weather's wetness runs mu toward (O20, F6).
+// The water classes' mu stands for the water (a world with no fluid over them: a tire
+// there finds little to push on); their last column is their bed's, soaked, which a
+// wading tire meets under a fluid's water (cvc::physics vehicle.h) and the rain does not
+// raise them to. Lake beds sort by depth (Hakanson and Jansson, "Principles of Lake
+// Sedimentology", 1983): the shallows, where waves wash out the fines, are sand and
+// gravel (wet 0.45 here); the deep accumulation bottoms are mud (wet 0.20).
 template <class Classes> constexpr void apply_contact_physics(Classes &classes) {
   struct row {
     std::uint16_t id;
@@ -204,8 +210,8 @@ template <class Classes> constexpr void apply_contact_physics(Classes &classes) 
       {12, 0.50f, 0.100f, 0.0f, 0.40f}, // rubble
       {13, 0.30f, 0.150f, 0.0f, 0.20f}, // mud
       {14, 0.50f, 0.015f, 0.0f, 0.50f}, // puddle (wet pavement)
-      {15, 0.30f, 0.050f, 0.0f, 0.30f}, // water_shallow
-      {16, 0.10f, 0.050f, 0.0f, 0.10f}, // water_deep
+      {15, 0.30f, 0.050f, 0.0f, 0.45f}, // water_shallow (its bed: wet sand or gravel)
+      {16, 0.10f, 0.050f, 0.0f, 0.20f}, // water_deep (its bed: wet mud)
       {17, 0.70f, 0.020f, 0.1f, 0.45f}, // cliff_rock
       {18, 0.60f, 0.010f, 0.1f, 0.40f}, // tree_trunk
       {19, 0.70f, 0.010f, 0.1f, 0.45f}, // boulder

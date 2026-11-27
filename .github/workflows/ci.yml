@@ -1354,6 +1354,7 @@ jobs:
                    inc/cvc/ariadne/web_document.h src/cvc/ariadne/web_document.cpp \
                    inc/cvc/ariadne/files.h src/cvc/ariadne/files.cpp \
                    inc/cvc/ariadne/media_save.h src/cvc/ariadne/media_save.cpp \
+                   inc/cvc/state/state_transport_ws.h src/cvc/state/state_transport_ws.cpp \
                    src/cvc/tests/data/ariadne_docset src/cvcGL/wasm cvcpkg/recipes/arigl-web \
                    src/cvcGL/Clipboard.cpp src/cvcGL/ariadne/ImGuiBackend.cpp \
                    src/cvcGL/ImGuiOverlay.cpp src/cvcGL/ImGuiKeyNames.h src/cvcGL/SdlWindow.cpp \
@@ -3088,11 +3089,26 @@ jobs:
         state_exec_router_test: OK ] RouterR.APostThroughAHandleGoesIntoItsGroup
         state_exec_router_test: OK ] RouterR.AnUnregisterAloneStillForwardsAtTheTeardown
         state_exec_router_test: OK ] RouterR.ATornDownHomeForwardsAMessageALaterPrefixCovers
-        state_exec_router_test: OK ] RouterR.AnAnswerWaitsForItsClosedHomesForward
+        state_exec_router_test: OK ] RouterR.AnAnswerToAClosedHomeGoesAfterItsForward
         state_exec_router_test: OK ] RouterR.ATeardownNeverWaitsOnItself
         state_exec_router_test: OK ] RouterR.AReplyOnAHashKeyIsNeverCapped
         state_exec_router_test: OK ] PoolKillOwner.TwoAtOnceBothReturn
         state_exec_router_test: OK ] PoolKillOwner.RefusedInsideAGroupsPumpBeforeActing
+        state_exec_router_test: OK ] RouterR3.AClosedHandleTakesRouterEntriesUntilDone
+        state_exec_router_test: OK ] RouterR3.ASealedHandleTakesOnlyATeardownsForward
+        state_exec_router_test: OK ] RouterR3.AHostPostingThroughATeardownKeepsItsOrder
+        state_exec_router_test: OK ] RouterR3.ALongChainOfTeardownsKeepsEveryAddress
+        state_exec_router_test: OK ] RouterR3.AnIslandsPostAfterItsTeardownBeganDiesCounted
+        state_exec_router_test: OK ] RouterR3.AnOverlappingTeardownsAnswerIsNotADuplicate
+        state_exec_router_test: OK ] RouterR3.AnOverlappingTeardownLeavesNoRecordOfADeadProcess
+        state_exec_router_test: OK ] RouterR3.ADoneHomesPosterFollowsItsForwardingAddress
+        state_exec_router_test: OK ] RouterR3.TwoHomesTearingDownAtOnceBothEnd
+        state_exec_router_test: OK ] RouterR3.NestedHomesTearingDownAtOnceBothEnd
+        state_exec_router_test: OK ] RouterR3.AHostPostAfterItsHomesTeardownFollowsTheForward
+        state_exec_router_test: OK ] RouterR3.AHostPostDuringItsHomesTeardownComesAfterTheForward
+        state_exec_router_test: OK ] RouterR3.AHandlesPostDiesWithAnIslandOrOnAHashKey
+        state_exec_router_test: OK ] RouterR3.AnIslandsOwnKeyNeverBuildsGroupZero
+        state_exec_router_test: OK ] RouterR3.AKillOwnerRetriesAfterAOneShotHolderOfGroupZero
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_AMovedDocumentKeepsReceivingOnItsChannels
@@ -3108,10 +3124,11 @@ jobs:
         mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=fork_join
         mt.cross_group_msg: pattern=broadcast span=cross t=4 k=4 m=20 pump=continuous
       # ^ SAN_REQUIRED_S2B ends here (no comment line inside it).
-      # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1) required lines,
-      # in every leg: its I/O threads take commands from the test's thread and post events back,
-      # so its ordering, group, backpressure, stop and fan-out cases (300 receivers under TSan)
-      # run under each sanitizer.
+      # The connection engine's (cvc/net/net_engine.h, ARIADNE_NET_ENGINE.md N1, N3) required
+      # lines, in every leg: its I/O threads take commands from the test's thread and post events
+      # back, so its ordering, group, backpressure, stop and fan-out cases (300 receivers under
+      # TSan) run under each sanitizer, and its TLS cases (handshakes, reloads with open
+      # connections, detection, backpressure and a broadcast mixing TLS and plain) with them.
       SAN_REQUIRED_NET: |
         net_engine_test: OK ] NetEngineFraming.APausedConnectionSwitchesFramingExactlyAtTheFrame
         net_engine_test: OK ] NetEngineOutput.SendsAndBroadcastsKeepTheirOrderOnEveryConnection
@@ -3121,6 +3138,12 @@ jobs:
         net_engine_test: OK ] NetEngineClose.AFlushingCloseSendsWhatIsQueuedThenEnds
         net_engine_test: OK ] NetEngine.StopClosesEveryConnectionAndLaterCommandsDoNothing
         net_engine_test: OK ] NetEngineFanOut.OneMessageToManyLoopbackReceivers
+        net_engine_test: OK ] NetEngineTls.HandshakesOnTls12And13WithTheirVersionCipherSniAndPeerCertificate
+        net_engine_test: OK ] NetEngineTls.AReloadServesNewConnectionsAndKeepsOpenOnes
+        net_engine_test: OK ] NetEngineTls.AWatchedListenerReloadsWhenItsFilesChange
+        net_engine_test: OK ] NetEngineTlsDetect.TlsPlainSlowAndSilentClientsOnOnePort
+        net_engine_test: OK ] NetEngineTlsBackpressure.ASlowTlsReaderClosesPastMaxQueued
+        net_engine_test: OK ] NetEngineTls.ABroadcastReachesAGroupOfTlsAndPlainConnections
       # The lock tests read this and run their smaller sanitizer sizes.
       CVC_LOCKS_SANITIZER: '1'
     steps:

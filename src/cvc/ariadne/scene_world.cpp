@@ -1447,6 +1447,10 @@ void SceneWorld::sync(const cvc::world_clock &clock, std::vector<std::string> *w
   for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
     w->tick(&clock);
   for (impl::tracked &t : d.tracked_nodes) {
+    // A revision built off the frame (a water's sea keyframe) that goes in by the clock's tick now:
+    // made now, so the step it is due at has it, however the frames fall (F4).
+    if (t.colliders->settle)
+      t.colliders->settle(clock.tick());
     d.take_dataset(t, warnings); // a dataset that is ready and new: its colliders
     // A change timed on the clock goes in at its step (follow), unless that step has gone by.
     const std::uint64_t at = t.colliders->from_tick;
@@ -1724,6 +1728,11 @@ void SceneWorld::sync_wind() {
   }
   if (d.vehicles) // the plants that do not feel the field (WorldVehicles::set_wind)
     d.vehicles->set_wind(d.wind_flow);
+  // The air into each runtime's slot (SceneColliders::air), here at a sync and within the steps
+  // alike: the water's ripples read the storms' fronts from it at each step (F4).
+  for (impl::tracked &t : d.tracked_nodes)
+    if (t.colliders->air && *t.colliders->air != d.wind_flow)
+      *t.colliders->air = d.wind_flow;
 }
 
 void SceneWorld::publish_front(const cvc::world_clock &clock) {
@@ -2064,6 +2073,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     bool gust = false;
     for (const auto &wf : d.weathers)
       gust = wf->switch_gust(tick) || gust;
+    for (const auto &wf : d.weathers) // a steering wind or time scale changed live (F4)
+      gust = wf->switch_steering(tick) || gust;
     if (gust)
       sync_wind();
     d.wake_in_fronts(tick, clock.fixed_dt());

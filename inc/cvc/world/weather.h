@@ -65,6 +65,7 @@
 #define CVC_WORLD_WEATHER_H
 
 #include <cstdint>
+#include <cvc/algo/gust_front.h> // a cell's gust front: the one shape the sea and the shaders read
 #include <limits>
 #include <string>
 #include <vector>
@@ -239,6 +240,10 @@ public:
   // behind the cell's centre, against. 0 in clear air and past every front's reach. O(cells);
   // deterministic (an ulp of sin or cos in the cells' tracks is the only platform difference).
   void gust_front(const weather_now &w, double x, double y, double &vx, double &vy) const;
+  // Cell c's gust front as cvc::algo::add_gust_front reads it (its outflow's peak the front's
+  // speed times its strength, the shape the params'): false when it blows none (too young to
+  // rain, no radius, no fronts).
+  bool front_cell_of(const storm_cell &c, cvc::algo::front_cell &out) const;
   // How far past a cell's centre its gust front reaches at most (ahead of it), for its radius r.
   double front_reach(double r) const;
   // A digest of the weather at t (the cells and the state, rounded to a tenth of a millimetre and

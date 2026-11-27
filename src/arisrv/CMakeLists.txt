@@ -304,7 +304,8 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                      "-DARGS=--python@@${_srv_tests}/net_program.py@@--net-threads@@3@@${_x_path}@@${_srv_listen}"
                      -DSTATUS=0 "-DEXPECT1=net: the connection engine runs 3 I/O thread"
                      "-DEXPECT2=net_program: ok: .*3 I/O threads"
-                     "-DEXPECT3=net_program: closed peer_closed" "-DREJECT=FAILED"
+                     "-DEXPECT3=net_program: closed peer_closed"
+                     "-DEXPECT4=net_program: tls (ok|skipped)" "-DREJECT=FAILED"
                      -P "${_srv_tests}/run_arisrv.cmake")
     add_test(NAME arisrvx_python_interpreter
              COMMAND arisrvx python -c "import _arihost; print(_arihost.host(), _arihost.attached())")

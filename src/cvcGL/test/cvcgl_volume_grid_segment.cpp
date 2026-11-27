@@ -491,11 +491,14 @@ void opens_segmented_and_two_apps() {
 // single-threaded wasm runs it, and CVC_SLICED_THREADING=cooperative here) gives the job about
 // 4 ms a frame, so a run on a larger volume spans many frames, and some show the labels so far;
 // a threaded run on the pool may finish within one chunk, so there it is reported, not required.
+// The volume must be large enough that even a fast runner can't finish it inside one frame's
+// slice: 56^3 did, on a package-linux runner (2026-11-26, all three tries), and then no frame sees
+// the labels so far. 96^3 is about five times the work.
 void live_labels() {
   cvc::app app;
   app.properties("system.log_verbosity", "0");
   cvc::gl::ariadne::register_cvcgl_extensions(app);
-  constexpr int n = 56;
+  constexpr int n = 96;
   cvc::state::instance(app)("vols.b").data(
       boost::any(std::make_shared<const cvc::volume>(blobs(app, n))));
   cvc::state::instance(app)("vols.p").data(boost::any(blob_seeds(n)));

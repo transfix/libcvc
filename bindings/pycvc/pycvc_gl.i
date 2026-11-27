@@ -71,6 +71,10 @@ if _sys.platform == "win32":
 #include <cvc/geometry/height_field.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
+// pycvc_physics.i's shared_ptr hierarchies, %import'd from pycvc.i: the type table casts a
+// shore_grid_mask to its wake_shore and a wind_flow to its flow_velocity here too.
+#include <cvc/physics/flow_velocity.h>
+#include <cvc/physics/shore_mask.h>
 #include "pycvc_scene.h"
 // VTK Python bridge: vtkPythonUtil translates C++ vtkProp* <-> live Python
 // vtkmodules objects. From the vtk-python cvcpkg package (vtkPythonUtil.h lands
@@ -2095,6 +2099,21 @@ namespace pycvc {
 void poke_update(const std::shared_ptr<cvc::gl::GraphicsNode> &node) {
   if (node)
     node->update();
+}
+} // namespace pycvc
+%}
+
+// cvcGL's vehicle fit (cvc::gl::ariadne::fit_vehicle_geometry, vehicle_view.h): a vehicle
+// model's mesh up +z on z = 0, its length along +x to `length`, its nose at +x, centred — the one
+// a world vehicle's model look and the swarm layer draw with. pycvc_gl.vehicle.VehicleModel fits
+// with it, so Python has no fit of its own. Throws (RuntimeError) for a geometry with no points.
+%{
+#include <cvc/gl/ariadne/vehicle_view.h>
+%}
+%inline %{
+namespace pycvc {
+cvc::geometry fit_vehicle_geometry(const cvc::geometry &g, double length) {
+  return cvc::gl::ariadne::fit_vehicle_geometry(g, length);
 }
 } // namespace pycvc
 %}

@@ -2372,6 +2372,15 @@ int main(int argc, char **argv) {
 #endif
     return !signals.stop_requested();
   };
+  // The room steps from here, and its first step sends it to every client. The relay listened
+  // before the room and the server document were set up (a generated world's load makes its
+  // dataset: seconds natively, and over 10 s in a Debug build with coverage), so a client that
+  // joined meanwhile has waited for this, as long as its join allows. tests/relay_pair.py starts
+  // its client once it reads this line.
+  if (!signals.stop_requested()) {
+    std::printf("[arisrv] serving room '%s': it steps from now\n", room.c_str());
+    std::fflush(stdout);
+  }
   while (relay_running()) {
     // Reap ghosts (~every second): a peer gone without closing its connection (a tab that
     // navigated or reloaded away, a crash behind NAT, a suspended phone) sends nothing more, while

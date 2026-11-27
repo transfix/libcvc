@@ -83,9 +83,14 @@ struct field_body {
   double radius = 0.0;  // sphere
   vec3 half;            // box
   bool vehicle = false; // a vehicle's chassis: no flow drag (vehicle.h's aero is its drag)
-  // The share of its cells' volume that displaces a fluid: 1, but a wading vehicle's chassis
-  // (vehicle.h) floods and keeps only wading_desc::displacement.
+  // The share of its cells' volume that displaces a fluid: body_desc::displacement (1 for a
+  // solid body, an avatar's mass over its density), and a wading vehicle's chassis (vehicle.h)
+  // floods and keeps only wading_desc::displacement.
   double buoyancy = 1.0;
+  // The share of a fluid's damping its cells feel: body_desc::displacement, since the water it
+  // moves aside is what damps it. A flooded chassis keeps the whole (the water inside moves with
+  // it), so mark_vehicle leaves this alone.
+  double damping = 1.0;
   field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
   // Its outline as a wake cuts it (immersion.h): its hull, else its shape, made when a wake first
@@ -158,6 +163,13 @@ public:
       it->second.mass = mass;
   }
 
+  // The share of a body's cells' volume that displaces a fluid (body_desc::displacement).
+  void set_displacement(body_id id, double share) {
+    const auto it = _bodies.find(id.value);
+    if (it != _bodies.end())
+      it->second.buoyancy = it->second.damping = share;
+  }
+
   // A vehicle's chassis (body_added first): its centre of mass, no flow drag, and the share of
   // its box that displaces a fluid (1 sealed; vehicle.h's wading).
   void mark_vehicle(body_id id, const vec3 &center_of_mass, double buoyancy = 1.0);
@@ -176,7 +188,7 @@ public:
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
   // in x and y and reaches below it. False if none does; `out` is then dry and still. With
   // `wake.on` its wake's waves too: their height in the top, their motion at p's depth below it
-  // in the velocity.
+  // in the velocity (one caller at a time then: it makes the wake's depths when they are due).
   bool water_at(const vec3 &p, double t, physics::water_sample &out,
                 const wake_read &wake = {}) const;
 

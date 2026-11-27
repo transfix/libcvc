@@ -12,8 +12,10 @@ to the key's home and is neither killed nor torn down). Each group's thread is o
 step it takes is
 atomic: it applies the head of its ordered ingress, steps one of its processes, fires one
 timeout, applies one kill, or takes one step of its teardown. A post is an atomic append to the
-target's ingress (group_ref::post); a closed handle refuses it, and a poster re-resolves the home
-and posts again (a home-bound entry), so a post races every other group's steps. The lock port,
+target's ingress (group_ref::post), so a post races every other group's steps. A closed handle
+refuses it (with rehome-order, only once its teardown is done: until then the post joins the
+handle's late queue), and a poster re-resolves the home and posts again (a home-bound entry), or
+follows a done home's forwarding address (G0, the model's only other home). The lock port,
 completions and controls other than kills are out of scope. A timed wait's deadline passes at
 any moment (a clock step, `expire`), after which its home skips its record and its group may fire
 the timeout. Every interleaving is explored, breadth first, so each trace is a shortest one.
@@ -68,9 +70,22 @@ place while a wait is served in another, the islands keeping the key to themselv
 parked at H rehomed to G0).
 
 `--amend` adds the amendments, as S2b.0a took them (README.md, "The router model"):
-- `rehome-order`: the teardown closes its handle first, forwards, and only then unregisters; a
-  poster the closed handle refuses waits while the home is still that group (td 4.11's FIFO and no
-  stale records across a teardown; an adopt ahead of every late answer);
+- `rehome-order`: the teardown closes its handle first, forwards, and only then unregisters (td
+  4.11's FIFO and no stale records across a teardown; an adopt ahead of every late answer). No
+  poster waits (S2b.R3, K-1): until the teardown is done, an entry posted to the closed handle (a
+  sender's, a receiver's answer or unsubscribe, another group's teardown or kills, a host's) joins
+  the handle's late queue, with no cap. After what it took at the close (pending, records,
+  trackers, queued entries, in forward-pending-first's order) the teardown forwards the late
+  entries in arrival order, each as a queued one is (a deliver as a requeue to its sender, a send
+  or host post as an uncapped send, the rest as they are), until the late queue is empty, and only
+  then is done: H unregisters its prefix. A post to a done handle is refused and goes to its
+  forwarding address, the key's new home (G0). R1's handle takes a deliver into its late queue the
+  same way until its teardown is done (refused-stale applies only after). S2b.0a had a poster wait
+  instead while the home was still the closed group (S2b.R2 exempted the poster's own teardown);
+  two homes torn down at once, each holding an entry for the other, would wait for each other,
+  which this one-home model cannot show. The code seals a handle whose late queue still fills after a few
+  rounds (other posters then wait for done); the scripts here are finite, so a late queue always
+  drains and the seal is not modelled;
 - `forward-pending-first`: the pending messages are forwarded first (they were applied before
   anything still queued), then the records, then the trackers (adopt), then the queued entries;
 - `forward-uncapped`: a queued send the teardown forwards is uncapped, like a pending one;
@@ -94,7 +109,7 @@ parked at H rehomed to G0).
   not `lost`);
 - `adopt`: a teardown forwards each broadcast tracker it holds (an `adopt` entry: value, id,
   copies outstanding, taken), which the new home takes over, so the copies' late answers find it
-  (it needs rehome-order's wait and unique-ids);
+  (it needs rehome-order's late queue and unique-ids);
 - `forward-host-posts`: a host post queued at a dying home is forwarded as an uncapped send, in
   queue order (S2b.0 says nothing; read as "its queued router entries" only, it dies there).
 
@@ -102,7 +117,10 @@ parked at H rehomed to G0).
 dropped), `requeue-always` (a stale copy is requeued although a local waiter took the message),
 `untracked` (k >= 2 remote copies untracked), `no-unsubscribe` (a timeout or kill posts no
 unsubscribe), `subscribe-no-fifo` (a subscribe always records, never answering from the FIFO),
-`deliver-no-seq` (a deliver patches the process's current wait whatever its seq).
+`deliver-no-seq` (a deliver patches the process's current wait whatever its seq),
+`teardown-no-wait` (the code's rule before S2b.R3, the skeptic's K-1: a post that another group's
+teardown step makes to the closed, still registered H skips H's late queue and resolves to G0 at
+once; other posters still use the late queue).
 
 usage:
     python -I router.py [--procs S:ss,R1:t,R2:r] [--opts kills=1,teardown=1,rdie=0,throws=0,
@@ -139,7 +157,7 @@ AMENDMENTS = ('rehome-order', 'forward-pending-first', 'forward-uncapped', 'unca
               'stale-rule', 'throw-resubscribe', 'refused-stale', 'queue-as-requeue',
               'unique-ids', 'next-waiter-order', 'island-rule', 'adopt', 'forward-host-posts')
 MUTATIONS = ('no-requeue', 'requeue-always', 'untracked', 'no-unsubscribe', 'subscribe-no-fifo',
-             'deliver-no-seq')
+             'deliver-no-seq', 'teardown-no-wait')
 GAPS = ('gap-requeue-order', 'gap-island-rehomed')
 
 # a process: (pc, status, seq, expired-seqs bitmask)
@@ -152,17 +170,13 @@ F_ASSIGNED, F_DROPPED, F_REQUEUED, F_ORPHAN, F_RDROP, F_LATE, F_DIED = 1, 2, 4, 
 # a home's state for the key: (local waiters, records, pending FIFO, trackers, next id); a record
 # is (group, pid, seq, timed), a tracker (id, message, copies outstanding, taken)
 EMPTY_HOME = ((), (), (), (), 1)
-# teardown phases: not started, unregistered (the frozen order), forwarding, forwarded (unregister
-# next, rehome-order), killing, done
-TD_NONE, TD_UNREG, TD_FWD, TD_FWDDONE, TD_KILL, TD_DONE = range(6)
+# teardown phases: not started, unregistered (the frozen order), forwarding what it took at the
+# close, forwarding its late queue (rehome-order; done when it is empty: H unregisters), killing,
+# done. A teardown's slot is (phase, what it took, still to forward; its late queue).
+TD_NONE, TD_UNREG, TD_FWD, TD_LATE, TD_KILL, TD_DONE = range(6)
 
 # the state's slots
 REG, CLOSED, ING, HOMES, PROCS, MSGS, SENT, TDH, TDR, BUDGET = range(10)
-
-
-class Blocked(Exception):
-    """The step posts to a home whose closed handle refuses it while it is still the home
-    (rehome-order): the poster waits, so the step is not enabled."""
 
 
 class Config(object):
@@ -240,6 +254,7 @@ class Work(object):
         self.taken = []
         self.points = []
         self.soft = []
+        self.td_poster = None   # the group whose teardown takes this step (teardown-no-wait)
 
     def note(self, text):
         if self.notes is not None:
@@ -315,26 +330,58 @@ class Work(object):
         self.set_item(ING, g, q + (e,))
         return True
 
+    def td_slot(self, g):
+        return TDH if g == H else TDR if g == R1 else None
+
+    def late_open(self, g):
+        """g's handle is closed and its teardown not yet done (rehome-order, S2b.R3): a router
+        entry posted to it joins its late queue."""
+        if 'rehome-order' not in self.am or not self.closed(g):
+            return False
+        slot = self.td_slot(g)
+        return slot is not None and self.s[slot][0] in (TD_FWD, TD_LATE)
+
+    def post_late(self, g, e):
+        """Post `e` to g's closed handle before its teardown is done: into its late queue (no
+        cap), which the teardown forwards before it is done; True. With teardown-no-wait, a post
+        made by another group's teardown to H resolves without closed groups at once instead (G0;
+        True when G0 takes it)."""
+        if 'teardown-no-wait' in self.mut and g == H and self.td_poster not in (None, H):
+            ok = self.push(G0, e)
+            self.note('posts %s to %s: closed: resolves past it to G0 at once (teardown-no-wait)%s'
+                      % (estr(self.cfg, e), GROUPS[g], '' if ok else ': refused (ingress full)'))
+            return ok
+        slot = self.td_slot(g)
+        phase, buf, late = self.s[slot]
+        self.s[slot] = (phase, buf, late + (e,))
+        self.note('posts %s to %s: closed: joins its late queue' % (estr(self.cfg, e), GROUPS[g]))
+        return True
+
     def post_home(self, e):
         """A home-bound entry (send, subscribe, unsubscribe) to the key's home, re-resolved."""
         h = self.homeg()
         if self.closed(h):
-            raise Blocked()   # only with rehome-order: H closed while still registered
+            # only with rehome-order: H closed and still registered (not done)
+            assert self.late_open(h), h
+            return self.post_late(h, e)
         ok = self.push(h, e)
         self.note('posts %s to %s%s' % (estr(self.cfg, e), GROUPS[h], '' if ok else
                                          ': refused (ingress full)'))
         return ok
 
     def post_from(self, e, frm):
-        """A requeue or taken to the deliver's home `frm`; its closed handle refuses it and the
-        poster re-resolves the home."""
+        """A requeue or taken to the deliver's home `frm`: into its late queue while it is closed
+        and not done; once done (or closed, in the frozen order) it refuses it and the poster
+        follows its forwarding address (re-resolves the home: G0)."""
         if not self.closed(frm):
             self.push(frm, e)
             self.note('posts %s to %s' % (estr(self.cfg, e), GROUPS[frm]))
             return
+        if self.late_open(frm):
+            self.post_late(frm, e)
+            return
         h = self.homeg()
-        if self.closed(h):
-            raise Blocked()
+        assert h == G0 and not self.closed(h), (frm, h)
         self.push(h, e)
         self.note('posts %s to %s: refused, re-resolves to %s' % (estr(self.cfg, e), GROUPS[frm],
                                                                   GROUPS[h]))
@@ -344,6 +391,11 @@ class Work(object):
         if not self.closed(g):
             self.push(g, e)
             self.note('posts %s to %s' % (estr(self.cfg, e), GROUPS[g]))
+            return
+        if self.late_open(g):
+            # S2b.R3: the closed receiver takes it until its teardown is done, and forwards it
+            # back as its queued delivers go (a requeue to its home, or dropped)
+            self.post_late(g, e)
             return
         _, frm, p, seq, m, bid, rqis = e
         if 'refused-stale' in self.am:
@@ -697,26 +749,31 @@ class Work(object):
         self.note('%s#%d\'s deadline passes' % (pname(self.cfg, p), seq))
 
     # --- teardown ---
+    def fwd_item(self, g, e):
+        """What g's teardown forwards for an entry it took queued or late: ('to', home, entry), a
+        requeue back to a deliver's home; ('home', entry), to the key's new home; or None (it dies
+        with g, or is dropped)."""
+        if e[0] == 'D':
+            if e[6] or 'stale-rule' not in self.am:
+                return ('to', e[1], ('Q', e[4], e[5]))   # "a deliver as a requeue"
+            self.note('%s: requeue_if_stale false: dropped (stale_dropped)' % estr(self.cfg, e))
+            return None
+        if e[0] == 'S':
+            return ('home', ('S', e[1], e[2] or 'forward-uncapped' in self.am))
+        if e[0] == 'P':
+            if 'forward-host-posts' in self.am:
+                return ('home', ('S', e[1], True))
+            self.note('a host post of %s dies with %s (destroy_dropped)' % (mname(e[1]),
+                                                                           GROUPS[g]))
+            return None
+        return ('home', e)
+
     def close_and_take(self, g):
         """Close g's handle and take what it holds, in the order to forward it."""
         self.set_item(CLOSED, g, True)
         q = self.s[ING][g]
         self.set_item(ING, g, ())
-        queued = []
-        for e in q:
-            if e[0] == 'D':
-                if e[6] or 'stale-rule' not in self.am:
-                    queued.append(('to', e[1], ('Q', e[4], e[5])))   # "a deliver as a requeue"
-            elif e[0] == 'S':
-                queued.append(('home', ('S', e[1], e[2] or 'forward-uncapped' in self.am)))
-            elif e[0] == 'P':
-                if 'forward-host-posts' in self.am:
-                    queued.append(('home', ('S', e[1], True)))
-                else:
-                    self.note('a host post of %s dies with %s (destroy_dropped)'
-                              % (mname(e[1]), GROUPS[g]))
-            else:
-                queued.append(('home', e))
+        queued = [x for x in (self.fwd_item(g, e) for e in q) if x is not None]
         recs = []
         pend = []
         adopts = []
@@ -761,8 +818,9 @@ class Work(object):
                                            ': refused (ingress full): lost'))
 
     def teardown(self, g):
+        self.td_poster = g
         slot = TDH if g == H else TDR
-        phase, buf = self.s[slot]
+        phase, buf, late = self.s[slot]
         rehome = 'rehome-order' in self.am
         if phase == TD_NONE and not rehome and g == H:
             self.s[REG] = False
@@ -770,15 +828,29 @@ class Work(object):
             phase = TD_UNREG
         elif phase == TD_NONE or phase == TD_UNREG:
             buf = self.close_and_take(g)
-            phase = TD_FWD if buf else (TD_FWDDONE if rehome and g == H else TD_KILL)
+            phase = TD_FWD if buf else (TD_LATE if rehome else TD_KILL)
         elif phase == TD_FWD:
-            self.forward(buf[0])
-            buf = buf[1:]
+            item, buf = buf[0], buf[1:]
             if not buf:
-                phase = TD_FWDDONE if rehome and g == H else TD_KILL
-        elif phase == TD_FWDDONE:
-            self.s[REG] = False
-            self.note('H unregisters its prefix (the home is G0)')
+                phase = TD_LATE if rehome else TD_KILL
+            self.s[slot] = (phase, buf, late)   # first: a forward may post to a late queue
+            self.forward(item)
+            return
+        elif phase == TD_LATE:
+            # S2b.R3: the late entries in arrival order, until none is left; only then done
+            if late:
+                self.s[slot] = (phase, buf, late[1:])
+                self.note('%s takes %s from its late queue' % (GROUPS[g], estr(self.cfg, late[0])))
+                item = self.fwd_item(g, late[0])
+                if item is not None:
+                    self.forward(item)
+                return
+            if g == H:
+                self.s[REG] = False
+                self.note('H\'s late queue is empty: unregisters its prefix and is done (the home '
+                          'is G0)')
+            else:
+                self.note('%s\'s late queue is empty: done' % GROUPS[g])
             phase = TD_KILL
         elif phase == TD_KILL:
             left = [p for p, (pg, _) in enumerate(self.cfg.procs)
@@ -794,7 +866,7 @@ class Work(object):
                 self.note('%s\'s teardown: nothing left to kill' % GROUPS[g])
             if len(left) <= 1:
                 phase = TD_DONE
-        self.s[slot] = (phase, buf)
+        self.s[slot] = (phase, buf, self.s[slot][2])
 
 
 def estr(cfg, e):
@@ -836,7 +908,8 @@ class Model(object):
         msgs = tuple((M_UNSENT, None, 0, 0, 0) for _ in range(self.nm))
         ing = ((('S', None, False),) if self.cfg.busy0 else (),) + ((),) * (NG - 1)
         return (True, (False,) * NG, ing, (EMPTY_HOME,) * NG, procs, msgs,
-                ((),) * NG, (TD_NONE, ()), (TD_NONE, ()), (self.cfg.kills, self.cfg.throws))
+                ((),) * NG, (TD_NONE, (), ()), (TD_NONE, (), ()),
+                (self.cfg.kills, self.cfg.throws))
 
     def busy(self, s, g):
         """g's thread is in its teardown, or done."""
@@ -877,7 +950,7 @@ class Model(object):
         return out
 
     def apply(self, s, label, oracle=(), notes=None):
-        """One step; returns its Work (raises Violation, or Blocked when it is not enabled)."""
+        """One step; returns its Work (raises Violation)."""
         w = Work(self, s, oracle, notes)
         kind, x = label
         if kind == 'drain':
@@ -898,7 +971,7 @@ class Model(object):
 
     def successors(self, s, label):
         """Every outcome of one step over the internal choices it makes (choice=1): a list of
-        (choices, state, soft violations); raises Violation or Blocked."""
+        (choices, state, soft violations); raises Violation."""
         out = []
         stack = [()]
         while stack:
@@ -1008,6 +1081,10 @@ class Model(object):
             if s[ING][g]:
                 parts.append('%s<-[%s]' % (GROUPS[g], ', '.join(estr(self.cfg, e)
                                                                 for e in s[ING][g])))
+        for g, slot in ((H, TDH), (R1, TDR)):
+            if s[slot][2]:
+                parts.append('%s late[%s]' % (GROUPS[g], ', '.join(estr(self.cfg, e)
+                                                                  for e in s[slot][2])))
         if not router_on(self.cfg, s):
             parts.append('router off')
         for h in range(NG):
@@ -1127,8 +1204,6 @@ def explore(cfg, max_states=None, log=None, compact=True):
         for label in m.options(s):
             try:
                 outs = m.successors(s, label)
-            except Blocked:
-                continue
             except Violation as v:
                 enabled += 1
                 transitions += 1
@@ -1253,6 +1328,8 @@ QUICK = [
     ('amended-kills', 'S:s,G0:t,R1:t', dict(kills=1), ALL, (), (), ()),
     ('amended-receiver-teardown', 'S:s,H:r,R1:t,R2:r', dict(rdie=1, throws=1, choice=1), ALL, (),
      (), ()),
+    # a receiving group's teardown overlapping its home's (S2b.R3, K-1): the late queue
+    ('amended-two-teardowns', 'S:s,R1:r,R2:r', dict(rdie=1), ALL, (), (), ()),
     ('amended-caps', 'S:ss,R1:t,R2:r', dict(icap=1, fcap=1, fcap0=1, busy0=1), ALL, (), (), ()),
     ('amended-islands', 'S:ss,R1:t,R2:r', dict(islands=1, kills=1), ALL, (), (), ()),
     ('amended-island-teardown', 'R1:r,R1:s,R2:t', dict(islands=1, rdie=1), ALL, (), (), ()),
@@ -1263,8 +1340,8 @@ QUICK = [
     # each finding of the frozen text (README.md), without its amendment
     ('finding-rehome-order', 'S:ss,R1:t', {}, BUT('rehome-order'), (), ('fifo', 'stale-record'),
      ()),
-    # adopt needs rehome-order's wait: a late answer that reaches G0 before the adopt is applied
-    # untracked, and the tracker then waits for it for ever
+    # adopt needs rehome-order's late queue: a late answer that reaches G0 before the adopt is
+    # applied untracked, and the tracker then waits for it for ever
     ('finding-rehome-order-adopt', 'H:s,R1:t,R2:t', {}, BUT('rehome-order'), (),
      ('duplicate', 'tracker-leak'), ('stale-record',)),
     ('finding-pending-first', 'S:ss,R1:r,R2:r', {}, BUT('forward-pending-first'), (),
@@ -1305,6 +1382,12 @@ QUICK = [
      ()),
     ('mutation-deliver-no-seq', 'S:s,R1:tr', NO_TD, ALL, ('deliver-no-seq',), ('misaddressed',),
      ()),
+    # the skeptic's K-1 (S2b.R2's code): a receiving group's teardown that skips its closed home's
+    # late queue puts an answer ahead of the adopt (duplicate, tracker-leak) and an unsubscribe
+    # ahead of the record (stale-record); deep-mutation-teardown-no-wait-* on the skeptic's other
+    # configurations
+    ('mutation-teardown-no-wait', 'S:s,R1:r,R2:r', dict(rdie=1), ALL, ('teardown-no-wait',),
+     ('duplicate', 'stale-record', 'tracker-leak'), ()),
 ]
 DEEP = [
     # the frozen text, every finding but unique-ids' at once: nothing else found
@@ -1316,6 +1399,10 @@ DEEP = [
     ('deep-amended', 'S:ss,R1:t,R2:t,H:t', dict(kills=1), ALL, (), (), ()),
     ('deep-amended-g0', 'S:ss,R1:t,R2:t,G0:t', {}, ALL, (), (), ()),
     ('deep-amended-receiver-teardown', 'S:ss,R1:t,R2:t', dict(rdie=1, throws=1), ALL, (), (), ()),
+    # the skeptic's configurations of overlapping teardowns (K-1; amended-receiver-teardown is the
+    # third): nothing found with the late queue
+    ('deep-amended-two-teardowns-kills', 'S:s,R1:t,R2:r', dict(rdie=1, kills=1), ALL, (), (), ()),
+    ('deep-amended-two-teardowns', 'S:ss,R1:t,R2:t', dict(rdie=1), ALL, (), (), ()),
     ('deep-amended-choice', 'H:t,S:ss,R1:t,R2:t', dict(choice=1), ALL, (), (), ()),
     ('deep-amended-caps', 'S:ss,R1:tr,R2:t', dict(icap=1, fcap=1, fcap0=1, busy0=1), ALL, (), (),
      ()),
@@ -1326,6 +1413,13 @@ DEEP = [
     # the collision's effect: a message lost (the invariant stops before it in the quick check)
     ('deep-finding-unique-ids-lost', 'H:s,S:s,R1:tr,R2:tr', {}, BUT('unique-ids'), (),
      ('lost', 'id-collision'), ()),
+    # K-1's mutation on the skeptic's other configurations (quick has the first)
+    ('deep-mutation-teardown-no-wait-throw', 'S:s,H:r,R1:t,R2:r', dict(rdie=1, throws=1, choice=1),
+     ALL, ('teardown-no-wait',), ('duplicate', 'stale-record', 'tracker-leak'), ()),
+    ('deep-mutation-teardown-no-wait-kill', 'S:s,R1:t,R2:r', dict(rdie=1, kills=1), ALL,
+     ('teardown-no-wait',), ('duplicate', 'stale-record', 'tracker-leak'), ()),
+    ('deep-mutation-teardown-no-wait', 'S:ss,R1:t,R2:t', dict(rdie=1), ALL, ('teardown-no-wait',),
+     ('duplicate', 'stale-record', 'tracker-leak'), ()),
 ]
 
 
@@ -1339,7 +1433,7 @@ def run_check(check, out=say, compact=True):
     r = explore(make_config(procs, opts, amend, mutation), compact=compact)
     got = set(r['violations'])
     ok = r['complete'] and set(must) <= got <= set(must) | set(allowed) | set(GAPS)
-    out('%-30s %s %9d states %10d transitions %7.1fs %6d MB  found %s%s'
+    out('%-36s %s %9d states %10d transitions %7.1fs %6d MB  found %s%s'
         % (name, 'ok  ' if ok else 'FAIL', r['states'], r['transitions'], r['seconds'],
            r['peak_mb'],
            ', '.join(sorted(got)) or 'nothing',

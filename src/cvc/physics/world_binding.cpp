@@ -297,6 +297,17 @@ const std::pair<const char *, double vehicle_desc::*> kVehicleKnobs[] = {
     {"driveline_efficiency", &vehicle_desc::driveline_efficiency},
     {"shift_up_rpm_light", &vehicle_desc::shift_up_rpm_light},
     {"shift_down_rpm_light", &vehicle_desc::shift_down_rpm_light}};
+// Wading's tuning world::set_vehicle accepts, as knobs under tuning.wading (wading.enabled and
+// wading.displacement are fixed when the vehicle is added, and so is whether flood_area is 0: a
+// change to or from 0 is refused, and so ignored).
+const std::pair<const char *, double wading_desc::*> kWadingKnobs[] = {
+    {"wheel_displacement", &wading_desc::wheel_displacement},
+    {"wheel_drag", &wading_desc::wheel_drag},
+    {"underbody_depth", &wading_desc::underbody_depth},
+    {"underbody_drag", &wading_desc::underbody_drag},
+    {"tire_pressure", &wading_desc::tire_pressure},
+    {"fording_depth", &wading_desc::fording_depth},
+    {"flood_area", &wading_desc::flood_area}};
 const std::pair<const char *, double axle_desc::*> kAxleKnobs[] = {
     {"max_brake_torque", &axle_desc::max_brake_torque},
     {"max_hand_brake_torque", &axle_desc::max_hand_brake_torque},
@@ -376,6 +387,9 @@ bool same_tuning(const vehicle_desc &a, const vehicle_desc &b) {
   for (const auto &k : kVehicleKnobs)
     if (!same_value(a.*k.second, b.*k.second))
       return false;
+  for (const auto &k : kWadingKnobs)
+    if (!same_value(a.wading.*k.second, b.wading.*k.second))
+      return false;
   for (std::size_t i = 0; i < a.axles.size() && i < b.axles.size(); ++i)
     for (const auto &k : kAxleKnobs)
       if (!same_value(a.axles[i].*k.second, b.axles[i].*k.second))
@@ -387,6 +401,8 @@ void copy_tuning(const vehicle_desc &from, vehicle_desc &to) {
   to.engine_friction_curve = from.engine_friction_curve;
   for (const auto &k : kVehicleKnobs)
     to.*k.second = from.*k.second;
+  for (const auto &k : kWadingKnobs)
+    to.wading.*k.second = from.wading.*k.second;
   for (std::size_t i = 0; i < from.axles.size() && i < to.axles.size(); ++i)
     for (const auto &k : kAxleKnobs)
       to.axles[i].*k.second = from.axles[i].*k.second;
@@ -830,6 +846,10 @@ void world_binding::write(const publication &p) const {
     put_vec(_ctx, at(base, "angular_velocity"), vs.body.angular_velocity);
     put_vec(_ctx, at(base, "aero_force"), vs.aero_force);
     put_vec(_ctx, at(base, "air_velocity"), vs.air_velocity);
+    put_vec(_ctx, at(base, "water_force"), vs.water_force);
+    write_val(_ctx, at(base, "engine_flooded"), vs.engine_flooded);
+    write_val(_ctx, at(base, "water_inside"), vs.water_inside);
+    write_val(_ctx, at(base, "water_inside_mass"), vs.water_inside_mass);
     {
       // The energy ledger, in doc 31's names (D11): joules since added, P_W the last step's.
       const vehicle_energy &e = vs.energy;
@@ -874,6 +894,8 @@ void world_binding::write(const publication &p) const {
       write_val(_ctx, at(wb, "sinkage"), w.sinkage);
       write_val(_ctx, at(wb, "rut"), w.rut);
       write_val(_ctx, at(wb, "medium_resistance"), w.medium_resistance);
+      write_val(_ctx, at(wb, "water_depth"), w.water_depth);
+      write_val(_ctx, at(wb, "water_drag"), w.water_drag);
     }
   }
   for (const auto &named : p.fields_named) {
@@ -1108,6 +1130,8 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
   for (const auto &k : kVehicleKnobs)
     knob(tr, at(tuning, k.first), t.*k.second);
   knob_curve(tr, at(tuning, "engine_friction_curve"), t.engine_friction_curve);
+  for (const auto &k : kWadingKnobs)
+    knob(tr, at(tuning, std::string("wading.") + k.first), t.wading.*k.second);
   for (std::size_t i = 0; i < t.axles.size(); ++i)
     for (const auto &k : kAxleKnobs)
       knob(tr, at(tuning, "axles." + std::to_string(i) + "." + k.first), t.axles[i].*k.second);
@@ -1133,6 +1157,9 @@ void world_binding::pull_vehicle(const std::string &name, vehicle_slot &v) {
         for (const auto &k : kVehicleKnobs)
           if (!same_value(t.*k.second, v.tuned.*k.second))
             attempt([&](vehicle_desc &x) { x.*k.second = t.*k.second; });
+        for (const auto &k : kWadingKnobs)
+          if (!same_value(t.wading.*k.second, v.tuned.wading.*k.second))
+            attempt([&](vehicle_desc &x) { x.wading.*k.second = t.wading.*k.second; });
         for (std::size_t i = 0; i < t.axles.size() && i < v.tuned.axles.size(); ++i)
           for (const auto &k : kAxleKnobs)
             if (!same_value(t.axles[i].*k.second, v.tuned.axles[i].*k.second))

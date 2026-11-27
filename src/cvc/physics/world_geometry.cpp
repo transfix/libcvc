@@ -32,7 +32,8 @@ field_id world_bodies::find_field(const std::string &name) const {
 
 double wet_friction(const cvc::world::surface_class &c, double wetness) {
   const double u = std::min(1.0, std::max(0.0, wetness));
-  return c.mu + (c.mu_wet - c.mu) * u;
+  // Rain only lowers it: a water class's mu_wet above its mu is its bed's under a fluid.
+  return c.mu + (std::min(c.mu_wet, c.mu) - c.mu) * u;
 }
 
 std::size_t apply_wetness(world &w, double wetness, const cvc::world::surface_registry &surfaces) {

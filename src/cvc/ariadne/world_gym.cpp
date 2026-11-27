@@ -114,6 +114,28 @@ struct WorldGym::impl {
   // and the world steps on the gym's clock (the runtime's).
   std::unique_ptr<holon> h;
   std::vector<std::string> people;
+  std::vector<gym_person> walking; // each person as the options put them, by people's order
+
+  // Before a step: each walking person's way among the cars (people_walk.h, OW7d), from where the
+  // cars are now: round a car stopped in their way, waiting for a moving one.
+  void walk_people() {
+    if (!h || people.empty())
+      return;
+    const std::vector<walker_car> cars = vehicles().footprints();
+    for (std::size_t i = 0; i < people.size() && i < walking.size(); ++i) {
+      const gym_person &p = walking[i];
+      if (!(p.walk > 0.0))
+        continue;
+      const physics::body_state s = h->state(people[i]);
+      double vx = 0.0, vy = 0.0;
+      walker_velocity(s.position.x, s.position.y, p.walk * std::cos(p.yaw),
+                      p.walk * std::sin(p.yaw), cars, vx, vy);
+      avatar_intent in;
+      in.move = {vx, vy, 0.0};
+      in.yaw = p.yaw;
+      h->set_intent(people[i], in);
+    }
+  }
 
   // The world's syncs (a generated world's colliders as they come, the vehicles' ground) between
   // steps: the runtime's frame, and the world's own sync on the holon's clock when it runs there.
@@ -150,6 +172,7 @@ struct WorldGym::impl {
   // The people of this episode: each an avatar on the ground under it, walking at its pace.
   void place_people() {
     people.clear();
+    walking.clear();
     if (!h)
       return;
     for (std::size_t i = 0; i < opts.people.size(); ++i) {
@@ -164,6 +187,7 @@ struct WorldGym::impl {
       in.yaw = p.yaw;
       h->set_intent(pid, in);
       people.push_back(pid);
+      walking.push_back(p);
     }
   }
 
@@ -461,7 +485,9 @@ gym_step WorldGym::step(const std::vector<double> &steer, const std::vector<doub
       quantum > 0.0 ? static_cast<std::uint64_t>(std::max(1.0, std::round(dt() / quantum))) : 1;
   if (d.h) {
     // In the holon: its lockstep clock a quantum at a time, the people walked and the world
-    // stepped in each (holon::scene_step), as the relay's holon steps its world.
+    // stepped in each (holon::scene_step), as the relay's holon steps its world. The people take
+    // their way among the cars first.
+    d.walk_people();
     for (std::uint64_t q = 0; q < quanta; ++q)
       d.h->advance(0.0);
     d.rt->drain(); // the runtime's frame: the document's programs, the keys

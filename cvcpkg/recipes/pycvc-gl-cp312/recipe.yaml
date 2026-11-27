@@ -5,7 +5,7 @@ recipe:
   # column recipe. Same sources as pycvc-gl-cp311, built against python312 +
   # numpy-cp312 + vtk-python-cp312. New catalog name — revision starts at 1.
   name: pycvc-gl-cp312
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   # Reset to 1 for the 3.3.0 upstream version: cvc_revision counts revisions OF
   # an upstream version, so a version bump restarts it. Supersedes the 3.2.4
   # +cvc.2 family republish (material-aware nav). The scene module source is
@@ -65,11 +65,11 @@ depends:
     # shared-lib wasm libcvc — build-wasm.sh compiles the WHOLE cvc + cvcGL closure
     # from the repo root instead, so they are NOT prebuilt deps there.
     - name: libcvc
-      version: "==4.0.9"
-      platforms: [linux, windows]
+      version: "==4.0.10"
+      platforms: [linux, macos, windows]
     - name: cvcgl
-      version: "==4.0.9"
-      platforms: [linux, windows]
+      version: "==4.0.10"
+      platforms: [linux, macos, windows]
     # On wasm, 3.12.10+cvc.25 or later with the VTK bridge (cvc.23 without it). The host link
     # (bindings/pycvc/wasm/link-host.sh) takes undefined symbols as errors, and earlier wasm
     # bundles lack pyexpat's expat and _sha2's HACL; cvc.23 and cvc.24 clash with VTK's expat.
@@ -117,14 +117,14 @@ depends:
     # to (same interpreter column). On wasm the core is embedded into the host
     # binary (static archive + inittab), not a separate side-by-side package.
     - name: pycvc-cp312
-      version: "==4.0.9"
-      platforms: [linux, windows]
+      version: "==4.0.10"
+      platforms: [linux, macos, windows]
     - name: libcvc
-      version: "==4.0.9"
-      platforms: [linux, windows]
+      version: "==4.0.10"
+      platforms: [linux, macos, windows]
     - name: cvcgl
-      version: "==4.0.9"
-      platforms: [linux, windows]
+      version: "==4.0.10"
+      platforms: [linux, macos, windows]
     - name: python312
     - name: numpy-cp312
     - name: vtk
@@ -137,10 +137,15 @@ depends:
     - python312
 
 build:
-  # cvcGL + VTK are available on linux + windows (no macOS VTK bundle yet).
+  # cvcGL + VTK have bundles for linux, windows and macos/arm64; vtk-python-cp312 for macOS comes
+  # with cy-pca/cvcpkg#638.
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
     # wasm: compile the whole trimmed cvc + cvcGL + pycvc(+gl, BRIDGE=ON) closure

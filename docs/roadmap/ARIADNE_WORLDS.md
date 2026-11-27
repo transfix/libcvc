@@ -604,10 +604,11 @@ its own world document.
     navigator of their own on the grid; `physics.stats.vehicles` names each one's plant; cvcGL
     poses a box look's wheels where its plant has them. A spawn may name a plant of its own
     (`entity_spec::plant`), as a gym's agents do (L4).
-  - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
-    the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
-    chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
-    asset: }` names another mesh.
+  - Looks: a humvee is the vehicle-humvee package's Humvee when it is installed (found under the
+    cvcpkg prefixes): in parts, its wheels turning, where the package has its `humvee/` parts
+    (1.0.0+cvc.5 on; ARIADNE.md, "A model in parts"), else the one-piece `Humvee.glb`, oriented
+    and scaled to the chassis as the nav demos do it; else its chassis box in the entity's colours
+    with a cabin and wheels. `look: { model: | file: | asset: }` names another mesh.
   - Controllers: `nav@1` (with a policy per entity, by `policy_library`), `none`, or `external`.
   - Intents (L2a, built 2026-11-14): any entity takes a wanted steer and acceleration that
     replaces or blends with its controller's command (`sim_world::override_command`, which takes
@@ -833,7 +834,7 @@ each builds what a WD phase needs.
 | L3b | **Built** (2026-11-16). **Boats as world vehicles, and spawns by medium.** `plant: dynamicboat` (launch, jonboat) on the world's water (a water node's field, else a still one at the water's level), its navigator on the inverse grid; the grid's water layer (`nav::world_grid::water_depth`, `nav::medium_grid`); each archetype's medium from its plant, and `world: spawns:`' `ford_depth`, `keel_clearance` and `shore_clearance`, so cars never start in a lake and boats only in water deep and open enough (§14, "Boats and spawns by medium"). | WD3 | M |
 | L4 | **Built** (2026-11-12). **The gym:** reset, step, observe, reward, episode logs, headless; `pycvc_gl.cars` moves onto it. As built: `WorldGym` (C++, and `pycvc.WorldGym`), one app per gym, the clock paused so only `step()` steps it; `reset(seed)` rebuilds the world and spawns the agents with every draw seeded; `step(steer, accel)` is a navigator tick (NaN: nav@1 drives); the observation as flat arrays (pose, goal, contacts per physics step, out of the world, ray ranges, envelope); a reward of the user's; a log per agent per step (CSV, numpy); `GymCars` and `--gym` put `pycvc_gl.cars`' controllers on it; `world_gym.ari` and `world_gym.py` are the example. | — | M |
 
-The one-world phases, **OW0** to **OW7**, are in §18.
+The one-world phases, **OW0** to **OW9**, are in §18.
 
 **The first cut is WD0 + WD1** for the relay, and **L0** for the lab, which can run beside it. E0
 and E1 need neither and can start any time. WD1 needs S0, which transfix/libcvc#1046 builds with
@@ -1068,6 +1069,26 @@ stream (WD3), and nothing collides them. Q9's proposal (`WorldVehicles` as the e
   whatever is in the way, and one stood against a stopped car most of the minute (15.8 m walked;
   the median 63 m). In the gym a car on nav@1 still keeps 3.1 m from a person and reaches its goal,
   and a car the gym commands still hits one.
+- **As built (OW7d, scripted people step around cars; the live check).** A scripted person walks
+  round a car in their way (`cvc/ariadne/people_walk.h`, `walker_velocity`): against each car's
+  footprint grown by their radius and a margin, in the car's frame and by their motion relative to
+  it, a moving car in their path over the next 2 s is waited for, or stepped out of the lane of
+  when standing would be reached; a stopped car across their way is walked round its nearer end,
+  one along their way passed on its nearer side. `WorldVehicles::footprints()` gives the cars as a
+  walker sees them; the gym's walking people take their way from it before each step. In the
+  traffic world for a minute with the cars braking: car-person touches go from 79 to 0, none while
+  a car moved, the closest 1.12 m centre to feet, and the person who walked least walked 53.9 m
+  (15.8 m walking straight on); all 18 cars drive (`ServerDocumentTest`, three runs: both, braking
+  alone, steering alone). In the gym a person walking at a car parked across their way passes it
+  1.96 m off their line, untouched (`AriadneWorldGym.PeopleAreInTheGymsWorld`).
+  **Live:** the Windows workstation builds `arisrv` with gRPC now, from cvcpkg's grpc 1.68.2 and
+  protobuf 28.3 (`cvcpkg install grpc protobuf --link shared`, `CVC_ENABLE_GRPC=ON`). `arisrv
+  --doc cvc://worlds/traffic.ari` runs the world at 120 Hz with its 18 vehicles as the room's
+  entities; one arigl client over gRPC walks its avatar back and forth, another over WebSocket
+  stands and joins twice: both build the world document, see each other, and between the second
+  client's two snapshots the cars have driven on (one truck gone, three rovers arrived) and the
+  walker has walked into its view. Arigl's snapshot is checked by eye; the relay's poses are not
+  read by the test document (its state is under its own prefix).
 
 ### 18.3 Contact
 
@@ -1565,8 +1586,9 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW4 | **Built** (2026-11-19). **Navigators avoid avatars.** Every entity a navigator doesn't drive is a foreign agent to it. | S |
 | OW5 | **Started** (2026-11-21, OW5a: the room's vehicles as kinematic boxes in the client's world; OW5b: the vehicle it drives predicted, on the kinematic plant; OW5c: the statics from the world document; OW5d: the dynamic plant predicted; OW5e: the dynamic4w plant predicted; OW5f: the relay's world switch and generated worlds followed; OW5g: the prediction on the world's ground; OW5h: the relay's surfaces; OW5i: the jolt plant predicted; OW5j: boats predicted; OW5k: the relay's document from a world pack; OW5l: a sea's waves under a predicted boat; OW5m: a vehicle's attitude in its pose; OW5n: a vehicle's spin and steering in its pose; OW5o: the room's vehicles in the car a client drives; OW5p: the room's avatars in it, and the room in a dynamic plant's car; OW5q: a sea the relay's storms grow; OW5r: a sample corrects all of a vehicle's motion). **Clients build the same world,** others kinematic at their playout, their own entity predicted by its controller. | L |
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
-| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people, from Python too, a person hit a person's; OW7b: the traffic world hosting people among its cars, measured; OW7c: cars brake for people; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
+| OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people, from Python too, a person hit a person's; OW7b: the traffic world hosting people among its cars, measured; OW7c: cars brake for people; OW7d: scripted people step around cars, and the live check, arisrv hosting traffic.ari with arigl clients over gRPC and WebSocket; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
+| OW9 | **Started** (2026-11-26, §18.10; OW9a: the room's water in the client's avatar world, replayed by tick; OW9b: a person's density, floating head-out). **Water: wading and swimming.** Today an avatar floats like a cork on the relay and walks on the bed in a client's prediction. OW9a: the same water in the client's avatar world; OW9b: a person's density, floating head-out; OW9c: walker@2, wading slower by depth, swimming at a swimmer's pace and cost, diving, climbing out; OW9d: the swimmer drawn, its controls, the live check. | M |
 
 **Open:**
 
@@ -1614,7 +1636,7 @@ files beside them:
 | `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs `props_r1` and `props_r2`), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
 | `props.json` | The props' render cells: the cell size and, per cell, its bounds and its run of triangles (lines, for the needles) in each prop mesh, so a renderer draws a cell as a ladder of rungs. A cell's points are the ones its faces use. |
 | `streets.json` | The street network the roads were extruded from (nodes, and segments with their widths and classes), and the city's counts (buildings, districts, road length). |
-| `ground.png` | The painted ground texture (the material colours, 2048 a side, north at the top), where a city has `satellite.png`. |
+| `ground.png` | The painted ground texture (the material colours, north at the top), where a city has `satellite.png`. It is 2048 a side on a world 256 m across or more, and fewer on a smaller one: the fewest, a power of two, at most 0.25 m a texel (`world_ground_size_for`; 1024 on a 200 m world). |
 
 - **Nav materials** are the terrain's cell surfaces and each item's face surfaces, read through
   the one surface table, so the renderer, the physics and the navigator read the same materials
@@ -1750,3 +1772,201 @@ compute are an issue." So a world's rate is a knob: the relay picks it, and its 
     on.
   - The scene swarm (`scene_swarm`) runs its own plant host and tick at 1/120 s and needs the
     120 Hz clock: a scene with a swarm and a rate of its own is not supported yet.
+
+### 18.10 Water: wading and swimming (OW9, designed 2026-11-26)
+
+Joe asked what happens when a user moves their avatar into a body of water: do they swim, or just
+sink? Today they do neither. On the relay the avatar floats upright like a cork and keeps walking
+across the water at its walk pace. On the player's own screen it is predicted to walk along the
+bottom.
+
+**Measured (2026-11-26).** A throwaway probe in `holon_test` walked an avatar at 1.4 m/s from dry
+ground into a pool 3 m deep. The water was made as `scene_world` makes a sea: 1000 kg/m^3, C_d 1,
+damping 1e4, inertial.
+
+| | feet in the pool | pace | energy |
+|---|---|---|---|
+| with the water field (the relay's world) | -0.28 m, steady (surface 0, bed -3) | 1.38 m/s | a little more spent (the drag) |
+| without water (a client's prediction) | -3.00 m: it walks on the bed | 1.40 m/s | unchanged |
+
+**Why.**
+
+- **The body floats too high.** An avatar is a dynamic 70 kg box, 0.5 x 0.5 x 1.7 m: 0.425 m^3,
+  so about 165 kg/m^3. A person is about 985 kg/m^3. The fields push every dynamic body they
+  reach (`field_set::body_added`), so the box floats with 0.28 m of it under water, its volume's
+  worth of water weighing what it does.
+- **The walk never notices the water.** `avatar_world::drive_walker` sets the horizontal velocity
+  only, toward the intent, with up to `force_max` (840 N) a step. That overpowers the water's drag,
+  and the body is turned back upright every step. There is no swimming, no slower pace in water,
+  and no cost beyond the drag.
+- **The client and the relay disagree.** Under One World (§18.2) the avatars are in the server
+  document's physics world, and its sea is a fluid field there. A client's holon gets the room's
+  water (`holon::set_statics`, `holon::set_water`), but only its vehicle models use it (OW5j,
+  OW5q). Its avatar world has no fluid field, so the player's own avatar is predicted on the bed
+  and reconciled toward the relay's floating pose, a snap of up to the water's depth. Others see
+  the relay's pose. This is read from the code, not seen live.
+
+#### 18.10.1 Goals
+
+- **The same water everywhere.** A client predicts its avatar in the same water the relay runs:
+  the same fields, the same free surface, on the relay's clock (OW5q). No snap at the shore.
+- **People float like people.** Head just out of the water, still, at rest.
+- **Wading, then swimming.** In shallow water a person wades, slower the deeper it gets. Out of
+  their depth they swim at a swimmer's pace (about 1 m/s, a sprint near 2), can dive and come up,
+  and pay a swimmer's energy.
+- **The water acts on swimmers as on anything else.** Currents and waves carry them, a boat's
+  wake rocks them, a boat can hit them. This needs nothing new once they are in the field.
+- **Nobody drowns.** An exhausted swimmer slows to what resting power sustains, as an exhausted
+  walker does (`when_empty: rest`). It stays at the surface. Breath and drowning are a later
+  rule, off by default, if ever.
+- **Rules, not code, set the numbers.** A world's `world:` block names the body's density and the
+  swimming controller's knobs. A world without water is byte-unchanged.
+
+#### 18.10.2 Design
+
+**The body: its own density.** An archetype's `avatar_body` gains `density` (kg/m^3, default 985).
+The avatar stays a box for contact and prediction. It displaces `mass / density` of water, not the
+box's volume. `field_set` already keeps a per-body displacement share for a wading vehicle's
+chassis (`field_body::buoyancy`, `mark_vehicle`). An avatar gets the same:
+`mark_avatar(id, share)` with `share = (mass / density) / box volume`, 0.167 for the default
+person. The default person then floats with 98.5% of the box under water: its top 2.5 cm above
+the surface, a head just out. The cells stay spread through the box, so a floating box still
+rights itself; the walker holds it upright anyway.
+
+**The controller: walker@2.** Controllers are kernels by name and version (`walker@1`), and a
+client predicts with the kernel the relay names, so the water goes in a new version. `walker@1`
+stays as it is: an old world, or a client built before walker@2, runs it unchanged. walker@2 is
+walker@1 on land. Each step it reads the water at the body (`world::water_at`, at its feet and at
+its chest) and is in one of three states:
+
+| state | when | what it does |
+|---|---|---|
+| walking | dry, or the water below `wade_depth` (default 0.3 m) | walker@1 |
+| wading | feet on the bed, the water from `wade_depth` up to `swim_depth` (default 1.2 m, chest-high) | walker@1, the pace cut by the depth: `walk_speed x (1 - wade_slow x (depth - wade_depth) / (swim_depth - wade_depth))`, `wade_slow` 0.6. No jumping above `swim_depth / 2` |
+| swimming | the water over `swim_depth`, or the feet off the bed with the chest wet | below |
+
+While swimming:
+
+- **Horizontal:** toward the intent's move, capped at `swim_speed` (default 1.0 m/s; the run modifier up to `swim_sprint`, 1.8), with at most `swim_force` (default 300 N). The water's drag acts too, so a swimmer coasts to a stop.
+- **Vertical:** buoyancy holds a still swimmer with its head out. The intent's `move.z` (never used by a walker) dives below 0 and comes up above 0, at up to `dive_speed` (default 0.8 m/s), with `swim_force`. `jump` is a stroke up: it surfaces, and at a bank or a boat's side it climbs out (below).
+- **Upright and facing:** as walker@1, the body upright and turned to the intent's yaw. The drawn swimmer lies forward (18.10.3). The body does not, so the box's contact and prediction stay simple.
+- **Getting out:** where the bed rises the swimmer finds its feet and wades out. At a steep edge (a quay, a pool's wall, a boat's side) within `climb_height` (default 0.6 m) of the surface, a stroke up toward it lifts the body onto it, as the jump lifts a walker. Higher edges need a ladder or a ramp in the world.
+
+**Energy.** Carrying the body costs `swim_cost x m g |v|` while swimming, `swim_cost` default 0.8:
+four times walking's 0.2, about a human swimmer's cost of transport. Wading costs walking's, plus
+the extra force the drag takes, which the controller already pays for. Floating still is free.
+The ledger books swimming apart (`avatar_ledger::swam`, metres and joules) so the Avatar window
+can show it.
+
+**Rules.** In a world's `world:` block, as the other knobs (WD2):
+
+```yaml
+world:
+  avatars:
+    archetypes:
+      - id: person
+        body: { mass: 70, width: 0.5, height: 1.7, density: 985 }
+        controllers: [walker@2]
+    controllers:
+      - id: walker@2
+        params: { walk_speed: 2.0, wade_depth: 0.3, swim_depth: 1.2, wade_slow: 0.6,
+                  swim_speed: 1.0, swim_sprint: 1.8, swim_force: 300, dive_speed: 0.8,
+                  climb_height: 0.6, swim_cost: 0.8 }
+```
+
+The stock worlds (`cvc://worlds/default.ari`, `large.ari`, `traffic.ari`) have no water; they
+move to walker@2 anyway, which changes nothing for them. terrain_lab's sea (#1482) is the
+first world with water to swim in.
+
+**The same water on the client.** The client's avatar world gets the room's water as fields, not
+statics: the fluid fields its vehicle models already get (`holon::_water`, `_water_after` by
+tick), added to the avatar world with their free surfaces on the relay's clock (`shown_clock`,
+OW5q). A sea that follows a storm (`WaterRuntime::follow_sea`) changes the avatar world's water at
+the same tick as the relay's. A replay after a correction runs in the water as it was at each
+tick, as the boat model's does. The fields' pushes are libcvc's own C++ (`field_step`), not Jolt,
+so their cross-platform determinism is not pinned. This is the same caveat as the dynamic plants
+(§18.7, Open). A gate measures the drift: a client swimming for a minute beside the relay.
+
+**Others' avatars.** A client shows other swimmers where the relay's samples put them, as it shows
+walkers. Their bodies are kinematic in its world (OW5a) and do not need the water.
+
+**Navigators and people.** A swimmer is a person to the navigators (OW4, OW7c): a boat on nav
+brakes for one in its lane. The scripted walkers (`people_walk.h`) do not route round water;
+scripted people stay on land unless a script sends them in.
+
+#### 18.10.3 Drawing (arigl)
+
+- **The body where the relay puts it:** mostly under the surface, head out. The water's own
+  surface hides what is under it. Nothing new is needed for a first cut.
+- **A swimmer's pose:** the look (`room_view`, the avatar's colour and accessory) drawn lying
+  forward along its facing while swimming, upright while wading or treading water. The relay
+  publishes the controller state (walking, wading, swimming) beside the pose, one small enum.
+- **Later:** a stroke animation, a splash going in, a swimmer's wake on the field wake (C6,
+  #1532).
+
+**Controls.** The walk keys and stick swim. Space is a stroke up (surfacing, climbing out). A dive
+key (C or Ctrl; the left stick pressed on a gamepad) sets `move.z` down while held. A swim scheme
+beside walk, car and boat (OW6a); its hints are in the Controls window.
+
+#### 18.10.4 Phases
+
+| Sub-phase | What | Size |
+|---|---|---|
+| OW9a | **Built** (2026-11-26). **The same water on the client.** The room's water as fields in the client's avatar world, on the relay's clock, replayed by tick. Before any new behaviour: the snap at the shore goes, and the avatar floats in prediction as on the relay. A holon_sync test walks a client into a lake: predicted against the relay's poses, corrections counted. | M |
+| OW9b | **Built** (2026-11-26). **People float like people.** `avatar_body::density`, `field_set::mark_avatar`, the rules key. The default person floats head-out (its top 2.5 cm above a still surface, the probe's -0.28 m becomes about -1.68 m). | S |
+| OW9c | **walker@2: wading and swimming.** The three states, the knobs, `move.z` diving and surfacing, the stroke up and climbing out, swimming's energy and ledger line, the controller state published. The stock worlds move to walker@2. Tests: the pace by depth, a swimmer's pace and cost, diving and surfacing, a current carrying a swimmer, getting out at a beach and at a quay, a client predicting it. | M |
+| OW9d | **Drawn and driven.** The swimmer's pose in arigl, the swim control scheme and its hints, the live check: arisrv hosting a world with terrain_lab's sea and clients swimming over gRPC and WebSocket. | S |
+
+- **As built (OW9a, the same water on the client; 2026-11-26).** `avatar_world::set_water` puts
+  fluid fields in a world of its own (a shared world's water is its owner's). A holon with a world
+  of its own puts the room's water there before each step (`avatar_water_for`), as a boat's model
+  takes it: the newest water in by the step ending on the tick, `set_statics`' water from the
+  start and `set_water`'s from the step ending past its tick, so a replay from before a change runs
+  in the water before it. The client's and the server's own worlds both take it (a relay's One
+  World avatars are in its scene's world, whose water is its own). In `holon_test`
+  (`AClientPredictsItsAvatarInTheRoomsWater`), a client walks into a lake 3 m deep beside the
+  server, a link's 6 frames each way:
+  - **The water in both:** the client floats where the server does (0.28 m under, the box's
+    draft), with no correction in 15 s.
+  - **The water in the server's only (before OW9a):** the client sinks toward the bed between
+    corrections, 20 m of corrections in the run, never where the server is.
+  - **The water rising half a metre, the client hearing it late:** one correction of 0.075 m (the
+    steps it predicted in the old water), then the client floats where the server does, 0.5 m
+    higher.
+
+  Not yet: the relay's wake (C6) is in its world's water and not the client's copy, so a boat's
+  wake rocks a swimmer on the relay alone; a sea's waves are read at the same tick on both but
+  their drift across platforms is not measured; not run live.
+- **As built (OW9b, people float like people; 2026-11-26).** `avatar_body::density` (985 kg/m^3,
+  the rules' `body: { density: }`, published with the archetypes) sets the share of an avatar's box
+  that displaces water: `avatar_displacement`, mass over density over the box's volume, 0.167 for
+  the default person, kept when `set_mass` changes the mass. The share went in as a body's own
+  setting rather than a `mark_avatar`: `physics::body_desc::displacement` and
+  `world::set_displacement`, for any dynamic body without a hull (a vehicle's chassis keeps its
+  wading's). It scales the cells' buoyancy and the water's damping on them, since the water a body
+  moves aside is what damps it; with the whole box's damping a person took over 10 s to settle and
+  a body heavier than water sank at 1.5 cm/s. A flooded chassis keeps the whole damping, so no
+  vehicle changes. In `holon_test` (`APersonFloatsHeadOut`), in a still lake for 30 s:
+  - **A person (985 kg/m^3):** its top 0.026 m above the surface, 98.5% under.
+  - **At 140 kg:** the same, 0.026 m: the depth is the density's.
+  - **At 1100 kg/m^3:** on the bed, 3 m down.
+  - **At the box's own density (165 kg/m^3, before OW9b):** a cork, 0.28 m in.
+
+  OW9a's lake test now floats both sides at -1.67 m, still with no correction. When the water
+  rises half a metre over a floating person, only 1.5% of its weight is left to lift it, so it
+  comes back up in about 35 s. That is OW9c's to answer with a stroke up. A relay from before OW9b
+  publishes no density, so a client from after it predicts a person where that relay floats a cork.
+
+**Open:**
+
+- **A client that does not know walker@2.** The relay refuses a `world:` block naming a kernel its
+  build lacks (`world_rules.cpp`). What an older client does with one it lacks is not settled:
+  predict with walker@1 and be corrected, or say so and not predict.
+- **Breath, drowning and depth.** Out of scope. A swimmer can dive to the bed and stay there. A
+  `breath` budget beside energy is the natural shape if a world wants one.
+- **Water other than a sea.** Rivers, lakes and pools are fluid fields too and work the same,
+  as long as a generated world or a document gives them one. A pool made of a box with no field is
+  dry.
+- **The avatar stays upright in physics.** A swimmer's box is upright, so it is taller in the
+  water than a lying swimmer. A swimmer passing under a low dock hits it. A lying box while
+  swimming would fix that, at the cost of a shape change mid-run.

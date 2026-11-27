@@ -569,10 +569,8 @@ void repose_forest(const forest_wind &w, double t, double wind_scale, std::vecto
 
 void repose_forest_in_wind(const forest_wind &w, double t, double strength, double dir_x,
                            double dir_y, const std::function<double(double, double)> &gust,
-                           std::vector<double> &wood_buf, std::vector<double> &needle_buf) {
-  // The world axis a downwind lean turns about: across the wind, horizontal (z tilts toward the
-  // wind's way under a positive turn about it).
-  const double ax = -dir_y, ay = dir_x;
+                           std::vector<double> &wood_buf, std::vector<double> &needle_buf,
+                           const tree_wind_fn &local) {
   auto put = [](std::vector<double> &buf, int off, const vec3 &v) {
     if (static_cast<std::size_t>(off) * 3 + 2 < buf.size()) {
       buf[off * 3] = v.x;
@@ -585,7 +583,14 @@ void repose_forest_in_wind(const forest_wind &w, double t, double strength, doub
       continue;
     const Mat4 root = from_array(tree.mods.front().hang);
     const double g = gust ? gust(root.at(0, 3), root.at(1, 3)) : 1.0;
-    const double a = tree.sway * strength * g * (0.6 + 0.4 * std::sin(1.3 * t + tree.phase));
+    // The wind at this tree: the forest's, or its own (`local`).
+    double s = strength, dx = dir_x, dy = dir_y;
+    if (local)
+      local(root.at(0, 3), root.at(1, 3), s, dx, dy);
+    // The world axis a downwind lean turns about: across the wind, horizontal (z tilts toward the
+    // wind's way under a positive turn about it).
+    const double ax = -dy, ay = dx;
+    const double a = tree.sway * s * g * (0.6 + 0.4 * std::sin(1.3 * t + tree.phase));
     std::vector<Mat4> world(tree.mods.size());
     for (std::size_t i = 0; i < tree.mods.size(); ++i) {
       const forest_wind::mod_rec &m = tree.mods[i];

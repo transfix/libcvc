@@ -176,6 +176,39 @@ TEST(PhysicsField, SlabsFloatAtTheirDensityRatio) {
   }
 }
 
+// A body that displaces only a share of its volume (body_desc::displacement; an avatar's box,
+// OW9b) floats deeper by that share: a 300 kg/m^3 slab displacing half its volume floats as a
+// 600 kg/m^3 one would, and as itself again once set_displacement gives it the whole. A share
+// that is not finite and >= 0 is refused, as is an unknown body.
+TEST(PhysicsField, ADisplacementShareFloatsABodyDeeper) {
+  {
+    world w{world_config{}};
+    body_desc bad = slab(300.0, 0.0);
+    bad.displacement = -0.5;
+    EXPECT_THROW(w.add_body(bad), cvc::physics_error);
+    bad.displacement = std::nan("");
+    EXPECT_THROW(w.add_body(bad), cvc::physics_error);
+    body_id nobody;
+    nobody.value = 12345;
+    EXPECT_THROW(w.set_displacement(nobody, 0.5), cvc::physics_error);
+  }
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  w.add_field(water());
+  body_desc d = slab(300.0, 0.0);
+  d.displacement = 0.5;
+  const body_id b = w.add_body(d);
+  EXPECT_THROW(w.set_displacement(b, -1.0), cvc::physics_error);
+  w.step(600);
+  const double half = 0.0 - (w.state(b).position.z - 0.2);
+  EXPECT_NEAR(half, 0.4 * 300.0 / 1000.0 / 0.5, 0.002) << "half the share, twice the draft";
+  w.set_displacement(b, 1.0);
+  w.step(600);
+  const double whole = 0.0 - (w.state(b).position.z - 0.2);
+  EXPECT_NEAR(whole, 0.4 * 300.0 / 1000.0, 0.002) << "the whole share, its own draft";
+  EXPECT_LT(tilt(w.state(b).rotation), 0.01);
+}
+
 // A tilted slab rights itself: the buoyancy torque, applied at the cells, has the
 // right sign and lever.
 TEST(PhysicsField, ATiltedSlabRightsItself) {
@@ -1640,8 +1673,9 @@ TEST(PhysicsFieldWake, SleepingBodiesLeaveTheirSlotsToABoat) {
 
 // Packed bodies (0.6 m apart) on calm water: their waves die down (they leave the window slowly,
 // through its sponge), and the bodies fall asleep with a wake as they do without one, if later:
-// within 120 s, where without one they sleep within 40. In a swell no crate sleeps, with a wake or
-// without, and the waves they scatter do not grow.
+// within 120 s, where without one they sleep within 3. (The swell's half is a test of its own,
+// PackedBodiesStayBoundedInASwell, so each has its own ctest budget: a Debug build takes minutes
+// over either.)
 TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   REQUIRE_JOLT();
   const auto still = std::make_shared<still_surface>(0.0);
@@ -1652,8 +1686,19 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   for (double p : on.peaks)
     std::printf(" %.4f", p);
   std::printf("\n");
+  EXPECT_EQ(off.asleep, 9) << "every crate sleeps without a wake";
   EXPECT_EQ(on.asleep, off.asleep) << "the wake keeps no crate awake";
   EXPECT_LT(on.peaks[9], 0.05 * std::max(on.peaks[0], on.peaks[1])) << "the waves die down";
+  // Each body cuts its columns against the others' waves, so one riding another's wave does not
+  // send it on again: the first waves stay under 0.5 m (cut against the bare water they reached
+  // 0.82 m, against 0.35 m now).
+  EXPECT_LT(on.peaks[0], 0.5);
+}
+
+// The packed crates in a swell: no crate sleeps, with a wake or without, and the waves they
+// scatter do not grow.
+TEST(PhysicsFieldWake, PackedBodiesStayBoundedInASwell) {
+  REQUIRE_JOLT();
   const auto swell = std::make_shared<wave_train_surface>(
       0.0, 0.0, std::vector<wave_train>{{0.25, 5.0, 0.3, 0.0}});
   const packed_run soff = packed(false, swell, 60.0), son = packed(true, swell, 60.0);
@@ -1663,6 +1708,8 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   for (double p : son.peaks)
     std::printf(" %.4f", p);
   std::printf("\n");
+  EXPECT_EQ(soff.asleep, 0) << "no crate sleeps in the swell";
+  EXPECT_EQ(son.asleep, 0) << "nor with a wake";
   double early = 0.0, late = 0.0;
   for (int k = 1; k < 5; ++k)
     early = std::max(early, son.peaks[k]);
@@ -1671,9 +1718,8 @@ TEST(PhysicsFieldWake, PackedBodiesStayBoundedAndSleep) {
   EXPECT_LT(late, 2.0 * early + 1e-3) << "the scattered waves do not grow";
   // Each body cuts its columns against the sea and the others' waves, so one riding another's
   // wave does not send it on again: the waves among the crates stay under 0.25 m (cut against the
-  // bare sea they reached 0.32 m, and 0.82 m on calm water against 0.35 m now).
+  // bare sea they reached 0.32 m).
   EXPECT_LT(std::max(early, son.peaks[0]), 0.25);
-  EXPECT_LT(on.peaks[0], 0.5);
   EXPECT_LT(son.late_speed, 2.0 * soff.late_speed + 0.05);
 }
 

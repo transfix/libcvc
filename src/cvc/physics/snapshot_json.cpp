@@ -354,6 +354,7 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
     w.key("underbody_drag").number(g.underbody_drag);
     w.key("tire_pressure").number(g.tire_pressure);
     w.key("fording_depth").number(g.fording_depth);
+    w.key("flood_area").number(g.flood_area);
     w.end_object();
   }
   w.key("axles").begin_array();
@@ -401,6 +402,8 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("air_velocity").vec(s.air_velocity);
   w.key("water_force").vec(s.water_force);
   w.key("engine_flooded").boolean(s.engine_flooded);
+  w.key("water_inside").number(s.water_inside);
+  w.key("water_inside_mass").number(s.water_inside_mass);
   {
     const vehicle_energy &e = s.energy;
     w.key("energy").begin_object();

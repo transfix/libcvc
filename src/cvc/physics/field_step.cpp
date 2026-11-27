@@ -732,6 +732,7 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
     fb.cut_shape = std::make_shared<const physics::shape>(d.shape);
   fb.cell_volume = fb.volume / static_cast<double>(fb.cells.size());
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
+  fb.buoyancy = fb.damping = d.displacement;
   bounds_of(fb);
   if (d.hull) {
     compile_hull(*d.hull, fb.hull);
@@ -838,6 +839,7 @@ bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_
       out.velocity = surface->velocity(p, t);
       if (fw) {
         wake_sample ws;
+        fw->ready_depths(); // its callers read one at a time (a boat's pre-step, the world's lock)
         fw->motion(own, p.x, p.y, out.depth, ws);
         out.velocity = out.velocity + vec3{ws.u, ws.v, ws.w};
       }
@@ -1421,6 +1423,16 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       advance_wakes(be, cfg, t, gn, held_of);
       break;
     }
+  // And their motion below the top, for the reads below (made here, before the field workers
+  // read it): only for a wake an awake body is in, so the waves' steps while every body sleeps
+  // make none.
+  for (const auto &fe : _fields)
+    if (fe.second.wake)
+      for (const placed &pb : awake)
+        if (overlaps(pb.blo, pb.bhi, fe.second.scalar)) {
+          fe.second.wake->ready_depths();
+          break;
+        }
   // What body `id` reads of field `cf`'s wake: the others' waves (none without a wake).
   const auto view_of = [](const compiled_field &cf, body_id id) {
     wake_view v;
@@ -1551,7 +1563,8 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           immersed += fv;
 
         if (cf.desc.kind == field_kind::fluid) {
-          // A flooded chassis displaces only its share (vehicle.h's wading; 1 otherwise).
+          // A body displaces only its share (body_desc::displacement; a flooded chassis,
+          // vehicle.h's wading).
           const vec3 b = g * (-cr.value * fv * fb.buoyancy);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
@@ -1567,7 +1580,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         }
 
         const vec3 u = cr.w - (s.linear_velocity + cross(s.angular_velocity, arm));
-        double c_i = cf.desc.damping * fv; // kg/s: the force is c_i u
+        double c_i = cf.desc.damping * fv * fb.damping; // kg/s: the force is c_i u
         if (inertial) {                    // the damping on the vertical only
           if (c_i > 0.0) {
             const vec3 d{0.0, 0.0, u.z * c_i};

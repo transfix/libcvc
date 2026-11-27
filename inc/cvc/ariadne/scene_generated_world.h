@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <cvc/ariadne/data.h>
 #include <cvc/world/generated_world.h>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,6 +55,9 @@ class app;
 
 namespace world {
 class world_geometry;
+}
+namespace physics {
+class flow_velocity;
 }
 
 namespace ariadne {
@@ -77,6 +81,18 @@ struct SceneColliders {
   // whose changes follow the clock makes them (the water's sea while the scene has storms:
   // kSceneWindFrontPeriod), or 0 for whenever it ticks.
   double clock_period = 0.0;
+  // Set by a runtime that builds a revision off the frame (a water's sea keyframe while the scene
+  // has storms, scene_water.h): the scene's world calls it each sync with the clock's tick before
+  // it puts anything in, and the runtime makes the revision there and then if it goes in after
+  // that tick or earlier, so the step it is due at has it. Null: nothing is built off the frame.
+  std::function<void(std::uint64_t tick)> settle;
+  // Set by the scene's world each sync, and again whenever it makes its air again within the steps
+  // (a storm-wind peak or a steering change switched on the clock): the air its bodies are in (a
+  // StormWindFlow while the scene has storms, scene_weather.h; null without a scene wind). A slot
+  // of its own, so a runtime's physics reads the world's air as it is at each step without holding
+  // the colliders: the water's ripples under the storms' fronts (F4).
+  std::shared_ptr<std::shared_ptr<const cvc::physics::flow_velocity>> air =
+      std::make_shared<std::shared_ptr<const cvc::physics::flow_velocity>>();
 };
 
 // The params a generated_world node states: its preset's counts and relief, then the counts,

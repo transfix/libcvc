@@ -115,7 +115,10 @@ and at 32 for the RoboRacer (see [the energy ledger](#the-energy-ledger-p3)).
 - **`wet_friction`** is the friction soaked, what a wading tire finds under water (Vehicles,
   "Wading"); 0, the default, means not known, and the tire keeps `friction`. `add_world_geometry`
   sets it to the surface class's `mu_wet`, the value `apply_wetness` runs `friction` toward in
-  the rain, so the rain and the water agree.
+  the rain, so the rain and the water agree. The water classes (`water_shallow`, `water_deep`)
+  are the exception: their `friction` stands for the water where no fluid covers them, and their
+  `wet_friction`, above it, is their bed's under a fluid (wet sand and gravel 0.45, wet mud
+  0.20). The rain never raises a material above its `friction`.
 
 ### Shapes
 
@@ -518,11 +521,13 @@ model rolls over the world's bodies. The chassis frame is x forward, y left, z u
     `clutch_strength`, `driveline_efficiency`;
   - each axle: `max_brake_torque`, `max_hand_brake_torque`, `suspension_frequency`,
     `suspension_damping`, and `anti_roll_stiffness` on an axle that was added with a bar;
-  - wading, all but `wading.enabled` and `wading.displacement` (fitting the deep-water kit is
-    `fording_depth` 1.52; it does not unflood an engine).
+  - wading, all but `wading.enabled`, `wading.displacement` and whether `wading.flood_area` is 0
+    (fitting the deep-water kit is `fording_depth` 1.52; it does not unflood an engine; opening a
+    door is a larger `flood_area`).
 
   A change to anything else (the chassis, the mass, the wheels' geometry, the gearing, the
-  torque and tire curves, the energy source, whether it wades and its body's displacement)
+  torque and tire curves, the energy source, whether it wades, its body's displacement and
+  whether it floods at once)
   throws `cvc::physics_error` naming it and changes nothing. Like materials, a tuning is not
   part of `save()`.
 
@@ -551,6 +556,17 @@ so a free surface's waves and a current count):
   field step scales its cells' buoyancy): what is left of a soft-doored body is its solid and
   sealed parts. A heavy vehicle stays on its wheels as it wades and sits on the bottom in water
   over its roof, rather than floating.
+- **Over time, with a `flood_area`.** The cabin and engine bay (the box's other 1 − displacement)
+  take the water in through openings of that area (m²) at the box's bottom, at an orifice's rate,
+  Q = C_d A √(2 g Δh), C_d 0.6, Δh the water over the openings outside less the water inside.
+  The box floats sealed and the water inside, level over its floor, weighs it down at its
+  centroid (its weight, not its inertia). So a vehicle driven into deep water floats a little at
+  first, settles as it fills, and lifts just `displacement` once the levels meet; out of the
+  water it is heavier until the water drains out of the same openings. Each step is exact for
+  the water outside at its start, so the level never overshoots. 0, the default and both presets'
+  value, floods at once. A car with its doors shut leaks a few hundredths of a square metre; an
+  open door or engine bay, tenths. The water inside is state (`save()` writes it only while there
+  is any), and its weight's work is the ledger's `fields`.
 - **The tires and underbody are dragged**, 1/2 ρ C_d A |u| u, u the water's velocity (a current,
   the waves' orbital motion) less the part's:
   - a tire along its travel: its width times its immersed height, with `wheel_drag` (AMC 25.1591's
@@ -567,7 +583,8 @@ so a free surface's waves and a current count):
 - **The grip.** A tire in water is on soaked ground: its μ runs from the material's `friction` to
   its `wet_friction` as the water over its contact deepens to 3 mm (AMC 25.1591's standing water).
   On ground the rain has already soaked (`apply_wetness`), `friction` is `wet_friction` already,
-  so it is no slicker under water. In standing water a tire with a `tire_pressure` aquaplanes:
+  so it is no slicker under water. On a lake or pond bed (a water class under a fluid) it runs up
+  to the bed's soaked μ, above the class's dry one. In standing water a tire with a `tire_pressure` aquaplanes:
   its μ falls as 1 − (v / v_p)² to 0.05 at v_p = 0.85 × 9 √p knots (p in psi; AMC 25.1591,
   7.1.1), v its speed over the ground; the shape between the ends is ours. A tire in a medium
   (mud, snow) keeps the medium's traction. `wheel_state::friction` reads the μ it used.
@@ -580,8 +597,12 @@ so a free surface's waves and a current count):
 - **The ledger.** The water's work on the tires and underbody is the ledger's `fields`, with the
   box's buoyancy and drag.
 - **Readbacks.** `wheel_state::water_depth` and `water_drag`, `vehicle_state::water_force` (the
-  tires' and underbody's, not the box's, which is `world::snapshot`'s field load) and
-  `engine_flooded`; the snapshot's JSON has them, and the description's `wading`.
+  tires' and underbody's and the water inside's weight, not the box's, which is
+  `world::snapshot`'s field load), `engine_flooded`, and `water_inside` (m³) and
+  `water_inside_mass` (kg); the snapshot's JSON has them, and the description's `wading`.
+- **The dynamic plants** (`dyn_bike_plant`, `dyn_4w_plant`) wade too, with a world and the
+  description's wading on: drag, the load lifted off the tires, soaking, aquaplaning and the
+  flooded engine on a model that never floats (`dyn_wading.h`).
 
 A dry vehicle that wades steps exactly as one that does not: nothing touches its loads, its
 grip or its saved bytes until a part of it is in water.
@@ -603,6 +624,10 @@ What `physics_vehicle_test` measures (Windows MSVC):
 | μ on asphalt (0.9 dry, 0.55 soaked) in 2 cm at 2 m/s, 20 psi tires | 0.543 | 0.543 |
 | in 1 mm (a third soaked) | 0.780 | 0.780 |
 | in 2 cm at 14 m/s (aquaplaning, v_p 17.6 m/s) | 0.202 | 0.202 |
+| A Humvee with 0.1 m² of openings put into 0.7 m: inside after 10 s | 0.492 m³ (the orifice, at the outside level each half second) | 0.506 m³; 0.025 m³ at 0.5 s, its tires carrying 12.4 kN against 19.6 kN flooded |
+| ... level inside and out (60 s) | the flooded-at-once model's 19639 N | 0.787 m³; tires carry 19575 N |
+| ... driven out onto dry land | 26222 N dry + the water's weight | 30950 N with 0.487 m³ (4774 N) inside; drained to 0 in 16 s |
+| Braking from 4 m/s on `water_deep` under 0.5 m | the bed's 0.20, as a 0.20 ground | μ 0.196, 2.66 m/s² (the 0.20 ground: 2.66); no water over it: 0.100, 1.43 m/s² |
 
 ### The presets
 
@@ -826,7 +851,7 @@ the first fluid field, in id order, whose box holds the point in x and y and rea
 gives a `water_sample`: `wet`, `depth` below the top (negative above it), `density` and the water's
 `velocity`. Where no fluid field covers the point it is dry, still and of density 0.
 
-Not modelled: the propeller's slipstream over the rudder (at low speed an outboard steers and a rudder barely does), propeller torque and walk, ventilation of a propeller near the surface (it is wet or dry at its centre), and a partly immersed rudder. `snapshot()`, its JSON, `physics_codec` and pycvc do not carry boats yet. `physics_boat_test` checks the balance at terminal speed, backing, the turning circle against the rudder angle, a dry propeller, an outboard at low speed, pitching on a swell, and the state (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O11b: boats)").
+Not modelled: the propeller's slipstream over the rudder (at low speed an outboard steers and a rudder barely does), propeller torque and walk, ventilation of a propeller near the surface (it is wet or dry at its centre), and a partly immersed rudder. `snapshot()`, its JSON and `physics_codec` do not carry boats yet (pycvc binds them: "Python: pycvc"). `physics_boat_test` checks the balance at terminal speed, backing, the turning circle against the rudder angle, a dry propeller, an outboard at low speed, pitching on a swell, and the state (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O11b: boats)").
 
 ## cvc::nav's plant: `nav_plant` (P4)
 
@@ -1134,7 +1159,7 @@ Gates (`physics_dyn_boat_plant_test`, Windows MSVC Release):
 | Hosting, contacts | A host stepping the world matches the plant's own stepping bit for bit; a hull hitting a pier counts a static contact |
 | Pinned | `DynBoatPlant.CrossPlatformGoldenHash` `96abfc30fcae4fd4` (Windows MSVC; CI confirms Linux and macOS) |
 
-pycvc does not bind it yet (pycvc binds no boats), and a scene's world vehicles do not spawn boats yet
+pycvc binds it (`dyn_boat_plant`; "Python: pycvc"), and a scene's world vehicles do not spawn boats yet
 (docs/roadmap/OCEAN-AND-WEATHER-ROADMAP.md, "As built (O12: the boat plant)").
 
 ## Terrain in the navigator's energy (P5)
@@ -1418,6 +1443,46 @@ The parts:
 - **The terrain planes.** `nav_terrain_build(heights, cell_w, config)` is `terrain_build`: the
   slope, the grade cost, the infeasible cells and the limit, as numpy arrays. It is the C++
   reference a Python twin of the planes is checked against.
+- **The wake** (`field.h`'s `field_wake`). `pycvc.field_wake(cells=64, cell=1.0, ...,
+  shore=None)` holds `field_wake`'s values; `add_field(..., inertial=True, wake=...)` puts it on
+  a fluid with a surface. `field_wake_info(field)` is a dict of `wake_info` (placed, x0, y0,
+  cell, cells, windows, sources, outside); `field_wake_height(field, x, y)` and
+  `field_wake_of(field)` read it, and `water_at(p, body=None)` is the water at a point (wet,
+  depth, density, velocity) with the waves in it, less `body`'s own. `shore_grid_mask(depth,
+  shore_m, min_x, min_y, cell, slope=None)` is a coast from (rows, cols) planes. `add_box`,
+  `add_sphere` and `add_hull` take `hull=` (a `hull_mesh`) for a body the water pushes on by
+  its triangles.
+- **Wading** (`vehicle.h`'s `wading_desc`). `vehicle_desc.wading` is a `pycvc.wading_desc`
+  whose fields read and write in place (`d.wading.fording_depth = 1.52`); `as_dict()` gives
+  them all. `vehicle_state` adds `water_force`, `engine_flooded`, `water_inside` and
+  `water_inside_mass` (with a `flood_area`), each wheel `water_depth` and `water_drag`.
+  `set_vehicle(id, desc)` tunes a running vehicle, wading's knobs included; `wading.enabled`,
+  `wading.displacement` and whether `flood_area` is 0 are fixed when it is added. The
+  binding's `vehicles.<name>.tuning.wading.*` knobs do the same from the tree.
+  `dyn_bike_plant.wading(i)` (wet, engine_flooded, drag, lift and each axle's contact, grip and
+  depth) and `waded(i)` read the dynamic plant's water (`dyn_wading.h`).
+- **The wind** (`flow_velocity.h`). `wind_flow(speed_mps, dir_rad, gustiness, base_z)` is the
+  scene's wind; `scene_wind_flow(speed, dir, gustiness=0.25, base_z=0)` is the one Ariadne's
+  `wind.speed`, `wind.dir` (degrees) and `wind.gustiness` keys make. Both have `velocity(p,
+  t)`, `reference(p, t)`, `profile(z)`, `base()` and `digest()`. `physics_world.set_wind(speed,
+  dir, gustiness, base_z)` keeps one as a flow of air everywhere (`add_wind`; a second call
+  changes it in place, `None` takes it away; `wind()` and `wind_field()` read it).
+  `add_field(None, kind="flow", wind=...)` adds one by hand. `mujoco_robot.set_wind(air,
+  time_offset, drag_coefficient, density)` blows on a robot; `wind_force()` and
+  `wind_torque()` read it.
+- **Boats** (`hull.h`, `boat.h`, `dyn_boat_plant.h`). `hull_mesh(vertices, triangles, ...)`,
+  `box_hull(half_extents)` and `loft_hull(stations)` (each `{"x": x, "section": [(half_width,
+  height), ...]}`) make hulls, with `vertices()`, `triangles()`, `bounds()` and
+  `waterline_box(z)`. `boat_desc` holds the hull body (`hull()`, `set_hull(half_extents=...,
+  mass=..., ...)`), its mesh (`hull_mesh()`, `set_hull_mesh()`, copied in and out), and the
+  propeller and rudder as dicts (`propeller()`, `set_propeller({...})`, `rudder()`,
+  `set_rudder({...})`). `dyn_boat_desc.launch()`, `jonboat()`, `tactical()` and `preset(name)`
+  add `max_speed`, `turn_radius` and `length_overall`. `physics_world.add_boat(desc, position)`,
+  `set_boat_controls(id, throttle, rudder)`, `boat_state(id)`, `remove_boat` and
+  `boat_desc_of`. `dyn_boat_plant(descs, world, ...)` is the boat plant, with `state(i)`,
+  `boat_state(i)`, `books(i)`, `hold_controls(i, ...)` and the static `float_height(boat,
+  mass, density)` and `draft(...)`; `nav_sim_world_set_plant` takes it. `plant_host` adds
+  `boat_state(i)` and `boat_books(i)` on "dynamicboat".
 - **Key metadata.** `state_comment`, `state_property` and `state_property_keys` read what a
   key says it is.
 - **Lifetimes.** A `nav_plant` keeps its world alive, a `physics_binding` its app and world, and

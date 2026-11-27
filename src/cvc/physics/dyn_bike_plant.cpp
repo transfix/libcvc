@@ -243,6 +243,8 @@ void dyn_bike_plant::place(const cvc::nav::plant_state &start, const vehicle_des
       a.half_track = std::max(a.half_track, ax.half_track);
     a.p = cvc::nav::dyn_bike_params_of(
         nav_plant::dyn_bike_si_of(a.desc, _o.mu, 1.0, _o.drive_lag, _o.gravity), si);
+    a.mu0 = a.p.mu;
+    a.drag0 = a.p.drag;
     a.lim.L = a.p.lf + a.p.lr;
     a.lim.delta_max = static_cast<float>(a.desc.max_steer);
     a.lim.hdt = static_cast<float>(h);
@@ -421,6 +423,7 @@ dyn_bike_saved dyn_bike_plant::save(int i) const {
   s.driver = a.driver;
   s.steer_cmd = a.steer_cmd;
   s.accel_cmd = a.accel_cmd;
+  s.engine_flooded = a.water.engine_flooded;
   return s;
 }
 
@@ -432,6 +435,10 @@ void dyn_bike_plant::restore(int i, const dyn_bike_saved &s) {
   a.driver = s.driver;
   a.steer_cmd = s.steer_cmd;
   a.accel_cmd = s.accel_cmd;
+  a.water = dyn_wading{};
+  a.water.engine_flooded = s.engine_flooded;
+  a.p.mu = a.mu0;
+  a.p.drag = a.drag0;
   if (_chassis->on()) {
     vec3 pos;
     quat rot;
@@ -455,10 +462,14 @@ void dyn_bike_plant::step_model(agent &a, std::size_t i, double hs, const double
   const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
   const double grade = dyn::grade_at(_o.plant, a.s.x + a.p.lr * c, a.s.y + a.p.lr * sn, a.s.psi,
                                      static_cast<double>(a.p.lf + a.p.lr));
+  // The water at its axles (wading): its drag, its tires' grip, its engine.
+  wade(a);
   // Nav's command as the Jolt plant's driver takes it (dyn_driver).
-  const double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade,
-                                              _o.gravity, a.p.tau_drive, hs)
-                                 : a.accel_cmd;
+  double accel = _o.driver ? dyn::drive(a.driver, a.desc, a.accel_cmd, a.s.vx, grade, _o.gravity,
+                                        a.p.tau_drive, hs)
+                           : a.accel_cmd;
+  if (a.water.engine_flooded)
+    accel = dyn::flooded_drive(accel, a.s.vx, a.accel_cmd);
   a.applied.push_back(accel);
   a.applied_grade.push_back(grade);
   // With side_slope, gravity along and across the heading from the ground's gradient, a
@@ -498,6 +509,42 @@ void dyn_bike_plant::step_model(agent &a, std::size_t i, double hs, const double
                  0.0};
     _chassis->put(static_cast<int>(i), pos, rot, v, {0.0, 0.0, o.r});
   }
+}
+
+void dyn_bike_plant::wade(agent &a) const {
+  if (!_chassis->on() || !a.desc.wading.enabled || a.desc.axles.empty())
+    return;
+  // Its two axles on the plant's ground, each standing for its pair of tires.
+  const double c = std::cos(a.s.psi), sn = std::sin(a.s.psi);
+  const double L = a.p.lf + a.p.lr;
+  int front = 0, rear = 0;
+  for (std::size_t k = 1; k < a.desc.axles.size(); ++k) {
+    if (a.desc.axles[k].x > a.desc.axles[static_cast<std::size_t>(front)].x)
+      front = static_cast<int>(k);
+    if (a.desc.axles[k].x < a.desc.axles[static_cast<std::size_t>(rear)].x)
+      rear = static_cast<int>(k);
+  }
+  dyn::wade_contact k[2];
+  k[0].x = a.s.x + L * c;
+  k[0].y = a.s.y + L * sn;
+  k[0].axle = front;
+  k[1].x = a.s.x;
+  k[1].y = a.s.y;
+  k[1].axle = rear;
+  for (dyn::wade_contact &w : k) {
+    w.ground = dyn::ground_at(_o.plant, w.x, w.y);
+    w.tires = 2;
+  }
+  vec3 pos;
+  quat rot;
+  chassis_pose(a, a.s, pos, rot);
+  const double bottom = (pos + dyn::rotate(rot, {0.0, 0.0, -a.desc.half_extents.z})).z;
+  a.water = dyn::wade(*_o.physics, a.desc, k, 2, bottom, a.s.vx, a.mu0, _o.gravity,
+                      a.water.engine_flooded);
+  a.p.mu =
+      a.water.wet ? static_cast<float>(a.mu0 * 0.5 * (a.water.grip[0] + a.water.grip[1])) : a.mu0;
+  a.p.drag = a.water.wet ? static_cast<float>(a.drag0 + a.water.drag) : a.drag0;
+  a.waded = a.waded || a.water.wet;
 }
 
 dyn_bike_books dyn_bike_plant::step_books(agent &a, const diff::dyn_ph_books<double> &books,
@@ -614,6 +661,7 @@ void dyn_bike_plant::advance() {
       a.touch_depth = 0.0;
       a.applied.clear();
       a.applied_grade.clear();
+      a.waded = false;
     }
     _ticking = true;
     return;
@@ -636,6 +684,7 @@ void dyn_bike_plant::advance() {
     a.touch_depth = 0.0;
     a.applied.clear();
     a.applied_grade.clear();
+    a.waded = false;
   }
   const bool world = _chassis->on();
   const double h = _dt / _nsub;

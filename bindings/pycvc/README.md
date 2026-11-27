@@ -152,9 +152,25 @@ Fields come from `add_field`: water, snow or wind over a `pycvc.volume`. A fluid
 a `still_surface` or `wave_train_surface` (linear Airy trains), read at the world's
 `field_time()`, which follows a `pycvc.world_clock` through `follow(clock)`.
 
-Python reads the same values as C++: `test_pycvc_physics.py` rebuilds the cross-platform golden
+The water physics:
+- **The wake.** A fluid's `wake` (a `field_wake`, with a `shore_grid_mask` for a coast) makes the
+  floating bodies' waves push each other. `field_wake_info`, `field_wake_height` and `water_at`
+  read it.
+- **Wading.** A vehicle's `wading` (a `wading_desc`) floods its body, drags its wheels and floods
+  its engine past `fording_depth`. The binding's `tuning.wading.*` knobs tune it from the state
+  tree.
+- **The wind.** `set_wind(speed, dir, gustiness)` gives the world the air that Ariadne's scene wind
+  keys give a scene. `wind_flow` and `scene_wind_flow` make one by hand, and
+  `mujoco_robot.set_wind` blows it on a robot.
+- **Boats.** `hull_mesh`, `loft_hull`, `boat_desc` and `dyn_boat_desc` (the launch, jonboat and
+  tactical presets) describe a boat. `add_boat`, `set_boat_controls` and `boat_state` float and
+  drive one. `dyn_boat_plant` is a sim_world's plant of boats.
+
+Python reads the same values as C++. `test_pycvc_physics.py` rebuilds the cross-platform golden
 scene, the swell scene and `physics_parity_test`'s scenarios through pycvc, and requires C++'s
-state hashes and values bit for bit. See `docs/PHYSICS_API.md`, "Python: pycvc".
+state hashes and values bit for bit. `test_pycvc_physics_water.py` does the same for the wake's
+golden scene and the wind's samples, and runs the C++ tests' wading, wind and boat scenarios. See
+`docs/PHYSICS_API.md`, "Python: pycvc".
 
 ### Vehicle routes on a plant
 

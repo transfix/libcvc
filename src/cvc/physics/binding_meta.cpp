@@ -250,6 +250,30 @@ const key_meta kVehicle[] = {
     {"tuning.engine_friction_curve", "knob", "rpm:N m", N, N,
      "The engine's motoring friction against its speed, as rpm:N m points (\"700:78, 2040:87, "
      "3400:128\"); \"none\" for none. It brakes only with the throttle shut."},
+    // wading (vehicle.h; only a vehicle added with wading on wades)
+    {"water_force.x", "telemetry", "N", N, N,
+     "The water's push on the wheels and underbody this step (drag, the wheels' buoyancy), x."},
+    {"water_force.y", "telemetry", "N", N, N, "The water's push on the wheels and underbody, y."},
+    {"water_force.z", "telemetry", "N", N, N, "The water's push on the wheels and underbody, z."},
+    {"engine_flooded", "telemetry", "", N, N,
+     "1 once water past the fording depth has flooded the engine (it does not restart)."},
+    {"water_inside", "telemetry", "m^3", N, N,
+     "With a flood_area: the water in the cabin and engine bay."},
+    {"water_inside_mass", "telemetry", "kg", N, N, "With a flood_area: that water's mass."},
+    {"tuning.wading.wheel_displacement", "knob", "1", 0, 1,
+     "The share of a wheel's immersed cylinder that displaces water (the tire, not the rim's "
+     "dish)."},
+    {"tuning.wading.wheel_drag", "knob", "1", 0, 2, "C_d on a tire's immersed area (0.75 AMC)."},
+    {"tuning.wading.underbody_depth", "knob", "m", 0, 1,
+     "How far the axles, frame and skid plates reach below the chassis box."},
+    {"tuning.wading.underbody_drag", "knob", "1", 0, 2, "The underbody's C_d."},
+    {"tuning.wading.tire_pressure", "knob", "Pa", 0, 1e6,
+     "The tires' inflation pressure, for aquaplaning; 0 never aquaplanes."},
+    {"tuning.wading.fording_depth", "knob", "m", 0, 3,
+     "The water at the front axle past which the engine floods and stops; 0 never floods."},
+    {"tuning.wading.flood_area", "knob", "m^2", 0, 1,
+     "The openings the cabin and engine bay flood and drain through; 0 floods at once. Whether it "
+     "is 0 is fixed when the vehicle is added."},
 };
 
 const key_meta kWheel[] = {
@@ -271,6 +295,9 @@ const key_meta kWheel[] = {
     {"sinkage", "telemetry", "m", N, N, "How far it has sunk below the medium's fresh surface."},
     {"rut", "telemetry", "m", N, N, "The rut it found, before this pass."},
     {"medium_resistance", "telemetry", "N", N, N, "The medium's compaction resistance."},
+    {"water_depth", "telemetry", "m", N, N,
+     "Wading: the water over its contact (its lowest point without one)."},
+    {"water_drag", "telemetry", "N", N, N, "Wading: the water's drag on it this step."},
 };
 
 const key_meta kAxle[] = {

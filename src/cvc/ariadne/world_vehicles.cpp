@@ -689,12 +689,36 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
   const auto relative = [](const std::string &p) {
     return fs::path(p).is_relative() && p.find("://") == std::string::npos;
   };
+  // The Humvee in parts, its wheels turning: the vehicle-humvee package's humvee/chassis.glb,
+  // humvee/wheel.glb and humvee/rig.json, all three in one directory where the vehicle models are
+  // installed. False, `look` as it was, when they are not all there. The one-piece model stays in
+  // `path` (when it is installed) for a reader that draws only that: a relay passes a look's kind
+  // and file on, not its parts (room_entities.h), so its clients draw the one piece.
+  const auto humvee_parts = [](vehicle_look &look, const std::string &one_piece) {
+    const std::string chassis = find_vehicle_model("humvee/chassis.glb");
+    if (chassis.empty())
+      return false;
+    std::error_code ec;
+    const fs::path dir = fs::path(chassis).parent_path();
+    const fs::path wheel = dir / "wheel.glb", rig = dir / "rig.json";
+    if (!fs::is_regular_file(wheel, ec) || !fs::is_regular_file(rig, ec))
+      return false;
+    look.kind = "file";
+    look.path = one_piece;
+    look.fit = true;
+    look.chassis = chassis;
+    look.wheel = wheel.string();
+    look.rig_file = rig.string();
+    return true;
+  };
   for (vehicle_archetype &v : archetypes) {
     vehicle_look &look = v.look;
     if (look.kind.empty()) { // the default: a preset's model, when it is installed
       const std::string model = v.preset == "humvee"     ? find_vehicle_model("humvee")
                                 : v.preset == "tactical" ? find_vehicle_model("TacticalBoat")
                                                          : std::string();
+      if (v.preset == "humvee" && humvee_parts(look, model))
+        continue;
       if (!model.empty()) {
         look.kind = "file";
         look.path = model;
@@ -706,6 +730,11 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
     }
     if (look.kind == "model") {
       const std::string model = find_vehicle_model(look.path);
+      // `model: humvee` is the Humvee in parts too, unless it is placed (scale:, yaw:, z:): a
+      // parted look is fitted to its vehicle by its rig, so only the one piece takes those.
+      if (look.path == "humvee" && look.scale == 1.0 && look.yaw == 0.0 && look.z == 0.0 &&
+          humvee_parts(look, model))
+        continue;
       if (model.empty()) {
         warn("world: vehicles: " + v.id + ": look: model '" + look.path +
              "' is not installed (cvcpkg install vehicle-" + look.path +
@@ -779,6 +808,20 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings) {
   resolve_vehicle_looks(archetypes, doc_dir, assets, warnings, std::vector<SceneData>{});
+}
+
+vehicle_look vehicle_look_named(const std::string &name, std::vector<std::string> *warnings) {
+  std::vector<vehicle_archetype> one(1); // a humvee preset with no look: the default
+  one[0].id = name;
+  vehicle_look &look = one[0].look;
+  std::error_code ec;
+  if (name != "humvee") {
+    look.kind = std::filesystem::is_regular_file(name, ec) ? "file" : "model";
+    look.path = name;
+    look.fit = true;
+  }
+  resolve_vehicle_looks(one, "", {}, warnings);
+  return one[0].look;
 }
 
 vehicle_stats vehicle_stats_of(const ph::vehicle_desc &d) {
@@ -4474,7 +4517,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     if (g->four) {
       const ph::dyn_4w_plant &pl = *g->four;
       p.model = "dyn4";
-      p.exact = true;
+      p.exact = !pl.waded(i); // in water its drag and grip changed each substep (dyn_wading.h)
       p.dyn4 = pl.params(i);
       p.dyn4_state = pl.body(i);
       p.limits = pl.step_limits(i);
@@ -4488,7 +4531,7 @@ std::vector<entity_plant> WorldVehicles::plants() const {
     } else if (g->bike) {
       const ph::dyn_bike_plant &pl = *g->bike;
       p.model = "dyn_bike";
-      p.exact = true;
+      p.exact = !pl.waded(i);
       p.bike = pl.params(i);
       p.bike_state = pl.body(i);
       p.limits = pl.step_limits(i);
@@ -4643,6 +4686,26 @@ ph::body_state entity_ride(const entity_info &e, const ph::world *world) {
     s.angular_velocity = b.angular_velocity;
   }
   return s;
+}
+
+std::vector<walker_car> WorldVehicles::footprints() const {
+  const impl &d = *_impl;
+  std::vector<walker_car> out;
+  for (const impl::entity &e : d.ents) {
+    const entity_info i = d.info(e);
+    if (!i.placed)
+      continue;
+    walker_car c;
+    c.x = i.x;
+    c.y = i.y;
+    c.yaw = i.yaw;
+    c.half_length = e.desc.half_extents.x;
+    c.half_width = e.desc.half_extents.y;
+    c.vx = i.vx;
+    c.vy = i.vy;
+    out.push_back(c);
+  }
+  return out;
 }
 
 std::vector<entity_info> WorldVehicles::entities() const {

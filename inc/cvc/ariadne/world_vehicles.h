@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cvc/ariadne/people_walk.h>        // walker_car: footprints() (OW7d)
 #include <cvc/ariadne/vehicle_drive.h>      // dynamic_drive
 #include <cvc/ariadne/vehicle_kinematics.h> // kinematic_drive
 #include <cvc/ariadne/world_rules.h>        // vehicle_archetype
@@ -125,11 +126,14 @@ struct SceneData;
 // Each archetype's look as a view can draw it wherever it runs: a model by name found (a fitted
 // file), a document asset's file, a file beside the document (`doc_dir`), a data: entry's package
 // (`data`: its uri and path: copied into the look, so it is whole without the document; a view
-// loads it, cvcGL's vehicle_model_state), and the default look made explicit (the Humvee model for
-// a humvee when it is installed, else the box). A parted look's files (its chassis, its wheel,
-// its rig's file) each beside the document, else installed where the vehicle models are
-// (find_vehicle_model: `humvee/chassis.glb`), else beside the document still (the view warns when
-// it cannot read one). A look that cannot be found is drawn as its box, with a warning.
+// loads it, cvcGL's vehicle_model_state), and the default look made explicit (for a humvee, or
+// `model: humvee` with no scale:, yaw: or z:, the Humvee in parts when humvee/chassis.glb,
+// humvee/wheel.glb and humvee/rig.json are installed together, as a parted file look whose path
+// is the one-piece model; else the Humvee model when it is installed; else the box). A parted
+// look's files (its chassis, its wheel, its rig's file) each beside the document, else installed
+// where the vehicle models are (find_vehicle_model: `humvee/chassis.glb`), else beside the
+// document still (the view warns when it cannot read one). A look that cannot be found is drawn as
+// its box, with a warning.
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings, const std::vector<SceneData> &data);
@@ -138,6 +142,13 @@ void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std
 void resolve_vehicle_looks(std::vector<vehicle_archetype> &archetypes, const std::string &doc_dir,
                            const std::vector<SceneAsset> &assets,
                            std::vector<std::string> *warnings = nullptr);
+// A look by a model's name, resolved as resolve_vehicle_looks resolves a world vehicle's, for a
+// host that draws vehicles of its own (a nav_swarm's agents, nav_scrub's runs): `humvee` a humvee's
+// default look (the Humvee in parts, else Humvee.glb, else the box); a file that is there, that
+// file, fitted; any other name `model: NAME` (found where the vehicle models are, fitted, else the
+// box, with a warning).
+vehicle_look vehicle_look_named(const std::string &name,
+                                std::vector<std::string> *warnings = nullptr);
 
 // What a vehicle_selector shows of a vehicle.
 struct vehicle_stats {
@@ -360,10 +371,11 @@ struct entity_plant {
   double rear_x = 0.0;        // the rear axle along the body from the chassis's centre (m)
   bool placed = false;        // in the world; nothing below is set otherwise
   // The model that stands for the plant:
-  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact`. jolt: the four-wheel
-  //             model with the vehicle's own numbers (nav_plant::dyn4_si_of), its pose and twist
-  //             read from the chassis, its heave 0 and its drive state 0 (not `exact`).
-  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact`.
+  //   dyn4      dynamic4w: the plant's own (physics::dyn_4w_plant), `exact` unless it waded in
+  //             the last tick (dyn_wading.h). jolt: the four-wheel model with the vehicle's own
+  //             numbers (nav_plant::dyn4_si_of), its pose and twist read from the chassis, its
+  //             heave 0 and its drive state 0 (not `exact`).
+  //   dyn_bike  dynamic: the plant's own (physics::dyn_bike_plant), `exact` unless it waded.
   //   bike      kinematic: nav's bicycle, `exact`; `bike_state` holds the rear axle, the heading
   //             and the speed (as vx), `limits` its limits. dynamicboat: the bicycle nav plans the
   //             boat with (physics::dyn_boat_plant drives it; not `exact`).
@@ -568,6 +580,9 @@ public:
   // default. A vehicle a participant or a gym commands is its commander's to brake.
   void set_brake_for_people(bool on);
   bool brakes_for_people() const;
+  // Each placed vehicle as a walker sees it (people_walk.h's walker_car: its chassis's centre,
+  // heading, half-length, half-width and velocity), for a scripted person to walk round (OW7d).
+  std::vector<walker_car> footprints() const;
   // What the navigators know of the world (the vehicles.sense key, "known" or "fog", sets it
   // too, read each poll; a document's init: may set it before the world is made):
   //   known  the world's grid, whole (the default): nothing to sense

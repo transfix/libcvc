@@ -9,21 +9,25 @@
 */
 
 // cvc::physics::dyn_bike_plant (dyn_bike_plant.h): nav's agents on the dynamic single-track
-// vehicle as their live plant. Its steps are dyn_plant's, its energy books close, and plant_host
-// puts a sim_world's agents on it by name, with or without Jolt in the build.
+// vehicle as their live plant. Its steps are dyn_plant's, its energy books close, it wades into the
+// world's water (dyn_wading.h), and plant_host puts a sim_world's agents on it by name, with or
+// without Jolt in the build.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cvc/core/app.h>
 #include <cvc/core/exception.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/physics/dyn_bike_plant.h>
 #include <cvc/physics/plant_host.h>
+#include <cvc/volume/volume.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace cvc::physics;
@@ -619,4 +623,80 @@ TEST(DynBikePlant, PlantHostPutsTheAgentsOnItByName) {
   EXPECT_EQ(sim.plant_type(), plant_kind::kinematic);
   EXPECT_EQ(host.dynamic(), nullptr);
   EXPECT_EQ(host.active(), nullptr);
+}
+
+// Into a lake (dyn_wading.h), on the single-track plant: from x = 40 0.5 m of still water, from
+// x = 90 1.2 m. Without wading the Humvee drives through as on dry ground, step for step; wading,
+// the water's drag slows it in the shallows, its axles' grip falls, and past its fording depth its
+// engine floods and it stops in the deep water.
+TEST(DynBikePlant, DrivesIntoALakeAndWades) {
+  if (!plant_host::available())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app; // the water's volumes'
+  struct run {
+    std::unique_ptr<world> w;
+    std::unique_ptr<dyn_bike_plant> plant;
+  };
+  const auto make = [&app](bool water, bool wading) {
+    run r;
+    r.w = std::make_unique<world>();
+    body_desc g;
+    g.shape = box{{500.0, 500.0, 0.5}};
+    g.motion = motion_type::static_;
+    g.position = {0.0, 0.0, -0.5};
+    g.material = r.w->add_material({"lake bed", 0.9f, 0.0f, 0.0f, -1, 0.45f});
+    const body_id ground = r.w->add_body(g);
+    for (const auto &[x0, x1, depth] : {std::tuple{40.0, 90.0, 0.5}, std::tuple{90.0, 400.0, 1.2}})
+      if (water) {
+        auto v = std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                               cvc::bounding_box(x0, -50.0, -1.0, x1, 50.0, depth));
+        v->fill(1000.0);
+        field f;
+        f.kind = field_kind::fluid;
+        f.volume = v;
+        r.w->add_field(f);
+      }
+    dyn_bike_plant_options o;
+    o.physics = r.w.get();
+    o.ground_bodies = {ground};
+    vehicle_desc d = vehicle_desc::humvee();
+    d.wading.enabled = wading;
+    r.plant = std::make_unique<dyn_bike_plant>(std::vector<vehicle_desc>{d}, o);
+    cvc::nav::plant_state start;
+    r.plant->attach(1, &start, trained_frame(), 0.06);
+    return r;
+  };
+  run dry = make(false, true), off = make(true, false), wet = make(true, true);
+  const double L = vehicle_desc::humvee().wheelbase();
+  double at85 = -1.0, dry85 = -1.0, flooded_at = -1.0, mu85 = 0.0;
+  bool same = true;
+  for (int t = 0; t < 1000; ++t) {
+    for (run *r : {&dry, &off, &wet}) {
+      r->plant->command(0, 0.0f, static_cast<float>(2.0 * kS));
+      r->plant->advance();
+    }
+    const diff::dyn_state<double> &a = dry.plant->body(0), &b = off.plant->body(0);
+    same = same && a.x == b.x && a.y == b.y && a.vx == b.vx && a.psi == b.psi;
+    const diff::dyn_state<double> &s = wet.plant->body(0);
+    if (dry85 < 0.0 && a.x > 85.0)
+      dry85 = a.vx;
+    if (at85 < 0.0 && s.x > 85.0) {
+      at85 = s.vx;
+      mu85 = wet.plant->params(0).mu;
+    }
+    if (flooded_at < 0.0 && wet.plant->wading(0).engine_flooded)
+      flooded_at = s.x + L; // its front axle
+  }
+  const diff::dyn_state<double> &s = wet.plant->body(0);
+  std::printf("  dry: %.2f m/s at x = 85; wading: %.2f m/s, mu %.2f (0.9 dry); flooded with its "
+              "front axle at %.1f m, at %.1f m after 60 s\n",
+              dry85, at85, mu85, flooded_at, s.x + L);
+  EXPECT_TRUE(same) << "without wading the water does nothing to the model";
+  EXPECT_LT(at85, 0.6 * dry85) << "the water's drag slows it";
+  EXPECT_LT(mu85, 0.5) << "its tires soaked to the bed's 0.45, less the load the water lifts";
+  EXPECT_NEAR(flooded_at, 90.0, 1.5) << "as its front axle reached the deep water";
+  EXPECT_LT(s.x + L, 110.0) << "and it stops in it";
+  EXPECT_LT(std::fabs(s.vx), 0.05);
+  EXPECT_TRUE(wet.plant->save(0).engine_flooded);
+  EXPECT_NEAR(identity_gap(*wet.plant, 0), 0.0, 1e-9 * wet.plant->books(0).flow());
 }
