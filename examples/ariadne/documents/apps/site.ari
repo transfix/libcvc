@@ -1,0 +1,31 @@
+# site.ari — one site's window, loaded by sites.ari once per site (docs/ARIADNE.md §6.3).
+#
+# The loader grants it `session`, its own site's entry in sessions.<site>. Everything else it
+# keeps is its own, at includes.<site>: its note, which its init: writes once, and its visits.
+
+meta:
+  name: Site
+  min_libcvc: 4.0.10
+
+requires:
+  - str-concat                     # its note
+
+needs: session
+
+init: |
+  (begin
+    (state-set "note" (str-concat "opened for " (state-get "session.host")))
+    (state-set "visits" "0"))
+
+windows:
+  - window: Site
+    id: site
+    bind: session.host             # titled by its host
+    size: [300, 110]
+    children:
+      - text: "note"
+        bind: note
+      - text: "visits"
+        bind: visits
+      - button: Visit
+        on: (state-set "visits" (str (+ 1 (int (state-get "visits")))))

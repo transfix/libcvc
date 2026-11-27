@@ -498,6 +498,18 @@
       "description": "A count: a number, a state key or an expression; {i} in the copies' strings is the index.",
       "type": ["integer", "string"]
     },
+    "widget_repeat": {
+      "description": "A count, as a scene node's repeat:, or {children: key}: an instance per child of the state key, in name order, {key} the child's name in its strings and {i} its place.",
+      "anyOf": [
+        {"$ref": "#/$defs/repeat"},
+        {
+          "type": "object",
+          "properties": {"children": {"$ref": "#/$defs/string"}},
+          "required": ["children"],
+          "additionalProperties": false
+        }
+      ]
+    },
     "widget_common": {
       "description": "The keys every widget takes (its own type's keys are listed on its schema).",
       "properties": {
@@ -521,7 +533,7 @@
           "description": "Hover text, or an expression \"(...)\" giving it."
         },
         "autofocus": {"$ref": "#/$defs/flag"},
-        "repeat": {"$ref": "#/$defs/repeat"},
+        "repeat": {"$ref": "#/$defs/widget_repeat"},
         "on_click": {"$ref": "#/$defs/program"},
         "on_hover": {"$ref": "#/$defs/program"},
         "on_drag": {"$ref": "#/$defs/program"},
@@ -1513,7 +1525,7 @@
         "load": {"$ref": "#/$defs/string"},
         "args": {"type": "object", "patternProperties": {"^.*$": {"$ref": "#/$defs/scalar"}}},
         "as": {"$ref": "#/$defs/scalar"},
-        "name": {"$ref": "#/$defs/string", "description": "A state key or an expression, worked out each frame ({i} its instance under repeat:), that names the application instead when not empty."},
+        "name": {"$ref": "#/$defs/string", "description": "A state key or an expression, worked out each frame ({i} its instance under repeat:, {key} its child under repeat: {children: key}), that names the application instead when not empty."},
         "functions": {
           "$ref": "#/$defs/strings",
           "description": "The functions it grants the module: names, or \"*\"."

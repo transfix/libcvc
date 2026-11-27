@@ -3171,6 +3171,92 @@ TEST(AriadneFtxui, JsonFeedDocumentRepeatsOverAParsedArray) {
     EXPECT_EQ(columns(l), columns(box.front())) << l << "\n" << s;
 }
 
+// §3 a load: repeated over a key's children, as `ari snapshot` draws it: a module per site, in
+// its name order, filled by its own child. A site added before the others, and one taken out,
+// leave the rest as they were: each keeps its own state (its note, which its init: wrote once) at
+// includes.<site>.
+TEST(AriadneFtxui, AMountRepeatedOverAKeysChildrenDrawsARowPerChild) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_ftxui_keyed_mount";
+  fs::create_directories(dir);
+  std::ofstream(dir / "site.ari") << R"(meta: { name: Site, min_libcvc: "4.0.10" }
+needs: session
+init: (state-set "note" (str-concat "opened as " (state-get "session.host")))
+root:
+  - text: "site"
+    bind: session.host
+  - text: "note"
+    bind: note
+  - text: "visits"
+    bind: session.visits
+)";
+  std::ofstream(dir / "sites.ari") << R"(meta: { name: Sites, min_libcvc: "4.0.10" }
+init: |
+  (begin
+    (state-set "sites.tx_wtf.on" "1")
+    (state-set "sessions.tx_wtf.host" "tx.wtf")
+    (state-set "sessions.tx_wtf.visits" "3")
+    (state-set "sites.ncviz.on" "1")
+    (state-set "sessions.ncviz.host" "ncviz.com")
+    (state-set "sessions.ncviz.visits" "5"))
+windows_menu: false
+windows:
+  - window: Sites
+    id: sites
+    closable: false
+    children:
+      - load: site.ari
+        as: "{key}"
+        repeat: {children: sites}
+        link:
+          session: {to: "sessions.{key}", mode: rw}
+)";
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.sites");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load((dir / "sites.ari").string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  art.drain();
+  be.render_to_string(art.runtime(), 60, 20); // the frame that runs each site's init:
+  std::string s = be.render_to_string(art.runtime(), 60, 20);
+  // A site's rows in its child's name order: ncviz, then tx_wtf.
+  const std::size_t ncviz = s.find("site: ncviz.com");
+  std::size_t tx = s.find("site: tx.wtf");
+  ASSERT_NE(ncviz, std::string::npos) << s;
+  ASSERT_NE(tx, std::string::npos) << s;
+  EXPECT_LT(ncviz, tx) << s;
+  EXPECT_LT(s.find("note: opened as ncviz.com"), tx) << s;
+  EXPECT_GT(s.find("note: opened as tx.wtf"), tx) << s;
+  EXPECT_NE(s.find("visits: 3"), std::string::npos) << s;
+
+  // A site added (named so it sorts first), and ncviz taken out: tx_wtf is the same instance,
+  // its note the one its init: wrote, its visits read through its own hole.
+  cvc::state &st = cvc::state::instance(app);
+  st("ui.docs.sites.sessions.a_site.host").value(std::string("a.example"));
+  st("ui.docs.sites.sessions.a_site.visits").value(std::string("1"));
+  st("ui.docs.sites.sites.a_site.on").value(std::string("1"));
+  st("ui.docs.sites.sites").removeChild("ncviz");
+  st("ui.docs.sites.sessions.tx_wtf.visits").value(std::string("4"));
+  art.drain();
+  be.render_to_string(art.runtime(), 60, 20); // the frame that opens a_site
+  s = be.render_to_string(art.runtime(), 60, 20);
+  const std::size_t a = s.find("site: a.example");
+  ASSERT_NE(a, std::string::npos) << s;
+  tx = s.find("site: tx.wtf");
+  ASSERT_NE(tx, std::string::npos) << s;
+  EXPECT_LT(a, tx) << s;
+  EXPECT_LT(s.find("note: opened as a.example"), tx) << s;
+  EXPECT_GT(s.find("note: opened as tx.wtf"), tx) << s;
+  EXPECT_GT(s.find("visits: 4"), tx) << s;
+  EXPECT_EQ(s.find("ncviz"), std::string::npos) << s;
+  EXPECT_EQ(val(app, "ui.docs.sites.includes.ncviz.note"), "opened as ncviz.com")
+      << "a site taken out keeps its state";
+}
+
 TEST(AriadneTvision, JsonFeedDocumentFillsItsHostedWindow) {
   REQUIRE_FTXUI();
   if (!AppRuntime::have_yaml())

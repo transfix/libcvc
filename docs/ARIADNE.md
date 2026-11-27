@@ -5591,6 +5591,23 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
 
   A repeated mount isn't a nested repeat: the module's own `repeat:`s use their `{i}` at its
   instance's sub-prefix, so the loader doesn't warn about them.
+- **A mount repeated over a key's children** (`repeat: {children: sites}`, §6.3) is an application
+  per child. With no `name:`, it is named by its child: `as: "{key}"` with no `meta.name` names
+  the instance by the child's name (`tx_wtf`), and otherwise the child's name follows the name
+  (`Site tx_wtf`) where a count's number would. A `name:` takes `{key}`
+  (`name: sites.{key}.title`). Since an instance is its child, a site added or removed while the
+  document runs leaves the others' applications as they were, quit or running. The numbered
+  slots above can then be keyed by site:
+
+  ```yaml
+  windows:
+    - load: nicotina.ari
+      as: "{key}"
+      repeat: {children: sites}
+      name: sites.{key}.host
+      link:
+        session: {to: "sessions.{key}", mode: rw}
+  ```
 - **Mechanism:** `plan_windows_menu` walks the tree with each node's composed scope. It records
   each mount's first menubar (the mount, its bar, its name, its prefix and its functions), and a
   repeated mount's from its template. Each frame `plan_frame_apps` expands the repeated ones into
@@ -6233,6 +6250,38 @@ A module with a `menubar:` of its own is an application: its bar becomes one men
 bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
 by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
+**A module per child of a key.** A `load:` with `repeat: {children: KEY}` (§6.5) mounts the
+fragment once per child of `KEY`, while the document runs: a child added mounts a new instance,
+and a child taken out unmounts its instance. With `as: "{key}"` each instance's mount id is its
+child's name, so it is mounted at `includes.<name>`. Its `link:` targets, its `name:` and its
+handlers take `{key}` as they take `{i}`:
+
+```yaml
+windows:
+  - load: site.ari
+    as: "{key}"                     # includes.tx_wtf for sites.tx_wtf
+    repeat: {children: sites}
+    name: sites.{key}.title
+    link:
+      session: {to: "sessions.{key}", mode: rw}
+```
+
+- **Its mount id.** `{key}` and `{i}` are the only parts of `as:` kept as written; the rest is
+  sanitized as before. With a token, the instance's sub-prefix is `as:` with it filled in. Without
+  one, the child's name is appended, as a count's index is: `as: site` mounts `includes.site.<name>`.
+  A name's characters other than letters, digits, `_` and `-` are `_` in the sub-prefix, so a
+  child always makes one segment. A `{key}` in `as:` without `repeat: {children: ...}`, or an `{i}`
+  without any `repeat:`, warns and is taken literally (`_key_`).
+- **An instance is its child.** Its sub-prefix, its holes, its `init:` and its `on_tick:` resident
+  belong to the child. A sibling added or taken out does not move it: it keeps its state, its
+  `init:` is not run again and its resident runs on. A positional `repeat:` count would shift
+  every instance after the change onto its neighbour's sub-prefix.
+- **A child taken out** has its resident stopped and its instance freed at the next frame. Its
+  state stays under its sub-prefix, as a quit application's does. If the child comes back, the
+  instance is made again over that state, and its `init:` does not run again (it ran once for the
+  sub-prefix).
+- `examples/ariadne/documents/sites.ari` mounts `apps/site.ari` per site, with Add and Remove.
+
 ### 6.4 The URI resolver
 
 All external references (`import:`, `load:`, scene `source:`, `fetch`) go through one
@@ -6349,6 +6398,31 @@ names state or shows text: `id`, `label`, `bind`, `on`, the pointer handlers (`o
 `src`, `status`, `poster`, `emoji`, a `background:`'s `src`, `bind` and `status`, and a `load:`
 mount's `link:` holes. A nested `repeat:` keeps its own `{i}`: the outer index does not reach
 into it.
+
+**Repeating over a key's children.** `repeat: {children: KEY}` draws an instance per child of the
+state key `KEY` (resolved as a `bind:` is, through a `link:` hole too), in name order, worked out
+each frame. In each instance `{key}` is the child's name, filled in wherever `{i}` is, and `{i}` is
+its place this frame:
+
+```yaml
+- type: group
+  repeat: {children: sites}
+  layout: {kind: horizontal}
+  children:
+    - text: "{key}"
+    - button: Remove
+      on: (state-delete "sites.{key}")
+```
+
+- An instance is its child, not a position. Its backend id is the child's name (a count's is its
+  index), and a repeated mount's sub-prefix goes by it (§6.3). So when a child is added before
+  the others, or one is taken out, the others keep their ids, their state and their programs.
+- A key that isn't there, or has no children, draws nothing. Past 4096 children the rest are
+  left out, with a warning, as a count is capped.
+- `KEY` is a state key, not an expression. Any other key in the map warns and is ignored.
+- A count's instances have `{key}` too: their index, the same as `{i}`.
+- `{key}` is a runtime token, as `{i}` is. An `include:` arg named `key` fills `{key}` in when
+  the document loads, before any repeat sees it.
 
 Slots `note` (a row above the header), `extra` (lines under the byline, in the header's text
 column) and `body` (widgets after the body text) take more of a post's parts. A part whose key
@@ -6482,7 +6556,9 @@ the runtime emits a container it computes `sub_prefix = resolve_bind(parent_pref
 scope)`, pushes it (RAII `ScopeGuard`), and resolves the children against it
 (`Runtime::Impl::emit_container`, [`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)). A mount's
 *own* reactive fields (e.g. its `visible_when`) stay in the **parent** scope — they are evaluated
-before the push. A repeated mount gets `includes.<as>.<i>` per instance.
+before the push. A repeated mount gets `includes.<as>.<i>` per instance. One repeated over a
+key's children gets `includes.<as>.<name>` per child, or `includes.<name>` with `as: "{key}"`
+(§6.3).
 
 ### 7.4 Default-deny and `link:` holes
 
@@ -6529,8 +6605,8 @@ resident starts right after it (§2.3). A reconcile keeps that resident running 
 has the same mount at the same sub-prefix with the same program (its body and its functions), as
 a reload of an unchanged document does, and stops it otherwise. A repeated mount's resident runs
 per instance and restarts at a reconcile. An instance stops when its outermost `repeat:` count
-drops below it (a nested repeat's count is not watched: its instances stop at the next
-reconcile). A module's functions come
+drops below it, or, under `repeat: {children: ...}`, when its child is gone (a nested repeat's
+instances are not watched: they stop at the next reconcile). A module's functions come
 only from its own `functions:` and the mount's `functions:` grant, never from its parent
 implicitly.
 

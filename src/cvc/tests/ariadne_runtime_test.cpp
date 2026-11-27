@@ -8420,6 +8420,229 @@ TEST(AriadneRuntime, AMountsNameNamesEachInstancesApplication) {
   EXPECT_TRUE(mb2.saw("begin_menu:Lab 7")) << mb2.dump();
 }
 
+// §3 repeat: {children: key}: an instance per child of the key, in name order, `{key}` its name
+// and `{i}` its place. Its backend id is its name, so a child keeps its id as others come and go.
+TEST(AriadneReactive, ARepeatOverAKeysChildrenNamesEachInstanceByItsChild) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("ui.demo.sites.tx_wtf.host").value(std::string("tx.wtf"));
+  st("ui.demo.sites.ncviz.host").value(std::string("ncviz.com"));
+  Widget t = text("{i}:{key}");
+  t.repeat = "sites";
+  t.repeat_children = true;
+  Widget c = checkbox("on {key}", "sites.{key}.on", false);
+  c.repeat = "sites";
+  c.repeat_children = true;
+  rt.set_root(group({t, c}));
+  rt.render();
+  EXPECT_LT(log_index(mb, "text_line:0:ncviz"), log_index(mb, "text_line:1:tx_wtf"))
+      << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("push_id:ncviz"));
+  EXPECT_TRUE(mb.saw("push_id:tx_wtf"));
+  EXPECT_FALSE(mb.saw("push_id:0")) << "a child's instance is not named by its place";
+  // A child added before the others takes place 0, and the others keep their names.
+  st("ui.demo.sites.a_site.host").value(std::string("a.example"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:0:a_site")) << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("text_line:2:tx_wtf"));
+  EXPECT_TRUE(mb.saw("checkbox:on tx_wtf"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "push_id:tx_wtf"), 2) << "both templates";
+  // One taken out is no longer drawn; an empty or missing key draws none.
+  st("ui.demo.sites").removeChild("ncviz");
+  mb.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb.saw("push_id:ncviz")) << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("text_line:1:tx_wtf"));
+  Widget none = text("none {key}");
+  none.repeat = "nothing.here";
+  none.repeat_children = true;
+  rt.set_root(group({none}));
+  mb.log.clear();
+  rt.render();
+  for (const std::string &l : mb.log)
+    EXPECT_EQ(l.find("none"), std::string::npos) << l;
+}
+
+// A keyed repeat in a grid: a cell per child, the hidden ones taking none.
+TEST(AriadneReactive, ARepeatOverAKeysChildrenFillsAGridsCells) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("rows.a.show").value(std::string("1"));
+  st("rows.b.show").value(std::string("0"));
+  st("rows.c.show").value(std::string("1"));
+  Widget cell = text("cell {key}");
+  cell.repeat = "rows";
+  cell.repeat_children = true;
+  cell.visible_when = "(= (state-get \"rows.{key}.show\") \"1\")";
+  Widget g = group({cell});
+  g.layout.kind = LayoutKind::Grid;
+  g.layout.col_widths = {{Unit::Px, 10}};
+  rt.set_root(group({g}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("text_line:cell a")) << ::testing::PrintToString(mb.log);
+  EXPECT_FALSE(mb.saw("text_line:cell b"));
+  EXPECT_TRUE(mb.saw("text_line:cell c"));
+  EXPECT_EQ(std::count(mb.log.begin(), mb.log.end(), "next_cell"), 2);
+}
+
+// §12 a load: repeated over a key's children, as "{key}": a module per child at includes.<name>,
+// its holes and its name: by the child. An instance is its child: as siblings are added and taken
+// out, it keeps its state, its init: is not run again and its on_tick: resident runs on, while a
+// child taken out has its resident stopped.
+TEST(AriadneMountScope, AMountRepeatedOverAKeysChildrenKeepsEachChildsInstance) {
+  if (!have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_keyed_mount";
+  fs::create_directories(dir);
+  const fs::path frag = dir / "site.ari";
+  std::ofstream(frag) << "meta: { min_libcvc: \"4.0.10\" }\n"
+                         "init: (state-set \"inits\" (str-concat (state-get \"inits\") \"x\"))\n"
+                         "on_tick: (state-set \"pid\" (self-pid))\n"
+                         "root:\n"
+                         "  - slider_int: Level\n    bind: level\n    lo: 0\n    hi: 100\n"
+                         "  - slider_int: Session\n    bind: session.n\n    lo: 0\n    hi: 100\n";
+  const std::string kOnce = "nilx"; // init: run once ((state-get) of a key not there is nil)
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  for (const auto &[site, n] : {std::pair<const char *, int>{"a", 10}, {"c", 30}}) {
+    st(std::string("ui.demo.sites.") + site).value(std::string("1"));
+    st(std::string("ui.demo.sessions.") + site + ".n").value(n);
+  }
+  LoadResult lr = load_string(app, "meta: { min_libcvc: \"4.0.10\" }\n"
+                                   "windows:\n  - window: W\n    children:\n      - load: " +
+                                       frag.string() +
+                                       "\n        as: \"{key}\"\n"
+                                       "        repeat: {children: sites}\n"
+                                       "        link:\n"
+                                       "          session: {to: \"sessions.{key}\", mode: rw}\n");
+  ASSERT_TRUE(lr.ok) << lr.error;
+  for (const std::string &w : lr.warnings)
+    ADD_FAILURE() << w;
+  rt.set_root(std::move(lr.root));
+  rt.render();
+  rt.drain();
+  EXPECT_TRUE(mb.saw("slider_int:Session=10")) << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("slider_int:Session=30"));
+  EXPECT_EQ(sval(app, "ui.demo.includes.a.inits"), kOnce);
+  EXPECT_EQ(sval(app, "ui.demo.includes.c.inits"), kOnce);
+  st("ui.demo.includes.c.level").value(7);
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "ui.demo.includes.c.pid").empty(); }));
+  const std::string c_pid = sval(app, "ui.demo.includes.c.pid");
+
+  // A site added before c, and a taken out: c is the same instance throughout.
+  st("ui.demo.sites.b").value(std::string("1"));
+  st("ui.demo.sessions.b.n").value(20);
+  rt.render();
+  rt.drain();
+  st("ui.demo.sites").removeChild("a");
+  st("ui.demo.includes.a.pid").value(std::string("gone"));
+  st("ui.demo.includes.c.pid").value(std::string(""));
+  mb.log.clear();
+  rt.render();
+  rt.drain();
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "ui.demo.includes.c.pid").empty(); }));
+  EXPECT_EQ(sval(app, "ui.demo.includes.c.pid"), c_pid) << "c's resident ran on, not restarted";
+  EXPECT_EQ(sval(app, "ui.demo.includes.c.inits"), kOnce) << "c's init: ran once";
+  EXPECT_EQ(sval(app, "ui.demo.includes.b.inits"), kOnce) << "b's ran as it came";
+  EXPECT_TRUE(mb.saw("slider_int:Level=7")) << "c's own state\n"
+                                            << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("slider_int:Session=20"));
+  EXPECT_FALSE(mb.saw("slider_int:Session=10")) << "a is no longer drawn";
+  for (int k = 0; k < 3; ++k) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(sval(app, "ui.demo.includes.a.pid"), "gone") << "a's resident was stopped";
+  EXPECT_EQ(sval(app, "ui.demo.includes.a.inits"), kOnce) << "a's state stays, as a quit app's";
+  // A write through c's hole lands on its own session.
+  mb.slider_int_ret.committed = true;
+  mb.slider_int_ret.value = 33;
+  rt.render();
+  EXPECT_EQ(sval(app, "ui.demo.sessions.c.n"), "33");
+  EXPECT_EQ(sval(app, "ui.demo.sessions.b.n"), "33") << "(every slider committed)";
+}
+
+// §5.25 a mount repeated over a key's children is an application per child, named by it: as
+// "{key}" names the mount by the child, a plain mount id gets the child's name after it, and a
+// name: with {key} is worked out per child. Each one's menu runs in its child's scope.
+TEST(AriadneRuntime, AMountRepeatedOverAKeysChildrenIsAnApplicationPerChild) {
+  cvc::app app;
+  Runtime rt(app, "ui.demo");
+  TrayBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("ui.demo.sites.tx_wtf.title").value(std::string("tx.wtf"));
+  st("ui.demo.sites.ncviz.title").value(std::string(""));
+  Widget m = fe_lab_mount();
+  m.repeat = "sites";
+  m.repeat_children = true;
+  m.scope = "includes.{key}";
+  m.app_name = "{key}";
+  rt.set_root(group({menubar({menu("File", {})}), m}));
+  rt.render();
+  EXPECT_LT(log_index(mb, "begin_menu:ncviz"), log_index(mb, "begin_menu:tx_wtf")) << mb.dump();
+  mb.pick = "Remesh"; // the first one's
+  rt.render();
+  rt.drain();
+  mb.pick.clear();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return !sval(app, "ui.demo.includes.ncviz.remeshed").empty(); }));
+  EXPECT_EQ(sval(app, "ui.demo.includes.ncviz.seeded"), "1");
+
+  Widget cam = fe_lab_mount();
+  cam.repeat = "sites";
+  cam.repeat_children = true;
+  cam.scope = "includes.cam";
+  cam.app_name = "Camera";
+  cam.app_name_bind = "sites.{key}.title";
+  TrayBackend mb2;
+  rt.set_backend(&mb2);
+  rt.set_root(group({menubar({menu("File", {})}), cam}));
+  rt.render();
+  EXPECT_TRUE(mb2.saw("begin_menu:tx.wtf")) << "its name:\n" << mb2.dump();
+  EXPECT_TRUE(mb2.saw("begin_menu:Camera ncviz")) << "no name: its mount id and its child";
+  mb2.pick = "Quit tx.wtf";
+  rt.render();
+  rt.drain();
+  mb2.pick.clear();
+  mb2.log.clear();
+  rt.render();
+  EXPECT_FALSE(mb2.saw("begin_menu:tx.wtf")) << mb2.dump();
+  EXPECT_TRUE(mb2.saw("begin_menu:Camera ncviz"));
+  EXPECT_EQ(sval(app, "ui.demo.includes.cam.ncviz.seeded"), "1") << "includes.<as>.<key>";
+}
+
+// The Windows menu lists a window repeated over a key's children once per child, by its id.
+TEST(AriadneRuntime, WindowsMenuListsAWindowRepeatedOverAKeysChildren) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state &st = cvc::state::instance(app);
+  st("peers.ann.name").value(std::string("Ann"));
+  st("peers.bo.name").value(std::string(""));
+  Widget cam = window_with_id("Peer {key}", "cam_{key}", true);
+  cam.bind = "peers.{key}.name";
+  cam.repeat = "peers";
+  cam.repeat_children = true;
+  rt.set_root(group({menubar({menu("View", {})}), cam, windows_menu("View")}));
+  rt.render();
+  EXPECT_TRUE(mb.saw("toggle:Ann")) << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("toggle:Peer bo"));
+  EXPECT_TRUE(mb.saw("push_id:cam_ann"));
+}
+
 // The shell's Processes view (docs/roadmap/ARIADNE_SHELL.md 4.10): every process the Runtime starts
 // says whose it is. (ps)'s and (inspect)'s `scope` is its chroot from the document's prefix: "" for
 // the document's own on_tick: and actions, "includes.fe_lab" for a loaded document's on_tick:, its

@@ -575,7 +575,7 @@ std::string issue_message(const raw_issue &r) {
 // looked up in `positions` (the node itself, or the template a clone was made from); an issue
 // whose place it does not have is left at line 0. A top-level key in `allowed` is accepted, and
 // with `skip_tokens` so is a string still holding a {name} token (a unit checked with only the
-// args it declares); a repeat's {i} always is. Sorted by position. Needs the validator.
+// args it declares); a repeat's {i} and {key} always are. Sorted by position. Needs the validator.
 std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bool widget,
                                        const YAML::Node &positions,
                                        const std::set<std::string> &allowed, bool skip_tokens) {
@@ -597,7 +597,7 @@ std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bo
       continue;
     if (r.value.is_string()) {
       const std::string &s = r.value.get_ref<const std::string &>();
-      if (s.find("{i}") != std::string::npos)
+      if (s.find("{i}") != std::string::npos || s.find("{key}") != std::string::npos)
         continue;
       if (skip_tokens) {
         const std::size_t open = s.find('{');
@@ -1790,6 +1790,28 @@ Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
 // per-kind branches focused on their own params and guarantees a new shared field is
 // wired for all kinds at once. §4 read-lane: visible_when is a state_exec predicate the
 // Runtime re-evaluates each frame (empty = always visible).
+// §3 `repeat: {children: key}`: the template is drawn once per child of the state key, each
+// instance named by its child (`{key}`), not by its place.
+void parse_repeat_children(Ctx &ctx, const YAML::Node &rep, Widget &w) {
+  const std::string where = "'" + (w.id.empty() ? w.label : w.id) + "': ";
+  for (const auto &kv : rep)
+    if (kv.first.IsScalar() && kv.first.Scalar() != "children")
+      ctx.warn("ari: " + where + "repeat: has an unknown key '" + kv.first.Scalar() +
+               "' (it takes a count, or {children: key}) — ignored");
+  const std::string key = str(rep, "children");
+  if (key.empty()) {
+    ctx.warn("ari: " + where + "repeat: {children: ...} needs a state key — not repeated");
+    return;
+  }
+  if (key.front() == '(') {
+    ctx.warn("ari: " + where + "repeat: {children: " + key +
+             "} takes a state key, not an expression — not repeated");
+    return;
+  }
+  w.repeat = key;
+  w.repeat_children = true;
+}
+
 // True if any widget in the subtree (excluding the root) carries a `repeat`.
 bool any_descendant_repeats(const Widget &w) {
   for (const Widget &c : w.children) {
@@ -1964,7 +1986,9 @@ Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
       w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
     if (has(n, "autofocus"))
       w.autofocus = flag(n, "autofocus", false);
-    if (has(n, "repeat"))
+    if (const YAML::Node rep = n["repeat"]; rep && rep.IsMap())
+      parse_repeat_children(ctx, rep, w); // §3: {children: key} -> once per child of the key
+    else if (has(n, "repeat"))
       w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
     if (has(n, "background"))
       parse_background(ctx, n["background"], w);
@@ -2469,8 +2493,22 @@ constexpr int kMaxMounts = 256;
 std::string sanitize_mount_id(const std::string &raw) {
   std::string out;
   out.reserve(raw.size());
-  for (char c : raw)
+  for (std::size_t k = 0; k < raw.size(); ++k) {
+    // A repeat's tokens stay, for its instances to fill in: `as: "{key}"` mounts each child of
+    // a repeat: {children: key} at includes.<its name>, `as: "slot{i}"` at includes.slot<i>.
+    bool token = false;
+    for (const std::string_view t : {std::string_view("{i}"), std::string_view("{key}")})
+      if (raw.compare(k, t.size(), t) == 0) {
+        out += t;
+        k += t.size() - 1;
+        token = true;
+        break;
+      }
+    if (token)
+      continue;
+    const char c = raw[k];
     out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_');
+  }
   if (out.empty())
     out = "mount";
   if (std::isdigit(static_cast<unsigned char>(out.front())))
@@ -2588,6 +2626,22 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   // Reserved only NOW — after the fragment has actually loaded+parsed — so a mount that failed
   // above never burns an id (which would spuriously bump a later valid sibling to <id>_2).
   std::string as = sanitize_mount_id(has(n, "as") ? str(n, "as") : default_mount_id(uri));
+  // Its tokens are a repeat's to fill in: `{key}` a repeat: {children: ...}'s, `{i}` any repeat's.
+  {
+    const YAML::Node rep = n["repeat"];
+    const bool keyed = rep && rep.IsMap(), counted = rep && rep.IsScalar();
+    for (const auto &[tok, ok] :
+         {std::pair<std::string_view, bool>{"{key}", keyed}, {"{i}", keyed || counted}})
+      if (as.find(tok) != std::string::npos && !ok) {
+        ctx.warn("ari: load '" + uri + "': as: '" + as + "' has " + std::string(tok) +
+                 (tok == "{key}" ? ", which only a repeat: {children: key} fills in"
+                                 : ", which only a repeat: fills in") +
+                 " — taken literally");
+        const std::string lit = "_" + std::string(tok.substr(1, tok.size() - 2)) + "_";
+        for (std::size_t at; (at = as.find(tok)) != std::string::npos;)
+          as.replace(at, tok.size(), lit);
+      }
+  }
   if (!ctx.mount_ids.insert(as).second) {
     std::string uniq;
     for (int i = 2; uniq.empty(); ++i) {

@@ -366,6 +366,11 @@ struct WidgetNode {
   // substituted into its bind / on / label / predicate / tooltip strings, so instances can
   // address distinct state (e.g. bind: items.{i}.on). Empty = emitted once.
   std::string repeat;
+  // `repeat: {children: key}`: `repeat` is then a state key, and the template is emitted once per
+  // child of it, in name order. An instance is the child it names, not a position: `{key}` is the
+  // child's name (and `{i}` its place this frame), its backend id and a repeated mount's
+  // sub-prefix go by the name, so it keeps its state as siblings come and go.
+  bool repeat_children = false;
 
   // numeric widget params
   double lo = 0.0, hi = 1.0, def = 0.0; // SliderFloat
