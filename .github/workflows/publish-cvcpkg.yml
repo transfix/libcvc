@@ -62,7 +62,8 @@
 #   * Linux   — libcvc + cvcgl + libcvc-examples + ari + ari-media + arisrv + arigl +
 #               pycvc-cp311/312/313 + pycvc-gl-cp311/312/313 (release config; the 312/313
 #               columns on x86_64 only; libcvc-examples, ari, ari-media, arisrv and arigl
-#               from the pyver-311 column only).
+#               from the pyver-311 column only). libcvc, ari, ari-media and arisrv in
+#               debug too.
 #   * Windows — libcvc + cvcgl + ari + ari-media + arisrv + arigl always; pycvc-cp312 +
 #               pycvc-gl-cp312 + arix + ariglx + arisrvx from the cp312 job;
 #               pycvc-cp311/pycvc-gl-cp311 only behind the `windows_pycvc` dispatch
@@ -70,9 +71,16 @@
 #   * macOS   — libcvc + ari + ari-media + arisrv, and where the catalog has macOS VTK (arm64)
 #               cvcgl + arigl + pycvc-cp311; pycvc-cp312 + arix + arisrvx from the cp312
 #               jobs, and pycvc-gl-cp312 + ariglx there once vtk-python-cp312 has a macOS
-#               bundle (cy-pca/cvcpkg#638).
-# The family packages are built in the RELEASE matrix jobs only (they pack
-# with `--config release` against the release Python/numpy/VTK bundles).
+#               bundle (cy-pca/cvcpkg#638). libcvc, ari, ari-media and arisrv in debug too.
+#   * Windows has no debug row (see the matrix exclude): a debug build there needs debug
+#               builds of its C++ deps, which the catalog lacks.
+# ari, ari-media and arisrv also build in the DEBUG jobs (Linux and macOS: the rows
+# with a debug libcvc), packed `--config debug` against that job's debug libcvc and
+# the release deps it links. A `cvcpkg install <pkg> --config debug` takes those
+# release deps too: where debug and release share an ABI (every platform but
+# Windows), a dep with no debug bundle comes from release (cy-pca/cvcpkg#645).
+# The rest of the family builds in the RELEASE jobs only (they pack with
+# `--config release` against the release Python/numpy/VTK bundles).
 #
 # Requires two repository secrets:
 #   CVCPKG_TOKEN       — publisher token for the cvc org. IMPORTANT: in prod
@@ -1047,7 +1055,9 @@ jobs:
         # against the libcvc just installed into $STAGE, so the published ari always
         # matches the libcvc built from this tree (its FTXUI backend and .ari loader
         # live in libcvc).  The macOS and Windows twins are at the end of this job.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        # In a debug row it is a Debug build against the debug libcvc there, packed
+        # `--config debug`; so are ari-media and arisrv, on Linux and macOS.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1061,7 +1071,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
@@ -1073,7 +1083,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari \
             --from-prefix stage-ari \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1083,7 +1093,7 @@ jobs:
             cvcpkg publish ari \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
@@ -1097,7 +1107,7 @@ jobs:
         # so no host FFmpeg stands in for it. Without FFmpeg it would still build and pack, with no
         # player, so it must say it has one, play the clip the player test plays, and link
         # ffmpeg-lgpl's libavformat. The macOS and Windows twins are at the end of this job.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1114,7 +1124,7 @@ jobs:
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
           export CVC_FFMPEG_PREFIX="$MEDIA"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ari-media/build.sh
           test -x stage-ari-media/bin/ari-media
@@ -1145,7 +1155,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari-media \
             --from-prefix stage-ari-media \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1155,7 +1165,7 @@ jobs:
             cvcpkg publish ari-media \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari-media publish"
@@ -1171,7 +1181,7 @@ jobs:
         # (PRIVATE to cvc, so only the binary can say). So it must open a room on loopback and report
         # each of them, then stop cleanly on SIGTERM, the way a service manager stops it. The macOS
         # and Windows twins are at the end of this job.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1185,7 +1195,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/arisrv/build.sh
           test -x stage-arisrv/bin/arisrv
@@ -1208,7 +1218,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/arisrv \
             --from-prefix stage-arisrv \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1218,7 +1228,7 @@ jobs:
             cvcpkg publish arisrv \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"
@@ -1860,7 +1870,7 @@ jobs:
           tools: cmake ninja
 
       - name: Build, pack & publish ari [macOS]
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1874,7 +1884,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
@@ -1897,7 +1907,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari \
             --from-prefix stage-ari \
             --platform macos \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1907,7 +1917,7 @@ jobs:
             cvcpkg publish ari \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform macos \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
@@ -1915,7 +1925,7 @@ jobs:
 
       - name: Build, pack & publish ari-media [macOS]
         # The twin of "... ari-media [Linux]", with otool in place of readelf.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1932,7 +1942,7 @@ jobs:
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
           export CVC_FFMPEG_PREFIX="$MEDIA"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/ari-media/build.sh
           test -x stage-ari-media/bin/ari-media
@@ -1961,7 +1971,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari-media \
             --from-prefix stage-ari-media \
             --platform macos \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1971,7 +1981,7 @@ jobs:
             cvcpkg publish ari-media \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform macos \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari-media publish"
@@ -1980,7 +1990,7 @@ jobs:
       - name: Build, pack & publish arisrv [macOS]
         # The same checks as on Linux. macOS has no GNU timeout, so the relay runs in the background
         # and gets its SIGTERM by pid, with a SIGKILL 30 s later if it has not stopped by then.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1994,7 +2004,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/arisrv/build.sh
           test -x stage-arisrv/bin/arisrv
@@ -2026,7 +2036,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/arisrv \
             --from-prefix stage-arisrv \
             --platform macos \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -2036,7 +2046,7 @@ jobs:
             cvcpkg publish arisrv \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform macos \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"
