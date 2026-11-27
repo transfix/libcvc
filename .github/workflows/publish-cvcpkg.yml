@@ -72,7 +72,8 @@
 #               jobs, and pycvc-gl-cp312 + ariglx there once vtk-python-cp312 has a macOS
 #               bundle (cy-pca/cvcpkg#638).
 #   * FreeBSD, OpenBSD, NetBSD — libcvc + ari + arisrv + ari-media + arisrvx + cvcgl + arigl +
-#               pycvc-cp312; Haiku — libcvc + ari. Built by the cvcpkg.org fleet, not here
+#               pycvc-cp312 (Haiku: libcvc + ari have rows, not submitted yet; see
+#               fleet-bsd-haiku). Built by the cvcpkg.org fleet, not here
 #               (GitHub has no such runners): push-recipes pushes the recipes with this run's
 #               tarball as their source, and fleet-bsd-haiku submits them as one DAG, for the
 #               columns each recipe's matrix names.
@@ -236,7 +237,9 @@ jobs:
           rm -f src1.tar.gz src2.tar.gz
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "sha256=${sums[0]}" >> "$GITHUB_OUTPUT"
-          python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes             --out "$RUNNER_TEMP/recipes" --url "$url" --sha256 "${sums[0]}"             --revisions-json "$REVISIONS"
+          python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes \
+            --out "$RUNNER_TEMP/recipes" --url "$url" --sha256 "${sums[0]}" \
+            --revisions-json "$REVISIONS"
       - name: Push libcvc's recipes
         if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
         shell: bash
@@ -263,7 +266,9 @@ jobs:
   # publish under it, at compute-revisions' +cvc.N.
   #
   # A recipe builds only on the columns its matrix names (submit-dag skips the
-  # rest, Haiku included until a recipe gets a `- platform: haiku` row).
+  # rest). Haiku is not submitted yet: libcvc and ari have rows, but the fleet's
+  # Haiku box is unreachable and their Haiku deps wait on cy-pca/cvcpkg#644; add
+  # haiku to --platform when both are back.
   # --no-deps: every dependency comes from the catalog, which cy-pca/cvcpkg
   # populates; an auto-added dep job would publish under the cvc org, where it
   # does not belong. A missing one fails that column's install-deps, by name.
@@ -292,7 +297,9 @@ jobs:
           SOURCE_URL: ${{ needs.push-recipes.outputs.source_url }}
           SOURCE_SHA256: ${{ needs.push-recipes.outputs.source_sha256 }}
         run: |
-          python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes             --out "$RUNNER_TEMP/recipes" --url "$SOURCE_URL" --sha256 "$SOURCE_SHA256"             --revisions-json "$REVISIONS"
+          python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes \
+            --out "$RUNNER_TEMP/recipes" --url "$SOURCE_URL" --sha256 "$SOURCE_SHA256" \
+            --revisions-json "$REVISIONS"
       - name: Build the family's BSD and Haiku columns on the fleet
         id: dag
         shell: bash
@@ -304,7 +311,7 @@ jobs:
           echo "DAG $dag: $CVCPKG_SERVER/v1/builds?dag_id=$dag"
           cvcpkg builds submit-dag \
             --server "$CVCPKG_SERVER" --token "$CVCPKG_TOKEN" --org "$CVCPKG_ORG" \
-            --platform freebsd,openbsd,netbsd,haiku --arch x86_64 \
+            --platform freebsd,openbsd,netbsd --arch x86_64 \
             --config release --link shared \
             --recipes-dir "$RUNNER_TEMP/recipes" \
             --dag-id "$dag" --no-deps --skip-existing \
