@@ -112,8 +112,9 @@ void get_values(const std::string &in, std::size_t &pos, std::vector<double> &v,
 }
 
 bool quiet(const std::vector<double> &a, const std::vector<double> &b) {
-  for (std::size_t c = 0; c < a.size(); ++c)
-    if (a[c] != 0.0 || b[c] != 0.0)
+  const double *pa = a.data(), *pb = b.data();
+  for (std::size_t c = 0, n = a.size(); c < n; ++c)
+    if (pa[c] != 0.0 || pb[c] != 0.0)
       return false;
   return true;
 }
@@ -237,7 +238,7 @@ double fluid_wake::layer_depth(int l) const {
   return _p.depth > 0.0 ? std::min(d, _p.depth) : d;
 }
 
-const std::vector<double> &fluid_wake::decay(int l, bool up) {
+const std::vector<double> &fluid_wake::decay(int l, bool up) const {
   std::vector<double> &out = _decay[up ? 1 : 0][l - 1];
   if (!out.empty())
     return out;
@@ -286,9 +287,9 @@ namespace {
 // Central differences of a and b at cell c along `step` (1: x, n: y), into *da and *db. A wall
 // neighbour (mask 0) is taken as the cell's own value, the no-flux wall's mirror image; a cell
 // between two walls has none. Without a mask, the plain central difference.
-void differences(const std::vector<double> &mask, const double *a, const double *b, std::size_t c,
+void differences(const double *mask, const double *a, const double *b, std::size_t c,
                  std::size_t step, double inv, double *da, double *db) {
-  if (mask.empty()) {
+  if (!mask) {
     *da = (a[c + step] - a[c - step]) * inv;
     *db = (b[c + step] - b[c - step]) * inv;
     return;
@@ -306,23 +307,29 @@ void fluid_wake::derive(state &s) const {
   const std::size_t un = std::size_t(n);
   const double inv = 1.0 / (2.0 * _dx);
   s.f.assign(un * un * kQ, 0.0);
+  // This pass and the others over every cell (deepen, sum, the wave step's dh/dt) index through
+  // raw pointers: an unoptimized build calls std::vector's operator[] for each element, which cost
+  // a Debug build more than their arithmetic. The operations and their order are the same.
+  const double *mask = _mask.empty() ? nullptr : _mask.data();
+  const double *h = s.h.data(), *phi = s.phi.data(), *w = s.w.data();
+  double *out = s.f.data();
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < n; ++i) {
       const std::size_t c = std::size_t(j) * un + std::size_t(i);
-      if (!_mask.empty() && !(_mask[c] > 0.0))
+      if (mask && !(mask[c] > 0.0))
         continue; // land: no waves
-      double *f = s.f.data() + c * kQ;
-      f[0] = s.h[c];
-      f[3] = s.w[c];
+      double *f = out + c * kQ;
+      f[0] = h[c];
+      f[3] = w[c];
       // Central differences inside; the border cells (deep in the sponge) give none.
       if (i > 0 && i < n - 1)
-        differences(_mask, s.phi.data(), s.h.data(), c, 1, inv, &f[1], &f[4]);
+        differences(mask, phi, h, c, 1, inv, &f[1], &f[4]);
       if (j > 0 && j < n - 1)
-        differences(_mask, s.phi.data(), s.h.data(), c, un, inv, &f[2], &f[5]);
+        differences(mask, phi, h, c, un, inv, &f[2], &f[5]);
     }
 }
 
-void fluid_wake::deepen(state &s) {
+void fluid_wake::deepen(const state &s) const {
   const int n = _n, L = _layers;
   const std::size_t un = std::size_t(n), cells = un * un;
   s.deep.assign(std::size_t(L) * cells * 5, 0.0);
@@ -331,13 +338,16 @@ void fluid_wake::deepen(state &s) {
   // phi + i h and dh/dt over the window, extended past the walls: water cells as they are, each
   // ghost the mirror image the ewave steps with (its weighted corners), other walls 0. So a
   // wall's image decays with the water it mirrors and the wall stays no-flux at every depth.
-  std::vector<double> &a = _work[0], &b = _work[1];
-  a.assign(cells * 2, 0.0);
-  b.assign(cells * 2, 0.0);
-  for (std::size_t c = 0; c < cells; ++c) {
-    a[c * 2] = s.phi[c];
-    a[c * 2 + 1] = s.h[c];
-    b[c * 2] = s.w[c];
+  _work[0].assign(cells * 2, 0.0);
+  _work[1].assign(cells * 2, 0.0);
+  double *a = _work[0].data(), *b = _work[1].data();
+  {
+    const double *phi = s.phi.data(), *h = s.h.data(), *w = s.w.data();
+    for (std::size_t c = 0; c < cells; ++c) {
+      a[c * 2] = phi[c];
+      a[c * 2 + 1] = h[c];
+      b[c * 2] = w[c];
+    }
   }
   if (!_mask.empty())
     for (const ocean::ewave_ghost &g : _engine->ghosts()) {
@@ -348,20 +358,21 @@ void fluid_wake::deepen(state &s) {
       a[at + 1] = g.w[0] * s.h[q[0]] + g.w[1] * s.h[q[1]] + g.w[2] * s.h[q[2]] + g.w[3] * s.h[q[3]];
       b[at] = g.w[0] * s.w[q[0]] + g.w[1] * s.w[q[1]] + g.w[2] * s.w[q[2]] + g.w[3] * s.w[q[3]];
     }
-  _fft.run_2d(a.data(), -1);
-  _fft.run_2d(b.data(), -1);
+  _fft.run_2d(a, -1);
+  _fft.run_2d(b, -1);
   // dh/dt at every depth first, two depths an inverse transform (each spectrum is a real field's).
-  std::vector<double> z(cells * 2), up(std::size_t(L) * cells);
+  std::vector<double> zv(cells * 2), upv(std::size_t(L) * cells);
+  double *z = zv.data(), *up = upv.data();
   for (int l = 1; l <= L; l += 2) {
-    const std::vector<double> &c0 = decay(l, true);
-    const std::vector<double> *c1 = l + 1 <= L ? &decay(l + 1, true) : nullptr;
+    const double *c0 = decay(l, true).data();
+    const double *c1 = l + 1 <= L ? decay(l + 1, true).data() : nullptr;
     for (std::size_t c = 0; c < cells; ++c) {
       const double br = b[c * 2], bi = b[c * 2 + 1];
-      const double k1 = c1 ? (*c1)[c] : 0.0;
+      const double k1 = c1 ? c1[c] : 0.0;
       z[c * 2] = br * c0[c] - bi * k1;
       z[c * 2 + 1] = bi * c0[c] + br * k1;
     }
-    _fft.run_2d(z.data(), +1);
+    _fft.run_2d(z, +1);
     for (std::size_t c = 0; c < cells; ++c) {
       up[std::size_t(l - 1) * cells + c] = z[c * 2];
       if (c1)
@@ -370,49 +381,63 @@ void fluid_wake::deepen(state &s) {
   }
   // Then phi and h at each depth, and what a reader takes of them.
   const double inv = 1.0 / (2.0 * _dx);
-  std::vector<double> phi(cells), h(cells);
+  const double *mask = _mask.empty() ? nullptr : _mask.data();
+  std::vector<double> phiv(cells), hv(cells);
+  double *phi = phiv.data(), *h = hv.data();
   for (int l = 1; l <= L; ++l) {
-    const std::vector<double> &side = decay(l, false);
+    const double *side = decay(l, false).data();
     for (std::size_t c = 0; c < cells; ++c) {
       z[c * 2] = a[c * 2] * side[c];
       z[c * 2 + 1] = a[c * 2 + 1] * side[c];
     }
-    _fft.run_2d(z.data(), +1);
+    _fft.run_2d(z, +1);
     for (std::size_t c = 0; c < cells; ++c) {
       phi[c] = z[c * 2];
       h[c] = z[c * 2 + 1];
     }
     double *out = s.deep.data() + std::size_t(l - 1) * cells * 5;
+    const double *upl = up + std::size_t(l - 1) * cells;
     for (int j = 0; j < n; ++j)
       for (int i = 0; i < n; ++i) {
         const std::size_t c = std::size_t(j) * un + std::size_t(i);
-        if (!_mask.empty() && !(_mask[c] > 0.0))
+        if (mask && !(mask[c] > 0.0))
           continue; // land
         double *f = out + c * 5;
-        f[2] = up[std::size_t(l - 1) * cells + c];
+        f[2] = upl[c];
         if (i > 0 && i < n - 1)
-          differences(_mask, phi.data(), h.data(), c, 1, inv, &f[0], &f[3]);
+          differences(mask, phi, h, c, 1, inv, &f[0], &f[3]);
         if (j > 0 && j < n - 1)
-          differences(_mask, phi.data(), h.data(), c, un, inv, &f[1], &f[4]);
+          differences(mask, phi, h, c, un, inv, &f[1], &f[4]);
       }
   }
 }
 
 void fluid_wake::sum() {
   std::fill(_total.begin(), _total.end(), 0.0);
-  _deepTotal.assign(std::size_t(_layers) * std::size_t(_n) * std::size_t(_n) * 5, 0.0);
   _ids.clear();
   _byIndex.clear();
+  double *t = _total.data();
   for (const auto &e : _states) { // id order
     _ids.push_back(e.first);
     _byIndex.push_back(&e.second);
-    const std::vector<double> &f = e.second.f;
-    for (std::size_t c = 0; c < _total.size(); ++c)
-      _total[c] += f[c];
-    const std::vector<double> &d = e.second.deep;
-    if (d.size() == _deepTotal.size())
-      for (std::size_t c = 0; c < _deepTotal.size(); ++c)
-        _deepTotal[c] += d[c];
+    const double *f = e.second.f.data();
+    for (std::size_t c = 0, m = _total.size(); c < m; ++c)
+      t[c] += f[c];
+  }
+}
+
+void fluid_wake::ready_depths() const {
+  if (!_depthsDue)
+    return;
+  _depthsDue = false;
+  _deepLayers = _layers;
+  _deepTotal.assign(std::size_t(_layers) * std::size_t(_n) * std::size_t(_n) * 5, 0.0);
+  double *t = _deepTotal.data();
+  for (const auto &e : _states) { // id order
+    deepen(e.second);
+    const double *d = e.second.deep.data();
+    for (std::size_t c = 0, m = _deepTotal.size(); c < m; ++c)
+      t[c] += d[c];
   }
 }
 
@@ -505,13 +530,14 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
     }
     _engine->set_state(s.h, s.phi);
     _engine->step(run);
-    const std::vector<double> &h2 = _engine->height();
+    const double *h2 = _engine->height().data(), *phi2 = _engine->phi().data(), *h = s.h.data();
+    double *w = s.w.data();
     double largest = 0.0;
     for (std::size_t c = 0; c < cells; ++c) {
-      s.w[c] = (h2[c] - s.h[c]) / T;
-      largest = std::max(largest, std::max(std::fabs(h2[c]), std::fabs(_engine->phi()[c])));
+      w[c] = (h2[c] - h[c]) / T;
+      largest = std::max(largest, std::max(std::fabs(h2[c]), std::fabs(phi2[c])));
     }
-    s.h = h2;
+    s.h = _engine->height();
     s.phi = _engine->phi();
     if (largest < kFaded) {
       std::fill(s.h.begin(), s.h.end(), 0.0);
@@ -786,11 +812,10 @@ void fluid_wake::advance(std::vector<wake_body> &bodies, const vec3 &lo, const v
       ++_layers;
   }
 
-  for (auto &e : _states) {
+  for (auto &e : _states)
     derive(e.second);
-    deepen(e.second);
-  }
   sum();
+  _depthsDue = true; // ready_depths makes them for the first read below the top
 
   // The sleeping bodies in the water the others' waves reach.
   for (const wake_body &b : bodies) {
@@ -870,7 +895,7 @@ void fluid_wake::motion(int own, double x, double y, double depth, wake_sample &
       v[q] = bilinear(k, _deepTotal.data() + at, o, 5, q);
   };
   double v[5];
-  const int L = _layers;
+  const int L = _deepLayers;
   if (!(depth > 0.0)) { // at the top
     layer(0, v);
     out.u = v[0];
@@ -1002,11 +1027,10 @@ void fluid_wake::commit(saved &s) {
   _layers = s.layers;
   _states.swap(s.states);
   remask(); // the window's mask at its saved place, then what each state gives a reader
-  for (auto &e : _states) {
+  for (auto &e : _states)
     derive(e.second);
-    deepen(e.second);
-  }
   sum();
+  _depthsDue = true; // ready_depths makes them for the first read below the top
 }
 
 } // namespace detail

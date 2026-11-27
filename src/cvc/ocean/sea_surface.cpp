@@ -438,6 +438,10 @@ sea_surface::point_forcing sea_surface::forcing_at(const frame &f, double x, dou
   if (!_forcing)
     return pf;
   pf.gust = cvc::algo::wind_gust(f.gust, x, y);
+  if (_forcing->fronts) // F4: the fronts where this wave is
+    if (const std::shared_ptr<const sea_fronts> fr = _forcing->fronts->at(f.t);
+        fr && !fr->cells.empty())
+      pf.gust *= cvc::algo::front_wind_ratio(fr->cells, fr->ux, fr->uy, fr->ref, x, y);
   if (_forcing->fetch) {
     pf.fetch = _forcing->fetch->sample(x, y);
     pf.fetch_from = _forcing->fetch_from ? _forcing->fetch_from->sample(x, y) : pf.fetch;

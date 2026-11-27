@@ -76,7 +76,7 @@ TEST(RouterInterfaces, ATeardownForwardsPastClosedHomes) {
   EXPECT_FALSE(router.has_prefix(gp.route())); // an island
   EXPECT_TRUE(router.has_prefix(router.home_of("other")));
   gab.route().close();                                  // as its teardown's first step does
-  EXPECT_EQ(router.home_of("docs.a.b.c"), gab.route()); // posters wait for the unregister
+  EXPECT_EQ(router.home_of("docs.a.b.c"), gab.route()); // its late queue takes posts until done
   EXPECT_EQ(router.new_home_of("docs.a.b.c"), ga.route());
   ga.route().close();
   EXPECT_TRUE(router.new_home_of("docs.a.b.c").is_group0());
@@ -542,15 +542,16 @@ TEST(RouterR, ARequeueGoesToTheEarliestWaiterOnly) {
   EXPECT_EQ(h.sched->pending_message_count("h.k"), 0u);
 }
 
-// A deliver that a receiving group's closed handle refuses is stale at once at the home (S2b.0a):
-// applied there as a requeue (the front of the FIFO, here), not lost.
+// A deliver that a receiving group's done handle refuses is stale at once at the home (S2b.0a):
+// applied there as a requeue (the front of the FIFO, here), not lost. (A closed handle not done yet
+// takes it into its late queue, and the teardown sends it back as a stale one: S2b.R3.)
 TEST(RouterR, ADeliverAClosedReceiverRefusesIsStaleAtOnce) {
   cvc::app app;
   r_world h(app, "h", {"h"}), r(app, "r");
   r.submit(kReceive);
   r.pump();
   h.pump();                 // r's record
-  r.group->route().close(); // as its teardown's first step does
+  (void)r.group->route().close_for_good(); // as a finished teardown leaves it
   ASSERT_TRUE(h.sched->post_message("h.k", envelope("kept")));
   h.pump();
   EXPECT_EQ(drain_fifo(*h.sched, "h.k"), (std::vector<std::string>{"kept"}));
@@ -913,9 +914,9 @@ TEST(RouterR, ATornDownHomeForwardsAMessageALaterPrefixCovers) {
 // C-M5 (after R2a's probe AnAnswerThatOutwaitsTheForwardIsNotADuplicate): a tracked broadcast's
 // answers, refused by their closed home, waited at most 2^20 yields, then went to the new home
 // ahead of the forwarded tracker: the stale copy was queued again although another copy was taken.
-// Now they wait, with no cap, until the home unregisters after its forward. The forward comes after
-// a pause (1 s) that only widens the window the old cap lost; nothing is timed.
-TEST(RouterR, AnAnswerWaitsForItsClosedHomesForward) {
+// R2 made them wait, with no cap, until the home unregistered after its forward; R3 (K-1) takes
+// them into the closed home's late queue at once, and the home forwards them after the adopt.
+TEST(RouterR, AnAnswerToAClosedHomeGoesAfterItsForward) {
   cvc::app app;
   r_world zero(app);
   r_world h(app, "h", {"h"}), r1(app, "r1"), r2(app, "r2");
@@ -928,13 +929,15 @@ TEST(RouterR, AnAnswerWaitsForItsClosedHomesForward) {
   h.group->route().close(); // h's teardown, step (1)
   std::atomic<bool> answered{false};
   std::thread receivers([&] {
-    r1.pump(); // r1's process takes its copy: `taken` waits on h
+    r1.pump(); // r1's process takes its copy: `taken`, into h's late queue
     r2.sched->kill(p2);
-    r2.pump(); // its stale copy's requeue waits on h too
+    r2.pump(); // its stale copy's requeue, into h's late queue too
     answered = true;
   });
-  std::this_thread::sleep_for(std::chrono::seconds(1));
-  EXPECT_FALSE(answered.load()) << "an answer went on while its closed home was registered";
+  const bool went_on = r_wait_for(answered, 30.0); // a hang guard only
+  EXPECT_TRUE(went_on) << "an answer waited on its closed home";
+  if (went_on)
+    EXPECT_FALSE(zero.sched->has_pending_ingress()) << "an answer went past its closed home";
   {
     se::async_scheduler::pump_owner_scope token(*h.sched);
     h.sched->leave_router(); // h's forward, the adopt, then the unregister
@@ -956,7 +959,8 @@ TEST(RouterR, AnAnswerWaitsForItsClosedHomesForward) {
 // C-m1 (after R2a's probe ATeardownNeverWaitsForItsOwnUnregister): a's teardown sends a queued
 // deliver from h back as a requeue; h is closed (its teardown on another thread), and home_of then
 // gave a itself, closed and registered until its own step (3): it waited 2^20 yields on itself.
-// A teardown's posts now resolve without closed groups at once.
+// No poster waits now (R3, K-1): the requeue and the kill's unsubscribe go into h's late queue,
+// and h forwards them.
 TEST(RouterR, ATeardownNeverWaitsOnItself) {
   cvc::app app;
   r_world zero(app);
@@ -973,8 +977,12 @@ TEST(RouterR, ATeardownNeverWaitsOnItself) {
   const std::uint64_t before = router.consulted();
   a.reset(); // the deliver goes back as a requeue, its process's kill unsubscribes
   EXPECT_LT(router.consulted() - before, 1000u) << "a's teardown waited on a closed group";
-  // The requeue went to group 0 (new_home_of), not lost; h, still registered, homes the key, so
-  // group 0 counts it in its FIFOs but does not answer for the key.
+  EXPECT_FALSE(zero.sched->has_pending_ingress()) << "a teardown's post went past a closed home";
+  {
+    se::async_scheduler::pump_owner_scope token(*h.sched);
+    h.sched->leave_router(); // h forwards its late requeue to group 0
+  }
+  // The requeue reached group 0, not lost.
   zero.pump();
   EXPECT_EQ(zero.sched->total_pending_messages(), 1u);
 }
@@ -3738,3 +3746,484 @@ TEST(PoolKillOwner, RefusedInsideAGroupsPumpBeforeActing) {
 }
 
 } // namespace c_tests
+
+// --- S2b.R3: the skeptic's findings (threaded-s2b R3-fixes.md): a closed handle's late queue and
+// its forwarding addresses, the homed rule for queued sends, a host post racing its teardown ---
+
+namespace {
+
+// The handle's late queue and forwarding addresses (S2b.R3): once closed, a router entry posted
+// through it is taken (into the late queue) until its teardown is done; a host's post or command
+// through it is refused; once done, every post is refused, and the handle names where its teardown
+// sent each key's entries.
+TEST(RouterR3, AClosedHandleTakesRouterEntriesUntilDone) {
+  cvc::app app;
+  r_world zero(app);
+  auto h = std::make_unique<r_world>(app, "h", std::vector<std::string>{"h"});
+  const se::group_ref ref = h->group->route();
+  EXPECT_FALSE(ref.done());
+  ref.close();
+  EXPECT_TRUE(ref.closed());
+  EXPECT_FALSE(ref.done());
+  EXPECT_TRUE(ref.post(entry(route_kind::send, "h.k", str("late")))) << "the late queue";
+  EXPECT_FALSE(ref.post_message("h.k", str("host"))) << "not a router entry";
+  EXPECT_FALSE(h->sched->has_pending_ingress()) << "a closed handle reached its scheduler";
+  EXPECT_FALSE(ref.forwarded("h.k")) << "an address before done";
+  {
+    se::async_scheduler::pump_owner_scope token(*h->sched);
+    h->sched->leave_router(); // forwards the late send to group 0, then is done
+  }
+  EXPECT_TRUE(ref.done());
+  EXPECT_FALSE(app.exec_router().has_prefix(ref));
+  EXPECT_FALSE(ref.post(entry(route_kind::send, "h.k", str("refused"))));
+  EXPECT_TRUE(ref.forwarded("h.k").is_group0());
+  EXPECT_FALSE(ref.forwarded("h.other")) << "no entry of it went anywhere";
+  h.reset();
+  zero.pump();
+  EXPECT_EQ(drain_fifo(*zero.sched, "h.k"), (std::vector<std::string>{"late"}));
+  EXPECT_TRUE(se::group_ref().done()) << "an empty handle";
+}
+
+// The teardown's backstop (S2b.R3): a sealed handle takes only another teardown's forward into its
+// late queue; any other poster waits until the handle is done, then goes on by its forwarding
+// address, after the forward.
+TEST(RouterR3, ASealedHandleTakesOnlyATeardownsForward) {
+  cvc::app app;
+  r_world zero(app);
+  auto h = std::make_unique<r_world>(app, "h", std::vector<std::string>{"h"});
+  const se::group_ref ref = h->group->route();
+  ref.close();
+  ref.seal();
+  EXPECT_FALSE(ref.post(entry(route_kind::send, "h.k", str("ordinary"))));
+  EXPECT_TRUE(ref.post(entry(route_kind::send, "h.k", str("forwarded")), true));
+  std::atomic<bool> posted{false};
+  std::thread host([&] {
+    app.exec_router().post_message("h.k", str("waited")); // waits for h's teardown to be done
+    posted = true;
+  });
+  {
+    se::async_scheduler::pump_owner_scope token(*h->sched);
+    h->sched->leave_router();
+  }
+  if (!r_wait_for(posted, 30.0)) { // a hang guard only
+    ADD_FAILURE() << "a poster's wait on a sealed handle never ended";
+    host.detach();
+    (void)h.release();
+    return;
+  }
+  host.join();
+  h.reset();
+  zero.pump();
+  EXPECT_EQ(drain_fifo(*zero.sched, "h.k"), (std::vector<std::string>{"forwarded", "waited"}));
+}
+
+// A host thread posting while its key's home tears down: every message reaches the new home once,
+// in the order posted (td 4.6: FIFO per sender across a home's teardown), whether it went into the
+// home's queue, its late queue, or on by its forwarding address; and the teardown ends (its seal
+// stops posters that keep up with its forward).
+TEST(RouterR3, AHostPostingThroughATeardownKeepsItsOrder) {
+  cvc::app app;
+  r_world zero(app);
+  auto h = std::make_unique<r_world>(app, "h", std::vector<std::string>{"h"});
+  constexpr int kPosts = 20000;
+  zero.sched->max_pending_messages = kPosts; // every one stays pending there
+  std::atomic<int> sent{0};
+  std::atomic<bool> finished{false};
+  std::thread host([&] {
+    for (int i = 0; i < kPosts; ++i) {
+      if (!app.exec_router().post_message("h.k", se::value_t(std::to_string(i))))
+        break; // refused (a cap): the check below reports it
+      sent = i + 1;
+    }
+    finished = true;
+  });
+  while (sent.load() < 1000)
+    std::this_thread::yield();
+  h.reset();                          // its teardown, while the host posts
+  if (!r_wait_for(finished, 120.0)) { // a hang guard only
+    ADD_FAILURE() << "the host's posts never ended";
+    host.detach();
+    return;
+  }
+  host.join();
+  ASSERT_EQ(sent.load(), kPosts);
+  zero.pump();
+  const std::vector<std::string> got = drain_fifo(*zero.sched, "h.k");
+  ASSERT_EQ(got.size(), static_cast<std::size_t>(kPosts));
+  for (int i = 0; i < kPosts; ++i)
+    if (got[static_cast<std::size_t>(i)] != std::to_string(i)) {
+      ADD_FAILURE() << "message " << i << " arrived as " << got[static_cast<std::size_t>(i)];
+      break;
+    }
+}
+
+// R3-4 (the R3 review): a forwarding address is followed however long the chain. Each of 20 homes
+// with the same prefix forwards r's record to the next, registered after it, in turn; r's kill then
+// unsubscribes through the first (done) handle, 20 addresses from the record. With a cap on the
+// hops (16 tries) the unsubscribe was dropped, and the last home kept a dead process's record.
+TEST(RouterR3, ALongChainOfTeardownsKeepsEveryAddress) {
+  cvc::app app;
+  r_world zero(app);
+  constexpr int kHomes = 20;
+  std::vector<std::unique_ptr<r_world>> homes;
+  homes.push_back(std::make_unique<r_world>(app, "h0", std::vector<std::string>{"h"}));
+  r_world r(app, "r");
+  const int p = r.submit(kReceive);
+  r.pump();         // parks, subscribes at h0
+  homes[0]->pump(); // h0 records r's waiter
+  for (int i = 1; i <= kHomes; ++i) {
+    homes.push_back(
+        std::make_unique<r_world>(app, "h" + std::to_string(i), std::vector<std::string>{"h"}));
+    homes[static_cast<std::size_t>(i - 1)].reset(); // forwards the record to h<i>, its address
+  }
+  r_world &last = *homes.back();
+  last.pump(); // the record, at the last home
+  r.sched->kill(p);
+  r.pump(); // the unsubscribe, through h0's handle and 20 addresses
+  last.pump();
+  ASSERT_TRUE(last.sched->post_route(entry(route_kind::send, "h.k", envelope("probe"))));
+  last.pump();
+  EXPECT_FALSE(r.sched->has_pending_ingress()) << "the last home kept the dead process's record";
+  EXPECT_EQ(drain_fifo(*last.sched, "h.k"), (std::vector<std::string>{"probe"}));
+  r.sched->reap(p);
+}
+
+// R3-3 (the R3 review): once a group's teardown routes its messages out, a host's post that would
+// have died with it in its queue (an island's own key, a '#' key) dies now, counted, and the post
+// returns true, as it did when the queue took it and the destructor dropped it.
+TEST(RouterR3, AnIslandsPostAfterItsTeardownBeganDiesCounted) {
+  cvc::app app;
+  r_world zero(app);
+  auto a = std::make_unique<r_world>(app, "a"); // an island, in an app with no prefix
+  {
+    se::async_scheduler::pump_owner_scope token(*a->sched);
+    a->sched->leave_router();
+  }
+  const std::uint64_t before = a->counters().destroy_dropped;
+  EXPECT_TRUE(a->sched->post_message("a.k", str("own")));
+  EXPECT_TRUE(a->sched->post_message("a#reply", str("hash")));
+  EXPECT_EQ(a->counters().destroy_dropped - before, 2u);
+  EXPECT_FALSE(a->sched->has_pending_ingress());
+  a.reset();
+  EXPECT_EQ(zero.sched->total_pending_messages(), 0u);
+}
+
+// K-1 (the skeptic's AnOverlappingTeardownsAnswerIsNotADuplicate): a receiving group's teardown
+// sends a queued deliver of a tracked broadcast back as a requeue while its home h is closed (h's
+// teardown, between its steps (1) and (3)). It went past h to group 0 at once, ahead of h's adopt:
+// applied as untracked, the message another receiver took was queued again. Now h's late queue
+// takes it, and h forwards it after the adopt.
+TEST(RouterR3, AnOverlappingTeardownsAnswerIsNotADuplicate) {
+  cvc::app app;
+  r_world zero(app);
+  r_world h(app, "h", {"h"}), r1(app, "r1");
+  auto a = std::make_unique<r_world>(app, "a");
+  const int p1 = r1.submit(kReceive);
+  a->submit(kReceive);
+  r1.pump();
+  a->pump(); // both park on "h.k" and subscribe at h
+  h.pump();  // two remote waiters recorded
+  ASSERT_TRUE(app.exec_router().post_message("h.k", envelope("m")));
+  h.pump();  // no local waiter, two remote: tracked, a copy to each
+  r1.pump(); // r1's process takes its copy: taken, to h
+  h.pump();  // h's tracker: taken, a's copy still out (queued in a's ingress)
+  ASSERT_EQ(r1.result(p1), "m");
+  ASSERT_TRUE(a->sched->has_pending_ingress());
+  h.group->route().close(); // h's teardown, step (1)
+  a.reset();                // a's teardown: its queued deliver goes back to h as a requeue
+  EXPECT_FALSE(zero.sched->has_pending_ingress()) << "an answer went past its closed home";
+  {
+    se::async_scheduler::pump_owner_scope token(*h.sched);
+    h.sched->leave_router(); // the adopt, then the late requeue, then the unregister
+  }
+  zero.pump();
+  EXPECT_EQ(drain_fifo(*zero.sched, "h.k"), std::vector<std::string>{})
+      << "a message r1 took was queued again at the new home";
+  EXPECT_EQ(zero.counters().stale_dropped, 1u);
+}
+
+// K-1, its second face (the skeptic's AnOverlappingTeardownLeavesNoRecordOfADeadProcess): the same
+// overlap, a's kill unsubscribes its process's wait while h is closed. The unsubscribe reached
+// group 0 before h forwarded the record, and group 0 kept a record of a dead process, which kept
+// the router on (RT-1) with no group left. h's late queue now takes it after the record.
+TEST(RouterR3, AnOverlappingTeardownLeavesNoRecordOfADeadProcess) {
+  cvc::app app;
+  r_world zero(app);
+  auto h = std::make_unique<r_world>(app, "h", std::vector<std::string>{"h"});
+  auto a = std::make_unique<r_world>(app, "a");
+  a->submit(kReceive);
+  a->pump();                 // parks, subscribes at h
+  h->pump();                 // h records a's remote waiter
+  h->group->route().close(); // h's teardown, step (1)
+  a.reset();                 // its kill unsubscribes the wait
+  {
+    se::async_scheduler::pump_owner_scope token(*h->sched);
+    h->sched->leave_router(); // a's record to group 0, then the late unsubscribe, then unregister
+  }
+  h.reset();
+  zero.pump();
+  EXPECT_FALSE(app.exec_router().active()) << "a record of a dead process keeps the router on";
+}
+
+// K-1's forwarding address: a done handle's poster follows where the teardown sent that key's
+// state, not the key's home now. h2 forwards r's record to h1; then h3 registers "h.x" (the key's
+// home from now on). r's kill unsubscribes through h2's handle: it must reach h1, which has the
+// record, or h1 keeps a record of a dead process and hands it the next message.
+TEST(RouterR3, ADoneHomesPosterFollowsItsForwardingAddress) {
+  cvc::app app;
+  r_world zero(app);
+  r_world h1(app, "h1", {"h"});
+  auto h2 = std::make_unique<r_world>(app, "h2", std::vector<std::string>{"h.x"});
+  r_world r(app, "r");
+  const int p = r.submit(R"((get-attr (msg-recv "h.x.k") "payload"))");
+  r.pump();   // parks, subscribes at h2
+  h2->pump(); // h2 records r's remote waiter
+  h2.reset(); // its teardown forwards the record to h1 (open), then unregisters
+  r_world h3(app, "h3", {"h.x"});
+  h1.pump(); // h1 records r's waiter
+  r.sched->kill(p);
+  r.pump();  // the kill unsubscribes through h2's (done) handle
+  h1.pump(); // ... which must reach h1
+  ASSERT_TRUE(h1.sched->post_route(entry(route_kind::send, "h.x.k", envelope("probe"))));
+  h1.pump();
+  EXPECT_FALSE(r.sched->has_pending_ingress()) << "h1 kept the dead process's record";
+  EXPECT_EQ(h1.sched->total_pending_messages(), 1u); // the probe, pending (h3 homes the key now)
+  EXPECT_EQ(h1.counters().requeued, 0u);
+  r.sched->reap(p);
+}
+
+// Two homes torn down at once, each holding a queued deliver from the other (a stale one: it goes
+// back to its sender as a requeue). The frozen text's wait (a teardown waits for another closed,
+// registered home) would deadlock here: each waits for the other's unregister. No poster waits now:
+// each requeue goes into the other's late queue (or past it, once done). Both end, and each
+// message reaches group 0 once.
+TEST(RouterR3, TwoHomesTearingDownAtOnceBothEnd) {
+  cvc::app app;
+  r_world zero(app);
+  auto h1 = std::make_unique<r_world>(app, "h1", std::vector<std::string>{"x"});
+  auto h2 = std::make_unique<r_world>(app, "h2", std::vector<std::string>{"y"});
+  const auto stale_deliver = [](const char *key, const char *payload, const se::group_ref &from) {
+    se::detail::route_entry d = entry(route_kind::deliver, key, envelope(payload));
+    d.from = from;
+    d.pid = 1 << 30; // no such process: stale
+    d.seq = 1;
+    return d;
+  };
+  ASSERT_TRUE(h1->sched->post_route(stale_deliver("y.k", "to-h1", h2->group->route())));
+  ASSERT_TRUE(h2->sched->post_route(stale_deliver("x.k", "to-h2", h1->group->route())));
+  h1->group->route().close();
+  h2->group->route().close(); // both teardowns past step (1)
+  std::atomic<bool> go{false}, done1{false}, done2{false};
+  const auto leave = [&go](r_world &w, std::atomic<bool> &done) {
+    while (!go.load())
+      std::this_thread::yield();
+    se::async_scheduler::pump_owner_scope token(*w.sched);
+    w.sched->leave_router();
+    done = true;
+  };
+  std::thread t1(leave, std::ref(*h1), std::ref(done1));
+  std::thread t2(leave, std::ref(*h2), std::ref(done2));
+  go = true;
+  const bool ended = r_wait_for(done1, 30.0) && r_wait_for(done2, 30.0); // hang guards only
+  if (!ended) {
+    ADD_FAILURE() << "two teardowns at once waited for each other";
+    t1.detach();
+    t2.detach();
+    (void)h1.release(); // leaked with the blocked threads
+    (void)h2.release();
+    return;
+  }
+  t1.join();
+  t2.join();
+  h1.reset();
+  h2.reset();
+  zero.pump();
+  EXPECT_EQ(drain_fifo(*zero.sched, "y.k"), (std::vector<std::string>{"to-h1"}));
+  EXPECT_EQ(drain_fifo(*zero.sched, "x.k"), (std::vector<std::string>{"to-h2"}));
+}
+
+// Nested homes torn down at once: h1 ("h") homed "h.x.k" before h2 ("h.x") registered, so each
+// holds a message of it. Neither forwards to the other (each chooses among groups still open), so
+// nothing goes back and forth: both end, and both messages reach group 0 once.
+TEST(RouterR3, NestedHomesTearingDownAtOnceBothEnd) {
+  cvc::app app;
+  r_world zero(app);
+  auto h1 = std::make_unique<r_world>(app, "h1", std::vector<std::string>{"h"});
+  ASSERT_TRUE(app.exec_router().post_message("h.x.k", envelope("first")));
+  h1->pump(); // pending at h1
+  auto h2 = std::make_unique<r_world>(app, "h2", std::vector<std::string>{"h.x"});
+  ASSERT_TRUE(app.exec_router().post_message("h.x.k", envelope("second")));
+  h2->pump(); // pending at h2, the key's home now
+  h1->group->route().close();
+  h2->group->route().close();
+  std::atomic<bool> go{false}, done1{false}, done2{false};
+  const auto leave = [&go](r_world &w, std::atomic<bool> &done) {
+    while (!go.load())
+      std::this_thread::yield();
+    se::async_scheduler::pump_owner_scope token(*w.sched);
+    w.sched->leave_router();
+    done = true;
+  };
+  std::thread t1(leave, std::ref(*h1), std::ref(done1));
+  std::thread t2(leave, std::ref(*h2), std::ref(done2));
+  go = true;
+  const bool ended = r_wait_for(done1, 30.0) && r_wait_for(done2, 30.0); // hang guards only
+  if (!ended) {
+    ADD_FAILURE() << "nested teardowns never ended";
+    t1.detach();
+    t2.detach();
+    (void)h1.release();
+    (void)h2.release();
+    return;
+  }
+  t1.join();
+  t2.join();
+  h1.reset();
+  h2.reset();
+  zero.pump();
+  std::vector<std::string> got = drain_fifo(*zero.sched, "h.x.k");
+  std::sort(got.begin(), got.end()); // two old homes: no order between them
+  EXPECT_EQ(got, (std::vector<std::string>{"first", "second"}));
+}
+
+// K-3: a host's post on its own group, after that group's teardown took the queue (with no other
+// prefix registered, the router is off by then), went into the dying ingress, where only a second
+// leave_router (the group's destructor) or nothing (a post after that) sent it on. It now follows
+// the teardown's forward at once, after it.
+TEST(RouterR3, AHostPostAfterItsHomesTeardownFollowsTheForward) {
+  cvc::app app;
+  r_world zero(app);
+  auto h = std::make_unique<r_world>(app, "h", std::vector<std::string>{"h"});
+  ASSERT_TRUE(h->sched->post_message("h.k", str("early")));
+  h->pump(); // pending at its home
+  {
+    se::async_scheduler::pump_owner_scope token(*h->sched);
+    h->sched->leave_router(); // forwards "early" to group 0, then unregisters
+  }
+  ASSERT_FALSE(app.exec_router().active());
+  EXPECT_TRUE(h->sched->post_message("h.k", str("late")));
+  zero.pump(); // before h's destructor (whose second leave_router used to send it on)
+  EXPECT_EQ(drain_fifo(*zero.sched, "h.k"), (std::vector<std::string>{"early", "late"}))
+      << "a post after the teardown took the queue sat in the dying ingress";
+  h.reset();
+}
+
+// K-5 (the skeptic's AHostPostDuringItsHomesTeardownComesAfterTheForward, which pinned C-M5's host
+// flag): a host's post on a group whose teardown closed its handle, for a key homed there, reaches
+// the new home after the messages the teardown sends on (td 4.6), and never waits.
+TEST(RouterR3, AHostPostDuringItsHomesTeardownComesAfterTheForward) {
+  cvc::app app;
+  r_world zero(app);
+  r_world h(app, "h", {"h"});
+  ASSERT_TRUE(h.sched->post_message("h.k", str("early")));
+  h.pump();                 // pending at its home
+  h.group->route().close(); // h's teardown, step (1)
+  std::atomic<bool> posted{false};
+  std::thread host([&] {
+    h.sched->post_message("h.k", str("late")); // a host thread's post, after "early"
+    posted = true;
+  });
+  const bool went_on = r_wait_for(posted, 30.0); // a hang guard only
+  EXPECT_TRUE(went_on) << "a host's post waited on its home's teardown";
+  {
+    se::async_scheduler::pump_owner_scope token(*h.sched);
+    h.sched->leave_router(); // forwards "early", then what was posted since, then unregisters
+  }
+  if (!r_wait_for(posted, 30.0)) {
+    ADD_FAILURE() << "the host's post never went on";
+    host.detach();
+    return;
+  }
+  host.join();
+  zero.pump();
+  EXPECT_EQ(drain_fifo(*zero.sched, "h.k"), (std::vector<std::string>{"early", "late"}));
+}
+
+// K-2 (the skeptic's AHandlesPostDiesWithAnIslandOrOnAHashKey): group_ref::post_message queues a
+// send entry, which a teardown's (2d) forwarded as a router entry whatever the group or key; a
+// host's post used to be a message, which an island's teardown drops, as it does a '#' key's. The
+// homed rule now applies to queued sends too.
+TEST(RouterR3, AHandlesPostDiesWithAnIslandOrOnAHashKey) {
+  cvc::app app;
+  r_world zero(app);
+  r_world p(app, "p", {"p"}); // the router on
+  for (const bool island : {true, false}) {
+    auto a = island ? std::make_unique<r_world>(app, "a")
+                    : std::make_unique<r_world>(app, "a", std::vector<std::string>{"a"});
+    const se::group_ref ref = a->group->route();
+    if (island)
+      ASSERT_TRUE(ref.post_message("a.k", str("own"))); // an island's own key
+    ASSERT_TRUE(ref.post_message("a#reply", str("hash")));
+    se::async_scheduler::ingress_stats at_end;
+    se::control_cmd kill;
+    kill.what = se::control_cmd::kind::kill;
+    se::async_scheduler *const raw = a->sched;
+    kill.done = [&](bool) { at_end = raw->ingress_counters(); }; // refused by its destructor
+    ASSERT_TRUE(a->sched->post_control(1, std::move(kill)));
+    a.reset();
+    EXPECT_EQ(at_end.destroy_dropped, island ? 2u : 1u) << (island ? "island" : "prefixed");
+    zero.sched->drain_ingress();
+    EXPECT_EQ(zero.sched->total_pending_messages(), 0u)
+        << (island ? "island" : "prefixed") << ": forwarded to group 0";
+    while (zero.sched->pop_pending_message("a.k") || zero.sched->pop_pending_message("a#reply")) {
+    }
+  }
+}
+
+// K-5 (the skeptic's probe, pinning 7618b8b6b's prefix_home_of): an island messaging on its own
+// keys, router on, never builds group 0 (its lookup asks only for a covering prefix).
+TEST(RouterR3, AnIslandsOwnKeyNeverBuildsGroupZero) {
+  cvc::app app;
+  r_world p(app, "p", {"p"}); // the router on, group 0 not built
+  r_world a(app, "a");        // an island
+  ASSERT_EQ(app.exec_scheduler_probe(), nullptr);
+  const int pid = a.submit(R"((begin (msg-send "a.k" "x") (get-attr (msg-recv "a.k") "payload")))");
+  a.pump();
+  EXPECT_EQ(a.result(pid), "x");
+  EXPECT_TRUE(a.sched->post_message("a.j", str("host")));
+  EXPECT_EQ(app.exec_scheduler_probe(), nullptr) << "an island's lookup built group 0";
+}
+
+// K-5 (the skeptic's probe, pinning C-M2's retry alone; TwoAtOnceBothReturn passes without it): a
+// one-shot holder of group 0's token that never drains (run_all's last round, a frame's look) holds
+// it while kill_owner posts and tries it, then lets go: only the retry drains the command, with
+// group 0 otherwise undriven.
+TEST(RouterR3, AKillOwnerRetriesAfterAOneShotHolderOfGroupZero) {
+  cvc::app app;
+  app.root()("state_exec.locks.threading").value(std::string("shared"));
+  cvc::pool_options po;
+  po.threads = 1;
+  cvc::exec_pool &pool = app.exec_pool(po);
+  r_world zero(app);
+  se::execute_options o;
+  o.env = se::environment::extend(zero.env);
+  o.owner = "x";
+  o.max_time = 300.0; // a backstop only
+  const int pid = zero.sched->execute(std::string(R"((get-attr (msg-recv "never") "payload"))"), o);
+  zero.pump(); // parks
+  std::atomic<bool> held{false}, back{false};
+  std::thread holder([&] {
+    se::async_scheduler::pump_owner_scope token(*zero.sched);
+    held = true;
+    while (!zero.sched->has_pending_ingress()) // kill_owner's command is posted
+      std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // its try fails meanwhile
+  });                                                           // let go, nothing drained
+  while (!held.load())
+    std::this_thread::yield();
+  std::thread killer([&] {
+    pool.kill_owner("x");
+    back = true;
+  });
+  holder.join();
+  const bool returned = r_wait_for(back, 30.0); // a hang guard only
+  EXPECT_TRUE(returned) << "kill_owner waited for a drain that never came";
+  if (!returned) {
+    se::async_scheduler::pump_owner_scope token(*zero.sched);
+    zero.sched->drain_ingress();
+  }
+  killer.join();
+  EXPECT_EQ(zero.status(pid), se::process_status::killed);
+}
+
+} // namespace

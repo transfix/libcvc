@@ -311,9 +311,14 @@ struct world_ground {
   std::vector<unsigned char> rgb;
   bool empty() const { return rgb.empty(); }
 };
-// The size of the ground a bundle holds (ground.png): paint_surface in the material colours,
-// world_ground_size texels a side.
+// The size of the ground a bundle holds (ground.png), paint_surface in the material colours: the
+// fewest texels a side, a power of two from 256 up to world_ground_size, that are at most
+// world_ground_texel_m apart over the world's extent (w.grid). So every world 256 m across or more
+// takes world_ground_size (0.59 m a texel on the default 1.2 km world), and a smaller one fewer:
+// 1024 on a 200 m world, where 2048 was 10 cm a texel and took four times the painting and the PNG.
 constexpr int world_ground_size = 2048;
+constexpr double world_ground_texel_m = 0.25;
+int world_ground_size_for(const generated_world &w);
 
 // The world as bundle files (city_bundle_bytes), everything the renderer draws:
 //   - geometry()'s items, the needles, and the props' coarser rungs (props_r1, props_r2), the last
@@ -323,7 +328,7 @@ constexpr int world_ground_size = 2048;
 //   - streets.json, the street network the roads were extruded from (nodes, segments, widths and
 //     classes) and the city's counts;
 //   - ground.png, the painted ground, north at the top: `ground` when given, else paint_surface
-//     in the material colours at world_ground_size;
+//     in the material colours at world_ground_size_for(w);
 //   - the water level, and the generator ("generated_world", `generator_version`, the seed and
 //     params).
 // Throws as city_bundle_bytes does.

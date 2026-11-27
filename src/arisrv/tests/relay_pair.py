@@ -8,8 +8,9 @@
                          [--client-net-asgi]
 
 The relay listens on ephemeral loopback ports; this reads the one the scheme dials from its
-output, then runs the client's --client-command (test, the default; arigl, which has none, runs
-snapshot) with --relay URL and its own args, and waits for the relay to stop
+output, waits for it to say it serves its room (after its --doc has loaded), then runs the
+client's --client-command (test, the default; arigl, which has none, runs snapshot) with
+--relay URL and its own args, and waits for the relay to stop
 (the client's last call stops it). It passes when both exit 0 and the relay's output matches each
 --expect. With --client-only the relay is stopped after the client, which must exit with
 --client-status (0) and match --client-expect, and the relay's output still each --expect. --client-env sets the client's environment (its
@@ -56,10 +57,13 @@ def main() -> int:
     lines = []
     port = {}
     ready = threading.Event()
+    serving = threading.Event()
 
     def read():
         for line in relay.stdout:
             lines.append(line)
+            if "serving room '" in line:
+                serving.set()
             m = re.search(r"relay up .*\| state=\S+?:(\d+) ", line)
             if m:
                 port["grpc"] = port["grpcs"] = m.group(1)
@@ -73,6 +77,7 @@ def main() -> int:
             if "relay up" in line and a.scheme != "ws":
                 ready.set()
         ready.set()
+        serving.set()
 
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
@@ -80,6 +85,13 @@ def main() -> int:
     try:
         if not ready.wait(60) or a.scheme not in port:
             print("relay_pair: the relay never listened", file=sys.stderr)
+            return 1
+        # The relay listens before it loads its --doc, and its room steps only after: a generated
+        # world's load takes seconds, and over 10 s in a Debug build with coverage, longer than a
+        # client's join waits for the room. So the client starts once the relay says it serves its
+        # room (or has stopped, so the client meets that).
+        if not serving.wait(90):
+            print("relay_pair: the relay listened but never served its room", file=sys.stderr)
             return 1
         url = f"{a.scheme}://{a.host}:{port[a.scheme]}"
         env = dict(os.environ)

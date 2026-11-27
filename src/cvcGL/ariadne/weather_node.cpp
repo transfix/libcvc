@@ -71,12 +71,14 @@
 // The steering wind the cells ride is the scene's one wind (R5), read through steeringWind(): with
 // a scene wind (O14's wind.speed / wind.dir) its heading at its speed at the deck's base, else the
 // cloud deck's own, sky.wind_az at the deck's drift speed, so the storms move with the clouds
-// drawn. A change in it is logged as a
-// steer event at the time it settles (it has held for HOLD_FRAMES frames), so the cells' tracks
-// stay a function of the events; so is a change of weather.time_scale (a rate event: weather
-// seconds per world second). weather.request starts a storm ("upwind": born upwind, timed to
-// cross the ground in its prime; "overhead": in its prime over the ground's centre now) or clears
-// the sky ("calm"), each an event at the time asked, and is emptied once read.
+// drawn. A change in it is logged as a steer event, so the cells' tracks stay a function of the
+// events; so is a change of weather.time_scale (a rate event: weather seconds per world second).
+// The scene's world logs both when it runs this weather (cvc::ariadne::WeatherFriction, F4: on the
+// clock, drawn or headless alike), and this node reads them from weather.events; in a scene with no
+// physics world it logs them itself, at the time a change settles (held for HOLD_FRAMES frames).
+// weather.request starts a storm ("upwind": born upwind, timed to cross the ground in its prime;
+// "overhead": in its prime over the ground's centre now) or clears the sky ("calm"), each an event
+// at the time asked, and is emptied once read.
 
 #include <algorithm>
 #include <cmath>
@@ -431,6 +433,10 @@ struct WeatherRT {
   double pendSpeed = 0.0, pendAz = 0.0, pendScale = 1.0;
   int steerHeld = 0, scaleHeld = 0;
   bool first = true;
+  // The scene's world runs this weather (its WeatherFriction), and so logs the steering and the
+  // time scale (scene_weather.h): this node only reads them. Set by its scene tick.
+  std::string id;
+  bool worldSteers = false;
   // O19, the rain: its keys (how strong the streaks, rings, fog and wet ground are; the streaks'
   // share of their most; the rain at the camera, published), the sky's (its tracks and constants),
   // the ground under the camera, and the streaks.
@@ -579,7 +585,13 @@ void tick(WeatherRT &r, vtkRenderer *ren) {
     r.scaleHeld = 0;
   }
   const bool windHeld = ++r.steerHeld >= HOLD_FRAMES, scaleHeld = ++r.scaleHeld >= HOLD_FRAMES;
-  if (windHeld && (std::fabs(speed - r.steerSpeed) > 1e-6 || std::fabs(az - r.steerAz) > 1e-6)) {
+  if (r.worldSteers) {
+    // The scene's world logs them (on the clock): what is in effect is what it logged.
+    r.steerSpeed = speed;
+    r.steerAz = az;
+    r.scale = scale;
+  } else if (windHeld &&
+             (std::fabs(speed - r.steerSpeed) > 1e-6 || std::fabs(az - r.steerAz) > 1e-6)) {
     cvc::world::weather_event e;
     e.type = cvc::world::weather_event::kind::steer;
     e.t = t;
@@ -589,7 +601,7 @@ void tick(WeatherRT &r, vtkRenderer *ren) {
     r.steerSpeed = speed;
     r.steerAz = az;
   }
-  if (scaleHeld && std::fabs(scale - r.scale) > 1e-9) {
+  if (!r.worldSteers && scaleHeld && std::fabs(scale - r.scale) > 1e-9) {
     cvc::world::weather_event e;
     e.type = cvc::world::weather_event::kind::rate;
     e.t = t;
@@ -1003,6 +1015,16 @@ std::shared_ptr<GraphicsNode> realize_weather(SceneGraph &sg, const ari::SceneNo
   }
 
   out.custom_ticks.push_back([rt](vtkRenderer *ren) { tick(*rt, ren); });
+  // Whether the scene's world runs this weather, and so logs its steering and time scale (F4).
+  rt->id = n.id;
+  out.scene_ticks.push_back(
+      [rt](vtkRenderer *, RealizedScene &scene, const cvc::world_clock::step_result &) {
+        bool runs = false;
+        if (scene.world)
+          for (const auto &wf : scene.world->weathers())
+            runs = runs || wf->node() == rt->id;
+        rt->worldSteers = runs;
+      });
   // A node of its own (the rain's mesh under it), so the scene lists it and a host can find it.
   return node;
 }

@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arisrvx
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -30,7 +30,8 @@ recipe:
 # bin\arisrvx.exe loads python312.dll from bin\. That takes python312 3.12.10+cvc.22 or later, as
 # for arix: cvc.21 first put the DLL there (cy-pca/cvcpkg#542) but with a python3.dll forwarding to
 # python313.dll (fixed in cvc.22, cy-pca/cvcpkg#551), and build.ps1 refuses both older kinds.
-# Needing no pycvc, macOS can follow arisrv's.
+# On macOS, as for arix: bin/arisrvx loads libpython3.12.dylib from ../lib and finds its Python in
+# <prefix>/lib/python3.12, and publish-cvcpkg.yml builds it in the macOS cp312 jobs.
 
 source:
   # Co-located with the libcvc source tree; build.sh points cmake at src/arisrv.
@@ -44,12 +45,12 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
     # libpython3.12 and its headers, the interpreter arisrvx embeds.
     - name: python312
   runtime:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
     - name: python312
   host_tools:
     - cmake
@@ -59,6 +60,10 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
 

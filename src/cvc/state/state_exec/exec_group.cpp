@@ -208,18 +208,27 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
     m.link.caller_only = !shared;
     // The app's routing (S2b, exec_router.h): its handle, and the prefixes it is the home of,
     // registered before the scheduler joins (set_router remembers it had one, S2b.R2 C-M4). A
-    // throw midway unregisters and closes the handle (no destructor runs: S2b.R2, C-m2).
+    // throw from here to the constructor's end unregisters it and closes the handle for good (no
+    // destructor runs: S2b.R2 C-m2, S2b.R3 K-4), so no group stays closed and registered.
     exec_router &router = app->exec_router();
     m.route = group_ref::make(*m.sched, this);
-    try {
-      for (const std::string &prefix : m.opts.channel_prefixes)
-        router.register_prefix(m.route, prefix);
-      m.sched->set_router(&router, m.route);
-    } catch (...) {
-      router.unregister(m.route);
-      m.route.close();
-      throw;
-    }
+    struct registration_guard {
+      exec_router &router;
+      const group_ref &route;
+      bool armed = true;
+      ~registration_guard() {
+        if (!armed)
+          return;
+        try {
+          router.unregister(route);
+        } catch (...) {
+        }
+        route.close_for_good(); // nothing was posted through it yet that its scheduler won't see
+      }
+    } registered{router, m.route};
+    for (const std::string &prefix : m.opts.channel_prefixes)
+      router.register_prefix(m.route, prefix);
+    m.sched->set_router(&router, m.route);
     if (!shared && !pool_built) {
       const bool first = !of_app->single_noted.exchange(true, std::memory_order_relaxed);
       if (first)
@@ -229,6 +238,7 @@ exec_group::exec_group(options o) : impl_(std::make_unique<impl>()) {
                  "exec_pool asked for workers: its groups are pumped on the caller of pump_all " +
                  "(S1-Q1; give app::exec_pool(opts) first, or set state_exec.threads)");
     }
+    registered.armed = false;
   }
   if (of_app)
     of_app->live.fetch_add(1, std::memory_order_release);
