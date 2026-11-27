@@ -23,7 +23,10 @@
 //   follow   the follow layer is a node a track camera finds by id, at the followed vehicle;
 //            the path layer shows only while one is followed;
 //   keys     a layer's visible: follows its key; a target's keys move its beacons;
-//   warn     a layer outside a nav_swarm node, and an unknown layer, warn and draw nothing.
+//   warn     a layer outside a nav_swarm node, and an unknown layer, warn and draw nothing;
+//   ghost    an arena with a stale map's phantom wall (the fog-ghost story): the city layer draws
+//            its border and the ground, the ghosts layer the phantom as a wall, worn away as the
+//            vehicle's sensor clears it; plan, route and sensor stream with the vehicle.
 //
 // Skips (rc 0) where nothing rasterises unless CVC_REQUIRE_RENDER=1. Synthetic data only.
 
@@ -47,6 +50,7 @@
 #include <vtkMapper.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPolyData.h>
+#include <vtkProperty.h>
 
 using namespace cvcgl_test;
 using cvc::gl::GeometryNode;
@@ -177,6 +181,33 @@ scene:
     - { node: stray, type: swarm_layer, layer: flags }
 )";
 }
+
+// The fog-ghost arena: one vehicle on a belief route through a phantom wall its map shows.
+const char *kGhostDoc = R"(meta: { min_libcvc: "0.0.0" }
+scene:
+  clock: { scale: 3.6 }
+  nodes:
+    - node: swarm
+      type: nav_swarm
+      keys: ghost
+      grid: 120
+      belief: shared
+      fog: true
+      policy: default
+      reach: 0.2
+      sense_ticks: 2
+      range: 35
+      route: belief
+      arena: { size: 200, phantoms: [[-0.5, -50, 0.5, 50]], wall_height: 6 }
+      vehicles:
+        - { start: [-80, -6], goal: [80, 6], color: [0.98, 0.85, 0.20] }
+      children:
+        - { node: g_city, type: swarm_layer, layer: city, belief: true }
+        - { node: g_ghosts, type: swarm_layer, layer: ghosts }
+        - { node: g_plan, type: swarm_layer, layer: plan }
+        - { node: g_route, type: swarm_layer, layer: route }
+        - { node: g_sensor, type: swarm_layer, layer: sensor }
+)";
 
 std::shared_ptr<GeometryNode> mesh_of(SceneGraph &sg, const std::string &layer,
                                       const std::string &suffix) {
@@ -370,6 +401,65 @@ int main() {
     frame();
     frame();
     check(moved(before, drawn_xy(goals)) > 0.0, "keys: a target moved takes its beacons with it");
+  }
+
+  // --- ghost --------------------------------------------------------------------------------
+  {
+    cvc::app gapp;
+    ari::register_swarm_node_types(gapp);
+    cvc::ariadne::LoadResult gdoc = cvc::ariadne::load_string(gapp, kGhostDoc);
+    if (!check(gdoc.ok, "ghost: the document loads", gdoc.error))
+      return finish("cvcgl_ariadne_swarm");
+    SceneGraph gsg(gapp, "ghost");
+    gsg.setDiagnosticChromeVisible(false);
+    std::vector<std::string> gw;
+    ari::RealizedScene grs = ari::realize_scene(gsg, gdoc.scene, kPrefix, &gw);
+    SceneRenderer gsr(gsg, W, H, /*offscreen=*/true);
+    const auto gframe = [&]() {
+      ari::tick_scene(grs, gsr.renderer(), 1.0 / 30.0);
+      gsr.render();
+    };
+    const auto gnum = [&](const char *k) {
+      return cvc::ariadne::read_or<int>(gapp, key(std::string("ghost.") + k), -1);
+    };
+    for (int i = 0; i < 600 && gnum("stats.ready") != 1; ++i)
+      gframe();
+    gframe();
+    check(gnum("stats.ready") == 1, "ghost: the swarm is in on its arena");
+    check(cvc::ariadne::read_or<std::string>(gapp, key("ghost.stats.city"), "") == "the arena",
+          "ghost: stats.city names the arena");
+    check(gnum("stats.ghosts0") == 60, "ghost: the phantom is 60 cells of the map",
+          std::to_string(gnum("stats.ghosts0")));
+    check(points_of(mesh_of(gsg, "g_city", "_walls")) > 0 &&
+              points_of(mesh_of(gsg, "g_city", "_ground")) == 4,
+          "ghost: the city layer draws the arena's border and its ground");
+    const auto ghosts = mesh_of(gsg, "g_ghosts", "_mesh");
+    const std::size_t ghost0 = points_of(ghosts);
+    check(ghost0 > 0, "ghost: the ghosts layer stands the phantom up as a wall");
+    vtkActor *ga = ghosts ? vtkActor::SafeDownCast(ghosts->prop()) : nullptr;
+    check(ga && std::fabs(ga->GetProperty()->GetOpacity() - 0.45) < 1e-6,
+          "ghost: see-through (0.45)");
+    check(points_of(mesh_of(gsg, "g_plan", "_lines")) == 4u,
+          "ghost: the plan is two segments a vehicle");
+    check(points_of(mesh_of(gsg, "g_sensor", "_lines")) == 72u * 2u,
+          "ghost: the sensor ring is 72 segments a vehicle");
+    check(points_of(mesh_of(gsg, "g_route", "_lines")) >= 2u,
+          "ghost: the route round the phantom is drawn");
+    const std::vector<double> plan0 = drawn_xy(mesh_of(gsg, "g_plan", "_lines"));
+    const std::vector<double> ring0 = drawn_xy(mesh_of(gsg, "g_sensor", "_lines"));
+    bool worn = false;
+    for (int i = 0; i < 900 && !worn; ++i) {
+      gframe();
+      worn = gnum("stats.ghosts") >= 0 && gnum("stats.ghosts") <= 45; // a quarter of it
+    }
+    check(worn, "ghost: the sensor wears the phantom away", std::to_string(gnum("stats.ghosts")));
+    const auto ghosts_now = mesh_of(gsg, "g_ghosts", "_mesh");
+    check(ghosts_now && (!ghosts_now->isVisible() || points_of(ghosts_now) < ghost0),
+          "ghost: the wall the ghosts layer draws wears away with it");
+    check(moved(plan0, drawn_xy(mesh_of(gsg, "g_plan", "_lines"))) > 0.0,
+          "ghost: the plan streams with the vehicle");
+    check(moved(ring0, drawn_xy(mesh_of(gsg, "g_sensor", "_lines"))) > 0.0,
+          "ghost: the sensor ring goes with it");
   }
 
   std::error_code ec;

@@ -14,10 +14,12 @@
 */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/color_value.h>
 #include <cvc/ariadne/scene_swarm.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
@@ -27,6 +29,7 @@
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/coef_train.h>
+#include <cvc/nav/grid_nav.h> // astar, inflate, simplify: the belief routes
 #include <cvc/nav/sim_thread.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/world_planes.h>
@@ -35,6 +38,7 @@
 #include <exception>
 #include <future>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -127,6 +131,8 @@ struct build_request {
   bool fog = true;
   unsigned seed = 7;
   std::string plant = "kinematic";
+  bool phantoms = true; // set out with the city's stale map, where it has one
+  double range = 60.0;  // the sensor's range, world units
 };
 
 // The fog as a worker hands it over.
@@ -135,12 +141,147 @@ struct coverage_box {
   std::uint64_t rev = 0;
   std::vector<std::uint8_t> coverage;
   std::vector<SceneSwarm::sensed_wall> walls;
+  std::vector<std::uint8_t> belief;
+  int ghosts = 0;
 };
 
-// The fog of `w` over `occ`: per cell 0 never seen, 1 seen, 2 in view; each seen wall's planes.
+// The belief routes as a worker plans them (route: belief).
+struct route_box {
+  std::mutex m;
+  std::uint64_t rev = 0;
+  std::vector<std::vector<float>> routes;
+  long replans = 0;
+  int field_ver = std::numeric_limits<int>::min(); // the world's field when they were planned
+  std::atomic<bool> busy{false};                   // a plan is posted to the worker
+};
+
+// What a route is planned on: the grid, and how far its walls are grown (the vehicle's radius).
+struct route_grid {
+  int rows = 0, cols = 0;
+  double min_x = 0.0, min_y = 0.0, max_x = 0.0, max_y = 0.0;
+  int inflate = 1;
+};
+
+// Each agent's route over its plane's belief, from where it is to goals[i] (world): the 8-connected
+// A* path over the belief grown by the vehicle's radius, string-pulled, as world points from its
+// second cell on (the first is its own), then the goal itself. An agent with no path drives
+// straight at its goal. On the thread that steps `w`.
+std::vector<std::vector<float>> plan_routes(const cvc::nav::sim_world &w, const route_grid &g,
+                                            const std::vector<float> &goals) {
+  const int n = w.size();
+  std::vector<std::vector<float>> out(static_cast<std::size_t>(n));
+  if (g.rows < 2 || g.cols < 2 || goals.size() < static_cast<std::size_t>(2) * n)
+    return out;
+  std::vector<float> pos(static_cast<std::size_t>(2) * n);
+  w.snapshot(pos.data(), nullptr, nullptr, nullptr, nullptr);
+  const double sx = (g.max_x - g.min_x) / (g.cols - 1), sy = (g.max_y - g.min_y) / (g.rows - 1);
+  const auto cell = [&](double x, double y, int &r, int &c) {
+    c = std::clamp(static_cast<int>(std::lround((x - g.min_x) / sx)), 0, g.cols - 1);
+    r = std::clamp(static_cast<int>(std::lround((y - g.min_y) / sy)), 0, g.rows - 1);
+  };
+  const int *planes = w.agent_planes();
+  std::map<int, std::vector<std::uint8_t>> grown; // a plane's belief, grown, once a plan
+  for (int i = 0; i < n; ++i) {
+    const int m = planes ? planes[i] : 0;
+    auto it = grown.find(m);
+    if (it == grown.end())
+      it = grown.emplace(m, cvc::nav::inflate(w.belief_occ(m), g.rows, g.cols, g.inflate)).first;
+    const std::uint8_t *occ = it->second.data();
+    int sr, sc, gr, gc;
+    cell(pos[2 * i], pos[2 * i + 1], sr, sc);
+    cell(goals[2 * i], goals[2 * i + 1], gr, gc);
+    const std::vector<int> path = cvc::nav::astar(occ, g.rows, g.cols, sr, sc, gr, gc);
+    std::vector<float> &r = out[static_cast<std::size_t>(i)];
+    if (path.size() >= 4) {
+      const std::vector<int> sp =
+          cvc::nav::simplify(occ, g.rows, g.cols, path.data(), static_cast<int>(path.size() / 2));
+      for (std::size_t k = 2; k + 1 < sp.size(); k += 2) {
+        r.push_back(static_cast<float>(g.min_x + sp[k + 1] * sx));
+        r.push_back(static_cast<float>(g.min_y + sp[k] * sy));
+      }
+    }
+    r.push_back(goals[2 * i]); // always the goal last, so a route that fails still drives at it
+    r.push_back(goals[2 * i + 1]);
+  }
+  return out;
+}
+
+// The cells a box (x0 y0 x1 y1) covers in a grid whose cell (r, c) is centred at
+// (min_x + c * cell, min_y + r * cell): their centres, else the row or column nearest its middle.
+void stamp_boxes(const std::vector<std::array<double, 4>> &boxes, const swarm_city &c, double cell,
+                 std::vector<std::uint8_t> &occ) {
+  const auto span = [&](double a, double b, double lo, int n, int &i0, int &i1) {
+    if (a > b)
+      std::swap(a, b);
+    i0 = static_cast<int>(std::ceil((a - lo) / cell - 1e-9));
+    i1 = static_cast<int>(std::floor((b - lo) / cell + 1e-9));
+    if (i0 > i1)
+      i0 = i1 = static_cast<int>(std::lround((0.5 * (a + b) - lo) / cell));
+    if (i1 < 0 || i0 > n - 1)
+      return false;
+    i0 = std::max(i0, 0);
+    i1 = std::min(i1, n - 1);
+    return true;
+  };
+  for (const auto &b : boxes) {
+    int k0, k1, r0, r1;
+    if (!span(b[0], b[2], c.min_x, c.cols, k0, k1) || !span(b[1], b[3], c.min_y, c.rows, r0, r1))
+      continue;
+    for (int r = r0; r <= r1; ++r)
+      for (int k = k0; k <= k1; ++k)
+        occ[static_cast<std::size_t>(r) * c.cols + k] = 1;
+  }
+}
+
+// x, y from a [x, y] sequence; false (out untouched) otherwise.
+bool read_xy(const Value *v, double out[2]) {
+  if (!v || !v->is_seq() || v->items.size() < 2)
+    return false;
+  const double x = v->items[0].as_double(std::nan("")), y = v->items[1].as_double(std::nan(""));
+  if (!std::isfinite(x) || !std::isfinite(y))
+    return false;
+  out[0] = x;
+  out[1] = y;
+  return true;
+}
+
+// Boxes from a list of [x0, y0, x1, y1]; others are skipped.
+void read_boxes(const Value *v, std::vector<std::array<double, 4>> &out) {
+  if (!v || !v->is_seq())
+    return;
+  for (const Value &b : v->items) {
+    if (!b.is_seq() || b.items.size() < 4)
+      continue;
+    std::array<double, 4> a{};
+    bool ok = true;
+    for (int k = 0; k < 4; ++k) {
+      a[k] = b.items[k].as_double(std::nan(""));
+      ok = ok && std::isfinite(a[k]);
+    }
+    if (ok)
+      out.push_back(a);
+  }
+}
+
+// A colour from [r, g, b] (0..1) or a colour's text ("#rrggbb", a name, c0..c7).
+bool read_rgb(const Value *v, float out[3]) {
+  if (!v)
+    return false;
+  if (v->is_seq()) {
+    if (v->items.size() < 3)
+      return false;
+    for (int k = 0; k < 3; ++k)
+      out[k] = static_cast<float>(std::clamp(v->items[k].as_double(0.8), 0.0, 1.0));
+    return true;
+  }
+  return parse_color_text(v->as_string(), out);
+}
+
+// The fog of `w` over `occ`: per cell 0 never seen, 1 seen, 2 in view; each seen wall's planes;
+// and what the planes believe (scene_swarm.h's belief()), with how many ghosts.
 void read_coverage(const cvc::nav::sim_world &w, const std::vector<std::uint8_t> &occ,
-                   std::vector<std::uint8_t> &coverage,
-                   std::vector<SceneSwarm::sensed_wall> &walls) {
+                   std::vector<std::uint8_t> &coverage, std::vector<SceneSwarm::sensed_wall> &walls,
+                   std::vector<std::uint8_t> &belief, int &ghosts) {
   const std::size_t cells = occ.size();
   coverage.assign(cells, 0);
   walls.clear();
@@ -171,6 +312,14 @@ void read_coverage(const cvc::nav::sim_world &w, const std::vector<std::uint8_t>
       walls.push_back(std::move(sw));
     }
   }
+  belief.assign(cells, 0);
+  for (int m = 0; m < M; ++m) {
+    const std::uint8_t *b = w.belief_occ(m);
+    for (std::size_t i = 0; i < cells; ++i)
+      if (b[i])
+        belief[i] = occ[i] ? 1 : 2;
+  }
+  ghosts = static_cast<int>(std::count(belief.begin(), belief.end(), std::uint8_t{2}));
 }
 
 } // namespace
@@ -191,8 +340,49 @@ swarm_spec swarm_spec::from_props(const Value &p) {
   s.plant = p.str("plant", s.plant);
   s.policy = p.str("policy", s.policy);
   s.sense_every = std::max(1, static_cast<int>(p.num("sense_every", s.sense_every)));
+  s.sense_ticks = std::max(1, static_cast<int>(p.num("sense_ticks", s.sense_ticks)));
   s.noun = p.str("noun", s.noun);
   s.groups = p.str("groups", s.groups);
+  if (const Value *vs = p.find("vehicles"); vs && vs->is_seq()) {
+    for (const Value &v : vs->items) {
+      swarm_vehicle sv;
+      if (!v.is_map() || !read_xy(v.find("start"), sv.start) || !read_xy(v.find("goal"), sv.goal))
+        continue;
+      sv.has_color = read_rgb(v.find("color"), sv.color);
+      sv.name = v.str("name");
+      s.vehicles.push_back(sv);
+    }
+    if (!s.vehicles.empty() && !p.find("agents"))
+      s.agents = static_cast<int>(s.vehicles.size());
+  }
+  if (const Value *a = p.find("arena"); a && a->is_map()) {
+    s.has_arena = true;
+    swarm_arena &ar = s.arena;
+    const Value *b = a->find("bounds");
+    const Value *sz = a->find("size");
+    if (b && b->is_seq() && b->items.size() >= 4) {
+      ar.min_x = b->items[0].as_double(ar.min_x);
+      ar.min_y = b->items[1].as_double(ar.min_y);
+      ar.max_x = b->items[2].as_double(ar.max_x);
+      ar.max_y = b->items[3].as_double(ar.max_y);
+    } else if (sz) {
+      double wh[2] = {200.0, 200.0};
+      if (!read_xy(sz, wh))
+        wh[0] = wh[1] = sz->as_double(200.0);
+      ar.min_x = -0.5 * wh[0];
+      ar.max_x = 0.5 * wh[0];
+      ar.min_y = -0.5 * wh[1];
+      ar.max_y = 0.5 * wh[1];
+    }
+    read_boxes(a->find("walls"), ar.walls);
+    read_boxes(a->find("phantoms"), ar.phantoms);
+    ar.wall_height = std::max(0.0, a->num("wall_height", ar.wall_height));
+    ar.name = a->str("name", ar.name);
+  }
+  s.route = lower(p.str("route", s.route));
+  if (s.route != "belief")
+    s.route = "none";
+  s.range = std::max(1.0, p.num("range", s.range));
   return s;
 }
 
@@ -269,6 +459,35 @@ swarm_city swarm_city_from_world(const cvc::world::world_geometry &w, int grid,
   return c;
 }
 
+swarm_city arena_swarm_city(const swarm_arena &a, int grid) {
+  swarm_city c;
+  const double w = a.max_x - a.min_x, h = a.max_y - a.min_y;
+  if (!(w > 0.0) || !(h > 0.0) || grid < 2)
+    return c;
+  const double cell = std::max(w, h) / (grid - 1);
+  c.cols = std::max(2, static_cast<int>(std::lround(w / cell)) + 1);
+  c.rows = std::max(2, static_cast<int>(std::lround(h / cell)) + 1);
+  c.min_x = a.min_x;
+  c.min_y = a.min_y;
+  c.max_x = a.min_x + (c.cols - 1) * cell;
+  c.max_y = a.min_y + (c.rows - 1) * cell;
+  c.min_z = 0.0;
+  c.max_z = a.wall_height;
+  c.scale = kMetre;
+  c.real = false;
+  c.arena = true;
+  c.name = a.name;
+  c.wall_h = a.wall_height;
+  c.occ.assign(static_cast<std::size_t>(c.rows) * c.cols, 0);
+  stamp_boxes(a.walls, c, cell, c.occ);
+  add_border(c.occ, c.rows, c.cols);
+  if (!a.phantoms.empty()) {
+    c.prior = c.occ;
+    stamp_boxes(a.phantoms, c, cell, c.prior);
+  }
+  return c;
+}
+
 struct SceneSwarm::impl {
   cvc::app &app;
   std::string keys;
@@ -289,6 +508,7 @@ struct SceneSwarm::impl {
   bool built = false;
   bool fog_on = true;
   std::string belief;
+  double range = 60.0; // the built world's sensor range
 
 #if CVC_SWARM_WORKER
   std::future<std::unique_ptr<cvc::nav::sim_world>> pending;
@@ -310,8 +530,21 @@ struct SceneSwarm::impl {
   std::uint64_t box_seen = 0;
   std::vector<std::uint8_t> coverage;
   std::vector<SceneSwarm::sensed_wall> walls;
+  std::vector<std::uint8_t> belief_cells;
+  int ghosts = 0, ghosts0 = 0;
   std::uint64_t cov_rev = 0;
   long last_sense = std::numeric_limits<long>::min() / 2;
+
+  // The belief routes (route: belief), a new box each build so a plan for the old world is dropped.
+  bool routing = false;
+  std::shared_ptr<route_box> rbox = std::make_shared<route_box>();
+  std::uint64_t rbox_seen = 0;
+  std::vector<std::vector<float>> routes;
+  std::vector<int> cursor;
+  std::vector<float> aimed; // [2n] world: the waypoint each agent was last retargeted to
+  std::uint64_t routes_rev = 0;
+  bool replan_asked = false; // a goal moved: plan again whatever the belief
+  long replans = 0;
 
   // The live keys as last applied.
   int separate = -1;
@@ -321,6 +554,7 @@ struct SceneSwarm::impl {
   impl(cvc::app &a, std::string k, swarm_spec s)
       : app(a), keys(std::move(k)), spec(std::move(s)), ts(cvc::nav::city_scene(spec.grid)),
         plant(plant_options()) {
+    routing = spec.route == "belief";
     load_policy();
     // The navigator's step is 7 quanta of the suite quantum on the scene's clock (cvc/core/
     // sim_tick.h), as the world's vehicles have it; a clock that has already ticked keeps its own,
@@ -381,6 +615,8 @@ struct SceneSwarm::impl {
     read_or_seed<double>(app, key("sep_gain"), spec.sep_gain);
     read_or_seed<int>(app, key("follow"), -1);
     read_or_seed<int>(app, key("drag"), -1); // the target a minimap is dragging (-1: none)
+    read_bool_or_seed(app, key("phantoms"), 1); // the city's stale map, where it has one
+    read_or_seed<double>(app, key("range"), spec.range);
     write(app, key("stats.policy"), policy);
     write(app, key("stats.ready"), 0);
     write(app, key("stats.building"), 0);
@@ -397,6 +633,8 @@ struct SceneSwarm::impl {
     r.plant = read_or<std::string>(app, key("plant"), spec.plant);
     if (r.plant.empty())
       r.plant = "kinematic";
+    r.phantoms = read_bool_or(app, key("phantoms"), 1) != 0;
+    r.range = std::max(1.0, read_or<double>(app, key("range"), spec.range));
     return r;
   }
 
@@ -420,6 +658,8 @@ struct SceneSwarm::impl {
     cfg.veh.vmax = ts.vmax;
     cfg.freeze_sense = !r.fog;
     cfg.reach_tol = static_cast<float>(spec.reach);
+    cfg.range_m = r.range;
+    cfg.sense_every = spec.sense_ticks;
     const bool sep = read_bool_or(app, key("separate"), spec.separate ? 1 : 0) != 0;
     const double gain = read_or<double>(app, key("sep_gain"), spec.sep_gain);
     cfg.sep_radius = static_cast<float>(spec.sep_radius) * ts.rr;
@@ -429,11 +669,52 @@ struct SceneSwarm::impl {
     return cfg;
   }
 
-  // A world as `r` asks, on `c`: callable on any thread (it reads only its arguments).
-  static std::unique_ptr<cvc::nav::sim_world> make_world(const cvc::nav::sim_world::config &cfg,
-                                                         const std::vector<std::uint8_t> &occ,
-                                                         const cvc::nav::coef_mlp &model,
-                                                         const build_request &r) {
+  // Listed vehicle i's colour (of n): its own, else the targets' hsv colour for its place.
+  static void listed_color(const swarm_vehicle &v, int i, int n, float out[3]) {
+    if (v.has_color) {
+      std::copy(v.color, v.color + 3, out);
+      return;
+    }
+    hsv2rgb(static_cast<double>(i) / std::max(1, n), 0.74, 0.98, out);
+  }
+
+  // A world as `r` asks, on the city's occupancy `occ` (the truth) with `prior` its agents' map
+  // (empty: occ), its agents scattered or `listed`: callable on any thread (it reads only its
+  // arguments).
+  static std::unique_ptr<cvc::nav::sim_world>
+  make_world(const cvc::nav::sim_world::config &cfg, const std::vector<std::uint8_t> &occ,
+             const std::vector<std::uint8_t> &prior, const cvc::nav::coef_mlp &model,
+             const build_request &r, const std::vector<swarm_vehicle> &listed) {
+    const bool stale = !prior.empty() && prior.size() == occ.size();
+    if (!listed.empty()) {
+      const int n = std::clamp(r.agents, 1, static_cast<int>(listed.size()));
+      std::vector<float> o(static_cast<std::size_t>(2) * n), g(o.size()),
+          col(static_cast<std::size_t>(3) * n);
+      for (int i = 0; i < n; ++i) {
+        const swarm_vehicle &v = listed[static_cast<std::size_t>(i)];
+        o[2 * i] = static_cast<float>((v.start[0] - cfg.cx) * cfg.scale);
+        o[2 * i + 1] = static_cast<float>((v.start[1] - cfg.cy) * cfg.scale);
+        g[2 * i] = static_cast<float>((v.goal[0] - cfg.cx) * cfg.scale);
+        g[2 * i + 1] = static_cast<float>((v.goal[1] - cfg.cy) * cfg.scale);
+        listed_color(v, i, n, &col[3 * static_cast<std::size_t>(i)]);
+      }
+      // shared: one plane; private: one each; grouped: max(2, n / 64) of them, in turn.
+      std::vector<int> ids;
+      int planes = 1;
+      if (r.belief == "private" || r.belief == "grouped") {
+        planes = r.belief == "private" ? n : std::min(n, std::max(2, n / 64));
+        ids.resize(n);
+        for (int i = 0; i < n; ++i)
+          ids[i] = i % planes;
+      }
+      auto w = std::make_unique<cvc::nav::sim_world>(
+          cfg, occ.data(), stale ? prior.data() : occ.data(), model, o.data(), g.data(), col.data(),
+          n, ids.empty() ? nullptr : ids.data(), planes);
+      for (int i = 0; i < n; ++i)
+        if (!listed[static_cast<std::size_t>(i)].name.empty())
+          w->set_name(i, listed[static_cast<std::size_t>(i)].name);
+      return w;
+    }
     auto m = cvc::nav::sim_world::belief_mode::shared;
     int k = 1;
     if (r.belief == "private") {
@@ -442,8 +723,18 @@ struct SceneSwarm::impl {
       m = cvc::nav::sim_world::belief_mode::clustered;
       k = std::max(2, r.agents / 64);
     }
-    return std::make_unique<cvc::nav::sim_world>(
-        cvc::nav::sim_world::from_occupancy(cfg, occ.data(), model, r.agents, r.seed, m, k));
+    // A stale map is the city and its phantoms: the agents scatter on its free cells (none in a
+    // phantom), their planes are seeded from it, and the world as it is replaces it as the truth.
+    auto w = std::make_unique<cvc::nav::sim_world>(cvc::nav::sim_world::from_occupancy(
+        cfg, stale ? prior.data() : occ.data(), model, r.agents, r.seed, m, k));
+    if (stale)
+      w->set_truth(occ.data());
+    return w;
+  }
+
+  // The prior a build sets out with: the city's stale map when it has one and `r` asks for it.
+  std::vector<std::uint8_t> prior_for(const build_request &r) const {
+    return r.phantoms ? city.prior : std::vector<std::uint8_t>{};
   }
 
   void start_build(const build_request &r) {
@@ -457,14 +748,15 @@ struct SceneSwarm::impl {
     }
     building_req = r;
     const cvc::nav::sim_world::config cfg = config_for(r);
-    pending = std::async(std::launch::async, [cfg, occ = city.occ, m = model, r]() {
-      return make_world(cfg, occ, m, r);
+    pending = std::async(std::launch::async, [cfg, occ = city.occ, prior = prior_for(r), m = model,
+                                              r, listed = spec.vehicles]() {
+      return make_world(cfg, occ, prior, m, r, listed);
     });
     write(app, key("stats.building"), 1);
 #else
     building_req = r;
     try {
-      install(make_world(config_for(r), city.occ, model, r));
+      install(make_world(config_for(r), city.occ, prior_for(r), model, r, spec.vehicles));
     } catch (const std::exception &e) {
       std::fprintf(stderr, "nav_swarm: build: %s\n", e.what());
     }
@@ -501,6 +793,7 @@ struct SceneSwarm::impl {
     }
     fog_on = building_req.fog;
     belief = building_req.belief;
+    range = building_req.range;
     separate = -1; // the live keys apply again to the new world
     sep_gain = -1.0;
     assign_targets();
@@ -509,9 +802,12 @@ struct SceneSwarm::impl {
     now = SceneSwarm::frame{};
     last_tick = -1;
     last_sense = std::numeric_limits<long>::min() / 2;
-    coverage.assign(static_cast<std::size_t>(city.rows) * city.cols, 0);
-    walls.clear();
+    // The fog and the belief as built (a stale map's ghosts all standing), read here before a
+    // worker owns the world.
+    read_coverage(*world, city.occ, coverage, walls, belief_cells, ghosts);
+    ghosts0 = ghosts;
     ++cov_rev;
+    start_routes();
     // The world's first frame, read here before a worker owns it: a view has every agent at its
     // start from the frame the world is in, not only once the worker has published.
     read_frame(true);
@@ -542,8 +838,25 @@ struct SceneSwarm::impl {
     publish_build();
   }
 
-  // The targets, their colours and each agent's, from the scattered goals' latitudes.
+  // The targets, their colours and each agent's: listed vehicles are each their own target, in
+  // their own colours; scattered ones go by their goals' latitudes.
   void assign_targets() {
+    if (!spec.vehicles.empty()) {
+      const int n = world->size();
+      targets.assign(static_cast<std::size_t>(2) * n, 0.0f);
+      world->goals_world(targets.data());
+      target_colors.assign(static_cast<std::size_t>(3) * n, 0.0f);
+      for (int i = 0; i < n; ++i)
+        listed_color(spec.vehicles[static_cast<std::size_t>(i)], i, n,
+                     &target_colors[3 * static_cast<std::size_t>(i)]);
+      colors = target_colors;
+      agent_targets.resize(n);
+      for (int i = 0; i < n; ++i)
+        agent_targets[i] = i;
+      goals = targets;
+      color_planes();
+      return;
+    }
     const int n = world->size();
     const int T = spec.targets;
     std::vector<float> gw(static_cast<std::size_t>(2) * n);
@@ -592,7 +905,12 @@ struct SceneSwarm::impl {
     }
     goals.assign(static_cast<std::size_t>(2) * n, 0.0f);
     world->goals_world(goals.data());
-    // Each belief plane's colour: the mean of its agents'.
+    color_planes();
+  }
+
+  // Each belief plane's colour (the mean of its agents'), and the targets out.
+  void color_planes() {
+    const int n = world->size();
     const int M = std::max(1, world->planes());
     const int *pl = world->agent_planes();
     plane_colors.assign(static_cast<std::size_t>(3) * M, 0.0f);
@@ -642,6 +960,8 @@ struct SceneSwarm::impl {
         goals[2 * static_cast<std::size_t>(i) + 1] = static_cast<float>(y);
       }
     ++targets_rev;
+    replan_asked = routing; // the routes go to the goals: plan them again
+    aimed.clear();          // and the agents were sent straight at them
     targets_keyed[2 * static_cast<std::size_t>(t)] = static_cast<float>(x);
     targets_keyed[2 * static_cast<std::size_t>(t) + 1] = static_cast<float>(y);
     write(app, key("targets." + std::to_string(t) + ".x"), x);
@@ -663,9 +983,9 @@ struct SceneSwarm::impl {
   }
 
   double vehicle_length() const {
-    return city.real ? kHumveeLen : 2.0 * static_cast<double>(ts.rr);
+    return city.real || city.arena ? kHumveeLen : 2.0 * static_cast<double>(ts.rr);
   }
-  double wall_height() const { return 0.06 * city.span(); }
+  double wall_height() const { return city.wall_h > 0.0 ? city.wall_h : 0.06 * city.span(); }
 
   void publish_build() {
     write(app, key("stats.agents"), world ? world->size() : 0);
@@ -676,7 +996,10 @@ struct SceneSwarm::impl {
     write(app, key("stats.building"), 0);
     write(app, key("stats.vehicle_length"), vehicle_length());
     write(app, key("stats.vehicle_radius"),
-          city.real ? 0.5 * kHumveeLen : static_cast<double>(ts.rr));
+          city.real || city.arena ? 0.5 * kHumveeLen : static_cast<double>(ts.rr));
+    write(app, key("stats.range"), range);
+    write(app, key("stats.ghosts0"), ghosts0);
+    write(app, key("stats.ghosts"), ghosts);
     write(app, key("stats.span"), city.span());
     write(app, key("stats.wall_height"), wall_height());
     char b[192];
@@ -707,6 +1030,10 @@ struct SceneSwarm::impl {
     write(app, key("stats.status"), std::string(st));
     write(app, key("stats.arrived"), static_cast<int>(now.arrived));
     write(app, key("stats.tick"), static_cast<int>(now.tick));
+    write(app, key("stats.time"),
+          static_cast<double>(now.tick) *
+              static_cast<double>(world ? world->current_config().veh.dt : 0.0f));
+    write(app, key("stats.replans"), static_cast<int>(replans));
   }
 
   // The latest navigator frame into `now`; true when it is newer.
@@ -724,6 +1051,7 @@ struct SceneSwarm::impl {
       now.heading = s->heading;
       now.mode = s->mode;
       now.reached = s->reached;
+      now.carrot = s->carrot;
       last_tick = s->tick;
     } else
 #endif
@@ -740,12 +1068,18 @@ struct SceneSwarm::impl {
       now.reached.resize(n);
       world->snapshot(now.pos.data(), now.heading.data(), nullptr, now.mode.data(),
                       now.reached.data());
+      now.carrot.resize(static_cast<std::size_t>(2) * n);
+      world->carrots_world(now.carrot.data());
       last_tick = t;
     }
     now.ground.resize(now.n);
     long arrived = 0;
     for (int i = 0; i < now.n; ++i) {
       now.ground[i] = city.ground(now.pos[2 * i], now.pos[2 * i + 1]);
+      // On a route, only its goal is the agent's: a waypoint it parks at on the way is not.
+      if (routing && i < static_cast<int>(routes.size()) && i < static_cast<int>(cursor.size()) &&
+          static_cast<std::size_t>(cursor[i] + 1) < routes[i].size() / 2)
+        now.reached[i] = 0;
       arrived += now.reached[i] ? 1 : 0;
     }
     now.arrived = arrived;
@@ -823,17 +1157,23 @@ struct SceneSwarm::impl {
         std::shared_ptr<coverage_box> b = box;
         std::vector<std::uint8_t> occ = city.occ;
         thread->post([b, occ = std::move(occ)](cvc::nav::sim_world &w) {
-          std::vector<std::uint8_t> c;
+          std::vector<std::uint8_t> c, bel;
           std::vector<SceneSwarm::sensed_wall> s;
-          read_coverage(w, occ, c, s);
+          int g = 0;
+          read_coverage(w, occ, c, s, bel, g);
           std::lock_guard<std::mutex> lk(b->m);
           b->coverage = std::move(c);
           b->walls = std::move(s);
+          b->belief = std::move(bel);
+          b->ghosts = g;
           ++b->rev;
         });
       } else {
-        read_coverage(*world, city.occ, coverage, walls);
+        const int was = ghosts;
+        read_coverage(*world, city.occ, coverage, walls, belief_cells, ghosts);
         ++cov_rev;
+        if (ghosts != was)
+          write(app, key("stats.ghosts"), ghosts);
       }
     }
     std::lock_guard<std::mutex> lk(box->m);
@@ -842,8 +1182,146 @@ struct SceneSwarm::impl {
       if (box->coverage.size() == coverage.size()) {
         coverage.swap(box->coverage);
         walls.swap(box->walls);
+        belief_cells.swap(box->belief);
+        const int was = ghosts;
+        ghosts = box->ghosts;
         ++cov_rev;
+        if (ghosts != was)
+          write(app, key("stats.ghosts"), ghosts);
       }
+    }
+  }
+
+  route_grid grid_for_routes() const {
+    route_grid g;
+    g.rows = city.rows;
+    g.cols = city.cols;
+    g.min_x = city.min_x;
+    g.min_y = city.min_y;
+    g.max_x = city.max_x;
+    g.max_y = city.max_y;
+    // The walls grown by the vehicle's radius, at least a cell: the route keeps the drive's
+    // clearance where it can.
+    const double cell = city.span() / std::max(1, city.cols - 1);
+    g.inflate = std::max(1, static_cast<int>(std::lround((ts.rr / city.scale) / cell)));
+    return g;
+  }
+
+  // A new world's routes, planned here before a worker owns it, each agent sent to its first
+  // waypoint.
+  void start_routes() {
+    routes.clear();
+    cursor.clear();
+    aimed.clear();
+    replans = 0;
+    replan_asked = false;
+    rbox = std::make_shared<route_box>(); // a plan posted to the old world is dropped
+    rbox_seen = 0;
+    if (!routing)
+      return;
+    routes = plan_routes(*world, grid_for_routes(), goals);
+    rbox->field_ver = world->field_version();
+    replans = 1;
+    cursor.assign(routes.size(), 0);
+    ++routes_rev;
+    follow_routes(true);
+  }
+
+  // Each agent on to its route's next waypoint once it is near its current one, or, `all`, every
+  // agent to its current one (new routes). Retargeted only when the point it drives at changes: a
+  // retarget sets the drive's carrot going again, and unparks an agent at its goal.
+  void follow_routes(bool all) {
+    // A waypoint is passed within 3% of the city's span, or its reach and a quarter, so the cursor
+    // moves on before the drive would park at it.
+    const double arrive = std::max(0.03 * city.span(), 1.25 * spec.reach / city.scale);
+    const int n = std::min(static_cast<int>(routes.size()), static_cast<int>(cursor.size()));
+    for (int i = 0; i < n; ++i) {
+      const std::vector<float> &r = routes[static_cast<std::size_t>(i)];
+      const int nw = static_cast<int>(r.size() / 2);
+      if (nw == 0)
+        continue;
+      int &k = cursor[static_cast<std::size_t>(i)];
+      bool moved = all;
+      float px = 0.0f, py = 0.0f;
+      bool have = false;
+      if (i < now.n && now.pos.size() >= static_cast<std::size_t>(2) * (i + 1)) {
+        px = now.pos[2 * i];
+        py = now.pos[2 * i + 1];
+        have = true;
+      } else if (world && !thread) {
+        std::vector<float> p(static_cast<std::size_t>(2) * world->size());
+        world->snapshot(p.data(), nullptr, nullptr, nullptr, nullptr);
+        px = p[2 * i];
+        py = p[2 * i + 1];
+        have = true;
+      }
+      while (have && k + 1 < nw && std::hypot(px - r[2 * k], py - r[2 * k + 1]) <= arrive) {
+        ++k;
+        moved = true;
+      }
+      if (aimed.size() != routes.size() * 2)
+        aimed.assign(routes.size() * 2, std::numeric_limits<float>::quiet_NaN());
+      const float ax = r[2 * k], ay = r[2 * k + 1];
+      if (moved &&
+          !(std::fabs(ax - aimed[2 * i]) < 1e-3f && std::fabs(ay - aimed[2 * i + 1]) < 1e-3f)) {
+        aimed[2 * i] = ax;
+        aimed[2 * i + 1] = ay;
+        float nx, ny;
+        to_nav(ax, ay, nx, ny);
+        retarget(i, nx, ny);
+      }
+    }
+  }
+
+  // The routes each frame: planned again (on the worker, which alone may read the planes while
+  // it runs) once a belief flip has changed some plane's map or a goal has moved, picked up a
+  // frame later, and followed.
+  void tick_routes(bool fresh) {
+    if (!routing || !world)
+      return;
+    const route_grid g = grid_for_routes();
+    if (thread) {
+      if (!rbox->busy.exchange(true)) {
+        const bool force = replan_asked;
+        replan_asked = false;
+        std::shared_ptr<route_box> b = rbox;
+        thread->post([b, g, goals = goals, force](cvc::nav::sim_world &w) {
+          if (force || w.field_version() != b->field_ver) {
+            std::vector<std::vector<float>> r = plan_routes(w, g, goals);
+            std::lock_guard<std::mutex> lk(b->m);
+            b->routes = std::move(r);
+            b->field_ver = w.field_version();
+            ++b->replans;
+            ++b->rev;
+          }
+          b->busy.store(false);
+        });
+      }
+    } else if (replan_asked || world->field_version() != rbox->field_ver) {
+      replan_asked = false;
+      std::vector<std::vector<float>> r = plan_routes(*world, g, goals);
+      std::lock_guard<std::mutex> lk(rbox->m);
+      rbox->routes = std::move(r);
+      rbox->field_ver = world->field_version();
+      ++rbox->replans;
+      ++rbox->rev;
+    }
+    bool fresh_routes = false;
+    {
+      std::lock_guard<std::mutex> lk(rbox->m);
+      if (rbox->rev != rbox_seen) {
+        rbox_seen = rbox->rev;
+        routes = rbox->routes;
+        replans = 1 + rbox->replans;
+        fresh_routes = true;
+      }
+    }
+    if (fresh_routes) {
+      cursor.assign(routes.size(), 0);
+      ++routes_rev;
+      follow_routes(true);
+    } else if (fresh) {
+      follow_routes(false);
     }
   }
 
@@ -876,6 +1354,7 @@ struct SceneSwarm::impl {
     }
     const bool fresh = read_frame(false);
     sense();
+    tick_routes(fresh);
     // The followed agent's pose, for a camera or a program.
     const int follow = read_or<int>(app, key("follow"), -1);
     if (fresh && follow >= 0 && follow < now.n) {
@@ -923,6 +1402,7 @@ bool SceneSwarm::fog() const { return _impl->fog_on; }
 double SceneSwarm::vehicle_radius() const { return _impl->ts.rr; }
 double SceneSwarm::vehicle_length() const { return _impl->vehicle_length(); }
 double SceneSwarm::wall_height() const { return _impl->wall_height(); }
+double SceneSwarm::sensor_range() const { return _impl->range; }
 const std::vector<float> &SceneSwarm::colors() const { return _impl->colors; }
 const std::vector<float> &SceneSwarm::goals() const { return _impl->goals; }
 const std::vector<int> &SceneSwarm::agent_targets() const { return _impl->agent_targets; }
@@ -935,6 +1415,12 @@ const std::vector<std::uint8_t> &SceneSwarm::coverage() const { return _impl->co
 const std::vector<SceneSwarm::sensed_wall> &SceneSwarm::sensed_walls() const {
   return _impl->walls;
 }
+const std::vector<std::uint8_t> &SceneSwarm::belief() const { return _impl->belief_cells; }
+int SceneSwarm::ghosts() const { return _impl->ghosts; }
+int SceneSwarm::ghosts_at_build() const { return _impl->ghosts0; }
+const std::vector<std::vector<float>> &SceneSwarm::routes() const { return _impl->routes; }
+const std::vector<int> &SceneSwarm::route_cursor() const { return _impl->cursor; }
+std::uint64_t SceneSwarm::routes_revision() const { return _impl->routes_rev; }
 int SceneSwarm::nearest_agent(double x, double y) const { return _impl->nearest_agent(x, y); }
 void SceneSwarm::move_target(int t, double x, double y) { _impl->move_target(t, x, y); }
 void SceneSwarm::restart() { _impl->start_build(_impl->request_from_keys()); }

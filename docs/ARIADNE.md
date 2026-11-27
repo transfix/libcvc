@@ -2072,24 +2072,40 @@ scene:
 - **The city.** `city:` names a `data:` entry; once its dataset is ready its world is rasterized onto
   `grid` x `grid` cells (96) over the terrain's extent, at the trained metric (0.05 navigator units a
   metre), and walled at its edge. With no `city:`, or a dataset that fails to load (no network),
-  the swarm crosses the synthetic city the trainer learns on, which the `city` layer draws.
+  the swarm crosses the synthetic city the trainer learns on, which the `city` layer draws, or the
+  node's `arena:`: an open field in metres that the document draws up (`size: 200`, or
+  `size: [w, h]` about the origin, or `bounds: [x0, y0, x1, y1]`), on square cells (`grid` along its
+  longer side), with `walls:` and `phantoms:` as lists of `[x0, y0, x1, y1]` boxes and a
+  `wall_height` (6). A phantom is a wall of a stale map: it is in the map the vehicles set out with
+  and not in the field, so it stands in their belief until their sensors' rays clear it. The
+  `city` layer draws an arena's walls, and its vehicles are a Humvee long.
 - **The swarm.** Its props: `agents`, `belief` (planes: shared one, grouped one a group of 64 and at
   least 2, private one each), `fog` (sensing; off, every plane is the known map), `seed`, `spawn`
   (`opposed`: one edge to the other; `scattered`), `targets` (1 to 64), `reach`, `separate`,
   `sep_radius` and `sep_gain` (in vehicle radii), `plant`, `policy` (a `.cvcnav`; empty: the published
   trained weights, else the built-in net; `default`: the built-in net), `grid`, `sense_every`, and
   `noun` / `groups` for its status line. Each agent is sent to the target of its goal's latitude
-  band and wears its colour. It steps on the app's world clock, one navigator step every 0.06 s of
+  band and wears its colour. Or `vehicles:` lists them, each `{start: [x, y], goal: [x, y], color,
+  name}` in world units, in place of the scatter and the targets: each is its own target, in its
+  own colour (unset: the targets' hsv colours), and `agents` is how many of the list (all of it
+  by default). `route: belief` drives each on an 8-connected A* route over its own belief plane,
+  its walls grown by the vehicle's radius: its waypoints are its goals in turn, and it is planned
+  again from where the vehicle is whenever a belief flip changes some plane's map, so a believed
+  wall bends it until sensing clears the wall (GRL-SNAM's belief route). `range` is the sensor's,
+  in world units (60), and `sense_ticks` the navigator steps between senses (4). It steps on the app's world clock, one navigator step every 0.06 s of
   world time, on a worker thread (a browser without threads steps it on the frame's thread).
-- **Its keys,** under `keys:` (`swarm`), seeded from the props: `agents`, `belief`, `fog`, `plant`
-  and `seed` are what the next build makes (`request: restart`, or `reseed` for one more seed; and
-  every `sim.restart`); `separate`, `sep_gain` and `follow` (the agent the `path` and `follow` layers
+- **Its keys,** under `keys:` (`swarm`), seeded from the props: `agents`, `belief`, `fog`, `plant`,
+  `seed`, `range` and `phantoms` (1: the vehicles set out with the arena's stale map, 0: with the
+  field as it is) are what the next build makes (`request: restart`, or `reseed` for one more seed;
+  and every `sim.restart`); `separate`, `sep_gain` and `follow` (the agent the `path` and `follow` layers
   follow, -1 none) are live; `follow_at: "x,y"` follows the agent nearest a point;
   `targets.<t>.x`/`.y` move a rally point, and its agents drive to it; `lockstep` 1 makes each frame
   wait for the steps due (a capture). It publishes `stats.*` (`agents`, `planes`, `arrived`, `tick`,
   `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
-  `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
-  target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
+  `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`, `time` (world seconds
+  since the build), `range`, `ghosts` (the cells some plane's map blocks that the field does not)
+  and `ghosts0` (as built), `replans`), `targets.count` and each target's `color`, and
+  `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
 - **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee`, a model's name or a mesh
   file, else arrows: the look a world vehicle would have, `vehicle_look_named` and
   `vehicle_look_mesh_of`, so `humvee` is the Humvee in parts, its wheels at rest in a tyre's dark,
@@ -2097,12 +2113,25 @@ scene:
   it, each colour role decimated on its own, picked per vehicle by its size on screen: a rung
   takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
   and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
-  reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
-  `belief` (the walls the fleet has sensed, in the colours of the belief planes that saw them),
-  `dots` and `targets` (markers over everything, for a map view), `city` (the synthetic city), and
-  `follow` (an empty node at the followed vehicle, heading its way, which a track camera names).
+  reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail;
+  `segments` up to 1024, its whole track), `belief` (the walls the fleet has sensed, in the colours
+  of the belief planes that saw them), `dots` and `targets` (markers over everything, for a map
+  view), `city` (the synthetic city or the arena; with `belief: true` its ground also shows the
+  fleet's map, a light per cell it blocks, red where the field has a wall and amber where it has
+  none), `ghosts` (those amber cells standing as a see-through wall, worn away as they are sensed
+  clear), `plan` (each vehicle to its carrot, what the drive steers at, and on to its route's
+  waypoint or its goal), `route` (each route ahead), `sensor` (a ring of the sensor's range round
+  each vehicle; `plan`, `route` and `sensor` take `width`, `color` and `tubes`), and `follow` (an
+  empty node at the followed vehicle, heading its way, which a track camera names).
 - **The panels.** `swarm_controls.ari` and `swarm_minimap.ari` (§6.5) drive the keys; a document's
   `on_tick` points the main camera at the followed vehicle (`viewers.main.camera.track.*`).
+- **The ghost story.** `examples/ariadne/documents/nav_fog_ghost.ari` is the fog-of-war ghost
+  (libcvc's C++ `nav_fog_ghost`) as a document, on a 2-D map: a 200 m `arena:` whose stale map
+  has a phantom wall across the middle, one listed vehicle on `route: belief` with a 35 m sensor,
+  and the `city` (`belief: true`), `ghosts`, `plan`, `route`, `path` and `sensor` layers. Its
+  route bends round the wall's end until the sensor clears it, then goes straight through; the
+  four-beat caption is its `on_tick` reading `stats.time` and `stats.ghosts`. Its other scenario,
+  `dynamic`, turns `phantoms` off and lists a second vehicle crossing the first one's path.
 
 **Generated terrain.** `source: { terrain: { generator, size, resolution, seed, amp, file,
 preset } }` draws a `cvc::world` terrain generator's ground as such a heightfield: `fbm` (the

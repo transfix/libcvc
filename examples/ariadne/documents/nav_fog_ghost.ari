@@ -1,0 +1,359 @@
+# nav_fog_ghost.ari — the fog-of-war "ghost" story from GRL-SNAM, as an Ariadne document: the port
+# of libcvc's C++ nav_fog_ghost (since retired). One vehicle crosses an open field with a STALE map
+# that shows a wall across its path, a wall the field does not have. Belief is all it has, so its
+# route bends round the wall's end; as it drives, its sensor's rays clear the phantom cell by cell,
+# the route is planned again on what it now believes, and it drives straight through where the
+# wall stood. Seen from above on a 2-D map by default (--view 3d: a perspective orbit), at half
+# real time (story pace).
+#
+# What is on the map:
+#   - the ground is the vehicle's honest epistemics: never seen near black, remembered dim, in
+#     view now lit; and a light per cell its map blocks, red where the field has a wall (its
+#     border), amber where it has none (a GHOST);
+#   - the phantom itself, standing in the field as a see-through amber wall, worn away as the
+#     sensor clears it;
+#   - the PLAN (blue): the vehicle to its carrot, what the drive steers at, and on to its route's
+#     next waypoint; the ROUTE ahead (cyan); the TRACK it has driven (yellow); the sensor's range
+#     (a cyan ring); the start (green) and the GOAL;
+#   - a caption in four beats, and the swarm's status line.
+#
+# Two limited-belief scenarios (Scenario, or --scenario), the same machinery with different lies:
+#   ghost     the map shows a wall that is not there: the vehicle detours round nothing, senses the
+#             space is clear and drives through;
+#   dynamic   the map is honest, but not the whole story: a second vehicle (the crosser) drives
+#             down through the first one's corridor, and it steers round it.
+# The lie is always in the belief, never in the field: the vehicles drive in the field as it is.
+#
+# What is where: the simulation is the nav_swarm node (its arena, its stale map's phantoms, the two
+# vehicles and route: belief, docs/ARIADNE.md §5.4 "Swarms"); each thing drawn is a swarm_layer
+# under it; the captions, the camera and the scenarios are this document's DSL. The vehicles are
+# drawn through Ariadne's vehicle look (look: humvee; arrows where no Humvee model is installed).
+#
+# Run:
+#   arigl nav_fog_ghost.ari
+#   arigl nav_fog_ghost.ari --scenario dynamic --view 3d
+#   arigl snapshot --png ghost.png --seconds 14 --width 1280 --height 720 nav_fog_ghost.ari --no-ui
+
+meta:
+  name: Nav fog ghost (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.10
+
+requires:
+  - gl.scene                       # the map is the point: a scene renderer
+
+customs:
+  - node: nav_swarm
+    required: true
+  - node: swarm_layer
+    required: true
+
+import:
+  - cvc://components/scene_controls.ari
+  - cvc://components/camera_controls.ari
+
+args:
+  scenario: {type: string, default: ghost, help: "ghost (the map shows a wall that is not there) | dynamic (an honest map, and a vehicle crossing the path)"}
+  view: {type: string, default: map, help: "map (top-down 2-D) | 3d (a perspective orbit)"}
+  speed: {type: float, default: 0.5, help: "world seconds per wall second (the story's pace)"}
+  range: {type: float, default: 35.0, help: "the sensor's range, metres"}
+  plant: {type: string, default: kinematic, help: "kinematic (nav's bicycle) | humvee | roboracer (Jolt)"}
+  ui: {type: bool, default: true, help: "--no-ui: no panels (a capture)"}
+
+functions: |
+  ; A state key's text, "" while it is unset; its number, 0 while unset.
+  (defun sv (k) (let ((v (state-get k))) (if (= v nil) "" v)))
+  (defun num (k) (let ((v (sv k))) (if (= v "") 0.0 (float v))))
+  (defun arg-on (name) (= (sv (str-concat "args." name)) "true"))
+  ; Scenario s's keys: how many of the listed vehicles (the hero alone, or the hero and the
+  ; crosser) and whether they set out with the stale map. `go` builds the swarm again with them.
+  (defun scenario (s go)
+    (begin
+      (state-set "ui.scenario" (if (= s "dynamic") "dynamic" "ghost"))
+      (state-set "swarm.agents" (if (= s "dynamic") "2" "1"))
+      (state-set "swarm.phantoms" (if (= s "dynamic") "0" "1"))
+      (state-set "ui.gone_t" "")
+      (if go (state-set "swarm.request" "restart"))))
+  ; The hero (vehicle 0, the one the track follows) within 8 m of its goal at (80, 6).
+  (defun hero-arrived ()
+    (let ((dx (- (num "swarm.follow_pose.x") 80.0)) (dy (- (num "swarm.follow_pose.y") 6.0)))
+      (and (!= (sv "swarm.follow_pose.x") "") (< (+ (* dx dx) (* dy dy)) 64.0))))
+  ; The caption at world time tw (seconds since the build): the story's beats.
+  (defun caption (tw)
+    (let ((gone (sv "ui.gone_t")))
+      (if (= (sv "ui.scenario") "dynamic")
+          (if (hero-arrived) "Round the crosser, and on to the goal."
+              "A CROSSER is coming through: the vehicle senses it and adapts.")
+          (if (hero-arrived) "Straight to the goal, through a wall that was never there."
+              (if (!= gone "")
+                  (if (< (- tw (float gone)) 4.0) "SENSOR: nothing there. Replanned." "")
+                  (if (> tw 5.0) "Belief is all it has, so it detours."
+                      "MAP: wall ahead. TRUTH: open field."))))))
+  ; The main camera: straight down on the whole field (a map), or a perspective orbit from the
+  ; south; shadows only in 3-D.
+  (defun set-view ()
+    (if (= (sv "ui.view") "3d")
+        (begin
+          (state-set "viewers.main.camera.mode" "0")
+          (state-set "viewers.main.camera.orbit.center.x" "0")
+          (state-set "viewers.main.camera.orbit.center.y" "-8")
+          (state-set "viewers.main.camera.orbit.center.z" "0")
+          (state-set "viewers.main.camera.orbit.azimuth" "-90")
+          (state-set "viewers.main.camera.orbit.elevation" "52")
+          (state-set "viewers.main.camera.orbit.distance" "290")
+          (state-set "shadows.enabled" "1"))
+        (begin
+          (state-set "viewers.main.camera.mode" "3")
+          (state-set "viewers.main.camera.map.center.x" "0")
+          (state-set "viewers.main.camera.map.center.y" "0")
+          (state-set "viewers.main.camera.map.scale" "108")
+          (state-set "shadows.enabled" "0"))))
+
+init: |
+  (begin
+    (scenario (sv "args.scenario") nil)
+    (state-set "swarm.range" (sv "args.range"))
+    (state-set "swarm.plant" (sv "args.plant"))
+    (state-set "swarm.follow" "0")                 ; the track is the hero's
+    (state-set "sim.speed" (sv "args.speed"))
+    (state-set "ui.view" (if (= (sv "args.view") "3d") "3d" "map"))
+    (state-set "ui.view_was" "")
+    (state-set "ui.frames" "0")
+    (state-set "ui.time_was" "0")
+    (state-set "ui.caption" "")
+    (state-set "ui.captions" "1")
+    (state-set "ui.caption_on" "0")
+    (state-set "show.ghost" "1")
+    (state-set "show.plan" "1")
+    (state-set "show.route" "1")
+    (state-set "show.track" "1")
+    (state-set "show.sensor" "1")
+    (state-set "shadows.enabled" "0")
+    (state-set "tree.scene_controls.open" "0")
+    (state-set "tree.camera_controls.open" "0")
+    (if (not (arg-on "ui"))
+        (begin
+          (state-set "tree.belief_controls.open" "0")
+          (state-set "tree.ghost_status.open" "0"))))
+
+on_tick: |
+  (let ((n (+ 1 (int (sv "ui.frames"))))
+        (tw (num "swarm.stats.time"))
+        (g (num "swarm.stats.ghosts"))
+        (g0 (num "swarm.stats.ghosts0")))
+    (begin
+      (state-set "ui.frames" (str n))
+      ; A new build (its world time back near 0): the story starts again.
+      (if (< tw (num "ui.time_was")) (state-set "ui.gone_t" ""))
+      (state-set "ui.time_was" (str tw))
+      ; The discovery: a quarter of the phantom sensed away, the end the route heads for, and the
+      ; route planned again through the gap. (The far end never comes within the sensor's range,
+      ; so the beat cannot wait for the last cell.)
+      (if (and (= (sv "ui.gone_t") "") (> g0 0.0) (< (* 4.0 g) (* 3.0 g0)))
+          (state-set "ui.gone_t" (str tw)))
+      (if (= (% n 3) 0)
+          (let ((c (caption tw)))
+            (begin
+              (state-set "ui.caption" c)
+              (state-set "ui.caption_on"
+                         (if (and (= (sv "ui.captions") "1") (!= c "")) "1" "0")))))
+      ; The camera, once the scene's first framing has run, and again when the view changes.
+      (if (and (>= n 20) (!= (sv "ui.view") (sv "ui.view_was")))
+          (begin (state-set "ui.view_was" (sv "ui.view")) (set-view)))))
+
+keys:
+  pause:
+    label: Pause the world
+    key: P
+    on: (state-set "sim.paused" (if (= (state-get "sim.paused") "1") "0" "1"))
+  view:
+    label: The 2-D map or the 3-D view
+    key: M
+    on: (state-set "ui.view" (if (= (sv "ui.view") "3d") "map" "3d"))
+
+menubar:
+  - menu: Scenario
+    items:
+      - menu_item: ghost (a phantom wall)
+        on: (scenario "ghost" t)
+      - menu_item: dynamic (a vehicle crossing)
+        on: (scenario "dynamic" t)
+  - menu: Sim
+    items:
+      - menu_item: Paused
+        bind: sim.paused
+      - menu_item: Restart
+        on: (state-set "swarm.request" "restart")
+      - separator
+      - menu_item: Quit
+        on: quit
+  - menu: View
+    items:
+      - menu_item: 2-D map
+        on: (state-set "ui.view" "map")
+        enabled_when: (= (state-get "ui.view") "3d")
+      - menu_item: 3-D view
+        on: (state-set "ui.view" "3d")
+        enabled_when: (!= (state-get "ui.view") "3d")
+      - separator
+      - menu_item: Captions
+        bind: ui.captions
+      - menu_item: Ghost wall
+        bind: show.ghost
+      - menu_item: Plan
+        bind: show.plan
+      - menu_item: Route
+        bind: show.route
+      - menu_item: Track
+        bind: show.track
+      - menu_item: Sensor range
+        bind: show.sensor
+  - menu: Scene
+    items:
+      - menu_item: Shadows
+        bind: shadows.enabled
+      - menu_item: Scene...
+        bind: tree.scene_controls.open
+      - menu_item: Camera...
+        bind: tree.camera_controls.open
+
+windows:
+  - window: Belief controls
+    id: belief_controls
+    pos: [10, 30]
+    size: [300, 0]
+    closable: true
+    children:
+      - text: "scenario"
+        bind: ui.scenario
+      - text: "driving"
+        bind: swarm.stats.driving
+      - text: "world time (s)"
+        bind: swarm.stats.time
+      - text: "ghost cells"
+        bind: swarm.stats.ghosts
+      - text: "routes planned"
+        bind: swarm.stats.replans
+      - separator
+      - type: group
+        layout: { kind: horizontal }
+        children:
+          - button: ghost
+            on: (scenario "ghost" t)
+            enabled_when: (!= (state-get "ui.scenario") "ghost")
+            tooltip: "the map shows a wall that is not there"
+          - button: dynamic
+            on: (scenario "dynamic" t)
+            enabled_when: (!= (state-get "ui.scenario") "dynamic")
+            tooltip: "an honest map, and a second vehicle crossing the path"
+      - slider_float: world speed
+        bind: sim.speed
+        lo: 0.1
+        hi: 3.0
+        fmt: "%.2fx"
+        tooltip: "world seconds per wall second"
+      - slider_float: sensor range
+        bind: swarm.range
+        lo: 10.0
+        hi: 90.0
+        fmt: "%.0f m"
+        tooltip: "how far the sensor's rays reach (Apply / Restart)"
+      - combo: plant
+        bind: swarm.plant
+        options: [kinematic, humvee, roboracer]
+        tooltip: "what the vehicles drive on: nav's kinematic bicycle, or a vehicle on the Jolt
+          physics plant at its real size and limits (Apply / Restart)"
+      - button: Apply / Restart
+        on: (begin (state-set "ui.gone_t" "") (state-set "swarm.request" "restart"))
+        tooltip: "the vehicles back at their starts, with the map they set out with"
+      - text: "range and plant apply on a restart"
+  - window: status
+    id: ghost_status
+    pos: [10, 10000]               # the bottom-left corner
+    closable: true
+    children:
+      - text: ""
+        bind: swarm.stats.status
+  - include: scene_controls
+    closable: true
+  - include: camera_controls
+    closable: true
+
+scene:
+  chrome: false
+  clock: { scale: 0.5 }            # half real time: the story's pace (sim.speed changes it)
+  background: { top: [0.30, 0.36, 0.46], bottom: [0.12, 0.14, 0.18] }
+  shadows:
+    enabled: false                 # the map has none; the 3-D view turns them on
+    resolution: 1024
+    update_interval: 4
+  lights:
+    - light: sun
+      rig: three_point
+      sun: true
+      stage: { center: [0, 0, 6], radius: 150 }
+      key: { intensity: 1.0, azimuth: -38, elevation: 60, cone: 62 }
+      fill: 0.5
+      back: 0
+      wash: 0
+      warmth: 0.3
+      environment: 0.4
+      ambient: 0.35
+  nodes:
+    # The simulation: one vehicle (or two) on a 200 m open field, its border the only wall, with a
+    # stale map that also shows a wall 100 m long across the middle. Its keys are under swarm.*.
+    - node: swarm
+      type: nav_swarm
+      arena:
+        size: 200
+        phantoms: [[-0.5, -50, 0.5, 50]]   # in the map only: the field has no such wall
+        wall_height: 6
+        name: the open field
+      grid: 120                    # cells a side, about 1.7 m each
+      vehicles:
+        - { name: hero, start: [-80, -6], goal: [80, 6], color: [0.98, 0.85, 0.20] }
+        - { name: crosser, start: [-10, 78], goal: [-10, -78], color: [0.35, 0.72, 0.95] }
+      agents: 1                    # the ghost scenario's: the hero alone (dynamic: both)
+      belief: shared               # the crosser shares what the hero has sensed
+      fog: true                    # sense the field into the belief
+      route: belief                # an A* route over the belief, planned again as it changes
+      range: 35                    # the sensor, metres: a sensor, not a hoop spanning the map
+      reach: 0.2                   # arrived within 4 m of the goal
+      sense_ticks: 2               # sense every 2 navigator steps, as the C++ demo did
+      sense_every: 2               # and repaint the fog and the lights as often
+      policy: default              # the built-in biased CoefMLP, as the C++ demo drove
+      plant: kinematic
+      noun: vehicles
+      children:
+        - { node: fog_ground, type: swarm_layer, layer: city, belief: true }
+        - { node: ghost_wall, type: swarm_layer, layer: ghosts, visible: show.ghost,
+            material: { opacity: 0.45 } }
+        - { node: route_ahead, type: swarm_layer, layer: route, visible: show.route }
+        - { node: plan, type: swarm_layer, layer: plan, visible: show.plan }
+        - { node: track, type: swarm_layer, layer: path, visible: show.track, segments: 1024,
+            width: 3 }
+        - { node: sensor_ring, type: swarm_layer, layer: sensor, visible: show.sensor }
+        - { node: goals, type: swarm_layer, layer: goals }
+        - { node: vehicles, type: swarm_layer, layer: agents, look: humvee, lod: false }
+    # The start: a green pad under the hero.
+    - node: start_pad
+      source: { box: { size: [7, 7, 0.25] } }
+      transform: { position: [-80, -6, 0.13] }
+      material: { color: [0.35, 0.85, 0.45] }
+      casts_shadow: false
+    # The goal: an orange marker over the spot, labelled.
+    - node: goal_marker
+      source: { sphere: 2.6 }
+      transform: { position: [80, 6, 9] }
+      material: { color: [1.00, 0.45, 0.20] }
+      casts_shadow: false
+      label: { text: GOAL, anchor: top, offset: 1.5, size: 14, color: [1.0, 0.85, 0.7],
+               backdrop: [0.08, 0.06, 0.05] }
+    # The caption: a lower third, on the field's south edge (under the map's camera, a fixed
+    # place on the screen).
+    - node: caption
+      type: group
+      visible: { bind: ui.caption_on, default: false }
+      transform: { position: [0, -88, 7] }
+      label: { bind: ui.caption, anchor: origin, size: 19, bold: true, color: [0.96, 0.96, 0.92],
+               backdrop: [0.05, 0.06, 0.08], edge: none }

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/color_value.h> // a layer's color:
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_swarm.h>
 #include <cvc/ariadne/world_vehicles.h> // vehicle_look_named, vehicle_desc_of
@@ -298,11 +299,15 @@ cvc::geometry occupancy_walls(const ari::swarm_city &c, double height, const dou
   return g;
 }
 
-// A flat quad over the city at z, UVs over it (the fog texture's).
+// A flat quad under the city's cells at z (each cell centred on its grid point, so the quad is
+// half a cell wider than the bounds all round), UVs over it: a texel column per cell lies under
+// that cell (the fog texture's).
 cvc::geometry ground_quad(const ari::swarm_city &c, double z, const double rgb[3]) {
   cvc::geometry g;
-  const double corner[4][2] = {
-      {c.min_x, c.min_y}, {c.max_x, c.min_y}, {c.max_x, c.max_y}, {c.min_x, c.max_y}};
+  const double hx = c.cols > 1 ? 0.5 * c.span() / (c.cols - 1) : 0.0;
+  const double hy = c.rows > 1 ? 0.5 * (c.max_y - c.min_y) / (c.rows - 1) : 0.0;
+  const double x0 = c.min_x - hx, x1 = c.max_x + hx, y0 = c.min_y - hy, y1 = c.max_y + hy;
+  const double corner[4][2] = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
   const double uv[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
   for (int k = 0; k < 4; ++k) {
     g.points().push_back({corner[k][0], corner[k][1], z});
@@ -408,7 +413,9 @@ struct swarm_view {
   std::string city;       // the data: name
   std::string city_path;  // <prefix>.data.<city>
   std::string city_seen;  // the dataset's rev drawn from
-  bool synthetic = false; // the synthetic city is in
+  bool synthetic = false; // the synthetic city (or the node's arena) is in
+  bool has_arena = false; // the node's arena:, in place of the synthetic city
+  ari::swarm_arena arena;
   int grid = 96;
   double top = 0.0; // the city's highest point (z): the map markers fly over it
 
@@ -433,13 +440,23 @@ struct swarm_view {
 
   int follow() const { return ari::read_or<int>(app, follow_key, -1); }
 
-  // The dataset's world, once it is ready (and again each time it changes); the synthetic city
-  // when there is none, or it failed.
+  // The city when there is no dataset (or it failed): the node's arena, else the synthetic city.
+  ari::swarm_city fallback_city() const {
+    if (has_arena) {
+      ari::swarm_city c = ari::arena_swarm_city(arena, grid);
+      if (c.rows >= 2)
+        return c;
+    }
+    return ari::synthetic_swarm_city(grid);
+  }
+
+  // The dataset's world, once it is ready (and again each time it changes); the arena or the
+  // synthetic city when there is none, or it failed.
   void watch_city() {
     if (city.empty()) {
       if (!synthetic) {
         synthetic = true;
-        use(ari::synthetic_swarm_city(grid));
+        use(fallback_city());
       }
       return;
     }
@@ -451,7 +468,7 @@ struct swarm_view {
                      id.c_str(), city.c_str(),
                      ari::read_or<std::string>(app, city_path + ".error", "").c_str());
         synthetic = true;
-        use(ari::synthetic_swarm_city(grid));
+        use(fallback_city());
       }
       return;
     }
@@ -474,7 +491,7 @@ struct swarm_view {
                    id.c_str(), city.c_str());
       if (!synthetic) {
         synthetic = true;
-        use(ari::synthetic_swarm_city(grid));
+        use(fallback_city());
       }
       return;
     }
@@ -1274,12 +1291,15 @@ struct targets_layer : layer {
   }
 };
 
-// The synthetic city: its blocks and its ground, which shows the fleet's fog under fog.
+// The synthetic city, or an arena: its walls and its ground, which shows the fleet's fog under
+// fog, and with `belief: true` what the fleet believes, a light per cell its map blocks.
 struct city_layer : layer {
   std::weak_ptr<GeometryNode> ground;
   cvc::image fog; // borrowed by the ground's texture (zero-copy) for the node's life
   std::uint64_t seen = ~std::uint64_t(0);
   bool fog_on = false;
+  bool leds = false; // belief: true
+  int px = 1;        // texels a cell a side: 3 with the lights (2 lit and a dark gutter), else 1
   void build(swarm_view &v) override {
     ari::SceneSwarm &s = *v.swarm;
     drop("_walls");
@@ -1288,16 +1308,26 @@ struct city_layer : layer {
     const ari::swarm_city &c = s.city();
     if (c.real)
       return; // a real city: the data node draws it
-    static const double wall_rgb[3] = {0.58, 0.58, 0.64}, ground_rgb[3] = {0.20, 0.23, 0.27};
-    mesh("_walls", occupancy_walls(c, s.wall_height(), wall_rgb, 0.45), 0.35, 0.8, 0.1);
+    static const double wall_rgb[3] = {0.58, 0.58, 0.64}, arena_rgb[3] = {0.42, 0.44, 0.50},
+                        ground_rgb[3] = {0.20, 0.23, 0.27};
+    // An arena's walls are one height (its wall_height); the synthetic city's blocks vary.
+    mesh("_walls",
+         occupancy_walls(c, s.wall_height(), c.arena ? arena_rgb : wall_rgb, c.arena ? 0.0 : 0.45),
+         0.35, 0.8, 0.1);
     auto gn = mesh("_ground", ground_quad(c, 0.0, ground_rgb), 0.65, 0.5);
     fog_on = s.fog();
+    px = leds ? 3 : 1;
     if (gn) {
       gn->setUseSingleColor(true);
-      if (fog_on) {
-        fog = cvc::image(c.cols, c.rows, cvc::image::pixel_format::RGBA, cvc::image::data_type::u8);
+      if (fog_on || leds) {
+        fog = cvc::image(px * c.cols, px * c.rows, cvc::image::pixel_format::RGBA,
+                         cvc::image::data_type::u8);
         paint(s);
         gn->setColor(1, 1, 1);
+        if (leds) { // the lights are the picture: flat, never shaded
+          gn->setAmbient(1.0);
+          gn->setDiffuse(0.0);
+        }
         gn->setTexture(fog, true);
       } else {
         gn->setColor(ground_rgb[0], ground_rgb[1], ground_rgb[2]);
@@ -1306,32 +1336,279 @@ struct city_layer : layer {
     ground = gn;
     seen = s.coverage_revision();
   }
-  // Never seen near black, seen dim, in view lit; image row 0 is the grid's top (max y) row.
+  // Never seen near black, seen dim, in view lit (with no fog, all lit); image row 0 is the grid's
+  // top (max y) row. With the lights, a cell the fleet's map blocks is red where the city has a
+  // wall and amber where it has none (a ghost), its texels but the gutter's.
   void paint(ari::SceneSwarm &s) {
     const ari::swarm_city &c = s.city();
     const auto &cov = s.coverage();
-    unsigned char *px = fog.data();
-    if (!px)
+    const auto &bel = s.belief();
+    unsigned char *img = fog.data();
+    if (!img)
       return;
+    static const unsigned char tiers[3][3] = {{20, 22, 26}, {40, 44, 50}, {62, 68, 78}};
+    static const unsigned char wall[3] = {217, 64, 56}, ghost[3] = {242, 184, 64};
+    const int W = px * c.cols;
     for (int r = 0; r < c.rows; ++r)
       for (int k = 0; k < c.cols; ++k) {
         const std::size_t i = static_cast<std::size_t>(r) * c.cols + k;
-        const int tier = i < cov.size() ? cov[i] : 0;
-        unsigned char *p = px + 4 * (static_cast<std::size_t>(c.rows - 1 - r) * c.cols + k);
-        const unsigned char t[3][3] = {{20, 22, 26}, {40, 44, 50}, {62, 68, 78}};
-        p[0] = t[tier][0];
-        p[1] = t[tier][1];
-        p[2] = t[tier][2];
-        p[3] = 255;
+        const int tier = !fog_on ? 2 : (i < cov.size() ? cov[i] : 0);
+        const int b = leds && i < bel.size() ? bel[i] : 0;
+        const int ir = c.rows - 1 - r;
+        for (int sy = 0; sy < px; ++sy)
+          for (int sx = 0; sx < px; ++sx) {
+            unsigned char *p = img + 4 * (static_cast<std::size_t>(px * ir + sy) * W + px * k + sx);
+            const bool gutter = px > 1 && (sx == px - 1 || sy == px - 1);
+            const unsigned char *col = b && !gutter ? (b == 2 ? ghost : wall) : tiers[tier];
+            p[0] = col[0];
+            p[1] = col[1];
+            p[2] = col[2];
+            p[3] = 255;
+          }
       }
   }
   void tick(swarm_view &v, vtkRenderer *, bool) override {
     std::shared_ptr<GeometryNode> gn = ground.lock();
-    if (!gn || !fog_on || v.swarm->coverage_revision() == seen)
+    if (!gn || !(fog_on || leds) || v.swarm->coverage_revision() == seen)
       return;
     seen = v.swarm->coverage_revision();
     paint(*v.swarm);
     gn->texture_modified();
+  }
+};
+
+// The ghosts: the cells the fleet's map blocks that the city does not, as a see-through wall
+// standing in the world (amber; material: { opacity }, 0.45), worn away cell by cell as the
+// fleet's sensors clear them, and gone with the last.
+struct ghosts_layer : layer {
+  std::weak_ptr<GeometryNode> node;
+  double height = 0.0;
+  double rgb[3] = {0.95, 0.72, 0.25};
+  int shown = -1; // the ghost count it was meshed for
+  void build(swarm_view &) override {
+    drop("_mesh");
+    node.reset();
+    shown = -1;
+  }
+  void tick(swarm_view &v, vtkRenderer *, bool) override {
+    ari::SceneSwarm &s = *v.swarm;
+    const int n = s.ghosts();
+    if (n == shown)
+      return;
+    shown = n;
+    std::shared_ptr<GeometryNode> nd = node.lock();
+    if (n <= 0) {
+      if (nd)
+        nd->setVisible(false);
+      return;
+    }
+    ari::swarm_city m = s.city(); // the ghost cells as a city's blocks, to mesh them as its walls
+    const auto &bel = s.belief();
+    m.occ.assign(m.occ.size(), 0);
+    for (std::size_t i = 0; i < bel.size() && i < m.occ.size(); ++i)
+      m.occ[i] = bel[i] == 2 ? 1 : 0;
+    m.prior.clear();
+    m.terrain.reset();
+    const cvc::geometry g = occupancy_walls(m, height > 0.0 ? height : s.wall_height(), rgb, 0.0);
+    if (!nd) {
+      nd = mesh("_mesh", g, 0.9, 0.2);
+      if (nd) {
+        if (!spec.has_opacity)
+          nd->setOpacity(0.45); // visibly a wall, visibly not solid
+        if (!spec.has_casts_shadow)
+          nd->setCastsShadow(false);
+      }
+      node = nd;
+    } else {
+      nd->setGeometry(g);
+      nd->setVisible(true);
+    }
+  }
+};
+
+// Lines streamed each frame: `segs` segments a vehicle, each two points, in one colour.
+cvc::geometry segment_lines(int n, int segs, const double rgb[3]) {
+  cvc::geometry g;
+  for (int i = 0; i < n * segs; ++i) {
+    for (int e = 0; e < 2; ++e) {
+      g.points().push_back({0.0, 0.0, 0.0});
+      g.colors().push_back({rgb[0], rgb[1], rgb[2]});
+    }
+    g.lines().push_back({static_cast<cvc::geometry::index_t>(2 * i),
+                         static_cast<cvc::geometry::index_t>(2 * i + 1)});
+  }
+  return g;
+}
+
+// A line layer's node: flat colour, over the ground (a decal: never z-fighting it), no shadow.
+void line_style(GeometryNode &nd, const layer &l, double width, double depth, bool tubes) {
+  nd.setRenderMode(GeometryRenderMode::LINES);
+  nd.setUseSingleColor(true);
+  nd.setLineWidth(width);
+  nd.setRenderLinesAsTubes(tubes);
+  nd.setDepthOffset(depth);
+  nd.setAmbient(1.0);
+  nd.setDiffuse(0.0);
+  if (!l.spec.has_casts_shadow)
+    nd.setCastsShadow(false);
+}
+
+// Each vehicle's plan, live: from it to its carrot (what the drive steers at), and on to its
+// route's waypoint (its goal without a route). The carrot bows round what the vehicle believes is
+// there, and straightens once it believes otherwise.
+struct plan_layer : layer {
+  std::weak_ptr<GeometryNode> node;
+  live_number width;
+  double rgb[3] = {0.35, 0.65, 1.00};
+  bool tubes = true;
+  int n = 0;
+  std::vector<double> xyz;
+  void build(swarm_view &v) override {
+    n = v.swarm->size();
+    auto nd = mesh("_lines", segment_lines(n, 2, rgb), 1.0, 0.0);
+    if (nd) {
+      line_style(*nd, *this, width.read(v.app), 2.0, tubes);
+      nd->setColor(rgb[0], rgb[1], rgb[2]);
+    }
+    node = nd;
+    xyz.assign(static_cast<std::size_t>(12) * n, 0.0);
+  }
+  void tick(swarm_view &v, vtkRenderer *, bool fresh) override {
+    std::shared_ptr<GeometryNode> nd = node.lock();
+    ari::SceneSwarm &s = *v.swarm;
+    const ari::SceneSwarm::frame &f = s.now();
+    if (!nd || !fresh || f.n != n || f.carrot.size() != static_cast<std::size_t>(2) * n)
+      return;
+    nd->setLineWidth(width.read(v.app));
+    const auto &routes = s.routes();
+    const auto &cur = s.route_cursor();
+    const auto &goals = s.goals();
+    for (int i = 0; i < n; ++i) {
+      double ex = goals.size() >= static_cast<std::size_t>(2) * n ? goals[2 * i] : f.carrot[2 * i];
+      double ey =
+          goals.size() >= static_cast<std::size_t>(2) * n ? goals[2 * i + 1] : f.carrot[2 * i + 1];
+      if (i < static_cast<int>(routes.size()) && i < static_cast<int>(cur.size())) {
+        const auto &r = routes[static_cast<std::size_t>(i)];
+        const std::size_t k = static_cast<std::size_t>(cur[i]);
+        if (2 * k + 1 < r.size()) {
+          ex = r[2 * k];
+          ey = r[2 * k + 1];
+        }
+      }
+      const double z = f.ground[i] + 0.7;
+      double *p = xyz.data() + static_cast<std::size_t>(12) * i;
+      const double pts[4][2] = {{f.pos[2 * i], f.pos[2 * i + 1]},
+                                {f.carrot[2 * i], f.carrot[2 * i + 1]},
+                                {f.carrot[2 * i], f.carrot[2 * i + 1]},
+                                {ex, ey}};
+      for (int e = 0; e < 4; ++e) {
+        p[3 * e] = pts[e][0];
+        p[3 * e + 1] = pts[e][1];
+        p[3 * e + 2] = z;
+      }
+    }
+    nd->updateVertices(xyz);
+  }
+};
+
+// Each vehicle's route ahead (route: belief): from its current waypoint to its goal, made again
+// whenever it is planned again or the vehicle passes a waypoint.
+struct route_layer : layer {
+  std::weak_ptr<GeometryNode> node;
+  live_number width;
+  double rgb[3] = {0.20, 0.90, 1.00};
+  bool tubes = true;
+  std::uint64_t rev = ~std::uint64_t(0);
+  std::vector<int> cur;
+  void build(swarm_view &) override {
+    drop("_lines");
+    node.reset();
+    rev = ~std::uint64_t(0);
+    cur.clear();
+  }
+  void tick(swarm_view &v, vtkRenderer *, bool) override {
+    ari::SceneSwarm &s = *v.swarm;
+    if (s.routes_revision() == rev && s.route_cursor() == cur)
+      return;
+    rev = s.routes_revision();
+    cur = s.route_cursor();
+    cvc::geometry g;
+    const auto &routes = s.routes();
+    const ari::swarm_city &c = s.city();
+    for (std::size_t i = 0; i < routes.size() && i < cur.size(); ++i) {
+      const auto &r = routes[i];
+      for (std::size_t k = static_cast<std::size_t>(std::max(0, cur[i])); 2 * k + 3 < r.size();
+           ++k) {
+        const auto base = static_cast<cvc::geometry::index_t>(g.points().size());
+        for (int e = 0; e < 2; ++e) {
+          const double x = r[2 * (k + e)], y = r[2 * (k + e) + 1];
+          g.points().push_back({x, y, c.ground(x, y) + 0.72});
+          g.colors().push_back({rgb[0], rgb[1], rgb[2]});
+        }
+        g.lines().push_back({base, static_cast<cvc::geometry::index_t>(base + 1)});
+      }
+    }
+    std::shared_ptr<GeometryNode> nd = node.lock();
+    if (g.points().empty()) { // nothing ahead (no routes, or each at its goal's leg)
+      if (nd)
+        nd->setVisible(false);
+      return;
+    }
+    if (!nd) {
+      nd = mesh("_lines", g, 1.0, 0.0);
+      if (nd) {
+        line_style(*nd, *this, width.read(v.app), 1.5, tubes);
+        nd->setColor(rgb[0], rgb[1], rgb[2]);
+      }
+      node = nd;
+    } else {
+      nd->setGeometry(g);
+      nd->setLineWidth(width.read(v.app));
+      nd->setVisible(true);
+    }
+  }
+};
+
+// A ring the sensor's range round each vehicle (its footprint on the ground).
+struct sensor_layer : layer {
+  std::weak_ptr<GeometryNode> node;
+  live_number width;
+  double rgb[3] = {0.30, 0.72, 0.95};
+  bool tubes = true;
+  static constexpr int kSeg = 72;
+  int n = 0;
+  double radius = 0.0;
+  std::vector<double> xyz;
+  void build(swarm_view &v) override {
+    n = v.swarm->size();
+    radius = v.swarm->sensor_range();
+    auto nd = mesh("_lines", segment_lines(n, kSeg, rgb), 1.0, 0.0);
+    if (nd) {
+      line_style(*nd, *this, width.read(v.app), 1.0, tubes);
+      nd->setColor(rgb[0], rgb[1], rgb[2]);
+    }
+    node = nd;
+    xyz.assign(static_cast<std::size_t>(6) * kSeg * n, 0.0);
+  }
+  void tick(swarm_view &v, vtkRenderer *, bool fresh) override {
+    std::shared_ptr<GeometryNode> nd = node.lock();
+    const ari::SceneSwarm::frame &f = v.swarm->now();
+    if (!nd || !fresh || f.n != n)
+      return;
+    nd->setLineWidth(width.read(v.app));
+    for (int i = 0; i < n; ++i) {
+      const double cx = f.pos[2 * i], cy = f.pos[2 * i + 1], z = f.ground[i] + 0.8;
+      double *p = xyz.data() + static_cast<std::size_t>(6) * kSeg * i;
+      for (int s = 0; s < kSeg; ++s)
+        for (int e = 0; e < 2; ++e) {
+          const double a = 2.0 * kPi * ((s + e) % kSeg) / kSeg;
+          double *q = p + 6 * s + 3 * e;
+          q[0] = cx + radius * std::cos(a);
+          q[1] = cy + radius * std::sin(a);
+          q[2] = z;
+        }
+    }
+    nd->updateVertices(xyz);
   }
 };
 
@@ -1351,6 +1628,21 @@ struct follow_layer : layer {
   }
 };
 
+// A layer's `color:` ([r, g, b] in 0..1, or a colour's text), over its default.
+void layer_rgb(const ari::Value &props, double rgb[3]) {
+  const ari::Value *v = props.find("color");
+  if (!v)
+    return;
+  float c[3];
+  if (v->is_seq() && v->items.size() >= 3) {
+    for (int k = 0; k < 3; ++k)
+      rgb[k] = std::clamp(v->items[k].as_double(rgb[k]), 0.0, 1.0);
+  } else if (ari::parse_color_text(v->as_string(), c)) {
+    for (int k = 0; k < 3; ++k)
+      rgb[k] = c[k];
+  }
+}
+
 std::shared_ptr<GraphicsNode> realize_nav_swarm(SceneGraph &sg, const ari::SceneNode &n,
                                                 GraphicsNode *parent, RealizedScene &out,
                                                 std::vector<std::string> *warnings) {
@@ -1368,6 +1660,8 @@ std::shared_ptr<GraphicsNode> realize_nav_swarm(SceneGraph &sg, const ari::Scene
     return nullptr;
   }
   view->city = n.props.str("city");
+  view->has_arena = spec.has_arena;
+  view->arena = spec.arena;
   if (!view->city.empty())
     view->city_path = ari::resolve_bind(out.bind_prefix, "data." + view->city);
   view->restarts_key = ari::resolve_bind(out.bind_prefix, "sim.restarts");
@@ -1411,7 +1705,7 @@ std::shared_ptr<GraphicsNode> realize_swarm_layer(SceneGraph &sg, const ari::Sce
     l = std::make_shared<goals_layer>();
   } else if (kind == "trails" || kind == "path") {
     view->trail_k =
-        std::max(view->trail_k, std::clamp(static_cast<int>(n.props.num("segments", 12)), 1, 256));
+        std::max(view->trail_k, std::clamp(static_cast<int>(n.props.num("segments", 12)), 1, 1024));
     if (kind == "trails") {
       view->trail_every = std::max(1, static_cast<int>(n.props.num("every", 3)));
       auto t = std::make_shared<trails_layer>();
@@ -1431,13 +1725,38 @@ std::shared_ptr<GraphicsNode> realize_swarm_layer(SceneGraph &sg, const ari::Sce
   } else if (kind == "targets") {
     l = std::make_shared<targets_layer>();
   } else if (kind == "city") {
-    l = std::make_shared<city_layer>();
+    auto c = std::make_shared<city_layer>();
+    c->leds = n.props.flag("belief", false);
+    l = c;
+  } else if (kind == "ghosts") {
+    auto g = std::make_shared<ghosts_layer>();
+    g->height = n.props.num("height", 0.0);
+    layer_rgb(n.props, g->rgb);
+    l = g;
+  } else if (kind == "plan") {
+    auto p = std::make_shared<plan_layer>();
+    p->width = live_prop(n.props, "width", 5.0, out.bind_prefix);
+    p->tubes = n.props.flag("tubes", true);
+    layer_rgb(n.props, p->rgb);
+    l = p;
+  } else if (kind == "route") {
+    auto r = std::make_shared<route_layer>();
+    r->width = live_prop(n.props, "width", 4.0, out.bind_prefix);
+    r->tubes = n.props.flag("tubes", true);
+    layer_rgb(n.props, r->rgb);
+    l = r;
+  } else if (kind == "sensor") {
+    auto s = std::make_shared<sensor_layer>();
+    s->width = live_prop(n.props, "width", 2.0, out.bind_prefix);
+    s->tubes = n.props.flag("tubes", true);
+    layer_rgb(n.props, s->rgb);
+    l = s;
   } else if (kind == "follow") {
     l = std::make_shared<follow_layer>();
   } else {
-    warn(warnings,
-         "ari: swarm_layer '" + n.id + "': no layer '" + kind +
-             "' (agents, flags, goals, trails, path, belief, dots, targets, city, follow)");
+    warn(warnings, "ari: swarm_layer '" + n.id + "': no layer '" + kind +
+                       "' (agents, flags, goals, trails, path, belief, dots, targets, city, "
+                       "ghosts, plan, route, sensor, follow)");
     return nullptr;
   }
   std::shared_ptr<GraphicsNode> group = parent->createChild(n.id);
