@@ -1549,7 +1549,7 @@
         },
         "link": {
           "type": "object",
-          "description": "Holes into the parent's state: name: target, or { to, mode: ro|rw }.",
+          "description": "Holes into the parent's state: name: target (read-write), or { to, mode: ro|rw } (read-only unless mode is rw).",
           "patternProperties": {
             "^.*$": {
               "anyOf": [
@@ -1567,7 +1567,7 @@
         },
         "channels": {
           "type": "object",
-          "description": "Channels granted to the module, as link:.",
+          "description": "Channels granted to the module, as link: (a map with no mode is read-only).",
           "patternProperties": {
             "^.*$": {
               "anyOf": [
