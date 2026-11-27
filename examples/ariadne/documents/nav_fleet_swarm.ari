@@ -19,9 +19,10 @@
 # step). Vehicles sets how many (the fleet is laid out again). Plant puts the fleet, or one team,
 # on Jolt, where each is a vehicle with wheels and suspension that collides as a body; Jolt steps
 # them on worker threads where there are threads (natively, and in a browser built with them),
-# and about 40 is where its step starts to cost the frame. Drag to orbit, the wheel to zoom;
-# Overhead (H) puts the camera back above the world, Chase follows a vehicle. The panel's fps is
-# the frame rate (quality.frame_ms).
+# and about 40 is where its step starts to cost the frame. A Jolt vehicle that rolls stays on its
+# side or roof until Restart; Righting sets it back on its wheels after 2 s there. Drag to orbit,
+# the wheel to zoom; Overhead (H) puts the camera back above the world, Chase follows a vehicle.
+# The panel's fps is the frame rate (quality.frame_ms).
 #
 # Run (the Humvee model and the trained policy come from cvcpkg.org; without the network the
 # vehicles are boxes and the built-in net drives):
@@ -248,6 +249,10 @@ windows:
         bind: vehicles.fleets.swarm.collide
         tooltip: "kept apart (nav's de-overlap on the kinematic plant); off, they pass through
           each other. On Jolt they collide as bodies."
+      - checkbox: righting
+        bind: vehicles.fleets.swarm.righting
+        tooltip: "on Jolt: a vehicle that rolls onto its side or roof is set back on its wheels
+          after 2 s there; off, it stays down until Restart lays the fleet out again"
       - checkbox: targets
         bind: ui.beacons
         tooltip: "a beacon on each team's rally point"

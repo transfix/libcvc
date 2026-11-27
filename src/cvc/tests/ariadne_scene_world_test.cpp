@@ -2459,22 +2459,29 @@ TEST(AriadneWorldVehicles, AFleetIsANamedStartEntry) {
   error("[{fleet: c, archetype: v, colors: rainbow}]", "colors: 'rainbow' is not one");
   error("[{fleet: c, archetype: v, keys: some}]", "keys: 'some' is not one");
   error("[{fleet: c, archetype: v, seed: -1}]", "seed: expects a whole number");
-  // righting: seconds, true (the default's 2 s) or false (never); 1 is a second, not true.
+  // righting: off by default; true (after 2 s), false, or seconds (on after that long; 0 off): 1
+  // is a second, not true.
   {
     world_rules y;
     ASSERT_EQ(parse("[{fleet: a, archetype: v}, {fleet: b, archetype: v, righting: false}, "
                     "{fleet: c, archetype: v, righting: 1}, {fleet: d, archetype: v, righting: "
-                    "true}, {fleet: e, archetype: v, righting: 0.5}]",
+                    "true}, {fleet: e, archetype: v, righting: 0.5}, {fleet: f, archetype: v, "
+                    "righting: 0}]",
                     y),
               "");
-    ASSERT_EQ(y.vehicle_starts.size(), 5u);
-    EXPECT_EQ(y.vehicle_starts[0].righting, 2.0);
-    EXPECT_EQ(y.vehicle_starts[1].righting, 0.0);
-    EXPECT_EQ(y.vehicle_starts[2].righting, 1.0);
-    EXPECT_EQ(y.vehicle_starts[3].righting, 2.0);
-    EXPECT_EQ(y.vehicle_starts[4].righting, 0.5);
+    ASSERT_EQ(y.vehicle_starts.size(), 6u);
+    const auto on_after = [&](std::size_t k) {
+      const vehicle_start &st = y.vehicle_starts[k];
+      return st.righting ? st.righting_after : 0.0;
+    };
+    EXPECT_FALSE(y.vehicle_starts[0].righting) << "off by default";
+    EXPECT_EQ(on_after(1), 0.0);
+    EXPECT_EQ(on_after(2), 1.0);
+    EXPECT_EQ(on_after(3), 2.0);
+    EXPECT_EQ(on_after(4), 0.5);
+    EXPECT_EQ(on_after(5), 0.0);
   }
-  error("[{fleet: c, archetype: v, righting: -1}]", "righting: expects seconds");
+  error("[{fleet: c, archetype: v, righting: -1}]", "righting: expects true, false or seconds");
   error("[{fleet: c, archetype: v, righting: soon}]", "righting:");
   // Its plants (FL1c): a list its vehicles cycle over, or each team's; and its metric.
   {
@@ -3137,9 +3144,10 @@ scene:
   EXPECT_LE(most_flips, 12) << "a gear flipping back and forth is a vehicle stuck at a block";
 }
 
-// A fleet's Jolt vehicle that has lain on its roof or its side for 2 s is set back on its wheels
-// where it lay (nav_plant_options::right_after): its heading kept, upright on the ground and at
-// rest. One on its wheels is left alone, and one on its roof is not righted before its 2 s.
+// With righting: true, a fleet's Jolt vehicle that has lain on its roof or its side for 2 s is set
+// back on its wheels where it lay (nav_plant_options::right_after): its heading kept, upright on
+// the ground and at rest. One on its wheels is left alone, and one on its roof is not righted
+// before its 2 s.
 TEST(AriadneWorldVehicles, AJoltFleetsVehicleOnItsRoofIsSetBackOnItsWheels) {
   REQUIRE_YAML();
   if (!jolt())
@@ -3153,7 +3161,7 @@ world:
       v: { plant: jolt, vehicle: humvee, controllers: [nav@1, none] }
     start:
       - { fleet: pack, archetype: v, count: 3, spawn: scattered, seed: 5, controller: none,
-          policy: builtin, keys: all }
+          policy: builtin, keys: all, righting: true }
 scene:
   clock: { paused: true }
   physics: {}
@@ -3228,9 +3236,10 @@ scene:
       << "the one on its wheels was left alone";
 }
 
-// righting: false leaves a fleet's rolled vehicle where it lies until the fleet is laid out again:
-// a restart puts it back on its wheels at its start. The key switches righting on live, and the
-// one lying down is righted from then on.
+// Righting is off by default: a fleet's rolled vehicle stays where it lies until the fleet is laid
+// out again, which puts it back on its wheels at its start. Its key (1 or 0, as the swarm demo's
+// checkbox writes it) switches righting on live, and the one lying down is righted from then on,
+// after .righting_after seconds.
 TEST(AriadneWorldVehicles, AJoltFleetWithoutRightingLeavesItsVehicleDown) {
   REQUIRE_YAML();
   if (!jolt())
@@ -3244,7 +3253,7 @@ world:
       v: { plant: jolt, vehicle: humvee, controllers: [nav@1, none] }
     start:
       - { fleet: pack, archetype: v, count: 2, spawn: scattered, seed: 5, controller: none,
-          policy: builtin, righting: false }
+          policy: builtin }
 scene:
   clock: { paused: true }
   physics: {}
@@ -3262,6 +3271,7 @@ scene:
   ASSERT_NE(v, nullptr);
   art.drain();
   EXPECT_EQ(val(app, "vehicles.fleets.pack.righting"), "0");
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.righting_after"), "2");
   const int per_s = static_cast<int>(std::lround(1.0 / cvc::kSimQuantum));
   art.step_world(per_s);
   art.drain();
@@ -3291,7 +3301,8 @@ scene:
   EXPECT_LT(up_z(es[0]), -0.9) << "still on its roof after 5 s";
   EXPECT_LT(up_z(es[1]), -0.9);
 
-  // Righting on, live: they are set back on their wheels 1 s on.
+  // Righting on, live, after 1 s: they are set back on their wheels 1 s on.
+  cvc::state::instance(app)("vehicles.fleets.pack.righting_after").value(std::string("1"));
   cvc::state::instance(app)("vehicles.fleets.pack.righting").value(std::string("1"));
   art.step_world(per_s / 2);
   art.drain();
@@ -3303,7 +3314,7 @@ scene:
   EXPECT_GT(up_z(es[1]), 0.98);
 
   // Off again, rolled again; a restart lays the fleet out again, on its wheels where it started.
-  cvc::state::instance(app)("vehicles.fleets.pack.righting").value(std::string("false"));
+  cvc::state::instance(app)("vehicles.fleets.pack.righting").value(std::string("0"));
   art.step_world(1);
   roll_over(es[0]);
   art.step_world(4 * per_s);

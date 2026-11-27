@@ -2728,13 +2728,14 @@ scene:
       `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
       vehicles start at rest where they are on the new plants. A plant or team that is not one is
       said in `vehicles.status` and changes nothing.
-    - `righting:` is how long (s) one of its Jolt vehicles lies on its side or roof, slow, before it
-      is set back on its wheels where it lies: its heading kept, upright on the ground and at rest
-      (`nav_plant_options::right_after`). `true` is the default, 2 s; `0` or `false` never: a
-      vehicle that rolls stays down until the fleet is laid out again (its `.restart.request`,
-      `.reseed.request` or another world), which puts every vehicle back on its wheels at its
-      start. `vehicles.fleets.<fleet>.righting` (seconds, `true` or `false`) switches it live. A Jolt
-      vehicle in no fleet is righted after 2 s.
+    - `righting:` sets one of its Jolt vehicles that has lain on its side or roof, slow, back on
+      its wheels where it lies: its heading kept, upright on the ground and at rest
+      (`nav_plant_options::right_after`). It is off by default: a vehicle that rolls stays down
+      until the fleet is laid out again (its `.restart.request`, `.reseed.request` or another
+      world), which puts every vehicle back on its wheels at its start. `righting: true` rights it
+      after 2 s there, `righting: <seconds>` after that long (`0` is off).
+      `vehicles.fleets.<fleet>.righting` (`1` or `0`, as a checkbox writes it) switches it live,
+      and `.righting_after` (seconds) sets how long. A Jolt vehicle in no fleet is never righted.
     - A view draws a fleet from `WorldVehicles::poses(fleet)`, not from state: a snapshot of its
       placed vehicles as the last step left them (ids, chassis centres, headings, speeds, teams,
       the box they lie in and the tick), made each step and read from any thread without a lock.

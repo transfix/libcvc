@@ -74,9 +74,6 @@ constexpr float kCollideGap = 3.6f;
 constexpr float kAvoidGain = 1.5f;
 constexpr float kAvoidSide = 0.6f;
 constexpr float kAvoidSideRadius = 20.0f; // the turn's look-ahead, in vehicle radii
-// A fleet's Jolt vehicle that has lain on its side or roof, slow, this long (s) is set back on its
-// wheels where it is (nav_plant_options::right_after).
-constexpr double kRightAfter = 2.0;
 
 std::string num(double v) {
   char buf[32];
@@ -1028,10 +1025,12 @@ struct WorldVehicles::impl {
     std::string sense, belief, seen_sense, seen_belief;
     bool collide = false; // its vehicles kept apart (collide:; the key switches it)
     std::string seen_collide;
-    // How long its Jolt vehicles lie on a side or the roof before they are set back on their
-    // wheels (righting:, s; 0 never; the key switches it).
-    double righting = vehicle_start::kRighting;
-    std::string seen_righting;
+    // Whether its Jolt vehicles that lie on a side or the roof are set back on their wheels, and
+    // after how long (s) there (righting:; its keys switch them). Off: they stay down.
+    bool righting = false;
+    double righting_after = vehicle_start::kRighting;
+    std::string seen_righting, seen_righting_after;
+    double right_after() const { return righting ? righting_after : 0.0; }
     // Its policy: what is asked (trained, builtin, data:<entry> or a uri; the key switches it),
     // what drives (`model`, null: the built-in net) and that, said (`drives`). `loading` is the
     // data store's node of weights still on their way, `file` the .cvcnav in it.
@@ -1427,9 +1426,9 @@ struct WorldVehicles::impl {
     o.ground_height = [g, t](double x, double y) { return ground_at(g.get(), t.get(), x, y); };
     const std::vector<ph::vehicle_desc> first{ph::vehicle_desc::humvee()};
     if (plant == "jolt") {
-      // A vehicle that rolled onto its side or roof is set back on its wheels after its fleet's
-      // righting: (2 s by default; never with righting: false), an unnamed one's after 2 s.
-      o.right_after = group >= 0 ? groups[static_cast<std::size_t>(group)].righting : kRightAfter;
+      // A vehicle that rolled onto its side or roof is set back on its wheels when its fleet's
+      // righting: is on; otherwise, and in no fleet, it stays down.
+      o.right_after = group >= 0 ? groups[static_cast<std::size_t>(group)].right_after() : 0.0;
       f->jolt = std::make_unique<ph::nav_plant>(*world, first, std::move(o));
       f->sim->set_plant(f->jolt.get());
     } else if (plant == "dynamic") {
@@ -2506,11 +2505,12 @@ struct WorldVehicles::impl {
             status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
   }
-  // Fleet `gi`'s Jolt vehicles righted after its righting now (0: never), its navigators kept.
+  // Fleet `gi`'s Jolt vehicles righted, or left down, as its righting says now, its navigators
+  // kept.
   void apply_righting(std::size_t gi) {
     for (const auto &[k, nav] : fleets)
       if (nav && nav->group == static_cast<int>(gi) && nav->jolt)
-        nav->jolt->set_right_after(groups[gi].righting);
+        nav->jolt->set_right_after(groups[gi].right_after());
   }
   // Fleet `gi`'s vehicles kept apart, or not, now (collide), its navigators kept.
   void apply_collide(std::size_t gi) {
@@ -2715,23 +2715,27 @@ struct WorldVehicles::impl {
           apply_collide(gi);
         }
       }
+      // Righting on or off (1 or 0, as a checkbox writes; true or false), and after how long.
       if (const std::string c = get(at + "righting"); c != g.seen_righting) {
-        g.seen_righting = c; // seconds, or true (the default's) / false (never)
-        double want = -1.0;
-        if (c == "true" || c == "on")
-          want = vehicle_start::kRighting;
-        else if (c == "false" || c == "off")
-          want = 0.0;
-        else
-          try {
-            std::size_t used = 0;
-            want = std::stod(c, &used);
-            if (used != c.size() || !std::isfinite(want))
-              want = -1.0;
-          } catch (const std::exception &) {
-          }
-        if (want >= 0.0 && want != g.righting) {
-          g.righting = want;
+        g.seen_righting = c;
+        const bool on = c == "1" || c == "true" || c == "on";
+        if ((on || c == "0" || c == "false" || c == "off") && on != g.righting) {
+          g.righting = on;
+          apply_righting(gi);
+        }
+      }
+      if (const std::string c = get(at + "righting_after"); c != g.seen_righting_after) {
+        g.seen_righting_after = c; // seconds, > 0
+        double after = 0.0;
+        try {
+          std::size_t used = 0;
+          after = std::stod(c, &used);
+          if (used != c.size())
+            after = 0.0;
+        } catch (const std::exception &) {
+        }
+        if (after > 0.0 && std::isfinite(after) && after != g.righting_after) {
+          g.righting_after = after;
           apply_righting(gi);
         }
       }
@@ -3841,6 +3845,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.belief = st.belief.empty() ? "shared" : st.belief;
       g.collide = st.collide;
       g.righting = st.righting;
+      g.righting_after = st.righting_after;
       g.policy = !st.policy_data.empty() ? "data:" + st.policy_data
                  : st.policy.empty()     ? "trained"
                                          : st.policy;
@@ -3857,7 +3862,8 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         d.put(at + "metric", g.metric);
         d.put(at + "plant", g.plants.empty() ? g.base_plant : g.plants.text());
         d.put(at + "collide", g.collide ? "1" : "0");
-        d.put(at + "righting", num(g.righting));
+        d.put(at + "righting", g.righting ? "1" : "0");
+        d.put(at + "righting_after", num(g.righting_after));
         d.put(at + "size", std::to_string(st.count));
       }
       g.seen_sense = d.get("fleets." + st.fleet + ".sense");
@@ -3867,6 +3873,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.seen_plant = d.get("fleets." + st.fleet + ".plant");
       g.seen_collide = d.get("fleets." + st.fleet + ".collide");
       g.seen_righting = d.get("fleets." + st.fleet + ".righting");
+      g.seen_righting_after = d.get("fleets." + st.fleet + ".righting_after");
       g.seen_size = d.get("fleets." + st.fleet + ".size");
       d.hold_placing = true;
       int got = 0;

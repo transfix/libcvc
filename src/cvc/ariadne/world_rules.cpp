@@ -383,17 +383,20 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
         if (!boolean(x, at + " collide:", s.collide, why))
           return why;
       } else if (k == "righting") {
-        // Seconds, or a word: true (the default's) or false (never); 1 is a second, not true.
+        // A word, true (after 2 s) or false, or seconds (on after that long; 0 off): 1 is a
+        // second, not true.
         constexpr std::string_view words[] = {"true", "yes", "on", "false", "no", "off"};
         if (x.is_scalar() &&
             std::find(std::begin(words), std::end(words), x.scalar) != std::end(words)) {
-          bool on = true;
-          if (!boolean(x, at + " righting:", on, why))
+          if (!boolean(x, at + " righting:", s.righting, why))
             return why;
-          s.righting = on ? vehicle_start::kRighting : 0.0;
-        } else if (!number(x, at + " righting:", s.righting, why) || !(s.righting >= 0.0) ||
-                   !std::isfinite(s.righting)) {
-          return at + " righting: expects seconds (0 or more), true or false";
+        } else {
+          double after = 0.0;
+          if (!number(x, at + " righting:", after, why) || !(after >= 0.0) || !std::isfinite(after))
+            return at + " righting: expects true, false or seconds (0 or more)";
+          s.righting = after > 0.0;
+          if (s.righting)
+            s.righting_after = after;
         }
       } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
@@ -473,6 +476,7 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
       s.sense = plain.sense;
       s.belief = plain.belief;
       s.righting = plain.righting;
+      s.righting_after = plain.righting_after;
       if (!s.policy_path.empty() || !s.policy_sha256.empty() || !s.policy_data.empty()) {
         s.policy = plain.policy;
         s.policy_path = plain.policy_path;
