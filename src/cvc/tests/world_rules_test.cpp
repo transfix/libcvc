@@ -102,7 +102,8 @@ scene:
 world:
   avatars:
     archetypes:
-      pilot: { body: { mass: 90, width: 0.6, height: 1.9 }, controllers: [stroll@1, walker@1] }
+      pilot: { body: { mass: 90, width: 0.6, height: 1.9, density: 1010 },
+               controllers: [stroll@1, walker@1] }
       child: { body: { mass: 30, height: 1.2 } }
     policy:
       max_speed: 6
@@ -119,6 +120,8 @@ world:
   EXPECT_EQ(r.avatar().id, "pilot") << "the first is every avatar's";
   EXPECT_EQ(r.avatar().body.mass, 90.0);
   EXPECT_EQ(r.avatar().body.height, 1.9);
+  EXPECT_EQ(r.avatar().body.density, 1010.0) << "the water it displaces (OW9b)";
+  EXPECT_EQ(r.archetypes[1].body.density, 985.0) << "a person's when left out";
   EXPECT_EQ(r.archetypes[1].body.width, 0.5) << "a body key left out keeps the default";
   EXPECT_EQ(r.archetypes[1].controllers, std::vector<std::string>{"walker@1"})
       << "and so do controllers left out";
@@ -163,7 +166,9 @@ world:
       {"world: { controllers: { runner@1: {} } }", "this build has no kernel runner@1"},
       {"world: { controllers: { walker@2: {} } }", "this build has no kernel walker@2"},
       {"world: { avatars: { archetypes: { a: { body: { mass: -1 } } } } }",
-       "body mass, width and height must be positive"},
+       "body mass, width, height and density must be positive"},
+      {"world: { avatars: { archetypes: { a: { body: { density: 0 } } } } }",
+       "body mass, width, height and density must be positive"},
       {"world: { avatars: { archetypes: { a: { body: { height: tall } } } } }",
        "height: expects a number"},
       {"world: { avatars: { archetypes: {} } }", "expects a map of archetypes by id"},
@@ -268,7 +273,7 @@ TEST(RoomRulesTest, EachSectionRoundTrips) {
   r.physics.gravity = cvc::physics::vec3{0.1, -0.2, -1.62};
   ca::avatar_archetype tall;
   tall.id = "tall";
-  tall.body = ca::avatar_body{95.0, 0.55, 2.1};
+  tall.body = ca::avatar_body{95.0, 0.55, 2.1, 1010.0}; // its density rides too (OW9b)
   tall.controllers = {"stroll@1", "walker@1"};
   r.archetypes.push_back(tall);
   ca::avatar_archetype kart; // a vehicle (section 18.6): its id rides with the section

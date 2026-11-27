@@ -85,8 +85,16 @@ struct avatar_body {
   double mass = 70.0;  // kg
   double width = 0.5;  // m, the box's x and y edge
   double height = 1.7; // m
+  // kg/m^3, a person's (OW9b, ARIADNE_WORLDS.md section 18.10): in water the box displaces
+  // mass / density, not its own volume, so a person floats head-out (98.5% of the box under)
+  // rather than like a cork. The box stays the shape for contact and prediction.
+  double density = 985.0;
   bool operator==(const avatar_body &) const = default;
 };
+
+// The share of an avatar's box that displaces water (physics::body_desc::displacement): its mass
+// over the body's density, over the box's volume. 0.167 for the default person.
+double avatar_displacement(const avatar_body &body, double mass);
 
 // What an avatar's controller may spend (§5k). The SERVER sets it, the same for every avatar, and
 // publishes it in the room (room_avatar.h) so a client predicts under the same rule.
@@ -248,8 +256,8 @@ public:
   void place(const std::string &pid, const cvc::physics::body_state &feet);
   // A kinematic avatar: arrive at this feet pose by the end of the next step.
   void move_kinematic(const std::string &pid, const cvc::physics::pose &feet);
-  // A dynamic avatar's mass (kg, > 0) from the next step on; it survives set_statics. A kinematic
-  // avatar has no mass (a no-op).
+  // A dynamic avatar's mass (kg, > 0) from the next step on, and the water it displaces with it
+  // (avatar_displacement); it survives set_statics. A kinematic avatar has no mass (a no-op).
   void set_mass(const std::string &pid, double kg);
 
   // OBSTACLES (ARIADNE_WORLDS.md section 18.5, OW5): a box the host holds where it shows something

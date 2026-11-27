@@ -394,7 +394,8 @@ std::string check_world_rules(const world_rules &rules);
 //   world:
 //     avatars:
 //       archetypes:                 # replaces the default list; the first is every avatar's
-//         person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+//         person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 },
+//                   controllers: [walker@1] }
 //       policy:                     # each key given replaces the default
 //         max_speed: 4.0
 //         allow_vertical: false
