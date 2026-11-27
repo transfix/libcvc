@@ -162,12 +162,15 @@ const SILENT_CONFIG = JSON.stringify({
   env: {CVC_ARIADNE_RELAY: '{ws_origin}/apps/silent-relay', CVC_ARIADNE_NAME: 'smoke'},
 });
 const silent = {opens: 0, closes: 0};
-// Whether the package's page is a conference client: arigl-web, whose module has the WebSocket
-// transport (the browser's WebSocket API in arigl.js's glue, as cyprty's stage.sh checks). Not
-// ariglx-web, built without the transport (CVC_ENABLE_WS off), where CVC_ARIADNE_RELAY runs the
-// document locally. Its threaded (wasm-mt) glue has the WebSocket API all the same, so the glue alone
-// can't tell.
-const HAS_WS = !PYTHON && fs.existsSync(path.join(WEB, 'arigl.js')) &&
+// Whether the package's page is a conference client: the single-threaded arigl-web, whose module
+// has the WebSocket transport (the browser's WebSocket API in arigl.js's glue, as cyprty's stage.sh
+// checks). Not ariglx-web, built without the transport (CVC_ENABLE_WS off), where
+// CVC_ARIADNE_RELAY runs the document locally. Nor the threaded (wasm-mt) arigl-web:
+// build-wasm.sh builds the transport single-threaded only (libopus has no -pthread wasm build), so
+// a threaded package (served --isolated) runs the document locally too. A threaded glue has the
+// WebSocket API all the same, so the glue alone can't tell. If a threaded build gains the
+// transport, drop the !ISOLATED here.
+const HAS_WS = !PYTHON && !ISOLATED && fs.existsSync(path.join(WEB, 'arigl.js')) &&
                fs.readFileSync(path.join(WEB, 'arigl.js'), 'utf8').includes('emscripten_websocket');
 function silentRelay(req, socket) {
   const key = req.headers['sec-websocket-key'];
