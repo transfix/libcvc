@@ -173,7 +173,9 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
 - **As built in SH1** (ARIADNE.md §6.8). `Kind::Mounts` reads `mounts:`, `allow:` and a third
   key, `catalog:` (a list, or `{ bind: <key> }`), which names the documents that run as `local`:
   the runtime takes the principal from where the bytes came (4.12), and the slot is where it
-  learns which local files are the shell's catalog. `load_mount` (loader.h) runs `expand_load`
+  learns which local files are the shell's catalog. An entry's own `catalog` flag does the same
+  for that entry: `shell.ari` sets it on what it opens from its catalog, and `catalog:` covers the
+  catalog's documents opened any other way (both, at Joe's choice, 2026-11-27). `load_mount` (loader.h) runs `expand_load`
   in a fresh context, stateless; `AppRuntime` hands the Runtime a loader that adds its component
   paths and the `requires:` check (`Runtime::set_mount_loader`). The Runtime keeps each mount in
   a slot by sub-prefix, reconciles the slots at the top of each frame (open, close, parse again)
@@ -757,6 +759,8 @@ acceptance test (SH15).
   with its publisher when it is signed (below).
 
 The principal is fixed at mount time from where the bytes came; a document cannot name its own.
+The shell says which local files are its catalog's: the slot's `catalog:` lists them, or an
+entry's `catalog` flag marks it (as built in SH1, 4.2); neither makes a remote document `local`.
 What it loads inherits it: a remote document that `load:`s a file from its own origin runs that
 file as the same principal and cannot raise it. Below, a *sandboxed* document is one whose
 principal is `file:` or `remote:`.

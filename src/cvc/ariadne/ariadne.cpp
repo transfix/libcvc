@@ -2709,6 +2709,7 @@ struct Runtime::Impl {
     std::string as;
     std::string uri; // as the entry gives it
     std::vector<std::pair<std::string, std::string>> args;
+    bool catalog = false;            // the entry's catalog flag as it opened (4.12)
     std::string canonical;           // where its bytes came from
     std::string principal;           // local, file:<dir> or remote:<origin> (4.12)
     std::string name;                // its application name
@@ -2770,7 +2771,7 @@ struct Runtime::Impl {
                                       const std::string &bind, const std::string &scope) const;
   std::string mount_norm(const std::string &uri, const std::string &base) const;
   std::string mount_principal(const Widget &w, const std::string &scope, const std::string &uri,
-                              const std::string &canonical) const;
+                              const std::string &canonical, bool catalog) const;
   Runtime::MountBudget mount_budget(const MountSlot &slot) const;
   void apply_mount_budget(MountSlot &slot);
   void measure_mounts(); // their memory, their time held at the limit, the notice, the mirror
@@ -6636,17 +6637,21 @@ std::string Runtime::Impl::mount_norm(const std::string &uri, const std::string 
   return out;
 }
 
-// 4.12 who a mount runs as, from where its bytes came: `local` for a cvc:// or state:// document
-// and for one the slot's catalog: lists, `remote:<scheme>://<host>` for one fetched from the
-// network, `file:<its directory>` for any other local file.
+// 4.12 who a mount runs as, from where its bytes came: `local` for a cvc:// or state:// document,
+// and for a local file the slot's catalog: lists or whose entry's catalog flag is set;
+// `remote:<scheme>://<host>` for one fetched from the network, whatever either says;
+// `file:<its directory>` for any other local file. The slot's document writes both: a mounted
+// document cannot write outside its own scope (§7.4), so it cannot name itself a catalog's.
 std::string Runtime::Impl::mount_principal(const Widget &w, const std::string &scope,
-                                           const std::string &uri,
-                                           const std::string &canonical) const {
+                                           const std::string &uri, const std::string &canonical,
+                                           bool catalog) const {
   const Uri u = parse_uri(uri);
   if (u.scheme == "cvc" || u.scheme == "state")
     return "local";
   if (u.scheme == "http" || u.scheme == "https")
     return "remote:" + u.scheme + "://" + u.path.substr(0, u.path.find('/'));
+  if (catalog)
+    return "local";
   const MountsSpec none{}; // a slot without a spec (a local, so no static state)
   const MountsSpec &spec = w.mounts ? *w.mounts : none;
   const std::string mine = mount_norm(uri, spec.base);
@@ -6820,7 +6825,7 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   slot.stamps = std::move(r.source_stamps);
   if (!r.ok)
     return refuse_mount(slot, r.error.empty() ? "it could not be loaded" : r.error);
-  slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical);
+  slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical, slot.catalog);
   // 4.12 the origins it holds beyond its principal's default, worked out with its principal and
   // before any of its programs is built: SH11's net host reaches them
   // (ScopePrincipal::net_origins), and a program keeps the access it was built with.
@@ -6919,6 +6924,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
     const Widget *w;
     std::string key, scope, as, uri, sub;
     std::vector<std::pair<std::string, std::string>> args;
+    bool catalog = false; // 4.12 <entry>.catalog: the slot's document says it is its catalog's
     bool has_grants = false, has_argv = false; // ARIADNE_SHELL.md 4.5, 4.6
     std::vector<std::string> grants, argv;
   };
@@ -6952,6 +6958,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
         continue;
       }
       Want x{w, key, scope, as, uri, resolve_bind(scope, "includes." + as), {}};
+      x.catalog = to_bool_int(read_string(app, entry + cvc::state::SEPARATOR + "catalog"), 0) != 0;
       try {
         if (cvc::state *args = tree.findDescendant(entry + cvc::state::SEPARATOR + "args"))
           for (const std::string &a : args->childNames())
@@ -6970,18 +6977,27 @@ bool Runtime::Impl::reconcile_mounts_once() {
     }
   }
   doc_slot_->set(doc_key);
-  // Close the mounts whose entry went, or whose document or args changed, deepest first.
+  // Close the mounts whose entry went, or whose document or args changed, deepest first. One whose
+  // catalog flag changed closes too, its state kept, when that changes its principal: it opens
+  // again as the new one (4.12). When it does not (catalog: lists it as well), it runs on.
   std::vector<std::pair<std::string, bool>> closing; // sub-prefix, a different document there
-  for (const auto &[sub, slot] : mount_slots_) {
+  for (auto &[sub, slot] : mount_slots_) {
     const auto x =
         std::find_if(want.begin(), want.end(), [&](const Want &v) { return v.sub == sub; });
-    if (x == want.end() || x->key != slot.slot_key)
+    if (x == want.end() || x->key != slot.slot_key) {
       closing.emplace_back(sub, false);
-    else if (x->uri != slot.uri || x->args != slot.args || x->has_argv != slot.has_argv ||
-             x->argv != slot.argv) // another command line: its state: and init: as at a new run
+    } else if (x->uri != slot.uri || x->args != slot.args || x->has_argv != slot.has_argv ||
+               x->argv != slot.argv) { // another command line: its state: and init: as at a new run
       closing.emplace_back(sub, true);
-    else if (x->has_grants != slot.has_grants || x->grants != slot.grants)
+    } else if (x->has_grants != slot.has_grants || x->grants != slot.grants) {
       closing.emplace_back(sub, false); // other grants: opened again with them, resumed
+    } else if (x->catalog != slot.catalog) {
+      if (mount_principal(*x->w, slot.parent_scope, slot.uri, slot.canonical, x->catalog) !=
+          slot.principal)
+        closing.emplace_back(sub, false);
+      else
+        slot.catalog = x->catalog;
+    }
   }
   if (!closing.empty()) {
     std::sort(closing.begin(), closing.end(),
@@ -7000,6 +7016,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
       slot.as = x.as;
       slot.uri = x.uri;
       slot.args = x.args;
+      slot.catalog = x.catalog;
       slot.has_grants = x.has_grants;
       slot.grants = x.grants;
       slot.has_argv = x.has_argv;
