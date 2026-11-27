@@ -70,6 +70,19 @@ DocumentArgs parse_document_args(const std::vector<ArgSpec> &spec,
 std::string format_document_usage(const std::string &invocation, const std::string &description,
                                   const std::vector<ArgSpec> &spec);
 
+// A mounted document's command line (docs/roadmap/ARIADNE_SHELL.md 4.6): the document that loads it
+// passes `argv` (a load:'s `argv: [...]`, a mounts: entry's `argv`), and its own `args:` block is
+// parsed against it as a top-level document's is. Carried on its mount (Widget::command_line); the
+// Runtime publishes it under the mount's sub-prefix (publish_document_args) before its init: runs.
+// A parse error, a missing required argument or --help refuses the mount, with its usage.
+struct MountCommandLine {
+  bool has_args_block = false;
+  std::vector<ArgSpec> args;
+  bool has_argv = false; // the loading document passed one (else nothing, and args take defaults)
+  std::vector<std::string> argv;
+  DocumentArgs parsed; // `args` parsed against `argv` (has_args_block only)
+};
+
 // Write argv, and the parsed values when `spec` is given, under `root` (the document prefix), all
 // read-only. Replaces whatever an earlier call wrote there, so a reload starts clean.
 void publish_document_args(cvc::app &app, const std::string &root,

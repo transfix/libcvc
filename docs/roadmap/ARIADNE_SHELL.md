@@ -189,8 +189,8 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
   already open on that URI; the verbs read the slot's key when called (it is set with the tree,
   so a resident started before the first frame finds it). The shell (`components/shell.ari`)
   takes `--open` besides `--catalog`, to open entries at start; its Apps menu lists the catalog
-  by title through a `menu_item:` label that is an expression. `view`, `background`, `grants`
-  and `argv` are not read yet (SH3, SH6, SH7).
+  by title through a `menu_item:` label that is an expression. `view` and `background` are not
+  read yet (SH3, SH6); `grants` and `argv` are SH7's (4.5, 4.6, *As built in SH7*).
 
 ### 4.3 Scenes of mounted documents
 
@@ -452,6 +452,71 @@ root:
   under the sub-prefix before its `init:` runs. With no `argv`, its defaults are published. A
   parse error, or a missing `required:` argument, refuses the mount and posts the usage to the
   feed, where a top-level document would print it and exit 2.
+
+**As built in SH7** (4.5 and 4.6; ARIADNE.md §5.6, §5.7, §6.3, §6.8, §13).
+
+- **Tokens.** [`grants.h`](../../inc/cvc/ariadne/grants.h) holds the table (each with a meaning
+  for authors and words for the sheet SH14 shows) and the arithmetic, as pure functions: a
+  `grants:` list is read into a `GrantSet` (`GrantBuilder`: a token, or `{delegate.signals: [...]}`
+  and `{net.origin: [...]}`), bounded by what the granter holds (`bound_grants`), and what a
+  document holds is what it asked for and was granted (`hold_grants`: the `MountGrants` a mount
+  carries, `Widget::grants`). `requires:` entries take `origins:` for `net.origin`. The loader
+  works out a `load:`'s grants as it opens the fragment (before its own `load:`s, which grant out
+  of it), the Runtime a `mounts:` entry's (`MountRequest::grants` and `held_by`, its slot's
+  `grants:` picked by the entry's own `grants`). `check_host_requirements` and the mount's check
+  answer the tokens from those grants: a required token not granted fails a `load:` (the
+  document's load) or refuses a `mounts:` entry, named ("it requires what it is not granted:
+  delegate.keys"). The entry gets `holds` and `net_origins` back.
+- **`(has? NAME)`** answers a token per mount: a program's context takes what its mount holds on
+  the host thread when it is made (its spawned children keep it), the mount's `init:` likewise,
+  and the read lane answers for the scope it reads, once a frame per scope. The document's own
+  scope answers as it would alone.
+- **Differences from the design above.** An optional token not granted does not warn: the
+  document copes by design, `(has? ...)` tells it, and a warning in the shell's feed for every
+  optional ask would be noise (it would also fail `ari test --mounted` where `ari test` passes).
+  The defaults (`extend.tray`, `extend.settings`) hold without being asked for: every loaded
+  application has had its tray icons, and asking would break every document that loads one. Of
+  the extend tokens only `extend.tray` is enforced (a loaded application's tray icons join the
+  tray only while it holds it); `extend.menubar`, `extend.context_menu`, `extend.settings`,
+  `access.*` and `request.*` are answered by `(has? ...)` and checked at mount, and do nothing
+  more until SH9, SH6 and SH14. `grants: { ask: [...] }` warns and grants the defaults (SH9).
+  `Ctrl+Tab` is not bound: a `keys:` binding has no modifiers yet, so the shell cannot bind it;
+  `(app-focus AS)` moves the focus, and the document reads it at `ariadne.focus`.
+- **Input.** `post_input` queues what a mount may take (only while a known mount holds
+  `delegate.keys` or `delegate.pointer`), and the drain routes it after the document's bindings
+  (`route_mount_input`), each as an action in the mount's scope with `event` bound: a key to the
+  focused application (its `on_key:`, its `keys:` bindings at `<sub>.keys.<id>`, seeded as it
+  opens), its release where its press went; none while a text field outside it holds the keyboard
+  or the Keys window waits. The backend says where the keyboard and the pointer are
+  (`Backend::window_focused`, `window_hovered`, `item_has_keyboard`, `reports_focus`; ImGui
+  answers them, the terminal backends do not yet, so there only `(app-focus)` moves the focus).
+  `InputEvent::ui` marks what the host's UI took: arigl now posts what ImGui wants, marked, in
+  place of dropping it, so a focused application's window gets its keys while the document's own
+  handlers still never see them. The pointer over the main view waits for SH6's front
+  application.
+- **Signals.** Without an `on_signal:` of the shell's own, `post_signal` passes an interrupt
+  (SIGINT, SIGQUIT) to the focused application, which takes it over (it returns true, so the host
+  does not end), and a request to end to every application holding `delegate.signals` for it,
+  queued for the next drain, which the hosts run before they end (it returns false). A shell with
+  one passes signals on itself with `(app-signal AS NAME)`. `(app-focus)` and `(app-signal)` are
+  the document's own (a mount's programs get a `PermissionError`) and are taken by the next drain.
+- **Argv.** The loader parses a fragment's `args:` against the argv passed (`MountCommandLine`,
+  `Widget::command_line`) before anything of it is built; the Runtime publishes it at the
+  sub-prefix before the `init:` runs (a static `load:` as the walk first meets it). A `mounts:`
+  entry's refusal carries the usage; a `load:`'s is a load warning, and the load is left out. A
+  module with a command line of its own gets no `args` or `argv` hole.
+- **`net.origin`.** The origins a mount holds are on its slot (`MountState::net_origins`, the
+  entry's `net_origins`), in the policy form SH11's table keeps. SH11 (transfix/libcvc#1576) reads
+  `ScopePrincipal::net_origins`; once both are on master, `open_mount` hands them over with the
+  principal.
+- **Tests.** `ariadne_grants_test` (the arithmetic, the loader, the Runtime: a refused mount, keys
+  to the focused application only and none while the shell's field has the keyboard, a parent's
+  binding keeping its key, the focus following the focused window, SIGTERM to every granted
+  application and SIGINT to the focused one, a signal list, `app-signal`, argv and a bad one's
+  usage in the feed, `has?` per mount, origins, a static `load:` taking keys, the tray gate, one
+  document's tests alone and mounted, and two apps side by side). `ari test --mounted` runs a
+  document as a shell's application; `ari_grants_alone` and `ari_grants_mounted` run
+  `src/ari/tests/grants_component.ari` both ways.
 
 ### 4.7 Adding to the shell: menus, right-click menus, Settings
 

@@ -1552,7 +1552,11 @@ bool ImGuiBackend::begin_window(const char *title, const char *id, const ariadne
   // seed). A build without ImGui reports nothing (has_pos/has_size stay false). In logical px
   // (ui_px), as the seed is.
   m_lastWindowGeom = ariadne::WindowGeom{};
+  m_windowFocused = m_windowHovered = false;
 #ifdef CVC_ENABLE_IMGUI
+  // ARIADNE_SHELL.md 4.6 whether it has the keyboard focus, and the pointer, a child of it too.
+  m_windowFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+  m_windowHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
   const float unit = ui_px(1.0f);
   const ImVec2 wp = ImGui::GetWindowPos();
   m_lastWindowGeom.has_pos = true;
@@ -2847,6 +2851,7 @@ ariadne::StringEdit ImGuiBackend::input_text(const char *label, const char *key,
                            (masked ? ImGuiInputTextFlags_Password : 0) |
                            (act ? ImGuiInputTextFlags_CallbackAlways : 0),
                        input_text_resize, &ud);
+  m_fieldKeyboard = ImGui::IsItemActive(); // being typed into (ARIADNE_SHELL.md 4.6)
   cm.field_menu(id, buf, masked);
   const bool committed = entered || ImGui::IsItemDeactivatedAfterEdit();
   return {buf != current, committed, buf};
@@ -2935,6 +2940,7 @@ ariadne::MessageEdit ImGuiBackend::message_input(const char *label, const char *
   cm.field_menu(id, f.text, false);
   const bool active = ImGui::IsItemActive();
   const bool left = ImGui::IsItemDeactivatedAfterEdit();
+  m_fieldKeyboard = active; // being typed into (ARIADNE_SHELL.md 4.6)
   if (f.text.empty() && !active && !o.hint.empty())
     ImGui::GetWindowDrawList()->AddText(ImVec2(ImGui::GetItemRectMin().x + st.FramePadding.x,
                                                ImGui::GetItemRectMin().y + st.FramePadding.y),

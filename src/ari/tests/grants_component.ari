@@ -1,0 +1,47 @@
+# grants_component.ari — `ari test` alone and `ari test --mounted` (docs/roadmap/ARIADNE_SHELL.md
+# 4.5, 4.6): a document runs the same as an application in a shell as it does on its own. Alone it
+# holds every delegate.* and extend.* token; mounted, the shell --mounted makes grants it the same,
+# so (has? ...) answers alike, its on_key: and on_signal: are its own, and its args: block takes
+# its defaults either way. ctest: ari_grants_alone, ari_grants_mounted.
+#
+#   ari test src/ari/tests/grants_component.ari
+#   ari test --mounted src/ari/tests/grants_component.ari
+
+meta: { name: Grants test, min_libcvc: 4.0.6 }
+
+requires:
+  - delegate.keys
+  - delegate.signals
+  - {name: access.settings, optional: true}
+  - {name: request.open, optional: true}
+
+args:
+  greeting: { type: string, default: hello, help: What it says first }
+  times: { type: int, default: 2, help: How often }
+
+state:
+  said: ""
+
+init: |
+  (state-set "said" (state-get "args.greeting"))
+
+on_key: (state-set "last_key" (get-attr event "key"))
+on_signal: (state-set "last_signal" (get-attr event "signal"))
+
+root:
+  - text: said
+    bind: said
+
+tests:
+  holds_what_it_asked_for: |
+    (assert (has? "delegate.keys") "alone it holds delegate.keys; mounted, it was granted it")
+    (assert (has? "delegate.signals"))
+    (assert (has? "extend.tray") "a default: its tray icons")
+    (assert (not (has? "access.settings")) "no one shares settings with it")
+    (assert (not (has? "request.open")) "no shell opens documents for it")
+    (assert (not (has? "delegate.nothing")) "not a token: answered by the host, which has none")
+  its_command_line_takes_its_defaults: |
+    (assert (= (state-get "args.greeting") "hello") "its default")
+    (assert (= (get-attr (state-data-get "args") "times") 2) "typed")
+    (assert (= (state-get "said") "hello") "its init: read it")
+    (assert (= (length (state-data-get "argv")) 0) "nothing was passed it")

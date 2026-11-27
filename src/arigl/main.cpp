@@ -2908,14 +2908,17 @@ int run_window(const ari::HostOptions &o, [[maybe_unused]] const Scripting &scri
       if (!sdl.attached())
         sdl.attach(view.renderWindow()); // once VTK has made its window
       // What ImGui takes -- the keys typed into a field, a click on a window -- is not the
-      // document's. A release always is, so nothing the document saw go down stays held.
+      // document's: it goes marked `ui`, for a mounted application whose window has the focus or
+      // the pointer, if it holds delegate.keys or delegate.pointer (ARIADNE_SHELL.md 4.6). A
+      // release always is the document's, so nothing the document saw go down stays held.
       for (const cvc::gl::InputEvent &e : sdl.poll()) {
         using K = cvc::gl::InputEvent::Kind;
-        if ((e.kind == K::KeyDown && ui.wantsKeyboard()) ||
+        ari::InputEvent ev = to_ari(e);
+        ev.ui =
+            (e.kind == K::KeyDown && ui.wantsKeyboard()) ||
             ((e.kind == K::MouseMove || e.kind == K::MouseButtonDown || e.kind == K::MouseWheel) &&
-             ui.wantsMouse()))
-          continue;
-        rt.post_input(to_ari(e));
+             ui.wantsMouse());
+        rt.post_input(ev);
       }
       // The gamepad: its new presses for the Controls window's gamepad Change, and itself for the
       // room's controls, unless that Change is waiting for one.
