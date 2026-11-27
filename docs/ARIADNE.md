@@ -6186,7 +6186,9 @@ fetch:
 token substitution from the `include:`'s `args:`. Units are collected before the body,
 so instantiation is order-free. A name-keyed expansion-stack guard (in `expand_include`,
 [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
-unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
+unknown unit warns and renders empty. The `include:` entry is a level of the document's nesting,
+and the unit's widget goes on a level below it (§6.7). `include:` is the static counterpart of
+`repeat:`.
 
 A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
 include site's `args:` override them, and a `{token}` with neither stays literal. That is how a
@@ -6266,7 +6268,8 @@ fragment as an **isolated module** in a fresh sub-context (its `units:` are its 
 based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth cap
 `kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256` (checked in
 `expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out
-a depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
+a depth cap alone would miss. The `load:` entry is a level of the document's nesting, and the
+fragment's widgets go on below it (§6.7). The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
@@ -6487,6 +6490,43 @@ root:
 
 `LoadResult::functions` lists the document's functions, and `LoadResult::root.functions` holds the
 same as a `FunctionScope`. A mount's are on its wrapper widget.
+
+### 6.7 How deep a document nests
+
+A document's widgets nest at most `kMaxNesting` levels deep, 256
+([`loader.h`](../inc/cvc/ariadne/loader.h)). Each widget is a level, and so is each `include:`
+and `load:` entry: the unit's widget, or the fragment's widgets, go on a level below the entry.
+A context menu's items and a tab bar's tabs are a level below their widget, as children are. The
+count runs through the whole document, across every unit and every mounted fragment.
+
+A load that would go deeper fails (`LoadResult::ok` is false) and builds no tree. The error is at
+the first widget past the limit, where it is written: for a widget in an `include:` expansion,
+the same place in the unit, in the unit's own file. It counts the `include:` and `load:` entries
+on the way down, and names each one that goes into another file:
+
+```
+ari: lib.ari:510:9: a widget nested deeper than 256 levels, the most a document may (each widget,
+include: and load: a level; docs/ARIADNE.md §6.7), with 127 include: and 1 load: on the way, by
+way of main.ari:5:9 load: frag.ari, frag.ari:4:5 include: level0 (in lib.ari)
+```
+
+`LoadResult::error_source`, `error_line` and `error_column` hold that place, and `ari validate`
+reports the error there (§14.3). A JSON schema cannot count across files, so the loader does it.
+
+The loader parses a document a level at a time on the native stack, and the limit keeps a load
+inside the smallest stack a host loads on: wasm's 2 MiB (`-sSTACK_SIZE` for ari's browser build,
+arigl web, arigl-web, cyprty and the examples). In MSVC Release the parse takes about 0.9 KB of
+stack a level through `include:`s, 1.1 KB a level written inline and about 2 KB for each `load:`,
+so a document at the limit loads, and draws, on 2 MiB (`ariadne_deep_nesting_test` checks that),
+where the parse alone would go about 2,300 levels deep. The shipped documents nest at most 11
+levels. Drawing has no limit of its own: the per-frame walk keeps its place on the heap.
+
+Two parts of a load go down a level of YAML at a time rather than a widget, and yaml-cpp bounds
+them: it parses at most about 500 levels of YAML, which is about 246 widgets written inline (two
+levels of YAML each). They are yaml-cpp's own parse, about 0.9 KB a level, and the schema check
+(§14.2), about 2.8 KB a level. Checking a document that deep takes 1.25 to 1.5 MiB in MSVC
+Release, and checking a fragment that deep, loaded at the bottom of a 254-level chain, 1.5 to
+1.75 MiB.
 
 ## 7. State prefix and mount scoping
 
@@ -9448,6 +9488,17 @@ doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or w
 - `--strict`: a loader warning fails the document too.
 - `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
   column, context, pointer, message), its load error and its warnings.
+
+A load error the loader can place is reported there, as the schema's are. A document nested
+deeper than the loader goes (§6.7) is one, at its first widget past the limit, which may be in a
+library or a fragment:
+
+```
+deep.ari:514:9: error: a widget nested deeper than 256 levels, the most a document may (each
+widget, include: and load: a level; docs/ARIADNE.md §6.7), with 128 include: and 0 load: on the way
+```
+
+In `--json` its place is `load_error_source`, `load_error_line` and `load_error_column`.
 
 The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
 the `cvc://` component library, `--component-path`). A document for arigl may name widget types

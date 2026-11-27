@@ -8,12 +8,14 @@
 // (kStackKiB), with a counting backend and, where libcvc has FTXUI, with FtxuiBackend and
 // TvisionBackend, so a walk that recursed once a level would fail here on every platform.
 //
-// The loader still recurses (yaml-cpp's parser does, and so does parse_widget, about 100 KB of
-// stack a widget level in MSVC Release), so the documents it reads load on the test's main thread
-// and draw on the small stack.
+// The loader still recurses, a level of the document at a time (yaml-cpp's parser, the schema
+// check, parse_widget), so most documents here load on the test's main thread and draw on the small
+// stack. Its parse takes about 1 KB of stack a widget level in MSVC Release, and a document nests
+// at most kMaxNesting (256) levels (docs/ARIADNE.md §6.7): one at the limit loads, and draws, on
+// the 2 MiB stack a browser build of ari runs on.
 //
 // For probing, CVC_ARI_DEEP_DEPTH overrides the depths and CVC_ARI_DEEP_STACK_KIB the stack (0
-// runs the body on the calling thread). DISABLED_ProbeLoad* load on the small stack, to find where
+// runs the body on the calling thread). DISABLED_Probe* load on the small stack, to find where
 // the loader runs out (--gtest_also_run_disabled_tests).
 
 #include <algorithm>
@@ -57,9 +59,11 @@ std::size_t depth(std::size_t fallback = kDepth) {
   return env_size("CVC_ARI_DEEP_DEPTH", fallback);
 }
 
-// Run `body` on a thread with a kStackKiB stack and rethrow what it throws.
-void on_small_stack(const std::function<void()> &body) {
-  const std::size_t kib = env_size("CVC_ARI_DEEP_STACK_KIB", kStackKiB);
+// Run `body` on a thread with a `kib` stack (kStackKiB, or CVC_ARI_DEEP_STACK_KIB, by default) and
+// rethrow what it throws.
+void on_small_stack(const std::function<void()> &body, std::size_t kib = 0) {
+  if (kib == 0)
+    kib = env_size("CVC_ARI_DEEP_STACK_KIB", kStackKiB);
   if (kib == 0) {
     body();
     return;
@@ -581,6 +585,112 @@ TEST(AriadneDeepNesting, ADocumentNestedThroughLoadsDraws) {
   b.expect_balanced();
 }
 
+// ---- the nesting limit (docs/ARIADNE.md §6.7) --------------------------------------------------
+//
+// A document nests at most kMaxNesting levels: a widget a level, and an include: or load: entry a
+// level of its own. One at the limit loads, and draws, on the smallest stack a host loads on:
+// wasm's 2 MiB (-sSTACK_SIZE for ari's browser build, arigl web, arigl-web, cyprty and the
+// examples). An unoptimized build's frames are several times larger, so a Debug build checks
+// 8 MiB.
+#ifdef NDEBUG
+constexpr std::size_t kLimitStackKiB = 2048;
+#else
+constexpr std::size_t kLimitStackKiB = 8192;
+#endif
+
+// Load `doc` (and, when it loads, draw it twice) on a kLimitStackKiB stack.
+LoadResult load_and_draw(const std::function<LoadResult(cvc::app &)> &load_doc,
+                         CountingBackend &b) {
+  LoadResult out;
+  on_small_stack(
+      [&] {
+        cvc::app app;
+        LoadResult r = load_doc(app);
+        if (r.ok) {
+          Runtime rt(app);
+          rt.set_backend(&b);
+          rt.set_root(std::move(r.root));
+          rt.render();
+          rt.render();
+        }
+        out.ok = r.ok;
+        out.error = r.error;
+        out.error_line = r.error_line;
+      },
+      kLimitStackKiB);
+  return out;
+}
+
+TEST(AriadneDeepNesting, ADocumentIncludedToTheNestingLimitLoadsAndDrawsOn2MiB) {
+  SKIP_WITHOUT_YAML();
+  ASSERT_EQ(kMaxNesting % 2, 0u);
+  // n units: the window's include: entry is level 2, each unit two levels, its text at 2n + 2.
+  const std::size_t n = kMaxNesting / 2 - 1;
+  CountingBackend b;
+  const LoadResult r =
+      load_and_draw([&](cvc::app &app) { return load_string(app, include_chain(n)); }, b);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(b.times("deepest " + std::to_string(n - 1)), 2);
+  b.expect_balanced();
+
+  CountingBackend none;
+  const LoadResult past =
+      load_and_draw([&](cvc::app &app) { return load_string(app, include_chain(n + 1)); }, none);
+  EXPECT_FALSE(past.ok);
+  EXPECT_NE(past.error.find("a widget nested deeper than " + std::to_string(kMaxNesting)),
+            std::string::npos)
+      << past.error;
+  EXPECT_GT(past.error_line, 0);
+}
+
+// Fragments, each 15 groups written inline around a load: of the next, to the limit: the costliest
+// way down a level is a load:'s (its fragment's sub-context, its group).
+TEST(AriadneDeepNesting, ADocumentLoadedToTheNestingLimitLoadsAndDrawsOn2MiB) {
+  SKIP_WITHOUT_YAML();
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      ("ari_deep_limit_" + std::to_string(static_cast<long long>(
+                               std::chrono::steady_clock::now().time_since_epoch().count())));
+  std::filesystem::create_directories(dir);
+  const auto groups = [](std::size_t n, const std::string &inner) {
+    std::string s;
+    for (std::size_t i = 0; i < n; ++i)
+      s += "{type: group, children: [";
+    s += inner;
+    for (std::size_t i = 0; i < n; ++i)
+      s += "]}";
+    return s;
+  };
+  // Each fragment 16 levels (15 groups, then the load: entry); the last, its groups and its text.
+  const std::size_t loads = kMaxNesting / 16 - 1, last = kMaxNesting - 16 * loads - 1;
+  const auto write = [&](std::size_t last_groups) {
+    for (std::size_t i = 0; i <= loads; ++i) {
+      std::ofstream out(dir / ("level" + std::to_string(i) + ".ari"));
+      out << "meta: { min_libcvc: \"0.0.0\" }\nchildren:\n  - "
+          << (i < loads ? groups(15, "{load: level" + std::to_string(i + 1) + ".ari}")
+                        : groups(last_groups, "{text: deepest}"))
+          << "\n";
+    }
+  };
+  const auto load_chain = [&](cvc::app &app) {
+    return load_file(app, (dir / "level0.ari").string());
+  };
+  write(last); // the text at kMaxNesting
+  CountingBackend b;
+  const LoadResult r = load_and_draw(load_chain, b);
+  write(last + 1); // a level past it
+  CountingBackend none;
+  const LoadResult past = load_and_draw(load_chain, none);
+  std::filesystem::remove_all(dir);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_EQ(b.times("deepest"), 2);
+  b.expect_balanced();
+  EXPECT_FALSE(past.ok);
+  EXPECT_NE(past.error.find("a widget nested deeper than " + std::to_string(kMaxNesting)),
+            std::string::npos)
+      << past.error;
+}
+
 // ---- probes ------------------------------------------------------------------------------------
 //
 // Where the loader runs out of stack: these load a document nested depth() deep on the small
@@ -606,6 +716,62 @@ TEST(AriadneDeepNesting, DISABLED_ProbeLoadInlineGroups) {
     EXPECT_TRUE(r.ok) << r.error;
     EXPECT_GE(chain_depth(r.root), n + 2); // the document's group, its window, then the n groups
   });
+}
+
+// The parts of a load that go down the YAML a level at a time without the widget parse: the
+// schema check alone (validate_string: yaml-cpp's parse, the document as JSON, the validator),
+// and yaml-cpp's parse with the conversion to a Value (parse_value).
+TEST(AriadneDeepNesting, DISABLED_ProbeValidateInlineGroups) {
+  SKIP_WITHOUT_YAML();
+  if (!have_jsonschema())
+    GTEST_SKIP() << "libcvc built without the .ari schema validator";
+  const std::string doc = inline_chain(depth(kIncludeDepth));
+  on_small_stack([&] {
+    cvc::app app;
+    const ValidationResult v = validate_string(app, doc);
+    EXPECT_TRUE(v.ok()) << v.error;
+  });
+}
+
+TEST(AriadneDeepNesting, DISABLED_ProbeParseInlineGroups) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = inline_chain(depth(kIncludeDepth));
+  on_small_stack([&] {
+    Value v;
+    std::string why;
+    EXPECT_TRUE(parse_value(doc, v, &why)) << why;
+  });
+}
+
+// The most stack a refused load takes: a chain of include:s to level 254 whose last unit loads a
+// fragment of depth() groups written inline, which yaml-cpp reads and the schema check walks, a
+// level of its YAML at a time, at the bottom of the chain, before its parse is refused. (246 groups
+// is as deep as yaml-cpp parses; MSVC Release needs more than 1536 KiB for it, and 1792 will do.)
+TEST(AriadneDeepNesting, DISABLED_ProbeLoadDeepFragmentAtTheLimit) {
+  SKIP_WITHOUT_YAML();
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      ("ari_probe_fragment_" + std::to_string(static_cast<long long>(
+                                   std::chrono::steady_clock::now().time_since_epoch().count())));
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir / "fragment.ari") << inline_chain(depth(246));
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nunits:\n";
+  const std::size_t units = kMaxNesting / 2 - 2; // the load: entry at level 254
+  for (std::size_t i = 0; i < units; ++i) {
+    doc += "  level" + std::to_string(i) + ":\n    type: group\n    children:\n";
+    doc += i + 1 < units ? "      - include: level" + std::to_string(i + 1) + "\n"
+                         : "      - load: fragment.ari\n";
+  }
+  std::ofstream(dir / "main.ari")
+      << doc << "windows:\n  - window: Deep\n    children:\n      - include: level0\n";
+  LoadResult r;
+  on_small_stack([&] {
+    cvc::app app;
+    r = load_file(app, (dir / "main.ari").string());
+  });
+  std::filesystem::remove_all(dir);
+  EXPECT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("a widget nested deeper than"), std::string::npos) << r.error;
 }
 
 // Where the walk ran out before: draws a document of depth() include: levels (loaded on the main
