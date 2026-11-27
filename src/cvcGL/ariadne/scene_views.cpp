@@ -166,8 +166,11 @@ void place(vtkProp3D *b, vtkProp3D *a, const double *X, vtkSmartPointer<vtkMatri
 
 struct SceneViews::View {
   std::string name;  // the viewport's, and its camera's viewer: <prefix>.viewers.<name>.camera
-  std::string scene; // the scene it shows: "" the main one, or a scenes: entry
+  std::string scene; // the scene it shows: "" the main one, a scenes: entry, or a mount's
   Viewport *vp = nullptr;
+  // The scene's own viewport (a mount's scene window, ARIADNE_SHELL.md 4.4), drawn as it is: no
+  // mirror filter, no shadow pass of its own, and the scene's, not this view's, to remove.
+  bool own_viewport = false;
   std::vector<std::string> show, hide; // tags; show empty = every tag
   bool chrome = true;                  // the scene's grid, axes and bounding box
   ari::SceneCamera start;              // its own camera: mode, track, where its orbit starts
@@ -827,17 +830,49 @@ void SceneViews::clear() {
     if (vm.hasViewport(a))
       vm.viewport(a).setVisible(false);
   anchors_on_.clear();
-  for (auto &kv : views_) {
-    View &v = *kv.second;
-    if (v.shadow_pass) { // its shadow pass's GL objects, while the window is still there
-      v.shadow_pass->ReleaseGraphicsResources(vm.renderWindow());
-      v.vp->renderer()->SetPass(nullptr);
-    }
-    if (vm.hasViewport(kv.first))
-      vm.removeViewport(kv.first);
-  }
+  for (auto &kv : views_)
+    release(*kv.second);
   views_.clear();
   cameras_.clear();
+}
+
+void SceneViews::release(View &v) {
+  if (view_->isClosed())
+    return;
+  ViewportManager &vm = view_->viewportManager();
+  if (v.own_viewport) { // the scene's own viewport: hidden, and left to its scene
+    if (vm.hasViewport(v.vp->name()))
+      v.vp->setVisible(false);
+    return;
+  }
+  if (v.shadow_pass) { // its shadow pass's GL objects, while the window is still there
+    v.shadow_pass->ReleaseGraphicsResources(vm.renderWindow());
+    v.vp->renderer()->SetPass(nullptr);
+  }
+  if (vm.hasViewport(v.vp->name()))
+    vm.removeViewport(v.vp->name());
+}
+
+void SceneViews::set_mount_lookup(std::function<std::string(const std::string &)> mount_at) {
+  mount_at_ = std::move(mount_at);
+}
+
+void SceneViews::drop_scene(const std::string &scene) {
+  const auto of = [&scene](const std::string &s) {
+    return s == scene || (s.size() > scene.size() && s.compare(0, scene.size(), scene) == 0 &&
+                          s[scene.size()] == '/');
+  };
+  for (auto it = views_.begin(); it != views_.end();) {
+    if (!of(it->second->scene)) {
+      ++it;
+      continue;
+    }
+    release(*it->second);
+    it = views_.erase(it);
+  }
+  for (auto it = cameras_.begin(); it != cameras_.end();)
+    it = of(it->second->scene) ? cameras_.erase(it) : std::next(it);
+  drawn_scenes_.erase(scene);
 }
 
 SceneViews::Camera *SceneViews::named_camera(const std::string &scene, const std::string &name) {
@@ -1164,33 +1199,52 @@ std::string SceneViews::key_scope(const SceneGraph &sg) const {
   return scope;
 }
 
-SceneViews::View *SceneViews::view_for(const std::string &name, const std::string &scene) {
+SceneViews::View *SceneViews::view_for(const std::string &name, const std::string &scene,
+                                       bool own) {
   ViewportManager &vm = view_->viewportManager();
-  auto it = views_.find(name);
+  // A view of a mounted document's scene is named after the mount, so two documents' views of one
+  // name never meet; its camera keeps the name (<sub>.viewers.<name>.camera), as alone. A scene
+  // window's view is the scene's own viewport, by its own name.
+  const bool mounted = scene.rfind("mount:", 0) == 0;
+  SceneSlot slot;
+  const bool found =
+      scenes_ && scenes_(scene, slot) && !slot.source.empty() && vm.hasViewport(slot.source);
+  if (own && !found)
+    return nullptr;
+  const std::string key = own ? slot.source : mounted ? scene + "|" + name : name;
+  auto it = views_.find(key);
   if (it != views_.end()) {
-    if (it->second->scene == scene)
+    if (it->second->scene == scene && it->second->own_viewport == own)
       return it->second.get();
-    // It shows another scene now: a new mirror of that one.
-    View &old = *it->second;
-    if (old.shadow_pass)
-      old.shadow_pass->ReleaseGraphicsResources(vm.renderWindow());
-    if (vm.hasViewport(name))
-      vm.removeViewport(name);
+    // It shows another scene now: a new view of that one.
+    release(*it->second);
     views_.erase(it);
   }
-  if (vm.hasViewport(name)) // the host's own viewport of that name: not the widget's to drive
+  if (!own && vm.hasViewport(key)) // the host's own viewport of that name: not the widget's
     return nullptr;
-  SceneSlot slot;
-  if (!scenes_ || !scenes_(scene, slot) || slot.source.empty() || !vm.hasViewport(slot.source))
+  if (!found)
     return nullptr;
   auto v = std::make_unique<View>();
   v->name = name;
   v->scene = scene;
+  if (own) {
+    v->own_viewport = true;
+    v->framed = true; // its scene framed its camera as it realized it
+    v->vp = &vm.viewport(slot.source);
+    // Where a double-click puts its camera back: where the scene starts it, its cameras: main.
+    if (slot.realized)
+      for (const ari::SceneCamera &c : slot.realized->cameras)
+        if (c.id == "main")
+          v->start = c;
+    View *raw = v.get();
+    views_[key] = std::move(v);
+    return raw;
+  }
   const double hidden_region[4] = {0.0, 0.0, 0.0, 0.0};
   // Over the main view (layer 1), and over a scene's own viewport (layer 1, a pixel of it drawn
   // under one of its views): layer 2.
-  Viewport &vp =
-      vm.addMirrorViewport(name, slot.source, hidden_region, scene.empty() ? 1 : 2, true);
+  Viewport &vp = vm.addMirrorViewport(key, slot.source, hidden_region, scene.empty() ? 1 : 2, true,
+                                      mounted ? name : std::string());
   vp.setVisible(false);
   vp.setInputEnabled(false); // the widget feeds its camera; the manager's router never does
   // Its scene's background, until the widget says otherwise.
@@ -1208,25 +1262,37 @@ SceneViews::View *SceneViews::view_for(const std::string &name, const std::strin
   View *raw = v.get();
   vp.setMirrorFilter([raw](vtkProp *p) { return raw->draw(p); });
   v->vp = &vp;
-  views_[name] = std::move(v);
+  views_[key] = std::move(v);
   return raw;
 }
 
 void SceneViews::end_walk() {
   walked_ = true;
+  // The scenes a view drew (a mount's world that holds in the background follows it), and the
+  // scenes' own viewports a scene window drew, at the window's size.
+  drawn_scenes_.clear();
+  std::set<std::string> owned;
+  for (auto &kv : views_)
+    if (kv.second->drawn) {
+      drawn_scenes_.insert(kv.second->scene);
+      if (kv.second->own_viewport)
+        owned.insert(kv.second->vp->name());
+    }
   // A scenes: entry's own viewport bakes its shadow maps when it draws, so while one of its views
-  // shows and it casts shadows, it draws one pixel, into a texture of its own that nothing shows.
+  // shows and it casts shadows, it draws one pixel, into a texture of its own that nothing shows
+  // (unless its scene window draws it whole this frame).
   std::vector<std::string> anchors;
   ViewportManager &vm = view_->viewportManager();
   for (auto &kv : views_) {
     View &v = *kv.second;
-    if (!v.drawn || v.scene.empty())
+    if (!v.drawn || v.scene.empty() || v.own_viewport)
       continue;
     SceneSlot slot;
     if (!scenes_ || !scenes_(v.scene, slot) || !slot.anchor || !slot.sg ||
         !slot.sg->shadowsEnabled() || !vm.hasViewport(slot.source))
       continue;
-    if (std::find(anchors.begin(), anchors.end(), slot.source) != anchors.end())
+    if (std::find(anchors.begin(), anchors.end(), slot.source) != anchors.end() ||
+        owned.count(slot.source))
       continue;
     Viewport &a = vm.viewport(slot.source);
     a.setTextureSize(1, 1);
@@ -1239,12 +1305,16 @@ void SceneViews::end_walk() {
     anchors.push_back(slot.source);
   }
   for (const std::string &old : anchors_on_)
-    if (std::find(anchors.begin(), anchors.end(), old) == anchors.end() && vm.hasViewport(old))
+    if (std::find(anchors.begin(), anchors.end(), old) == anchors.end() && !owned.count(old) &&
+        vm.hasViewport(old))
       vm.viewport(old).setVisible(false);
   anchors_on_ = std::move(anchors);
   for (auto &kv : views_) {
     View &v = *kv.second;
-    if (!v.drawn && v.vp->visible())
+    // An own viewport a view of its scene still needs (its shadows) stays, at one pixel.
+    if (!v.drawn && v.vp->visible() &&
+        !(v.own_viewport &&
+          std::find(anchors_on_.begin(), anchors_on_.end(), v.vp->name()) != anchors_on_.end()))
       v.vp->setVisible(false);
     if (!v.drawn && (v.dragging || v.panning)) { // its window went away mid-drag
       if (v.panning)
@@ -1269,6 +1339,7 @@ void SceneViews::update(double dt) {
   const bool walked = walked_;
   walked_ = false;
   if (!walked) {
+    drawn_scenes_.clear();
     ViewportManager &vm = view_->viewportManager();
     for (const std::string &a : anchors_on_)
       if (vm.hasViewport(a))
@@ -1429,7 +1500,8 @@ void SceneViews::prepare(View &v, double dt) {
   const std::pair<const void *, double> key = v.shadow_mode != "off"
                                                   ? sg.shadowReceiverKey()
                                                   : std::pair<const void *, double>(nullptr, 0.0);
-  if (key != v.shadow_key || v.shadow_mode != v.shadow_built) {
+  // The scene's own viewport bakes and reads its maps itself (its graph's passes).
+  if (!v.own_viewport && (key != v.shadow_key || v.shadow_mode != v.shadow_built)) {
     vtkRenderer *r = v.vp->renderer();
     if (v.shadow_pass)
       v.shadow_pass->ReleaseGraphicsResources(view_->viewportManager().renderWindow());
@@ -1527,11 +1599,32 @@ void SceneViews::register_widget() {
         std::string name = w.props.str("view");
         if (name.empty())
           name = w.id.empty() ? std::string("view") : w.id;
-        const std::string scene = w.props.str("scene"); // "" the document's scene: block
-        View *v = view_for(name, scene);
+        // Its scene: the document's scene: ("") or one of its scenes: (an id). Inside a mount with
+        // a scene (ARIADNE_SHELL.md 4.3) those are the mount's, as when it runs alone;
+        // `scene: { mount: <as> }` is the scene of the document mounted as <as> beside it; and a
+        // mount's scene window (scene_window, which the loader gives it) is its scene's own view.
+        const bool own = w.props.flag("scene_window", false);
+        const std::string &scope = backend_->custom_scope();
+        std::string scene = w.props.str("scene");
+        std::string named = scene; // as the document names it, for the message below
+        if (own) {
+          scene = "mount:" + scope;
+        } else if (const ari::Value *sv = w.props.find("scene"); sv && sv->is_map()) {
+          const std::string as = sv->str("mount");
+          named = "mount: " + as;
+          scene =
+              "mount:" + (as.empty() ? std::string() : ari::resolve_bind(scope, "includes." + as));
+        } else if (mount_at_) {
+          const std::string m = mount_at_(scope);
+          if (!m.empty())
+            scene = "mount:" + m + (scene.empty() ? std::string() : "/" + scene);
+        }
+        View *v = view_for(name, scene, own);
         if (!v) {
-          if (!scene.empty())
-            ImGui::TextDisabled("[viewport %s: no scene '%s']", name.c_str(), scene.c_str());
+          if (own)
+            return {}; // its scene is not realized (yet, or any more)
+          if (!named.empty())
+            ImGui::TextDisabled("[viewport %s: no scene '%s']", name.c_str(), named.c_str());
           else
             ImGui::TextDisabled("[viewport %s: the host has a viewport of that name]",
                                 name.c_str());
@@ -1587,7 +1680,7 @@ void SceneViews::register_widget() {
         start.elevation = w.props.num("elevation", 0.0);
         start.zoom = w.props.num("zoom", 1.0);
         ari::read_scene_camera_viewpoint(w.props, start); // position, target, up, fov, ...
-        if (!same_start(start, v->start)) {
+        if (!own && !same_start(start, v->start)) { // a scene window starts as its scene says
           v->start = start;
           v->framed = false;
         }
@@ -1658,6 +1751,10 @@ void SceneViews::register_widget() {
         float hpx = static_cast<float>(w.props.num("height", 0.0)) * unit;
         if (!(hpx > 0.0f))
           hpx = wpx * 0.75f;
+        if (w.props.flag("fill", false)) { // the rest of its window (a mount's scene window)
+          wpx = std::max(avail.x, 32.0f);
+          hpx = std::max(avail.y, 32.0f);
+        }
         const std::string id = "##viewport." + name;
         ImGui::InvisibleButton(id.c_str(), ImVec2(wpx, hpx),
                                ImGuiButtonFlags_MouseButtonLeft |

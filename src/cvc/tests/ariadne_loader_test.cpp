@@ -13,6 +13,7 @@
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/ftxui_backend.h> // a deep document drawn in a terminal
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
 #include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
 #include <cvc/ariadne/uri_http.h>  // §13.6 http:// handler
@@ -8409,6 +8410,131 @@ windows:
   const MountResult scene = load_mount(app, rq);
   EXPECT_TRUE(scene.ok) << scene.error;
   EXPECT_TRUE(scene.has_scene) << "the host decides (gl.scene)";
+}
+
+// docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): a fragment's scene:, scenes:, data:, assets: and keys:
+// are parsed and carried on the mount, for a static load: and a mounts: entry alike, each node's
+// and dataset's relative paths against the fragment's own directory; one with a scene: gets its
+// scene window (a window in its tree, titled by its name, with its scene's own view); the load:'s
+// view: and in_background: are kept; a dataset whose URI is an argument is not loaded in a mount.
+TEST(AriadneLoader, AFragmentsSceneIsParsed) {
+  SKIP_WITHOUT_YAML();
+  const std::string frag =
+      write_temp_ari("sh3_scene_frag.ari", R"(meta: { name: Spinner, min_libcvc: "0.0.0" }
+assets:
+  cube: { source: { primitive: cube } }
+data:
+  table: { uri: table.json, as: json }
+  given: { uri: { arg: file } }
+keys:
+  spin:
+    label: Spin
+    key: S
+    on: (state-set "spun" "1")
+scene:
+  clock: { hz: 30 }
+  nodes:
+    - { node: box, source: { asset: cube }, visible: show_box }
+scenes:
+  - scene: side
+    nodes:
+      - { node: ball, source: { primitive: sphere } }
+windows:
+  - window: Controls
+)");
+  const std::string dir = std::filesystem::path(frag).parent_path().string();
+  write_temp_ari("sh3_data_frag.ari", "meta: { min_libcvc: \"0.0.0\" }\ndata:\n  d: d.json\n");
+  write_temp_ari("sh3_plain_frag.ari",
+                 "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - window: P\n");
+  const std::string main = write_temp_ari("sh3_scene_main.ari", R"(meta: { min_libcvc: "0.0.0" }
+root:
+  - load: sh3_scene_frag.ari
+    as: spin
+    view: window
+    in_background: hold
+  - load: sh3_data_frag.ari
+    as: dat
+  - load: sh3_plain_frag.ari
+    as: plain
+  - mounts: shell.apps
+    in_background: { bind: shell.settings.hold }
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_FALSE(r.scene.any()) << "the fragment's scene is its own, not the document's";
+  EXPECT_TRUE(r.scenes.empty());
+  EXPECT_TRUE(r.data.empty());
+  const Widget *spin = find_scope(r.root, "includes.spin");
+  ASSERT_NE(spin, nullptr);
+  ASSERT_NE(spin->mount_scene, nullptr);
+  const MountScene &ms = *spin->mount_scene;
+  ASSERT_EQ(ms.scene.nodes.size(), 1u);
+  EXPECT_EQ(ms.scene.nodes[0].id, "box");
+  EXPECT_EQ(ms.scene.nodes[0].visible_bind, "show_box") << "kept relative: the mount resolves it";
+  EXPECT_EQ(ms.scene.clock.hz, 30.0);
+  ASSERT_EQ(ms.scene.assets.size(), 1u);
+  EXPECT_EQ(ms.scene.assets[0].id, "cube");
+  ASSERT_EQ(ms.scenes.size(), 1u);
+  EXPECT_EQ(ms.scenes[0].id, "side");
+  ASSERT_EQ(ms.data.size(), 1u) << "the argument's dataset is left out";
+  EXPECT_EQ(ms.data[0].name, "table");
+  EXPECT_TRUE(std::filesystem::equivalent(ms.data[0].base, dir)) << "relative to the fragment";
+  ASSERT_EQ(ms.keys.size(), 1u);
+  EXPECT_EQ(ms.keys[0].id, "spin");
+  EXPECT_EQ(ms.view, "window");
+  EXPECT_EQ(ms.background, "hold");
+  EXPECT_TRUE(has_warning(r, "data.given: its uri is the argument 'file'"));
+  // Its scene window, in its own tree: titled by its name, with its scene's own view filling it.
+  const Widget *win = find(*spin, Kind::Window, "Spinner");
+  ASSERT_NE(win, nullptr);
+  EXPECT_EQ(win->id, kSceneWindowId);
+  EXPECT_NE(win->visible_when.find("ariadne.scene"), std::string::npos);
+  ASSERT_EQ(win->children.size(), 1u);
+  EXPECT_EQ(win->children[0].custom_type, "viewport");
+  EXPECT_TRUE(win->children[0].props.flag("scene_window", false));
+  EXPECT_TRUE(win->children[0].props.flag("fill", false));
+  EXPECT_NE(find(*spin, Kind::Window, "Controls"), nullptr) << "its own windows stay";
+  // Datasets alone: carried, no scene window.
+  const Widget *dat = find_scope(r.root, "includes.dat");
+  ASSERT_NE(dat, nullptr);
+  ASSERT_NE(dat->mount_scene, nullptr);
+  EXPECT_FALSE(dat->mount_scene->has_scene());
+  EXPECT_EQ(dat->mount_scene->data.size(), 1u);
+  EXPECT_EQ(find(*dat, Kind::Window, "sh3_data_frag"), nullptr);
+  // Nothing but widgets: nothing carried.
+  const Widget *plain = find_scope(r.root, "includes.plain");
+  ASSERT_NE(plain, nullptr);
+  EXPECT_EQ(plain->mount_scene, nullptr);
+  // The slot's in_background:.
+  const Widget *slot = find(r.root, Kind::Mounts);
+  ASSERT_NE(slot, nullptr);
+  ASSERT_NE(slot->mounts, nullptr);
+  EXPECT_EQ(slot->mounts->background_bind, "shell.settings.hold");
+
+  // A mounts: entry's document carries the same.
+  cvc::app app;
+  MountRequest rq;
+  rq.uri = "sh3_scene_frag.ari";
+  rq.as = "s";
+  rq.base_dir = dir;
+  const MountResult m = load_mount(app, rq);
+  ASSERT_TRUE(m.ok) << m.error;
+  EXPECT_TRUE(m.has_scene);
+  ASSERT_NE(m.wrapper.mount_scene, nullptr);
+  EXPECT_EQ(m.wrapper.mount_scene->scene.nodes.size(), 1u);
+  EXPECT_EQ(m.wrapper.mount_scene->scenes.size(), 1u);
+  EXPECT_EQ(m.wrapper.mount_scene->background, "") << "an entry's background is its state key's";
+  EXPECT_NE(find(m.wrapper, Kind::Window, "Spinner"), nullptr);
+
+  // view: other than window warns (the main view is SH6's) and it shows in a window.
+  LoadResult v =
+      fresh_load_file(write_temp_ari("sh3_view_main.ari", R"(meta: { min_libcvc: "0.0.0" }
+root:
+  - load: sh3_scene_frag.ari
+    view: main
+)"));
+  ASSERT_TRUE(v.ok) << v.error;
+  EXPECT_TRUE(has_warning(v, "view: 'main'"));
 }
 
 // A mounts: entry's document nests at most kMaxNesting levels, counted as a document of its own's

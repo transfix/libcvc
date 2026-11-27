@@ -14486,6 +14486,116 @@ on_tick: |
 // lets the documents with a scene mount (their scene is not drawn in a mount yet; their programs
 // run). A document this host refuses (it needs the network, a player, a relay) is listed, and
 // counts as not held.
+// docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): every mount with a scene, a mounts: entry as it opens
+// and a load: as the document runs, is realized at its own sub-prefix through the host's adapter,
+// and taken down as it closes; its data: is bound at its sub-prefix before its init: reads it; its
+// world holds in the background as its entry, its slot or its load: says.
+TEST(AriadneMounts, AMountsSceneIsRealizedAtItsSubPrefix) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_scenes";
+  fs::remove_all(dir);
+  write_doc(dir, "table.json", "{\"rows\": 3}");
+  const char *const scene_doc = R"(meta: { name: "{who}", min_libcvc: "0.0.0" }
+data:
+  table: { uri: table.json, as: json }
+init: (state-set "seen" (if (is-null (state-get "data.table.status")) "no" "yes"))
+scene:
+  nodes:
+    - { node: "box_{who}", source: { primitive: cube }, visible: show }
+scenes:
+  - scene: side
+    nodes:
+      - { node: ball, source: { primitive: sphere } }
+)";
+  const fs::path spin = write_doc(dir, "spin.ari", scene_doc);
+  write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+root:
+  - load: spin.ari
+    as: st
+    args: { who: st }
+    in_background: hold
+  - mounts: apps
+    in_background: { bind: hold_all }
+)");
+  struct Realized {
+    std::string id, sub, node;
+    std::size_t scenes = 0;
+  };
+  struct RecordingScene : SceneAdapter {
+    std::vector<Realized> realized;
+    std::vector<std::string> cleared;
+    std::map<std::string, bool> holds;
+    void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
+    bool realize_mount(const std::string &id, const Scene &scene, const std::vector<Scene> &scenes,
+                       const std::string &sub, std::vector<std::string> *) override {
+      realized.push_back(
+          {id, sub, scene.nodes.empty() ? std::string() : scene.nodes[0].id, scenes.size()});
+      return true;
+    }
+    void clear_mount(const std::string &id) override { cleared.push_back(id); }
+    void hold_mount(const std::string &id, bool hold) override { holds[id] = hold; }
+    void sync_visibility(cvc::app &) override {}
+    void tick() override {}
+    bool has(const std::string &id) const {
+      return std::any_of(realized.begin(), realized.end(),
+                         [&](const Realized &r) { return r.id == id; });
+    }
+  } scene;
+  cvc::app app;
+  AppRuntime art(app, "ui.shell", &scene);
+  TrayBackend be;
+  art.set_backend(be);
+  art.load((dir / "shell.ari").string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  const auto frame = [&] {
+    rt.render();
+    art.drain();
+  };
+  tree("ui.shell.apps.a.uri").value(spin.generic_string());
+  tree("ui.shell.apps.a.args.who").value("a");
+  tree("ui.shell.apps.b.uri").value(spin.generic_string());
+  tree("ui.shell.apps.b.args.who").value("b");
+  for (int i = 0;
+       i < 40 && !(scene.has("ui.shell.includes.a") && scene.has("ui.shell.includes.b") &&
+                   scene.has("ui.shell.includes.st"));
+       ++i)
+    frame();
+  ASSERT_TRUE(scene.has("ui.shell.includes.a"));
+  ASSERT_TRUE(scene.has("ui.shell.includes.b"));
+  ASSERT_TRUE(scene.has("ui.shell.includes.st")) << "a load:'s scene too";
+  for (const Realized &r : scene.realized) {
+    EXPECT_EQ(r.sub, r.id) << "realized at its own sub-prefix";
+    EXPECT_EQ(r.scenes, 1u) << "with its scenes:";
+    EXPECT_EQ(r.node, "box_" + r.id.substr(r.id.rfind('.') + 1)) << "its own scene";
+  }
+  for (const char *who : {"a", "b", "st"}) {
+    const std::string sub = std::string("ui.shell.includes.") + who;
+    EXPECT_EQ(sval(app, (sub + ".ariadne.scene").c_str()), "1") << sub;
+    EXPECT_EQ(sval(app, (sub + ".seen").c_str()), "yes") << sub << ": its data: before its init:";
+    EXPECT_NE(tree.findDescendant(sub + ".data.table"), nullptr) << sub;
+  }
+  // In the background: the load: holds; the entries run until the slot's key says hold, and an
+  // entry's own background wins over the slot's.
+  EXPECT_TRUE(scene.holds["ui.shell.includes.st"]);
+  EXPECT_FALSE(scene.holds["ui.shell.includes.a"]);
+  tree("ui.shell.hold_all").value("1");
+  tree("ui.shell.apps.b.background").value("run");
+  frame();
+  frame();
+  EXPECT_TRUE(scene.holds["ui.shell.includes.a"]);
+  EXPECT_FALSE(scene.holds["ui.shell.includes.b"]);
+  // Closing one takes its scene down; the others stay.
+  tree("ui.shell.apps").removeChild("a");
+  for (int i = 0; i < 10 && scene.cleared.empty(); ++i)
+    frame();
+  ASSERT_EQ(scene.cleared.size(), 1u);
+  EXPECT_EQ(scene.cleared[0], "ui.shell.includes.a");
+  EXPECT_EQ(sval(app, "ui.shell.includes.a.ariadne.scene"), "0");
+  frame();
+  EXPECT_EQ(scene.cleared.size(), 1u) << "b and st stay";
+  fs::remove_all(dir);
+}
+
 TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
   const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
   const fs::path docs = root / "examples" / "ariadne" / "documents";

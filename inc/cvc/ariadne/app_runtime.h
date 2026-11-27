@@ -366,6 +366,18 @@ private:
   // docs/roadmap/ARIADNE_SHELL.md 4.2: the Runtime's mount loader (set_mount_loader): load_mount,
   // with this runtime's component paths, its document's requires: checked against this host.
   MountResult load_mount_checked(const MountRequest &rq);
+  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): the mounts' scenes the adapter has realized, by
+  // sub-prefix, each with the MountScene it was realized from and whether its world holds in the
+  // background. sync_mount_scenes, each drain, realizes the ones Runtime::scene_mounts lists anew
+  // and takes down the ones it no longer lists (or lists from another parse).
+  struct RealizedMount {
+    std::shared_ptr<const MountScene> scene;
+    bool hold = false;
+    bool drawn = false; // the adapter realized it (else no adapter draws it)
+  };
+  std::map<std::string, RealizedMount> mountScenes_;
+  void sync_mount_scenes();
+  void forget_mount_scenes(); // every one's <sub>.ariadne.scene back to 0 (a new document)
   std::vector<std::string> componentPaths_;
   std::vector<std::string> sources_;
   std::map<std::string, std::int64_t> stamps_;

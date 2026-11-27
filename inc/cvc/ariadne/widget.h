@@ -265,6 +265,7 @@ struct TextRunSpec {
 };
 
 struct MountsSpec; // Kind::Mounts's slot, below
+struct MountScene; // a mount's scene, datasets and keys (mount_scene.h)
 
 // §5.3 a `state:` block's seeds, in document order: each a path (relative to the prefix it is
 // written under, or app-root-absolute with a leading '/') and the text written there.
@@ -638,6 +639,12 @@ struct WidgetNode {
   // a mount wrapper; empty otherwise.
   std::string tick_script;
 
+  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): the mounted fragment's scene:, scenes:, data:,
+  // assets: and keys:, and the load:'s view: and background: (mount_scene.h). The Runtime binds its
+  // datasets at the sub-prefix as it opens, and a host with a scene realizes its scene there. Only
+  // on a mount wrapper whose fragment has any of them; null otherwise.
+  std::shared_ptr<const MountScene> mount_scene;
+
   // Kind::Mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): `bind` is the state key whose children are
   // the mounts (<bind>.<as>.uri, .args.<name>, ...), and this the rest of the slot (MountsSpec,
   // below). Out of line, so every other widget stays the size it was. Null for every other kind.
@@ -748,13 +755,17 @@ inline Widget::~Widget() {
 // `allow_bind` names a state key holding them (a list, or one per child); both empty: any.
 // `catalog` / `catalog_bind` likewise list the catalog's documents, which run as the `local`
 // principal. `base` is the directory of the document that holds the slot: its entries' relative
-// URIs resolve against it.
+// URIs resolve against it. `background` (run | hold) or `background_bind` (a state key holding one)
+// is whether its applications' worlds keep stepping while their scenes are drawn nowhere, where an
+// entry's own `background` says nothing (ARIADNE_SHELL.md 4.4); both empty: run.
 struct MountsSpec {
   std::vector<std::string> allow;
   std::string allow_bind;
   std::vector<std::string> catalog;
   std::string catalog_bind;
   std::string base;
+  std::string background;
+  std::string background_bind;
 };
 
 // §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).

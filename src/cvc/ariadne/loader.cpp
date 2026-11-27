@@ -20,6 +20,7 @@
 #include <cvc/ariadne/color_value.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
+#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
 #include <cvc/ariadne/uri.h>      // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/app.h>         // app.slot: the app's block parsers
@@ -837,7 +838,7 @@ std::string action(const YAML::Node &n) {
 void parse_widget(Ctx &ctx, const YAML::Node &n, Widget &w);
 void expand_include(Ctx &ctx, const YAML::Node &n, Widget &w); // §12 include: a units: template
 // What expand_load tells a caller that asks (load_mount): why the fragment was not mounted, where
-// its bytes came from, and whether it has a scene (not mounted until SH3).
+// its bytes came from, and whether it has a scene (scene: or scenes:, drawn by a host with one).
 struct LoadOutcome {
   std::string error;
   std::string canonical;
@@ -851,6 +852,9 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
 StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where = ""); // §5.3
 void parse_document(Ctx &ctx, const YAML::Node &doc, Widget &w); // §12 a document, or a fragment
+// §9 a document's (or a fragment's) prototypes:, scene:, data:, assets: and scenes:.
+void parse_scene_blocks(Ctx &ctx, const YAML::Node &doc, Scene &scene, std::vector<Scene> &scenes,
+                        std::vector<DataSpec> &data);
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
 std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label); // §5.9
 
@@ -3298,8 +3302,85 @@ void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w) {
   auto spec = std::make_shared<MountsSpec>();
   uris("allow", spec->allow, spec->allow_bind);
   uris("catalog", spec->catalog, spec->catalog_bind);
+  // in_background: run | hold, or { bind: <key> } (ARIADNE_SHELL.md 4.4): its applications'
+  // worlds while their scenes are drawn nowhere, where an entry's own background says nothing.
+  // (background: is every widget's backdrop.)
+  if (const YAML::Node bg = n["in_background"]) {
+    if (bg.IsScalar() && (bg.Scalar() == "run" || bg.Scalar() == "hold"))
+      spec->background = bg.Scalar();
+    else if (bg.IsMap() && bg["bind"] && bg["bind"].IsScalar())
+      spec->background_bind = bg["bind"].Scalar();
+    else
+      ctx.warn("ari: mounts: in_background: is run, hold or { bind: <key> } — they run");
+  }
   spec->base = ctx.base_dir;
   w.mounts = std::move(spec);
+}
+
+// ARIADNE_SHELL.md 4.3 what fragment `frag` carries besides its widgets, parsed in its own context
+// `sub`: its scene:, scenes:, data:, assets: and keys:, and the load: node's view: and
+// in_background:. Null when the fragment has none of them.
+CVC_ARI_NOINLINE std::shared_ptr<MountScene> parse_mount_scene(Ctx &ctx, const YAML::Node &n,
+                                                               const std::string &uri,
+                                                               const YAML::Node &frag, Ctx &sub) {
+  auto ms = std::make_shared<MountScene>();
+  if (frag.IsMap()) {
+    parse_scene_blocks(sub, frag, ms->scene, ms->scenes, ms->data);
+    ms->keys = parse_keys(sub, frag["keys"]);
+  }
+  // Only the outermost document takes arguments (doc_args.h), so a dataset whose URI is one has
+  // nothing to load in a mount.
+  for (auto d = ms->data.begin(); d != ms->data.end();) {
+    if (d->uri_arg.empty()) {
+      ++d;
+      continue;
+    }
+    ctx.warn("ari: load '" + uri + "': data." + d->name + ": its uri is the argument '" +
+             d->uri_arg + "', and only the outermost document takes arguments — not loaded");
+    d = ms->data.erase(d);
+  }
+  if (const YAML::Node v = n["view"]) {
+    const std::string view = v.IsScalar() ? v.Scalar() : std::string();
+    if (view != "window")
+      ctx.warn("ari: load '" + uri + "': view: '" + view +
+               "' — only window is built (the main view is ARIADNE_SHELL.md SH6); in a window");
+  }
+  if (const YAML::Node bg = n["in_background"]) {
+    const std::string b = bg.IsScalar() ? bg.Scalar() : std::string();
+    if (b == "run" || b == "hold")
+      ms->background = b;
+    else
+      ctx.warn("ari: load '" + uri + "': in_background: is run or hold — it runs");
+  }
+  if (!ms->has_scene() && ms->data.empty() && ms->keys.empty())
+    return nullptr;
+  return ms;
+}
+
+// ARIADNE_SHELL.md 4.4 the window a mount's scene is drawn in (its scene window), in the mount's
+// own tree: titled by the application's name, with a viewport that is the scene's own renderer
+// drawing into the window's texture. Shown once the host has realized the scene, which writes
+// <sub-prefix>.ariadne.scene; a host that draws no scene never shows it.
+Widget scene_window(const std::string &title) {
+  Widget vp;
+  vp.kind = Kind::Custom;
+  vp.custom_type = "viewport";
+  vp.props.kind = Value::Kind::Map;
+  for (const char *k : {"scene_window", "fill"}) {
+    Value::Entry e;
+    e.first = k;
+    e.second.scalar = "true";
+    vp.props.entries.push_back(std::move(e));
+  }
+  Widget win;
+  win.kind = Kind::Window;
+  win.id = kSceneWindowId;
+  win.label = title;
+  win.visible_when = "(= (state-get \"ariadne.scene\") \"1\")";
+  win.size.w = {Unit::Px, 480.0f};
+  win.size.h = {Unit::Px, 360.0f};
+  win.children.push_back(std::move(vp));
+  return win;
 }
 
 // §12: mount a `load: <uri>` fragment — resolve + parse another .ari as an ISOLATED module, in `w`:
@@ -3319,7 +3400,15 @@ void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w, LoadOutcome *outcome)
   open_mount(ctx, n, uri, canonical, frag, sub);
   w.children.emplace_back();
   parse_document(sub, frag, w.children.back());
+  // ARIADNE_SHELL.md 4.3 its scene, datasets and keys, in its own context (its warnings go up with
+  // the rest in finish_mount), and a window for its scene once the mount has its name.
+  std::shared_ptr<MountScene> ms = parse_mount_scene(ctx, n, uri, frag, sub);
   finish_mount(ctx, n, uri, frag, sub, w);
+  if (ms) {
+    if (ms->scene.any())
+      w.children.back().children.push_back(scene_window(w.app_name));
+    w.mount_scene = std::move(ms);
+  }
 }
 
 // A document's settings that are widgets in its group, after its own widgets: the Windows menu's,
@@ -5488,6 +5577,89 @@ CVC_ARI_NOINLINE void fail_nesting(Ctx &ctx, LoadResult &r) {
     r.schema_issues = *ctx.schema_issues;
 }
 
+// A document's scene blocks (a fragment's too, ARIADNE_SHELL.md 4.3): its prototypes:, scene:,
+// data:, assets: and scenes:. A node's relative paths and a dataset's URI are relative to the
+// document's directory (ctx.base_dir); every scene gets the assets and the datasets.
+void parse_scene_blocks(Ctx &ctx, const YAML::Node &doc, Scene &scene, std::vector<Scene> &scenes,
+                        std::vector<DataSpec> &data) {
+  // prototypes: { <name>: <node> } — scene-node templates a node's use: instantiates, in any
+  // scene (expand_use). Kept raw, like units, so each instance fills in its own args.
+  if (const YAML::Node ps = doc["prototypes"]; ps && ps.IsMap()) {
+    for (const auto &kv : ps) {
+      if (kv.first.IsScalar() && kv.second.IsMap())
+        ctx.prototypes[kv.first.Scalar()] = kv.second;
+      else
+        ctx.warn("ari: prototypes: '" + (kv.first.IsScalar() ? kv.first.Scalar() : "?") +
+                 "' is not a node — ignored");
+    }
+  } else if (ps) {
+    ctx.warn("ari: prototypes: must be a map of name -> node — ignored");
+  }
+  scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
+  stamp_base_dir(scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
+  data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
+  // The scenes' nodes and looks name the entries too (a boat's model, a vehicle's look): their
+  // sources made absolute, as the store reads them.
+  std::vector<SceneData> scene_data;
+  for (const DataSpec &d : data) {
+    SceneData e;
+    e.name = d.name;
+    e.uri = d.uri;
+    if (e.uri.find("://") == std::string::npos && std::filesystem::path(e.uri).is_relative() &&
+        !d.base.empty())
+      e.uri = (std::filesystem::path(d.base) / e.uri).lexically_normal().generic_string();
+    e.path = d.path;
+    scene_data.push_back(std::move(e));
+  }
+  scene.data = scene_data;
+  // assets: { <id>: { source: ..., fit: ... } } — meshes loaded once, shared by every scene.
+  std::vector<SceneAsset> assets;
+  if (const YAML::Node as = doc["assets"]; as && as.IsMap()) {
+    for (const auto &kv : as) {
+      if (!kv.first.IsScalar() || !kv.second.IsMap())
+        continue;
+      SceneAsset a;
+      a.id = kv.first.Scalar();
+      a.source = parse_scene_node(ctx, kv.second);
+      a.source.id = a.id;
+      a.source.base_dir = ctx.base_dir;
+      assets.push_back(std::move(a));
+    }
+  } else if (as) {
+    ctx.warn("ari: assets: must be a map of id -> { source, fit } — ignored");
+  }
+  scene.assets = assets;
+  // scenes: [{ scene: <id>, nodes, lights, shadows, background, cameras, ... }] — scenes of
+  // their own, each drawn by the viewports that name it (scene: <id>).
+  if (const YAML::Node ss = doc["scenes"]; ss && ss.IsSequence()) {
+    for (const YAML::Node &s : ss) {
+      Scene sc = parse_scene(ctx, s);
+      sc.id = str(s, "scene", str(s, "id"));
+      if (sc.id.empty()) {
+        ctx.warn("ari: a scenes: entry has no `scene:` name — ignored");
+        continue;
+      }
+      stamp_base_dir(sc.nodes, ctx.base_dir);
+      sc.assets = assets;
+      sc.data = scene_data;
+      scenes.push_back(std::move(sc));
+    }
+  } else if (ss) {
+    ctx.warn("ari: scenes: must be a list of { scene: <id>, ... } — ignored");
+  }
+  // The meshes the prototypes' instances share (share_proto_meshes), as assets of every scene.
+  for (const auto &[id, part] : ctx.proto_assets) {
+    SceneAsset a;
+    a.id = id;
+    a.source = parse_scene_node(ctx, part);
+    a.source.id = id;
+    a.source.base_dir = ctx.base_dir;
+    scene.assets.push_back(a);
+    for (Scene &sc : scenes)
+      sc.assets.push_back(a);
+  }
+}
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
 // the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
 // `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
@@ -5602,82 +5774,7 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   r.functions = ctx.functions;
   r.root.functions = make_function_scope(ctx.functions);
   if (doc.IsMap()) {
-    // prototypes: { <name>: <node> } — scene-node templates a node's use: instantiates, in any
-    // scene (expand_use). Kept raw, like units, so each instance fills in its own args.
-    if (const YAML::Node ps = doc["prototypes"]; ps && ps.IsMap()) {
-      for (const auto &kv : ps) {
-        if (kv.first.IsScalar() && kv.second.IsMap())
-          ctx.prototypes[kv.first.Scalar()] = kv.second;
-        else
-          ctx.warn("ari: prototypes: '" + (kv.first.IsScalar() ? kv.first.Scalar() : "?") +
-                   "' is not a node — ignored");
-      }
-    } else if (ps) {
-      ctx.warn("ari: prototypes: must be a map of name -> node — ignored");
-    }
-    r.scene = parse_scene(ctx, doc["scene"]);    // §9: the scene graph, alongside the widgets
-    stamp_base_dir(r.scene.nodes, ctx.base_dir); // relative paths in a node's keys resolve here
-    r.data = parse_data(ctx, doc["data"]);       // the datasets, relative to the document too
-    // The scenes' nodes and looks name the entries too (a boat's model, a vehicle's look): their
-    // sources made absolute, as the store reads them.
-    std::vector<SceneData> scene_data;
-    for (const DataSpec &d : r.data) {
-      SceneData e;
-      e.name = d.name;
-      e.uri = d.uri;
-      if (e.uri.find("://") == std::string::npos && std::filesystem::path(e.uri).is_relative() &&
-          !d.base.empty())
-        e.uri = (std::filesystem::path(d.base) / e.uri).lexically_normal().generic_string();
-      e.path = d.path;
-      scene_data.push_back(std::move(e));
-    }
-    r.scene.data = scene_data;
-    // assets: { <id>: { source: ..., fit: ... } } — meshes loaded once, shared by every scene.
-    std::vector<SceneAsset> assets;
-    if (const YAML::Node as = doc["assets"]; as && as.IsMap()) {
-      for (const auto &kv : as) {
-        if (!kv.first.IsScalar() || !kv.second.IsMap())
-          continue;
-        SceneAsset a;
-        a.id = kv.first.Scalar();
-        a.source = parse_scene_node(ctx, kv.second);
-        a.source.id = a.id;
-        a.source.base_dir = ctx.base_dir;
-        assets.push_back(std::move(a));
-      }
-    } else if (as) {
-      ctx.warn("ari: assets: must be a map of id -> { source, fit } — ignored");
-    }
-    r.scene.assets = assets;
-    // scenes: [{ scene: <id>, nodes, lights, shadows, background, cameras, ... }] — scenes of
-    // their own, each drawn by the viewports that name it (scene: <id>).
-    if (const YAML::Node ss = doc["scenes"]; ss && ss.IsSequence()) {
-      for (const YAML::Node &s : ss) {
-        Scene sc = parse_scene(ctx, s);
-        sc.id = str(s, "scene", str(s, "id"));
-        if (sc.id.empty()) {
-          ctx.warn("ari: a scenes: entry has no `scene:` name — ignored");
-          continue;
-        }
-        stamp_base_dir(sc.nodes, ctx.base_dir);
-        sc.assets = assets;
-        sc.data = scene_data;
-        r.scenes.push_back(std::move(sc));
-      }
-    } else if (ss) {
-      ctx.warn("ari: scenes: must be a list of { scene: <id>, ... } — ignored");
-    }
-    // The meshes the prototypes' instances share (share_proto_meshes), as assets of every scene.
-    for (const auto &[id, part] : ctx.proto_assets) {
-      SceneAsset a;
-      a.id = id;
-      a.source = parse_scene_node(ctx, part);
-      a.source.id = id;
-      a.source.base_dir = ctx.base_dir;
-      r.scene.assets.push_back(a);
-      for (Scene &sc : r.scenes)
-        sc.assets.push_back(a);
-    }
+    parse_scene_blocks(ctx, doc, r.scene, r.scenes, r.data);
     // §6.7 a scene nested deeper than the loader goes fails the load too, as a widget tree does.
     if (ctx.nesting->refused) {
       fail_nesting(ctx, r);

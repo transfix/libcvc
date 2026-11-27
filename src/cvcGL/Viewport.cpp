@@ -471,7 +471,7 @@ struct Viewport::Impl {
 };
 
 Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
-                   const std::string &name, bool mirror, bool managed)
+                   const std::string &name, bool mirror, bool managed, const std::string &viewer)
     : m_impl(new Impl) {
   m_impl->name = name;
   m_impl->mirror = mirror;
@@ -512,7 +512,8 @@ Viewport::Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraSt
   // The manager re-syncs its window layer count each render(), so a layer change
   // arriving this way is composited correctly.
   Impl *impl = m_impl.get();
-  const std::string layoutPath = ViewportLayout::viewerStatePath(scene.getStatePrefix(), name);
+  const std::string layoutPath =
+      ViewportLayout::viewerStatePath(scene.getStatePrefix(), viewer.empty() ? name : viewer);
   impl->layout.reset(new ViewportLayout(app, layoutPath, [impl](ViewportLayout::Values v) {
     for (int i = 0; i < 4; ++i)
       impl->region[i] = v.region[i];

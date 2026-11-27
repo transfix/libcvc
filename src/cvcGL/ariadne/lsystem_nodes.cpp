@@ -46,6 +46,7 @@
 #include <cvc/ariadne/shown_clock.h> // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/sliced_task.h> // a storm deck's build: on the pool, or sliced between frames
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
@@ -364,7 +365,7 @@ std::shared_ptr<GraphicsNode> realize_forest_trees(SceneGraph &sg, const ari::Sc
     }
     if (windLive != 0.0 && !rt->wind.trees.empty()) {
       // At the time the scene is drawn at (a relay's, when a client shows one: shown_clock.h).
-      const double t = ari::shown_time(*rt->app, rt->prefix, rt->app->world_clock().t());
+      const double t = ari::shown_time(*rt->app, rt->prefix, cvc::scene_clock(*rt->app, rt->prefix).t());
       rt->workW = rt->woodBind;
       rt->workN = rt->needleBind;
       if (sw) {
@@ -497,7 +498,7 @@ std::shared_ptr<GraphicsNode> realize_wave_sea(SceneGraph &sg, const ari::SceneN
         if (!v)
           return;
         const long f = (*frame)++;
-        const double t = ari::shown_time(*app, shownPrefix, app->world_clock().t());
+        const double t = ari::shown_time(*app, shownPrefix, cvc::scene_clock(*app, shownPrefix).t());
         if (f % 2 == 0) {
           sp->wave_amp = read_key(*app, ampKey, sp->wave_amp); // live from sea_controls
           sp->sea_level = read_key(*app, lvlKey, sp->sea_level);
@@ -1701,7 +1702,7 @@ std::shared_ptr<GraphicsNode> realize_cloud_sky(SceneGraph &sg, const ari::Scene
 
     // The wind and the morph run on the world clock (Paused freezes them), at the live rates; at
     // the time the scene is drawn at (a relay's, when a client shows one: shown_clock.h).
-    const double t = ari::shown_time(app, r.prefix, app.world_clock().t());
+    const double t = ari::shown_time(app, r.prefix, cvc::scene_clock(app, r.prefix).t());
     const double dt = r.lastT < 0.0 ? 0.0 : std::max(0.0, t - r.lastT);
     r.lastT = t;
     // The live sky (F1): the coverage (the cells' targets ranked again; the clouds fade over fade

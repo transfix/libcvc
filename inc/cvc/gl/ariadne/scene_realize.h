@@ -239,6 +239,14 @@ struct RealizedScene {
   cvc::ariadne::SceneClock clock; // resolved clock declaration; clock.present gates the drive
   cvc::app *app = nullptr;        // owning app (world_clock() + state) — set by realize_scene
   std::unique_ptr<cvc::ariadne::SceneClockDriver> clock_driver; // made by the first tick_scene
+  // The clock the scene runs on: a mounted document's own (cvc::scene_clock at its bind prefix,
+  // docs/roadmap/ARIADNE_SHELL.md 4.4), else the app's. own_world_clock() is null for the app's.
+  cvc::world_clock &scene_world_clock() const;
+  cvc::world_clock *own_world_clock() const;
+  // Set by the host for the next tick_scene: the world holds this frame (a mounted scene drawn
+  // nowhere whose world the user holds in the background): its clock runs no time, so its world,
+  // its animations and its bodies stand still.
+  bool held = false;
 
   // shadows: { focus: camera | { follow: camera, ... } }: tick_scene re-aims the shadow maps at
   // what the renderer's camera looks at, every frame, on `sg` (set by realize_scene; the host keeps

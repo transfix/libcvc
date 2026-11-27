@@ -189,8 +189,8 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
   already open on that URI; the verbs read the slot's key when called (it is set with the tree,
   so a resident started before the first frame finds it). The shell (`components/shell.ari`)
   takes `--open` besides `--catalog`, to open entries at start; its Apps menu lists the catalog
-  by title through a `menu_item:` label that is an expression. `view`, `background`, `grants`
-  and `argv` are not read yet (SH3, SH6, SH7).
+  by title through a `menu_item:` label that is an expression. `background` is read since SH3
+  (4.4); `view`, `grants` and `argv` are not read yet (SH6, SH7).
 
 ### 4.3 Scenes of mounted documents
 
@@ -209,6 +209,29 @@ the §11 caveat.
   is that renderer drawing into the window's texture, and the main view, when the application is
   in front, is that renderer drawing into the window's frame (4.4). A `viewport` widget with
   `scene: { mount: <as> }` is a further view of it.
+- **As built in SH3** (ARIADNE.md §5.18, §6.3, §6.8). `parse_scene_blocks` (loader.cpp) parses a
+  document's and a fragment's scene blocks alike; `expand_load` keeps the fragment's on the mount
+  as `Widget::mount_scene` (`MountScene`, mount_scene.h: its `scene`, `scenes`, `data`, `keys`,
+  the load:'s `view` and `in_background`), and adds its scene window to the fragment's tree: a
+  window `ariadne_scene` titled by its name, with one `viewport` (`scene_window: true`,
+  `fill: true`), shown while `<sub>.ariadne.scene` is `1`. The Runtime binds the mount's
+  datasets at its sub-prefix before its `init:` (a `load:` as it is first drawn, a `mounts:`
+  entry as it opens) and lists the mounts with a scene, datasets or keys
+  (`Runtime::scene_mounts`: every `load:` not under `repeat:` and every open entry, less the
+  quit applications, each with its `hold`). `AppRuntime` realizes each one's scene from that
+  list once a frame (`SceneAdapter::realize_mount(id, scene, scenes, sub_prefix)`, the id its
+  sub-prefix), takes it down when it leaves the list or is parsed again (`clear_mount`), and
+  tells the adapter which worlds hold (`hold_mount`). cvcGL's adapter gives each a SceneGraph at
+  the sub-prefix on a viewport of its own, `mount:<sub>`, whose camera is
+  `<sub>.viewers.main.camera` (`ViewportManager::addSceneViewport`'s new `viewer`), framed on the
+  scene as the main view is; its `scenes:` get theirs (`mount:<sub>|scene.<id>`, state at
+  `<sub>.scenes.<id>`). `SceneViews` resolves a viewport's scene by the scope it is drawn in: a
+  mounted document's viewports find their mount's scene, `scene: { mount: <as> }` the scene at
+  `includes.<as>`, and the scene window's view is the scene's own viewport drawn into the
+  window's texture (no mirror). Not built: a mounted scene's `world:` block (vehicles), its keys
+  (SH7), the main view (SH6), a repeated `load:`'s scene, and a world for a mounted scene on a
+  host without a scene adapter (`ari`: a `mounts:` entry with a scene is refused there, naming
+  `gl.scene`, and a `load:`'s is warned about).
 
 ### 4.4 Where an application's scene is drawn: its window or the main view
 
@@ -280,6 +303,22 @@ nothing else: the SceneGraph, its world and its bodies stay as they are.
   just that one (`shell.apps.<as>.background: hold`). A held world stops stepping while its scene
   is drawn nowhere (not in the main view, and its window closed or collapsed) and goes on when it
   is drawn again. Its `on_tick:` and actions keep running; Quit is what stops them.
+- **As built in SH3.** The world clocks are the app's, by state prefix
+  (`cvc/core/scene_clocks.h`: `add_scene_clock`, `remove_scene_clock`, and
+  `scene_clock(app, prefix)`, the clock of the scene at a prefix or the nearest one above it,
+  else `app.world_clock()`). A mounted scene's clock is made before its world, with its
+  `clock: hz` quantum or the quantum of the clock above it, and its scene drives it each frame
+  (`RealizedScene::scene_world_clock`, a `SceneClockDriver` and `SceneWorld::build` given that
+  clock), so its physics, animations and `<sub>.sim.*` keys are its own; its `scenes:` read it and
+  do not drive it. Node types look the clock up by their bind prefix (cvcGL's water, weather,
+  L-system, world, swarm and vehicle nodes do); a `nav_swarm` node's navigator
+  (`scene_swarm.cpp`) still reads `app.world_clock()`. The shell's setting is the slot's
+  `in_background:` (`shell.ari` binds it to `shell.settings.hold_background`, with no page for it
+  until SH14); an entry's `background` wins over it, and a `load:` takes `in_background:` (its
+  `background:` is the backdrop every widget takes). Drawn nowhere means no view of the scene was
+  drawn in the last frame's walk (`SceneViews::scene_drawn`): its window closed, collapsed or
+  hidden, and no further view drawn. A held world's clock runs no time (`SceneClockDriver::hold`),
+  so its bodies and animations stand still.
 
 **Views drawn into textures (SH2).** Today a view (§5.18) is drawn into the window's frame under
 all of the UI, and its window gets a hole cut in its background so the view shows through

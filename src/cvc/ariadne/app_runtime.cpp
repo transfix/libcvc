@@ -9,6 +9,7 @@
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
+#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene, realized here
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/ariadne/requires.h> // requires:, free_heads (what a document needs from its host)
 #include <cvc/ariadne/script_engine.h> // a scripting host's engines: their blocks and lanes
@@ -1175,13 +1176,10 @@ MountResult AppRuntime::load_mount_checked(const MountRequest &rq) {
   if (!r.ok)
     return r;
   std::string needs = mount_needs(rt_, r.wrapper, r.warnings);
-  // Its scene (SH3 mounts it): a host that draws no scene refuses a document with one, naming
-  // gl.scene, as a static load of it would warn that the scene is ignored.
+  // Its scene (ARIADNE_SHELL.md 4.3): a host that draws no scene refuses a document with one,
+  // naming gl.scene, as a static load of it would warn that the scene is ignored.
   if (r.has_scene && !rt_.has("gl.scene"))
     needs = "gl.scene (its scene:)" + (needs.empty() ? std::string() : ", " + needs);
-  else if (r.has_scene)
-    r.warnings.push_back("ari: load '" + rq.uri +
-                         "': its scene: is not drawn in a mount yet (ARIADNE_SHELL.md SH3)");
   if (!needs.empty()) {
     r.ok = false;
     r.error = "this host does not provide what it requires: " + needs;
@@ -1311,7 +1309,8 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   // An empty stage for this document: the last one's scene goes, whether this is a hot reload of
   // the same file or a host switching documents, and even when this one declares no scene.
   if (scene_)
-    scene_->clear();
+    scene_->clear(); // the mounts' scenes too
+  forget_mount_scenes();
   worldClock_.reset();
   world_.reset();
   stepKey_.clear();
@@ -1441,6 +1440,7 @@ void AppRuntime::drain_begin() { rt_.drain_begin(); }
 
 void AppRuntime::drain_end() {
   rt_.drain_end(); // pump a slice (unless app.exec_pump_frame() did) and sweep
+  sync_mount_scenes(); // ARIADNE_SHELL.md 4.3 the mounts' scenes opened or closed since
   if (scene_) {
     scene_->sync_visibility(app_); // bound visible: -> node .visible
     scene_->tick();                // volren/volslice per-frame service
@@ -1472,6 +1472,62 @@ void AppRuntime::drain_end() {
     const std::function<void()> hook = frameHooks_[i]; // a copy: a hook may add another
     hook();
   }
+}
+
+// docs/roadmap/ARIADNE_SHELL.md 4.3: realize the scenes of the mounts that opened since the last
+// frame and take down the ones that closed (or were parsed again: their MountScene is another),
+// then tell the adapter which worlds hold in the background. A realized one's
+// <sub>.ariadne.scene is 1, which shows its scene window.
+void AppRuntime::sync_mount_scenes() {
+  std::vector<Runtime::SceneMount> now;
+  if (!rt_.scene_mounts(now))
+    return; // a new tree waits for the next frame
+  for (auto it = mountScenes_.begin(); it != mountScenes_.end();) {
+    const auto x = std::find_if(now.begin(), now.end(),
+                                [&](const Runtime::SceneMount &m) { return m.scope == it->first; });
+    if (x != now.end() && x->scene == it->second.scene) {
+      ++it;
+      continue;
+    }
+    if (scene_ && it->second.drawn)
+      scene_->clear_mount(it->first);
+    write<std::string>(app_, resolve_bind(it->first, "ariadne.scene"), "0");
+    it = mountScenes_.erase(it);
+  }
+  for (const Runtime::SceneMount &m : now) {
+    if (!m.scene || !m.scene->has_scene())
+      continue; // datasets or keys alone
+    auto it = mountScenes_.find(m.scope);
+    if (it == mountScenes_.end()) {
+      RealizedMount rm;
+      rm.scene = m.scene;
+      std::vector<std::string> warns;
+      if (scene_)
+        rm.drawn = scene_->realize_mount(m.scope, m.scene->scene, m.scene->scenes, m.scope, &warns);
+      else
+        warns.push_back("ari: this host draws no scene: the scene of " + m.name + " (mounted at '" +
+                        m.scope + "') is ignored");
+      rm.hold = !m.hold; // so the adapter hears the first answer below
+      it = mountScenes_.emplace(m.scope, std::move(rm)).first;
+      write<std::string>(app_, resolve_bind(m.scope, "ariadne.scene"),
+                         it->second.drawn ? "1" : "0");
+      for (std::string &w : warns) {
+        post_warning(w);
+        pendingWarnings_.push_back(std::move(w));
+      }
+    }
+    if (it->second.hold != m.hold) {
+      it->second.hold = m.hold;
+      if (scene_ && it->second.drawn)
+        scene_->hold_mount(m.scope, m.hold);
+    }
+  }
+}
+
+void AppRuntime::forget_mount_scenes() {
+  for (const auto &[sub, rm] : mountScenes_)
+    write<std::string>(app_, resolve_bind(sub, "ariadne.scene"), "0");
+  mountScenes_.clear();
 }
 
 // The Runtime reads the declarations when it decides where the document runs, at load (S1-Q6).

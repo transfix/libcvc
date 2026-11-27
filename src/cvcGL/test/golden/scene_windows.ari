@@ -1,0 +1,22 @@
+# scene_windows.ari — golden: two applications' scene windows overlapping (docs/roadmap/
+# ARIADNE_SHELL.md 4.4, SH3). A shell-like document opens two documents in a `mounts:` slot; each
+# has a scene, drawn by its own renderer (its lights, its background) into its scene window's
+# texture. The window opened second is in front and covers part of the first; its scene has a
+# volren node, raycast for that window's camera and size. The shell itself has no scene, so the
+# main view shows the host's background. Each window's place is seeded through its geometry key
+# (<sub-prefix>.tree.ariadne_scene.geometry), as a user's last placement would be.
+
+meta:
+  name: golden scene windows
+  min_libcvc: 4.0.6
+
+state:
+  apps:
+    shapes: { uri: data/scene_windows_shapes.ari }
+    volume: { uri: data/scene_windows_volume.ari }
+  includes:
+    shapes: { tree: { ariadne_scene: { geometry: "24,40,460,360" } } }
+    volume: { tree: { ariadne_scene: { geometry: "300,250,460,360" } } }
+
+root:
+  - mounts: apps

@@ -5179,6 +5179,21 @@ stale maps. A document may have only `scenes:`, and then the main view is empty.
 `examples/ariadne/documents/viewer_scenes.ari` has three scenes (day, night, a studio) built from
 the same assets.
 
+**Scenes of mounted documents.** A document mounted with `load:` (§6.3) or in a `mounts:` slot
+(§6.8) keeps its scene ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.3). The host realizes it as
+a SceneGraph of its own at the mount's sub-prefix: its nodes at
+`<sub>.graphics.root.children.<node>`, its physics at `<sub>.physics`, its `scenes:` at
+`<sub>.scenes.<id>`, its camera at `<sub>.viewers.main.camera`, every bind in it resolved under the
+sub-prefix, as when it runs alone. Its own viewports (in its own windows) show its scene and its
+`scenes:`, as alone. Its scene window shows it: a window in the mount's tree, titled by its name,
+in which the scene's own renderer (its lights, its background, its shadows, its `volren` nodes)
+draws into the window's texture. A viewport anywhere else shows it with
+`scene: { mount: <as> }`, the document mounted as `<as>` in the viewport's scope: a further view,
+which mirrors the scene's own viewport, its camera `<sub>.viewers.<view>.camera`. Views of a
+mounted scene are named after the mount, so two documents' views of one name never meet.
+`fill: true` makes a viewport as wide and as tall as the rest of its window (the scene window's
+does).
+
 **Groups in one scene.** Where the "scenes" should share the lights and the shadows, make them
 tagged groups of one scene. `main_view: { show: [...], hide: [...] }` in `scene:` picks the groups
 the main view draws, as a viewport's `show:` / `hide:` do, and the main camera is framed on them.
@@ -6353,6 +6368,29 @@ A module with a `menubar:` of its own is an application: its bar becomes one men
 bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
 by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
+A module keeps its scene ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.3, 4.4). The loader
+carries its `scene:`, `scenes:`, `data:`, `assets:` and `keys:` on the mount
+(`Widget::mount_scene`, [`mount_scene.h`](../inc/cvc/ariadne/mount_scene.h)):
+
+- **Its datasets** are bound at its sub-prefix (`<sub>.data.<name>`, relative to its own
+  directory) as it is first drawn, just before its `state:` and `init:`, so `init:` reads their
+  status as a document's does. A dataset whose URI is an argument is not loaded: only the
+  outermost document takes arguments.
+- **Its scene** is realized at its sub-prefix by a host with a scene (§5.18, *Scenes of mounted
+  documents*) and shown in its scene window, a window the loader adds to the module's tree
+  (`tree.ariadne_scene`, titled by its name), shown once the scene is realized
+  (`<sub>.ariadne.scene` is `1`). `view: window` on the `load:` says so; the main view is SH6's. A
+  host with no scene warns that it ignores it. A repeated `load:`'s scene is not drawn (each
+  instance would need a scene of its own), with a warning.
+- **Its world** steps on a world clock of its own, at its `clock: hz`, else at the rate of the
+  clock above it (the document's). The clock is the app's, kept by the sub-prefix
+  ([`scene_clocks.h`](../inc/cvc/core/scene_clocks.h): `cvc::scene_clock(app, prefix)` is the
+  clock of the scene at a prefix or the nearest one above it), so its physics, animations and
+  `sim.*` keys (at `<sub>.sim.*`) are its own. It keeps stepping while its scene is drawn nowhere,
+  unless `in_background: hold`: then it stops while its scene window is closed or collapsed and no
+  other view of it is drawn, and goes on when one is. Its `on_tick:` and actions run either way.
+- **Its keys** are carried for when it is granted the keyboard (SH7); they are not bound yet.
+
 To mount documents while the document runs, picked by the user or a program, use a `mounts:`
 slot (§6.8).
 
@@ -6630,6 +6668,7 @@ root:
   - mounts: shell.apps                 # one mount per child of shell.apps
     allow: { bind: shell.allow }       # the URI prefixes that may be mounted; empty: any
     catalog: { bind: shell.catalog_uris }   # the documents that run as the local principal
+    in_background: { bind: shell.settings.hold_background }   # run, hold, or a key holding one
 ```
 
 Each child of the key is an entry:
@@ -6640,11 +6679,14 @@ shell.apps.<id>.args.<name>       its args: substitutions, as a load:'s args: ar
 shell.apps.<id>.budget.steps      its budget, when not its principal's default (below)
 shell.apps.<id>.budget.time
 shell.apps.<id>.budget.memory
+shell.apps.<id>.background        run or hold: its world while its scene is drawn nowhere
 ```
 
 and the Runtime writes back `status` (`open`, `refused`, `closed`), `error` (why it was
 refused), `principal` and `name`. `<id>` is a state key segment (`[A-Za-z0-9_]`, not starting
-with a digit). `view`, `background`, `grants` and `argv` are SH3, SH6 and SH7's.
+with a digit). `background` is the slot's `in_background:` when the entry says neither run nor
+hold (that a value, or a key holding `hold` or a true value; else run). `view`, `grants` and
+`argv` are SH6 and SH7's.
 
 - **Mounting.** When an entry with a `uri` appears, the Runtime asks its host's loader for the
   document. The loader resolves and parses it as `load: <uri>` with `as: <id>` and its `args:`
@@ -6680,7 +6722,7 @@ with a digit). `view`, `background`, `grants` and `argv` are SH3, SH6 and SH7's.
   naming what is missing: a `requires:` entry this host lacks, a function a program calls that it
   does not provide, or `gl.scene` for a document with a `scene:` on a host that draws none. An
   optional entry this host lacks is not refused: the document said it copes. A mount's scene is
-  not drawn yet (SH3).
+  drawn as a `load:` module's is (§6.3): realized as it opens, taken down as it closes.
 - **Limits.** At most 256 open mounts and 32 levels of them, as a document's `load:`s.
 
 **The verbs.** A document's own programs open and close entries in its first `mounts:` slot:
@@ -9361,10 +9403,14 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   scene needs a cvcGL build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a
   scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
   every frame, so a remote session is better off with half-blocks (`--graphics color`).
-- **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
-  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A
-  loaded document's `scene:`, `scenes:`, `data:`, `assets:` and `keys:` are dropped. The shell
-  design ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md)) proposes keeping them.
+- **`load:` `prefix:` / `reload:` are not yet parsed** at the loader
+  ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A loaded document keeps its scene, datasets and
+  keys (§6.3), but its `keys:` are not bound (SH7), its `world:` block (vehicles) is not read,
+  and its scene is drawn only by a host with a scene adapter (arigl and the other cvcGL hosts); a
+  host without one runs no world for it. A node type that reads `app.world_clock()` itself rather
+  than `cvc::scene_clock(app, its prefix)` times a mounted scene by the document's clock: cvcGL's
+  water, weather, L-system, world, swarm and vehicle nodes look theirs up, while a `nav_swarm`
+  node's own navigator (`scene_swarm.cpp`) still steps on the app's clock.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).

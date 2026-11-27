@@ -321,13 +321,20 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // the one it went idle on, so the windows show the keys it published; a probe busy again (a
   // request a finished job left) starts the count over. A slow machine only takes more frames
   // here; a document whose nodes register no probe takes none. The ceiling is a hang guard.
+  // The document's scene, and its mounted documents' (ARIADNE_SHELL.md 4.3), alike.
   int workFrames = 0;
-  const cvc::gl::ariadne::RealizedScene *realized = rt.realized();
-  if (realized && !realized->pending_work.empty()) {
+  std::vector<const cvc::gl::ariadne::RealizedScene *> scenes = rt.mounted_scenes();
+  if (const cvc::gl::ariadne::RealizedScene *own = rt.realized())
+    scenes.insert(scenes.begin(), own);
+  const auto any_scene = [&scenes](auto has) {
+    return std::any_of(scenes.begin(), scenes.end(), has);
+  };
+  if (any_scene([](const auto *s) { return !s->pending_work.empty(); })) {
     const auto busy = [&] {
-      for (const auto &probe : realized->pending_work)
-        if (probe && probe())
-          return true;
+      for (const auto *s : scenes)
+        for (const auto &probe : s->pending_work)
+          if (probe && probe())
+            return true;
       return false;
     };
     const auto start = std::chrono::steady_clock::now();
@@ -342,13 +349,14 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
           std::to_string(workFrames) + " frames more");
   }
   int volrenFrames = 0;
-  if (realized && !realized->volren_ticks.empty()) {
+  if (any_scene([](const auto *s) { return !s->volren_ticks.empty(); })) {
     const auto raycastsDone = [&] {
-      for (const auto &weak : realized->volren_ticks) {
-        const auto node = weak.lock();
-        if (node && (!node->converged() || node->framesRendered() == 0))
-          return false;
-      }
+      for (const auto *s : scenes)
+        for (const auto &weak : s->volren_ticks) {
+          const auto node = weak.lock();
+          if (node && (!node->converged() || node->framesRendered() == 0))
+            return false;
+        }
       return true;
     };
     const auto start = std::chrono::steady_clock::now();
