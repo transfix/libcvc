@@ -14,6 +14,7 @@ model, in parts where the vehicle-humvee package has them, is drawn everywhere.
 
 | demo | what it shows |
 |------|---------------|
+| [`nav_fleet_swarm.ari`](../ariadne/documents/nav_fleet_swarm.ari) | the gallery's swarm: one fleet of the world's vehicles, 240 Humvees (in parts, their wheels turning) in six team colours, crosses a small terrain-lab world or a city of blocks to rally points that swap every 15 s, drawn at scale by an entity layer ([docs/ARIADNE.md](../../docs/ARIADNE.md), "Fleets"). The old `nav_city_swarm` and `nav_city_drive` gallery addresses open it. |
 | [`nav_city_swarm.ari`](../ariadne/documents/nav_city_swarm.ari) | 800 vehicles cross a city (the Austin bundle, or `--bundle DIR`) under fog with grouped belief: goal flags, street-flow trails, the fleet's fog coverage, a minimap. `--no-fog --agents 1500` is the scale-benchmark path. |
 | [`nav_city_drive.ari`](../ariadne/documents/nav_city_drive.ari) | the legible cousin: 60 Humvees on Jolt in colour-coded convoys thread downtown Austin to six rally points; chase one, drag a rally point, switch belief. |
 | [`nav_scrub`](../ariadne/nav_scrub) | watch a policy learn: cvc::nav's coef_trainer trains on a walled square of city blocks, every checkpoint is deployed on the Jolt Humvee and on nav's kinematic bicycle, and the document shows checkpoint k beside step 0 ([docs/NAV_SCRUB.md](../../docs/NAV_SCRUB.md)). In the gallery it trains and deploys in the page. |
