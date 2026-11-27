@@ -418,40 +418,6 @@ private:
   std::vector<FunctionImport> imports_;
 };
 
-// Whether the guest declares each import it takes as the host defines it, under the same module
-// (`ari`, WASI's `wasi_snapshot_preview1`): the parameters (an i64 where Import::wide marks one)
-// and the result (an i64, an i32 where Import::returns_i32 says so, or none). wasmtime's linker
-// checks the same natively; JS checks nothing, and an import of another type would take what the
-// trampoline passes.
-bool imports_match(const std::vector<FunctionImport> &declared, const std::vector<Import> &host,
-                   std::string &error) {
-  for (const FunctionImport &f : declared) {
-    const std::string what = f.module + "." + f.name;
-    std::string params, results;
-    if (f.module == "ari" && f.name == "gas") {
-      params = "\x7e"; // the gas pass's ari.gas (meter.h), the runtime's own
-    } else {
-      const auto im = std::find_if(host.begin(), host.end(), [&](const Import &i) {
-        return i.module == f.module && i.name == f.name;
-      });
-      if (im == host.end()) {
-        error = "it imports " + what + ", which the host doesn't define";
-        return false;
-      }
-      for (int i = 0; i < im->params; ++i)
-        params.push_back((im->wide >> i) & 1u ? '\x7e' : '\x7f');
-      if (im->returns)
-        results = im->returns_i32 ? "\x7f" : "\x7e";
-    }
-    if (f.params != params || f.results != results) {
-      error = "it imports " + what + " as (func" + type_text(f.params, f.results) +
-              "), and the host's " + what + " is (func" + type_text(params, results) + ")";
-      return false;
-    }
-  }
-  return true;
-}
-
 // The guest's memory, through the page: copies in and out, and no host pointer.
 class BrMemory : public GuestMemory {
 public:

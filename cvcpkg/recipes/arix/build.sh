@@ -3,8 +3,8 @@
 # installed libcvc SDK and the deps prefix's python312. Compiles src/ari with -DARI_WITH_PYTHON=ON
 # (main.cpp plus src/ariadne_python's engine) and links the pre-installed cvc::cvc and libpython, so
 # libcvc is NOT rebuilt. -DARI_WITH_WASM=ON adds src/ariadne_wasm's engine, linking the deps prefix's
-# wasmtime, and makes a missing wasmtime a configure error. Installs just bin/arix: ari, built beside
-# it, is not installed.
+# wasmtime (on the BSDs, its WAMR and binaryen), and makes a missing runtime a configure error.
+# Installs just bin/arix: ari, built beside it, is not installed.
 set -euo pipefail
 
 : "${CVC_SOURCE_DIR:?CVC_SOURCE_DIR must be set}"   # libcvc repo root (vendored)
@@ -12,7 +12,13 @@ set -euo pipefail
 : "${CVC_INSTALL_DIR:?CVC_INSTALL_DIR must be set}"
 
 CVC_BUILD_TYPE="${CVC_BUILD_TYPE:-Release}"
-CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+# OpenBSD has no nproc; sysctl hw.ncpu answers on every BSD and macOS.
+CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+# NetBSD: pkgsrc's clang, which built cvcpkg's NetBSD deps (_common/env-netbsd.sh), not base GCC 10.
+if [[ "$(uname -s)" == NetBSD && -z "${CXX:-}" && -x /usr/pkg/bin/clang++ ]]; then
+  export CC=/usr/pkg/bin/clang CXX=/usr/pkg/bin/clang++
+fi
 
 case "$(echo "$CVC_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" in
   debug) CMAKE_BUILD_TYPE=Debug ;;
@@ -30,7 +36,7 @@ CMAKE_ARGS=(
 )
 
 # The deps prefix carries the installed libcvc SDK (find_package(cvc CONFIG)), python312 and
-# wasmtime (find_package(wasmtime CONFIG)). It may be several prefixes, ;-separated. The
+# wasmtime (find_package(wasmtime CONFIG)), or on the BSDs wamr and binaryen (iwasm, binaryen). It may be several prefixes, ;-separated. The
 # interpreter is named outright: FindPython3 left to itself would take a system python3 first, and
 # arix must embed the one it runs beside.
 if [[ -n "${CVC_DEPS_PREFIX:-}" ]]; then

@@ -56,9 +56,10 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARIGL_WITH_PYTHON))
     target_link_libraries(ariglx PRIVATE cvc::cvcGL ${VTK_LIBRARIES})
     vtk_module_autoinit(TARGETS ariglx MODULES ${VTK_LIBRARIES})
     cvc_ariadne_python_host(ariglx)
-    # ... with WebAssembly guests where wasmtime's C API is found (src/ariadne_wasm); with
-    # -DARIGL_WITH_WASM=ON a missing one is a configure error.
-    option(ARIGL_WITH_WASM "ariglx requires WebAssembly guests (wasmtime's C API)" OFF)
+    # ... with WebAssembly guests where a runtime is found (src/ariadne_wasm: wasmtime's C API, or
+    # WAMR's where there is no wasmtime); with -DARIGL_WITH_WASM=ON a missing one is a configure
+    # error.
+    option(ARIGL_WITH_WASM "ariglx requires WebAssembly guests (wasmtime's or WAMR's C API)" OFF)
     include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
     cvc_find_ariadne_wasm(ARIGL_WITH_WASM)
     if(CVC_ARIADNE_WASM_FOUND)

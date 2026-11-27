@@ -1,8 +1,9 @@
 // WebAssembly guests transformed for the browser (src/ariadne_wasm; docs/roadmap/
-// ARIADNE_SCRIPTING_HOSTS.md §8.5, G2). One file, both backends: under Emscripten (node; plain
+// ARIADNE_SCRIPTING_HOSTS.md §8.5, G2). One file, every backend: under Emscripten (node; plain
 // wasm, no pthreads) on the page's own WebAssembly (browser_runtime.cpp), where a guest pauses by
 // Asyncify where its slice runs out (ari.gas, meter.h) or at an import that waits, as
-// ariadne_wasm_browser_test; natively on wasmtime, which runs the same transformed guests, as
+// ariadne_wasm_browser_test; natively on wasmtime, which runs the same transformed guests, or on
+// WAMR, which pauses them by Asyncify as the browser does (wamr_runtime.cpp, G3), as
 // ariadne_wasm_transform_test.
 // The guests are tests/guest.wat and tests/page_guest.wat through cvc_ariadne_wasm_transform
 // (CVC_WASM_GUESTS_DIR; without wasm-opt the WasmTransformed cases skip). Here: exports as the
@@ -657,17 +658,19 @@ TEST_F(WasmTransformed, AnImportOfAnotherTypeIsRefused) {
                 "wasm: " + std::string(c.file) + ".wasm\nroot:\n  - text: hi\n");
     EXPECT_NE(why, "loaded") << c.file;
     EXPECT_NE(why.find(c.fn), std::string::npos) << c.file << ": " << why;
-#ifdef __EMSCRIPTEN__
-    EXPECT_NE(why.find(c.browser), std::string::npos) << c.file << ": " << why;
+#if defined(__EMSCRIPTEN__) || defined(CVC_ARIADNE_WASM_WAMR)
+    EXPECT_NE(why.find(c.browser), std::string::npos) << c.file << ": " << why; // WAMR's too
 #endif
   }
 }
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(CVC_ARIADNE_WASM_WAMR)
 
-// ── what the browser refuses ───────────────────────────────────────────────────────────────────
+// ── a guest paused by Asyncify: in the browser, and on WAMR (G3) ─────────────────────────────────
 
 using WasmBrowser = WasmTransformed;
+
+#ifdef __EMSCRIPTEN__
 
 // The page compiles binaries only: a .wat module is refused, naming the transform.
 TEST_F(WasmBrowser, AWatModuleIsRefused) {
@@ -693,6 +696,8 @@ TEST_F(WasmBrowser, AnUntransformedGuestIsRefused) {
   EXPECT_NE(why.find("isn't transformed for the browser"), std::string::npos) << why;
   EXPECT_NE(why.find("cvc_ariadne_wasm_transform"), std::string::npos) << why;
 }
+
+#endif // __EMSCRIPTEN__
 
 // A paused stack past its room (ariadne.limits.wasm_unwind_bytes) has written over the guest's
 // memory after the room, so the pause traps, naming the setting, and the guest refuses every call
@@ -742,4 +747,4 @@ TEST_F(WasmBrowser, TheUnwindRoomIsASetting) {
   }
 }
 
-#endif // __EMSCRIPTEN__
+#endif // __EMSCRIPTEN__ || CVC_ARIADNE_WASM_WAMR

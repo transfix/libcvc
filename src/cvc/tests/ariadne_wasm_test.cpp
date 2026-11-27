@@ -1,25 +1,27 @@
 // WebAssembly guests in documents (src/ariadne_wasm; docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md
-// §8.2-8.7, phase G1), on wasmtime: the CBOR codec; a wasm: block whose WAT guest's exports the
-// document's programs call (each call an activation, parked on by the caller), each document its
-// own guest's when two share an app; calls back into the lane under the document's chroot, and
-// their narrowing; slices of gas charged as steps under the action caps; a yield; traps and
-// fail() as WasmError; _initialize; re-entry, direct
-// or through a document function, as a RecursionError; one activation per instance, the others
-// waiting as with-lock waits; a frame hook; the block's load errors; host objects by handle
-// (§8.4.1): volumes, meshes and height fields, read a region at a time, their handles dropped,
-// narrowed by imports:, and a guest out of memory as a MemoryError; a guest's own copy of a volume
-// written, and a new volume; the state imports (§8.4), the lane's state functions called in the
-// guest's slice; pure exports, functions of the read lane (§8.6); and the gas pass (meter.h,
-// G2), whose count is the same however a call is sliced.
-// WASI preview 1 (§8.6.1, phase G6) too: the stubs every guest links, and the block's wasi:
-// request.
-// Clients' guests (§6.3, §8.6, phase G4): a relay's client's module run as its program
-// (ServerDocument::run_client_guest), compiled on the pool, and what it may not do.
+// §8.2-8.7, phase G1), on wasmtime, or on WAMR with binaryen (G3: the guests' text read and the
+// guests transformed as they load, CVC_ARIADNE_WASM_WAMR): the CBOR codec; a wasm: block whose WAT
+// guest's exports the document's programs call (each call an activation, parked on by the caller),
+// each document its own guest's when two share an app; calls back into the lane under the
+// document's chroot, and their narrowing; slices of gas charged as steps under the action caps; a
+// yield; traps and fail() as WasmError; _initialize; re-entry, direct or through a document
+// function, as a RecursionError; one activation per instance, the others waiting as with-lock
+// waits; a frame hook; the block's load errors; host objects by handle (§8.4.1): volumes, meshes
+// and height fields, read a region at a time, their handles dropped, narrowed by imports:, and a
+// guest out of memory as a MemoryError; a guest's own copy of a volume written, and a new volume;
+// the state imports (§8.4), the lane's state functions called in the guest's slice; pure exports,
+// functions of the read lane (§8.6); and the gas pass (meter.h, G2), whose count is the same
+// however a call is sliced. WASI preview 1 (§8.6.1, phase G6) too: the stubs every guest links, and
+// the block's wasi: request. Clients' guests (§6.3, §8.6, phase G4): a relay's client's module run
+// as its program (ServerDocument::run_client_guest), compiled on the pool, and what it may not do.
 
 #include "guest_runtime.h"
 #include "meter.h"
 #include "value_cbor.h"
 #include "wasm_engine.h"
+#ifdef CVC_ARIADNE_WASM_WAMR
+#include "wasm_transform.h"
+#endif
 
 #include <algorithm>
 #include <boost/any.hpp>
@@ -49,7 +51,9 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#ifndef CVC_ARIADNE_WASM_WAMR
 #include <wasmtime.h>
+#endif
 
 #if defined(_WIN32)
 #include <process.h>
@@ -1380,7 +1384,7 @@ const char kWasiGuest[] = R"WAT(
     (call $put_e (call $fd_filestat_get (i32.const 1) (i32.const 1072)))
     (call $put (i64.load8_u (i32.const 1088)))
     (call $put (i64.load (i32.const 1104)))
-    (call $put_e (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 57344) (i32.const 1024) (i32.const 1024)))
     (call $put_e (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1025) (i32.const 1024)))
     (call $end))
   ;; (sleep): [poll_oneoff's errno for a 1 ms sleep on the monotonic clock, the events it gave,
@@ -1410,7 +1414,7 @@ const char kWasiGuest[] = R"WAT(
   (func (export "writes") (param $p i32) (param $n i32) (result i64) (local $i i32) (local $k i32)
     (local.set $k (i32.mul (call $arg (local.get $p)) (i32.const 100)))
     (loop $l
-      (drop (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+      (drop (call $fd_write (i32.const 1) (i32.const 57344) (i32.const 1024) (i32.const 1024)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br_if $l (i32.lt_u (local.get $i) (local.get $k))))
     (i64.const 0))
@@ -1780,7 +1784,8 @@ TEST_F(WasmWasiTest, ARequestOutsideTheGrantFailsTheLoad) {
 }
 
 // A guest that imports a WASI function with the wrong type, or one preview 1 doesn't have, fails
-// the load with wasmtime's message naming it.
+// the load with the runtime's message naming it: wasmtime's linker's, or WAMR's backend's, which
+// gives both types.
 TEST_F(WasmWasiTest, AMistypedWasiImportFailsTheLoad) {
   REQUIRE_YAML();
   cvc::app app;
@@ -1790,13 +1795,18 @@ TEST_F(WasmWasiTest, AMistypedWasiImportFailsTheLoad) {
                     "(func (param i32 i32 i32) (result i32))))");
   const std::string typo =
       load_error(art, "typo.ari", "requires: [wasm]\nwasm: typo.wat\nroot:\n  - text: hi\n");
-  EXPECT_NE(typo.find("incompatible import type"), std::string::npos) << typo;
+#ifdef CVC_ARIADNE_WASM_WAMR
+  const char *const kMistyped = "and the host's wasi_snapshot_preview1.fd_write is (func";
+#else
+  const char *const kMistyped = "incompatible import type";
+#endif
+  EXPECT_NE(typo.find(kMistyped), std::string::npos) << typo;
   EXPECT_NE(typo.find("fd_write"), std::string::npos) << typo;
   write("wide.wat", "(module (import \"wasi_snapshot_preview1\" \"fd_write\" "
                     "(func (param i32 i32 i32 i32) (result i64))))");
   const std::string wide =
       load_error(art, "wide.ari", "requires: [wasm]\nwasm: wide.wat\nroot:\n  - text: hi\n");
-  EXPECT_NE(wide.find("incompatible import type"), std::string::npos) << wide;
+  EXPECT_NE(wide.find(kMistyped), std::string::npos) << wide;
   write("none.wat", "(module (import \"wasi_snapshot_preview1\" \"fd_wrote\" (func)))");
   const std::string none =
       load_error(art, "none.ari", "requires: [wasm]\nwasm: none.wat\nroot:\n  - text: hi\n");
@@ -2083,6 +2093,15 @@ namespace {
 
 namespace gw = cvc::ariadne::wasm;
 
+#ifdef CVC_ARIADNE_WASM_WAMR
+// The runtime's own reader of the text format: binaryen's (wasm_transform.h).
+std::string wat2wasm(std::string_view text) {
+  std::string out, why;
+  if (!gw::wat_to_wasm(text, out, why))
+    throw std::runtime_error("wat2wasm: " + why);
+  return out;
+}
+#else
 std::string wat2wasm(std::string_view text) {
   wasm_byte_vec_t out{};
   if (wasmtime_error_t *e = wasmtime_wat2wasm(text.data(), text.size(), &out)) {
@@ -2097,6 +2116,7 @@ std::string wat2wasm(std::string_view text) {
   wasm_byte_vec_delete(&out);
   return s;
 }
+#endif
 
 // Functions named everywhere an index can name one: calls, a table's elements, a ref.func in a
 // global and in a declared segment, exports, the start function, and the name section (boom's
@@ -2140,8 +2160,12 @@ const char *kNamed = R"((module
   (func $boom (export "boom") (unreachable)))
 )";
 
-// Eight a turn of the loop, and one after it: count(n) costs 8n + 1.
+// Eight a turn of the loop, and one after it: count(n) costs 8n + 1. With the guest ABI's memory
+// and ari_alloc (§8.4), from which a runtime that pauses a guest by Asyncify (WAMR) takes the room
+// a paused call's stack unwinds into.
 const char *kLoop = R"((module
+  (memory (export "memory") 1)
+  (func (export "ari_alloc") (param i32) (result i32) (i32.const 1024))
   (func (export "count") (param $n i32) (result i32) (local $i i32)
     (loop $l
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
@@ -2180,6 +2204,10 @@ protected:
   std::uint64_t count(gw::Instance &in, std::uint64_t slice, std::uint64_t &polls) {
     std::unique_ptr<gw::Call> c = in.start("count", {1000}, error);
     std::uint64_t used = 0;
+    if (!c) {
+      ADD_FAILURE() << "count: " << error;
+      return used;
+    }
     for (polls = 1;; ++polls) {
       const gw::Call::State s = c->poll(slice);
       used += c->gas_used();
@@ -2246,7 +2274,7 @@ TEST_F(WasmGasTest, AModuleIsMeteredOnce) {
   gw::Metered once, twice;
   ASSERT_TRUE(gw::meter(bin, once, error)) << error;
   EXPECT_FALSE(once.already);
-  EXPECT_EQ(once.charges, 2u) << "the loop's body, and what follows the loop";
+  EXPECT_EQ(once.charges, 3u) << "ari_alloc's body, the loop's, and what follows the loop";
   ASSERT_TRUE(gw::meter(once.bytes, twice, error)) << error;
   EXPECT_TRUE(twice.already);
   EXPECT_EQ(twice.bytes, once.bytes);
@@ -2264,8 +2292,10 @@ TEST_F(WasmGasTest, WhatThePassCantReadIsRefused) {
   EXPECT_FALSE(gw::meter(std::string("\0asm\x0d\0\x01\0", 8), out, error));
   EXPECT_NE(error.find("component"), std::string::npos) << error;
 
-  // A GC type, and a GC instruction.
-  EXPECT_FALSE(gw::meter(wat2wasm("(module (type $s (struct (field i32))))"), out, error));
+  // A GC type, and a GC instruction. The type is bytes (a type section of one struct of an i32):
+  // binaryen, which reads WAT for WAMR, writes no type that nothing uses.
+  EXPECT_FALSE(
+      gw::meter(std::string("\0asm\x01\0\0\0\x01\x05\x01\x5f\x01\x7f\x00", 15), out, error));
   EXPECT_NE(error.find("GC type"), std::string::npos) << error;
   EXPECT_FALSE(gw::meter(wat2wasm("(module (func (drop (ref.i31 (i32.const 1)))))"), out, error));
   EXPECT_NE(error.find("GC instruction"), std::string::npos) << error;
@@ -2399,6 +2429,11 @@ protected:
     if (!AppRuntime::have_yaml())
       GTEST_SKIP() << "libcvc built without yaml-cpp";
     path = write("client_guests.ari", kClientGuestsDoc).string();
+    // No frame budget for the guests' slices (ariadne.limits.wasm_frame_budget, 8 ms): these cases
+    // are about what a guest may do. A ServerDocument's step doesn't advance the app's pump frame,
+    // so a budget spent stays spent, and on WAMR's interpreter spin's first slice takes ~4 ms:
+    // with the budget, the guests started after it never got a slice.
+    cvc::state::instance(app)("ariadne.limits.wasm_frame_budget").value(std::string("0"));
     doc = std::make_unique<ServerDocument>(app, "standup");
     ASSERT_EQ(doc->read(path), "");
     doc->use_client_guests(engine);
