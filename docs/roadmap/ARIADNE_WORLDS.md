@@ -1635,7 +1635,7 @@ files beside them:
 | `<item>.glb` | Every other mesh item (roads, props, foliage, needles, the props' coarser rungs `props_r1` and `props_r2`), one primitive per surface, the material named by the surface, per-vertex colour where the item has it. |
 | `props.json` | The props' render cells: the cell size and, per cell, its bounds and its run of triangles (lines, for the needles) in each prop mesh, so a renderer draws a cell as a ladder of rungs. A cell's points are the ones its faces use. |
 | `streets.json` | The street network the roads were extruded from (nodes, and segments with their widths and classes), and the city's counts (buildings, districts, road length). |
-| `ground.png` | The painted ground texture (the material colours, 2048 a side, north at the top), where a city has `satellite.png`. |
+| `ground.png` | The painted ground texture (the material colours, north at the top), where a city has `satellite.png`. It is 2048 a side on a world 256 m across or more, and fewer on a smaller one: the fewest, a power of two, at most 0.25 m a texel (`world_ground_size_for`; 1024 on a 200 m world). |
 
 - **Nav materials** are the terrain's cell surfaces and each item's face surfaces, read through
   the one surface table, so the renderer, the physics and the navigator read the same materials
