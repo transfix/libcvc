@@ -1203,6 +1203,9 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
       docPath_.empty() || !std::filesystem::equivalent(docPath_, path, same_ec);
   seed_keys(lr.keys, new_document);
 
+  // §5.3 state: the document's literal seeds, just before init:, which reads and may override them.
+  seed_state(app_, prefix_, lr.state_seeds);
+
   std::vector<std::string> initErrors;
   // §init: seeds win over widget defaults. It runs with the document's functions (§6.6), and with
   // this runtime's verbs and host functions, as an action has them.
