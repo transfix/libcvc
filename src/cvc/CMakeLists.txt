@@ -278,6 +278,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/scatter.h
   ../../inc/cvc/world/roads.h
   ../../inc/cvc/world/building_archetypes.h
+  ../../inc/cvc/world/model_assets.h
+  ../../inc/cvc/world/world_theme.h
   ../../inc/cvc/world/sites.h
   ../../inc/cvc/world/road_mesh.h
   ../../inc/cvc/world/road_raster.h
@@ -612,6 +614,8 @@ set(SOURCE_FILES
   world/scatter.cpp
   world/roads.cpp
   world/building_archetypes.cpp
+  world/model_assets.cpp
+  world/world_theme.cpp
   world/sites.cpp
   world/road_mesh.cpp
   world/road_raster.cpp

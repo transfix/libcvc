@@ -29,6 +29,7 @@
 //   w.props / w.foliage / w.needles / w.buildings / w.roads   // merged meshes, one per look
 //   w.prop_cells, w.props_r1, w.props_r2                      // the props' render LOD, by cell
 //   w.terrain_chunks                                          // the ground's render LOD, by chunk
+//   w.models, w.model_assets   // a theme's textured model buildings and trees, placed copies
 //   w.water          // the sea, lakes and ponds, and the shore grid (cvc/world/water_bodies.h)
 //   water_field(w, t, ...)                                    // the water, as a volume of depth
 //   w.geometry()     // the world as cvc::world::world_geometry, for physics and nav
@@ -51,6 +52,11 @@
 //     load_building_library), or without one procedural massing whose heights rise with urbanity
 //     (houses with gable roofs outside the cores, a rare tower in them).
 //
+// With a theme (generated_world_params::theme, cvc/world/world_theme.h), a share of the lots take
+// a textured model building that fits them instead of the massing, and a share of the trees become
+// model trees (palms on the coast, oaks inland, as the theme's biome rules say), from the model
+// assets the app's catalog has (cvc/world/model_assets.h); each placed copy is a model_instance.
+//
 // The roads are extruded into a surface and burned into the raster as asphalt, the buildings as
 // occupied concrete wall, and trees and rocks keep off the roads and buildings. Water is everything
 // below water_level_m, and water_field fills it with a gently travelling wave.
@@ -69,12 +75,14 @@
 #include <cvc/world/building_archetypes.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/grid.h>
+#include <cvc/world/model_assets.h>
 #include <cvc/world/raster.h>
 #include <cvc/world/roads.h>
 #include <cvc/world/terrain_lod.h>
 #include <cvc/world/terrain_source.h>
 #include <cvc/world/water_bodies.h>
 #include <cvc/world/world_geometry.h>
+#include <cvc/world/world_theme.h>
 #include <functional>
 #include <memory>
 #include <string>
@@ -136,6 +144,11 @@ struct generated_world_params {
   std::string city = "districts";
   std::string terrain_file;
   int edge = 0; // world_edge: walls, a shore and the sea, or nothing at the world's edge
+  // The world theme (cvc/world/world_theme.h; find_world_theme, the app's): which model assets the
+  // city builds on its lots and which trees it plants where. Empty: none, the procedural massing
+  // (or the building library) and the L-system trees alone, as before themes. A theme whose
+  // assets are not installed (model_catalog_of) builds and plants as if it named none of them.
+  std::string theme;
 };
 
 // The shore edge's band: how far in from the world's edge the coast starts (metres, 20 % of the
@@ -263,6 +276,21 @@ struct generated_world {
   road_network streets;
   std::size_t building_count = 0;
   bool archetypes = false;   // the buildings came from a building library
+
+  // The theme's models (generated_world_params::theme): the assets they draw, and each placed
+  // copy. Not merged into any mesh above: a renderer draws each instance from its asset's own LOD
+  // ladder (model_asset::lods), textured. The buildings among them collide (geometry() adds a box
+  // per building, role_collide); the trees are drawn only, like the props. The city's
+  // building_count counts the model buildings too.
+  struct model_instance {
+    int asset = -1;             // index into model_assets
+    double x = 0, y = 0, z = 0; // where the model's origin (its bottom centre) stands
+    double yaw = 0.0;           // radians about +Z; 0 = the model's front along +Y
+    double scale = 1.0;
+  };
+  std::vector<model_asset> model_assets;
+  std::vector<model_instance> models;
+  std::size_t model_buildings = 0, model_trees = 0;
   double road_length = 0.0;  // the street network's total length (metres)
   std::size_t districts = 0; // how many district cores the city grew from
 
@@ -322,6 +350,8 @@ constexpr int world_ground_size = 2048;
 //     run of triangles (lines, for the needles) in each prop mesh;
 //   - streets.json, the street network the roads were extruded from (nodes, segments, widths and
 //     classes) and the city's counts;
+//   - models.json, when the world has a theme's models: their assets (as sidecars, found again by
+//     name) and each placed copy;
 //   - ground.png, the painted ground, north at the top: `ground` when given, else paint_surface
 //     in the material colours at world_ground_size;
 //   - the water level, and the generator ("generated_world", `generator_version`, the seed and

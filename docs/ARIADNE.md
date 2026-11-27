@@ -2082,7 +2082,33 @@ higher relief never floods or drains the world. The size defaults to 1200 and th
 vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
 `city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
-made while the document loads. An edit to a `world.*` key then waits (`world.pending` is 1) until
+made while the document loads.
+
+**Themes and model assets.** The node's `theme:` (`world.theme` live; `generated_world_params::theme`)
+names a world theme ([`world_theme.h`](../inc/cvc/world/world_theme.h)): data that says which
+textured model assets the city builds and which trees it plants where. A theme lists building
+archetypes (an asset, a weight, the urbanity band it suits, a scale range, and how many street lots
+it may span) and tree archetypes (an asset, a weight, a scale range and a biome rule: the ground's
+height over the water, its slope, the distance to the nearest water). The city tries a building
+archetype on a share of its lots, the one that fits the lot (or the lot and its neighbour) at its
+real size, its front on the setback line, and builds the procedural massing elsewhere; the scatter's
+trees become tree archetypes where their biome holds, and stay L-system trees elsewhere. The
+built-ins are `temperate_town` (brick shops, brownstones and offices; oaks inland), `coastal_town`
+(the same streets; palms along the coast, oaks inland) and `tropical` (palms everywhere but steep
+ground); a host adds its own with `register_world_theme`, or reads one from JSON
+(`world_theme_from_json`). Every draw is keyed on its spot, so the same params, theme and installed
+assets make the same world.
+
+An asset is a glb and its coarser LODs beside it, described by `<name>.asset.json` (schema
+`cvc-model-asset/1`, [`model_assets.h`](../inc/cvc/world/model_assets.h)), as the cy-pca
+`building-*`, `tree-*` and `prop-*` cvcpkg packages install them to `share/cvc-scenes/shared/`. The
+app's catalog (`model_catalog_of`) finds them there under the cvcpkg prefix (`CVCPKG_PREFIX`,
+`CVC_PREFIX`), the nav bundle's `shared/`, and `CVC_MODEL_PATH`; a theme whose assets are not
+installed builds as if it named none of them. The renderer draws each placed copy as a LOD ladder
+of the asset's rungs (their switch distances from each rung's `world_error_m`), all copies sharing
+one set of buffers and textures, so only the copies near the camera draw at full resolution. The
+model buildings collide as boxes; the trees are drawn only. A world's bundle carries its models in
+`models.json`. An edit to a `world.*` key then waits (`world.pending` is 1) until
 Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
 `world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and
 every repaint (`world.color`, at once) is a sliced task on the app's scheduler
@@ -4516,7 +4542,8 @@ scene:
 The built-in `generated_world` makes the world and writes it as a version 2 city bundle
 (ARIADNE_WORLDS §18.8): `world.json`, the terrain's heights and cell surfaces, and a glb per
 mesh. It takes `generated_world_params`' fields by name (`seed`, `half_m`, `trees`, `rocks`,
-`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`, ...)
+`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`,
+`theme`, ...)
 and `building_library`. A generated world is then the same kind of dataset as a loaded city, and
 its `world` is the bundle read back, so the physics is the same on every host that decodes it.
 Beside the decoder's outputs, `generated` holds the world as made (its raster, roads and props).
