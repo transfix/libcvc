@@ -118,6 +118,7 @@ struct member {
   unsigned char c1[3] = {0, 0, 0}, c2[3] = {0, 0, 0};
   bool promoted = false;
   bool posed = false;   // a pose since the layers were made (draw draws it)
+  bool moved = false;   // a pose other than the last since the last draw
   bool located = false; // x, y, z known (promote ranks it)
   double m[16] = {};    // its pose (row-major), the last given
   double x = 0.0, y = 0.0, z = 0.0;
@@ -206,7 +207,8 @@ std::string rung_name(const layer_spec &s, const arch_draw &a, std::size_t k) {
   return s.id + "_" + a.id + "_lod" + std::to_string(k);
 }
 
-// The rungs of one archetype under `group`: a fitted model's four (the finest textured), else one.
+// The rungs of one archetype under `group`: a fitted model's or a boat's hull's four (the finest
+// textured), else one.
 void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look_mesh &mesh,
                 GraphicsNode &group) {
   const int n = static_cast<int>(a.members.size());
@@ -215,7 +217,7 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
     int cap;
   };
   std::vector<spec> specs;
-  if (mesh.model && L.spec.lod)
+  if ((mesh.model || mesh.hull) && L.spec.lod)
     specs = {{0.00, std::max(1, std::min(n, L.spec.near_cap))},
              {0.62, std::min(n, 28)},
              {0.88, std::min(n, 72)},
@@ -223,6 +225,9 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
   else
     specs = {{0.0, n}};
   a.rungs.assign(specs.size(), rung{});
+  // Each colour role's coarsest decimation yet (the rungs go from finer to coarser).
+  std::unordered_map<unsigned char, std::pair<std::vector<double>, std::vector<std::uint32_t>>>
+      coarsest;
   for (std::size_t k = 0; k < specs.size(); ++k) {
     rung &r = a.rungs[k];
     r.cap = std::max(1, specs[k].cap);
@@ -236,7 +241,9 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
       r.uv = mesh.uvs;
     if (specs[k].reduction > 0.0) {
       // Each colour role's triangles decimated on their own, so a wheeled look's wheels keep a
-      // tyre's dark; a role's that collapse are kept as they are.
+      // tyre's dark. A role that collapses at this rung's reduction keeps its coarsest yet (a small
+      // mesh, a boat's hull, at the coarsest rung), and one that collapses at every rung is kept as
+      // it is.
       std::vector<double> rv;
       std::vector<std::uint32_t> rt;
       std::vector<unsigned char> rrole, rown;
@@ -268,7 +275,14 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
         }
         std::vector<double> dv;
         std::vector<std::uint32_t> dt;
-        const bool ok = decimate_mesh(pv, pt, specs[k].reduction, dv, dt);
+        bool ok = decimate_mesh(pv, pt, specs[k].reduction, dv, dt);
+        if (ok) {
+          coarsest[q] = {dv, dt};
+        } else if (const auto it = coarsest.find(q); it != coarsest.end()) {
+          dv = it->second.first;
+          dt = it->second.second;
+          ok = true;
+        }
         coarser = coarser || ok;
         const std::vector<double> &uv = ok ? dv : pv;
         const std::vector<std::uint32_t> &ut = ok ? dt : pt;
@@ -455,9 +469,18 @@ struct entity_view::impl {
       std::sort(r.slots.begin(), r.slots.end());
       stats.instanced += r.slots.size();
       std::shared_ptr<GeometryNode> node = r.node.lock();
-      if (!node || (r.slots.empty() && r.shown == 0))
-        continue; // an empty rung that was empty: nothing to send
+      if (!node)
+        continue;
+      // A rung drawing the members it drew, none of them moved (an empty rung that was empty, a
+      // still fleet, a paused world), is left as it was sent: nothing to pack or upload, and its
+      // shadows not baked again.
+      bool stale = r.slots != r.prev || r.slots.size() != r.shown;
+      for (std::size_t j = 0; !stale && j < r.slots.size(); ++j)
+        stale = L.members[static_cast<std::size_t>(r.slots[j])].moved;
+      if (!stale)
+        continue;
       r.shown = r.slots.size();
+      ++stats.sent;
       pack(L, r);
       node->updateVertices(r.xyz);
       node->updateNormals(r.nrm);
@@ -739,7 +762,10 @@ void entity_view::pose(std::size_t k, const double m[16]) {
     return;
   const auto [l, i] = d.posed_at[k];
   member &mb = d.layers[static_cast<std::size_t>(l)].members[static_cast<std::size_t>(i)];
-  std::copy(m, m + 16, mb.m);
+  if (!mb.posed || !std::equal(m, m + 16, mb.m)) {
+    std::copy(m, m + 16, mb.m);
+    mb.moved = true;
+  }
   mb.x = m[3];
   mb.y = m[7];
   mb.z = m[11];
@@ -750,10 +776,14 @@ void entity_view::pose(std::size_t k, const double m[16]) {
 void entity_view::draw() {
   impl &d = *_impl;
   d.stats.instanced = 0;
-  for (bodies_layer &L : d.layers)
+  d.stats.sent = 0;
+  for (bodies_layer &L : d.layers) {
     if (L.instancing)
       for (arch_draw &a : L.archs)
         d.draw_arch(L, a);
+    for (member &m : L.members)
+      m.moved = false;
+  }
 }
 
 entity_view_stats entity_view::stats() const { return _impl->stats; }

@@ -696,8 +696,9 @@ scene:
 // add_hull_node draws it, its topsides in role 0 and its stripe in role 1 (where the node has the
 // colours it was given), the rest (its wet bottom, a box hull's teak sole) in role 2, the node's
 // colour; a box hull (the launch) open with its sole, a V hull (the tactical boat) without one.
-// 40 launches on a lake: one mesh, the nearest 8 their hulls' nodes, each copy where a launch is,
-// and the water kept out of the 4 nearest hulls as when each boat had its node. 40 tactical boats
+// 40 launches on a lake: the hull's four rungs, the nearest 8 their hulls' nodes, each copy where
+// a launch is, a paused fleet not sent again, and the water kept out of the 4 nearest hulls as
+// when each boat had its node. 40 tactical boats
 // with a one-piece model: fitted as the boat node fits it (boat_fit_of: its length overall, its
 // keel on its hull's bottom), the same in the promoted boats' nodes and in the mesh's copies.
 void test_boats() {
@@ -726,7 +727,7 @@ void test_boats() {
     ari::vehicle_look_mesh mesh;
     const ari::vehicle_model_status st =
         ari::vehicle_look_mesh_of(app, *cache, box, fit.shape, fit.keel, mesh, nullptr, &desc.boat);
-    check(st == ari::vehicle_model_status::ready && !mesh.model && !mesh.texture,
+    check(st == ari::vehicle_model_status::ready && !mesh.model && mesh.hull && !mesh.texture,
           at + "its box look's mesh is ready: its hull, not a model");
     const float topsides[3] = {0.2f, 0.4f, 0.6f}, stripe[3] = {0.8f, 0.1f, 0.9f};
     std::shared_ptr<GeometryNode> hull =
@@ -777,8 +778,8 @@ void test_boats() {
     if (!w.ok || !check(w.settle(40), "boats: the view takes all 40 launches"))
       return;
     const ari::entity_view_stats s = ari::entity_view_stats_of(w.rs);
-    check(s.meshes == 1 && s.promoted == 8 && own_nodes(w.rs) == 8,
-          "boats: one mesh (the hull), the nearest 8 their own nodes",
+    check(s.meshes == 4 && s.promoted == 8 && own_nodes(w.rs) == 8,
+          "boats: the hull's four rungs, the nearest 8 their own nodes",
           std::to_string(s.meshes) + " meshes, " + std::to_string(own_nodes(w.rs)) + " nodes");
     bool hulls = own_nodes(w.rs) == 8;
     for (const auto &kv : w.rs.vehicle_markers) {
@@ -786,10 +787,64 @@ void test_boats() {
       hulls = hulls && node && node->findChildByName(kv.first + "_hull") != nullptr;
     }
     check(hulls, "boats: a promoted launch's node is its hull, as before");
-    std::size_t n = 0;
-    const bool where = copies_where_entities_are(w, "entities_boat_lod0", 3.0, &n, launch_points);
-    check(where && n >= 24, "boats: each copy where an unpromoted launch is",
-          std::to_string(n) + " copies");
+    // Each rung's copies where unpromoted launches are, the finest the whole hull and the coarser
+    // fewer points; at each rung drawn, the wet bottom its own red and the topsides not (each
+    // colour decimated on its own). The rungs' caps, make_rungs' for 40 members: 10, 28, 40, 40.
+    std::shared_ptr<GraphicsNode> layer = w.sg.getGraphics("entities");
+    const std::size_t caps[4] = {10, 28, 40, 40};
+    std::size_t total = 0, prev_per = launch_points + 1, last_per = 0;
+    bool where = true, coarser = true, bands = true;
+    std::string seen;
+    for (int k = 0; k < 4; ++k) {
+      const std::string name = "entities_boat_lod" + std::to_string(k);
+      std::shared_ptr<GraphicsNode> m = layer ? layer->findChildByName(name) : nullptr;
+      const std::vector<double> pts = drawn(m), cols = drawn_colors(m);
+      const std::size_t per = pts.size() / 3 / caps[k];
+      coarser = coarser && per > 0 && per * caps[k] * 3 == pts.size() &&
+                (k == 0 ? per == launch_points : per <= prev_per);
+      prev_per = per;
+      last_per = per;
+      const std::size_t c = copies(pts, per).size();
+      seen += " lod" + std::to_string(k) + ": " + std::to_string(c) + " of " + std::to_string(per) +
+              " points;";
+      if (c == 0)
+        continue;
+      total += c;
+      where = where && copies_where_entities_are(w, name, 3.0, nullptr, per);
+      std::size_t red = 0, other = 0;
+      for (std::size_t j = 0; cols.size() == pts.size() && (j + 1) * per * 3 <= pts.size(); ++j) {
+        double lo = 1e30, hi = -1e30;
+        for (std::size_t q = 0; q < per; ++q) {
+          lo = std::min(lo, pts[(j * per + q) * 3]);
+          hi = std::max(hi, pts[(j * per + q) * 3]);
+        }
+        if (hi - lo < 1e-9)
+          continue; // collapsed: no launch in this slot
+        for (std::size_t q = 0; q < per; ++q) {
+          const double *rgb = &cols[(j * per + q) * 3];
+          (std::fabs(rgb[0] - 92.0) < 1.0 && std::fabs(rgb[1] - 20.0) < 1.0 ? red : other) += 1;
+        }
+      }
+      bands = bands && red > 0 && other > 0;
+    }
+    check(coarser && last_per < launch_points,
+          "boats: the finest rung the whole hull, the coarser ones fewer points", seen);
+    check(where && total == s.instanced && total >= 24,
+          "boats: each rung's copies where unpromoted launches are",
+          std::to_string(total) + " copies, " + std::to_string(s.instanced) + " instanced");
+    check(bands, "boats: at every rung drawn, the wet bottom red and the topsides in colour", seen);
+    // A paused world's launches are still: no rung is sent again; going on, they move and are.
+    cvc::state::instance(w.app)(w.rs.clock.paused_key).value(1);
+    for (int i = 0; i < 3; ++i)
+      w.frame();
+    const std::size_t still = ari::entity_view_stats_of(w.rs).sent;
+    cvc::state::instance(w.app)(w.rs.clock.paused_key).value(0);
+    for (int i = 0; i < 3; ++i)
+      w.frame();
+    const std::size_t moving = ari::entity_view_stats_of(w.rs).sent;
+    check(still == 0 && moving > 0,
+          "boats: a still fleet's rungs are not sent again, a moving one's are",
+          std::to_string(still) + " paused, " + std::to_string(moving) + " going on");
     // The water reads where the world's boats are, not their nodes: the 4 nearest kept out.
     std::shared_ptr<GraphicsNode> water = w.sg.getGraphics("water");
     auto far =

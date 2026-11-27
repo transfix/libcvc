@@ -1179,6 +1179,7 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
       }
       for (const std::array<std::uint32_t, 3> &t : f.tris)
         out.tris.insert(out.tris.end(), t.begin(), t.end());
+      out.hull = true;
       return vehicle_model_status::ready;
     }
   }

@@ -30,9 +30,11 @@
 // body's origin as the boat node draws it: its model fitted to its length overall, its keel on its
 // hull's bottom (boat_fit_of), and a box look's template its hull, flat-shaded as add_hull_node
 // draws it (its topsides and stripe in the entity's colours, its wet bottom its own; a box hull
-// open, with its teak sole). A relay's client knows a boat's length overall and keel but not its
-// hull, so its box look there is the box. Each frame the meshes are posed from the entities' poses
-// and an entity off screen is drawn by no rung. The entities on screen are ranked by their size
+// open, with its teak sole), with a model's four rungs (each colour decimated on its own). A
+// relay's client knows a boat's length overall and keel but not its hull, so its box look there
+// is the box. Each frame the meshes are posed from the entities' poses and an entity off screen is
+// drawn by no rung; a rung drawing the entities it drew, none of them moved (a still fleet, a
+// paused world), is not packed or sent again. The entities on screen are ranked by their size
 // there, the largest taking the finest rung up to its cap (`near_cap` for the finest; 28 and 72
 // for the next) while their radius on screen is at least that rung's `px`.
 //
@@ -108,6 +110,7 @@ struct entity_view_stats {
   std::size_t promoted = 0;  // of those, drawn as their own nodes
   std::size_t instanced = 0; // drawn by a rung in the last draw (on screen, not promoted)
   std::size_t meshes = 0;    // the rungs' mesh nodes
+  std::size_t sent = 0;      // rungs packed and sent in the last draw (not one of still copies)
   std::size_t rebuilds = 0;  // times the layers were made (set_entities)
 };
 

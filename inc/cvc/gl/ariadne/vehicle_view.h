@@ -224,6 +224,7 @@ struct vehicle_look_mesh {
   std::vector<float> uvs;                    // [2V], or empty
   std::shared_ptr<const cvc::image> texture; // null: untextured
   bool model = false;                        // a fitted model (else the box look's boxes)
+  bool hull = false; // a boat's box look, its hull (decimated on a layer's coarse rungs as a model)
 };
 // The look's mesh, its base `base_z` below the chassis's centre (a model's; the boxes sit on the
 // chassis as vehicle_scene_node puts them): the box look (kind "" or box), or a fitted model (a
@@ -234,7 +235,7 @@ struct vehicle_look_mesh {
 // own nodes. A boat's box look (`boat` its hull, when it has a hull_mesh) is its hull as
 // add_hull_node draws it, about its hull body's origin, flat-shaded: its topsides in role 0, the
 // stripe in role 1, its wet bottom and a box hull's teak sole in role 2 (their own colours); a box
-// hull open, no deck.
+// hull open, no deck; `hull` set (an entity layer decimates it as it does a model).
 vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &cache,
                                           const cvc::ariadne::vehicle_look &look,
                                           const vehicle_shape &shape, double base_z,

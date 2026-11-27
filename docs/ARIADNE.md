@@ -2690,11 +2690,12 @@ scene:
     - A boat (a `dynamicboat` vehicle) is drawn as the `boat` node draws one, about its hull
       body: its model fitted to its length overall with its keel on its hull's bottom, and a box
       look's mesh its hull, flat-shaded, topsides and stripe in its colours and the wet bottom dark
-      red (a box hull open, with its teak sole). The water keeps out of the nearest boats' hulls
-      however they are drawn. A relay's client has no hull to draw, so a box-look boat is its box
-      there.
+      red (a box hull open, with its teak sole), on a model's four rungs. The water keeps out of
+      the nearest boats' hulls however they are drawn. A relay's client has no hull to draw, so a
+      box-look boat is its box there.
     - The meshes are posed from the physics binding's poses, between steps, whether the frame
-      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      steps the world or `--world-thread`'s local holon does. A rung whose entities have not moved
+      (a parked fleet, a paused world) is not sent again. A client of a relay draws the room's
       entities the same way (`room_view`, from its entity playout, under node `room_entities`),
       the vehicle it drives among the promoted.
     - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
