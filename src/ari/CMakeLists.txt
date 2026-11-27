@@ -219,8 +219,23 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
   add_test(NAME ari_validate_json COMMAND ari validate --json "${_ari_mistakes}")
   set_tests_properties(ari_validate_json PROPERTIES
                        PASS_REGULAR_EXPRESSION "\"pointer\": \"/windows/0\", \"message\": \"unknown key 'closeable'\"")
-  set_tests_properties(ari_validate_examples ari_validate_mistakes ari_validate_json PROPERTIES
-                       SKIP_RETURN_CODE 4)
+  # §6.7 a document nested deeper than the loader goes (256 levels; here 128 units, each an
+  # include: entry and the unit's group a level) fails to load, reported at its deepest widget: the
+  # include: entry past the limit, in the last unit's template (line 6 + 4 * 127, column 9).
+  set(_ari_deep "${CMAKE_CURRENT_BINARY_DIR}/validate_too_deep.ari")
+  set(_ari_deep_doc "meta: { min_libcvc: \"0.0.0\" }\nunits:\n")
+  foreach(_i RANGE 127)
+    math(EXPR _next "${_i} + 1")
+    string(APPEND _ari_deep_doc
+           "  level${_i}:\n    type: group\n    children:\n      - include: level${_next}\n")
+  endforeach()
+  string(APPEND _ari_deep_doc "  level128:\n    text: deepest\nwindows:\n  - include: level0\n")
+  file(WRITE "${_ari_deep}" "${_ari_deep_doc}")
+  add_test(NAME ari_validate_too_deep COMMAND ari validate "${_ari_deep}")
+  set_tests_properties(ari_validate_too_deep PROPERTIES
+                       PASS_REGULAR_EXPRESSION "validate_too_deep.ari:514:9: error: a widget nested deeper than 256 levels")
+  set_tests_properties(ari_validate_examples ari_validate_mistakes ari_validate_json
+                       ari_validate_too_deep PROPERTIES SKIP_RETURN_CODE 4)
   add_test(NAME ari_schema COMMAND ari schema)
   set_tests_properties(ari_schema PROPERTIES PASS_REGULAR_EXPRESSION "\"title\": \"Ariadne .ari document")
   # A URL names a document for the browser page; natively ari says so.
