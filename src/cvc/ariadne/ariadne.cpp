@@ -6495,7 +6495,10 @@ std::string Runtime::Impl::mount_principal(const Widget &w, const std::string &s
       return "local";
   }
   const std::string path = canonical.empty() ? mine : canonical;
-  return "file:" + std::filesystem::path(path).parent_path().generic_string();
+  // A name with no directory (a loader that gave no canonical path, and no base) is in the current
+  // one: a principal names a directory, and SH11's store refuses an empty one (4.12).
+  const std::string dir = std::filesystem::path(path).parent_path().generic_string();
+  return "file:" + (dir.empty() ? std::string(".") : dir);
 }
 
 // 4.11 a mount's budget: its principal's default, each part the entry's budget.<part> when set.
@@ -6665,7 +6668,6 @@ void Runtime::Impl::close_mount(const std::string &sub, bool forget_init) {
   if (it == mount_slots_.end())
     return;
   quit_app(sub);
-  clear_scope_principal(app, sub); // 4.12: its programs are gone; the next open records it again
   // What quit_app leaves: the children its programs spawned or forked, which share its scope.
   if (group_ || used_scheduler_) {
     try {
@@ -6678,6 +6680,9 @@ void Runtime::Impl::close_mount(const std::string &sub, bool forget_init) {
     } catch (const std::exception &) {
     }
   }
+  // 4.12: its programs and their children are gone (cleared only now, so none is built in between
+  // as the scope's parent); the next open records it again.
+  clear_scope_principal(app, sub);
   for (auto q = quit_apps.begin(); q != quit_apps.end();)
     q = path_under(*q, sub) ? quit_apps.erase(q) : std::next(q);
   for (std::map<std::string, std::string> *m : {&mount_names, &mount_functions})
@@ -7707,10 +7712,6 @@ Runtime::Impl::~Impl() {
   }
   if (sched)
     kill_and_reap(*sched, "tearing down");
-  // ARIADNE_SHELL.md 4.12 its mounts' principals, which the app keeps by scope: another document
-  // at this prefix starts with none.
-  for (const auto &[sub, slot] : mount_slots_)
-    clear_scope_principal(app, sub);
   // Last the group, which the app's frames stop pumping first: its own teardown (S1.5) kills and
   // reaps whatever is left, before channel_policy_ and doc_scope_ go, which its processes'
   // contexts point at; then any retired group, waiting for its kernels as a teardown does. Both
@@ -7718,6 +7719,14 @@ Runtime::Impl::~Impl() {
   frame_handle_.reset();
   group_.reset();
   retired_groups_.clear();
+  // ARIADNE_SHELL.md 4.12 its mounts' principals, which the app keeps by scope, once none of their
+  // processes is left: another document at this prefix starts with none.
+  try {
+    for (const auto &[sub, slot] : mount_slots_)
+      clear_scope_principal(app, sub);
+  } catch (const std::exception &e) {
+    teardown_note("tearing down", "clearing its mounts' principals", e.what());
+  }
 }
 
 void Runtime::Impl::kill_and_reap(cvc::state_exec::async_scheduler &sched,
