@@ -193,10 +193,11 @@ jobs:
   # they build from the checkout (`source: vendored`), which a cvcpkg.org builder
   # does not have; pinned, the fleet can build them, and the fleet-bsd-haiku job
   # below has it build the columns GitHub has no runners for.
+  #
+  # A dry run pins too (so it checks the tarball and the rewrite) and stops before the push.
   push-recipes:
     needs: [ensure-org, compute-revisions]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     outputs:
       source_url: ${{ steps.pin.outputs.url }}
       source_sha256: ${{ steps.pin.outputs.sha256 }}
@@ -237,6 +238,7 @@ jobs:
           echo "sha256=${sums[0]}" >> "$GITHUB_OUTPUT"
           python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes             --out "$RUNNER_TEMP/recipes" --url "$url" --sha256 "${sums[0]}"             --revisions-json "$REVISIONS"
       - name: Push libcvc's recipes
+        if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -270,6 +272,7 @@ jobs:
   # the fleet and publish when they finish, so this job passes with a notice.
   fleet-bsd-haiku:
     needs: [compute-revisions, push-recipes]
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
