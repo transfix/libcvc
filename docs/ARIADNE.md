@@ -6637,6 +6637,7 @@ Each child of the key is an entry:
 ```
 shell.apps.<id>.uri               the document to mount (relative to the slot's document)
 shell.apps.<id>.args.<name>       its args: substitutions, as a load:'s args: are
+shell.apps.<id>.catalog           1: one of the document's catalog, run as `local` (below)
 shell.apps.<id>.budget.steps      its budget, when not its principal's default (below)
 shell.apps.<id>.budget.time
 shell.apps.<id>.budget.memory
@@ -6697,9 +6698,16 @@ A mounted document's programs get a `PermissionError`: opening others needs a gr
 (`request.open`, SH14). A document with no slot gets a `RuntimeError`.
 
 **Principals and budgets.** Every mount runs as a principal, from where its bytes came: `local`
-for a `cvc://` or `state://` document and for one the slot's `catalog:` lists (a URI, or a prefix
-ending in `/`), `remote:<scheme>://<host>` for one from the network, and `file:<its directory>`
-for any other local file. Each mount has a budget for its programs, counted over every process
+for a `cvc://` or `state://` document and for a local file that is the document's catalog's,
+`remote:<scheme>://<host>` for one from the network, and `file:<its directory>` for any other
+local file. A local file is the catalog's when the slot's `catalog:` lists it (a URI, or a prefix
+ending in `/`) or its entry's `catalog` flag is true; the shell sets the flag on what it opens from
+its catalog, and `catalog:` covers the catalog's documents opened any other way. Neither makes a
+document from the network `local`. The slot's document writes both, and a mounted document cannot
+write outside its own scope (§7.4), so it cannot make itself `local`. The principal is decided as
+the entry opens. An entry whose flag changes while it is open is opened again as its new
+principal, its state kept and its `init:` not run again; one that `catalog:` lists as well keeps
+its principal and runs on. Each mount has a budget for its programs, counted over every process
 whose scope is under it (the mount's actions, its `on_tick:` resident, what they spawn and fork):
 
 | | `local` | `file:`, `remote:` |

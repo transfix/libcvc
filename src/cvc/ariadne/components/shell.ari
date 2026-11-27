@@ -112,9 +112,12 @@ functions: |
           (if (and (= (length parts) 4) (= (state-get rel) uri)) (set found (nth parts 2)) #f))
         #f))
     found)
-  ; Open catalog entry I (a running one is the one returned), and Close it.
+  ; Open catalog entry I (a running one is the one returned), and Close it. The entry gets the
+  ; catalog flag, so it runs as `local` (ARIADNE.md §6.8) however the catalog spells its URI.
   (defun shell-open (i)
-    (app-open (state-get (str-concat "shell.catalog." (str i) ".uri"))))
+    (set id (app-open (state-get (str-concat "shell.catalog." (str i) ".uri"))))
+    (state-set (str-concat "shell.apps." id ".catalog") "1")
+    id)
   (defun shell-close (i)
     (set id (shell-find (state-get (str-concat "shell.catalog." (str i) ".uri"))))
     (if (= id "") #f (app-close id)))
@@ -183,7 +186,9 @@ windows:
 
 root:
   # One isolated mount per child of shell.apps (ARIADNE_SHELL.md 4.2): any file or link may be
-  # opened unless shell.allow lists prefixes, and the catalog's documents run as `local`.
+  # opened unless shell.allow lists prefixes, and the catalog's documents run as `local`: an entry
+  # shell-open writes carries the catalog flag, and catalog: lists the catalog's URIs for an entry
+  # written any other way.
   - mounts: shell.apps
     allow: { bind: shell.allow }
     catalog: { bind: shell.catalog_uris }
