@@ -1990,6 +1990,9 @@ struct world_builder::impl {
       stampBuildings(fps, w.grid, reg, w.raster); // after the asphalt: a building always wins
       road_mesh_params rmp;
       rmp.lift = 0.35; // clearly above the terrain mesh, so the ribbons don't z-fight it
+      // ... and its edges drop in walls to half a metre below the ground, so from the side a road
+      // is a layer of pavement set into the terrain, never a ribbon floating over it.
+      rmp.skirt_depth = 0.5;
       // One asphalt for every road (width and the centre stripe tell them apart), so a junction's
       // pad matches every road meeting it; rounder pads at this scale.
       for (int k = 0; k < 3; ++k)
