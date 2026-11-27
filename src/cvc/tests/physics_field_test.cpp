@@ -176,6 +176,39 @@ TEST(PhysicsField, SlabsFloatAtTheirDensityRatio) {
   }
 }
 
+// A body that displaces only a share of its volume (body_desc::displacement; an avatar's box,
+// OW9b) floats deeper by that share: a 300 kg/m^3 slab displacing half its volume floats as a
+// 600 kg/m^3 one would, and as itself again once set_displacement gives it the whole. A share
+// that is not finite and >= 0 is refused, as is an unknown body.
+TEST(PhysicsField, ADisplacementShareFloatsABodyDeeper) {
+  {
+    world w{world_config{}};
+    body_desc bad = slab(300.0, 0.0);
+    bad.displacement = -0.5;
+    EXPECT_THROW(w.add_body(bad), cvc::physics_error);
+    bad.displacement = std::nan("");
+    EXPECT_THROW(w.add_body(bad), cvc::physics_error);
+    body_id nobody;
+    nobody.value = 12345;
+    EXPECT_THROW(w.set_displacement(nobody, 0.5), cvc::physics_error);
+  }
+  REQUIRE_JOLT();
+  world w(jolt_config());
+  w.add_field(water());
+  body_desc d = slab(300.0, 0.0);
+  d.displacement = 0.5;
+  const body_id b = w.add_body(d);
+  EXPECT_THROW(w.set_displacement(b, -1.0), cvc::physics_error);
+  w.step(600);
+  const double half = 0.0 - (w.state(b).position.z - 0.2);
+  EXPECT_NEAR(half, 0.4 * 300.0 / 1000.0 / 0.5, 0.002) << "half the share, twice the draft";
+  w.set_displacement(b, 1.0);
+  w.step(600);
+  const double whole = 0.0 - (w.state(b).position.z - 0.2);
+  EXPECT_NEAR(whole, 0.4 * 300.0 / 1000.0, 0.002) << "the whole share, its own draft";
+  EXPECT_LT(tilt(w.state(b).rotation), 0.01);
+}
+
 // A tilted slab rights itself: the buoyancy torque, applied at the cells, has the
 // right sign and lever.
 TEST(PhysicsField, ATiltedSlabRightsItself) {

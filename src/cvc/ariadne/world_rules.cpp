@@ -115,13 +115,14 @@ bool names(const Value &v, const std::string &where, std::vector<std::string> &o
 std::string parse_body(const Value &v, const std::string &where, avatar_body &body,
                        std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return where + " expects a map (mass:, width:, height:)";
+    return where + " expects a map (mass:, width:, height:, density:)";
   std::string why;
   for (const auto &[key, val] : v.entries) {
-    double *field = key == "mass"     ? &body.mass
-                    : key == "width"  ? &body.width
-                    : key == "height" ? &body.height
-                                      : nullptr;
+    double *field = key == "mass"      ? &body.mass
+                    : key == "width"   ? &body.width
+                    : key == "height"  ? &body.height
+                    : key == "density" ? &body.density
+                                       : nullptr;
     if (!field) {
       warn(warnings, where + " unknown key '" + key + "', ignored");
       continue;
@@ -1020,8 +1021,8 @@ std::string check_world_rules(const world_rules &r) {
       continue;
     }
     if (!finite_positive(a.body.mass) || !finite_positive(a.body.width) ||
-        !finite_positive(a.body.height))
-      return at + ": body mass, width and height must be positive";
+        !finite_positive(a.body.height) || !finite_positive(a.body.density))
+      return at + ": body mass, width, height and density must be positive";
     if (a.controllers.empty())
       return at + " allows no controller";
     for (const std::string &c : a.controllers)

@@ -7649,7 +7649,7 @@ on_tick: |
   world:
     avatars:
       archetypes:                  # every avatar has the first, for now
-        person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@1] }
       policy:
         max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
         allow_vertical: false
