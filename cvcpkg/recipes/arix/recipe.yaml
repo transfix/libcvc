@@ -39,7 +39,8 @@ recipe:
 # wamr_runtime.cpp, G3): cvc_find_ariadne_wasm finds no wasmtime there and takes the wamr package's
 # static libiwasm, with the binaryen package's static libbinaryen, which reads a guest's text and
 # transforms a guest that wasn't transformed at install as it loads. Both are linked in, so neither is
-# a runtime dependency. The BSD rows build on the cvcpkg.org fleet from the release tag's tarball,
+# a runtime dependency. NetBSD has no binaryen (its base libstdc++ is GCC 10's, older than binaryen
+# needs), so arix there runs guests transformed at install, and no .wat. The BSD rows build on the cvcpkg.org fleet from the release tag's tarball,
 # against the fleet's libcvc and pycvc-cp312 (see the libcvc recipe's matrix). Haiku has no row: it
 # has no python312.
 #
@@ -76,7 +77,7 @@ depends:
     - name: wamr
       platforms: [freebsd, openbsd, netbsd]
     - name: binaryen
-      platforms: [freebsd, openbsd, netbsd]
+      platforms: [freebsd, openbsd]
   runtime:
     - name: libcvc
       version: "==4.0.10"
