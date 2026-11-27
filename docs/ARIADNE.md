@@ -2868,7 +2868,9 @@ scene:
     moves), so a joiner on a generated world or a city stands on it. One with no ground beneath
     it comes back once `respawn_depth` (10 m) below where it last stood, or below
     `respawn_below_z` (-10 m): at a spawn point, or where it joined when the world has none. One
-    over ground never respawns, however low the ground.
+    over ground never respawns, however low the ground. When the ground of the world on changes
+    (a switch, a Regenerate, a dataset loaded: `SceneWorld::ground_rev`), everyone respawns at the
+    next step: drives end, and each avatar goes to a spawn point by the policy, on the new ground.
   - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
     world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
     square, at most `suggest.count`, free in the grid and out of water deeper than a ford, each

@@ -232,6 +232,11 @@ public:
   // one. The bodies take a new world at the next sync().
   std::shared_ptr<const cvc::world::world_geometry>
   world_geometry(const std::string &id, std::uint64_t *revision = nullptr) const;
+  // Goes up each time the ground of the world on changes: a switch to another world (set_world),
+  // or a new world's bodies put in for one of its nodes (a generated world's Regenerate, a
+  // dataset loaded or reloaded). A water's sea changing doesn't count. A server's holon respawns
+  // everyone when it moves (holon::attach_world).
+  std::uint64_t ground_rev() const noexcept;
   // That world as the navigator sees it (cvc::nav::world_grid): `cell` m samples over its terrain,
   // or a square `half` m either side of the terrain's centre. A terrain node's grid is its height
   // field's; a node with a body of its own is a flat ground: an open walled grid over its
