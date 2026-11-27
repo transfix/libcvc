@@ -494,10 +494,15 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       const float ch = std::cos(thi), sh = std::sin(thi);
       float nx, ny, d, gov_rr;
       float Fbar_x, Fbar_y, Frep_x = 0.0f, Frep_y = 0.0f;
+      // The tail's disc's clearance and its wall's normal (the plant arm's room to back up).
+      float d_tail = 3.0e38f, nx_tail = 0.0f, ny_tail = 0.0f;
       if (!has_fp) {
         float phi;
         sample_unit(f, plane, ox, oy, phi, nx, ny);
         d = phi - rr_i;
+        d_tail = d;
+        nx_tail = nx;
+        ny_tail = ny;
         const float ipc = ipc_dbdd(d, d_hat);
         Fbar_x = -(ali * ipc) * nx;
         Fbar_y = -(ali * ipc) * ny;
@@ -522,6 +527,11 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           float bphi, bnx, bny;
           sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
           const float bd = bphi - body_rr_i;
+          if (b == 0) { // a plant's discs run from its tail to its nose
+            d_tail = bd;
+            nx_tail = bnx;
+            ny_tail = bny;
+          }
           const float bipc = ipc_dbdd(bd, d_hat);
           const float alg = v.body_gain == 1.0f ? ali : ali * v.body_gain;
           Fbar_x += -(alg * bipc) * bnx;
@@ -690,6 +700,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         delta = delta + k_steer * std::tanh(Frep_x * (-sh) + Frep_y * ch); // F_rep . left
       }
       delta = std::min(std::max(delta, -dmax), dmax);
+      const float delta_want = delta; // before the actuator's reach (a tight turn's)
       if (rate_limited)
         delta = within_reach(delta);
 
@@ -724,7 +735,12 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
               0.1f * ab_p);
         v_stop = std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * ds + 1e-24f) - ab_p * tau_p;
       }
-      const float motion_sign = spi >= 0.0f ? 1.0f : -1.0f;
+      // With tight turns the plant arm takes the wall ahead whatever way its measured speed points:
+      // v_lim caps only the forward speed, and a vehicle at rest reads a few mm/s either way on its
+      // springs, so by the sign a stop at a wall read as backing away from it, and the next tick's
+      // command was full ahead into it.
+      const bool turns = pd && pd->backing;
+      const float motion_sign = (turns || spi >= 0.0f) ? 1.0f : -1.0f;
       float approach = -(nx * ch + ny * sh) * motion_sign;
       approach = std::min(std::max(approach, 0.0f), 1.0f);
       const float v_stop_dir = approach > 0.05f ? v_stop / std::max(approach, 0.05f) : vmax;
@@ -784,6 +800,35 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         if (nose_blocked) {
           a_long = (-0.10f - spi) / hdt;
           delta = -delta;
+          if (turns)
+            pd->backing[i] = 0;
+        } else if (turns) {
+          // The plant arm's tight turn (plant_drive::backing), a three-point turn. The kinematic
+          // arm creeps into the wall's margin to turn (v_floor), which a vehicle with mass and a
+          // turning circle cannot: it stood at the wall. Held as state, not decided afresh each
+          // tick, so the jitter of a vehicle at rest, and the steer slewing over, do not flip it
+          // between ahead and astern (each flip an automatic gearbox's shift, with no drive).
+          // How fast it may back up: as fast as it stops short of the wall nearest its tail,
+          // over the part of backing that closes on it (none when that wall is ahead of it).
+          const float ds_tail = std::max(d_tail - 0.5f * gov_rr, 0.0f);
+          const float closing_tail =
+              std::min(std::max(nx_tail * ch + ny_tail * sh, 0.0f), 1.0f); // backing: -heading
+          const float v_tail =
+              std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * ds_tail + 1e-24f) -
+              ab_p * tau_p;
+          const float back = std::min(0.10f, closing_tail > 0.05f ? v_tail / closing_tail : 0.10f);
+          std::uint8_t &bk = pd->backing[i];
+          if (bk) {
+            if (ds >= L || std::fabs(delta_want) < 0.5f * dmax || back <= 0.01f || head_on <= 0.0f)
+              bk = 0; // room enough ahead, turned enough, no room behind, or no wall ahead
+          } else if (std::fabs(delta_want) >= 0.7f * dmax && head_on > 0.05f &&
+                     v_stop_dir < 0.08f && spi < 0.02f && back > 0.01f) {
+            bk = 1;
+          }
+          if (bk) {
+            a_long = (-back - spi) / hdt;
+            delta = -delta_want;
+          }
         }
       }
       a_long = std::min(std::max(a_long, -a_max_e), a_max_e);

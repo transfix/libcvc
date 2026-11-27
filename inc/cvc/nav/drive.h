@@ -161,6 +161,15 @@ struct plant_drive {
   float *steer_cmd = nullptr; // out: delta_cmd (rad)
   float *accel_cmd = nullptr; // out: a_cmd (normalized / s^2)
   float *v_stop = nullptr;    // out: the stopping speed the command respects
+  // In/out, [n], may be null: each agent's tight turn (sim_world::config::plant_turns), 1 while
+  // it backs up. A vehicle that must turn hard (its wanted steer at least 0.7 of the lock) with a
+  // wall ahead within its stopping distance (it could not creep round at the turn's 0.08) backs
+  // up at up to 0.10 with its wheels the other way, no faster than it stops short of what is
+  // behind its tail, until it has a wheelbase of room ahead, the turn needs under half the lock,
+  // or no wall is ahead: its next leg forward turns it on (a three-point turn). With it the
+  // stopping governor takes the wall ahead whatever way the measured speed points (v_lim caps
+  // only the forward speed). Null: neither, as before.
+  std::uint8_t *backing = nullptr;
 };
 
 // Terrain's soft grade force and hard barrier (P5 H1, cvc/nav/terrain.h): a material_stack

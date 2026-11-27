@@ -2412,7 +2412,7 @@ scene:
 
     | `plant:` | The vehicle | Its body in the world |
     |---|---|---|
-    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis: its body box, and a Humvee's cabin up to its roof (1.88 m), so it rests on its roof or side at its outline |
     | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
     | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
     | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
@@ -2714,8 +2714,10 @@ scene:
       the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
       weights it drives on the built-in net, and the host's log says why once.
     - `metric:` is what it plans with. `trained` is the trainer's vehicle (a 3 m disc and 18 m/s,
-      the bicycle the weights learned on; its plants plan with it too). `vehicle` is each plant's
-      own size and limits. `policy` (the default) follows the policy: `trained` while weights
+      the bicycle the weights learned on; its kinematic and dynamic plants plan with it too, but a
+      Jolt vehicle plans with its own size and limits on either metric: the trainer's accelerates
+      at 30 m/s^2, corners at 2 g and misses a Humvee's nose). `vehicle` is each plant's own size
+      and limits. `policy` (the default) follows the policy: `trained` while weights
       drive it or are on their way, `vehicle` on the built-in net, its own or a fallback's.
       `vehicles.fleets.<fleet>.metric` switches it, and `.plans` says which it plans with now.
       A change makes its navigators again, its vehicles at rest where they are.
@@ -2725,7 +2727,9 @@ scene:
       `vehicles.fleets.<fleet>.plant` switches them live, written as `jolt`, `jolt, kinematic`,
       `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
       vehicles start at rest where they are on the new plants. A plant or team that is not one is
-      said in `vehicles.status` and changes nothing.
+      said in `vehicles.status` and changes nothing. A fleet's Jolt vehicle that has lain on its
+      side or roof, slow, for 2 s is set back on its wheels where it lies: its heading kept,
+      upright on the ground and at rest (`nav_plant_options::right_after`).
     - A view draws a fleet from `WorldVehicles::poses(fleet)`, not from state: a snapshot of its
       placed vehicles as the last step left them (ids, chassis centres, headings, speeds, teams,
       the box they lie in and the tick), made each step and read from any thread without a lock.

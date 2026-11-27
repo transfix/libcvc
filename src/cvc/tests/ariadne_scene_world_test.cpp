@@ -3036,6 +3036,181 @@ scene:
   EXPECT_GT(apart, piled);
 }
 
+// A fleet of Humvees on Jolt drives through a city of blocks: nearly all of them get going and
+// some arrive. Two things stopped them where they met a block. The plant turned nav's stop at a
+// few cm/s into a change of gear, ahead or astern by the sign of the springs' jitter, and an
+// automatic gearbox's shift leaves the clutch out for most of a second, so they sat idling, the
+// gear flipping dozens of times. And nav's plant arm could not turn where it had no room to creep
+// round, as a vehicle with a turning circle cannot: now it backs up with its wheels the other way
+// (sim_world::config::plant_turns). Without the fixes 6 to 7 of these 12 moved, the gear of one
+// flipping 16 to 35 times in 25 s.
+TEST(AriadneWorldVehicles, AJoltFleetDrivesThroughABlockCity) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  std::string blocks;
+  for (const int x : {-38, 0, 38})
+    for (const int y : {-38, 0, 38})
+      if (x != 0 || y != 0) // a plaza in the middle
+        blocks += "    - { node: block_" + std::to_string(x + 38) + "_" + std::to_string(y + 38) +
+                  ", world: blocks, body: static, source: { box: { size: [26, 26, 12] } }, "
+                  "transform: { position: [" +
+                  std::to_string(x) + ", " + std::to_string(y) + ", 6] } }\n";
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_jolt_blocks", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: jolt, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: pack, archetype: v, count: 12, spawn: scattered, seed: 7, rally: { count: 2 },
+          policy: builtin, collide: true }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: blocks, cell: 2 }
+  nodes:
+    - node: ground
+      world: blocks
+      source: { box: { size: [140, 140, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)" + blocks)
+               .string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  ASSERT_NE(v, nullptr);
+  art.drain();
+  const std::vector<entity_info> e0 = v->entities();
+  ASSERT_EQ(e0.size(), 12u);
+  std::vector<double> gone(e0.size(), 0.0);
+  std::vector<int> flips(e0.size(), 0), gear(e0.size(), 0);
+  std::vector<bool> arrived(e0.size(), false);
+  const int per_s = static_cast<int>(std::lround(1.0 / cvc::kSimQuantum));
+  for (int q = 0; q < 25 * per_s; ++q) {
+    art.step_world(1);
+    if (q % 6 != 5) // 20 looks a second
+      continue;
+    art.drain();
+    const std::vector<entity_info> es = v->entities();
+    ASSERT_EQ(es.size(), e0.size());
+    for (std::size_t k = 0; k < es.size(); ++k) {
+      gone[k] = std::max(gone[k], std::hypot(es[k].x - e0[k].x, es[k].y - e0[k].y));
+      arrived[k] =
+          arrived[k] || std::hypot(es[k].goal_x - es[k].x, es[k].goal_y - es[k].y) < es[k].reach;
+      const int g = es[k].gear > 0 ? 1 : (es[k].gear < 0 ? -1 : 0); // ahead, astern, neutral
+      if (g != 0 && gear[k] != 0 && g != gear[k])
+        ++flips[k];
+      if (g != 0)
+        gear[k] = g;
+    }
+  }
+  int moved = 0, there = 0, most_flips = 0;
+  for (std::size_t k = 0; k < e0.size(); ++k) {
+    moved += gone[k] > 10.0 ? 1 : 0;
+    there += arrived[k] ? 1 : 0;
+    most_flips = std::max(most_flips, flips[k]);
+  }
+  std::printf("[jolt fleet] in 25 s %d of 12 moved more than 10 m, %d arrived; the most changes "
+              "between ahead and astern %d\n",
+              moved, there, most_flips);
+  EXPECT_GE(moved, 11) << "nearly all get going";
+  EXPECT_GE(there, 2) << "and some arrive";
+  EXPECT_LE(most_flips, 12) << "a gear flipping back and forth is a vehicle stuck at a block";
+}
+
+// A fleet's Jolt vehicle that has lain on its roof or its side for 2 s is set back on its wheels
+// where it lay (nav_plant_options::right_after): its heading kept, upright on the ground and at
+// rest. One on its wheels is left alone, and one on its roof is not righted before its 2 s.
+TEST(AriadneWorldVehicles, AJoltFleetsVehicleOnItsRoofIsSetBackOnItsWheels) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_righting", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: jolt, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: pack, archetype: v, count: 3, spawn: scattered, seed: 5, controller: none,
+          policy: builtin, keys: all }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)")
+               .string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  ASSERT_NE(v, nullptr);
+  art.drain();
+  const int per_s = static_cast<int>(std::lround(1.0 / cvc::kSimQuantum));
+  art.step_world(per_s); // settled on their wheels
+  art.drain();
+  std::vector<entity_info> es = v->entities();
+  ASSERT_EQ(es.size(), 3u);
+  cvc::physics::world &w = art.scene_world()->world();
+  const auto up_z = [&](const entity_info &e) {
+    const cvc::physics::quat q = w.state(e.chassis).rotation;
+    return 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
+  };
+  const auto yaw_of = [&](const entity_info &e) {
+    const cvc::physics::quat q = w.state(e.chassis).rotation;
+    return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  };
+  // The first onto its roof, the second onto its right side, each 1.5 m up where it stood.
+  const double z_ride = w.state(es[2].chassis).position.z;
+  std::array<double, 3> yaw{}, x{}, y{};
+  for (int k = 0; k < 3; ++k) {
+    EXPECT_GT(up_z(es[k]), 0.98) << k;
+    yaw[k] = yaw_of(es[k]);
+    const cvc::physics::body_state s = w.state(es[k].chassis);
+    x[k] = s.position.x;
+    y[k] = s.position.y;
+    if (k == 2)
+      continue;
+    const double roll = k == 0 ? 3.14159265358979323846 : 0.5 * 3.14159265358979323846;
+    const cvc::physics::quat qy{std::cos(0.5 * yaw[k]), 0.0, 0.0, std::sin(0.5 * yaw[k])};
+    const double c = std::cos(0.5 * roll), sr = std::sin(0.5 * roll); // about its own length
+    cvc::physics::body_state f = s;
+    f.rotation = {qy.w * c, qy.w * sr, qy.z * sr, qy.z * c};
+    f.position.z = s.position.z + 1.5;
+    f.linear_velocity = f.angular_velocity = {};
+    w.set_state(es[k].chassis, f);
+  }
+  art.step_world(per_s + per_s / 2); // down, but not yet for 2 s
+  art.drain();
+  es = v->entities();
+  ASSERT_EQ(es.size(), 3u);
+  EXPECT_LT(up_z(es[0]), -0.9) << "on its roof";
+  EXPECT_LT(std::fabs(up_z(es[1])), 0.2) << "on its side";
+  art.step_world(2 * per_s);
+  art.drain();
+  es = v->entities();
+  for (int k = 0; k < 3; ++k) {
+    const cvc::physics::body_state s = w.state(es[k].chassis);
+    EXPECT_GT(up_z(es[k]), 0.98) << k << ": on its wheels";
+    EXPECT_NEAR(std::remainder(yaw_of(es[k]) - yaw[k], 2.0 * 3.14159265358979323846), 0.0, 0.05)
+        << k;
+    EXPECT_LT(std::hypot(s.position.x - x[k], s.position.y - y[k]), 1.5) << k << ": where it lay";
+    EXPECT_NEAR(s.position.z, z_ride, 0.1) << k << ": on the ground";
+    EXPECT_LT(std::fabs(es[k].speed), 0.2) << k;
+  }
+  EXPECT_LT(std::hypot(w.state(es[2].chassis).position.x - x[2],
+                       w.state(es[2].chassis).position.y - y[2]),
+            0.05)
+      << "the one on its wheels was left alone";
+}
+
 // A fleet's size key (vehicles.fleets.<f>.size) starts at its count: writing it adds vehicles
 // after its last or takes its last ones off, and the fleet is laid out again from its seed. A
 // size out of range is held to 1..256, and the key says what the fleet holds.

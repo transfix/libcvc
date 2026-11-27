@@ -90,6 +90,13 @@ public:
     // pull can hold a speed: a Humvee-sized agent parked at 5.5 m/s drove on to the map's edge.
     bool stop_at_goal = false;
     bool park_hold = false;
+    // THE PLANT ARM'S TIGHT TURNS (default false = OFF, byte-identical; plant_drive::backing): a
+    // vehicle on a plant that must turn hard with a wall within its stopping distance ahead backs
+    // up with its wheels the other way until it has a wheelbase of room (a three-point turn), and
+    // the stopping governor takes the wall ahead whatever way its measured speed points. Without
+    // it a Humvee on Jolt that met a wall it had to turn along stood there: the kinematic arm
+    // creeps into the wall's margin to turn, which a vehicle with mass and a turning circle cannot.
+    bool plant_turns = false;
     int sense_every = 4;
     bool freeze_sense = false; // static known map: skip the sense/rebuild path
     double l_occ = 2.2, l_free = -1.4, l_clamp = 8.0;
@@ -1017,6 +1024,7 @@ private:
   bool ov_any_ = false;
   bool pl_has_a_max_ = false, pl_has_vmax_ = false, pl_has_a_lat_ = false, pl_fp_ = false;
   std::vector<float> pl_steer_cmd_, pl_accel_cmd_, pl_v_stop_; // [n], the last tick's
+  std::vector<std::uint8_t> pl_backing_; // [n], each one's tight turn (config::plant_turns)
   std::vector<plant_state> pl_start_;                          // [n], the tick's start
   std::vector<drift_sample> pl_drift_;                         // [n], the last tick's
   std::vector<plant_sample> pl_sample_;                        // [n], the last tick's

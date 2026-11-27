@@ -74,6 +74,9 @@ constexpr float kCollideGap = 3.6f;
 constexpr float kAvoidGain = 1.5f;
 constexpr float kAvoidSide = 0.6f;
 constexpr float kAvoidSideRadius = 20.0f; // the turn's look-ahead, in vehicle radii
+// A fleet's Jolt vehicle that has lain on its side or roof, slow, this long (s) is set back on its
+// wheels where it is (nav_plant_options::right_after).
+constexpr double kRightAfter = 2.0;
 
 std::string num(double v) {
   char buf[32];
@@ -1409,13 +1412,19 @@ struct WorldVehicles::impl {
       f->sim->set_thread_pool(&app->computePool());
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
-    o.plan_with_vehicle = !f->trained;
+    // A Jolt vehicle plans with its own envelope and size on either metric (the policy's
+    // coefficients are the trained net's all the same): the trainer's vehicle accelerates at
+    // 30 m/s^2, corners at 2 g and is a disc at the rear axle that misses a Humvee's nose, so on
+    // it a Jolt fleet ran its noses into the blocks and rolled over on the terrain's hills.
+    o.plan_with_vehicle = !f->trained || plant == "jolt";
     o.ground_bodies = ground;
     std::shared_ptr<const cvc::nav::world_grid> g = grid;
     std::shared_ptr<const cvc::height_field> t = terrain;
     o.ground_height = [g, t](double x, double y) { return ground_at(g.get(), t.get(), x, y); };
     const std::vector<ph::vehicle_desc> first{ph::vehicle_desc::humvee()};
     if (plant == "jolt") {
+      // A vehicle that rolled onto its side or roof is set back on its wheels after 2 s there.
+      o.right_after = kRightAfter;
       f->jolt = std::make_unique<ph::nav_plant>(*world, first, std::move(o));
       f->sim->set_plant(f->jolt.get());
     } else if (plant == "dynamic") {
@@ -1744,6 +1753,9 @@ struct WorldVehicles::impl {
     // never were all at their goals at once.
     cfg.stop_at_goal = true;
     cfg.park_hold = true;
+    // A vehicle on a plant turns in a tight spot as a real one does, backing up with its wheels
+    // the other way: a Humvee on Jolt that met a block it had to turn along stood at it.
+    cfg.plant_turns = true;
     // Vehicles steer around each other: the nav demos' separation for the largest vehicle (the
     // other plants' vehicles join in as foreign agents at each tick, navigator_tick).
     if (avoid) {

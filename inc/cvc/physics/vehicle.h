@@ -195,7 +195,15 @@ struct wading_desc {
 struct vehicle_desc {
   vec3 half_extents{2.25, 1.0, 0.5};   // the chassis box
   vec3 center_of_mass{0.0, 0.0, -0.3}; // body-local
-  double mass = 2000.0;                // kg, the whole vehicle
+  // A cabin on the chassis box, up to the roof: a second box the chassis collides with (the ground,
+  // buildings, other vehicles), so a vehicle on its roof or side rests on its outline and a wall
+  // stops it there. Its half extents and its centre, body-local; zero half extents: none. Only the
+  // collision shape: the mass, the centre of mass and the inertia stay the chassis box's (the
+  // handling the plants fit, dyn_bike_si_of and dyn4_si_of, reads the box), and the fields, the
+  // wading and the navigator's footprint see the box alone.
+  vec3 cabin_half_extents{0.0, 0.0, 0.0};
+  vec3 cabin_center{0.0, 0.0, 0.0};
+  double mass = 2000.0; // kg, the whole vehicle
   std::vector<axle_desc> axles;
 
   // Steering: the bicycle angle's limit and slew rate.

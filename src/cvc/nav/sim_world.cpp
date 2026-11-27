@@ -327,6 +327,8 @@ const veh_params &sim_world::drive_vehicle(veh_params &vplant, plant_drive &pdri
     pdrive.steer_cmd = pl_steer_cmd_.data();
     pdrive.accel_cmd = pl_accel_cmd_.data();
     pdrive.v_stop = pl_v_stop_.data();
+    if (cfg_.plant_turns && pl_backing_.size() == static_cast<std::size_t>(n_))
+      pdrive.backing = pl_backing_.data();
     if (pl_mod_.tire_gain > 0.0f || pl_mod_.tip_gain > 0.0f)
       pdrive.gamma_scale = pl_gamma_scale_.data();
     if (pl_mod_.tip_gain > 0.0f)
@@ -1035,6 +1037,8 @@ void sim_world::step(int num_threads) {
   if (plant_) {
     const float dt = cfg_.veh.dt;
     for (int i = 0; i < n_; ++i) {
+      if (parked_[i] && !pl_backing_.empty())
+        pl_backing_[i] = 0; // a parked one's tight turn is over
       if (parked_[i] && !(ov_any_ && ov_on_[i])) {
         // Parked: brake to a stop within the tick, at most at what the vehicle's brakes achieve
         // (plant_limits::a_brake; a_max without one), then hold. At a_max (2 m/s^2 on the
@@ -1930,6 +1934,7 @@ void sim_world::set_plant(vehicle_plant *p) {
     pl_start_.clear();
     pl_drift_.clear();
     pl_sample_.clear();
+    pl_backing_.clear();
     pl_max_steer_ = 0.0f;
     pl_has_a_max_ = pl_has_vmax_ = pl_has_a_lat_ = pl_fp_ = false;
     return;
@@ -1944,6 +1949,7 @@ void sim_world::set_plant(vehicle_plant *p) {
   pl_hard_scale_.assign(n, 1.0f);
   pl_start_.assign(n, plant_state{});
   pl_drift_.assign(n, drift_sample{});
+  pl_backing_.assign(n, 0);
   pl_sample_.clear(); // filled each tick when the plant measures its vehicles
   // The plant takes the agents where they are, at rest.
   std::vector<plant_state> start(n);
@@ -2305,6 +2311,7 @@ template <class F> void sim_world::each_agent_column(F &&f) {
   f(pl_hard_scale_, 1, 1.0f, false, plant);
   f(pl_start_, 1, plant_state{}, false, plant);
   f(pl_drift_, 1, drift_sample{}, false, plant);
+  f(pl_backing_, 1, std::uint8_t{0}, false, plant);
   f(pl_sample_, 1, plant_sample{}, false, false); // filled each tick when the plant measures
 }
 
