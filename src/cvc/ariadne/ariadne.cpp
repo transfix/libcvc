@@ -6430,8 +6430,11 @@ std::vector<std::string> Runtime::Impl::mount_list(const std::vector<std::string
   return out;
 }
 
-// A URI as the slot compares it: a local path made absolute against `base` and normalized; any
-// other scheme's as written.
+// A URI as the slot compares it: a local path made absolute against `base` and made canonical the
+// way the resolver makes a document's own path (so `base` and the entry's path are in one form:
+// on Windows a short name such as RUNNER~1 is spelled out, and a link is followed). A path written
+// with a trailing slash keeps it, so an allow: prefix matches only under that directory. Any other
+// scheme's as written.
 std::string Runtime::Impl::mount_norm(const std::string &uri, const std::string &base) const {
   const Uri u = parse_uri(uri);
   if (u.scheme != "file")
@@ -6439,7 +6442,13 @@ std::string Runtime::Impl::mount_norm(const std::string &uri, const std::string 
   std::filesystem::path p(u.path);
   if (p.is_relative() && !base.empty())
     p = std::filesystem::path(base) / p;
-  return p.lexically_normal().generic_string();
+  std::error_code ec;
+  const std::filesystem::path canon = std::filesystem::weakly_canonical(p, ec);
+  std::string out = (ec ? p.lexically_normal() : canon).generic_string();
+  const bool dir = !u.path.empty() && (u.path.back() == '/' || u.path.back() == '\\');
+  if (dir && (out.empty() || out.back() != '/'))
+    out += '/';
+  return out;
 }
 
 // 4.12 who a mount runs as, from where its bytes came: `local` for a cvc:// or state:// document

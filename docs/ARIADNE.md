@@ -6488,8 +6488,10 @@ with a digit). `view`, `background`, `grants` and `argv` are SH3, SH6 and SH7's.
   resident when the program is the same, as a static `load:` does on a reload.
 - **What may be mounted.** Any local file or URL, unless `allow:` lists URI prefixes (literally,
   or `{ bind: <key> }`: the key's children's values, or its own). A local prefix is relative to
-  the slot's document. A refused entry is posted to the feed (§5.24), its `status` `refused` and
-  its `error` saying why.
+  the slot's document. Local paths are compared in canonical form, the form the document's own
+  path has: links followed, and Windows short names such as `RUNNER~1` spelled out. A prefix that
+  ends in `/` matches only under that directory. A refused entry is posted to the feed (§5.24),
+  its `status` `refused` and its `error` saying why.
 - **`requires:` at mount time.** The document goes through the scan a static load's modules go
   through (§5.7), and where that scan would fail the load or warn, the mount is refused instead,
   naming what is missing: a `requires:` entry this host lacks, a function a program calls that it
