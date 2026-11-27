@@ -1958,7 +1958,9 @@ beside walk, car and boat (OW6a); its hints are in the Controls window.
   publishes no density, so a client from after it predicts a person where that relay floats a cork.
 - **As built (OW9c, walker@2; 2026-11-27).** `avatar_world::set_swim` (`avatar_swim`, the knobs
   above, from walker@2's params) turns it on; a holon does so when the avatar's controller is
-  walker@2, and the default rules and the stock worlds now name walker@2 with every knob stated.
+  walker@2, and the default person and the stock worlds now name walker@2 with every knob stated.
+  walker@1 stays defined in the default rules, first as it was, so a document whose archetype names
+  it still runs (arisrv's own `world_rules.ari` does).
   Each drive reads the water at the feet (`world::water_at`, less its own wake) and whether they
   stand on something, and picks the motion from that state alone, with no memory of the last, so a
   replay picks the same: swimming over `swim_depth`, or with the feet off the bed in water over

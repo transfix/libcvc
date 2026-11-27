@@ -129,7 +129,8 @@ world:
   EXPECT_EQ(r.archetypes[1].body.width, 0.5) << "a body key left out keeps the default";
   EXPECT_EQ(r.archetypes[1].controllers, std::vector<std::string>{"walker@2"})
       << "and so do controllers left out";
-  ASSERT_EQ(r.controllers.size(), 2u) << "the document's controllers join the default walker@2";
+  ASSERT_EQ(r.controllers.size(), 3u)
+      << "the document's controllers join the defaults walker@1 and walker@2";
   EXPECT_EQ(r.controller().id, "stroll@1") << "the avatar's: the first its archetype allows";
   EXPECT_EQ(r.controller().kernel, "walker");
   EXPECT_EQ(r.controller().version, 1) << "the version from the id";
@@ -367,15 +368,15 @@ TEST(RoomRulesTest, AShorterListLeavesNothingBehind) {
   ca::avatar_archetype extra;
   extra.id = "extra";
   r.archetypes.push_back(extra);
-  r.controllers[0].params = {{"walk_speed", 2.0}, {"turn", 1.0}};
+  r.controllers.back().params = {{"walk_speed", 2.0}, {"turn", 1.0}}; // walker@2, the person's
   rc::write_room_rules(app, "r", r);
   r.archetypes.pop_back();
-  r.controllers[0].params = {{"walk_speed", 2.5}};
+  r.controllers.back().params = {{"walk_speed", 2.5}};
   rc::write_room_rules(app, "r", r);
   const ca::world_rules back = rc::read_room_rules(app, "r");
   EXPECT_EQ(back.archetypes.size(), 1u);
-  ASSERT_EQ(back.controllers.size(), 1u);
-  EXPECT_EQ(back.controllers[0].params.size(), 1u);
+  ASSERT_EQ(back.controllers.size(), 2u) << "walker@1 and walker@2";
+  EXPECT_EQ(back.controllers.back().params.size(), 1u);
   EXPECT_EQ(back.controller().param("walk_speed", 0.0), 2.5);
   EXPECT_TRUE(back == r);
 }

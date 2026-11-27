@@ -371,7 +371,7 @@ TEST(HolonSyncTest, TheRulesReachEveryHolonAndARestartedRelaysAreTakenAfresh) {
   cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
   rules.policy.max_speed = 3.0;
   rules.archetypes[0].body.height = 1.9;
-  rules.controllers[0].params["walk_speed"] = 1.5;
+  rules.controllers.back().params["walk_speed"] = 1.5; // walker@2, the person's
   rules.physics.gravity = vec3{0.0, 0.0, -3.7};
   rc::write_room_rules(server_app, room, rules);
   rc::room_join(a_app, room, "A");

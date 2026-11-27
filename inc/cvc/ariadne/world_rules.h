@@ -355,7 +355,10 @@ struct world_rules {
   world_physics physics;
   std::vector<avatar_archetype> archetypes{avatar_archetype{}};
   avatar_policy policy;
-  std::vector<avatar_controller> controllers{avatar_controller{}};
+  // walker@1 stays defined beside walker@2 (OW9c), first as it always was, so a document whose
+  // archetype names walker@1 still runs; the default person allows walker@2.
+  std::vector<avatar_controller> controllers{
+      avatar_controller{"walker@1", "walker", 1, {{"walk_speed", 2.0}}}, avatar_controller{}};
   // The vehicles a world offers (world: vehicles: archetypes:), none by default. The relay does
   // not read them yet; a local world runtime (SceneWorld) spawns them.
   std::vector<vehicle_archetype> vehicles;
@@ -414,7 +417,7 @@ std::string check_world_rules(const world_rules &rules);
 //         allow_vertical: false
 //         energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
 //                   reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
-//     controllers:                  # added to (or replacing, by id) the default walker@2
+//     controllers:                  # added to (or replacing, by id) the defaults walker@1, @2
 //       walker@2: { kernel: walker, version: 2, params: { walk_speed: 2.0, wade_depth: 0.3,
 //                   swim_depth: 1.2, wade_slow: 0.6, swim_speed: 1.0, swim_sprint: 1.8,
 //                   swim_force: 300, dive_speed: 0.8, climb_height: 0.6, swim_cost: 0.8 } }
