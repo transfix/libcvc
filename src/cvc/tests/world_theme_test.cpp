@@ -85,7 +85,7 @@ void add_real(model_catalog &c) {
     c.add(parse_model_asset(sidecar(r.name, r.kind, r.lo, r.hi), ""));
 }
 
-const world_theme &builtin(const std::string &name) {
+world_theme builtin(const std::string &name) {
   for (const world_theme &t : builtin_world_themes())
     if (t.name == name)
       return t;

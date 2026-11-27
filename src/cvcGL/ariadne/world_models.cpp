@@ -40,14 +40,13 @@ namespace gl {
 namespace ariadne {
 namespace {
 
+// The app's loaded meshes, keyed by LOD 0's path; held weakly, so a mesh lives as long as its
+// instances do.
 struct mesh_cache {
+  static constexpr const char *app_slot = "cvc.gl.ariadne.model_meshes";
   std::mutex m;
-  std::map<std::string, std::weak_ptr<model_mesh>> by_file; // LOD 0's path
+  std::map<std::string, std::weak_ptr<model_mesh>> by_file;
 };
-mesh_cache &cache() {
-  static mesh_cache c;
-  return c;
-}
 
 // The asset's files: its own directory when its LOD 0 is there, else the catalog's entry's.
 cvc::world::model_asset located(cvc::app &app, const cvc::world::model_asset &a) {
@@ -101,9 +100,10 @@ std::shared_ptr<model_mesh> load_model_mesh(cvc::app &app, const cvc::world::mod
       *error = "model '" + a.name + "' has no LODs";
     return nullptr;
   }
+  mesh_cache &cache = app.slot<mesh_cache>();
   {
-    std::lock_guard<std::mutex> g(cache().m);
-    if (auto hit = cache().by_file[key].lock())
+    std::lock_guard<std::mutex> g(cache.m);
+    if (auto hit = cache.by_file[key].lock())
       return hit;
   }
   auto mesh = std::make_shared<model_mesh>();
@@ -135,8 +135,8 @@ std::shared_ptr<model_mesh> load_model_mesh(cvc::app &app, const cvc::world::mod
     }
   }
   mesh->donors.resize(mesh->pyr.rungs.size());
-  std::lock_guard<std::mutex> g(cache().m);
-  std::weak_ptr<model_mesh> &slot = cache().by_file[key];
+  std::lock_guard<std::mutex> g(cache.m);
+  std::weak_ptr<model_mesh> &slot = cache.by_file[key];
   if (auto raced = slot.lock()) // another job read it meanwhile: share that one
     return raced;
   slot = mesh;

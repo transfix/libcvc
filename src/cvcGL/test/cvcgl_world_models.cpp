@@ -24,8 +24,8 @@
 //
 //   * the glTF frame (+Y up, front +Z) turns into the world's (+Z up, front +Y), points and
 //     normals, and an instance's matrix scales, yaws and translates;
-//   * an asset's LODs read from its glbs into one ladder, with the sidecar's errors, cached by file;
-//     a missing coarse rung ends the ladder, a missing LOD 0 is an error;
+//   * an asset's LODs read from its glbs into one ladder, with the sidecar's errors, cached on
+//     the app by file; a missing coarse rung ends the ladder, a missing LOD 0 is an error;
 //   * every placed copy is a LodGraphicsNode on that ladder whose rungs draw from the first copy's
 //     arrays, its errors scaled with it, choosing its rung by its own distance.
 //
@@ -74,8 +74,9 @@ void write_box_glb(const fs::path &p, int tris) {
     uv[i][0] = pos[i][0] + 0.5f;
     uv[i][1] = pos[i][2] + 0.5f;
   }
-  const std::uint32_t faces[12][3] = {{0, 1, 3}, {0, 3, 2}, {4, 6, 7}, {4, 7, 5}, {0, 4, 5}, {0, 5, 1},
-                                      {2, 3, 7}, {2, 7, 6}, {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
+  const std::uint32_t faces[12][3] = {{0, 1, 3}, {0, 3, 2}, {4, 6, 7}, {4, 7, 5},
+                                      {0, 4, 5}, {0, 5, 1}, {2, 3, 7}, {2, 7, 6},
+                                      {0, 2, 6}, {0, 6, 4}, {1, 5, 7}, {1, 7, 3}};
   std::vector<unsigned char> bin(sizeof pos + sizeof uv + 12u * tris);
   std::memcpy(bin.data(), pos, sizeof pos);
   std::memcpy(bin.data() + sizeof pos, uv, sizeof uv);

@@ -183,10 +183,7 @@ void check(bool ok, const std::string &what, const std::string &msg) {
 
 } // namespace
 
-const std::vector<world_theme> &builtin_world_themes() {
-  static const std::vector<world_theme> v = makeBuiltins();
-  return v;
-}
+std::vector<world_theme> builtin_world_themes() { return makeBuiltins(); }
 
 void register_world_theme(cvc::app &app, const world_theme &t) {
   theme_registry &r = app.slot<theme_registry>();

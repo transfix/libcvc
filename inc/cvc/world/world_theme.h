@@ -100,7 +100,7 @@ struct world_theme {
 //                     10 m over it), oaks inland.
 //   "tropical":       palms everywhere but steep ground, the odd oak on the hills; a low-rise
 //                     town (corner shops and brownstones), the office in the cores.
-const std::vector<world_theme> &builtin_world_themes();
+std::vector<world_theme> builtin_world_themes();
 
 // The app's themes. register_world_theme adds a theme or replaces the one of its name.
 void register_world_theme(cvc::app &app, const world_theme &t);

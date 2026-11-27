@@ -64,10 +64,10 @@ struct model_mesh {
 cvc::geometry model_frame_to_world(cvc::geometry g);
 
 // The asset's ladder, read from its files: its own directory, else the app's catalog's entry of
-// its name (a world read from a bundle knows its assets by name). Cached by file: every world that
-// draws the asset shares one. A rung whose file cannot be read ends the ladder there; null (and
-// `error` set) when LOD 0 cannot be read. Thread-safe: a world's job reads its models off the
-// frame thread.
+// its name (a world read from a bundle knows its assets by name). Cached on the app by file: every
+// world of the app that draws the asset shares one. A rung whose file cannot be read ends the
+// ladder there; null (and `error` set) when LOD 0 cannot be read. Thread-safe: a world's job reads
+// its models off the frame thread.
 std::shared_ptr<model_mesh> load_model_mesh(cvc::app &app, const cvc::world::model_asset &asset,
                                             std::string *error = nullptr);
 
