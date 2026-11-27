@@ -27,6 +27,7 @@
 #include <cvc/ariadne/tvision_backend.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
+#include <cvc/state/state.h>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -578,6 +579,60 @@ TEST(AriadneDeepNesting, ADocumentNestedThroughLoadsDraws) {
   CountingBackend b = draw(std::move(r.root));
   // The innermost mount's init: ran in its own scope, before its text was drawn.
   EXPECT_EQ(b.times("level " + std::to_string(kLoads) + ": " + std::to_string(kLoads)), 2);
+  b.expect_balanced();
+}
+
+// ---- mounts: (docs/roadmap/ARIADNE_SHELL.md 4.2) ------------------------------------------------
+
+// A mounts: slot's entries, opened and drawn on the small stack. One mount's window nests n groups;
+// one's menubar opens submenus n deep, its bar a menu of the outer bar; one has no bar, so its
+// menu holds only Restart, Quit and Close (4.9). The host's mount loader builds the trees here (the
+// YAML loader still recurses), and the Runtime opens them as each frame starts.
+TEST(AriadneDeepNesting, AMountsSlotsEntriesDraw) {
+  const std::size_t n = depth(3000);
+  constexpr int kFrames = 3;
+  CountingBackend b;
+  std::size_t opened = 0;
+  on_small_stack([&] {
+    cvc::app app;
+    Runtime rt(app);
+    rt.set_backend(&b);
+    rt.set_mount_loader([n](const MountRequest &rq) {
+      MountResult r;
+      r.ok = true;
+      r.wrapper.scope = "includes." + rq.as;
+      r.wrapper.app_name = "App " + rq.as;
+      if (rq.uri == "deep-window")
+        r.wrapper.children = one(window("Deep", one(plain_groups(n, "deepest in " + rq.as))));
+      else if (rq.uri == "deep-menus")
+        r.wrapper.children = one(menubar(
+            one(nest(n, menu_action("deepest menu item", "go"), [](std::size_t i, Widget w) {
+              return menu("Menu " + std::to_string(i), one(std::move(w)));
+            }))));
+      else
+        r.wrapper.children = one(text("no bar"));
+      return r;
+    });
+    Widget slot;
+    slot.kind = Kind::Mounts;
+    slot.bind = "apps";
+    rt.set_root(
+        group(two(menubar(one(menu("File", one(menu_action("New", "new"))))), std::move(slot))));
+    cvc::state &tree = cvc::state::instance(app);
+    tree("apps.a.uri").value(std::string("deep-window"));
+    tree("apps.b.uri").value(std::string("deep-menus"));
+    tree("apps.c.uri").value(std::string("plain"));
+    for (int i = 0; i < kFrames; ++i)
+      rt.render();
+    opened = rt.mounts().size();
+  });
+  EXPECT_EQ(opened, 3u);
+  EXPECT_EQ(b.times("deepest in a"), kFrames);
+  EXPECT_EQ(b.times("deepest menu item"), kFrames);
+  EXPECT_EQ(b.times("no bar"), kFrames);
+  for (const char *as : {"a", "b", "c"})
+    EXPECT_EQ(b.times(std::string("Close App ") + as), kFrames) << as;
+  EXPECT_GE(b.deepest, static_cast<int>(n));
   b.expect_balanced();
 }
 

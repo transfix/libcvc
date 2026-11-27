@@ -9337,15 +9337,19 @@ void Runtime::set_root(Widget root) {
   // (app-open) writes: known before the first frame, so a resident started first finds it.
   {
     std::string key;
-    const std::function<void(const Widget &)> find = [&](const Widget &w) {
-      if (!key.empty() || !w.scope.empty() || !w.repeat.empty())
-        return;
-      if (w.kind == Kind::Mounts && !w.bind.empty())
+    std::vector<const Widget *> todo{&root}; // in tree order, on the heap: any depth
+    while (!todo.empty()) {
+      const Widget &w = *todo.back();
+      todo.pop_back();
+      if (!w.scope.empty() || !w.repeat.empty())
+        continue;
+      if (w.kind == Kind::Mounts && !w.bind.empty()) {
         key = resolve_bind(m_->prefix, w.bind);
-      for (const Widget &c : w.children)
-        find(c);
-    };
-    find(root);
+        break;
+      }
+      for (auto c = w.children.rbegin(); c != w.children.rend(); ++c)
+        todo.push_back(&*c);
+    }
     m_->doc_slot_->set(key);
   }
   // Now, not at the swap: a resident submitted in the next drain() runs with these.
