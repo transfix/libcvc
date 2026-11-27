@@ -318,7 +318,7 @@ scene:
       transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
       children:
         - { node: rally_0_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
-            material: { color: [0.98, 0.255, 0.255] }, opacity: 0.5, casts_shadow: false }
+            material: { color: [0.98, 0.255, 0.255], opacity: 0.5 }, casts_shadow: false }
         - { node: rally_0_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
             material: { color: [0.98, 0.255, 0.255] }, casts_shadow: false }
     - node: rally_1
@@ -327,7 +327,7 @@ scene:
       transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
       children:
         - { node: rally_1_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
-            material: { color: [0.98, 0.98, 0.255] }, opacity: 0.5, casts_shadow: false }
+            material: { color: [0.98, 0.98, 0.255], opacity: 0.5 }, casts_shadow: false }
         - { node: rally_1_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
             material: { color: [0.98, 0.98, 0.255] }, casts_shadow: false }
     - node: rally_2
@@ -336,7 +336,7 @@ scene:
       transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
       children:
         - { node: rally_2_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
-            material: { color: [0.255, 0.98, 0.255] }, opacity: 0.5, casts_shadow: false }
+            material: { color: [0.255, 0.98, 0.255], opacity: 0.5 }, casts_shadow: false }
         - { node: rally_2_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
             material: { color: [0.255, 0.98, 0.255] }, casts_shadow: false }
     - node: rally_3
@@ -345,7 +345,7 @@ scene:
       transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
       children:
         - { node: rally_3_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
-            material: { color: [0.255, 0.98, 0.98] }, opacity: 0.5, casts_shadow: false }
+            material: { color: [0.255, 0.98, 0.98], opacity: 0.5 }, casts_shadow: false }
         - { node: rally_3_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
             material: { color: [0.255, 0.98, 0.98] }, casts_shadow: false }
     - node: rally_4
@@ -354,7 +354,7 @@ scene:
       transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
       children:
         - { node: rally_4_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
-            material: { color: [0.255, 0.255, 0.98] }, opacity: 0.5, casts_shadow: false }
+            material: { color: [0.255, 0.255, 0.98], opacity: 0.5 }, casts_shadow: false }
         - { node: rally_4_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
             material: { color: [0.255, 0.255, 0.98] }, casts_shadow: false }
     - node: rally_5
@@ -363,7 +363,7 @@ scene:
       transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
       children:
         - { node: rally_5_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
-            material: { color: [0.98, 0.255, 0.98] }, opacity: 0.5, casts_shadow: false }
+            material: { color: [0.98, 0.255, 0.98], opacity: 0.5 }, casts_shadow: false }
         - { node: rally_5_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
             material: { color: [0.98, 0.255, 0.98] }, casts_shadow: false }
     # The terrain lab's world, small: cvc::world's relief, L-system trees, rocks and a roads-first
