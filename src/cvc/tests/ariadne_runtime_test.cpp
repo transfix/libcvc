@@ -14845,8 +14845,10 @@ TEST(AriadneComponents, ShellGivesACatalogEntryItsOwnNetwork) {
   EXPECT_EQ(cvc::ariadne::scope_principal(app, scope).principal, "local");
   const std::optional<NetAccess> own = cvc::ariadne::net_host_access(app, scope);
   ASSERT_TRUE(own && own->credentials && own->policy);
-  EXPECT_EQ(fs::path(own->credentials->path()).lexically_normal(),
-            (dir / "nicotina" / "credentials").lexically_normal());
+  // weakly_canonical both: the store's path comes back resolved (long names), and the temp
+  // directory may be in its short (8.3) spelling on Windows (RUNNER~1).
+  EXPECT_EQ(fs::weakly_canonical(own->credentials->path()),
+            fs::weakly_canonical(dir / "nicotina" / "credentials"));
   EXPECT_TRUE(own->policy->allows(*cvc::net::parse_origin("https://tx.wtf")));
   EXPECT_FALSE(own->policy->allows(*cvc::net::parse_origin("https://example.test")))
       << "its own policy, not the shell's";
