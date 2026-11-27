@@ -87,6 +87,14 @@ build:
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
+    # The BSDs build on the cvcpkg.org fleet from the release tag's tarball, against the fleet's
+    # libcvc (see the libcvc recipe's matrix).
+    - platform: freebsd
+      script: build.sh
+    - platform: openbsd
+      script: build.sh
+    - platform: netbsd
+      script: build.sh
 
 package:
   files:
@@ -99,9 +107,9 @@ package:
     # fails on an entry that matches nothing, and no file suffix tells these
     # apart).
     - glob: lib/python3.12/site-packages/pycvc.py
-      platforms: [linux, macos]
+      platforms: [linux, macos, freebsd, openbsd, netbsd]
     - glob: lib/python3.12/site-packages/_pycvc*
-      platforms: [linux, macos]
+      platforms: [linux, macos, freebsd, openbsd, netbsd]
     - glob: Lib/site-packages/pycvc.py
       platforms: [windows]
     - glob: Lib/site-packages/_pycvc*
