@@ -29,6 +29,7 @@ class geometry;
 class image;
 namespace physics {
 struct boat_desc;
+struct dyn_boat_desc;
 struct vehicle_desc;
 }
 namespace ariadne {
@@ -195,6 +196,19 @@ std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &i
                                             const cvc::physics::boat_desc &boat,
                                             const float topsides[3], const float stripe[3]);
 
+// What a boat's one-piece model is fitted to, wherever it is drawn (the `boat` node, a world
+// vehicle's node, an entity layer): `shape.length` its length overall (dyn_boat_desc::
+// length_overall; its hull's length when it gives none), `shape.width` and `height` its hull's
+// beam and depth, no wheels; `keel` its hull's bottom in its hull body's frame (negative), where
+// the model's base goes (attach_vehicle_model's base_z), so the model is drawn about the hull
+// body's origin as the hull is. Not `ok` without a hull_mesh.
+struct boat_fit {
+  vehicle_shape shape;
+  double keel = 0.0;
+  bool ok = false;
+};
+boat_fit boat_fit_of(const cvc::physics::dyn_boat_desc &desc);
+
 // The size a vehicle body is drawn at (its chassis box, wheelbase, track and wheel radius).
 vehicle_shape vehicle_shape_of(const cvc::physics::vehicle_desc &desc);
 
@@ -217,16 +231,22 @@ struct vehicle_look_mesh {
 // rest, as attach_parted_model places them, the wheels in a tyre's dark (one texture: the
 // chassis's); pending while a data look's package loads; failed for a look an entity layer cannot
 // draw (a mesh file without `fit`, a model that cannot be read): its entities are drawn as their
-// own nodes.
+// own nodes. A boat's box look (`boat` its hull, when it has a hull_mesh) is its hull as
+// add_hull_node draws it, about its hull body's origin, flat-shaded: its topsides in role 0, the
+// stripe in role 1, its wet bottom and a box hull's teak sole in role 2 (their own colours); a box
+// hull open, no deck.
 vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &cache,
                                           const cvc::ariadne::vehicle_look &look,
                                           const vehicle_shape &shape, double base_z,
                                           vehicle_look_mesh &out,
-                                          std::vector<std::string> *warnings = nullptr);
+                                          std::vector<std::string> *warnings = nullptr,
+                                          const cvc::physics::boat_desc *boat = nullptr);
 
 // Each frame after the world steps (tick_scene): when the vehicles' revision has moved, the
 // entities' drawings are built again and bound to their chassis bodies. A boat's (dynamicboat)
-// box look is its hull (add_hull_node), in its colours. An entity an entity layer draws
+// box look is its hull (add_hull_node), in its colours; its one-piece model is fitted as the boat
+// node fits it (boat_fit_of: its length overall, its keel on its hull's bottom), its hull while the
+// model loads or when it cannot be read. An entity an entity layer draws
 // (entity_view.h) has no node of its own unless it is promoted: as the promoted ones change, their
 // nodes come and go, and the others' stay.
 void sync_vehicle_markers(RealizedScene &realized, std::vector<std::string> *warnings);

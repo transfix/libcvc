@@ -588,12 +588,13 @@ void entity_view::set_entities(SceneGraph &sg, vehicle_model_cache &models,
         fit.length = e.fit_length;
       const bool fitted = e.look.kind == "data" || (e.look.kind == "file" && e.look.fit);
       vehicle_model_status st = vehicle_look_mesh_of(app, models, e.look, fitted ? fit : e.shape,
-                                                     e.base_z, lk.mesh, nullptr);
-      if (st == vehicle_model_status::pending) { // its boxes while its model loads
+                                                     e.base_z, lk.mesh, nullptr, e.boat.get());
+      if (st == vehicle_model_status::pending) { // its boxes (a boat's hull) while it loads
         d.pending.push_back({e.look, fit.length});
         cvc::ariadne::vehicle_look box;
         box.kind = "box";
-        st = vehicle_look_mesh_of(app, models, box, e.shape, e.base_z, lk.mesh, nullptr);
+        st = vehicle_look_mesh_of(app, models, box, e.shape, e.base_z, lk.mesh, nullptr,
+                                  e.boat.get());
       }
       lk.ok = st == vehicle_model_status::ready;
       it = looks.emplace(e.archetype, std::move(lk)).first;
@@ -610,8 +611,8 @@ void entity_view::set_entities(SceneGraph &sg, vehicle_model_cache &models,
       arch_draw a;
       a.id = aid;
       const vehicle_shape &s = e.shape;
-      a.radius =
-          0.5 * std::sqrt(s.length * s.length + s.width * s.width + 4.0 * s.height * s.height);
+      const double l = std::max(s.length, e.fit_length); // a boat's model spans its length overall
+      a.radius = 0.5 * std::sqrt(l * l + s.width * s.width + 4.0 * s.height * s.height);
       L.archs.push_back(std::move(a));
       ai = static_cast<int>(L.archs.size()) - 1;
     }
@@ -789,10 +790,18 @@ std::shared_ptr<GraphicsNode> realize_entity_layer(SceneGraph &sg, const ari::Sc
   return group;
 }
 
-// The world's entities as the view draws them: each placed one but a boat, its look and size its
-// archetype's.
+// The world's entities as the view draws them: each placed one, its look and size its archetype's.
+// A boat (a floating plant's) is drawn about its hull body's origin, as its own node draws it
+// (sync_vehicle_markers): its model fitted to its length overall, its keel on its hull's bottom,
+// and its box look its hull; each boat archetype's preset made once (the view's template is made
+// from an archetype's first entity). A boat in a parted look keeps its own node.
 std::vector<entity_draw_info> world_entities(const ari::WorldVehicles &v,
                                              const std::vector<ari::entity_info> &ents) {
+  struct boat_draw {
+    boat_fit fit;
+    std::shared_ptr<const ph::boat_desc> boat;
+  };
+  std::unordered_map<std::string, boat_draw> boats;
   std::vector<entity_draw_info> out;
   out.reserve(ents.size());
   for (const ari::entity_info &e : ents) {
@@ -802,8 +811,25 @@ std::vector<entity_draw_info> world_entities(const ari::WorldVehicles &v,
     for (const ari::vehicle_archetype &x : v.archetypes())
       if (x.id == e.spec.archetype)
         a = &x;
-    if (!a || ari::vehicle_plant_floats(a->plant))
-      continue; // a boat: its hull, its own node
+    if (!a)
+      continue;
+    const boat_draw *boat = nullptr;
+    if (ari::vehicle_plant_floats(a->plant)) {
+      auto it = boats.find(a->id);
+      if (it == boats.end()) {
+        boat_draw b;
+        try {
+          const ph::dyn_boat_desc desc = ari::boat_desc_of(*a, e.spec.mass, e.spec.max_speed);
+          b.fit = boat_fit_of(desc);
+          b.boat = std::make_shared<const ph::boat_desc>(desc.boat);
+        } catch (const std::exception &) {
+        }
+        it = boats.emplace(a->id, std::move(b)).first;
+      }
+      if (!it->second.fit.ok || a->look.parted())
+        continue; // one it cannot fit, or a model in parts (a car's rig): its own node
+      boat = &it->second;
+    }
     entity_draw_info d;
     d.id = e.id;
     d.fleet = e.fleet;
@@ -814,9 +840,16 @@ std::vector<entity_draw_info> world_entities(const ari::WorldVehicles &v,
       d.color2[k] = e.spec.color2[k];
     }
     d.look = a->look;
-    const ph::vehicle_desc desc = ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
-    d.shape = vehicle_shape_of(desc);
-    d.base_z = -ari::stand_height(desc);
+    if (boat) {
+      d.shape = boat->fit.shape; // its hull's box, at its length overall
+      d.base_z = boat->fit.keel;
+      d.fit_length = boat->fit.shape.length;
+      d.boat = boat->boat;
+    } else {
+      const ph::vehicle_desc desc = ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
+      d.shape = vehicle_shape_of(desc);
+      d.base_z = -ari::stand_height(desc);
+    }
     d.position = {e.x, e.y, e.z};
     d.has_position = true;
     out.push_back(std::move(d));

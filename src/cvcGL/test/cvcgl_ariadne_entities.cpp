@@ -24,6 +24,11 @@
 //              one the client drives promoted with the nearest;
 //   parted     a parted look (a chassis, a wheel and a rig): its mesh the chassis and four wheels
 //              at rest where its nodes draw them, the wheels dark; 40 of them at scale.
+//   boats      a boat's box look's mesh is its hull, each point where add_hull_node draws it;
+//              40 launches on a lake at scale, the nearest 8 their hulls' nodes, the water kept
+//              out of the nearest hulls; 40 tactical boats with a one-piece model, its copies
+//              fitted to their length overall, their keels on their hulls' bottoms, as a
+//              promoted one's node draws it.
 //
 // Skips (rc 0) without Jolt, or where nothing rasterises unless CVC_REQUIRE_RENDER=1.
 
@@ -49,8 +54,10 @@
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/vehicle_view.h>
+#include <cvc/gl/ariadne/world_nodes.h> // register_water_node_types
 #include <cvc/gl/physics_scene_binding.h>
 #include <cvc/physics/backend.h>
+#include <cvc/physics/dyn_boat_plant.h> // a boat preset's hull
 #include <cvc/state/state.h>
 #include <filesystem>
 #include <fstream>
@@ -164,6 +171,7 @@ struct world_run {
 
   world_run(const std::string &doc, bool threaded) {
     ari::register_entity_node_types(app);
+    ari::register_water_node_types(app); // a lake's water node (the boats)
     ca::register_world_block(app);
     ca::LoadResult r = ca::load_string(app, doc);
     if (!check(r.ok, "the document loads", r.error))
@@ -254,15 +262,14 @@ struct world_run {
 };
 
 // Every copy in the mesh is within `tol` m of an entity that has no node of its own, and every
-// such entity on screen is a copy.
+// such entity on screen is a copy. `per`: a copy's points (the box look: six boxes of 24).
 bool copies_where_entities_are(world_run &w, const std::string &mesh, double tol,
-                               std::size_t *count = nullptr) {
+                               std::size_t *count = nullptr, std::size_t per = 144) {
   std::shared_ptr<GraphicsNode> node = w.sg.getGraphics("entities");
   std::shared_ptr<GraphicsNode> m = node ? node->findChildByName(mesh) : nullptr;
   if (!m)
     return false;
-  // The box look: six boxes of 24 points.
-  const std::vector<std::array<double, 2>> c = copies(drawn(m), 144);
+  const std::vector<std::array<double, 2>> c = copies(drawn(m), per);
   if (count)
     *count = c.size();
   std::set<std::uint64_t> drawn_as_node;
@@ -645,6 +652,242 @@ void test_parted() {
         std::to_string(placed) + " copies");
 }
 
+// A lake (the terrain's 6 m bowl, the water at -1 m over it, about 130 m across) and a fleet of
+// `count` boats of `preset` on the dynamicboat plant, their look `look` when it names one (else
+// the preset's: a launch's is its hull), and `extra` scene nodes.
+std::string lake_doc(const std::string &preset, int count, const std::string &look = "",
+                     const std::string &extra = "") {
+  return R"(meta: { min_libcvc: "0.0.0" }
+requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      boat: { plant: "dynamicboat:)" +
+         preset + R"(", controllers: [nav@1, none])" +
+         (look.empty() ? std::string() : ", look: " + look) + R"( }
+    start:
+      - { fleet: harbour, archetype: boat, count: )" +
+         std::to_string(count) + R"(, spawn: scattered, seed: 7, policy: builtin, keys: summary }
+scene:
+  clock: {}
+  physics: {}
+  world: { source: lake, cell: 2 }
+  nodes:
+    - node: terrain
+      world: lake
+      source:
+        heightfield:
+          size: 300
+          resolution: 151
+          layers:
+            - { kind: dome, amplitude: -6, radius: 50 }
+      body: static
+    - node: water
+      type: water
+      ground: terrain
+      level: -1
+      wind_speed: 0.5
+      wave_amp: 0.1
+      body: {}
+)" + extra;
+}
+
+// A boat's box look at scale is its hull (vehicle_look_mesh_of with its hull): each point where
+// add_hull_node draws it, its topsides in role 0 and its stripe in role 1 (where the node has the
+// colours it was given), the rest (its wet bottom, a box hull's teak sole) in role 2, the node's
+// colour; a box hull (the launch) open with its sole, a V hull (the tactical boat) without one.
+// 40 launches on a lake: one mesh, the nearest 8 their hulls' nodes, each copy where a launch is,
+// and the water kept out of the 4 nearest hulls as when each boat had its node. 40 tactical boats
+// with a one-piece model: fitted as the boat node fits it (boat_fit_of: its length overall, its
+// keel on its hull's bottom), the same in the promoted boats' nodes and in the mesh's copies.
+void test_boats() {
+  std::printf("boats\n");
+  namespace ph = cvc::physics;
+  std::size_t launch_points = 0;
+  ari::boat_fit tactical;
+  for (const std::string preset : {"launch", "tactical"}) {
+    cvc::app app;
+    SceneGraph sg(app, "boats");
+    const ph::dyn_boat_desc desc = ph::dyn_boat_desc::preset(preset);
+    const ari::boat_fit fit = ari::boat_fit_of(desc);
+    double keel = 1e30;
+    for (const ph::vec3 &v : desc.boat.hull.hull->vertices)
+      keel = std::min(keel, v.z);
+    const std::string at = "boats (" + preset + "): ";
+    check(fit.ok && fit.keel == keel && keel < 0.0 &&
+              (desc.length_overall <= 0.0 || fit.shape.length == desc.length_overall),
+          at + "fitted to its length overall, its keel its hull's bottom",
+          std::to_string(fit.shape.length) + " m, its keel at " + std::to_string(fit.keel));
+    if (preset == "tactical")
+      tactical = fit;
+    const std::shared_ptr<ari::vehicle_model_cache> cache = ari::make_vehicle_model_cache();
+    ca::vehicle_look box;
+    box.kind = "box";
+    ari::vehicle_look_mesh mesh;
+    const ari::vehicle_model_status st =
+        ari::vehicle_look_mesh_of(app, *cache, box, fit.shape, fit.keel, mesh, nullptr, &desc.boat);
+    check(st == ari::vehicle_model_status::ready && !mesh.model && !mesh.texture,
+          at + "its box look's mesh is ready: its hull, not a model");
+    const float topsides[3] = {0.2f, 0.4f, 0.6f}, stripe[3] = {0.8f, 0.1f, 0.9f};
+    std::shared_ptr<GeometryNode> hull =
+        ari::add_hull_node(sg, "hull", nullptr, desc.boat, topsides, stripe);
+    if (!check(hull && hull->getGeometry(), at + "add_hull_node draws its hull"))
+      continue;
+    const cvc::geometry &g = *hull->getGeometry();
+    const std::size_t n = g.const_points().size();
+    bool same = n > 0 && mesh.verts.size() == 3 * n && mesh.normals.size() == 3 * n &&
+                mesh.role.size() == n && mesh.own.size() == 3 * n && g.const_colors().size() == n &&
+                g.const_normals().size() == n && mesh.tris.size() == 3 * g.const_tris().size();
+    std::size_t roles[3] = {0, 0, 0}, teak = 0;
+    for (std::size_t i = 0; same && i < n; ++i) {
+      const unsigned char r = mesh.role[i];
+      if (r > 2) {
+        same = false;
+        break;
+      }
+      ++roles[r];
+      const float *given = r == 0 ? topsides : r == 1 ? stripe : nullptr;
+      for (int k = 0; k < 3; ++k) {
+        same = same && std::fabs(mesh.verts[3 * i + k] - g.const_points()[i][k]) < 1e-9 &&
+               std::fabs(mesh.normals[3 * i + k] - g.const_normals()[i][k]) < 1e-9;
+        const double want = given ? given[k] : mesh.own[3 * i + k] / 255.0;
+        same = same && std::fabs(g.const_colors()[i][k] - want) < 0.003;
+      }
+      teak += r == 2 && mesh.own[3 * i] == 140 ? 1 : 0; // the teak's 0.55 red (the bottom's 0.36)
+    }
+    for (std::size_t t = 0; same && t < g.const_tris().size(); ++t)
+      for (int k = 0; k < 3; ++k)
+        same = same && mesh.tris[3 * t + k] == g.const_tris()[t][k];
+    // A box hull's corners are at its bottom and its sheer, none in the stripe's band.
+    const bool box_hull = preset == "launch";
+    check(same && roles[0] > 0 && (box_hull || roles[1] > 0) && roles[2] > 0,
+          at + "each point where add_hull_node draws it: topsides role 0, stripe 1, the rest 2",
+          std::to_string(n) + " points (" + std::to_string(roles[0]) + ", " +
+              std::to_string(roles[1]) + ", " + std::to_string(roles[2]) + ")");
+    check(box_hull ? teak == 4 : teak == 0,
+          at + (box_hull ? "a box hull, open, with its teak sole" : "a V hull: no sole"),
+          std::to_string(teak) + " teak points");
+    if (box_hull)
+      launch_points = n;
+  }
+  if (launch_points == 0 || !tactical.ok)
+    return;
+  {
+    world_run w(lake_doc("launch", 40), false);
+    if (!w.ok || !check(w.settle(40), "boats: the view takes all 40 launches"))
+      return;
+    const ari::entity_view_stats s = ari::entity_view_stats_of(w.rs);
+    check(s.meshes == 1 && s.promoted == 8 && own_nodes(w.rs) == 8,
+          "boats: one mesh (the hull), the nearest 8 their own nodes",
+          std::to_string(s.meshes) + " meshes, " + std::to_string(own_nodes(w.rs)) + " nodes");
+    bool hulls = own_nodes(w.rs) == 8;
+    for (const auto &kv : w.rs.vehicle_markers) {
+      std::shared_ptr<GraphicsNode> node = w.sg.getGraphics(kv.first);
+      hulls = hulls && node && node->findChildByName(kv.first + "_hull") != nullptr;
+    }
+    check(hulls, "boats: a promoted launch's node is its hull, as before");
+    std::size_t n = 0;
+    const bool where = copies_where_entities_are(w, "entities_boat_lod0", 3.0, &n, launch_points);
+    check(where && n >= 24, "boats: each copy where an unpromoted launch is",
+          std::to_string(n) + " copies");
+    // The water reads where the world's boats are, not their nodes: the 4 nearest kept out.
+    std::shared_ptr<GraphicsNode> water = w.sg.getGraphics("water");
+    auto far =
+        water ? std::dynamic_pointer_cast<GeometryNode>(water->findChildByName("far")) : nullptr;
+    std::array<float, 3> e0{}, e3{};
+    const bool kept = far && far->shaderUniform3f("uHullE0", e0) &&
+                      far->shaderUniform3f("uHullE3", e3) && std::fabs(e0[0] - 2.0f) < 1e-5 &&
+                      std::fabs(e3[0] - 2.0f) < 1e-5;
+    check(kept, "boats: the water keeps out of the 4 nearest launches' hulls",
+          std::to_string(e0[0]) + ", " + std::to_string(e3[0]) + " m half lengths");
+  }
+  // A one-piece model: a box filed 4 m long, on z 0 (fit_vehicle_geometry stands it so).
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path dir = fs::temp_directory_path(ec) / "cvcgl_ariadne_entities_boats";
+  fs::create_directories(dir, ec);
+  box_obj(dir / "boat.obj", {-2.0, -0.6, 0.0}, {2.0, 0.6, 0.8});
+  const std::string file = (dir / "boat.obj").generic_string();
+  std::size_t per = 0;
+  {
+    cvc::app app;
+    const std::shared_ptr<ari::vehicle_model_cache> cache = ari::make_vehicle_model_cache();
+    ca::vehicle_look look;
+    look.kind = "file";
+    look.path = file;
+    look.fit = true;
+    ari::vehicle_look_mesh mesh;
+    if (ari::vehicle_look_mesh_of(app, *cache, look, tactical.shape, tactical.keel, mesh) ==
+        ari::vehicle_model_status::ready)
+      per = mesh.verts.size() / 3;
+  }
+  if (!check(per > 0, "boats: the model's mesh is ready"))
+    return;
+  world_run w(lake_doc("tactical", 40, "{ file: \"" + file + "\", fit: true }",
+                       R"(    - node: bodies
+      type: entity_layer
+      lod: false
+)"),
+              false);
+  if (!w.ok || !check(w.settle(40), "boats, a model: the layer takes all 40"))
+    return;
+  check(own_nodes(w.rs) == 8, "boats, a model: the nearest 8 their own nodes");
+  bool fitted = own_nodes(w.rs) == 8;
+  for (const auto &kv : w.rs.vehicle_markers) {
+    std::shared_ptr<GraphicsNode> node = w.sg.getGraphics(kv.first);
+    std::shared_ptr<GraphicsNode> m = node ? node->findChildByName(kv.first + "_mesh") : nullptr;
+    fitted = fitted && m && !node->findChildByName(kv.first + "_hull") &&
+             std::fabs(m->getTransform()->GetElement(2, 3) - tactical.keel) < 1e-9;
+  }
+  check(fitted,
+        "boats, a model: a promoted boat's node is its model, its keel on its hull's bottom");
+  // Each copy: its lowest point its boat's keel, its length along its heading the boat's overall.
+  std::shared_ptr<GraphicsNode> layer = w.sg.getGraphics("bodies");
+  std::shared_ptr<GraphicsNode> lod0 = layer ? layer->findChildByName("bodies_boat_lod0") : nullptr;
+  const std::vector<double> pts = drawn(lod0);
+  std::set<std::uint64_t> drawn_as_node;
+  for (const auto &kv : w.rs.vehicle_markers)
+    drawn_as_node.insert(std::stoull(kv.first.substr(8)));
+  const std::vector<ca::entity_info> ents = w.entities();
+  std::size_t placed = 0;
+  double worst_keel = 0.0, worst_length = 0.0;
+  for (std::size_t c = 0; (c + 1) * per * 3 <= pts.size(); ++c) {
+    double cx = 0.0, cy = 0.0, lo = 1e30, hi = -1e30;
+    for (std::size_t k = 0; k < per; ++k) {
+      const double *p = &pts[(c * per + k) * 3];
+      cx += p[0] / static_cast<double>(per);
+      cy += p[1] / static_cast<double>(per);
+      lo = std::min(lo, p[0]);
+      hi = std::max(hi, p[0]);
+    }
+    if (hi - lo < 1e-9)
+      continue; // collapsed: no entity in this slot
+    const ca::entity_info *e = nullptr;
+    for (const ca::entity_info &x : ents)
+      if (!drawn_as_node.count(x.id) &&
+          (!e || std::hypot(x.x - cx, x.y - cy) < std::hypot(e->x - cx, e->y - cy)))
+        e = &x;
+    if (!e)
+      break;
+    double low = 1e30, a0 = 1e30, a1 = -1e30;
+    for (std::size_t k = 0; k < per; ++k) {
+      const double *p = &pts[(c * per + k) * 3];
+      low = std::min(low, p[2]);
+      const double along = (p[0] - e->x) * std::cos(e->yaw) + (p[1] - e->y) * std::sin(e->yaw);
+      a0 = std::min(a0, along);
+      a1 = std::max(a1, along);
+    }
+    ++placed;
+    worst_keel = std::max(worst_keel, std::fabs(low - (e->z + tactical.keel)));
+    worst_length = std::max(worst_length, std::fabs(a1 - a0 - tactical.shape.length));
+  }
+  check(placed >= 24 && worst_keel < 0.25 && worst_length < 0.2,
+        "boats, a model: each copy's keel on its hull's bottom, its length overall the boat's",
+        std::to_string(placed) + " copies, keels within " + std::to_string(worst_keel) +
+            " m, lengths within " + std::to_string(worst_length) + " m of " +
+            std::to_string(tactical.shape.length));
+}
+
 } // namespace
 
 int main() {
@@ -665,5 +908,6 @@ int main() {
   test_worker();
   test_room();
   test_parted();
+  test_boats();
   return finish("cvcgl_ariadne_entities");
 }

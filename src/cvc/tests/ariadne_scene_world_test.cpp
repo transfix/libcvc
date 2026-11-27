@@ -10796,6 +10796,50 @@ TEST(AriadneOneWorld, AClientRunsTheBoatItDrivesAsTheWorldDoes) {
   EXPECT_LT(run.worst_tilt, 0.05) << "the hull's pitch and roll";
 }
 
+// A boat's model, as a relay sends it to its clients (conference::room_entities_of): fitted to its
+// length overall, its base its keel (its hull's bottom, hull-body z), where the boat node and a
+// scene's own entity layer put it; not the lake's bed under it, which a car's base is the ground.
+TEST(AriadneWorldBoats, ABoatsModelSitsOnItsKeelOnARelaysClients) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kBoatDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "launch", -25.0, 0.0);
+  for (int i = 0; i < 60; ++i) {
+    v.before_step();
+    w->world().step();
+    v.after_step();
+  }
+  const entity_info e = entity(v, id);
+  ASSERT_TRUE(e.placed);
+  const cvc::physics::dyn_boat_desc b = boat_desc_of(r.scene.vehicles[0]);
+  double keel = 1e30;
+  for (const cvc::physics::vec3 &p : b.boat.hull.hull->vertices)
+    keel = std::min(keel, p.z);
+  const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+  ASSERT_EQ(wire.size(), 1u);
+  EXPECT_DOUBLE_EQ(wire[0].base_z, keel) << "its keel";
+  EXPECT_LT(keel, 0.0);
+  EXPECT_LT(e.ground_z - e.z, keel - 1.0) << "the lake's bed is well below its keel";
+  if (b.length_overall > 0.0)
+    EXPECT_DOUBLE_EQ(wire[0].fit_length, b.length_overall);
+}
+
 // A lake with a wind sea on it (OW5l): kBoatDrivable's made wider and deeper (12 m at its
 // middle, so the waves do not fade over its shallows), the wind at 14 m/s over a long fetch, no
 // lee.
