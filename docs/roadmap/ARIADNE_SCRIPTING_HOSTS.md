@@ -594,7 +594,8 @@ list narrowed to CPython's eval loop.
   page's main thread waits. A document's Python runs on that main thread (`init:`, an export, a
   tick), so it can have only as many threads at once as the pool has free workers. One more hangs
   the page. By `init:` the shell holds one worker. Linked with arigl's pool of 4, ariglx had room
-  for 3 threads (4 hung). Its own pool is 8, which leaves room for 7 (8 hung). The pool starts with the module, and 8
+  for 3 threads (4 hung). Its own pool is 8, which leaves room for 7 (8 hung); 10 since a physics
+  world's Jolt has two workers of its own (arigl's 6), the same 7. The pool starts with the module, and 8
   workers in place of 4 cost no startup that could be measured: a plain document ran after
   4.7 s against 5.3 s, medians of four loads.
 - **Each thread gets the 8 MB stack** (`STACK_SIZE`), since Emscripten's default pthread stack

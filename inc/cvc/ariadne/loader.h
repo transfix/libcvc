@@ -118,6 +118,18 @@ struct SchemaIssue {
   std::string text() const;
 };
 
+// §6.7 the deepest a document's widgets nest: a level for each widget, and one for each include:
+// and load: entry, across every unit and mount. A load that goes deeper fails, and says where
+// (LoadResult::error, error_source, error_line). The loader parses a level at a time on the
+// native stack, so this keeps a load inside the smallest stack a host loads on (wasm's 2 MiB).
+constexpr std::size_t kMaxNesting = 256;
+
+// §6.7 the deepest the schema check (§14.2) goes: levels of YAML, the document (or include:
+// expansion) itself one. The check goes down a level of YAML at a time on the native stack, so a
+// tree deeper than this is not checked: it gets one SchemaIssue, at its first value past the
+// limit, that says so. The deepest shipped document is 13 levels of YAML.
+constexpr std::size_t kMaxSchemaDepth = 128;
+
 // What validate_string / validate_file found.
 struct ValidationResult {
   // False when nothing was checked: this build has no validator (have_jsonschema()), or the
@@ -147,6 +159,9 @@ struct LoadResult {
   // only CAPTURES it (it has no cvc::app and never runs the DSL); the host runs it once
   // at load via cvc::ariadne::run_init, scoped to the document prefix.
   std::string init_script;
+  // §5.3 `state:`: literal values the host writes under the document prefix (seed_state) just
+  // before init: runs, so init: reads them and may override them. In document order.
+  StateSeeds state_seeds;
   // §7.1/§4.6 document-level resident handlers (verbatim scripts; empty if none). Like init_script
   // the loader only CAPTURES these — the host hands each to the matching Runtime setter, which
   // submits ONE long-lived resident process (parking between activations): on_tick_script ->
@@ -184,6 +199,11 @@ struct LoadResult {
   std::vector<std::pair<std::string, Value>> extras;
   std::vector<std::string> warnings; // non-fatal issues (unknown types, empty binds, …)
   std::string error;                 // human-readable message when !ok
+  // Where `error` is, when the load can say (a document nested deeper than kMaxNesting: its
+  // deepest widget): the file ("" for a document given as a string), and the 1-based line and
+  // column (0 when unknown). `ari validate` reports the error there.
+  std::string error_source;
+  int error_line = 0, error_column = 0;
   // Where the document, its import:ed libraries, its load: fragments and its include:
   // expansions break the .ari schema (each also in `warnings`, as "ari: schema: " + text()).
   // Empty when this build has no validator.

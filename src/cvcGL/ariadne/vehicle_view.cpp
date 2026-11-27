@@ -690,7 +690,8 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
     return false;
   chassis->setPosition(f.offset[0], f.offset[1], f.offset[2]);
   chassis->setScale(f.scale[0], f.scale[1], f.scale[2]);
-  colour(*chassis, m->chassis_texture, color);
+  const cvc::image none; // `texture: false`: in its colours (a local, not process-wide state)
+  colour(*chassis, look.texture ? m->chassis_texture : none, color);
   static const float tyre[3] = {0.07f, 0.07f, 0.08f};
   for (std::size_t k = 0; k < f.hubs.size(); ++k) {
     const std::array<double, 3> &h = f.hubs[k];
@@ -707,7 +708,11 @@ bool attach_parts(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
     if (right && m->rig.mirror == "turn") // before the scale: setRotation drops it
       mesh->setRotation(0.0, 0.0, 180.0); // half a turn about its upright: its outside to -y
     mesh->setScale(f.wheel_scale, f.wheel_scale, f.wheel_scale);
-    colour(*mesh, m->wheel_texture, tyre);
+    colour(*mesh, look.texture ? m->wheel_texture : none, tyre);
+    // No shadow of its own: it stands under its chassis, whose shadow is the vehicle's, and a
+    // turning wheel is a moving caster the shadow cache redraws on its own every bake (four a
+    // vehicle; 8 promoted Humvees' wheels took a 240-vehicle frame from 78 to 109-131 ms).
+    mesh->setCastsShadow(false);
     drawn_wheel d;
     d.node = hub;
     d.x = h[0];
@@ -741,7 +746,7 @@ bool attach_model(cvc::app &app, vehicle_model_cache &cache, GraphicsNode &group
   node->setPosition(0.0, 0.0, base_z + look.z);
   node->setRotation(0.0, 0.0, look.yaw);
   node->setScale(look.scale, look.scale, look.scale);
-  if (!m->texture.empty()) {
+  if (look.texture && !m->texture.empty()) {
     node->setUseSingleColor(false);
     node->setTexture(m->texture, false);
   } else {
@@ -1000,12 +1005,114 @@ void add_part(vehicle_look_mesh &out, const cvc::geometry &g, const std::array<d
   }
 }
 
+// A boat's hull as drawn (add_hull_node, and an entity layer's template), about its hull body's
+// origin: each triangle its own three corners, so the faces shade flat, and each corner's band:
+// 0 its topsides, 1 the stripe just over the waterline it floats at in fresh water, 2 the wet
+// bottom below that, 3 a box hull's teak sole. A box hull (the presets') is open: no deck, and a
+// sole 0.12 m over the waterline, so the water node's exclusion is what keeps a wave out of its
+// cockpit. Empty without a hull_mesh.
+struct hull_faces {
+  std::vector<std::array<double, 3>> pts, nrm; // [V]
+  std::vector<unsigned char> band;             // [V]
+  std::vector<std::array<std::uint32_t, 3>> tris;
+};
+constexpr float kHullBottom[3] = {0.36f, 0.08f, 0.07f}; // wet antifouling
+constexpr float kHullTeak[3] = {0.55f, 0.40f, 0.24f};
+
+hull_faces hull_faces_of(const cvc::physics::boat_desc &boat) {
+  hull_faces out;
+  if (!boat.hull.hull || boat.hull.hull->triangles.empty())
+    return out;
+  const cvc::physics::hull_mesh &h = *boat.hull.hull;
+  // The waterline it floats at, body z (fresh water); its mass the engine's when the hull names
+  // none (the shape's volume at its density).
+  double waterline = 0.0;
+  try {
+    double mass = boat.hull.mass;
+    if (!(mass > 0.0))
+      if (const auto *b = std::get_if<cvc::physics::box>(&boat.hull.shape))
+        mass = boat.hull.density * 8.0 * b->half_extents.x * b->half_extents.y * b->half_extents.z;
+    waterline = -cvc::physics::dyn_boat_plant::float_height(boat, mass, 1000.0);
+  } catch (const std::exception &) {
+  }
+  const auto *hull_box = std::get_if<cvc::physics::box>(&boat.hull.shape);
+  double top = -1e300, low = 1e300, x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
+  for (const cvc::physics::vec3 &v : h.vertices) {
+    top = std::max(top, v.z);
+    low = std::min(low, v.z);
+    x0 = std::min(x0, v.x);
+    x1 = std::max(x1, v.x);
+    y0 = std::min(y0, v.y);
+    y1 = std::max(y1, v.y);
+  }
+  for (const auto &t : h.triangles) {
+    const cvc::physics::vec3 &a = h.vertices[t[0]], &b = h.vertices[t[1]], &c = h.vertices[t[2]];
+    const double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+    const double vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (len > 0.0) {
+      nx /= len;
+      ny /= len;
+      nz /= len;
+    }
+    if (hull_box && nz > 0.9 && a.z >= top - 1e-9 && b.z >= top - 1e-9 && c.z >= top - 1e-9)
+      continue; // the deck: open
+    const auto base = static_cast<std::uint32_t>(out.pts.size());
+    for (const cvc::physics::vec3 *p : {&a, &b, &c}) {
+      out.pts.push_back({p->x, p->y, p->z});
+      out.nrm.push_back({nx, ny, nz});
+      const double z = p->z - waterline;
+      out.band.push_back(z < 0.02 ? 2 : z < 0.10 ? 1 : 0);
+    }
+    out.tris.push_back({base, base + 1, base + 2});
+  }
+  if (hull_box) { // the sole, inside the hull's sides
+    const double z = std::min(std::max(waterline + 0.12, low + 0.05), top - 0.05), m = 0.04;
+    const auto base = static_cast<std::uint32_t>(out.pts.size());
+    for (const auto &p :
+         {std::array<double, 2>{x0 + m, y0 + m}, std::array<double, 2>{x1 - m, y0 + m},
+          std::array<double, 2>{x1 - m, y1 - m}, std::array<double, 2>{x0 + m, y1 - m}}) {
+      out.pts.push_back({p[0], p[1], z});
+      out.nrm.push_back({0.0, 0.0, 1.0});
+      out.band.push_back(3);
+    }
+    out.tris.push_back({base, base + 1, base + 2});
+    out.tris.push_back({base, base + 2, base + 3});
+  }
+  return out;
+}
+
 } // namespace
+
+boat_fit boat_fit_of(const cvc::physics::dyn_boat_desc &desc) {
+  boat_fit out;
+  const cvc::physics::boat_desc &boat = desc.boat;
+  if (!boat.hull.hull || boat.hull.hull->vertices.empty())
+    return out;
+  double x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300, z0 = 1e300, z1 = -1e300;
+  for (const cvc::physics::vec3 &v : boat.hull.hull->vertices) {
+    x0 = std::min(x0, v.x);
+    x1 = std::max(x1, v.x);
+    y0 = std::min(y0, v.y);
+    y1 = std::max(y1, v.y);
+    z0 = std::min(z0, v.z);
+    z1 = std::max(z1, v.z);
+  }
+  out.shape.length = desc.length_overall > 0.0 ? desc.length_overall : x1 - x0;
+  out.shape.width = y1 - y0;
+  out.shape.height = z1 - z0;
+  out.shape.wheelbase = out.shape.track = out.shape.wheel_radius = 0.0; // no wheels
+  out.keel = z0;
+  out.ok = true;
+  return out;
+}
 
 vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &cache,
                                           const ari::vehicle_look &look, const vehicle_shape &s,
                                           double base_z, vehicle_look_mesh &out,
-                                          std::vector<std::string> *warnings) {
+                                          std::vector<std::string> *warnings,
+                                          const cvc::physics::boat_desc *boat) {
   out = vehicle_look_mesh{};
   static const unsigned char white[3] = {255, 255, 255}, tyre[3] = {18, 18, 20};
   if (look.parted()) {
@@ -1017,8 +1124,8 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
     if (!m)
       return pending ? vehicle_model_status::pending : vehicle_model_status::failed;
     const parted_fit f = fit_parts(m->rig, s, base_z);
-    const bool textured =
-        !m->chassis_texture.empty() && m->chassis.uvs().size() == m->chassis.points().size();
+    const bool textured = look.texture && !m->chassis_texture.empty() &&
+                          m->chassis.uvs().size() == m->chassis.points().size();
     add_part(out, m->chassis, {f.scale[0], 0.0, 0.0, 0.0, f.scale[1], 0.0, 0.0, 0.0, f.scale[2]},
              f.offset, textured, 3, white);
     const double ws = f.wheel_scale;
@@ -1048,7 +1155,8 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
     const cvc::geometry &g = m->geometry;
     const double yaw = look.yaw * 3.14159265358979323846 / 180.0;
     const double cy = std::cos(yaw), sy = std::sin(yaw), sc = look.scale;
-    const bool textured = !m->texture.empty() && g.uvs().size() == g.points().size();
+    const bool textured =
+        look.texture && !m->texture.empty() && g.uvs().size() == g.points().size();
     add_part(out, g, {sc * cy, -sc * sy, 0.0, sc * sy, sc * cy, 0.0, 0.0, 0.0, sc},
              {0.0, 0.0, base_z + look.z}, textured, 3, white);
     if (textured)
@@ -1058,9 +1166,31 @@ vehicle_model_status vehicle_look_mesh_of(cvc::app &app, vehicle_model_cache &ca
   }
   if (look.kind == "file" && !look.path.empty())
     return vehicle_model_status::failed; // a mesh node of its own (vehicle_scene_node)
+  static const unsigned char none[3] = {0, 0, 0};
+  if (boat && (look.kind.empty() || look.kind == "box")) {
+    // A boat's box look: its hull as add_hull_node draws it (sync_vehicle_markers), its topsides
+    // and stripe in the entity's colours as the hull's node has them.
+    const hull_faces f = hull_faces_of(*boat);
+    if (!f.tris.empty()) {
+      const auto u8 = [](float c) { return static_cast<unsigned char>(std::lround(c * 255.0f)); };
+      const unsigned char bottom[3] = {u8(kHullBottom[0]), u8(kHullBottom[1]), u8(kHullBottom[2])};
+      const unsigned char teak[3] = {u8(kHullTeak[0]), u8(kHullTeak[1]), u8(kHullTeak[2])};
+      for (std::size_t i = 0; i < f.pts.size(); ++i) {
+        out.verts.insert(out.verts.end(), f.pts[i].begin(), f.pts[i].end());
+        out.normals.insert(out.normals.end(), f.nrm[i].begin(), f.nrm[i].end());
+        const unsigned char band = f.band[i];
+        out.role.push_back(band < 2 ? band : 2);
+        const unsigned char *own = band == 2 ? bottom : band == 3 ? teak : none;
+        out.own.insert(out.own.end(), own, own + 3);
+      }
+      for (const std::array<std::uint32_t, 3> &t : f.tris)
+        out.tris.insert(out.tris.end(), t.begin(), t.end());
+      out.hull = true;
+      return vehicle_model_status::ready;
+    }
+  }
   // The box look, as vehicle_scene_node lays it out.
   const double L = s.length, W = s.width, H = s.height;
-  static const unsigned char none[3] = {0, 0, 0};
   const double body_c[3] = {0.0, 0.0, 0.0}, body_l[3] = {L, W, H};
   add_box(out, body_c, body_l, 0, none);
   const double cab_c[3] = {-0.12 * L, 0.0, 0.5 * H + 0.375 * H},
@@ -1112,78 +1242,27 @@ std::shared_ptr<GeometryNode> add_hull_node(SceneGraph &sg, const std::string &i
                                             GraphicsNode *parent,
                                             const cvc::physics::boat_desc &boat,
                                             const float topsides[3], const float stripe[3]) {
-  if (!boat.hull.hull || boat.hull.hull->triangles.empty())
+  const hull_faces f = hull_faces_of(boat);
+  if (f.tris.empty())
     return nullptr;
-  const cvc::physics::hull_mesh &h = *boat.hull.hull;
-  // The waterline it floats at, body z (fresh water); its mass the engine's when the hull names
-  // none (the shape's volume at its density).
-  double waterline = 0.0;
-  try {
-    double mass = boat.hull.mass;
-    if (!(mass > 0.0))
-      if (const auto *b = std::get_if<cvc::physics::box>(&boat.hull.shape))
-        mass = boat.hull.density * 8.0 * b->half_extents.x * b->half_extents.y * b->half_extents.z;
-    waterline = -cvc::physics::dyn_boat_plant::float_height(boat, mass, 1000.0);
-  } catch (const std::exception &) {
-  }
-  static const float bottom[3] = {0.36f, 0.08f, 0.07f}; // wet antifouling
   cvc::geometry g(sg.appContext());
   auto &pts = g.points();
   auto &nrm = g.normals();
   auto &col = g.colors();
   auto &tris = g.tris();
   using idx = cvc::geometry::index_t;
-  // A box hull is drawn as an open boat: no deck, a sole (its cockpit's floor) 0.12 m over the
-  // waterline, so the water it keeps out of its hull (the water node's exclusion) is what would
-  // otherwise show in the cockpit on a wave.
-  const auto *hull_box = std::get_if<cvc::physics::box>(&boat.hull.shape);
-  double top = -1e300, low = 1e300, x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
-  for (const cvc::physics::vec3 &v : h.vertices) {
-    top = std::max(top, v.z);
-    low = std::min(low, v.z);
-    x0 = std::min(x0, v.x);
-    x1 = std::max(x1, v.x);
-    y0 = std::min(y0, v.y);
-    y1 = std::max(y1, v.y);
+  for (std::size_t i = 0; i < f.pts.size(); ++i) {
+    pts.push_back({f.pts[i][0], f.pts[i][1], f.pts[i][2]});
+    nrm.push_back({f.nrm[i][0], f.nrm[i][1], f.nrm[i][2]});
+    const unsigned char band = f.band[i];
+    const float *rgb = band == 0   ? topsides
+                       : band == 1 ? stripe
+                       : band == 2 ? kHullBottom
+                                   : kHullTeak;
+    col.push_back({rgb[0], rgb[1], rgb[2]});
   }
-  // Each triangle its own corners, so the faces shade flat.
-  for (const auto &t : h.triangles) {
-    const cvc::physics::vec3 &a = h.vertices[t[0]], &b = h.vertices[t[1]], &c = h.vertices[t[2]];
-    const double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
-    const double vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
-    double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-    const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
-    if (len > 0.0) {
-      nx /= len;
-      ny /= len;
-      nz /= len;
-    }
-    if (hull_box && nz > 0.9 && a.z >= top - 1e-9 && b.z >= top - 1e-9 && c.z >= top - 1e-9)
-      continue; // the deck: open
-    const idx base = static_cast<idx>(pts.size());
-    for (const cvc::physics::vec3 *p : {&a, &b, &c}) {
-      pts.push_back({p->x, p->y, p->z});
-      nrm.push_back({nx, ny, nz});
-      const double z = p->z - waterline;
-      const float *rgb = z < 0.02 ? bottom : z < 0.10 ? stripe : topsides;
-      col.push_back({rgb[0], rgb[1], rgb[2]});
-    }
-    tris.push_back({base, static_cast<idx>(base + 1), static_cast<idx>(base + 2)});
-  }
-  if (hull_box) { // the sole, teak, inside the hull's sides
-    static const float teak[3] = {0.55f, 0.40f, 0.24f};
-    const double z = std::min(std::max(waterline + 0.12, low + 0.05), top - 0.05), m = 0.04;
-    const idx base = static_cast<idx>(pts.size());
-    for (const auto &p :
-         {std::array<double, 2>{x0 + m, y0 + m}, std::array<double, 2>{x1 - m, y0 + m},
-          std::array<double, 2>{x1 - m, y1 - m}, std::array<double, 2>{x0 + m, y1 - m}}) {
-      pts.push_back({p[0], p[1], z});
-      nrm.push_back({0.0, 0.0, 1.0});
-      col.push_back({teak[0], teak[1], teak[2]});
-    }
-    tris.push_back({base, static_cast<idx>(base + 1), static_cast<idx>(base + 2)});
-    tris.push_back({base, static_cast<idx>(base + 2), static_cast<idx>(base + 3)});
-  }
+  for (const std::array<std::uint32_t, 3> &t : f.tris)
+    tris.push_back({static_cast<idx>(t[0]), static_cast<idx>(t[1]), static_cast<idx>(t[2])});
   std::shared_ptr<GeometryNode> node =
       parent ? parent->createChild<GeometryNode>(id, g)
              : std::dynamic_pointer_cast<GeometryNode>(sg.addGraphics(id, g));
@@ -1252,13 +1331,26 @@ void sync_vehicle_markers(RealizedScene &r, std::vector<std::string> *warnings) 
     if (!a)
       continue;
     const std::string id = "vehicle_" + std::to_string(e.id);
-    if (ari::vehicle_plant_floats(a->plant) && (a->look.kind.empty() || a->look.kind == "box")) {
-      // A boat: its hull, in its colours, bound to its hull body.
+    if (ari::vehicle_plant_floats(a->plant) && (a->look.kind.empty() || a->look.kind == "box" ||
+                                                (fitted_look(a->look) && !a->look.parted()))) {
+      // A boat, bound to its hull body: its one-piece model fitted as the boat node and an entity
+      // layer fit it (its length overall, its keel on its hull's bottom, about the body's origin),
+      // else its hull in its colours (a box look; while the model loads; when it cannot be read).
       std::shared_ptr<GraphicsNode> group = sg.addGraphics(id);
       try {
         const cvc::physics::dyn_boat_desc b = ari::boat_desc_of(*a, e.spec.mass, e.spec.max_speed);
-        add_hull_node(sg, id + "_hull", group.get(), b.boat, e.spec.color.data(),
-                      e.spec.color2.data());
+        bool model = false;
+        if (fitted_look(a->look))
+          if (const boat_fit fit = boat_fit_of(b); fit.ok) {
+            model = attach_model(sg.appContext(), *models, *group, id + "_mesh", a->look, fit.shape,
+                                 fit.keel, e.spec.color.data(), warnings);
+            if (!model && vehicle_model_state(sg.appContext(), *models, a->look,
+                                              fit.shape.length) == vehicle_model_status::pending)
+              r.vehicle_models_pending = true;
+          }
+        if (!model)
+          add_hull_node(sg, id + "_hull", group.get(), b.boat, e.spec.color.data(),
+                        e.spec.color2.data());
         r.physics_binding->bind(e.chassis, group);
       } catch (const std::exception &ex) {
         if (warnings)
@@ -1458,9 +1550,10 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
     const std::string sig = sel + "|" + get(st, a + "length") + "|" + get(st, a + "width") + "|" +
                             get(st, a + "height") + "|" + get(st, a + "look.kind") + "|" +
                             get(st, a + "look.path") + "|" + get(st, a + "look.uri") + "|" +
-                            get(st, a + "look.fit") + "|" + get(st, a + "look.chassis") + "|" +
-                            get(st, a + "look.wheel") + "|" + get(st, a + "look.rig") + "|" +
-                            get(st, root + ".spawn.color") + "|" + get(st, root + ".spawn.color2");
+                            get(st, a + "look.fit") + "|" + get(st, a + "look.texture") + "|" +
+                            get(st, a + "look.chassis") + "|" + get(st, a + "look.wheel") + "|" +
+                            get(st, a + "look.rig") + "|" + get(st, root + ".spawn.color") + "|" +
+                            get(st, root + ".spawn.color2");
     if (sig != *last) {
       *last = sig;
       if (graph->getGraphics(drawn))
@@ -1482,6 +1575,7 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
         look.yaw = num(get(st, a + "look.yaw"), 0.0);
         look.z = num(get(st, a + "look.z"), 0.0);
         look.fit = get(st, a + "look.fit") == "1";
+        look.texture = get(st, a + "look.texture") != "0";
         look.chassis = get(st, a + "look.chassis");
         look.wheel = get(st, a + "look.wheel");
         const std::string rig = get(st, a + "look.rig"); // its file, or its text when inline

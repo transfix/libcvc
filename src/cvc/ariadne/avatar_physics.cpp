@@ -121,6 +121,13 @@ void avatar_world::move_to(ph::world &shared, const std::map<std::string, ph::bo
     kv.second.id = create_obstacle(kv.second.half_extents, ph::body_state{});
 }
 
+double avatar_displacement(const avatar_body &body, double mass) {
+  const double box = body.width * body.width * body.height;
+  if (!(box > 0.0) || !(body.density > 0.0) || !(mass > 0.0))
+    return 1.0;
+  return mass / body.density / box;
+}
+
 std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynamic, double mass) {
   ph::body_desc d;
   d.shape = ph::box{ph::vec3{0.5 * _body.width, 0.5 * _body.width, 0.5 * _body.height}};
@@ -130,6 +137,8 @@ std::uint32_t avatar_world::create_avatar(const ph::body_state &feet, bool dynam
   d.linear_velocity = feet.linear_velocity;
   d.material = static_cast<ph::material_id>(_avatar_material);
   d.mass = dynamic ? mass : 0.0;
+  if (dynamic)
+    d.displacement = avatar_displacement(_body, mass);
   d.linear_damping = 0.0;
   d.angular_damping = 0.0;
   d.allow_sleeping = false; // an idle avatar must still be pushable and respond to its intent
@@ -274,6 +283,21 @@ void avatar_world::set_wind(const cvc::algo::wind_state &w, double base_z) {
     _world->set_field(id, f);
   else
     _wind_field = _world->add_field(f).value;
+}
+
+void avatar_world::set_water(const std::vector<ph::field> &water) {
+  if (!_own)
+    return; // a shared world's water is its owner's
+  if (water.size() == _water_fields.size()) {
+    for (std::size_t i = 0; i < water.size(); ++i)
+      _world->set_field(_water_fields[i], water[i]);
+    return;
+  }
+  for (const ph::field_id id : _water_fields)
+    _world->remove_field(id);
+  _water_fields.clear();
+  for (const ph::field &f : water)
+    _water_fields.push_back(_world->add_field(f));
 }
 
 void avatar_world::set_time(double t) {
@@ -497,6 +521,7 @@ void avatar_world::set_mass(const std::string &pid, double kg) {
   ph::body_settings s = _world->get_body(bid(a.id));
   s.mass = kg;
   _world->set_body(bid(a.id), s);
+  _world->set_displacement(bid(a.id), avatar_displacement(_body, kg));
   a.mass = kg;
   a.own_mass = true;
 }

@@ -22,6 +22,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
+#include <cvc/ocean/sea_surface.h> // sea_fronts: the fronts where each wave is
 #include <cvc/physics/world.h>
 #include <cvc/physics/world_geometry.h> // apply_wetness
 #include <functional>
@@ -148,6 +149,44 @@ struct WeatherFriction::impl {
   std::string gustKey;
   double gust = 0.0, gustPending = 0.0;
   std::uint64_t gustFrom = 0;
+  // The steering wind and the time scale (F4): the sky's keys the steering is read from (its drift
+  // and heading) and the deck's base; the steering and rate in effect (the props', then the last
+  // steer and rate events); and a change read, waiting for the tick it goes in after.
+  std::string driftKey, windAzKey, scaleKey, prefix;
+  double base = kWeatherDeckBase;
+  double steerSpeed = 0.0, steerAz = 0.0, rate = 1.0;
+  double pendSpeed = 0.0, pendAz = 0.0, pendRate = 1.0;
+  std::uint64_t steerFrom = kNever, rateFrom = kNever;
+  double dt = 0.0; // the clock's quantum when they were read
+  // It follows another host's weather (follow, OW5q): that host logs the steering; this one
+  // takes its events as they come and logs none of its own.
+  bool following = false;
+
+  // The steering and rate in effect: the props', then the events' last.
+  void in_effect() {
+    steerSpeed = model.params().steer_speed;
+    steerAz = model.params().steer_az;
+    rate = model.params().rate;
+    for (const cvc::world::weather_event &e : model.events())
+      if (e.type == cvc::world::weather_event::kind::steer) {
+        steerSpeed = e.speed;
+        steerAz = e.az;
+      } else if (e.type == cvc::world::weather_event::kind::rate) {
+        rate = e.scale;
+      }
+  }
+  // Log event e (at world time e.t), compacted past kCompact events, into weather.events.
+  void log(const cvc::world::weather_event &e) {
+    model.add_event(e);
+    if (model.events().size() > kCompact)
+      model.compact(e.t);
+    eventsText = cvc::world::format_weather_events(model.events());
+    if (app)
+      write<std::string>(*app, eventsKey, eventsText);
+    period = kNever; // the storms' history changed: the wetness again at the next step
+    ++revision;
+  }
+  static constexpr std::size_t kCompact = 24; // the drawn node's COMPACT
 
   void params() {
     cvc::world::weather_params p = scene_weather_params(node, field.get());
@@ -181,6 +220,11 @@ WeatherFriction::WeatherFriction(cvc::app *app, const SceneNode &n, const std::s
     const double drift = read_or<double>(*app, resolve_bind(bind_prefix, sky + ".drift"), 1.0);
     const double base = read_or<double>(*app, resolve_bind(bind_prefix, sky + ".base"), deck_base);
     d.steered = scene_weather_steering(*app, bind_prefix, base, drift, d.steer_speed, d.steer_az);
+    d.base = base;
+    d.prefix = bind_prefix;
+    d.driftKey = resolve_bind(bind_prefix, sky + ".drift");
+    d.windAzKey = resolve_bind(bind_prefix, sky + ".wind_az");
+    d.scaleKey = d.key(bind_prefix, "weather.time_scale");
     d.gustKey = d.key(bind_prefix, "weather.gust_front");
     d.gust = d.gustPending = std::max(0.0, read_or_seed<double>(*app, d.gustKey, d.gust));
   }
@@ -199,6 +243,12 @@ WeatherFriction::WeatherFriction(cvc::app *app, const SceneNode &n, const std::s
   std::vector<cvc::world::weather_event> ev;
   if (cvc::world::parse_weather_events(d.eventsText, ev))
     d.model.set_events(std::move(ev));
+  d.in_effect();
+  d.pendSpeed = d.steerSpeed;
+  d.pendAz = d.steerAz;
+  if (app) // as the drawn node seeds it
+    read_or_seed<double>(*app, d.scaleKey, d.model.params().rate);
+  d.pendRate = d.rate;
 }
 
 WeatherFriction::~WeatherFriction() = default;
@@ -227,8 +277,42 @@ void WeatherFriction::read_keys(const cvc::world_clock *clock_on) {
       d.model.set_events(std::move(ev));
       d.period = kNever; // the storms' history changed: the wetness again at the next step
       ++d.revision;
+      d.in_effect();
     }
     d.eventsText = text;
+  }
+  // The steering wind and the time scale, read as the drawn node reads them: a change goes in at
+  // the start of the next clock period (switch_steering), the last value read before it.
+  if (!d.following) {
+    const cvc::world_clock &clock = clock_on ? *clock_on : d.app->world_clock();
+    const std::uint64_t ticks = scene_clock_period_ticks(kSceneWindFrontPeriod, clock.fixed_dt());
+    const std::uint64_t from = (clock.tick() / ticks + 1) * ticks;
+    d.dt = clock.fixed_dt();
+    // No step took a change in (the physics is off): it goes in here, a period after its tick.
+    if ((d.steerFrom != kNever && clock.tick() > d.steerFrom + ticks) ||
+        (d.rateFrom != kNever && clock.tick() > d.rateFrom + ticks))
+      switch_steering(clock.tick());
+    const double drift = read_or<double>(*d.app, d.driftKey, 1.0);
+    double speed = 0.0, az = 0.0;
+    if (!scene_weather_steering(*d.app, d.prefix, d.base, drift, speed, az)) {
+      az = read_or<double>(*d.app, d.windAzKey, d.model.params().steer_az);
+      speed = kCloudSkyDrift * drift;
+    }
+    if (std::fabs(speed - d.steerSpeed) <= 1e-6 && std::fabs(az - d.steerAz) <= 1e-6) {
+      d.steerFrom = kNever; // back where it is: nothing to log
+    } else if (speed != d.pendSpeed || az != d.pendAz || d.steerFrom == kNever) {
+      if (d.steerFrom == kNever || from > d.steerFrom)
+        d.steerFrom = from;
+    }
+    d.pendSpeed = speed;
+    d.pendAz = az;
+    const double scale = std::max(0.0, read_or<double>(*d.app, d.scaleKey, d.rate));
+    if (std::fabs(scale - d.rate) <= 1e-9)
+      d.rateFrom = kNever;
+    else if (scale != d.pendRate || d.rateFrom == kNever)
+      if (d.rateFrom == kNever || from > d.rateFrom)
+        d.rateFrom = from;
+    d.pendRate = scale;
   }
   const bool on = read_or<double>(*d.app, d.frictionKey, 1.0) != 0.0;
   if (on != d.on) {
@@ -254,6 +338,36 @@ bool WeatherFriction::switch_gust(std::uint64_t tick) {
   d.params();
   ++d.revision;
   return true;
+}
+
+bool WeatherFriction::switch_steering(std::uint64_t tick) {
+  impl &d = *_impl;
+  bool changed = false;
+  if (d.following)
+    return false; // the host it follows logs them
+  if (d.steerFrom != kNever && tick > d.steerFrom) {
+    cvc::world::weather_event e;
+    e.type = cvc::world::weather_event::kind::steer;
+    e.t = static_cast<double>(d.steerFrom) * d.dt; // the period's start, world seconds
+    e.speed = d.pendSpeed;
+    e.az = d.pendAz;
+    d.steerFrom = kNever;
+    d.log(e);
+    d.steerSpeed = e.speed;
+    d.steerAz = e.az;
+    changed = true;
+  }
+  if (d.rateFrom != kNever && tick > d.rateFrom) {
+    cvc::world::weather_event e;
+    e.type = cvc::world::weather_event::kind::rate;
+    e.t = static_cast<double>(d.rateFrom) * d.dt;
+    e.scale = d.pendRate;
+    d.rateFrom = kNever;
+    d.log(e);
+    d.rate = e.scale;
+    changed = true;
+  }
+  return changed;
 }
 
 void WeatherFriction::before_step(cvc::physics::world &w, std::uint64_t tick, double dt) {
@@ -317,6 +431,8 @@ std::uint64_t WeatherFriction::gust_from() const { return _impl->gustFrom; }
 bool WeatherFriction::follow(const std::string &events, double gust, std::uint64_t gust_from) {
   impl &d = *_impl;
   bool changed = false;
+  d.following = true; // the steering is the followed host's to log (F4)
+  d.steerFrom = d.rateFrom = kNever;
   if (!events.empty() && events != d.eventsText) {
     std::vector<cvc::world::weather_event> ev;
     if (cvc::world::parse_weather_events(events, ev)) {
@@ -340,6 +456,71 @@ bool WeatherFriction::follow(const std::string &events, double gust, std::uint64
   if (changed)
     ++d.revision;
   return changed;
+}
+
+// ── the fronts where each thing is (F4) ──────────────────────────────────────────────────────────
+
+void scene_fronts(const cvc::physics::flow_velocity *air, double clock_t,
+                  cvc::ocean::sea_fronts &out) {
+  out.cells.clear();
+  out.ux = out.uy = out.ref = 0.0;
+  const auto *storm = dynamic_cast<const StormWindFlow *>(air);
+  if (!storm || storm->weathers().empty())
+    return;
+  const cvc::algo::wind_state &w = storm->wind();
+  out.ux = w.speed_mps * cvc::algo::det::cos(w.dir_rad);
+  out.uy = w.speed_mps * cvc::algo::det::sin(w.dir_rad);
+  cvc::algo::front_cell f;
+  for (const cvc::world::weather &m : storm->weathers())
+    for (const cvc::world::storm_cell &c : m.at(clock_t).cells)
+      if (m.front_cell_of(c, f))
+        out.cells.push_back(f);
+  // The strongest, in the order the weathers list them among equals.
+  std::stable_sort(
+      out.cells.begin(), out.cells.end(),
+      [](const cvc::algo::front_cell &a, const cvc::algo::front_cell &b) { return a.out > b.out; });
+  if (out.cells.size() > kSceneFrontCells)
+    out.cells.resize(kSceneFrontCells);
+  const cvc::world::weather_params &p = storm->weathers().front().params();
+  double vx = out.ux, vy = out.uy;
+  for (const cvc::algo::front_cell &c : out.cells)
+    cvc::algo::add_gust_front(c, p.cx, p.cy, vx, vy);
+  out.ref = std::sqrt(vx * vx + vy * vy);
+}
+
+namespace {
+using air_slot = std::shared_ptr<std::shared_ptr<const cvc::physics::flow_velocity>>;
+
+class SceneSeaFronts final : public cvc::ocean::sea_front_source {
+public:
+  explicit SceneSeaFronts(air_slot slot) : _slot(std::move(slot)) {}
+  std::shared_ptr<const cvc::ocean::sea_fronts> at(double t) const override {
+    const std::shared_ptr<const cvc::physics::flow_velocity> air = _slot ? *_slot : nullptr;
+    const auto *storm = dynamic_cast<const StormWindFlow *>(air.get());
+    if (!storm)
+      return nullptr; // no storms: no fronts
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_last && _air == air && _t == t)
+      return _last;
+    auto f = std::make_shared<cvc::ocean::sea_fronts>();
+    scene_fronts(storm, t + storm->clock_offset(), *f);
+    _air = air;
+    _t = t;
+    _last = std::move(f);
+    return _last;
+  }
+
+private:
+  air_slot _slot;
+  mutable std::mutex _mutex;
+  mutable std::shared_ptr<const cvc::physics::flow_velocity> _air;
+  mutable double _t = 0.0;
+  mutable std::shared_ptr<const cvc::ocean::sea_fronts> _last;
+};
+} // namespace
+
+std::shared_ptr<const cvc::ocean::sea_front_source> scene_sea_fronts(air_slot slot) {
+  return std::make_shared<const SceneSeaFronts>(std::move(slot));
 }
 
 // ── StormWindFlow ────────────────────────────────────────────────────────────────────────────────

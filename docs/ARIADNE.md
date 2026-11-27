@@ -985,11 +985,12 @@ The built-in top-level keys (`is_builtin_block`,
 
 ```
 meta  menubar  windows  overlays  root (alias: children)  scene  customs  requires
-init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint  args
-windows_menu  tests  functions  data  assets  scenes  clock  menu_collapse  notifications
-context_menu
+state  init  on_tick  on_key  on_pointer  on_signal  keys  units  import  channels  lint
+args  windows_menu  tests  functions  data  assets  scenes  prototypes  clock  menu_collapse
+notifications  context_menu
 ```
 
+`state:` is the document's starting values, written just before `init:` runs (§5.3).
 `tests:` is read only by `ari test` (§13). `clock:` is the tray's clock (§5.22).
 `menu_collapse:` says when the menu bar's menus fold into one (§5.23). `notifications:` shows
 the tray's bell or not (§5.24). `assets:` and
@@ -1021,7 +1022,36 @@ meta:
   min_libcvc: 0.42.0      # refuse to load on an older runtime
 ```
 
-### 5.3 `init:` and the resident handlers
+### 5.3 `init:`, `state:` and the resident handlers
+
+**`state:`** gives keys their starting values without a program. It is a map of state paths to
+literal values, which the host writes under the document's prefix (`seed_state`) just before
+`init:` runs. So `init:` reads them and may override them, and, like an `init:` seed, they win
+over a widget's `def:`.
+
+```yaml
+state:
+  run:
+    world: data
+    crop: 600
+    paused: 0
+  view.camera: follow        # a key may hold dots
+  /app.theme: dark           # a leading / is the app root (§7.1)
+```
+
+writes what `init: (begin (state-set "run.world" "data") (state-set "run.crop" "600") ...)`
+wrote, without the program:
+
+- **Keys.** A map's keys are path segments, joined by dots, and a key may hold dots itself. Only a
+  top-level key may start with `/`.
+- **Values.** A value is written as it is spelled: `paused: 0` writes `0`, and `ready: true` writes
+  `true`. A list of scalars is joined by commas (`[1, 2, 3]` writes `1,2,3`, as a position key
+  holds it), and a key with nothing after it writes the empty string. Anything else, and a key
+  that is not a path (`a..b`), is left out with a warning; a key given twice warns, and the later
+  value is used.
+- **When.** Like `init:`, it is written on every load and reload. A `load:`ed module's `state:` is
+  written at its mount's sub-prefix just before the module's `init:` (§12), and again when the
+  module is restarted (§5.25).
 
 `init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
 the loader only *captures*. The host wires them:
@@ -1143,7 +1173,7 @@ widget's fields as sibling keys; copy the shipped components (§6.5) for the exa
 each type takes:
 
 ```yaml
-meta: { name: hello, version: 0.1.0, min_libcvc: 3.4.0 }
+meta: { name: hello, version: 0.1.0, min_libcvc: 4.0.9 }
 menubar:
   - menu: File
     items:
@@ -1161,7 +1191,7 @@ windows:
         bind: (* 2 (int (state-get "demo.n")))   # a computed bind, read lane
       - button: Bump
         on: (state-set "demo.n" (+ (int (state-get "demo.n")) 1))   # a program, action lane
-init: (begin (state-set "demo.n" 10) (state-set "demo.frames" 0))
+state: { demo: { n: 10, frames: 0 } }   # starting values (§5.3)
 on_tick: (state-set "demo.frames" (+ (int (state-get "demo.frames")) 1))
 ```
 
@@ -2060,8 +2090,11 @@ scene:
   `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
   `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
   target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
-- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee` or a mesh file, else arrows;
-  with `lod:` on, four quadric-decimated rungs of it picked per vehicle by its size on screen: a rung
+- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee`, a model's name or a mesh
+  file, else arrows: the look a world vehicle would have, `vehicle_look_named` and
+  `vehicle_look_mesh_of`, so `humvee` is the Humvee in parts, its wheels at rest in a tyre's dark,
+  where vehicle-humvee has them, else `Humvee.glb`; with `lod:` on, four quadric-decimated rungs of
+  it, each colour role decimated on its own, picked per vehicle by its size on screen: a rung
   takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
   and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
   reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
@@ -2082,7 +2115,33 @@ higher relief never floods or drains the world. The size defaults to 1200 and th
 vertex per 5 m (at most 2049). A `heightfield:` source takes the same `generator:` keys, its
 layers adding on top. The `generated_world` node type uses the same generators (its `terrain:`,
 `city:` and `terrain_file:` props; `world_controls.ari` switches them live). Its first world is
-made while the document loads. An edit to a `world.*` key then waits (`world.pending` is 1) until
+made while the document loads.
+
+**Themes and model assets.** The node's `theme:` (`world.theme` live; `generated_world_params::theme`)
+names a world theme ([`world_theme.h`](../inc/cvc/world/world_theme.h)): data that says which
+textured model assets the city builds and which trees it plants where. A theme lists building
+archetypes (an asset, a weight, the urbanity band it suits, a scale range, and how many street lots
+it may span) and tree archetypes (an asset, a weight, a scale range and a biome rule: the ground's
+height over the water, its slope, the distance to the nearest water). The city tries a building
+archetype on a share of its lots, the one that fits the lot (or the lot and its neighbour) at its
+real size, its front on the setback line, and builds the procedural massing elsewhere; the scatter's
+trees become tree archetypes where their biome holds, and stay L-system trees elsewhere. The
+built-ins are `temperate_town` (brick shops, brownstones and offices; oaks inland), `coastal_town`
+(the same streets; palms along the coast, oaks inland) and `tropical` (palms everywhere but steep
+ground); a host adds its own with `register_world_theme`, or reads one from JSON
+(`world_theme_from_json`). Every draw is keyed on its spot, so the same params, theme and installed
+assets make the same world.
+
+An asset is a glb and its coarser LODs beside it, described by `<name>.asset.json` (schema
+`cvc-model-asset/1`, [`model_assets.h`](../inc/cvc/world/model_assets.h)), as the cy-pca
+`building-*`, `tree-*` and `prop-*` cvcpkg packages install them to `share/cvc-scenes/shared/`. The
+app's catalog (`model_catalog_of`) finds them there under the cvcpkg prefix (`CVCPKG_PREFIX`,
+`CVC_PREFIX`), the nav bundle's `shared/`, and `CVC_MODEL_PATH`; a theme whose assets are not
+installed builds as if it named none of them. The renderer draws each placed copy as a LOD ladder
+of the asset's rungs (their switch distances from each rung's `world_error_m`), all copies sharing
+one set of buffers and textures, so only the copies near the camera draw at full resolution. The
+model buildings collide as boxes; the trees are drawn only. A world's bundle carries its models in
+`models.json`. An edit to a `world.*` key then waits (`world.pending` is 1) until
 Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
 `world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and
 every repaint (`world.color`, at once) is a sliced task on the app's scheduler
@@ -2219,6 +2278,10 @@ scene:
 - **Stepping.** The world runs on `app.world_clock()`, driven as `clock: {}` would drive it, and
   steps by the quanta due. With a renderer, `tick_scene` does that and draws each moving body's
   node at the body's pose, between the last two steps, wherever the node sits in the hierarchy.
+  Each step runs on Jolt's own workers beside the stepping thread wherever there are threads: up
+  to three natively, two in a browser built with threads, none without. Its vehicles' wheels,
+  its collisions and its islands are shared among them, and a run is the same on any number. 40
+  Jolt vehicles step in about 1.8 ms on three workers against 3 ms on none, 120 in 5 against 12.
 - **Headless.** The world is core libcvc's (`cvc::ariadne::SceneWorld`,
   [`scene_world.h`](../inc/cvc/ariadne/scene_world.h)), so it runs with no renderer too. An
   `AppRuntime` with no `SceneAdapter` (`ari`, `ari test`, pycvc's headless `AriApp`, `arix`)
@@ -2309,7 +2372,8 @@ scene:
     (`scene.world.grid.{rows, cols, cell, occupied, summary}`, `SceneWorld::grid`):
     - a generated or data world's grid comes from its world;
     - a terrain's from its height field;
-    - a flat ground's is an open walled grid over its footprint.
+    - a flat ground's is an open walled grid over its footprint, with the world's other static
+      nodes that stand 0.5 m or more over it blocked under their footprints (a city of boxes).
   - **The panel.** `world_source.ari` picks the world, and shows its settings and readiness:
     - for a generated world, `world_controls`' widgets;
     - for a data world, its loading progress, plus loading another bundle into the same dataset.
@@ -2363,24 +2427,33 @@ scene:
     `entity_spec::plant`), as a gym's agents do. A kinematic box meets no building in the
     physics world, so its obstacle contacts are its footprint on the grid's blocked cells, and
     two kinematic boxes touch when they overlap.
-  - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
-    `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
+  - **Looks.** With no `look:`, a humvee is the real Humvee from the vehicle-humvee package, with
+    its texture, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
-    `$CONDA_PREFIX` or the program's prefix), with its texture. It is oriented and scaled to the
-    chassis as the nav demos do it, and stands on the ground under it. Anything else, or a humvee
-    without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
-    `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
-    document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
-    `z:` place it. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
+    `$CONDA_PREFIX` or the program's prefix). It is the Humvee in parts, its wheels rolling and
+    its front pair steering (a parted look, below: the package's `humvee/chassis.glb`,
+    `humvee/wheel.glb` and `humvee/rig.json`, from 1.0.0+cvc.5), when the three are installed
+    together; else the one-piece `Humvee.glb`, oriented and scaled to the chassis as the nav demos
+    do it, its wheels still. Either stands on the ground under the chassis. Anything else, or a
+    humvee without the package, is its chassis box in the entity's two colours, with a cabin and
+    wheels. `look: { model: humvee }` names a model, `file:` a mesh beside the document and
+    `asset:` a document asset; `fit: true` orients and scales a file as a model is; `scale:`,
+    `yaw:` and `z:` place it. `model: humvee` is the Humvee in parts too, unless it has `scale:`,
+    `yaw:` or `z:`, which only the one-piece model takes; `file: Humvee.glb` is the
+    one piece always. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
     document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
     document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
-    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }`. It is
-    fitted unless `fit: false`. The resolved look carries the entry's source and path (`uri`,
+    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }` (the
+    one piece) or `look: { data: humvee, chassis: humvee/chassis.glb, wheel: humvee/wheel.glb,
+    rig: humvee/rig.json }` (in parts, as `world_lab.ari` draws it). It is fitted unless
+    `fit: false`. The resolved look carries the entry's source and path (`uri`,
     `subpath`), so it is whole without the document: a client fetches the same package. The view
     asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
     the box while it loads, then the model. When the package cannot load (the host's network is
     off: `--net-allow https://cvcpkg.org`; no such package), a local install of the file by its
-    name is used (`find_vehicle_model`), else the box.
+    name is used (`find_vehicle_model`), else the box. `texture: false` draws a model (one-piece or
+    parted) in the entity's colours instead of its texture, so a fleet's teams read at any
+    distance (an entity layer's coarse rungs are in them already).
   - **A model in parts.** A one-piece model is one mesh: its wheels are in it and cannot turn. A
     parted look is the chassis without its wheels, one wheel, and a rig that says where the
     wheels go, so each wheel is drawn on its own and rolls and steers as the vehicle drives:
@@ -2410,9 +2483,18 @@ scene:
       for glTF's own: +y up, +z forward, +x left). The wheel mesh is the left wheel, its axle along
       y and its outside toward +y; it is taken about its middle (its bounds' centre), wherever its
       file has it. Files sit beside the document, else where the vehicle models are installed
-      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package such as
-      vehicle-humvee can ship them; with `data:`, they are files in that entry's package, loaded as
-      a one-piece data look is (the box until it loads).
+      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package can
+      ship them; with `data:`, they are files in that entry's package, loaded as a one-piece data
+      look is (the box until it loads).
+    - **The Humvee in parts.** vehicle-humvee (1.0.0+cvc.5 on) ships its Humvee so beside
+      `Humvee.glb`: `share/cvc-scenes/shared/humvee/chassis.glb` (the chassis without its wheels),
+      `humvee/wheel.glb` (the front left wheel about its hub) and `humvee/rig.json` (its four hubs
+      and radius; it steers the front pair, `mirror: turn`), all in the rig's frame, z up, made by
+      graphics-assets' `tools/split_wheels.py`. A humvee with no `look:`, or `look: { model:
+      humvee }`, is drawn so when the three are installed in one directory (`resolve_vehicle_looks`;
+      an older package has no `humvee/`, so it is the one piece). Its resolved look keeps the
+      one-piece model's file as well (`vehicle_look::path`): a relay passes an entity's look on as
+      its kind and file alone (`room_entities.h`), so a room's clients draw the one piece.
     - **The rig** (`cvc::ariadne::vehicle_rig`), inline or a file of a map, YAML or JSON:
       `radius:` (or `wheel: { radius: }`), `hubs:` (a list of `[x, y, z]`, or a map whose `xyz:`
       lists them and whose `order:` names them, so `steer:` may name them), `steer:` (by index or
@@ -2439,7 +2521,9 @@ scene:
       passes both with each pose (`entity_pose`, the pose keys or the packed poses).
     - **Nodes.** The entity's group `vehicle_<id>` holds `vehicle_<id>_chassis` and
       `vehicle_<id>_wheel<k>` (a group posed each frame, its mesh `vehicle_<id>_wheel<k>_mesh`
-      under it), the wheels in the rig's order. The catalog publishes the parts too:
+      under it), the wheels in the rig's order. The wheels cast no shadow: the chassis's is the
+      vehicle's, and each turning wheel would be a moving caster the shadow cache redraws on its
+      own. The catalog publishes the parts too:
       `<vehicles>.archetypes.<id>.look.chassis`, `.look.wheel` and `.look.rig` (the rig's file, or
       an inline rig's text, `vehicle_rig_text`), so a `vehicle_preview` draws them, at rest.
     - **Later.** Each wheel's own suspension travel for a `pose` entity: today its wheels stand on
@@ -2574,7 +2658,10 @@ scene:
     document included, populates its world. A gym's reset clears them and spawns its own agents.
   - **Fleets.** A `start:` entry with `fleet:` (a state name) is a fleet: up to 4096 vehicles,
     named `<fleet> 1`, `<fleet> 2`, ... (or after `name:`), laid out together once the world's
-    grid exists, the way libcvc's nav swarms are:
+    grid exists, the way libcvc's nav swarms are
+    ([`nav_fleet_swarm.ari`](../examples/ariadne/documents/nav_fleet_swarm.ari): 240 Humvees in six
+    teams over a small terrain lab world or a city of blocks, their rally points moved by the
+    document):
 
     ```yaml
     start:
@@ -2595,12 +2682,18 @@ scene:
       `status`, and `rally.count` with `rally.<t>.x`, `.y` and `.color`. Writing a rally point's
       `x` and `y` moves its team (held to the grid). A change of `restart.request` lays the fleet
       out again from its seed, every vehicle back at its start; `reseed.request` from the next
-      seed. `vehicles.fleets.names` lists the fleets.
+      seed. `size` (the entry's `count:` to start) is how many it has: writing it adds vehicles
+      or takes its last ones off (1 to 256), and the fleet is laid out again from its seed.
+      `vehicles.fleets.names` lists the fleets.
     - `keys: summary` (a fleet's default) writes no per-entity keys for its vehicles but for those
       `vehicles.watch` names (entity ids joined by `,`: the one a camera follows, the one a panel
       shows) and those with an intent; `entities.ids` lists the entities with keys, and
       `entities.count` counts them all. The others share a line in `entities.summary` and in
       `physics.stats.vehicles`. `keys: all` writes every vehicle's.
+    - `collide: true` keeps its vehicles from passing through each other on nav's own plant
+      (kinematic): after each navigator step, any two closer than nine tenths of the vehicle's
+      length are pushed apart (never into what blocks the grid). A Jolt plant's vehicles collide as
+      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
@@ -2683,11 +2776,19 @@ scene:
     - The promoted are the vehicles a camera follows (`viewers.main.camera.track.target` naming
       `vehicle_<id>`), those `vehicles.watch` names, then the nearest. One keeps its node until
       another is a fifth nearer, so a moving camera does not swap them frame by frame.
-    - An entity goes to the first layer whose `of:` takes it. One no layer takes, a boat, or a
-      mesh file look without `fit` has its own node. With no `entity_layer` the scene has one over
-      all of them (node `entities`, the defaults above), so a world of up to 32 is drawn as before.
+    - An entity goes to the first layer whose `of:` takes it, a boat as a car does. One no layer
+      takes, or a mesh file look without `fit`, has its own node. With no `entity_layer` the scene
+      has one over all of them (node `entities`, the defaults above), so a world of up to 32 is
+      drawn as before.
+    - A boat (a `dynamicboat` vehicle) is drawn as the `boat` node draws one, about its hull
+      body: its model fitted to its length overall with its keel on its hull's bottom, and a box
+      look's mesh its hull, flat-shaded, topsides and stripe in its colours and the wet bottom dark
+      red (a box hull open, with its teak sole), on a model's four rungs. The water keeps out of
+      the nearest boats' hulls however they are drawn. A relay's client has no hull to draw, so a
+      box-look boat is its box there.
     - The meshes are posed from the physics binding's poses, between steps, whether the frame
-      steps the world or `--world-thread`'s local holon does. A client of a relay draws the room's
+      steps the world or `--world-thread`'s local holon does. A rung whose entities have not moved
+      (a parked fleet, a paused world) is not sent again. A client of a relay draws the room's
       entities the same way (`room_view`, from its entity playout, under node `room_entities`),
       the vehicle it drives among the promoted.
     - On arigl, 200 kinematic vehicles at 3.6x take 8 ms a frame against 61 with each its own
@@ -3685,7 +3786,10 @@ How each backend does it:
   line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
   little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
-  and cascade new windows instead of flowing them. A window that would run off the screen stops at
+  and cascade new windows instead of flowing them. That size is the content's natural one: content
+  that stretches to the line's end (a clickable group's card, a message field) takes the window's
+  width but doesn't widen it to the screen's edge, as under ImGui (FTXUI: libcvc 4.0.10; before
+  it, such content widened the window to the edge). A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view. The mouse wheel over it scrolls
   it too, 3 rows a notch, from where it shows, and stops with its last row at the bottom (a feed in
@@ -3737,10 +3841,14 @@ that use of the unit.
   the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
   - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
   - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
-  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+  - FTXUI (libcvc 4.0.10): a press on a window's left, right or bottom edge, or a bottom corner,
+    and a drag resize it; the title bar moves it. The other edges stay put, and the window keeps
+    to its `min:` and `max:` and to the screen. A press there without a drag changes nothing.
+    `resizable: false`: a drag on its edge does nothing. FTXUI draws no handle: the frame is it.
+    `ariadne_ftxui_test`'s `AWindowResizesByAnEdgeOrACorner` drags each.
 - A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
-  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
-  keeps that size; `resizable: false` stops that as well.
+  can't resize it either way. On the tvision desktop and under FTXUI the user may resize one, and
+  from then on it keeps that size; `resizable: false` stops that as well.
 - A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
 
 **Maximizing.**
@@ -3753,8 +3861,8 @@ that use of the unit.
   again:
   - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
     where along the title bar it was grabbed.
-  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
-    window's own, so a later maximize goes back to it.
+  - Resized by an edge or a corner (ImGui, FTXUI), it keeps the size it was given, where it was
+    drawn. That size is now the window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
 - **How it starts:** a window's `maximized:` is the maximize it has while that key holds nothing:
@@ -4516,7 +4624,8 @@ scene:
 The built-in `generated_world` makes the world and writes it as a version 2 city bundle
 (ARIADNE_WORLDS §18.8): `world.json`, the terrain's heights and cell surfaces, and a glb per
 mesh. It takes `generated_world_params`' fields by name (`seed`, `half_m`, `trees`, `rocks`,
-`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`, ...)
+`buildings`, `amp_m`, `water_level_m`, `preset`, `terrain`, `city`, `terrain_file`, `edge`,
+`theme`, ...)
 and `building_library`. A generated world is then the same kind of dataset as a loaded city, and
 its `world` is the bundle read back, so the physics is the same on every host that decodes it.
 Beside the decoder's outputs, `generated` holds the world as made (its raster, roads and props).
@@ -5046,7 +5155,8 @@ scene:
   and its parts under it), its own transform, material and tags, so a script moves or recolours
   one instance and not the others.
 - **Nesting.** A prototype's nodes may `use:` other prototypes. A prototype within itself, at any
-  depth, is not expanded, with a warning, and so is a name no prototype has.
+  depth, is not expanded, with a warning, and so is a name no prototype has. Each `use:` is a
+  level of the document's nesting, and so is each node (§6.7): a scene nests at most 256 levels.
 - **The schema** (§14) checks a using node as it is written, its `use:` and `args:` with its other
   keys, and a prototype only for its `args:`: its values may hold tokens its instances fill in.
 
@@ -5558,7 +5668,8 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
 - **Quit** takes the application away: its windows, its menu and its tray icons go, and its
   `on_tick:` and the programs it started stop. Its state stays.
 - **Restart** quits it, drops its state subtree and its notifications, and starts it again as when
-  it was first loaded: its `link:` holes are planted, its `init:` runs, and its `on_tick:` starts.
+  it was first loaded: its `link:` holes are planted, its `state:` is written, its `init:` runs,
+  and its `on_tick:` starts.
 - **Windows > Applications** lists every application, ticked while it runs. Untick one to quit it;
   tick a quit one to open it again as it was. A quit application's windows are not listed until it
   comes back. A quit stays for the run; nothing persists it.
@@ -6129,7 +6240,9 @@ fetch:
 token substitution from the `include:`'s `args:`. Units are collected before the body,
 so instantiation is order-free. A name-keyed expansion-stack guard (in `expand_include`,
 [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
-unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
+unknown unit warns and renders empty. The `include:` entry is a level of the document's nesting,
+and the unit's widget goes on a level below it (§6.7). `include:` is the static counterpart of
+`repeat:`.
 
 A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
 include site's `args:` override them, and a `{token}` with neither stays literal. That is how a
@@ -6209,7 +6322,8 @@ fragment as an **isolated module** in a fresh sub-context (its `units:` are its 
 based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth cap
 `kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256` (checked in
 `expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out
-a depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
+a depth cap alone would miss. The `load:` entry is a level of the document's nesting, and the
+fragment's widgets go on below it (§6.7). The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
@@ -6219,8 +6333,9 @@ A module's own programs are its `init:`, its `on_tick:` and its widgets' actions
 from the host goes in the module's own `requires:` (§5.7). The loader
 captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
 `Widget::tick_script`), and the runtime runs both at the sub-prefix with the mount's functions:
-`init:` once, `on_tick:` as the mount's own tick resident (§2.3). So a module can own a loop, a
-request poller say, and be tested on its own with `ari test` (§13).
+`init:` once, `on_tick:` as the mount's own tick resident (§2.3). Its `state:` (§5.3), captured as
+`Widget::state_seeds`, is written at the sub-prefix just before its `init:`. So a module can own a
+loop, a request poller say, and be tested on its own with `ari test` (§13).
 
 `on_key:`, `on_pointer:` and `on_signal:` stay the outermost document's. A fragment that declares
 one loads with a warning, and the handler is ignored. Raw input and signals belong to the
@@ -6429,6 +6544,70 @@ root:
 
 `LoadResult::functions` lists the document's functions, and `LoadResult::root.functions` holds the
 same as a `FunctionScope`. A mount's are on its wrapper widget.
+
+### 6.7 How deep a document nests
+
+A document's widgets nest at most `kMaxNesting` levels deep, 256
+([`loader.h`](../inc/cvc/ariadne/loader.h)). Each widget is a level, and so is each `include:`
+and `load:` entry: the unit's widget, or the fragment's widgets, go on a level below the entry.
+A context menu's items and a tab bar's tabs are a level below their widget, as children are. The
+count runs through the whole document, across every unit and every mounted fragment.
+
+A scene counts the same way: each scene node is a level, and so is each `use:` of a prototype
+(§5.18), whose node goes on a level below it. Scenes are parsed after the widgets, so a scene has
+all 256 levels to itself. Written out, a scene's YAML stops it at about 247 nodes (see below);
+through `use:`s of prototypes that `use:` others, the limit is all that stops it.
+
+A load that would go deeper fails (`LoadResult::ok` is false) and builds no tree and no scenes.
+The error is at the first widget past the limit, where it is written: for a widget in an
+`include:` expansion, the same place in the unit, in the unit's own file. It counts the
+`include:` and `load:` entries on the way down, and names each one that goes into another file:
+
+```
+ari: lib.ari:510:9: a widget nested deeper than 256 levels, the most a document may (each widget,
+include: and load: a level; docs/ARIADNE.md §6.7), with 127 include: and 1 load: on the way, by
+way of main.ari:5:9 load: frag.ari, frag.ari:4:5 include: level0 (in lib.ari)
+```
+
+A scene that goes deeper fails the same way, at its first node past the limit; for a node in a
+prototype's instance, that is where the node is written in the prototype:
+
+```
+ari: scene.ari:102:1310: a scene node nested deeper than 256 levels, the most a document may (each
+scene node and use: a level; docs/ARIADNE.md §6.7), with 100 use: on the way
+```
+
+`LoadResult::error_source`, `error_line` and `error_column` hold that place, and `ari validate`
+reports the error there (§14.3). A JSON schema cannot count across files, so the loader does it.
+
+The loader parses a document a level at a time on the native stack, and the limit keeps a load
+inside the smallest stack a host loads on: wasm's 2 MiB (`-sSTACK_SIZE` for ari's browser build,
+arigl web, arigl-web, cyprty and the examples). In MSVC Release the parse takes about 0.9 KB of
+stack a level through `include:`s, 1.1 KB a level written inline and about 2 KB for each `load:`,
+so a document at the limit loads, and draws, on 2 MiB (`ariadne_deep_nesting_test` checks that),
+where the parse alone would go about 2,300 levels deep. A scene level takes about 0.6 KB (0.2 KB
+in wasm), so a scene at the limit loads on less than 192 KiB. The shipped documents nest at most
+11 levels, and their scenes 2. Drawing has no limit of its own: the per-frame walk keeps its place
+on the heap.
+
+Two parts of a load go down a level of YAML at a time rather than a widget or a scene node:
+
+- **yaml-cpp's own parse**, about 0.9 KB a level. It stops at about 500 levels of YAML, which is
+  about 246 widgets written inline (two levels of YAML each): reading a document that deep takes
+  384 to 448 KiB in MSVC Release.
+- **The schema check** (§14.2), about 2.8 KB a level, inside json-schema-validator. It goes at
+  most `kMaxSchemaDepth` levels of YAML deep, 128 (the document, or the `include:` expansion,
+  is level 1). That is ten times the deepest shipped document's 13. A document, library, fragment
+  or `include:` expansion whose YAML goes deeper is not checked. Instead it gets one schema
+  issue, at its first value past the limit: `nested more than 128 levels of YAML deep, the most
+  the schema check goes (docs/ARIADNE.md §6.7): this document is not checked`. The load goes on,
+  as it does for any schema issue, and `ari validate` fails the document. The deepest check that
+  runs takes 320 to 384 KiB.
+
+So the most stack a load takes is for a fragment as deep as yaml-cpp reads, `load:`ed at the
+bottom of a 254-level chain: 640 to 704 KiB in MSVC Release, about a third of 2 MiB. Checking
+every level of it took 1.5 to 1.6 MiB. `ariadne_deep_nesting_test` loads each worst case on
+1 MiB: that fragment, a document and a scene as deep as yaml-cpp reads, and a scene at the limit.
 
 ## 7. State prefix and mount scoping
 
@@ -7033,8 +7212,9 @@ and runs headless too. [CARS.md](CARS.md) describes it.
 `nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
 `<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
 vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
-makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
-`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+makes a glTF vehicle +X forward, +Z up and true to scale with cvcGL's own fit
+(`pycvc_gl.fit_vehicle_geometry`, as a world vehicle's model look is fitted), and
+`seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
@@ -7649,7 +7829,7 @@ on_tick: |
   world:
     avatars:
       archetypes:                  # every avatar has the first, for now
-        person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@1] }
       policy:
         max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
         allow_vertical: false
@@ -9352,6 +9532,9 @@ A build with the validator (json-schema-validator over nlohmann-json; `have_json
   A problem there is reported in the unit's own file and line, with the context
   `include <unit>`.
 
+Each of these is checked down to `kMaxSchemaDepth` levels of YAML, 128 (§6.7). One that goes
+deeper is not checked, and its one issue, at its first value past that depth, says so.
+
 Each problem is a warning, `ari: schema: <file>:<line>:<column>: <context>: <pointer>:
 <message>`, and a `SchemaIssue` in `LoadResult::schema_issues`. The load goes on: the loader is
 lenient, and a host decides how strict to be. `ari test` fails a document that warns, so a
@@ -9389,6 +9572,17 @@ doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or w
 - `--strict`: a loader warning fails the document too.
 - `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
   column, context, pointer, message), its load error and its warnings.
+
+A load error the loader can place is reported there, as the schema's are. A document nested
+deeper than the loader goes (§6.7) is one, at its first widget past the limit, which may be in a
+library or a fragment:
+
+```
+deep.ari:514:9: error: a widget nested deeper than 256 levels, the most a document may (each
+widget, include: and load: a level; docs/ARIADNE.md §6.7), with 128 include: and 0 load: on the way
+```
+
+In `--json` its place is `load_error_source`, `load_error_line` and `load_error_column`.
 
 The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
 the `cvc://` component library, `--component-path`). A document for arigl may name widget types

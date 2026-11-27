@@ -228,7 +228,12 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
       list(APPEND _relay_python_path "--relay-arg=${_a}")
     endforeach()
     set(_relay_tests)
-    foreach(_scheme grpc ws)
+    # The WebSocket pairs only with CVC_ENABLE_WS: without it the relay has no WebSocket.
+    set(_relay_schemes grpc)
+    if(CVC_ENABLE_WS)
+      list(APPEND _relay_schemes ws)
+    endif()
+    foreach(_scheme IN LISTS _relay_schemes)
       add_test(NAME arisrvx_room_call_arigl_${_scheme}
                COMMAND "${Python3_EXECUTABLE}" "${_srv_tests}/relay_pair.py"
                        --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:arigl>
@@ -301,8 +306,9 @@ if(EMSCRIPTEN)
     -sSTACK_SIZE=2097152
     -sEXIT_RUNTIME=0
     -sFETCH=1)
+  # Threaded, as arigl's pool below: 4, and two for a physics world's Jolt workers.
   if(CVC_WASM_PTHREADS)
-    target_link_options(cyprty PRIVATE -sPTHREAD_POOL_SIZE=4)
+    target_link_options(cyprty PRIVATE -sPTHREAD_POOL_SIZE=6)
   endif()
   # The component library the document imports (cvc://components/...: its Users and Chat windows),
   # embedded where an install keeps it, as arigl-web does.
@@ -341,8 +347,11 @@ if(EMSCRIPTEN)
       -sSTACK_SIZE=2097152
       -sEXIT_RUNTIME=0
       -sFETCH=1)
+  # Threaded (wasm-mt), a pool of 4 workers and two more for a physics world's Jolt workers
+  # (SceneWorld::build gives its world two in a threaded browser): they start with the world, and
+  # a new worker can't load while the page's main thread waits, so the pool has them ready.
   if(CVC_WASM_PTHREADS)
-    list(APPEND _arigl_wasm_link -sPTHREAD_POOL_SIZE=4)
+    list(APPEND _arigl_wasm_link -sPTHREAD_POOL_SIZE=6)
   endif()
   set(_arigl_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
   file(GLOB _arigl_component_files CONFIGURE_DEPENDS "${_arigl_components}/*.ari")
@@ -461,15 +470,16 @@ if(EMSCRIPTEN)
       # 16 MB does not.
       list(TRANSFORM _arigl_wasm_link REPLACE "^-sSTACK_SIZE=.*" "-sSTACK_SIZE=8388608"
            OUTPUT_VARIABLE _ariglx_wasm_link)
-      # Threaded (wasm-mt), a pool of 8 workers where arigl has 4, for Python's threads. Their
+      # Threaded (wasm-mt), a pool of 10 workers where arigl has 6, for Python's threads. Their
       # start() waits for the thread to run, and on the page's main thread (init:, an export, a
       # tick) a thread only runs on a worker the pool already has: a new one can't load while
-      # that thread waits, so the page hangs. By init: the shell holds one, so 4 left room for 3
-      # threads at once and 8 leaves 7. Each thread gets the 8 MB stack above (the default
-      # pthread stack is STACK_SIZE).
+      # that thread waits, so the page hangs. By init: the shell holds one, and a physics world's
+      # Jolt workers two, so 10 leaves room for 7 threads at once (4 left 3 before Jolt had
+      # workers). Each thread gets the 8 MB stack above (the default pthread stack is
+      # STACK_SIZE).
       if(CVC_WASM_PTHREADS)
         list(TRANSFORM _ariglx_wasm_link REPLACE "^-sPTHREAD_POOL_SIZE=.*"
-             "-sPTHREAD_POOL_SIZE=8")
+             "-sPTHREAD_POOL_SIZE=10")
       endif()
       target_link_options(ariglx PRIVATE
         "--embed-file=${_arigl_components}@/usr/share/libcvc/ariadne/components"

@@ -115,13 +115,14 @@ bool names(const Value &v, const std::string &where, std::vector<std::string> &o
 std::string parse_body(const Value &v, const std::string &where, avatar_body &body,
                        std::vector<std::string> *warnings) {
   if (!v.is_map())
-    return where + " expects a map (mass:, width:, height:)";
+    return where + " expects a map (mass:, width:, height:, density:)";
   std::string why;
   for (const auto &[key, val] : v.entries) {
-    double *field = key == "mass"     ? &body.mass
-                    : key == "width"  ? &body.width
-                    : key == "height" ? &body.height
-                                      : nullptr;
+    double *field = key == "mass"      ? &body.mass
+                    : key == "width"   ? &body.width
+                    : key == "height"  ? &body.height
+                    : key == "density" ? &body.density
+                                       : nullptr;
     if (!field) {
       warn(warnings, where + " unknown key '" + key + "', ignored");
       continue;
@@ -206,7 +207,7 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
     } else if (key == "look") {
       if (!val.is_map())
         return at + " look: expects a map (box:, file:, asset:, model:, data:, chassis:, wheel:, "
-                    "rig:, fit:, scale:, yaw:, z:)";
+                    "rig:, fit:, texture:, scale:, yaw:, z:)";
       bool fit_given = false, rig_given = false;
       for (const auto &[k, x] : val.entries) {
         if (k == "chassis" || k == "wheel") {
@@ -233,6 +234,9 @@ std::string parse_vehicle_archetype(const std::string &id, const Value &a, vehic
         } else if (k == "fit") {
           fit_given = true;
           if (!boolean(x, at + " look: fit:", v.look.fit, why))
+            return why;
+        } else if (k == "texture") {
+          if (!boolean(x, at + " look: texture:", v.look.texture, why))
             return why;
         } else if (k == "scale" || k == "yaw" || k == "z") {
           double n = 0.0;
@@ -375,6 +379,9 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
          : k == "sense"  ? s.sense
          : k == "belief" ? s.belief
                          : s.metric) = x.as_string();
+      } else if (k == "collide") {
+        if (!boolean(x, at + " collide:", s.collide, why))
+          return why;
       } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
         if (!number(x, at + " " + k + ":", n, why))
@@ -433,7 +440,8 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
                std::to_string(kMaxVehicleStartCount) + " (name a fleet: for more)";
       for (const auto &[k, x] : item.entries)
         if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys" ||
-            k == "sense" || k == "belief" || k == "metric" || (k == "policy" && x.is_map()))
+            k == "sense" || k == "belief" || k == "metric" || k == "collide" ||
+            (k == "policy" && x.is_map()))
           warn(warnings, at + " " + k + ": is a fleet's (fleet: names one), ignored");
         else if (k == "plant" && (x.is_seq() || x.is_map()))
           warn(warnings,
@@ -1020,8 +1028,8 @@ std::string check_world_rules(const world_rules &r) {
       continue;
     }
     if (!finite_positive(a.body.mass) || !finite_positive(a.body.width) ||
-        !finite_positive(a.body.height))
-      return at + ": body mass, width and height must be positive";
+        !finite_positive(a.body.height) || !finite_positive(a.body.density))
+      return at + ": body mass, width, height and density must be positive";
     if (a.controllers.empty())
       return at + " allows no controller";
     for (const std::string &c : a.controllers)

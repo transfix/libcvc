@@ -15,7 +15,8 @@ Checks:
      from voltages and currents, and its books;
   7. a query: fit_history from bus voltages alone, a candidate's card, and ph_rank's certified,
      inconclusive and abstaining outcomes;
-  8. errors: a wrong-sized state, an unknown scheme, a malformed file.
+  8. a short native training run of a DGU law (ph_train_dgu);
+  9. errors: a wrong-sized state, an unknown scheme, a malformed file.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -154,7 +155,21 @@ if hasattr(pycvc.ph_composite, "fit_history") and hasattr(pycvc, "ph_rank"):
     r = pycvc.ph_rank([{"peak": 2.0, "loss": 1.0}], [{}], [("peak", 1.0)], {"loss": 1.0})
     check(r["outcome"] == "abstain" and r["best"] is None, f"abstain: {r}")
 
-# 8. Errors.
+# 8. Training a DGU law natively, a short run: it beats the fitted-linear control on held-out rollouts
+#    and its law reads back as a ph_composite block.
+if hasattr(pycvc, "ph_train_dgu"):
+    # ph_train_test's short run (8 runs of 100 transitions: fewer, and the nets extrapolate badly to
+    # held-out starts outside what they saw).
+    t = pycvc.ph_train_dgu(updates=400, batch=64, lr=3e-3, train_runs=8, transitions=100, test_runs=4,
+                           test_transitions=200, data_seed=21, v_hidden=[16, 16], m_hidden=[8], d_hidden=[8],
+                           threads=4, log_every=100)
+    check(t["trained"]["finite"] and t["trained"]["voltage_rmse"] < t["linear"]["voltage_rmse"],
+          f"train: linear {t['linear']}, trained {t['trained']}")
+    check(len(t["history"]) == 4 and t["history"][-1]["update"] == 400, f"history: {t['history']}")
+    law = json.loads(t["law"])
+    check(law["kind"] == "canonical" and t["parameters"] > 100, f"law: {law.get('kind')}, {t['parameters']}")
+
+# 9. Errors.
 for bad, what in ((lambda: g.energy([1.0, 2.0]), "a wrong-sized state"),
                   (lambda: g.simulate(x0, u0, coupling="trapezoid"), "an unknown coupling"),
                   (lambda: pycvc.ph_composite('{"format": "cvc-ph-system/9"}'), "a wrong format"),

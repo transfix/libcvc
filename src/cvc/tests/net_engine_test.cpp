@@ -1,10 +1,13 @@
-// cvc::net's connection engine (inc/cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1):
-// framing in its three modes and their switches, the order of sends and broadcasts, groups,
-// backpressure, the inbound limits, the counters, and a fan-out benchmark (one message to N
+// cvc::net's connection engine (inc/cvc/net/net_engine.h, docs/roadmap/ARIADNE_NET_ENGINE.md N1,
+// N3): framing in its three modes and their switches, the order of sends and broadcasts, groups,
+// backpressure, the inbound limits, the counters, TLS (handshakes on 1.2 and 1.3, a refused
+// version, reloads and the files' watch, the keyprint, detection on a plain port, backpressure and
+// broadcasts over TLS; with OpenSSL, CVC_NET_TEST_TLS), and a fan-out benchmark (one message to N
 // loopback connections; CVC_NET_FANOUT_N sets N, 6000 by default, and CVC_NET_FANOUT_THREADS the
 // engine's I/O threads, 2 by default).
 //
-// The clients are plain Asio sockets on the test's side; the engine runs its own threads.
+// The clients are plain Asio sockets on the test's side (TLS ones run OpenSSL over them); the
+// engine runs its own threads.
 
 #include <algorithm>
 #include <atomic>
@@ -12,13 +15,24 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cvc/net/net_engine.h>
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if CVC_NET_TEST_TLS
+#include <filesystem>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#endif
 
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -121,6 +135,7 @@ struct seen {
   std::map<conn_id, close_reason> closed;
   std::map<conn_id, int> writable;
   std::vector<std::string> errors;
+  std::vector<std::string> reloads; // tls_reloaded's keyprints
   std::size_t batches = 0;
 };
 
@@ -154,6 +169,9 @@ struct program {
         break;
       case net_event::type::error:
         s.errors.push_back(ev.message);
+        break;
+      case net_event::type::tls_reloaded:
+        s.reloads.push_back(ev.message);
         break;
       }
     }
@@ -779,6 +797,710 @@ TEST(NetEngine, ABatchKeepsItsFramesAliveUntilItIsCleared) {
   EXPECT_EQ(views[1], "second\n");
 }
 
+// ── TLS (N3) ─────────────────────────────────────────────────────────────────────────────────
+
+#if CVC_NET_TEST_TLS
+
+std::string hex_of(const unsigned char *p, std::size_t n) {
+  static const char digits[] = "0123456789abcdef";
+  std::string out;
+  for (std::size_t i = 0; i < n; ++i) {
+    out.push_back(digits[p[i] >> 4]);
+    out.push_back(digits[p[i] & 15]);
+  }
+  return out;
+}
+
+// RFC 4648 base32 of a hex string, unpadded: the keyprint's digits.
+std::string base32_of_hex(const std::string &h) {
+  static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  std::string bits;
+  for (char c : h) {
+    const int v = std::stoi(std::string(1, c), nullptr, 16);
+    for (int b = 3; b >= 0; --b)
+      bits.push_back((v >> b) & 1 ? '1' : '0');
+  }
+  while (bits.size() % 5)
+    bits.push_back('0');
+  std::string out;
+  for (std::size_t i = 0; i < bits.size(); i += 5)
+    out.push_back(digits[std::stoi(bits.substr(i, 5), nullptr, 2)]);
+  return out;
+}
+
+std::string cert_hex(X509 *x) {
+  unsigned char md[32];
+  unsigned int len = 0;
+  X509_digest(x, EVP_sha256(), md, &len);
+  return hex_of(md, len);
+}
+
+std::string tls_dir() { return CVC_NET_TEST_TLS_DIR; }
+
+// A directory of the test's own files, removed with it.
+struct temp_dir {
+  std::filesystem::path path;
+  temp_dir() {
+    static std::atomic<int> n{0};
+    path = std::filesystem::temp_directory_path() /
+           ("cvc_net_tls_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+            std::to_string(n++));
+    std::filesystem::create_directories(path);
+  }
+  ~temp_dir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path, ec);
+  }
+  std::string file(const std::string &name) const { return (path / name).string(); }
+};
+
+// A self-signed P-256 certificate and its key, as PEM strings, and its DER's SHA-256 in hex.
+struct test_cert {
+  std::string cert_pem, key_pem, sha256;
+};
+
+test_cert make_cert(const std::string &cn) {
+  static std::atomic<long> serial{1};
+  test_cert out;
+  EVP_PKEY *key = nullptr;
+  EVP_PKEY_CTX *kc = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+  EVP_PKEY_keygen_init(kc);
+  EVP_PKEY_CTX_set_ec_paramgen_curve_nid(kc, NID_X9_62_prime256v1);
+  EVP_PKEY_keygen(kc, &key);
+  EVP_PKEY_CTX_free(kc);
+  X509 *x = X509_new();
+  X509_set_version(x, 2);
+  ASN1_INTEGER_set(X509_get_serialNumber(x), serial++);
+  X509_gmtime_adj(X509_getm_notBefore(x), -3600);
+  X509_gmtime_adj(X509_getm_notAfter(x), 30L * 86400);
+  X509_set_pubkey(x, key);
+  X509_NAME *name = X509_get_subject_name(x);
+  X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                             reinterpret_cast<const unsigned char *>(cn.c_str()), -1, -1, 0);
+  X509_set_issuer_name(x, name);
+  X509_sign(x, key, EVP_sha256());
+  auto pem = [](auto write) {
+    BIO *b = BIO_new(BIO_s_mem());
+    write(b);
+    char *data = nullptr;
+    const long n = BIO_get_mem_data(b, &data);
+    std::string s(data, static_cast<std::size_t>(n));
+    BIO_free(b);
+    return s;
+  };
+  out.cert_pem = pem([&](BIO *b) { PEM_write_bio_X509(b, x); });
+  out.key_pem =
+      pem([&](BIO *b) { PEM_write_bio_PrivateKey(b, key, nullptr, nullptr, 0, nullptr, nullptr); });
+  out.sha256 = cert_hex(x);
+  X509_free(x);
+  EVP_PKEY_free(key);
+  return out;
+}
+
+// Replace a file at once (a new one renamed over it), its time moved on, so a watch sees it
+// change even where file times are coarse.
+void write_file(const std::string &path, const std::string &bytes) {
+  static int step = 0;
+  const std::string next = path + ".new";
+  std::FILE *f = std::fopen(next.c_str(), "wb");
+  ASSERT_NE(f, nullptr) << next;
+  std::fwrite(bytes.data(), 1, bytes.size(), f);
+  std::fclose(f);
+  std::filesystem::last_write_time(next, std::filesystem::file_time_type::clock::now() +
+                                             std::chrono::seconds(++step * 2));
+  // Windows refuses to replace a file while the watch has it open: try again.
+  std::error_code ec;
+  for (int i = 0; i < 100; ++i) {
+    std::filesystem::rename(next, path, ec);
+    if (!ec)
+      break;
+    std::this_thread::sleep_for(10ms);
+  }
+  ASSERT_FALSE(ec) << path << ": " << ec.message();
+}
+
+// A certificate's two files, one after the other.
+void put_cert(const std::string &cert, const std::string &key, const test_cert &c) {
+  write_file(cert, c.cert_pem);
+  write_file(key, c.key_pem);
+}
+
+// A TLS client over the blocking-with-timeouts client's socket: OpenSSL on its non-blocking
+// descriptor, polled.
+struct tls_client_options {
+  int min_version = 0, max_version = 0; // TLS1_2_VERSION, ...; 0: OpenSSL's
+  std::string sni;
+  std::string cert_pem, key_pem; // a client certificate
+};
+
+struct tls_client {
+  using options = tls_client_options;
+  client c;
+  SSL_CTX *ctx = nullptr;
+  SSL *ssl = nullptr;
+  std::string error;
+
+  explicit tls_client(std::uint16_t port, const options &o = {}, int receive_buffer = 0)
+      : c(port, receive_buffer) {
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (o.min_version)
+      SSL_CTX_set_min_proto_version(ctx, o.min_version);
+    if (o.max_version)
+      SSL_CTX_set_max_proto_version(ctx, o.max_version);
+    if (!o.cert_pem.empty()) {
+      BIO *b = BIO_new_mem_buf(o.cert_pem.data(), static_cast<int>(o.cert_pem.size()));
+      X509 *x = PEM_read_bio_X509(b, nullptr, nullptr, nullptr);
+      BIO_free(b);
+      b = BIO_new_mem_buf(o.key_pem.data(), static_cast<int>(o.key_pem.size()));
+      EVP_PKEY *k = PEM_read_bio_PrivateKey(b, nullptr, nullptr, nullptr);
+      BIO_free(b);
+      SSL_CTX_use_certificate(ctx, x);
+      SSL_CTX_use_PrivateKey(ctx, k);
+      X509_free(x);
+      EVP_PKEY_free(k);
+    }
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr); // the tests read the server's digest
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, static_cast<int>(c.s.native_handle()));
+    if (!o.sni.empty())
+      SSL_set_tlsext_host_name(ssl, o.sni.c_str());
+    SSL_set_connect_state(ssl);
+  }
+  ~tls_client() {
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+  }
+
+  // Whether the call wants to be tried again (and wait a little); sets `error` when not.
+  bool again(int r) {
+    const int e = SSL_get_error(ssl, r);
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+      std::this_thread::sleep_for(1ms);
+      return true;
+    }
+    const unsigned long code = ERR_get_error();
+    const char *why = code ? ERR_reason_error_string(code) : nullptr;
+    error = why ? why : "ssl error " + std::to_string(e);
+    ERR_clear_error();
+    return false;
+  }
+
+  bool handshake(std::chrono::milliseconds timeout = 5000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const int r = SSL_do_handshake(ssl);
+      if (r == 1)
+        return true;
+      if (!again(r))
+        return false;
+    }
+    error = "timed out";
+    return false;
+  }
+
+  void write(const std::string &bytes) {
+    std::size_t done = 0;
+    while (done < bytes.size()) {
+      const int r = SSL_write(ssl, bytes.data() + done, static_cast<int>(bytes.size() - done));
+      if (r > 0)
+        done += static_cast<std::size_t>(r);
+      else if (!again(r))
+        return;
+    }
+  }
+
+  std::string read(std::size_t n, std::chrono::milliseconds timeout = 5000ms) {
+    std::string out;
+    std::vector<char> buf(65536);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (out.size() < n && std::chrono::steady_clock::now() < deadline) {
+      const int r =
+          SSL_read(ssl, buf.data(), static_cast<int>(std::min(buf.size(), n - out.size())));
+      if (r > 0)
+        out.append(buf.data(), static_cast<std::size_t>(r));
+      else if (!again(r))
+        break;
+    }
+    return out;
+  }
+
+  // Whether the server ends the session (close_notify, end of stream or a reset) in time.
+  bool closed(std::chrono::milliseconds timeout = 5000ms) {
+    char buf[4096];
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const int r = SSL_read(ssl, buf, sizeof buf);
+      if (r <= 0 && !again(r))
+        return true;
+    }
+    return false;
+  }
+
+  std::string version() const { return SSL_get_version(ssl); }
+  std::string server_sha256() const {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    X509 *x = SSL_get1_peer_certificate(ssl);
+#else
+    X509 *x = SSL_get_peer_certificate(ssl);
+#endif
+    if (!x)
+      return {};
+    std::string h = cert_hex(x);
+    X509_free(x);
+    return h;
+  }
+};
+
+// src/arisrv/tests/tls/localhost.pem's keyprint. Its SHA-256 is what
+//   openssl x509 -in localhost.pem -outform DER | openssl dgst -sha256
+// prints, 42081986f376739721e6594713fd38f141b987c2d063b3eef32edd137e92c899, and these digits are
+// Python's base64.b32encode of it, unpadded.
+const char *kLocalhostKeyprint = "SHA256/IIEBTBXTOZZZOIPGLFDRH7JY6FA3TB6C2BR3H3XTF3ORG7USZCMQ";
+
+listener_options tls_local(framing f, const std::string &cert, const std::string &key) {
+  listener_options o = local(std::move(f));
+  o.tls.certificate_file = cert;
+  o.tls.key_file = key;
+  return o;
+}
+
+listener_options localhost_tls(framing f) {
+  return tls_local(std::move(f), tls_dir() + "/localhost.pem", tls_dir() + "/localhost.key");
+}
+
+TEST(NetEngineTls, HandshakesOnTls12And13WithTheirVersionCipherSniAndPeerCertificate) {
+  ASSERT_TRUE(net_engine::tls_available());
+  net_engine e;
+  program p(e);
+  std::string err;
+  const auto l = e.listen(localhost_tls(framing::delimited('|')), &err);
+  ASSERT_NE(l, 0u) << err;
+  EXPECT_EQ(e.tls_keyprint(l), kLocalhostKeyprint);
+
+  tls_client::options o12;
+  o12.max_version = TLS1_2_VERSION;
+  o12.sni = "hub.example";
+  tls_client a(e.port(l), o12);
+  ASSERT_TRUE(a.handshake()) << a.error;
+  EXPECT_EQ(a.version(), "TLSv1.2");
+  EXPECT_EQ(a.server_sha256(), "42081986f376739721e6594713fd38f141b987c2d063b3eef32edd137e92c899");
+  a.write("$Key a|$ValidateNick a|");
+  const conn_id ia = p.id_of(a.c);
+  ASSERT_TRUE(p.until([&] { return p.s.frames[ia].size() == 2; }));
+  EXPECT_EQ(p.frames_of(ia), (std::vector<std::string>{"$Key a|", "$ValidateNick a|"}));
+  const auto &info_a = p.s.info[ia];
+  EXPECT_TRUE(info_a.tls());
+  EXPECT_EQ(info_a.tls_version, "TLSv1.2");
+  EXPECT_FALSE(info_a.tls_cipher.empty());
+  EXPECT_EQ(info_a.tls_sni, "hub.example");
+  EXPECT_TRUE(info_a.tls_peer_sha256.empty()); // it sent no certificate
+  e.send(ia, "$Hello a|");
+  EXPECT_EQ(a.read(9), "$Hello a|");
+
+  const test_cert mine = make_cert("client");
+  tls_client::options o13;
+  o13.min_version = TLS1_3_VERSION;
+  o13.cert_pem = mine.cert_pem;
+  o13.key_pem = mine.key_pem;
+  tls_client b(e.port(l), o13);
+  ASSERT_TRUE(b.handshake()) << b.error;
+  EXPECT_EQ(b.version(), "TLSv1.3");
+  const conn_id ib = p.id_of(b.c);
+  const auto &info_b = p.s.info[ib];
+  EXPECT_EQ(info_b.tls_version, "TLSv1.3");
+  EXPECT_EQ(info_b.tls_cipher.rfind("TLS_", 0), 0u) << info_b.tls_cipher;
+  EXPECT_TRUE(info_b.tls_sni.empty());
+  EXPECT_EQ(info_b.tls_peer_sha256, mine.sha256);
+  EXPECT_EQ(info_b.tls_peer_keyprint, "SHA256/" + base32_of_hex(mine.sha256));
+
+  // Many small sends (packed into records) and one large one (records straight from its buffer),
+  // in order.
+  std::string want;
+  for (int i = 0; i < 500; ++i) {
+    const std::string line = "<hub> line " + std::to_string(i) + "|";
+    e.send(ib, line);
+    want += line;
+  }
+  std::string big(1 << 20, '\0');
+  for (std::size_t i = 0; i < big.size(); ++i)
+    big[i] = static_cast<char>('a' + (i * 7919) % 26);
+  e.send(ib, big);
+  want += big;
+  EXPECT_EQ(b.read(want.size(), 20000ms), want);
+  b.write("$MyINFO b|");
+  ASSERT_TRUE(p.until([&] { return p.s.frames[ib].size() == 1; }));
+
+  const auto st = e.stats();
+  EXPECT_EQ(st.engine.tls_accepted, 2u);
+  EXPECT_EQ(st.listeners.at(0).counters.tls_accepted, 2u);
+  EXPECT_GT(st.engine.bytes_out, want.size()); // the records' overhead
+}
+
+TEST(NetEngineTls, AVersionBelowTheMinimumAndAStalledHandshakeCloseUnseen) {
+  net_engine e;
+  program p(e);
+  auto o = localhost_tls(framing::delimited('|'));
+  o.tls.min_version = cvc::net::tls_protocol::tls1_3;
+  o.tls.handshake_timeout = 300ms;
+  const auto l = e.listen(o);
+  ASSERT_NE(l, 0u);
+
+  tls_client::options o12;
+  o12.max_version = TLS1_2_VERSION;
+  tls_client old(e.port(l), o12);
+  EXPECT_FALSE(old.handshake());
+  EXPECT_FALSE(old.error.empty());
+
+  client stalled(e.port(l)); // connects and says nothing
+  EXPECT_TRUE(stalled.closed(5000ms));
+
+  client plain(e.port(l)); // plain bytes on a TLS port
+  plain.write("$Supports NoGetINFO|");
+  EXPECT_TRUE(plain.closed(5000ms));
+
+  const auto refused = [&] {
+    return e.stats().engine.closed[static_cast<std::size_t>(close_reason::tls_handshake)];
+  };
+  ASSERT_TRUE(p.until([&] { return refused() == 3; }));
+  p.idle(50ms);
+  EXPECT_TRUE(p.s.accepted.empty()); // the program never heard of them
+  EXPECT_TRUE(p.s.closed.empty());
+  const auto st = e.stats();
+  EXPECT_EQ(st.engine.accepted, 3u);
+  EXPECT_EQ(st.engine.open, 0u);
+  EXPECT_EQ(st.engine.tls_accepted, 0u);
+}
+
+TEST(NetEngineTls, TheKeyprintIsTheCertificatesDerSha256InBase32) {
+  net_engine e;
+  const auto l = e.listen(localhost_tls(framing::raw()));
+  ASSERT_NE(l, 0u);
+  const std::string kp = e.tls_keyprint(l);
+  EXPECT_EQ(kp, kLocalhostKeyprint);
+  EXPECT_EQ(kp.size(), 7u + 52u);
+
+  // The DER read here and hashed with EVP_Digest, apart from the engine's X509_digest.
+  BIO *b = BIO_new_file((tls_dir() + "/localhost.pem").c_str(), "r");
+  ASSERT_NE(b, nullptr);
+  X509 *x = PEM_read_bio_X509(b, nullptr, nullptr, nullptr);
+  BIO_free(b);
+  ASSERT_NE(x, nullptr);
+  unsigned char *der = nullptr;
+  const int der_len = i2d_X509(x, &der);
+  X509_free(x);
+  ASSERT_GT(der_len, 0);
+  unsigned char md[32];
+  unsigned int md_len = 0;
+  EVP_Digest(der, static_cast<std::size_t>(der_len), md, &md_len, EVP_sha256(), nullptr);
+  OPENSSL_free(der);
+  EXPECT_EQ(kp, "SHA256/" + base32_of_hex(hex_of(md, md_len)));
+
+#if !defined(_WIN32)
+  // And the openssl command, where there is one.
+  const std::string cmd = "openssl x509 -in '" + tls_dir() +
+                          "/localhost.pem' -outform DER 2>/dev/null | openssl dgst -sha256 -r "
+                          "2>/dev/null";
+  if (std::FILE *f = popen(cmd.c_str(), "r")) {
+    char line[256] = {};
+    const bool got = std::fgets(line, sizeof line, f) != nullptr;
+    pclose(f);
+    const std::string h = got ? std::string(line).substr(0, 64) : std::string();
+    if (h.size() == 64 && h.find_first_not_of("0123456789abcdef") == std::string::npos)
+      EXPECT_EQ(kp, "SHA256/" + base32_of_hex(h));
+  }
+#endif
+
+  const auto plain = e.listen(local(framing::raw()));
+  EXPECT_TRUE(e.tls_keyprint(plain).empty());
+  EXPECT_TRUE(e.tls_keyprint(9999).empty());
+}
+
+TEST(NetEngineTls, AReloadServesNewConnectionsAndKeepsOpenOnes) {
+  temp_dir dir;
+  const std::string cert = dir.file("hub.pem"), key = dir.file("hub.key");
+  const test_cert ca = make_cert("a"), cb = make_cert("b");
+  put_cert(cert, key, ca);
+  net_engine e;
+  program p(e);
+  const auto l = e.listen(tls_local(framing::delimited('|'), cert, key));
+  ASSERT_NE(l, 0u);
+  EXPECT_EQ(e.tls_keyprint(l), "SHA256/" + base32_of_hex(ca.sha256));
+
+  tls_client first(e.port(l));
+  ASSERT_TRUE(first.handshake()) << first.error;
+  EXPECT_EQ(first.server_sha256(), ca.sha256);
+  const conn_id i1 = p.id_of(first.c);
+
+  put_cert(cert, key, cb);
+  std::string err;
+  ASSERT_TRUE(e.reload_tls(l, &err)) << err;
+  EXPECT_EQ(e.tls_keyprint(l), "SHA256/" + base32_of_hex(cb.sha256));
+  ASSERT_TRUE(p.until([&] { return p.s.reloads.size() == 1; }));
+  EXPECT_EQ(p.s.reloads[0], "SHA256/" + base32_of_hex(cb.sha256));
+
+  tls_client second(e.port(l));
+  ASSERT_TRUE(second.handshake()) << second.error;
+  EXPECT_EQ(second.server_sha256(), cb.sha256);
+
+  // The first connection kept its session, both ways.
+  e.send(i1, "still here|");
+  EXPECT_EQ(first.read(11), "still here|");
+  first.write("me too|");
+  ASSERT_TRUE(p.until([&] { return p.s.frames[i1].size() == 1; }));
+  EXPECT_FALSE(p.s.closed.count(i1));
+
+  // A file that does not load leaves the certificate in use.
+  write_file(cert, "not a certificate");
+  EXPECT_FALSE(e.reload_tls(l, &err));
+  EXPECT_NE(err.find(cert), std::string::npos) << err;
+  EXPECT_EQ(e.tls_keyprint(l), "SHA256/" + base32_of_hex(cb.sha256));
+  tls_client third(e.port(l));
+  ASSERT_TRUE(third.handshake()) << third.error;
+  EXPECT_EQ(third.server_sha256(), cb.sha256);
+
+  // New options: other files.
+  const std::string cert2 = dir.file("other.pem"), key2 = dir.file("other.key");
+  put_cert(cert2, key2, ca);
+  cvc::net::tls_options other;
+  other.certificate_file = cert2;
+  other.key_file = key2;
+  ASSERT_TRUE(e.reload_tls(l, other, &err)) << err;
+  tls_client fourth(e.port(l));
+  ASSERT_TRUE(fourth.handshake()) << fourth.error;
+  EXPECT_EQ(fourth.server_sha256(), ca.sha256);
+
+  const auto plain = e.listen(local(framing::raw()));
+  EXPECT_FALSE(e.reload_tls(plain, &err));
+  EXPECT_FALSE(e.reload_tls(12345, &err));
+}
+
+TEST(NetEngineTls, AWatchedListenerReloadsWhenItsFilesChange) {
+  temp_dir dir;
+  const std::string cert = dir.file("hub.pem"), key = dir.file("hub.key");
+  const test_cert ca = make_cert("a"), cb = make_cert("b"), cc = make_cert("c");
+  put_cert(cert, key, ca);
+  net_engine e;
+  program p(e);
+  auto o = tls_local(framing::delimited('|'), cert, key);
+  o.tls.watch = 50ms;
+  const auto l = e.listen(o);
+  ASSERT_NE(l, 0u);
+  tls_client first(e.port(l));
+  ASSERT_TRUE(first.handshake()) << first.error;
+  const conn_id i1 = p.id_of(first.c);
+
+  put_cert(cert, key, cb);
+  ASSERT_TRUE(p.until([&] { return p.s.reloads.size() == 1; }));
+  EXPECT_EQ(p.s.reloads[0], "SHA256/" + base32_of_hex(cb.sha256));
+  tls_client second(e.port(l));
+  ASSERT_TRUE(second.handshake()) << second.error;
+  EXPECT_EQ(second.server_sha256(), cb.sha256);
+
+  // A broken file is said once (not every tick), and the certificate in use stays.
+  write_file(cert, "-----BEGIN CERTIFICATE-----\ntruncated");
+  ASSERT_TRUE(p.until([&] { return p.s.errors.size() == 1; }));
+  EXPECT_NE(p.s.errors[0].find("TLS reload"), std::string::npos) << p.s.errors[0];
+  p.idle(300ms);
+  EXPECT_EQ(p.s.errors.size(), 1u);
+  EXPECT_EQ(e.tls_keyprint(l), "SHA256/" + base32_of_hex(cb.sha256));
+
+  put_cert(cert, key, cc);
+  ASSERT_TRUE(p.until([&] { return p.s.reloads.size() == 2; }));
+  EXPECT_EQ(e.tls_keyprint(l), "SHA256/" + base32_of_hex(cc.sha256));
+  e.send(i1, "kept|");
+  EXPECT_EQ(first.read(5), "kept|");
+}
+
+// A plain port that also speaks TLS, for a protocol whose server speaks first: each connection is
+// greeted once the engine has decided its layer.
+TEST(NetEngineTlsDetect, TlsPlainSlowAndSilentClientsOnOnePort) {
+  net_engine e;
+  program p(e);
+  auto o = localhost_tls(framing::delimited('|'));
+  o.detect_tls = 400ms;
+  const auto l = e.listen(o);
+  ASSERT_NE(l, 0u);
+  std::set<conn_id> greeted;
+  const auto greet = [&] {
+    for (conn_id id : p.s.accepted)
+      if (greeted.insert(id).second)
+        e.send(id, "$Lock EXTENDEDPROTOCOL|");
+  };
+  const auto accepted = [&](const client &c) {
+    const conn_id id = p.id_of(c);
+    greet();
+    return id;
+  };
+  const std::string lock = "$Lock EXTENDEDPROTOCOL|";
+
+  // TLS at once: greeted over TLS, its `accepted` already knowing it.
+  {
+    tls_client t(e.port(l));
+    ASSERT_TRUE(t.handshake()) << t.error;
+    const conn_id id = accepted(t.c);
+    EXPECT_EQ(p.s.info[id].tls_version.substr(0, 5), "TLSv1");
+    EXPECT_EQ(t.read(lock.size()), lock);
+  }
+  // A plain client that speaks first: plain at once, its input framed.
+  {
+    client c(e.port(l));
+    c.write("$Supports NoHello|");
+    const conn_id id = accepted(c);
+    EXPECT_FALSE(p.s.info[id].tls());
+    ASSERT_TRUE(p.until([&] { return p.s.frames[id].size() == 1; }));
+    EXPECT_EQ(p.frames_of(id)[0], "$Supports NoHello|");
+    EXPECT_EQ(c.read(lock.size()), lock);
+  }
+  // A slow TLS client, within the wait.
+  {
+    tls_client t(e.port(l));
+    std::this_thread::sleep_for(150ms);
+    ASSERT_TRUE(t.handshake()) << t.error;
+    const conn_id id = accepted(t.c);
+    EXPECT_TRUE(p.s.info[id].tls());
+    EXPECT_EQ(t.read(lock.size()), lock);
+  }
+  // A silent plain client, waiting for the server: plain once the wait is over.
+  {
+    const auto start = std::chrono::steady_clock::now();
+    client c(e.port(l));
+    const conn_id id = accepted(c);
+    EXPECT_GE(std::chrono::steady_clock::now() - start, 380ms);
+    EXPECT_FALSE(p.s.info[id].tls());
+    EXPECT_EQ(c.read(lock.size()), lock);
+  }
+  // A TLS client later than the wait has been decided plain, and greeted in plain: its
+  // handshake fails on the greeting.
+  {
+    tls_client t(e.port(l));
+    const conn_id id = accepted(t.c);
+    EXPECT_FALSE(p.s.info[id].tls());
+    std::this_thread::sleep_for(50ms);
+    EXPECT_FALSE(t.handshake(3000ms));
+  }
+  const auto st = e.stats();
+  EXPECT_EQ(st.engine.tls_accepted, 2u);
+  EXPECT_EQ(st.engine.accepted, 5u);
+}
+
+TEST(NetEngineTlsBackpressure, ASlowTlsReaderClosesPastMaxQueued) {
+  net_engine e;
+  program p(e);
+  auto o = localhost_tls(framing::raw());
+  o.max_queued = 256 * 1024;
+  const auto l = e.listen(o);
+  tls_client c(e.port(l), {}, 4096);
+  ASSERT_TRUE(c.handshake()) << c.error; // then never reads
+  const conn_id id = p.id_of(c.c);
+  const auto chunk = std::make_shared<const std::string>(64 * 1024, 'q');
+  for (int i = 0; i < 400 && !p.s.closed.count(id); ++i) {
+    e.send(id, chunk);
+    if (i % 16 == 0)
+      p.idle(2ms);
+  }
+  ASSERT_TRUE(p.until([&] { return p.s.closed.count(id) > 0; }));
+  EXPECT_EQ(p.s.closed[id], close_reason::slow_reader);
+  const auto st = e.stats();
+  EXPECT_EQ(st.engine.slow_reader(), 1u);
+  EXPECT_EQ(st.engine.queued_bytes, 0u);
+  EXPECT_LE(st.engine.max_queued_bytes, o.max_queued);
+}
+
+TEST(NetEngineTlsBackpressure, WritableComesOnceATlsQueueDrainsToTheMark) {
+  net_engine e;
+  program p(e);
+  auto o = localhost_tls(framing::raw());
+  o.max_queued = 256 * 1024 * 1024;
+  const auto l = e.listen(o);
+  tls_client c(e.port(l), {}, 4096);
+  ASSERT_TRUE(c.handshake()) << c.error;
+  const conn_id id = p.id_of(c.c);
+  const auto chunk = std::make_shared<const std::string>(1024 * 1024, 'w');
+  std::size_t sent = 0;
+  for (int i = 0; i < 64 && e.stats().engine.queued_bytes == 0; ++i) {
+    e.send(id, chunk);
+    sent += chunk->size();
+    p.idle(20ms);
+  }
+  ASSERT_GT(e.stats().engine.queued_bytes, 0u) << "the socket never filled";
+  e.want_writable(id, 0);
+  p.idle(30ms);
+  EXPECT_EQ(p.s.writable[id], 0);
+  EXPECT_EQ(c.read(sent, 20000ms), std::string(sent, 'w'));
+  ASSERT_TRUE(p.until([&] { return p.s.writable[id] == 1; }));
+}
+
+TEST(NetEngineTls, ABroadcastReachesAGroupOfTlsAndPlainConnections) {
+  net_engine e(cvc::net::engine_options{3});
+  program p(e);
+  const auto plain_l = e.listen(local(framing::delimited('|')));
+  auto o = localhost_tls(framing::delimited('|'));
+  o.detect_tls = 300ms;
+  const auto both_l = e.listen(o);
+  ASSERT_NE(both_l, 0u);
+  const auto tls_l = e.listen(localhost_tls(framing::delimited('|')));
+  ASSERT_NE(tls_l, 0u);
+
+  std::vector<std::unique_ptr<client>> plains;
+  std::vector<std::unique_ptr<tls_client>> tlss;
+  for (int i = 0; i < 3; ++i)
+    plains.push_back(std::make_unique<client>(e.port(plain_l)));
+  for (int i = 0; i < 2; ++i) { // plain on the detecting port: they speak first
+    plains.push_back(std::make_unique<client>(e.port(both_l)));
+    plains.back()->write("$Hi|");
+  }
+  for (int i = 0; i < 3; ++i) {
+    tlss.push_back(std::make_unique<tls_client>(e.port(i % 2 ? both_l : tls_l)));
+    ASSERT_TRUE(tlss.back()->handshake()) << tlss.back()->error;
+  }
+  std::vector<conn_id> ids;
+  for (auto &c : plains)
+    ids.push_back(p.id_of(*c));
+  for (auto &t : tlss)
+    ids.push_back(p.id_of(t->c));
+  for (conn_id id : ids)
+    e.join(id, "all");
+  const conn_id excluded = ids[1];
+  std::string want;
+  for (int i = 0; i < 200; ++i) {
+    const std::string line =
+        i == 100 ? std::string(40000, 'x') + "|" : "<hub> broadcast " + std::to_string(i) + "|";
+    e.broadcast("all", line, i % 2 ? 0 : excluded);
+    want += line;
+  }
+  std::string want_excluded;
+  for (int i = 0; i < 200; ++i)
+    if (i % 2)
+      want_excluded += "<hub> broadcast " + std::to_string(i) + "|";
+  for (std::size_t i = 0; i < plains.size(); ++i) {
+    const std::string &w = ids[i] == excluded ? want_excluded : want;
+    EXPECT_EQ(plains[i]->read(w.size(), 20000ms), w) << "plain " << i;
+  }
+  for (std::size_t i = 0; i < tlss.size(); ++i)
+    EXPECT_EQ(tlss[i]->read(want.size(), 20000ms), want) << "tls " << i;
+  const auto st = e.stats();
+  EXPECT_EQ(st.engine.broadcasts, 200u);
+  EXPECT_EQ(st.engine.broadcast_receivers, 200u * ids.size() - 100u);
+  EXPECT_EQ(st.engine.tls_accepted, 3u);
+
+  // A flushing close sends what is queued, then close_notify.
+  for (std::size_t i = 0; i < tlss.size(); ++i) {
+    const conn_id id = ids[plains.size() + i];
+    e.send(id, "$ForceMove elsewhere|");
+    e.close(id, true);
+  }
+  for (auto &t : tlss) {
+    EXPECT_EQ(t->read(21), "$ForceMove elsewhere|");
+    EXPECT_TRUE(t->closed());
+  }
+  ASSERT_TRUE(p.until([&] { return p.s.closed.size() == tlss.size(); }));
+  for (const auto &[id, why] : p.s.closed)
+    EXPECT_EQ(why, close_reason::program);
+}
+
+#endif // CVC_NET_TEST_TLS
+
 // ── fan-out benchmark ────────────────────────────────────────────────────────────────────────
 
 std::size_t fanout_n() {
@@ -949,5 +1671,102 @@ TEST(NetEngineFanOut, OneMessageToManyLoopbackReceivers) {
   for (auto &t : readers)
     t.join();
 }
+
+#if CVC_NET_TEST_TLS
+// What TLS adds to a broadcast: one 113-byte line to a group of TLS receivers and to a plain group
+// of the same size on the same engine, rounds interleaved; the I/O threads' busy time a receiver
+// for each (CVC_NET_TLS_FANOUT_N receivers a group, 500 by default; CVC_NET_FANOUT_THREADS).
+TEST(NetEngineTlsFanOut, OneMessageToTlsAndPlainReceivers) {
+#if defined(CVC_NET_TEST_TSAN)
+  std::size_t want = 40;
+  const int rounds = 3;
+#else
+  std::size_t want = 500;
+  const int rounds = 11;
+#endif
+  if (const char *v = std::getenv("CVC_NET_TLS_FANOUT_N"))
+    want = static_cast<std::size_t>(std::max(1, std::atoi(v)));
+  const std::size_t n = std::max<std::size_t>(1, fit_descriptors(2 * want) / 2);
+  cvc::net::engine_options eo;
+  if (const char *v = std::getenv("CVC_NET_FANOUT_THREADS"))
+    eo.io_threads = static_cast<unsigned>(std::max(1, std::atoi(v)));
+  net_engine e(eo);
+  program p(e);
+  const auto plain_l = e.listen(local(framing::delimited('|')));
+  const auto tls_l = e.listen(localhost_tls(framing::delimited('|')));
+  ASSERT_NE(tls_l, 0u);
+  std::vector<std::unique_ptr<client>> plains;
+  std::vector<std::unique_ptr<tls_client>> tlss;
+  for (std::size_t i = 0; i < n; ++i) {
+    plains.push_back(std::make_unique<client>(e.port(plain_l)));
+    tlss.push_back(std::make_unique<tls_client>(e.port(tls_l)));
+    ASSERT_TRUE(tlss.back()->handshake()) << i << ": " << tlss.back()->error;
+    if (i % 64 == 0)
+      p.idle(0ms);
+  }
+  ASSERT_TRUE(p.until([&] { return p.s.accepted.size() == 2 * n; }, 60000ms));
+  for (conn_id id : p.s.accepted)
+    e.join(id, p.s.info[id].tls() ? "tls" : "plain");
+
+  const std::string msg = "<sublevels> " + std::string(100, 'm') + "|";
+  auto busy_now = [&] {
+    std::uint64_t ns = 0;
+    for (const auto &t : e.stats().threads)
+      ns += t.busy_ns;
+    return ns;
+  };
+  std::uint64_t reached = 0;
+  // One round: `burst` broadcasts to `group`; the busy time a receiver a message, in us.
+  auto round = [&](const char *group, int burst) {
+    p.idle(2ms);
+    const auto before = busy_now();
+    for (int k = 0; k < burst; ++k)
+      e.broadcast(group, msg);
+    reached += static_cast<std::uint64_t>(burst) * n;
+    EXPECT_TRUE(p.until(
+        [&] {
+          const auto st = e.stats();
+          return st.engine.broadcast_receivers == reached && st.engine.queued_bytes == 0;
+        },
+        60000ms));
+    p.idle(5ms); // the turn's last accounting
+    const double us = static_cast<double>(busy_now() - before) / 1000.0;
+    const std::string want_bytes = [&] {
+      std::string s;
+      for (int k = 0; k < burst; ++k)
+        s += msg;
+      return s;
+    }();
+    std::size_t bad = 0;
+    if (std::strcmp(group, "tls") == 0) {
+      for (auto &t : tlss)
+        bad += t->read(want_bytes.size(), 20000ms) != want_bytes;
+    } else {
+      for (auto &c : plains)
+        bad += c->read(want_bytes.size(), 20000ms) != want_bytes;
+    }
+    EXPECT_EQ(bad, 0u) << group;
+    return us / static_cast<double>(n) / burst;
+  };
+  for (int burst : {1, 10}) {
+    std::vector<double> tls_us, plain_us;
+    for (int r = 0; r < rounds + 1; ++r) { // round 0 warms up
+      const double t = round("tls", burst), pl = round("plain", burst);
+      if (r > 0) {
+        tls_us.push_back(t);
+        plain_us.push_back(pl);
+      }
+    }
+    std::printf("[tls fan-out] receivers=%zu a group, io_threads=%u, burst=%d: I/O busy time "
+                "median %.3f us per TLS receiver per message, %.3f us per plain one\n",
+                n, e.io_threads(), burst, median(tls_us), median(plain_us));
+    if (burst == 1) {
+      RecordProperty("tls_us_per_receiver_x1000", static_cast<int>(median(tls_us) * 1000));
+      RecordProperty("plain_us_per_receiver_x1000", static_cast<int>(median(plain_us) * 1000));
+    }
+  }
+  RecordProperty("receivers", static_cast<int>(n));
+}
+#endif // CVC_NET_TEST_TLS
 
 } // namespace

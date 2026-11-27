@@ -29,6 +29,7 @@
 #endif
 #include <algorithm>
 #include <cmath>
+#include <cvc/algo/distance_transform.h>
 #include <cvc/core/app.h>
 #include <cvc/lsys/derive.h>
 #include <cvc/lsys/forest.h> // the preserved demo tree generators (grow_pine / grow_branchy)
@@ -398,13 +399,79 @@ cvc::geometry::color_t meanColor(const cvc::geometry &g, std::size_t p0, std::si
 // out any the city has taken the ground of (`keep` false: a road, a building). They go down a
 // ground cell at a time, each at three details: w.props + w.foliage + w.needles (rung 0),
 // w.props_r1 and w.props_r2, with w.prop_cells recording each cell's run of every mesh.
+// The index of `a` in w.model_assets, adding it on first use.
+int modelAssetIndex(generated_world &w, const model_asset &a) {
+  for (std::size_t k = 0; k < w.model_assets.size(); ++k)
+    if (w.model_assets[k].name == a.name)
+      return int(k);
+  w.model_assets.push_back(a);
+  return int(w.model_assets.size()) - 1;
+}
+
+// The distance from each raster cell to the nearest water (its ground under the water level), in
+// metres, row-major over w.grid; empty for a raster with no cells.
+std::vector<double> waterDistance(const generated_world &w) {
+  const raster_out &ro = w.raster;
+  if (ro.rows <= 0 || ro.cols <= 0 || ro.height.size() != std::size_t(ro.rows) * ro.cols)
+    return {};
+  std::vector<std::uint8_t> wet(ro.height.size());
+  for (std::size_t i = 0; i < wet.size(); ++i)
+    wet[i] = ro.height[i] < w.params.water_level_m ? 1 : 0;
+  std::vector<double> d = cvc::algo::edt2_squared(wet.data(), ro.rows, ro.cols);
+  const double cell = w.grid.cell_w();
+  for (double &v : d)
+    v = v >= cvc::algo::edt_far ? std::numeric_limits<double>::infinity() : std::sqrt(v) * cell;
+  return d;
+}
+
+// What the theme's trees see: the world's ground, slope and water.
+struct TreeThemer {
+  const world_theme *theme = nullptr;
+  const model_catalog *catalog = nullptr;
+  std::vector<double> water; // waterDistance(w)
+  bool on() const { return theme && catalog && !theme->trees.empty(); }
+};
+
 void buildProps(const world_model &wm, const surface_registry &reg, PropLib &lib,
-                const std::function<bool(double, double)> &keep, double half, generated_world &w) {
+                const std::function<bool(double, double)> &keep, double half, generated_world &w,
+                const TreeThemer &themer = TreeThemer()) {
   const double kStem = 1.7, kLeaf = 2.2;
   constexpr double kInf = std::numeric_limits<double>::infinity();
-  std::set<std::string> buildingRecipes;
+  std::set<std::string> buildingRecipes, treeRecipes;
   for (const auto &sw : wm.params().sc.buildings)
     buildingRecipes.insert(sw.recipe);
+  for (const auto &sw : wm.params().sc.trees)
+    treeRecipes.insert(sw.recipe);
+  // A themed tree in place of the L-system one at pp: true when the theme takes the spot.
+  auto themedTree = [&](const placed_prop &pp) {
+    if (!themer.on() || !treeRecipes.count(pp.recipe))
+      return false;
+    tree_site site;
+    site.x = pp.x;
+    site.y = pp.y;
+    site.height_m = pp.z - w.params.water_level_m;
+    site.slope_deg = wm.terrain().slope_deg(pp.x, pp.y, 2.0);
+    if (!themer.water.empty()) {
+      const grid_spec &g = w.grid;
+      const int c = std::clamp(int(std::lround((pp.x - g.min_x) / g.cell_w())), 0, g.cols - 1);
+      const int r = std::clamp(int(std::lround((pp.y - g.min_y) / g.cell_h())), 0, g.rows - 1);
+      site.water_m = themer.water[std::size_t(r) * g.cols + c];
+    }
+    const tree_pick tp = pick_tree(*themer.theme, *themer.catalog, site, wm.params().seed);
+    model_asset a;
+    if (tp.archetype < 0 || !themer.catalog->find(themer.theme->trees[tp.archetype].asset, a))
+      return false;
+    generated_world::model_instance m;
+    m.asset = modelAssetIndex(w, a);
+    m.x = pp.x - (a.centre_x * std::cos(tp.yaw) - a.centre_y * std::sin(tp.yaw)) * tp.scale;
+    m.y = pp.y - (a.centre_x * std::sin(tp.yaw) + a.centre_y * std::cos(tp.yaw)) * tp.scale;
+    m.z = pp.z - a.base_z * tp.scale - 0.05; // the trunk a little into the ground
+    m.yaw = tp.yaw;
+    m.scale = tp.scale;
+    w.models.push_back(m);
+    ++w.model_trees;
+    return true;
+  };
   cvc::geometry &solid = w.props, &foliage = w.foliage, &needle = w.needles;
   cvc::geometry &r1 = w.props_r1, &r2 = w.props_r2;
   const std::uint64_t seed = wm.params().seed;
@@ -432,6 +499,8 @@ void buildProps(const world_model &wm, const surface_registry &reg, PropLib &lib
     if (buildingRecipes.count(pp.recipe) || (keep && !keep(pp.x, pp.y)))
       return;
     pp.z = wm.terrain().sample(pp.x, pp.y); // the ground as built: a road's cut or bank moves it
+    if (themedTree(pp))
+      return;
     const std::size_t s0 = solid.points().size(), n0 = needle.points().size();
     const std::size_t t0 = solid.tris().size();
     if (growNativeTree(pp.recipe, pp, seed, solid, needle)) {
@@ -848,15 +917,132 @@ Footprint massLot(const lot &L, std::uint64_t seed, const surface_registry &reg,
   return Footprint{c.x, c.y, yc, ys, 0.5 * w + 1.0, 0.5 * d + 1.0};
 }
 
+// The theme's building for ordered[i] (already marked used), if it takes one. Two candidates are
+// drawn: an archetype fitted to the lot alone, and one of the archetypes that span two lots fitted
+// to the lot and its nearest unused neighbour on the same street side; when both draw one, a draw
+// weighted by the two archetypes' weights picks between them. The model's front stands on the
+// setback line, facing the road. On a slope it stands on the site's highest ground over a concrete
+// plinth down to its lowest (as the massing's walls go down to it), so no corner floats and none is
+// buried; a site whose ground falls more than kModelRelief keeps the massing. Records the instance,
+// its plinth (in `out`, with the massing) and its footprint; false leaves the lot to the massing.
+constexpr double kModelRelief = 6.0;
+bool placeModelBuilding(const world_theme &theme, const model_catalog &catalog,
+                        const std::vector<lot> &ordered, std::vector<char> &used, std::size_t i,
+                        std::uint64_t seed, const surface_registry &reg, generated_world &w,
+                        cvc::geometry &out, FootprintIndex &fps) {
+  const lot &L = ordered[i];
+  auto relief = [](const lot &a) { return a.has_ground ? a.ground_max - a.ground_min : 0.0; };
+  // The lot alone.
+  lot_view v1;
+  v1.x = L.x;
+  v1.y = L.y;
+  v1.frontage = L.frontage;
+  v1.depth = L.depth;
+  v1.urbanity = L.urbanity;
+  const building_pick one =
+      relief(L) <= kModelRelief ? pick_building(theme, catalog, v1, seed) : building_pick();
+  // The lot and its neighbour, for the archetypes that span two.
+  building_pick two;
+  lot pair = L;
+  std::size_t partner = ordered.size();
+  int maxSpan = 1;
+  for (const building_archetype_rule &r : theme.buildings)
+    maxSpan = std::max(maxSpan, r.span);
+  if (maxSpan >= 2) {
+    const double c = std::cos(L.yaw), s = std::sin(L.yaw);
+    double best = std::numeric_limits<double>::infinity();
+    for (std::size_t j = 0; j < ordered.size(); ++j) {
+      const lot &M = ordered[j];
+      if (used[j] || M.seg != L.seg || M.side != L.side)
+        continue;
+      const double dx = M.x - L.x, dy = M.y - L.y;
+      const double along = dx * c + dy * s, across = -dx * s + dy * c;
+      const double reach = 0.5 * (L.frontage + M.frontage) + 4.0;
+      if (std::fabs(across) < 3.0 && std::fabs(along) <= reach && std::fabs(along) < best) {
+        best = std::fabs(along);
+        partner = j;
+      }
+    }
+    if (partner < ordered.size()) {
+      const lot &M = ordered[partner];
+      pair.ground_min = std::min(L.ground_min, M.ground_min);
+      pair.ground_max = std::max(L.ground_max, M.ground_max);
+      pair.x = 0.5 * (L.x + M.x);
+      pair.y = 0.5 * (L.y + M.y);
+      pair.frontage = best + 0.5 * (L.frontage + M.frontage);
+      pair.depth = std::min(L.depth, M.depth);
+      pair.urbanity = 0.5 * (L.urbanity + M.urbanity);
+      if (relief(pair) <= kModelRelief) {
+        lot_view v2;
+        v2.x = pair.x;
+        v2.y = pair.y;
+        v2.frontage = pair.frontage;
+        v2.depth = pair.depth;
+        v2.urbanity = pair.urbanity;
+        v2.lots = 2;
+        two = pick_building(theme, catalog, v2, seed);
+      }
+    }
+  }
+  bool spans = two.archetype >= 0;
+  if (spans && one.archetype >= 0) {
+    const double w1 = theme.buildings[one.archetype].weight,
+                 w2 = theme.buildings[two.archetype].weight;
+    const std::uint64_t el =
+        lsys::cell_id(std::int32_t(std::lround(L.x)), std::int32_t(std::lround(L.y)));
+    spans = lsys::uni(seed, lsys::stream::theme, el, 3) * (w1 + w2) < w2;
+  }
+  if (!spans && one.archetype < 0)
+    return false;
+  const building_pick pick = spans ? two : one;
+  const lot &site = spans ? pair : L;
+  model_asset a;
+  if (!catalog.find(theme.buildings[pick.archetype].asset, a))
+    return false;
+  if (spans)
+    used[partner] = 1;
+  const double sc = pick.scale, yc = std::cos(site.yaw), ys = std::sin(site.yaw);
+  // The footprint's centre in the lot's frame: the front wall on the setback line (local +Y is
+  // toward the road; the lot's centre is half its depth behind it, as massLot has it).
+  const double fy = 0.5 * site.depth - a.half_y * sc;
+  // The model's origin, so that its footprint's centre lands there.
+  const double ox = -a.centre_x * sc, oy = fy - a.centre_y * sc;
+  const double base = site.has_ground ? site.ground_max : 0.0;
+  generated_world::model_instance m;
+  m.asset = modelAssetIndex(w, a);
+  m.x = site.x + ox * yc - oy * ys;
+  m.y = site.y + ox * ys + oy * yc;
+  m.z = base - a.base_z * sc;
+  m.yaw = site.yaw;
+  m.scale = sc;
+  w.models.push_back(m);
+  ++w.model_buildings;
+  if (site.has_ground && relief(site) > 0.05) {
+    auto to = [&](double lx, double ly, double z) {
+      return Vec3d{site.x + lx * yc - ly * ys, site.y + lx * ys + ly * yc, z};
+    };
+    cvc::geometry::color_t plinth = roleColor(reg, lsys::role::wall_concrete);
+    for (double &ch : plinth)
+      ch *= 0.85;
+    appendMass(out, to, 0.0, fy, a.half_x * sc, a.half_y * sc, site.ground_min - 0.5, base, 0.0,
+               plinth, plinth);
+  }
+  const double cx = site.x - fy * ys, cy = site.y + fy * yc;
+  fps.add(Footprint{cx, cy, yc, ys, a.half_x * sc + 1.0, a.half_y * sc + 1.0});
+  return true;
+}
+
 // Build the city on the network's lots: the most built-up streets first (the urbanity at the lot,
 // plus noise shared by a whole street side, so a side is built out or not), up to `cap`
 // buildings. With a library the lots take the archetypes at their real size; without, procedural
-// massing. Core lots get a paved forecourt to the kerb. Returns how many buildings.
+// massing, or with a theme its building archetypes where they fit (placeModelBuilding) and the
+// massing elsewhere. Core lots get a paved forecourt to the kerb. Returns how many buildings.
 std::size_t buildCity(const building_library *lib, const road_network &net,
                       const terrain_source &hf, const road_density_fn &urbanity,
                       const surface_registry &reg, std::uint64_t seed, double waterLevel, int cap,
                       cvc::geometry &out, std::vector<generated_world::apron> &aprons,
-                      FootprintIndex &fps) {
+                      FootprintIndex &fps, const world_theme *theme = nullptr,
+                      const model_catalog *catalog = nullptr, generated_world *w = nullptr) {
   using lsys::stream;
   site_params sp;
   sp.seed = seed;
@@ -953,10 +1139,18 @@ std::size_t buildCity(const building_library *lib, const road_network &net,
     }
     count = inst.size();
   } else {
-    for (const lot &L : ordered) {
+    const bool themed = theme && catalog && w && !theme->buildings.empty();
+    std::vector<char> used(ordered.size(), 0);
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
       if (count >= limit)
         break;
-      fps.add(massLot(L, seed, reg, out));
+      if (used[i])
+        continue;
+      const lot &L = ordered[i];
+      used[i] = 1;
+      if (!(themed &&
+            placeModelBuilding(*theme, *catalog, ordered, used, i, seed, reg, *w, out, fps)))
+        fps.add(massLot(L, seed, reg, out));
       forecourt(L);
       ++count;
     }
@@ -1412,6 +1606,39 @@ world_geometry generated_world::geometry() const {
   add_mesh("roads", roads, asphalt, role_render);
   add_mesh("props", props, 0, role_render);
   add_mesh("foliage", foliage, 0, role_render);
+  // The model buildings collide as their boxes: a renderer draws the models themselves.
+  cvc::geometry boxes;
+  for (const model_instance &m : models) {
+    if (m.asset < 0 || m.asset >= int(model_assets.size()) ||
+        model_assets[m.asset].kind != model_kind::building)
+      continue;
+    const model_asset &a = model_assets[m.asset];
+    const double c = std::cos(m.yaw), s = std::sin(m.yaw), k = m.scale;
+    const double cx = a.centre_x * k, cy = a.centre_y * k;
+    const double z0 = m.z + a.base_z * k, z1 = z0 + a.height * k;
+    const idx_t base = idx_t(boxes.const_points().size());
+    for (int corner = 0; corner < 8; ++corner) {
+      const double lx = cx + ((corner & 1) ? a.half_x : -a.half_x) * k;
+      const double ly = cy + ((corner & 2) ? a.half_y : -a.half_y) * k;
+      cvc::geometry::point_t p;
+      p[0] = m.x + lx * c - ly * s;
+      p[1] = m.y + lx * s + ly * c;
+      p[2] = (corner & 4) ? z1 : z0;
+      boxes.points().push_back(p);
+    }
+    // Outward-facing: bottom, top, then the four sides.
+    const int f[12][3] = {{0, 2, 1}, {1, 2, 3}, {4, 5, 6}, {5, 7, 6}, {0, 1, 4}, {1, 5, 4},
+                          {2, 6, 3}, {3, 6, 7}, {0, 4, 2}, {2, 4, 6}, {1, 3, 5}, {3, 7, 5}};
+    for (const auto &t : f) {
+      cvc::geometry::tri_t tri;
+      tri[0] = base + t[0];
+      tri[1] = base + t[1];
+      tri[2] = base + t[2];
+      boxes.tris().push_back(tri);
+    }
+  }
+  add_mesh("model_buildings", boxes, reg.class_for_role(lsys::role::wall_concrete),
+           std::uint8_t(role_collide | role_navigate));
   return g;
 }
 
@@ -1500,6 +1727,11 @@ struct world_builder::impl {
   FootprintIndex fps;
   std::shared_ptr<const graded_terrain> graded; // the ground with the roads graded in
   std::vector<std::uint8_t> roadBed; // the mesh samples on a road's bed (never lowered as slivers)
+  // The theme (params.theme), and the assets it names that the app's catalog has, as the builder
+  // was made: the world is a function of these, not of what is installed later.
+  bool themed = false;
+  world_theme theme;
+  model_catalog catalog;
 
   // Terrain cell (r, c)'s material: the raster cell's under its centre, but its water from the
   // mesh `hs`: deep water, shallow water or dry by its own height (its corners' mean) against the
@@ -1739,7 +1971,8 @@ struct world_builder::impl {
       const road_network &net = streets.roads;
       w.building_count =
           buildCity(library, net, w.model->terrain(), streets.urbanity, w.model->registry(), p.seed,
-                    p.water_level_m, p.buildings, w.buildings, w.aprons, fps);
+                    p.water_level_m, p.buildings, w.buildings, w.aprons, fps,
+                    themed ? &theme : nullptr, themed ? &catalog : nullptr, &w);
       w.archetypes = library && !library->empty();
       w.road_length = 0.0;
       for (const road_segment &s : net.segments)
@@ -1771,12 +2004,18 @@ struct world_builder::impl {
       const road_network &net = streets.roads;
       PropLib lib;
       lib.build(wp);
+      TreeThemer themer;
+      if (themed && !theme.trees.empty()) {
+        themer.theme = &theme;
+        themer.catalog = &catalog;
+        themer.water = waterDistance(w);
+      }
       buildProps(
           *w.model, w.model->registry(), lib,
           [&](double x, double y) {
             return !net.on_or_near_road(x, y, 1.5) && !fps.contains(x, y);
           },
-          w.params.half_m, w);
+          w.params.half_m, w, themer);
       waterN = water_resolution(w);
       w.water_ground.assign(std::size_t(waterN) * waterN, 0.0f);
       advance(build_stage::water);
@@ -1854,6 +2093,19 @@ world_builder::world_builder(cvc::app &app, const generated_world_params &p,
     world_generators &g = generators(app);
     d_->city = g.city.get(p.city, "city");
     d_->terrain = g.terrain.get(p.terrain, "terrain");
+    if (!p.theme.empty()) {
+      if (!find_world_theme(app, p.theme, d_->theme))
+        throw std::invalid_argument("generate_world: unknown world theme '" + p.theme + "'");
+      d_->themed = true;
+      const model_catalog &installed = model_catalog_of(app);
+      model_asset a;
+      for (const building_archetype_rule &r : d_->theme.buildings)
+        if (installed.find(r.asset, a))
+          d_->catalog.add(a);
+      for (const tree_archetype_rule &r : d_->theme.trees)
+        if (installed.find(r.asset, a))
+          d_->catalog.add(a);
+    }
   } catch (...) {
     d_->failed = std::current_exception();
   }
@@ -2140,6 +2392,38 @@ void paintAprons(const generated_world &w, int T, std::vector<unsigned char> &im
   }
 }
 
+// street_verge's noise at (x, y), which depends on nothing but where: whether the ground there has
+// a verge (present, 0 to 1), and how far past the pavement its frayed edge lies (edge, in metres;
+// left 0 where present is 0). paintStreets makes it once for a texel that several roads reach.
+struct verge_noise {
+  double present = 0.0, edge = 0.0;
+};
+
+verge_noise verge_noise_at(double x, double y) {
+  verge_noise v;
+  // Where: a low-frequency field picks the stretches (a few hundred metres each) that have one.
+  const double where = gfbm2(x / 380.0 + 17.3, y / 380.0 + 4.1);
+  v.present = std::clamp((where - 0.47) / 0.08, 0.0, 1.0);
+  if (v.present <= 0.0)
+    return v;
+  // How wide: 1 to 3.5 m past the pavement, wandering along the road over tens of metres.
+  const double width = 1.0 + (street_verge_max_m - 1.0) * gfbm2(x / 24.0 + 5.7, y / 24.0 + 9.2);
+  // The edge frays into the grass: finer noise moves it by up to a metre either way.
+  v.edge = width + 1.0 * (2.0 * gnoise2(x * 0.7 + 1.9, y * 0.7 + 7.3) - 1.0);
+  return v;
+}
+
+// street_verge from its noise there: the texel's share of the band from the pavement's edge out to
+// the verge's, none under the pavement, so a road whose texel is wider than it still darkens it.
+double verge_cover(const verge_noise &v, double from_edge_m, double texel_m) {
+  if (v.present <= 0.0)
+    return 0.0;
+  const double soft = std::max(texel_m, 0.8);
+  const double out = std::clamp((v.edge - from_edge_m) / soft + 0.5, 0.0, 1.0);
+  const double in = std::clamp(-from_edge_m / soft + 0.5, 0.0, 1.0);
+  return 0.85 * v.present * std::max(0.0, out - in);
+}
+
 // The streets over the material texture, from their centrelines (generated_world::streets): each
 // road's asphalt a little narrower than its mesh, and along some stretches a verge of light dirt.
 // Both are coverages per texel, the largest of any road there, antialiased over a texel, so a road
@@ -2147,6 +2431,13 @@ void paintAprons(const generated_world &w, int T, std::vector<unsigned char> &im
 // a coarse terrain rung rises over the mesh. The verge eases the dark pavement into the grass. It
 // comes and goes along the roads with low-frequency noise (about half their length has one), its
 // width wanders, and its edge frays into the ground.
+//
+// A road reaches the texels in a box around it, and on a small world those are many (a texel is
+// 10 cm on a 200 m world) and shared: the roads meet, and a short road's box is mostly its ends'.
+// So the rows paint in parallel, each one the roads over it in their order, and the verge's noise,
+// which depends on nothing but where, is made once a texel. Every texel takes the same roads'
+// coverages in the same order as one road at a time would, so the bytes are the same on any thread
+// count.
 void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &img) {
   const road_network &net = w.streets;
   if (net.segments.empty())
@@ -2160,38 +2451,91 @@ void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &i
       asphalt[q] = reg[asphaltId].albedo[q];
   const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
   const double tx_m = spanx / (T - 1), ty_m = spany / (T - 1), texel = std::max(tx_m, ty_m);
-  const std::size_t n = std::size_t(T) * T;
-  std::vector<float> road(n, 0.0f), verge(n, 0.0f);
+  // Each road: its centreline, its half width, its asphalt's, how far it reaches, and the box of
+  // texels that reach takes in.
+  struct road_reach {
+    double ax, ay, dx, dy, len2, hw, paintHw, reach;
+    int x0, x1, y0, y1;
+  };
+  std::vector<road_reach> roads;
+  roads.reserve(net.segments.size());
   for (const road_segment &s : net.segments) {
     if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
       continue;
-    const double ax = net.nodes[s.a].x, ay = net.nodes[s.a].y;
+    road_reach r;
+    r.ax = net.nodes[s.a].x;
+    r.ay = net.nodes[s.a].y;
     const double bx = net.nodes[s.b].x, by = net.nodes[s.b].y;
-    const double hw = 0.5 * s.width;
+    r.hw = 0.5 * s.width;
     // Inset by up to half a texel, so the asphalt's filtered edge stays under the mesh.
-    const double paintHw = hw - std::min(0.5 * texel, 0.5 * hw);
-    const double reach = hw + street_verge_max_m + 1.0 + texel; // the verge's frayed edge too
-    const int x0 = std::max(0, int(std::floor((std::min(ax, bx) - reach - g.min_x) / tx_m)));
-    const int x1 = std::min(T - 1, int(std::ceil((std::max(ax, bx) + reach - g.min_x) / tx_m)));
-    const int y0 = std::max(0, int(std::floor((std::min(ay, by) - reach - g.min_y) / ty_m)));
-    const int y1 = std::min(T - 1, int(std::ceil((std::max(ay, by) + reach - g.min_y) / ty_m)));
-    const double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-    for (int ty = y0; ty <= y1; ++ty)
-      for (int tx = x0; tx <= x1; ++tx) {
-        const double wx = g.min_x + tx * tx_m, wy = g.min_y + ty * ty_m;
-        const double t =
-            len2 > 1e-12 ? std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len2, 0.0, 1.0) : 0.0;
-        const double d = std::hypot(wx - (ax + t * dx), wy - (ay + t * dy));
-        if (d > reach)
-          continue;
-        const std::size_t i = std::size_t(ty) * T + tx;
-        const double rc = std::clamp((paintHw - d) / texel + 0.5, 0.0, 1.0);
-        road[i] = std::max(road[i], float(rc));
-        const double vc = street_verge(wx, wy, d - hw, texel);
-        verge[i] = std::max(verge[i], float(vc));
+    r.paintHw = r.hw - std::min(0.5 * texel, 0.5 * r.hw);
+    r.reach = r.hw + street_verge_max_m + 1.0 + texel; // the verge's frayed edge too
+    r.x0 = std::max(0, int(std::floor((std::min(r.ax, bx) - r.reach - g.min_x) / tx_m)));
+    r.x1 = std::min(T - 1, int(std::ceil((std::max(r.ax, bx) + r.reach - g.min_x) / tx_m)));
+    r.y0 = std::max(0, int(std::floor((std::min(r.ay, by) - r.reach - g.min_y) / ty_m)));
+    r.y1 = std::min(T - 1, int(std::ceil((std::max(r.ay, by) + r.reach - g.min_y) / ty_m)));
+    r.dx = bx - r.ax;
+    r.dy = by - r.ay;
+    r.len2 = r.dx * r.dx + r.dy * r.dy;
+    if (r.x0 <= r.x1 && r.y0 <= r.y1)
+      roads.push_back(r);
+  }
+  // The roads over each row, in their order: row ty's are rowRoads from rowAt[ty] to rowAt[ty + 1].
+  std::vector<std::size_t> rowAt(std::size_t(T) + 1, 0);
+  for (const road_reach &r : roads)
+    for (int ty = r.y0; ty <= r.y1; ++ty)
+      ++rowAt[std::size_t(ty) + 1];
+  for (int ty = 0; ty < T; ++ty)
+    rowAt[std::size_t(ty) + 1] += rowAt[std::size_t(ty)];
+  std::vector<std::size_t> rowRoads(rowAt.back());
+  {
+    std::vector<std::size_t> next(rowAt.begin(), rowAt.end() - 1);
+    for (std::size_t k = 0; k < roads.size(); ++k)
+      for (int ty = roads[k].y0; ty <= roads[k].y1; ++ty)
+        rowRoads[next[std::size_t(ty)]++] = k;
+  }
+  const std::size_t n = std::size_t(T) * T;
+  std::vector<float> road(n, 0.0f), verge(n, 0.0f);
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel
+#endif
+  {
+    // This thread's verge noise for the row it paints, by column, and the row each was made for.
+    std::vector<verge_noise> noise(static_cast<std::size_t>(T));
+    std::vector<int> noiseRow(static_cast<std::size_t>(T), -1);
+#ifdef CVC_USING_OPENMP
+#pragma omp for schedule(dynamic, 8)
+#endif
+    for (int ty = 0; ty < T; ++ty) {
+      const double wy = g.min_y + ty * ty_m;
+      for (std::size_t k = rowAt[std::size_t(ty)]; k < rowAt[std::size_t(ty) + 1]; ++k) {
+        const road_reach &r = roads[rowRoads[k]];
+        for (int tx = r.x0; tx <= r.x1; ++tx) {
+          const double wx = g.min_x + tx * tx_m;
+          const double t =
+              r.len2 > 1e-12
+                  ? std::clamp(((wx - r.ax) * r.dx + (wy - r.ay) * r.dy) / r.len2, 0.0, 1.0)
+                  : 0.0;
+          const double d = std::hypot(wx - (r.ax + t * r.dx), wy - (r.ay + t * r.dy));
+          if (d > r.reach)
+            continue;
+          const std::size_t i = std::size_t(ty) * T + tx;
+          const double rc = std::clamp((r.paintHw - d) / texel + 0.5, 0.0, 1.0);
+          road[i] = std::max(road[i], float(rc));
+          if (noiseRow[std::size_t(tx)] != ty) {
+            noise[std::size_t(tx)] = verge_noise_at(wx, wy);
+            noiseRow[std::size_t(tx)] = ty;
+          }
+          const double vc = verge_cover(noise[std::size_t(tx)], d - r.hw, texel);
+          verge[i] = std::max(verge[i], float(vc));
+        }
       }
+    }
   }
   const cvc::geometry::color_t light = {0.64, 0.57, 0.44}, dark = {0.50, 0.42, 0.30};
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (int ty = 0; ty < T; ++ty)
     for (int tx = 0; tx < T; ++tx) {
       const std::size_t i = std::size_t(ty) * T + tx;
@@ -2199,8 +2543,9 @@ void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &i
         continue;
       unsigned char *p = &img[i * 3];
       const double wx = g.min_x + tx * tx_m, wy = g.min_y + ty * ty_m;
-      // Dust mottled light and darker, so the verge is not one flat tone.
-      const double mott = gfbm2(wx * 0.35 + 41.0, wy * 0.35 + 3.0);
+      // Dust mottled light and darker, so the verge is not one flat tone. Under no verge the soil
+      // adds nothing (c moves by (soil - c) * 0), so its noise is not made.
+      const double mott = verge[i] > 0.0f ? gfbm2(wx * 0.35 + 41.0, wy * 0.35 + 3.0) : 0.0;
       for (int q = 0; q < 3; ++q) {
         const double soil = light[q] + (dark[q] - light[q]) * mott;
         double c = p[q] / 255.0;
@@ -2211,30 +2556,30 @@ void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &i
     }
 }
 
+// The material mode's paved ground over its painted rows: the core lots' forecourts, then the
+// streets. The QA modes show the raw raster.
+void paintPaved(const generated_world &w, surface_color mode, int T,
+                std::vector<unsigned char> &img) {
+  if (mode == surface_color::material && !w.raster.klass.empty()) {
+    paintAprons(w, T, img);
+    paintStreets(w, T, img);
+  }
+}
+
 } // namespace
 
 double street_verge(double x, double y, double from_edge_m, double texel_m) {
-  // Where: a low-frequency field picks the stretches (a few hundred metres each) that have one.
-  const double where = gfbm2(x / 380.0 + 17.3, y / 380.0 + 4.1);
-  const double present = std::clamp((where - 0.47) / 0.08, 0.0, 1.0);
-  if (present <= 0.0)
-    return 0.0;
-  // How wide: 1 to 3.5 m past the pavement, wandering along the road over tens of metres.
-  const double width = 1.0 + (street_verge_max_m - 1.0) * gfbm2(x / 24.0 + 5.7, y / 24.0 + 9.2);
-  // The edge frays into the grass: finer noise moves it by up to a metre either way.
-  const double edge = width + 1.0 * (2.0 * gnoise2(x * 0.7 + 1.9, y * 0.7 + 7.3) - 1.0);
-  // The texel's share of the band from the pavement's edge out to there: none under the pavement,
-  // so a road whose texel is wider than it still darkens it.
-  const double soft = std::max(texel_m, 0.8);
-  const double out = std::clamp((edge - from_edge_m) / soft + 0.5, 0.0, 1.0);
-  const double in = std::clamp(-from_edge_m / soft + 0.5, 0.0, 1.0);
-  return 0.85 * present * std::max(0.0, out - in);
+  return verge_cover(verge_noise_at(x, y), from_edge_m, texel_m);
 }
 
 std::vector<unsigned char> paint_surface(const generated_world &w, surface_color mode, int size) {
-  surface_painter s(w, mode, size);
-  s.step(0);
-  return s.take();
+  // surface_painter's texture, all at once, without the water's (paint_water) beside it, which
+  // nothing here reads.
+  const int T = std::max(2, size);
+  std::vector<unsigned char> img(std::size_t(T) * T * 3, 0);
+  paintRows(w, mode, T, 0, T, img);
+  paintPaved(w, mode, T, img);
+  return img;
 }
 
 surface_painter::surface_painter(const generated_world &w, surface_color mode, int size)
@@ -2252,10 +2597,7 @@ bool surface_painter::step(std::size_t budget) {
       return false;
   }
   if (!finished_) {
-    if (mode_ == surface_color::material && !w_.raster.klass.empty()) { // QA modes: the raw raster
-      paintAprons(w_, size_, img_);
-      paintStreets(w_, size_, img_);
-    }
+    paintPaved(w_, mode_, size_, img_);
     finished_ = true;
   }
   return true;
