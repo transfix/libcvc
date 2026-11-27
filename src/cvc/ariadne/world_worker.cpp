@@ -21,6 +21,7 @@
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_worker.h>
 #include <cvc/core/sim_tick.h>
+#include <cvc/core/thread_support.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/physics/world.h>
 #include <mutex>
@@ -133,7 +134,7 @@ world_worker::world_worker(SceneWorld &world, const cvc::world_clock &leader)
 
 world_worker::world_worker(SceneWorld &world, const cvc::world_clock &leader, options opt)
     : _impl(std::make_shared<impl>(world, leader, std::move(opt))) {
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#if defined(CVC_NO_THREADS)
   throw std::runtime_error("world_worker: this build has no threads");
 #else
   impl &d = *_impl;
@@ -225,7 +226,7 @@ world_worker::frame_lock::frame_lock(frame_lock &&o) noexcept = default;
 world_worker::frame_lock &world_worker::frame_lock::operator=(frame_lock &&o) noexcept = default;
 
 bool world_worker::available() {
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#if defined(CVC_NO_THREADS)
   return false;
 #else
   return true;

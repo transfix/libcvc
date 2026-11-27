@@ -20,6 +20,10 @@ name: publish-cvcgl-wasm
 # flavours, from the recipe's own build-wasm.sh against the recipe's own declared dep closure.
 # The ariglx-web job does the same for ariglx-web, arigl-web with an embedded Python.
 #
+# The libcvc-wasi job builds + publishes the libcvc SDK for platform wasi (wasm32-wasip1, a WASI
+# command under Wasmtime) with cvcpkg's wasi-sdk, against the catalog's wasi column, and runs two
+# smokes under wasmtime before packing.
+#
 # Runner-agnostic: runs on GitHub-hosted ubuntu-latest and provisions the emsdk
 # toolchain + cmake/ninja from the cvcpkg catalog, so it is not tied to any one
 # box (it used to require catx-03's pre-installed /opt/cvc-wasm/emsdk). A v* tag
@@ -309,6 +313,132 @@ jobs:
             if cvcpkg search "$name" --platform wasm-mt 2>/dev/null \
                  | awk -v n="$name" -v v="$ver" '$1==n && $2==v{f=1} END{exit !f}'; then
               echo "=== skip $name $ver (already on catalog) ==="; continue
+            fi
+            echo "=== publish $a ==="
+            cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"
+          done
+
+  # libcvc-wasi: the libcvc SDK for platform wasi -- wasm32-wasip1, a WASI command for an engine such
+  # as Wasmtime: single-threaded, no sockets, no processes, no terminal control. wasi-sdk (clang) and
+  # wasmtime come from the catalog like everything else, and the dep closure is the recipe's own
+  # (`cvcpkg install-deps`): Boost, pegtl, ImageMagick and its codecs from cvcpkg's wasi column. The
+  # column is built with wasm exception handling in the standard encoding (cy-pca/cvcpkg
+  # recipes/_common/env-wasi.sh), and the top-level CMakeLists.txt's WASI branch builds cvc the same
+  # way and hands the flags to its consumers. Two plain-main smokes then run under wasmtime with the
+  # exception-handling proposal on: state_exec_wasm_smoke (the state_exec locks with no threads, as
+  # ci.yml runs it under node for the single-threaded wasm build) and image_magick_roundtrip_test
+  # (ImageMagick's coders at run time, through a preopened /tmp). No ari here: whether there is a
+  # wasi ari, and in what form, is open. Revisions as for libcvc wasm: skipped when this version is
+  # already on the catalog for wasi.
+  libcvc-wasi:
+    name: libcvc (wasi)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      TOOLS: ${{ github.workspace }}/tools
+      WASI_SDK: ${{ github.workspace }}/wasi-sdk
+      WASI_DEPS: ${{ github.workspace }}/wasi-deps
+      INST: ${{ github.workspace }}/wasi-inst
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cvcpkg, cmake/ninja, wasi-sdk and wasmtime from the catalog
+        run: |
+          curl -fsSL https://cvcpkg.org/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cvcpkg install cmake ninja --prefix "$TOOLS" --config release --link shared
+          echo "$TOOLS/bin" >> "$GITHUB_PATH"
+          # Host tools for the wasi target: wasi-sdk's clang + sysroot, and the wasmtime CLI the
+          # smokes run under. Their own prefix, so wasi-sdk's clang never shadows a host compiler.
+          cvcpkg install wasi-sdk wasmtime --platform linux --prefix "$WASI_SDK" \
+            --config release --link shared --no-fallback-to-source
+          test -f "$WASI_SDK/share/cmake/wasi-sdk-p1.cmake" \
+            || { echo "::error::wasi-sdk bundle has no share/cmake/wasi-sdk-p1.cmake"; exit 1; }
+          "$WASI_SDK/bin/wasmtime" --version
+
+      - name: Install the recipe's wasi deps
+        run: |
+          set -o pipefail
+          mkdir -p "$WASI_DEPS"
+          cvcpkg install-deps cvcpkg/recipes/libcvc --prefix "$WASI_DEPS" \
+            --platform wasi --arch wasm32 --config release --link static \
+            --no-fallback-to-source \
+            || { echo "::error::failed to install libcvc's wasi deps"; exit 1; }
+
+      - name: Build + install libcvc (wasi)
+        run: |
+          set -euo pipefail
+          # pkg-config must answer from the wasi prefix alone (ImageMagick's Q16/HDRI and its
+          # static codec closure come from MagickCore.pc), never from the runner's /usr.
+          export PKG_CONFIG_LIBDIR="$WASI_DEPS/lib/pkgconfig:$WASI_DEPS/share/pkgconfig"
+          export PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
+          cmake -G Ninja -S . -B build-wasi \
+            -DCMAKE_TOOLCHAIN_FILE="$WASI_SDK/share/cmake/wasi-sdk-p1.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$INST" \
+            -DCMAKE_FIND_ROOT_PATH="$WASI_DEPS" -DCMAKE_PREFIX_PATH="$WASI_DEPS" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCVC_ENABLE_CUDA=OFF -DCVC_BUILD_TESTS=OFF -DCVC_BUILD_CLI=OFF \
+            -DCVC_ENABLE_OPENMP=OFF -DDISABLE_CGAL=ON -DCVC_USING_HDF5=OFF \
+            -DCVC_USING_IMOD_MRC=OFF -DCVC_ENABLE_IMAGEMAGICK=ON -DCVC_ENABLE_FFTW=OFF \
+            -DCVC_FFT_PROVIDER=none -DCVC_ENABLE_ASSIMP=OFF -DCVC_ENABLE_MESHER=OFF \
+            -DCVC_BUILD_CVCGL=OFF -DCVC_BUILD_EXAMPLES=OFF \
+            -DCVC_BUILD_ARI=OFF -DCVC_BUILD_ARIGL=OFF -DCVC_BUILD_ARISRV=OFF \
+            -DCVC_BUILD_STATE_EXEC_WASM_SMOKE=ON -DCVC_BUILD_IMAGE_MAGICK_ROUNDTRIP=ON \
+            | tee configure-wasi.log
+          grep -q "ImageMagick found: .*(Q16, HDRI=1)" configure-wasi.log \
+            || { echo "::error::the wasi configure did not find ImageMagick (Q16 HDRI)"; exit 1; }
+          cmake --build build-wasi --target cvc state_exec_wasm_smoke image_magick_roundtrip_test \
+            -j"$(nproc)"
+          cmake --install build-wasi
+          test -f "$INST/lib/libcvc.a" || { echo "::error::wasi build produced no libcvc.a"; exit 1; }
+          grep -q "MAGICKCORE_HDRI_ENABLE=1" "$INST/lib/cmake/cvc/cvcTargets.cmake" \
+            || { echo "::error::libcvc wasi built WITHOUT ImageMagick, or with MAGICKCORE_HDRI_ENABLE not matching the Q16HDRI library"; exit 1; }
+          if grep -nF -e "$GITHUB_WORKSPACE" "$INST"/lib/cmake/cvc/*.cmake; then
+            echo "::error::cvc's installed CMake files name a path on this runner (not relocatable)"; exit 1
+          fi
+
+      - name: Run the smokes under wasmtime
+        run: |
+          set -euo pipefail
+          # CMake's WASI platform gives executables no suffix: bin/<name> is the module.
+          run="$WASI_SDK/bin/wasmtime run -W exceptions=y"
+          $run build-wasi/bin/state_exec_wasm_smoke | tee smoke.txt
+          grep -qx STATE_EXEC_WASM_OK smoke.txt \
+            || { echo "::error::state_exec_wasm_smoke failed under wasmtime"; exit 1; }
+          mkdir -p wasi-tmp
+          $run --dir wasi-tmp::/tmp build-wasi/bin/image_magick_roundtrip_test
+
+      - name: Pack + publish libcvc (wasi)
+        env:
+          CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cvcpkg pack cvcpkg/recipes/libcvc --from-prefix "$INST" \
+            --platform wasi --config release --link static \
+            --local --output-dir dist
+          ls -la dist/
+          # Every wasi bundle is wasm32. A cvcpkg before cy-pca/cvcpkg#646 tags a from-prefix wasi
+          # pack with the runner's arch, which no `install --platform wasi --arch wasm32` matches.
+          shopt -s nullglob
+          archives=(dist/libcvc-*-wasi-wasm32-*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no libcvc wasi/wasm32 archive in dist/ (a host-arch tag means this cvcpkg predates cy-pca/cvcpkg#646)"
+            exit 1
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry-run: built + packed libcvc (wasi), not publishing"; exit 0
+          fi
+          [ -n "${CVCPKG_TOKEN:-}" ] || { echo "::error::CVCPKG_TOKEN required to publish"; exit 1; }
+          # By archive path, as above; skip a version this column already has.
+          for a in "${archives[@]}"; do
+            ver=$(basename "$a" .tar.gz | sed -E 's/^libcvc-//; s/-wasi-wasm32-.*$//')
+            if cvcpkg search libcvc --platform wasi 2>/dev/null \
+                 | awk -v v="$ver" '$1=="libcvc" && $2==v && $3=="wasi"{f=1} END{exit !f}'; then
+              echo "=== skip libcvc $ver wasi (already on catalog) ==="; continue
             fi
             echo "=== publish $a ==="
             cvcpkg publish "$a" --server https://cvcpkg.org --org cvc --token "$CVCPKG_TOKEN"

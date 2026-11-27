@@ -32,7 +32,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h> // GetModuleHandleExW, GetModuleFileNameW: the component library beside cvc.dll
-#elif !defined(__EMSCRIPTEN__)
+#elif !defined(__EMSCRIPTEN__) && !defined(__wasi__)
 #include <dlfcn.h> // dladdr: the component library beside libcvc
 #endif
 
@@ -66,8 +66,8 @@ std::string to_lower(std::string s) {
   return s;
 }
 
-// An unpredictable token for a temp-file name (the Windows fallback path; POSIX uses mkstemps for
-// exclusive creation instead): about 64 bits from random_device, drawn per name.
+// An unpredictable token for a temp-file name (the Windows and WASI fallback path; POSIX uses
+// mkstemps for exclusive creation instead): about 64 bits from random_device, drawn per name.
 [[maybe_unused]] std::string temp_token() {
   std::random_device rd;
   std::ostringstream os;
@@ -93,7 +93,7 @@ std::string write_new_file(const std::filesystem::path &dir, const std::string &
                            const std::string &suffix, const std::string &content,
                            std::string &err) {
   namespace fs = std::filesystem;
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__wasi__) // wasi-libc has no mkstemps: the random-name path
   std::string tmpl = (dir / (prefix + "XXXXXX" + suffix)).string();
   const int fd = ::mkstemps(&tmpl[0], static_cast<int>(suffix.size()));
   if (fd < 0) {
@@ -358,7 +358,7 @@ std::string installed_data_dir() {
     if (n > 0 && n < buf.size())
       module = fs::path(buf.substr(0, n));
   }
-#elif !defined(__EMSCRIPTEN__)
+#elif !defined(__EMSCRIPTEN__) && !defined(__wasi__) // a wasm module has no file of its own
   Dl_info info;
   if (dladdr(reinterpret_cast<const void *>(&installed_data_dir), &info) && info.dli_fname)
     module = fs::path(info.dli_fname);

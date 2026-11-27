@@ -22,6 +22,8 @@
 #endif
 #include <io.h>
 #include <windows.h>
+#elif defined(__wasi__)
+#include <unistd.h> // isatty; wasip1 has no terminal-size ioctl
 #elif !defined(__EMSCRIPTEN__)
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -80,6 +82,9 @@ void describe_terminal(HostInfo &info) {
     info.cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
     info.rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
   }
+#elif defined(__wasi__)
+  // A WASI runtime says whether stdout is a terminal (fd_fdstat's filetype), not its size.
+  info.tty = isatty(STDOUT_FILENO) != 0;
 #elif !defined(__EMSCRIPTEN__)
   info.tty = isatty(STDOUT_FILENO) != 0;
   struct winsize ws {};

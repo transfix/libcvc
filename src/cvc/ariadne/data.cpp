@@ -22,6 +22,7 @@
 #include <cvc/ariadne/scene_generated_world.h> // the generated_world generator
 #include <cvc/ariadne/uri.h>
 #include <cvc/core/app.h>
+#include <cvc/core/thread_support.h>
 #include <cvc/geometry/contours.h>
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h>
@@ -48,7 +49,7 @@
 #include <stdexcept>
 #include <thread>
 
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#if defined(CVC_NO_THREADS)
 #define CVC_DATA_INLINE 1 // no threads: a load runs where it is asked for
 #endif
 

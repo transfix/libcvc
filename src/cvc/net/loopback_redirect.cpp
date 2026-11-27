@@ -6,22 +6,28 @@
 #include <string>
 #include <vector>
 
-#if !defined(__EMSCRIPTEN__)
+#if !defined(__EMSCRIPTEN__) && !defined(__wasi__)
 #include <boost/asio.hpp>
 #endif
 
 namespace cvc {
 namespace net {
 
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
 
+// No listening socket in a browser page, nor under wasip1 (no bind() or listen(), and Boost.Asio
+// is not in the wasi Boost).
 struct LoopbackRedirect::Impl {};
 LoopbackRedirect::LoopbackRedirect() : m_(std::make_unique<Impl>()) {}
 LoopbackRedirect::~LoopbackRedirect() = default;
 bool LoopbackRedirect::available() { return false; }
 bool LoopbackRedirect::listen(int, const std::string &, std::string *error) {
   if (error)
+#if defined(__wasi__)
+    *error = "a WASI program cannot listen for a loopback redirect";
+#else
     *error = "a browser page cannot listen for a loopback redirect";
+#endif
   return false;
 }
 std::string LoopbackRedirect::redirect_uri() const { return std::string(); }

@@ -23,6 +23,8 @@
 #include <windows.h>
 // windows.h first
 #include <shellapi.h>
+#elif defined(__wasi__)
+// wasip1 cannot start a process: no browser command opens (spawn_quiet below fails).
 #else
 #include <fcntl.h>
 #include <spawn.h>
@@ -131,7 +133,9 @@ bool env_set(const char *name) {
 bool over_ssh() { return env_set("SSH_CONNECTION") || env_set("SSH_CLIENT") || env_set("SSH_TTY"); }
 #endif
 
-#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+#if defined(__wasi__)
+bool spawn_quiet(const std::vector<std::string> &) { return false; }
+#elif !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 // Start `argv` with its standard streams on /dev/null, and reap it on a detached thread.
 bool spawn_quiet(const std::vector<std::string> &argv) {
   if (argv.empty())
@@ -218,6 +222,8 @@ bool browser_available(cvc::app &app) {
   }
 #if defined(__EMSCRIPTEN__)
   return true;
+#elif defined(__wasi__)
+  return false; // only a host's opener (above) can open a page
 #else
   if (env_set("BROWSER"))
     return true;

@@ -58,7 +58,7 @@ bool write(const fs::path &path, const std::string &text, const std::string &wha
   const fs::path dir = path.parent_path();
   if (!dir.empty() && !fs::exists(dir, ec)) {
     fs::create_directories(dir, ec);
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__wasi__)
     ::chmod(dir.c_str(), 0700); // ours, so nobody else lists it
 #endif
   }
@@ -80,12 +80,22 @@ bool write(const fs::path &path, const std::string &text, const std::string &wha
   }
   return true;
 #else
+#if defined(__wasi__)
+  // wasip1: one process (no pid to tell writers apart) and no permission bits; who may read the
+  // file is the host's, through the directory it preopened.
+  const std::string tmp = path.string() + ".tmp";
+#else
   const std::string tmp = path.string() + ".tmp." + std::to_string(::getpid());
+#endif
   ::unlink(tmp.c_str());
   const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0)
     return fail(error, "could not write " + what + " '" + path.string() + "'");
+#if defined(__wasi__)
+  bool ok = true;
+#else
   bool ok = ::fchmod(fd, 0600) == 0; // whatever the umask
+#endif
   ok = ok && ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
   ok = ok && ::fsync(fd) == 0;
   ok = ::close(fd) == 0 && ok;
@@ -100,7 +110,7 @@ bool write(const fs::path &path, const std::string &text, const std::string &wha
 }
 
 bool check_owner_only(const fs::path &path, const std::string &what, std::string *error) {
-#if defined(_WIN32) || defined(__EMSCRIPTEN__)
+#if defined(_WIN32) || defined(__EMSCRIPTEN__) || defined(__wasi__) // wasip1: no users, no modes
   (void)path;
   (void)what;
   (void)error;

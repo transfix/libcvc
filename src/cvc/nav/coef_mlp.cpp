@@ -52,7 +52,10 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
-#ifndef _WIN32
+// dladdr: the loaded libcvc library, to find the weights beside it. Not on Windows, and not in a
+// wasm module (WASI), which is no file of its own.
+#if !defined(_WIN32) && !defined(__wasi__)
+#define CVC_NAV_HAVE_DLADDR 1
 #include <dlfcn.h>
 #endif
 
@@ -403,7 +406,7 @@ std::string coef_mlp::default_weights_path() {
   const std::string canonical = std::string(CVC_NAV_DATADIR) + "/coef_mlp.cvcnav";
   if (file_exists(canonical))
     return canonical;
-#ifndef _WIN32
+#ifdef CVC_NAV_HAVE_DLADDR
   // Relocated / cvcpkg install: resolve relative to the loaded libcvc library.
   Dl_info info;
   if (dladdr(reinterpret_cast<const void *>(&coef_mlp::default_weights_path), &info) &&
@@ -428,7 +431,7 @@ std::string coef_mlp::default_weights_path() {
     if (file_exists(pkg))
       return pkg;
   }
-#ifndef _WIN32
+#ifdef CVC_NAV_HAVE_DLADDR
   {
     Dl_info info;
     if (dladdr(reinterpret_cast<const void *>(&coef_mlp::default_weights_path), &info) &&

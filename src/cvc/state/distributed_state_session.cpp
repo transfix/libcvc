@@ -13,7 +13,10 @@
 #include <cvc/state/state_data_hydrator.h>
 #include <cvc/state/state_distributed_metrics.h>
 #include <cvc/state/state_transport_inproc.h>
-#ifndef _WIN32
+// The IPC transport is Unix domain sockets: not on Windows, and not on wasip1, which has no
+// socket(), bind() or connect() (src/cvc/CMakeLists.txt leaves it out of both builds).
+#if !defined(_WIN32) && !defined(__wasi__)
+#define CVC_STATE_HAVE_IPC 1
 #include <cvc/state/state_transport_ipc.h>
 #endif
 #ifdef CVC_ENABLE_GRPC
@@ -42,7 +45,7 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
     break;
   }
   case transport_kind::ipc: {
-#ifndef _WIN32
+#ifdef CVC_STATE_HAVE_IPC
     auto ipc = std::make_unique<state_transport_ipc>();
     ipc->set_blob_store(session->_blob_store.get());
     if (!config.listen_address.empty())
@@ -50,7 +53,7 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
     session->_transport = std::move(ipc);
 #else
     throw std::runtime_error(
-        "distributed_state_session: IPC transport is not available on Windows");
+        "distributed_state_session: IPC transport is not available on Windows or WASI");
 #endif
     break;
   }
@@ -91,7 +94,7 @@ distributed_state_session::join(app &ctx, const distributed_state_config &config
 
   // 3. Connect to seed peers.
   for (const auto &seed : config.seeds) {
-#ifndef _WIN32
+#ifdef CVC_STATE_HAVE_IPC
     if (auto *ipc = dynamic_cast<state_transport_ipc *>(session->_transport.get()))
       ipc->connect_to_peer(seed);
 #endif
@@ -196,7 +199,7 @@ void distributed_state_session::stop() {
     _transport->unregister_shard(_shard.get());
 
     // 4. Stop transport.
-#ifndef _WIN32
+#ifdef CVC_STATE_HAVE_IPC
   if (auto *ipc = dynamic_cast<state_transport_ipc *>(_transport.get()))
     ipc->stop();
 #endif
@@ -257,7 +260,7 @@ replica_status distributed_state_session::status() const {
   s.pending_hydrations = _hydrator ? _hydrator->pending_count() : 0;
 
   // connection_count is on the concrete transports, not the base.
-#ifndef _WIN32
+#ifdef CVC_STATE_HAVE_IPC
   if (auto *ipc = dynamic_cast<state_transport_ipc *>(_transport.get()))
     s.peer_count = ipc->connection_count();
 #endif

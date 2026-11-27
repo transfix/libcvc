@@ -13,8 +13,8 @@
 
 #if defined(_WIN32)
 #include <stdlib.h>
-#elif defined(__APPLE__) || defined(__EMSCRIPTEN__)
-#include <sys/random.h> // getentropy (Emscripten: crypto.getRandomValues)
+#elif defined(__APPLE__) || defined(__EMSCRIPTEN__) || defined(__wasi__)
+#include <sys/random.h> // getentropy (Emscripten: crypto.getRandomValues; WASI: random_get)
 #include <unistd.h>
 #else
 #include <fcntl.h>
@@ -114,7 +114,7 @@ bool fill_random(unsigned char *out, std::size_t n) {
       out[i] = static_cast<unsigned char>(r >> (8 * k));
   }
   return true;
-#elif defined(__APPLE__) || defined(__EMSCRIPTEN__)
+#elif defined(__APPLE__) || defined(__EMSCRIPTEN__) || defined(__wasi__)
   while (n > 0) {
     const std::size_t chunk = n < 256 ? n : 256; // getentropy's limit
     if (getentropy(out, chunk) != 0)

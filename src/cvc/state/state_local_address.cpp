@@ -20,7 +20,7 @@
 #include <cstring>
 #include <cvc/state/state_identity.h>
 #include <string>
-#if !defined(__EMSCRIPTEN__)
+#if !defined(__EMSCRIPTEN__) && !defined(__wasi__) // no sockets to ask, nor Boost.Asio
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/udp.hpp>
 #endif
@@ -62,7 +62,7 @@ namespace {
 } // namespace
 
 std::string local_address_toward(const std::string &target) {
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
   (void)target;
   return std::string();
 #else

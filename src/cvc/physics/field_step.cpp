@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <cvc/core/exception.h>
+#include <cvc/core/thread_support.h>
 #include <cvc/volume/volume.h>
 #include <stdexcept>
 #include <string>
@@ -1279,7 +1280,7 @@ bool field_set::medium_under(const vec3 &p, wheel_medium &out) const {
 // ── field_workers ──
 
 field_workers::field_workers(int threads) : _wanted(threads) {
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#if defined(CVC_NO_THREADS)
   threads = 0; // no threads in this build: run() runs every index here
 #endif
   for (int i = 0; i < threads; ++i)

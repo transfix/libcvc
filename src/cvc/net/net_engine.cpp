@@ -36,7 +36,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if !defined(__EMSCRIPTEN__)
+#if !defined(__EMSCRIPTEN__) && !defined(__wasi__)
 #include <boost/asio.hpp>
 #endif
 
@@ -67,7 +67,8 @@ const char *to_string(close_reason reason) {
   return "unknown";
 }
 
-#if defined(__EMSCRIPTEN__)
+// No engine in a browser page, nor under wasip1 (no sockets of its own, no Boost.Asio).
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
 
 struct net_engine::impl {};
 net_engine::net_engine(engine_options) : m_(std::make_unique<impl>()) {}
@@ -1355,7 +1356,7 @@ void net_engine::stop() {
   m_->ev_cv.notify_all();
 }
 
-#endif // !__EMSCRIPTEN__
+#endif // !__EMSCRIPTEN__ && !__wasi__
 
 } // namespace net
 } // namespace cvc

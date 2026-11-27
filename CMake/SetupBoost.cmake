@@ -4,8 +4,8 @@
 #
 
 function(SetupBoost TargetName)
-  if(EMSCRIPTEN)
-    # The wasm Boost bundle is static-only (wasm builds force CVC_LINK=static).
+  if(EMSCRIPTEN OR WASI)
+    # The wasm and wasi Boost bundles are static-only (cvcpkg forces CVC_LINK=static).
     set(Boost_USE_STATIC_LIBS ON)
   else()
     set(Boost_USE_STATIC_LIBS OFF)
@@ -48,7 +48,7 @@ function(SetupBoost TargetName)
     target_link_libraries(${TargetName} PUBLIC ${_boost_targets})
     
     # Platform-specific definitions
-    if(NOT EMSCRIPTEN)
+    if(NOT EMSCRIPTEN AND NOT WASI)
       target_compile_definitions(${TargetName} PUBLIC BOOST_ALL_DYN_LINK)
     endif()
     

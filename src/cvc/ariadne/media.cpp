@@ -14,6 +14,7 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http_cache.h>
 #include <cvc/core/app.h>
+#include <cvc/core/thread_support.h>
 #include <cvc/net/http_client.h>
 #include <deque>
 #include <exception>
@@ -30,10 +31,10 @@ namespace media {
 
 namespace {
 
-// Whether this build has threads for the background pool (a browser build without -pthread runs
-// pool jobs on the frame pump, so the cache runs its steps itself, one per frame).
+// Whether this build has threads for the background pool (a browser build without -pthread, or a
+// wasip1 one, runs pool jobs on the frame pump, so the cache runs its steps itself, one per frame).
 constexpr bool kThreaded =
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#if defined(CVC_NO_THREADS)
     false;
 #else
     true;

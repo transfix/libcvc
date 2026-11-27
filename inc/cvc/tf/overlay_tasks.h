@@ -91,9 +91,9 @@ enum class overlay_threading {
   threaded     // always on the background pool (cooperative where no threads exist or start)
 };
 
-// Whether this build can run work on other threads: false exactly under Emscripten without
-// pthreads (__EMSCRIPTEN__ && !__EMSCRIPTEN_PTHREADS__); true in every native build and in
-// wasm-mt.
+// Whether this build can run work on other threads: false exactly under CVC_NO_THREADS
+// (cvc/core/thread_support.h: Emscripten without pthreads, and wasip1); true in every native build
+// and in wasm-mt.
 bool threads_available();
 
 struct overlay_task_options {

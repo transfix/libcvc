@@ -16,11 +16,12 @@
 #define STBI_WRITE_NO_STDIO
 #include "../image/third_party/stb_image_write.h"
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
 #include <unistd.h> // isatty: $TERM_PROGRAM counts only for a terminal
 #endif
 
-#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+// No probe under wasip1 either: it has no termios, no /dev/tty and no poll on a terminal.
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && !defined(__wasi__)
 #define CVC_TERM_GRAPHICS_POSIX 1
 #include <fcntl.h>
 #include <poll.h>

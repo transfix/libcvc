@@ -861,6 +861,10 @@ struct stdout_lock {
 #ifdef _WIN32
   stdout_lock() { _lock_file(stdout); }
   ~stdout_lock() { _unlock_file(stdout); }
+#elif defined(__wasi__) && !defined(_REENTRANT)
+  // wasip1 is single-threaded and its libc has no stdio locks: no other thread can print.
+  stdout_lock() {}
+  ~stdout_lock() {}
 #else
   stdout_lock() { flockfile(stdout); }
   ~stdout_lock() { funlockfile(stdout); }

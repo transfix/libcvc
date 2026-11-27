@@ -24,8 +24,8 @@
 #define __VOLMAGICK_UTILITY_H__
 
 #include <boost/any.hpp>
-#ifndef __EMSCRIPTEN__
-#include <boost/asio.hpp> // not in the wasm Boost bundle; only utility.cpp uses it
+#if !defined(__EMSCRIPTEN__) && !defined(__wasi__)
+#include <boost/asio.hpp> // not in the wasm/wasi Boost bundles; only utility.cpp uses it
 #endif
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/property_tree/json_parser.hpp>

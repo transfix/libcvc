@@ -23,6 +23,7 @@
 #include <cvc/core/app.h>
 #include <cvc/core/clock_follower.h>
 #include <cvc/core/sim_tick.h>
+#include <cvc/core/thread_support.h>
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/nav/coef_mlp.h>
@@ -41,7 +42,7 @@
 
 // A worker thread for the navigator wherever there are threads: natively, and in a browser built
 // with them (a cross-origin-isolated page). A browser without them steps it on the frame's thread.
-#if !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
+#if !defined(CVC_NO_THREADS)
 #define CVC_SWARM_WORKER 1
 #else
 #define CVC_SWARM_WORKER 0

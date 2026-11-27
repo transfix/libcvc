@@ -122,6 +122,23 @@ if(EMSCRIPTEN)
     add_compile_options(-pthread)
     add_link_options(-pthread)
   endif()
+elseif(WASI)
+  # wasm32-wasip1 (wasi-sdk's toolchain file sets WASI): a WASI command for an engine
+  # such as Wasmtime, single-threaded, no sockets, no processes, no terminal control.
+  # Exceptions are wasm's own here too, in the standard (exnref) encoding the engines
+  # run; clang 22 still defaults to the legacy one. -wasm-enable-sjlj makes
+  # setjmp/longjmp wasm exceptions as well, as libpng/libjpeg need. It is the flavour
+  # of the whole cvcpkg wasi column (cy-pca/cvcpkg recipes/_common/env-wasi.sh), so
+  # every static library in the link agrees. The cvc target hands the same flags and
+  # wasi-sdk's eh runtime (unwind, setjmp) to whatever links it (src/cvc/CMakeLists.txt).
+  # Run the result with `wasmtime run -W exceptions=y`.
+  set(CVC_WASI_EH_OPTIONS -fwasm-exceptions "SHELL:-mllvm -wasm-enable-sjlj"
+                          "SHELL:-mllvm -wasm-use-legacy-eh=false")
+  add_compile_options(${CVC_WASI_EH_OPTIONS})
+  add_link_options(${CVC_WASI_EH_OPTIONS})
+  # wasm-ld's default stack is 64 KiB, below the data; a few PATH_MAX buffers per frame
+  # overrun it and the stack pointer wraps. Native programs assume about 8 MiB.
+  add_link_options("LINKER:-z,stack-size=8388608")
 endif()
 
 # MSVC-specific: enable M_PI, silence deprecated POSIX / CRT names, and

@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cvc/ariadne/stream/producer_thread.h>
+#include <cvc/core/thread_support.h>
 
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 #include <emscripten/html5.h>
@@ -85,6 +86,36 @@ void producer_thread::set_rate(double hz) {
 }
 
 void producer_thread::run() {} // unused in the timer-driven build
+
+#elif defined(CVC_NO_THREADS) // wasip1: no thread, and no timer to tick from
+
+// The producer runs when its host asks, on the host's one thread: run_now() ticks it, as the
+// single-threaded browser build's run_now does between timer ticks, and start() only marks it
+// running. A WASI host that wants a stream's frames calls run_now() each frame.
+void producer_thread::em_tick_trampoline(void *) {}
+
+void producer_thread::em_tick() {
+  if (!run_.load() || in_tick_)
+    return;
+  in_tick_ = true;
+  const bool keep = !tick_ || tick_();
+  in_tick_ = false;
+  if (!keep) {
+    run_.store(false);
+    return;
+  }
+  ticks_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void producer_thread::run_now() { em_tick(); }
+
+void producer_thread::start() { run_.store(true); }
+
+void producer_thread::stop() { run_.store(false); }
+
+void producer_thread::set_rate(double hz) { period_.store(1.0 / clamp_hz(hz)); }
+
+void producer_thread::run() {}
 
 #else // native / pthread-wasm: the dedicated worker thread.
 
