@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/core/thread_support.h>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,10 +40,11 @@ enum class lock_mode : std::uint8_t { shared, exclusive };
 /// manager's mutex (shared). Fixed at construction.
 enum class lock_threading : std::uint8_t { single, shared };
 
-/// Whether this build has threads. False only on Emscripten without pthreads, where every home is
-/// pumped on the one thread: app::lock_manager()'s auto mode picks single there, and a host that
-/// attaches with cross_thread passes this, so such a build never asks for a cross-thread attach.
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+/// Whether this build has threads. False only under CVC_NO_THREADS (Emscripten without pthreads,
+/// and wasip1: cvc/core/thread_support.h), where every home is pumped on the one thread:
+/// app::lock_manager()'s auto mode picks single there, and a host that attaches with cross_thread
+/// passes this, so such a build never asks for a cross-thread attach.
+#if defined(CVC_NO_THREADS)
 inline constexpr bool threads_compiled_in = false;
 #else
 inline constexpr bool threads_compiled_in = true;

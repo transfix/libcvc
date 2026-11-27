@@ -1,5 +1,32 @@
 // OS signals for a host program, sent to one app — see inc/cvc/ariadne/host_signals.h.
 
+#if defined(__wasi__)
+// wasip1 delivers no signals to a program: wasi-libc's <signal.h> is an #error without its
+// emulation, and the emulation's handlers only ever run from raise(). A route therefore has
+// nothing to take; a stop comes from request_stop() alone, and nothing is ever trapped.
+#include <cvc/ariadne/host_signals.h>
+#include <cvc/core/app.h>
+
+namespace cvc {
+namespace ariadne {
+
+std::string host_signals::take_trapped() { return {}; }
+
+host_signals &signals_of(cvc::app &a) { return a.slot<host_signals>(); }
+
+struct signal_route::saved {};
+
+signal_route::signal_route(cvc::app &, mode) : saved_(std::make_unique<saved>()) {}
+
+signal_route::~signal_route() = default;
+
+int signal_number(const std::string &) { return 0; }
+
+} // namespace ariadne
+} // namespace cvc
+
+#else // !__wasi__
+
 #include <csignal>
 #include <cvc/ariadne/host_signals.h>
 #include <cvc/core/app.h>
@@ -156,3 +183,5 @@ int signal_number(const std::string &name) {
 
 } // namespace ariadne
 } // namespace cvc
+
+#endif // !__wasi__

@@ -22,7 +22,7 @@
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) && !defined(__wasi__)
 #include <boost/asio.hpp>
 #endif
 #include <boost/regex.hpp>
@@ -43,9 +43,9 @@ CVC_DEF_EXCEPTION(network_error);
 // ---- Change History ----
 // 02/24/2012 -- Joe R. -- Creation.
 std::string get_local_ip_address() {
-#ifdef __EMSCRIPTEN__
-  // No raw sockets in the browser sandbox (and Boost.Asio is excluded from the
-  // wasm Boost bundle) — loopback is the only honest answer.
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
+  // No raw sockets in the browser sandbox or under wasip1 (and Boost.Asio is excluded
+  // from the wasm and wasi Boost bundles) — loopback is the only honest answer.
   return "127.0.0.1";
 #else
   using namespace boost::asio;

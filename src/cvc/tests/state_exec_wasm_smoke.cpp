@@ -131,8 +131,9 @@ bool run(bool use_sync) {
 bool run_on_app_manager() {
   const char *kind = "app manager";
   bool ok = true;
-#ifdef __EMSCRIPTEN__
-  // ari-wasm's build has no pthreads: the checks below are the no-threads ones only then.
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
+  // ari-wasm's build has no pthreads, and wasip1 none at all (publish-cvcgl-wasm.yml's
+  // libcvc-wasi job runs this under wasmtime): the checks below are the no-threads ones only then.
   ok &= expect(!se::threads_compiled_in, kind, "threads_compiled_in is true (pthreads?)");
 #endif
   world w(false);

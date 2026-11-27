@@ -1,8 +1,8 @@
 // cvc::process — see inc/cvc/core/process.h.
 #include <cvc/core/process.h>
 
-#if defined(__EMSCRIPTEN__)
-// No processes to find or start.
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
+// No processes to find or start (the browser; wasip1 has no process API).
 #elif defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -28,7 +28,7 @@ namespace process {
 namespace fs = std::filesystem;
 
 fs::path self_path() {
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
   return {};
 #elif defined(_WIN32)
   std::wstring buf(32768, L'\0');
@@ -66,7 +66,7 @@ fs::path self_path() {
 bool spawn_detached(const std::vector<std::string> &argv) {
   if (argv.empty())
     return false;
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) || defined(__wasi__)
   return false;
 #elif defined(_WIN32)
   // One command line, each argument quoted (the demos' paths have no quotes of their own).

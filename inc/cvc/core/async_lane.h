@@ -29,12 +29,13 @@
  *     A wasm app normally never stops its lanes (EXIT_RUNTIME=0).
  *
  * BUILDS WITHOUT THREADS
- *   Under Emscripten without -pthread (__EMSCRIPTEN__ && !__EMSCRIPTEN_PTHREADS__) starting a
- *   std::thread aborts, so every lane is forced to lane_mode::deferred: jobs queue and run on the
- *   PUMP thread, in FIFO order, when the driver calls run_deferred() (pump_exec_frame does that for
- *   the lanes passed to it). Results then arrive one frame after the submit, exactly as with a
- *   threaded lane, and nothing else in the caller changes. lane_mode::deferred can also be chosen
- *   natively, e.g. for a "--sim-async=0" parity run where the lane's work must stay on main.
+ *   Under Emscripten without -pthread, and on wasip1 (CVC_NO_THREADS, cvc/core/thread_support.h),
+ *   starting a std::thread aborts or throws, so every lane is forced to lane_mode::deferred: jobs
+ *   queue and run on the PUMP thread, in FIFO order, when the driver calls run_deferred()
+ *   (pump_exec_frame does that for the lanes passed to it). Results then arrive one frame after
+ *   the submit, exactly as with a threaded lane, and nothing else in the caller changes.
+ *   lane_mode::deferred can also be chosen natively, e.g. for a "--sim-async=0" parity run where
+ *   the lane's work must stay on main.
  *
  * STATE_EXEC INTEGRATION (launch_lane_task / park_on_lane_task / future_lane_task / post_lane_task)
  *   These mirror launch_pool_task / park_on_pool_task / future_pool_task (async_task.h) with the
@@ -89,6 +90,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cvc/core/async_task.h> // pool_task_work / pool_task_on_error
+#include <cvc/core/thread_support.h>
 #include <cvc/state/state_exec/types.h>
 #include <deque>
 #include <functional>
@@ -104,8 +106,9 @@ namespace state_exec {
 class async_scheduler;
 }
 
-/// True when this build can start threads: every native build, and Emscripten built with -pthread.
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+/// True when this build can start threads: every native build, and Emscripten built with -pthread;
+/// false under CVC_NO_THREADS (cvc/core/thread_support.h: Emscripten without it, and wasip1).
+#if defined(CVC_NO_THREADS)
 inline constexpr bool async_lane_has_threads = false;
 #else
 inline constexpr bool async_lane_has_threads = true;

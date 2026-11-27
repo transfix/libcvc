@@ -172,6 +172,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/text.h
   ../../inc/cvc/core/thread_pool.h
   ../../inc/cvc/core/thread_class.h
+  ../../inc/cvc/core/thread_support.h
   ../../inc/cvc/core/exec_pool.h
   ../../inc/cvc/core/cpu_placement.h
   ../../inc/cvc/volume/volmagick.h
@@ -822,8 +823,10 @@ else()
 endif()
 
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
-# header itself is portable but the implementation is not. Drop it on Windows.
-if(WIN32)
+# header itself is portable but the implementation is not. Drop it on Windows,
+# and on WASI: wasip1's sockets are only those the runtime hands in, with no
+# socket(), bind() or connect().
+if(WIN32 OR WASI)
   list(REMOVE_ITEM SOURCE_FILES state/state_transport_ipc.cpp)
 endif()
 
@@ -2813,6 +2816,23 @@ if(CVC_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
                       "import MSVC's non-redistributable libomp140. Add `openmp` to the "
                       "prefix to link LLVM's redistributable libomp instead.")
     endif()
+  endif()
+endif()
+
+# WASI (wasm32-wasip1): cvc throws and catches, and on this target exceptions are wasm's own in the
+# standard encoding (the top-level CMakeLists.txt's WASI branch). A program that links the static
+# cvc must compile and link the same way, and link wasi-sdk's eh runtime (libunwind; libsetjmp for
+# the codecs' setjmp/longjmp), so the exported target carries both to every consumer. The
+# cvcpkg wasi ImageMagick is a POSIX program on wasi-libc's emulations of signals, getpid and
+# times; a static consumer links those three as well (MagickCore.pc says so; FindImageMagick's
+# target does not).
+if(WASI)
+  target_compile_options(cvc INTERFACE ${CVC_WASI_EH_OPTIONS})
+  target_link_options(cvc INTERFACE ${CVC_WASI_EH_OPTIONS})
+  target_link_libraries(cvc INTERFACE unwind setjmp)
+  if(CVC_ENABLE_IMAGEMAGICK)
+    target_link_libraries(cvc INTERFACE wasi-emulated-signal wasi-emulated-getpid
+                                        wasi-emulated-process-clocks)
   endif()
 endif()
 

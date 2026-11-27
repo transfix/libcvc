@@ -25,6 +25,11 @@
 #include <windows.h>
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten/stack.h>
+#elif defined(__wasi__) && !defined(_REENTRANT)
+// wasm-ld defines the stack's lowest address (the stack grows down to it), as Emscripten's
+// emscripten_stack_get_end() reports it. wasip1 has the one thread; under wasi-threads
+// (_REENTRANT) each thread has a stack of its own, so that target takes the unknown-bound path.
+extern "C" char __stack_low;
 #elif defined(__APPLE__) || defined(__linux__)
 #include <pthread.h>
 #endif
@@ -41,10 +46,11 @@ namespace {
 std::uintptr_t stack_here() {
 #if defined(_MSC_VER)
   return reinterpret_cast<std::uintptr_t>(_AddressOfReturnAddress());
-#elif (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__) && !defined(__wasi__)
   return reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
 #else
-  // Emscripten: the stack whose end it reports is in linear memory, where a local's address is.
+  // Emscripten and WASI: the stack whose end they report is in linear memory, where a local's
+  // address is.
   const char here = 0;
   return reinterpret_cast<std::uintptr_t>(&here);
 #endif
@@ -63,6 +69,8 @@ std::uintptr_t this_thread_stack_low() {
   return reinterpret_cast<std::uintptr_t>(info.AllocationBase);
 #elif defined(__EMSCRIPTEN__)
   return static_cast<std::uintptr_t>(emscripten_stack_get_end());
+#elif defined(__wasi__) && !defined(_REENTRANT)
+  return reinterpret_cast<std::uintptr_t>(&__stack_low);
 #elif defined(__APPLE__)
   const pthread_t self = pthread_self();
   const auto high = reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));

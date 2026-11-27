@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h>
+#include <cvc/core/thread_support.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/builtins.h>
@@ -436,7 +437,7 @@ double positive_or(double v, double fallback, double floor) {
 } // namespace
 
 bool threads_available() {
-#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+#if defined(CVC_NO_THREADS)
   return false;
 #else
   return true;
