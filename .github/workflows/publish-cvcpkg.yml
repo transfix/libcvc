@@ -76,9 +76,9 @@
 #               builds of its C++ deps, which the catalog lacks.
 # ari, ari-media and arisrv also build in the DEBUG jobs (Linux and macOS: the rows
 # with a debug libcvc), packed `--config debug` against that job's debug libcvc and
-# the release deps it links. A `cvcpkg install <pkg> --config debug` takes those
-# release deps too: where debug and release share an ABI (every platform but
-# Windows), a dep with no debug bundle comes from release (cy-pca/cvcpkg#645).
+# the release public deps it links. A `cvcpkg install <pkg> --config debug` installs
+# that same closure: the cvc org's packages in debug, other orgs' in release, where
+# debug and release share an ABI (every platform but Windows; cy-pca/cvcpkg#645).
 # The rest of the family builds in the RELEASE jobs only (they pack with
 # `--config release` against the release Python/numpy/VTK bundles).
 #
