@@ -532,6 +532,44 @@ TEST(HolonSyncTest, TheReserveIsWrittenOnStepsThatSkipThePoses) {
   EXPECT_NEAR(published, e.reserve, 0.005 * 2000.0 + 1.0);
 }
 
+// The relay publishes each avatar's motion (walker@2, OW9c) once it leaves the land: nothing for a
+// walk on the dry floor, then "swimming" once the room's water stands 1.5 m deep over it.
+TEST(HolonSyncTest, TheRelayPublishesASwimmersMotion) {
+  cvc::app server_app;
+  const std::string room = "r";
+  cvc::ariadne::holon_config cfg;
+  cfg.physics = true;
+  holon server(holon_role::server, cfg);
+  if (!server.physics())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  cvc::ariadne::conference::seed_default_scene(server_app, room);
+  cvc::ariadne::conference::room_join(server_app, room, "A");
+  cvc::ariadne::write_intent(server_app, room, "A", avatar_intent{vec3{1.0, 0.0, 0.0}});
+  const double dt = server.clock().fixed_dt();
+  for (int step = 0; step < 120; ++step)
+    cvc::ariadne::server_pump(server, server_app, room, dt);
+  cvc::ariadne::avatar_motion m = cvc::ariadne::avatar_motion::wading;
+  ASSERT_TRUE(server.motion("A", m));
+  EXPECT_EQ(m, cvc::ariadne::avatar_motion::walking);
+  EXPECT_FALSE(cvc::ariadne::conference::read_avatar_motion(server_app, room, "A", m))
+      << "a dry walk publishes nothing";
+
+  auto v = std::make_shared<cvc::volume>(server_app, cvc::dimension(2, 2, 2), cvc::Float,
+                                         cvc::bounding_box(-50.0, -50.0, -5.0, 50.0, 50.0, 1.5));
+  v->fill(1000.0);
+  cvc::physics::field water;
+  water.kind = cvc::physics::field_kind::fluid;
+  water.volume = v;
+  water.drag_coefficient = 1.0;
+  water.damping = 1.0e4;
+  water.inertial = true;
+  server.set_water({water}, 0, 1);
+  for (int step = 0; step < 240; ++step)
+    cvc::ariadne::server_pump(server, server_app, room, dt);
+  ASSERT_TRUE(cvc::ariadne::conference::read_avatar_motion(server_app, room, "A", m));
+  EXPECT_EQ(m, cvc::ariadne::avatar_motion::swimming) << "out of its depth";
+}
+
 // An avatar standing still with a full reserve: once its reserve is published the relay writes no
 // more of it -- the re-stamp is for a reserve still drifting from the published one -- and a walk
 // publishes again. Each reserve write journals one mutation per leaf that changed.
