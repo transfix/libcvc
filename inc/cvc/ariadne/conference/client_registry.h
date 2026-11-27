@@ -71,15 +71,37 @@ public:
     std::size_t max_connections = 32; // connections kept in each record's log
   };
 
+  // What a client says it is (ID5a, ARISRV_IDENTITY.md 2.7): a claim, used to route and offer
+  // services, never to grant anything. clean_client() makes a valid one of anything.
+  struct client_info {
+    std::string kind = "unknown"; // an app's name ("nicotina"), else its host's ("arigl"), or
+                                  // "nmdc"; "unknown" when it said nothing
+    std::string version;          // free text for the log (a libcvc version, an NMDC tag)
+    std::vector<std::string> capabilities; // the services it can use: "chat", "files.share", ...
+  };
+
+  // Where a connection's address is (@host.geolocate, ID4c): any field may be "" (GeoLite2 City
+  // has no ASN).
+  struct geo_info {
+    std::string country, region, city, asn;
+    bool empty() const noexcept {
+      return country.empty() && region.empty() && city.empty() && asn.empty();
+    }
+  };
+
   struct connection {
     std::uint64_t seq =
         0;           // its number in its record's log (arisrv.clients.<id>.connections.n<seq>)
-    std::string pid; // the node id its Hello named
-    std::string transport;      // "grpc" | "ws"
+    std::string pid; // the node id its Hello named; "" for a program's connection
+    std::string transport;      // "grpc" | "ws", or a program's listener's ("nmdc", "nmdcs", ...)
     std::string public_address; // the address the relay saw, without its port
     std::string local_address; // the client's own end, as its Hello reported it ("" from a browser)
     std::string opened, closed; // UTC, ISO 8601; closed "" while it is open
     bool active = false;
+    bool engine = false; // a program's connection (ID5b): no Hello, no pid, no room presence
+    std::string key;     // the program's key for it (ID5b); "" for a transport's
+    client_info client;
+    geo_info geo;
   };
 
   // A client's own caps, where an admin set them (server.limits); an unset field keeps the
@@ -113,6 +135,7 @@ public:
     bool banned = false;        // refused at each connection (server.ban), until unbanned
     std::uint64_t rcon_failures = 0; // wrong rcon passwords its connections sent
     client_limits limits;            // where an admin set them (server.limits)
+    client_info client; // what its newest open connection says it is (the last one's, once none is)
   };
 
   // Why a request was refused: a room-call error code (room_calls.h) and its message.
@@ -163,7 +186,8 @@ public:
 
   // A requested username cleaned: trimmed, 1-32 bytes of valid UTF-8 with no control characters.
   // False when nothing usable is left.
-  static bool clean_username(const std::string &in, std::string &out);
+  static bool clean_username(const std::string &in, std::string &out,
+                             std::size_t max = kUsernameMax);
   static constexpr std::size_t kUsernameMax = 32;
   // An address as a transport reports it ("ipv4:1.2.3.4:5678", "ipv6:[::1]:5678", "1.2.3.4:5678")
   // without its scheme, brackets or port.
@@ -188,10 +212,13 @@ public:
   };
   bool holder_of(const std::string &pid, holder &out) const;
 
-  // One open connection, as a transport numbers it (state_link_report::connection).
+  // One open connection: as a transport numbers it (state_link_report::connection), or, for a
+  // program's connection (ID5b), by the program's key, which the relay hands the program's closer
+  // with the reason and kick or ban, so the program can tell the client why before it closes.
   struct link_ref {
-    std::string transport; // "grpc" | "ws"
-    std::uint64_t connection = 0;
+    std::string transport;        // "grpc" | "ws", or the program's listener's ("nmdc", ...)
+    std::uint64_t connection = 0; // a transport's; 0 for a program's
+    std::string key;              // a program's; "" for a transport's
   };
   // The open connections of client ID_OR_PID (a client id, or the pid its connection holds):
   // what server.kick closes.
@@ -213,8 +240,44 @@ public:
   // loop, as every call here is (ServerDocument asks from run_client_*, which runs there).
   std::optional<client_limits> limits(const std::string &pid) const;
 
+  // -------- a program's connections (ID5b, ARISRV_IDENTITY.md 2.8) --------
+  //
+  // A connection a relay's program accepts itself (an NMDC client, on the net engine or on its
+  // own sockets) has no Hello and no pid. The program reports it, from its accept hook
+  // (host.clients.open_engine), under a key of its own that it doesn't reuse while the connection
+  // is open (1-128 bytes of [A-Za-z0-9._:-], such as "nmdc:41"). It is kept until close_engine:
+  // update() leaves it alone. Each call is on the room loop, as the rest are.
+
+  // Open the program's connection KEY, accepted on its listener TRANSPORT ("nmdc", "nmdcs", ...),
+  // in the record of its addresses' client id (client_id's fallback: it sends no device id), with
+  // what CLIENT says it is and, when the program looked it up, where it is (GEO). Returns the
+  // client id; "" with WHY: `forbidden` for a banned client (the program closes it), `invalid`
+  // for a KEY already open or that is no key, or a TRANSPORT that is no short lowercase name.
+  std::string open_engine(const std::string &key, const std::string &transport,
+                          const std::string &public_address, const std::string &local_address,
+                          const client_info &client, const geo_info &geo, double now_s,
+                          const std::string &wall, refusal &why);
+  // The username KEY's protocol gives its client (an NMDC nick): cleaned as set_username cleans
+  // one, but up to kProgramUsernameMax bytes (NMDC's nicks), and unique among the active clients,
+  // never with a suffix (a renamed NMDC nick breaks its client): false with WHY, `invalid` for no
+  // name or one another active client has (the program refuses the login), `unavailable` for no
+  // such connection.
+  bool name_engine(const std::string &key, const std::string &nick, refusal &why);
+  static constexpr std::size_t kProgramUsernameMax = 64;
+  // What KEY says it is now: its protocol told, or changed it (an NMDC $MyINFO, a share that went
+  // to 0). False for no such connection.
+  bool update_engine(const std::string &key, const client_info &client);
+  // KEY closed at WALL. False for no such connection.
+  bool close_engine(const std::string &key, const std::string &wall);
+
+  // CLIENT made valid: a kind of 1-32 bytes of [a-z0-9._-] ("unknown" otherwise), a version of at
+  // most 64 printable ASCII bytes, and capabilities of 1-64 bytes of [a-z0-9._-] each, at most 32,
+  // in order with no repeats; anything else is dropped.
+  static client_info clean_client(const client_info &client);
+
   // Every record, active ones first, then the latest seen (server.clients): a list of
-  // {client_id, username, active, admin, banned, verified, device, first_seen, last_seen}.
+  // {client_id, username, active, admin, banned, verified, device, first_seen, last_seen, kind,
+  // capabilities}.
   cvc::state_exec::value_t list_value() const;
   // One record (server.client): the list's fields, its limits, its rcon failures and its
   // connection log. Nil for an unknown id.
@@ -239,8 +302,14 @@ private:
     std::uint64_t connection = 0;
     std::string public_address;
     bool secure = false;
+    bool engine = false; // a program's connection: close_engine ends it, not update()
+    std::string key;     // the program's key for it
   };
   bool record_admin(const std::string &id) const;
+  // REC's client: its newest active connection's, else its newest connection's.
+  static void take_client(record &rec);
+  static std::string engine_key(const std::string &key);
+  static bool valid_program_key(const std::string &key);
   cvc::state_exec::value_t summary(const record &rec) const;
 
   options _opt;
