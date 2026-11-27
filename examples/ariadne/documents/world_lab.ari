@@ -12,9 +12,10 @@
 # line per vehicle: its speed, power, energy and wheel load.
 #
 # The vehicles are the world block's archetypes: a Humvee (drawn as the vehicle-humvee package's
-# model when it is installed) and a RoboRacer. Vehicles shows the one picked on a lit studio set
-# (the `studio` scene's vehicle_preview node), its body and settings within its ranges, its
-# controller (nav@1 drives it from goal to goal; none parks it) and its name, team and colours;
+# Humvee in parts, its wheels rolling and its front pair steering) and a RoboRacer. Vehicles shows
+# the one picked on a lit studio set (the `studio` scene's vehicle_preview node), its body and
+# settings within its ranges, its controller (nav@1 drives it from goal to goal; none parks it) and
+# its name, team and colours;
 # Spawn puts it in the world, a Jolt vehicle in the scene's own physics world, where it collides
 # with the crate and the ball. Spawn points shows the world from above: a click adds a point (or
 # removes or tags the nearest); the policy picks the point each spawn takes. The flat square comes
@@ -86,6 +87,7 @@ windows:
 
 # The Humvee's model, the vehicle-humvee package, pulled from cvcpkg when a Humvee is drawn
 # (load: lazy), not shipped with the document; without the network a local install, else its box.
+# Its humvee/ parts: the chassis without its wheels, one wheel and the rig that places the four.
 data:
   humvee:
     uri: cvcpkg://cy-pca/vehicle-humvee
@@ -97,7 +99,8 @@ world:
     archetypes:
       humvee:
         vehicle: humvee
-        look: { data: humvee, file: Humvee.glb }
+        look: { data: humvee, chassis: humvee/chassis.glb, wheel: humvee/wheel.glb,
+                rig: humvee/rig.json }
         ranges: { mass: [2000, 3500], max_speed: [5, 20] }
         controllers: [nav@1, none]
       roboracer:

@@ -604,10 +604,11 @@ its own world document.
     navigator of their own on the grid; `physics.stats.vehicles` names each one's plant; cvcGL
     poses a box look's wheels where its plant has them. A spawn may name a plant of its own
     (`entity_spec::plant`), as a gym's agents do (L4).
-  - Looks: a humvee is the vehicle-humvee package's `Humvee.glb` when it is installed (found under
-    the cvcpkg prefixes, oriented and scaled to the chassis as the nav demos do it), else its
-    chassis box in the entity's colours with a cabin and wheels; `look: { model: | file: |
-    asset: }` names another mesh.
+  - Looks: a humvee is the vehicle-humvee package's Humvee when it is installed (found under the
+    cvcpkg prefixes): in parts, its wheels turning, where the package has its `humvee/` parts
+    (1.0.0+cvc.5 on; ARIADNE.md, "A model in parts"), else the one-piece `Humvee.glb`, oriented
+    and scaled to the chassis as the nav demos do it; else its chassis box in the entity's colours
+    with a cabin and wheels. `look: { model: | file: | asset: }` names another mesh.
   - Controllers: `nav@1` (with a policy per entity, by `policy_library`), `none`, or `external`.
   - Intents (L2a, built 2026-11-14): any entity takes a wanted steer and acceleration that
     replaces or blends with its controller's command (`sim_world::override_command`, which takes

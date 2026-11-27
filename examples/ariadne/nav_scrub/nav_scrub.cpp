@@ -13,9 +13,12 @@
 // bundle, a generated world or a flat square, run by the world runtime (cvc::ariadne::SceneWorld),
 // whose grid the scenario is on (cvc::nav::grid_scenario: agents 12 m apart on free ground, in
 // metres) and whose geometry the Humvee collides with; or the built-in blocks. Each run's vehicles
-// are the Humvee model at its true size, posed on the ground; checkpoint k's opaque in orange,
-// step 0's translucent in blue, each with a ring under it and its trail behind it. Every pose is
-// the run's own: where two cars overlap, they are there in both runs (step 0 and k start alike).
+// are the Humvee at its true size as a world vehicle draws it (in parts where vehicle-humvee has
+// them, its wheels rolling by the distance it has driven and its front pair turned by its logged
+// steer; else the one-piece model; else a box), posed on the ground; checkpoint k's opaque in
+// orange, step 0's translucent in blue, each with a ring under it and its trail behind it. Every
+// pose is the run's own: where two cars overlap, they are there in both runs (step 0 and k start
+// alike).
 //
 //   nav_scrub nav_scrub.ari --component-path <repo>/src/cvc/ariadne --bundle <austin_south>
 //   nav_scrub nav_scrub.ari --net-allow https://cvcpkg.org        # Austin from cvcpkg.org
@@ -280,6 +283,10 @@ std::string local_bundle(const std::string &flag) {
 struct run_cars {
   std::vector<std::string> nodes, rings, trails;
   std::vector<long> trail_tick; // the tick each trail was drawn to (-1: draw it)
+  // A parted look's wheels, each car's (none: a one-piece model or a box), and the distance each
+  // car has driven by each tick (its logged speed, summed), which rolls them.
+  std::vector<std::vector<gla::drawn_wheel>> wheels;
+  std::vector<std::vector<double>> driven;
 };
 
 } // namespace
@@ -419,7 +426,7 @@ int main(int argc, char **argv) {
     nav::panel_set(app, prefix + ".view.camera", cameraFlag);
 
   // The world: the document's world node for --world, run by the world runtime, or the blocks.
-  const std::string bundle = local_bundle(bundleFlag); // the city's, and a Humvee.glb
+  const std::string bundle = local_bundle(bundleFlag); // the city's
   if (worldName == "city") {
     if (bundle.empty() && netAllow.empty()) {
       say("no Austin bundle here (--bundle DIR, CVC_NAV_BUNDLE, or --net-allow "
@@ -598,32 +605,22 @@ int main(int argc, char **argv) {
     pn->setColor(0.95, 0.80, 0.10);
   }
 
-  // The runs' vehicles: the Humvee model at its true size where one is here (an install's, the
-  // bundle's), else a box; each over a ring of its run's colour.
+  // The runs' vehicles: the Humvee at its true size, as a world vehicle's default look is
+  // (vehicle_look_named: in parts where they are installed, else Humvee.glb, else a box); each over
+  // a ring of its run's colour.
   gla::vehicle_shape shape; // a Humvee's chassis box, as the catalog publishes it
   double stand = 0.9;       // its chassis box's centre over the ground
   try {
     stand = ari::stand_height(cvc::physics::plant_host::preset("humvee"));
   } catch (const std::exception &) {
   }
-  ari::vehicle_look look;
-  look.kind = "box";
-  {
-    std::error_code ec;
-    std::string model;
-    if (!bundle.empty() && fs::is_regular_file(fs::path(bundle) / "Humvee.glb", ec))
-      model = (fs::path(bundle) / "Humvee.glb").string(); // the scene package's copy
-    if (model.empty())
-      model = ari::find_vehicle_model("humvee"); // the vehicle-humvee package's
-    if (!model.empty()) {
-      look.kind = "file";
-      look.path = model;
-      look.fit = true;
-    }
-  }
-  say("the vehicles: " + (look.kind == "file" ? look.path : std::string("boxes (no Humvee.glb)")));
+  const ari::vehicle_look look = ari::vehicle_look_named("humvee");
+  say("the vehicles: " + (look.parted()         ? "the Humvee in parts, " + look.chassis
+                          : look.kind == "file" ? look.path
+                                                : std::string("boxes (no Humvee.glb)")));
   std::shared_ptr<gla::vehicle_model_cache> models = gla::make_vehicle_model_cache();
   run_cars cars[2];
+  std::vector<gla::drawn_wheel> built_wheels; // the car build_car last drew's
   const auto build_car = [&](int j, int i) {
     const std::string node = "run" + std::to_string(j) + "_car" + std::to_string(i);
     const float dark[3] = {0.5f * kRunColour[j][0], 0.5f * kRunColour[j][1],
@@ -636,10 +633,14 @@ int main(int argc, char **argv) {
     };
     realize_look(look);
     bool model = false;
+    built_wheels.clear();
     if (look.kind == "file") {
       std::shared_ptr<GraphicsNode> group = sg.getGraphics(node);
-      model = group && gla::attach_vehicle_model(app, *models, *group, node + "_mesh", look, shape,
-                                                 -stand, kRunColour[j], &w);
+      model = group &&
+              (look.parted() ? gla::attach_parted_model(app, *models, *group, node, look, shape,
+                                                        -stand, kRunColour[j], &built_wheels, &w)
+                             : gla::attach_vehicle_model(app, *models, *group, node + "_mesh", look,
+                                                         shape, -stand, kRunColour[j], &w));
       if (!model) {
         sg.removeGraphics(node);
         ari::vehicle_look box;
@@ -659,6 +660,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < world.size(); ++i) {
       const std::string node = build_car(j, i);
       cars[j].nodes.push_back(node);
+      cars[j].wheels.push_back(built_wheels);
       const std::string r = node + "_ring";
       auto rn = std::dynamic_pointer_cast<GeometryNode>(
           sg.addGraphics(r, ring(kRing[j][0], kRing[j][1], 0.12)));
@@ -743,8 +745,14 @@ int main(int argc, char **argv) {
     const nav::run_log &log = scrub.replay().log();
     if (&log != shownLog) { // another checkpoint or plant: every trail again
       shownLog = &log;
-      for (run_cars &c : cars)
+      for (int j = 0; j < 2; ++j) {
+        run_cars &c = cars[j];
         std::fill(c.trail_tick.begin(), c.trail_tick.end(), -1);
+        c.driven.assign(c.nodes.size(), {});
+        for (std::size_t i = 0; i < c.nodes.size(); ++i)
+          if (!c.wheels[i].empty() && j < log.arms() && static_cast<int>(i) < log.agents())
+            c.driven[i] = log.cumulative(j, static_cast<int>(i), "speed");
+      }
     }
     // the follow camera's vehicle: the Stats window's Follow arm (checkpoint k's by default), the
     // Ledger's agent
@@ -766,6 +774,38 @@ int main(int argc, char **argv) {
         pose_matrix(cx, cy, gz + stand, p.heading, m);
         if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(cars[j].nodes[i]))
           g->setPoseMatrix(m);
+        // A parted look's wheels: rolled by the distance driven to the play head over their
+        // radius, the front pair turned by the logged steer (parted_wheel_poses, as a world
+        // vehicle's).
+        if (const std::vector<gla::drawn_wheel> &dw = cars[j].wheels[i]; !dw.empty()) {
+          const std::vector<double> &sum = cars[j].driven[i];
+          const std::vector<double> &ts = log.times();
+          double metres = 0.0, steer = 0.0;
+          if (!sum.empty() &&
+              sum.size() == ts.size()) { // between the ticks either side, as its pose
+            const long k = std::clamp<long>(f.replay.k, 0, static_cast<long>(sum.size()) - 1);
+            const auto k0 = static_cast<std::size_t>(k), k1 = std::min(k0 + 1, sum.size() - 1);
+            const double u =
+                k1 > k0 ? std::clamp((f.replay.t - ts[k0]) / (ts[k1] - ts[k0]), 0.0, 1.0) : 0.0;
+            metres = (sum[k0] + u * (sum[k1] - sum[k0])) * log.dt();
+            steer = log.at(k, j, static_cast<int>(i), "tel.steer");
+          }
+          const double r = shape.wheel_radius > 0.0 ? shape.wheel_radius : 0.45;
+          std::vector<ari::entity_wheel> at(dw.size());
+          for (std::size_t q = 0; q < dw.size(); ++q) {
+            at[q].x = dw[q].x;
+            at[q].y = dw[q].y;
+            at[q].z = dw[q].rest_z;
+            at[q].steered = dw[q].steers;
+            at[q].steer = dw[q].steers && std::isfinite(steer) ? steer : 0.0;
+            at[q].spin = std::isfinite(metres) ? std::remainder(metres / r, 2.0 * M_PI) : 0.0;
+            at[q].radius = r;
+          }
+          const std::vector<std::array<double, 16>> wm = gla::parted_wheel_poses(dw, at);
+          for (std::size_t q = 0; q < wm.size(); ++q)
+            if (const std::shared_ptr<GraphicsNode> w = dw[q].node.lock())
+              w->setPoseMatrix(wm[q].data());
+        }
         pose_matrix(cx, cy, gz, p.heading, m);
         if (std::shared_ptr<GraphicsNode> g = sg.getGraphics(cars[j].rings[i]))
           g->setPoseMatrix(m);
