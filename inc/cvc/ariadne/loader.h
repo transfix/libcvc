@@ -147,6 +147,9 @@ struct LoadResult {
   // only CAPTURES it (it has no cvc::app and never runs the DSL); the host runs it once
   // at load via cvc::ariadne::run_init, scoped to the document prefix.
   std::string init_script;
+  // §5.3 `state:`: literal values the host writes under the document prefix (seed_state) just
+  // before init: runs, so init: reads them and may override them. In document order.
+  StateSeeds state_seeds;
   // §7.1/§4.6 document-level resident handlers (verbatim scripts; empty if none). Like init_script
   // the loader only CAPTURES these — the host hands each to the matching Runtime setter, which
   // submits ONE long-lived resident process (parking between activations): on_tick_script ->
