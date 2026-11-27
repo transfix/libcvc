@@ -257,6 +257,9 @@ const key_meta kVehicle[] = {
     {"water_force.z", "telemetry", "N", N, N, "The water's push on the wheels and underbody, z."},
     {"engine_flooded", "telemetry", "", N, N,
      "1 once water past the fording depth has flooded the engine (it does not restart)."},
+    {"water_inside", "telemetry", "m^3", N, N,
+     "With a flood_area: the water in the cabin and engine bay."},
+    {"water_inside_mass", "telemetry", "kg", N, N, "With a flood_area: that water's mass."},
     {"tuning.wading.wheel_displacement", "knob", "1", 0, 1,
      "The share of a wheel's immersed cylinder that displaces water (the tire, not the rim's "
      "dish)."},
@@ -268,6 +271,9 @@ const key_meta kVehicle[] = {
      "The tires' inflation pressure, for aquaplaning; 0 never aquaplanes."},
     {"tuning.wading.fording_depth", "knob", "m", 0, 3,
      "The water at the front axle past which the engine floods and stops; 0 never floods."},
+    {"tuning.wading.flood_area", "knob", "m^2", 0, 1,
+     "The openings the cabin and engine bay flood and drain through; 0 floods at once. Whether it "
+     "is 0 is fixed when the vehicle is added."},
 };
 
 const key_meta kWheel[] = {

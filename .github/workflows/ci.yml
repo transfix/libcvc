@@ -3089,11 +3089,26 @@ jobs:
         state_exec_router_test: OK ] RouterR.APostThroughAHandleGoesIntoItsGroup
         state_exec_router_test: OK ] RouterR.AnUnregisterAloneStillForwardsAtTheTeardown
         state_exec_router_test: OK ] RouterR.ATornDownHomeForwardsAMessageALaterPrefixCovers
-        state_exec_router_test: OK ] RouterR.AnAnswerWaitsForItsClosedHomesForward
+        state_exec_router_test: OK ] RouterR.AnAnswerToAClosedHomeGoesAfterItsForward
         state_exec_router_test: OK ] RouterR.ATeardownNeverWaitsOnItself
         state_exec_router_test: OK ] RouterR.AReplyOnAHashKeyIsNeverCapped
         state_exec_router_test: OK ] PoolKillOwner.TwoAtOnceBothReturn
         state_exec_router_test: OK ] PoolKillOwner.RefusedInsideAGroupsPumpBeforeActing
+        state_exec_router_test: OK ] RouterR3.AClosedHandleTakesRouterEntriesUntilDone
+        state_exec_router_test: OK ] RouterR3.ASealedHandleTakesOnlyATeardownsForward
+        state_exec_router_test: OK ] RouterR3.AHostPostingThroughATeardownKeepsItsOrder
+        state_exec_router_test: OK ] RouterR3.ALongChainOfTeardownsKeepsEveryAddress
+        state_exec_router_test: OK ] RouterR3.AnIslandsPostAfterItsTeardownBeganDiesCounted
+        state_exec_router_test: OK ] RouterR3.AnOverlappingTeardownsAnswerIsNotADuplicate
+        state_exec_router_test: OK ] RouterR3.AnOverlappingTeardownLeavesNoRecordOfADeadProcess
+        state_exec_router_test: OK ] RouterR3.ADoneHomesPosterFollowsItsForwardingAddress
+        state_exec_router_test: OK ] RouterR3.TwoHomesTearingDownAtOnceBothEnd
+        state_exec_router_test: OK ] RouterR3.NestedHomesTearingDownAtOnceBothEnd
+        state_exec_router_test: OK ] RouterR3.AHostPostAfterItsHomesTeardownFollowsTheForward
+        state_exec_router_test: OK ] RouterR3.AHostPostDuringItsHomesTeardownComesAfterTheForward
+        state_exec_router_test: OK ] RouterR3.AHandlesPostDiesWithAnIslandOrOnAHashKey
+        state_exec_router_test: OK ] RouterR3.AnIslandsOwnKeyNeverBuildsGroupZero
+        state_exec_router_test: OK ] RouterR3.AKillOwnerRetriesAfterAOneShotHolderOfGroupZero
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_AGlobalChannelCrossesBetweenGroupZeroAndADocumentsGroup
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_GroupZeroWithNoLiveProcessStillDeliversARoutedMessage
         ariadne_runtime_test: OK ] AriadneRouter.S2b6_AMovedDocumentKeepsReceivingOnItsChannels

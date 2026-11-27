@@ -501,6 +501,8 @@ void holon::set_statics(const std::vector<avatar_static> &statics, const section
   _statics_list = statics;
   _water = water;
   _water_after.clear();  // the water as it is now, from the start
+  _water_trimmed = false;
+  ++_water_gen;          // the avatars' water again at their next step (avatar_water_for)
   if (_world && !_scene) // with a world attached, its bodies are the statics
     _world->set_statics(statics);
   // A jolt vehicle's or a boat's model runs on the statics (OW5i, OW5j), and a dynamic plant's
@@ -529,11 +531,31 @@ void holon::set_water(const std::vector<cvc::physics::field> &water, std::uint64
   while (!_water_after.empty() && _water_after.back().from_tick >= from_tick)
     _water_after.pop_back();
   _water_after.push_back({from_tick, water});
-  if (_water_after.size() > dynamic_vehicle_model::kWaterKept)
+  if (_water_after.size() > dynamic_vehicle_model::kWaterKept) {
     _water_after.erase(_water_after.begin());
+    _water_trimmed = true;
+  }
+  ++_water_gen;
   for (auto &[pid, p] : _participants)
     if (p.vdyn && p.vdyn->is_boat())
       p.vdyn->set_water(water, from_tick);
+}
+
+void holon::avatar_water_for(std::uint64_t tick) {
+  // As a boat's model takes it (dynamic_vehicle_model::water_for): the newest water in by the step
+  // ending on TICK, its from_tick behind it (the relay's world puts a keyframe's field in at the
+  // first step that ends past it); before them all, the oldest kept.
+  if (!_world || _scene)
+    return;
+  std::size_t i = _water_trimmed && !_water_after.empty() ? 1 : 0;
+  for (std::size_t j = 0; j < _water_after.size(); ++j)
+    if (_water_after[j].from_tick == 0 || tick > _water_after[j].from_tick)
+      i = j + 1;
+  if (_avatar_water_gen == _water_gen && _avatar_water_index == i)
+    return;
+  _world->set_water(i == 0 ? _water : _water_after[i - 1].water);
+  _avatar_water_gen = _water_gen;
+  _avatar_water_index = i;
 }
 
 jolt_vehicle_world holon::jolt_world() const {
@@ -665,6 +687,8 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
   _world = std::move(next);
   _scene = world;
   _scene_world = world ? static_cast<const void *>(&world->world()) : nullptr;
+  _avatar_water_gen =
+      ~std::uint64_t{0}; // a world of its own again takes the water at its next step
   return true;
 }
 
@@ -1358,6 +1382,7 @@ void holon::world_step_client(const std::string &self, const avatar_intent &in,
   }
   _world->drive(self, veto(in, _applied.policy));
   _world->set_time(double(tick) * _clock.fixed_dt()); // the wind's gusts at the tick's time
+  avatar_water_for(tick); // the water this step ends in, as the relay's (OW9a)
   _world->step();
 }
 
@@ -1445,6 +1470,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
           _world->drive(kv.first, veto(p.intent, _applied.policy));
         }
         _world->set_time(double(tick) * dt); // the wind's gusts at the tick's time, as the clients
+        avatar_water_for(tick);              // and the water, as theirs (OW9a)
         _world->step();
         for (auto &kv : _participants)
           if (_world->state(kv.first).position.z < _cfg.respawn_below_z)

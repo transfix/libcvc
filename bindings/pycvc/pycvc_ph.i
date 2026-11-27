@@ -18,6 +18,7 @@
 #include <cvc/ph/compose.h>
 #include <cvc/ph/microgrid.h>
 #include <cvc/ph/query.h>
+#include <cvc/ph/train.h>
 
 namespace pycvc {
 
@@ -107,6 +108,7 @@ PyObject *ph_list(const double *v, size_t n) {
 %feature("kwargs") pycvc::ph_microgrid_json;
 %feature("kwargs") pycvc::ph_composite::fit_history;
 %feature("kwargs") pycvc::ph_composite::card;
+%feature("kwargs") pycvc::ph_train_dgu;
 
 %inline %{
 namespace pycvc {
@@ -507,6 +509,81 @@ PyObject *ph_rank(PyObject *cards, PyObject *bounds, PyObject *limits, PyObject 
   Py_DECREF(sb);
   Py_DECREF(best);
   return d;
+}
+
+// The isolated-DGU calibration (train.h), as `cvc ph train-dgu` runs it: fit a DGU law to
+// trajectories of the reference nonlinear DGU, score it and the fitted-linear control on held-out
+// rollouts. Returns {"law" (cvc-ph-law/1 text), "parameters", "linear" and "trained"
+// ({"voltage_rmse", "current_rmse", "finite"}), "fit" ({"C", "L", "R"}), "history" (a list of
+// {"update", "step", "constraint", "total"})}.
+PyObject *ph_train_dgu(int updates = 2000, int constraint_first = 0, int batch = 128, double lr = 1e-4,
+                       int threads = 1, int train_runs = 32, int transitions = 200, int test_runs = 16,
+                       int test_transitions = 500, unsigned data_seed = 1, unsigned init_seed = 7,
+                       PyObject *v_hidden = nullptr, PyObject *m_hidden = nullptr, PyObject *d_hidden = nullptr,
+                       int log_every = 0) {
+  const cvc::ph::law_ptr ref = cvc::ph::reference_dgu();
+  cvc::ph::dgu_dataset_options d;
+  d.trajectories = train_runs;
+  d.transitions = transitions;
+  d.seed = data_seed;
+  cvc::ph::dgu_family fam;
+  if (v_hidden && v_hidden != Py_None)
+    fam.v_hidden = ph_ints(v_hidden, "v_hidden");
+  if (m_hidden && m_hidden != Py_None)
+    fam.m_hidden = ph_ints(m_hidden, "m_hidden");
+  if (d_hidden && d_hidden != Py_None)
+    fam.d_hidden = ph_ints(d_hidden, "d_hidden");
+  fam.seed = init_seed;
+  cvc::ph::dgu_train_options o;
+  o.updates = updates;
+  o.constraint_first = constraint_first;
+  o.batch = batch;
+  o.lr = lr;
+  o.threads = threads;
+  o.log_every = log_every;
+  o.seed = init_seed + 1000;
+  cvc::ph::linear_fit fit;
+  cvc::ph::dgu_train_result r;
+  cvc::ph::dgu_eval el, et;
+  std::string err;
+  Py_BEGIN_ALLOW_THREADS
+  try {
+    const cvc::ph::dgu_dataset train = cvc::ph::make_dgu_dataset(*ref, d);
+    d.trajectories = test_runs;
+    d.transitions = test_transitions;
+    d.seed = data_seed + 1;
+    const cvc::ph::dgu_dataset test = cvc::ph::make_dgu_dataset(*ref, d);
+    fit = cvc::ph::fit_linear_dgu(train);
+    r = cvc::ph::train_dgu(cvc::ph::warm_start_dgu(fit, fam), train, o);
+    el = cvc::ph::evaluate_dgu(cvc::ph::canonical_law(cvc::ph::linear_dgu_spec(fit)), *ref, test);
+    et = cvc::ph::evaluate_dgu(cvc::ph::canonical_law(r.law), *ref, test);
+  } catch (const std::exception &e) {
+    err = e.what();
+    if (err.empty())
+      err = "ph_train_dgu failed";
+  }
+  Py_END_ALLOW_THREADS
+  if (!err.empty())
+    throw std::runtime_error(err);
+  auto score = [](const cvc::ph::dgu_eval &e) {
+    return Py_BuildValue("{s:d,s:d,s:O}", "voltage_rmse", e.voltage_rmse, "current_rmse", e.current_rmse, "finite",
+                         e.finite ? Py_True : Py_False);
+  };
+  PyObject *hist = PyList_New(static_cast<Py_ssize_t>(r.history.size()));
+  for (size_t k = 0; k < r.history.size(); ++k)
+    PyList_SET_ITEM(hist, static_cast<Py_ssize_t>(k),
+                    Py_BuildValue("{s:i,s:d,s:d,s:d}", "update", r.history[k].update, "step", r.history[k].batch.step,
+                                  "constraint", r.history[k].batch.constraint, "total", r.history[k].batch.total));
+  PyObject *lin = score(el), *tr = score(et);
+  PyObject *fd = Py_BuildValue("{s:d,s:d,s:d}", "C", fit.C, "L", fit.L, "R", fit.R);
+  PyObject *out = Py_BuildValue("{s:s,s:i,s:O,s:O,s:O,s:O}", "law",
+                                cvc::ph::law_json(cvc::ph::canonical_law(r.law)).c_str(), "parameters", r.parameters,
+                                "linear", lin, "trained", tr, "fit", fd, "history", hist);
+  Py_DECREF(lin);
+  Py_DECREF(tr);
+  Py_DECREF(fd);
+  Py_DECREF(hist);
+  return out;
 }
 
 } // namespace pycvc
